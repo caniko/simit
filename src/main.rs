@@ -4,6 +4,7 @@ use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::{collections::BTreeMap, fmt};
 
 use anyhow::{Context, Result, anyhow, bail};
 use camino::Utf8PathBuf;
@@ -79,6 +80,7 @@ struct InitCiCommand {
     platform: Platform,
     check: bool,
     runner: Option<String>,
+    runtime: RuntimeChoice,
 }
 
 impl InitCiCommand {
@@ -86,14 +88,20 @@ impl InitCiCommand {
         let start = env::current_dir().context("reading current directory")?;
         let manifest = find_manifest(&start)?;
         let metadata = cargo_metadata(&manifest)?;
+        let package = select_package(&metadata, None)?;
         let workspace_root = metadata.workspace_root.as_std_path();
-        let runtime = Runtime::detect(workspace_root);
+        let runtime = self.runtime.resolve(workspace_root)?;
         let self_check = metadata
             .packages
             .iter()
             .any(|package| package.name == "simit");
-        let workflows =
-            generate_workflows(self.platform, runtime, self_check, self.runner.as_deref());
+        let workflows = generate_workflows(
+            self.platform,
+            runtime,
+            package,
+            self_check,
+            self.runner.as_deref(),
+        );
 
         if self.check {
             check_workflows(workspace_root, &workflows)
@@ -141,17 +149,46 @@ impl Platform {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RuntimeChoice {
+    Auto,
+    Cargo,
+    Nix,
+}
+
+impl RuntimeChoice {
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            "auto" => Ok(Self::Auto),
+            "cargo" => Ok(Self::Cargo),
+            "nix" => Ok(Self::Nix),
+            _ => bail!("--runtime must be one of: auto, cargo, nix"),
+        }
+    }
+
+    fn resolve(self, workspace_root: &Path) -> Result<Runtime> {
+        match self {
+            Self::Auto | Self::Cargo => Ok(Runtime::Cargo),
+            Self::Nix => {
+                if !workspace_root.join("flake.nix").exists() {
+                    bail!("--runtime nix requires flake.nix at the workspace root");
+                }
+                Ok(Runtime::Nix)
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Runtime {
     Nix,
     Cargo,
 }
 
-impl Runtime {
-    fn detect(workspace_root: &Path) -> Self {
-        if workspace_root.join("flake.nix").exists() {
-            Self::Nix
-        } else {
-            Self::Cargo
+impl fmt::Display for Runtime {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Nix => f.write_str("nix"),
+            Self::Cargo => f.write_str("cargo"),
         }
     }
 }
@@ -243,6 +280,7 @@ fn parse_init_ci_args(args: Vec<OsString>) -> Result<CommandSpec> {
     let mut platform = None;
     let mut check = false;
     let mut runner = None;
+    let mut runtime = RuntimeChoice::Auto;
 
     while let Some(arg) = iter.next() {
         match arg.to_str() {
@@ -265,9 +303,20 @@ fn parse_init_ci_args(args: Vec<OsString>) -> Result<CommandSpec> {
                 validate_runner(value)?;
                 runner = Some(value.to_owned());
             }
+            Some("--runtime") => {
+                let Some(value) = iter.next() else {
+                    bail!("--runtime requires a value");
+                };
+                let value = value
+                    .to_str()
+                    .ok_or_else(|| anyhow!("--runtime value must be UTF-8"))?;
+                runtime = RuntimeChoice::parse(value)?;
+            }
             Some("--check") => check = true,
             _ => {
-                bail!("usage: simit init-ci --platform forgejo|github [--runner <label>] [--check]")
+                bail!(
+                    "usage: simit init-ci --platform forgejo|github [--runtime auto|cargo|nix] [--runner <label>] [--check]"
+                )
             }
         }
     }
@@ -280,6 +329,7 @@ fn parse_init_ci_args(args: Vec<OsString>) -> Result<CommandSpec> {
         platform,
         check,
         runner,
+        runtime,
     }))
 }
 
@@ -309,6 +359,10 @@ struct Package {
     id: String,
     name: String,
     version: String,
+    #[serde(default)]
+    rust_version: Option<String>,
+    #[serde(default)]
+    features: BTreeMap<String, Vec<String>>,
     manifest_path: Utf8PathBuf,
 }
 
@@ -379,6 +433,7 @@ fn bump_version(mut version: Version, bump: Bump) -> Version {
 fn generate_workflows(
     platform: Platform,
     runtime: Runtime,
+    package: &Package,
     self_check: bool,
     runner_override: Option<&str>,
 ) -> Vec<GeneratedWorkflow> {
@@ -386,11 +441,11 @@ fn generate_workflows(
     vec![
         GeneratedWorkflow {
             relative_path: dir.join("ci.yaml"),
-            content: ci_workflow(platform, runtime, self_check, runner_override),
+            content: ci_workflow(platform, runtime, package, self_check, runner_override),
         },
         GeneratedWorkflow {
             relative_path: dir.join("publish-crate.yaml"),
-            content: publish_workflow(platform, runtime, runner_override),
+            content: publish_workflow(platform, runtime, package, runner_override),
         },
     ]
 }
@@ -453,6 +508,7 @@ fn infer_platform_name(workflows: &[GeneratedWorkflow]) -> &'static str {
 fn ci_workflow(
     platform: Platform,
     runtime: Runtime,
+    package: &Package,
     self_check: bool,
     runner_override: Option<&str>,
 ) -> String {
@@ -467,9 +523,9 @@ fn ci_workflow(
     workflow.push_str("    runs-on: ");
     workflow.push_str(&runner(platform, runtime, JobKind::Ci, runner_override));
     workflow.push('\n');
+    push_container(&mut workflow, platform, runtime, package);
     workflow.push_str("    steps:\n");
-    workflow.push_str("      - name: Checkout\n");
-    workflow.push_str("        uses: actions/checkout@v4\n\n");
+    push_checkout_step(&mut workflow, platform, runtime);
 
     match runtime {
         Runtime::Nix => {
@@ -483,7 +539,7 @@ fn ci_workflow(
                 workflow.push_str("      - name: Check generated CI\n");
                 workflow.push_str("        run: nix develop -c cargo run -- init-ci --platform ");
                 workflow.push_str(platform.as_str());
-                push_self_check_suffix(&mut workflow, runner_override);
+                push_self_check_suffix(&mut workflow, runtime, runner_override);
             }
             workflow.push_str("      - name: Clippy\n");
             workflow.push_str(
@@ -493,24 +549,15 @@ fn ci_workflow(
             workflow.push_str("        run: nix develop -c cargo package --allow-dirty\n");
         }
         Runtime::Cargo => {
-            workflow.push_str("      - name: Install Rust\n");
-            workflow.push_str("        uses: ");
-            workflow.push_str(rust_toolchain_action(platform));
-            workflow.push('\n');
-            workflow.push_str("        with:\n");
-            workflow.push_str("          components: rustfmt, clippy\n\n");
-            workflow.push_str("      - name: Format\n");
-            workflow.push_str("        run: cargo fmt --check\n\n");
-            workflow.push_str("      - name: Test\n");
-            workflow.push_str("        run: cargo test\n\n");
+            push_rust_setup_step(&mut workflow, platform, package);
+            push_test_steps(&mut workflow, package);
             if self_check {
                 workflow.push_str("      - name: Check generated CI\n");
                 workflow.push_str("        run: cargo run -- init-ci --platform ");
                 workflow.push_str(platform.as_str());
-                push_self_check_suffix(&mut workflow, runner_override);
+                push_self_check_suffix(&mut workflow, runtime, runner_override);
             }
-            workflow.push_str("      - name: Clippy\n");
-            workflow.push_str("        run: cargo clippy --all-targets -- --deny warnings\n\n");
+            push_clippy_steps(&mut workflow, package);
             workflow.push_str("      - name: Package crate\n");
             workflow.push_str("        run: cargo package --allow-dirty\n");
         }
@@ -519,7 +566,12 @@ fn ci_workflow(
     workflow
 }
 
-fn publish_workflow(platform: Platform, runtime: Runtime, runner_override: Option<&str>) -> String {
+fn publish_workflow(
+    platform: Platform,
+    runtime: Runtime,
+    package: &Package,
+    runner_override: Option<&str>,
+) -> String {
     let mut workflow = String::new();
     workflow.push_str("name: Publish Crate\n\n");
     workflow.push_str("on:\n");
@@ -536,15 +588,17 @@ fn publish_workflow(platform: Platform, runtime: Runtime, runner_override: Optio
         runner_override,
     ));
     workflow.push('\n');
+    push_container(&mut workflow, platform, runtime, package);
     workflow.push_str("    steps:\n");
-    workflow.push_str("      - name: Checkout\n");
-    workflow.push_str("        uses: actions/checkout@v4\n\n");
+    push_checkout_step(&mut workflow, platform, runtime);
 
     match runtime {
         Runtime::Nix => {
             workflow.push_str("      - name: Install Nix\n");
             workflow.push_str("        uses: https://github.com/cachix/install-nix-action@v31\n\n");
-            workflow.push_str(&validate_tag_step("nix develop -c cargo pkgid"));
+            workflow.push_str(&validate_tag_step(
+                "nix develop -c cargo metadata --no-deps --format-version 1",
+            ));
             workflow.push_str("      - name: Check flake\n");
             workflow.push_str("        run: nix flake check\n\n");
             workflow.push_str("      - name: Test\n");
@@ -558,19 +612,12 @@ fn publish_workflow(platform: Platform, runtime: Runtime, runner_override: Optio
             workflow.push_str(&publish_step("nix develop -c cargo publish"));
         }
         Runtime::Cargo => {
-            workflow.push_str("      - name: Install Rust\n");
-            workflow.push_str("        uses: ");
-            workflow.push_str(rust_toolchain_action(platform));
-            workflow.push('\n');
-            workflow.push_str("        with:\n");
-            workflow.push_str("          components: rustfmt, clippy\n\n");
-            workflow.push_str(&validate_tag_step("cargo pkgid"));
-            workflow.push_str("      - name: Format\n");
-            workflow.push_str("        run: cargo fmt --check\n\n");
-            workflow.push_str("      - name: Test\n");
-            workflow.push_str("        run: cargo test\n\n");
-            workflow.push_str("      - name: Clippy\n");
-            workflow.push_str("        run: cargo clippy --all-targets -- --deny warnings\n\n");
+            push_rust_setup_step(&mut workflow, platform, package);
+            workflow.push_str(&validate_tag_step(
+                "cargo metadata --no-deps --format-version 1",
+            ));
+            push_test_steps(&mut workflow, package);
+            push_clippy_steps(&mut workflow, package);
             workflow.push_str("      - name: Dry-run publish\n");
             workflow.push_str("        run: cargo publish --dry-run\n\n");
             workflow.push_str(&publish_step("cargo publish"));
@@ -585,6 +632,96 @@ fn rust_toolchain_action(platform: Platform) -> &'static str {
         Platform::Forgejo => "https://github.com/dtolnay/rust-toolchain@stable",
         Platform::Github => "dtolnay/rust-toolchain@stable",
     }
+}
+
+fn push_container(workflow: &mut String, platform: Platform, runtime: Runtime, package: &Package) {
+    if platform == Platform::Forgejo && runtime == Runtime::Cargo {
+        workflow.push_str("    container: ");
+        workflow.push_str(&rust_container_image(package));
+        workflow.push('\n');
+    }
+}
+
+fn rust_container_image(package: &Package) -> String {
+    match package.rust_version.as_deref() {
+        Some(version) => format!("rust:{version}-bookworm"),
+        None => "rust:stable-bookworm".to_owned(),
+    }
+}
+
+fn push_checkout_step(workflow: &mut String, platform: Platform, runtime: Runtime) {
+    if platform == Platform::Forgejo && runtime == Runtime::Cargo {
+        workflow.push_str(
+            r#"      - name: Checkout
+        run: |
+          repo="${GITHUB_REPOSITORY:-${FORGE_REPOSITORY:-}}"
+          server="${GITHUB_SERVER_URL:-${FORGE_SERVER_URL:-https://codeberg.org}}"
+          sha="${GITHUB_SHA:-${FORGE_SHA:-}}"
+          ref="${GITHUB_REF:-${FORGE_REF:-}}"
+          if [ -z "$repo" ]; then
+            echo "Repository name is unavailable" >&2
+            exit 1
+          fi
+          git init .
+          git remote add origin "$server/$repo.git"
+          if [ -n "$ref" ]; then
+            git fetch --depth=1 origin "$ref"
+          else
+            git fetch --depth=1 origin "$sha"
+          fi
+          git checkout --detach FETCH_HEAD
+
+"#,
+        );
+    } else {
+        workflow.push_str("      - name: Checkout\n");
+        workflow.push_str("        uses: actions/checkout@v4\n\n");
+    }
+}
+
+fn push_rust_setup_step(workflow: &mut String, platform: Platform, package: &Package) {
+    match platform {
+        Platform::Forgejo => {
+            workflow.push_str("      - name: Install Rust components\n");
+            workflow.push_str("        run: rustup component add clippy rustfmt\n\n");
+        }
+        Platform::Github => {
+            workflow.push_str("      - name: Install Rust\n");
+            workflow.push_str("        uses: ");
+            workflow.push_str(rust_toolchain_action(platform));
+            workflow.push('\n');
+            workflow.push_str("        with:\n");
+            workflow.push_str("          toolchain: ");
+            workflow.push_str(package.rust_version.as_deref().unwrap_or("stable"));
+            workflow.push('\n');
+            workflow.push_str("          components: rustfmt, clippy\n\n");
+        }
+    }
+}
+
+fn push_test_steps(workflow: &mut String, package: &Package) {
+    workflow.push_str("      - name: Test all features\n");
+    workflow.push_str("        run: cargo test --all-features\n\n");
+    if has_features(package) {
+        workflow.push_str("      - name: Test no default features\n");
+        workflow.push_str("        run: cargo test --no-default-features\n\n");
+    }
+}
+
+fn push_clippy_steps(workflow: &mut String, package: &Package) {
+    workflow.push_str("      - name: Clippy all features\n");
+    workflow
+        .push_str("        run: cargo clippy --all-targets --all-features -- --deny warnings\n\n");
+    if has_features(package) {
+        workflow.push_str("      - name: Clippy no default features\n");
+        workflow.push_str(
+            "        run: cargo clippy --all-targets --no-default-features -- --deny warnings\n\n",
+        );
+    }
+}
+
+fn has_features(package: &Package) -> bool {
+    !package.features.is_empty()
 }
 
 fn validate_runner(value: &str) -> Result<()> {
@@ -602,7 +739,10 @@ fn validate_runner(value: &str) -> Result<()> {
     Ok(())
 }
 
-fn push_self_check_suffix(workflow: &mut String, runner_override: Option<&str>) {
+fn push_self_check_suffix(workflow: &mut String, runtime: Runtime, runner_override: Option<&str>) {
+    if runtime == Runtime::Nix {
+        workflow.push_str(" --runtime nix");
+    }
     if let Some(runner) = runner_override {
         workflow.push_str(" --runner ");
         workflow.push_str(runner);
@@ -627,13 +767,13 @@ fn runner(
     }
 
     match (platform, runtime) {
-        (Platform::Forgejo, Runtime::Cargo) => "codeberg-tiny".to_owned(),
+        (Platform::Forgejo, Runtime::Cargo) => "codeberg-small".to_owned(),
         (Platform::Forgejo, Runtime::Nix) => "codeberg-small".to_owned(),
         (Platform::Github, _) => "ubuntu-latest".to_owned(),
     }
 }
 
-fn validate_tag_step(cargo_pkgid_command: &str) -> String {
+fn validate_tag_step(cargo_metadata_command: &str) -> String {
     format!(
         r#"      - name: Validate tag
         run: |
@@ -648,7 +788,11 @@ fn validate_tag_step(cargo_pkgid_command: &str) -> String {
             exit 1
           fi
 
-          version="$({cargo_pkgid_command} | sed 's/.*@//')"
+          version="$({cargo_metadata_command} | grep -m1 -o '"version":"[^"]*"' | cut -d '"' -f4)"
+          if [ -z "$version" ]; then
+            echo "Could not read package version from cargo metadata" >&2
+            exit 1
+          fi
           if [ "$tag" != "$version" ]; then
             echo "Tag $tag does not match Cargo.toml package version $version" >&2
             exit 1

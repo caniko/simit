@@ -18,6 +18,7 @@ fn init_package(with_flake: bool) -> TempDir {
 name = "demo"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
 "#,
     )
     .unwrap();
@@ -41,7 +42,7 @@ fn generates_forgejo_nix_workflows() {
 
     let status = simit()
         .current_dir(temp.path())
-        .args(["init-ci", "--platform", "forgejo"])
+        .args(["init-ci", "--platform", "forgejo", "--runtime", "nix"])
         .status()
         .unwrap();
     assert!(status.success());
@@ -55,7 +56,7 @@ fn generates_forgejo_nix_workflows() {
     let publish = read(&temp.path().join(".forgejo/workflows/publish-crate.yaml"));
     assert!(publish.contains("tags:"));
     assert!(publish.contains("grep -Eq '^[0-9]+\\.[0-9]+\\.[0-9]+$'"));
-    assert!(publish.contains("nix develop -c cargo pkgid"));
+    assert!(publish.contains("nix develop -c cargo metadata --no-deps --format-version 1"));
     assert!(publish.contains("CRATES_IO_API_TOKEN: ${{ secrets.CRATES_IO_API_TOKEN }}"));
     assert!(publish.contains("CRATES_IO_API_TOKEN is required"));
     assert!(publish.contains("export CARGO_REGISTRY_TOKEN="));
@@ -63,7 +64,7 @@ fn generates_forgejo_nix_workflows() {
 
 #[test]
 fn generates_github_plain_cargo_workflows() {
-    let temp = init_package(false);
+    let temp = init_package(true);
 
     let status = simit()
         .current_dir(temp.path())
@@ -75,17 +76,18 @@ fn generates_github_plain_cargo_workflows() {
     let ci = read(&temp.path().join(".github/workflows/ci.yaml"));
     assert!(ci.contains("runs-on: ubuntu-latest"));
     assert!(ci.contains("uses: dtolnay/rust-toolchain@stable"));
-    assert!(ci.contains("run: cargo fmt --check"));
+    assert!(ci.contains("toolchain: 1.85"));
+    assert!(ci.contains("run: cargo test --all-features"));
     assert!(ci.contains("run: cargo package --allow-dirty"));
 
     let publish = read(&temp.path().join(".github/workflows/publish-crate.yaml"));
     assert!(publish.contains("run: cargo publish --dry-run"));
-    assert!(publish.contains("cargo pkgid"));
+    assert!(publish.contains("cargo metadata --no-deps --format-version 1"));
 }
 
 #[test]
-fn forgejo_plain_cargo_defaults_to_tiny_runner() {
-    let temp = init_package(false);
+fn forgejo_auto_runtime_uses_rust_container_even_when_flake_exists() {
+    let temp = init_package(true);
 
     let status = simit()
         .current_dir(temp.path())
@@ -95,10 +97,16 @@ fn forgejo_plain_cargo_defaults_to_tiny_runner() {
     assert!(status.success());
 
     let ci = read(&temp.path().join(".forgejo/workflows/ci.yaml"));
-    assert!(ci.contains("runs-on: codeberg-tiny"));
+    assert!(ci.contains("runs-on: codeberg-small"));
+    assert!(ci.contains("container: rust:1.85-bookworm"));
+    assert!(ci.contains("run: rustup component add clippy rustfmt"));
+    assert!(ci.contains("run: cargo test --all-features"));
+    assert!(!ci.contains("uses: https://github.com/cachix/install-nix-action@v31"));
 
     let publish = read(&temp.path().join(".forgejo/workflows/publish-crate.yaml"));
-    assert!(publish.contains("runs-on: codeberg-tiny"));
+    assert!(publish.contains("runs-on: codeberg-small"));
+    assert!(publish.contains("container: rust:1.85-bookworm"));
+    assert!(publish.contains("cargo metadata --no-deps --format-version 1"));
 }
 
 #[test]
@@ -111,6 +119,8 @@ fn forgejo_runner_override_applies_to_all_jobs() {
             "init-ci",
             "--platform",
             "forgejo",
+            "--runtime",
+            "nix",
             "--runner",
             "codeberg-medium-lazy",
         ])
@@ -126,6 +136,44 @@ fn forgejo_runner_override_applies_to_all_jobs() {
 }
 
 #[test]
+fn featureful_package_gets_no_default_feature_checks() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+
+    fs::write(
+        root.join("Cargo.toml"),
+        r#"[package]
+name = "demo"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+
+[features]
+default = ["sync"]
+sync = []
+"#,
+    )
+    .unwrap();
+    fs::create_dir(root.join("src")).unwrap();
+    fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
+
+    let status = simit()
+        .current_dir(root)
+        .args(["init-ci", "--platform", "forgejo"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let ci = read(&root.join(".forgejo/workflows/ci.yaml"));
+    assert!(ci.contains("run: cargo test --all-features"));
+    assert!(ci.contains("run: cargo test --no-default-features"));
+    assert!(ci.contains("run: cargo clippy --all-targets --all-features -- --deny warnings"));
+    assert!(
+        ci.contains("run: cargo clippy --all-targets --no-default-features -- --deny warnings")
+    );
+}
+
+#[test]
 fn self_check_preserves_runner_override() {
     let temp = TempDir::new().unwrap();
     let root = temp.path();
@@ -136,6 +184,7 @@ fn self_check_preserves_runner_override() {
 name = "simit"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
 "#,
     )
     .unwrap();
@@ -221,6 +270,7 @@ fn simit_package_gets_self_check_step() {
 name = "simit"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
 "#,
     )
     .unwrap();

@@ -41,17 +41,24 @@ simit init-ci --platform forgejo
 simit init-ci --platform github
 ```
 
-`simit` detects `flake.nix` at the workspace root. Repositories with a flake
-use `nix flake check` and `nix develop -c cargo ...`; other repositories use
-plain Cargo with a stable Rust toolchain.
+Forgejo workflows use direct Rust container jobs by default, even when the
+repository has a `flake.nix`. The container tag is derived from
+`package.rust-version`, for example `rust:1.85-bookworm`.
 
 Forgejo workflows are tuned for Codeberg's hosted runner limits. Plain Cargo
-repositories use `codeberg-tiny` by default. Repositories with `flake.nix` use
-`codeberg-small` for CI and publishing because Nix setup and builds need more
-headroom. Use `--runner` when a repository needs a specific hosted runner:
+crate jobs use `codeberg-small` by default because test, clippy, and package
+work usually exceed the tiny runner's two-minute budget. Use `--runner` when a
+repository needs a specific hosted runner:
 
 ```sh
 simit init-ci --platform forgejo --runner codeberg-medium
+```
+
+Use `--runtime nix` only for workflows that intentionally need flake outputs,
+such as cross-platform binary builds or release artifacts:
+
+```sh
+simit init-ci --platform forgejo --runtime nix
 ```
 
 Use `--check` in CI to make sure committed workflows still match `simit`'s
