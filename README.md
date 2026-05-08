@@ -31,3 +31,23 @@ For workspaces with more than one package, choose the target package:
 ```sh
 simit commit --package memory-admission patch -m "release memory-admission"
 ```
+
+## CI wiring
+
+Generate lightweight Rust CI and crates.io publish workflows for a repository:
+
+```sh
+simit init-ci --platform forgejo
+simit init-ci --platform github
+```
+
+`simit` detects `flake.nix` at the workspace root. Repositories with a flake
+use `nix flake check` and `nix develop -c cargo ...`; other repositories use
+plain Cargo with a stable Rust toolchain.
+
+Use `--check` in CI to make sure committed workflows still match `simit`'s
+generated output:
+
+```sh
+simit init-ci --platform forgejo --check
+```

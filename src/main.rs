@@ -1,6 +1,7 @@
 use std::env;
 use std::ffi::OsString;
 use std::fs;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -21,12 +22,14 @@ fn run(args: Vec<OsString>) -> Result<()> {
     let command = parse_args(args)?;
     match command {
         CommandSpec::Commit(commit) => commit.run(),
+        CommandSpec::InitCi(init_ci) => init_ci.run(),
     }
 }
 
 #[derive(Debug)]
 enum CommandSpec {
     Commit(CommitCommand),
+    InitCi(InitCiCommand),
 }
 
 #[derive(Debug)]
@@ -71,6 +74,33 @@ impl CommitCommand {
     }
 }
 
+#[derive(Debug)]
+struct InitCiCommand {
+    platform: Platform,
+    check: bool,
+}
+
+impl InitCiCommand {
+    fn run(self) -> Result<()> {
+        let start = env::current_dir().context("reading current directory")?;
+        let manifest = find_manifest(&start)?;
+        let metadata = cargo_metadata(&manifest)?;
+        let workspace_root = metadata.workspace_root.as_std_path();
+        let runtime = Runtime::detect(workspace_root);
+        let self_check = metadata
+            .packages
+            .iter()
+            .any(|package| package.name == "simit");
+        let workflows = generate_workflows(self.platform, runtime, self_check);
+
+        if self.check {
+            check_workflows(workspace_root, &workflows)
+        } else {
+            write_workflows(workspace_root, &workflows)
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Bump {
     Patch,
@@ -78,16 +108,80 @@ enum Bump {
     Major,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Platform {
+    Forgejo,
+    Github,
+}
+
+impl Platform {
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            "forgejo" => Ok(Self::Forgejo),
+            "github" => Ok(Self::Github),
+            _ => bail!("--platform must be one of: forgejo, github"),
+        }
+    }
+
+    fn workflow_dir(self) -> &'static str {
+        match self {
+            Self::Forgejo => ".forgejo/workflows",
+            Self::Github => ".github/workflows",
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Forgejo => "forgejo",
+            Self::Github => "github",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Runtime {
+    Nix,
+    Cargo,
+}
+
+impl Runtime {
+    fn detect(workspace_root: &Path) -> Self {
+        if workspace_root.join("flake.nix").exists() {
+            Self::Nix
+        } else {
+            Self::Cargo
+        }
+    }
+}
+
+#[derive(Debug)]
+struct GeneratedWorkflow {
+    relative_path: PathBuf,
+    content: String,
+}
+
 fn parse_args(args: Vec<OsString>) -> Result<CommandSpec> {
     let mut iter = args.into_iter();
     let Some(command) = iter.next() else {
-        bail!("expected command: simit commit patch|minor|major <git commit args>");
+        bail!("expected command: simit commit|init-ci");
     };
 
-    if command != "commit" {
-        bail!("unknown command {:?}; expected `commit`", command);
+    if command == "commit" {
+        return parse_commit_args(iter.collect());
     }
 
+    if command == "init-ci" {
+        return parse_init_ci_args(iter.collect());
+    }
+
+    bail!(
+        "unknown command {:?}; expected `commit` or `init-ci`",
+        command
+    );
+}
+
+fn parse_commit_args(args: Vec<OsString>) -> Result<CommandSpec> {
+    let mut iter = args.into_iter();
     let mut package = None;
     let mut create_tag = true;
     let mut sign_tag = true;
@@ -140,6 +234,34 @@ fn parse_args(args: Vec<OsString>) -> Result<CommandSpec> {
         sign_tag,
         git_args,
     }))
+}
+
+fn parse_init_ci_args(args: Vec<OsString>) -> Result<CommandSpec> {
+    let mut iter = args.into_iter();
+    let mut platform = None;
+    let mut check = false;
+
+    while let Some(arg) = iter.next() {
+        match arg.to_str() {
+            Some("--platform") => {
+                let Some(value) = iter.next() else {
+                    bail!("--platform requires a value");
+                };
+                let value = value
+                    .to_str()
+                    .ok_or_else(|| anyhow!("--platform value must be UTF-8"))?;
+                platform = Some(Platform::parse(value)?);
+            }
+            Some("--check") => check = true,
+            _ => bail!("usage: simit init-ci --platform forgejo|github [--check]"),
+        }
+    }
+
+    let Some(platform) = platform else {
+        bail!("init-ci requires --platform forgejo|github");
+    };
+
+    Ok(CommandSpec::InitCi(InitCiCommand { platform, check }))
 }
 
 fn find_manifest(start: &Path) -> Result<PathBuf> {
@@ -233,6 +355,253 @@ fn bump_version(mut version: Version, bump: Bump) -> Version {
     }
 
     version
+}
+
+fn generate_workflows(
+    platform: Platform,
+    runtime: Runtime,
+    self_check: bool,
+) -> Vec<GeneratedWorkflow> {
+    let dir = PathBuf::from(platform.workflow_dir());
+    vec![
+        GeneratedWorkflow {
+            relative_path: dir.join("ci.yaml"),
+            content: ci_workflow(platform, runtime, self_check),
+        },
+        GeneratedWorkflow {
+            relative_path: dir.join("publish-crate.yaml"),
+            content: publish_workflow(platform, runtime),
+        },
+    ]
+}
+
+fn write_workflows(workspace_root: &Path, workflows: &[GeneratedWorkflow]) -> Result<()> {
+    for workflow in workflows {
+        let path = workspace_root.join(&workflow.relative_path);
+        let parent = path
+            .parent()
+            .ok_or_else(|| anyhow!("workflow path has no parent: {}", path.display()))?;
+        fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+        fs::write(&path, &workflow.content)
+            .with_context(|| format!("writing {}", path.display()))?;
+    }
+
+    Ok(())
+}
+
+fn check_workflows(workspace_root: &Path, workflows: &[GeneratedWorkflow]) -> Result<()> {
+    let mut mismatches = Vec::new();
+
+    for workflow in workflows {
+        let path = workspace_root.join(&workflow.relative_path);
+        match fs::read_to_string(&path) {
+            Ok(actual) if actual == workflow.content => {}
+            Ok(_) => mismatches.push(format!("{} differs", workflow.relative_path.display())),
+            Err(e) if e.kind() == ErrorKind::NotFound => {
+                mismatches.push(format!("{} is missing", workflow.relative_path.display()));
+            }
+            Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+        }
+    }
+
+    if mismatches.is_empty() {
+        Ok(())
+    } else {
+        bail!(
+            "CI workflows are not up to date; run `simit init-ci --platform {}`:\n{}",
+            infer_platform_name(workflows),
+            mismatches.join("\n")
+        );
+    }
+}
+
+fn infer_platform_name(workflows: &[GeneratedWorkflow]) -> &'static str {
+    workflows
+        .first()
+        .and_then(|workflow| workflow.relative_path.components().next())
+        .and_then(|component| component.as_os_str().to_str())
+        .map(|dir| {
+            if dir == ".github" {
+                "github"
+            } else {
+                "forgejo"
+            }
+        })
+        .unwrap_or("forgejo")
+}
+
+fn ci_workflow(platform: Platform, runtime: Runtime, self_check: bool) -> String {
+    let mut workflow = String::new();
+    workflow.push_str("name: CI\n\n");
+    workflow.push_str("on:\n");
+    workflow.push_str("  push:\n");
+    workflow.push_str("    branches: [trunk]\n");
+    workflow.push_str("  pull_request:\n\n");
+    workflow.push_str("jobs:\n");
+    workflow.push_str("  test:\n");
+    workflow.push_str("    runs-on: ");
+    workflow.push_str(runner(platform));
+    workflow.push('\n');
+    workflow.push_str("    steps:\n");
+    workflow.push_str("      - name: Checkout\n");
+    workflow.push_str("        uses: actions/checkout@v4\n\n");
+
+    match runtime {
+        Runtime::Nix => {
+            workflow.push_str("      - name: Install Nix\n");
+            workflow.push_str("        uses: https://github.com/cachix/install-nix-action@v31\n\n");
+            workflow.push_str("      - name: Check flake\n");
+            workflow.push_str("        run: nix flake check\n\n");
+            workflow.push_str("      - name: Test\n");
+            workflow.push_str("        run: nix develop -c cargo test\n\n");
+            if self_check {
+                workflow.push_str("      - name: Check generated CI\n");
+                workflow.push_str("        run: nix develop -c cargo run -- init-ci --platform ");
+                workflow.push_str(platform.as_str());
+                workflow.push_str(" --check\n\n");
+            }
+            workflow.push_str("      - name: Clippy\n");
+            workflow.push_str(
+                "        run: nix develop -c cargo clippy --all-targets -- --deny warnings\n\n",
+            );
+            workflow.push_str("      - name: Package crate\n");
+            workflow.push_str("        run: nix develop -c cargo package --allow-dirty\n");
+        }
+        Runtime::Cargo => {
+            workflow.push_str("      - name: Install Rust\n");
+            workflow.push_str("        uses: ");
+            workflow.push_str(rust_toolchain_action(platform));
+            workflow.push('\n');
+            workflow.push_str("        with:\n");
+            workflow.push_str("          components: rustfmt, clippy\n\n");
+            workflow.push_str("      - name: Format\n");
+            workflow.push_str("        run: cargo fmt --check\n\n");
+            workflow.push_str("      - name: Test\n");
+            workflow.push_str("        run: cargo test\n\n");
+            if self_check {
+                workflow.push_str("      - name: Check generated CI\n");
+                workflow.push_str("        run: cargo run -- init-ci --platform ");
+                workflow.push_str(platform.as_str());
+                workflow.push_str(" --check\n\n");
+            }
+            workflow.push_str("      - name: Clippy\n");
+            workflow.push_str("        run: cargo clippy --all-targets -- --deny warnings\n\n");
+            workflow.push_str("      - name: Package crate\n");
+            workflow.push_str("        run: cargo package --allow-dirty\n");
+        }
+    }
+
+    workflow
+}
+
+fn publish_workflow(platform: Platform, runtime: Runtime) -> String {
+    let mut workflow = String::new();
+    workflow.push_str("name: Publish Crate\n\n");
+    workflow.push_str("on:\n");
+    workflow.push_str("  push:\n");
+    workflow.push_str("    tags:\n");
+    workflow.push_str("      - \"*.*.*\"\n\n");
+    workflow.push_str("jobs:\n");
+    workflow.push_str("  publish:\n");
+    workflow.push_str("    runs-on: ");
+    workflow.push_str(runner(platform));
+    workflow.push('\n');
+    workflow.push_str("    steps:\n");
+    workflow.push_str("      - name: Checkout\n");
+    workflow.push_str("        uses: actions/checkout@v4\n\n");
+
+    match runtime {
+        Runtime::Nix => {
+            workflow.push_str("      - name: Install Nix\n");
+            workflow.push_str("        uses: https://github.com/cachix/install-nix-action@v31\n\n");
+            workflow.push_str(&validate_tag_step("nix develop -c cargo pkgid"));
+            workflow.push_str("      - name: Check flake\n");
+            workflow.push_str("        run: nix flake check\n\n");
+            workflow.push_str("      - name: Test\n");
+            workflow.push_str("        run: nix develop -c cargo test\n\n");
+            workflow.push_str("      - name: Clippy\n");
+            workflow.push_str(
+                "        run: nix develop -c cargo clippy --all-targets -- --deny warnings\n\n",
+            );
+            workflow.push_str("      - name: Dry-run publish\n");
+            workflow.push_str("        run: nix develop -c cargo publish --dry-run\n\n");
+            workflow.push_str(&publish_step("nix develop -c cargo publish"));
+        }
+        Runtime::Cargo => {
+            workflow.push_str("      - name: Install Rust\n");
+            workflow.push_str("        uses: ");
+            workflow.push_str(rust_toolchain_action(platform));
+            workflow.push('\n');
+            workflow.push_str("        with:\n");
+            workflow.push_str("          components: rustfmt, clippy\n\n");
+            workflow.push_str(&validate_tag_step("cargo pkgid"));
+            workflow.push_str("      - name: Format\n");
+            workflow.push_str("        run: cargo fmt --check\n\n");
+            workflow.push_str("      - name: Test\n");
+            workflow.push_str("        run: cargo test\n\n");
+            workflow.push_str("      - name: Clippy\n");
+            workflow.push_str("        run: cargo clippy --all-targets -- --deny warnings\n\n");
+            workflow.push_str("      - name: Dry-run publish\n");
+            workflow.push_str("        run: cargo publish --dry-run\n\n");
+            workflow.push_str(&publish_step("cargo publish"));
+        }
+    }
+
+    workflow
+}
+
+fn rust_toolchain_action(platform: Platform) -> &'static str {
+    match platform {
+        Platform::Forgejo => "https://github.com/dtolnay/rust-toolchain@stable",
+        Platform::Github => "dtolnay/rust-toolchain@stable",
+    }
+}
+
+fn runner(platform: Platform) -> &'static str {
+    match platform {
+        Platform::Forgejo => "codeberg-small",
+        Platform::Github => "ubuntu-latest",
+    }
+}
+
+fn validate_tag_step(cargo_pkgid_command: &str) -> String {
+    format!(
+        r#"      - name: Validate tag
+        run: |
+          tag="${{GITHUB_REF_NAME:-${{FORGE_REF_NAME:-}}}}"
+          if [ -z "$tag" ]; then
+            ref="${{GITHUB_REF:-${{FORGE_REF:-}}}}"
+            tag="${{ref#refs/tags/}}"
+          fi
+
+          if ! printf '%s\n' "$tag" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "Tag must be an exact semver version like 0.1.1, got '$tag'" >&2
+            exit 1
+          fi
+
+          version="$({cargo_pkgid_command} | sed 's/.*@//')"
+          if [ "$tag" != "$version" ]; then
+            echo "Tag $tag does not match Cargo.toml package version $version" >&2
+            exit 1
+          fi
+
+"#
+    )
+}
+
+fn publish_step(command: &str) -> String {
+    format!(
+        r#"      - name: Publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{{{ secrets.CARGO_REGISTRY_TOKEN }}}}
+        run: |
+          if [ -z "${{CARGO_REGISTRY_TOKEN:-}}" ]; then
+            echo "CARGO_REGISTRY_TOKEN is required to publish to crates.io" >&2
+            exit 1
+          fi
+          {command}
+"#
+    )
 }
 
 fn update_manifest_version(manifest_path: &Path, version: &Version) -> Result<()> {
