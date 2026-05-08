@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  push:
+    branches: [trunk]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: codeberg-small
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: https://github.com/cachix/install-nix-action@v31
+
+      - name: Check flake
+        run: nix flake check
+
+      - name: Test
+        run: nix develop -c cargo test
+
+      - name: Clippy
+        run: nix develop -c cargo clippy --all-targets -- --deny warnings
+
+      - name: Package crate
+        run: nix develop -c cargo package --allow-dirty

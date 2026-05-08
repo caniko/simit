@@ -1,0 +1,22 @@
+[package]
+name = "simit"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+description = "Semver-aware git commit helper for Rust projects"
+repository = "https://codeberg.org/caniko/simit"
+readme = "README.md"
+keywords = ["git", "semver", "release", "cargo", "commit"]
+categories = ["command-line-utilities", "development-tools"]
+
+[dependencies]
+anyhow = "1"
+camino = { version = "1", features = ["serde1"] }
+semver = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml_edit = "0.23"
+
+[dev-dependencies]
+tempfile = "3"
