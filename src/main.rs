@@ -78,6 +78,7 @@ impl CommitCommand {
 struct InitCiCommand {
     platform: Platform,
     check: bool,
+    runner: Option<String>,
 }
 
 impl InitCiCommand {
@@ -91,7 +92,8 @@ impl InitCiCommand {
             .packages
             .iter()
             .any(|package| package.name == "simit");
-        let workflows = generate_workflows(self.platform, runtime, self_check);
+        let workflows =
+            generate_workflows(self.platform, runtime, self_check, self.runner.as_deref());
 
         if self.check {
             check_workflows(workspace_root, &workflows)
@@ -240,6 +242,7 @@ fn parse_init_ci_args(args: Vec<OsString>) -> Result<CommandSpec> {
     let mut iter = args.into_iter();
     let mut platform = None;
     let mut check = false;
+    let mut runner = None;
 
     while let Some(arg) = iter.next() {
         match arg.to_str() {
@@ -252,8 +255,20 @@ fn parse_init_ci_args(args: Vec<OsString>) -> Result<CommandSpec> {
                     .ok_or_else(|| anyhow!("--platform value must be UTF-8"))?;
                 platform = Some(Platform::parse(value)?);
             }
+            Some("--runner") => {
+                let Some(value) = iter.next() else {
+                    bail!("--runner requires a value");
+                };
+                let value = value
+                    .to_str()
+                    .ok_or_else(|| anyhow!("--runner value must be UTF-8"))?;
+                validate_runner(value)?;
+                runner = Some(value.to_owned());
+            }
             Some("--check") => check = true,
-            _ => bail!("usage: simit init-ci --platform forgejo|github [--check]"),
+            _ => {
+                bail!("usage: simit init-ci --platform forgejo|github [--runner <label>] [--check]")
+            }
         }
     }
 
@@ -261,7 +276,11 @@ fn parse_init_ci_args(args: Vec<OsString>) -> Result<CommandSpec> {
         bail!("init-ci requires --platform forgejo|github");
     };
 
-    Ok(CommandSpec::InitCi(InitCiCommand { platform, check }))
+    Ok(CommandSpec::InitCi(InitCiCommand {
+        platform,
+        check,
+        runner,
+    }))
 }
 
 fn find_manifest(start: &Path) -> Result<PathBuf> {
@@ -361,16 +380,17 @@ fn generate_workflows(
     platform: Platform,
     runtime: Runtime,
     self_check: bool,
+    runner_override: Option<&str>,
 ) -> Vec<GeneratedWorkflow> {
     let dir = PathBuf::from(platform.workflow_dir());
     vec![
         GeneratedWorkflow {
             relative_path: dir.join("ci.yaml"),
-            content: ci_workflow(platform, runtime, self_check),
+            content: ci_workflow(platform, runtime, self_check, runner_override),
         },
         GeneratedWorkflow {
             relative_path: dir.join("publish-crate.yaml"),
-            content: publish_workflow(platform, runtime),
+            content: publish_workflow(platform, runtime, runner_override),
         },
     ]
 }
@@ -430,7 +450,12 @@ fn infer_platform_name(workflows: &[GeneratedWorkflow]) -> &'static str {
         .unwrap_or("forgejo")
 }
 
-fn ci_workflow(platform: Platform, runtime: Runtime, self_check: bool) -> String {
+fn ci_workflow(
+    platform: Platform,
+    runtime: Runtime,
+    self_check: bool,
+    runner_override: Option<&str>,
+) -> String {
     let mut workflow = String::new();
     workflow.push_str("name: CI\n\n");
     workflow.push_str("on:\n");
@@ -440,7 +465,7 @@ fn ci_workflow(platform: Platform, runtime: Runtime, self_check: bool) -> String
     workflow.push_str("jobs:\n");
     workflow.push_str("  test:\n");
     workflow.push_str("    runs-on: ");
-    workflow.push_str(runner(platform));
+    workflow.push_str(&runner(platform, runtime, JobKind::Ci, runner_override));
     workflow.push('\n');
     workflow.push_str("    steps:\n");
     workflow.push_str("      - name: Checkout\n");
@@ -458,7 +483,7 @@ fn ci_workflow(platform: Platform, runtime: Runtime, self_check: bool) -> String
                 workflow.push_str("      - name: Check generated CI\n");
                 workflow.push_str("        run: nix develop -c cargo run -- init-ci --platform ");
                 workflow.push_str(platform.as_str());
-                workflow.push_str(" --check\n\n");
+                push_self_check_suffix(&mut workflow, runner_override);
             }
             workflow.push_str("      - name: Clippy\n");
             workflow.push_str(
@@ -482,7 +507,7 @@ fn ci_workflow(platform: Platform, runtime: Runtime, self_check: bool) -> String
                 workflow.push_str("      - name: Check generated CI\n");
                 workflow.push_str("        run: cargo run -- init-ci --platform ");
                 workflow.push_str(platform.as_str());
-                workflow.push_str(" --check\n\n");
+                push_self_check_suffix(&mut workflow, runner_override);
             }
             workflow.push_str("      - name: Clippy\n");
             workflow.push_str("        run: cargo clippy --all-targets -- --deny warnings\n\n");
@@ -494,7 +519,7 @@ fn ci_workflow(platform: Platform, runtime: Runtime, self_check: bool) -> String
     workflow
 }
 
-fn publish_workflow(platform: Platform, runtime: Runtime) -> String {
+fn publish_workflow(platform: Platform, runtime: Runtime, runner_override: Option<&str>) -> String {
     let mut workflow = String::new();
     workflow.push_str("name: Publish Crate\n\n");
     workflow.push_str("on:\n");
@@ -504,7 +529,12 @@ fn publish_workflow(platform: Platform, runtime: Runtime) -> String {
     workflow.push_str("jobs:\n");
     workflow.push_str("  publish:\n");
     workflow.push_str("    runs-on: ");
-    workflow.push_str(runner(platform));
+    workflow.push_str(&runner(
+        platform,
+        runtime,
+        JobKind::Publish,
+        runner_override,
+    ));
     workflow.push('\n');
     workflow.push_str("    steps:\n");
     workflow.push_str("      - name: Checkout\n");
@@ -557,10 +587,49 @@ fn rust_toolchain_action(platform: Platform) -> &'static str {
     }
 }
 
-fn runner(platform: Platform) -> &'static str {
-    match platform {
-        Platform::Forgejo => "codeberg-small",
-        Platform::Github => "ubuntu-latest",
+fn validate_runner(value: &str) -> Result<()> {
+    if value.is_empty() {
+        bail!("--runner cannot be empty");
+    }
+
+    if !value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        bail!("--runner may only contain ASCII letters, digits, '.', '_', and '-'");
+    }
+
+    Ok(())
+}
+
+fn push_self_check_suffix(workflow: &mut String, runner_override: Option<&str>) {
+    if let Some(runner) = runner_override {
+        workflow.push_str(" --runner ");
+        workflow.push_str(runner);
+    }
+    workflow.push_str(" --check\n\n");
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JobKind {
+    Ci,
+    Publish,
+}
+
+fn runner(
+    platform: Platform,
+    runtime: Runtime,
+    _job_kind: JobKind,
+    runner_override: Option<&str>,
+) -> String {
+    if let Some(runner) = runner_override {
+        return runner.to_owned();
+    }
+
+    match (platform, runtime) {
+        (Platform::Forgejo, Runtime::Cargo) => "codeberg-tiny".to_owned(),
+        (Platform::Forgejo, Runtime::Nix) => "codeberg-small".to_owned(),
+        (Platform::Github, _) => "ubuntu-latest".to_owned(),
     }
 }
 

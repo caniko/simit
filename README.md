@@ -45,6 +45,15 @@ simit init-ci --platform github
 use `nix flake check` and `nix develop -c cargo ...`; other repositories use
 plain Cargo with a stable Rust toolchain.
 
+Forgejo workflows are tuned for Codeberg's hosted runner limits. Plain Cargo
+repositories use `codeberg-tiny` by default. Repositories with `flake.nix` use
+`codeberg-small` for CI and publishing because Nix setup and builds need more
+headroom. Use `--runner` when a repository needs a specific hosted runner:
+
+```sh
+simit init-ci --platform forgejo --runner codeberg-medium
+```
+
 Use `--check` in CI to make sure committed workflows still match `simit`'s
 generated output:
 

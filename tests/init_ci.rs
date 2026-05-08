@@ -84,6 +84,85 @@ fn generates_github_plain_cargo_workflows() {
 }
 
 #[test]
+fn forgejo_plain_cargo_defaults_to_tiny_runner() {
+    let temp = init_package(false);
+
+    let status = simit()
+        .current_dir(temp.path())
+        .args(["init-ci", "--platform", "forgejo"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let ci = read(&temp.path().join(".forgejo/workflows/ci.yaml"));
+    assert!(ci.contains("runs-on: codeberg-tiny"));
+
+    let publish = read(&temp.path().join(".forgejo/workflows/publish-crate.yaml"));
+    assert!(publish.contains("runs-on: codeberg-tiny"));
+}
+
+#[test]
+fn forgejo_runner_override_applies_to_all_jobs() {
+    let temp = init_package(true);
+
+    let status = simit()
+        .current_dir(temp.path())
+        .args([
+            "init-ci",
+            "--platform",
+            "forgejo",
+            "--runner",
+            "codeberg-medium-lazy",
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let ci = read(&temp.path().join(".forgejo/workflows/ci.yaml"));
+    assert!(ci.contains("runs-on: codeberg-medium-lazy"));
+
+    let publish = read(&temp.path().join(".forgejo/workflows/publish-crate.yaml"));
+    assert!(publish.contains("runs-on: codeberg-medium-lazy"));
+}
+
+#[test]
+fn self_check_preserves_runner_override() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+
+    fs::write(
+        root.join("Cargo.toml"),
+        r#"[package]
+name = "simit"
+version = "0.1.0"
+edition = "2024"
+"#,
+    )
+    .unwrap();
+    fs::create_dir(root.join("src")).unwrap();
+    fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
+    fs::write(root.join("flake.nix"), "{}\n").unwrap();
+
+    let status = simit()
+        .current_dir(root)
+        .args([
+            "init-ci",
+            "--platform",
+            "forgejo",
+            "--runner",
+            "codeberg-medium",
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let ci = read(&root.join(".forgejo/workflows/ci.yaml"));
+    assert!(
+        ci.contains("cargo run -- init-ci --platform forgejo --runner codeberg-medium --check")
+    );
+}
+
+#[test]
 fn check_succeeds_when_workflows_are_current() {
     let temp = init_package(true);
 
