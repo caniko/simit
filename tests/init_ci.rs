@@ -98,14 +98,15 @@ fn forgejo_auto_runtime_uses_rust_container_even_when_flake_exists() {
 
     let ci = read(&temp.path().join(".forgejo/workflows/ci.yaml"));
     assert!(ci.contains("runs-on: codeberg-small"));
-    assert!(ci.contains("container: rust:1.85-bookworm"));
+    assert!(ci.contains("container: rust:1.85-alpine"));
+    assert!(ci.contains("run: apk add --no-cache git build-base"));
     assert!(ci.contains("run: rustup component add clippy rustfmt"));
     assert!(ci.contains("run: cargo test --all-features"));
     assert!(!ci.contains("uses: https://github.com/cachix/install-nix-action@v31"));
 
     let publish = read(&temp.path().join(".forgejo/workflows/publish-crate.yaml"));
     assert!(publish.contains("runs-on: codeberg-small"));
-    assert!(publish.contains("container: rust:1.85-bookworm"));
+    assert!(publish.contains("container: rust:1.85-alpine"));
     assert!(publish.contains("cargo metadata --no-deps --format-version 1"));
 }
 

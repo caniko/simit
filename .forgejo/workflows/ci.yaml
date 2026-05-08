@@ -8,8 +8,11 @@ on:
 jobs:
   test:
     runs-on: codeberg-small
-    container: rust:1.85-bookworm
+    container: rust:1.85-alpine
     steps:
+      - name: Install Alpine tools
+        run: apk add --no-cache git build-base
+
       - name: Checkout
         run: |
           repo="${GITHUB_REPOSITORY:-${FORGE_REPOSITORY:-}}"

@@ -644,15 +644,18 @@ fn push_container(workflow: &mut String, platform: Platform, runtime: Runtime, p
 
 fn rust_container_image(package: &Package) -> String {
     match package.rust_version.as_deref() {
-        Some(version) => format!("rust:{version}-bookworm"),
-        None => "rust:stable-bookworm".to_owned(),
+        Some(version) => format!("rust:{version}-alpine"),
+        None => "rust:alpine".to_owned(),
     }
 }
 
 fn push_checkout_step(workflow: &mut String, platform: Platform, runtime: Runtime) {
     if platform == Platform::Forgejo && runtime == Runtime::Cargo {
         workflow.push_str(
-            r#"      - name: Checkout
+            r#"      - name: Install Alpine tools
+        run: apk add --no-cache git build-base
+
+      - name: Checkout
         run: |
           repo="${GITHUB_REPOSITORY:-${FORGE_REPOSITORY:-}}"
           server="${GITHUB_SERVER_URL:-${FORGE_SERVER_URL:-https://codeberg.org}}"
