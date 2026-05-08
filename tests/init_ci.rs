@@ -56,7 +56,9 @@ fn generates_forgejo_nix_workflows() {
     assert!(publish.contains("tags:"));
     assert!(publish.contains("grep -Eq '^[0-9]+\\.[0-9]+\\.[0-9]+$'"));
     assert!(publish.contains("nix develop -c cargo pkgid"));
-    assert!(publish.contains("CARGO_REGISTRY_TOKEN is required"));
+    assert!(publish.contains("CRATES_IO_API_TOKEN: ${{ secrets.CRATES_IO_API_TOKEN }}"));
+    assert!(publish.contains("CRATES_IO_API_TOKEN is required"));
+    assert!(publish.contains("export CARGO_REGISTRY_TOKEN="));
 }
 
 #[test]

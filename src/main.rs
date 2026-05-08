@@ -593,12 +593,13 @@ fn publish_step(command: &str) -> String {
     format!(
         r#"      - name: Publish
         env:
-          CARGO_REGISTRY_TOKEN: ${{{{ secrets.CARGO_REGISTRY_TOKEN }}}}
+          CRATES_IO_API_TOKEN: ${{{{ secrets.CRATES_IO_API_TOKEN }}}}
         run: |
-          if [ -z "${{CARGO_REGISTRY_TOKEN:-}}" ]; then
-            echo "CARGO_REGISTRY_TOKEN is required to publish to crates.io" >&2
+          if [ -z "${{CRATES_IO_API_TOKEN:-}}" ] && [ -z "${{CARGO_REGISTRY_TOKEN:-}}" ]; then
+            echo "CRATES_IO_API_TOKEN is required to publish to crates.io" >&2
             exit 1
           fi
+          export CARGO_REGISTRY_TOKEN="${{CARGO_REGISTRY_TOKEN:-$CRATES_IO_API_TOKEN}}"
           {command}
 "#
     )
