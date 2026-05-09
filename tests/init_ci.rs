@@ -288,4 +288,49 @@ rust-version = "1.85"
 
     let ci = read(&root.join(".forgejo/workflows/ci.yaml"));
     assert!(ci.contains("cargo run -- init-ci --platform forgejo --check"));
+    assert!(ci.contains("cargo run -- init-hooks --check"));
+    assert!(!ci.contains("cargo run -- ci"));
+}
+
+#[test]
+fn ci_command_is_not_available() {
+    let temp = init_package(false);
+
+    let output = simit()
+        .current_dir(temp.path())
+        .args(["ci"])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("unrecognized subcommand 'ci'"));
+}
+
+#[test]
+fn optional_strict_flags_render_expected_steps() {
+    let temp = init_package(false);
+
+    let status = simit()
+        .current_dir(temp.path())
+        .args([
+            "init-ci",
+            "--platform",
+            "forgejo",
+            "--with-msrv",
+            "--with-audit",
+            "--with-deny",
+            "--with-docs",
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let ci = read(&temp.path().join(".forgejo/workflows/ci.yaml"));
+    assert!(ci.contains("run: cargo install cargo-audit --locked"));
+    assert!(ci.contains("run: cargo audit"));
+    assert!(ci.contains("run: cargo install cargo-deny --locked"));
+    assert!(ci.contains("run: cargo deny check"));
+    assert!(ci.contains("run: cargo +1.85 check --all-targets"));
+    assert!(ci.contains("run: cargo doc --no-deps --all-features"));
 }

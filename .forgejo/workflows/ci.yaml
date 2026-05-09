@@ -38,8 +38,29 @@ jobs:
       - name: Test all features
         run: cargo test --all-features
 
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --locked
+
+      - name: Check MSRV
+        run: cargo +1.85 check --all-targets
+
+      - name: Audit dependencies
+        run: cargo audit
+
+      - name: Deny dependency policy
+        run: cargo deny check
+
+      - name: Build docs
+        run: cargo doc --no-deps --all-features
+
       - name: Check generated CI
-        run: cargo run -- init-ci --platform forgejo --check
+        run: cargo run -- init-ci --platform forgejo --with-msrv --with-audit --with-deny --with-docs --check
+
+      - name: Check generated hooks
+        run: cargo run -- init-hooks --check
 
       - name: Clippy all features
         run: cargo clippy --all-targets --all-features -- --deny warnings
