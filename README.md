@@ -6,6 +6,7 @@
 simit commit patch -m "fix admission edge case"
 simit commit minor -m "add weighted provider API"
 simit commit major -m "remove deprecated API"
+simit commit patch --pre rc.1 -m "prepare release candidate"
 ```
 
 The command bumps the selected package version in `Cargo.toml`, updates
@@ -26,11 +27,29 @@ GPG signing is unavailable:
 simit commit --no-sign patch -m "release without tag signing"
 ```
 
+Preview a release commit without touching the worktree:
+
+```sh
+simit commit --dry-run patch -m "preview patch release"
+```
+
 For workspaces with more than one package, choose the target package:
 
 ```sh
 simit commit --package memory-admission patch -m "release memory-admission"
+simit commit --workspace patch -m "release all workspace crates"
 ```
+
+Run the full local release flow, including checks and a strict Keep a Changelog
+update:
+
+```sh
+simit release --no-sign patch -m "release patch"
+```
+
+`simit release` runs `cargo test`, `cargo clippy --all-targets --all-features
+-- --deny warnings`, updates `CHANGELOG.md`, commits, and tags locally. It does
+not push.
 
 ## CI wiring
 
@@ -67,3 +86,67 @@ generated output:
 ```sh
 simit init-ci --platform forgejo --check
 ```
+
+Add optional CI jobs and checks when the project needs them:
+
+```sh
+simit init-ci --platform github --with-nextest --with-msrv --with-docs
+simit init-ci --platform forgejo --with-audit --with-deny --with-artifacts
+simit init-ci --platform forgejo --check --diff
+```
+
+`--with-msrv` requires `package.rust-version`.
+
+## Flake and hook wiring
+
+Generate a canonical Rust crane flake plus formatter and pre-commit hook definitions:
+
+```sh
+simit init-flake
+```
+
+This writes `flake.nix`, `nix/treefmt.nix`, and `nix/pre-commit.nix`,
+detects Rust, Nix, uv-based Python, TOML, YAML, and Markdown files, and wires
+`treefmt-nix` and `cachix/git-hooks.nix`. Existing `flake.nix` files are
+patched only when simit can find safe anchors; otherwise, use `--print` and
+apply the generated wiring manually.
+
+Preview the generated files without writing them:
+
+```sh
+simit init-flake --print
+```
+
+Check committed flake and hook files in CI:
+
+```sh
+simit init-flake --check
+simit init-flake --check --diff
+```
+
+## Shell integration
+
+Generate shell completions or a manpage:
+
+```sh
+simit completions bash
+simit completions zsh
+simit completions fish
+simit man
+```
+
+## Release checklist
+
+Before publishing a release, make sure `CHANGELOG.md` has the intended
+`## [Unreleased]` entries, then run:
+
+```sh
+simit release patch -m "release patch"
+```
+
+The crates.io publish workflow runs when the release tag is pushed and requires
+`CRATES_IO_API_TOKEN`.
+
+## License
+
+`simit` is licensed under the MIT License. See `LICENSE`.

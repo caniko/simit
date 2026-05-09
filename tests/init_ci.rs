@@ -288,4 +288,81 @@ rust-version = "1.85"
 
     let ci = read(&root.join(".forgejo/workflows/ci.yaml"));
     assert!(ci.contains("cargo run -- init-ci --platform forgejo --check"));
+    assert!(ci.contains("cargo run -- init-flake --check"));
+    assert!(!ci.contains("cargo run -- ci"));
+}
+
+#[test]
+fn ci_command_is_not_available() {
+    let temp = init_package(false);
+
+    let output = simit()
+        .current_dir(temp.path())
+        .args(["ci"])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("unrecognized subcommand 'ci'"));
+}
+
+#[test]
+fn optional_strict_flags_render_expected_steps() {
+    let temp = init_package(false);
+
+    let status = simit()
+        .current_dir(temp.path())
+        .args([
+            "init-ci",
+            "--platform",
+            "forgejo",
+            "--with-msrv",
+            "--with-audit",
+            "--with-deny",
+            "--with-docs",
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let ci = read(&temp.path().join(".forgejo/workflows/ci.yaml"));
+    assert!(ci.contains("run: cargo install cargo-audit --locked"));
+    assert!(ci.contains("run: cargo audit"));
+    assert!(ci.contains("run: cargo install cargo-deny --locked"));
+    assert!(ci.contains("run: cargo deny check"));
+    assert!(ci.contains("run: cargo +1.85 check --all-targets"));
+    assert!(ci.contains("run: cargo doc --no-deps --all-features"));
+
+    let deny = read(&temp.path().join("deny.toml"));
+    assert!(deny.contains("\"MIT\""));
+    assert!(deny.contains("\"Apache-2.0\""));
+    assert!(deny.contains("\"Unicode-3.0\""));
+    assert!(deny.contains("\"Unlicense\""));
+    assert!(deny.contains("allow-registry = [\"https://github.com/rust-lang/crates.io-index\"]"));
+}
+
+#[test]
+fn check_fails_when_deny_policy_differs() {
+    let temp = init_package(false);
+
+    let write_status = simit()
+        .current_dir(temp.path())
+        .args(["init-ci", "--platform", "forgejo", "--with-deny"])
+        .status()
+        .unwrap();
+    assert!(write_status.success());
+
+    fs::write(temp.path().join("deny.toml"), "[licenses]\n").unwrap();
+
+    let output = simit()
+        .current_dir(temp.path())
+        .args(["init-ci", "--platform", "forgejo", "--with-deny", "--check"])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("CI workflows are not up to date"));
+    assert!(stderr.contains("deny.toml differs"));
 }
