@@ -8,41 +8,33 @@ on:
 jobs:
   test:
     runs-on: atlas
-    container: rust:1.95-alpine
+    container: rust:1.95-trixie
     steps:
-      - name: Install Alpine tools
-        run: apk add --no-cache git build-base
+      - uses: https://code.forgejo.org/actions/checkout@v4
 
-      - name: Checkout
-        run: |
-          repo="${GITHUB_REPOSITORY:-${FORGE_REPOSITORY:-}}"
-          server="${GITHUB_SERVER_URL:-${FORGE_SERVER_URL:-https://codeberg.org}}"
-          sha="${GITHUB_SHA:-${FORGE_SHA:-}}"
-          ref="${GITHUB_REF:-${FORGE_REF:-}}"
-          if [ -z "$repo" ]; then
-            echo "Repository name is unavailable" >&2
-            exit 1
-          fi
-          git init .
-          git remote add origin "$server/$repo.git"
-          if [ -n "$ref" ]; then
-            git fetch --depth=1 origin "$ref"
-          else
-            git fetch --depth=1 origin "$sha"
-          fi
-          git checkout --detach FETCH_HEAD
+      - uses: https://github.com/Swatinem/rust-cache@v2
+        with:
+          shared-key: ${{ github.workflow }}
+          cache-on-failure: true
 
       - name: Install Rust components
         run: rustup component add clippy rustfmt
 
+      - name: Install cargo-binstall
+        run: |
+          base="https://raw.githubusercontent.com/cargo-bins"
+          script="$base/cargo-binstall/main/install-from-binstall-release.sh"
+          curl -L --proto '=https' --tlsv1.2 -sSf "$script" | bash
+
+      - name: Install cargo tools
+        run: |
+          cargo binstall -y --no-confirm \
+            cargo-nextest \
+            cargo-audit \
+            cargo-deny
+
       - name: Test all features
-        run: cargo test --all-features
-
-      - name: Install cargo-audit
-        run: cargo install cargo-audit --locked
-
-      - name: Install cargo-deny
-        run: cargo install cargo-deny --locked
+        run: cargo nextest run --all-features
 
       - name: Check MSRV
         run: cargo +1.95 check --all-targets
@@ -57,7 +49,15 @@ jobs:
         run: cargo doc --no-deps --all-features
 
       - name: Check generated CI
-        run: cargo run -- init-ci --platform forgejo --runner atlas --with-msrv --with-audit --with-deny --with-docs --check
+        run: |
+          cargo run -- init-ci \
+            --platform forgejo \
+            --runner atlas \
+            --with-msrv \
+            --with-audit \
+            --with-deny \
+            --with-docs \
+            --check
 
       - name: Check generated flake and hooks
         run: cargo run -- init-flake --check
