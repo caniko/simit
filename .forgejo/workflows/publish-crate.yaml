@@ -1,6 +1,8 @@
+---
+# yamllint disable rule:line-length
 name: Publish Crate
 
-on:
+"on":
   push:
     tags:
       - "*.*.*"
@@ -8,76 +10,51 @@ on:
 jobs:
   publish:
     runs-on: atlas
-    container: rust:1.95-trixie
     steps:
       - uses: https://code.forgejo.org/actions/checkout@v4
 
-      - uses: https://github.com/Swatinem/rust-cache@v2
+      - uses: https://github.com/cachix/install-nix-action@v27
         with:
-          shared-key: ${{ github.workflow }}
-          cache-on-failure: true
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+            substituters = https://attic.candee.baby/canix https://cache.nixos.org
+            trusted-public-keys = canix:uqr0nD3I0mfj9BYfZgTZHMaDKfI2yCTtSA5JGTWKUeg= cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=
 
-      - name: Install Rust components
-        run: rustup component add clippy rustfmt
-
-      - name: Install cargo-binstall
-        run: |
-          base="https://raw.githubusercontent.com/cargo-bins"
-          script="$base/cargo-binstall/main/install-from-binstall-release.sh"
-          curl -L --proto '=https' --tlsv1.2 -sSf "$script" | bash
-
-      - name: Install cargo tools
-        run: |
-          cargo binstall -y --no-confirm \
-            cargo-nextest \
-            cargo-audit \
-            cargo-deny
+      - name: Flake check
+        run: nix flake check --keep-going --print-build-logs
 
       - name: Validate tag
         run: |
-          tag="${GITHUB_REF_NAME:-${FORGE_REF_NAME:-}}"
-          if [ -z "$tag" ]; then
-            ref="${GITHUB_REF:-${FORGE_REF:-}}"
-            tag="${ref#refs/tags/}"
-          fi
+          nix develop --command bash -euo pipefail -c '
+            tag="${GITHUB_REF_NAME:-${FORGE_REF_NAME:-}}"
+            if [ -z "$tag" ]; then
+              ref="${GITHUB_REF:-${FORGE_REF:-}}"
+              tag="${ref#refs/tags/}"
+            fi
 
-          if ! printf '%s\n' "$tag" \
-            | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-            echo "Tag must be an exact semver version, got '$tag'" >&2
-            exit 1
-          fi
+            if ! printf "%s\n" "$tag" \
+              | grep -Eq "^[0-9]+\.[0-9]+\.[0-9]+$"; then
+              echo "Tag must be an exact semver version, got '\''$tag'\''" >&2
+              exit 1
+            fi
 
-          version="$(
-            cargo metadata --no-deps --format-version 1 \
-              | grep -m1 -o '"version":"[^"]*"' \
-              | cut -d '"' -f4
-          )"
-          if [ -z "$version" ]; then
-            echo "Could not read package version from cargo metadata" >&2
-            exit 1
-          fi
-          if [ "$tag" != "$version" ]; then
-            echo "Tag $tag does not match package version $version" >&2
-            exit 1
-          fi
-
-      - name: Test all features
-        run: cargo nextest run --all-features
-
-      - name: Audit dependencies
-        run: cargo audit
-
-      - name: Deny dependency policy
-        run: cargo deny check
-
-      - name: Build docs
-        run: cargo doc --no-deps --all-features
-
-      - name: Clippy all features
-        run: cargo clippy --all-targets --all-features -- --deny warnings
+            version="$(
+              cargo metadata --no-deps --format-version 1 \
+                | grep -m1 -o '\''"version":"[^"]*"'\'' \
+                | cut -d '\''"'\'' -f4
+            )"
+            if [ -z "$version" ]; then
+              echo "Could not read package version from cargo metadata" >&2
+              exit 1
+            fi
+            if [ "$tag" != "$version" ]; then
+              echo "Tag $tag does not match package version $version" >&2
+              exit 1
+            fi
+          '
 
       - name: Dry-run publish
-        run: cargo publish --dry-run
+        run: nix develop --command cargo publish --dry-run
 
       - name: Publish
         env:
@@ -90,4 +67,4 @@ jobs:
           fi
           CARGO_REGISTRY_TOKEN="${CARGO_REGISTRY_TOKEN:-$CRATES_IO_API_TOKEN}"
           export CARGO_REGISTRY_TOKEN
-          cargo publish
+          nix develop --command cargo publish

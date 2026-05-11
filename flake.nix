@@ -16,10 +16,15 @@
       url = "github:cachix/git-hooks.nix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    advisory-db = {
+      url = "github:rustsec/advisory-db";
+      flake = false;
+    };
   };
 
   outputs = {
     self,
+    advisory-db,
     nixpkgs,
     rs-harbor,
     flake-utils,
@@ -42,6 +47,7 @@
       commonArgs = {
         inherit src;
         strictDeps = true;
+        cargoExtraArgs = "--all-features";
       };
 
       cargoArtifacts = craneLib.buildDepsOnly commonArgs;
@@ -61,6 +67,38 @@
           rustToolchain = toolchain.rustToolchain;
         };
       };
+
+      depsCheck = cargoArtifacts;
+
+      clippyCheck = craneLib.cargoClippy (commonArgs
+        // {
+          inherit cargoArtifacts;
+          cargoClippyExtraArgs = "--all-targets -- --deny warnings";
+        });
+
+      fmtCheck = craneLib.cargoFmt {
+        inherit src;
+      };
+
+      nextestCheck = craneLib.cargoNextest (commonArgs
+        // {
+          inherit cargoArtifacts;
+          nativeCheckInputs = [pkgs.git];
+        });
+
+      docCheck = craneLib.cargoDoc (commonArgs
+        // {
+          inherit cargoArtifacts;
+          cargoDocExtraArgs = "--no-deps";
+        });
+
+      auditCheck = craneLib.cargoAudit {
+        inherit advisory-db src;
+      };
+
+      denyCheck = craneLib.cargoDeny {
+        inherit src;
+      };
     in {
       packages.default = package;
 
@@ -70,15 +108,22 @@
         default = package;
         formatting = treefmtEval.config.build.check self;
 
-        clippy = craneLib.cargoClippy (commonArgs
-          // {
-            inherit cargoArtifacts;
-            cargoClippyExtraArgs = "--all-targets -- --deny warnings";
-          });
+        # Exposes the crane deps closure so atlas's post-build hook and CI
+        # Attic push can cache the project dependency graph independently.
+        simit-deps = depsCheck;
+        simit-clippy = clippyCheck;
+        simit-fmt = fmtCheck;
+        simit-nextest = nextestCheck;
+        simit-doc = docCheck;
+        simit-audit = auditCheck;
+        simit-deny = denyCheck;
 
-        fmt = craneLib.cargoFmt {
-          inherit src;
-        };
+        clippy = clippyCheck;
+        fmt = fmtCheck;
+        nextest = nextestCheck;
+        doc = docCheck;
+        audit = auditCheck;
+        deny = denyCheck;
       };
 
       devShells.default = craneLib.devShell {
@@ -86,6 +131,8 @@
         packages = with pkgs;
           [
             alejandra
+            cargo-audit
+            cargo-deny
             cargo-nextest
             git
             prettier

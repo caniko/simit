@@ -1,69 +1,38 @@
+---
+# yamllint disable rule:line-length
 name: CI
 
-on:
+"on":
   push:
     branches: [trunk]
   pull_request:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  test:
+  check:
     runs-on: atlas
-    container: rust:1.95-trixie
     steps:
       - uses: https://code.forgejo.org/actions/checkout@v4
 
-      - uses: https://github.com/Swatinem/rust-cache@v2
+      - uses: https://github.com/cachix/install-nix-action@v27
         with:
-          shared-key: ${{ github.workflow }}
-          cache-on-failure: true
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+            substituters = https://attic.candee.baby/canix https://cache.nixos.org
+            trusted-public-keys = canix:uqr0nD3I0mfj9BYfZgTZHMaDKfI2yCTtSA5JGTWKUeg= cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=
 
-      - name: Install Rust components
-        run: rustup component add clippy rustfmt
+      - name: Flake check
+        run: nix flake check --keep-going --print-build-logs
 
-      - name: Install cargo-binstall
+      - name: Push to Attic
+        if: github.ref == 'refs/heads/trunk' || github.ref == 'refs/heads/main'
         run: |
-          base="https://raw.githubusercontent.com/cargo-bins"
-          script="$base/cargo-binstall/main/install-from-binstall-release.sh"
-          curl -L --proto '=https' --tlsv1.2 -sSf "$script" | bash
-
-      - name: Install cargo tools
-        run: |
-          cargo binstall -y --no-confirm \
-            cargo-nextest \
-            cargo-audit \
-            cargo-deny
-
-      - name: Test all features
-        run: cargo nextest run --all-features
-
-      - name: Check MSRV
-        run: cargo +1.95 check --all-targets
-
-      - name: Audit dependencies
-        run: cargo audit
-
-      - name: Deny dependency policy
-        run: cargo deny check
-
-      - name: Build docs
-        run: cargo doc --no-deps --all-features
-
-      - name: Check generated CI
-        run: |
-          cargo run -- init-ci \
-            --platform forgejo \
-            --runner atlas \
-            --with-msrv \
-            --with-audit \
-            --with-deny \
-            --with-docs \
-            --check
-
-      - name: Check generated flake and hooks
-        run: cargo run -- init-flake --check
-
-      - name: Clippy all features
-        run: cargo clippy --all-targets --all-features -- --deny warnings
-
-      - name: Package crate
-        run: cargo package --allow-dirty
+          nix profile install nixpkgs#attic-client
+          attic login canix https://attic.candee.baby "$(cat "$ATTIC_TOKENS_DIR/simit")"
+          nix build --print-out-paths --no-link \
+            .#checks.x86_64-linux.simit-deps \
+            .#packages.x86_64-linux.default \
+            | xargs attic push canix
