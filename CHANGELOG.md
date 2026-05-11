@@ -4,6 +4,10 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-05-11
+
+- Adjust generated Rust CI defaults
+
 ## [0.3.0] - 2026-05-09
 
 - Reorg and release to crates.io

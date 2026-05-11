@@ -61,8 +61,8 @@ simit init-ci --platform github
 ```
 
 Forgejo workflows use direct Rust container jobs by default, even when the
-repository has a `flake.nix`. The container tag is derived from
-`package.rust-version`, for example `rust:1.85-alpine`.
+repository has a `flake.nix`. The default container is `rust:alpine`; MSRV is
+only checked when `--with-msrv` is requested.
 
 Forgejo workflows are tuned for Codeberg's hosted runner limits. Plain Cargo
 crate jobs use `codeberg-small` by default because test, clippy, and package

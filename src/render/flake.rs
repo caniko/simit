@@ -337,7 +337,13 @@ fn treefmt_nix(languages: &Languages) -> String {
     content.push_str("  projectRootFile = \"flake.nix\";\n");
 
     if languages.rust {
-        content.push_str("\n  programs.rustfmt.enable = true;\n");
+        content.push_str("\n  programs.rustfmt = {\n");
+        content.push_str("    enable = true;\n");
+        content.push_str("    edition = \"2021\";\n");
+        content.push_str("    package = pkgs.rust-bin.nightly.latest.default.override {\n");
+        content.push_str("      extensions = [\"rustfmt\"];\n");
+        content.push_str("    };\n");
+        content.push_str("  };\n");
     }
     if languages.nix {
         content.push_str("\n  programs.alejandra.enable = true;\n");

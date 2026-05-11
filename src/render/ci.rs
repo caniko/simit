@@ -50,7 +50,7 @@ pub fn files(
     if options.with_artifacts {
         files.push(GeneratedFile {
             relative_path: dir.join("release-artifacts.yaml"),
-            content: artifacts_workflow(platform, runtime, package, runner_override),
+            content: artifacts_workflow(platform, runtime, runner_override),
         });
     }
     if options.with_deny {
@@ -82,7 +82,7 @@ fn ci_workflow(
     workflow.push_str("    runs-on: ");
     workflow.push_str(&runner(platform, runner_override));
     workflow.push('\n');
-    push_container(&mut workflow, platform, runtime, package);
+    push_container(&mut workflow, platform, runtime);
     workflow.push_str("    steps:\n");
     push_checkout_step(&mut workflow, platform, runtime);
 
@@ -107,7 +107,7 @@ fn ci_workflow(
             workflow.push_str("        run: nix develop -c cargo package --allow-dirty\n");
         }
         Runtime::Cargo => {
-            push_rust_setup_step(&mut workflow, platform, package);
+            push_rust_setup_step(&mut workflow, platform);
             push_test_steps(&mut workflow, package, options);
             push_quality_tool_install_steps(&mut workflow, runtime, options);
             push_optional_ci_steps(&mut workflow, runtime, package, options);
@@ -141,7 +141,7 @@ fn publish_workflow(
     workflow.push_str("    runs-on: ");
     workflow.push_str(&runner(platform, runner_override));
     workflow.push('\n');
-    push_container(&mut workflow, platform, runtime, package);
+    push_container(&mut workflow, platform, runtime);
     workflow.push_str("    steps:\n");
     push_checkout_step(&mut workflow, platform, runtime);
 
@@ -167,7 +167,7 @@ fn publish_workflow(
             workflow.push_str(&publish_step("nix develop -c cargo publish"));
         }
         Runtime::Cargo => {
-            push_rust_setup_step(&mut workflow, platform, package);
+            push_rust_setup_step(&mut workflow, platform);
             workflow.push_str(&validate_tag_step(
                 "cargo metadata --no-deps --format-version 1",
             ));
@@ -187,7 +187,6 @@ fn publish_workflow(
 fn artifacts_workflow(
     platform: Platform,
     runtime: Runtime,
-    package: &Package,
     runner_override: Option<&str>,
 ) -> String {
     let mut workflow = String::new();
@@ -201,7 +200,7 @@ fn artifacts_workflow(
     workflow.push_str("    runs-on: ");
     workflow.push_str(&runner(platform, runner_override));
     workflow.push('\n');
-    push_container(&mut workflow, platform, runtime, package);
+    push_container(&mut workflow, platform, runtime);
     workflow.push_str("    steps:\n");
     push_checkout_step(&mut workflow, platform, runtime);
     match runtime {
@@ -212,7 +211,7 @@ fn artifacts_workflow(
             workflow.push_str("        run: nix build\n");
         }
         Runtime::Cargo => {
-            push_rust_setup_step(&mut workflow, platform, package);
+            push_rust_setup_step(&mut workflow, platform);
             workflow.push_str("      - name: Build release binary\n");
             workflow.push_str("        run: cargo build --release --locked\n");
         }
@@ -240,18 +239,9 @@ allow-registry = ["https://github.com/rust-lang/crates.io-index"]
     .to_owned()
 }
 
-fn push_container(workflow: &mut String, platform: Platform, runtime: Runtime, package: &Package) {
+fn push_container(workflow: &mut String, platform: Platform, runtime: Runtime) {
     if platform == Platform::Forgejo && runtime == Runtime::Cargo {
-        workflow.push_str("    container: ");
-        workflow.push_str(&rust_container_image(package));
-        workflow.push('\n');
-    }
-}
-
-fn rust_container_image(package: &Package) -> String {
-    match package.rust_version.as_deref() {
-        Some(version) => format!("rust:{version}-alpine"),
-        None => "rust:alpine".to_owned(),
+        workflow.push_str("    container: rust:alpine\n");
     }
 }
 
@@ -288,7 +278,7 @@ fn push_checkout_step(workflow: &mut String, platform: Platform, runtime: Runtim
     }
 }
 
-fn push_rust_setup_step(workflow: &mut String, platform: Platform, package: &Package) {
+fn push_rust_setup_step(workflow: &mut String, platform: Platform) {
     match platform {
         Platform::Forgejo => {
             workflow.push_str("      - name: Install Rust components\n");
@@ -298,9 +288,7 @@ fn push_rust_setup_step(workflow: &mut String, platform: Platform, package: &Pac
             workflow.push_str("      - name: Install Rust\n");
             workflow.push_str("        uses: dtolnay/rust-toolchain@stable\n");
             workflow.push_str("        with:\n");
-            workflow.push_str("          toolchain: ");
-            workflow.push_str(package.rust_version.as_deref().unwrap_or("stable"));
-            workflow.push('\n');
+            workflow.push_str("          toolchain: stable\n");
             workflow.push_str("          components: rustfmt, clippy\n\n");
         }
     }

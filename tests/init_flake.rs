@@ -101,7 +101,10 @@ fn writes_flake_and_detected_hook_files() {
     assert!(temp.path().join("flake.nix").exists());
 
     let treefmt = read(&temp.path().join("nix/treefmt.nix"));
-    assert!(treefmt.contains("programs.rustfmt.enable = true"));
+    assert!(treefmt.contains("programs.rustfmt = {"));
+    assert!(treefmt.contains("edition = \"2021\""));
+    assert!(treefmt.contains("pkgs.rust-bin.nightly.latest.default.override"));
+    assert!(treefmt.contains("extensions = [\"rustfmt\"]"));
     assert!(treefmt.contains("programs.alejandra.enable = true"));
     assert!(treefmt.contains("programs.taplo.enable = true"));
     assert!(treefmt.contains("programs.prettier"));
