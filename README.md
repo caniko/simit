@@ -48,8 +48,47 @@ simit release --no-sign patch -m "release patch"
 ```
 
 `simit release` runs `cargo test`, `cargo clippy --all-targets --all-features
--- --deny warnings`, updates `CHANGELOG.md`, commits, and tags locally. It does
-not push.
+-- --deny warnings`, promotes `CHANGELOG.md` from `[Unreleased]` when that file
+exists, commits, and tags locally. It does not push. Use `--no-changelog` to
+skip changelog promotion for one release.
+
+## Changelog management
+
+Initialize a canonical Keep a Changelog file:
+
+```sh
+simit changelog init
+```
+
+Add entries under `[Unreleased]` with one of the standard section kinds:
+
+```sh
+simit changelog add added "support artifact workflows"
+simit changelog add fixed "avoid detached-head release failures"
+```
+
+Promote `[Unreleased]` into a dated release section:
+
+```sh
+simit changelog release 0.4.0
+simit changelog release 0.4.0 --date 2026-05-20 --repo-url https://codeberg.org/caniko/simit
+```
+
+Validate or inspect a changelog section:
+
+```sh
+simit changelog check
+simit changelog show
+simit changelog show 0.3.1
+```
+
+`simit release` automatically runs the same promotion logic when `CHANGELOG.md`
+is present, so the normal local release flow is:
+
+```sh
+simit changelog add added "describe the release"
+simit release patch -m "release patch"
+```
 
 ## CI wiring
 
@@ -138,7 +177,8 @@ simit man
 ## Release checklist
 
 Before publishing a release, make sure `CHANGELOG.md` has the intended
-`## [Unreleased]` entries, then run:
+`## [Unreleased]` entries. You can validate them explicitly with
+`simit changelog check`, then run:
 
 ```sh
 simit release patch -m "release patch"
