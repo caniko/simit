@@ -1,4 +1,5 @@
 mod cargo;
+mod changelog;
 mod cli;
 mod commands;
 mod git;
@@ -24,6 +25,7 @@ fn run() -> Result<()> {
         Commands::Release(command) => commands::release::run(command),
         Commands::InitCi(command) => commands::init_ci::run(command),
         Commands::InitFlake(command) => commands::init_flake::run(command),
+        Commands::Changelog(command) => commands::changelog::run(command),
         Commands::Completions(command) => commands::completions::run(command),
         Commands::Man(command) => commands::man::run(command),
     }

@@ -54,6 +54,7 @@ fn generates_forgejo_nix_workflows() {
     assert!(ci.contains("run: nix develop -c cargo clippy --all-targets -- --deny warnings"));
 
     let publish = read(&temp.path().join(".forgejo/workflows/publish-crate.yaml"));
+    assert!(publish.contains("simit changelog release <version>"));
     assert!(publish.contains("tags:"));
     assert!(publish.contains("grep -Eq '^[0-9]+\\.[0-9]+\\.[0-9]+$'"));
     assert!(publish.contains("nix develop -c cargo metadata --no-deps --format-version 1"));
@@ -81,6 +82,7 @@ fn generates_github_plain_cargo_workflows() {
     assert!(ci.contains("run: cargo package --allow-dirty"));
 
     let publish = read(&temp.path().join(".github/workflows/publish-crate.yaml"));
+    assert!(publish.contains("simit changelog release <version>"));
     assert!(publish.contains("run: cargo publish --dry-run"));
     assert!(publish.contains("cargo metadata --no-deps --format-version 1"));
 }
@@ -105,6 +107,7 @@ fn forgejo_auto_runtime_uses_rust_container_even_when_flake_exists() {
     assert!(!ci.contains("uses: https://github.com/cachix/install-nix-action@v31"));
 
     let publish = read(&temp.path().join(".forgejo/workflows/publish-crate.yaml"));
+    assert!(publish.contains("simit changelog release <version>"));
     assert!(publish.contains("runs-on: codeberg-small"));
     assert!(publish.contains("container: rust:alpine"));
     assert!(publish.contains("cargo metadata --no-deps --format-version 1"));

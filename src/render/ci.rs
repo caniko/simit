@@ -131,6 +131,9 @@ fn publish_workflow(
     options: CiOptions,
 ) -> String {
     let mut workflow = String::new();
+    workflow.push_str(
+        "# Before creating and pushing a release tag, run `simit changelog release <version>` locally.\n",
+    );
     workflow.push_str("name: Publish Crate\n\n");
     workflow.push_str("on:\n");
     workflow.push_str("  push:\n");

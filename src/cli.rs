@@ -1,6 +1,8 @@
 use std::ffi::OsString;
 
+use camino::Utf8PathBuf;
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use semver::Version;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -24,6 +26,8 @@ pub enum Commands {
     InitCi(InitCiCommand),
     #[command(about = "Generate or verify a canonical Rust crane flake and hook wiring")]
     InitFlake(InitFlakeCommand),
+    #[command(about = "Manage a Keep a Changelog file")]
+    Changelog(ChangelogCommand),
     #[command(about = "Print shell completion scripts")]
     Completions(CompletionsCommand),
     #[command(about = "Print a roff manpage for simit")]
@@ -97,9 +101,14 @@ pub struct ReleaseCommand {
         short = 'm',
         long = "message",
         value_name = "MESSAGE",
-        help = "Release commit message and fallback changelog entry"
+        help = "Release commit message"
     )]
     pub message: String,
+    #[arg(
+        long = "no-changelog",
+        help = "Skip promoting CHANGELOG.md even when it exists"
+    )]
+    pub no_changelog: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -212,6 +221,69 @@ pub struct InitFlakeCommand {
     pub print: bool,
     #[arg(long, help = "Show a unified diff when --check finds stale files")]
     pub diff: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct ChangelogCommand {
+    #[arg(
+        long,
+        default_value = "CHANGELOG.md",
+        value_name = "PATH",
+        help = "Path to the changelog file"
+    )]
+    pub file: Utf8PathBuf,
+    #[command(subcommand)]
+    pub action: ChangelogAction,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ChangelogAction {
+    #[command(about = "Create a Keep a Changelog skeleton")]
+    Init,
+    #[command(about = "Add an entry under [Unreleased]")]
+    Add {
+        #[arg(value_enum, value_name = "KIND", help = "Entry kind to append")]
+        kind: ChangelogEntryKind,
+        #[arg(value_name = "TEXT", help = "Entry text to add")]
+        text: String,
+    },
+    #[command(about = "Promote [Unreleased] into a dated release section")]
+    Release {
+        #[arg(value_name = "VERSION", help = "Release version to create")]
+        version: Version,
+        #[arg(
+            long,
+            value_name = "YYYY-MM-DD",
+            help = "Override the release date instead of using today in UTC"
+        )]
+        date: Option<String>,
+        #[arg(
+            long = "repo-url",
+            value_name = "URL",
+            help = "Repository URL used for compare links"
+        )]
+        repo_url: Option<String>,
+    },
+    #[command(about = "Validate that the file matches simit's Keep a Changelog rules")]
+    Check,
+    #[command(about = "Print the body of one changelog section")]
+    Show {
+        #[arg(
+            value_name = "VERSION",
+            help = "Version to print; omit to show [Unreleased]"
+        )]
+        version: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ChangelogEntryKind {
+    Added,
+    Changed,
+    Deprecated,
+    Removed,
+    Fixed,
+    Security,
 }
 
 #[derive(Debug, Args)]

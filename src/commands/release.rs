@@ -3,9 +3,9 @@ use std::ffi::OsString;
 use anyhow::Result;
 
 use crate::cargo::{self, BumpSpec};
+use crate::changelog;
 use crate::cli::ReleaseCommand;
 use crate::git;
-use crate::render::changelog;
 
 pub fn run(command: ReleaseCommand) -> Result<()> {
     let metadata = cargo::metadata_for_current_dir()?;
@@ -20,6 +20,7 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
         OsString::from("-m"),
         OsString::from(command.message.clone()),
     ];
+    let changelog_path = workspace_root.join(changelog::DEFAULT_PATH);
 
     if command.dry_run {
         println!("simit release dry-run");
@@ -30,7 +31,9 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
             );
         }
         println!("would run cargo test and cargo clippy");
-        println!("would update CHANGELOG.md");
+        if !command.no_changelog && changelog_path.exists() {
+            println!("would promote CHANGELOG.md [Unreleased] to {new_version}");
+        }
         println!("would run git commit with {:?}", git_args);
         if create_tag {
             println!("would create tag {new_version}");
@@ -39,8 +42,18 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
     }
 
     git::release_preflight(workspace_root, create_tag, sign_tag, &new_version)?;
-    let changelog_update =
-        changelog::planned_update(workspace_root, &new_version, &command.message)?;
+    let changelog_update = if !command.no_changelog && changelog_path.exists() {
+        Some(changelog::release_content(
+            &std::fs::read_to_string(&changelog_path)?,
+            &new_version,
+            changelog::today_utc(),
+            None,
+            &changelog_path,
+            Some(workspace_root),
+        )?)
+    } else {
+        None
+    };
     git::run_project_checks(workspace_root)?;
     for plan in &plans {
         cargo::update_manifest_version(
@@ -51,10 +64,14 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
     if workspace_root.join("Cargo.lock").exists() {
         cargo::update_lockfile(workspace_root, &plans)?;
     }
-    changelog::write_update(workspace_root, &changelog_update)?;
+    if let Some(changelog_update) = changelog_update {
+        std::fs::write(&changelog_path, changelog_update)?;
+    }
 
     let mut paths = git::version_paths(workspace_root, &plans);
-    paths.push(workspace_root.join("CHANGELOG.md"));
+    if changelog_path.exists() && !command.no_changelog {
+        paths.push(changelog_path);
+    }
     paths.sort();
     paths.dedup();
     git::stage_paths(workspace_root, &paths)?;

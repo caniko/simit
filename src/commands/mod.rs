@@ -1,3 +1,4 @@
+pub mod changelog;
 pub mod commit;
 pub mod completions;
 pub mod init_ci;
