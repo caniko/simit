@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-05-21
+
 ### Added
 
 - `simit changelog` subcommand for managing keep-a-changelog `CHANGELOG.md`
@@ -32,3 +34,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.2.0] - 2026-05-09
 
 - Prepare the first public crates.io release.
+
+[Unreleased]: https://codeberg.org/caniko/simit/compare/0.7.0...HEAD
+[0.7.0]: https://codeberg.org/caniko/simit/compare/0.3.1...0.7.0
