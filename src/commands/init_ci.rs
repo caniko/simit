@@ -1,7 +1,8 @@
 use anyhow::{Result, bail};
 
 use crate::cargo;
-use crate::cli::{InitCiCommand, Platform, Runtime, RuntimeChoice};
+use crate::cli::{HomebrewOverridesArgs, InitCiCommand, Platform, Runtime, RuntimeChoice};
+use crate::config::{ProjectConfig, ResolvedHomebrew};
 use crate::project;
 use crate::render::ci::{self, CiOptions, HomebrewOptions, HomebrewPlatformSet};
 
@@ -30,7 +31,8 @@ pub fn run(command: InitCiCommand) -> Result<()> {
         eprintln!("--with-homebrew implies --with-artifacts; enabling it.");
     }
     let homebrew = if command.with_homebrew {
-        Some(homebrew_options(&command, &package)?)
+        let cfg = ProjectConfig::load(workspace_root)?;
+        Some(homebrew_options(&cfg, &command.homebrew, &package)?)
     } else {
         None
     };
@@ -67,63 +69,26 @@ pub fn run(command: InitCiCommand) -> Result<()> {
     }
 }
 
-fn homebrew_options(command: &InitCiCommand, package: &cargo::Package) -> Result<HomebrewOptions> {
-    let tap_url = normalize_tap_url(
-        command
-            .homebrew_tap
-            .as_deref()
-            .ok_or_else(|| anyhow::anyhow!("--with-homebrew requires --homebrew-tap"))?,
-    )?;
-    let description = required_homebrew_value(
-        "--homebrew-description",
-        command.homebrew_description.as_deref(),
-    )?;
-    if description.chars().count() > 80 {
-        bail!("--homebrew-description must be 80 characters or fewer");
-    }
-    let homepage =
-        required_homebrew_value("--homebrew-homepage", command.homebrew_homepage.as_deref())?;
-    let download_repo = required_homebrew_value(
-        "--homebrew-download-repo",
-        command.homebrew_download_repo.as_deref(),
-    )?;
-    validate_download_repo(&download_repo)?;
-    let license = match command.homebrew_license.as_deref() {
-        Some(value) if !value.is_empty() => value.to_owned(),
-        Some(_) => bail!("--homebrew-license cannot be empty"),
-        None => package.license.clone().ok_or_else(|| {
-            anyhow::anyhow!(
-                "--with-homebrew requires --homebrew-license when package.license is missing"
-            )
-        })?,
-    };
-    let platforms = homebrew_platforms(&command.homebrew_no_platform)?;
-    if !platforms.darwin_arm
-        && !platforms.darwin_intel
-        && !platforms.linux_arm
-        && !platforms.linux_intel
-    {
-        bail!("at least one Homebrew platform must be enabled");
-    }
-
+fn homebrew_options(
+    cfg: &ProjectConfig,
+    args: &HomebrewOverridesArgs,
+    package: &cargo::Package,
+) -> Result<HomebrewOptions> {
+    let resolved = cfg.resolve_homebrew(args.as_overrides(), package)?;
+    let tap_url = normalize_tap_url(&resolved.tap_url)?;
+    validate_download_repo(&resolved.download_repo)?;
+    let platforms = homebrew_platforms(&resolved);
     Ok(HomebrewOptions {
-        name: package.name.clone(),
-        binaries: command.homebrew_binary.clone(),
+        name: resolved.name,
+        binaries: resolved.binaries,
         tap_url,
-        description,
-        homepage,
-        license,
-        archive_pattern: command.homebrew_archive_pattern.clone(),
-        download_repo,
+        description: resolved.description,
+        homepage: resolved.homepage,
+        license: resolved.license,
+        archive_pattern: resolved.archive_pattern,
+        download_repo: resolved.download_repo,
         platforms,
     })
-}
-
-fn required_homebrew_value(flag: &str, value: Option<&str>) -> Result<String> {
-    match value {
-        Some(value) if !value.is_empty() => Ok(value.to_owned()),
-        _ => bail!("--with-homebrew requires {flag}"),
-    }
 }
 
 fn normalize_tap_url(value: &str) -> Result<String> {
@@ -157,20 +122,13 @@ fn validate_download_repo(value: &str) -> Result<()> {
     Ok(())
 }
 
-fn homebrew_platforms(disabled: &[String]) -> Result<HomebrewPlatformSet> {
-    let mut platforms = HomebrewPlatformSet::default();
-    for key in disabled {
-        match key.as_str() {
-            "darwin_arm" => platforms.darwin_arm = false,
-            "darwin_intel" => platforms.darwin_intel = false,
-            "linux_arm" => platforms.linux_arm = false,
-            "linux_intel" => platforms.linux_intel = false,
-            _ => bail!(
-                "--homebrew-no-platform must be one of darwin_arm, darwin_intel, linux_arm, linux_intel"
-            ),
-        }
+fn homebrew_platforms(resolved: &ResolvedHomebrew) -> HomebrewPlatformSet {
+    HomebrewPlatformSet {
+        darwin_arm: resolved.platforms.darwin_arm,
+        darwin_intel: resolved.platforms.darwin_intel,
+        linux_arm: resolved.platforms.linux_arm,
+        linux_intel: resolved.platforms.linux_intel,
     }
-    Ok(platforms)
 }
 
 pub(crate) fn resolve_runtime(

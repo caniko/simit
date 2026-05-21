@@ -6,3 +6,4 @@ pub mod config;
 pub mod git;
 pub mod project;
 pub mod render;
+pub mod sha256;

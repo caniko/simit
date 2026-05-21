@@ -15,6 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add Forgejo/Nix Homebrew tap publishing to init-ci.
 - Add optional `simit.toml` project config with a `[homebrew]` section for
   upcoming Homebrew subcommands.
+- Add `simit init-homebrew-tap` for bootstrapping Homebrew tap repos with a
+  checked-in `Formula/<name>.rb` skeleton.
+- Add `simit homebrew render` and `simit homebrew bump` for native Homebrew
+  formula rendering, sha256 computation, and optional tap commits/pushes
+  without shelling out to `rs-harbor`.
 
 ## [0.3.1] - 2026-05-11
 

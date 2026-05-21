@@ -24,6 +24,10 @@ pub enum Commands {
     Release(ReleaseCommand),
     #[command(about = "Generate or verify Rust CI workflows")]
     InitCi(InitCiCommand),
+    #[command(about = "Bootstrap a Homebrew tap repo with a formula skeleton")]
+    InitHomebrewTap(InitHomebrewTapCommand),
+    #[command(about = "Homebrew formula helpers (render, bump, push)")]
+    Homebrew(HomebrewCommand),
     #[command(about = "Generate or verify a canonical Rust crane flake and hook wiring")]
     InitFlake(InitFlakeCommand),
     #[command(about = "Manage a Keep a Changelog file")]
@@ -173,63 +177,169 @@ pub struct InitCiCommand {
         help = "Add a Homebrew tap publishing step (forgejo + nix only)"
     )]
     pub with_homebrew: bool,
+    #[command(flatten)]
+    pub homebrew: HomebrewOverridesArgs,
+}
+
+#[derive(Debug, Args)]
+pub struct HomebrewOverridesArgs {
+    #[arg(
+        long = "homebrew-name",
+        value_name = "NAME",
+        help = "Homebrew formula name"
+    )]
+    pub name: Option<String>,
     #[arg(
         long = "homebrew-tap",
+        id = "homebrew_tap",
         value_name = "URL",
-        requires = "with_homebrew",
         help = "Homebrew tap repo URL, e.g. https://codeberg.org/foo/homebrew-bar.git"
     )]
-    pub homebrew_tap: Option<String>,
+    pub tap: Option<String>,
     #[arg(
         long = "homebrew-binary",
         value_name = "NAME",
-        requires = "with_homebrew",
         help = "Binary to install via the formula; repeatable"
     )]
-    pub homebrew_binary: Vec<String>,
+    pub binary: Vec<String>,
     #[arg(
         long = "homebrew-description",
         value_name = "TEXT",
-        requires = "with_homebrew",
         help = "Formula description (<= 80 chars)"
     )]
-    pub homebrew_description: Option<String>,
+    pub description: Option<String>,
     #[arg(
         long = "homebrew-homepage",
         value_name = "URL",
-        requires = "with_homebrew",
         help = "Project homepage URL"
     )]
-    pub homebrew_homepage: Option<String>,
+    pub homepage: Option<String>,
     #[arg(
         long = "homebrew-license",
         value_name = "SPDX",
-        requires = "with_homebrew",
         help = "SPDX license identifier (defaults to package.license)"
     )]
-    pub homebrew_license: Option<String>,
+    pub license: Option<String>,
     #[arg(
         long = "homebrew-download-repo",
         value_name = "OWNER/REPO",
-        requires = "with_homebrew",
         help = "Codeberg/GitHub owner/repo for release downloads"
     )]
-    pub homebrew_download_repo: Option<String>,
+    pub download_repo: Option<String>,
     #[arg(
         long = "homebrew-archive-pattern",
         value_name = "PATTERN",
-        requires = "with_homebrew",
-        default_value = "{name}-{version}-{arch}-{os}.tar.gz",
         help = "Filename pattern for release archives"
     )]
-    pub homebrew_archive_pattern: String,
+    pub archive_pattern: Option<String>,
     #[arg(
         long = "homebrew-no-platform",
         value_name = "KEY",
-        requires = "with_homebrew",
         help = "Disable a platform (darwin_arm|darwin_intel|linux_arm|linux_intel); repeatable"
     )]
-    pub homebrew_no_platform: Vec<String>,
+    pub no_platform: Vec<String>,
+}
+
+impl HomebrewOverridesArgs {
+    pub fn as_overrides(&self) -> crate::config::HomebrewOverrides<'_> {
+        crate::config::HomebrewOverrides {
+            name: self.name.as_deref(),
+            binaries: Some(&self.binary),
+            tap_url: self.tap.as_deref(),
+            description: self.description.as_deref(),
+            homepage: self.homepage.as_deref(),
+            license: self.license.as_deref(),
+            download_repo: self.download_repo.as_deref(),
+            archive_pattern: self.archive_pattern.as_deref(),
+            disabled_platforms: &self.no_platform,
+        }
+    }
+}
+
+#[derive(Debug, Args)]
+pub struct InitHomebrewTapCommand {
+    #[arg(
+        long,
+        value_name = "DIR",
+        help = "Path to the tap repo to bootstrap (created if missing)"
+    )]
+    pub target: Utf8PathBuf,
+    #[arg(
+        long,
+        help = "Verify the existing Formula/<name>.rb matches the rendered template"
+    )]
+    pub check: bool,
+    #[arg(long, help = "Show a unified diff when --check finds drift")]
+    pub diff: bool,
+    #[arg(long, help = "Print the rendered formula without writing files")]
+    pub print: bool,
+    #[arg(long, help = "Skip `git init` and remote wiring (formula write only)")]
+    pub no_git: bool,
+    #[command(flatten)]
+    pub homebrew: HomebrewOverridesArgs,
+}
+
+#[derive(Debug, Args)]
+pub struct HomebrewCommand {
+    #[command(subcommand)]
+    pub action: HomebrewAction,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum HomebrewAction {
+    #[command(about = "Render the formula to stdout or a file (no sha256)")]
+    Render(HomebrewRenderArgs),
+    #[command(about = "Render with real sha256 sums and write to a tap repo")]
+    Bump(HomebrewBumpArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct HomebrewRenderArgs {
+    #[arg(
+        long,
+        value_name = "VERSION",
+        help = "Version to render (no leading 'v'). Defaults to cargo package.version"
+    )]
+    pub version: Option<String>,
+    #[arg(long, value_name = "PATH", help = "Write to PATH instead of stdout")]
+    pub output: Option<Utf8PathBuf>,
+    #[command(flatten)]
+    pub homebrew: HomebrewOverridesArgs,
+}
+
+#[derive(Debug, Args)]
+pub struct HomebrewBumpArgs {
+    #[arg(
+        long,
+        value_name = "VERSION",
+        help = "Release version (no leading 'v')"
+    )]
+    pub version: String,
+    #[arg(
+        long,
+        value_name = "DIR",
+        help = "Tap repo directory (Formula/<name>.rb written here)"
+    )]
+    pub tap: Utf8PathBuf,
+    #[arg(
+        long,
+        value_name = "PLATFORM=PATH",
+        help = "Per-platform archive path for sha256 computation"
+    )]
+    pub archive: Vec<String>,
+    #[arg(
+        long,
+        help = "After writing, run git add + commit + push. Requires git credentials"
+    )]
+    pub push: bool,
+    #[arg(
+        long,
+        value_name = "MESSAGE",
+        help = "Commit message (defaults to '<name> <version>')"
+    )]
+    pub commit_message: Option<String>,
+    #[command(flatten)]
+    pub homebrew: HomebrewOverridesArgs,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]

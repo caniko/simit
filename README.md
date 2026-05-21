@@ -153,12 +153,42 @@ project workflow must stage each enabled platform archive under
 the generated step verifies those files exist but does not build project-shaped
 tarballs itself.
 
+## Homebrew automation
+
+`simit homebrew render` renders `Formula/<name>.rb` from `simit.toml` and
+`Cargo.toml` metadata, using `sha256 :no_check` placeholders. This is useful
+for local inspection and first-time bootstrap work before release archives
+exist.
+
+```sh
+simit homebrew render --version 0.3.1
+simit homebrew render --version 0.3.1 --output ../homebrew-foo/Formula/foo.rb
+```
+
+`simit homebrew bump` computes sha256 sums from local archives, writes the
+formula to a target tap repo, and can optionally commit and push using the
+user's existing git credentials.
+
+```sh
+simit homebrew bump \
+  --version 0.3.1 \
+  --tap ../homebrew-foo \
+  --archive darwin_arm=release/foo-0.3.1-aarch64-darwin.tar.gz \
+  --archive darwin_intel=release/foo-0.3.1-x86_64-darwin.tar.gz \
+  --archive linux_arm=release/foo-0.3.1-aarch64-linux.tar.gz \
+  --archive linux_intel=release/foo-0.3.1-x86_64-linux.tar.gz \
+  --push
+```
+
+The Homebrew renderer and sha256 streamer are implemented natively in `simit`
+instead of shelling out to `rs-harbor`, so projects can use this release path
+without adopting `rs-harbor` as a runtime dependency.
+
 ## Project config
 
 Projects may opt in to stable simit settings with a `simit.toml` file at the
 Cargo workspace root. The first supported section is `[homebrew]`, which is
-used by the public config API and upcoming Homebrew commands. Existing
-subcommands do not read this file yet.
+used by the public config API and Homebrew commands.
 
 For each Homebrew setting, resolution order is: CLI flag, `simit.toml`, Cargo
 package metadata, then an error. `tap_url` and `download_repo` have no Cargo

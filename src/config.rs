@@ -147,6 +147,7 @@ impl ProjectConfig {
         if homebrew.tap_url.is_empty() {
             bail!("simit.toml: [homebrew].tap_url is required");
         }
+        reject_basic_auth_url("simit.toml: [homebrew].tap_url", &homebrew.tap_url)?;
         if homebrew.download_repo.is_empty() {
             bail!("simit.toml: [homebrew].download_repo is required");
         }
@@ -191,6 +192,7 @@ impl ProjectConfig {
             None,
             "tap_url",
         )?;
+        reject_basic_auth_url("homebrew.tap_url", &tap_url)?;
         let description = merge(
             overrides.description.map(str::to_owned),
             cfg.and_then(|homebrew| homebrew.description.clone()),
@@ -242,6 +244,20 @@ impl ProjectConfig {
             platforms,
         })
     }
+}
+
+fn reject_basic_auth_url(name: &str, value: &str) -> Result<()> {
+    let Some(scheme_end) = value.find("://") else {
+        return Ok(());
+    };
+    let authority_start = scheme_end + 3;
+    let authority_end = value[authority_start..]
+        .find(['/', '?', '#'])
+        .map_or(value.len(), |offset| authority_start + offset);
+    if value[authority_start..authority_end].contains('@') {
+        bail!("{name} must not include embedded credentials");
+    }
+    Ok(())
 }
 
 fn resolve_binaries(

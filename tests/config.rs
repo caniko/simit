@@ -124,6 +124,21 @@ homepage = "http://example.com"
 }
 
 #[test]
+fn tap_url_with_embedded_credentials_is_invalid() {
+    let cfg = load_toml(
+        r#"[homebrew]
+tap_url = "https://user:token@codeberg.org/caniko/homebrew-mythos.git"
+download_repo = "caniko/mythos"
+"#,
+    )
+    .unwrap();
+
+    let err = cfg.validate_homebrew().unwrap_err();
+
+    assert!(format!("{err:#}").contains("embedded credentials"));
+}
+
+#[test]
 fn all_disabled_platforms_are_invalid() {
     let cfg = load_toml(
         r#"[homebrew]

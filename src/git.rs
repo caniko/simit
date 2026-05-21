@@ -109,6 +109,24 @@ pub fn tag(workspace_root: &Path, version: &Version, sign_tag: bool) -> Result<(
     Ok(())
 }
 
+pub fn output(workspace_root: &Path, args: &[&str]) -> Result<String> {
+    let output = Command::new("git")
+        .current_dir(workspace_root)
+        .args(args)
+        .output()
+        .with_context(|| format!("running git {}", args.join(" ")))?;
+
+    if !output.status.success() {
+        bail!(
+            "git {} failed:\n{}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    String::from_utf8(output.stdout).context("git output was not valid UTF-8")
+}
+
 pub fn ensure_tag_absent(workspace_root: &Path, version: &Version) -> Result<()> {
     let output = Command::new("git")
         .current_dir(workspace_root)
