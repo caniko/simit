@@ -6,7 +6,7 @@ use crate::cargo::Package;
 use crate::cli::{Platform, Runtime};
 use crate::project::GeneratedFile;
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct CiOptions {
     pub with_nextest: bool,
     pub with_msrv: bool,
@@ -14,6 +14,48 @@ pub struct CiOptions {
     pub with_deny: bool,
     pub with_docs: bool,
     pub with_artifacts: bool,
+    pub homebrew: Option<HomebrewOptions>,
+}
+
+#[derive(Debug, Clone)]
+pub struct HomebrewOptions {
+    /// Formula name (e.g. "modde"). UpperCamelCased for the Ruby class.
+    pub name: String,
+    /// Binaries to install. Defaults to [name] if empty.
+    pub binaries: Vec<String>,
+    /// Tap repo URL (e.g. "https://codeberg.org/caniko/homebrew-modde.git").
+    pub tap_url: String,
+    /// Project description for the formula (<= 80 chars).
+    pub description: String,
+    /// Homepage URL.
+    pub homepage: String,
+    /// SPDX license identifier.
+    pub license: String,
+    /// Release-artefact filename pattern. Supports {version}, {arch}, {os} placeholders.
+    pub archive_pattern: String,
+    /// Codeberg user/repo for download URLs.
+    pub download_repo: String,
+    /// Per-platform enable/disable. Default: all four.
+    pub platforms: HomebrewPlatformSet,
+}
+
+#[derive(Debug, Clone)]
+pub struct HomebrewPlatformSet {
+    pub darwin_arm: bool,
+    pub darwin_intel: bool,
+    pub linux_arm: bool,
+    pub linux_intel: bool,
+}
+
+impl Default for HomebrewPlatformSet {
+    fn default() -> Self {
+        Self {
+            darwin_arm: true,
+            darwin_intel: true,
+            linux_arm: true,
+            linux_intel: true,
+        }
+    }
 }
 
 pub fn files(
@@ -38,19 +80,19 @@ pub fn files(
                 package,
                 self_check,
                 runner_override,
-                options,
+                options.clone(),
             ),
         },
         GeneratedFile {
             relative_path: dir.join("publish-crate.yaml"),
-            content: publish_workflow(platform, runtime, package, runner_override, options),
+            content: publish_workflow(platform, runtime, package, runner_override, options.clone()),
         },
     ];
 
     if options.with_artifacts {
         files.push(GeneratedFile {
             relative_path: dir.join("release-artifacts.yaml"),
-            content: artifacts_workflow(platform, runtime, runner_override),
+            content: artifacts_workflow(platform, runtime, runner_override, &options),
         });
     }
     if options.with_deny {
@@ -94,10 +136,10 @@ fn ci_workflow(
             workflow.push_str("        run: nix flake check\n\n");
             workflow.push_str("      - name: Test\n");
             workflow.push_str("        run: nix develop -c cargo test\n\n");
-            push_quality_tool_install_steps(&mut workflow, runtime, options);
-            push_optional_ci_steps(&mut workflow, runtime, package, options);
+            push_quality_tool_install_steps(&mut workflow, runtime, &options);
+            push_optional_ci_steps(&mut workflow, runtime, package, &options);
             if self_check {
-                push_self_check_steps(&mut workflow, platform, runtime, runner_override, options);
+                push_self_check_steps(&mut workflow, platform, runtime, runner_override, &options);
             }
             workflow.push_str("      - name: Clippy\n");
             workflow.push_str(
@@ -108,11 +150,11 @@ fn ci_workflow(
         }
         Runtime::Cargo => {
             push_rust_setup_step(&mut workflow, platform);
-            push_test_steps(&mut workflow, package, options);
-            push_quality_tool_install_steps(&mut workflow, runtime, options);
-            push_optional_ci_steps(&mut workflow, runtime, package, options);
+            push_test_steps(&mut workflow, package, &options);
+            push_quality_tool_install_steps(&mut workflow, runtime, &options);
+            push_optional_ci_steps(&mut workflow, runtime, package, &options);
             if self_check {
-                push_self_check_steps(&mut workflow, platform, runtime, runner_override, options);
+                push_self_check_steps(&mut workflow, platform, runtime, runner_override, &options);
             }
             push_clippy_steps(&mut workflow, package);
             workflow.push_str("      - name: Package crate\n");
@@ -159,8 +201,8 @@ fn publish_workflow(
             workflow.push_str("        run: nix flake check\n\n");
             workflow.push_str("      - name: Test\n");
             workflow.push_str("        run: nix develop -c cargo test\n\n");
-            push_quality_tool_install_steps(&mut workflow, runtime, options);
-            push_optional_publish_steps(&mut workflow, runtime, options);
+            push_quality_tool_install_steps(&mut workflow, runtime, &options);
+            push_optional_publish_steps(&mut workflow, runtime, &options);
             workflow.push_str("      - name: Clippy\n");
             workflow.push_str(
                 "        run: nix develop -c cargo clippy --all-targets -- --deny warnings\n\n",
@@ -174,9 +216,9 @@ fn publish_workflow(
             workflow.push_str(&validate_tag_step(
                 "cargo metadata --no-deps --format-version 1",
             ));
-            push_test_steps(&mut workflow, package, options);
-            push_quality_tool_install_steps(&mut workflow, runtime, options);
-            push_optional_publish_steps(&mut workflow, runtime, options);
+            push_test_steps(&mut workflow, package, &options);
+            push_quality_tool_install_steps(&mut workflow, runtime, &options);
+            push_optional_publish_steps(&mut workflow, runtime, &options);
             push_clippy_steps(&mut workflow, package);
             workflow.push_str("      - name: Dry-run publish\n");
             workflow.push_str("        run: cargo publish --dry-run\n\n");
@@ -191,6 +233,7 @@ fn artifacts_workflow(
     platform: Platform,
     runtime: Runtime,
     runner_override: Option<&str>,
+    options: &CiOptions,
 ) -> String {
     let mut workflow = String::new();
     workflow.push_str("name: Release Artifacts\n\n");
@@ -211,15 +254,182 @@ fn artifacts_workflow(
             workflow.push_str("      - name: Install Nix\n");
             workflow.push_str("        uses: https://github.com/cachix/install-nix-action@v31\n\n");
             workflow.push_str("      - name: Build package\n");
-            workflow.push_str("        run: nix build\n");
+            workflow.push_str("        run: nix build\n\n");
         }
         Runtime::Cargo => {
             push_rust_setup_step(&mut workflow, platform);
             workflow.push_str("      - name: Build release binary\n");
-            workflow.push_str("        run: cargo build --release --locked\n");
+            workflow.push_str("        run: cargo build --release --locked\n\n");
         }
     }
+    if let Some(homebrew) = &options.homebrew {
+        push_homebrew_publish_step(&mut workflow, homebrew);
+    }
     workflow
+}
+
+fn push_homebrew_publish_step(workflow: &mut String, opts: &HomebrewOptions) {
+    let tap_repo = homebrew_tap_repo(&opts.tap_url);
+    let archives = homebrew_archives(opts);
+    let binaries = if opts.binaries.is_empty() {
+        vec![opts.name.as_str()]
+    } else {
+        opts.binaries.iter().map(String::as_str).collect()
+    };
+
+    workflow.push_str("      - name: Publish Homebrew tap\n");
+    workflow.push_str("        env:\n");
+    workflow.push_str("          HOMEBREW_TAP_TOKEN: ${{ secrets.homebrew_tap_token }}\n");
+    workflow.push_str("          HOMEBREW_TAP_REPO: ");
+    workflow.push_str(&tap_repo);
+    workflow.push('\n');
+    workflow.push_str("          HOMEBREW_TAP_URL: ");
+    workflow.push_str(&opts.tap_url);
+    workflow.push('\n');
+    workflow.push_str("        run: |\n");
+    workflow.push_str("          set -euo pipefail\n\n");
+    workflow.push_str("          if [ -z \"${HOMEBREW_TAP_TOKEN:-}\" ]; then\n");
+    workflow.push_str(
+        "            echo \"HOMEBREW_TAP_TOKEN not configured; skipping Homebrew tap update.\"\n",
+    );
+    workflow.push_str("            exit 0\n");
+    workflow.push_str("          fi\n\n");
+    workflow.push_str("          VERSION=\"$CODEBERG_REF_NAME\"\n");
+    workflow.push_str("          for artifact in \\\n");
+    for (index, archive) in archives.iter().enumerate() {
+        workflow.push_str("            \"release/");
+        workflow.push_str(&archive.file_name);
+        workflow.push('"');
+        if index + 1 == archives.len() {
+            workflow.push_str("; do\n");
+        } else {
+            workflow.push_str(" \\\n");
+        }
+    }
+    workflow.push_str("            test -s \"$artifact\"\n");
+    workflow.push_str("          done\n\n");
+    workflow.push_str(
+        "          credential_helper='!f() { echo username=caniko; echo \"password=$HOMEBREW_TAP_TOKEN\"; }; f'\n",
+    );
+    workflow.push_str("          rm -rf tap\n");
+    workflow.push_str("          git -c credential.helper=\"$credential_helper\" clone \"$HOMEBREW_TAP_URL\" tap\n");
+    workflow.push_str("          cd tap\n");
+    workflow.push_str("          git config credential.helper \"$credential_helper\"\n");
+    workflow.push_str("          git config user.email 'ci@modde.tartanoglu.com'\n");
+    workflow.push_str("          git config user.name 'modde release bot'\n");
+    workflow.push_str("          git remote set-head origin -a\n");
+    workflow.push_str(
+        "          DEFAULT_BRANCH=\"$(git symbolic-ref --short refs/remotes/origin/HEAD | sed 's|^origin/||')\"\n",
+    );
+    workflow.push_str("          git checkout \"$DEFAULT_BRANCH\"\n");
+    workflow.push_str("          cd ..\n\n");
+    workflow.push_str("          nix run '.#rs-harbor' -- brew bump \\\n");
+    workflow.push_str("            --name ");
+    workflow.push_str(&shell_word(&opts.name));
+    workflow.push_str(" \\\n");
+    workflow.push_str("            --version \"$VERSION\" \\\n");
+    workflow.push_str("            --description ");
+    workflow.push_str(&shell_quote(&opts.description));
+    workflow.push_str(" \\\n");
+    workflow.push_str("            --homepage ");
+    workflow.push_str(&shell_quote(&opts.homepage));
+    workflow.push_str(" \\\n");
+    workflow.push_str("            --license ");
+    workflow.push_str(&shell_word(&opts.license));
+    workflow.push_str(" \\\n");
+    for archive in &archives {
+        workflow.push_str("            --archive \"");
+        workflow.push_str(archive.key);
+        workflow.push('=');
+        workflow.push_str("https://codeberg.org/");
+        workflow.push_str(&opts.download_repo);
+        workflow.push_str("/releases/download/${VERSION}/");
+        workflow.push_str(&archive.file_name);
+        workflow.push_str(",release/");
+        workflow.push_str(&archive.file_name);
+        workflow.push_str("\" \\\n");
+    }
+    for binary in binaries {
+        workflow.push_str("            --binary ");
+        workflow.push_str(&shell_word(binary));
+        workflow.push_str(" \\\n");
+    }
+    workflow.push_str("            --tap \"$PWD/tap\"\n\n");
+    workflow.push_str("          cd tap\n");
+    workflow.push_str("          if [ -z \"$(git status --porcelain -- Formula/");
+    workflow.push_str(&opts.name);
+    workflow.push_str(".rb)\" ]; then\n");
+    workflow.push_str("            echo \"tap already contains ");
+    workflow.push_str(&opts.name);
+    workflow.push_str(" ${VERSION}; nothing to push\"\n");
+    workflow.push_str("            exit 0\n");
+    workflow.push_str("          fi\n\n");
+    workflow.push_str("          git add Formula/");
+    workflow.push_str(&opts.name);
+    workflow.push_str(".rb\n");
+    workflow.push_str("          git commit -m \"");
+    workflow.push_str(&opts.name);
+    workflow.push_str(" ${VERSION}\"\n");
+    workflow.push_str("          git push origin \"HEAD:${DEFAULT_BRANCH}\"\n");
+}
+
+struct HomebrewArchive {
+    key: &'static str,
+    file_name: String,
+}
+
+fn homebrew_archives(opts: &HomebrewOptions) -> Vec<HomebrewArchive> {
+    [
+        ("darwin_arm", "aarch64", "darwin", opts.platforms.darwin_arm),
+        (
+            "darwin_intel",
+            "x86_64",
+            "darwin",
+            opts.platforms.darwin_intel,
+        ),
+        ("linux_arm", "aarch64", "linux", opts.platforms.linux_arm),
+        ("linux_intel", "x86_64", "linux", opts.platforms.linux_intel),
+    ]
+    .into_iter()
+    .filter(|(_, _, _, enabled)| *enabled)
+    .map(|(key, arch, os, _)| HomebrewArchive {
+        key,
+        file_name: resolve_archive(opts, arch, os),
+    })
+    .collect()
+}
+
+fn resolve_archive(opts: &HomebrewOptions, arch: &str, os: &str) -> String {
+    opts.archive_pattern
+        .replace("{name}", &opts.name)
+        .replace("{version}", "${VERSION}")
+        .replace("{arch}", arch)
+        .replace("{os}", os)
+}
+
+fn homebrew_tap_repo(tap_url: &str) -> String {
+    tap_url
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .trim_end_matches(".git")
+        .split_once('/')
+        .map(|(_, path)| path.to_owned())
+        .unwrap_or_else(|| tap_url.to_owned())
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn shell_word(value: &str) -> String {
+    if value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b'/'))
+    {
+        value.to_owned()
+    } else {
+        shell_quote(value)
+    }
 }
 
 fn deny_toml() -> String {
@@ -297,7 +507,7 @@ fn push_rust_setup_step(workflow: &mut String, platform: Platform) {
     }
 }
 
-fn push_test_steps(workflow: &mut String, package: &Package, options: CiOptions) {
+fn push_test_steps(workflow: &mut String, package: &Package, options: &CiOptions) {
     if options.with_nextest {
         workflow.push_str("      - name: Install nextest\n");
         workflow.push_str("        run: cargo install cargo-nextest --locked\n\n");
@@ -329,7 +539,7 @@ fn push_clippy_steps(workflow: &mut String, package: &Package) {
     }
 }
 
-fn push_quality_tool_install_steps(workflow: &mut String, runtime: Runtime, options: CiOptions) {
+fn push_quality_tool_install_steps(workflow: &mut String, runtime: Runtime, options: &CiOptions) {
     let prefix = command_prefix(runtime);
     if options.with_audit {
         workflow.push_str("      - name: Install cargo-audit\n");
@@ -349,7 +559,7 @@ fn push_optional_ci_steps(
     workflow: &mut String,
     runtime: Runtime,
     package: &Package,
-    options: CiOptions,
+    options: &CiOptions,
 ) {
     let prefix = command_prefix(runtime);
     if options.with_msrv {
@@ -380,7 +590,7 @@ fn push_optional_ci_steps(
     }
 }
 
-fn push_optional_publish_steps(workflow: &mut String, runtime: Runtime, options: CiOptions) {
+fn push_optional_publish_steps(workflow: &mut String, runtime: Runtime, options: &CiOptions) {
     let prefix = command_prefix(runtime);
     if options.with_audit {
         workflow.push_str("      - name: Audit dependencies\n");
@@ -418,7 +628,7 @@ fn push_self_check_steps(
     platform: Platform,
     runtime: Runtime,
     runner_override: Option<&str>,
-    options: CiOptions,
+    options: &CiOptions,
 ) {
     workflow.push_str("      - name: Check generated CI\n");
     workflow.push_str("        run: ");
@@ -436,7 +646,7 @@ fn push_self_check_suffix(
     workflow: &mut String,
     runtime: Runtime,
     runner_override: Option<&str>,
-    options: CiOptions,
+    options: &CiOptions,
 ) {
     if runtime == Runtime::Nix {
         workflow.push_str(" --runtime nix");

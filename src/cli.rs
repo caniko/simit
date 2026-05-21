@@ -168,6 +168,68 @@ pub struct InitCiCommand {
         help = "Generate a tagged-release artifact workflow"
     )]
     pub with_artifacts: bool,
+    #[arg(
+        long = "with-homebrew",
+        help = "Add a Homebrew tap publishing step (forgejo + nix only)"
+    )]
+    pub with_homebrew: bool,
+    #[arg(
+        long = "homebrew-tap",
+        value_name = "URL",
+        requires = "with_homebrew",
+        help = "Homebrew tap repo URL, e.g. https://codeberg.org/foo/homebrew-bar.git"
+    )]
+    pub homebrew_tap: Option<String>,
+    #[arg(
+        long = "homebrew-binary",
+        value_name = "NAME",
+        requires = "with_homebrew",
+        help = "Binary to install via the formula; repeatable"
+    )]
+    pub homebrew_binary: Vec<String>,
+    #[arg(
+        long = "homebrew-description",
+        value_name = "TEXT",
+        requires = "with_homebrew",
+        help = "Formula description (<= 80 chars)"
+    )]
+    pub homebrew_description: Option<String>,
+    #[arg(
+        long = "homebrew-homepage",
+        value_name = "URL",
+        requires = "with_homebrew",
+        help = "Project homepage URL"
+    )]
+    pub homebrew_homepage: Option<String>,
+    #[arg(
+        long = "homebrew-license",
+        value_name = "SPDX",
+        requires = "with_homebrew",
+        help = "SPDX license identifier (defaults to package.license)"
+    )]
+    pub homebrew_license: Option<String>,
+    #[arg(
+        long = "homebrew-download-repo",
+        value_name = "OWNER/REPO",
+        requires = "with_homebrew",
+        help = "Codeberg/GitHub owner/repo for release downloads"
+    )]
+    pub homebrew_download_repo: Option<String>,
+    #[arg(
+        long = "homebrew-archive-pattern",
+        value_name = "PATTERN",
+        requires = "with_homebrew",
+        default_value = "{name}-{version}-{arch}-{os}.tar.gz",
+        help = "Filename pattern for release archives"
+    )]
+    pub homebrew_archive_pattern: String,
+    #[arg(
+        long = "homebrew-no-platform",
+        value_name = "KEY",
+        requires = "with_homebrew",
+        help = "Disable a platform (darwin_arm|darwin_intel|linux_arm|linux_intel); repeatable"
+    )]
+    pub homebrew_no_platform: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]

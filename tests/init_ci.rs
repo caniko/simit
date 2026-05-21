@@ -19,6 +19,7 @@ name = "demo"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
+license = "MIT"
 "#,
     )
     .unwrap();
@@ -34,6 +35,35 @@ rust-version = "1.85"
 
 fn read(path: &Path) -> String {
     fs::read_to_string(path).unwrap_or_else(|err| panic!("reading {}: {err}", path.display()))
+}
+
+fn assert_homebrew_run_block_indentation(workflow: &str) {
+    let mut in_homebrew_step = false;
+    let mut in_run_block = false;
+    let mut saw_script_line = false;
+
+    for line in workflow.lines() {
+        if line == "      - name: Publish Homebrew tap" {
+            in_homebrew_step = true;
+            continue;
+        }
+        if in_homebrew_step && line == "        run: |" {
+            in_run_block = true;
+            continue;
+        }
+        if in_run_block && line.starts_with("      - name: ") {
+            break;
+        }
+        if in_run_block && !line.is_empty() {
+            assert!(
+                line.starts_with("          "),
+                "Homebrew run block line is under-indented: {line:?}"
+            );
+            saw_script_line = true;
+        }
+    }
+
+    assert!(saw_script_line, "Homebrew run block was not found");
 }
 
 #[test]
@@ -343,6 +373,161 @@ fn optional_strict_flags_render_expected_steps() {
     assert!(deny.contains("\"Unicode-3.0\""));
     assert!(deny.contains("\"Unlicense\""));
     assert!(deny.contains("allow-registry = [\"https://github.com/rust-lang/crates.io-index\"]"));
+}
+
+#[test]
+fn forgejo_nix_homebrew_step_matches_hardened_shape() {
+    let temp = init_package(true);
+
+    let status = simit()
+        .current_dir(temp.path())
+        .args([
+            "init-ci",
+            "--platform",
+            "forgejo",
+            "--runtime",
+            "nix",
+            "--with-artifacts",
+            "--with-homebrew",
+            "--homebrew-tap",
+            "https://example.com/homebrew-demo.git",
+            "--homebrew-description",
+            "demo binary",
+            "--homebrew-homepage",
+            "https://example.com",
+            "--homebrew-download-repo",
+            "foo/demo",
+            "--homebrew-binary",
+            "demo",
+            "--homebrew-binary",
+            "demo-ui",
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let workflow = read(
+        &temp
+            .path()
+            .join(".forgejo/workflows/release-artifacts.yaml"),
+    );
+    assert_homebrew_run_block_indentation(&workflow);
+    assert!(workflow.contains("name: Publish Homebrew tap"));
+    assert!(workflow.contains("HOMEBREW_TAP_TOKEN: ${{ secrets.homebrew_tap_token }}"));
+    assert!(workflow.contains("HOMEBREW_TAP_REPO: homebrew-demo"));
+    assert!(workflow.contains("HOMEBREW_TAP_URL: https://example.com/homebrew-demo.git"));
+    assert!(workflow.contains("set -euo pipefail"));
+    assert!(workflow.contains("HOMEBREW_TAP_TOKEN not configured; skipping Homebrew tap update."));
+    assert!(workflow.contains("\"release/demo-${VERSION}-aarch64-darwin.tar.gz\""));
+    assert!(workflow.contains("\"release/demo-${VERSION}-x86_64-darwin.tar.gz\""));
+    assert!(workflow.contains("\"release/demo-${VERSION}-aarch64-linux.tar.gz\""));
+    assert!(workflow.contains("\"release/demo-${VERSION}-x86_64-linux.tar.gz\""));
+    assert!(workflow.contains("credential_helper='!f() { echo username=caniko; echo \"password=$HOMEBREW_TAP_TOKEN\"; }; f'"));
+    assert!(workflow.contains(
+        "git -c credential.helper=\"$credential_helper\" clone \"$HOMEBREW_TAP_URL\" tap"
+    ));
+    assert!(!workflow.contains("https://$HOMEBREW_TAP_TOKEN"));
+    assert!(workflow.contains("nix run '.#rs-harbor' -- brew bump \\"));
+    assert!(workflow.contains("--name demo \\"));
+    assert!(workflow.contains("--description 'demo binary' \\"));
+    assert!(workflow.contains("--homepage 'https://example.com' \\"));
+    assert!(workflow.contains("--license MIT \\"));
+    assert!(workflow.contains("--archive \"darwin_arm=https://codeberg.org/foo/demo/releases/download/${VERSION}/demo-${VERSION}-aarch64-darwin.tar.gz,release/demo-${VERSION}-aarch64-darwin.tar.gz\" \\"));
+    assert!(workflow.contains("--archive \"darwin_intel=https://codeberg.org/foo/demo/releases/download/${VERSION}/demo-${VERSION}-x86_64-darwin.tar.gz,release/demo-${VERSION}-x86_64-darwin.tar.gz\" \\"));
+    assert!(workflow.contains("--archive \"linux_arm=https://codeberg.org/foo/demo/releases/download/${VERSION}/demo-${VERSION}-aarch64-linux.tar.gz,release/demo-${VERSION}-aarch64-linux.tar.gz\" \\"));
+    assert!(workflow.contains("--archive \"linux_intel=https://codeberg.org/foo/demo/releases/download/${VERSION}/demo-${VERSION}-x86_64-linux.tar.gz,release/demo-${VERSION}-x86_64-linux.tar.gz\" \\"));
+    assert_eq!(workflow.matches("--binary ").count(), 2);
+    assert!(workflow.contains("--binary demo \\"));
+    assert!(workflow.contains("--binary demo-ui \\"));
+    assert!(workflow.contains("if [ -z \"$(git status --porcelain -- Formula/demo.rb)\" ]; then"));
+    assert!(workflow.contains("tap already contains demo ${VERSION}; nothing to push"));
+    assert!(workflow.contains("git push origin \"HEAD:${DEFAULT_BRANCH}\""));
+
+    let check_status = simit()
+        .current_dir(temp.path())
+        .args([
+            "init-ci",
+            "--platform",
+            "forgejo",
+            "--runtime",
+            "nix",
+            "--with-artifacts",
+            "--with-homebrew",
+            "--homebrew-tap",
+            "https://example.com/homebrew-demo.git",
+            "--homebrew-description",
+            "demo binary",
+            "--homebrew-homepage",
+            "https://example.com",
+            "--homebrew-download-repo",
+            "foo/demo",
+            "--homebrew-binary",
+            "demo",
+            "--homebrew-binary",
+            "demo-ui",
+            "--check",
+        ])
+        .status()
+        .unwrap();
+    assert!(check_status.success());
+}
+
+#[test]
+fn homebrew_rejects_cargo_runtime() {
+    let temp = init_package(true);
+
+    let output = simit()
+        .current_dir(temp.path())
+        .args([
+            "init-ci",
+            "--platform",
+            "forgejo",
+            "--runtime",
+            "cargo",
+            "--with-homebrew",
+            "--homebrew-tap",
+            "https://example.com/homebrew-demo.git",
+            "--homebrew-description",
+            "demo binary",
+            "--homebrew-homepage",
+            "https://example.com",
+            "--homebrew-download-repo",
+            "foo/demo",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("Homebrew tap publish requires --runtime nix"));
+}
+
+#[test]
+fn homebrew_rejects_github_platform() {
+    let temp = init_package(true);
+
+    let output = simit()
+        .current_dir(temp.path())
+        .args([
+            "init-ci",
+            "--platform",
+            "github",
+            "--with-homebrew",
+            "--homebrew-tap",
+            "https://example.com/homebrew-demo.git",
+            "--homebrew-description",
+            "demo binary",
+            "--homebrew-homepage",
+            "https://example.com",
+            "--homebrew-download-repo",
+            "foo/demo",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("Homebrew tap publish is forgejo-only for now"));
 }
 
 #[test]

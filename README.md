@@ -136,6 +136,23 @@ simit init-ci --platform forgejo --check --diff
 
 `--with-msrv` requires `package.rust-version`.
 
+Forgejo + Nix artifact workflows can also publish a Homebrew tap:
+
+```sh
+simit init-ci --platform forgejo --runtime nix --with-artifacts --with-homebrew \
+  --homebrew-tap https://codeberg.org/caniko/homebrew-demo.git \
+  --homebrew-description "demo binary" \
+  --homebrew-homepage https://example.com \
+  --homebrew-download-repo caniko/demo \
+  --homebrew-binary demo
+```
+
+`--with-homebrew` is Forgejo + Nix only and implies `--with-artifacts`. The
+project workflow must stage each enabled platform archive under
+`release/{name}-{version}-{arch}-{os}.tar.gz` before the Homebrew step runs;
+the generated step verifies those files exist but does not build project-shaped
+tarballs itself.
+
 ## Flake and hook wiring
 
 Generate a canonical Rust crane flake plus formatter and pre-commit hook definitions:

@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `simit changelog` subcommand for managing keep-a-changelog `CHANGELOG.md`
   files (init / add / release / check / show), with optional auto-promotion
   from `simit release`.
+- Add Forgejo/Nix Homebrew tap publishing to init-ci.
 
 ## [0.3.1] - 2026-05-11
 
