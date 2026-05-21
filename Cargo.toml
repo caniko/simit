@@ -6,9 +6,23 @@ rust-version = "1.95"
 license = "MIT"
 description = "Semver-aware git commit helper for Rust projects"
 repository = "https://codeberg.org/caniko/simit"
+documentation = "https://docs.rs/simit"
 readme = "README.md"
 keywords = ["git", "semver", "release", "cargo", "commit"]
 categories = ["command-line-utilities", "development-tools"]
+include = [
+  "/Cargo.lock",
+  "/Cargo.toml",
+  "/CHANGELOG.md",
+  "/LICENSE",
+  "/README.md",
+  "/src/**/*.rs",
+  "/tests/**/*.rs",
+]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
 anyhow = "1"

@@ -99,8 +99,27 @@
       denyCheck = craneLib.cargoDeny {
         inherit src;
       };
+
+      docs = pkgs.stdenv.mkDerivation {
+        pname = "simit-docs";
+        inherit (package) version;
+        src = ./docs;
+        nativeBuildInputs = [pkgs.mdbook];
+        phases = ["buildPhase" "installPhase"];
+        buildPhase = ''
+          cp -r --no-preserve=mode $src docs
+          mdbook build docs
+        '';
+        installPhase = ''
+          cp -r docs/book $out
+        '';
+      };
     in {
-      packages.default = package;
+      packages = {
+        default = package;
+        docs = docs;
+        site = docs;
+      };
 
       formatter = treefmtEval.config.build.wrapper;
 
@@ -135,6 +154,7 @@
             cargo-deny
             cargo-nextest
             git
+            mdbook
             prettier
             pre-commit
             rust-analyzer

@@ -19,11 +19,11 @@ pub struct CiOptions {
 
 #[derive(Debug, Clone)]
 pub struct HomebrewOptions {
-    /// Formula name (e.g. "modde"). UpperCamelCased for the Ruby class.
+    /// Formula name, for example `modde`. UpperCamelCased for the Ruby class.
     pub name: String,
-    /// Binaries to install. Defaults to [name] if empty.
+    /// Binaries to install. Defaults to `name` if empty.
     pub binaries: Vec<String>,
-    /// Tap repo URL (e.g. "https://codeberg.org/caniko/homebrew-modde.git").
+    /// Tap repo URL, for example `<https://codeberg.org/caniko/homebrew-modde.git>`.
     pub tap_url: String,
     /// Project description for the formula (<= 80 chars).
     pub description: String,
