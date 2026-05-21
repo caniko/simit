@@ -155,21 +155,44 @@ tarballs itself.
 
 ## Homebrew automation
 
-`simit homebrew render` renders `Formula/<name>.rb` from `simit.toml` and
-`Cargo.toml` metadata, using `sha256 :no_check` placeholders. This is useful
-for local inspection and first-time bootstrap work before release archives
-exist.
+Homebrew tap publishing tends to grow a lot of release-CI boilerplate. `simit`
+keeps the tap metadata in `simit.toml`, bootstraps the tap once, and generates
+the Forgejo release step from that same config.
 
-```sh
-simit homebrew render --version 0.3.1
-simit homebrew render --version 0.3.1 --output ../homebrew-foo/Formula/foo.rb
+```toml
+[homebrew]
+tap_url       = "https://codeberg.org/caniko/homebrew-foo.git"
+download_repo = "caniko/foo"
+binaries      = ["foo", "foo-ui"]
+description   = "Cross-platform foo manager"
+homepage      = "https://foo.example.com"
+license       = "GPL-3.0-only"
+archive_pattern = "foo-{version}-{arch}-{os}.tar.gz"
+
+[homebrew.platforms]
+# All four platforms are enabled by default. Override here if needed:
+# linux_arm = false
 ```
 
-`simit homebrew bump` computes sha256 sums from local archives, writes the
-formula to a target tap repo, and can optionally commit and push using the
-user's existing git credentials.
+Bootstrap the tap repo once with a placeholder formula:
 
 ```sh
+simit init-homebrew-tap --target ../homebrew-foo
+# prints the next-step git commit and push hints
+```
+
+Wire the release workflow from the project repo:
+
+```sh
+simit init-ci --platform forgejo --runtime nix \
+  --with-artifacts --with-homebrew
+```
+
+For local inspection and iteration, render the formula or bump a checked-out
+tap using release archives:
+
+```sh
+simit homebrew render
 simit homebrew bump \
   --version 0.3.1 \
   --tap ../homebrew-foo \
@@ -180,9 +203,9 @@ simit homebrew bump \
   --push
 ```
 
-The Homebrew renderer and sha256 streamer are implemented natively in `simit`
-instead of shelling out to `rs-harbor`, so projects can use this release path
-without adopting `rs-harbor` as a runtime dependency.
+rs-modde is the worked example for this flow: its release CI publishes
+`modde` and `modde-ui` to `caniko/homebrew-modde` from the generated Homebrew
+step.
 
 ## Project config
 
