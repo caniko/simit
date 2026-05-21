@@ -26,6 +26,10 @@ pub struct Package {
     #[serde(default)]
     pub license: Option<String>,
     #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub homepage: Option<String>,
+    #[serde(default)]
     pub rust_version: Option<String>,
     #[serde(default)]
     pub features: BTreeMap<String, Vec<String>>,

@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   files (init / add / release / check / show), with optional auto-promotion
   from `simit release`.
 - Add Forgejo/Nix Homebrew tap publishing to init-ci.
+- Add optional `simit.toml` project config with a `[homebrew]` section for
+  upcoming Homebrew subcommands.
 
 ## [0.3.1] - 2026-05-11
 

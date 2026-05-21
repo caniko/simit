@@ -1,6 +1,6 @@
 [package]
 name = "simit"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT"
@@ -20,7 +20,7 @@ semver = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 time = "0.3"
-toml_edit = "0.25"
+toml_edit = { version = "0.25", features = ["serde"] }
 
 [dev-dependencies]
 tempfile = "3"

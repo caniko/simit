@@ -153,6 +153,28 @@ project workflow must stage each enabled platform archive under
 the generated step verifies those files exist but does not build project-shaped
 tarballs itself.
 
+## Project config
+
+Projects may opt in to stable simit settings with a `simit.toml` file at the
+Cargo workspace root. The first supported section is `[homebrew]`, which is
+used by the public config API and upcoming Homebrew commands. Existing
+subcommands do not read this file yet.
+
+For each Homebrew setting, resolution order is: CLI flag, `simit.toml`, Cargo
+package metadata, then an error. `tap_url` and `download_repo` have no Cargo
+metadata fallback, so they must be set by a flag or in `[homebrew]`.
+
+```toml
+[homebrew]
+tap_url       = "https://codeberg.org/caniko/homebrew-mythos.git"
+download_repo = "caniko/mythos"
+binaries      = ["mythos", "mythos-ui"]
+# description, homepage, license, and name default from Cargo.toml when unset.
+
+[homebrew.platforms]
+linux_arm = false  # Override: do not publish aarch64-linux.
+```
+
 ## Flake and hook wiring
 
 Generate a canonical Rust crane flake plus formatter and pre-commit hook definitions:

@@ -1,15 +1,8 @@
-mod cargo;
-mod changelog;
-mod cli;
-mod commands;
-mod git;
-mod project;
-mod render;
-
 use anyhow::Result;
 use clap::Parser;
 
-use crate::cli::{Cli, Commands};
+use simit::cli::{Cli, Commands};
+use simit::commands;
 
 fn main() {
     if let Err(err) = run() {
