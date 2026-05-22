@@ -170,7 +170,6 @@ fn ci_workflow(
     push_container(&mut workflow, platform, runtime, package);
     workflow.push_str("    steps:\n");
     push_checkout_step(&mut workflow, platform);
-    push_rust_cache_step(&mut workflow, platform, runtime);
 
     match runtime {
         Runtime::Nix => {
@@ -248,7 +247,6 @@ fn publish_workflow(
     push_container(&mut workflow, platform, runtime, package);
     workflow.push_str("    steps:\n");
     push_checkout_step(&mut workflow, platform);
-    push_rust_cache_step(&mut workflow, platform, runtime);
 
     match runtime {
         Runtime::Nix => {
@@ -320,7 +318,6 @@ fn artifacts_workflow(
     push_container(&mut workflow, platform, runtime, package);
     workflow.push_str("    steps:\n");
     push_checkout_step(&mut workflow, platform);
-    push_rust_cache_step(&mut workflow, platform, runtime);
     match runtime {
         Runtime::Nix => {
             workflow.push_str("      - name: Install Nix\n");
@@ -923,20 +920,6 @@ fn push_action_uses(workflow: &mut String, platform: Platform, action: &str, ver
         workflow.push('@');
         workflow.push_str(version);
         workflow.push('\n');
-    }
-}
-
-fn push_rust_cache_step(workflow: &mut String, platform: Platform, runtime: Runtime) {
-    if platform == Platform::Forgejo && runtime == Runtime::Cargo {
-        workflow.push_str(
-            r#"      - name: Cache Rust builds
-        uses: https://github.com/Swatinem/rust-cache@v2
-        with:
-          shared-key: ${{ github.workflow }}
-          cache-on-failure: true
-
-"#,
-        );
     }
 }
 

@@ -17,12 +17,6 @@ jobs:
       - name: Checkout
         uses: https://code.forgejo.org/actions/checkout@v4
 
-      - name: Cache Rust builds
-        uses: https://github.com/Swatinem/rust-cache@v2
-        with:
-          shared-key: ${{ github.workflow }}
-          cache-on-failure: true
-
       - name: Install Rust components
         run: rustup component add clippy rustfmt
 

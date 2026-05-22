@@ -186,7 +186,7 @@ fn forgejo_auto_runtime_uses_rust_container_even_when_flake_exists() {
     assert!(ci.contains("cancel-in-progress: true"));
     assert!(ci.contains("container: rust:1.85-bookworm"));
     assert!(ci.contains("uses: https://code.forgejo.org/actions/checkout@v4"));
-    assert!(ci.contains("uses: https://github.com/Swatinem/rust-cache@v2"));
+    assert!(!ci.contains("uses: https://github.com/Swatinem/rust-cache@v2"));
     assert!(!ci.contains("run: apk add --no-cache git build-base"));
     assert!(ci.contains("run: rustup component add clippy rustfmt"));
     assert!(ci.contains("run: cargo test --all-features"));
@@ -196,7 +196,7 @@ fn forgejo_auto_runtime_uses_rust_container_even_when_flake_exists() {
     assert!(publish.contains("simit changelog release <version>"));
     assert!(publish.contains("runs-on: atlas"));
     assert!(publish.contains("container: rust:1.85-bookworm"));
-    assert!(publish.contains("uses: https://github.com/Swatinem/rust-cache@v2"));
+    assert!(!publish.contains("uses: https://github.com/Swatinem/rust-cache@v2"));
     assert!(publish.contains("cargo metadata --no-deps --format-version 1"));
 }
 
