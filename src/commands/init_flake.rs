@@ -23,7 +23,8 @@ pub fn run(command: InitFlakeCommand) -> Result<()> {
     let mut languages = project::detect_languages(workspace_root)?;
     languages.nix = true;
     let rust_edition = rustfmt_edition(&metadata);
-    let files = flake::files(&languages, &rust_edition);
+    let rust_version = workspace_rust_version(&metadata);
+    let files = flake::files(&languages, &rust_edition, rust_version.as_deref());
 
     if command.print {
         flake::print_files(&files);
@@ -61,6 +62,30 @@ fn rustfmt_edition(metadata: &cargo::Metadata) -> String {
         .max()
         .unwrap_or("2021")
         .to_owned()
+}
+
+fn workspace_rust_version(metadata: &cargo::Metadata) -> Option<String> {
+    metadata
+        .packages
+        .iter()
+        .filter(|package| metadata.workspace_members.contains(&package.id))
+        .filter_map(|package| package.rust_version.as_deref())
+        .filter_map(|version| {
+            let normalized = normalize_rust_version(version);
+            semver::Version::parse(&normalized)
+                .ok()
+                .map(|parsed| (parsed, version.to_owned()))
+        })
+        .max_by(|left, right| left.0.cmp(&right.0))
+        .map(|(_, version)| version)
+}
+
+fn normalize_rust_version(version: &str) -> String {
+    match version.matches('.').count() {
+        0 => format!("{version}.0.0"),
+        1 => format!("{version}.0"),
+        _ => version.to_owned(),
+    }
 }
 
 fn check_files(

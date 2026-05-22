@@ -24,7 +24,11 @@ const PRE_COMMIT_PACKAGE: &str = "          pre-commit\n";
 const PRE_COMMIT_ENABLED_PACKAGES: &str = "        ] ++ pre-commit-check.enabledPackages;\n";
 const SHELL_HOOK: &str = "        shellHook = pre-commit-check.shellHook;\n";
 
-pub fn files(languages: &Languages, rust_edition: &str) -> Vec<GeneratedFile> {
+pub fn files(
+    languages: &Languages,
+    rust_edition: &str,
+    rust_version: Option<&str>,
+) -> Vec<GeneratedFile> {
     vec![
         GeneratedFile {
             relative_path: PathBuf::from("flake.nix"),
@@ -36,7 +40,7 @@ pub fn files(languages: &Languages, rust_edition: &str) -> Vec<GeneratedFile> {
         },
         GeneratedFile {
             relative_path: PathBuf::from("nix/pre-commit.nix"),
-            content: pre_commit_nix(languages),
+            content: pre_commit_nix(languages, rust_version),
         },
     ]
 }
@@ -386,7 +390,7 @@ fn has_pre_commit_shell_hook(content: &str) -> bool {
     content.contains("shellHook =") && content.contains("pre-commit-check.shellHook")
 }
 
-fn pre_commit_nix(languages: &Languages) -> String {
+fn pre_commit_nix(languages: &Languages, rust_version: Option<&str>) -> String {
     let mut content = String::new();
     content.push_str("{\n");
     content.push_str("  pkgs,\n");
@@ -421,6 +425,21 @@ fn pre_commit_nix(languages: &Languages) -> String {
         );
         content.push_str("    pass_filenames = false;\n");
         content.push_str("  };\n");
+        if let Some(rust_version) = rust_version {
+            let toolchain_version = rust_overlay_version(rust_version);
+            content.push_str("\n  cargo-msrv = {\n");
+            content.push_str("    enable = true;\n");
+            content.push_str("    name = \"cargo check MSRV\";\n");
+            content.push_str(&format!(
+                "    entry = \"${{pkgs.rust-bin.stable.\"{toolchain_version}\".default}}/bin/cargo check --workspace --all-features\";\n"
+            ));
+            content.push_str(&format!(
+                "    extraPackages = [pkgs.rust-bin.stable.\"{toolchain_version}\".default];\n"
+            ));
+            content.push_str("    pass_filenames = false;\n");
+            content.push_str("    stages = [\"pre-push\" \"manual\"];\n");
+            content.push_str("  };\n");
+        }
         content.push_str("\n  cargo-audit = {\n");
         content.push_str("    enable = true;\n");
         content.push_str("    name = \"cargo audit\";\n");
@@ -462,4 +481,12 @@ fn pre_commit_nix(languages: &Languages) -> String {
 
     content.push_str("}\n");
     content
+}
+
+fn rust_overlay_version(version: &str) -> String {
+    match version.matches('.').count() {
+        0 => format!("{version}.0.0"),
+        1 => format!("{version}.0"),
+        _ => version.to_owned(),
+    }
 }

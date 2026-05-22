@@ -194,11 +194,58 @@ fn writes_flake_and_detected_hook_files() {
     let hooks = read(&temp.path().join("nix/pre-commit.nix"));
     assert!(hooks.contains("cargo fmt --all -- --check"));
     assert!(hooks.contains("cargo clippy --all-targets --all-features -- --deny warnings"));
+    assert!(hooks.contains("cargo-msrv"));
+    assert!(hooks.contains("cargo check MSRV"));
+    assert!(hooks.contains("pkgs.rust-bin.stable.\"1.85.0\".default"));
+    assert!(hooks.contains("cargo check --workspace --all-features"));
+    assert!(hooks.contains("stages = [\"pre-push\" \"manual\"]"));
     assert!(hooks.contains("cargo audit"));
     assert!(hooks.contains("pkgs.cargo-audit"));
     assert!(hooks.contains(
         "nix --extra-experimental-features 'nix-command flakes' flake check --cores 0 --max-jobs auto --no-update-lock-file"
     ));
+}
+
+#[test]
+fn generated_msrv_hook_uses_highest_workspace_rust_version() {
+    let temp = init_package();
+    let root = temp.path();
+    fs::write(
+        root.join("Cargo.toml"),
+        r#"[workspace]
+members = ["low", "high"]
+resolver = "3"
+"#,
+    )
+    .unwrap();
+    for (member, rust_version) in [("low", "1.85"), ("high", "1.88")] {
+        let dir = root.join(member);
+        fs::create_dir_all(dir.join("src")).unwrap();
+        fs::write(
+            dir.join("Cargo.toml"),
+            format!(
+                r#"[package]
+name = "{member}"
+version = "0.1.0"
+edition = "2024"
+rust-version = "{rust_version}"
+"#
+            ),
+        )
+        .unwrap();
+        fs::write(dir.join("src/lib.rs"), "").unwrap();
+    }
+
+    let status = simit()
+        .current_dir(root)
+        .args(["init-flake"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let hooks = read(&root.join("nix/pre-commit.nix"));
+    assert!(hooks.contains("pkgs.rust-bin.stable.\"1.88.0\".default"));
+    assert!(!hooks.contains("pkgs.rust-bin.stable.\"1.85.0\".default"));
 }
 
 #[test]
