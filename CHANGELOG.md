@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-05-22
+
 ### Added
 
 - Chocolatey package publishing via simit chocolatey and init-ci --with-chocolatey
@@ -44,5 +46,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Prepare the first public crates.io release.
 
-[Unreleased]: https://codeberg.org/caniko/simit/compare/0.7.0...HEAD
+[Unreleased]: https://codeberg.org/caniko/simit/compare/0.8.0...HEAD
+[0.8.0]: https://codeberg.org/caniko/simit/compare/0.7.0...0.8.0
 [0.7.0]: https://codeberg.org/caniko/simit/compare/0.3.1...0.7.0
