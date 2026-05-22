@@ -8,7 +8,7 @@ The Rust library exposes the modules used by the `simit` binary.
   Changelog files.
 - `cli` defines the command-line parser structures.
 - `commands` contains the command implementations used by the binary.
-- `config` loads `simit.toml` and resolves Homebrew release settings.
+- `config` loads simit project config and resolves package release settings.
 - `git` performs release preflight checks, stages changed version files,
   delegates commits, and creates release tags.
 - `project` detects repository languages and manages generated files.

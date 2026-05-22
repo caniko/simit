@@ -218,7 +218,7 @@ fn choco_missing_context() -> String {
 pub(crate) fn validate_resolved(resolved: &ResolvedChocolatey) -> Result<()> {
     if resolved.authors.as_deref().is_none_or(str::is_empty) {
         bail!(
-            "chocolatey.authors not set: provide it via --choco-authors, simit.toml [chocolatey].authors, or Cargo.toml package.authors"
+            "chocolatey.authors not set: provide it via --choco-authors, simit project config [chocolatey].authors, or Cargo.toml package.authors"
         );
     }
     Ok(())

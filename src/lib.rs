@@ -14,7 +14,7 @@ pub mod changelog;
 pub mod cli;
 /// Command implementations used by the binary.
 pub mod commands;
-/// Project configuration loaded from `simit.toml`.
+/// Project configuration loaded from supported simit project config sources.
 pub mod config;
 /// Git preflight, staging, commit, and tag helpers.
 pub mod git;

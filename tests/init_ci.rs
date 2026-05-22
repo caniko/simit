@@ -395,6 +395,31 @@ fn check_fails_when_workflows_differ() {
 }
 
 #[test]
+fn check_fails_when_publish_workflow_is_missing() {
+    let temp = init_package(true);
+
+    let write_status = simit()
+        .current_dir(temp.path())
+        .args(["init-ci", "--platform", "forgejo"])
+        .status()
+        .unwrap();
+    assert!(write_status.success());
+
+    fs::remove_file(temp.path().join(".forgejo/workflows/publish-crate.yaml")).unwrap();
+
+    let output = simit()
+        .current_dir(temp.path())
+        .args(["init-ci", "--platform", "forgejo", "--check"])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("CI workflows are not up to date"));
+    assert!(stderr.contains(".forgejo/workflows/publish-crate.yaml is missing"));
+}
+
+#[test]
 fn simit_package_gets_self_check_step() {
     let temp = TempDir::new().unwrap();
     let root = temp.path();

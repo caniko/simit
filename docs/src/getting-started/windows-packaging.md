@@ -1,9 +1,8 @@
 # Windows Packaging
 
 `simit` supports Chocolatey packages and Scoop bucket manifests for tagged
-Windows releases. Both flows use `simit.toml` as the source of package
-metadata, render deterministic skeleton files, and can be wired into
-`init-ci`.
+Windows releases. Both flows use simit project config as the source of package
+metadata, render deterministic skeleton files, and can be wired into `init-ci`.
 
 ## Configuration
 
@@ -24,6 +23,10 @@ download_repo = "caniko/foo"
 binaries = ["foo"]
 archive_pattern = "foo-{version}-{arch}-windows.zip"
 ```
+
+The same schema can live in `simit.toml`, in root Cargo metadata under
+`[workspace.metadata.simit]` or `[package.metadata.simit]`, or in flake
+`outputs.simitConfig`. Keep exactly one simit project config source in a repo.
 
 Chocolatey requires `download_repo` plus package metadata. Scoop requires
 `bucket_url` and `download_repo`. Fields not listed here can usually fall back

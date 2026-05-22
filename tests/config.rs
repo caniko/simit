@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
+use std::env;
 use std::fs;
+use std::sync::{Mutex, OnceLock};
 
 use camino::Utf8PathBuf;
 use simit::cargo::Package;
@@ -12,11 +14,67 @@ fn load_toml(toml: &str) -> anyhow::Result<ProjectConfig> {
     ProjectConfig::load(temp.path())
 }
 
+fn load_cargo_manifest(manifest: &str) -> anyhow::Result<ProjectConfig> {
+    let temp = TempDir::new().unwrap();
+    fs::write(temp.path().join("Cargo.toml"), manifest).unwrap();
+    ProjectConfig::load(temp.path())
+}
+
+fn env_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn with_fake_nix<T>(json: &str, body: impl FnOnce(&TempDir) -> T) -> T {
+    let _guard = env_lock().lock().unwrap();
+    let temp = TempDir::new().unwrap();
+    let bin = temp.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    let nix = bin.join("nix");
+    fs::write(
+        &nix,
+        format!(
+            r#"#!/bin/sh
+printf '%s\n' '{}'
+"#,
+            json
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&nix, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let old_path = env::var_os("PATH");
+    let new_path = match &old_path {
+        Some(path) => {
+            let mut paths = vec![bin];
+            paths.extend(env::split_paths(path));
+            env::join_paths(paths).unwrap()
+        }
+        None => temp.path().join("bin").into_os_string(),
+    };
+    unsafe {
+        env::set_var("PATH", new_path);
+    }
+    let result = body(&temp);
+    unsafe {
+        match old_path {
+            Some(path) => env::set_var("PATH", path),
+            None => env::remove_var("PATH"),
+        }
+    }
+    result
+}
+
 fn package() -> Package {
     Package {
         id: "path+file:///demo#0.1.0".to_owned(),
         name: "metadata-name".to_owned(),
         version: "0.1.0".to_owned(),
+        edition: Some("2024".to_owned()),
         authors: vec!["Metadata Author".to_owned()],
         license: Some("MIT".to_owned()),
         description: Some("metadata description".to_owned()),
@@ -36,6 +94,161 @@ fn loading_without_simit_toml_returns_default_config() {
     assert!(cfg.homebrew.is_none());
     assert!(cfg.chocolatey.is_none());
     assert!(cfg.scoop.is_none());
+}
+
+#[test]
+fn workspace_cargo_metadata_simit_config_loads() {
+    let cfg = load_cargo_manifest(
+        r#"[workspace]
+members = []
+
+[workspace.metadata.simit.homebrew]
+tap_url = "https://codeberg.org/caniko/homebrew-mythos.git"
+download_repo = "caniko/mythos"
+"#,
+    )
+    .unwrap();
+
+    let resolved = cfg
+        .resolve_homebrew(HomebrewOverrides::default(), &package())
+        .unwrap();
+
+    assert_eq!(
+        resolved.tap_url,
+        "https://codeberg.org/caniko/homebrew-mythos.git"
+    );
+    assert_eq!(resolved.download_repo, "caniko/mythos");
+}
+
+#[test]
+fn package_cargo_metadata_simit_config_loads() {
+    let cfg = load_cargo_manifest(
+        r#"[package]
+name = "demo"
+version = "0.1.0"
+edition = "2024"
+
+[package.metadata.simit.scoop]
+bucket_url = "https://codeberg.org/caniko/scoop-mythos.git"
+download_repo = "caniko/mythos"
+"#,
+    )
+    .unwrap();
+
+    let resolved = cfg
+        .resolve_scoop(ScoopOverrides::default(), &package())
+        .unwrap();
+
+    assert_eq!(
+        resolved.bucket_url,
+        "https://codeberg.org/caniko/scoop-mythos.git"
+    );
+    assert_eq!(resolved.download_repo, "caniko/mythos");
+}
+
+#[test]
+fn flake_simit_config_output_loads() {
+    with_fake_nix(
+        r#"{"homebrew":{"tap_url":"https://codeberg.org/caniko/homebrew-mythos.git","download_repo":"caniko/mythos"}}"#,
+        |temp| {
+            fs::write(
+                temp.path().join("flake.nix"),
+                r#"{ outputs = { self }: { simitConfig = {}; }; }"#,
+            )
+            .unwrap();
+
+            let resolved = ProjectConfig::load(temp.path())
+                .unwrap()
+                .resolve_homebrew(HomebrewOverrides::default(), &package())
+                .unwrap();
+            assert_eq!(resolved.download_repo, "caniko/mythos");
+        },
+    );
+}
+
+#[test]
+fn multiple_project_config_sources_are_rejected() {
+    let temp = TempDir::new().unwrap();
+    fs::write(
+        temp.path().join("simit.toml"),
+        r#"[homebrew]
+tap_url = "https://codeberg.org/caniko/homebrew-mythos.git"
+download_repo = "caniko/mythos"
+"#,
+    )
+    .unwrap();
+    fs::write(
+        temp.path().join("Cargo.toml"),
+        r#"[package]
+name = "demo"
+version = "0.1.0"
+
+[package.metadata.simit.scoop]
+bucket_url = "https://codeberg.org/caniko/scoop-mythos.git"
+download_repo = "caniko/mythos"
+"#,
+    )
+    .unwrap();
+
+    let err = ProjectConfig::load(temp.path()).unwrap_err();
+
+    let message = format!("{err:#}");
+    assert!(message.contains("multiple simit project config sources found"));
+    assert!(message.contains("simit.toml"));
+    assert!(message.contains("Cargo.toml [package.metadata.simit]"));
+}
+
+#[test]
+fn workspace_and_package_cargo_metadata_sources_are_rejected() {
+    let err = load_cargo_manifest(
+        r#"[package]
+name = "demo"
+version = "0.1.0"
+
+[package.metadata.simit.homebrew]
+tap_url = "https://package.example.com/homebrew-demo.git"
+download_repo = "package/demo"
+
+[workspace.metadata.simit.scoop]
+bucket_url = "https://workspace.example.com/scoop-demo.git"
+download_repo = "workspace/demo"
+"#,
+    )
+    .unwrap_err();
+
+    let message = format!("{err:#}");
+    assert!(message.contains("Cargo.toml [workspace.metadata.simit]"));
+    assert!(message.contains("Cargo.toml [package.metadata.simit]"));
+}
+
+#[test]
+fn cargo_metadata_and_flake_sources_are_rejected() {
+    with_fake_nix(
+        r#"{"scoop":{"bucket_url":"https://codeberg.org/caniko/scoop-mythos.git","download_repo":"caniko/mythos"}}"#,
+        |temp| {
+            fs::write(
+                temp.path().join("Cargo.toml"),
+                r#"[workspace]
+members = []
+
+[workspace.metadata.simit.homebrew]
+tap_url = "https://codeberg.org/caniko/homebrew-mythos.git"
+download_repo = "caniko/mythos"
+"#,
+            )
+            .unwrap();
+            fs::write(
+                temp.path().join("flake.nix"),
+                r#"{ outputs = { self }: { simitConfig = {}; }; }"#,
+            )
+            .unwrap();
+
+            let err = ProjectConfig::load(temp.path()).unwrap_err();
+            let message = format!("{err:#}");
+            assert!(message.contains("Cargo.toml [workspace.metadata.simit]"));
+            assert!(message.contains("flake outputs.simitConfig"));
+        },
+    );
 }
 
 #[test]

@@ -87,6 +87,86 @@ fn patchable_flake() -> &'static str {
 "#
 }
 
+fn custom_rs_harbor_flake() -> &'static str {
+    r#"{
+  description = "Memory-aware admission gate for Rust work pipelines";
+
+  inputs = {
+    rs-harbor.url = "git+https://codeberg.org/caniko/rs-harbor.git";
+
+    nixpkgs.follows = "rs-harbor/nixpkgs";
+    rust-overlay.follows = "rs-harbor/rust-overlay";
+    crane.follows = "rs-harbor/crane";
+    flake-utils.follows = "rs-harbor/flake-utils";
+    treefmt-nix = {
+      url = "github:numtide/treefmt-nix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+    git-hooks = {
+      url = "github:cachix/git-hooks.nix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+  };
+
+  outputs = {
+    self,
+    nixpkgs,
+    rs-harbor,
+    flake-utils,
+    rust-overlay,
+    treefmt-nix,
+    git-hooks,
+    ...
+  }:
+    flake-utils.lib.eachDefaultSystem (system: let
+      pkgs = import nixpkgs {
+        inherit system;
+        overlays = [(import rust-overlay)];
+      };
+      toolchain = rs-harbor.lib.mkToolchain {inherit pkgs;};
+      inherit (toolchain) craneLib;
+      src = craneLib.cleanCargoSource ./.;
+      commonArgs = {
+        inherit src;
+        strictDeps = true;
+      };
+      cargoArtifacts = craneLib.buildDepsOnly commonArgs;
+      package = craneLib.buildPackage (commonArgs // {inherit cargoArtifacts;});
+      treefmtEval = treefmt-nix.lib.evalModule pkgs (import ./nix/treefmt.nix);
+      pre-commit-check = git-hooks.lib.${system}.run {
+        src = ./.;
+        hooks = import ./nix/pre-commit.nix {
+          inherit pkgs;
+          treefmtWrapper = treefmtEval.config.build.wrapper;
+          rustToolchain = toolchain.rustToolchain;
+        };
+      };
+    in {
+      packages = {
+        default = package;
+      };
+      formatter = treefmtEval.config.build.wrapper;
+      checks = {
+        default = package;
+        formatting = treefmtEval.config.build.check self;
+      };
+      devShells.default = craneLib.devShell {
+        checks = self.checks.${system};
+        packages = with pkgs; [
+          cargo-nextest
+          pre-commit
+          rust-analyzer
+        ] ++ pre-commit-check.enabledPackages;
+        shellHook = ''
+          ${pre-commit-check.shellHook}
+          echo "Documentation: cd docs && mdbook serve"
+        '';
+      };
+    });
+}
+"#
+}
+
 #[test]
 fn writes_flake_and_detected_hook_files() {
     let temp = init_package();
@@ -102,7 +182,7 @@ fn writes_flake_and_detected_hook_files() {
 
     let treefmt = read(&temp.path().join("nix/treefmt.nix"));
     assert!(treefmt.contains("programs.rustfmt = {"));
-    assert!(treefmt.contains("edition = \"2021\""));
+    assert!(treefmt.contains("edition = \"2024\""));
     assert!(treefmt.contains("pkgs.rust-bin.nightly.latest.default.override"));
     assert!(treefmt.contains("extensions = [\"rustfmt\"]"));
     assert!(treefmt.contains("programs.alejandra.enable = true"));
@@ -220,6 +300,27 @@ fn check_succeeds_when_flake_and_hooks_are_current() {
         .unwrap();
     assert!(write_status.success());
 
+    let check_status = simit()
+        .current_dir(temp.path())
+        .args(["init-flake", "--check"])
+        .status()
+        .unwrap();
+    assert!(check_status.success());
+}
+
+#[test]
+fn check_accepts_custom_rs_harbor_flake_with_generated_hook_wiring() {
+    let temp = init_package();
+    fs::write(temp.path().join("flake.nix"), custom_rs_harbor_flake()).unwrap();
+
+    let write_status = simit()
+        .current_dir(temp.path())
+        .args(["init-flake"])
+        .status()
+        .unwrap();
+    assert!(write_status.success());
+
+    fs::write(temp.path().join("flake.nix"), custom_rs_harbor_flake()).unwrap();
     let check_status = simit()
         .current_dir(temp.path())
         .args(["init-flake", "--check"])

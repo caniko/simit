@@ -109,15 +109,21 @@ fn render_writes_deterministic_package_files() {
 
     if choco_available() {
         let pack = Command::new("choco")
-            .arg("pack")
-            .current_dir(&output_dir)
+            .args([
+                "pack",
+                output_dir.join("demo-app.nuspec").to_str().unwrap(),
+                "--output-directory",
+                output_dir.to_str().unwrap(),
+            ])
             .output()
             .unwrap();
         assert!(
             pack.status.success(),
-            "{}",
+            "stdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&pack.stdout),
             String::from_utf8_lossy(&pack.stderr)
         );
+        assert!(output_dir.join("demo-app.0.1.0.nupkg").exists());
     }
 }
 

@@ -31,7 +31,7 @@ moves the local tag.
 Projects that publish Windows packages can add Chocolatey and Scoop jobs to
 the release artifact workflow. See
 [Windows Packaging](getting-started/windows-packaging.md) for the required
-`simit.toml` sections, CI flags, and secrets.
+simit project config sections, CI flags, and secrets.
 
 Release candidate validation commands:
 

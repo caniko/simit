@@ -4,8 +4,8 @@
 //! setting, the value comes from, in order:
 //!
 //! 1. The CLI flag, when provided.
-//! 2. The corresponding `simit.toml` packager field, when the file exists and
-//!    the field is present.
+//! 2. The corresponding simit project config field, when a project config
+//!    source exists and the field is present.
 //! 3. The Cargo package metadata fallback, where one exists.
 //! 4. An error.
 //!
@@ -13,11 +13,12 @@
 //! `download_repo`, error if neither a CLI flag nor config value provides them.
 
 use std::path::Path;
+use std::process::Command;
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectConfig {
     #[serde(default)]
@@ -309,14 +310,38 @@ pub struct ScoopOverrides<'a> {
 
 impl ProjectConfig {
     pub fn load(workspace_root: &Path) -> Result<Self> {
-        let path = workspace_root.join("simit.toml");
-        if !path.exists() {
-            return Ok(Self::default());
+        let sources = Self::load_sources(workspace_root)?;
+        match sources.as_slice() {
+            [] => Ok(Self::default()),
+            [source] => Ok(source.config.clone()),
+            _ => {
+                let labels = sources
+                    .iter()
+                    .map(|source| source.label.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                bail!(
+                    "multiple simit project config sources found ({labels}); keep exactly one of simit.toml, Cargo.toml [workspace.metadata.simit], Cargo.toml [package.metadata.simit], or flake outputs.simitConfig"
+                )
+            }
+        }
+    }
+
+    fn load_sources(workspace_root: &Path) -> Result<Vec<ProjectConfigSource>> {
+        let mut sources = Vec::new();
+
+        if let Some(source) = load_simit_toml(workspace_root)? {
+            sources.push(source);
+        }
+        sources.extend(load_cargo_metadata_config(workspace_root)?);
+        if let Some(source) = load_flake_config(workspace_root)? {
+            sources.push(source);
         }
 
-        let text = std::fs::read_to_string(&path)
-            .with_context(|| format!("reading {}", path.display()))?;
-        toml_edit::de::from_str(&text).with_context(|| format!("parsing {}", path.display()))
+        Ok(sources
+            .into_iter()
+            .filter(|source| !source.config.is_empty())
+            .collect())
     }
 
     /// Validate the optional `[homebrew]` section.
@@ -330,24 +355,27 @@ impl ProjectConfig {
         };
 
         if homebrew.tap_url.is_empty() {
-            bail!("simit.toml: [homebrew].tap_url is required");
+            bail!("simit project config: [homebrew].tap_url is required");
         }
-        reject_basic_auth_url("simit.toml: [homebrew].tap_url", &homebrew.tap_url)?;
+        reject_basic_auth_url(
+            "simit project config: [homebrew].tap_url",
+            &homebrew.tap_url,
+        )?;
         if homebrew.download_repo.is_empty() {
-            bail!("simit.toml: [homebrew].download_repo is required");
+            bail!("simit project config: [homebrew].download_repo is required");
         }
         if let Some(desc) = &homebrew.description
             && desc.chars().count() > 80
         {
-            bail!("simit.toml: [homebrew].description must be 80 characters or fewer");
+            bail!("simit project config: [homebrew].description must be 80 characters or fewer");
         }
         if let Some(home) = &homebrew.homepage
             && !home.starts_with("https://")
         {
-            bail!("simit.toml: [homebrew].homepage must start with https://");
+            bail!("simit project config: [homebrew].homepage must start with https://");
         }
         if !homebrew.platforms.any_enabled() {
-            bail!("simit.toml: [homebrew].platforms has all platforms disabled");
+            bail!("simit project config: [homebrew].platforms has all platforms disabled");
         }
 
         Ok(())
@@ -360,20 +388,22 @@ impl ProjectConfig {
         };
 
         if chocolatey.download_repo.is_empty() {
-            bail!("simit.toml: [chocolatey].download_repo is required");
+            bail!("simit project config: [chocolatey].download_repo is required");
         }
         if let Some(desc) = &chocolatey.description
             && desc.chars().count() > 4000
         {
-            bail!("simit.toml: [chocolatey].description must be 4000 characters or fewer");
+            bail!(
+                "simit project config: [chocolatey].description must be 4000 characters or fewer"
+            );
         }
         if let Some(tags) = &chocolatey.tags
             && tags.chars().count() > 4000
         {
-            bail!("simit.toml: [chocolatey].tags must be 4000 characters or fewer");
+            bail!("simit project config: [chocolatey].tags must be 4000 characters or fewer");
         }
         reject_basic_auth_url(
-            "simit.toml: [chocolatey].push.source",
+            "simit project config: [chocolatey].push.source",
             &chocolatey.push.source,
         )?;
 
@@ -387,14 +417,17 @@ impl ProjectConfig {
         };
 
         if scoop.bucket_url.is_empty() {
-            bail!("simit.toml: [scoop].bucket_url is required");
+            bail!("simit project config: [scoop].bucket_url is required");
         }
-        reject_basic_auth_url("simit.toml: [scoop].bucket_url", &scoop.bucket_url)?;
+        reject_basic_auth_url(
+            "simit project config: [scoop].bucket_url",
+            &scoop.bucket_url,
+        )?;
         if scoop.download_repo.is_empty() {
-            bail!("simit.toml: [scoop].download_repo is required");
+            bail!("simit project config: [scoop].download_repo is required");
         }
         if !scoop.architectures.any_enabled() {
-            bail!("simit.toml: [scoop].architectures has all architectures disabled");
+            bail!("simit project config: [scoop].architectures has all architectures disabled");
         }
 
         Ok(())
@@ -649,6 +682,137 @@ impl ProjectConfig {
             architectures,
         })
     }
+
+    fn is_empty(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
+#[derive(Debug)]
+struct ProjectConfigSource {
+    label: String,
+    config: ProjectConfig,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct CargoManifestConfig {
+    #[serde(default)]
+    package: Option<CargoPackageConfig>,
+    #[serde(default)]
+    workspace: Option<CargoWorkspaceConfig>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct CargoPackageConfig {
+    #[serde(default)]
+    metadata: CargoMetadataConfig,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct CargoWorkspaceConfig {
+    #[serde(default)]
+    metadata: CargoMetadataConfig,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct CargoMetadataConfig {
+    #[serde(default)]
+    simit: Option<ProjectConfig>,
+}
+
+fn load_simit_toml(workspace_root: &Path) -> Result<Option<ProjectConfigSource>> {
+    let path = workspace_root.join("simit.toml");
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let text =
+        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    let config =
+        toml_edit::de::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+    Ok(Some(ProjectConfigSource {
+        label: "simit.toml".to_owned(),
+        config,
+    }))
+}
+
+fn load_cargo_metadata_config(workspace_root: &Path) -> Result<Vec<ProjectConfigSource>> {
+    let path = workspace_root.join("Cargo.toml");
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let text =
+        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    let manifest: CargoManifestConfig =
+        toml_edit::de::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+
+    let mut sources = Vec::new();
+    if let Some(config) = manifest
+        .workspace
+        .and_then(|workspace| workspace.metadata.simit)
+    {
+        sources.push(ProjectConfigSource {
+            label: "Cargo.toml [workspace.metadata.simit]".to_owned(),
+            config,
+        });
+    }
+    if let Some(config) = manifest.package.and_then(|package| package.metadata.simit) {
+        sources.push(ProjectConfigSource {
+            label: "Cargo.toml [package.metadata.simit]".to_owned(),
+            config,
+        });
+    }
+
+    Ok(sources)
+}
+
+fn load_flake_config(workspace_root: &Path) -> Result<Option<ProjectConfigSource>> {
+    let path = workspace_root.join("flake.nix");
+    if !path.exists() || !flake_declares_simit_config(&path)? {
+        return Ok(None);
+    }
+
+    let command_text = "nix --extra-experimental-features 'nix-command flakes' eval --json --no-write-lock-file .#simitConfig";
+    let output = Command::new("nix")
+        .current_dir(workspace_root)
+        .args([
+            "--extra-experimental-features",
+            "nix-command flakes",
+            "eval",
+            "--json",
+            "--no-write-lock-file",
+            ".#simitConfig",
+        ])
+        .output()
+        .with_context(|| {
+            format!(
+                "running `{command_text}` to read flake outputs.simitConfig; ensure Nix is installed and flakes are enabled"
+            )
+        })?;
+
+    if !output.status.success() {
+        bail!(
+            "flake outputs.simitConfig could not be evaluated; fix the flake and rerun `{command_text}` to validate it:\n{}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    let config =
+        serde_json::from_slice(&output.stdout).context("parsing flake outputs.simitConfig JSON")?;
+    Ok(Some(ProjectConfigSource {
+        label: "flake outputs.simitConfig".to_owned(),
+        config,
+    }))
+}
+
+fn flake_declares_simit_config(path: &Path) -> Result<bool> {
+    let text =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    Ok(text
+        .lines()
+        .map(str::trim_start)
+        .any(|line| !line.starts_with('#') && line.contains("simitConfig") && line.contains('=')))
 }
 
 fn reject_basic_auth_url(name: &str, value: &str) -> Result<()> {
@@ -747,70 +911,106 @@ fn merge_packager<T>(
 }
 
 fn missing_message(name: &str) -> String {
+    let config_hint = config_hint();
     match name {
         "name" => {
-            "homebrew.name not set: provide it via --homebrew-name, simit.toml [homebrew].name, or Cargo.toml package.name"
+            format!(
+                "homebrew.name not set: provide it via --homebrew-name, {config_hint} [homebrew].name, or Cargo.toml package.name"
+            )
         }
         "tap_url" => {
-            "homebrew.tap_url not set: provide it via --homebrew-tap or simit.toml [homebrew].tap_url"
+            format!(
+                "homebrew.tap_url not set: provide it via --homebrew-tap or {config_hint} [homebrew].tap_url"
+            )
         }
         "description" => {
-            "homebrew.description not set: provide it via --homebrew-description, simit.toml [homebrew].description, or Cargo.toml package.description"
+            format!(
+                "homebrew.description not set: provide it via --homebrew-description, {config_hint} [homebrew].description, or Cargo.toml package.description"
+            )
         }
         "homepage" => {
-            "homebrew.homepage not set: provide it via --homebrew-homepage, simit.toml [homebrew].homepage, or Cargo.toml package.homepage"
+            format!(
+                "homebrew.homepage not set: provide it via --homebrew-homepage, {config_hint} [homebrew].homepage, or Cargo.toml package.homepage"
+            )
         }
         "license" => {
-            "homebrew.license not set: provide it via --homebrew-license, simit.toml [homebrew].license, or Cargo.toml package.license"
+            format!(
+                "homebrew.license not set: provide it via --homebrew-license, {config_hint} [homebrew].license, or Cargo.toml package.license"
+            )
         }
         "download_repo" => {
-            "homebrew.download_repo not set: provide it via --homebrew-download-repo or simit.toml [homebrew].download_repo"
+            format!(
+                "homebrew.download_repo not set: provide it via --homebrew-download-repo or {config_hint} [homebrew].download_repo"
+            )
         }
-        _ => "homebrew setting not set",
+        _ => "homebrew setting not set".to_owned(),
     }
-    .to_owned()
 }
 
 fn missing_chocolatey_message(name: &str) -> String {
+    let config_hint = config_hint();
     match name {
         "name" => {
-            "chocolatey.name not set: provide it via --choco-name, simit.toml [chocolatey].name, or Cargo.toml package.name"
+            format!(
+                "chocolatey.name not set: provide it via --choco-name, {config_hint} [chocolatey].name, or Cargo.toml package.name"
+            )
         }
         "description" => {
-            "chocolatey.description not set: provide it via --choco-description, simit.toml [chocolatey].description, or Cargo.toml package.description"
+            format!(
+                "chocolatey.description not set: provide it via --choco-description, {config_hint} [chocolatey].description, or Cargo.toml package.description"
+            )
         }
         "project_url" => {
-            "chocolatey.project_url not set: provide it via --choco-project-url, simit.toml [chocolatey].project_url, or Cargo.toml package.homepage"
+            format!(
+                "chocolatey.project_url not set: provide it via --choco-project-url, {config_hint} [chocolatey].project_url, or Cargo.toml package.homepage"
+            )
         }
         "download_repo" => {
-            "chocolatey.download_repo not set: provide it via --choco-download-repo or simit.toml [chocolatey].download_repo"
+            format!(
+                "chocolatey.download_repo not set: provide it via --choco-download-repo or {config_hint} [chocolatey].download_repo"
+            )
         }
-        _ => "chocolatey setting not set",
+        _ => "chocolatey setting not set".to_owned(),
     }
-    .to_owned()
 }
 
 fn missing_scoop_message(name: &str) -> String {
+    let config_hint = config_hint();
     match name {
         "name" => {
-            "scoop.name not set: provide it via --scoop-name, simit.toml [scoop].name, or Cargo.toml package.name"
+            format!(
+                "scoop.name not set: provide it via --scoop-name, {config_hint} [scoop].name, or Cargo.toml package.name"
+            )
         }
         "bucket_url" => {
-            "scoop.bucket_url not set: provide it via --scoop-bucket or simit.toml [scoop].bucket_url"
+            format!(
+                "scoop.bucket_url not set: provide it via --scoop-bucket or {config_hint} [scoop].bucket_url"
+            )
         }
         "description" => {
-            "scoop.description not set: provide it via --scoop-description, simit.toml [scoop].description, or Cargo.toml package.description"
+            format!(
+                "scoop.description not set: provide it via --scoop-description, {config_hint} [scoop].description, or Cargo.toml package.description"
+            )
         }
         "homepage" => {
-            "scoop.homepage not set: provide it via --scoop-homepage, simit.toml [scoop].homepage, or Cargo.toml package.homepage"
+            format!(
+                "scoop.homepage not set: provide it via --scoop-homepage, {config_hint} [scoop].homepage, or Cargo.toml package.homepage"
+            )
         }
         "license" => {
-            "scoop.license not set: provide it via --scoop-license, simit.toml [scoop].license, or Cargo.toml package.license"
+            format!(
+                "scoop.license not set: provide it via --scoop-license, {config_hint} [scoop].license, or Cargo.toml package.license"
+            )
         }
         "download_repo" => {
-            "scoop.download_repo not set: provide it via --scoop-download-repo or simit.toml [scoop].download_repo"
+            format!(
+                "scoop.download_repo not set: provide it via --scoop-download-repo or {config_hint} [scoop].download_repo"
+            )
         }
-        _ => "scoop setting not set",
+        _ => "scoop setting not set".to_owned(),
     }
-    .to_owned()
+}
+
+fn config_hint() -> &'static str {
+    "simit.toml, Cargo.toml [workspace.metadata.simit]/[package.metadata.simit], or flake outputs.simitConfig"
 }

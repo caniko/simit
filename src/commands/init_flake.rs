@@ -22,7 +22,8 @@ pub fn run(command: InitFlakeCommand) -> Result<()> {
     let workspace_root = metadata.workspace_root.as_std_path();
     let mut languages = project::detect_languages(workspace_root)?;
     languages.nix = true;
-    let files = flake::files(&languages);
+    let rust_edition = rustfmt_edition(&metadata);
+    let files = flake::files(&languages, &rust_edition);
 
     if command.print {
         flake::print_files(&files);
@@ -49,6 +50,17 @@ pub fn run(command: InitFlakeCommand) -> Result<()> {
     }
 
     project::write_generated_files(workspace_root, &files)
+}
+
+fn rustfmt_edition(metadata: &cargo::Metadata) -> String {
+    metadata
+        .packages
+        .iter()
+        .filter(|package| metadata.workspace_members.contains(&package.id))
+        .filter_map(|package| package.edition.as_deref())
+        .max()
+        .unwrap_or("2021")
+        .to_owned()
 }
 
 fn check_files(

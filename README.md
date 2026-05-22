@@ -139,6 +139,12 @@ generated output:
 simit init-ci --platform forgejo --check
 ```
 
+`init-ci` always renders a separate `publish-crate.yaml` workflow. That
+workflow runs only on exact semver tag pushes such as `0.9.0`, verifies that
+the tag matches the Cargo package version, runs a publish dry run, and publishes
+with the `CRATES_IO_API_TOKEN` secret. The `--check` command fails if that
+publish workflow is missing or edited.
+
 Add optional CI jobs and checks when the project needs them:
 
 ```sh
@@ -169,8 +175,8 @@ tarballs itself.
 ## Homebrew automation
 
 Homebrew tap publishing tends to grow a lot of release-CI boilerplate. `simit`
-keeps the tap metadata in `simit.toml`, bootstraps the tap once, and generates
-the Forgejo release step from that same config.
+keeps the tap metadata in project config, bootstraps the tap once, and
+generates the Forgejo release step from that same config.
 
 ```toml
 [homebrew]
@@ -224,7 +230,7 @@ step.
 
 `simit` can render and publish Windows packages for Chocolatey and Scoop from
 the same project metadata used by release artifacts. Declare the package
-surface in `simit.toml`:
+surface in project config:
 
 ```toml
 [chocolatey]
@@ -288,13 +294,20 @@ simit scoop bump \
 
 ## Project config
 
-Projects may opt in to stable simit settings with a `simit.toml` file at the
-Cargo workspace root. The supported packaging sections are `[homebrew]`,
-`[chocolatey]`, and `[scoop]`.
+Projects may opt in to stable simit settings with exactly one project config
+source. Supported sources are:
 
-For each Homebrew setting, resolution order is: CLI flag, `simit.toml`, Cargo
-package metadata, then an error. `tap_url` and `download_repo` have no Cargo
-metadata fallback, so they must be set by a flag or in `[homebrew]`.
+- `simit.toml` at the Cargo workspace root.
+- `[workspace.metadata.simit]` or `[package.metadata.simit]` in root
+  `Cargo.toml`.
+- `outputs.simitConfig` in `flake.nix`.
+
+All sources use the same section names: `[homebrew]`, `[chocolatey]`, and
+`[scoop]`.
+
+For each Homebrew setting, resolution order is: CLI flag, simit project config,
+Cargo package metadata, then an error. `tap_url` and `download_repo` have no
+Cargo metadata fallback, so they must be set by a flag or in project config.
 
 ```toml
 [homebrew]
@@ -309,6 +322,29 @@ linux_arm = false  # Override: do not publish aarch64-linux.
 
 Chocolatey and Scoop use the same resolution order. Their `download_repo`
 fields must be `OWNER/REPO`, and Scoop also requires `bucket_url`.
+
+Cargo metadata config nests the same schema under `metadata.simit`:
+
+```toml
+[workspace.metadata.simit.homebrew]
+tap_url       = "https://codeberg.org/caniko/homebrew-mythos.git"
+download_repo = "caniko/mythos"
+```
+
+Flake config exports the same schema as JSON-compatible Nix data:
+
+```nix
+{
+  outputs = {self, simit, ...}: {
+    simitConfig = simit.lib.mkSimitConfig {
+      homebrew = {
+        tap_url = "https://codeberg.org/caniko/homebrew-mythos.git";
+        download_repo = "caniko/mythos";
+      };
+    };
+  };
+}
+```
 
 ## Flake and hook wiring
 

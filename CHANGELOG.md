@@ -7,10 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-05-22
+
 ### Added
 
 - `simit release sync-up` for rerunning a failed tag-triggered release from a
   fixed commit.
+- Simit project config can now live in `simit.toml`, Cargo metadata, or flake
+  `outputs.simitConfig`, with a Nix helper exposed as `lib.mkSimitConfig`.
+
+### Changed
+
+- `simit init-flake` now renders `rustfmt` with the Rust edition declared by
+  workspace packages instead of hard-coding edition 2021.
+- `simit init-flake --check` accepts custom `rs-harbor` flakes that preserve
+  the generated pre-commit hook wiring through equivalent local bindings.
+- Document and regression-test that `simit init-ci --check` enforces the
+  generated tag-triggered crates.io publish workflow.
 
 ## [0.8.0] - 2026-05-22
 
@@ -51,6 +64,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Prepare the first public crates.io release.
 
-[Unreleased]: https://codeberg.org/caniko/simit/compare/0.8.0...HEAD
+[Unreleased]: https://codeberg.org/caniko/simit/compare/0.9.0...HEAD
+[0.9.0]: https://codeberg.org/caniko/simit/compare/0.8.0...0.9.0
 [0.8.0]: https://codeberg.org/caniko/simit/compare/0.7.0...0.8.0
 [0.7.0]: https://codeberg.org/caniko/simit/compare/0.3.1...0.7.0

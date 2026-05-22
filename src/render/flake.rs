@@ -24,7 +24,7 @@ const PRE_COMMIT_PACKAGE: &str = "          pre-commit\n";
 const PRE_COMMIT_ENABLED_PACKAGES: &str = "        ] ++ pre-commit-check.enabledPackages;\n";
 const SHELL_HOOK: &str = "        shellHook = pre-commit-check.shellHook;\n";
 
-pub fn files(languages: &Languages) -> Vec<GeneratedFile> {
+pub fn files(languages: &Languages, rust_edition: &str) -> Vec<GeneratedFile> {
     vec![
         GeneratedFile {
             relative_path: PathBuf::from("flake.nix"),
@@ -32,7 +32,7 @@ pub fn files(languages: &Languages) -> Vec<GeneratedFile> {
         },
         GeneratedFile {
             relative_path: PathBuf::from("nix/treefmt.nix"),
-            content: treefmt_nix(languages),
+            content: treefmt_nix(languages, rust_edition),
         },
         GeneratedFile {
             relative_path: PathBuf::from("nix/pre-commit.nix"),
@@ -138,15 +138,16 @@ pub fn has_required_wiring(content: &str) -> bool {
             "treefmtEval = treefmt-nix.lib.evalModule pkgs (import ./nix/treefmt.nix);",
             "pre-commit-check = git-hooks.lib.${system}.run",
             "hooks = import ./nix/pre-commit.nix",
-            "treefmtWrapper = treefmtEval.config.build.wrapper;",
             "formatter = treefmtEval.config.build.wrapper;",
             "formatting = treefmtEval.config.build.check self;",
             "pre-commit",
             "pre-commit-check.enabledPackages",
-            "shellHook = pre-commit-check.shellHook;",
         ]
         .iter()
         .all(|snippet| content.contains(snippet))
+        && has_rust_toolchain_hook_package(content)
+        && has_treefmt_wrapper_argument(content)
+        && has_pre_commit_shell_hook(content)
 }
 
 pub fn patch_error(anchor: &str, reason: &str) -> anyhow::Error {
@@ -331,7 +332,7 @@ fn template() -> String {
     .to_owned()
 }
 
-fn treefmt_nix(languages: &Languages) -> String {
+fn treefmt_nix(languages: &Languages, rust_edition: &str) -> String {
     let mut content = String::new();
     content.push_str("{pkgs, ...}: {\n");
     content.push_str("  projectRootFile = \"flake.nix\";\n");
@@ -339,7 +340,7 @@ fn treefmt_nix(languages: &Languages) -> String {
     if languages.rust {
         content.push_str("\n  programs.rustfmt = {\n");
         content.push_str("    enable = true;\n");
-        content.push_str("    edition = \"2021\";\n");
+        content.push_str(&format!("    edition = \"{rust_edition}\";\n"));
         content.push_str("    package = pkgs.rust-bin.nightly.latest.default.override {\n");
         content.push_str("      extensions = [\"rustfmt\"];\n");
         content.push_str("    };\n");
@@ -370,6 +371,19 @@ fn treefmt_nix(languages: &Languages) -> String {
 
     content.push_str("}\n");
     content
+}
+
+fn has_rust_toolchain_hook_package(content: &str) -> bool {
+    content.contains("inherit rustToolchain;")
+        || content.contains("rustToolchain = toolchain.rustToolchain;")
+}
+
+fn has_treefmt_wrapper_argument(content: &str) -> bool {
+    content.contains("treefmtWrapper = treefmtEval.config.build.wrapper;")
+}
+
+fn has_pre_commit_shell_hook(content: &str) -> bool {
+    content.contains("shellHook =") && content.contains("pre-commit-check.shellHook")
 }
 
 fn pre_commit_nix(languages: &Languages) -> String {

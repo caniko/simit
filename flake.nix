@@ -163,5 +163,11 @@
           ++ pre-commit-check.enabledPackages;
         shellHook = pre-commit-check.shellHook;
       };
-    });
+    })
+    // {
+      lib = {
+        simitModule = import ./nix/simit-module.nix {lib = nixpkgs.lib;};
+        mkSimitConfig = import ./nix/simit-config.nix {lib = nixpkgs.lib;};
+      };
+    };
 }
