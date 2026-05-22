@@ -159,7 +159,7 @@ fn ci_workflow(
     workflow.push_str("name: CI\n\n");
     workflow.push_str("on:\n");
     workflow.push_str("  push:\n");
-    workflow.push_str("    branches: [trunk]\n");
+    workflow.push_str("    branches: [\"**\"]\n");
     workflow.push_str("  pull_request:\n\n");
     push_concurrency(&mut workflow);
     workflow.push_str("jobs:\n");
@@ -233,6 +233,7 @@ fn publish_workflow(
     workflow.push_str(
         "# Before creating and pushing a release tag, run `simit changelog release <version>` locally.\n",
     );
+    push_release_security_header(&mut workflow, false);
     workflow.push_str("name: Publish Crate\n\n");
     workflow.push_str("on:\n");
     workflow.push_str("  push:\n");
@@ -241,6 +242,7 @@ fn publish_workflow(
     push_concurrency(&mut workflow);
     workflow.push_str("jobs:\n");
     workflow.push_str("  publish:\n");
+    push_release_permissions(&mut workflow, platform);
     workflow.push_str("    runs-on: ");
     workflow.push_str(&runner(platform, runner_override));
     workflow.push('\n');
@@ -297,6 +299,7 @@ fn artifacts_workflow(
 ) -> String {
     let mut workflow = String::new();
     workflow.push_str("name: Release Artifacts\n\n");
+    push_release_security_header(&mut workflow, true);
     workflow.push_str("on:\n");
     workflow.push_str("  push:\n");
     workflow.push_str("    tags:\n");
@@ -312,12 +315,14 @@ fn artifacts_workflow(
     workflow.push_str("  ");
     workflow.push_str(linux_job_name);
     workflow.push_str(":\n");
+    push_release_permissions(&mut workflow, platform);
     workflow.push_str("    runs-on: ");
     workflow.push_str(&runner(platform, runner_override));
     workflow.push('\n');
     push_container(&mut workflow, platform, runtime, package);
     workflow.push_str("    steps:\n");
     push_checkout_step(&mut workflow, platform);
+    workflow.push_str(&validate_release_tag_step(None));
     match runtime {
         Runtime::Nix => {
             workflow.push_str("      - name: Install Nix\n");
@@ -329,8 +334,11 @@ fn artifacts_workflow(
             push_rust_setup_step(&mut workflow, platform);
             workflow.push_str("      - name: Build release binary\n");
             workflow.push_str("        run: cargo build --release --locked\n\n");
+            workflow.push_str("      - name: Install Nix release tools\n");
+            workflow.push_str("        uses: https://github.com/cachix/install-nix-action@v31\n\n");
         }
     }
+    push_release_integrity_steps(&mut workflow, platform);
     if let Some(homebrew) = &options.homebrew {
         push_homebrew_publish_step(&mut workflow, homebrew);
     }
@@ -838,6 +846,134 @@ fn homebrew_tap_repo(tap_url: &str) -> String {
         .unwrap_or_else(|| tap_url.to_owned())
 }
 
+fn push_release_security_header(workflow: &mut String, include_artifact_signing: bool) {
+    workflow.push_str("# Required release trust roots and secrets:\n");
+    workflow.push_str(
+        "# - keys/maintainers.gpg: pinned maintainer OpenPGP public keys for git verify-tag.\n",
+    );
+    if !include_artifact_signing {
+        return;
+    }
+    workflow.push_str(
+        "# - keys/minisign.pub: pinned minisign public key for SHA256SUMS.txt.minisig.\n",
+    );
+    workflow.push_str("# - MINISIGN_SECRET_KEY: password-protected minisign secret key for signing SHA256SUMS.txt.\n");
+    workflow.push_str("# - MINISIGN_PASSWORD: password for MINISIGN_SECRET_KEY.\n");
+    workflow.push_str("# - COSIGN_PRIVATE_KEY and COSIGN_PASSWORD: optional fallback when keyless Sigstore OIDC is unavailable.\n");
+}
+
+fn push_release_permissions(workflow: &mut String, platform: Platform) {
+    match platform {
+        Platform::Github => {
+            workflow.push_str("    permissions:\n");
+            workflow.push_str("      contents: read\n");
+            workflow.push_str("      id-token: write\n");
+        }
+        Platform::Forgejo => {
+            workflow.push_str("    enable-openid-connect: true\n");
+        }
+    }
+}
+
+fn push_release_integrity_steps(workflow: &mut String, platform: Platform) {
+    workflow.push_str("      - name: Generate signed checksums and provenance\n");
+    workflow.push_str("        env:\n");
+    workflow.push_str("          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}\n");
+    workflow.push_str("          MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}\n");
+    workflow.push_str("          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}\n");
+    workflow.push_str("          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}\n");
+    workflow.push_str("        run: |\n");
+    workflow.push_str("          set -euo pipefail\n");
+    workflow.push_str("          test -d release\n");
+    workflow.push_str("          test -s keys/minisign.pub\n");
+    workflow.push_str("          test -n \"${MINISIGN_SECRET_KEY:-}\"\n");
+    workflow.push_str("          test -n \"${MINISIGN_PASSWORD:-}\"\n\n");
+    workflow.push_str("          find release -maxdepth 1 -type f ! -name 'SHA256SUMS.txt*' ! -name '*.cosign.bundle' ! -name '*.intoto.*' -print0 | sort -z | xargs -0 sha256sum > release/SHA256SUMS.txt\n");
+    workflow.push_str("          test -s release/SHA256SUMS.txt\n\n");
+    workflow.push_str("          umask 077\n");
+    workflow.push_str("          minisign_key=\"$(mktemp)\"\n");
+    workflow.push_str("          oidc_token=\"$(mktemp)\"\n");
+    workflow.push_str("          cosign_key=\"$(mktemp)\"\n");
+    workflow.push_str("          export oidc_token cosign_key\n");
+    workflow.push_str(
+        "          cleanup() { rm -f \"$minisign_key\" \"$oidc_token\" \"$cosign_key\"; }\n",
+    );
+    workflow.push_str("          trap cleanup EXIT\n");
+    workflow.push_str("          printf '%s' \"$MINISIGN_SECRET_KEY\" > \"$minisign_key\"\n");
+    workflow.push_str("          printf '%s\\n' \"$MINISIGN_PASSWORD\" |\n");
+    workflow.push_str("            nix shell nixpkgs#minisign -c minisign -S \\\n");
+    workflow.push_str("              -s \"$minisign_key\" \\\n");
+    workflow.push_str("              -m release/SHA256SUMS.txt \\\n");
+    workflow.push_str("              -x release/SHA256SUMS.txt.minisig \\\n");
+    workflow.push_str("              -c \"untrusted comment: ${GITHUB_REF_NAME:-${FORGE_REF_NAME:-${CODEBERG_REF_NAME:-release}}} SHA256SUMS signature\"\n");
+    workflow.push_str("          nix shell nixpkgs#minisign -c minisign -V \\\n");
+    workflow.push_str("            -m release/SHA256SUMS.txt \\\n");
+    workflow.push_str("            -x release/SHA256SUMS.txt.minisig \\\n");
+    workflow.push_str("            -p keys/minisign.pub\n\n");
+    workflow.push_str(
+        "          nix shell nixpkgs#cosign nixpkgs#curl nixpkgs#jq -c bash <<'SCRIPT'\n",
+    );
+    workflow.push_str("          set -euo pipefail\n");
+    workflow.push_str(
+        "          tag=\"${GITHUB_REF_NAME:-${FORGE_REF_NAME:-${CODEBERG_REF_NAME:-}}}\"\n",
+    );
+    workflow.push_str("          if [ -z \"$tag\" ]; then ref=\"${GITHUB_REF:-${FORGE_REF:-${CODEBERG_REF:-}}}\"; tag=\"${ref#refs/tags/}\"; fi\n");
+    workflow.push_str("          repo_url=\"${GITHUB_SERVER_URL:-${FORGE_SERVER_URL:-https://codeberg.org}}/${GITHUB_REPOSITORY:-${FORGE_REPOSITORY:-${CODEBERG_REPOSITORY:-unknown/unknown}}}\"\n");
+    workflow.push_str("          git_sha=\"$(git rev-parse HEAD)\"\n");
+    workflow.push_str("          workflow_sha=\"$(sha256sum ");
+    workflow.push_str(platform.workflow_dir());
+    workflow.push_str("/release-artifacts.yaml | awk '{print $1}')\"\n");
+    workflow.push_str("          flake_lock_sha=\"missing\"\n");
+    workflow.push_str("          if [ -f flake.lock ]; then flake_lock_sha=\"$(sha256sum flake.lock | awk '{print $1}')\"; fi\n");
+    workflow.push_str("          builder_id=\"${repo_url}/src/tag/${tag}/");
+    workflow.push_str(platform.workflow_dir());
+    workflow.push_str("/release-artifacts.yaml\"\n\n");
+    workflow.push_str("          sign_blob_keyless() {\n");
+    workflow.push_str("            file=\"$1\"\n");
+    workflow.push_str("            if [ -n \"${ACTIONS_ID_TOKEN_REQUEST_URL:-}\" ] && [ -n \"${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}\" ]; then\n");
+    workflow.push_str("              curl -fsSL -H \"Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}\" \"${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sigstore\" > \"$oidc_token\"\n");
+    workflow.push_str("              cosign sign-blob --yes --identity-token \"$oidc_token\" --bundle \"${file}.cosign.bundle\" \"$file\"\n");
+    workflow.push_str("            else\n");
+    workflow.push_str("              return 1\n");
+    workflow.push_str("            fi\n");
+    workflow.push_str("          }\n\n");
+    workflow.push_str("          attest_blob_keyless() {\n");
+    workflow.push_str("            file=\"$1\" predicate=\"$2\"\n");
+    workflow.push_str("            if [ -s \"$oidc_token\" ]; then\n");
+    workflow.push_str("              cosign attest-blob --yes --identity-token \"$oidc_token\" --predicate \"$predicate\" --type slsaprovenance1 --output-attestation \"${file}.intoto.jsonl\" --bundle \"${file}.intoto.bundle\" \"$file\"\n");
+    workflow.push_str("            else\n");
+    workflow.push_str("              return 1\n");
+    workflow.push_str("            fi\n");
+    workflow.push_str("          }\n\n");
+    workflow.push_str("          sign_blob_with_key() {\n");
+    workflow.push_str("            file=\"$1\"\n");
+    workflow.push_str("            test -n \"${COSIGN_PRIVATE_KEY:-}\"\n");
+    workflow.push_str("            printf '%s' \"$COSIGN_PRIVATE_KEY\" > \"$cosign_key\"\n");
+    workflow.push_str("            cosign sign-blob --yes --key \"$cosign_key\" --bundle \"${file}.cosign.bundle\" \"$file\"\n");
+    workflow.push_str("          }\n\n");
+    workflow.push_str("          attest_blob_with_key() {\n");
+    workflow.push_str("            file=\"$1\" predicate=\"$2\"\n");
+    workflow.push_str("            cosign attest-blob --yes --key \"$cosign_key\" --predicate \"$predicate\" --type slsaprovenance1 --output-attestation \"${file}.intoto.jsonl\" --bundle \"${file}.intoto.bundle\" \"$file\"\n");
+    workflow.push_str("          }\n\n");
+    workflow.push_str("          find release -maxdepth 1 -type f \\( -name '*.tar.gz' -o -name '*.zip' -o -name '*.AppImage' -o -name '*.src.rpm' \\) -print0 | sort -z | while IFS= read -r -d '' file; do\n");
+    workflow.push_str("            artifact_sha=\"$(sha256sum \"$file\" | awk '{print $1}')\"\n");
+    workflow.push_str("            predicate=\"$(mktemp)\"\n");
+    workflow.push_str("            jq -n --arg builder_id \"$builder_id\" --arg git_sha \"$git_sha\" --arg workflow_sha \"$workflow_sha\" --arg flake_lock_sha \"$flake_lock_sha\" --arg artifact \"$(basename \"$file\")\" --arg artifact_sha \"$artifact_sha\" '{buildDefinition:{buildType:\"https://simit.rs/release-artifacts\",externalParameters:{artifact:$artifact,artifactDigest:{sha256:$artifact_sha}},internalParameters:{},resolvedDependencies:[{uri:\"git\",digest:{gitCommit:$git_sha}},{uri:\"release-artifacts workflow\",digest:{sha256:$workflow_sha}},{uri:\"flake.lock\",digest:{sha256:$flake_lock_sha}}]},runDetails:{builder:{id:$builder_id}}}' > \"$predicate\"\n");
+    workflow.push_str("            if sign_blob_keyless \"$file\" && attest_blob_keyless \"$file\" \"$predicate\"; then\n");
+    workflow.push_str("              echo \"signed and attested $file with keyless Sigstore\"\n");
+    workflow.push_str("            elif [ -n \"${COSIGN_PRIVATE_KEY:-}\" ]; then\n");
+    workflow.push_str("              echo \"keyless Sigstore failed for $file; using COSIGN_PRIVATE_KEY fallback\"\n");
+    workflow.push_str("              sign_blob_with_key \"$file\"\n");
+    workflow.push_str("              attest_blob_with_key \"$file\" \"$predicate\"\n");
+    workflow.push_str("            else\n");
+    workflow.push_str("              echo \"keyless Sigstore failed for $file, and COSIGN_PRIVATE_KEY is not configured\" >&2\n");
+    workflow.push_str("              exit 1\n");
+    workflow.push_str("            fi\n");
+    workflow.push_str("            rm -f \"$predicate\"\n");
+    workflow.push_str("          done\n");
+    workflow.push_str("          SCRIPT\n\n");
+}
+
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
@@ -1169,21 +1305,10 @@ fn default_windows_runner(platform: Platform) -> &'static str {
     }
 }
 
-fn validate_tag_step(cargo_metadata_command: &str) -> String {
-    format!(
-        r#"      - name: Validate tag
-        run: |
-          tag="${{GITHUB_REF_NAME:-${{FORGE_REF_NAME:-}}}}"
-          if [ -z "$tag" ]; then
-            ref="${{GITHUB_REF:-${{FORGE_REF:-}}}}"
-            tag="${{ref#refs/tags/}}"
-          fi
-
-          if ! printf '%s\n' "$tag" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-            echo "Tag must be an exact semver version like 0.1.1, got '$tag'" >&2
-            exit 1
-          fi
-
+fn validate_release_tag_step(cargo_metadata_command: Option<&str>) -> String {
+    let version_check = if let Some(cargo_metadata_command) = cargo_metadata_command {
+        format!(
+            r#"
           version="$({cargo_metadata_command} | grep -m1 -o '"version":"[^"]*"' | cut -d '"' -f4)"
           if [ -z "$version" ]; then
             echo "Could not read package version from cargo metadata" >&2
@@ -1193,9 +1318,51 @@ fn validate_tag_step(cargo_metadata_command: &str) -> String {
             echo "Tag $tag does not match Cargo.toml package version $version" >&2
             exit 1
           fi
+"#
+        )
+    } else {
+        String::new()
+    };
+
+    format!(
+        r#"      - name: Validate signed release tag
+        run: |
+          set -euo pipefail
+          tag="${{GITHUB_REF_NAME:-${{FORGE_REF_NAME:-${{CODEBERG_REF_NAME:-}}}}}}"
+          if [ -z "$tag" ]; then
+            ref="${{GITHUB_REF:-${{FORGE_REF:-${{CODEBERG_REF:-}}}}}}"
+            tag="${{ref#refs/tags/}}"
+          fi
+
+          if ! printf '%s\n' "$tag" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "Tag must be an exact semver version like 0.1.1, got '$tag'" >&2
+            exit 1
+          fi
+{version_check}
+          test -s keys/maintainers.gpg
+          if ! command -v gpg >/dev/null 2>&1; then
+            if command -v apt-get >/dev/null 2>&1; then
+              apt-get update
+              apt-get install -y --no-install-recommends gnupg
+            else
+              echo "gpg is required to verify signed release tags" >&2
+              exit 1
+            fi
+          fi
+          GNUPGHOME="$(mktemp -d)"
+          export GNUPGHOME
+          trap 'rm -rf "$GNUPGHOME"' EXIT
+          chmod 700 "$GNUPGHOME"
+          gpg --batch --import keys/maintainers.gpg
+          git fetch --force --tags origin "refs/tags/${{tag}}:refs/tags/${{tag}}"
+          git verify-tag "$tag"
 
 "#
     )
+}
+
+fn validate_tag_step(cargo_metadata_command: &str) -> String {
+    validate_release_tag_step(Some(cargo_metadata_command))
 }
 
 fn publish_step(command: &str) -> String {

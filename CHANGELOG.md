@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-05-22
+
+### Added
+
+- Generated release workflows now verify GPG-signed tags against
+  `keys/maintainers.gpg`, sign `SHA256SUMS.txt` with minisign, and emit
+  cosign/SLSA provenance bundles for release archives.
+- Document release integrity trust roots, required signing secrets, and
+  consumer verification commands.
+
+### Fixed
+
+- Lower simit's own Rust requirement back to 1.85 so a local simit checkout can
+  run inside projects using the generated Rust 1.85 release workflows.
+
 ## [0.9.0] - 2026-05-22
 
 ### Added
@@ -64,7 +79,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Prepare the first public crates.io release.
 
-[Unreleased]: https://codeberg.org/caniko/simit/compare/0.9.0...HEAD
+[Unreleased]: https://codeberg.org/caniko/simit/compare/0.10.0...HEAD
+[0.10.0]: https://codeberg.org/caniko/simit/compare/0.9.0...0.10.0
 [0.9.0]: https://codeberg.org/caniko/simit/compare/0.8.0...0.9.0
 [0.8.0]: https://codeberg.org/caniko/simit/compare/0.7.0...0.8.0
 [0.7.0]: https://codeberg.org/caniko/simit/compare/0.3.1...0.7.0

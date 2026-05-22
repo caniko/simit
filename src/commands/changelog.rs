@@ -16,7 +16,7 @@ pub fn run(command: ChangelogCommand) -> Result<()> {
         } => {
             let date = match date {
                 Some(value) => changelog::parse_iso_date(&value)?,
-                None => changelog::today_utc(),
+                None => changelog::today_utc()?,
             };
             changelog::release_file(
                 command.file.as_std_path(),

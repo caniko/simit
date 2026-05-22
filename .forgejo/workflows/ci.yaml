@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [trunk]
+    branches: ["**"]
   pull_request:
 
 concurrency:
@@ -12,7 +12,7 @@ concurrency:
 jobs:
   test:
     runs-on: atlas
-    container: rust:1.95-trixie
+    container: rust:1.85-bookworm
     steps:
       - name: Checkout
         uses: https://code.forgejo.org/actions/checkout@v4

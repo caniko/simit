@@ -1,13 +1,60 @@
+use std::fmt;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail};
 use semver::Version;
-use time::{Date, Month, OffsetDateTime};
 
 pub const DEFAULT_PATH: &str = "CHANGELOG.md";
 pub const HEADER: &str = "# Changelog\n\nAll notable changes to this project will be documented in this file.\n\nThe format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),\nand this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).\n";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Date {
+    year: i32,
+    month: u8,
+    day: u8,
+}
+
+impl Date {
+    fn from_calendar_date(year: i32, month: u8, day: u8) -> Result<Self> {
+        if !(1..=12).contains(&month) {
+            bail!("month must be between 1 and 12");
+        }
+        let max_day = days_in_month(year, month);
+        if day == 0 || day > max_day {
+            bail!("day must be between 1 and {max_day}");
+        }
+        Ok(Self { year, month, day })
+    }
+
+    fn from_unix_days(days: i64) -> Result<Self> {
+        let z = days
+            .checked_add(719_468)
+            .context("current date is outside supported range")?;
+        let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+        let doe = z - era * 146_097;
+        let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+        let y = yoe + era * 400;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let day = doy - (153 * mp + 2) / 5 + 1;
+        let month = mp + if mp < 10 { 3 } else { -9 };
+        let year = y + i64::from(month <= 2);
+
+        let year = i32::try_from(year).context("current year is outside supported range")?;
+        let month = u8::try_from(month).context("current month is outside supported range")?;
+        let day = u8::try_from(day).context("current day is outside supported range")?;
+        Self::from_calendar_date(year, month, day)
+    }
+}
+
+impl fmt::Display for Date {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:04}-{:02}-{:02}", self.year, self.month, self.day)
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EntryKind {
@@ -119,13 +166,13 @@ pub fn release_content(
     let unreleased_end = unreleased.end;
 
     let latest = latest_released_version(&document)?;
-    if let Some(latest) = latest.as_ref()
-        && version <= latest
-    {
-        bail!(
-            "release version {version} must be greater than the latest changelog release {}",
-            latest
-        );
+    if let Some(latest) = latest.as_ref() {
+        if version <= latest {
+            bail!(
+                "release version {version} must be greater than the latest changelog release {}",
+                latest
+            );
+        }
     }
 
     let body = trimmed_body_lines(&document.lines[unreleased_start + 1..unreleased_end]);
@@ -188,12 +235,12 @@ pub fn check_content(content: &str) -> Result<()> {
         if let SectionKind::Version(version) = &section.kind {
             let heading = &document.lines[section.start];
             parse_version_heading(heading)?;
-            if let Some(previous) = previous
-                && version >= previous
-            {
-                bail!(
-                    "release sections must be in descending semver order; found {version} after {previous}"
-                );
+            if let Some(previous) = previous {
+                if version >= previous {
+                    bail!(
+                        "release sections must be in descending semver order; found {version} after {previous}"
+                    );
+                }
             }
             previous = Some(version);
         }
@@ -255,8 +302,14 @@ pub fn add_entry(content: &str, kind: EntryKind, text: &str) -> Result<String> {
     Ok(render_lines(&document.lines))
 }
 
-pub fn today_utc() -> Date {
-    OffsetDateTime::now_utc().date()
+pub fn today_utc() -> Result<Date> {
+    let seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("current system time is before the Unix epoch")?
+        .as_secs();
+    let days =
+        i64::try_from(seconds / 86_400).context("current date is outside supported range")?;
+    Date::from_unix_days(days)
 }
 
 pub fn parse_iso_date(input: &str) -> Result<Date> {
@@ -274,10 +327,22 @@ pub fn parse_iso_date(input: &str) -> Result<Date> {
     let day = parts[2]
         .parse::<u8>()
         .with_context(|| format!("parsing day in `{input}`"))?;
-    let month = Month::try_from(month).with_context(|| format!("parsing month in `{input}`"))?;
-
     Date::from_calendar_date(year, month, day)
         .with_context(|| format!("parsing calendar date `{input}`"))
+}
+
+fn days_in_month(year: i32, month: u8) -> u8 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if is_leap_year(year) => 29,
+        2 => 28,
+        _ => 0,
+    }
+}
+
+fn is_leap_year(year: i32) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
 }
 
 fn read_file(path: &Path) -> Result<String> {

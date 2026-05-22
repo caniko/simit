@@ -56,8 +56,15 @@ simit init-ci --platform forgejo --with-chocolatey --with-scoop \
 
 Generated workflows read these secrets:
 
+- `MINISIGN_SECRET_KEY` and `MINISIGN_PASSWORD` for the signed checksum manifest.
+- `COSIGN_PRIVATE_KEY` and `COSIGN_PASSWORD` as the optional Sigstore fallback
+  when keyless OIDC is unavailable.
 - `chocolatey_api_key` for Chocolatey package pushes.
 - `scoop_bucket_token` for authenticated Scoop bucket pushes.
+
+The same artifact workflow verifies signed release tags and emits signed
+checksums plus SLSA provenance. See [Release Integrity](release-integrity.md)
+for the required `keys/maintainers.gpg` and `keys/minisign.pub` trust roots.
 
 ## Local Render and Bump
 

@@ -197,6 +197,34 @@ fn release_rejects_empty_unreleased() {
 }
 
 #[test]
+fn release_rejects_invalid_calendar_dates() {
+    let temp = TempDir::new().unwrap();
+    run(
+        temp.path(),
+        env!("CARGO_BIN_EXE_simit"),
+        &["changelog", "init"],
+    );
+    run(
+        temp.path(),
+        env!("CARGO_BIN_EXE_simit"),
+        &["changelog", "add", "fixed", "Prepare release"],
+    );
+
+    let output = simit()
+        .current_dir(temp.path())
+        .args(["changelog", "release", "0.1.0", "--date", "2025-02-29"])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8(output.stderr)
+            .unwrap()
+            .contains("parsing calendar date `2025-02-29`")
+    );
+}
+
+#[test]
 fn check_rejects_noncanonical_header_malformed_versions_and_out_of_order_sections() {
     let bad_header = TempDir::new().unwrap();
     fs::write(

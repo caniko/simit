@@ -364,15 +364,17 @@ impl ProjectConfig {
         if homebrew.download_repo.is_empty() {
             bail!("simit project config: [homebrew].download_repo is required");
         }
-        if let Some(desc) = &homebrew.description
-            && desc.chars().count() > 80
-        {
-            bail!("simit project config: [homebrew].description must be 80 characters or fewer");
+        if let Some(desc) = &homebrew.description {
+            if desc.chars().count() > 80 {
+                bail!(
+                    "simit project config: [homebrew].description must be 80 characters or fewer"
+                );
+            }
         }
-        if let Some(home) = &homebrew.homepage
-            && !home.starts_with("https://")
-        {
-            bail!("simit project config: [homebrew].homepage must start with https://");
+        if let Some(home) = &homebrew.homepage {
+            if !home.starts_with("https://") {
+                bail!("simit project config: [homebrew].homepage must start with https://");
+            }
         }
         if !homebrew.platforms.any_enabled() {
             bail!("simit project config: [homebrew].platforms has all platforms disabled");
@@ -390,17 +392,17 @@ impl ProjectConfig {
         if chocolatey.download_repo.is_empty() {
             bail!("simit project config: [chocolatey].download_repo is required");
         }
-        if let Some(desc) = &chocolatey.description
-            && desc.chars().count() > 4000
-        {
-            bail!(
-                "simit project config: [chocolatey].description must be 4000 characters or fewer"
-            );
+        if let Some(desc) = &chocolatey.description {
+            if desc.chars().count() > 4000 {
+                bail!(
+                    "simit project config: [chocolatey].description must be 4000 characters or fewer"
+                );
+            }
         }
-        if let Some(tags) = &chocolatey.tags
-            && tags.chars().count() > 4000
-        {
-            bail!("simit project config: [chocolatey].tags must be 4000 characters or fewer");
+        if let Some(tags) = &chocolatey.tags {
+            if tags.chars().count() > 4000 {
+                bail!("simit project config: [chocolatey].tags must be 4000 characters or fewer");
+            }
         }
         reject_basic_auth_url(
             "simit project config: [chocolatey].push.source",
@@ -570,10 +572,10 @@ impl ProjectConfig {
             .tags
             .map(str::to_owned)
             .or_else(|| cfg.and_then(|chocolatey| chocolatey.tags.clone()));
-        if let Some(tags) = &tags
-            && tags.chars().count() > 4000
-        {
-            bail!("chocolatey.tags must be 4000 characters or fewer");
+        if let Some(tags) = &tags {
+            if tags.chars().count() > 4000 {
+                bail!("chocolatey.tags must be 4000 characters or fewer");
+            }
         }
         let release_notes_url = overrides
             .release_notes_url

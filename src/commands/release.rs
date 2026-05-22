@@ -61,7 +61,7 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
         Some(changelog::release_content(
             &std::fs::read_to_string(&changelog_path)?,
             &new_version,
-            changelog::today_utc(),
+            changelog::today_utc()?,
             None,
             &changelog_path,
             Some(workspace_root),

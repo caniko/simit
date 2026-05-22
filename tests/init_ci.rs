@@ -88,6 +88,11 @@ fn assert_yaml_parses(text: &str) {
     serde_yaml::from_str::<serde_yaml::Value>(text).unwrap();
 }
 
+fn assert_all_branch_push_trigger(workflow: &str) {
+    assert!(workflow.contains("branches: [\"**\"]"));
+    assert!(!workflow.contains("branches: [trunk]"));
+}
+
 fn assert_homebrew_run_block_indentation(workflow: &str) {
     let mut in_homebrew_step = false;
     let mut in_run_block = false;
@@ -117,6 +122,22 @@ fn assert_homebrew_run_block_indentation(workflow: &str) {
     assert!(saw_script_line, "Homebrew run block was not found");
 }
 
+fn assert_release_integrity_steps(workflow: &str) {
+    assert!(workflow.contains("keys/maintainers.gpg"));
+    assert!(workflow.contains("git verify-tag \"$tag\""));
+    assert!(workflow.contains("keys/minisign.pub"));
+    assert!(workflow.contains("MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}"));
+    assert!(workflow.contains("MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}"));
+    assert!(workflow.contains("COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}"));
+    assert!(workflow.contains("release/SHA256SUMS.txt.minisig"));
+    assert!(workflow.contains("cosign sign-blob --yes --identity-token \"$oidc_token\""));
+    assert!(workflow.contains("cosign attest-blob --yes --identity-token \"$oidc_token\""));
+    assert!(workflow.contains("--type slsaprovenance1"));
+    assert!(workflow.contains("--output-attestation \"${file}.intoto.jsonl\""));
+    assert!(workflow.contains("--bundle \"${file}.intoto.bundle\""));
+    assert!(workflow.contains("COSIGN_PRIVATE_KEY fallback"));
+}
+
 #[test]
 fn generates_forgejo_nix_workflows() {
     let temp = init_package(true);
@@ -129,6 +150,7 @@ fn generates_forgejo_nix_workflows() {
     assert!(status.success());
 
     let ci = read(&temp.path().join(".forgejo/workflows/ci.yaml"));
+    assert_all_branch_push_trigger(&ci);
     assert!(ci.contains("runs-on: atlas"));
     assert!(ci.contains("group: ${{ github.workflow }}-${{ github.ref }}"));
     assert!(ci.contains("uses: https://code.forgejo.org/actions/checkout@v4"));
@@ -140,6 +162,8 @@ fn generates_forgejo_nix_workflows() {
     assert!(publish.contains("simit changelog release <version>"));
     assert!(publish.contains("tags:"));
     assert!(publish.contains("grep -Eq '^[0-9]+\\.[0-9]+\\.[0-9]+$'"));
+    assert!(publish.contains("keys/maintainers.gpg"));
+    assert!(publish.contains("git verify-tag \"$tag\""));
     assert!(publish.contains("nix develop -c cargo metadata --no-deps --format-version 1"));
     assert!(publish.contains("CRATES_IO_API_TOKEN: ${{ secrets.CRATES_IO_API_TOKEN }}"));
     assert!(publish.contains("CRATES_IO_API_TOKEN is required"));
@@ -158,6 +182,7 @@ fn generates_github_plain_cargo_workflows() {
     assert!(status.success());
 
     let ci = read(&temp.path().join(".github/workflows/ci.yaml"));
+    assert_all_branch_push_trigger(&ci);
     assert!(ci.contains("runs-on: ubuntu-latest"));
     assert!(ci.contains("uses: dtolnay/rust-toolchain@stable"));
     assert!(ci.contains("toolchain: stable"));
@@ -182,6 +207,7 @@ fn forgejo_auto_runtime_uses_rust_container_even_when_flake_exists() {
     assert!(status.success());
 
     let ci = read(&temp.path().join(".forgejo/workflows/ci.yaml"));
+    assert_all_branch_push_trigger(&ci);
     assert!(ci.contains("runs-on: atlas"));
     assert!(ci.contains("cancel-in-progress: true"));
     assert!(ci.contains("container: rust:1.85-bookworm"));
@@ -538,6 +564,8 @@ fn forgejo_nix_homebrew_step_matches_hardened_shape() {
             .join(".forgejo/workflows/release-artifacts.yaml"),
     );
     assert_homebrew_run_block_indentation(&workflow);
+    assert_release_integrity_steps(&workflow);
+    assert!(workflow.contains("enable-openid-connect: true"));
     assert!(workflow.contains("name: Publish Homebrew tap"));
     assert!(workflow.contains("HOMEBREW_TAP_TOKEN: ${{ secrets.homebrew_tap_token }}"));
     assert!(workflow.contains("HOMEBREW_TAP_REPO: homebrew-demo"));
@@ -677,6 +705,8 @@ fn github_chocolatey_flag_resolves_when_config_is_present() {
     assert!(status.success());
     let workflow = read(&temp.path().join(".github/workflows/release-artifacts.yaml"));
     assert_yaml_parses(&workflow);
+    assert_release_integrity_steps(&workflow);
+    assert!(workflow.contains("id-token: write"));
     assert!(workflow.contains("name: Release Artifacts"));
     assert!(workflow.contains("build-linux:"));
     assert!(workflow.contains("build-windows:"));
