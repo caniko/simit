@@ -12,15 +12,13 @@ concurrency:
 jobs:
   publish:
     runs-on: atlas
+    container: nixos/nix:latest
     steps:
       - name: Checkout
         uses: https://code.forgejo.org/actions/checkout@v4
 
-      - name: Install Nix
-        uses: https://github.com/cachix/install-nix-action@v31
-
       - name: Build site
-        run: nix build .#site
+        run: nix --extra-experimental-features "nix-command flakes" build .#site
 
       - name: Publish to Codeberg Pages
         uses: https://codeberg.org/git-pages/action@v2
