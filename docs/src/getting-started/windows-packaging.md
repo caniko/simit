@@ -46,13 +46,12 @@ also supports `--no-git` for writing only `bucket/<name>.json`.
 
 ```sh
 simit init-ci --platform github --with-chocolatey --with-scoop
-simit init-ci --platform forgejo --with-chocolatey --with-scoop \
-  --windows-runner windows-atlas
+simit init-ci --platform forgejo --with-chocolatey --with-scoop
 ```
 
 `--with-chocolatey` and `--with-scoop` imply `--with-artifacts`. GitHub uses
-`windows-latest` unless `--windows-runner` overrides it. Forgejo requires
-`--windows-runner` because Codeberg's shared runners do not provide Windows.
+`windows-latest` unless `--windows-runner` overrides it. Forgejo uses the
+`windows` default from simit user config unless `--windows-runner` overrides it.
 
 Generated workflows read these secrets:
 

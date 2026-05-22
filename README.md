@@ -115,18 +115,29 @@ repository has a `flake.nix`. The default container is derived from
 `rust-version`, simit uses `rust:bookworm`. MSRV is only checked when
 `--with-msrv` is requested.
 
-Forgejo workflows default to our self-hosted atlas runner (`runs-on: atlas`).
-The runner bind-mounts Node, git, and other JavaScript-action runtime tools
-into job containers, so generated workflows use the Forgejo checkout action
-instead of manual git checkout. Use `--runner` only when a repository needs a
-specific non-default runner:
+Forgejo runner labels are user infrastructure. Before generating Forgejo
+workflows, configure your local runner fleet in the simit user config:
+
+```sh
+simit config init
+$EDITOR "$(simit config path)"
+simit config check
+```
+
+The config lives at `$XDG_CONFIG_HOME/simit/config.toml`, or
+`~/.config/simit/config.toml` when `XDG_CONFIG_HOME` is unset. `init-ci`
+selects Forgejo runners from `[ci.defaults.forgejo]`; if no matching default is
+configured, it fails instead of guessing a non-portable label. Use `--runner`
+only for a one-off explicit label override:
 
 ```sh
 simit init-ci --platform forgejo --runner custom-runner
 ```
 
 Use `--runtime nix` only for workflows that intentionally need flake outputs,
-such as cross-platform binary builds or release artifacts:
+such as cross-platform binary builds or release artifacts. Forgejo Nix
+workflows use the configured `nix` runner default and do not run on
+pull-request events:
 
 ```sh
 simit init-ci --platform forgejo --runtime nix
@@ -141,9 +152,22 @@ simit init-ci --platform forgejo --check
 
 `init-ci` always renders a separate `publish-crate.yaml` workflow. That
 workflow runs only on exact semver tag pushes such as `0.9.0`, verifies that
-the tag matches the Cargo package version, runs a publish dry run, and publishes
-with the `CRATES_IO_API_TOKEN` secret. The `--check` command fails if that
-publish workflow is missing or edited.
+the tag matches the Cargo package version, verifies the signed tag against
+`keys/maintainers.gpg`, runs a publish dry run, and publishes with the
+`CRATES_IO_API_TOKEN` secret. On generation, `init-ci` discovers the release
+signing key from `[release.signing].key`, `git config user.signingkey`, or
+`--maintainer-key`, then writes the maintainer public keyring.
+
+You can manage that trust root explicitly:
+
+```sh
+simit release trust status
+simit release trust init
+simit release trust check
+```
+
+The default trust root is `keys/maintainers.gpg`; override it with
+`[release.signing].trust_root` or `--maintainers-gpg`.
 
 Add optional CI jobs and checks when the project needs them:
 
@@ -265,13 +289,12 @@ Wire Windows publishing into tagged release CI:
 
 ```sh
 simit init-ci --platform github --with-chocolatey --with-scoop
-simit init-ci --platform forgejo --with-chocolatey --with-scoop \
-  --windows-runner windows-atlas
+simit init-ci --platform forgejo --with-chocolatey --with-scoop
 ```
 
 `--with-chocolatey` and `--with-scoop` imply `--with-artifacts`. GitHub uses
-`windows-latest` by default. Forgejo requires `--windows-runner` because
-Codeberg's shared runners are Linux-only. Generated workflows read
+`windows-latest` by default. Forgejo uses `[ci.defaults.forgejo].windows` from
+the simit user config unless `--windows-runner` overrides it. Generated workflows read
 `secrets.chocolatey_api_key` for Chocolatey pushes and
 `secrets.scoop_bucket_token` for Scoop bucket pushes.
 
@@ -323,7 +346,41 @@ linux_arm = false  # Override: do not publish aarch64-linux.
 Chocolatey and Scoop use the same resolution order. Their `download_repo`
 fields must be `OWNER/REPO`, and Scoop also requires `bucket_url`.
 
-Cargo metadata config nests the same schema under `metadata.simit`:
+## User config
+
+User config is intentionally separate from project config. It stores local
+infrastructure such as runner labels, while repositories stay portable.
+
+```toml
+[ci.runners.atlas]
+platform = "forgejo"
+labels = ["atlas"]
+os = "linux"
+arch = "x86_64"
+runtimes = ["cargo", "nix"]
+trusted = true
+
+[ci.runners.windows_atlas]
+platform = "forgejo"
+labels = ["windows-atlas"]
+os = "windows"
+arch = "x86_64"
+runtimes = ["cargo"]
+
+[ci.defaults.forgejo]
+cargo = "atlas"
+nix = "atlas"
+release = "atlas"
+windows = "windows_atlas"
+```
+
+Each default names a runner from `[ci.runners]`. The selected runner must match
+the requested platform, operating system, and runtime before simit writes a
+workflow. GitHub keeps portable built-in fallbacks (`ubuntu-latest` and
+`windows-latest`) when user config does not override them.
+
+Project config in Cargo metadata nests the same project schema under
+`metadata.simit`:
 
 ```toml
 [workspace.metadata.simit.homebrew]
@@ -395,7 +452,9 @@ simit release patch -m "release patch"
 ```
 
 The crates.io publish workflow runs when the release tag is pushed and requires
-`CRATES_IO_API_TOKEN`.
+`CRATES_IO_API_TOKEN`. It also requires `keys/maintainers.gpg`, which
+`simit init-ci` and `simit release trust init` generate from the configured
+release signing key.
 
 If that tag-triggered workflow fails after the tag has already been pushed,
 commit the fix and rerun the release pipeline with:

@@ -22,11 +22,58 @@ use serde::Deserialize;
 #[serde(deny_unknown_fields)]
 pub struct ProjectConfig {
     #[serde(default)]
+    pub release: ReleaseConfig,
+    #[serde(default)]
     pub homebrew: Option<HomebrewConfig>,
     #[serde(default)]
     pub chocolatey: Option<ChocolateyConfig>,
     #[serde(default)]
     pub scoop: Option<ScoopConfig>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ReleaseConfig {
+    #[serde(default)]
+    pub signing: ReleaseSigningConfig,
+    #[serde(default)]
+    pub smoke: ReleaseSmokeConfig,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ReleaseSigningConfig {
+    /// OpenPGP fingerprint used to sign and verify release tags.
+    pub key: Option<String>,
+
+    /// Public keyring committed for CI-side `git verify-tag`.
+    #[serde(default = "default_release_trust_root")]
+    pub trust_root: String,
+
+    /// Whether release publishing must have a usable signing trust root.
+    #[serde(default = "default_true")]
+    pub required: bool,
+}
+
+impl Default for ReleaseSigningConfig {
+    fn default() -> Self {
+        Self {
+            key: None,
+            trust_root: default_release_trust_root(),
+            required: true,
+        }
+    }
+}
+
+fn default_release_trust_root() -> String {
+    "keys/maintainers.gpg".to_owned()
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ReleaseSmokeConfig {
+    /// Command run after artifact signing/provenance and before publishing.
+    pub command: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]

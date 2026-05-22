@@ -7,8 +7,8 @@ stages only the version files it changed, delegates commit creation to `git`,
 and creates a release tag named exactly like the new version.
 
 The tool also provides helpers for Keep a Changelog files, generated Rust CI,
-crane-based Nix flakes, shell completions, manpages, and Homebrew tap release
-automation.
+user-scoped runner configuration, release maintainer trust roots, crane-based
+Nix flakes, shell completions, manpages, and Homebrew tap release automation.
 
 ## Scope
 

@@ -7,9 +7,12 @@ use crate::cli::{
 };
 use crate::config::{ProjectConfig, ResolvedChocolatey, ResolvedHomebrew, ResolvedScoop};
 use crate::project;
+use crate::release_trust::{self, TrustOverrides};
 use crate::render::ci::{
     self, ChocolateyOptions, CiOptions, HomebrewOptions, HomebrewPlatformSet, ScoopOptions,
+    SelfCheckOptions,
 };
+use crate::user_config::{UserConfig, validate_runner_label};
 
 pub fn run(command: InitCiCommand) -> Result<()> {
     validate_runner(command.runner.as_deref())?;
@@ -35,11 +38,6 @@ pub fn run(command: InitCiCommand) -> Result<()> {
         .iter()
         .any(|package| package.name == "simit");
     let windows_packagers = command.with_chocolatey || command.with_scoop;
-    let windows_runner = resolve_windows_runner(
-        command.platform,
-        command.windows_runner.as_deref(),
-        windows_packagers,
-    )?;
     let with_artifacts = command.with_artifacts || command.with_homebrew || windows_packagers;
     if command.with_homebrew && !command.with_artifacts {
         eprintln!("--with-homebrew implies --with-artifacts; enabling it.");
@@ -50,35 +48,19 @@ pub fn run(command: InitCiCommand) -> Result<()> {
     if command.with_scoop && !command.with_artifacts {
         eprintln!("--with-scoop implies --with-artifacts; enabling it.");
     }
-    let cfg = if command.with_homebrew || windows_packagers {
-        Some(ProjectConfig::load(workspace_root)?)
-    } else {
-        None
-    };
+    let cfg = ProjectConfig::load(workspace_root)?;
     let homebrew = if command.with_homebrew {
-        Some(homebrew_options(
-            cfg.as_ref().expect("config loaded for packagers"),
-            &command.homebrew,
-            &package,
-        )?)
+        Some(homebrew_options(&cfg, &command.homebrew, &package)?)
     } else {
         None
     };
     let chocolatey = if command.with_chocolatey {
-        Some(chocolatey_options(
-            cfg.as_ref().expect("config loaded for packagers"),
-            &command.chocolatey,
-            &package,
-        )?)
+        Some(chocolatey_options(&cfg, &command.chocolatey, &package)?)
     } else {
         None
     };
     let scoop = if command.with_scoop {
-        Some(scoop_options(
-            cfg.as_ref().expect("config loaded for packagers"),
-            &command.scoop,
-            &package,
-        )?)
+        Some(scoop_options(&cfg, &command.scoop, &package)?)
     } else {
         None
     };
@@ -89,19 +71,50 @@ pub fn run(command: InitCiCommand) -> Result<()> {
         with_deny: command.with_deny,
         with_docs: command.with_docs,
         with_artifacts,
+        release_smoke_command: command
+            .release_smoke_command
+            .or_else(|| cfg.release.smoke.command.clone()),
         homebrew,
         chocolatey,
         scoop,
     };
+    let user_config = UserConfig::load().or_else(|err| {
+        if command.platform == Platform::Github {
+            Ok(UserConfig::default())
+        } else {
+            Err(err)
+        }
+    })?;
+    let runners = user_config.resolve_ci_runners(
+        command.platform,
+        runtime,
+        command.runner.as_deref(),
+        command.windows_runner.as_deref(),
+        windows_packagers,
+    )?;
     let files = ci::files(
         command.platform,
         runtime,
         &package,
-        self_check,
-        command.runner.as_deref(),
-        windows_runner,
+        SelfCheckOptions {
+            enabled: self_check,
+            runner_override: command.runner.as_deref(),
+            windows_runner_override: command.windows_runner.as_deref(),
+        },
+        &runners,
         options,
     )?;
+    let trust_overrides = TrustOverrides {
+        key: command.maintainer_key,
+        trust_root: command.maintainers_gpg,
+    };
+    let mut files = files;
+    files.push(release_trust::generated_file(
+        workspace_root,
+        &cfg,
+        &trust_overrides,
+        command.check,
+    )?);
 
     if command.check {
         project::check_generated_files(
@@ -251,44 +264,7 @@ pub(crate) fn resolve_runtime(
     }
 }
 
-fn resolve_windows_runner(
-    platform: Platform,
-    override_label: Option<&str>,
-    windows_packagers: bool,
-) -> Result<Option<&str>> {
-    if let Some(label) = override_label {
-        if platform == Platform::Forgejo && windows_packagers {
-            eprintln!(
-                "Forgejo Windows packaging requires a registered Windows runner matching --windows-runner {label}."
-            );
-        }
-        return Ok(Some(label));
-    }
-
-    if !windows_packagers {
-        return Ok(None);
-    }
-
-    match platform {
-        Platform::Github => Ok(Some("windows-latest")),
-        Platform::Forgejo => bail!(
-            "--windows-runner is required for Forgejo when --with-chocolatey or --with-scoop is set; register a Windows runner and pass its label"
-        ),
-    }
-}
-
 pub(crate) fn validate_runner(value: Option<&str>) -> Result<()> {
-    let Some(value) = value else {
-        return Ok(());
-    };
-    if value.is_empty() {
-        bail!("--runner cannot be empty");
-    }
-    if !value
-        .bytes()
-        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
-    {
-        bail!("--runner may only contain ASCII letters, digits, '.', '_', and '-'");
-    }
+    value.map(validate_runner_label).transpose()?;
     Ok(())
 }

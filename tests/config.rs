@@ -147,6 +147,55 @@ download_repo = "caniko/mythos"
 }
 
 #[test]
+fn release_signing_config_loads() {
+    let cfg = load_toml(
+        r#"[release.signing]
+key = "818D507F1E62139F8A17EAA64623DEA06FDACFE1"
+trust_root = "keys/release-maintainers.gpg"
+"#,
+    )
+    .unwrap();
+
+    assert_eq!(
+        cfg.release.signing.key.as_deref(),
+        Some("818D507F1E62139F8A17EAA64623DEA06FDACFE1")
+    );
+    assert_eq!(
+        cfg.release.signing.trust_root,
+        "keys/release-maintainers.gpg"
+    );
+    assert!(cfg.release.signing.required);
+}
+
+#[test]
+fn release_signing_config_defaults_trust_root() {
+    let cfg = load_toml(
+        r#"[release.signing]
+key = "818D507F1E62139F8A17EAA64623DEA06FDACFE1"
+"#,
+    )
+    .unwrap();
+
+    assert_eq!(cfg.release.signing.trust_root, "keys/maintainers.gpg");
+    assert!(cfg.release.signing.required);
+}
+
+#[test]
+fn release_smoke_config_loads() {
+    let cfg = load_toml(
+        r#"[release.smoke]
+command = "nix run .#release-smoke --"
+"#,
+    )
+    .unwrap();
+
+    assert_eq!(
+        cfg.release.smoke.command.as_deref(),
+        Some("nix run .#release-smoke --")
+    );
+}
+
+#[test]
 fn flake_simit_config_output_loads() {
     with_fake_nix(
         r#"{"homebrew":{"tap_url":"https://codeberg.org/caniko/homebrew-mythos.git","download_repo":"caniko/mythos"}}"#,

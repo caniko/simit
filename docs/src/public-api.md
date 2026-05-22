@@ -12,8 +12,11 @@ The Rust library exposes the modules used by the `simit` binary.
 - `git` performs release preflight checks, stages changed version files,
   delegates commits, and creates release tags.
 - `project` detects repository languages and manages generated files.
+- `release_trust` discovers and validates release maintainer trust roots.
 - `render` renders generated CI, flake, diff, and Homebrew formula content.
 - `sha256` computes release artifact hashes.
+- `user_config` loads and validates user-scoped infrastructure defaults such
+  as CI runner labels.
 
 Full API documentation is published on docs.rs:
 

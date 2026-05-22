@@ -2,6 +2,7 @@ pub mod changelog;
 pub mod chocolatey;
 pub mod commit;
 pub mod completions;
+pub mod config;
 pub mod homebrew;
 pub mod init_chocolatey;
 pub mod init_ci;

@@ -1,4 +1,9 @@
------BEGIN PGP PUBLIC KEY BLOCK-----
+use std::fs;
+use std::path::PathBuf;
+use std::process::{Command, id};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+const MAINTAINERS_ASC: &str = r#"-----BEGIN PGP PUBLIC KEY BLOCK-----
 
 mDMEaRBcoRYJKwYBBAHaRw8BAQdAfqwJgLlh5ZUmOlW3/xcBilGd881RdfZ59DwW
 o6/v7/C0MkNhbiBILiBUYXJ0YW5vZ2x1IChjYW5pa28pIDxncGdAcm90YXMubW96
@@ -15,3 +20,20 @@ CAeIeAQYFgoAIBYhBIGNUH8eYhOfihfqpkYj3qBv2s/hBQJpEFyhAhsMAAoJEEYj
 MxverdzrWh20hxbY1ESMO55STiJlCofv54bICg==
 =vJ/Z
 -----END PGP PUBLIC KEY BLOCK-----
+"#;
+
+pub fn maintainer_key_path() -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock is before UNIX_EPOCH")
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!("simit-maintainers-{}-{nanos}.asc", id()));
+    fs::write(&path, MAINTAINERS_ASC).expect("write maintainer key fixture");
+    path
+}
+
+pub fn simit() -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_simit"));
+    command.env("SIMIT_MAINTAINERS_GPG", maintainer_key_path());
+    command
+}

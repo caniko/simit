@@ -20,7 +20,11 @@ pub mod config;
 pub mod git;
 /// Project language detection and generated-file management.
 pub mod project;
+/// Release maintainer trust-root discovery and validation.
+pub mod release_trust;
 /// Renderers for generated support files.
 pub mod render;
 /// SHA-256 helpers for release artifacts.
 pub mod sha256;
+/// User-scoped configuration for local infrastructure defaults.
+pub mod user_config;

@@ -5,10 +5,19 @@ use semver::Version;
 
 use crate::cargo::{self, BumpSpec, Package};
 use crate::changelog;
-use crate::cli::{ReleaseAction, ReleaseCommand};
+use crate::cli::{ReleaseAction, ReleaseCommand, ReleaseTrustAction};
+use crate::config::ProjectConfig;
 use crate::git;
+use crate::release_trust::{self, TrustOverrides};
 
 pub fn run(command: ReleaseCommand) -> Result<()> {
+    if command.action == ReleaseAction::Trust {
+        return trust(command);
+    }
+    if command.trust_action.is_some() || command.trust_key.is_some() || command.trust_root.is_some()
+    {
+        bail!("release trust arguments are only valid with `simit release trust`");
+    }
     if command.action == ReleaseAction::SyncUp {
         return sync_up(command);
     }
@@ -96,6 +105,56 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn trust(command: ReleaseCommand) -> Result<()> {
+    if !command.packages.is_empty() {
+        bail!("--package is not valid with `simit release trust`");
+    }
+    if command.workspace {
+        bail!("--workspace is not valid with `simit release trust`");
+    }
+    if command.no_tag {
+        bail!("--no-tag is not valid with `simit release trust`");
+    }
+    if command.no_sign {
+        bail!("--no-sign is not valid with `simit release trust`");
+    }
+    if command.dry_run {
+        bail!("--dry-run is not valid with `simit release trust`");
+    }
+    if command.pre.is_some() {
+        bail!("--pre is not valid with `simit release trust`");
+    }
+    if command.message.is_some() {
+        bail!("-m/--message is not valid with `simit release trust`");
+    }
+    if command.no_changelog {
+        bail!("--no-changelog is not valid with `simit release trust`");
+    }
+    if command.push {
+        bail!("--push is not valid with `simit release trust`");
+    }
+    if command.remote != "origin" {
+        bail!("--remote is not valid with `simit release trust`");
+    }
+
+    let action = command
+        .trust_action
+        .ok_or_else(|| anyhow!("release trust action is required: status, init, or check"))?;
+    let metadata = cargo::metadata_for_current_dir()?;
+    let workspace_root = metadata.workspace_root.as_std_path();
+    let config = ProjectConfig::load(workspace_root)?;
+    let overrides = TrustOverrides {
+        key: command.trust_key,
+        trust_root: command.trust_root,
+    };
+
+    match action {
+        ReleaseTrustAction::Status => release_trust::status(workspace_root, &config, &overrides),
+        ReleaseTrustAction::Init => release_trust::init(workspace_root, &config, &overrides),
+        ReleaseTrustAction::Check => release_trust::check(workspace_root, &config, &overrides),
+    }
 }
 
 fn sync_up(command: ReleaseCommand) -> Result<()> {

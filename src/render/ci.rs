@@ -5,6 +5,7 @@ use anyhow::{Result, bail};
 use crate::cargo::Package;
 use crate::cli::{Platform, Runtime};
 use crate::project::GeneratedFile;
+use crate::user_config::{ResolvedCiRunners, ResolvedRunner};
 
 #[derive(Debug, Clone, Default)]
 pub struct CiOptions {
@@ -14,6 +15,7 @@ pub struct CiOptions {
     pub with_deny: bool,
     pub with_docs: bool,
     pub with_artifacts: bool,
+    pub release_smoke_command: Option<String>,
     pub homebrew: Option<HomebrewOptions>,
     pub chocolatey: Option<ChocolateyOptions>,
     pub scoop: Option<ScoopOptions>,
@@ -79,6 +81,13 @@ pub struct ScoopOptions {
     pub arm64: bool,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct SelfCheckOptions<'a> {
+    pub enabled: bool,
+    pub runner_override: Option<&'a str>,
+    pub windows_runner_override: Option<&'a str>,
+}
+
 impl Default for HomebrewPlatformSet {
     fn default() -> Self {
         Self {
@@ -94,9 +103,8 @@ pub fn files(
     platform: Platform,
     runtime: Runtime,
     package: &Package,
-    self_check: bool,
-    runner_override: Option<&str>,
-    windows_runner_override: Option<&str>,
+    self_check: SelfCheckOptions<'_>,
+    runners: &ResolvedCiRunners,
     options: CiOptions,
 ) -> Result<Vec<GeneratedFile>> {
     if options.with_msrv && package.rust_version.is_none() {
@@ -112,28 +120,26 @@ pub fn files(
                 runtime,
                 package,
                 self_check,
-                runner_override,
-                windows_runner_override,
+                runners,
                 options.clone(),
             ),
         },
         GeneratedFile {
             relative_path: dir.join("publish-crate.yaml"),
-            content: publish_workflow(platform, runtime, package, runner_override, options.clone()),
+            content: publish_workflow(
+                platform,
+                runtime,
+                package,
+                &runners.release,
+                options.clone(),
+            ),
         },
     ];
 
     if options.with_artifacts {
         files.push(GeneratedFile {
             relative_path: dir.join("release-artifacts.yaml"),
-            content: artifacts_workflow(
-                platform,
-                runtime,
-                package,
-                runner_override,
-                windows_runner_override,
-                &options,
-            ),
+            content: artifacts_workflow(platform, runtime, package, runners, &options),
         });
     }
     if options.with_deny {
@@ -150,9 +156,8 @@ fn ci_workflow(
     platform: Platform,
     runtime: Runtime,
     package: &Package,
-    self_check: bool,
-    runner_override: Option<&str>,
-    windows_runner_override: Option<&str>,
+    self_check: SelfCheckOptions<'_>,
+    runners: &ResolvedCiRunners,
     options: CiOptions,
 ) -> String {
     let mut workflow = String::new();
@@ -160,12 +165,15 @@ fn ci_workflow(
     workflow.push_str("on:\n");
     workflow.push_str("  push:\n");
     workflow.push_str("    branches: [\"**\"]\n");
-    workflow.push_str("  pull_request:\n\n");
+    if !(platform == Platform::Forgejo && runtime == Runtime::Nix) {
+        workflow.push_str("  pull_request:\n");
+    }
+    workflow.push('\n');
     push_concurrency(&mut workflow);
     workflow.push_str("jobs:\n");
     workflow.push_str("  test:\n");
     workflow.push_str("    runs-on: ");
-    workflow.push_str(&runner(platform, runner_override));
+    workflow.push_str(&runs_on(&runners.ci));
     workflow.push('\n');
     push_container(&mut workflow, platform, runtime, package);
     workflow.push_str("    steps:\n");
@@ -173,21 +181,20 @@ fn ci_workflow(
 
     match runtime {
         Runtime::Nix => {
-            workflow.push_str("      - name: Install Nix\n");
-            workflow.push_str("        uses: https://github.com/cachix/install-nix-action@v31\n\n");
+            push_install_nix_step(&mut workflow, platform);
             workflow.push_str("      - name: Check flake\n");
             workflow.push_str("        run: nix flake check\n\n");
             workflow.push_str("      - name: Test\n");
             workflow.push_str("        run: nix develop -c cargo test\n\n");
             push_quality_tool_install_steps(&mut workflow, runtime, &options);
             push_optional_ci_steps(&mut workflow, runtime, package, &options);
-            if self_check {
+            if self_check.enabled {
                 push_self_check_steps(
                     &mut workflow,
                     platform,
                     runtime,
-                    runner_override,
-                    windows_runner_override,
+                    self_check.runner_override,
+                    self_check.windows_runner_override,
                     &options,
                 );
             }
@@ -203,13 +210,13 @@ fn ci_workflow(
             push_test_steps(&mut workflow, package, &options);
             push_quality_tool_install_steps(&mut workflow, runtime, &options);
             push_optional_ci_steps(&mut workflow, runtime, package, &options);
-            if self_check {
+            if self_check.enabled {
                 push_self_check_steps(
                     &mut workflow,
                     platform,
                     runtime,
-                    runner_override,
-                    windows_runner_override,
+                    self_check.runner_override,
+                    self_check.windows_runner_override,
                     &options,
                 );
             }
@@ -226,7 +233,7 @@ fn publish_workflow(
     platform: Platform,
     runtime: Runtime,
     package: &Package,
-    runner_override: Option<&str>,
+    runner: &ResolvedRunner,
     options: CiOptions,
 ) -> String {
     let mut workflow = String::new();
@@ -238,13 +245,22 @@ fn publish_workflow(
     workflow.push_str("on:\n");
     workflow.push_str("  push:\n");
     workflow.push_str("    tags:\n");
-    workflow.push_str("      - \"*.*.*\"\n\n");
+    workflow.push_str("      - \"*.*.*\"\n");
+    workflow.push_str("  workflow_dispatch:\n");
+    workflow.push_str("    inputs:\n");
+    workflow.push_str("      force_publish:\n");
+    workflow.push_str(
+        "        description: \"Bypass release smoke checks and continue publishing.\"\n",
+    );
+    workflow.push_str("        required: false\n");
+    workflow.push_str("        default: false\n");
+    workflow.push_str("        type: boolean\n\n");
     push_concurrency(&mut workflow);
     workflow.push_str("jobs:\n");
     workflow.push_str("  publish:\n");
     push_release_permissions(&mut workflow, platform);
     workflow.push_str("    runs-on: ");
-    workflow.push_str(&runner(platform, runner_override));
+    workflow.push_str(&runs_on(runner));
     workflow.push('\n');
     push_container(&mut workflow, platform, runtime, package);
     workflow.push_str("    steps:\n");
@@ -252,8 +268,7 @@ fn publish_workflow(
 
     match runtime {
         Runtime::Nix => {
-            workflow.push_str("      - name: Install Nix\n");
-            workflow.push_str("        uses: https://github.com/cachix/install-nix-action@v31\n\n");
+            push_install_nix_step(&mut workflow, platform);
             workflow.push_str(&validate_tag_step(
                 "nix develop -c cargo metadata --no-deps --format-version 1",
             ));
@@ -293,8 +308,7 @@ fn artifacts_workflow(
     platform: Platform,
     runtime: Runtime,
     package: &Package,
-    runner_override: Option<&str>,
-    windows_runner_override: Option<&str>,
+    runners: &ResolvedCiRunners,
     options: &CiOptions,
 ) -> String {
     let mut workflow = String::new();
@@ -317,7 +331,7 @@ fn artifacts_workflow(
     workflow.push_str(":\n");
     push_release_permissions(&mut workflow, platform);
     workflow.push_str("    runs-on: ");
-    workflow.push_str(&runner(platform, runner_override));
+    workflow.push_str(&runs_on(&runners.release));
     workflow.push('\n');
     push_container(&mut workflow, platform, runtime, package);
     workflow.push_str("    steps:\n");
@@ -325,8 +339,7 @@ fn artifacts_workflow(
     workflow.push_str(&validate_release_tag_step(None));
     match runtime {
         Runtime::Nix => {
-            workflow.push_str("      - name: Install Nix\n");
-            workflow.push_str("        uses: https://github.com/cachix/install-nix-action@v31\n\n");
+            push_install_nix_step(&mut workflow, platform);
             workflow.push_str("      - name: Build package\n");
             workflow.push_str("        run: nix build\n\n");
         }
@@ -339,12 +352,17 @@ fn artifacts_workflow(
         }
     }
     push_release_integrity_steps(&mut workflow, platform);
+    if let Some(command) = options.release_smoke_command.as_deref() {
+        push_release_smoke_step(&mut workflow, command);
+    }
     if let Some(homebrew) = &options.homebrew {
         push_homebrew_publish_step(&mut workflow, homebrew);
     }
     if has_windows_packagers {
-        let windows_runner =
-            windows_runner_override.unwrap_or_else(|| default_windows_runner(platform));
+        let windows_runner = runners
+            .windows
+            .as_ref()
+            .expect("windows runner resolved for windows packagers");
         push_windows_build_job(&mut workflow, platform, package, windows_runner, options);
         push_windows_publish_job(&mut workflow, platform, windows_runner, options);
     }
@@ -355,13 +373,13 @@ fn push_windows_build_job(
     workflow: &mut String,
     platform: Platform,
     package: &Package,
-    windows_runner: &str,
+    windows_runner: &ResolvedRunner,
     options: &CiOptions,
 ) {
     let matrix = windows_matrix(options);
     workflow.push_str("\n  build-windows:\n");
     workflow.push_str("    runs-on: ");
-    workflow.push_str(windows_runner);
+    workflow.push_str(&runs_on(windows_runner));
     workflow.push('\n');
     workflow.push_str("    strategy:\n");
     workflow.push_str("      fail-fast: false\n");
@@ -394,13 +412,13 @@ fn push_windows_build_job(
 fn push_windows_publish_job(
     workflow: &mut String,
     platform: Platform,
-    windows_runner: &str,
+    windows_runner: &ResolvedRunner,
     options: &CiOptions,
 ) {
     workflow.push_str("\n  publish-windows-packages:\n");
     workflow.push_str("    needs: build-windows\n");
     workflow.push_str("    runs-on: ");
-    workflow.push_str(windows_runner);
+    workflow.push_str(&runs_on(windows_runner));
     workflow.push('\n');
     workflow.push_str("    steps:\n");
     push_checkout_step(workflow, platform);
@@ -974,6 +992,31 @@ fn push_release_integrity_steps(workflow: &mut String, platform: Platform) {
     workflow.push_str("          SCRIPT\n\n");
 }
 
+fn push_release_smoke_step(workflow: &mut String, command: &str) {
+    workflow.push_str("      - name: Run release smoke checks\n");
+    workflow.push_str("        env:\n");
+    workflow.push_str("          FORCE_PUBLISH: ${{ inputs.force_publish }}\n");
+    workflow.push_str("        run: |\n");
+    workflow.push_str("          set -euo pipefail\n");
+    workflow.push_str("          mkdir -p release\n\n");
+    workflow.push_str("          if [ \"${FORCE_PUBLISH:-false}\" = \"true\" ]; then\n");
+    workflow.push_str("            {\n");
+    workflow.push_str("              echo \"release smoke report\"\n");
+    workflow.push_str("              echo \"force_publish: true\"\n");
+    workflow.push_str("              echo \"smoke checks bypassed by workflow_dispatch input; external publish continued by explicit operator override\"\n");
+    workflow.push_str("            } | tee release/smoke-report.txt\n");
+    workflow.push_str("            exit 0\n");
+    workflow.push_str("          fi\n\n");
+    workflow.push_str(
+        "          VERSION=\"${GITHUB_REF_NAME:-${FORGE_REF_NAME:-${CODEBERG_REF_NAME:-}}}\"\n",
+    );
+    workflow.push_str("          if [ -z \"$VERSION\" ]; then ref=\"${GITHUB_REF:-${FORGE_REF:-${CODEBERG_REF:-}}}\"; VERSION=\"${ref#refs/tags/}\"; fi\n");
+    workflow.push_str("          test -n \"$VERSION\"\n");
+    workflow.push_str("          ");
+    workflow.push_str(command);
+    workflow.push_str(" \"$VERSION\" release\n\n");
+}
+
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
@@ -1057,6 +1100,15 @@ fn push_action_uses(workflow: &mut String, platform: Platform, action: &str, ver
         workflow.push_str(version);
         workflow.push('\n');
     }
+}
+
+fn push_install_nix_step(workflow: &mut String, platform: Platform) {
+    if platform == Platform::Forgejo {
+        return;
+    }
+
+    workflow.push_str("      - name: Install Nix\n");
+    workflow.push_str("        uses: https://github.com/cachix/install-nix-action@v31\n\n");
 }
 
 fn rust_container(package: &Package) -> String {
@@ -1287,22 +1339,18 @@ fn push_self_check_suffix(
     workflow.push_str(" --check\n\n");
 }
 
-fn runner(platform: Platform, runner_override: Option<&str>) -> String {
-    if let Some(runner) = runner_override {
-        return runner.to_owned();
+fn runs_on(runner: &ResolvedRunner) -> String {
+    if runner.labels.len() == 1 {
+        return runner.labels[0].clone();
     }
 
-    match platform {
-        Platform::Forgejo => "atlas".to_owned(),
-        Platform::Github => "ubuntu-latest".to_owned(),
-    }
-}
-
-fn default_windows_runner(platform: Platform) -> &'static str {
-    match platform {
-        Platform::Github => "windows-latest",
-        Platform::Forgejo => "windows-runner",
-    }
+    let labels = runner
+        .labels
+        .iter()
+        .map(|label| format!("\"{}\"", label.replace('"', "\\\"")))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("[{labels}]")
 }
 
 fn validate_release_tag_step(cargo_metadata_command: Option<&str>) -> String {

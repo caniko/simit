@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-05-22
+
+### Added
+
+- Add `simit release trust status|init|check` for managing the maintainer
+  OpenPGP trust root used by generated publish workflows.
+- `simit init-ci` now discovers the release signing key and generates
+  `keys/maintainers.gpg` instead of requiring maintainers to export it by hand.
+
 ## [0.10.0] - 2026-05-22
 
 ### Added
@@ -79,7 +88,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Prepare the first public crates.io release.
 
-[Unreleased]: https://codeberg.org/caniko/simit/compare/0.10.0...HEAD
+[Unreleased]: https://codeberg.org/caniko/simit/compare/0.11.0...HEAD
+[0.11.0]: https://codeberg.org/caniko/simit/compare/0.10.0...0.11.0
 [0.10.0]: https://codeberg.org/caniko/simit/compare/0.9.0...0.10.0
 [0.9.0]: https://codeberg.org/caniko/simit/compare/0.8.0...0.9.0
 [0.8.0]: https://codeberg.org/caniko/simit/compare/0.7.0...0.8.0

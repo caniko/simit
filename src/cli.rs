@@ -40,6 +40,8 @@ pub enum Commands {
     InitFlake(InitFlakeCommand),
     #[command(about = "Manage a Keep a Changelog file")]
     Changelog(ChangelogCommand),
+    #[command(about = "Manage user-scoped simit configuration")]
+    Config(ConfigCommand),
     #[command(about = "Print shell completion scripts")]
     Completions(CompletionsCommand),
     #[command(about = "Print a roff manpage for simit")]
@@ -107,6 +109,20 @@ pub struct ReleaseCommand {
         help = "Version bump to apply, or sync-up to rerun a failed release from HEAD"
     )]
     pub action: ReleaseAction,
+    #[arg(value_enum, value_name = "TRUST_ACTION", help = "Release trust action")]
+    pub trust_action: Option<ReleaseTrustAction>,
+    #[arg(
+        long = "key",
+        value_name = "FINGERPRINT",
+        help = "OpenPGP key fingerprint for `simit release trust`"
+    )]
+    pub trust_key: Option<String>,
+    #[arg(
+        long = "trust-root",
+        value_name = "PATH",
+        help = "Path to the release maintainer public keyring"
+    )]
+    pub trust_root: Option<Utf8PathBuf>,
     #[arg(
         long = "pre",
         value_name = "ID",
@@ -151,6 +167,8 @@ pub enum ReleaseAction {
         help = "Move the current-version release tag to HEAD"
     )]
     SyncUp,
+    #[value(name = "trust", help = "Manage release maintainer trust roots")]
+    Trust,
 }
 
 impl ReleaseAction {
@@ -160,9 +178,19 @@ impl ReleaseAction {
             Self::Minor => Some(BumpKind::Minor),
             Self::Major => Some(BumpKind::Major),
             Self::Prerelease => Some(BumpKind::Prerelease),
-            Self::SyncUp => None,
+            Self::SyncUp | Self::Trust => None,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ReleaseTrustAction {
+    #[value(help = "Show detected release signing key and trust-root state")]
+    Status,
+    #[value(help = "Export the maintainer public key into the release trust root")]
+    Init,
+    #[value(help = "Verify the release trust root exists and matches the signing key")]
+    Check,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -206,6 +234,24 @@ pub struct InitCiCommand {
         help = "Override the generated runner label for Windows artifact jobs"
     )]
     pub windows_runner: Option<String>,
+    #[arg(
+        long = "maintainer-key",
+        value_name = "FINGERPRINT",
+        help = "OpenPGP key fingerprint to export into keys/maintainers.gpg"
+    )]
+    pub maintainer_key: Option<String>,
+    #[arg(
+        long = "maintainers-gpg",
+        value_name = "PATH",
+        help = "Path to the generated maintainer public keyring"
+    )]
+    pub maintainers_gpg: Option<Utf8PathBuf>,
+    #[arg(
+        long = "release-smoke-command",
+        value_name = "COMMAND",
+        help = "Command to run after signing release artifacts and before publishing"
+    )]
+    pub release_smoke_command: Option<String>,
     #[arg(long, help = "Verify committed workflow files match generated output")]
     pub check: bool,
     #[arg(long, help = "Show a unified diff when --check finds stale files")]
@@ -840,6 +886,24 @@ pub struct ChangelogCommand {
     pub file: Utf8PathBuf,
     #[command(subcommand)]
     pub action: ChangelogAction,
+}
+
+#[derive(Debug, Args)]
+pub struct ConfigCommand {
+    #[command(subcommand, help = "User config action to run")]
+    pub action: ConfigAction,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ConfigAction {
+    #[command(about = "Print the resolved user config path")]
+    Path,
+    #[command(about = "Print the normalized user config")]
+    Show,
+    #[command(about = "Validate the user config")]
+    Check,
+    #[command(about = "Write a starter user config if one does not exist")]
+    Init,
 }
 
 #[derive(Debug, Subcommand)]

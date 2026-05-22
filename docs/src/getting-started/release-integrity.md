@@ -13,12 +13,18 @@ keys/minisign.pub
 ```
 
 `keys/maintainers.gpg` is the OpenPGP public keyring used by CI to run
-`git verify-tag` before publishing. Export it from the maintainer keyring:
+`git verify-tag` before publishing. `simit init-ci` writes it automatically
+from the configured release signing key. You can manage it directly:
 
 ```sh
-mkdir -p keys
-gpg --export <MAINTAINER_FINGERPRINT> > keys/maintainers.gpg
+simit release trust status
+simit release trust init
+simit release trust check
 ```
+
+The key is discovered from `[release.signing].key`, `git config
+user.signingkey`, or `--key`/`--maintainer-key`. If no exportable key is
+available, simit blocks instead of generating an unsigned publish path.
 
 `keys/minisign.pub` is the public half of the offline minisign key used to
 sign `SHA256SUMS.txt`. Generate the keypair on the maintainer-controlled

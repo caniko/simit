@@ -25,6 +25,7 @@ fn run() -> Result<()> {
         Commands::Scoop(command) => commands::scoop::run(command),
         Commands::InitFlake(command) => commands::init_flake::run(command),
         Commands::Changelog(command) => commands::changelog::run(command),
+        Commands::Config(command) => commands::config::run(command),
         Commands::Completions(command) => commands::completions::run(command),
         Commands::Man(command) => commands::man::run(command),
     }

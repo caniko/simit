@@ -55,7 +55,7 @@
       package = craneLib.buildPackage (commonArgs
         // {
           inherit cargoArtifacts;
-          nativeCheckInputs = [pkgs.git];
+          nativeCheckInputs = [pkgs.git pkgs.gnupg];
         });
 
       treefmtEval = treefmt-nix.lib.evalModule pkgs (import ./nix/treefmt.nix);
@@ -83,7 +83,7 @@
       nextestCheck = craneLib.cargoNextest (commonArgs
         // {
           inherit cargoArtifacts;
-          nativeCheckInputs = [pkgs.git];
+          nativeCheckInputs = [pkgs.git pkgs.gnupg];
         });
 
       docCheck = craneLib.cargoDoc (commonArgs
