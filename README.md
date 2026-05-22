@@ -100,16 +100,20 @@ simit init-ci --platform github
 ```
 
 Forgejo workflows use direct Rust container jobs by default, even when the
-repository has a `flake.nix`. The default container is `rust:alpine`; MSRV is
-only checked when `--with-msrv` is requested.
+repository has a `flake.nix`. The default container is derived from
+`package.rust-version`: `rust:<version>-bookworm` for current MSRVs, or
+`rust:<version>-trixie` once the matching official tag exists. Without
+`rust-version`, simit uses `rust:bookworm`. MSRV is only checked when
+`--with-msrv` is requested.
 
-Forgejo workflows are tuned for Codeberg's hosted runner limits. Plain Cargo
-crate jobs use `codeberg-small` by default because test, clippy, and package
-work usually exceed the tiny runner's two-minute budget. Use `--runner` when a
-repository needs a specific hosted runner:
+Forgejo workflows default to our self-hosted atlas runner (`runs-on: atlas`).
+The runner bind-mounts Node, git, and other JavaScript-action runtime tools
+into job containers, so generated workflows use the Forgejo checkout action
+instead of manual git checkout. Use `--runner` only when a repository needs a
+specific non-default runner:
 
 ```sh
-simit init-ci --platform forgejo --runner codeberg-medium
+simit init-ci --platform forgejo --runner custom-runner
 ```
 
 Use `--runtime nix` only for workflows that intentionally need flake outputs,

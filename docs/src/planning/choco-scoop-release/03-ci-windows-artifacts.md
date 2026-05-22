@@ -19,6 +19,7 @@ Starts from phases 1 + 2 merged. The simit repo's own `.forgejo/workflows/` is t
 ## Goal
 
 Extend [src/render/ci.rs](../../../../src/render/ci.rs) `artifacts_workflow` so that:
+
 - `--with-chocolatey` adds a Windows build matrix entry, computes archive sha256s, and runs `choco pack && choco push` from a Windows runner.
 - `--with-scoop` reuses the Windows artifacts (or downloads released archives) and pushes a manifest to the bucket repo via the same clone-commit-push pattern as Homebrew tap.
 - Both can coexist with `--with-homebrew` in a single workflow without duplicating Linux build steps.

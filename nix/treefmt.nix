@@ -1,7 +1,13 @@
 {pkgs, ...}: {
   projectRootFile = "flake.nix";
 
-  programs.rustfmt.enable = true;
+  programs.rustfmt = {
+    enable = true;
+    edition = "2021";
+    package = pkgs.rust-bin.nightly.latest.default.override {
+      extensions = ["rustfmt"];
+    };
+  };
 
   programs.alejandra.enable = true;
 

@@ -6,32 +6,23 @@ on:
     tags:
       - "*.*.*"
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   publish:
-    runs-on: codeberg-small
-    container: rust:alpine
+    runs-on: atlas
+    container: rust:1.95-trixie
     steps:
-      - name: Install Alpine tools
-        run: apk add --no-cache git build-base
-
       - name: Checkout
-        run: |
-          repo="${GITHUB_REPOSITORY:-${FORGE_REPOSITORY:-}}"
-          server="${GITHUB_SERVER_URL:-${FORGE_SERVER_URL:-https://codeberg.org}}"
-          sha="${GITHUB_SHA:-${FORGE_SHA:-}}"
-          ref="${GITHUB_REF:-${FORGE_REF:-}}"
-          if [ -z "$repo" ]; then
-            echo "Repository name is unavailable" >&2
-            exit 1
-          fi
-          git init .
-          git remote add origin "$server/$repo.git"
-          if [ -n "$ref" ]; then
-            git fetch --depth=1 origin "$ref"
-          else
-            git fetch --depth=1 origin "$sha"
-          fi
-          git checkout --detach FETCH_HEAD
+        uses: https://code.forgejo.org/actions/checkout@v4
+
+      - name: Cache Rust builds
+        uses: https://github.com/Swatinem/rust-cache@v2
+        with:
+          shared-key: ${{ github.workflow }}
+          cache-on-failure: true
 
       - name: Install Rust components
         run: rustup component add clippy rustfmt

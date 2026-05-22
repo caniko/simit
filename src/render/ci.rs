@@ -161,14 +161,16 @@ fn ci_workflow(
     workflow.push_str("  push:\n");
     workflow.push_str("    branches: [trunk]\n");
     workflow.push_str("  pull_request:\n\n");
+    push_concurrency(&mut workflow);
     workflow.push_str("jobs:\n");
     workflow.push_str("  test:\n");
     workflow.push_str("    runs-on: ");
     workflow.push_str(&runner(platform, runner_override));
     workflow.push('\n');
-    push_container(&mut workflow, platform, runtime);
+    push_container(&mut workflow, platform, runtime, package);
     workflow.push_str("    steps:\n");
-    push_checkout_step(&mut workflow, platform, runtime);
+    push_checkout_step(&mut workflow, platform);
+    push_rust_cache_step(&mut workflow, platform, runtime);
 
     match runtime {
         Runtime::Nix => {
@@ -237,14 +239,16 @@ fn publish_workflow(
     workflow.push_str("  push:\n");
     workflow.push_str("    tags:\n");
     workflow.push_str("      - \"*.*.*\"\n\n");
+    push_concurrency(&mut workflow);
     workflow.push_str("jobs:\n");
     workflow.push_str("  publish:\n");
     workflow.push_str("    runs-on: ");
     workflow.push_str(&runner(platform, runner_override));
     workflow.push('\n');
-    push_container(&mut workflow, platform, runtime);
+    push_container(&mut workflow, platform, runtime, package);
     workflow.push_str("    steps:\n");
-    push_checkout_step(&mut workflow, platform, runtime);
+    push_checkout_step(&mut workflow, platform);
+    push_rust_cache_step(&mut workflow, platform, runtime);
 
     match runtime {
         Runtime::Nix => {
@@ -299,6 +303,7 @@ fn artifacts_workflow(
     workflow.push_str("  push:\n");
     workflow.push_str("    tags:\n");
     workflow.push_str("      - \"*.*.*\"\n\n");
+    push_concurrency(&mut workflow);
     workflow.push_str("jobs:\n");
     let has_windows_packagers = options.chocolatey.is_some() || options.scoop.is_some();
     let linux_job_name = if has_windows_packagers {
@@ -312,9 +317,10 @@ fn artifacts_workflow(
     workflow.push_str("    runs-on: ");
     workflow.push_str(&runner(platform, runner_override));
     workflow.push('\n');
-    push_container(&mut workflow, platform, runtime);
+    push_container(&mut workflow, platform, runtime, package);
     workflow.push_str("    steps:\n");
-    push_checkout_step(&mut workflow, platform, runtime);
+    push_checkout_step(&mut workflow, platform);
+    push_rust_cache_step(&mut workflow, platform, runtime);
     match runtime {
         Runtime::Nix => {
             workflow.push_str("      - name: Install Nix\n");
@@ -365,8 +371,7 @@ fn push_windows_build_job(
         workflow.push('\n');
     }
     workflow.push_str("    steps:\n");
-    workflow.push_str("      - name: Checkout\n");
-    workflow.push_str("        uses: actions/checkout@v4\n\n");
+    push_checkout_step(workflow, platform);
     push_windows_rust_setup_step(workflow, platform);
     workflow.push_str("      - name: Install Windows target\n");
     workflow.push_str("        run: rustup target add ${{ matrix.target }}\n\n");
@@ -375,7 +380,7 @@ fn push_windows_build_job(
         .push_str("        run: cargo build --release --locked --target ${{ matrix.target }}\n\n");
     push_windows_archive_step(workflow, package, options);
     workflow.push_str("      - name: Upload Windows archives\n");
-    workflow.push_str("        uses: actions/upload-artifact@v4\n");
+    push_action_uses(workflow, platform, "upload-artifact", "v4");
     workflow.push_str("        with:\n");
     workflow.push_str("          name: windows-${{ matrix.arch }}\n");
     workflow.push_str("          path: release/*.zip\n");
@@ -393,10 +398,9 @@ fn push_windows_publish_job(
     workflow.push_str(windows_runner);
     workflow.push('\n');
     workflow.push_str("    steps:\n");
-    workflow.push_str("      - name: Checkout\n");
-    workflow.push_str("        uses: actions/checkout@v4\n\n");
+    push_checkout_step(workflow, platform);
     workflow.push_str("      - name: Download Windows archives\n");
-    workflow.push_str("        uses: actions/download-artifact@v4\n");
+    push_action_uses(workflow, platform, "download-artifact", "v4");
     workflow.push_str("        with:\n");
     workflow.push_str("          pattern: windows-*\n");
     workflow.push_str("          path: release\n");
@@ -886,43 +890,76 @@ allow-registry = ["https://github.com/rust-lang/crates.io-index"]
     .to_owned()
 }
 
-fn push_container(workflow: &mut String, platform: Platform, runtime: Runtime) {
+fn push_concurrency(workflow: &mut String) {
+    workflow.push_str("concurrency:\n");
+    workflow.push_str("  group: ${{ github.workflow }}-${{ github.ref }}\n");
+    workflow.push_str("  cancel-in-progress: true\n\n");
+}
+
+fn push_container(workflow: &mut String, platform: Platform, runtime: Runtime, package: &Package) {
     if platform == Platform::Forgejo && runtime == Runtime::Cargo {
-        workflow.push_str("    container: rust:alpine\n");
+        workflow.push_str("    container: ");
+        workflow.push_str(&rust_container(package));
+        workflow.push('\n');
     }
 }
 
-fn push_checkout_step(workflow: &mut String, platform: Platform, runtime: Runtime) {
+fn push_checkout_step(workflow: &mut String, platform: Platform) {
+    workflow.push_str("      - name: Checkout\n");
+    push_action_uses(workflow, platform, "checkout", "v4");
+    workflow.push('\n');
+}
+
+fn push_action_uses(workflow: &mut String, platform: Platform, action: &str, version: &str) {
+    if platform == Platform::Forgejo {
+        workflow.push_str("        uses: https://code.forgejo.org/actions/");
+        workflow.push_str(action);
+        workflow.push('@');
+        workflow.push_str(version);
+        workflow.push('\n');
+    } else {
+        workflow.push_str("        uses: actions/");
+        workflow.push_str(action);
+        workflow.push('@');
+        workflow.push_str(version);
+        workflow.push('\n');
+    }
+}
+
+fn push_rust_cache_step(workflow: &mut String, platform: Platform, runtime: Runtime) {
     if platform == Platform::Forgejo && runtime == Runtime::Cargo {
         workflow.push_str(
-            r#"      - name: Install Alpine tools
-        run: apk add --no-cache git build-base
-
-      - name: Checkout
-        run: |
-          repo="${GITHUB_REPOSITORY:-${FORGE_REPOSITORY:-}}"
-          server="${GITHUB_SERVER_URL:-${FORGE_SERVER_URL:-https://codeberg.org}}"
-          sha="${GITHUB_SHA:-${FORGE_SHA:-}}"
-          ref="${GITHUB_REF:-${FORGE_REF:-}}"
-          if [ -z "$repo" ]; then
-            echo "Repository name is unavailable" >&2
-            exit 1
-          fi
-          git init .
-          git remote add origin "$server/$repo.git"
-          if [ -n "$ref" ]; then
-            git fetch --depth=1 origin "$ref"
-          else
-            git fetch --depth=1 origin "$sha"
-          fi
-          git checkout --detach FETCH_HEAD
+            r#"      - name: Cache Rust builds
+        uses: https://github.com/Swatinem/rust-cache@v2
+        with:
+          shared-key: ${{ github.workflow }}
+          cache-on-failure: true
 
 "#,
         );
-    } else {
-        workflow.push_str("      - name: Checkout\n");
-        workflow.push_str("        uses: actions/checkout@v4\n\n");
     }
+}
+
+fn rust_container(package: &Package) -> String {
+    let Some(rust_version) = package.rust_version.as_deref() else {
+        return "rust:bookworm".to_owned();
+    };
+    let distro = if rust_version_supports_trixie(rust_version) {
+        "trixie"
+    } else {
+        "bookworm"
+    };
+    format!("rust:{rust_version}-{distro}")
+}
+
+fn rust_version_supports_trixie(rust_version: &str) -> bool {
+    let mut parts = rust_version.split('.');
+    let major = parts.next().and_then(|part| part.parse::<u64>().ok());
+    let minor = parts.next().and_then(|part| part.parse::<u64>().ok());
+    matches!(
+        (major, minor),
+        (Some(major), _) if major > 1
+    ) || matches!((major, minor), (Some(1), Some(minor)) if minor >= 93)
 }
 
 fn push_rust_setup_step(workflow: &mut String, platform: Platform) {
@@ -1137,7 +1174,7 @@ fn runner(platform: Platform, runner_override: Option<&str>) -> String {
     }
 
     match platform {
-        Platform::Forgejo => "codeberg-small".to_owned(),
+        Platform::Forgejo => "atlas".to_owned(),
         Platform::Github => "ubuntu-latest".to_owned(),
     }
 }

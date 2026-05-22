@@ -129,7 +129,9 @@ fn generates_forgejo_nix_workflows() {
     assert!(status.success());
 
     let ci = read(&temp.path().join(".forgejo/workflows/ci.yaml"));
-    assert!(ci.contains("runs-on: codeberg-small"));
+    assert!(ci.contains("runs-on: atlas"));
+    assert!(ci.contains("group: ${{ github.workflow }}-${{ github.ref }}"));
+    assert!(ci.contains("uses: https://code.forgejo.org/actions/checkout@v4"));
     assert!(ci.contains("uses: https://github.com/cachix/install-nix-action@v31"));
     assert!(ci.contains("run: nix flake check"));
     assert!(ci.contains("run: nix develop -c cargo clippy --all-targets -- --deny warnings"));
@@ -180,17 +182,21 @@ fn forgejo_auto_runtime_uses_rust_container_even_when_flake_exists() {
     assert!(status.success());
 
     let ci = read(&temp.path().join(".forgejo/workflows/ci.yaml"));
-    assert!(ci.contains("runs-on: codeberg-small"));
-    assert!(ci.contains("container: rust:alpine"));
-    assert!(ci.contains("run: apk add --no-cache git build-base"));
+    assert!(ci.contains("runs-on: atlas"));
+    assert!(ci.contains("cancel-in-progress: true"));
+    assert!(ci.contains("container: rust:1.85-bookworm"));
+    assert!(ci.contains("uses: https://code.forgejo.org/actions/checkout@v4"));
+    assert!(ci.contains("uses: https://github.com/Swatinem/rust-cache@v2"));
+    assert!(!ci.contains("run: apk add --no-cache git build-base"));
     assert!(ci.contains("run: rustup component add clippy rustfmt"));
     assert!(ci.contains("run: cargo test --all-features"));
     assert!(!ci.contains("uses: https://github.com/cachix/install-nix-action@v31"));
 
     let publish = read(&temp.path().join(".forgejo/workflows/publish-crate.yaml"));
     assert!(publish.contains("simit changelog release <version>"));
-    assert!(publish.contains("runs-on: codeberg-small"));
-    assert!(publish.contains("container: rust:alpine"));
+    assert!(publish.contains("runs-on: atlas"));
+    assert!(publish.contains("container: rust:1.85-bookworm"));
+    assert!(publish.contains("uses: https://github.com/Swatinem/rust-cache@v2"));
     assert!(publish.contains("cargo metadata --no-deps --format-version 1"));
 }
 
@@ -862,7 +868,7 @@ download_repo = "foo/demo"
     );
     assert_yaml_parses(&workflow);
     assert!(workflow.contains("build-linux:"));
-    assert!(workflow.contains("runs-on: codeberg-small"));
+    assert!(workflow.contains("runs-on: atlas"));
     assert!(workflow.contains("name: Publish Homebrew tap"));
     assert!(workflow.contains("build-windows:"));
     assert!(workflow.contains("runs-on: windows-atlas"));
