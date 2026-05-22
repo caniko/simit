@@ -24,6 +24,8 @@ pub struct Package {
     pub name: String,
     pub version: String,
     #[serde(default)]
+    pub authors: Vec<String>,
+    #[serde(default)]
     pub license: Option<String>,
     #[serde(default)]
     pub description: Option<String>,

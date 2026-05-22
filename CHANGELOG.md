@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Chocolatey package publishing via simit chocolatey and init-ci --with-chocolatey
+- Scoop bucket publishing via simit scoop and init-ci --with-scoop
+
+### Changed
+
+- release-artifacts.yaml now uses a Linux + Windows matrix when Windows packagers are enabled
+
 ## [0.7.0] - 2026-05-21
 
 ### Added

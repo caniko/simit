@@ -17,6 +17,11 @@ The crates.io publish workflow runs when an exact semver tag is pushed. The
 workflow validates that the tag matches the Cargo package version, runs a
 publish dry run, and requires `CRATES_IO_API_TOKEN` to publish.
 
+Projects that publish Windows packages can add Chocolatey and Scoop jobs to
+the release artifact workflow. See
+[Windows Packaging](getting-started/windows-packaging.md) for the required
+`simit.toml` sections, CI flags, and secrets.
+
 Release candidate validation commands:
 
 ```sh

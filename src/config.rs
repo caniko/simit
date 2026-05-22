@@ -1,11 +1,11 @@
 //! Project-level simit configuration.
 //!
-//! Homebrew setting precedence is intentionally centralized here. For each
+//! Packager setting precedence is intentionally centralized here. For each
 //! setting, the value comes from, in order:
 //!
 //! 1. The CLI flag, when provided.
-//! 2. The `[homebrew]` field in `simit.toml`, when the file exists and the
-//!    field is present.
+//! 2. The corresponding `simit.toml` packager field, when the file exists and
+//!    the field is present.
 //! 3. The Cargo package metadata fallback, where one exists.
 //! 4. An error.
 //!
@@ -22,6 +22,10 @@ use serde::Deserialize;
 pub struct ProjectConfig {
     #[serde(default)]
     pub homebrew: Option<HomebrewConfig>,
+    #[serde(default)]
+    pub chocolatey: Option<ChocolateyConfig>,
+    #[serde(default)]
+    pub scoop: Option<ScoopConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -62,6 +66,10 @@ fn default_archive_pattern() -> String {
     "{name}-{version}-{arch}-{os}.tar.gz".to_owned()
 }
 
+fn default_windows_archive_pattern() -> String {
+    "{name}-{version}-{arch}-windows.zip".to_owned()
+}
+
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HomebrewPlatformsConfig {
@@ -73,6 +81,125 @@ pub struct HomebrewPlatformsConfig {
     pub linux_arm: bool,
     #[serde(default = "default_true")]
     pub linux_intel: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ChocolateyConfig {
+    /// Chocolatey package display name; if omitted, derived from Cargo package name.
+    pub name: Option<String>,
+
+    /// Nuspec package identifier; if omitted, derived from the resolved name.
+    pub id: Option<String>,
+
+    /// Nuspec title; if omitted, derived from the resolved name.
+    pub title: Option<String>,
+
+    /// Nuspec authors. If omitted, derived from Cargo package authors when available.
+    pub authors: Option<String>,
+
+    /// Nuspec description. If omitted, derived from Cargo metadata.
+    pub description: Option<String>,
+
+    /// Project URL. If omitted, derived from Cargo package homepage.
+    pub project_url: Option<String>,
+
+    /// License URL.
+    pub license_url: Option<String>,
+
+    /// Space-separated Chocolatey tags.
+    pub tags: Option<String>,
+
+    /// Release notes URL.
+    pub release_notes_url: Option<String>,
+
+    /// Codeberg/GitHub `<owner>/<repo>` for release downloads.
+    pub download_repo: String,
+
+    /// Archive filename pattern with `{name}`, `{version}`, `{arch}`.
+    #[serde(default = "default_windows_archive_pattern")]
+    pub archive_pattern: String,
+
+    /// Chocolatey push settings.
+    #[serde(default)]
+    pub push: ChocolateyPushConfig,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ChocolateyPushConfig {
+    #[serde(default = "default_chocolatey_push_source")]
+    pub source: String,
+}
+
+impl Default for ChocolateyPushConfig {
+    fn default() -> Self {
+        Self {
+            source: default_chocolatey_push_source(),
+        }
+    }
+}
+
+fn default_chocolatey_push_source() -> String {
+    "https://push.chocolatey.org/".to_owned()
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ScoopConfig {
+    /// Scoop manifest name; if omitted, derived from Cargo package name.
+    pub name: Option<String>,
+
+    /// Bucket repo URL. Required when `[scoop]` is present.
+    pub bucket_url: String,
+
+    /// Manifest description. If omitted, derived from Cargo metadata.
+    pub description: Option<String>,
+
+    /// Manifest homepage. If omitted, derived from Cargo metadata.
+    pub homepage: Option<String>,
+
+    /// Manifest license. If omitted, derived from Cargo metadata.
+    pub license: Option<String>,
+
+    /// Codeberg/GitHub `<owner>/<repo>` for release downloads.
+    pub download_repo: String,
+
+    /// Archive filename pattern with `{name}`, `{version}`, `{arch}`.
+    #[serde(default = "default_windows_archive_pattern")]
+    pub archive_pattern: String,
+
+    /// Binaries to expose. If omitted, defaults to `[name]`.
+    #[serde(default)]
+    pub binaries: Vec<String>,
+
+    /// Per-architecture enable flags. Each defaults to true.
+    #[serde(default)]
+    pub architectures: ScoopArchSet,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ScoopArchSet {
+    #[serde(default = "default_true")]
+    pub x64: bool,
+    #[serde(default = "default_true")]
+    pub arm64: bool,
+}
+
+impl ScoopArchSet {
+    pub fn any_enabled(&self) -> bool {
+        self.x64 || self.arm64
+    }
+}
+
+impl Default for ScoopArchSet {
+    fn default() -> Self {
+        Self {
+            x64: true,
+            arm64: true,
+        }
+    }
 }
 
 impl HomebrewPlatformsConfig {
@@ -122,6 +249,64 @@ pub struct HomebrewOverrides<'a> {
     pub disabled_platforms: &'a [String],
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedChocolatey {
+    pub name: String,
+    pub id: String,
+    pub title: String,
+    pub authors: Option<String>,
+    pub description: String,
+    pub project_url: String,
+    pub license_url: Option<String>,
+    pub tags: Option<String>,
+    pub release_notes_url: Option<String>,
+    pub download_repo: String,
+    pub archive_pattern: String,
+    pub push: ChocolateyPushConfig,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ChocolateyOverrides<'a> {
+    pub name: Option<&'a str>,
+    pub id: Option<&'a str>,
+    pub title: Option<&'a str>,
+    pub authors: Option<&'a str>,
+    pub description: Option<&'a str>,
+    pub project_url: Option<&'a str>,
+    pub license_url: Option<&'a str>,
+    pub tags: Option<&'a str>,
+    pub release_notes_url: Option<&'a str>,
+    pub download_repo: Option<&'a str>,
+    pub archive_pattern: Option<&'a str>,
+    pub push_source: Option<&'a str>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedScoop {
+    pub name: String,
+    pub bucket_url: String,
+    pub description: String,
+    pub homepage: String,
+    pub license: String,
+    pub download_repo: String,
+    pub archive_pattern: String,
+    pub binaries: Vec<String>,
+    pub architectures: ScoopArchSet,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ScoopOverrides<'a> {
+    pub name: Option<&'a str>,
+    pub bucket_url: Option<&'a str>,
+    pub description: Option<&'a str>,
+    pub homepage: Option<&'a str>,
+    pub license: Option<&'a str>,
+    pub download_repo: Option<&'a str>,
+    pub archive_pattern: Option<&'a str>,
+    pub binaries: Option<&'a [String]>,
+    pub disabled_architectures: &'a [String],
+}
+
 impl ProjectConfig {
     pub fn load(workspace_root: &Path) -> Result<Self> {
         let path = workspace_root.join("simit.toml");
@@ -163,6 +348,53 @@ impl ProjectConfig {
         }
         if !homebrew.platforms.any_enabled() {
             bail!("simit.toml: [homebrew].platforms has all platforms disabled");
+        }
+
+        Ok(())
+    }
+
+    /// Validate the optional `[chocolatey]` section.
+    pub fn validate_chocolatey(&self) -> Result<()> {
+        let Some(chocolatey) = &self.chocolatey else {
+            return Ok(());
+        };
+
+        if chocolatey.download_repo.is_empty() {
+            bail!("simit.toml: [chocolatey].download_repo is required");
+        }
+        if let Some(desc) = &chocolatey.description
+            && desc.chars().count() > 4000
+        {
+            bail!("simit.toml: [chocolatey].description must be 4000 characters or fewer");
+        }
+        if let Some(tags) = &chocolatey.tags
+            && tags.chars().count() > 4000
+        {
+            bail!("simit.toml: [chocolatey].tags must be 4000 characters or fewer");
+        }
+        reject_basic_auth_url(
+            "simit.toml: [chocolatey].push.source",
+            &chocolatey.push.source,
+        )?;
+
+        Ok(())
+    }
+
+    /// Validate the optional `[scoop]` section.
+    pub fn validate_scoop(&self) -> Result<()> {
+        let Some(scoop) = &self.scoop else {
+            return Ok(());
+        };
+
+        if scoop.bucket_url.is_empty() {
+            bail!("simit.toml: [scoop].bucket_url is required");
+        }
+        reject_basic_auth_url("simit.toml: [scoop].bucket_url", &scoop.bucket_url)?;
+        if scoop.download_repo.is_empty() {
+            bail!("simit.toml: [scoop].download_repo is required");
+        }
+        if !scoop.architectures.any_enabled() {
+            bail!("simit.toml: [scoop].architectures has all architectures disabled");
         }
 
         Ok(())
@@ -244,6 +476,179 @@ impl ProjectConfig {
             platforms,
         })
     }
+
+    /// Resolve Chocolatey settings for one Cargo package.
+    pub fn resolve_chocolatey(
+        &self,
+        overrides: ChocolateyOverrides<'_>,
+        package: &crate::cargo::Package,
+    ) -> Result<ResolvedChocolatey> {
+        self.validate_chocolatey()?;
+
+        let cfg = self.chocolatey.as_ref();
+        let name = merge_packager(
+            overrides.name.map(str::to_owned),
+            cfg.and_then(|chocolatey| chocolatey.name.clone()),
+            Some(package.name.clone()),
+            missing_chocolatey_message("name"),
+        )?;
+        let id = overrides
+            .id
+            .map(str::to_owned)
+            .or_else(|| cfg.and_then(|chocolatey| chocolatey.id.clone()))
+            .unwrap_or_else(|| name.clone());
+        let title = overrides
+            .title
+            .map(str::to_owned)
+            .or_else(|| cfg.and_then(|chocolatey| chocolatey.title.clone()))
+            .unwrap_or_else(|| name.clone());
+        let authors = overrides
+            .authors
+            .map(str::to_owned)
+            .or_else(|| cfg.and_then(|chocolatey| chocolatey.authors.clone()));
+        let authors =
+            authors.or_else(|| (!package.authors.is_empty()).then(|| package.authors.join(", ")));
+        let download_repo = merge_packager(
+            overrides.download_repo.map(str::to_owned),
+            cfg.map(|chocolatey| chocolatey.download_repo.clone()),
+            None,
+            missing_chocolatey_message("download_repo"),
+        )?;
+        let description = merge_packager(
+            overrides.description.map(str::to_owned),
+            cfg.and_then(|chocolatey| chocolatey.description.clone()),
+            package.description.clone(),
+            missing_chocolatey_message("description"),
+        )?;
+        if description.chars().count() > 4000 {
+            bail!("chocolatey.description must be 4000 characters or fewer");
+        }
+        let project_url = merge_packager(
+            overrides.project_url.map(str::to_owned),
+            cfg.and_then(|chocolatey| chocolatey.project_url.clone()),
+            package.homepage.clone(),
+            missing_chocolatey_message("project_url"),
+        )?;
+        let license_url = overrides
+            .license_url
+            .map(str::to_owned)
+            .or_else(|| cfg.and_then(|chocolatey| chocolatey.license_url.clone()));
+        let tags = overrides
+            .tags
+            .map(str::to_owned)
+            .or_else(|| cfg.and_then(|chocolatey| chocolatey.tags.clone()));
+        if let Some(tags) = &tags
+            && tags.chars().count() > 4000
+        {
+            bail!("chocolatey.tags must be 4000 characters or fewer");
+        }
+        let release_notes_url = overrides
+            .release_notes_url
+            .map(str::to_owned)
+            .or_else(|| cfg.and_then(|chocolatey| chocolatey.release_notes_url.clone()));
+        let archive_pattern = overrides
+            .archive_pattern
+            .map(str::to_owned)
+            .or_else(|| cfg.map(|chocolatey| chocolatey.archive_pattern.clone()))
+            .unwrap_or_else(default_windows_archive_pattern);
+        let push_source = overrides
+            .push_source
+            .map(str::to_owned)
+            .or_else(|| cfg.map(|chocolatey| chocolatey.push.source.clone()))
+            .unwrap_or_else(default_chocolatey_push_source);
+        reject_basic_auth_url("chocolatey.push.source", &push_source)?;
+
+        Ok(ResolvedChocolatey {
+            name,
+            id,
+            title,
+            authors,
+            description,
+            project_url,
+            license_url,
+            tags,
+            release_notes_url,
+            download_repo,
+            archive_pattern,
+            push: ChocolateyPushConfig {
+                source: push_source,
+            },
+        })
+    }
+
+    /// Resolve Scoop settings for one Cargo package.
+    pub fn resolve_scoop(
+        &self,
+        overrides: ScoopOverrides<'_>,
+        package: &crate::cargo::Package,
+    ) -> Result<ResolvedScoop> {
+        self.validate_scoop()?;
+
+        let cfg = self.scoop.as_ref();
+        let name = merge_packager(
+            overrides.name.map(str::to_owned),
+            cfg.and_then(|scoop| scoop.name.clone()),
+            Some(package.name.clone()),
+            missing_scoop_message("name"),
+        )?;
+        let bucket_url = merge_packager(
+            overrides.bucket_url.map(str::to_owned),
+            cfg.map(|scoop| scoop.bucket_url.clone()),
+            None,
+            missing_scoop_message("bucket_url"),
+        )?;
+        reject_basic_auth_url("scoop.bucket_url", &bucket_url)?;
+        let description = merge_packager(
+            overrides.description.map(str::to_owned),
+            cfg.and_then(|scoop| scoop.description.clone()),
+            package.description.clone(),
+            missing_scoop_message("description"),
+        )?;
+        let homepage = merge_packager(
+            overrides.homepage.map(str::to_owned),
+            cfg.and_then(|scoop| scoop.homepage.clone()),
+            package.homepage.clone(),
+            missing_scoop_message("homepage"),
+        )?;
+        let license = merge_packager(
+            overrides.license.map(str::to_owned),
+            cfg.and_then(|scoop| scoop.license.clone()),
+            package.license.clone(),
+            missing_scoop_message("license"),
+        )?;
+        let download_repo = merge_packager(
+            overrides.download_repo.map(str::to_owned),
+            cfg.map(|scoop| scoop.download_repo.clone()),
+            None,
+            missing_scoop_message("download_repo"),
+        )?;
+        let archive_pattern = overrides
+            .archive_pattern
+            .map(str::to_owned)
+            .or_else(|| cfg.map(|scoop| scoop.archive_pattern.clone()))
+            .unwrap_or_else(default_windows_archive_pattern);
+        let binaries = resolve_scoop_binaries(overrides.binaries, cfg, &name);
+        let mut architectures = cfg
+            .map(|scoop| scoop.architectures.clone())
+            .unwrap_or_default();
+        apply_disabled_architectures(&mut architectures, overrides.disabled_architectures)?;
+
+        if !architectures.any_enabled() {
+            bail!("scoop.architectures has all architectures disabled");
+        }
+
+        Ok(ResolvedScoop {
+            name,
+            bucket_url,
+            description,
+            homepage,
+            license,
+            download_repo,
+            archive_pattern,
+            binaries,
+            architectures,
+        })
+    }
 }
 
 fn reject_basic_auth_url(name: &str, value: &str) -> Result<()> {
@@ -275,6 +680,21 @@ fn resolve_binaries(
         .unwrap_or_else(|| vec![name.to_owned()])
 }
 
+fn resolve_scoop_binaries(
+    cli: Option<&[String]>,
+    cfg: Option<&ScoopConfig>,
+    name: &str,
+) -> Vec<String> {
+    cli.filter(|values| !values.is_empty())
+        .map(|values| values.to_vec())
+        .or_else(|| scoop_config_binaries(cfg))
+        .unwrap_or_else(|| vec![name.to_owned()])
+}
+
+fn scoop_config_binaries(cfg: Option<&ScoopConfig>) -> Option<Vec<String>> {
+    cfg.and_then(|scoop| (!scoop.binaries.is_empty()).then(|| scoop.binaries.clone()))
+}
+
 fn apply_disabled_platforms(
     platforms: &mut HomebrewPlatformsConfig,
     disabled: &[String],
@@ -294,10 +714,36 @@ fn apply_disabled_platforms(
     Ok(())
 }
 
+fn apply_disabled_architectures(
+    architectures: &mut ScoopArchSet,
+    disabled: &[String],
+) -> Result<()> {
+    for key in disabled {
+        match key.as_str() {
+            "x64" => architectures.x64 = false,
+            "arm64" => architectures.arm64 = false,
+            _ => bail!("scoop disabled architecture must be one of x64, arm64"),
+        }
+    }
+
+    Ok(())
+}
+
 fn merge<T>(cli: Option<T>, cfg: Option<T>, metadata: Option<T>, name: &str) -> Result<T> {
     cli.or(cfg)
         .or(metadata)
         .ok_or_else(|| anyhow!("{}", missing_message(name)))
+}
+
+fn merge_packager<T>(
+    cli: Option<T>,
+    cfg: Option<T>,
+    metadata: Option<T>,
+    missing: String,
+) -> Result<T> {
+    cli.or(cfg)
+        .or(metadata)
+        .ok_or_else(|| anyhow!("{}", missing))
 }
 
 fn missing_message(name: &str) -> String {
@@ -321,6 +767,50 @@ fn missing_message(name: &str) -> String {
             "homebrew.download_repo not set: provide it via --homebrew-download-repo or simit.toml [homebrew].download_repo"
         }
         _ => "homebrew setting not set",
+    }
+    .to_owned()
+}
+
+fn missing_chocolatey_message(name: &str) -> String {
+    match name {
+        "name" => {
+            "chocolatey.name not set: provide it via --choco-name, simit.toml [chocolatey].name, or Cargo.toml package.name"
+        }
+        "description" => {
+            "chocolatey.description not set: provide it via --choco-description, simit.toml [chocolatey].description, or Cargo.toml package.description"
+        }
+        "project_url" => {
+            "chocolatey.project_url not set: provide it via --choco-project-url, simit.toml [chocolatey].project_url, or Cargo.toml package.homepage"
+        }
+        "download_repo" => {
+            "chocolatey.download_repo not set: provide it via --choco-download-repo or simit.toml [chocolatey].download_repo"
+        }
+        _ => "chocolatey setting not set",
+    }
+    .to_owned()
+}
+
+fn missing_scoop_message(name: &str) -> String {
+    match name {
+        "name" => {
+            "scoop.name not set: provide it via --scoop-name, simit.toml [scoop].name, or Cargo.toml package.name"
+        }
+        "bucket_url" => {
+            "scoop.bucket_url not set: provide it via --scoop-bucket or simit.toml [scoop].bucket_url"
+        }
+        "description" => {
+            "scoop.description not set: provide it via --scoop-description, simit.toml [scoop].description, or Cargo.toml package.description"
+        }
+        "homepage" => {
+            "scoop.homepage not set: provide it via --scoop-homepage, simit.toml [scoop].homepage, or Cargo.toml package.homepage"
+        }
+        "license" => {
+            "scoop.license not set: provide it via --scoop-license, simit.toml [scoop].license, or Cargo.toml package.license"
+        }
+        "download_repo" => {
+            "scoop.download_repo not set: provide it via --scoop-download-repo or simit.toml [scoop].download_repo"
+        }
+        _ => "scoop setting not set",
     }
     .to_owned()
 }

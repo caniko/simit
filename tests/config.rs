@@ -3,7 +3,7 @@ use std::fs;
 
 use camino::Utf8PathBuf;
 use simit::cargo::Package;
-use simit::config::{HomebrewOverrides, ProjectConfig};
+use simit::config::{ChocolateyOverrides, HomebrewOverrides, ProjectConfig, ScoopOverrides};
 use tempfile::TempDir;
 
 fn load_toml(toml: &str) -> anyhow::Result<ProjectConfig> {
@@ -17,6 +17,7 @@ fn package() -> Package {
         id: "path+file:///demo#0.1.0".to_owned(),
         name: "metadata-name".to_owned(),
         version: "0.1.0".to_owned(),
+        authors: vec!["Metadata Author".to_owned()],
         license: Some("MIT".to_owned()),
         description: Some("metadata description".to_owned()),
         homepage: Some("https://metadata.example.com".to_owned()),
@@ -33,6 +34,8 @@ fn loading_without_simit_toml_returns_default_config() {
     let cfg = ProjectConfig::load(temp.path()).unwrap();
 
     assert!(cfg.homebrew.is_none());
+    assert!(cfg.chocolatey.is_none());
+    assert!(cfg.scoop.is_none());
 }
 
 #[test]
@@ -305,4 +308,267 @@ download_repo = "caniko/mythos"
         .unwrap();
 
     assert_eq!(resolved.binaries, ["cli-name"]);
+}
+
+#[test]
+fn valid_chocolatey_section_loads_and_validates() {
+    let cfg = load_toml(
+        r#"[chocolatey]
+name = "mythos"
+id = "mythos"
+title = "Mythos"
+authors = "Can"
+description = "Mythos command line"
+project_url = "https://codeberg.org/caniko/mythos"
+license_url = "https://codeberg.org/caniko/mythos/src/branch/trunk/LICENSE"
+tags = "mythos cli"
+release_notes_url = "https://codeberg.org/caniko/mythos/releases"
+download_repo = "caniko/mythos"
+
+[chocolatey.push]
+source = "https://push.chocolatey.org/"
+"#,
+    )
+    .unwrap();
+
+    cfg.validate_chocolatey().unwrap();
+    let chocolatey = cfg.chocolatey.unwrap();
+    assert_eq!(chocolatey.name.as_deref(), Some("mythos"));
+    assert_eq!(
+        chocolatey.archive_pattern,
+        "{name}-{version}-{arch}-windows.zip"
+    );
+    assert_eq!(chocolatey.push.source, "https://push.chocolatey.org/");
+}
+
+#[test]
+fn resolve_chocolatey_errors_when_required_value_is_missing_everywhere() {
+    let cfg = ProjectConfig::default();
+
+    let err = cfg
+        .resolve_chocolatey(ChocolateyOverrides::default(), &package())
+        .unwrap_err();
+
+    assert!(format!("{err:#}").contains("chocolatey.download_repo not set"));
+}
+
+#[test]
+fn resolve_chocolatey_uses_cli_then_config_then_metadata_precedence() {
+    let cfg = load_toml(
+        r#"[chocolatey]
+name = "config-name"
+id = "config-id"
+title = "Config Title"
+authors = "Config Authors"
+description = "config description"
+project_url = "https://config.example.com"
+license_url = "https://config.example.com/license"
+tags = "config tags"
+release_notes_url = "https://config.example.com/releases"
+download_repo = "config/demo"
+archive_pattern = "config-{name}-{version}-{arch}.zip"
+
+[chocolatey.push]
+source = "https://config.example.com/choco"
+"#,
+    )
+    .unwrap();
+
+    let resolved = cfg
+        .resolve_chocolatey(
+            ChocolateyOverrides {
+                name: Some("cli-name"),
+                id: Some("cli-id"),
+                title: Some("CLI Title"),
+                authors: Some("CLI Authors"),
+                description: Some("cli description"),
+                project_url: Some("https://cli.example.com"),
+                license_url: Some("https://cli.example.com/license"),
+                tags: Some("cli tags"),
+                release_notes_url: Some("https://cli.example.com/releases"),
+                download_repo: Some("cli/demo"),
+                archive_pattern: Some("cli-{name}-{version}-{arch}.zip"),
+                push_source: Some("https://cli.example.com/choco"),
+            },
+            &package(),
+        )
+        .unwrap();
+
+    assert_eq!(resolved.name, "cli-name");
+    assert_eq!(resolved.id, "cli-id");
+    assert_eq!(resolved.title, "CLI Title");
+    assert_eq!(resolved.authors.as_deref(), Some("CLI Authors"));
+    assert_eq!(resolved.description, "cli description");
+    assert_eq!(resolved.project_url, "https://cli.example.com");
+    assert_eq!(
+        resolved.license_url.as_deref(),
+        Some("https://cli.example.com/license")
+    );
+    assert_eq!(resolved.tags.as_deref(), Some("cli tags"));
+    assert_eq!(
+        resolved.release_notes_url.as_deref(),
+        Some("https://cli.example.com/releases")
+    );
+    assert_eq!(resolved.download_repo, "cli/demo");
+    assert_eq!(resolved.archive_pattern, "cli-{name}-{version}-{arch}.zip");
+    assert_eq!(resolved.push.source, "https://cli.example.com/choco");
+
+    let config_wins = cfg
+        .resolve_chocolatey(ChocolateyOverrides::default(), &package())
+        .unwrap();
+    assert_eq!(config_wins.name, "config-name");
+    assert_eq!(config_wins.description, "config description");
+    assert_eq!(config_wins.project_url, "https://config.example.com");
+}
+
+#[test]
+fn resolve_chocolatey_uses_metadata_when_config_omits_optional_fields() {
+    let cfg = load_toml(
+        r#"[chocolatey]
+download_repo = "caniko/mythos"
+"#,
+    )
+    .unwrap();
+
+    let resolved = cfg
+        .resolve_chocolatey(ChocolateyOverrides::default(), &package())
+        .unwrap();
+
+    assert_eq!(resolved.name, "metadata-name");
+    assert_eq!(resolved.id, "metadata-name");
+    assert_eq!(resolved.title, "metadata-name");
+    assert_eq!(resolved.description, "metadata description");
+    assert_eq!(resolved.project_url, "https://metadata.example.com");
+}
+
+#[test]
+fn valid_scoop_section_loads_and_validates() {
+    let cfg = load_toml(
+        r#"[scoop]
+name = "mythos"
+bucket_url = "https://codeberg.org/caniko/scoop-mythos.git"
+description = "Mythos command line"
+homepage = "https://codeberg.org/caniko/mythos"
+license = "MIT"
+download_repo = "caniko/mythos"
+binaries = ["mythos", "mythos-ui"]
+"#,
+    )
+    .unwrap();
+
+    cfg.validate_scoop().unwrap();
+    let scoop = cfg.scoop.unwrap();
+    assert_eq!(scoop.name.as_deref(), Some("mythos"));
+    assert_eq!(scoop.binaries, ["mythos", "mythos-ui"]);
+    assert_eq!(scoop.archive_pattern, "{name}-{version}-{arch}-windows.zip");
+    assert!(scoop.architectures.x64);
+    assert!(scoop.architectures.arm64);
+}
+
+#[test]
+fn resolve_scoop_errors_when_required_value_is_missing_everywhere() {
+    let cfg = ProjectConfig::default();
+
+    let err = cfg
+        .resolve_scoop(ScoopOverrides::default(), &package())
+        .unwrap_err();
+
+    assert!(format!("{err:#}").contains("scoop.bucket_url not set"));
+}
+
+#[test]
+fn resolve_scoop_uses_cli_then_config_then_metadata_precedence() {
+    let cfg = load_toml(
+        r#"[scoop]
+name = "config-name"
+bucket_url = "https://config.example.com/scoop-demo.git"
+description = "config description"
+homepage = "https://config.example.com"
+license = "Apache-2.0"
+download_repo = "config/demo"
+archive_pattern = "config-{name}-{version}-{arch}.zip"
+binaries = ["config-bin"]
+"#,
+    )
+    .unwrap();
+    let cli_binaries = vec!["cli-bin".to_owned()];
+
+    let resolved = cfg
+        .resolve_scoop(
+            ScoopOverrides {
+                name: Some("cli-name"),
+                bucket_url: Some("https://cli.example.com/scoop-demo.git"),
+                description: Some("cli description"),
+                homepage: Some("https://cli.example.com"),
+                license: Some("BSD-2-Clause"),
+                download_repo: Some("cli/demo"),
+                archive_pattern: Some("cli-{name}-{version}-{arch}.zip"),
+                binaries: Some(&cli_binaries),
+                disabled_architectures: &["arm64".to_owned()],
+            },
+            &package(),
+        )
+        .unwrap();
+
+    assert_eq!(resolved.name, "cli-name");
+    assert_eq!(
+        resolved.bucket_url,
+        "https://cli.example.com/scoop-demo.git"
+    );
+    assert_eq!(resolved.description, "cli description");
+    assert_eq!(resolved.homepage, "https://cli.example.com");
+    assert_eq!(resolved.license, "BSD-2-Clause");
+    assert_eq!(resolved.download_repo, "cli/demo");
+    assert_eq!(resolved.archive_pattern, "cli-{name}-{version}-{arch}.zip");
+    assert_eq!(resolved.binaries, ["cli-bin"]);
+    assert!(resolved.architectures.x64);
+    assert!(!resolved.architectures.arm64);
+
+    let config_wins = cfg
+        .resolve_scoop(ScoopOverrides::default(), &package())
+        .unwrap();
+    assert_eq!(config_wins.name, "config-name");
+    assert_eq!(config_wins.description, "config description");
+    assert_eq!(config_wins.homepage, "https://config.example.com");
+    assert_eq!(config_wins.license, "Apache-2.0");
+}
+
+#[test]
+fn resolve_scoop_uses_metadata_when_config_omits_optional_fields() {
+    let cfg = load_toml(
+        r#"[scoop]
+bucket_url = "https://codeberg.org/caniko/scoop-mythos.git"
+download_repo = "caniko/mythos"
+"#,
+    )
+    .unwrap();
+
+    let resolved = cfg
+        .resolve_scoop(ScoopOverrides::default(), &package())
+        .unwrap();
+
+    assert_eq!(resolved.name, "metadata-name");
+    assert_eq!(resolved.description, "metadata description");
+    assert_eq!(resolved.homepage, "https://metadata.example.com");
+    assert_eq!(resolved.license, "MIT");
+    assert_eq!(resolved.binaries, ["metadata-name"]);
+}
+
+#[test]
+fn all_disabled_scoop_architectures_are_invalid() {
+    let cfg = load_toml(
+        r#"[scoop]
+bucket_url = "https://codeberg.org/caniko/scoop-mythos.git"
+download_repo = "caniko/mythos"
+
+[scoop.architectures]
+x64 = false
+arm64 = false
+"#,
+    )
+    .unwrap();
+
+    let err = cfg.validate_scoop().unwrap_err();
+
+    assert!(format!("{err:#}").contains("all architectures disabled"));
 }

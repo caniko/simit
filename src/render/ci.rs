@@ -15,6 +15,8 @@ pub struct CiOptions {
     pub with_docs: bool,
     pub with_artifacts: bool,
     pub homebrew: Option<HomebrewOptions>,
+    pub chocolatey: Option<ChocolateyOptions>,
+    pub scoop: Option<ScoopOptions>,
 }
 
 #[derive(Debug, Clone)]
@@ -47,6 +49,36 @@ pub struct HomebrewPlatformSet {
     pub linux_intel: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct ChocolateyOptions {
+    pub name: String,
+    pub id: String,
+    pub title: String,
+    pub authors: Option<String>,
+    pub description: String,
+    pub project_url: String,
+    pub license_url: Option<String>,
+    pub tags: Option<String>,
+    pub release_notes_url: Option<String>,
+    pub download_repo: String,
+    pub archive_pattern: String,
+    pub push_source: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ScoopOptions {
+    pub name: String,
+    pub bucket_url: String,
+    pub description: String,
+    pub homepage: String,
+    pub license: String,
+    pub download_repo: String,
+    pub archive_pattern: String,
+    pub binaries: Vec<String>,
+    pub x64: bool,
+    pub arm64: bool,
+}
+
 impl Default for HomebrewPlatformSet {
     fn default() -> Self {
         Self {
@@ -64,6 +96,7 @@ pub fn files(
     package: &Package,
     self_check: bool,
     runner_override: Option<&str>,
+    windows_runner_override: Option<&str>,
     options: CiOptions,
 ) -> Result<Vec<GeneratedFile>> {
     if options.with_msrv && package.rust_version.is_none() {
@@ -80,6 +113,7 @@ pub fn files(
                 package,
                 self_check,
                 runner_override,
+                windows_runner_override,
                 options.clone(),
             ),
         },
@@ -92,7 +126,14 @@ pub fn files(
     if options.with_artifacts {
         files.push(GeneratedFile {
             relative_path: dir.join("release-artifacts.yaml"),
-            content: artifacts_workflow(platform, runtime, runner_override, &options),
+            content: artifacts_workflow(
+                platform,
+                runtime,
+                package,
+                runner_override,
+                windows_runner_override,
+                &options,
+            ),
         });
     }
     if options.with_deny {
@@ -111,6 +152,7 @@ fn ci_workflow(
     package: &Package,
     self_check: bool,
     runner_override: Option<&str>,
+    windows_runner_override: Option<&str>,
     options: CiOptions,
 ) -> String {
     let mut workflow = String::new();
@@ -139,7 +181,14 @@ fn ci_workflow(
             push_quality_tool_install_steps(&mut workflow, runtime, &options);
             push_optional_ci_steps(&mut workflow, runtime, package, &options);
             if self_check {
-                push_self_check_steps(&mut workflow, platform, runtime, runner_override, &options);
+                push_self_check_steps(
+                    &mut workflow,
+                    platform,
+                    runtime,
+                    runner_override,
+                    windows_runner_override,
+                    &options,
+                );
             }
             workflow.push_str("      - name: Clippy\n");
             workflow.push_str(
@@ -154,7 +203,14 @@ fn ci_workflow(
             push_quality_tool_install_steps(&mut workflow, runtime, &options);
             push_optional_ci_steps(&mut workflow, runtime, package, &options);
             if self_check {
-                push_self_check_steps(&mut workflow, platform, runtime, runner_override, &options);
+                push_self_check_steps(
+                    &mut workflow,
+                    platform,
+                    runtime,
+                    runner_override,
+                    windows_runner_override,
+                    &options,
+                );
             }
             push_clippy_steps(&mut workflow, package);
             workflow.push_str("      - name: Package crate\n");
@@ -232,7 +288,9 @@ fn publish_workflow(
 fn artifacts_workflow(
     platform: Platform,
     runtime: Runtime,
+    package: &Package,
     runner_override: Option<&str>,
+    windows_runner_override: Option<&str>,
     options: &CiOptions,
 ) -> String {
     let mut workflow = String::new();
@@ -242,7 +300,15 @@ fn artifacts_workflow(
     workflow.push_str("    tags:\n");
     workflow.push_str("      - \"*.*.*\"\n\n");
     workflow.push_str("jobs:\n");
-    workflow.push_str("  build:\n");
+    let has_windows_packagers = options.chocolatey.is_some() || options.scoop.is_some();
+    let linux_job_name = if has_windows_packagers {
+        "build-linux"
+    } else {
+        "build"
+    };
+    workflow.push_str("  ");
+    workflow.push_str(linux_job_name);
+    workflow.push_str(":\n");
     workflow.push_str("    runs-on: ");
     workflow.push_str(&runner(platform, runner_override));
     workflow.push('\n');
@@ -265,7 +331,361 @@ fn artifacts_workflow(
     if let Some(homebrew) = &options.homebrew {
         push_homebrew_publish_step(&mut workflow, homebrew);
     }
+    if has_windows_packagers {
+        let windows_runner =
+            windows_runner_override.unwrap_or_else(|| default_windows_runner(platform));
+        push_windows_build_job(&mut workflow, platform, package, windows_runner, options);
+        push_windows_publish_job(&mut workflow, platform, windows_runner, options);
+    }
     workflow
+}
+
+fn push_windows_build_job(
+    workflow: &mut String,
+    platform: Platform,
+    package: &Package,
+    windows_runner: &str,
+    options: &CiOptions,
+) {
+    let matrix = windows_matrix(options);
+    workflow.push_str("\n  build-windows:\n");
+    workflow.push_str("    runs-on: ");
+    workflow.push_str(windows_runner);
+    workflow.push('\n');
+    workflow.push_str("    strategy:\n");
+    workflow.push_str("      fail-fast: false\n");
+    workflow.push_str("      matrix:\n");
+    workflow.push_str("        include:\n");
+    for row in &matrix {
+        workflow.push_str("          - arch: ");
+        workflow.push_str(row.arch);
+        workflow.push('\n');
+        workflow.push_str("            target: ");
+        workflow.push_str(row.target);
+        workflow.push('\n');
+    }
+    workflow.push_str("    steps:\n");
+    workflow.push_str("      - name: Checkout\n");
+    workflow.push_str("        uses: actions/checkout@v4\n\n");
+    push_windows_rust_setup_step(workflow, platform);
+    workflow.push_str("      - name: Install Windows target\n");
+    workflow.push_str("        run: rustup target add ${{ matrix.target }}\n\n");
+    workflow.push_str("      - name: Build release binary\n");
+    workflow
+        .push_str("        run: cargo build --release --locked --target ${{ matrix.target }}\n\n");
+    push_windows_archive_step(workflow, package, options);
+    workflow.push_str("      - name: Upload Windows archives\n");
+    workflow.push_str("        uses: actions/upload-artifact@v4\n");
+    workflow.push_str("        with:\n");
+    workflow.push_str("          name: windows-${{ matrix.arch }}\n");
+    workflow.push_str("          path: release/*.zip\n");
+}
+
+fn push_windows_publish_job(
+    workflow: &mut String,
+    platform: Platform,
+    windows_runner: &str,
+    options: &CiOptions,
+) {
+    workflow.push_str("\n  publish-windows-packages:\n");
+    workflow.push_str("    needs: build-windows\n");
+    workflow.push_str("    runs-on: ");
+    workflow.push_str(windows_runner);
+    workflow.push('\n');
+    workflow.push_str("    steps:\n");
+    workflow.push_str("      - name: Checkout\n");
+    workflow.push_str("        uses: actions/checkout@v4\n\n");
+    workflow.push_str("      - name: Download Windows archives\n");
+    workflow.push_str("        uses: actions/download-artifact@v4\n");
+    workflow.push_str("        with:\n");
+    workflow.push_str("          pattern: windows-*\n");
+    workflow.push_str("          path: release\n");
+    workflow.push_str("          merge-multiple: true\n\n");
+    push_windows_rust_setup_step(workflow, platform);
+    workflow.push_str("      - name: Install simit\n");
+    workflow.push_str("        run: |\n");
+    workflow.push_str("          # TODO(cache): cache cargo install output for tagged releases.\n");
+    workflow.push_str("          cargo install --locked simit\n\n");
+
+    if let Some(chocolatey) = &options.chocolatey {
+        push_chocolatey_publish_step(workflow, chocolatey);
+    }
+    if let Some(scoop) = &options.scoop {
+        push_scoop_publish_step(workflow, scoop);
+    }
+}
+
+#[derive(Clone, Copy)]
+struct WindowsMatrixRow {
+    arch: &'static str,
+    target: &'static str,
+}
+
+fn windows_matrix(options: &CiOptions) -> Vec<WindowsMatrixRow> {
+    let mut rows = Vec::new();
+    if options.chocolatey.is_some() || options.scoop.as_ref().is_some_and(|scoop| scoop.x64) {
+        rows.push(WindowsMatrixRow {
+            arch: "x64",
+            target: "x86_64-pc-windows-msvc",
+        });
+    }
+    if options.scoop.as_ref().is_some_and(|scoop| scoop.arm64) {
+        rows.push(WindowsMatrixRow {
+            arch: "arm64",
+            target: "aarch64-pc-windows-msvc",
+        });
+    }
+    rows
+}
+
+fn push_windows_rust_setup_step(workflow: &mut String, platform: Platform) {
+    match platform {
+        Platform::Github => {
+            workflow.push_str("      - name: Install Rust\n");
+            workflow.push_str("        uses: dtolnay/rust-toolchain@stable\n");
+            workflow.push_str("        with:\n");
+            workflow.push_str("          toolchain: stable\n\n");
+        }
+        Platform::Forgejo => {
+            workflow.push_str("      - name: Install Rust\n");
+            workflow.push_str("        run: |\n");
+            workflow.push_str("          rustup toolchain install stable --profile minimal\n");
+            workflow.push_str("          rustup default stable\n\n");
+        }
+    }
+}
+
+fn push_windows_archive_step(workflow: &mut String, package: &Package, options: &CiOptions) {
+    let archives = windows_archive_specs(options);
+    workflow.push_str("      - name: Package Windows archive\n");
+    workflow.push_str("        shell: pwsh\n");
+    workflow.push_str("        run: |\n");
+    workflow.push_str("          $version = $env:GITHUB_REF_NAME\n");
+    workflow.push_str("          if (-not $version) { $version = $env:FORGE_REF_NAME }\n");
+    workflow.push_str("          if (-not $version -and $env:GITHUB_REF) { $version = $env:GITHUB_REF -replace '^refs/tags/', '' }\n");
+    workflow.push_str("          if (-not $version -and $env:FORGE_REF) { $version = $env:FORGE_REF -replace '^refs/tags/', '' }\n");
+    workflow.push_str("          if (-not $version) { throw 'Release tag name is unavailable' }\n");
+    workflow.push_str("          New-Item -ItemType Directory -Force release | Out-Null\n");
+    workflow.push_str("          $binary = \"target/${{ matrix.target }}/release/");
+    workflow.push_str(&package.name);
+    workflow.push_str(".exe\"\n");
+    workflow.push_str(
+        "          if (-not (Test-Path $binary)) { throw \"missing Windows binary: $binary\" }\n",
+    );
+    for archive in archives {
+        workflow.push_str("          if (\"${{ matrix.arch }}\" -eq \"");
+        workflow.push_str(archive.arch);
+        workflow.push_str("\") {\n");
+        workflow.push_str("            $archive = Join-Path release ");
+        workflow.push_str(&ps_expanding_double_quote(&archive.file_name));
+        workflow.push('\n');
+        workflow.push_str(
+            "            Compress-Archive -Path $binary -DestinationPath $archive -Force\n",
+        );
+        workflow.push_str("          }\n");
+    }
+    workflow.push('\n');
+}
+
+#[derive(Clone, Eq, PartialEq)]
+struct WindowsArchiveSpec {
+    arch: &'static str,
+    key: &'static str,
+    file_name: String,
+}
+
+fn windows_archive_specs(options: &CiOptions) -> Vec<WindowsArchiveSpec> {
+    let mut specs = Vec::new();
+    if let Some(chocolatey) = &options.chocolatey {
+        specs.push(WindowsArchiveSpec {
+            arch: "x64",
+            key: "x64",
+            file_name: resolve_windows_archive(
+                &chocolatey.archive_pattern,
+                &chocolatey.name,
+                "x86_64",
+            ),
+        });
+    }
+    if let Some(scoop) = &options.scoop {
+        if scoop.x64 {
+            specs.push(WindowsArchiveSpec {
+                arch: "x64",
+                key: "x64",
+                file_name: resolve_windows_archive(&scoop.archive_pattern, &scoop.name, "x86_64"),
+            });
+        }
+        if scoop.arm64 {
+            specs.push(WindowsArchiveSpec {
+                arch: "arm64",
+                key: "arm64",
+                file_name: resolve_windows_archive(&scoop.archive_pattern, &scoop.name, "aarch64"),
+            });
+        }
+    }
+    specs.sort_by(|left, right| left.file_name.cmp(&right.file_name));
+    specs.dedup_by(|left, right| left.file_name == right.file_name && left.arch == right.arch);
+    specs
+}
+
+fn resolve_windows_archive(pattern: &str, name: &str, arch: &str) -> String {
+    pattern
+        .replace("{name}", name)
+        .replace("{version}", "$version")
+        .replace("{arch}", arch)
+}
+
+fn push_chocolatey_publish_step(workflow: &mut String, opts: &ChocolateyOptions) {
+    let archive = resolve_windows_archive(&opts.archive_pattern, &opts.name, "x86_64");
+    workflow.push_str("      - name: Install Chocolatey\n");
+    workflow.push_str("        shell: pwsh\n");
+    workflow.push_str("        run: |\n");
+    workflow.push_str("          if (Get-Command choco -ErrorAction SilentlyContinue) { choco --version; exit 0 }\n");
+    workflow.push_str("          Set-ExecutionPolicy Bypass -Scope Process -Force\n");
+    workflow.push_str("          [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072\n");
+    workflow.push_str(
+        "          iwr https://community.chocolatey.org/install.ps1 -UseBasicParsing | iex\n\n",
+    );
+    workflow.push_str("      - name: Publish Chocolatey package\n");
+    workflow.push_str("        env:\n");
+    workflow.push_str("          CHOCOLATEY_API_KEY: ${{ secrets.chocolatey_api_key }}\n");
+    workflow.push_str("          CHOCO_PUSH_SOURCE: ");
+    workflow.push_str(&opts.push_source);
+    workflow.push('\n');
+    workflow.push_str("        shell: pwsh\n");
+    workflow.push_str("        run: |\n");
+    workflow.push_str("          if (-not $env:CHOCOLATEY_API_KEY) { Write-Host 'CHOCOLATEY_API_KEY not configured; skipping Chocolatey package update.'; exit 0 }\n");
+    push_windows_version_lines(workflow);
+    workflow.push_str("          simit chocolatey bump `\n");
+    workflow.push_str("            --version $version `\n");
+    workflow.push_str("            --package-dir chocolatey-package `\n");
+    workflow.push_str("            --archive ");
+    workflow.push_str(&ps_expanding_double_quote(&format!(
+        "x64=release/{archive}"
+    )));
+    workflow.push_str(" `\n");
+    push_chocolatey_cli_flags(workflow, opts);
+    workflow.push_str("            --push `\n");
+    workflow.push_str("            --push-source \"$env:CHOCO_PUSH_SOURCE\" `\n");
+    workflow.push_str("            --api-key-env CHOCOLATEY_API_KEY\n\n");
+}
+
+fn push_scoop_publish_step(workflow: &mut String, opts: &ScoopOptions) {
+    workflow.push_str("      - name: Publish Scoop bucket\n");
+    workflow.push_str("        env:\n");
+    workflow.push_str("          SCOOP_BUCKET_TOKEN: ${{ secrets.scoop_bucket_token }}\n");
+    workflow.push_str("          SCOOP_BUCKET_URL: ");
+    workflow.push_str(&opts.bucket_url);
+    workflow.push('\n');
+    workflow.push_str("        shell: pwsh\n");
+    workflow.push_str("        run: |\n");
+    workflow.push_str("          if (-not $env:SCOOP_BUCKET_TOKEN) { Write-Host 'SCOOP_BUCKET_TOKEN not configured; skipping Scoop bucket update.'; exit 0 }\n");
+    push_windows_version_lines(workflow);
+    workflow.push_str("          $credentialHelper = '!f() { echo username=caniko; echo \"password=$SCOOP_BUCKET_TOKEN\"; }; f'\n");
+    workflow.push_str("          if (Test-Path bucket) { Remove-Item -Recurse -Force bucket }\n");
+    workflow.push_str("          git -c credential.helper=\"$credentialHelper\" clone \"$env:SCOOP_BUCKET_URL\" bucket\n");
+    workflow.push_str("          Push-Location bucket\n");
+    workflow.push_str("          git config credential.helper \"$credentialHelper\"\n");
+    workflow.push_str("          git config user.email 'ci@simit.rs'\n");
+    workflow.push_str("          git config user.name 'simit release bot'\n");
+    workflow.push_str("          git remote set-head origin -a\n");
+    workflow.push_str("          $defaultBranch = (git symbolic-ref --short refs/remotes/origin/HEAD) -replace '^origin/', ''\n");
+    workflow.push_str("          git checkout $defaultBranch\n");
+    workflow.push_str("          Pop-Location\n");
+    workflow.push_str("          simit scoop bump `\n");
+    workflow.push_str("            --version $version `\n");
+    workflow.push_str("            --bucket bucket `\n");
+    for spec in scoop_archive_specs(opts) {
+        workflow.push_str("            --archive ");
+        workflow.push_str(&ps_expanding_double_quote(&format!(
+            "{}=release/{}",
+            spec.key, spec.file_name
+        )));
+        workflow.push_str(" `\n");
+    }
+    push_scoop_cli_flags(workflow, opts);
+    workflow.push_str("            --push\n\n");
+}
+
+fn push_windows_version_lines(workflow: &mut String) {
+    workflow.push_str("          $version = $env:GITHUB_REF_NAME\n");
+    workflow.push_str("          if (-not $version) { $version = $env:FORGE_REF_NAME }\n");
+    workflow.push_str("          if (-not $version -and $env:GITHUB_REF) { $version = $env:GITHUB_REF -replace '^refs/tags/', '' }\n");
+    workflow.push_str("          if (-not $version -and $env:FORGE_REF) { $version = $env:FORGE_REF -replace '^refs/tags/', '' }\n");
+    workflow.push_str("          if (-not $version) { throw 'Release tag name is unavailable' }\n");
+}
+
+fn push_chocolatey_cli_flags(workflow: &mut String, opts: &ChocolateyOptions) {
+    push_ps_arg(workflow, "--choco-name", &opts.name);
+    push_ps_arg(workflow, "--choco-id", &opts.id);
+    push_ps_arg(workflow, "--choco-title", &opts.title);
+    if let Some(authors) = &opts.authors {
+        push_ps_arg(workflow, "--choco-authors", authors);
+    }
+    push_ps_arg(workflow, "--choco-description", &opts.description);
+    push_ps_arg(workflow, "--choco-project-url", &opts.project_url);
+    if let Some(license_url) = &opts.license_url {
+        push_ps_arg(workflow, "--choco-license-url", license_url);
+    }
+    if let Some(tags) = &opts.tags {
+        push_ps_arg(workflow, "--choco-tags", tags);
+    }
+    if let Some(release_notes_url) = &opts.release_notes_url {
+        push_ps_arg(workflow, "--choco-release-notes-url", release_notes_url);
+    }
+    push_ps_arg(workflow, "--choco-download-repo", &opts.download_repo);
+    push_ps_arg(workflow, "--choco-archive-pattern", &opts.archive_pattern);
+}
+
+fn push_scoop_cli_flags(workflow: &mut String, opts: &ScoopOptions) {
+    push_ps_arg(workflow, "--scoop-name", &opts.name);
+    push_ps_arg(workflow, "--scoop-bucket", &opts.bucket_url);
+    push_ps_arg(workflow, "--scoop-description", &opts.description);
+    push_ps_arg(workflow, "--scoop-homepage", &opts.homepage);
+    push_ps_arg(workflow, "--scoop-license", &opts.license);
+    push_ps_arg(workflow, "--scoop-download-repo", &opts.download_repo);
+    push_ps_arg(workflow, "--scoop-archive-pattern", &opts.archive_pattern);
+    let binaries = if opts.binaries.is_empty() {
+        vec![opts.name.as_str()]
+    } else {
+        opts.binaries.iter().map(String::as_str).collect::<Vec<_>>()
+    };
+    for binary in binaries {
+        push_ps_arg(workflow, "--scoop-binary", binary);
+    }
+    if !opts.x64 {
+        push_ps_arg(workflow, "--scoop-no-arch", "x64");
+    }
+    if !opts.arm64 {
+        push_ps_arg(workflow, "--scoop-no-arch", "arm64");
+    }
+}
+
+fn scoop_archive_specs(opts: &ScoopOptions) -> Vec<WindowsArchiveSpec> {
+    let mut specs = Vec::new();
+    if opts.x64 {
+        specs.push(WindowsArchiveSpec {
+            arch: "x64",
+            key: "x64",
+            file_name: resolve_windows_archive(&opts.archive_pattern, &opts.name, "x86_64"),
+        });
+    }
+    if opts.arm64 {
+        specs.push(WindowsArchiveSpec {
+            arch: "arm64",
+            key: "arm64",
+            file_name: resolve_windows_archive(&opts.archive_pattern, &opts.name, "aarch64"),
+        });
+    }
+    specs
+}
+
+fn push_ps_arg(workflow: &mut String, flag: &str, value: &str) {
+    workflow.push_str("            ");
+    workflow.push_str(flag);
+    workflow.push(' ');
+    workflow.push_str(&ps_double_quote(value));
+    workflow.push_str(" `\n");
 }
 
 fn push_homebrew_publish_step(workflow: &mut String, opts: &HomebrewOptions) {
@@ -430,6 +850,20 @@ fn shell_word(value: &str) -> String {
     } else {
         shell_quote(value)
     }
+}
+
+fn ps_double_quote(value: &str) -> String {
+    format!(
+        "\"{}\"",
+        value
+            .replace('`', "``")
+            .replace('"', "`\"")
+            .replace('$', "`$")
+    )
+}
+
+fn ps_expanding_double_quote(value: &str) -> String {
+    format!("\"{}\"", value.replace('`', "``").replace('"', "`\""))
 }
 
 fn deny_toml() -> String {
@@ -628,6 +1062,7 @@ fn push_self_check_steps(
     platform: Platform,
     runtime: Runtime,
     runner_override: Option<&str>,
+    windows_runner_override: Option<&str>,
     options: &CiOptions,
 ) {
     workflow.push_str("      - name: Check generated CI\n");
@@ -635,7 +1070,13 @@ fn push_self_check_steps(
     workflow.push_str(command_prefix(runtime));
     workflow.push_str("cargo run -- init-ci --platform ");
     workflow.push_str(platform.as_str());
-    push_self_check_suffix(workflow, runtime, runner_override, options);
+    push_self_check_suffix(
+        workflow,
+        runtime,
+        runner_override,
+        windows_runner_override,
+        options,
+    );
     workflow.push_str("      - name: Check generated flake and hooks\n");
     workflow.push_str("        run: ");
     workflow.push_str(command_prefix(runtime));
@@ -646,6 +1087,7 @@ fn push_self_check_suffix(
     workflow: &mut String,
     runtime: Runtime,
     runner_override: Option<&str>,
+    windows_runner_override: Option<&str>,
     options: &CiOptions,
 ) {
     if runtime == Runtime::Nix {
@@ -653,6 +1095,10 @@ fn push_self_check_suffix(
     }
     if let Some(runner) = runner_override {
         workflow.push_str(" --runner ");
+        workflow.push_str(runner);
+    }
+    if let Some(runner) = windows_runner_override {
+        workflow.push_str(" --windows-runner ");
         workflow.push_str(runner);
     }
     if options.with_nextest {
@@ -673,6 +1119,15 @@ fn push_self_check_suffix(
     if options.with_artifacts {
         workflow.push_str(" --with-artifacts");
     }
+    if options.homebrew.is_some() {
+        workflow.push_str(" --with-homebrew");
+    }
+    if options.chocolatey.is_some() {
+        workflow.push_str(" --with-chocolatey");
+    }
+    if options.scoop.is_some() {
+        workflow.push_str(" --with-scoop");
+    }
     workflow.push_str(" --check\n\n");
 }
 
@@ -684,6 +1139,13 @@ fn runner(platform: Platform, runner_override: Option<&str>) -> String {
     match platform {
         Platform::Forgejo => "codeberg-small".to_owned(),
         Platform::Github => "ubuntu-latest".to_owned(),
+    }
+}
+
+fn default_windows_runner(platform: Platform) -> &'static str {
+    match platform {
+        Platform::Github => "windows-latest",
+        Platform::Forgejo => "windows-runner",
     }
 }
 

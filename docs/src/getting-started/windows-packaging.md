@@ -1,0 +1,79 @@
+# Windows Packaging
+
+`simit` supports Chocolatey packages and Scoop bucket manifests for tagged
+Windows releases. Both flows use `simit.toml` as the source of package
+metadata, render deterministic skeleton files, and can be wired into
+`init-ci`.
+
+## Configuration
+
+```toml
+[chocolatey]
+id = "foo"
+title = "Foo"
+authors = "Example Maintainers"
+description = "Cross-platform foo manager"
+project_url = "https://foo.example.com"
+download_repo = "caniko/foo"
+archive_pattern = "foo-{version}-{arch}-windows.zip"
+
+[scoop]
+name = "foo"
+bucket_url = "https://codeberg.org/caniko/scoop-foo.git"
+download_repo = "caniko/foo"
+binaries = ["foo"]
+archive_pattern = "foo-{version}-{arch}-windows.zip"
+```
+
+Chocolatey requires `download_repo` plus package metadata. Scoop requires
+`bucket_url` and `download_repo`. Fields not listed here can usually fall back
+to Cargo package metadata.
+
+## Bootstrap
+
+```sh
+simit init-chocolatey --target packaging/chocolatey
+simit init-scoop-bucket --target ../scoop-foo
+```
+
+Both commands support `--check`, `--diff`, and `--print`. `init-scoop-bucket`
+also supports `--no-git` for writing only `bucket/<name>.json`.
+
+## Release CI
+
+```sh
+simit init-ci --platform github --with-chocolatey --with-scoop
+simit init-ci --platform forgejo --with-chocolatey --with-scoop \
+  --windows-runner windows-atlas
+```
+
+`--with-chocolatey` and `--with-scoop` imply `--with-artifacts`. GitHub uses
+`windows-latest` unless `--windows-runner` overrides it. Forgejo requires
+`--windows-runner` because Codeberg's shared runners do not provide Windows.
+
+Generated workflows read these secrets:
+
+- `chocolatey_api_key` for Chocolatey package pushes.
+- `scoop_bucket_token` for authenticated Scoop bucket pushes.
+
+## Local Render and Bump
+
+```sh
+simit chocolatey render --output-dir packaging/chocolatey
+simit chocolatey bump \
+  --version 0.3.1 \
+  --package-dir packaging/chocolatey \
+  --archive x64=release/foo-0.3.1-x86_64-windows.zip
+
+simit scoop render --output packaging/scoop/foo.json
+simit scoop bump \
+  --version 0.3.1 \
+  --bucket ../scoop-foo \
+  --archive x64=release/foo-0.3.1-x86_64-windows.zip \
+  --archive arm64=release/foo-0.3.1-aarch64-windows.zip
+```
+
+Use `--scoop-no-arch arm64` or `[scoop.architectures] arm64 = false` when a
+project only publishes x64 Windows archives. Use `--choco-archive-pattern` and
+`--scoop-archive-pattern` when release archive names do not match the default
+`{name}-{version}-{arch}-windows.zip` shape.

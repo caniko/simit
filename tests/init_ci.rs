@@ -33,8 +33,59 @@ license = "MIT"
     temp
 }
 
+fn write_chocolatey_config(root: &Path) {
+    fs::write(
+        root.join("simit.toml"),
+        r#"[chocolatey]
+authors = "Example Maintainers"
+description = "demo binary"
+project_url = "https://example.com/demo"
+download_repo = "foo/demo"
+"#,
+    )
+    .unwrap();
+}
+
+fn write_scoop_config(root: &Path) {
+    fs::write(
+        root.join("simit.toml"),
+        r#"[scoop]
+bucket_url = "https://example.com/scoop-demo.git"
+description = "demo binary"
+homepage = "https://example.com/demo"
+license = "MIT"
+download_repo = "foo/demo"
+"#,
+    )
+    .unwrap();
+}
+
+fn write_windows_packager_config(root: &Path) {
+    fs::write(
+        root.join("simit.toml"),
+        r#"[chocolatey]
+authors = "Example Maintainers"
+description = "demo binary"
+project_url = "https://example.com/demo"
+download_repo = "foo/demo"
+
+[scoop]
+bucket_url = "https://example.com/scoop-demo.git"
+description = "demo binary"
+homepage = "https://example.com/demo"
+license = "MIT"
+download_repo = "foo/demo"
+"#,
+    )
+    .unwrap();
+}
+
 fn read(path: &Path) -> String {
     fs::read_to_string(path).unwrap_or_else(|err| panic!("reading {}: {err}", path.display()))
+}
+
+fn assert_yaml_parses(text: &str) {
+    serde_yaml::from_str::<serde_yaml::Value>(text).unwrap();
 }
 
 fn assert_homebrew_run_block_indentation(workflow: &str) {
@@ -243,6 +294,50 @@ rust-version = "1.85"
     assert!(
         ci.contains("cargo run -- init-ci --platform forgejo --runner codeberg-medium --check")
     );
+}
+
+#[test]
+fn self_check_preserves_windows_packager_flags() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+
+    fs::write(
+        root.join("Cargo.toml"),
+        r#"[package]
+name = "simit"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+authors = ["Example Maintainers"]
+license = "MIT"
+description = "demo binary"
+homepage = "https://example.com/demo"
+"#,
+    )
+    .unwrap();
+    fs::create_dir(root.join("src")).unwrap();
+    fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
+    write_windows_packager_config(root);
+
+    let status = simit()
+        .current_dir(root)
+        .args([
+            "init-ci",
+            "--platform",
+            "github",
+            "--with-chocolatey",
+            "--with-scoop",
+            "--windows-runner",
+            "windows-latest",
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let ci = read(&root.join(".github/workflows/ci.yaml"));
+    assert!(ci.contains(
+        "cargo run -- init-ci --platform github --windows-runner windows-latest --with-artifacts --with-chocolatey --with-scoop --check"
+    ));
 }
 
 #[test]
@@ -528,6 +623,300 @@ fn homebrew_rejects_github_platform() {
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("Homebrew tap publish is forgejo-only for now"));
+}
+
+#[test]
+fn github_chocolatey_flag_resolves_when_config_is_present() {
+    let temp = init_package(false);
+    write_chocolatey_config(temp.path());
+
+    let status = simit()
+        .current_dir(temp.path())
+        .args([
+            "init-ci",
+            "--platform",
+            "github",
+            "--with-chocolatey",
+            "--windows-runner",
+            "windows-latest",
+        ])
+        .status()
+        .unwrap();
+
+    assert!(status.success());
+    let workflow = read(&temp.path().join(".github/workflows/release-artifacts.yaml"));
+    assert_yaml_parses(&workflow);
+    assert!(workflow.contains("name: Release Artifacts"));
+    assert!(workflow.contains("build-linux:"));
+    assert!(workflow.contains("build-windows:"));
+    assert!(workflow.contains("runs-on: windows-latest"));
+    assert!(workflow.contains("target: x86_64-pc-windows-msvc"));
+    assert!(workflow.contains("demo-$version-x86_64-windows.zip"));
+    assert!(workflow.contains("name: Install Chocolatey"));
+    assert!(workflow.contains("name: Publish Chocolatey package"));
+    assert!(workflow.contains("CHOCOLATEY_API_KEY: ${{ secrets.chocolatey_api_key }}"));
+    assert!(workflow.contains("simit chocolatey bump `"));
+    assert!(workflow.contains("--archive \"x64=release/demo-$version-x86_64-windows.zip\" `"));
+    assert!(workflow.contains("--push-source \"$env:CHOCO_PUSH_SOURCE\" `"));
+}
+
+#[test]
+fn github_chocolatey_flag_errors_when_config_is_absent() {
+    let temp = init_package(false);
+
+    let output = simit()
+        .current_dir(temp.path())
+        .args(["init-ci", "--platform", "github", "--with-chocolatey"])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("chocolatey.download_repo not set"));
+}
+
+#[test]
+fn github_scoop_flag_resolves_when_config_is_present() {
+    let temp = init_package(false);
+    write_scoop_config(temp.path());
+
+    let status = simit()
+        .current_dir(temp.path())
+        .args(["init-ci", "--platform", "github", "--with-scoop"])
+        .status()
+        .unwrap();
+
+    assert!(status.success());
+    let workflow = read(&temp.path().join(".github/workflows/release-artifacts.yaml"));
+    assert_yaml_parses(&workflow);
+    assert!(workflow.contains("name: Release Artifacts"));
+    assert!(workflow.contains("build-linux:"));
+    assert!(workflow.contains("build-windows:"));
+    assert!(workflow.contains("target: x86_64-pc-windows-msvc"));
+    assert!(workflow.contains("target: aarch64-pc-windows-msvc"));
+    assert!(workflow.contains("windows-${{ matrix.arch }}"));
+    assert!(workflow.contains("name: Publish Scoop bucket"));
+    assert!(workflow.contains("SCOOP_BUCKET_TOKEN: ${{ secrets.scoop_bucket_token }}"));
+    assert!(workflow.contains(
+        "git -c credential.helper=\"$credentialHelper\" clone \"$env:SCOOP_BUCKET_URL\" bucket"
+    ));
+    assert!(workflow.contains("simit scoop bump `"));
+    assert!(workflow.contains("--archive \"x64=release/demo-$version-x86_64-windows.zip\" `"));
+    assert!(workflow.contains("--archive \"arm64=release/demo-$version-aarch64-windows.zip\" `"));
+}
+
+#[test]
+fn github_scoop_respects_no_arch_and_custom_archive_pattern() {
+    let temp = init_package(false);
+    fs::write(
+        temp.path().join("simit.toml"),
+        r#"[scoop]
+bucket_url = "https://example.com/scoop-demo.git"
+description = "demo binary"
+homepage = "https://example.com/demo"
+license = "MIT"
+download_repo = "foo/demo"
+archive_pattern = "demo-windows-{arch}-{version}.zip"
+
+[scoop.architectures]
+arm64 = false
+"#,
+    )
+    .unwrap();
+
+    let status = simit()
+        .current_dir(temp.path())
+        .args(["init-ci", "--platform", "github", "--with-scoop"])
+        .status()
+        .unwrap();
+
+    assert!(status.success());
+    let workflow = read(&temp.path().join(".github/workflows/release-artifacts.yaml"));
+    assert_yaml_parses(&workflow);
+    assert!(workflow.contains("demo-windows-x86_64-$version.zip"));
+    assert!(workflow.contains("--archive \"x64=release/demo-windows-x86_64-$version.zip\" `"));
+    assert!(!workflow.contains("aarch64-pc-windows-msvc"));
+    assert!(!workflow.contains("--archive \"arm64="));
+}
+
+#[test]
+fn github_scoop_flag_errors_when_config_is_absent() {
+    let temp = init_package(false);
+
+    let output = simit()
+        .current_dir(temp.path())
+        .args(["init-ci", "--platform", "github", "--with-scoop"])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("scoop.bucket_url not set"));
+}
+
+#[test]
+fn github_chocolatey_and_scoop_share_windows_artifacts() {
+    let temp = init_package(false);
+    write_windows_packager_config(temp.path());
+
+    let status = simit()
+        .current_dir(temp.path())
+        .args([
+            "init-ci",
+            "--platform",
+            "github",
+            "--with-chocolatey",
+            "--with-scoop",
+        ])
+        .status()
+        .unwrap();
+
+    assert!(status.success());
+    let workflow = read(&temp.path().join(".github/workflows/release-artifacts.yaml"));
+    assert_yaml_parses(&workflow);
+    assert_eq!(workflow.matches("build-windows:").count(), 1);
+    assert_eq!(
+        workflow
+            .matches("run: cargo build --release --locked\n")
+            .count(),
+        1
+    );
+    assert_eq!(
+        workflow
+            .matches("run: cargo build --release --locked --target ${{ matrix.target }}")
+            .count(),
+        1
+    );
+    assert!(workflow.contains("name: Publish Chocolatey package"));
+    assert!(workflow.contains("name: Publish Scoop bucket"));
+    assert!(workflow.contains("needs: build-windows"));
+    assert!(workflow.contains("pattern: windows-*"));
+
+    let first = workflow;
+    let second_status = simit()
+        .current_dir(temp.path())
+        .args([
+            "init-ci",
+            "--platform",
+            "github",
+            "--with-chocolatey",
+            "--with-scoop",
+        ])
+        .status()
+        .unwrap();
+    assert!(second_status.success());
+    let second = read(&temp.path().join(".github/workflows/release-artifacts.yaml"));
+    assert_eq!(first, second);
+}
+
+#[test]
+fn github_chocolatey_scoop_and_homebrew_keep_single_linux_job() {
+    let temp = init_package(true);
+    fs::write(
+        temp.path().join("simit.toml"),
+        r#"[homebrew]
+tap_url = "https://example.com/homebrew-demo.git"
+description = "demo binary"
+homepage = "https://example.com/demo"
+license = "MIT"
+download_repo = "foo/demo"
+
+[chocolatey]
+authors = "Example Maintainers"
+description = "demo binary"
+project_url = "https://example.com/demo"
+download_repo = "foo/demo"
+
+[scoop]
+bucket_url = "https://example.com/scoop-demo.git"
+description = "demo binary"
+homepage = "https://example.com/demo"
+license = "MIT"
+download_repo = "foo/demo"
+"#,
+    )
+    .unwrap();
+
+    let status = simit()
+        .current_dir(temp.path())
+        .args([
+            "init-ci",
+            "--platform",
+            "forgejo",
+            "--runtime",
+            "nix",
+            "--with-homebrew",
+            "--with-chocolatey",
+            "--with-scoop",
+            "--windows-runner",
+            "windows-atlas",
+        ])
+        .status()
+        .unwrap();
+
+    assert!(status.success());
+    let workflow = read(
+        &temp
+            .path()
+            .join(".forgejo/workflows/release-artifacts.yaml"),
+    );
+    assert_yaml_parses(&workflow);
+    assert!(workflow.contains("build-linux:"));
+    assert!(workflow.contains("runs-on: codeberg-small"));
+    assert!(workflow.contains("name: Publish Homebrew tap"));
+    assert!(workflow.contains("build-windows:"));
+    assert!(workflow.contains("runs-on: windows-atlas"));
+    assert_eq!(workflow.matches("name: Build package").count(), 1);
+    assert_eq!(workflow.matches("name: Publish Homebrew tap").count(), 1);
+    assert_eq!(
+        workflow.matches("name: Publish Chocolatey package").count(),
+        1
+    );
+    assert_eq!(workflow.matches("name: Publish Scoop bucket").count(), 1);
+}
+
+#[test]
+fn forgejo_windows_packagers_require_windows_runner() {
+    let temp = init_package(false);
+    write_chocolatey_config(temp.path());
+
+    let output = simit()
+        .current_dir(temp.path())
+        .args(["init-ci", "--platform", "forgejo", "--with-chocolatey"])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("--windows-runner is required for Forgejo"));
+    assert!(stderr.contains("register a Windows runner"));
+}
+
+#[test]
+fn chocolatey_implies_artifacts_even_when_artifacts_false() {
+    let temp = init_package(false);
+    write_chocolatey_config(temp.path());
+
+    let output = simit()
+        .current_dir(temp.path())
+        .args([
+            "init-ci",
+            "--platform",
+            "github",
+            "--with-chocolatey",
+            "--with-artifacts=false",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("--with-chocolatey implies --with-artifacts; enabling it."));
+    assert!(
+        temp.path()
+            .join(".github/workflows/release-artifacts.yaml")
+            .exists()
+    );
 }
 
 #[test]

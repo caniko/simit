@@ -207,11 +207,77 @@ rs-modde is the worked example for this flow: its release CI publishes
 `modde` and `modde-ui` to `caniko/homebrew-modde` from the generated Homebrew
 step.
 
+## Windows packaging
+
+`simit` can render and publish Windows packages for Chocolatey and Scoop from
+the same project metadata used by release artifacts. Declare the package
+surface in `simit.toml`:
+
+```toml
+[chocolatey]
+id = "foo"
+title = "Foo"
+authors = "Example Maintainers"
+description = "Cross-platform foo manager"
+project_url = "https://foo.example.com"
+download_repo = "caniko/foo"
+archive_pattern = "foo-{version}-{arch}-windows.zip"
+
+[scoop]
+name = "foo"
+bucket_url = "https://codeberg.org/caniko/scoop-foo.git"
+download_repo = "caniko/foo"
+binaries = ["foo"]
+archive_pattern = "foo-{version}-{arch}-windows.zip"
+
+[scoop.architectures]
+# x64 and arm64 are enabled by default. Override here if needed:
+# arm64 = false
+```
+
+Bootstrap the package repositories once:
+
+```sh
+simit init-chocolatey --target packaging/chocolatey
+simit init-scoop-bucket --target ../scoop-foo
+```
+
+Wire Windows publishing into tagged release CI:
+
+```sh
+simit init-ci --platform github --with-chocolatey --with-scoop
+simit init-ci --platform forgejo --with-chocolatey --with-scoop \
+  --windows-runner windows-atlas
+```
+
+`--with-chocolatey` and `--with-scoop` imply `--with-artifacts`. GitHub uses
+`windows-latest` by default. Forgejo requires `--windows-runner` because
+Codeberg's shared runners are Linux-only. Generated workflows read
+`secrets.chocolatey_api_key` for Chocolatey pushes and
+`secrets.scoop_bucket_token` for Scoop bucket pushes.
+
+For local inspection and iteration:
+
+```sh
+simit chocolatey render --output-dir packaging/chocolatey
+simit chocolatey bump \
+  --version 0.3.1 \
+  --package-dir packaging/chocolatey \
+  --archive x64=release/foo-0.3.1-x86_64-windows.zip
+
+simit scoop render --output packaging/scoop/foo.json
+simit scoop bump \
+  --version 0.3.1 \
+  --bucket ../scoop-foo \
+  --archive x64=release/foo-0.3.1-x86_64-windows.zip \
+  --archive arm64=release/foo-0.3.1-aarch64-windows.zip
+```
+
 ## Project config
 
 Projects may opt in to stable simit settings with a `simit.toml` file at the
-Cargo workspace root. The first supported section is `[homebrew]`, which is
-used by the public config API and Homebrew commands.
+Cargo workspace root. The supported packaging sections are `[homebrew]`,
+`[chocolatey]`, and `[scoop]`.
 
 For each Homebrew setting, resolution order is: CLI flag, `simit.toml`, Cargo
 package metadata, then an error. `tap_url` and `download_repo` have no Cargo
@@ -227,6 +293,9 @@ binaries      = ["mythos", "mythos-ui"]
 [homebrew.platforms]
 linux_arm = false  # Override: do not publish aarch64-linux.
 ```
+
+Chocolatey and Scoop use the same resolution order. Their `download_repo`
+fields must be `OWNER/REPO`, and Scoop also requires `bucket_url`.
 
 ## Flake and hook wiring
 

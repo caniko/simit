@@ -1,9 +1,13 @@
 pub mod changelog;
+pub mod chocolatey;
 pub mod commit;
 pub mod completions;
 pub mod homebrew;
+pub mod init_chocolatey;
 pub mod init_ci;
 pub mod init_flake;
 pub mod init_homebrew_tap;
+pub mod init_scoop_bucket;
 pub mod man;
 pub mod release;
+pub mod scoop;
