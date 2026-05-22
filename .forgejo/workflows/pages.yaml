@@ -12,17 +12,20 @@ concurrency:
 jobs:
   publish:
     runs-on: atlas
-    container: nixos/nix:latest
+    container: rust:1.85-bookworm
     steps:
       - name: Checkout
         uses: https://code.forgejo.org/actions/checkout@v4
 
+      - name: Install mdBook
+        run: cargo install mdbook --version 0.4.52 --locked
+
       - name: Build site
-        run: nix --extra-experimental-features "nix-command flakes" build .#site
+        run: mdbook build docs
 
       - name: Publish to Codeberg Pages
         uses: https://codeberg.org/git-pages/action@v2
         with:
           site: "https://${{ forge.repository_owner }}.codeberg.page/simit/"
           token: ${{ forge.token }}
-          source: result/
+          source: docs/book/
