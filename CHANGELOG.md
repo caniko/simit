@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-05-22
+
+### Added
+
+- Generate an MSRV pre-push hook from workspace rust-version metadata in init-flake output.
+- Allow `simit init-flake --check` to accept equivalent generated treefmt and pre-commit hook wiring instead of requiring byte-for-byte generated files.
+
 ## [0.11.0] - 2026-05-22
 
 ### Added
@@ -88,7 +95,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Prepare the first public crates.io release.
 
-[Unreleased]: https://codeberg.org/caniko/simit/compare/0.11.0...HEAD
+[Unreleased]: https://codeberg.org/caniko/simit/compare/0.12.0...HEAD
+[0.12.0]: https://codeberg.org/caniko/simit/compare/0.11.0...0.12.0
 [0.11.0]: https://codeberg.org/caniko/simit/compare/0.10.0...0.11.0
 [0.10.0]: https://codeberg.org/caniko/simit/compare/0.9.0...0.10.0
 [0.9.0]: https://codeberg.org/caniko/simit/compare/0.8.0...0.9.0

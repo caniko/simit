@@ -6,7 +6,7 @@ use anyhow::{Context, Result, bail};
 
 use crate::cargo;
 use crate::cli::InitFlakeCommand;
-use crate::project::{self, GeneratedFile};
+use crate::project::{self, GeneratedFile, Languages};
 use crate::render::diff::unified_diff;
 use crate::render::flake;
 
@@ -33,7 +33,14 @@ pub fn run(command: InitFlakeCommand) -> Result<()> {
     }
 
     if command.check {
-        return check_files(workspace_root, &files, command.diff);
+        return check_files(
+            workspace_root,
+            &files,
+            &languages,
+            &rust_edition,
+            rust_version.as_deref(),
+            command.diff,
+        );
     }
 
     let flake_path = workspace_root.join("flake.nix");
@@ -91,6 +98,9 @@ fn normalize_rust_version(version: &str) -> String {
 fn check_files(
     workspace_root: &std::path::Path,
     files: &[GeneratedFile],
+    languages: &Languages,
+    rust_edition: &str,
+    rust_version: Option<&str>,
     show_diff: bool,
 ) -> Result<()> {
     let mut mismatches = Vec::new();
@@ -106,6 +116,28 @@ fn check_files(
                 mismatches.push("flake.nix is missing generated hook wiring".to_owned());
                 if show_diff {
                     diffs.push(unified_diff("flake.nix", &actual, &file.content));
+                }
+            }
+            Ok(actual) if file.relative_path == Path::new("nix/treefmt.nix") => {
+                if actual == file.content
+                    || flake::has_required_treefmt(&actual, languages, rust_edition)
+                {
+                    continue;
+                }
+                mismatches.push("nix/treefmt.nix is missing generated formatter wiring".to_owned());
+                if show_diff {
+                    diffs.push(unified_diff("nix/treefmt.nix", &actual, &file.content));
+                }
+            }
+            Ok(actual) if file.relative_path == Path::new("nix/pre-commit.nix") => {
+                if actual == file.content
+                    || flake::has_required_pre_commit(&actual, languages, rust_version)
+                {
+                    continue;
+                }
+                mismatches.push("nix/pre-commit.nix is missing generated hook wiring".to_owned());
+                if show_diff {
+                    diffs.push(unified_diff("nix/pre-commit.nix", &actual, &file.content));
                 }
             }
             Ok(actual) if actual == file.content => {}

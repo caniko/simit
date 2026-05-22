@@ -377,6 +377,89 @@ fn check_accepts_custom_rs_harbor_flake_with_generated_hook_wiring() {
 }
 
 #[test]
+fn check_accepts_semantically_current_custom_hook_files() {
+    let temp = init_package();
+
+    let write_status = simit()
+        .current_dir(temp.path())
+        .args(["init-flake"])
+        .status()
+        .unwrap();
+    assert!(write_status.success());
+
+    let mut flake = read(&temp.path().join("flake.nix"));
+    flake = flake.replace("inherit pkgs;", "inherit pkgs rustToolchain;");
+    flake = flake.replace("          inherit rustToolchain;\n", "");
+    fs::write(temp.path().join("flake.nix"), flake).unwrap();
+    fs::write(
+        temp.path().join("nix/treefmt.nix"),
+        r#"{pkgs, ...}: {
+  projectRootFile = "flake.nix";
+  programs.rustfmt = {
+    enable = true;
+    edition = "2024";
+  };
+  programs.alejandra.enable = true;
+  programs.taplo.enable = true;
+  programs.prettier = {
+    enable = true;
+    package = pkgs.prettier;
+    includes = [
+      "*.md"
+      "*.markdown"
+      "*.yaml"
+      "*.yml"
+    ];
+  };
+}
+"#,
+    )
+    .unwrap();
+    fs::write(
+        temp.path().join("nix/pre-commit.nix"),
+        r#"{
+  pkgs,
+  rustToolchain ? null,
+  ...
+}: {
+  cargo-fmt = {
+    enable = true;
+    entry = "cargo fmt --all -- --check";
+    pass_filenames = false;
+  };
+  cargo-clippy = {
+    enable = true;
+    entry = "cargo clippy --workspace --all-targets --all-features -- --deny warnings";
+    pass_filenames = false;
+  };
+  cargo-msrv = {
+    enable = true;
+    name = "cargo check MSRV";
+    entry = "${pkgs.rust-bin.stable."1.85.0".default}/bin/cargo check --workspace --all-features";
+    stages = ["pre-push" "manual"];
+  };
+  cargo-audit = {
+    enable = true;
+    entry = "cargo audit --deny warnings";
+  };
+  nix-flake-check = {
+    enable = true;
+    entry = "nix flake check";
+  };
+}
+"#,
+    )
+    .unwrap();
+
+    let check_status = simit()
+        .current_dir(temp.path())
+        .args(["init-flake", "--check"])
+        .status()
+        .unwrap();
+    assert!(check_status.success());
+}
+
+#[test]
 fn check_fails_when_hook_files_differ() {
     let temp = init_package();
 
@@ -398,7 +481,7 @@ fn check_fails_when_hook_files_differ() {
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("flake and hook files are not up to date"));
-    assert!(stderr.contains("nix/treefmt.nix differs"));
+    assert!(stderr.contains("nix/treefmt.nix is missing generated formatter wiring"));
 }
 
 #[test]

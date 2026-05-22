@@ -154,6 +154,49 @@ pub fn has_required_wiring(content: &str) -> bool {
         && has_pre_commit_shell_hook(content)
 }
 
+pub fn has_required_treefmt(content: &str, languages: &Languages, rust_edition: &str) -> bool {
+    content.contains("projectRootFile = \"flake.nix\";")
+        && (!languages.rust
+            || (content.contains("programs.rustfmt")
+                && content.contains("enable = true;")
+                && content.contains(&format!("edition = \"{rust_edition}\";"))))
+        && (!languages.nix || content.contains("programs.alejandra.enable = true;"))
+        && (!languages.toml || content.contains("programs.taplo.enable = true;"))
+        && (!(languages.yaml || languages.markdown) || content.contains("programs.prettier"))
+        && (!languages.markdown || content.contains("\"*.md\""))
+        && (!languages.yaml || content.contains("\"*.yaml\""))
+}
+
+pub fn has_required_pre_commit(
+    content: &str,
+    languages: &Languages,
+    rust_version: Option<&str>,
+) -> bool {
+    (!languages.rust
+        || (content.contains("cargo-fmt")
+            && content.contains("cargo fmt --all -- --check")
+            && content.contains("cargo-clippy")
+            && content.contains("cargo clippy")
+            && content.contains("--all-targets")
+            && content.contains("--all-features")
+            && content.contains("--deny warnings")
+            && content.contains("cargo-audit")
+            && content.contains("cargo audit")))
+        && (!languages.nix
+            || (content.contains("nix-flake-check") && content.contains("flake check")))
+        && rust_version.is_none_or(|version| {
+            let toolchain_version = rust_overlay_version(version);
+            content.contains("cargo-msrv")
+                && content.contains("cargo check MSRV")
+                && content.contains(&format!(
+                    "pkgs.rust-bin.stable.\"{toolchain_version}\".default"
+                ))
+                && content.contains("cargo check --workspace --all-features")
+                && content.contains("\"pre-push\"")
+                && content.contains("\"manual\"")
+        })
+}
+
 pub fn patch_error(anchor: &str, reason: &str) -> anyhow::Error {
     anyhow::anyhow!(
         "cannot patch flake.nix: missing or ambiguous anchor `{anchor}`; {reason}; run `simit init-flake --print` to get the generated template and apply the wiring manually"
@@ -379,6 +422,7 @@ fn treefmt_nix(languages: &Languages, rust_edition: &str) -> String {
 
 fn has_rust_toolchain_hook_package(content: &str) -> bool {
     content.contains("inherit rustToolchain;")
+        || content.contains("inherit pkgs rustToolchain;")
         || content.contains("rustToolchain = toolchain.rustToolchain;")
 }
 
