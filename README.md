@@ -52,6 +52,15 @@ simit release --no-sign patch -m "release patch"
 exists, commits, and tags locally. It does not push. Use `--no-changelog` to
 skip changelog promotion for one release.
 
+If a pushed release tag runs CI on a bad commit, commit the fix and move the
+current-version tag to `HEAD`:
+
+```sh
+simit release sync-up --push
+```
+
+Without `--push`, sync-up only moves the local tag.
+
 ## Changelog management
 
 Initialize a canonical Keep a Changelog file:
@@ -351,6 +360,13 @@ simit release patch -m "release patch"
 
 The crates.io publish workflow runs when the release tag is pushed and requires
 `CRATES_IO_API_TOKEN`.
+
+If that tag-triggered workflow fails after the tag has already been pushed,
+commit the fix and rerun the release pipeline with:
+
+```sh
+simit release sync-up --push
+```
 
 ## License
 

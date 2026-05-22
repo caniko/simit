@@ -51,6 +51,7 @@ rust-version = "1.85"
     .unwrap();
     fs::create_dir(root.join("src")).unwrap();
     fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
+    fs::write(root.join(".gitignore"), "target/\n").unwrap();
     run(root, "cargo", &["generate-lockfile"]);
     run(root, "git", &["add", "."]);
     run(root, "git", &["commit", "-m", "initial"]);
@@ -90,6 +91,7 @@ resolver = "3"
         .unwrap();
         fs::write(package_dir.join("src/lib.rs"), "").unwrap();
     }
+    fs::write(root.join(".gitignore"), "target/\n").unwrap();
     run(root, "cargo", &["generate-lockfile"]);
     run(root, "git", &["add", "."]);
     run(root, "git", &["commit", "-m", "initial"]);
@@ -228,6 +230,206 @@ fn release_updates_keep_a_changelog() {
     assert!(changelog.contains("## [0.1.1] - "));
     assert!(changelog.contains("- Add release flow"));
     assert_eq!(output(root, "git", &["tag", "--list"]).trim(), "0.1.1");
+}
+
+#[test]
+fn release_sync_up_moves_current_version_tag_to_head() {
+    let temp = init_package();
+    let root = temp.path();
+    run(root, "git", &["tag", "0.1.0"]);
+    let old_target = output(root, "git", &["rev-parse", "0.1.0^{commit}"]);
+    fs::write(
+        root.join("src/main.rs"),
+        "fn main() { println!(\"fixed\"); }\n",
+    )
+    .unwrap();
+    run(root, "git", &["add", "src/main.rs"]);
+    run(root, "git", &["commit", "-m", "fix release ci"]);
+    let head = output(root, "git", &["rev-parse", "HEAD"]);
+
+    let status = simit()
+        .current_dir(root)
+        .args(["release", "sync-up", "--no-sign"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    assert_ne!(old_target, head);
+    assert_eq!(output(root, "git", &["rev-parse", "0.1.0^{commit}"]), head);
+}
+
+#[test]
+fn release_sync_up_dry_run_does_not_move_tag() {
+    let temp = init_package();
+    let root = temp.path();
+    run(root, "git", &["tag", "0.1.0"]);
+    let old_target = output(root, "git", &["rev-parse", "0.1.0^{commit}"]);
+    fs::write(
+        root.join("src/main.rs"),
+        "fn main() { println!(\"fixed\"); }\n",
+    )
+    .unwrap();
+    run(root, "git", &["add", "src/main.rs"]);
+    run(root, "git", &["commit", "-m", "fix release ci"]);
+
+    let status = simit()
+        .current_dir(root)
+        .args(["release", "sync-up", "--no-sign", "--dry-run"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    assert_eq!(
+        output(root, "git", &["rev-parse", "0.1.0^{commit}"]),
+        old_target
+    );
+}
+
+#[test]
+fn release_sync_up_rejects_dirty_worktree() {
+    let temp = init_package();
+    let root = temp.path();
+    run(root, "git", &["tag", "0.1.0"]);
+    fs::write(
+        root.join("src/main.rs"),
+        "fn main() { println!(\"dirty\"); }\n",
+    )
+    .unwrap();
+
+    let output = simit()
+        .current_dir(root)
+        .args(["release", "sync-up", "--no-sign"])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8(output.stderr)
+            .unwrap()
+            .contains("worktree has uncommitted changes")
+    );
+}
+
+#[test]
+fn release_sync_up_rejects_missing_current_version_tag() {
+    let temp = init_package();
+    let root = temp.path();
+
+    let output = simit()
+        .current_dir(root)
+        .args(["release", "sync-up", "--no-sign"])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8(output.stderr)
+            .unwrap()
+            .contains("tag 0.1.0 does not exist")
+    );
+}
+
+#[test]
+fn release_sync_up_rejects_workspace_version_disagreement() {
+    let temp = init_workspace("0.1.0", "0.2.0");
+    let root = temp.path();
+    run(root, "git", &["tag", "0.1.0"]);
+
+    let output = simit()
+        .current_dir(root)
+        .args(["release", "sync-up", "--workspace", "--no-sign"])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8(output.stderr)
+            .unwrap()
+            .contains("selected packages do not have one current release version")
+    );
+}
+
+#[test]
+fn release_sync_up_pushes_moved_tag_to_remote() {
+    let temp = init_package();
+    let root = temp.path();
+    let remote = TempDir::new().unwrap();
+    run(remote.path(), "git", &["init", "--bare"]);
+    run(
+        root,
+        "git",
+        &["remote", "add", "origin", remote.path().to_str().unwrap()],
+    );
+    run(root, "git", &["tag", "0.1.0"]);
+    run(root, "git", &["push", "origin", "HEAD", "refs/tags/0.1.0"]);
+    fs::write(
+        root.join("src/main.rs"),
+        "fn main() { println!(\"fixed\"); }\n",
+    )
+    .unwrap();
+    run(root, "git", &["add", "src/main.rs"]);
+    run(root, "git", &["commit", "-m", "fix release ci"]);
+    let head = output(root, "git", &["rev-parse", "HEAD"]);
+
+    let status = simit()
+        .current_dir(root)
+        .args(["release", "sync-up", "--no-sign", "--push"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    assert_eq!(
+        output(root, "git", &["ls-remote", "origin", "refs/tags/0.1.0"])
+            .split_whitespace()
+            .next()
+            .unwrap(),
+        head.trim()
+    );
+}
+
+#[test]
+fn release_sync_up_can_push_after_local_sync() {
+    let temp = init_package();
+    let root = temp.path();
+    let remote = TempDir::new().unwrap();
+    run(remote.path(), "git", &["init", "--bare"]);
+    run(
+        root,
+        "git",
+        &["remote", "add", "origin", remote.path().to_str().unwrap()],
+    );
+    run(root, "git", &["tag", "0.1.0"]);
+    run(root, "git", &["push", "origin", "HEAD", "refs/tags/0.1.0"]);
+    fs::write(
+        root.join("src/main.rs"),
+        "fn main() { println!(\"fixed\"); }\n",
+    )
+    .unwrap();
+    run(root, "git", &["add", "src/main.rs"]);
+    run(root, "git", &["commit", "-m", "fix release ci"]);
+    let head = output(root, "git", &["rev-parse", "HEAD"]);
+
+    let local_status = simit()
+        .current_dir(root)
+        .args(["release", "sync-up", "--no-sign"])
+        .status()
+        .unwrap();
+    assert!(local_status.success());
+
+    let push_status = simit()
+        .current_dir(root)
+        .args(["release", "sync-up", "--no-sign", "--push"])
+        .status()
+        .unwrap();
+    assert!(push_status.success());
+
+    assert_eq!(
+        output(root, "git", &["ls-remote", "origin", "refs/tags/0.1.0"])
+            .split_whitespace()
+            .next()
+            .unwrap(),
+        head.trim()
+    );
 }
 
 #[test]

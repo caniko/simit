@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `simit release sync-up` for rerunning a failed tag-triggered release from a
+  fixed commit.
+
 ## [0.8.0] - 2026-05-22
 
 ### Added

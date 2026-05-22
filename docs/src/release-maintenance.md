@@ -17,6 +17,17 @@ The crates.io publish workflow runs when an exact semver tag is pushed. The
 workflow validates that the tag matches the Cargo package version, runs a
 publish dry run, and requires `CRATES_IO_API_TOKEN` to publish.
 
+If a release workflow fails after its tag has already been pushed, commit the
+fix and move the current-version tag to the fixed commit:
+
+```sh
+simit release sync-up --push
+```
+
+The command reruns local release checks, retargets the existing version tag to
+`HEAD`, and force-updates only that tag on the remote. Without `--push`, it only
+moves the local tag.
+
 Projects that publish Windows packages can add Chocolatey and Scoop jobs to
 the release artifact workflow. See
 [Windows Packaging](getting-started/windows-packaging.md) for the required

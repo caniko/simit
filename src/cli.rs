@@ -101,8 +101,12 @@ pub struct ReleaseCommand {
     pub no_sign: bool,
     #[arg(long, help = "Print the planned release without changing files")]
     pub dry_run: bool,
-    #[arg(value_enum, value_name = "BUMP", help = "Version bump to apply")]
-    pub bump: BumpKind,
+    #[arg(
+        value_enum,
+        value_name = "ACTION",
+        help = "Version bump to apply, or sync-up to rerun a failed release from HEAD"
+    )]
+    pub action: ReleaseAction,
     #[arg(
         long = "pre",
         value_name = "ID",
@@ -115,12 +119,50 @@ pub struct ReleaseCommand {
         value_name = "MESSAGE",
         help = "Release commit message"
     )]
-    pub message: String,
+    pub message: Option<String>,
     #[arg(
         long = "no-changelog",
         help = "Skip promoting CHANGELOG.md even when it exists"
     )]
     pub no_changelog: bool,
+    #[arg(long, help = "Push a sync-up tag move to the remote")]
+    pub push: bool,
+    #[arg(
+        long,
+        value_name = "REMOTE",
+        default_value = "origin",
+        help = "Remote to push sync-up tag moves to"
+    )]
+    pub remote: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ReleaseAction {
+    #[value(help = "Increment patch: 1.2.3 -> 1.2.4")]
+    Patch,
+    #[value(help = "Increment minor and reset patch: 1.2.3 -> 1.3.0")]
+    Minor,
+    #[value(help = "Increment major and reset minor/patch: 1.2.3 -> 2.0.0")]
+    Major,
+    #[value(help = "Keep the numeric version and replace prerelease metadata")]
+    Prerelease,
+    #[value(
+        name = "sync-up",
+        help = "Move the current-version release tag to HEAD"
+    )]
+    SyncUp,
+}
+
+impl ReleaseAction {
+    pub fn bump_kind(self) -> Option<BumpKind> {
+        match self {
+            Self::Patch => Some(BumpKind::Patch),
+            Self::Minor => Some(BumpKind::Minor),
+            Self::Major => Some(BumpKind::Major),
+            Self::Prerelease => Some(BumpKind::Prerelease),
+            Self::SyncUp => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]

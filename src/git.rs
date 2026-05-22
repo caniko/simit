@@ -43,6 +43,16 @@ pub fn release_preflight(
     Ok(())
 }
 
+pub fn sync_up_preflight(workspace_root: &Path, sign_tag: bool) -> Result<()> {
+    ensure_git_identity(workspace_root)?;
+    ensure_attached_head(workspace_root)?;
+    ensure_worktree_clean(workspace_root)?;
+    if sign_tag {
+        ensure_signing_available(workspace_root)?;
+    }
+    Ok(())
+}
+
 pub fn version_paths(workspace_root: &Path, plans: &[VersionPlan]) -> Vec<PathBuf> {
     let mut paths = plans
         .iter()
@@ -105,6 +115,119 @@ pub fn tag(workspace_root: &Path, version: &Version, sign_tag: bool) -> Result<(
 
     if !status.success() {
         bail!("git tag failed for {version}");
+    }
+    Ok(())
+}
+
+pub fn move_tag(workspace_root: &Path, version: &Version, sign_tag: bool) -> Result<()> {
+    let mut command = Command::new("git");
+    command.current_dir(workspace_root).args(["tag", "-f"]);
+
+    if sign_tag {
+        command
+            .arg("-s")
+            .arg("-m")
+            .arg(format!("Release {version}"));
+    } else {
+        command.arg("--no-sign");
+    }
+
+    let status = command
+        .arg(version.to_string())
+        .status()
+        .context("moving git tag")?;
+
+    if !status.success() {
+        bail!("git tag -f failed for {version}");
+    }
+    Ok(())
+}
+
+pub fn head_commit(workspace_root: &Path) -> Result<String> {
+    rev_parse(workspace_root, "HEAD")
+}
+
+pub fn tag_ref_object(workspace_root: &Path, version: &Version) -> Result<String> {
+    let output = Command::new("git")
+        .current_dir(workspace_root)
+        .args(["rev-parse", "--verify"])
+        .arg(format!("refs/tags/{version}"))
+        .output()
+        .context("checking existing git tag")?;
+
+    if !output.status.success() {
+        bail!("tag {version} does not exist");
+    }
+
+    String::from_utf8(output.stdout)
+        .context("git tag object was not valid UTF-8")
+        .map(|value| value.trim().to_owned())
+}
+
+pub fn tag_target_commit(workspace_root: &Path, version: &Version) -> Result<String> {
+    let output = Command::new("git")
+        .current_dir(workspace_root)
+        .args(["rev-parse", "--verify"])
+        .arg(format!("refs/tags/{version}^{{commit}}"))
+        .output()
+        .context("checking existing git tag target")?;
+
+    if !output.status.success() {
+        bail!("tag {version} does not point to a commit");
+    }
+
+    String::from_utf8(output.stdout)
+        .context("git tag target was not valid UTF-8")
+        .map(|value| value.trim().to_owned())
+}
+
+pub fn remote_tag_ref_object(
+    workspace_root: &Path,
+    remote: &str,
+    version: &Version,
+) -> Result<String> {
+    let output = Command::new("git")
+        .current_dir(workspace_root)
+        .args(["ls-remote", "--tags", remote])
+        .arg(format!("refs/tags/{version}"))
+        .output()
+        .with_context(|| format!("checking remote tag {remote}/{version}"))?;
+
+    if !output.status.success() {
+        bail!(
+            "git ls-remote failed for {remote}:\n{}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    let stdout =
+        String::from_utf8(output.stdout).context("git ls-remote output was not valid UTF-8")?;
+    stdout
+        .lines()
+        .filter_map(|line| line.split_once('\t'))
+        .find_map(|(object, refname)| {
+            (refname == format!("refs/tags/{version}")).then(|| object.to_owned())
+        })
+        .ok_or_else(|| anyhow::anyhow!("remote {remote} does not have tag {version}"))
+}
+
+pub fn push_moved_tag(
+    workspace_root: &Path,
+    remote: &str,
+    version: &Version,
+    expected_remote_object: &str,
+) -> Result<()> {
+    let refname = format!("refs/tags/{version}");
+    let lease = format!("--force-with-lease={refname}:{expected_remote_object}");
+    let refspec = format!("{refname}:{refname}");
+    let status = Command::new("git")
+        .current_dir(workspace_root)
+        .args(["push", remote, &lease, &refspec])
+        .status()
+        .with_context(|| format!("pushing moved tag {version} to {remote}"))?;
+
+    if !status.success() {
+        bail!("git push failed while updating {remote} tag {version}");
     }
     Ok(())
 }
@@ -186,6 +309,24 @@ fn ensure_attached_head(workspace_root: &Path) -> Result<()> {
     Ok(())
 }
 
+fn ensure_worktree_clean(workspace_root: &Path) -> Result<()> {
+    let output = Command::new("git")
+        .current_dir(workspace_root)
+        .args(["status", "--porcelain"])
+        .output()
+        .context("checking worktree status")?;
+    if !output.status.success() {
+        bail!("git status failed while checking worktree status");
+    }
+    if !output.stdout.is_empty() {
+        bail!(
+            "worktree has uncommitted changes:\n{}",
+            String::from_utf8_lossy(&output.stdout).trim()
+        );
+    }
+    Ok(())
+}
+
 fn ensure_paths_clean(workspace_root: &Path, paths: &[PathBuf]) -> Result<()> {
     let mut command = Command::new("git");
     command
@@ -229,4 +370,8 @@ fn run(workspace_root: &Path, program: &str, args: &[&str]) -> Result<()> {
         bail!("{program} {} failed", args.join(" "));
     }
     Ok(())
+}
+
+fn rev_parse(workspace_root: &Path, revision: &str) -> Result<String> {
+    output(workspace_root, &["rev-parse", revision]).map(|value| value.trim().to_owned())
 }
