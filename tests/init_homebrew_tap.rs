@@ -4,8 +4,10 @@ use std::process::Command;
 
 use tempfile::TempDir;
 
+mod common;
+
 fn simit() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_simit"))
+    common::simit()
 }
 
 fn git() -> Command {
@@ -61,7 +63,7 @@ fn bootstraps_fresh_tap_repo() {
 
     let output = simit()
         .current_dir(project.path())
-        .args(["init-homebrew-tap", "--target", tap.to_str().unwrap()])
+        .args(["init", "homebrew-tap", "--target", tap.to_str().unwrap()])
         .output()
         .unwrap();
 
@@ -114,7 +116,7 @@ fn check_succeeds_after_bootstrap_and_rerender_is_idempotent() {
     for _ in 0..2 {
         let status = simit()
             .current_dir(project.path())
-            .args(["init-homebrew-tap", "--target", tap.to_str().unwrap()])
+            .args(["init", "homebrew-tap", "--target", tap.to_str().unwrap()])
             .status()
             .unwrap();
         assert!(status.success());
@@ -123,7 +125,8 @@ fn check_succeeds_after_bootstrap_and_rerender_is_idempotent() {
     let check = simit()
         .current_dir(project.path())
         .args([
-            "init-homebrew-tap",
+            "init",
+            "homebrew-tap",
             "--target",
             tap.to_str().unwrap(),
             "--check",
@@ -141,7 +144,7 @@ fn check_fails_when_formula_drifts() {
 
     let write = simit()
         .current_dir(project.path())
-        .args(["init-homebrew-tap", "--target", tap.to_str().unwrap()])
+        .args(["init", "homebrew-tap", "--target", tap.to_str().unwrap()])
         .status()
         .unwrap();
     assert!(write.success());
@@ -150,7 +153,8 @@ fn check_fails_when_formula_drifts() {
     let output = simit()
         .current_dir(project.path())
         .args([
-            "init-homebrew-tap",
+            "init",
+            "homebrew-tap",
             "--target",
             tap.to_str().unwrap(),
             "--check",
@@ -175,7 +179,8 @@ fn print_writes_formula_to_stdout_without_creating_target() {
     let output = simit()
         .current_dir(project.path())
         .args([
-            "init-homebrew-tap",
+            "init",
+            "homebrew-tap",
             "--target",
             tap.to_str().unwrap(),
             "--print",
@@ -203,7 +208,8 @@ fn no_git_skips_git_initialisation() {
     let status = simit()
         .current_dir(project.path())
         .args([
-            "init-homebrew-tap",
+            "init",
+            "homebrew-tap",
             "--target",
             tap.to_str().unwrap(),
             "--no-git",
@@ -236,7 +242,8 @@ fn different_existing_origin_warns_without_overwriting() {
     let output = simit()
         .current_dir(project.path())
         .args([
-            "init-homebrew-tap",
+            "init",
+            "homebrew-tap",
             "--target",
             tap.path().to_str().unwrap(),
         ])
@@ -271,7 +278,7 @@ fn missing_tap_url_errors_clearly() {
 
     let output = simit()
         .current_dir(project.path())
-        .args(["init-homebrew-tap", "--target", tap.to_str().unwrap()])
+        .args(["init", "homebrew-tap", "--target", tap.to_str().unwrap()])
         .output()
         .unwrap();
 
@@ -289,7 +296,8 @@ fn non_empty_non_git_target_is_rejected() {
     let output = simit()
         .current_dir(project.path())
         .args([
-            "init-homebrew-tap",
+            "init",
+            "homebrew-tap",
             "--target",
             tap.path().to_str().unwrap(),
         ])

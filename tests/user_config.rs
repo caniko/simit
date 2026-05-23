@@ -46,6 +46,7 @@ fn simit_with_xdg(root: &TempDir) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_simit"));
     command
         .env("XDG_CONFIG_HOME", root.path())
+        .env("XDG_DATA_HOME", root.path().join("data"))
         .env("HOME", root.path().join("home"));
     command
 }

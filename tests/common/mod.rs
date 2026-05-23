@@ -32,8 +32,19 @@ pub fn maintainer_key_path() -> PathBuf {
     path
 }
 
+pub fn data_home_path() -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock is before UNIX_EPOCH")
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!("simit-data-home-{}-{nanos}", id()));
+    fs::create_dir_all(&path).expect("create isolated simit data home");
+    path
+}
+
 pub fn simit() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_simit"));
     command.env("SIMIT_MAINTAINERS_GPG", maintainer_key_path());
+    command.env("XDG_DATA_HOME", data_home_path());
     command
 }

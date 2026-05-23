@@ -10,5 +10,7 @@ pub mod init_flake;
 pub mod init_homebrew_tap;
 pub mod init_scoop_bucket;
 pub mod man;
+pub mod projects;
 pub mod release;
+pub mod scaffold;
 pub mod scoop;

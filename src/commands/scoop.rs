@@ -1,14 +1,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
 use crate::cargo;
 use crate::cli::{ScoopAction, ScoopBumpArgs, ScoopCommand, ScoopRenderArgs};
+use crate::commands::scaffold::{BumpFlow, WriteArtifact};
 use crate::config::{ProjectConfig, ResolvedScoop, ScoopOverrides};
-use crate::git;
+use crate::registry::{self, FeatureStatus};
 use crate::render::scoop_manifest::{self, Architecture, ScoopChecksums};
 use crate::sha256;
 
@@ -46,19 +46,27 @@ fn bump(args: ScoopBumpArgs) -> Result<()> {
     let checksums = checksum_set(&resolved, &archives)?;
     let manifest = scoop_manifest::render(&resolved, &args.version, &checksums);
     let manifest_path = manifest_path(args.bucket.as_std_path(), &resolved.name);
-    if let Some(parent) = manifest_path.parent() {
-        fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
-    }
-    fs::write(&manifest_path, manifest)
-        .with_context(|| format!("writing {}", manifest_path.display()))?;
+    let staged_path = format!("bucket/{}.json", resolved.name);
+    let flow = BumpFlow {
+        repo: args.bucket.as_std_path(),
+        artifact: WriteArtifact {
+            path: &manifest_path,
+            contents: &manifest,
+        },
+        staged_path: &staged_path,
+        working_tree_label: "bucket",
+        default_branch_hint: "bucket",
+    };
+    flow.write()?;
 
     if args.push {
         let commit_message = args
             .commit_message
             .unwrap_or_else(|| format!("{} {}", resolved.name, args.version));
-        push_manifest(args.bucket.as_std_path(), &resolved.name, &commit_message)?;
+        flow.push(&commit_message)?;
     }
 
+    registry::touch_current_project_or_warn([("scoop", FeatureStatus::Managed)]);
     Ok(())
 }
 
@@ -122,99 +130,6 @@ fn checksum_set(
         checksums.set(architecture, sha256::sha256_of_file(path)?);
     }
     Ok(checksums)
-}
-
-fn push_manifest(bucket: &Path, name: &str, commit_message: &str) -> Result<()> {
-    guard_clean_for_push(bucket, name)?;
-    let manifest = format!("bucket/{name}.json");
-    run_git(bucket, ["add", "--", manifest.as_str()])?;
-
-    let status = git::output(bucket, &["status", "--porcelain", "--", &manifest])?;
-    if status.trim().is_empty() {
-        if last_commit_subject(bucket).as_deref() == Some(commit_message) {
-            return Ok(());
-        }
-        let default_branch = origin_default_branch(bucket)?;
-        run_git(bucket, ["commit", "--allow-empty", "-m", commit_message])?;
-        run_git(
-            bucket,
-            ["push", "origin", &format!("HEAD:{default_branch}")],
-        )
-    } else {
-        let default_branch = origin_default_branch(bucket)?;
-        run_git(bucket, ["commit", "-m", commit_message])?;
-        run_git(
-            bucket,
-            ["push", "origin", &format!("HEAD:{default_branch}")],
-        )
-    }
-}
-
-fn guard_clean_for_push(bucket: &Path, name: &str) -> Result<()> {
-    let dirty = git::output(bucket, &["status", "--porcelain"])?;
-    let allowed = format!("bucket/{name}.json");
-    let unrelated = dirty
-        .lines()
-        .filter(|line| !status_line_is_for_path(line, &allowed))
-        .collect::<Vec<_>>();
-    if !unrelated.is_empty() {
-        bail!(
-            "bucket working tree has unrelated changes:\n{}",
-            unrelated.join("\n")
-        );
-    }
-    Ok(())
-}
-
-fn status_line_is_for_path(line: &str, path: &str) -> bool {
-    line.get(3..) == Some(path)
-        || line
-            .split_once(" -> ")
-            .is_some_and(|(_, target)| target == path)
-}
-
-fn run_git<'a, I>(target: &Path, args: I) -> Result<()>
-where
-    I: IntoIterator<Item = &'a str>,
-{
-    let args = args.into_iter().collect::<Vec<_>>();
-    let status = Command::new("git")
-        .current_dir(target)
-        .args(&args)
-        .status()
-        .with_context(|| format!("running git {}", args.join(" ")))?;
-    if !status.success() {
-        bail!("git {} failed", args.join(" "));
-    }
-    Ok(())
-}
-
-fn origin_default_branch(bucket: &Path) -> Result<String> {
-    let _ = git::output(bucket, &["remote", "set-head", "origin", "-a"]);
-    let symbolic = git::output(
-        bucket,
-        &[
-            "symbolic-ref",
-            "--quiet",
-            "--short",
-            "refs/remotes/origin/HEAD",
-        ],
-    )
-    .context(
-        "detecting origin default branch; run `git -C <bucket> remote set-head origin -a` locally and retry",
-    )?;
-    symbolic
-        .trim()
-        .strip_prefix("origin/")
-        .map(str::to_string)
-        .filter(|branch| !branch.is_empty())
-        .context("origin/HEAD did not resolve to origin/<branch>")
-}
-
-fn last_commit_subject(bucket: &Path) -> Option<String> {
-    git::output(bucket, &["log", "-1", "--pretty=%s"])
-        .ok()
-        .map(|subject| subject.trim().to_owned())
 }
 
 fn validate_version(version: &str) -> Result<()> {

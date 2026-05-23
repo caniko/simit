@@ -2,7 +2,7 @@
 
 `simit` supports Chocolatey packages and Scoop bucket manifests for tagged
 Windows releases. Both flows use simit project config as the source of package
-metadata, render deterministic skeleton files, and can be wired into `init-ci`.
+metadata, render deterministic skeleton files, and can be wired into `init ci`.
 
 ## Configuration
 
@@ -35,18 +35,18 @@ to Cargo package metadata.
 ## Bootstrap
 
 ```sh
-simit init-chocolatey --target packaging/chocolatey
-simit init-scoop-bucket --target ../scoop-foo
+simit init chocolatey --target packaging/chocolatey
+simit init scoop-bucket --target ../scoop-foo
 ```
 
-Both commands support `--check`, `--diff`, and `--print`. `init-scoop-bucket`
+Both commands support `--check`, `--diff`, and `--print`. `init scoop-bucket`
 also supports `--no-git` for writing only `bucket/<name>.json`.
 
 ## Release CI
 
 ```sh
-simit init-ci --platform github --with-chocolatey --with-scoop
-simit init-ci --platform forgejo --with-chocolatey --with-scoop
+simit init ci --platform github --with-chocolatey --with-scoop
+simit init ci --platform forgejo --with-chocolatey --with-scoop
 ```
 
 `--with-chocolatey` and `--with-scoop` imply `--with-artifacts`. GitHub uses
@@ -68,14 +68,14 @@ for the required `keys/maintainers.gpg` and `keys/minisign.pub` trust roots.
 ## Local Render and Bump
 
 ```sh
-simit chocolatey render --output-dir packaging/chocolatey
-simit chocolatey bump \
+simit dist chocolatey render --output-dir packaging/chocolatey
+simit dist chocolatey bump \
   --version 0.3.1 \
   --package-dir packaging/chocolatey \
   --archive x64=release/foo-0.3.1-x86_64-windows.zip
 
-simit scoop render --output packaging/scoop/foo.json
-simit scoop bump \
+simit dist scoop render --output packaging/scoop/foo.json
+simit dist scoop bump \
   --version 0.3.1 \
   --bucket ../scoop-foo \
   --archive x64=release/foo-0.3.1-x86_64-windows.zip \

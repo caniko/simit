@@ -199,7 +199,7 @@ pub fn has_required_pre_commit(
 
 pub fn patch_error(anchor: &str, reason: &str) -> anyhow::Error {
     anyhow::anyhow!(
-        "cannot patch flake.nix: missing or ambiguous anchor `{anchor}`; {reason}; run `simit init-flake --print` to get the generated template and apply the wiring manually"
+        "cannot patch flake.nix: missing or ambiguous anchor `{anchor}`; {reason}; run `simit init flake --print` to get the generated template and apply the wiring manually"
     )
 }
 

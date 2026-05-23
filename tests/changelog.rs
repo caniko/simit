@@ -4,12 +4,18 @@ use std::process::Command;
 
 use tempfile::TempDir;
 
+mod common;
+
 fn simit() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_simit"))
+    common::simit()
 }
 
 fn run(dir: &Path, program: &str, args: &[&str]) {
-    let status = Command::new(program)
+    let mut command = Command::new(program);
+    if program == env!("CARGO_BIN_EXE_simit") {
+        command.env("XDG_DATA_HOME", common::data_home_path());
+    }
+    let status = command
         .current_dir(dir)
         .args(args)
         .status()
@@ -18,7 +24,11 @@ fn run(dir: &Path, program: &str, args: &[&str]) {
 }
 
 fn output(dir: &Path, program: &str, args: &[&str]) -> String {
-    let output = Command::new(program)
+    let mut command = Command::new(program);
+    if program == env!("CARGO_BIN_EXE_simit") {
+        command.env("XDG_DATA_HOME", common::data_home_path());
+    }
+    let output = command
         .current_dir(dir)
         .args(args)
         .output()

@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-05-23
+
+### Added
+
+- Add `simit projects list|show|scan|forget|prune|clear-state` for inspecting and
+  maintaining the per-user project registry.
+- Add `simit projects discover <ROOT>` to walk a filesystem subtree, find Cargo
+  workspaces with at least one simit feature in use, and register them in the
+  per-user project registry. Supports `--dry-run`, `--json`, `--max-depth`,
+  `--skip`, `--include-empty`, and `--follow-symlinks`.
+- Mark `simit projects discover --include-empty` entries with no detected simit
+  features in human output instead of treating generic project files as simit
+  usage.
+- Add `simit projects clear-state` to clear all per-user project registry state,
+  with `--dry-run` support for previewing the target registry path.
+- Keep default `simit projects discover` human output compact by summarizing
+  skipped non-simit projects instead of listing every skipped path.
+
+### Changed
+
+- Breaking CLI restructure: grouped the former top-level `simit init-ci`,
+  `simit init-flake`, `simit init-homebrew-tap`, `simit init-chocolatey`, and
+  `simit init-scoop-bucket` commands under `simit init ...`, and grouped the
+  former top-level `simit homebrew`, `simit chocolatey`, and `simit scoop`
+  package-manager commands under `simit dist ...`.
+
 ## [0.12.0] - 2026-05-22
 
 ### Added
@@ -95,7 +121,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Prepare the first public crates.io release.
 
-[Unreleased]: https://codeberg.org/caniko/simit/compare/0.12.0...HEAD
+[Unreleased]: https://codeberg.org/caniko/simit/compare/0.13.0...HEAD
+[0.13.0]: https://codeberg.org/caniko/simit/compare/0.12.0...0.13.0
 [0.12.0]: https://codeberg.org/caniko/simit/compare/0.11.0...0.12.0
 [0.11.0]: https://codeberg.org/caniko/simit/compare/0.10.0...0.11.0
 [0.10.0]: https://codeberg.org/caniko/simit/compare/0.9.0...0.10.0

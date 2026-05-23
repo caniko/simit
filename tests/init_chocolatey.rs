@@ -4,8 +4,10 @@ use std::process::Command;
 
 use tempfile::TempDir;
 
+mod common;
+
 fn simit() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_simit"))
+    common::simit()
 }
 
 fn init_package(name: &str, with_chocolatey: bool) -> TempDir {
@@ -55,7 +57,7 @@ fn bootstraps_fresh_package_directory() {
 
     let output = simit()
         .current_dir(project.path())
-        .args(["init-chocolatey", "--target", target.to_str().unwrap()])
+        .args(["init", "chocolatey", "--target", target.to_str().unwrap()])
         .output()
         .unwrap();
 
@@ -74,7 +76,7 @@ fn bootstraps_fresh_package_directory() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("Initialised Chocolatey package"));
     assert!(stdout.contains("choco pack"));
-    assert!(stdout.contains("simit chocolatey bump --version <version>"));
+    assert!(stdout.contains("simit dist chocolatey bump --version <version>"));
 }
 
 #[test]
@@ -86,7 +88,7 @@ fn check_succeeds_after_bootstrap_and_rerender_is_idempotent() {
     for _ in 0..2 {
         let status = simit()
             .current_dir(project.path())
-            .args(["init-chocolatey", "--target", target.to_str().unwrap()])
+            .args(["init", "chocolatey", "--target", target.to_str().unwrap()])
             .status()
             .unwrap();
         assert!(status.success());
@@ -95,7 +97,8 @@ fn check_succeeds_after_bootstrap_and_rerender_is_idempotent() {
     let check = simit()
         .current_dir(project.path())
         .args([
-            "init-chocolatey",
+            "init",
+            "chocolatey",
             "--target",
             target.to_str().unwrap(),
             "--check",
@@ -113,7 +116,7 @@ fn check_fails_when_package_drifts() {
 
     let write = simit()
         .current_dir(project.path())
-        .args(["init-chocolatey", "--target", target.to_str().unwrap()])
+        .args(["init", "chocolatey", "--target", target.to_str().unwrap()])
         .status()
         .unwrap();
     assert!(write.success());
@@ -122,7 +125,8 @@ fn check_fails_when_package_drifts() {
     let output = simit()
         .current_dir(project.path())
         .args([
-            "init-chocolatey",
+            "init",
+            "chocolatey",
             "--target",
             target.to_str().unwrap(),
             "--check",
@@ -147,7 +151,8 @@ fn print_writes_package_to_stdout_without_creating_target() {
     let output = simit()
         .current_dir(project.path())
         .args([
-            "init-chocolatey",
+            "init",
+            "chocolatey",
             "--target",
             target.to_str().unwrap(),
             "--print",
@@ -175,7 +180,7 @@ fn missing_chocolatey_config_errors_clearly() {
 
     let output = simit()
         .current_dir(project.path())
-        .args(["init-chocolatey", "--target", target.to_str().unwrap()])
+        .args(["init", "chocolatey", "--target", target.to_str().unwrap()])
         .output()
         .unwrap();
 

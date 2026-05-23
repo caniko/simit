@@ -2,10 +2,15 @@ use anyhow::Result;
 
 use crate::changelog::{self, EntryKind};
 use crate::cli::{ChangelogAction, ChangelogCommand, ChangelogEntryKind};
+use crate::registry::{self, FeatureStatus};
 
 pub fn run(command: ChangelogCommand) -> Result<()> {
     match command.action {
-        ChangelogAction::Init => changelog::init_file(command.file.as_std_path()),
+        ChangelogAction::Init => {
+            changelog::init_file(command.file.as_std_path())?;
+            registry::touch_current_project_or_warn([("changelog", FeatureStatus::Managed)]);
+            Ok(())
+        }
         ChangelogAction::Add { kind, text } => {
             changelog::add_entry_file(command.file.as_std_path(), entry_kind(kind), &text)
         }
@@ -24,7 +29,9 @@ pub fn run(command: ChangelogCommand) -> Result<()> {
                 date,
                 repo_url.as_deref(),
                 None,
-            )
+            )?;
+            registry::touch_current_project_or_warn([("changelog", FeatureStatus::Managed)]);
+            Ok(())
         }
         ChangelogAction::Check => changelog::check_file(command.file.as_std_path()),
         ChangelogAction::Show { version } => {

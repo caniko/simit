@@ -4,8 +4,10 @@ use std::process::Command;
 
 use tempfile::TempDir;
 
+mod common;
+
 fn simit() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_simit"))
+    common::simit()
 }
 
 fn init_package(version: &str) -> TempDir {
@@ -75,6 +77,7 @@ fn render_writes_deterministic_package_files() {
     let output = simit()
         .current_dir(temp.path())
         .args([
+            "dist",
             "chocolatey",
             "render",
             "--version",
@@ -135,7 +138,8 @@ fn init_chocolatey_prints_without_writing() {
     let output = simit()
         .current_dir(temp.path())
         .args([
-            "init-chocolatey",
+            "init",
+            "chocolatey",
             "--target",
             target.to_str().unwrap(),
             "--print",
@@ -164,6 +168,7 @@ fn bump_writes_real_sha256s() {
     let output = simit()
         .current_dir(temp.path())
         .args([
+            "dist",
             "chocolatey",
             "bump",
             "--version",
@@ -195,6 +200,7 @@ fn bump_missing_archive_errors_clearly() {
     let output = simit()
         .current_dir(temp.path())
         .args([
+            "dist",
             "chocolatey",
             "bump",
             "--version",
@@ -219,6 +225,7 @@ fn bump_push_requires_api_key_env() {
     let output = simit()
         .current_dir(temp.path())
         .args([
+            "dist",
             "chocolatey",
             "bump",
             "--version",

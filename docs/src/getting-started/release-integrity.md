@@ -13,7 +13,7 @@ keys/minisign.pub
 ```
 
 `keys/maintainers.gpg` is the OpenPGP public keyring used by CI to run
-`git verify-tag` before publishing. `simit init-ci` writes it automatically
+`git verify-tag` before publishing. `simit init ci` writes it automatically
 from the configured release signing key. You can manage it directly:
 
 ```sh
@@ -37,7 +37,7 @@ minisign -G -p keys/minisign.pub -s minisign.sec
 
 ## Workflow Secrets
 
-`simit init-ci --with-artifacts` generates an artifact workflow that requires:
+`simit init ci --with-artifacts` generates an artifact workflow that requires:
 
 - `MINISIGN_SECRET_KEY`: contents of the password-protected minisign secret key.
 - `MINISIGN_PASSWORD`: password for `MINISIGN_SECRET_KEY`.

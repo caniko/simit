@@ -8,6 +8,7 @@ use crate::changelog;
 use crate::cli::{ReleaseAction, ReleaseCommand, ReleaseTrustAction};
 use crate::config::ProjectConfig;
 use crate::git;
+use crate::registry;
 use crate::release_trust::{self, TrustOverrides};
 
 pub fn run(command: ReleaseCommand) -> Result<()> {
@@ -104,6 +105,7 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
         git::tag(workspace_root, &new_version, sign_tag)?;
     }
 
+    registry::refresh_current_project_or_warn();
     Ok(())
 }
 
@@ -219,6 +221,7 @@ fn sync_up(command: ReleaseCommand) -> Result<()> {
         )?;
     }
 
+    registry::refresh_current_project_or_warn();
     Ok(())
 }
 

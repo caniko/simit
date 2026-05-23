@@ -223,7 +223,7 @@ fn generates_forgejo_nix_workflows() {
 
     let status = simit_with_user_config(temp.path())
         .current_dir(temp.path())
-        .args(["init-ci", "--platform", "forgejo", "--runtime", "nix"])
+        .args(["init", "ci", "--platform", "forgejo", "--runtime", "nix"])
         .status()
         .unwrap();
     assert!(status.success());
@@ -259,7 +259,7 @@ fn generates_github_plain_cargo_workflows() {
 
     let status = simit_with_user_config(temp.path())
         .current_dir(temp.path())
-        .args(["init-ci", "--platform", "github"])
+        .args(["init", "ci", "--platform", "github"])
         .status()
         .unwrap();
     assert!(status.success());
@@ -284,7 +284,7 @@ fn forgejo_auto_runtime_uses_rust_container_even_when_flake_exists() {
 
     let status = simit_with_user_config(temp.path())
         .current_dir(temp.path())
-        .args(["init-ci", "--platform", "forgejo"])
+        .args(["init", "ci", "--platform", "forgejo"])
         .status()
         .unwrap();
     assert!(status.success());
@@ -316,7 +316,8 @@ fn forgejo_runner_override_applies_to_all_jobs() {
     let status = simit_with_user_config(temp.path())
         .current_dir(temp.path())
         .args([
-            "init-ci",
+            "init",
+            "ci",
             "--platform",
             "forgejo",
             "--runtime",
@@ -336,12 +337,30 @@ fn forgejo_runner_override_applies_to_all_jobs() {
 }
 
 #[test]
+fn forgejo_runner_override_does_not_require_user_config() {
+    let temp = init_package(false);
+
+    let status = simit()
+        .current_dir(temp.path())
+        .args(["init", "ci", "--platform", "forgejo", "--runner", "atlas"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let ci = read(&temp.path().join(".forgejo/workflows/ci.yaml"));
+    assert!(ci.contains("runs-on: atlas"));
+
+    let publish = read(&temp.path().join(".forgejo/workflows/publish-crate.yaml"));
+    assert!(publish.contains("runs-on: atlas"));
+}
+
+#[test]
 fn forgejo_user_config_can_render_structured_runner_labels() {
     let temp = init_package(false);
 
     let status = simit_with_multilabel_user_config(temp.path())
         .current_dir(temp.path())
-        .args(["init-ci", "--platform", "forgejo"])
+        .args(["init", "ci", "--platform", "forgejo"])
         .status()
         .unwrap();
     assert!(status.success());
@@ -377,7 +396,7 @@ sync = []
 
     let status = simit_with_user_config(root)
         .current_dir(root)
-        .args(["init-ci", "--platform", "forgejo"])
+        .args(["init", "ci", "--platform", "forgejo"])
         .status()
         .unwrap();
     assert!(status.success());
@@ -413,7 +432,8 @@ rust-version = "1.85"
     let status = simit_with_user_config(root)
         .current_dir(root)
         .args([
-            "init-ci",
+            "init",
+            "ci",
             "--platform",
             "forgejo",
             "--runner",
@@ -425,7 +445,7 @@ rust-version = "1.85"
 
     let ci = read(&root.join(".forgejo/workflows/ci.yaml"));
     assert!(
-        ci.contains("cargo run -- init-ci --platform forgejo --runner codeberg-medium --check")
+        ci.contains("cargo run -- init ci --platform forgejo --runner codeberg-medium --check")
     );
 }
 
@@ -455,7 +475,8 @@ homepage = "https://example.com/demo"
     let status = simit_with_user_config(root)
         .current_dir(root)
         .args([
-            "init-ci",
+            "init",
+            "ci",
             "--platform",
             "github",
             "--with-chocolatey",
@@ -469,7 +490,7 @@ homepage = "https://example.com/demo"
 
     let ci = read(&root.join(".github/workflows/ci.yaml"));
     assert!(ci.contains(
-        "cargo run -- init-ci --platform github --windows-runner windows-latest --with-artifacts --with-chocolatey --with-scoop --check"
+        "cargo run -- init ci --platform github --windows-runner windows-latest --with-artifacts --with-chocolatey --with-scoop --check"
     ));
 }
 
@@ -479,14 +500,14 @@ fn check_succeeds_when_workflows_are_current() {
 
     let write_status = simit_with_user_config(temp.path())
         .current_dir(temp.path())
-        .args(["init-ci", "--platform", "forgejo"])
+        .args(["init", "ci", "--platform", "forgejo"])
         .status()
         .unwrap();
     assert!(write_status.success());
 
     let check_status = simit_with_user_config(temp.path())
         .current_dir(temp.path())
-        .args(["init-ci", "--platform", "forgejo", "--check"])
+        .args(["init", "ci", "--platform", "forgejo", "--check"])
         .status()
         .unwrap();
     assert!(check_status.success());
@@ -503,9 +524,10 @@ fn init_ci_blocks_without_exportable_maintainer_key() {
         .env_remove("SIMIT_MAINTAINERS_GPG")
         .env("HOME", isolated_home.path())
         .env("XDG_CONFIG_HOME", isolated_home.path().join(".xdg"))
+        .env("XDG_DATA_HOME", common::data_home_path())
         .env("GIT_CONFIG_GLOBAL", isolated_home.path().join("gitconfig"))
         .env("GIT_CONFIG_NOSYSTEM", "true")
-        .args(["init-ci", "--platform", "forgejo"])
+        .args(["init", "ci", "--platform", "forgejo"])
         .output()
         .unwrap();
 
@@ -546,6 +568,7 @@ fn release_trust_check_accepts_existing_trust_root_without_local_key() {
         .env_remove("SIMIT_MAINTAINERS_GPG")
         .env("HOME", isolated_home.path())
         .env("XDG_CONFIG_HOME", isolated_home.path().join("xdg"))
+        .env("XDG_DATA_HOME", common::data_home_path())
         .env("GIT_CONFIG_GLOBAL", isolated_home.path().join("gitconfig"))
         .env("GIT_CONFIG_NOSYSTEM", "true")
         .args(["release", "trust", "check"])
@@ -563,7 +586,7 @@ fn check_fails_when_workflows_differ() {
 
     let write_status = simit_with_user_config(temp.path())
         .current_dir(temp.path())
-        .args(["init-ci", "--platform", "forgejo"])
+        .args(["init", "ci", "--platform", "forgejo"])
         .status()
         .unwrap();
     assert!(write_status.success());
@@ -576,7 +599,7 @@ fn check_fails_when_workflows_differ() {
 
     let output = simit_with_user_config(temp.path())
         .current_dir(temp.path())
-        .args(["init-ci", "--platform", "forgejo", "--check"])
+        .args(["init", "ci", "--platform", "forgejo", "--check"])
         .output()
         .unwrap();
 
@@ -592,7 +615,7 @@ fn check_fails_when_publish_workflow_is_missing() {
 
     let write_status = simit_with_user_config(temp.path())
         .current_dir(temp.path())
-        .args(["init-ci", "--platform", "forgejo"])
+        .args(["init", "ci", "--platform", "forgejo"])
         .status()
         .unwrap();
     assert!(write_status.success());
@@ -601,7 +624,7 @@ fn check_fails_when_publish_workflow_is_missing() {
 
     let output = simit_with_user_config(temp.path())
         .current_dir(temp.path())
-        .args(["init-ci", "--platform", "forgejo", "--check"])
+        .args(["init", "ci", "--platform", "forgejo", "--check"])
         .output()
         .unwrap();
 
@@ -632,14 +655,14 @@ rust-version = "1.85"
 
     let status = simit_with_user_config(root)
         .current_dir(root)
-        .args(["init-ci", "--platform", "forgejo"])
+        .args(["init", "ci", "--platform", "forgejo"])
         .status()
         .unwrap();
     assert!(status.success());
 
     let ci = read(&root.join(".forgejo/workflows/ci.yaml"));
-    assert!(ci.contains("cargo run -- init-ci --platform forgejo --check"));
-    assert!(ci.contains("cargo run -- init-flake --check"));
+    assert!(ci.contains("cargo run -- init ci --platform forgejo --check"));
+    assert!(ci.contains("cargo run -- init flake --check"));
     assert!(!ci.contains("cargo run -- ci"));
 }
 
@@ -659,13 +682,29 @@ fn ci_command_is_not_available() {
 }
 
 #[test]
+fn old_init_ci_command_is_not_available() {
+    let temp = init_package(false);
+
+    let output = simit_with_user_config(temp.path())
+        .current_dir(temp.path())
+        .args(["init-ci", "--platform", "forgejo"])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("unrecognized subcommand 'init-ci'"));
+}
+
+#[test]
 fn optional_strict_flags_render_expected_steps() {
     let temp = init_package(false);
 
     let status = simit_with_user_config(temp.path())
         .current_dir(temp.path())
         .args([
-            "init-ci",
+            "init",
+            "ci",
             "--platform",
             "forgejo",
             "--with-msrv",
@@ -700,7 +739,8 @@ fn forgejo_nix_homebrew_step_matches_hardened_shape() {
     let status = simit_with_user_config(temp.path())
         .current_dir(temp.path())
         .args([
-            "init-ci",
+            "init",
+            "ci",
             "--platform",
             "forgejo",
             "--runtime",
@@ -766,7 +806,8 @@ fn forgejo_nix_homebrew_step_matches_hardened_shape() {
     let check_status = simit_with_user_config(temp.path())
         .current_dir(temp.path())
         .args([
-            "init-ci",
+            "init",
+            "ci",
             "--platform",
             "forgejo",
             "--runtime",
@@ -799,7 +840,8 @@ fn homebrew_rejects_cargo_runtime() {
     let output = simit_with_user_config(temp.path())
         .current_dir(temp.path())
         .args([
-            "init-ci",
+            "init",
+            "ci",
             "--platform",
             "forgejo",
             "--runtime",
@@ -829,7 +871,8 @@ fn homebrew_rejects_github_platform() {
     let output = simit_with_user_config(temp.path())
         .current_dir(temp.path())
         .args([
-            "init-ci",
+            "init",
+            "ci",
             "--platform",
             "github",
             "--with-homebrew",
@@ -858,7 +901,8 @@ fn github_chocolatey_flag_resolves_when_config_is_present() {
     let status = simit_with_user_config(temp.path())
         .current_dir(temp.path())
         .args([
-            "init-ci",
+            "init",
+            "ci",
             "--platform",
             "github",
             "--with-chocolatey",
@@ -882,7 +926,7 @@ fn github_chocolatey_flag_resolves_when_config_is_present() {
     assert!(workflow.contains("name: Install Chocolatey"));
     assert!(workflow.contains("name: Publish Chocolatey package"));
     assert!(workflow.contains("CHOCOLATEY_API_KEY: ${{ secrets.chocolatey_api_key }}"));
-    assert!(workflow.contains("simit chocolatey bump `"));
+    assert!(workflow.contains("simit dist chocolatey bump `"));
     assert!(workflow.contains("--archive \"x64=release/demo-$version-x86_64-windows.zip\" `"));
     assert!(workflow.contains("--push-source \"$env:CHOCO_PUSH_SOURCE\" `"));
 }
@@ -895,7 +939,8 @@ fn release_artifact_workflow_runs_configured_smoke_before_publish() {
     let status = simit_with_user_config(temp.path())
         .current_dir(temp.path())
         .args([
-            "init-ci",
+            "init",
+            "ci",
             "--platform",
             "forgejo",
             "--runtime",
@@ -930,7 +975,7 @@ fn github_chocolatey_flag_errors_when_config_is_absent() {
 
     let output = simit_with_user_config(temp.path())
         .current_dir(temp.path())
-        .args(["init-ci", "--platform", "github", "--with-chocolatey"])
+        .args(["init", "ci", "--platform", "github", "--with-chocolatey"])
         .output()
         .unwrap();
 
@@ -946,7 +991,7 @@ fn github_scoop_flag_resolves_when_config_is_present() {
 
     let status = simit_with_user_config(temp.path())
         .current_dir(temp.path())
-        .args(["init-ci", "--platform", "github", "--with-scoop"])
+        .args(["init", "ci", "--platform", "github", "--with-scoop"])
         .status()
         .unwrap();
 
@@ -964,7 +1009,7 @@ fn github_scoop_flag_resolves_when_config_is_present() {
     assert!(workflow.contains(
         "git -c credential.helper=\"$credentialHelper\" clone \"$env:SCOOP_BUCKET_URL\" bucket"
     ));
-    assert!(workflow.contains("simit scoop bump `"));
+    assert!(workflow.contains("simit dist scoop bump `"));
     assert!(workflow.contains("--archive \"x64=release/demo-$version-x86_64-windows.zip\" `"));
     assert!(workflow.contains("--archive \"arm64=release/demo-$version-aarch64-windows.zip\" `"));
 }
@@ -990,7 +1035,7 @@ arm64 = false
 
     let status = simit_with_user_config(temp.path())
         .current_dir(temp.path())
-        .args(["init-ci", "--platform", "github", "--with-scoop"])
+        .args(["init", "ci", "--platform", "github", "--with-scoop"])
         .status()
         .unwrap();
 
@@ -1009,7 +1054,7 @@ fn github_scoop_flag_errors_when_config_is_absent() {
 
     let output = simit_with_user_config(temp.path())
         .current_dir(temp.path())
-        .args(["init-ci", "--platform", "github", "--with-scoop"])
+        .args(["init", "ci", "--platform", "github", "--with-scoop"])
         .output()
         .unwrap();
 
@@ -1026,7 +1071,8 @@ fn github_chocolatey_and_scoop_share_windows_artifacts() {
     let status = simit_with_user_config(temp.path())
         .current_dir(temp.path())
         .args([
-            "init-ci",
+            "init",
+            "ci",
             "--platform",
             "github",
             "--with-chocolatey",
@@ -1060,7 +1106,8 @@ fn github_chocolatey_and_scoop_share_windows_artifacts() {
     let second_status = simit_with_user_config(temp.path())
         .current_dir(temp.path())
         .args([
-            "init-ci",
+            "init",
+            "ci",
             "--platform",
             "github",
             "--with-chocolatey",
@@ -1104,7 +1151,8 @@ download_repo = "foo/demo"
     let status = simit_with_user_config(temp.path())
         .current_dir(temp.path())
         .args([
-            "init-ci",
+            "init",
+            "ci",
             "--platform",
             "forgejo",
             "--runtime",
@@ -1150,10 +1198,11 @@ fn forgejo_requires_user_runner_config_when_no_override_exists() {
         .current_dir(temp.path())
         .env("HOME", isolated_home.path())
         .env("XDG_CONFIG_HOME", isolated_home.path().join(".xdg"))
+        .env("XDG_DATA_HOME", common::data_home_path())
         .env("GIT_CONFIG_GLOBAL", isolated_home.path().join("gitconfig"))
         .env("GIT_CONFIG_NOSYSTEM", "true")
         .env("SIMIT_MAINTAINERS_GPG", common::maintainer_key_path())
-        .args(["init-ci", "--platform", "forgejo", "--with-chocolatey"])
+        .args(["init", "ci", "--platform", "forgejo", "--with-chocolatey"])
         .output()
         .unwrap();
 
@@ -1171,7 +1220,8 @@ fn chocolatey_implies_artifacts_even_when_artifacts_false() {
     let output = simit_with_user_config(temp.path())
         .current_dir(temp.path())
         .args([
-            "init-ci",
+            "init",
+            "ci",
             "--platform",
             "github",
             "--with-chocolatey",
@@ -1196,7 +1246,7 @@ fn check_fails_when_deny_policy_differs() {
 
     let write_status = simit_with_user_config(temp.path())
         .current_dir(temp.path())
-        .args(["init-ci", "--platform", "forgejo", "--with-deny"])
+        .args(["init", "ci", "--platform", "forgejo", "--with-deny"])
         .status()
         .unwrap();
     assert!(write_status.success());
@@ -1205,7 +1255,14 @@ fn check_fails_when_deny_policy_differs() {
 
     let output = simit_with_user_config(temp.path())
         .current_dir(temp.path())
-        .args(["init-ci", "--platform", "forgejo", "--with-deny", "--check"])
+        .args([
+            "init",
+            "ci",
+            "--platform",
+            "forgejo",
+            "--with-deny",
+            "--check",
+        ])
         .output()
         .unwrap();
 

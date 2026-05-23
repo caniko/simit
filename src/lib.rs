@@ -20,6 +20,8 @@ pub mod config;
 pub mod git;
 /// Project language detection and generated-file management.
 pub mod project;
+/// Per-user registry of projects simit has acted on.
+pub mod registry;
 /// Release maintainer trust-root discovery and validation.
 pub mod release_trust;
 /// Renderers for generated support files.

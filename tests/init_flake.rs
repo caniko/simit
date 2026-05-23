@@ -4,8 +4,10 @@ use std::process::Command;
 
 use tempfile::TempDir;
 
+mod common;
+
 fn simit() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_simit"))
+    common::simit()
 }
 
 fn init_package() -> TempDir {
@@ -173,7 +175,7 @@ fn writes_flake_and_detected_hook_files() {
 
     let status = simit()
         .current_dir(temp.path())
-        .args(["init-flake"])
+        .args(["init", "flake"])
         .status()
         .unwrap();
     assert!(status.success());
@@ -238,7 +240,7 @@ rust-version = "{rust_version}"
 
     let status = simit()
         .current_dir(root)
-        .args(["init-flake"])
+        .args(["init", "flake"])
         .status()
         .unwrap();
     assert!(status.success());
@@ -255,7 +257,7 @@ fn patches_existing_anchorable_flake() {
 
     let status = simit()
         .current_dir(temp.path())
-        .args(["init-flake"])
+        .args(["init", "flake"])
         .status()
         .unwrap();
     assert!(status.success());
@@ -278,14 +280,14 @@ fn refuses_unpatchable_existing_flake_without_writing_hooks() {
 
     let output = simit()
         .current_dir(temp.path())
-        .args(["init-flake"])
+        .args(["init", "flake"])
         .output()
         .unwrap();
 
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("cannot patch flake.nix"));
-    assert!(stderr.contains("run `simit init-flake --print`"));
+    assert!(stderr.contains("run `simit init flake --print`"));
     assert!(!temp.path().join("nix/treefmt.nix").exists());
 }
 
@@ -306,7 +308,7 @@ version = "0.1.0"
 
     let status = simit()
         .current_dir(temp.path())
-        .args(["init-flake"])
+        .args(["init", "flake"])
         .status()
         .unwrap();
     assert!(status.success());
@@ -322,7 +324,7 @@ fn print_outputs_without_writing() {
 
     let output = simit()
         .current_dir(temp.path())
-        .args(["init-flake", "--print"])
+        .args(["init", "flake", "--print"])
         .output()
         .unwrap();
     assert!(output.status.success());
@@ -342,14 +344,14 @@ fn check_succeeds_when_flake_and_hooks_are_current() {
 
     let write_status = simit()
         .current_dir(temp.path())
-        .args(["init-flake"])
+        .args(["init", "flake"])
         .status()
         .unwrap();
     assert!(write_status.success());
 
     let check_status = simit()
         .current_dir(temp.path())
-        .args(["init-flake", "--check"])
+        .args(["init", "flake", "--check"])
         .status()
         .unwrap();
     assert!(check_status.success());
@@ -362,7 +364,7 @@ fn check_accepts_custom_rs_harbor_flake_with_generated_hook_wiring() {
 
     let write_status = simit()
         .current_dir(temp.path())
-        .args(["init-flake"])
+        .args(["init", "flake"])
         .status()
         .unwrap();
     assert!(write_status.success());
@@ -370,7 +372,7 @@ fn check_accepts_custom_rs_harbor_flake_with_generated_hook_wiring() {
     fs::write(temp.path().join("flake.nix"), custom_rs_harbor_flake()).unwrap();
     let check_status = simit()
         .current_dir(temp.path())
-        .args(["init-flake", "--check"])
+        .args(["init", "flake", "--check"])
         .status()
         .unwrap();
     assert!(check_status.success());
@@ -382,7 +384,7 @@ fn check_accepts_semantically_current_custom_hook_files() {
 
     let write_status = simit()
         .current_dir(temp.path())
-        .args(["init-flake"])
+        .args(["init", "flake"])
         .status()
         .unwrap();
     assert!(write_status.success());
@@ -453,7 +455,7 @@ fn check_accepts_semantically_current_custom_hook_files() {
 
     let check_status = simit()
         .current_dir(temp.path())
-        .args(["init-flake", "--check"])
+        .args(["init", "flake", "--check"])
         .status()
         .unwrap();
     assert!(check_status.success());
@@ -465,7 +467,7 @@ fn check_fails_when_hook_files_differ() {
 
     let write_status = simit()
         .current_dir(temp.path())
-        .args(["init-flake"])
+        .args(["init", "flake"])
         .status()
         .unwrap();
     assert!(write_status.success());
@@ -474,7 +476,7 @@ fn check_fails_when_hook_files_differ() {
 
     let output = simit()
         .current_dir(temp.path())
-        .args(["init-flake", "--check"])
+        .args(["init", "flake", "--check"])
         .output()
         .unwrap();
 
@@ -490,7 +492,7 @@ fn check_diff_includes_stale_hook_file_diff() {
 
     let write_status = simit()
         .current_dir(temp.path())
-        .args(["init-flake"])
+        .args(["init", "flake"])
         .status()
         .unwrap();
     assert!(write_status.success());
@@ -498,7 +500,7 @@ fn check_diff_includes_stale_hook_file_diff() {
 
     let output = simit()
         .current_dir(temp.path())
-        .args(["init-flake", "--check", "--diff"])
+        .args(["init", "flake", "--check", "--diff"])
         .output()
         .unwrap();
     assert!(!output.status.success());
@@ -513,13 +515,13 @@ fn check_and_print_are_mutually_exclusive() {
 
     let output = simit()
         .current_dir(temp.path())
-        .args(["init-flake", "--check", "--print"])
+        .args(["init", "flake", "--check", "--print"])
         .output()
         .unwrap();
 
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(stderr.contains("init-flake accepts only one of --check or --print"));
+    assert!(stderr.contains("init flake accepts only one of --check or --print"));
 }
 
 #[test]
@@ -528,11 +530,11 @@ fn diff_requires_check() {
 
     let output = simit()
         .current_dir(temp.path())
-        .args(["init-flake", "--diff"])
+        .args(["init", "flake", "--diff"])
         .output()
         .unwrap();
 
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(stderr.contains("init-flake --diff requires --check"));
+    assert!(stderr.contains("init flake --diff requires --check"));
 }

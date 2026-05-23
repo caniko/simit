@@ -22,30 +22,59 @@ pub enum Commands {
     Commit(CommitCommand),
     #[command(about = "Run local release checks, update the changelog, commit, and tag")]
     Release(ReleaseCommand),
-    #[command(about = "Generate or verify Rust CI workflows")]
-    InitCi(Box<InitCiCommand>),
-    #[command(about = "Bootstrap a Homebrew tap repo with a formula skeleton")]
-    InitHomebrewTap(InitHomebrewTapCommand),
-    #[command(about = "Bootstrap a Chocolatey package directory")]
-    InitChocolatey(InitChocolateyCommand),
-    #[command(about = "Homebrew formula helpers (render, bump, push)")]
-    Homebrew(HomebrewCommand),
-    #[command(about = "Chocolatey package helpers (render, bump, push)")]
-    Chocolatey(ChocolateyCommand),
-    #[command(about = "Bootstrap a Scoop bucket repo with a manifest skeleton")]
-    InitScoopBucket(InitScoopBucketCommand),
-    #[command(about = "Scoop manifest helpers (render, bump, push)")]
-    Scoop(ScoopCommand),
-    #[command(about = "Generate or verify a canonical Rust crane flake and hook wiring")]
-    InitFlake(InitFlakeCommand),
+    #[command(
+        about = "Bootstrap generated project files and distribution skeletons",
+        disable_help_subcommand = true
+    )]
+    Init(InitCommand),
+    #[command(about = "Distribution channel helpers")]
+    Dist(DistCommand),
     #[command(about = "Manage a Keep a Changelog file")]
     Changelog(ChangelogCommand),
     #[command(about = "Manage user-scoped simit configuration")]
     Config(ConfigCommand),
+    #[command(about = "Inspect and maintain the per-user project registry")]
+    Projects(ProjectsCommand),
     #[command(about = "Print shell completion scripts")]
     Completions(CompletionsCommand),
     #[command(about = "Print a roff manpage for simit")]
     Man(ManCommand),
+}
+
+#[derive(Debug, Args)]
+pub struct InitCommand {
+    #[command(subcommand)]
+    pub action: InitAction,
+}
+
+#[derive(Debug, Args)]
+pub struct DistCommand {
+    #[command(subcommand)]
+    pub action: DistAction,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum InitAction {
+    #[command(about = "Generate or verify Rust CI workflows")]
+    Ci(Box<InitCiCommand>),
+    #[command(about = "Generate or verify a canonical Rust crane flake and hook wiring")]
+    Flake(InitFlakeCommand),
+    #[command(about = "Bootstrap a Homebrew tap repo with a formula skeleton")]
+    HomebrewTap(InitHomebrewTapCommand),
+    #[command(about = "Bootstrap a Chocolatey package directory")]
+    Chocolatey(InitChocolateyCommand),
+    #[command(about = "Bootstrap a Scoop bucket repo with a manifest skeleton")]
+    ScoopBucket(InitScoopBucketCommand),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum DistAction {
+    #[command(about = "Homebrew formula helpers (render, bump, push)")]
+    Homebrew(HomebrewCommand),
+    #[command(about = "Chocolatey package helpers (render, bump, push)")]
+    Chocolatey(ChocolateyCommand),
+    #[command(about = "Scoop manifest helpers (render, bump, push)")]
+    Scoop(ScoopCommand),
 }
 
 #[derive(Debug, Args)]
@@ -892,6 +921,137 @@ pub struct ChangelogCommand {
 pub struct ConfigCommand {
     #[command(subcommand, help = "User config action to run")]
     pub action: ConfigAction,
+}
+
+#[derive(Debug, Args)]
+pub struct ProjectsCommand {
+    #[command(subcommand, help = "Project registry action to run")]
+    pub action: ProjectsAction,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ProjectsAction {
+    #[command(about = "List registered projects")]
+    List(ProjectsListArgs),
+    #[command(about = "Show one registered project's feature status")]
+    Show(ProjectsShowArgs),
+    #[command(about = "Re-run feature detection across registered projects")]
+    Scan(ProjectsScanArgs),
+    #[command(about = "Discover Rust workspaces under a filesystem subtree")]
+    Discover(ProjectsDiscoverArgs),
+    #[command(about = "Forget one registered project")]
+    Forget(ProjectsForgetArgs),
+    #[command(about = "Remove registered projects whose paths no longer exist")]
+    Prune(ProjectsPruneArgs),
+    #[command(about = "Clear all per-user project registry state")]
+    ClearState(ProjectsClearStateArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct ProjectsListArgs {
+    #[arg(
+        long = "feature",
+        value_name = "NAME[=STATUS]",
+        action = clap::ArgAction::Append,
+        help = "Filter to projects where feature NAME has STATUS, or any non-absent status"
+    )]
+    pub features: Vec<String>,
+    #[arg(long, help = "Print a machine-readable JSON array")]
+    pub json: bool,
+    #[arg(
+        long,
+        value_enum,
+        value_name = "KEY",
+        default_value = "last-seen",
+        help = "Sort by name, path, last-seen, or first-seen"
+    )]
+    pub sort: ProjectsSort,
+}
+
+#[derive(Debug, Args)]
+pub struct ProjectsShowArgs {
+    #[arg(
+        value_name = "PATH",
+        help = "Project path; defaults to the current workspace root"
+    )]
+    pub path: Option<Utf8PathBuf>,
+    #[arg(long, help = "Print machine-readable JSON")]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct ProjectsScanArgs {
+    #[arg(long, help = "Also drop entries whose paths no longer exist")]
+    pub prune: bool,
+    #[arg(long, help = "Print intended changes without writing the registry")]
+    pub dry_run: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct ProjectsDiscoverArgs {
+    #[arg(
+        value_name = "ROOT",
+        help = "Filesystem subtree to walk; defaults to the current directory"
+    )]
+    pub root: Option<Utf8PathBuf>,
+    #[arg(
+        long,
+        help = "Walk and report discoverable projects without writing the registry"
+    )]
+    pub dry_run: bool,
+    #[arg(long, help = "Print the discovery report as machine-readable JSON")]
+    pub json: bool,
+    #[arg(
+        long,
+        value_name = "NAME",
+        action = clap::ArgAction::Append,
+        help = "Also skip directories with this basename, in addition to built-in skips; may be repeated"
+    )]
+    pub skip: Vec<String>,
+    #[arg(
+        long,
+        value_name = "N",
+        help = "Maximum recursion depth from ROOT; defaults to 8"
+    )]
+    pub max_depth: Option<usize>,
+    #[arg(long, help = "Follow symlinked directories during discovery")]
+    pub follow_symlinks: bool,
+    #[arg(
+        long,
+        help = "Register Cargo workspaces even when no simit features are detected"
+    )]
+    pub include_empty: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct ProjectsForgetArgs {
+    #[arg(value_name = "PATH", help = "Project path to remove from the registry")]
+    pub path: Utf8PathBuf,
+}
+
+#[derive(Debug, Args)]
+pub struct ProjectsPruneArgs {
+    #[arg(long, help = "Print stale entries without writing the registry")]
+    pub dry_run: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct ProjectsClearStateArgs {
+    #[arg(
+        long,
+        help = "Print the registry path that would be cleared without writing"
+    )]
+    pub dry_run: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ProjectsSort {
+    Name,
+    Path,
+    #[value(name = "last-seen")]
+    LastSeen,
+    #[value(name = "first-seen")]
+    FirstSeen,
 }
 
 #[derive(Debug, Subcommand)]

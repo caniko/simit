@@ -583,7 +583,7 @@ fn push_chocolatey_publish_step(workflow: &mut String, opts: &ChocolateyOptions)
     workflow.push_str("        run: |\n");
     workflow.push_str("          if (-not $env:CHOCOLATEY_API_KEY) { Write-Host 'CHOCOLATEY_API_KEY not configured; skipping Chocolatey package update.'; exit 0 }\n");
     push_windows_version_lines(workflow);
-    workflow.push_str("          simit chocolatey bump `\n");
+    workflow.push_str("          simit dist chocolatey bump `\n");
     workflow.push_str("            --version $version `\n");
     workflow.push_str("            --package-dir chocolatey-package `\n");
     workflow.push_str("            --archive ");
@@ -619,7 +619,7 @@ fn push_scoop_publish_step(workflow: &mut String, opts: &ScoopOptions) {
     workflow.push_str("          $defaultBranch = (git symbolic-ref --short refs/remotes/origin/HEAD) -replace '^origin/', ''\n");
     workflow.push_str("          git checkout $defaultBranch\n");
     workflow.push_str("          Pop-Location\n");
-    workflow.push_str("          simit scoop bump `\n");
+    workflow.push_str("          simit dist scoop bump `\n");
     workflow.push_str("            --version $version `\n");
     workflow.push_str("            --bucket bucket `\n");
     for spec in scoop_archive_specs(opts) {
@@ -1276,7 +1276,7 @@ fn push_self_check_steps(
     workflow.push_str("      - name: Check generated CI\n");
     workflow.push_str("        run: ");
     workflow.push_str(command_prefix(runtime));
-    workflow.push_str("cargo run -- init-ci --platform ");
+    workflow.push_str("cargo run -- init ci --platform ");
     workflow.push_str(platform.as_str());
     push_self_check_suffix(
         workflow,
@@ -1288,7 +1288,7 @@ fn push_self_check_steps(
     workflow.push_str("      - name: Check generated flake and hooks\n");
     workflow.push_str("        run: ");
     workflow.push_str(command_prefix(runtime));
-    workflow.push_str("cargo run -- init-flake --check\n\n");
+    workflow.push_str("cargo run -- init flake --check\n\n");
 }
 
 fn push_self_check_suffix(

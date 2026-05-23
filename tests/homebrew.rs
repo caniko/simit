@@ -4,8 +4,10 @@ use std::process::Command;
 
 use tempfile::TempDir;
 
+mod common;
+
 fn simit() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_simit"))
+    common::simit()
 }
 
 fn init_package(version: &str, platform_config: &str) -> TempDir {
@@ -88,7 +90,7 @@ fn render_version_outputs_no_check_formula() {
 
     let output = simit()
         .current_dir(temp.path())
-        .args(["homebrew", "render", "--version", "1.2.3"])
+        .args(["dist", "homebrew", "render", "--version", "1.2.3"])
         .output()
         .unwrap();
 
@@ -107,6 +109,7 @@ fn render_output_writes_file_without_stdout() {
     let output = simit()
         .current_dir(temp.path())
         .args([
+            "dist",
             "homebrew",
             "render",
             "--version",
@@ -130,7 +133,7 @@ fn render_without_version_uses_package_version() {
 
     let output = simit()
         .current_dir(temp.path())
-        .args(["homebrew", "render"])
+        .args(["dist", "homebrew", "render"])
         .output()
         .unwrap();
 
@@ -145,6 +148,7 @@ fn bump_writes_formula_with_real_sha256s() {
     let tap = temp.path().join("tap");
     let archives = fixture_archives(temp.path());
     let mut args = vec![
+        "dist".to_owned(),
         "homebrew".to_owned(),
         "bump".to_owned(),
         "--version".to_owned(),
@@ -182,6 +186,7 @@ linux_arm = false
         .filter(|(platform, _)| platform != "linux_arm")
         .collect::<Vec<_>>();
     let mut args = vec![
+        "dist".to_owned(),
         "homebrew".to_owned(),
         "bump".to_owned(),
         "--version".to_owned(),
@@ -209,6 +214,7 @@ fn bump_push_rejects_non_git_tap() {
     let tap = temp.path().join("tap");
     let archives = fixture_archives(temp.path());
     let mut args = vec![
+        "dist".to_owned(),
         "homebrew".to_owned(),
         "bump".to_owned(),
         "--version".to_owned(),
@@ -248,6 +254,7 @@ fn bump_push_rejects_unrelated_dirty_file() {
     fs::write(tap.join("README.md"), "dirty\n").unwrap();
     let archives = fixture_archives(temp.path());
     let mut args = vec![
+        "dist".to_owned(),
         "homebrew".to_owned(),
         "bump".to_owned(),
         "--version".to_owned(),
@@ -293,6 +300,7 @@ linux_arm = false
     let simit_status = simit()
         .current_dir(temp.path())
         .args([
+            "dist",
             "homebrew",
             "bump",
             "--version",
@@ -342,4 +350,16 @@ linux_arm = false
         .find(|line| line.trim_start().starts_with("sha256 "))
         .unwrap();
     assert_eq!(simit_sha, rs_harbor_sha);
+}
+
+#[test]
+fn old_top_level_homebrew_command_is_rejected() {
+    let output = simit()
+        .args(["homebrew", "bump", "--help"])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("unrecognized subcommand 'homebrew'"));
 }

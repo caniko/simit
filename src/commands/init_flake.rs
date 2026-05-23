@@ -7,15 +7,16 @@ use anyhow::{Context, Result, bail};
 use crate::cargo;
 use crate::cli::InitFlakeCommand;
 use crate::project::{self, GeneratedFile, Languages};
+use crate::registry::{self, FeatureStatus};
 use crate::render::diff::unified_diff;
 use crate::render::flake;
 
 pub fn run(command: InitFlakeCommand) -> Result<()> {
     if command.check && command.print {
-        bail!("init-flake accepts only one of --check or --print");
+        bail!("init flake accepts only one of --check or --print");
     }
     if command.diff && !command.check {
-        bail!("init-flake --diff requires --check");
+        bail!("init flake --diff requires --check");
     }
 
     let metadata = cargo::metadata_for_current_dir()?;
@@ -54,10 +55,20 @@ pub fn run(command: InitFlakeCommand) -> Result<()> {
             .find(|file| file.relative_path == Path::new("flake.nix"))
             .expect("flake.nix is generated");
         flake_file.content = patched;
-        return project::write_generated_files(workspace_root, &patched_files);
+        project::write_generated_files(workspace_root, &patched_files)?;
+        registry::touch_current_project_or_warn([
+            ("flake", FeatureStatus::Managed),
+            ("hooks", FeatureStatus::Installed),
+        ]);
+        return Ok(());
     }
 
-    project::write_generated_files(workspace_root, &files)
+    project::write_generated_files(workspace_root, &files)?;
+    registry::touch_current_project_or_warn([
+        ("flake", FeatureStatus::Managed),
+        ("hooks", FeatureStatus::Installed),
+    ]);
+    Ok(())
 }
 
 fn rustfmt_edition(metadata: &cargo::Metadata) -> String {
@@ -162,12 +173,12 @@ fn check_files(
         Ok(())
     } else if diffs.is_empty() {
         bail!(
-            "flake and hook files are not up to date; run `simit init-flake`:\n{}",
+            "flake and hook files are not up to date; run `simit init flake`:\n{}",
             mismatches.join("\n")
         );
     } else {
         bail!(
-            "flake and hook files are not up to date; run `simit init-flake`:\n{}\n{}",
+            "flake and hook files are not up to date; run `simit init flake`:\n{}\n{}",
             mismatches.join("\n"),
             diffs.join("\n")
         );

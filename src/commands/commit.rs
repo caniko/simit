@@ -3,6 +3,7 @@ use anyhow::Result;
 use crate::cargo::{self, BumpSpec};
 use crate::cli::CommitCommand;
 use crate::git;
+use crate::registry;
 
 pub fn run(command: CommitCommand) -> Result<()> {
     let metadata = cargo::metadata_for_current_dir()?;
@@ -36,6 +37,7 @@ pub fn run(command: CommitCommand) -> Result<()> {
         git::tag(workspace_root, &new_version, sign_tag)?;
     }
 
+    registry::refresh_current_project_or_warn();
     Ok(())
 }
 

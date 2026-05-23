@@ -8,6 +8,7 @@ use anyhow::{Context, Result, bail};
 use crate::cargo;
 use crate::cli::{ChocolateyAction, ChocolateyBumpArgs, ChocolateyCommand, ChocolateyRenderArgs};
 use crate::config::{ProjectConfig, ResolvedChocolatey};
+use crate::registry::{self, FeatureStatus};
 use crate::render::chocolatey_nuspec::{
     self, Architecture, ChocolateyRenderOptions, RenderedPackage, Sha256Set,
 };
@@ -70,6 +71,7 @@ fn bump(args: ChocolateyBumpArgs) -> Result<()> {
         }
         pack_and_push(package_dir, &resolved.push.source, &api_key)?;
     }
+    registry::touch_current_project_or_warn([("chocolatey", FeatureStatus::Managed)]);
     Ok(())
 }
 

@@ -661,7 +661,7 @@ fn init_flake_creates_prints_checks_and_refuses_unpatchable_existing_flake() {
 
     let print = simit()
         .current_dir(root)
-        .args(["init-flake", "--print"])
+        .args(["init", "flake", "--print"])
         .output()
         .unwrap();
     assert!(print.status.success());
@@ -675,7 +675,7 @@ fn init_flake_creates_prints_checks_and_refuses_unpatchable_existing_flake() {
 
     let status = simit()
         .current_dir(root)
-        .args(["init-flake"])
+        .args(["init", "flake"])
         .status()
         .unwrap();
     assert!(status.success());
@@ -685,7 +685,7 @@ fn init_flake_creates_prints_checks_and_refuses_unpatchable_existing_flake() {
 
     let check = simit()
         .current_dir(root)
-        .args(["init-flake", "--check"])
+        .args(["init", "flake", "--check"])
         .status()
         .unwrap();
     assert!(check.success());
@@ -693,7 +693,7 @@ fn init_flake_creates_prints_checks_and_refuses_unpatchable_existing_flake() {
     fs::write(root.join("flake.nix"), "{}\n").unwrap();
     let output = simit()
         .current_dir(root)
-        .args(["init-flake"])
+        .args(["init", "flake"])
         .output()
         .unwrap();
     assert!(!output.status.success());
@@ -712,7 +712,8 @@ fn ci_options_emit_expected_steps_and_msrv_requires_rust_version() {
     let status = simit()
         .current_dir(root)
         .args([
-            "init-ci",
+            "init",
+            "ci",
             "--platform",
             "github",
             "--with-nextest",
@@ -751,7 +752,7 @@ fn ci_options_emit_expected_steps_and_msrv_requires_rust_version() {
     fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
     let output = simit()
         .current_dir(root)
-        .args(["init-ci", "--platform", "github", "--with-msrv"])
+        .args(["init", "ci", "--platform", "github", "--with-msrv"])
         .output()
         .unwrap();
     assert!(!output.status.success());
@@ -769,7 +770,7 @@ fn generated_diff_is_printed_for_stale_hooks() {
 
     let status = simit()
         .current_dir(root)
-        .args(["init-flake"])
+        .args(["init", "flake"])
         .status()
         .unwrap();
     assert!(status.success());
@@ -777,7 +778,7 @@ fn generated_diff_is_printed_for_stale_hooks() {
 
     let output = simit()
         .current_dir(root)
-        .args(["init-flake", "--check", "--diff"])
+        .args(["init", "flake", "--check", "--diff"])
         .output()
         .unwrap();
     assert!(!output.status.success());
@@ -802,4 +803,43 @@ fn completions_and_man_are_non_empty() {
     let man = simit().current_dir(root).args(["man"]).output().unwrap();
     assert!(man.status.success());
     assert!(!man.stdout.is_empty());
+}
+
+#[test]
+fn init_help_is_grouped() {
+    let temp = init_package();
+    let root = temp.path();
+
+    let top_help = simit().current_dir(root).arg("--help").output().unwrap();
+    assert!(top_help.status.success());
+    let top_help = String::from_utf8(top_help.stdout).unwrap();
+    for old in [
+        "init-ci",
+        "init-flake",
+        "init-homebrew-tap",
+        "init-chocolatey",
+        "init-scoop-bucket",
+    ] {
+        assert!(!top_help.contains(old), "top-level help still lists {old}");
+    }
+    assert!(top_help.contains("init"));
+
+    let init_help = simit()
+        .current_dir(root)
+        .args(["init", "--help"])
+        .output()
+        .unwrap();
+    assert!(init_help.status.success());
+    let init_help = String::from_utf8(init_help.stdout).unwrap();
+    let commands: Vec<_> = init_help
+        .lines()
+        .skip_while(|line| line.trim() != "Commands:")
+        .skip(1)
+        .take_while(|line| line.trim() != "Options:")
+        .filter_map(|line| line.split_whitespace().next())
+        .collect();
+    assert_eq!(
+        commands,
+        ["ci", "flake", "homebrew-tap", "chocolatey", "scoop-bucket"]
+    );
 }

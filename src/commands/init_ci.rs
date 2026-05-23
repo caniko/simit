@@ -7,6 +7,7 @@ use crate::cli::{
 };
 use crate::config::{ProjectConfig, ResolvedChocolatey, ResolvedHomebrew, ResolvedScoop};
 use crate::project;
+use crate::registry::{self, FeatureStatus};
 use crate::release_trust::{self, TrustOverrides};
 use crate::render::ci::{
     self, ChocolateyOptions, CiOptions, HomebrewOptions, HomebrewPlatformSet, ScoopOptions,
@@ -48,6 +49,8 @@ pub fn run(command: InitCiCommand) -> Result<()> {
     if command.with_scoop && !command.with_artifacts {
         eprintln!("--with-scoop implies --with-artifacts; enabling it.");
     }
+    let explicit_runners_cover_required =
+        runner_overrides_cover_required_runners(&command, windows_packagers);
     let cfg = ProjectConfig::load(workspace_root)?;
     let homebrew = if command.with_homebrew {
         Some(homebrew_options(&cfg, &command.homebrew, &package)?)
@@ -79,7 +82,7 @@ pub fn run(command: InitCiCommand) -> Result<()> {
         scoop,
     };
     let user_config = UserConfig::load().or_else(|err| {
-        if command.platform == Platform::Github {
+        if command.platform == Platform::Github || explicit_runners_cover_required {
             Ok(UserConfig::default())
         } else {
             Err(err)
@@ -121,14 +124,23 @@ pub fn run(command: InitCiCommand) -> Result<()> {
             workspace_root,
             &files,
             &format!(
-                "CI workflows are not up to date; run `simit init-ci --platform {}`",
+                "CI workflows are not up to date; run `simit init ci --platform {}`",
                 command.platform.as_str()
             ),
             command.diff,
         )
     } else {
-        project::write_generated_files(workspace_root, &files)
+        project::write_generated_files(workspace_root, &files)?;
+        registry::touch_current_project_or_warn([("ci", FeatureStatus::Managed)]);
+        Ok(())
     }
+}
+
+fn runner_overrides_cover_required_runners(
+    command: &InitCiCommand,
+    windows_packagers: bool,
+) -> bool {
+    command.runner.is_some() && (!windows_packagers || command.windows_runner.is_some())
 }
 
 fn chocolatey_options(

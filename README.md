@@ -61,6 +61,25 @@ simit release sync-up --push
 
 Without `--push`, sync-up only moves the local tag.
 
+## Project registry
+
+Simit records projects it has acted on in a per-user registry. Inspect that
+state with `simit projects`:
+
+```sh
+simit projects list
+simit projects list --json --feature flake=managed
+simit projects show
+simit projects discover ~/Projects --dry-run
+simit projects scan --prune
+simit projects clear-state --dry-run
+```
+
+The JSON output is intended for scripts and AI agents that need to find all
+projects where simit manages a feature such as flake, CI, or packaging.
+Run `simit projects discover <ROOT>` once per machine to add existing
+simit-managed projects to the registry.
+
 ## Changelog management
 
 Initialize a canonical Keep a Changelog file:
@@ -104,8 +123,8 @@ simit release patch -m "release patch"
 Generate lightweight Rust CI and crates.io publish workflows for a repository:
 
 ```sh
-simit init-ci --platform forgejo
-simit init-ci --platform github
+simit init ci --platform forgejo
+simit init ci --platform github
 ```
 
 Forgejo workflows use direct Rust container jobs by default, even when the
@@ -125,13 +144,13 @@ simit config check
 ```
 
 The config lives at `$XDG_CONFIG_HOME/simit/config.toml`, or
-`~/.config/simit/config.toml` when `XDG_CONFIG_HOME` is unset. `init-ci`
+`~/.config/simit/config.toml` when `XDG_CONFIG_HOME` is unset. `init ci`
 selects Forgejo runners from `[ci.defaults.forgejo]`; if no matching default is
 configured, it fails instead of guessing a non-portable label. Use `--runner`
 only for a one-off explicit label override:
 
 ```sh
-simit init-ci --platform forgejo --runner custom-runner
+simit init ci --platform forgejo --runner custom-runner
 ```
 
 Use `--runtime nix` only for workflows that intentionally need flake outputs,
@@ -140,21 +159,21 @@ workflows use the configured `nix` runner default and do not run on
 pull-request events:
 
 ```sh
-simit init-ci --platform forgejo --runtime nix
+simit init ci --platform forgejo --runtime nix
 ```
 
 Use `--check` in CI to make sure committed workflows still match `simit`'s
 generated output:
 
 ```sh
-simit init-ci --platform forgejo --check
+simit init ci --platform forgejo --check
 ```
 
-`init-ci` always renders a separate `publish-crate.yaml` workflow. That
+`init ci` always renders a separate `publish-crate.yaml` workflow. That
 workflow runs only on exact semver tag pushes such as `0.9.0`, verifies that
 the tag matches the Cargo package version, verifies the signed tag against
 `keys/maintainers.gpg`, runs a publish dry run, and publishes with the
-`CRATES_IO_API_TOKEN` secret. On generation, `init-ci` discovers the release
+`CRATES_IO_API_TOKEN` secret. On generation, `init ci` discovers the release
 signing key from `[release.signing].key`, `git config user.signingkey`, or
 `--maintainer-key`, then writes the maintainer public keyring.
 
@@ -172,9 +191,9 @@ The default trust root is `keys/maintainers.gpg`; override it with
 Add optional CI jobs and checks when the project needs them:
 
 ```sh
-simit init-ci --platform github --with-nextest --with-msrv --with-docs
-simit init-ci --platform forgejo --with-audit --with-deny --with-artifacts
-simit init-ci --platform forgejo --check --diff
+simit init ci --platform github --with-nextest --with-msrv --with-docs
+simit init ci --platform forgejo --with-audit --with-deny --with-artifacts
+simit init ci --platform forgejo --check --diff
 ```
 
 `--with-msrv` requires `package.rust-version`.
@@ -182,7 +201,7 @@ simit init-ci --platform forgejo --check --diff
 Forgejo + Nix artifact workflows can also publish a Homebrew tap:
 
 ```sh
-simit init-ci --platform forgejo --runtime nix --with-artifacts --with-homebrew \
+simit init ci --platform forgejo --runtime nix --with-artifacts --with-homebrew \
   --homebrew-tap https://codeberg.org/caniko/homebrew-demo.git \
   --homebrew-description "demo binary" \
   --homebrew-homepage https://example.com \
@@ -220,14 +239,14 @@ archive_pattern = "foo-{version}-{arch}-{os}.tar.gz"
 Bootstrap the tap repo once with a placeholder formula:
 
 ```sh
-simit init-homebrew-tap --target ../homebrew-foo
+simit init homebrew-tap --target ../homebrew-foo
 # prints the next-step git commit and push hints
 ```
 
 Wire the release workflow from the project repo:
 
 ```sh
-simit init-ci --platform forgejo --runtime nix \
+simit init ci --platform forgejo --runtime nix \
   --with-artifacts --with-homebrew
 ```
 
@@ -235,8 +254,8 @@ For local inspection and iteration, render the formula or bump a checked-out
 tap using release archives:
 
 ```sh
-simit homebrew render
-simit homebrew bump \
+simit dist homebrew render
+simit dist homebrew bump \
   --version 0.3.1 \
   --tap ../homebrew-foo \
   --archive darwin_arm=release/foo-0.3.1-aarch64-darwin.tar.gz \
@@ -281,15 +300,15 @@ archive_pattern = "foo-{version}-{arch}-windows.zip"
 Bootstrap the package repositories once:
 
 ```sh
-simit init-chocolatey --target packaging/chocolatey
-simit init-scoop-bucket --target ../scoop-foo
+simit init chocolatey --target packaging/chocolatey
+simit init scoop-bucket --target ../scoop-foo
 ```
 
 Wire Windows publishing into tagged release CI:
 
 ```sh
-simit init-ci --platform github --with-chocolatey --with-scoop
-simit init-ci --platform forgejo --with-chocolatey --with-scoop
+simit init ci --platform github --with-chocolatey --with-scoop
+simit init ci --platform forgejo --with-chocolatey --with-scoop
 ```
 
 `--with-chocolatey` and `--with-scoop` imply `--with-artifacts`. GitHub uses
@@ -301,14 +320,14 @@ the simit user config unless `--windows-runner` overrides it. Generated workflow
 For local inspection and iteration:
 
 ```sh
-simit chocolatey render --output-dir packaging/chocolatey
-simit chocolatey bump \
+simit dist chocolatey render --output-dir packaging/chocolatey
+simit dist chocolatey bump \
   --version 0.3.1 \
   --package-dir packaging/chocolatey \
   --archive x64=release/foo-0.3.1-x86_64-windows.zip
 
-simit scoop render --output packaging/scoop/foo.json
-simit scoop bump \
+simit dist scoop render --output packaging/scoop/foo.json
+simit dist scoop bump \
   --version 0.3.1 \
   --bucket ../scoop-foo \
   --archive x64=release/foo-0.3.1-x86_64-windows.zip \
@@ -408,7 +427,7 @@ Flake config exports the same schema as JSON-compatible Nix data:
 Generate a canonical Rust crane flake plus formatter and pre-commit hook definitions:
 
 ```sh
-simit init-flake
+simit init flake
 ```
 
 This writes `flake.nix`, `nix/treefmt.nix`, and `nix/pre-commit.nix`,
@@ -420,14 +439,14 @@ apply the generated wiring manually.
 Preview the generated files without writing them:
 
 ```sh
-simit init-flake --print
+simit init flake --print
 ```
 
 Check committed flake and hook files in CI:
 
 ```sh
-simit init-flake --check
-simit init-flake --check --diff
+simit init flake --check
+simit init flake --check --diff
 ```
 
 ## Shell integration
@@ -453,7 +472,7 @@ simit release patch -m "release patch"
 
 The crates.io publish workflow runs when the release tag is pushed and requires
 `CRATES_IO_API_TOKEN`. It also requires `keys/maintainers.gpg`, which
-`simit init-ci` and `simit release trust init` generate from the configured
+`simit init ci` and `simit release trust init` generate from the configured
 release signing key.
 
 If that tag-triggered workflow fails after the tag has already been pushed,

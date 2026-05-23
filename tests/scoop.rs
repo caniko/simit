@@ -4,8 +4,10 @@ use std::process::Command;
 
 use tempfile::TempDir;
 
+mod common;
+
 fn simit() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_simit"))
+    common::simit()
 }
 
 fn init_package(version: &str, arch_config: &str) -> TempDir {
@@ -86,7 +88,7 @@ fn render_version_outputs_stable_manifest() {
 
     let output = simit()
         .current_dir(temp.path())
-        .args(["scoop", "render", "--version", "1.2.3"])
+        .args(["dist", "scoop", "render", "--version", "1.2.3"])
         .output()
         .unwrap();
 
@@ -123,6 +125,7 @@ fn bump_writes_manifest_with_real_sha256s() {
     let bucket = temp.path().join("bucket-repo");
     let archives = fixture_archives(temp.path());
     let mut args = vec![
+        "dist".to_owned(),
         "scoop".to_owned(),
         "bump".to_owned(),
         "--version".to_owned(),
@@ -156,6 +159,7 @@ fn bump_errors_when_enabled_architecture_archive_is_missing() {
     let output = simit()
         .current_dir(temp.path())
         .args([
+            "dist",
             "scoop",
             "bump",
             "--version",
@@ -180,6 +184,7 @@ fn render_no_arch_arm64_omits_arm64_block() {
     let output = simit()
         .current_dir(temp.path())
         .args([
+            "dist",
             "scoop",
             "render",
             "--version",
@@ -203,12 +208,12 @@ fn init_scoop_bucket_print_matches_render() {
 
     let render = simit()
         .current_dir(temp.path())
-        .args(["scoop", "render"])
+        .args(["dist", "scoop", "render"])
         .output()
         .unwrap();
     let init = simit()
         .current_dir(temp.path())
-        .args(["init-scoop-bucket", "--target", "/tmp/unused", "--print"])
+        .args(["init", "scoop-bucket", "--target", "/tmp/unused", "--print"])
         .output()
         .unwrap();
 
@@ -234,6 +239,7 @@ fn bump_without_push_writes_expected_git_diff() {
 
     let archives = fixture_archives(temp.path());
     let mut args = vec![
+        "dist".to_owned(),
         "scoop".to_owned(),
         "bump".to_owned(),
         "--version".to_owned(),
