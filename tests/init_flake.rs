@@ -169,6 +169,125 @@ fn custom_rs_harbor_flake() -> &'static str {
 "#
 }
 
+fn custom_skillnet_flake_config() -> &'static str {
+    r#"[flake]
+mode = "custom"
+toolchain_binding = "toolchain.rustToolchain"
+crane_lib_binding = "craneLib"
+package_binding = "package"
+
+[flake.expected_outputs]
+packages = ["default", "docs", "site"]
+checks = ["default", "formatting", "clippy", "fmt", "nextest", "doc", "audit", "deny", "hm-module"]
+top_level = ["hmModules"]
+"#
+}
+
+fn custom_skillnet_flake() -> &'static str {
+    r#"{
+  description = "skillnet AI skill mirror manager";
+
+  inputs = {
+    rs-harbor.url = "git+https://codeberg.org/caniko/rs-harbor.git";
+
+    nixpkgs.follows = "rs-harbor/nixpkgs";
+    rust-overlay.follows = "rs-harbor/rust-overlay";
+    crane.follows = "rs-harbor/crane";
+    flake-utils.follows = "rs-harbor/flake-utils";
+    treefmt-nix = {
+      url = "github:numtide/treefmt-nix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+    git-hooks = {
+      url = "github:cachix/git-hooks.nix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+  };
+
+  outputs = {
+    self,
+    nixpkgs,
+    rs-harbor,
+    flake-utils,
+    rust-overlay,
+    treefmt-nix,
+    git-hooks,
+    ...
+  }: let
+    hmModule = import ./nix/hm-module.nix;
+  in
+    flake-utils.lib.eachDefaultSystem (system: let
+      pkgs = import nixpkgs {
+        inherit system;
+        overlays = [(import rust-overlay)];
+      };
+      toolchain = rs-harbor.lib.mkToolchain {inherit pkgs;};
+      inherit (toolchain) craneLib;
+      src = craneLib.cleanCargoSource ./.;
+      commonArgs = {
+        inherit src;
+        strictDeps = true;
+      };
+      cargoArtifacts = craneLib.buildDepsOnly commonArgs;
+      package = craneLib.buildPackage (commonArgs // {inherit cargoArtifacts;});
+      treefmtEval = treefmt-nix.lib.evalModule pkgs (import ./nix/treefmt.nix);
+      pre-commit-check = git-hooks.lib.${system}.run {
+        src = ./.;
+        hooks = import ./nix/pre-commit.nix {
+          inherit pkgs;
+          treefmtWrapper = treefmtEval.config.build.wrapper;
+          rustToolchain = toolchain.rustToolchain;
+        };
+      };
+      clippyCheck = craneLib.cargoClippy commonArgs;
+      fmtCheck = craneLib.cargoFmt {inherit src;};
+      nextestCheck = craneLib.cargoNextest commonArgs;
+      docCheck = craneLib.cargoDoc commonArgs;
+      auditCheck = craneLib.cargoAudit {inherit src;};
+      denyCheck = craneLib.cargoDeny {inherit src;};
+      docs = pkgs.stdenv.mkDerivation {
+        pname = "skillnet-docs";
+        inherit (package) version;
+      };
+      hmModuleTest = pkgs.runCommand "hm-module" {} "touch $out";
+    in {
+      packages = {
+        default = package;
+        docs = docs;
+        site = docs;
+      };
+
+      formatter = treefmtEval.config.build.wrapper;
+
+      checks = {
+        default = package;
+        formatting = treefmtEval.config.build.check self;
+        clippy = clippyCheck;
+        fmt = fmtCheck;
+        nextest = nextestCheck;
+        doc = docCheck;
+        audit = auditCheck;
+        deny = denyCheck;
+        hm-module = hmModuleTest;
+      };
+
+      devShells.default = craneLib.devShell {
+        checks = self.checks.${system};
+        packages = with pkgs; [
+          cargo-nextest
+          pre-commit
+          rust-analyzer
+        ] ++ pre-commit-check.enabledPackages;
+        shellHook = pre-commit-check.shellHook;
+      };
+    })
+    // {
+      hmModules.default = hmModule;
+    };
+}
+"#
+}
+
 #[test]
 fn writes_flake_and_detected_hook_files() {
     let temp = init_package();
@@ -376,6 +495,69 @@ fn check_accepts_custom_rs_harbor_flake_with_generated_hook_wiring() {
         .status()
         .unwrap();
     assert!(check_status.success());
+}
+
+#[test]
+fn custom_mode_accepts_skillnet_rs_harbor_flake() {
+    let temp = init_package();
+    fs::write(
+        temp.path().join("simit.toml"),
+        custom_skillnet_flake_config(),
+    )
+    .unwrap();
+    fs::write(temp.path().join("flake.nix"), custom_skillnet_flake()).unwrap();
+
+    let write_status = simit()
+        .current_dir(temp.path())
+        .args(["init", "flake"])
+        .status()
+        .unwrap();
+    assert!(write_status.success());
+
+    let flake = read(&temp.path().join("flake.nix"));
+    assert_eq!(flake, custom_skillnet_flake());
+    assert!(temp.path().join("nix/treefmt.nix").exists());
+    assert!(temp.path().join("nix/pre-commit.nix").exists());
+
+    let check_status = simit()
+        .current_dir(temp.path())
+        .args(["init", "flake", "--check"])
+        .status()
+        .unwrap();
+    assert!(check_status.success());
+}
+
+#[test]
+fn custom_mode_reports_missing_owned_wiring_without_template_diff() {
+    let temp = init_package();
+    fs::write(
+        temp.path().join("simit.toml"),
+        custom_skillnet_flake_config(),
+    )
+    .unwrap();
+    let flake = custom_skillnet_flake().replace(
+        "pre-commit-check = git-hooks.lib.${system}.run",
+        "project-hooks = git-hooks.lib.${system}.run",
+    );
+    fs::write(temp.path().join("flake.nix"), flake).unwrap();
+
+    let write_status = simit()
+        .current_dir(temp.path())
+        .args(["init", "flake"])
+        .status()
+        .unwrap();
+    assert!(write_status.success());
+
+    let output = simit()
+        .current_dir(temp.path())
+        .args(["init", "flake", "--check", "--diff"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("flake.nix custom mode: missing pre-commit-check binding"));
+    assert!(!stderr.contains("+++ flake.nix"));
+    assert!(!stderr.contains("description = \"Rust project\""));
 }
 
 #[test]

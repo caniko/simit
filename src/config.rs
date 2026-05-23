@@ -12,6 +12,7 @@
 //! Settings that have no Cargo fallback, such as `tap_url` and
 //! `download_repo`, error if neither a CLI flag nor config value provides them.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::Command;
 
@@ -24,11 +25,93 @@ pub struct ProjectConfig {
     #[serde(default)]
     pub release: ReleaseConfig,
     #[serde(default)]
+    pub flake: FlakeConfig,
+    #[serde(default)]
+    pub ci: CiConfig,
+    #[serde(default)]
     pub homebrew: Option<HomebrewConfig>,
     #[serde(default)]
     pub chocolatey: Option<ChocolateyConfig>,
     #[serde(default)]
     pub scoop: Option<ScoopConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct FlakeConfig {
+    #[serde(default)]
+    pub mode: FlakeMode,
+    #[serde(default = "default_toolchain_binding")]
+    pub toolchain_binding: String,
+    #[serde(default = "default_crane_lib_binding")]
+    pub crane_lib_binding: String,
+    #[serde(default = "default_package_binding")]
+    pub package_binding: String,
+    #[serde(default = "default_true")]
+    pub formatter_output: bool,
+    #[serde(default = "default_true")]
+    pub formatting_check: bool,
+    #[serde(default = "default_true")]
+    pub pre_commit_shell_hook: bool,
+    #[serde(default)]
+    pub expected_outputs: FlakeExpectedOutputs,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum FlakeMode {
+    #[default]
+    Canonical,
+    Custom,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct FlakeExpectedOutputs {
+    #[serde(default)]
+    pub packages: Vec<String>,
+    #[serde(default)]
+    pub checks: Vec<String>,
+    #[serde(default)]
+    pub top_level: Vec<String>,
+}
+
+impl Default for FlakeConfig {
+    fn default() -> Self {
+        Self {
+            mode: FlakeMode::Canonical,
+            toolchain_binding: default_toolchain_binding(),
+            crane_lib_binding: default_crane_lib_binding(),
+            package_binding: default_package_binding(),
+            formatter_output: true,
+            formatting_check: true,
+            pre_commit_shell_hook: true,
+            expected_outputs: FlakeExpectedOutputs::default(),
+        }
+    }
+}
+
+fn default_toolchain_binding() -> String {
+    "rustToolchain".to_owned()
+}
+
+fn default_crane_lib_binding() -> String {
+    "craneLib".to_owned()
+}
+
+fn default_package_binding() -> String {
+    "package".to_owned()
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CiConfig {
+    #[serde(default)]
+    pub extra_setup: Vec<String>,
+    #[serde(default)]
+    pub extra_env: BTreeMap<String, String>,
+    #[serde(default)]
+    pub required_secrets: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
@@ -360,7 +443,10 @@ impl ProjectConfig {
         let sources = Self::load_sources(workspace_root)?;
         match sources.as_slice() {
             [] => Ok(Self::default()),
-            [source] => Ok(source.config.clone()),
+            [source] => {
+                source.config.validate_common()?;
+                Ok(source.config.clone())
+            }
             _ => {
                 let labels = sources
                     .iter()
@@ -372,6 +458,40 @@ impl ProjectConfig {
                 )
             }
         }
+    }
+
+    fn validate_common(&self) -> Result<()> {
+        validate_nonempty_strings(
+            "simit project config: [flake.expected_outputs].packages",
+            &self.flake.expected_outputs.packages,
+        )?;
+        validate_nonempty_strings(
+            "simit project config: [flake.expected_outputs].checks",
+            &self.flake.expected_outputs.checks,
+        )?;
+        validate_nonempty_strings(
+            "simit project config: [flake.expected_outputs].top_level",
+            &self.flake.expected_outputs.top_level,
+        )?;
+        validate_nonempty_strings(
+            "simit project config: [ci].required_secrets",
+            &self.ci.required_secrets,
+        )?;
+        validate_nonempty_strings(
+            "simit project config: [ci].extra_setup",
+            &self.ci.extra_setup,
+        )?;
+        for (key, value) in &self.ci.extra_env {
+            if key.trim().is_empty() {
+                bail!("simit project config: [ci].extra_env keys must not be empty");
+            }
+            if key.contains('\n') || value.contains('\n') {
+                bail!(
+                    "simit project config: [ci].extra_env must not contain multiline keys or values"
+                );
+            }
+        }
+        Ok(())
     }
 
     fn load_sources(workspace_root: &Path) -> Result<Vec<ProjectConfigSource>> {
@@ -735,6 +855,13 @@ impl ProjectConfig {
     fn is_empty(&self) -> bool {
         self == &Self::default()
     }
+}
+
+fn validate_nonempty_strings(name: &str, values: &[String]) -> Result<()> {
+    if values.iter().any(|value| value.trim().is_empty()) {
+        bail!("{name} must not contain empty values");
+    }
+    Ok(())
 }
 
 #[derive(Debug)]

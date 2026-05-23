@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-05-23
+
+### Added
+
+- Support project-configured custom flake validation for repositories that keep project-owned flake outputs.
+- Render project-configured CI setup steps, environment variables, and required-secret documentation into generated workflows.
+
 ## [0.13.0] - 2026-05-23
 
 ### Added
@@ -121,7 +128,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Prepare the first public crates.io release.
 
-[Unreleased]: https://codeberg.org/caniko/simit/compare/0.13.0...HEAD
+[Unreleased]: https://codeberg.org/caniko/simit/compare/0.14.0...HEAD
+[0.14.0]: https://codeberg.org/caniko/simit/compare/0.13.0...0.14.0
 [0.13.0]: https://codeberg.org/caniko/simit/compare/0.12.0...0.13.0
 [0.12.0]: https://codeberg.org/caniko/simit/compare/0.11.0...0.12.0
 [0.11.0]: https://codeberg.org/caniko/simit/compare/0.10.0...0.11.0

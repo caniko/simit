@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use anyhow::{Result, bail};
 
+use crate::config::FlakeConfig;
 use crate::project::{GeneratedFile, Languages};
 
 const TREEFMT_INPUT: &str = "    treefmt-nix.url = \"github:numtide/treefmt-nix\";\n";
@@ -152,6 +153,118 @@ pub fn has_required_wiring(content: &str) -> bool {
         && has_rust_toolchain_hook_package(content)
         && has_treefmt_wrapper_argument(content)
         && has_pre_commit_shell_hook(content)
+}
+
+pub fn custom_wiring_mismatches(content: &str, config: &FlakeConfig) -> Vec<String> {
+    let mut missing = Vec::new();
+    if !(content.contains("treefmt-nix.url") || content.contains("treefmt-nix = {")) {
+        missing.push("flake.nix custom mode: missing treefmt-nix input".to_owned());
+    }
+    if !(content.contains("git-hooks.url") || content.contains("git-hooks = {")) {
+        missing.push("flake.nix custom mode: missing git-hooks input".to_owned());
+    }
+    if !content
+        .contains("treefmtEval = treefmt-nix.lib.evalModule pkgs (import ./nix/treefmt.nix);")
+    {
+        missing.push(
+            "flake.nix custom mode: missing treefmtEval import of ./nix/treefmt.nix".to_owned(),
+        );
+    }
+    if !content.contains("pre-commit-check = git-hooks.lib.${system}.run") {
+        missing.push("flake.nix custom mode: missing pre-commit-check binding".to_owned());
+    }
+    if !content.contains("hooks = import ./nix/pre-commit.nix") {
+        missing.push(
+            "flake.nix custom mode: missing pre-commit hook import of ./nix/pre-commit.nix"
+                .to_owned(),
+        );
+    }
+    if !has_treefmt_wrapper_argument(content) {
+        missing.push(
+            "flake.nix custom mode: missing treefmtWrapper argument for pre-commit hooks"
+                .to_owned(),
+        );
+    }
+    if !contains_binding(content, &config.toolchain_binding) {
+        missing.push(format!(
+            "flake.nix custom mode: missing configured toolchain binding `{}`",
+            config.toolchain_binding
+        ));
+    }
+    if !contains_binding(content, &config.crane_lib_binding) {
+        missing.push(format!(
+            "flake.nix custom mode: missing configured crane lib binding `{}`",
+            config.crane_lib_binding
+        ));
+    }
+    if !contains_binding(content, &config.package_binding) {
+        missing.push(format!(
+            "flake.nix custom mode: missing configured package binding `{}`",
+            config.package_binding
+        ));
+    }
+    if config.formatter_output && !content.contains("formatter = treefmtEval.config.build.wrapper;")
+    {
+        missing.push("flake.nix custom mode: missing formatter output".to_owned());
+    }
+    if config.formatting_check
+        && !content.contains("formatting = treefmtEval.config.build.check self;")
+    {
+        missing.push("flake.nix custom mode: missing formatting check".to_owned());
+    }
+    if config.pre_commit_shell_hook {
+        if !content.contains("pre-commit-check.enabledPackages") {
+            missing.push(
+                "flake.nix custom mode: dev shell missing pre-commit-check.enabledPackages"
+                    .to_owned(),
+            );
+        }
+        if !has_pre_commit_shell_hook(content) {
+            missing.push(
+                "flake.nix custom mode: dev shell missing pre-commit-check.shellHook".to_owned(),
+            );
+        }
+    }
+    for package in &config.expected_outputs.packages {
+        if !contains_attr_assignment(content, package) {
+            missing.push(format!(
+                "flake.nix custom mode: missing expected package output `{package}`"
+            ));
+        }
+    }
+    for check in &config.expected_outputs.checks {
+        if !contains_attr_assignment(content, check) {
+            missing.push(format!(
+                "flake.nix custom mode: missing expected check output `{check}`"
+            ));
+        }
+    }
+    for top_level in &config.expected_outputs.top_level {
+        if !contains_attr_assignment(content, top_level)
+            && !content.contains(&format!("{top_level}."))
+        {
+            missing.push(format!(
+                "flake.nix custom mode: missing expected top-level output `{top_level}`"
+            ));
+        }
+    }
+    missing
+}
+
+fn contains_binding(content: &str, binding: &str) -> bool {
+    if binding.contains('.') {
+        content.contains(binding)
+    } else {
+        contains_attr_assignment(content, binding)
+            || content.contains(&format!("inherit {binding}"))
+            || content.contains(&format!(" {binding};"))
+    }
+}
+
+fn contains_attr_assignment(content: &str, name: &str) -> bool {
+    content.contains(&format!("{name} ="))
+        || content.contains(&format!("{name}="))
+        || content.contains(&format!("inherit {name}"))
 }
 
 pub fn has_required_treefmt(content: &str, languages: &Languages, rust_edition: &str) -> bool {

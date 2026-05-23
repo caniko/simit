@@ -5,7 +5,9 @@ use std::sync::{Mutex, OnceLock};
 
 use camino::Utf8PathBuf;
 use simit::cargo::Package;
-use simit::config::{ChocolateyOverrides, HomebrewOverrides, ProjectConfig, ScoopOverrides};
+use simit::config::{
+    ChocolateyOverrides, FlakeMode, HomebrewOverrides, ProjectConfig, ScoopOverrides,
+};
 use tempfile::TempDir;
 
 fn load_toml(toml: &str) -> anyhow::Result<ProjectConfig> {
@@ -192,6 +194,119 @@ command = "nix run .#release-smoke --"
     assert_eq!(
         cfg.release.smoke.command.as_deref(),
         Some("nix run .#release-smoke --")
+    );
+}
+
+#[test]
+fn flake_and_ci_config_load() {
+    let cfg = load_toml(
+        r#"[flake]
+mode = "custom"
+toolchain_binding = "toolchain.rustToolchain"
+crane_lib_binding = "craneLib"
+package_binding = "package"
+formatter_output = true
+formatting_check = true
+pre_commit_shell_hook = true
+
+[flake.expected_outputs]
+packages = ["default", "docs", "site"]
+checks = ["default", "formatting", "hm-module"]
+top_level = ["hmModules"]
+
+[ci]
+extra_setup = ["apt-get update && apt-get install -y --no-install-recommends postgresql-client"]
+extra_env = { SKILLNET_TEST_PG_URL = "${{ secrets.SKILLNET_TEST_PG_URL }}" }
+required_secrets = ["CRATES_IO_API_TOKEN"]
+"#,
+    )
+    .unwrap();
+
+    assert_eq!(cfg.flake.mode, FlakeMode::Custom);
+    assert_eq!(cfg.flake.toolchain_binding, "toolchain.rustToolchain");
+    assert_eq!(
+        cfg.flake.expected_outputs.packages,
+        ["default", "docs", "site"]
+    );
+    assert_eq!(
+        cfg.flake.expected_outputs.checks,
+        ["default", "formatting", "hm-module"]
+    );
+    assert_eq!(cfg.flake.expected_outputs.top_level, ["hmModules"]);
+    assert_eq!(cfg.ci.extra_setup.len(), 1);
+    assert_eq!(
+        cfg.ci
+            .extra_env
+            .get("SKILLNET_TEST_PG_URL")
+            .map(String::as_str),
+        Some("${{ secrets.SKILLNET_TEST_PG_URL }}")
+    );
+    assert_eq!(cfg.ci.required_secrets, ["CRATES_IO_API_TOKEN"]);
+}
+
+#[test]
+fn flake_and_ci_config_load_from_flake_output() {
+    with_fake_nix(
+        r#"{"flake":{"mode":"custom","toolchain_binding":"toolchain.rustToolchain","expected_outputs":{"checks":["hm-module"],"top_level":["hmModules"]}},"ci":{"extra_setup":["echo setup"],"extra_env":{"PG_URL":"${{ secrets.PG_URL }}"}}}"#,
+        |temp| {
+            fs::write(
+                temp.path().join("flake.nix"),
+                r#"{ outputs = { self }: { simitConfig = {}; }; }"#,
+            )
+            .unwrap();
+
+            let cfg = ProjectConfig::load(temp.path()).unwrap();
+            assert_eq!(cfg.flake.mode, FlakeMode::Custom);
+            assert_eq!(cfg.flake.toolchain_binding, "toolchain.rustToolchain");
+            assert_eq!(cfg.flake.expected_outputs.checks, ["hm-module"]);
+            assert_eq!(cfg.flake.expected_outputs.top_level, ["hmModules"]);
+            assert_eq!(cfg.ci.extra_setup, ["echo setup"]);
+            assert_eq!(
+                cfg.ci.extra_env.get("PG_URL").map(String::as_str),
+                Some("${{ secrets.PG_URL }}")
+            );
+        },
+    );
+}
+
+#[test]
+fn invalid_flake_mode_is_rejected() {
+    load_toml(
+        r#"[flake]
+mode = "bespoke"
+"#,
+    )
+    .unwrap_err();
+}
+
+#[test]
+fn empty_expected_output_is_rejected() {
+    let err = load_toml(
+        r#"[flake]
+mode = "custom"
+
+[flake.expected_outputs]
+checks = [""]
+"#,
+    )
+    .unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("[flake.expected_outputs].checks must not contain empty values")
+    );
+}
+
+#[test]
+fn multiline_ci_env_is_rejected() {
+    let err = load_toml(
+        r#"[ci]
+extra_env = { BAD = "one\ntwo" }
+"#,
+    )
+    .unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("[ci].extra_env must not contain multiline")
     );
 }
 

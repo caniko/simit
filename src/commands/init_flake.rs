@@ -6,6 +6,7 @@ use anyhow::{Context, Result, bail};
 
 use crate::cargo;
 use crate::cli::InitFlakeCommand;
+use crate::config::{FlakeMode, ProjectConfig};
 use crate::project::{self, GeneratedFile, Languages};
 use crate::registry::{self, FeatureStatus};
 use crate::render::diff::unified_diff;
@@ -21,6 +22,7 @@ pub fn run(command: InitFlakeCommand) -> Result<()> {
 
     let metadata = cargo::metadata_for_current_dir()?;
     let workspace_root = metadata.workspace_root.as_std_path();
+    let cfg = ProjectConfig::load(workspace_root)?;
     let mut languages = project::detect_languages(workspace_root)?;
     languages.nix = true;
     let rust_edition = rustfmt_edition(&metadata);
@@ -40,11 +42,27 @@ pub fn run(command: InitFlakeCommand) -> Result<()> {
             &languages,
             &rust_edition,
             rust_version.as_deref(),
+            &cfg,
             command.diff,
         );
     }
 
     let flake_path = workspace_root.join("flake.nix");
+    if cfg.flake.mode == FlakeMode::Custom {
+        if !flake_path.exists() {
+            bail!(
+                "custom flake mode requires an existing flake.nix; simit will manage hook files but will not generate a canonical flake"
+            );
+        }
+        let hook_files = hook_files(&files);
+        project::write_generated_files(workspace_root, &hook_files)?;
+        registry::touch_current_project_or_warn([
+            ("flake", FeatureStatus::Managed),
+            ("hooks", FeatureStatus::Installed),
+        ]);
+        return Ok(());
+    }
+
     if flake_path.exists() {
         let content = fs::read_to_string(&flake_path)
             .with_context(|| format!("reading {}", flake_path.display()))?;
@@ -112,12 +130,31 @@ fn check_files(
     languages: &Languages,
     rust_edition: &str,
     rust_version: Option<&str>,
+    cfg: &ProjectConfig,
     show_diff: bool,
 ) -> Result<()> {
     let mut mismatches = Vec::new();
     let mut diffs = Vec::new();
 
     for file in files {
+        if cfg.flake.mode == FlakeMode::Custom && file.relative_path == Path::new("flake.nix") {
+            let path = workspace_root.join(&file.relative_path);
+            match fs::read_to_string(&path) {
+                Ok(actual) => {
+                    let missing = flake::custom_wiring_mismatches(&actual, &cfg.flake);
+                    if missing.is_empty() {
+                        continue;
+                    }
+                    mismatches.extend(missing);
+                }
+                Err(e) if e.kind() == ErrorKind::NotFound => {
+                    mismatches.push("flake.nix is missing; custom flake mode requires a project-owned flake.nix".to_owned());
+                }
+                Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+            }
+            continue;
+        }
+
         let path = workspace_root.join(&file.relative_path);
         match fs::read_to_string(&path) {
             Ok(actual) if file.relative_path == Path::new("flake.nix") => {
@@ -183,4 +220,12 @@ fn check_files(
             diffs.join("\n")
         );
     }
+}
+
+fn hook_files(files: &[GeneratedFile]) -> Vec<GeneratedFile> {
+    files
+        .iter()
+        .filter(|file| file.relative_path != Path::new("flake.nix"))
+        .cloned()
+        .collect()
 }

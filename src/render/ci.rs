@@ -16,6 +16,9 @@ pub struct CiOptions {
     pub with_docs: bool,
     pub with_artifacts: bool,
     pub release_smoke_command: Option<String>,
+    pub extra_setup: Vec<String>,
+    pub extra_env: Vec<(String, String)>,
+    pub required_secrets: Vec<String>,
     pub homebrew: Option<HomebrewOptions>,
     pub chocolatey: Option<ChocolateyOptions>,
     pub scoop: Option<ScoopOptions>,
@@ -161,6 +164,7 @@ fn ci_workflow(
     options: CiOptions,
 ) -> String {
     let mut workflow = String::new();
+    push_required_secrets_header(&mut workflow, &options.required_secrets);
     workflow.push_str("name: CI\n\n");
     workflow.push_str("on:\n");
     workflow.push_str("  push:\n");
@@ -176,12 +180,14 @@ fn ci_workflow(
     workflow.push_str(&runs_on(&runners.ci));
     workflow.push('\n');
     push_container(&mut workflow, platform, runtime, package);
+    push_job_env(&mut workflow, &options.extra_env);
     workflow.push_str("    steps:\n");
     push_checkout_step(&mut workflow, platform);
 
     match runtime {
         Runtime::Nix => {
             push_install_nix_step(&mut workflow, platform);
+            push_extra_setup_steps(&mut workflow, &options.extra_setup);
             workflow.push_str("      - name: Check flake\n");
             workflow.push_str("        run: nix flake check\n\n");
             workflow.push_str("      - name: Test\n");
@@ -207,6 +213,7 @@ fn ci_workflow(
         }
         Runtime::Cargo => {
             push_rust_setup_step(&mut workflow, platform);
+            push_extra_setup_steps(&mut workflow, &options.extra_setup);
             push_test_steps(&mut workflow, package, &options);
             push_quality_tool_install_steps(&mut workflow, runtime, &options);
             push_optional_ci_steps(&mut workflow, runtime, package, &options);
@@ -237,6 +244,7 @@ fn publish_workflow(
     options: CiOptions,
 ) -> String {
     let mut workflow = String::new();
+    push_required_secrets_header(&mut workflow, &options.required_secrets);
     workflow.push_str(
         "# Before creating and pushing a release tag, run `simit changelog release <version>` locally.\n",
     );
@@ -263,12 +271,14 @@ fn publish_workflow(
     workflow.push_str(&runs_on(runner));
     workflow.push('\n');
     push_container(&mut workflow, platform, runtime, package);
+    push_job_env(&mut workflow, &options.extra_env);
     workflow.push_str("    steps:\n");
     push_checkout_step(&mut workflow, platform);
 
     match runtime {
         Runtime::Nix => {
             push_install_nix_step(&mut workflow, platform);
+            push_extra_setup_steps(&mut workflow, &options.extra_setup);
             workflow.push_str(&validate_tag_step(
                 "nix develop -c cargo metadata --no-deps --format-version 1",
             ));
@@ -288,6 +298,7 @@ fn publish_workflow(
         }
         Runtime::Cargo => {
             push_rust_setup_step(&mut workflow, platform);
+            push_extra_setup_steps(&mut workflow, &options.extra_setup);
             workflow.push_str(&validate_tag_step(
                 "cargo metadata --no-deps --format-version 1",
             ));
@@ -312,6 +323,7 @@ fn artifacts_workflow(
     options: &CiOptions,
 ) -> String {
     let mut workflow = String::new();
+    push_required_secrets_header(&mut workflow, &options.required_secrets);
     workflow.push_str("name: Release Artifacts\n\n");
     push_release_security_header(&mut workflow, true);
     workflow.push_str("on:\n");
@@ -334,17 +346,20 @@ fn artifacts_workflow(
     workflow.push_str(&runs_on(&runners.release));
     workflow.push('\n');
     push_container(&mut workflow, platform, runtime, package);
+    push_job_env(&mut workflow, &options.extra_env);
     workflow.push_str("    steps:\n");
     push_checkout_step(&mut workflow, platform);
     workflow.push_str(&validate_release_tag_step(None));
     match runtime {
         Runtime::Nix => {
             push_install_nix_step(&mut workflow, platform);
+            push_extra_setup_steps(&mut workflow, &options.extra_setup);
             workflow.push_str("      - name: Build package\n");
             workflow.push_str("        run: nix build\n\n");
         }
         Runtime::Cargo => {
             push_rust_setup_step(&mut workflow, platform);
+            push_extra_setup_steps(&mut workflow, &options.extra_setup);
             workflow.push_str("      - name: Build release binary\n");
             workflow.push_str("        run: cargo build --release --locked\n\n");
             workflow.push_str("      - name: Install Nix release tools\n");
@@ -1072,6 +1087,18 @@ fn push_concurrency(workflow: &mut String) {
     workflow.push_str("  cancel-in-progress: true\n\n");
 }
 
+fn push_required_secrets_header(workflow: &mut String, required_secrets: &[String]) {
+    if required_secrets.is_empty() {
+        return;
+    }
+    workflow.push_str("# Project-required secrets:\n");
+    for secret in required_secrets {
+        workflow.push_str("# - ");
+        workflow.push_str(secret);
+        workflow.push('\n');
+    }
+}
+
 fn push_container(workflow: &mut String, platform: Platform, runtime: Runtime, package: &Package) {
     if platform == Platform::Forgejo && runtime == Runtime::Cargo {
         workflow.push_str("    container: ");
@@ -1080,10 +1107,52 @@ fn push_container(workflow: &mut String, platform: Platform, runtime: Runtime, p
     }
 }
 
+fn push_job_env(workflow: &mut String, extra_env: &[(String, String)]) {
+    if extra_env.is_empty() {
+        return;
+    }
+    workflow.push_str("    env:\n");
+    for (key, value) in extra_env {
+        workflow.push_str("      ");
+        workflow.push_str(key);
+        workflow.push_str(": \"");
+        workflow.push_str(&yaml_double_quote(value));
+        workflow.push_str("\"\n");
+    }
+}
+
+fn yaml_double_quote(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
 fn push_checkout_step(workflow: &mut String, platform: Platform) {
     workflow.push_str("      - name: Checkout\n");
     push_action_uses(workflow, platform, "checkout", "v4");
     workflow.push('\n');
+}
+
+fn push_extra_setup_steps(workflow: &mut String, extra_setup: &[String]) {
+    for (index, command) in extra_setup.iter().enumerate() {
+        workflow.push_str("      - name: Project setup");
+        if extra_setup.len() > 1 {
+            workflow.push(' ');
+            workflow.push_str(&(index + 1).to_string());
+        }
+        workflow.push('\n');
+        if command.contains('\n') {
+            workflow.push_str("        run: |\n");
+            for line in command.lines() {
+                workflow.push_str("          ");
+                workflow.push_str(line);
+                workflow.push('\n');
+            }
+            workflow.push('\n');
+        } else {
+            workflow.push_str("        run: ");
+            workflow.push_str(command);
+            workflow.push_str("\n\n");
+        }
+    }
 }
 
 fn push_action_uses(workflow: &mut String, platform: Platform, action: &str, version: &str) {

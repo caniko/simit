@@ -92,6 +92,20 @@ command = "nix run .#release-smoke --"
     .unwrap();
 }
 
+fn write_ci_customization_config(root: &Path) {
+    fs::write(
+        root.join("simit.toml"),
+        r#"[ci]
+extra_setup = [
+  "apt-get update && apt-get install -y --no-install-recommends postgresql-client"
+]
+extra_env = { SKILLNET_TEST_PG_URL = "${{ secrets.SKILLNET_TEST_PG_URL }}" }
+required_secrets = ["SKILLNET_TEST_PG_URL"]
+"#,
+    )
+    .unwrap();
+}
+
 fn write_user_runner_config(root: &Path) {
     let config_dir = root.join(".xdg/simit");
     fs::create_dir_all(&config_dir).unwrap();
@@ -276,6 +290,41 @@ fn generates_github_plain_cargo_workflows() {
     assert!(publish.contains("simit changelog release <version>"));
     assert!(publish.contains("run: cargo publish --dry-run"));
     assert!(publish.contains("cargo metadata --no-deps --format-version 1"));
+}
+
+#[test]
+fn generated_workflows_include_project_ci_setup_and_env() {
+    let temp = init_package(true);
+    write_ci_customization_config(temp.path());
+
+    let status = simit_with_user_config(temp.path())
+        .current_dir(temp.path())
+        .args([
+            "init",
+            "ci",
+            "--platform",
+            "forgejo",
+            "--runtime",
+            "nix",
+            "--with-artifacts",
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    for path in [
+        ".forgejo/workflows/ci.yaml",
+        ".forgejo/workflows/publish-crate.yaml",
+        ".forgejo/workflows/release-artifacts.yaml",
+    ] {
+        let workflow = read(&temp.path().join(path));
+        assert_yaml_parses(&workflow);
+        assert!(workflow.contains("# Project-required secrets:\n# - SKILLNET_TEST_PG_URL"));
+        assert!(workflow.contains(
+            "    env:\n      SKILLNET_TEST_PG_URL: \"${{ secrets.SKILLNET_TEST_PG_URL }}\""
+        ));
+        assert!(workflow.contains("      - name: Project setup\n        run: apt-get update && apt-get install -y --no-install-recommends postgresql-client"));
+    }
 }
 
 #[test]

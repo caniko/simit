@@ -169,6 +169,12 @@ generated output:
 simit init ci --platform forgejo --check
 ```
 
+When `[ci].extra_setup`, `[ci].extra_env`, or `[ci].required_secrets` are set
+in project config, simit renders them into every generated CI, publish, and
+artifact workflow. Extra setup runs after checkout/toolchain setup and before
+tests or builds; extra env is job-level environment; required secrets are
+documented as workflow comments but are not read locally.
+
 `init ci` always renders a separate `publish-crate.yaml` workflow. That
 workflow runs only on exact semver tag pushes such as `0.9.0`, verifies that
 the tag matches the Cargo package version, verifies the signed tag against
@@ -344,8 +350,8 @@ source. Supported sources are:
   `Cargo.toml`.
 - `outputs.simitConfig` in `flake.nix`.
 
-All sources use the same section names: `[homebrew]`, `[chocolatey]`, and
-`[scoop]`.
+All sources use the same section names: `[flake]`, `[ci]`, `[homebrew]`,
+`[chocolatey]`, and `[scoop]`.
 
 For each Homebrew setting, resolution order is: CLI flag, simit project config,
 Cargo package metadata, then an error. `tap_url` and `download_repo` have no
@@ -364,6 +370,36 @@ linux_arm = false  # Override: do not publish aarch64-linux.
 
 Chocolatey and Scoop use the same resolution order. Their `download_repo`
 fields must be `OWNER/REPO`, and Scoop also requires `bucket_url`.
+
+Projects with custom flakes can keep their own Nix inputs and outputs while
+letting simit manage formatter/pre-commit hooks. Set `[flake].mode = "custom"`
+to make `simit init flake --check` validate simit's required wiring
+semantically instead of comparing against the canonical flake template:
+
+```toml
+[flake]
+mode = "custom"
+toolchain_binding = "toolchain.rustToolchain"
+crane_lib_binding = "craneLib"
+package_binding = "package"
+
+[flake.expected_outputs]
+packages = ["default", "docs", "site"]
+checks = ["default", "formatting", "clippy", "fmt", "nextest", "doc", "audit", "deny", "hm-module"]
+top_level = ["hmModules"]
+```
+
+Project CI can also declare stable workflow additions without hand-editing the
+generated YAML:
+
+```toml
+[ci]
+extra_setup = [
+  "apt-get update && apt-get install -y --no-install-recommends postgresql-client",
+]
+extra_env = { SKILLNET_TEST_PG_URL = "${{ secrets.SKILLNET_TEST_PG_URL }}" }
+required_secrets = ["SKILLNET_TEST_PG_URL", "CRATES_IO_API_TOKEN"]
+```
 
 ## User config
 
@@ -417,6 +453,16 @@ Flake config exports the same schema as JSON-compatible Nix data:
         tap_url = "https://codeberg.org/caniko/homebrew-mythos.git";
         download_repo = "caniko/mythos";
       };
+      flake = {
+        mode = "custom";
+        toolchain_binding = "toolchain.rustToolchain";
+        expected_outputs.checks = ["hm-module"];
+        expected_outputs.top_level = ["hmModules"];
+      };
+      ci = {
+        extra_setup = ["echo project setup"];
+        extra_env.SKILLNET_TEST_PG_URL = "\${{ secrets.SKILLNET_TEST_PG_URL }}";
+      };
     };
   };
 }
@@ -435,6 +481,13 @@ detects Rust, Nix, uv-based Python, TOML, YAML, and Markdown files, and wires
 `treefmt-nix` and `cachix/git-hooks.nix`. Existing `flake.nix` files are
 patched only when simit can find safe anchors; otherwise, use `--print` and
 apply the generated wiring manually.
+
+In custom flake mode, `simit init flake` writes only `nix/treefmt.nix` and
+`nix/pre-commit.nix`; the repository-owned `flake.nix` is left intact. The
+check mode requires treefmt/git-hooks inputs, the `treefmtEval` and
+`pre-commit-check` bindings, formatter/check/dev-shell hook wiring, and any
+configured expected outputs. This supports flakes based on helpers such as
+`rs-harbor` without requiring simit to render every project-specific output.
 
 Preview the generated files without writing them:
 

@@ -77,6 +77,14 @@ pub fn run(command: InitCiCommand) -> Result<()> {
         release_smoke_command: command
             .release_smoke_command
             .or_else(|| cfg.release.smoke.command.clone()),
+        extra_setup: cfg.ci.extra_setup.clone(),
+        extra_env: cfg
+            .ci
+            .extra_env
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect(),
+        required_secrets: cfg.ci.required_secrets.clone(),
         homebrew,
         chocolatey,
         scoop,
