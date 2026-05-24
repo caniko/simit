@@ -200,7 +200,7 @@ jobs:
 
       - name: Run om ci
         env:
-          OMNIX_REF: 'github:juspay/omnix/v1.3.2'
+          OMNIX_REF: "github:juspay/omnix/v1.3.2"
         run: nix run "$OMNIX_REF" -- ci run
 ```
 
@@ -227,7 +227,7 @@ jobs:
 
       - name: Run om ci
         env:
-          OMNIX_REF: 'github:juspay/omnix/v1.3.2'
+          OMNIX_REF: "github:juspay/omnix/v1.3.2"
         run: nix run "$OMNIX_REF" -- ci run
 
       - name: Check flake
