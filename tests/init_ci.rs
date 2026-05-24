@@ -136,6 +136,39 @@ windows = "windows_atlas"
     .unwrap();
 }
 
+fn write_user_runner_config_with_omnix_ref(root: &Path) {
+    let config_dir = root.join(".xdg/simit");
+    fs::create_dir_all(&config_dir).unwrap();
+    fs::write(
+        config_dir.join("config.toml"),
+        r#"[ci.runners.atlas]
+platform = "forgejo"
+labels = ["atlas"]
+os = "linux"
+arch = "x86_64"
+runtimes = ["cargo", "nix"]
+trusted = true
+
+[ci.runners.windows_atlas]
+platform = "forgejo"
+labels = ["windows-atlas"]
+os = "windows"
+arch = "x86_64"
+runtimes = ["cargo"]
+
+[ci.defaults.forgejo]
+cargo = "atlas"
+nix = "atlas"
+release = "atlas"
+windows = "windows_atlas"
+
+[ci.tools.omnix]
+ref = "github:user/pin/v3"
+"#,
+    )
+    .unwrap();
+}
+
 fn simit_with_user_config(root: &Path) -> Command {
     write_user_runner_config(root);
     let mut command = simit();
@@ -249,12 +282,18 @@ fn generates_forgejo_nix_workflows() {
     assert!(ci.contains("uses: https://code.forgejo.org/actions/checkout@v4"));
     assert!(!ci.contains("pull_request:"));
     assert!(!ci.contains("uses: https://github.com/cachix/install-nix-action@v31"));
+    assert!(!ci.contains("uses: https://github.com/Swatinem/rust-cache@v2"));
+    assert!(!ci.contains("path: ~/.cargo/bin"));
+    assert!(!ci.contains("command -v cargo-nextest"));
     assert!(ci.contains("run: nix flake check"));
     assert!(ci.contains("run: nix develop -c cargo clippy --all-targets -- --deny warnings"));
 
     let publish = read(&temp.path().join(".forgejo/workflows/publish-crate.yaml"));
     assert!(publish.contains("runs-on: atlas"));
     assert!(!publish.contains("uses: https://github.com/cachix/install-nix-action@v31"));
+    assert!(!publish.contains("uses: https://github.com/Swatinem/rust-cache@v2"));
+    assert!(!publish.contains("path: ~/.cargo/bin"));
+    assert!(!publish.contains("command -v cargo-nextest"));
     assert!(publish.contains("simit changelog release <version>"));
     assert!(publish.contains("tags:"));
     assert!(publish.contains("grep -Eq '^[0-9]+\\.[0-9]+\\.[0-9]+$'"));
@@ -271,12 +310,253 @@ fn generates_forgejo_nix_workflows() {
 }
 
 #[test]
+fn forgejo_nix_with_om_ci_replace_emits_om_ci_step() {
+    let temp = init_package(true);
+
+    let status = simit_with_user_config(temp.path())
+        .current_dir(temp.path())
+        .args([
+            "init",
+            "ci",
+            "--platform",
+            "forgejo",
+            "--runtime",
+            "nix",
+            "--with-om-ci",
+            "--with-docs",
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let ci = read(&temp.path().join(".forgejo/workflows/ci.yaml"));
+    assert!(ci.contains("OMNIX_REF:"));
+    assert!(ci.contains("nix run \"$OMNIX_REF\" -- ci run"));
+    assert!(ci.contains("run: nix develop -c cargo doc --no-deps --all-features"));
+    assert!(!ci.ends_with("\n\n"));
+    assert!(!ci.contains("run: nix flake check"));
+    assert!(!ci.contains("nix develop -c cargo test"));
+    assert!(!ci.contains("nix develop -c cargo clippy"));
+    assert!(!ci.contains("nix develop -c cargo package"));
+
+    let publish = read(&temp.path().join(".forgejo/workflows/publish-crate.yaml"));
+    assert!(publish.contains("OMNIX_REF:"));
+    assert!(publish.contains("nix run \"$OMNIX_REF\" -- ci run"));
+    assert!(publish.contains("nix develop -c cargo metadata --no-deps --format-version 1"));
+    assert!(publish.contains("nix develop -c cargo publish --dry-run"));
+    assert!(!publish.contains("run: nix flake check"));
+    assert!(!publish.contains("nix develop -c cargo test"));
+    assert!(!publish.contains("nix develop -c cargo clippy"));
+}
+
+#[test]
+fn forgejo_nix_with_om_ci_augment_keeps_legacy_steps() {
+    let temp = init_package(true);
+
+    let status = simit_with_user_config(temp.path())
+        .current_dir(temp.path())
+        .args([
+            "init",
+            "ci",
+            "--platform",
+            "forgejo",
+            "--runtime",
+            "nix",
+            "--om-ci-augment",
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let ci = read(&temp.path().join(".forgejo/workflows/ci.yaml"));
+    assert!(ci.contains("OMNIX_REF:"));
+    assert!(ci.contains("nix run \"$OMNIX_REF\" -- ci run"));
+    assert!(ci.contains("run: nix flake check"));
+    assert!(ci.contains("nix develop -c cargo test"));
+    assert!(ci.contains("nix develop -c cargo clippy --all-targets -- --deny warnings"));
+}
+
+#[test]
+fn github_nix_with_om_ci_replace_keeps_install_nix_action() {
+    let temp = init_package(true);
+
+    let status = simit_with_user_config(temp.path())
+        .current_dir(temp.path())
+        .args([
+            "init",
+            "ci",
+            "--platform",
+            "github",
+            "--runtime",
+            "nix",
+            "--with-om-ci",
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let ci = read(&temp.path().join(".github/workflows/ci.yaml"));
+    assert!(ci.contains("uses: https://github.com/cachix/install-nix-action@v31"));
+    assert!(ci.contains("OMNIX_REF:"));
+    assert!(ci.contains("nix run \"$OMNIX_REF\" -- ci run"));
+    assert!(!ci.contains("run: nix flake check"));
+}
+
+#[test]
+fn with_om_ci_without_runtime_nix_fails() {
+    let temp = init_package(false);
+
+    let output = simit_with_user_config(temp.path())
+        .current_dir(temp.path())
+        .args(["init", "ci", "--with-om-ci", "--platform", "forgejo"])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("--runtime nix"));
+}
+
+#[test]
+fn omnix_ref_without_om_ci_warns_and_does_not_change_output() {
+    let with_ref = init_package(true);
+    let without_ref = init_package(true);
+
+    let output = simit_with_user_config(with_ref.path())
+        .current_dir(with_ref.path())
+        .args([
+            "init",
+            "ci",
+            "--omnix-ref",
+            "github:x/y/z",
+            "--platform",
+            "forgejo",
+            "--runtime",
+            "nix",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("ignored"));
+
+    let status = simit_with_user_config(without_ref.path())
+        .current_dir(without_ref.path())
+        .args(["init", "ci", "--platform", "forgejo", "--runtime", "nix"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    assert_eq!(
+        read(&with_ref.path().join(".forgejo/workflows/ci.yaml")),
+        read(&without_ref.path().join(".forgejo/workflows/ci.yaml"))
+    );
+}
+
+#[test]
+fn project_config_om_ci_matches_cli_flag() {
+    let from_config = init_package(true);
+    fs::write(
+        from_config.path().join("simit.toml"),
+        "[ci]\nom_ci = true\n",
+    )
+    .unwrap();
+
+    let config_status = simit_with_user_config(from_config.path())
+        .current_dir(from_config.path())
+        .args(["init", "ci", "--platform", "forgejo", "--runtime", "nix"])
+        .status()
+        .unwrap();
+    assert!(config_status.success());
+
+    let from_cli = init_package(true);
+    let cli_status = simit_with_user_config(from_cli.path())
+        .current_dir(from_cli.path())
+        .args([
+            "init",
+            "ci",
+            "--platform",
+            "forgejo",
+            "--runtime",
+            "nix",
+            "--with-om-ci",
+        ])
+        .status()
+        .unwrap();
+    assert!(cli_status.success());
+
+    assert_eq!(
+        read(&from_config.path().join(".forgejo/workflows/ci.yaml")),
+        read(&from_cli.path().join(".forgejo/workflows/ci.yaml"))
+    );
+}
+
+#[test]
+fn cli_omnix_ref_beats_project_config() {
+    let temp = init_package(true);
+    fs::write(
+        temp.path().join("simit.toml"),
+        r#"[ci]
+om_ci = true
+omnix_ref = "github:project/pin/v1"
+"#,
+    )
+    .unwrap();
+
+    let status = simit_with_user_config(temp.path())
+        .current_dir(temp.path())
+        .args([
+            "init",
+            "ci",
+            "--platform",
+            "forgejo",
+            "--runtime",
+            "nix",
+            "--omnix-ref",
+            "github:cli/pin/v2",
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let ci = read(&temp.path().join(".forgejo/workflows/ci.yaml"));
+    assert!(ci.contains("github:cli/pin/v2"));
+    assert!(!ci.contains("github:project/pin/v1"));
+}
+
+#[test]
+fn user_config_omnix_ref_used_when_no_override() {
+    let temp = init_package(true);
+    write_user_runner_config_with_omnix_ref(temp.path());
+
+    let mut command = simit();
+    let status = command
+        .env("XDG_CONFIG_HOME", temp.path().join(".xdg"))
+        .current_dir(temp.path())
+        .args([
+            "init",
+            "ci",
+            "--platform",
+            "forgejo",
+            "--runtime",
+            "nix",
+            "--with-om-ci",
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let ci = read(&temp.path().join(".forgejo/workflows/ci.yaml"));
+    assert!(ci.contains("github:user/pin/v3"));
+}
+
+#[test]
 fn generates_github_plain_cargo_workflows() {
     let temp = init_package(true);
 
     let status = simit_with_user_config(temp.path())
         .current_dir(temp.path())
-        .args(["init", "ci", "--platform", "github"])
+        .args(["init", "ci", "--platform", "github", "--with-nextest"])
         .status()
         .unwrap();
     assert!(status.success());
@@ -286,10 +566,25 @@ fn generates_github_plain_cargo_workflows() {
     assert!(ci.contains("runs-on: ubuntu-latest"));
     assert!(ci.contains("uses: dtolnay/rust-toolchain@stable"));
     assert!(ci.contains("toolchain: stable"));
-    assert!(ci.contains("run: cargo test --all-features"));
+    assert!(ci.contains("uses: actions/cache@v4"));
+    assert!(!ci.contains("https://code.forgejo.org/actions/cache@v4"));
+    assert!(ci.contains("uses: https://github.com/Swatinem/rust-cache@v2"));
+    assert!(ci.contains("path: ~/.cargo/bin"));
+    assert!(ci.contains(
+        "command -v cargo-nextest >/dev/null 2>&1 || cargo install cargo-nextest --locked"
+    ));
+    assert!(!ci.contains("&>/dev/null"));
+    assert!(ci.contains("run: cargo nextest run --all-features"));
     assert!(ci.contains("run: cargo package --allow-dirty"));
 
     let publish = read(&temp.path().join(".github/workflows/publish-crate.yaml"));
+    assert!(publish.contains("uses: actions/cache@v4"));
+    assert!(!publish.contains("https://code.forgejo.org/actions/cache@v4"));
+    assert!(publish.contains("uses: https://github.com/Swatinem/rust-cache@v2"));
+    assert!(publish.contains("path: ~/.cargo/bin"));
+    assert!(publish.contains(
+        "command -v cargo-nextest >/dev/null 2>&1 || cargo install cargo-nextest --locked"
+    ));
     assert!(publish.contains("simit changelog release <version>"));
     assert!(publish.contains("run: cargo publish --dry-run"));
     assert!(publish.contains("cargo metadata --no-deps --format-version 1"));
@@ -339,7 +634,7 @@ fn forgejo_auto_runtime_uses_rust_container_even_when_flake_exists() {
 
     let status = simit_with_user_config(temp.path())
         .current_dir(temp.path())
-        .args(["init", "ci", "--platform", "forgejo"])
+        .args(["init", "ci", "--platform", "forgejo", "--with-nextest"])
         .status()
         .unwrap();
     assert!(status.success());
@@ -350,18 +645,52 @@ fn forgejo_auto_runtime_uses_rust_container_even_when_flake_exists() {
     assert!(ci.contains("cancel-in-progress: true"));
     assert!(ci.contains("container: rust:1.85-bookworm"));
     assert!(ci.contains("uses: https://code.forgejo.org/actions/checkout@v4"));
-    assert!(!ci.contains("uses: https://github.com/Swatinem/rust-cache@v2"));
+    assert!(ci.contains("uses: https://code.forgejo.org/actions/cache@v4"));
+    assert!(ci.contains("uses: https://github.com/Swatinem/rust-cache@v2"));
+    assert!(ci.contains("path: ~/.cargo/bin"));
+    assert!(ci.contains(
+        "command -v cargo-nextest >/dev/null 2>&1 || cargo install cargo-nextest --locked"
+    ));
+    assert!(!ci.contains("&>/dev/null"));
     assert!(!ci.contains("run: apk add --no-cache git build-base"));
     assert!(ci.contains("run: rustup component add clippy rustfmt"));
-    assert!(ci.contains("run: cargo test --all-features"));
+    assert!(ci.contains("run: cargo nextest run --all-features"));
     assert!(!ci.contains("uses: https://github.com/cachix/install-nix-action@v31"));
 
     let publish = read(&temp.path().join(".forgejo/workflows/publish-crate.yaml"));
     assert!(publish.contains("simit changelog release <version>"));
     assert!(publish.contains("runs-on: atlas"));
     assert!(publish.contains("container: rust:1.85-bookworm"));
-    assert!(!publish.contains("uses: https://github.com/Swatinem/rust-cache@v2"));
+    assert!(publish.contains("uses: https://code.forgejo.org/actions/cache@v4"));
+    assert!(publish.contains("uses: https://github.com/Swatinem/rust-cache@v2"));
+    assert!(publish.contains("path: ~/.cargo/bin"));
+    assert!(publish.contains(
+        "command -v cargo-nextest >/dev/null 2>&1 || cargo install cargo-nextest --locked"
+    ));
     assert!(publish.contains("cargo metadata --no-deps --format-version 1"));
+}
+
+#[test]
+fn rendered_ci_yaml_parses_as_valid_yaml() {
+    let temp = init_package(true);
+
+    let status = simit_with_user_config(temp.path())
+        .current_dir(temp.path())
+        .args([
+            "init",
+            "ci",
+            "--platform",
+            "forgejo",
+            "--with-nextest",
+            "--with-audit",
+            "--with-deny",
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let ci = read(&temp.path().join(".forgejo/workflows/ci.yaml"));
+    assert_yaml_parses(&ci);
 }
 
 #[test]
@@ -772,12 +1101,17 @@ fn optional_strict_flags_render_expected_steps() {
     assert!(status.success());
 
     let ci = read(&temp.path().join(".forgejo/workflows/ci.yaml"));
-    assert!(ci.contains("run: cargo install cargo-audit --locked"));
+    assert!(ci.contains(
+        "run: command -v cargo-audit >/dev/null 2>&1 || cargo install cargo-audit --locked"
+    ));
     assert!(ci.contains("run: cargo audit"));
-    assert!(ci.contains("run: cargo install cargo-deny --locked"));
+    assert!(ci.contains(
+        "run: command -v cargo-deny >/dev/null 2>&1 || cargo install cargo-deny --locked"
+    ));
     assert!(ci.contains("run: cargo deny check"));
     assert!(ci.contains("run: cargo +1.85 check --all-targets"));
     assert!(ci.contains("run: cargo doc --no-deps --all-features"));
+    assert!(!ci.contains("&>/dev/null"));
 
     let deny = read(&temp.path().join("deny.toml"));
     assert!(deny.contains("\"MIT\""));

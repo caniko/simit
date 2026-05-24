@@ -7,7 +7,17 @@ use crate::cli::{Platform, Runtime};
 use crate::project::GeneratedFile;
 use crate::user_config::{ResolvedCiRunners, ResolvedRunner};
 
-#[derive(Debug, Clone, Default)]
+pub const OMNIX_REF_DEFAULT: &str = "github:juspay/omnix/v1.3.2";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OmCiMode {
+    #[default]
+    Off,
+    Replace,
+    Augment,
+}
+
+#[derive(Debug, Clone)]
 pub struct CiOptions {
     pub with_nextest: bool,
     pub with_msrv: bool,
@@ -15,6 +25,8 @@ pub struct CiOptions {
     pub with_deny: bool,
     pub with_docs: bool,
     pub with_artifacts: bool,
+    pub om_ci: OmCiMode,
+    pub omnix_ref: String,
     pub release_smoke_command: Option<String>,
     pub extra_setup: Vec<String>,
     pub extra_env: Vec<(String, String)>,
@@ -22,6 +34,28 @@ pub struct CiOptions {
     pub homebrew: Option<HomebrewOptions>,
     pub chocolatey: Option<ChocolateyOptions>,
     pub scoop: Option<ScoopOptions>,
+}
+
+impl Default for CiOptions {
+    fn default() -> Self {
+        Self {
+            with_nextest: false,
+            with_msrv: false,
+            with_audit: false,
+            with_deny: false,
+            with_docs: false,
+            with_artifacts: false,
+            om_ci: OmCiMode::default(),
+            omnix_ref: OMNIX_REF_DEFAULT.to_owned(),
+            release_smoke_command: None,
+            extra_setup: Vec::new(),
+            extra_env: Vec::new(),
+            required_secrets: Vec::new(),
+            homebrew: None,
+            chocolatey: None,
+            scoop: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -188,31 +222,46 @@ fn ci_workflow(
         Runtime::Nix => {
             push_install_nix_step(&mut workflow, platform);
             push_extra_setup_steps(&mut workflow, &options.extra_setup);
-            workflow.push_str("      - name: Check flake\n");
-            workflow.push_str("        run: nix flake check\n\n");
-            workflow.push_str("      - name: Test\n");
-            workflow.push_str("        run: nix develop -c cargo test\n\n");
-            push_quality_tool_install_steps(&mut workflow, runtime, &options);
-            push_optional_ci_steps(&mut workflow, runtime, package, &options);
-            if self_check.enabled {
-                push_self_check_steps(
-                    &mut workflow,
-                    platform,
-                    runtime,
-                    self_check.runner_override,
-                    self_check.windows_runner_override,
-                    &options,
-                );
+            match options.om_ci {
+                OmCiMode::Off => {
+                    push_nix_ci_legacy_steps(
+                        &mut workflow,
+                        platform,
+                        package,
+                        self_check,
+                        &options,
+                    );
+                }
+                OmCiMode::Replace => {
+                    push_om_ci_step(&mut workflow, &options);
+                    push_quality_tool_install_steps(&mut workflow, runtime, &options);
+                    push_optional_ci_steps(&mut workflow, runtime, package, &options);
+                    if self_check.enabled {
+                        push_self_check_steps(
+                            &mut workflow,
+                            platform,
+                            runtime,
+                            self_check.runner_override,
+                            self_check.windows_runner_override,
+                            &options,
+                        );
+                    }
+                }
+                OmCiMode::Augment => {
+                    push_om_ci_step(&mut workflow, &options);
+                    push_nix_ci_legacy_steps(
+                        &mut workflow,
+                        platform,
+                        package,
+                        self_check,
+                        &options,
+                    );
+                }
             }
-            workflow.push_str("      - name: Clippy\n");
-            workflow.push_str(
-                "        run: nix develop -c cargo clippy --all-targets -- --deny warnings\n\n",
-            );
-            workflow.push_str("      - name: Package crate\n");
-            workflow.push_str("        run: nix develop -c cargo package --allow-dirty\n");
         }
         Runtime::Cargo => {
             push_rust_setup_step(&mut workflow, platform);
+            push_rust_cache_steps(&mut workflow, platform);
             push_extra_setup_steps(&mut workflow, &options.extra_setup);
             push_test_steps(&mut workflow, package, &options);
             push_quality_tool_install_steps(&mut workflow, runtime, &options);
@@ -233,6 +282,7 @@ fn ci_workflow(
         }
     }
 
+    trim_trailing_blank_lines(&mut workflow);
     workflow
 }
 
@@ -282,22 +332,27 @@ fn publish_workflow(
             workflow.push_str(&validate_tag_step(
                 "nix develop -c cargo metadata --no-deps --format-version 1",
             ));
-            workflow.push_str("      - name: Check flake\n");
-            workflow.push_str("        run: nix flake check\n\n");
-            workflow.push_str("      - name: Test\n");
-            workflow.push_str("        run: nix develop -c cargo test\n\n");
-            push_quality_tool_install_steps(&mut workflow, runtime, &options);
-            push_optional_publish_steps(&mut workflow, runtime, &options);
-            workflow.push_str("      - name: Clippy\n");
-            workflow.push_str(
-                "        run: nix develop -c cargo clippy --all-targets -- --deny warnings\n\n",
-            );
-            workflow.push_str("      - name: Dry-run publish\n");
-            workflow.push_str("        run: nix develop -c cargo publish --dry-run\n\n");
-            workflow.push_str(&publish_step(package, "nix develop -c cargo publish"));
+            match options.om_ci {
+                OmCiMode::Off => {
+                    push_nix_publish_legacy_steps(&mut workflow, package, &options);
+                }
+                OmCiMode::Replace => {
+                    push_om_ci_step(&mut workflow, &options);
+                    push_quality_tool_install_steps(&mut workflow, runtime, &options);
+                    push_optional_publish_steps(&mut workflow, runtime, &options);
+                    workflow.push_str("      - name: Dry-run publish\n");
+                    workflow.push_str("        run: nix develop -c cargo publish --dry-run\n\n");
+                    workflow.push_str(&publish_step(package, "nix develop -c cargo publish"));
+                }
+                OmCiMode::Augment => {
+                    push_om_ci_step(&mut workflow, &options);
+                    push_nix_publish_legacy_steps(&mut workflow, package, &options);
+                }
+            }
         }
         Runtime::Cargo => {
             push_rust_setup_step(&mut workflow, platform);
+            push_rust_cache_steps(&mut workflow, platform);
             push_extra_setup_steps(&mut workflow, &options.extra_setup);
             workflow.push_str(&validate_tag_step(
                 "cargo metadata --no-deps --format-version 1",
@@ -359,6 +414,7 @@ fn artifacts_workflow(
         }
         Runtime::Cargo => {
             push_rust_setup_step(&mut workflow, platform);
+            push_rust_cache_steps(&mut workflow, platform);
             push_extra_setup_steps(&mut workflow, &options.extra_setup);
             workflow.push_str("      - name: Build release binary\n");
             workflow.push_str("        run: cargo build --release --locked\n\n");
@@ -446,7 +502,9 @@ fn push_windows_publish_job(
     push_windows_rust_setup_step(workflow, platform);
     workflow.push_str("      - name: Install simit\n");
     workflow.push_str("        run: |\n");
-    workflow.push_str("          # TODO(cache): cache cargo install output for tagged releases.\n");
+    workflow.push_str(
+        "          # TODO(cache): cache cargo install output for tagged windows-publish runs (see planning/cargo-cache-defaults out-of-scope).\n",
+    );
     workflow.push_str("          cargo install --locked simit\n\n");
 
     if let Some(chocolatey) = &options.chocolatey {
@@ -1180,6 +1238,60 @@ fn push_install_nix_step(workflow: &mut String, platform: Platform) {
     workflow.push_str("        uses: https://github.com/cachix/install-nix-action@v31\n\n");
 }
 
+fn push_om_ci_step(workflow: &mut String, options: &CiOptions) {
+    workflow.push_str("      - name: Run om ci\n");
+    workflow.push_str("        env:\n");
+    workflow.push_str("          OMNIX_REF: ");
+    workflow.push_str(&shell_word(&options.omnix_ref));
+    workflow.push('\n');
+    workflow.push_str("        run: nix run \"$OMNIX_REF\" -- ci run\n\n");
+}
+
+fn push_nix_ci_legacy_steps(
+    workflow: &mut String,
+    platform: Platform,
+    package: &Package,
+    self_check: SelfCheckOptions<'_>,
+    options: &CiOptions,
+) {
+    workflow.push_str("      - name: Check flake\n");
+    workflow.push_str("        run: nix flake check\n\n");
+    workflow.push_str("      - name: Test\n");
+    workflow.push_str("        run: nix develop -c cargo test\n\n");
+    push_quality_tool_install_steps(workflow, Runtime::Nix, options);
+    push_optional_ci_steps(workflow, Runtime::Nix, package, options);
+    if self_check.enabled {
+        push_self_check_steps(
+            workflow,
+            platform,
+            Runtime::Nix,
+            self_check.runner_override,
+            self_check.windows_runner_override,
+            options,
+        );
+    }
+    workflow.push_str("      - name: Clippy\n");
+    workflow
+        .push_str("        run: nix develop -c cargo clippy --all-targets -- --deny warnings\n\n");
+    workflow.push_str("      - name: Package crate\n");
+    workflow.push_str("        run: nix develop -c cargo package --allow-dirty\n");
+}
+
+fn push_nix_publish_legacy_steps(workflow: &mut String, package: &Package, options: &CiOptions) {
+    workflow.push_str("      - name: Check flake\n");
+    workflow.push_str("        run: nix flake check\n\n");
+    workflow.push_str("      - name: Test\n");
+    workflow.push_str("        run: nix develop -c cargo test\n\n");
+    push_quality_tool_install_steps(workflow, Runtime::Nix, options);
+    push_optional_publish_steps(workflow, Runtime::Nix, options);
+    workflow.push_str("      - name: Clippy\n");
+    workflow
+        .push_str("        run: nix develop -c cargo clippy --all-targets -- --deny warnings\n\n");
+    workflow.push_str("      - name: Dry-run publish\n");
+    workflow.push_str("        run: nix develop -c cargo publish --dry-run\n\n");
+    workflow.push_str(&publish_step(package, "nix develop -c cargo publish"));
+}
+
 fn rust_container(package: &Package) -> String {
     let Some(rust_version) = package.rust_version.as_deref() else {
         return "rust:bookworm".to_owned();
@@ -1218,10 +1330,28 @@ fn push_rust_setup_step(workflow: &mut String, platform: Platform) {
     }
 }
 
+fn push_rust_cache_steps(workflow: &mut String, platform: Platform) {
+    workflow.push_str("      - name: Cache cargo bin (tools)\n");
+    push_action_uses(workflow, platform, "cache", "v4");
+    workflow.push_str("        with:\n");
+    workflow.push_str("          path: ~/.cargo/bin\n");
+    workflow.push_str(
+        "          key: cargo-bin-${{ runner.os }}-${{ hashFiles('.forgejo/workflows/ci.yaml', '.github/workflows/ci.yaml') }}\n\n",
+    );
+    workflow.push_str("      - name: Cache cargo registry + target\n");
+    workflow.push_str("        uses: https://github.com/Swatinem/rust-cache@v2\n");
+    workflow.push_str("        with:\n");
+    workflow.push_str("          cache-all-crates: \"true\"\n");
+    workflow.push_str("          cache-on-failure: \"true\"\n");
+    workflow.push_str("          save-if: ${{ github.ref == 'refs/heads/trunk' }}\n\n");
+}
+
 fn push_test_steps(workflow: &mut String, package: &Package, options: &CiOptions) {
     if options.with_nextest {
         workflow.push_str("      - name: Install nextest\n");
-        workflow.push_str("        run: cargo install cargo-nextest --locked\n\n");
+        workflow.push_str(
+            "        run: command -v cargo-nextest >/dev/null 2>&1 || cargo install cargo-nextest --locked\n\n",
+        );
         workflow.push_str("      - name: Test all features\n");
         workflow.push_str("        run: cargo nextest run --all-features\n\n");
     } else {
@@ -1255,14 +1385,26 @@ fn push_quality_tool_install_steps(workflow: &mut String, runtime: Runtime, opti
     if options.with_audit {
         workflow.push_str("      - name: Install cargo-audit\n");
         workflow.push_str("        run: ");
-        workflow.push_str(prefix);
-        workflow.push_str("cargo install cargo-audit --locked\n\n");
+        if runtime == Runtime::Cargo {
+            workflow.push_str(
+                "command -v cargo-audit >/dev/null 2>&1 || cargo install cargo-audit --locked\n\n",
+            );
+        } else {
+            workflow.push_str(prefix);
+            workflow.push_str("cargo install cargo-audit --locked\n\n");
+        }
     }
     if options.with_deny {
         workflow.push_str("      - name: Install cargo-deny\n");
         workflow.push_str("        run: ");
-        workflow.push_str(prefix);
-        workflow.push_str("cargo install cargo-deny --locked\n\n");
+        if runtime == Runtime::Cargo {
+            workflow.push_str(
+                "command -v cargo-deny >/dev/null 2>&1 || cargo install cargo-deny --locked\n\n",
+            );
+        } else {
+            workflow.push_str(prefix);
+            workflow.push_str("cargo install cargo-deny --locked\n\n");
+        }
     }
 }
 
@@ -1327,6 +1469,12 @@ fn command_prefix(runtime: Runtime) -> &'static str {
     match runtime {
         Runtime::Cargo => "",
         Runtime::Nix => "nix develop -c ",
+    }
+}
+
+fn trim_trailing_blank_lines(workflow: &mut String) {
+    while workflow.ends_with("\n\n") {
+        workflow.pop();
     }
 }
 
@@ -1395,6 +1543,19 @@ fn push_self_check_suffix(
     }
     if options.with_artifacts {
         workflow.push_str(" --with-artifacts");
+    }
+    match options.om_ci {
+        OmCiMode::Off => {}
+        OmCiMode::Replace => {
+            workflow.push_str(" --with-om-ci");
+        }
+        OmCiMode::Augment => {
+            workflow.push_str(" --om-ci-augment");
+        }
+    }
+    if options.om_ci != OmCiMode::Off && options.omnix_ref != OMNIX_REF_DEFAULT {
+        workflow.push_str(" --omnix-ref ");
+        workflow.push_str(&shell_word(&options.omnix_ref));
     }
     if options.homebrew.is_some() {
         workflow.push_str(" --with-homebrew");

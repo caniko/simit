@@ -299,6 +299,22 @@ pub struct InitCiCommand {
     #[arg(long = "with-docs", help = "Build package documentation in CI")]
     pub with_docs: bool,
     #[arg(
+        long = "with-om-ci",
+        help = "Replace flake check and cargo dev-shell steps with om ci run (requires --runtime nix)"
+    )]
+    pub with_om_ci: bool,
+    #[arg(
+        long = "om-ci-augment",
+        help = "Run om ci run alongside the legacy cargo dev-shell steps; implies --with-om-ci"
+    )]
+    pub om_ci_augment: bool,
+    #[arg(
+        long = "omnix-ref",
+        value_name = "REF",
+        help = "Override the pinned omnix flakeref"
+    )]
+    pub omnix_ref: Option<String>,
+    #[arg(
         long = "with-artifacts",
         num_args = 0..=1,
         default_value_t = false,

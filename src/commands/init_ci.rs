@@ -10,8 +10,8 @@ use crate::project;
 use crate::registry::{self, FeatureStatus};
 use crate::release_trust::{self, TrustOverrides};
 use crate::render::ci::{
-    self, ChocolateyOptions, CiOptions, HomebrewOptions, HomebrewPlatformSet, ScoopOptions,
-    SelfCheckOptions,
+    self, ChocolateyOptions, CiOptions, HomebrewOptions, HomebrewPlatformSet, OMNIX_REF_DEFAULT,
+    OmCiMode, ScoopOptions, SelfCheckOptions,
 };
 use crate::user_config::{UserConfig, validate_runner_label};
 
@@ -52,6 +52,20 @@ pub fn run(command: InitCiCommand) -> Result<()> {
     let explicit_runners_cover_required =
         runner_overrides_cover_required_runners(&command, windows_packagers);
     let cfg = ProjectConfig::load(workspace_root)?;
+    let om_ci_requested =
+        command.with_om_ci || command.om_ci_augment || cfg.ci.om_ci || cfg.ci.om_ci_augment;
+    let augment = command.om_ci_augment || cfg.ci.om_ci_augment;
+    let om_ci = match (om_ci_requested, augment) {
+        (false, _) => OmCiMode::Off,
+        (true, true) => OmCiMode::Augment,
+        (true, false) => OmCiMode::Replace,
+    };
+    if om_ci != OmCiMode::Off && runtime != Runtime::Nix {
+        bail!("--with-om-ci requires --runtime nix");
+    }
+    if command.omnix_ref.is_some() && om_ci == OmCiMode::Off {
+        eprintln!("--omnix-ref is ignored unless --with-om-ci or --om-ci-augment is enabled.");
+    }
     let homebrew = if command.with_homebrew {
         Some(homebrew_options(&cfg, &command.homebrew, &package)?)
     } else {
@@ -67,6 +81,19 @@ pub fn run(command: InitCiCommand) -> Result<()> {
     } else {
         None
     };
+    let user_config = UserConfig::load().or_else(|err| {
+        if command.platform == Platform::Github || explicit_runners_cover_required {
+            Ok(UserConfig::default())
+        } else {
+            Err(err)
+        }
+    })?;
+    let omnix_ref = command
+        .omnix_ref
+        .clone()
+        .or_else(|| cfg.ci.omnix_ref.clone())
+        .or_else(|| user_config.ci.tools.omnix.r#ref.clone())
+        .unwrap_or_else(|| OMNIX_REF_DEFAULT.to_owned());
     let options = CiOptions {
         with_nextest: command.with_nextest,
         with_msrv: command.with_msrv,
@@ -74,6 +101,8 @@ pub fn run(command: InitCiCommand) -> Result<()> {
         with_deny: command.with_deny,
         with_docs: command.with_docs,
         with_artifacts,
+        om_ci,
+        omnix_ref,
         release_smoke_command: command
             .release_smoke_command
             .or_else(|| cfg.release.smoke.command.clone()),
@@ -89,13 +118,6 @@ pub fn run(command: InitCiCommand) -> Result<()> {
         chocolatey,
         scoop,
     };
-    let user_config = UserConfig::load().or_else(|err| {
-        if command.platform == Platform::Github || explicit_runners_cover_required {
-            Ok(UserConfig::default())
-        } else {
-            Err(err)
-        }
-    })?;
     let runners = user_config.resolve_ci_runners(
         command.platform,
         runtime,

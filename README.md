@@ -162,6 +162,91 @@ pull-request events:
 simit init ci --platform forgejo --runtime nix
 ```
 
+### Omnix CI (`--with-om-ci`)
+
+Use `--with-om-ci` with `--runtime nix` to replace the generated Nix flake
+check and cargo dev-shell test steps with [Omnix `om ci`](https://omnix.page/om/ci.html):
+
+```sh
+simit init ci --platform forgejo --runtime nix --with-om-ci
+```
+
+Replace mode is the default when `--with-om-ci` is set. It trusts the flake's
+`checks.*` to cover the project's test, clippy, fmt, and doc gates. Projects
+using simit's generated crane flake satisfy that contract. Custom flakes
+(`[flake].mode = "custom"`) must audit `[flake.expected_outputs].checks`
+before enabling replace mode; otherwise CI can go green while skipping work the
+legacy `nix develop -c cargo ...` steps used to run.
+
+For Forgejo, replace mode emits this CI workflow:
+
+```yaml
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: atlas
+    steps:
+      - name: Checkout
+        uses: https://code.forgejo.org/actions/checkout@v4
+
+      - name: Run om ci
+        env:
+          OMNIX_REF: 'github:juspay/omnix/v1.3.2'
+        run: nix run "$OMNIX_REF" -- ci run
+```
+
+Use `--om-ci-augment` when the flake checks are not yet complete. Augment mode
+runs `om ci` first, then keeps the legacy Nix-runtime cargo steps:
+
+```yaml
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: atlas
+    steps:
+      - name: Checkout
+        uses: https://code.forgejo.org/actions/checkout@v4
+
+      - name: Run om ci
+        env:
+          OMNIX_REF: 'github:juspay/omnix/v1.3.2'
+        run: nix run "$OMNIX_REF" -- ci run
+
+      - name: Check flake
+        run: nix flake check
+
+      - name: Test
+        run: nix develop -c cargo test
+
+      - name: Clippy
+        run: nix develop -c cargo clippy --all-targets -- --deny warnings
+
+      - name: Package crate
+        run: nix develop -c cargo package --allow-dirty
+```
+
+Pin the Omnix flakeref with `--omnix-ref`, project config, or user config. The
+resolution order is CLI `--omnix-ref` > project `[ci].omnix_ref` > user
+`[ci.tools.omnix].ref` > simit's pinned default.
+
 Use `--check` in CI to make sure committed workflows still match `simit`'s
 generated output:
 
@@ -203,6 +288,13 @@ simit init ci --platform forgejo --check --diff
 ```
 
 `--with-msrv` requires `package.rust-version`.
+
+Cargo-runtime workflows include warm-cache steps by default: a `~/.cargo/bin`
+cache keyed by the generated workflow files, plus `Swatinem/rust-cache@v2` for
+Cargo registry and target state. Optional tool installs use `command -v ... ||
+cargo install ... --locked` so a cache hit skips the download while a cache miss
+still installs the required binary. Nix-runtime workflows skip these Cargo
+caches and rely on the runner's Nix store and binary cache behavior.
 
 Forgejo + Nix artifact workflows can also publish a Homebrew tap:
 

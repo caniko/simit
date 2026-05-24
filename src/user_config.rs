@@ -25,6 +25,20 @@ pub struct UserConfig {
 pub struct UserCiConfig {
     pub runners: BTreeMap<String, UserRunnerConfig>,
     pub defaults: BTreeMap<String, UserCiPlatformDefaults>,
+    pub tools: CiTools,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct CiTools {
+    pub omnix: OmnixToolConfig,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct OmnixToolConfig {
+    #[serde(rename = "ref")]
+    pub r#ref: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]

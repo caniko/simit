@@ -112,6 +112,12 @@ pub struct CiConfig {
     pub extra_env: BTreeMap<String, String>,
     #[serde(default)]
     pub required_secrets: Vec<String>,
+    #[serde(default)]
+    pub om_ci: bool,
+    #[serde(default)]
+    pub om_ci_augment: bool,
+    #[serde(default)]
+    pub omnix_ref: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
