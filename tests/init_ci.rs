@@ -264,6 +264,9 @@ fn generates_forgejo_nix_workflows() {
     assert!(publish.contains("CRATES_IO_API_TOKEN: ${{ secrets.CRATES_IO_API_TOKEN }}"));
     assert!(publish.contains("CRATES_IO_API_TOKEN is required"));
     assert!(publish.contains("export CARGO_REGISTRY_TOKEN="));
+    assert!(publish.contains("https://crates.io/api/v1/crates/${crate_name}/${version}"));
+    assert!(publish.contains("already published on crates.io; skipping publish"));
+    assert!(!publish.contains("cargo login"));
     assert_maintainer_key_written(temp.path());
 }
 
@@ -290,6 +293,9 @@ fn generates_github_plain_cargo_workflows() {
     assert!(publish.contains("simit changelog release <version>"));
     assert!(publish.contains("run: cargo publish --dry-run"));
     assert!(publish.contains("cargo metadata --no-deps --format-version 1"));
+    assert!(publish.contains("export CARGO_REGISTRY_TOKEN="));
+    assert!(publish.contains("already published on crates.io; skipping publish"));
+    assert!(!publish.contains("cargo login"));
 }
 
 #[test]

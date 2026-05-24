@@ -294,7 +294,7 @@ fn publish_workflow(
             );
             workflow.push_str("      - name: Dry-run publish\n");
             workflow.push_str("        run: nix develop -c cargo publish --dry-run\n\n");
-            workflow.push_str(&publish_step("nix develop -c cargo publish"));
+            workflow.push_str(&publish_step(package, "nix develop -c cargo publish"));
         }
         Runtime::Cargo => {
             push_rust_setup_step(&mut workflow, platform);
@@ -308,7 +308,7 @@ fn publish_workflow(
             push_clippy_steps(&mut workflow, package);
             workflow.push_str("      - name: Dry-run publish\n");
             workflow.push_str("        run: cargo publish --dry-run\n\n");
-            workflow.push_str(&publish_step("cargo publish"));
+            workflow.push_str(&publish_step(package, "cargo publish"));
         }
     }
 
@@ -1482,12 +1482,48 @@ fn validate_tag_step(cargo_metadata_command: &str) -> String {
     validate_release_tag_step(Some(cargo_metadata_command))
 }
 
-fn publish_step(command: &str) -> String {
+fn publish_step(package: &Package, command: &str) -> String {
+    let package_name = shell_quote(&package.name);
     format!(
         r#"      - name: Publish
         env:
           CRATES_IO_API_TOKEN: ${{{{ secrets.CRATES_IO_API_TOKEN }}}}
         run: |
+          set -euo pipefail
+          crate_name={package_name}
+          version="${{GITHUB_REF_NAME:-${{FORGE_REF_NAME:-${{CODEBERG_REF_NAME:-}}}}}}"
+          if [ -z "$version" ]; then
+            ref="${{GITHUB_REF:-${{FORGE_REF:-${{CODEBERG_REF:-}}}}}}"
+            version="${{ref#refs/tags/}}"
+          fi
+          if [ -z "$version" ]; then
+            echo "Could not determine release version from tag ref" >&2
+            exit 1
+          fi
+          if ! command -v curl >/dev/null 2>&1; then
+            if command -v apt-get >/dev/null 2>&1; then
+              apt-get update
+              apt-get install -y --no-install-recommends curl ca-certificates
+            else
+              echo "curl is required to check crates.io for existing versions" >&2
+              exit 1
+            fi
+          fi
+          if ! status="$(curl --retry 3 -sS -o /dev/null -w '%{{http_code}}' -A 'simit init-ci publish check' "https://crates.io/api/v1/crates/${{crate_name}}/${{version}}")"; then
+            status=000
+          fi
+          case "$status" in
+            200)
+              echo "${{crate_name}} ${{version}} is already published on crates.io; skipping publish"
+              exit 0
+              ;;
+            404)
+              ;;
+            *)
+              echo "Could not check crates.io for ${{crate_name}} ${{version}} before publishing (HTTP $status)" >&2
+              exit 1
+              ;;
+          esac
           if [ -z "${{CRATES_IO_API_TOKEN:-}}" ] && [ -z "${{CARGO_REGISTRY_TOKEN:-}}" ]; then
             echo "CRATES_IO_API_TOKEN is required to publish to crates.io" >&2
             exit 1

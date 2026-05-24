@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.1] - 2026-05-24
+
+### Fixed
+
+- Skip crates.io publishing for already-visible package versions in generated
+  publish workflows before requiring a registry token.
+
 ## [0.14.0] - 2026-05-23
 
 ### Added
@@ -128,7 +135,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Prepare the first public crates.io release.
 
-[Unreleased]: https://codeberg.org/caniko/simit/compare/0.14.0...HEAD
+[Unreleased]: https://codeberg.org/caniko/simit/compare/0.14.1...HEAD
+[0.14.1]: https://codeberg.org/caniko/simit/compare/0.14.0...0.14.1
 [0.14.0]: https://codeberg.org/caniko/simit/compare/0.13.0...0.14.0
 [0.13.0]: https://codeberg.org/caniko/simit/compare/0.12.0...0.13.0
 [0.12.0]: https://codeberg.org/caniko/simit/compare/0.11.0...0.12.0
