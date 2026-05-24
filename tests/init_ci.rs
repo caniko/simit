@@ -41,6 +41,15 @@ fn init_workspace_fixture() -> TempDir {
     temp
 }
 
+fn init_diverging_workspace_fixture() -> TempDir {
+    let temp = TempDir::new().unwrap();
+    copy_dir(
+        Path::new("tests/fixtures/workspace-ci-diverging"),
+        temp.path(),
+    );
+    temp
+}
+
 fn copy_dir(source: &Path, destination: &Path) {
     fs::create_dir_all(destination).unwrap();
     for entry in fs::read_dir(source).unwrap() {
@@ -319,7 +328,7 @@ fn generates_forgejo_nix_workflows() {
     assert!(publish.contains("grep -Eq '^[0-9]+\\.[0-9]+\\.[0-9]+$'"));
     assert!(publish.contains("keys/maintainers.gpg"));
     assert!(publish.contains("git verify-tag \"$tag\""));
-    assert!(publish.contains("nix develop -c cargo metadata --no-deps --format-version 1"));
+    assert!(publish.contains(r#"nix develop -c cargo pkgid -p demo | awk -F'[#@]' '{print $NF}'"#));
     assert!(publish.contains("CRATES_IO_API_TOKEN: ${{ secrets.CRATES_IO_API_TOKEN }}"));
     assert!(publish.contains("CRATES_IO_API_TOKEN is required"));
     assert!(publish.contains("export CARGO_REGISTRY_TOKEN="));
@@ -362,7 +371,7 @@ fn forgejo_nix_with_om_ci_replace_emits_om_ci_step() {
     let publish = read(&temp.path().join(".forgejo/workflows/publish-crate.yaml"));
     assert!(publish.contains("OMNIX_REF:"));
     assert!(publish.contains("nix run \"$OMNIX_REF\" -- ci run"));
-    assert!(publish.contains("nix develop -c cargo metadata --no-deps --format-version 1"));
+    assert!(publish.contains(r#"nix develop -c cargo pkgid -p demo | awk -F'[#@]' '{print $NF}'"#));
     assert!(publish.contains("nix develop -c cargo publish --dry-run"));
     assert!(!publish.contains("run: nix flake check"));
     assert!(!publish.contains("nix develop -c cargo test"));
@@ -607,23 +616,15 @@ fn generates_github_plain_cargo_workflows() {
     ));
     assert!(publish.contains("simit changelog release <version>"));
     assert!(publish.contains("run: cargo publish --dry-run"));
-    assert!(publish.contains("cargo metadata --no-deps --format-version 1"));
+    assert!(publish.contains(r#"cargo pkgid -p demo | awk -F'[#@]' '{print $NF}'"#));
     assert!(publish.contains("export CARGO_REGISTRY_TOKEN="));
     assert!(publish.contains("already published on crates.io; skipping publish"));
     assert!(!publish.contains("cargo login"));
-    // Regression: `grep -m1 -o` over compact single-line cargo-metadata JSON
-    // bounds matching *lines*, not match occurrences, so on a Cargo workspace
-    // every member's `"version":"…"` is emitted and `$version` becomes a
-    // multi-line concatenation that always fails the tag equality check.
-    // The extractor must instead use `head -n1` (or another single-match
-    // selector) after `grep -o`.
+    // Regression: the publish workflow must not infer the release version from
+    // the first package in workspace-wide cargo metadata.
     assert!(
-        !publish.contains("grep -m1 -o '\"version\":\"[^\"]*\"'"),
-        "publish workflow must not use `grep -m1 -o` for cargo metadata version extraction (breaks on workspaces)"
-    );
-    assert!(
-        publish.contains("grep -o '\"version\":\"[^\"]*\"' | head -n1"),
-        "publish workflow must pipe `grep -o` through `head -n1` to bound to a single match"
+        !publish.contains("cargo metadata --no-deps --format-version 1"),
+        "publish workflow must use a package-scoped version extractor"
     );
 }
 
@@ -701,7 +702,7 @@ fn forgejo_auto_runtime_uses_rust_container_even_when_flake_exists() {
     assert!(publish.contains(
         "command -v cargo-nextest >/dev/null 2>&1 || cargo install cargo-nextest --locked"
     ));
-    assert!(publish.contains("cargo metadata --no-deps --format-version 1"));
+    assert!(publish.contains(r#"cargo pkgid -p demo | awk -F'[#@]' '{print $NF}'"#));
 }
 
 #[test]
@@ -986,6 +987,38 @@ fn workspace_flag_generates_per_package_workflows() {
     assert_yaml_parses(&beta_publish);
     assert!(beta_publish.contains("run: cargo publish -p beta --dry-run"));
     assert!(beta_publish.contains("cargo publish -p beta"));
+}
+
+#[test]
+fn workspace_publish_tag_validation_is_package_scoped_for_diverging_versions() {
+    let temp = init_diverging_workspace_fixture();
+
+    let status = simit_with_user_config(temp.path())
+        .current_dir(temp.path())
+        .args(["init", "ci", "--platform", "forgejo", "--workspace"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let member_a_publish = read(
+        &temp
+            .path()
+            .join(".forgejo/workflows/publish-crate-member-a.yaml"),
+    );
+    assert_yaml_parses(&member_a_publish);
+    assert!(member_a_publish.contains(r#"cargo pkgid -p member-a | awk -F'[#@]' '{print $NF}'"#));
+    assert!(!member_a_publish.contains("cargo pkgid -p member-b"));
+    assert!(!member_a_publish.contains("cargo metadata --no-deps --format-version 1"));
+
+    let member_b_publish = read(
+        &temp
+            .path()
+            .join(".forgejo/workflows/publish-crate-member-b.yaml"),
+    );
+    assert_yaml_parses(&member_b_publish);
+    assert!(member_b_publish.contains(r#"cargo pkgid -p member-b | awk -F'[#@]' '{print $NF}'"#));
+    assert!(!member_b_publish.contains("cargo pkgid -p member-a"));
+    assert!(!member_b_publish.contains("cargo metadata --no-deps --format-version 1"));
 }
 
 #[test]

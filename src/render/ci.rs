@@ -341,9 +341,7 @@ fn publish_workflow(
         Runtime::Nix => {
             push_install_nix_step(&mut workflow, platform);
             push_extra_setup_steps(&mut workflow, &options.extra_setup);
-            workflow.push_str(&validate_tag_step(
-                "nix develop -c cargo metadata --no-deps --format-version 1",
-            ));
+            workflow.push_str(&validate_tag_step(command_prefix(runtime), &package.name));
             match options.om_ci {
                 OmCiMode::Off => {
                     push_nix_publish_legacy_steps(&mut workflow, package, &options);
@@ -372,9 +370,7 @@ fn publish_workflow(
             push_rust_setup_step(&mut workflow, platform);
             push_rust_cache_steps(&mut workflow, platform);
             push_extra_setup_steps(&mut workflow, &options.extra_setup);
-            workflow.push_str(&validate_tag_step(
-                "cargo metadata --no-deps --format-version 1",
-            ));
+            workflow.push_str(&validate_tag_step(command_prefix(runtime), &package.name));
             push_test_steps(&mut workflow, package, &options);
             push_quality_tool_install_steps(&mut workflow, runtime, &options);
             push_optional_publish_steps(&mut workflow, runtime, &options);
@@ -429,7 +425,7 @@ fn artifacts_workflow(
     push_job_env(&mut workflow, &options.extra_env);
     workflow.push_str("    steps:\n");
     push_checkout_step(&mut workflow, platform);
-    workflow.push_str(&validate_release_tag_step(None));
+    workflow.push_str(&validate_release_tag_step(None, None));
     match runtime {
         Runtime::Nix => {
             push_install_nix_step(&mut workflow, platform);
@@ -1645,13 +1641,20 @@ fn runs_on(runner: &ResolvedRunner) -> String {
     format!("[{labels}]")
 }
 
-fn validate_release_tag_step(cargo_metadata_command: Option<&str>) -> String {
-    let version_check = if let Some(cargo_metadata_command) = cargo_metadata_command {
+fn validate_release_tag_step(
+    cargo_command_prefix: Option<&str>,
+    package_name: Option<&str>,
+) -> String {
+    let version_check = if let (Some(cargo_command_prefix), Some(package_name)) =
+        (cargo_command_prefix, package_name)
+    {
+        let package_name = shell_word(package_name);
         format!(
             r#"
-          version="$({cargo_metadata_command} | grep -o '"version":"[^"]*"' | head -n1 | cut -d '"' -f4)"
+          # cargo pkgid scopes the version lookup to the crate this workflow publishes.
+          version="$({cargo_command_prefix}cargo pkgid -p {package_name} | awk -F'[#@]' '{{print $NF}}')"
           if [ -z "$version" ]; then
-            echo "Could not read package version from cargo metadata" >&2
+            echo "Could not read package version from cargo pkgid" >&2
             exit 1
           fi
           if [ "$tag" != "$version" ]; then
@@ -1701,8 +1704,8 @@ fn validate_release_tag_step(cargo_metadata_command: Option<&str>) -> String {
     )
 }
 
-fn validate_tag_step(cargo_metadata_command: &str) -> String {
-    validate_release_tag_step(Some(cargo_metadata_command))
+fn validate_tag_step(cargo_command_prefix: &str, package_name: &str) -> String {
+    validate_release_tag_step(Some(cargo_command_prefix), Some(package_name))
 }
 
 fn publish_step(package: &Package, command: &str, package_scoped: bool) -> String {

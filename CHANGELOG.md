@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Scope generated crates.io publish workflow tag/version validation to the
+  package being published, avoiding wrong-version checks in Cargo workspaces
+  whose members have diverging versions.
+
 ## [0.15.1] - 2026-05-24
 
 ### Fixed
