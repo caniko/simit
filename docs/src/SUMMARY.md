@@ -10,3 +10,11 @@
 - [Omnix CI](getting-started/om-ci.md)
 - [Public API](public-api.md)
 - [Release Maintenance](release-maintenance.md)
+
+# Plan: publish-version-extractor-fix
+
+- [Overview](planning/publish-version-extractor-fix/README.md)
+- [01 — Commit and release simit 0.15.1](planning/publish-version-extractor-fix/01-simit-commit-and-release.md)
+- [02 — Package-scope the extractor](planning/publish-version-extractor-fix/02-simit-package-scope-extractor.md)
+- [03 — Detritus: commit regen and retry publish](planning/publish-version-extractor-fix/03-detritus-commit-and-retry-publish.md)
+- [04 — Sweep latent dependents](planning/publish-version-extractor-fix/04-sweep-latent-dependents.md)

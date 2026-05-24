@@ -1649,7 +1649,7 @@ fn validate_release_tag_step(cargo_metadata_command: Option<&str>) -> String {
     let version_check = if let Some(cargo_metadata_command) = cargo_metadata_command {
         format!(
             r#"
-          version="$({cargo_metadata_command} | grep -m1 -o '"version":"[^"]*"' | cut -d '"' -f4)"
+          version="$({cargo_metadata_command} | grep -o '"version":"[^"]*"' | head -n1 | cut -d '"' -f4)"
           if [ -z "$version" ]; then
             echo "Could not read package version from cargo metadata" >&2
             exit 1

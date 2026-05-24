@@ -611,6 +611,20 @@ fn generates_github_plain_cargo_workflows() {
     assert!(publish.contains("export CARGO_REGISTRY_TOKEN="));
     assert!(publish.contains("already published on crates.io; skipping publish"));
     assert!(!publish.contains("cargo login"));
+    // Regression: `grep -m1 -o` over compact single-line cargo-metadata JSON
+    // bounds matching *lines*, not match occurrences, so on a Cargo workspace
+    // every member's `"version":"…"` is emitted and `$version` becomes a
+    // multi-line concatenation that always fails the tag equality check.
+    // The extractor must instead use `head -n1` (or another single-match
+    // selector) after `grep -o`.
+    assert!(
+        !publish.contains("grep -m1 -o '\"version\":\"[^\"]*\"'"),
+        "publish workflow must not use `grep -m1 -o` for cargo metadata version extraction (breaks on workspaces)"
+    );
+    assert!(
+        publish.contains("grep -o '\"version\":\"[^\"]*\"' | head -n1"),
+        "publish workflow must pipe `grep -o` through `head -n1` to bound to a single match"
+    );
 }
 
 #[test]

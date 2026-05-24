@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.1] - 2026-05-24
+
+### Fixed
+
+- Fix generated crates.io publish workflows so Cargo workspace metadata version
+  extraction selects a single package version instead of failing tag validation
+  with concatenated workspace versions; see
+  [`docs/src/planning/publish-workflow-version-extraction-research.md`](docs/src/planning/publish-workflow-version-extraction-research.md).
+
 ## [0.15.0] - 2026-05-24
 
 ### Added
@@ -147,7 +156,8 @@ ci`, including the `~/.cargo/bin` key, rust-cache settings, and why Nix
 
 - Prepare the first public crates.io release.
 
-[Unreleased]: https://codeberg.org/caniko/simit/compare/0.15.0...HEAD
+[Unreleased]: https://codeberg.org/caniko/simit/compare/0.15.1...HEAD
+[0.15.1]: https://codeberg.org/caniko/simit/compare/0.15.0...0.15.1
 [0.15.0]: https://codeberg.org/caniko/simit/compare/0.14.1...0.15.0
 [0.14.1]: https://codeberg.org/caniko/simit/compare/0.14.0...0.14.1
 [0.14.0]: https://codeberg.org/caniko/simit/compare/0.13.0...0.14.0
