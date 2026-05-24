@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.2] - 2026-05-24
+
 ### Fixed
 
 - Scope generated crates.io publish workflow tag/version validation to the
@@ -162,7 +164,8 @@ ci`, including the `~/.cargo/bin` key, rust-cache settings, and why Nix
 
 - Prepare the first public crates.io release.
 
-[Unreleased]: https://codeberg.org/caniko/simit/compare/0.15.1...HEAD
+[Unreleased]: https://codeberg.org/caniko/simit/compare/0.15.2...HEAD
+[0.15.2]: https://codeberg.org/caniko/simit/compare/0.15.1...0.15.2
 [0.15.1]: https://codeberg.org/caniko/simit/compare/0.15.0...0.15.1
 [0.15.0]: https://codeberg.org/caniko/simit/compare/0.14.1...0.15.0
 [0.14.1]: https://codeberg.org/caniko/simit/compare/0.14.0...0.14.1
