@@ -264,7 +264,7 @@ fn include_empty_marks_non_simit_registrations_in_human_output() {
 }
 
 #[test]
-fn generic_project_files_are_skipped_without_include_empty() {
+fn generic_project_files_with_hand_rolled_ci_are_registered() {
     let data_home = TempDir::new().unwrap();
     let root = TempDir::new().unwrap();
     let project = root.path().join("plain");
@@ -281,7 +281,38 @@ fn generic_project_files_are_skipped_without_include_empty() {
     assert!(output.status.success());
 
     let value = registry_json(data_home.path());
-    assert!(value.as_array().unwrap().is_empty());
+    assert_eq!(value.as_array().unwrap().len(), 1);
+    assert_eq!(value[0]["name"], "plain");
+    assert_eq!(value[0]["features"]["ci"], "hand-rolled");
+    assert_eq!(value[0]["features"]["flake"], "absent");
+}
+
+#[test]
+fn include_empty_surfaces_hand_rolled_ci_in_json() {
+    let data_home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    init_package(project.path(), "plain");
+    fs::create_dir_all(project.path().join(".github/workflows")).unwrap();
+    fs::write(
+        project.path().join(".github/workflows/custom.yml"),
+        "name: CI\n",
+    )
+    .unwrap();
+
+    let output = simit_with_data_home(data_home.path())
+        .args([
+            "projects",
+            "discover",
+            project.path().to_str().unwrap(),
+            "--include-empty",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+
+    let value = registry_json(data_home.path());
+    assert_eq!(value.as_array().unwrap().len(), 1);
+    assert_eq!(value[0]["features"]["ci"], "hand-rolled");
 }
 
 #[test]

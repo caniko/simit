@@ -9,6 +9,12 @@ The registry records each project path, package name, first and last time simit
 saw it, and feature status for known surfaces such as `flake`, `ci`,
 `homebrew`, `chocolatey`, `scoop`, `changelog`, and `hooks`.
 
+For CI, the registry distinguishes `managed`, `hand-rolled`, `drift`, and
+`absent`. `hand-rolled` means workflow YAML exists under `.forgejo/workflows/`
+or `.github/workflows/` but does not carry simit's generated-workflow marker.
+`drift` means the workflow set is mixed or unreadable: some files are marked as
+simit-generated and some are not.
+
 ## Onboarding existing projects
 
 Run discovery once per machine to populate the registry from projects simit
@@ -40,6 +46,7 @@ Filter by feature status:
 ```sh
 simit projects list --feature flake=managed
 simit projects list --feature ci=drift
+simit projects list --feature ci=hand-rolled
 ```
 
 Omitting `=STATUS` matches any non-absent status:
@@ -52,6 +59,7 @@ Use JSON output when another tool or an AI agent needs structured state:
 
 ```sh
 simit projects list --json --feature ci=drift
+simit projects list --json --feature ci=hand-rolled
 simit projects show --json .
 ```
 

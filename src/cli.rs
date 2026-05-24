@@ -237,6 +237,15 @@ pub enum BumpKind {
 #[derive(Debug, Args)]
 pub struct InitCiCommand {
     #[arg(
+        long = "package",
+        value_name = "NAME",
+        conflicts_with = "workspace",
+        help = "Workspace package to generate CI for; may be repeated"
+    )]
+    pub packages: Vec<String>,
+    #[arg(long, help = "Generate CI for every package in the workspace")]
+    pub workspace: bool,
+    #[arg(
         long,
         value_enum,
         value_name = "PLATFORM",

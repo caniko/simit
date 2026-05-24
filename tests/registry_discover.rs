@@ -242,7 +242,7 @@ fn generic_flake_does_not_make_crate_simit_managed() {
 }
 
 #[test]
-fn generic_ci_does_not_make_crate_simit_managed() {
+fn generic_ci_registers_as_hand_rolled() {
     let _env = EnvGuard::new();
     let root = TempDir::new().unwrap();
     init_package(root.path(), "plain");
@@ -255,9 +255,37 @@ fn generic_ci_does_not_make_crate_simit_managed() {
 
     let report = discover(root.path(), DiscoverOptions::default());
 
-    assert!(report.registered.is_empty());
-    assert_eq!(report.skipped_empty, [canonical(root.path())]);
-    assert!(registry::load().unwrap().projects.is_empty());
+    assert_eq!(report.registered, [canonical(root.path())]);
+    assert!(report.skipped_empty.is_empty());
+    let registry = registry::load().unwrap();
+    let entry = registry.projects.get(&canonical(root.path())).unwrap();
+    assert_eq!(entry.features["ci"], FeatureStatus::HandRolled);
+}
+
+#[test]
+fn hand_rolled_ci_registers_with_include_empty() {
+    let _env = EnvGuard::new();
+    let root = TempDir::new().unwrap();
+    init_package(root.path(), "plain");
+    fs::create_dir_all(root.path().join(".github/workflows")).unwrap();
+    fs::write(
+        root.path().join(".github/workflows/ci.yaml"),
+        "name: CI\n\non: [push]\n",
+    )
+    .unwrap();
+
+    let report = discover(
+        root.path(),
+        DiscoverOptions {
+            include_empty: true,
+            ..DiscoverOptions::default()
+        },
+    );
+
+    assert_eq!(report.registered, [canonical(root.path())]);
+    let registry = registry::load().unwrap();
+    let entry = registry.projects.get(&canonical(root.path())).unwrap();
+    assert_eq!(entry.features["ci"], FeatureStatus::HandRolled);
 }
 
 #[test]

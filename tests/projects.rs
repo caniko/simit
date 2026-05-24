@@ -336,3 +336,60 @@ fn show_without_path_uses_current_workspace_root() {
     assert!(stdout.contains("name: demo"));
     assert!(stdout.contains("flake       managed"));
 }
+
+#[test]
+fn list_and_show_render_hand_rolled_ci_status() {
+    let data_home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    init_package(project.path(), "demo");
+    let project_path = fs::canonicalize(project.path()).unwrap();
+    write_registry(
+        data_home.path(),
+        &[(&project_path, "demo", &[("ci", "hand-rolled")])],
+    );
+
+    let list = simit_with_data_home(data_home.path())
+        .args(["projects", "list", "--sort", "path"])
+        .output()
+        .unwrap();
+    assert!(list.status.success());
+    let list_stdout = String::from_utf8(list.stdout).unwrap();
+    assert!(list_stdout.contains("[ci(hand-rolled)]"));
+
+    let show = simit_with_data_home(data_home.path())
+        .args(["projects", "show", project_path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(show.status.success());
+    let show_stdout = String::from_utf8(show.stdout).unwrap();
+    assert!(show_stdout.contains("ci          hand-rolled"));
+}
+
+#[test]
+fn feature_filter_accepts_hand_rolled_status() {
+    let data_home = TempDir::new().unwrap();
+    let one = TempDir::new().unwrap();
+    let two = TempDir::new().unwrap();
+    init_package(one.path(), "one");
+    init_package(two.path(), "two");
+    let one_path = fs::canonicalize(one.path()).unwrap();
+    let two_path = fs::canonicalize(two.path()).unwrap();
+    write_registry(
+        data_home.path(),
+        &[
+            (&one_path, "one", &[("ci", "managed")]),
+            (&two_path, "two", &[("ci", "hand-rolled")]),
+        ],
+    );
+
+    let output = simit_with_data_home(data_home.path())
+        .args(["projects", "list", "--json", "--feature", "ci=hand-rolled"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let value: Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(value.as_array().unwrap().len(), 1);
+    assert_eq!(value[0]["name"], "two");
+    assert_eq!(value[0]["features"]["ci"], "hand-rolled");
+}

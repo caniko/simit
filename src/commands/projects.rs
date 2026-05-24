@@ -350,11 +350,12 @@ fn parse_feature_status(value: &str) -> Result<FeatureStatus> {
     match value {
         "managed" => Ok(FeatureStatus::Managed),
         "drift" => Ok(FeatureStatus::Drift),
+        "hand-rolled" => Ok(FeatureStatus::HandRolled),
         "configured" => Ok(FeatureStatus::Configured),
         "installed" => Ok(FeatureStatus::Installed),
         "absent" => Ok(FeatureStatus::Absent),
         _ => bail!(
-            "unknown feature status `{value}`; valid statuses: managed, drift, configured, installed, absent"
+            "unknown feature status `{value}`; valid statuses: managed, drift, hand-rolled, configured, installed, absent"
         ),
     }
 }
@@ -397,10 +398,22 @@ fn format_list_line(path: &Utf8Path, entry: &ProjectEntry) -> String {
                 .get(**feature)
                 .is_some_and(|status| *status != FeatureStatus::Absent)
         })
-        .copied()
+        .map(|feature| format_feature_token(feature, entry.features.get(*feature).copied()))
         .collect::<Vec<_>>()
         .join(" ");
     format!("{indicator} {} {}  [{features}]", entry.name, path)
+}
+
+fn format_feature_token(feature: &str, status: Option<FeatureStatus>) -> String {
+    match status.unwrap_or(FeatureStatus::Absent) {
+        FeatureStatus::Managed | FeatureStatus::Configured | FeatureStatus::Installed => {
+            feature.to_owned()
+        }
+        FeatureStatus::Drift | FeatureStatus::HandRolled => {
+            format!("{feature}({})", status_label(status.unwrap()))
+        }
+        FeatureStatus::Absent => feature.to_owned(),
+    }
 }
 
 fn print_project(path: &Utf8Path, entry: &ProjectEntry) {
@@ -425,6 +438,7 @@ fn status_label(status: FeatureStatus) -> &'static str {
     match status {
         FeatureStatus::Managed => "managed",
         FeatureStatus::Drift => "drift",
+        FeatureStatus::HandRolled => "hand-rolled",
         FeatureStatus::Configured => "configured",
         FeatureStatus::Installed => "installed",
         FeatureStatus::Absent => "absent",

@@ -26,3 +26,20 @@ simit release patch -m "release patch"
 
 `simit release` runs Cargo tests, Clippy with warnings denied, promotes
 `CHANGELOG.md` when present, commits, and tags locally.
+
+Generate CI workflows for a single-package project:
+
+```sh
+simit init ci --platform forgejo
+```
+
+For Cargo workspaces, select the generated workflow set explicitly:
+
+```sh
+simit init ci --platform forgejo --workspace
+simit init ci --platform forgejo --package my-crate
+```
+
+Workspace CI is rendered per package as `ci-<crate>.yaml` and
+`publish-crate-<crate>.yaml`; single-package projects keep the stable
+`ci.yaml` and `publish-crate.yaml` paths.

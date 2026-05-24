@@ -35,6 +35,26 @@ license = "MIT"
     temp
 }
 
+fn init_workspace_fixture() -> TempDir {
+    let temp = TempDir::new().unwrap();
+    copy_dir(Path::new("tests/fixtures/workspace-ci"), temp.path());
+    temp
+}
+
+fn copy_dir(source: &Path, destination: &Path) {
+    fs::create_dir_all(destination).unwrap();
+    for entry in fs::read_dir(source).unwrap() {
+        let entry = entry.unwrap();
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_dir(&source_path, &destination_path);
+        } else {
+            fs::copy(&source_path, &destination_path).unwrap();
+        }
+    }
+}
+
 fn write_chocolatey_config(root: &Path) {
     fs::write(
         root.join("simit.toml"),
@@ -646,7 +666,7 @@ fn forgejo_auto_runtime_uses_rust_container_even_when_flake_exists() {
     assert!(ci.contains("container: rust:1.85-bookworm"));
     assert!(ci.contains("uses: https://code.forgejo.org/actions/checkout@v4"));
     assert!(ci.contains("uses: https://code.forgejo.org/actions/cache@v4"));
-    assert!(ci.contains("uses: https://github.com/Swatinem/rust-cache@v2"));
+    assert!(!ci.contains("uses: https://github.com/Swatinem/rust-cache@v2"));
     assert!(ci.contains("path: ~/.cargo/bin"));
     assert!(ci.contains(
         "command -v cargo-nextest >/dev/null 2>&1 || cargo install cargo-nextest --locked"
@@ -662,7 +682,7 @@ fn forgejo_auto_runtime_uses_rust_container_even_when_flake_exists() {
     assert!(publish.contains("runs-on: atlas"));
     assert!(publish.contains("container: rust:1.85-bookworm"));
     assert!(publish.contains("uses: https://code.forgejo.org/actions/cache@v4"));
-    assert!(publish.contains("uses: https://github.com/Swatinem/rust-cache@v2"));
+    assert!(!publish.contains("uses: https://github.com/Swatinem/rust-cache@v2"));
     assert!(publish.contains("path: ~/.cargo/bin"));
     assert!(publish.contains(
         "command -v cargo-nextest >/dev/null 2>&1 || cargo install cargo-nextest --locked"
@@ -895,6 +915,171 @@ fn check_succeeds_when_workflows_are_current() {
         .status()
         .unwrap();
     assert!(check_status.success());
+}
+
+#[test]
+fn workspace_flag_generates_per_package_workflows() {
+    let temp = init_workspace_fixture();
+
+    let status = simit_with_user_config(temp.path())
+        .current_dir(temp.path())
+        .args(["init", "ci", "--platform", "forgejo", "--workspace"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    assert!(!temp.path().join(".forgejo/workflows/ci.yaml").exists());
+    assert!(
+        !temp
+            .path()
+            .join(".forgejo/workflows/publish-crate.yaml")
+            .exists()
+    );
+
+    let alpha_ci = read(&temp.path().join(".forgejo/workflows/ci-alpha.yaml"));
+    assert_yaml_parses(&alpha_ci);
+    assert!(alpha_ci.contains("container: rust:1.85-bookworm"));
+    assert!(alpha_ci.contains("run: cargo test -p alpha --all-features"));
+    assert!(
+        alpha_ci
+            .contains("run: cargo clippy -p alpha --all-targets --all-features -- --deny warnings")
+    );
+    assert!(alpha_ci.contains("run: cargo package -p alpha --allow-dirty"));
+    assert!(!alpha_ci.contains("--no-default-features"));
+
+    let beta_ci = read(&temp.path().join(".forgejo/workflows/ci-beta.yaml"));
+    assert_yaml_parses(&beta_ci);
+    assert!(beta_ci.contains("run: cargo test -p beta --all-features"));
+    assert!(beta_ci.contains("run: cargo test -p beta --no-default-features"));
+    assert!(beta_ci.contains(
+        "run: cargo clippy -p beta --all-targets --no-default-features -- --deny warnings"
+    ));
+
+    let alpha_publish = read(
+        &temp
+            .path()
+            .join(".forgejo/workflows/publish-crate-alpha.yaml"),
+    );
+    assert_yaml_parses(&alpha_publish);
+    assert!(alpha_publish.contains("run: cargo publish -p alpha --dry-run"));
+    assert!(alpha_publish.contains("cargo publish -p alpha"));
+
+    let beta_publish = read(
+        &temp
+            .path()
+            .join(".forgejo/workflows/publish-crate-beta.yaml"),
+    );
+    assert_yaml_parses(&beta_publish);
+    assert!(beta_publish.contains("run: cargo publish -p beta --dry-run"));
+    assert!(beta_publish.contains("cargo publish -p beta"));
+}
+
+#[test]
+fn package_flag_generates_selected_package_workflows() {
+    let temp = init_workspace_fixture();
+
+    let status = simit_with_user_config(temp.path())
+        .current_dir(temp.path())
+        .args(["init", "ci", "--platform", "forgejo", "--package", "beta"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    assert!(!temp.path().join(".forgejo/workflows/ci.yaml").exists());
+    assert!(
+        !temp
+            .path()
+            .join(".forgejo/workflows/ci-alpha.yaml")
+            .exists()
+    );
+    assert!(temp.path().join(".forgejo/workflows/ci-beta.yaml").exists());
+
+    let ci = read(&temp.path().join(".forgejo/workflows/ci-beta.yaml"));
+    assert_yaml_parses(&ci);
+    assert!(ci.contains("run: cargo test -p beta --all-features"));
+
+    let publish = read(
+        &temp
+            .path()
+            .join(".forgejo/workflows/publish-crate-beta.yaml"),
+    );
+    assert_yaml_parses(&publish);
+    assert!(publish.contains("run: cargo publish -p beta --dry-run"));
+}
+
+#[test]
+fn workspace_check_diff_detects_stale_generated_workflow() {
+    let temp = init_workspace_fixture();
+
+    let write_status = simit_with_user_config(temp.path())
+        .current_dir(temp.path())
+        .args(["init", "ci", "--platform", "forgejo", "--workspace"])
+        .status()
+        .unwrap();
+    assert!(write_status.success());
+
+    fs::write(
+        temp.path().join(".forgejo/workflows/ci-alpha.yaml"),
+        "name: stale\n",
+    )
+    .unwrap();
+
+    let output = simit_with_user_config(temp.path())
+        .current_dir(temp.path())
+        .args([
+            "init",
+            "ci",
+            "--platform",
+            "forgejo",
+            "--workspace",
+            "--check",
+            "--diff",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains(".forgejo/workflows/ci-alpha.yaml differs"));
+    assert!(stderr.contains("--- .forgejo/workflows/ci-alpha.yaml"));
+}
+
+#[test]
+fn workspace_check_rejects_extra_generated_workflow() {
+    let temp = init_workspace_fixture();
+
+    let write_status = simit_with_user_config(temp.path())
+        .current_dir(temp.path())
+        .args(["init", "ci", "--platform", "forgejo", "--workspace"])
+        .status()
+        .unwrap();
+    assert!(write_status.success());
+
+    fs::write(
+        temp.path().join(".forgejo/workflows/ci-old.yaml"),
+        format!(
+            "{}\nname: old\n",
+            simit::render::ci::GENERATED_WORKFLOW_MARKER
+        ),
+    )
+    .unwrap();
+
+    let output = simit_with_user_config(temp.path())
+        .current_dir(temp.path())
+        .args([
+            "init",
+            "ci",
+            "--platform",
+            "forgejo",
+            "--workspace",
+            "--check",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains(".forgejo/workflows/ci-old.yaml is extra"));
 }
 
 #[test]

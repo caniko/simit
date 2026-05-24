@@ -1,4 +1,9 @@
-use anyhow::{Result, bail};
+use std::collections::BTreeSet;
+use std::fs;
+use std::io::ErrorKind;
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context, Result, bail};
 
 use crate::cargo;
 use crate::cli::{
@@ -20,10 +25,7 @@ pub fn run(command: InitCiCommand) -> Result<()> {
     validate_runner(command.windows_runner.as_deref())?;
 
     let metadata = cargo::metadata_for_current_dir()?;
-    let package = cargo::select_packages(&metadata, &[], false)?
-        .into_iter()
-        .next()
-        .expect("single package selected");
+    let packages = cargo::select_packages(&metadata, &command.packages, command.workspace)?;
     let workspace_root = metadata.workspace_root.as_std_path();
     if command.with_homebrew && command.platform != Platform::Forgejo {
         bail!("Homebrew tap publish is forgejo-only for now");
@@ -66,21 +68,6 @@ pub fn run(command: InitCiCommand) -> Result<()> {
     if command.omnix_ref.is_some() && om_ci == OmCiMode::Off {
         eprintln!("--omnix-ref is ignored unless --with-om-ci or --om-ci-augment is enabled.");
     }
-    let homebrew = if command.with_homebrew {
-        Some(homebrew_options(&cfg, &command.homebrew, &package)?)
-    } else {
-        None
-    };
-    let chocolatey = if command.with_chocolatey {
-        Some(chocolatey_options(&cfg, &command.chocolatey, &package)?)
-    } else {
-        None
-    };
-    let scoop = if command.with_scoop {
-        Some(scoop_options(&cfg, &command.scoop, &package)?)
-    } else {
-        None
-    };
     let user_config = UserConfig::load().or_else(|err| {
         if command.platform == Platform::Github || explicit_runners_cover_required {
             Ok(UserConfig::default())
@@ -105,6 +92,7 @@ pub fn run(command: InitCiCommand) -> Result<()> {
         omnix_ref,
         release_smoke_command: command
             .release_smoke_command
+            .clone()
             .or_else(|| cfg.release.smoke.command.clone()),
         extra_setup: cfg.ci.extra_setup.clone(),
         extra_env: cfg
@@ -114,9 +102,10 @@ pub fn run(command: InitCiCommand) -> Result<()> {
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect(),
         required_secrets: cfg.ci.required_secrets.clone(),
-        homebrew,
-        chocolatey,
-        scoop,
+        package_scoped: false,
+        homebrew: None,
+        chocolatey: None,
+        scoop: None,
     };
     let runners = user_config.resolve_ci_runners(
         command.platform,
@@ -125,23 +114,51 @@ pub fn run(command: InitCiCommand) -> Result<()> {
         command.windows_runner.as_deref(),
         windows_packagers,
     )?;
-    let files = ci::files(
-        command.platform,
-        runtime,
-        &package,
-        SelfCheckOptions {
-            enabled: self_check,
-            runner_override: command.runner.as_deref(),
-            windows_runner_override: command.windows_runner.as_deref(),
-        },
-        &runners,
-        options,
-    )?;
+    let multi_package_workspace = metadata.workspace_members.len() > 1;
+    let mut files = Vec::new();
+    for package in &packages {
+        let homebrew = if command.with_homebrew {
+            Some(homebrew_options(&cfg, &command.homebrew, package)?)
+        } else {
+            None
+        };
+        let chocolatey = if command.with_chocolatey {
+            Some(chocolatey_options(&cfg, &command.chocolatey, package)?)
+        } else {
+            None
+        };
+        let scoop = if command.with_scoop {
+            Some(scoop_options(&cfg, &command.scoop, package)?)
+        } else {
+            None
+        };
+        let package_options = CiOptions {
+            homebrew,
+            chocolatey,
+            scoop,
+            package_scoped: multi_package_workspace,
+            ..options.clone()
+        };
+        files.extend(ci::files(
+            command.platform,
+            runtime,
+            package,
+            multi_package_workspace.then_some(package.name.as_str()),
+            SelfCheckOptions {
+                enabled: self_check,
+                runner_override: command.runner.as_deref(),
+                windows_runner_override: command.windows_runner.as_deref(),
+                packages: &command.packages,
+                workspace: command.workspace,
+            },
+            &runners,
+            package_options,
+        )?);
+    }
     let trust_overrides = TrustOverrides {
         key: command.maintainer_key,
         trust_root: command.maintainers_gpg,
     };
-    let mut files = files;
     files.push(release_trust::generated_file(
         workspace_root,
         &cfg,
@@ -150,9 +167,10 @@ pub fn run(command: InitCiCommand) -> Result<()> {
     )?);
 
     if command.check {
-        project::check_generated_files(
+        check_generated_ci_files(
             workspace_root,
             &files,
+            command.platform,
             &format!(
                 "CI workflows are not up to date; run `simit init ci --platform {}`",
                 command.platform.as_str()
@@ -164,6 +182,77 @@ pub fn run(command: InitCiCommand) -> Result<()> {
         registry::touch_current_project_or_warn([("ci", FeatureStatus::Managed)]);
         Ok(())
     }
+}
+
+fn check_generated_ci_files(
+    workspace_root: &Path,
+    files: &[project::GeneratedFile],
+    platform: Platform,
+    message: &str,
+    show_diff: bool,
+) -> Result<()> {
+    project::check_generated_files(workspace_root, files, message, show_diff)?;
+
+    let expected = files
+        .iter()
+        .map(|file| file.relative_path.clone())
+        .collect::<BTreeSet<_>>();
+    let extras = extra_generated_workflows(workspace_root, platform, &expected)?;
+    if extras.is_empty() {
+        Ok(())
+    } else {
+        let details = extras
+            .into_iter()
+            .map(|path| format!("{} is extra", path.display()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        bail!("{message}:\n{details}");
+    }
+}
+
+fn extra_generated_workflows(
+    workspace_root: &Path,
+    platform: Platform,
+    expected: &BTreeSet<PathBuf>,
+) -> Result<Vec<PathBuf>> {
+    let workflow_dir = PathBuf::from(platform.workflow_dir());
+    let absolute_dir = workspace_root.join(&workflow_dir);
+    let entries = match fs::read_dir(&absolute_dir) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => return Err(err).with_context(|| format!("reading {}", absolute_dir.display())),
+    };
+
+    let mut extras = Vec::new();
+    for entry in entries {
+        let entry =
+            entry.with_context(|| format!("reading entry in {}", absolute_dir.display()))?;
+        if !entry
+            .file_type()
+            .with_context(|| format!("reading file type for {}", entry.path().display()))?
+            .is_file()
+        {
+            continue;
+        }
+        let path = entry.path();
+        let Some(extension) = path.extension().and_then(|ext| ext.to_str()) else {
+            continue;
+        };
+        if extension != "yaml" && extension != "yml" {
+            continue;
+        }
+        let relative_path = workflow_dir.join(entry.file_name());
+        if expected.contains(&relative_path) {
+            continue;
+        }
+        let content =
+            fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+        if content.contains(ci::GENERATED_WORKFLOW_MARKER) {
+            extras.push(relative_path);
+        }
+    }
+    extras.sort();
+    Ok(extras)
 }
 
 fn runner_overrides_cover_required_runners(

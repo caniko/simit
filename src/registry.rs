@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 use crate::cargo;
 use crate::config::ProjectConfig;
 use crate::project;
+use crate::render::ci;
 use crate::render::flake;
 
 pub const SCHEMA_VERSION: u32 = 1;
@@ -105,6 +106,8 @@ pub struct ProjectEntry {
 pub enum FeatureStatus {
     Managed,
     Drift,
+    #[serde(rename = "hand-rolled")]
+    HandRolled,
     Configured,
     Installed,
     Absent,
@@ -528,26 +531,52 @@ fn detect_flake_status(workspace_root: &Path) -> FeatureStatus {
 }
 
 fn detect_ci_status(workspace_root: &Path) -> FeatureStatus {
-    for relative in [
-        ".forgejo/workflows/ci.yaml",
-        ".forgejo/workflows/publish-crate.yaml",
-        ".forgejo/workflows/release-artifacts.yaml",
-        ".github/workflows/ci.yaml",
-        ".github/workflows/publish-crate.yaml",
-        ".github/workflows/release-artifacts.yaml",
-    ] {
-        let path = workspace_root.join(relative);
-        let Ok(content) = fs::read_to_string(&path) else {
-            if path.exists() {
-                return FeatureStatus::Drift;
-            }
-            continue;
+    let mut workflow_count = 0usize;
+    let mut managed_count = 0usize;
+
+    for relative_dir in [".forgejo/workflows", ".github/workflows"] {
+        let dir = workspace_root.join(relative_dir);
+        let entries = match fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(_) => continue,
         };
-        if content.contains("simit ") || content.contains("simit.rs/") {
-            return FeatureStatus::Managed;
+
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(_) => return FeatureStatus::Drift,
+            };
+            let path = entry.path();
+            let file_type = match entry.file_type() {
+                Ok(file_type) => file_type,
+                Err(_) => return FeatureStatus::Drift,
+            };
+            if !file_type.is_file() {
+                continue;
+            }
+            let Some(extension) = path.extension().and_then(|ext| ext.to_str()) else {
+                continue;
+            };
+            if extension != "yaml" && extension != "yml" {
+                continue;
+            }
+
+            workflow_count += 1;
+            let Ok(content) = fs::read_to_string(&path) else {
+                return FeatureStatus::Drift;
+            };
+            if content.contains(ci::GENERATED_WORKFLOW_MARKER) {
+                managed_count += 1;
+            }
         }
     }
-    FeatureStatus::Absent
+
+    match (workflow_count, managed_count) {
+        (0, _) => FeatureStatus::Absent,
+        (total, managed) if managed == total => FeatureStatus::Managed,
+        (_, 0) => FeatureStatus::HandRolled,
+        _ => FeatureStatus::Drift,
+    }
 }
 
 fn detect_hooks_status(workspace_root: &Path) -> FeatureStatus {
