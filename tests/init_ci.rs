@@ -1391,7 +1391,7 @@ fn optional_strict_flags_render_expected_steps() {
     assert!(ci.contains(
         "run: command -v cargo-deny >/dev/null 2>&1 || cargo install cargo-deny --locked --version 0.18.3"
     ));
-    assert!(ci.contains("run: cargo deny check"));
+    assert!(ci.contains("run: cargo deny check bans licenses sources"));
     assert!(ci.contains("run: cargo +1.85 check --all-targets"));
     assert!(ci.contains("run: cargo doc --no-deps --all-features"));
     assert!(!ci.contains("&>/dev/null"));
