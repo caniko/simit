@@ -1508,8 +1508,11 @@ fn push_optional_ci_steps(
         workflow.push_str("      - name: Check MSRV\n");
         workflow.push_str("        run: ");
         workflow.push_str(prefix);
-        workflow.push_str("cargo +");
-        workflow.push_str(package.rust_version.as_deref().expect("validated MSRV"));
+        workflow.push_str("cargo");
+        if runtime == Runtime::Cargo {
+            workflow.push_str(" +");
+            workflow.push_str(package.rust_version.as_deref().expect("validated MSRV"));
+        }
         workflow.push_str(" check");
         push_package_selector(workflow, package, options);
         workflow.push_str(" --all-targets\n\n");

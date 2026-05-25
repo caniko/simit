@@ -447,6 +447,30 @@ fn forgejo_nix_with_om_ci_augment_keeps_legacy_steps() {
 }
 
 #[test]
+fn forgejo_nix_msrv_uses_devshell_toolchain() {
+    let temp = init_package(true);
+
+    let status = simit_with_user_config(temp.path())
+        .current_dir(temp.path())
+        .args([
+            "init",
+            "ci",
+            "--platform",
+            "forgejo",
+            "--runtime",
+            "nix",
+            "--with-msrv",
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let ci = read(&temp.path().join(".forgejo/workflows/ci.yaml"));
+    assert!(ci.contains("run: nix develop -c cargo check --all-targets"));
+    assert!(!ci.contains("cargo +1.85 check"));
+}
+
+#[test]
 fn github_nix_with_om_ci_replace_keeps_install_nix_action() {
     let temp = init_package(true);
 
