@@ -193,13 +193,6 @@ pub fn files(
             content: artifacts_workflow(platform, runtime, package, runners, &options),
         });
     }
-    if options.with_deny {
-        files.push(GeneratedFile {
-            relative_path: PathBuf::from("deny.toml"),
-            content: deny_toml(),
-        });
-    }
-
     Ok(files)
 }
 
@@ -1148,7 +1141,7 @@ fn ps_expanding_double_quote(value: &str) -> String {
     format!("\"{}\"", value.replace('`', "``").replace('"', "`\""))
 }
 
-fn deny_toml() -> String {
+pub fn deny_toml() -> String {
     r#"[advisories]
 version = 2
 

@@ -2001,7 +2001,7 @@ fn chocolatey_implies_artifacts_even_when_artifacts_false() {
 }
 
 #[test]
-fn check_fails_when_deny_policy_differs() {
+fn check_ignores_existing_deny_policy_customization() {
     let temp = init_package(false);
 
     let write_status = simit_with_user_config(temp.path())
@@ -2026,8 +2026,5 @@ fn check_fails_when_deny_policy_differs() {
         .output()
         .unwrap();
 
-    assert!(!output.status.success());
-    let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(stderr.contains("CI workflows are not up to date"));
-    assert!(stderr.contains("deny.toml differs"));
+    assert!(output.status.success());
 }

@@ -163,6 +163,7 @@ pub fn run(command: InitCiCommand) -> Result<()> {
         key: command.maintainer_key,
         trust_root: command.maintainers_gpg,
     };
+    maybe_push_deny_template(workspace_root, command.with_deny, command.check, &mut files);
     files.push(release_trust::generated_file(
         workspace_root,
         &cfg,
@@ -186,6 +187,22 @@ pub fn run(command: InitCiCommand) -> Result<()> {
         registry::touch_current_project_or_warn([("ci", FeatureStatus::Managed)]);
         Ok(())
     }
+}
+
+fn maybe_push_deny_template(
+    workspace_root: &Path,
+    with_deny: bool,
+    check: bool,
+    files: &mut Vec<project::GeneratedFile>,
+) {
+    if !with_deny || check || workspace_root.join("deny.toml").exists() {
+        return;
+    }
+
+    files.push(project::GeneratedFile {
+        relative_path: PathBuf::from("deny.toml"),
+        content: ci::deny_toml(),
+    });
 }
 
 fn check_generated_ci_files(
