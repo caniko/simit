@@ -1350,7 +1350,65 @@ fn check_fails_when_workflows_differ() {
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("CI workflows are not up to date"));
+    assert!(stderr.contains("run `simit init ci --platform forgejo`"));
     assert!(stderr.contains(".forgejo/workflows/ci.yaml differs"));
+}
+
+#[test]
+fn check_failure_hint_includes_effective_generation_flags() {
+    let temp = init_workspace_fixture();
+    fs::write(temp.path().join("flake.nix"), "{}\n").unwrap();
+
+    let write_status = simit_with_user_config(temp.path())
+        .current_dir(temp.path())
+        .args([
+            "init",
+            "ci",
+            "--platform",
+            "forgejo",
+            "--runtime",
+            "nix",
+            "--runner",
+            "atlas",
+            "--workspace",
+            "--with-deny",
+            "--with-artifacts",
+        ])
+        .status()
+        .unwrap();
+    assert!(write_status.success());
+
+    fs::write(
+        temp.path().join(".forgejo/workflows/ci-alpha.yaml"),
+        "name: stale\n",
+    )
+    .unwrap();
+
+    let output = simit_with_user_config(temp.path())
+        .current_dir(temp.path())
+        .args([
+            "init",
+            "ci",
+            "--platform",
+            "forgejo",
+            "--runtime",
+            "nix",
+            "--runner",
+            "atlas",
+            "--workspace",
+            "--with-deny",
+            "--with-artifacts",
+            "--check",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains(
+        "run `simit init ci --platform forgejo --runtime nix --runner atlas --workspace --with-deny --with-artifacts`"
+    ));
+    assert!(stderr.contains(".forgejo/workflows/ci-alpha.yaml differs"));
 }
 
 #[test]

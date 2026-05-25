@@ -89,7 +89,7 @@ pub fn run(command: InitCiCommand) -> Result<()> {
         with_docs: command.with_docs,
         with_artifacts,
         om_ci,
-        omnix_ref,
+        omnix_ref: omnix_ref.clone(),
         release_smoke_command: command
             .release_smoke_command
             .clone()
@@ -159,6 +159,10 @@ pub fn run(command: InitCiCommand) -> Result<()> {
             package_options,
         )?);
     }
+    let check_message = format!(
+        "CI workflows are not up to date; run `{}`",
+        render_regeneration_command(&command, runtime, with_artifacts, om_ci, &omnix_ref)
+    );
     let trust_overrides = TrustOverrides {
         key: command.maintainer_key,
         trust_root: command.maintainers_gpg,
@@ -176,16 +180,151 @@ pub fn run(command: InitCiCommand) -> Result<()> {
             workspace_root,
             &files,
             command.platform,
-            &format!(
-                "CI workflows are not up to date; run `simit init ci --platform {}`",
-                command.platform.as_str()
-            ),
+            &check_message,
             command.diff,
         )
     } else {
         project::write_generated_files(workspace_root, &files)?;
         registry::touch_current_project_or_warn([("ci", FeatureStatus::Managed)]);
         Ok(())
+    }
+}
+
+fn render_regeneration_command(
+    command: &InitCiCommand,
+    runtime: Runtime,
+    with_artifacts: bool,
+    om_ci: OmCiMode,
+    omnix_ref: &str,
+) -> String {
+    let mut args = vec![
+        "simit".to_owned(),
+        "init".to_owned(),
+        "ci".to_owned(),
+        "--platform".to_owned(),
+        command.platform.as_str().to_owned(),
+    ];
+
+    if runtime != Runtime::Cargo || command.runtime != RuntimeChoice::Auto {
+        args.push("--runtime".to_owned());
+        args.push(runtime_as_str(runtime).to_owned());
+    }
+    if let Some(runner) = &command.runner {
+        args.push("--runner".to_owned());
+        args.push(shell_word(runner));
+    }
+    if let Some(runner) = &command.windows_runner {
+        args.push("--windows-runner".to_owned());
+        args.push(shell_word(runner));
+    }
+    if command.workspace {
+        args.push("--workspace".to_owned());
+    }
+    for package in &command.packages {
+        args.push("--package".to_owned());
+        args.push(shell_word(package));
+    }
+    if command.with_nextest {
+        args.push("--with-nextest".to_owned());
+    }
+    if command.with_msrv {
+        args.push("--with-msrv".to_owned());
+    }
+    if command.with_audit {
+        args.push("--with-audit".to_owned());
+    }
+    if command.with_deny {
+        args.push("--with-deny".to_owned());
+    }
+    if command.with_docs {
+        args.push("--with-docs".to_owned());
+    }
+    if with_artifacts {
+        args.push("--with-artifacts".to_owned());
+    }
+    match om_ci {
+        OmCiMode::Off => {}
+        OmCiMode::Replace => args.push("--with-om-ci".to_owned()),
+        OmCiMode::Augment => args.push("--om-ci-augment".to_owned()),
+    }
+    if om_ci != OmCiMode::Off && omnix_ref != OMNIX_REF_DEFAULT {
+        args.push("--omnix-ref".to_owned());
+        args.push(shell_word(omnix_ref));
+    }
+    if command.with_homebrew {
+        args.push("--with-homebrew".to_owned());
+        push_optional_arg(
+            &mut args,
+            "--homebrew-name",
+            command.homebrew.name.as_deref(),
+        );
+        push_optional_arg(&mut args, "--homebrew-tap", command.homebrew.tap.as_deref());
+        for binary in &command.homebrew.binary {
+            args.push("--homebrew-binary".to_owned());
+            args.push(shell_word(binary));
+        }
+        push_optional_arg(
+            &mut args,
+            "--homebrew-description",
+            command.homebrew.description.as_deref(),
+        );
+        push_optional_arg(
+            &mut args,
+            "--homebrew-homepage",
+            command.homebrew.homepage.as_deref(),
+        );
+        push_optional_arg(
+            &mut args,
+            "--homebrew-license",
+            command.homebrew.license.as_deref(),
+        );
+        push_optional_arg(
+            &mut args,
+            "--homebrew-download-repo",
+            command.homebrew.download_repo.as_deref(),
+        );
+        push_optional_arg(
+            &mut args,
+            "--homebrew-archive-pattern",
+            command.homebrew.archive_pattern.as_deref(),
+        );
+        for platform in &command.homebrew.no_platform {
+            args.push("--homebrew-no-platform".to_owned());
+            args.push(shell_word(platform));
+        }
+    }
+    if command.with_chocolatey {
+        args.push("--with-chocolatey".to_owned());
+    }
+    if command.with_scoop {
+        args.push("--with-scoop".to_owned());
+    }
+
+    args.join(" ")
+}
+
+fn runtime_as_str(runtime: Runtime) -> &'static str {
+    match runtime {
+        Runtime::Cargo => "cargo",
+        Runtime::Nix => "nix",
+    }
+}
+
+fn push_optional_arg(args: &mut Vec<String>, flag: &str, value: Option<&str>) {
+    if let Some(value) = value {
+        args.push(flag.to_owned());
+        args.push(shell_word(value));
+    }
+}
+
+fn shell_word(value: &str) -> String {
+    if value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '/' | '.' | '_' | '-' | ':' | '='))
+    {
+        value.to_owned()
+    } else {
+        format!("'{}'", value.replace('\'', "'\"'\"'"))
     }
 }
 

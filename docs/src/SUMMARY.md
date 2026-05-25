@@ -6,6 +6,7 @@
 - [Project Registry](getting-started/project-registry.md)
 - [Release Integrity](getting-started/release-integrity.md)
 - [CI Caching](getting-started/ci-caching.md)
+- [CI Adoption Notes](getting-started/ci-adoption.md)
 - [Windows Packaging](getting-started/windows-packaging.md)
 - [Omnix CI](getting-started/om-ci.md)
 - [Public API](public-api.md)

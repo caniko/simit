@@ -254,19 +254,26 @@ generated output:
 simit init ci --platform forgejo --check
 ```
 
+When check mode reports drift, the error prints the effective regeneration
+command, including runtime, runner, workspace, and optional gate flags. For
+more migration rules and runner-debugging notes, see
+`docs/src/getting-started/ci-adoption.md`.
+
 When `[ci].extra_setup`, `[ci].extra_env`, or `[ci].required_secrets` are set
 in project config, simit renders them into every generated CI, publish, and
 artifact workflow. Extra setup runs after checkout/toolchain setup and before
 tests or builds; extra env is job-level environment; required secrets are
 documented as workflow comments but are not read locally.
 
-`init ci` always renders a separate `publish-crate.yaml` workflow. That
-workflow runs only on exact semver tag pushes such as `0.9.0`, verifies that
-the tag matches the Cargo package version, verifies the signed tag against
-`keys/maintainers.gpg`, runs a publish dry run, and publishes with the
-`CRATES_IO_API_TOKEN` secret. On generation, `init ci` discovers the release
-signing key from `[release.signing].key`, `git config user.signingkey`, or
-`--maintainer-key`, then writes the maintainer public keyring.
+For publishable crates, `init ci` renders a separate `publish-crate.yaml`
+workflow. That workflow runs only on exact semver tag pushes such as `0.9.0`,
+verifies that the tag matches the Cargo package version, verifies the signed
+tag against `keys/maintainers.gpg`, runs a publish dry run, and publishes with
+the `CRATES_IO_API_TOKEN` secret. Workspace members with `publish = false` keep
+test and clippy CI but do not get `cargo package` or `publish-crate` gates.
+On generation, `init ci` discovers the release signing key from
+`[release.signing].key`, `git config user.signingkey`, or `--maintainer-key`,
+then writes the maintainer public keyring.
 
 You can manage that trust root explicitly:
 
