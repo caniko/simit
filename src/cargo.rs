@@ -37,7 +37,17 @@ pub struct Package {
     pub rust_version: Option<String>,
     #[serde(default)]
     pub features: BTreeMap<String, Vec<String>>,
+    #[serde(default)]
+    pub dependencies: Vec<Dependency>,
     pub manifest_path: Utf8PathBuf,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Dependency {
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub path: Option<Utf8PathBuf>,
 }
 
 #[derive(Debug, Clone)]

@@ -83,6 +83,7 @@ fn package() -> Package {
         homepage: Some("https://metadata.example.com".to_owned()),
         rust_version: None,
         features: BTreeMap::new(),
+        dependencies: Vec::new(),
         manifest_path: Utf8PathBuf::from("/demo/Cargo.toml"),
     }
 }

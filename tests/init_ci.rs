@@ -1015,6 +1015,7 @@ fn workspace_flag_generates_per_package_workflows() {
             .contains("run: cargo clippy -p alpha --all-targets --all-features -- --deny warnings")
     );
     assert!(alpha_ci.contains("run: cargo package -p alpha --allow-dirty"));
+    assert!(!alpha_ci.contains("run: cargo package -p alpha --allow-dirty --no-verify"));
     assert!(!alpha_ci.contains("--no-default-features"));
 
     let beta_ci = read(&temp.path().join(".forgejo/workflows/ci-beta.yaml"));
@@ -1024,6 +1025,7 @@ fn workspace_flag_generates_per_package_workflows() {
     assert!(beta_ci.contains(
         "run: cargo clippy -p beta --all-targets --no-default-features -- --deny warnings"
     ));
+    assert!(beta_ci.contains("run: cargo package -p beta --allow-dirty --no-verify"));
 
     let alpha_publish = read(
         &temp

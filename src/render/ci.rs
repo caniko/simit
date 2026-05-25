@@ -293,7 +293,7 @@ fn ci_workflow(
             workflow.push_str("      - name: Package crate\n");
             workflow.push_str("        run: cargo package");
             push_package_selector(&mut workflow, package, &options);
-            workflow.push_str(" --allow-dirty\n");
+            push_package_flags(&mut workflow, package, &options);
         }
     }
 
@@ -1327,7 +1327,7 @@ fn push_nix_ci_legacy_steps(
     workflow.push_str("      - name: Package crate\n");
     workflow.push_str("        run: nix develop -c cargo package");
     push_package_selector(workflow, package, options);
-    workflow.push_str(" --allow-dirty\n");
+    push_package_flags(workflow, package, options);
 }
 
 fn push_nix_publish_legacy_steps(workflow: &mut String, package: &Package, options: &CiOptions) {
@@ -1554,6 +1554,21 @@ fn push_package_selector(workflow: &mut String, package: &Package, options: &CiO
         workflow.push_str(" -p ");
         workflow.push_str(&shell_word(&package.name));
     }
+}
+
+fn push_package_flags(workflow: &mut String, package: &Package, options: &CiOptions) {
+    workflow.push_str(" --allow-dirty");
+    if options.package_scoped && has_local_path_dependencies(package) {
+        workflow.push_str(" --no-verify");
+    }
+    workflow.push('\n');
+}
+
+fn has_local_path_dependencies(package: &Package) -> bool {
+    package
+        .dependencies
+        .iter()
+        .any(|dependency| dependency.source.is_none() && dependency.path.is_some())
 }
 
 fn command_prefix(runtime: Runtime) -> &'static str {

@@ -1403,6 +1403,7 @@ mod tests {
             homepage: Some("https://modde.tartanoglu.com".to_owned()),
             rust_version: Some("1.85".to_owned()),
             features: BTreeMap::new(),
+            dependencies: Vec::new(),
             manifest_path: Utf8PathBuf::from("/workspace/crates/modde-cli/Cargo.toml"),
         };
         let marked = vec![WorkflowFile {
