@@ -736,7 +736,13 @@ fn ci_options_emit_expected_steps_and_msrv_requires_rust_version() {
     let deny = fs::read_to_string(root.join("deny.toml")).unwrap();
     assert!(deny.contains("\"MIT\""));
     assert!(deny.contains("\"BSD-2-Clause\""));
+    assert!(deny.contains("\"BSL-1.0\""));
+    assert!(deny.contains("\"CC0-1.0\""));
+    assert!(deny.contains("\"ISC\""));
+    assert!(deny.contains("\"LicenseRef-UFL-1.0\""));
     assert!(deny.contains("\"Apache-2.0\""));
+    assert!(deny.contains("\"OFL-1.1\""));
+    assert!(deny.contains("\"Zlib\""));
     assert!(
         root.join(".github/workflows/release-artifacts.yaml")
             .exists()
