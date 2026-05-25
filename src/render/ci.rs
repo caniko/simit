@@ -1213,12 +1213,17 @@ fn push_container(workflow: &mut String, platform: Platform, runtime: Runtime, p
 fn push_job_env(workflow: &mut String, runtime: Runtime, extra_env: &[(String, String)]) {
     let needs_nix_config =
         runtime == Runtime::Nix && !extra_env.iter().any(|(key, _)| key == "NIX_CONFIG");
-    if !needs_nix_config && extra_env.is_empty() {
+    let needs_xdg_cache_home =
+        runtime == Runtime::Nix && !extra_env.iter().any(|(key, _)| key == "XDG_CACHE_HOME");
+    if !needs_nix_config && !needs_xdg_cache_home && extra_env.is_empty() {
         return;
     }
     workflow.push_str("    env:\n");
     if needs_nix_config {
         workflow.push_str("      NIX_CONFIG: \"experimental-features = nix-command flakes\"\n");
+    }
+    if needs_xdg_cache_home {
+        workflow.push_str("      XDG_CACHE_HOME: \"/tmp/.cache\"\n");
     }
     for (key, value) in extra_env {
         workflow.push_str("      ");

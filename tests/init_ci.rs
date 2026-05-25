@@ -341,6 +341,7 @@ fn generates_forgejo_nix_workflows() {
     assert_all_branch_push_trigger(&ci);
     assert!(ci.contains("runs-on: atlas"));
     assert!(ci.contains("NIX_CONFIG: \"experimental-features = nix-command flakes\""));
+    assert!(ci.contains("XDG_CACHE_HOME: \"/tmp/.cache\""));
     assert!(ci.contains("group: ${{ github.workflow }}-${{ github.ref }}"));
     assert!(ci.contains("uses: https://code.forgejo.org/actions/checkout@v4"));
     assert!(!ci.contains("pull_request:"));
@@ -354,6 +355,7 @@ fn generates_forgejo_nix_workflows() {
     let publish = read(&temp.path().join(".forgejo/workflows/publish-crate.yaml"));
     assert!(publish.contains("runs-on: atlas"));
     assert!(publish.contains("NIX_CONFIG: \"experimental-features = nix-command flakes\""));
+    assert!(publish.contains("XDG_CACHE_HOME: \"/tmp/.cache\""));
     assert!(!publish.contains("uses: https://github.com/cachix/install-nix-action@v31"));
     assert!(!publish.contains("uses: https://github.com/Swatinem/rust-cache@v2"));
     assert!(!publish.contains("path: ~/.cargo/bin"));
@@ -692,7 +694,7 @@ fn generated_workflows_include_project_ci_setup_and_env() {
         assert_yaml_parses(&workflow);
         assert!(workflow.contains("# Project-required secrets:\n# - SKILLNET_TEST_PG_URL"));
         assert!(workflow.contains(
-            "    env:\n      NIX_CONFIG: \"experimental-features = nix-command flakes\"\n      SKILLNET_TEST_PG_URL: \"${{ secrets.SKILLNET_TEST_PG_URL }}\""
+            "    env:\n      NIX_CONFIG: \"experimental-features = nix-command flakes\"\n      XDG_CACHE_HOME: \"/tmp/.cache\"\n      SKILLNET_TEST_PG_URL: \"${{ secrets.SKILLNET_TEST_PG_URL }}\""
         ));
         assert!(workflow.contains("      - name: Project setup\n        run: apt-get update && apt-get install -y --no-install-recommends postgresql-client"));
     }
