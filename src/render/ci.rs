@@ -235,7 +235,7 @@ fn ci_workflow(
     workflow.push_str(&runs_on(&runners.ci));
     workflow.push('\n');
     push_container(&mut workflow, platform, runtime, package);
-    push_job_env(&mut workflow, &options.extra_env);
+    push_job_env(&mut workflow, runtime, &options.extra_env);
     workflow.push_str("    steps:\n");
     push_checkout_step(&mut workflow, platform);
 
@@ -337,7 +337,7 @@ fn publish_workflow(
     workflow.push_str(&runs_on(runner));
     workflow.push('\n');
     push_container(&mut workflow, platform, runtime, package);
-    push_job_env(&mut workflow, &options.extra_env);
+    push_job_env(&mut workflow, runtime, &options.extra_env);
     workflow.push_str("    steps:\n");
     push_checkout_step(&mut workflow, platform);
 
@@ -426,7 +426,7 @@ fn artifacts_workflow(
     workflow.push_str(&runs_on(&runners.release));
     workflow.push('\n');
     push_container(&mut workflow, platform, runtime, package);
-    push_job_env(&mut workflow, &options.extra_env);
+    push_job_env(&mut workflow, runtime, &options.extra_env);
     workflow.push_str("    steps:\n");
     push_checkout_step(&mut workflow, platform);
     workflow.push_str(&validate_release_tag_step(None, None));
@@ -1210,11 +1210,16 @@ fn push_container(workflow: &mut String, platform: Platform, runtime: Runtime, p
     }
 }
 
-fn push_job_env(workflow: &mut String, extra_env: &[(String, String)]) {
-    if extra_env.is_empty() {
+fn push_job_env(workflow: &mut String, runtime: Runtime, extra_env: &[(String, String)]) {
+    let needs_nix_config =
+        runtime == Runtime::Nix && !extra_env.iter().any(|(key, _)| key == "NIX_CONFIG");
+    if !needs_nix_config && extra_env.is_empty() {
         return;
     }
     workflow.push_str("    env:\n");
+    if needs_nix_config {
+        workflow.push_str("      NIX_CONFIG: \"experimental-features = nix-command flakes\"\n");
+    }
     for (key, value) in extra_env {
         workflow.push_str("      ");
         workflow.push_str(key);
