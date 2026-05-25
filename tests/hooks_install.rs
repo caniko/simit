@@ -13,15 +13,66 @@ fn simit() -> Command {
 fn isolated_git_env() -> TempDir {
     let temp = TempDir::new().unwrap();
     fs::create_dir_all(temp.path().join("xdg")).unwrap();
+    install_fake_pre_commit(&temp);
     temp
 }
 
 fn with_isolated_git_env(command: &mut Command, env: &TempDir) {
+    let old_path = std::env::var_os("PATH").unwrap_or_default();
+    let path = std::env::join_paths(
+        std::iter::once(env.path().join("bin")).chain(std::env::split_paths(&old_path)),
+    )
+    .unwrap();
     command
         .env("GIT_CONFIG_GLOBAL", env.path().join("global.gitconfig"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("HOME", env.path())
+        .env("PATH", path)
         .env("XDG_CONFIG_HOME", env.path().join("xdg"));
+}
+
+#[cfg(unix)]
+fn install_fake_pre_commit(temp: &TempDir) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let bin = temp.path().join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    let fake = bin.join("pre-commit");
+    fs::write(
+        &fake,
+        r#"#!/bin/sh
+set -eu
+mkdir -p .git/hooks
+for hook in pre-commit pre-push commit-msg; do
+  cat > ".git/hooks/$hook" <<EOF
+#!/bin/sh
+ARGS=(hook-impl --config=.pre-commit-config.yaml --hook-type=$hook)
+EOF
+  chmod +x ".git/hooks/$hook"
+done
+"#,
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&fake).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(fake, permissions).unwrap();
+}
+
+#[cfg(not(unix))]
+fn install_fake_pre_commit(temp: &TempDir) {
+    let bin = temp.path().join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    fs::write(
+        bin.join("pre-commit.bat"),
+        r#"@echo off
+mkdir .git\hooks 2>NUL
+for %%h in (pre-commit pre-push commit-msg) do (
+  echo #!/bin/sh>.git\hooks\%%h
+  echo ARGS=(hook-impl --config=.pre-commit-config.yaml --hook-type=%%h)>>.git\hooks\%%h
+)
+"#,
+    )
+    .unwrap();
 }
 
 fn run(dir: &Path, program: &str, args: &[&str]) {
