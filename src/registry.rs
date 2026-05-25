@@ -643,12 +643,14 @@ fn infer_expected_ci_files(
         windows: windows_runner,
     };
     let options = infer_ci_options(marked, &config)?;
+    let self_check_runner_override = single_runner_label(&runners.ci);
+    let self_check_windows_runner_override = runners.windows.as_ref().and_then(single_runner_label);
     let self_check = ci::SelfCheckOptions {
         enabled: marked
             .iter()
             .any(|workflow| workflow.content.contains("Check generated CI")),
-        runner_override: None,
-        windows_runner_override: None,
+        runner_override: self_check_runner_override,
+        windows_runner_override: self_check_windows_runner_override,
         packages: &[],
         workspace: false,
     };
@@ -677,6 +679,14 @@ fn infer_expected_ci_files(
         .into_iter()
         .filter(|file| is_workflow_path(&file.relative_path))
         .collect())
+}
+
+fn single_runner_label(runner: &ResolvedRunner) -> Option<&str> {
+    if runner.labels.len() == 1 {
+        Some(runner.labels[0].as_str())
+    } else {
+        None
+    }
 }
 
 fn infer_ci_platform(marked: &[WorkflowFile]) -> Result<Platform> {
