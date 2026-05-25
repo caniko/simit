@@ -600,7 +600,7 @@ fn generates_github_plain_cargo_workflows() {
     assert!(ci.contains("uses: https://github.com/Swatinem/rust-cache@v2"));
     assert!(ci.contains("path: ~/.cargo/bin"));
     assert!(ci.contains(
-        "command -v cargo-nextest >/dev/null 2>&1 || cargo install cargo-nextest --locked"
+        "command -v cargo-nextest >/dev/null 2>&1 || cargo install cargo-nextest --locked --version 0.9.100"
     ));
     assert!(!ci.contains("&>/dev/null"));
     assert!(ci.contains("run: cargo nextest run --all-features"));
@@ -612,7 +612,7 @@ fn generates_github_plain_cargo_workflows() {
     assert!(publish.contains("uses: https://github.com/Swatinem/rust-cache@v2"));
     assert!(publish.contains("path: ~/.cargo/bin"));
     assert!(publish.contains(
-        "command -v cargo-nextest >/dev/null 2>&1 || cargo install cargo-nextest --locked"
+        "command -v cargo-nextest >/dev/null 2>&1 || cargo install cargo-nextest --locked --version 0.9.100"
     ));
     assert!(publish.contains("simit changelog release <version>"));
     assert!(publish.contains("run: cargo publish --dry-run"));
@@ -684,7 +684,7 @@ fn forgejo_auto_runtime_uses_rust_container_even_when_flake_exists() {
     assert!(!ci.contains("uses: https://github.com/Swatinem/rust-cache@v2"));
     assert!(ci.contains("path: ~/.cargo/bin"));
     assert!(ci.contains(
-        "command -v cargo-nextest >/dev/null 2>&1 || cargo install cargo-nextest --locked"
+        "command -v cargo-nextest >/dev/null 2>&1 || cargo install cargo-nextest --locked --version 0.9.100"
     ));
     assert!(!ci.contains("&>/dev/null"));
     assert!(!ci.contains("run: apk add --no-cache git build-base"));
@@ -700,7 +700,7 @@ fn forgejo_auto_runtime_uses_rust_container_even_when_flake_exists() {
     assert!(!publish.contains("uses: https://github.com/Swatinem/rust-cache@v2"));
     assert!(publish.contains("path: ~/.cargo/bin"));
     assert!(publish.contains(
-        "command -v cargo-nextest >/dev/null 2>&1 || cargo install cargo-nextest --locked"
+        "command -v cargo-nextest >/dev/null 2>&1 || cargo install cargo-nextest --locked --version 0.9.100"
     ));
     assert!(publish.contains(r#"cargo pkgid -p demo | awk -F'[#@]' '{print $NF}'"#));
 }
