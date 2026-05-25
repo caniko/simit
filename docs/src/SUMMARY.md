@@ -28,3 +28,10 @@
 - [03 — Canix: dispatcher hooks directory](planning/hooks-enforcement/03-canix-dispatcher-hooks.md)
 - [04 — Fleet sweep: install hooks across projects](planning/hooks-enforcement/04-fleet-sweep-install-hooks.md)
 - [05 — Simit: surface conflicted hook state](planning/hooks-enforcement/05-simit-surface-conflicted-state.md)
+
+# Plan: hooks-enforcement-followups
+
+- [Overview](planning/hooks-enforcement-followups/README.md)
+- [01 — Simit: defensive installer](planning/hooks-enforcement-followups/01-simit-defensive-installer.md)
+- [02 — Simit: scan surfaces missing paths](planning/hooks-enforcement-followups/02-simit-scan-surfaces-missing-paths.md)
+- [03 — Release and propagate to canix](planning/hooks-enforcement-followups/03-release-and-propagate-to-canix.md)

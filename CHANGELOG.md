@@ -17,8 +17,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `simit projects list`/`show`, with `--no-issues` available for scripts that
   need the old human table shape.
 
+### Changed
+
+- `simit projects scan` now reports registry entries whose paths no longer
+  exist on disk, including broken symlinks (use `--prune` to remove).
+- `simit projects list` flags missing-path entries in its attention footer
+  alongside `drift` / `conflicted` features, while filtering ephemeral `/tmp/*`
+  paths from that footer.
+
 ### Fixed
 
+- `simit hooks install` warns when a repo-local `core.hooksPath` shadows a
+  friendly system dispatcher. Pass `--fix` to unset the rogue value
+  automatically.
 - Detect dispatcher-bypassing hook paths as `hooks: conflicted`, require all
   managed hook wrappers before reporting `hooks: installed`, and auto-repair
   local `core.hooksPath` overrides when the canix dispatcher is available.

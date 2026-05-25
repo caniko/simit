@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::cargo::{self, Package};
 use crate::cli::{Platform, Runtime};
-use crate::config::ProjectConfig;
+use crate::config::{HomebrewOverrides, ProjectConfig};
 use crate::project;
 use crate::render::ci;
 use crate::render::flake;
@@ -790,7 +790,49 @@ fn infer_homebrew_options(
         return Ok(None);
     }
 
-    let resolved = config.resolve_homebrew(Default::default(), package)?;
+    let workflow = marked
+        .iter()
+        .find(|workflow| {
+            workflow_name(&workflow.relative_path) == Some("release-artifacts")
+                && workflow.content.contains("name: Publish Homebrew tap")
+                && workflow_suffix(&workflow.relative_path)
+                    .as_deref()
+                    .is_none_or(|suffix| suffix == package.name)
+        })
+        .or_else(|| {
+            marked
+                .iter()
+                .find(|workflow| workflow.content.contains("name: Publish Homebrew tap"))
+        });
+
+    let inferred_name =
+        workflow.and_then(|workflow| infer_homebrew_flag(&workflow.content, "--name"));
+    let inferred_binaries = workflow.map_or_else(Vec::new, |workflow| {
+        infer_homebrew_flags(&workflow.content, "--binary")
+    });
+    let inferred_tap_url =
+        workflow.and_then(|workflow| infer_ci_env_value(&workflow.content, "HOMEBREW_TAP_URL"));
+    let inferred_description =
+        workflow.and_then(|workflow| infer_homebrew_flag(&workflow.content, "--description"));
+    let inferred_homepage =
+        workflow.and_then(|workflow| infer_homebrew_flag(&workflow.content, "--homepage"));
+    let inferred_license =
+        workflow.and_then(|workflow| infer_homebrew_flag(&workflow.content, "--license"));
+    let inferred_download_repo =
+        workflow.and_then(|workflow| infer_homebrew_download_repo(&workflow.content));
+
+    let overrides = HomebrewOverrides {
+        name: inferred_name.as_deref(),
+        binaries: (!inferred_binaries.is_empty()).then_some(inferred_binaries.as_slice()),
+        tap_url: inferred_tap_url.as_deref(),
+        description: inferred_description.as_deref(),
+        homepage: inferred_homepage.as_deref(),
+        license: inferred_license.as_deref(),
+        download_repo: inferred_download_repo.as_deref(),
+        ..Default::default()
+    };
+
+    let resolved = config.resolve_homebrew(overrides, package)?;
     Ok(Some(ci::HomebrewOptions {
         name: resolved.name,
         binaries: resolved.binaries,
@@ -807,6 +849,40 @@ fn infer_homebrew_options(
             linux_intel: resolved.platforms.linux_intel,
         },
     }))
+}
+
+fn infer_ci_env_value(content: &str, key: &str) -> Option<String> {
+    let prefix = format!("{key}: ");
+    content
+        .lines()
+        .find_map(|line| line.trim_start().strip_prefix(&prefix))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
+fn infer_homebrew_flag(content: &str, flag: &str) -> Option<String> {
+    infer_homebrew_flags(content, flag).into_iter().next()
+}
+
+fn infer_homebrew_flags(content: &str, flag: &str) -> Vec<String> {
+    let prefix = format!("{flag} ");
+    content
+        .lines()
+        .filter_map(|line| {
+            let value = line.trim_start().strip_prefix(&prefix)?;
+            let value = value.trim_end_matches('\\').trim();
+            (!value.is_empty()).then(|| shell_unquote(value))
+        })
+        .collect()
+}
+
+fn infer_homebrew_download_repo(content: &str) -> Option<String> {
+    content.lines().find_map(|line| {
+        let (_, rest) = line.split_once("https://codeberg.org/")?;
+        let (repo, _) = rest.split_once("/releases/download/")?;
+        (!repo.is_empty()).then(|| repo.to_owned())
+    })
 }
 
 fn infer_chocolatey_options(
@@ -1159,6 +1235,8 @@ mod tests {
 
     use tempfile::TempDir;
 
+    use crate::config::{HomebrewConfig, HomebrewPlatformsConfig};
+
     use super::*;
 
     static GIT_CONFIG_LOCK: Mutex<()> = Mutex::new(());
@@ -1286,6 +1364,66 @@ mod tests {
         );
         assert!(!marked_workflows_drift(root, &marked));
         assert_eq!(detect_ci_status(root), FeatureStatus::ManagedExtra);
+    }
+
+    #[test]
+    fn ci_detector_infers_homebrew_name_override_from_release_workflow() {
+        let config = ProjectConfig {
+            homebrew: Some(HomebrewConfig {
+                name: None,
+                binaries: vec!["modde".to_owned(), "modde-ui".to_owned()],
+                tap_url: "https://codeberg.org/caniko/homebrew-modde.git".to_owned(),
+                description: Some("Cross-platform game mod manager".to_owned()),
+                homepage: Some("https://modde.tartanoglu.com".to_owned()),
+                license: Some("GPL-3.0-only".to_owned()),
+                download_repo: "caniko/rs-modde".to_owned(),
+                archive_pattern: "modde-{version}-{arch}-{os}.tar.gz".to_owned(),
+                platforms: HomebrewPlatformsConfig::default(),
+            }),
+            ..Default::default()
+        };
+        let package = Package {
+            id: "path+file:///workspace#modde-cli@0.2.0".to_owned(),
+            name: "modde-cli".to_owned(),
+            version: "0.2.0".to_owned(),
+            edition: Some("2024".to_owned()),
+            authors: Vec::new(),
+            license: Some("GPL-3.0-only".to_owned()),
+            description: Some("CLI interface for modde".to_owned()),
+            homepage: Some("https://modde.tartanoglu.com".to_owned()),
+            rust_version: Some("1.85".to_owned()),
+            features: BTreeMap::new(),
+            manifest_path: Utf8PathBuf::from("/workspace/crates/modde-cli/Cargo.toml"),
+        };
+        let marked = vec![WorkflowFile {
+            relative_path: PathBuf::from(".forgejo/workflows/release-artifacts-modde-cli.yaml"),
+            marked: true,
+            content: r#"
+# Generated by simit. Manual edits will be reported as ci=drift.
+      - name: Publish Homebrew tap
+        env:
+          HOMEBREW_TAP_URL: https://codeberg.org/caniko/homebrew-modde.git
+        run: |
+          nix run '.#rs-harbor' -- brew bump \
+            --name modde \
+            --version "$VERSION" \
+            --description 'Cross-platform game mod manager' \
+            --homepage https://modde.tartanoglu.com \
+            --license GPL-3.0-only \
+            --archive "darwin_arm=https://codeberg.org/caniko/rs-modde/releases/download/${VERSION}/modde-${VERSION}-aarch64-darwin.tar.gz,release/modde-${VERSION}-aarch64-darwin.tar.gz" \
+            --binary modde \
+            --binary modde-ui \
+            --tap "$PWD/tap"
+"#
+            .to_owned(),
+        }];
+
+        let homebrew = infer_homebrew_options(&config, &package, &marked)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(homebrew.name, "modde");
+        assert_eq!(homebrew.binaries, ["modde", "modde-ui"]);
     }
 
     fn set_local_hooks_path(repo: &Path, hooks_path: &Path) {

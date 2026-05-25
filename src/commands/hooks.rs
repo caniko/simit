@@ -11,6 +11,7 @@ use crate::cli::HooksInstallCommand;
 use crate::render::diff::unified_diff;
 
 const HOOK_TYPES: &[&str] = &["pre-commit", "pre-push", "commit-msg"];
+const CANIX_DISPATCHER_SENTINEL: &str = "dispatched-by-canix";
 
 pub fn install(command: HooksInstallCommand) -> Result<()> {
     let metadata = cargo::metadata_for_current_dir()?;
@@ -23,6 +24,8 @@ fn install_in_workspace(workspace_root: &Path, command: HooksInstallCommand) -> 
     let git_common_dir = git_common_dir(workspace_root)?;
     let hooks_dir = git_common_dir.join("hooks");
     let effective_hooks_path = effective_hooks_path(workspace_root, &hooks_dir)?;
+    let defensive_status =
+        defend_against_rogue_local_hooks_path(workspace_root, &hooks_dir, command.fix)?;
     warn_if_git_will_not_execute_installed_hooks(
         &git_common_dir,
         &hooks_dir,
@@ -31,7 +34,7 @@ fn install_in_workspace(workspace_root: &Path, command: HooksInstallCommand) -> 
 
     if command.check || command.diff {
         check_hooks(workspace_root, &hooks_dir, command.diff)?;
-        return check_hook_route(workspace_root, &git_common_dir, &hooks_dir);
+        return check_hook_route(workspace_root, &git_common_dir, &hooks_dir, false);
     }
 
     run_pre_commit_install(
@@ -40,9 +43,13 @@ fn install_in_workspace(workspace_root: &Path, command: HooksInstallCommand) -> 
         install_hooks_envs(workspace_root),
         false,
     )?;
-    repair_local_hooks_path_override(workspace_root)?;
     check_hooks(workspace_root, &hooks_dir, false)?;
-    check_hook_route(workspace_root, &git_common_dir, &hooks_dir)?;
+    check_hook_route(
+        workspace_root,
+        &git_common_dir,
+        &hooks_dir,
+        defensive_status.allows_install_to_continue(),
+    )?;
     Ok(())
 }
 
@@ -92,14 +99,36 @@ fn effective_hooks_path(workspace_root: &Path, hooks_dir: &Path) -> Result<PathB
 }
 
 fn local_hooks_path(workspace_root: &Path) -> Result<Option<PathBuf>> {
-    hooks_path_config(workspace_root, &["--local", "--get", "core.hooksPath"])
+    Ok(local_hooks_path_entry(workspace_root)?.map(|entry| entry.path))
+}
+
+fn local_hooks_path_entry(workspace_root: &Path) -> Result<Option<HooksPathConfig>> {
+    hooks_path_config_entry(workspace_root, &["--local", "--get", "core.hooksPath"])
 }
 
 fn global_hooks_path(workspace_root: &Path) -> Result<Option<PathBuf>> {
     hooks_path_config(workspace_root, &["--global", "--get", "core.hooksPath"])
 }
 
+fn system_hooks_path(workspace_root: &Path) -> Result<Option<PathBuf>> {
+    hooks_path_config(workspace_root, &["--system", "--get", "core.hooksPath"])
+}
+
+fn friendly_system_hooks_path(workspace_root: &Path) -> Result<Option<PathBuf>> {
+    if let Some(system) = system_hooks_path(workspace_root)? {
+        return Ok(Some(system));
+    }
+    global_hooks_path(workspace_root)
+}
+
 fn hooks_path_config(workspace_root: &Path, args: &[&str]) -> Result<Option<PathBuf>> {
+    Ok(hooks_path_config_entry(workspace_root, args)?.map(|entry| entry.path))
+}
+
+fn hooks_path_config_entry(
+    workspace_root: &Path,
+    args: &[&str],
+) -> Result<Option<HooksPathConfig>> {
     let output = Command::new("git")
         .arg("-C")
         .arg(workspace_root)
@@ -111,7 +140,15 @@ fn hooks_path_config(workspace_root: &Path, args: &[&str]) -> Result<Option<Path
         return Ok(None);
     }
     let path = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    Ok((!path.is_empty()).then(|| resolve_path(workspace_root, &expand_home(&path))))
+    Ok((!path.is_empty()).then(|| HooksPathConfig {
+        path: resolve_path(workspace_root, &expand_home(&path)),
+        raw: path,
+    }))
+}
+
+struct HooksPathConfig {
+    raw: String,
+    path: PathBuf,
 }
 
 fn warn_if_git_will_not_execute_installed_hooks(
@@ -121,7 +158,7 @@ fn warn_if_git_will_not_execute_installed_hooks(
 ) {
     if effective_hooks_path == hooks_dir
         || effective_hooks_path.starts_with(git_common_dir)
-        || effective_hooks_path.join("dispatched-by-canix").exists()
+        || is_canix_dispatcher(effective_hooks_path)
     {
         return;
     }
@@ -226,20 +263,76 @@ fn check_hooks(workspace_root: &Path, hooks_dir: &Path, show_diff: bool) -> Resu
     }
 }
 
-fn repair_local_hooks_path_override(workspace_root: &Path) -> Result<()> {
-    let Some(local) = local_hooks_path(workspace_root)? else {
-        return Ok(());
-    };
-    if is_canix_dispatcher(&local) {
-        return Ok(());
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DefensiveHooksPathStatus {
+    NoIssue,
+    WarnedRogueLocalWithDispatcher,
+}
+
+impl DefensiveHooksPathStatus {
+    fn allows_install_to_continue(self) -> bool {
+        matches!(self, Self::WarnedRogueLocalWithDispatcher)
     }
-    let Some(global) = global_hooks_path(workspace_root)? else {
-        return Ok(());
+}
+
+fn defend_against_rogue_local_hooks_path(
+    workspace_root: &Path,
+    hooks_dir: &Path,
+    fix: bool,
+) -> Result<DefensiveHooksPathStatus> {
+    let Some(local) = local_hooks_path_entry(workspace_root)? else {
+        return Ok(DefensiveHooksPathStatus::NoIssue);
     };
-    if !is_canix_dispatcher(&global) {
-        return Ok(());
+    if local.path != hooks_dir {
+        eprintln!(
+            "note: repo-local core.hooksPath = {} points outside this repository's .git/hooks; leaving it unchanged",
+            local.raw
+        );
+        return Ok(DefensiveHooksPathStatus::NoIssue);
     }
 
+    let Some(dispatcher) = friendly_system_hooks_path(workspace_root)? else {
+        warn_rogue_local_without_dispatcher(&local.raw, fix);
+        return Ok(DefensiveHooksPathStatus::NoIssue);
+    };
+    if !is_canix_dispatcher(&dispatcher) {
+        warn_rogue_local_without_dispatcher(&local.raw, fix);
+        return Ok(DefensiveHooksPathStatus::NoIssue);
+    }
+
+    if !fix {
+        eprintln!(
+            "warning: repo-local core.hooksPath = {} shadows the system dispatcher at {}. Project pre-commit hooks will fire, but the dispatcher's system step (e.g. AI-strip commit-msg) is bypassed. Run `simit hooks install --fix` to unset the local override and restore the dispatcher chain.",
+            local.raw,
+            dispatcher.display()
+        );
+        return Ok(DefensiveHooksPathStatus::WarnedRogueLocalWithDispatcher);
+    }
+
+    unset_local_hooks_path(workspace_root)?;
+    eprintln!(
+        "unset rogue local core.hooksPath = {} so git uses system dispatcher {}",
+        local.raw,
+        dispatcher.display()
+    );
+    Ok(DefensiveHooksPathStatus::NoIssue)
+}
+
+fn warn_rogue_local_without_dispatcher(local: &str, fix: bool) {
+    if fix {
+        eprintln!(
+            "warning: repo-local core.hooksPath = {} points at this repository's .git/hooks, but no friendly system dispatcher is configured; skipping --fix because there is no dispatcher to fall back to",
+            local
+        );
+    } else {
+        eprintln!(
+            "warning: repo-local core.hooksPath = {} points at this repository's .git/hooks and no friendly system dispatcher is configured; project hooks will fire without a dispatcher system step",
+            local
+        );
+    }
+}
+
+fn unset_local_hooks_path(workspace_root: &Path) -> Result<()> {
     let status = Command::new("git")
         .arg("-C")
         .arg(workspace_root)
@@ -257,29 +350,34 @@ fn repair_local_hooks_path_override(workspace_root: &Path) -> Result<()> {
             workspace_root.display()
         );
     }
-    eprintln!(
-        "repaired local core.hooksPath override: unset {} so git uses canix dispatcher {}",
-        local.display(),
-        global.display()
-    );
     Ok(())
 }
 
-fn check_hook_route(workspace_root: &Path, git_common_dir: &Path, hooks_dir: &Path) -> Result<()> {
+fn check_hook_route(
+    workspace_root: &Path,
+    git_common_dir: &Path,
+    hooks_dir: &Path,
+    allow_local_project_hooks_shadowing_dispatcher: bool,
+) -> Result<()> {
     let local = local_hooks_path(workspace_root)?;
-    let global = global_hooks_path(workspace_root)?;
-    let global_canix_dispatcher = global.as_deref().is_some_and(is_canix_dispatcher);
+    let friendly_dispatcher = friendly_system_hooks_path(workspace_root)?;
+    let friendly_canix_dispatcher = friendly_dispatcher
+        .as_deref()
+        .is_some_and(is_canix_dispatcher);
     let effective = effective_hooks_path(workspace_root, hooks_dir)?;
 
     if let Some(local) = local.as_deref() {
         if is_canix_dispatcher(local) {
             return Ok(());
         }
-        if global_canix_dispatcher {
+        if allow_local_project_hooks_shadowing_dispatcher && local == hooks_dir {
+            return Ok(());
+        }
+        if friendly_canix_dispatcher {
             bail!(
-                "local core.hooksPath {} bypasses canix dispatcher {}; run `simit hooks install` to repair it",
+                "local core.hooksPath {} bypasses canix dispatcher {}; run `simit hooks install --fix` to repair it",
                 local.display(),
-                global.as_ref().unwrap().display()
+                friendly_dispatcher.as_ref().unwrap().display()
             );
         }
         if local != hooks_dir {
@@ -305,7 +403,7 @@ fn check_hook_route(workspace_root: &Path, git_common_dir: &Path, hooks_dir: &Pa
 }
 
 fn is_canix_dispatcher(path: &Path) -> bool {
-    path.join("dispatched-by-canix").exists()
+    path.join(CANIX_DISPATCHER_SENTINEL).exists()
 }
 
 fn desired_hooks(workspace_root: &Path) -> Result<TempWorkspace> {

@@ -142,7 +142,7 @@ fn hooks_install_rejects_custom_hooks_path_without_dispatcher() {
 }
 
 #[test]
-fn hooks_install_repairs_local_override_when_global_canix_dispatcher_exists() {
+fn hooks_install_warns_about_rogue_local_override_when_global_canix_dispatcher_exists() {
     let temp = init_package();
     let root = temp.path();
     let git_env = isolated_git_env();
@@ -183,7 +183,69 @@ fn hooks_install_repairs_local_override_when_global_canix_dispatcher_exists() {
         String::from_utf8_lossy(&install_output.stderr)
     );
     let stderr = String::from_utf8_lossy(&install_output.stderr);
-    assert!(stderr.contains("repaired local core.hooksPath override"));
+    assert!(stderr.contains("repo-local core.hooksPath"));
+    assert!(stderr.contains("shadows the system dispatcher"));
+    assert!(stderr.contains("simit hooks install --fix"));
+
+    let local = git_config_with_env(
+        root,
+        &git_env,
+        &["config", "--local", "--get", "core.hooksPath"],
+    );
+    assert!(local.status.success());
+    assert_eq!(
+        String::from_utf8(local.stdout).unwrap().trim(),
+        ".git/hooks"
+    );
+    assert!(git_config_snapshot_with_env(root, &git_env).contains(dispatcher.to_str().unwrap()));
+    assert!(is_executable(&root.join(".git/hooks/pre-commit")));
+    assert!(is_executable(&root.join(".git/hooks/pre-push")));
+    assert!(is_executable(&root.join(".git/hooks/commit-msg")));
+}
+
+#[test]
+fn hooks_install_fix_unsets_rogue_local_override_when_global_canix_dispatcher_exists() {
+    let temp = init_package();
+    let root = temp.path();
+    let git_env = isolated_git_env();
+    let dispatcher = root.join("global-hooks");
+    write_canix_dispatcher(&dispatcher);
+    let status = {
+        let mut command = Command::new("git");
+        with_isolated_git_env(&mut command, &git_env);
+        command
+            .current_dir(root)
+            .args(["config", "--global", "core.hooksPath"])
+            .arg(&dispatcher)
+            .status()
+            .unwrap()
+    };
+    assert!(status.success());
+    let status = {
+        let mut command = Command::new("git");
+        with_isolated_git_env(&mut command, &git_env);
+        command
+            .current_dir(root)
+            .args(["config", "--local", "core.hooksPath", ".git/hooks"])
+            .status()
+            .unwrap()
+    };
+    assert!(status.success());
+
+    let mut command = simit();
+    with_isolated_git_env(&mut command, &git_env);
+    let install_output = command
+        .current_dir(root)
+        .args(["hooks", "install", "--fix"])
+        .output()
+        .unwrap();
+    assert!(
+        install_output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&install_output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&install_output.stderr);
+    assert!(stderr.contains("unset rogue local core.hooksPath"));
 
     let local = git_config_with_env(
         root,
@@ -195,6 +257,44 @@ fn hooks_install_repairs_local_override_when_global_canix_dispatcher_exists() {
     assert!(is_executable(&root.join(".git/hooks/pre-commit")));
     assert!(is_executable(&root.join(".git/hooks/pre-push")));
     assert!(is_executable(&root.join(".git/hooks/commit-msg")));
+}
+
+#[test]
+fn hooks_install_fix_does_not_mutate_config_without_rogue_local_override() {
+    let temp = init_package();
+    let root = temp.path();
+    let git_env = isolated_git_env();
+    let dispatcher = root.join("global-hooks");
+    write_canix_dispatcher(&dispatcher);
+    let status = {
+        let mut command = Command::new("git");
+        with_isolated_git_env(&mut command, &git_env);
+        command
+            .current_dir(root)
+            .args(["config", "--global", "core.hooksPath"])
+            .arg(&dispatcher)
+            .status()
+            .unwrap()
+    };
+    assert!(status.success());
+    let before = git_config_snapshot_with_env(root, &git_env);
+
+    let mut command = simit();
+    with_isolated_git_env(&mut command, &git_env);
+    let install_output = command
+        .current_dir(root)
+        .args(["hooks", "install", "--fix"])
+        .output()
+        .unwrap();
+    assert!(
+        install_output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&install_output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&install_output.stderr);
+    assert!(!stderr.contains("unset rogue local core.hooksPath"));
+    assert!(!stderr.contains("shadows the system dispatcher"));
+    assert_eq!(git_config_snapshot_with_env(root, &git_env), before);
 }
 
 #[test]
@@ -334,6 +434,8 @@ fn hooks_install_help_lists_install_subcommand() {
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("Usage: simit hooks install"));
+    assert!(stdout.contains("--fix"));
+    assert!(stdout.contains("Unset rogue repo-local core.hooksPath values"));
 
     let output = simit().args(["hooks", "--help"]).output().unwrap();
     assert!(output.status.success());

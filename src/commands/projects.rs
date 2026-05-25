@@ -65,9 +65,12 @@ struct FeatureFilter {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AttentionItem {
-    feature: String,
-    status: FeatureStatus,
+pub enum AttentionItem {
+    Feature {
+        feature: String,
+        status: FeatureStatus,
+    },
+    Missing,
 }
 
 #[derive(Serialize)]
@@ -150,11 +153,13 @@ fn show(args: ProjectsShowArgs) -> Result<()> {
 fn scan(args: ProjectsScanArgs) -> Result<()> {
     let mut registry = registry::load()?;
     let mut touched = 0usize;
+    let mut missing = Vec::new();
     let mut pruned = Vec::new();
     let now = Utc::now();
 
     for (path, entry) in &mut registry.projects {
-        if !path.as_std_path().exists() {
+        if entry_is_missing(path) {
+            missing.push(path.clone());
             if args.prune {
                 pruned.push(path.clone());
             }
@@ -174,7 +179,16 @@ fn scan(args: ProjectsScanArgs) -> Result<()> {
             "would scan {touched} project{}",
             if touched == 1 { "" } else { "s" }
         );
-        if args.prune {
+        if !missing.is_empty() && !args.prune {
+            println!(
+                "would prune {} stale project{}",
+                missing.len(),
+                if missing.len() == 1 { "" } else { "s" }
+            );
+            for path in &missing {
+                println!("  {path}");
+            }
+        } else if args.prune {
             println!(
                 "would prune {} stale project{}",
                 pruned.len(),
@@ -190,7 +204,15 @@ fn scan(args: ProjectsScanArgs) -> Result<()> {
             "scanned {touched} project{}",
             if touched == 1 { "" } else { "s" }
         );
-        if args.prune {
+        if !missing.is_empty() && !args.prune {
+            println!(
+                "{} project(s) missing on disk (use --prune to remove):",
+                missing.len()
+            );
+            for path in &missing {
+                println!("  {path}");
+            }
+        } else if args.prune {
             println!(
                 "pruned {} stale project{}",
                 pruned.len(),
@@ -470,7 +492,11 @@ fn print_project(path: &Utf8Path, entry: &ProjectEntry) {
     println!("first_seen: {}", entry.first_seen.to_rfc3339());
     println!("last_seen: {}", entry.last_seen.to_rfc3339());
     println!();
-    println!("feature     status");
+    if entry_is_missing(path) {
+        println!("feature     status (features as of last successful scan)");
+    } else {
+        println!("feature     status");
+    }
     println!("-------     ------");
     for feature in registry::KNOWN_FEATURES {
         let status = entry
@@ -507,7 +533,7 @@ pub fn attention_items(features: &BTreeMap<String, FeatureStatus>) -> Vec<Attent
                 | ("ci" | "flake" | "changelog", FeatureStatus::Drift)
         );
         if needs_attention {
-            items.push(AttentionItem {
+            items.push(AttentionItem::Feature {
                 feature: feature.to_owned(),
                 status,
             });
@@ -520,8 +546,17 @@ fn attention_items_for_project(path: &Utf8Path, entry: &ProjectEntry) -> Vec<Att
     if is_ephemeral_project_path(path) {
         Vec::new()
     } else {
-        attention_items(&entry.features)
+        let mut items = Vec::new();
+        if entry_is_missing(path) {
+            items.push(AttentionItem::Missing);
+        }
+        items.extend(attention_items(&entry.features));
+        items
     }
+}
+
+pub fn entry_is_missing(path: &Utf8Path) -> bool {
+    !path.as_std_path().exists()
 }
 
 fn is_ephemeral_project_path(path: &Utf8Path) -> bool {
@@ -543,7 +578,12 @@ fn print_attention_footer(attention: &[(&Utf8PathBuf, Vec<AttentionItem>)]) {
 fn format_attention_items(items: &[AttentionItem]) -> String {
     items
         .iter()
-        .map(|item| format!("{}={}", item.feature, status_label(item.status)))
+        .map(|item| match item {
+            AttentionItem::Feature { feature, status } => {
+                format!("{feature}={}", status_label(*status))
+            }
+            AttentionItem::Missing => "missing".to_owned(),
+        })
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -605,8 +645,13 @@ mod tests {
         let items = attention_items(&features(&[("hooks", FeatureStatus::Conflicted)]));
 
         assert_eq!(items.len(), 1);
-        assert_eq!(items[0].feature, "hooks");
-        assert_eq!(items[0].status, FeatureStatus::Conflicted);
+        assert_eq!(
+            items[0],
+            AttentionItem::Feature {
+                feature: "hooks".to_owned(),
+                status: FeatureStatus::Conflicted,
+            }
+        );
     }
 
     #[test]
@@ -614,8 +659,13 @@ mod tests {
         let items = attention_items(&features(&[("flake", FeatureStatus::Drift)]));
 
         assert_eq!(items.len(), 1);
-        assert_eq!(items[0].feature, "flake");
-        assert_eq!(items[0].status, FeatureStatus::Drift);
+        assert_eq!(
+            items[0],
+            AttentionItem::Feature {
+                feature: "flake".to_owned(),
+                status: FeatureStatus::Drift,
+            }
+        );
     }
 
     #[test]

@@ -962,6 +962,11 @@ pub struct HooksInstallCommand {
     pub check: bool,
     #[arg(long, help = "Show a unified diff for stale hook wrappers")]
     pub diff: bool,
+    #[arg(
+        long,
+        help = "Unset rogue repo-local core.hooksPath values that shadow a friendly system dispatcher (no-op otherwise)"
+    )]
+    pub fix: bool,
 }
 
 #[derive(Debug, Args)]
@@ -1008,7 +1013,7 @@ pub struct ProjectsListArgs {
     #[arg(
         long,
         conflicts_with = "no_issues",
-        help = "Mark projects with drift or hook conflicts and print an issues footer"
+        help = "Mark projects with drift, hook conflicts, or missing paths and print an issues footer"
     )]
     pub issues: bool,
     #[arg(
@@ -1038,7 +1043,7 @@ pub struct ProjectsShowArgs {
     #[arg(
         long,
         conflicts_with = "no_issues",
-        help = "Print an attention header for drift or hook conflicts"
+        help = "Print an attention header for drift, hook conflicts, or missing paths"
     )]
     pub issues: bool,
     #[arg(long = "no-issues", help = "Suppress the attention header")]

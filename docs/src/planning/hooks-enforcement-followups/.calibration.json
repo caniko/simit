@@ -1,0 +1,168 @@
+{
+  "schema_version": 1,
+  "plan": {
+    "id": "38e14a67-8490-40fc-b6c9-da204d4db1cb",
+    "name": "Plan: hooks-enforcement-followups",
+    "flavor": "codex",
+    "worktype": null,
+    "created_at": 1779690698,
+    "phase_count": 3,
+    "wave_count": 2,
+    "max_chain_depth": 2,
+    "repo_spread": 3,
+    "routing_dist": {
+      "medium": 3
+    },
+    "shape_hash": "45c7582172cb312eec61091c97bcf598c90cf00b9085532b46ce874e3f4eabb1"
+  },
+  "triggers": [
+    {
+      "name": "shared-file-contention",
+      "input_value": 1.0,
+      "threshold": 2.0,
+      "fired": false,
+      "section_added": null
+    },
+    {
+      "name": "external-repo-phases",
+      "input_value": 3.0,
+      "threshold": 1.0,
+      "fired": true,
+      "section_added": "External repo coordination"
+    },
+    {
+      "name": "convergence-point",
+      "input_value": 2.0,
+      "threshold": 3.0,
+      "fired": false,
+      "section_added": null
+    },
+    {
+      "name": "ownership-boundary-spread",
+      "input_value": 3.0,
+      "threshold": 2.0,
+      "fired": true,
+      "section_added": "PR sequencing & cross-owner coordination"
+    },
+    {
+      "name": "risk-concentration",
+      "input_value": 0.0,
+      "threshold": 2.0,
+      "fired": false,
+      "section_added": null
+    },
+    {
+      "name": "risk-late-in-plan",
+      "input_value": 0.0,
+      "threshold": 1.0,
+      "fired": false,
+      "section_added": null
+    },
+    {
+      "name": "infrastructure-spof",
+      "input_value": 0.0,
+      "threshold": 1.0,
+      "fired": false,
+      "section_added": null
+    },
+    {
+      "name": "revendor-phase",
+      "input_value": 0.0,
+      "threshold": 1.0,
+      "fired": false,
+      "section_added": null
+    },
+    {
+      "name": "long-serial-chain",
+      "input_value": 2.0,
+      "threshold": 4.0,
+      "fired": false,
+      "section_added": null
+    },
+    {
+      "name": "mid-plan-rerouting",
+      "input_value": 3.0,
+      "threshold": 10.0,
+      "fired": false,
+      "section_added": null
+    },
+    {
+      "name": "trivial-phase-swamp",
+      "input_value": 3.0,
+      "threshold": 4.0,
+      "fired": false,
+      "section_added": null
+    },
+    {
+      "name": "no-integrated-verification",
+      "input_value": 1.0,
+      "threshold": 1.0,
+      "fired": true,
+      "section_added": null
+    },
+    {
+      "name": "routing-tier-inversion",
+      "input_value": 1.0,
+      "threshold": 1.0,
+      "fired": true,
+      "section_added": null
+    },
+    {
+      "name": "mechanical-streak",
+      "input_value": 0.0,
+      "threshold": 3.0,
+      "fired": false,
+      "section_added": null
+    },
+    {
+      "name": "hidden-prerequisite",
+      "input_value": 0.0,
+      "threshold": 1.0,
+      "fired": false,
+      "section_added": null
+    }
+  ],
+  "phases": [
+    {
+      "ordinal": 1,
+      "slug": "simit-defensive-installer",
+      "routing_tier": "medium",
+      "files": [
+        "CHANGELOG.md` — `[Unreleased]` entry.",
+        "src/cli.rs` — `--fix` flag on `HooksInstallCommand`. **Note:**",
+        "src/commands/hooks.rs` — detection + warning + conditional",
+        "tests/hooks_install.rs` — three new scenarios."
+      ]
+    },
+    {
+      "ordinal": 2,
+      "slug": "simit-scan-surfaces-missing-paths",
+      "routing_tier": "medium",
+      "files": [
+        "CHANGELOG.md`.",
+        "src/commands/projects.rs` — scan output, list/show",
+        "tests/projects.rs` — five new test scenarios."
+      ]
+    },
+    {
+      "ordinal": 3,
+      "slug": "release-and-propagate-to-canix",
+      "routing_tier": "medium",
+      "files": [
+        "/data/nvme0/can/Projects/canix/flake.lock` — simit input",
+        "/data/nvme0/can/Projects/simit/CHANGELOG.md` — release entry.",
+        "/data/nvme0/can/Projects/simit/Cargo.toml` — only if the",
+        "/data/nvme0/can/Projects/simit/docs/src/planning/hooks-enforcement/.calibration.json"
+      ]
+    }
+  ],
+  "meta_heuristics_fired": [
+    "threshold-proximity"
+  ],
+  "tags": {
+    "flavor": "codex",
+    "risk": "low",
+    "scope": "cross-org"
+  },
+  "verify": null
+}

@@ -42,6 +42,13 @@ fn non_tmp_project(name: &str) -> TempDir {
     project
 }
 
+fn missing_non_tmp_project(name: &str) -> PathBuf {
+    let project = non_tmp_project(name);
+    let path = project.path().to_path_buf();
+    drop(project);
+    path
+}
+
 fn registry_file(data_home: &Path) -> PathBuf {
     data_home.join("simit/projects.toml")
 }
@@ -181,6 +188,35 @@ fn scan_updates_last_seen_for_existing_projects() {
 }
 
 #[test]
+fn scan_reports_missing_paths_without_pruning() {
+    let data_home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    init_package(project.path(), "demo");
+    let project_path = fs::canonicalize(project.path()).unwrap();
+    let missing = missing_non_tmp_project("missing-scan");
+    write_registry(
+        data_home.path(),
+        &[
+            (&project_path, "demo", &[("flake", "managed")]),
+            (&missing, "missing", &[("ci", "managed")]),
+        ],
+    );
+
+    let output = simit_with_data_home(data_home.path())
+        .args(["projects", "scan"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("scanned 1 project"));
+    assert!(stdout.contains("1 project(s) missing on disk (use --prune to remove):"));
+    assert!(stdout.contains(&missing.display().to_string()));
+
+    let value = registry_json(data_home.path());
+    assert_eq!(value.as_array().unwrap().len(), 2);
+}
+
+#[test]
 fn scan_prune_removes_missing_paths() {
     let data_home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
@@ -195,11 +231,13 @@ fn scan_prune_removes_missing_paths() {
         ],
     );
 
-    let status = simit_with_data_home(data_home.path())
+    let output = simit_with_data_home(data_home.path())
         .args(["projects", "scan", "--prune"])
-        .status()
+        .output()
         .unwrap();
-    assert!(status.success());
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("pruned 1 stale project"));
 
     let output = simit_with_data_home(data_home.path())
         .args(["projects", "list", "--json", "--sort", "path"])
@@ -210,6 +248,14 @@ fn scan_prune_removes_missing_paths() {
     let value: Value = serde_json::from_str(&stdout).unwrap();
     assert_eq!(value.as_array().unwrap().len(), 1);
     assert_eq!(value[0]["name"], "demo");
+
+    let output = simit_with_data_home(data_home.path())
+        .args(["projects", "show", missing.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("project path does not exist and is not registered"));
 }
 
 #[test]
@@ -430,6 +476,47 @@ fn list_surfaces_attention_issues_by_default() {
 }
 
 #[test]
+fn list_surfaces_missing_paths_in_attention_footer() {
+    let data_home = TempDir::new().unwrap();
+    let missing = missing_non_tmp_project("missing-list");
+    write_registry(
+        data_home.path(),
+        &[(&missing, "missing", &[("hooks", "installed")])],
+    );
+
+    let output = simit_with_data_home(data_home.path())
+        .args(["projects", "list", "--sort", "path"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains(&format!("! * missing {}", missing.display())));
+    assert!(stdout.contains("1 project(s) need attention:"));
+    assert!(stdout.contains(&format!("  {}   missing", missing.display())));
+}
+
+#[test]
+fn list_filters_tmp_missing_paths_from_attention_footer() {
+    let data_home = TempDir::new().unwrap();
+    let missing = data_home.path().join("missing-tmp-project");
+    write_registry(
+        data_home.path(),
+        &[(&missing, "missing-tmp", &[("hooks", "installed")])],
+    );
+
+    let output = simit_with_data_home(data_home.path())
+        .args(["projects", "list", "--sort", "path"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains(&format!("* missing-tmp {}", missing.display())));
+    assert!(!stdout.contains("! * missing-tmp"));
+    assert!(!stdout.contains("need attention"));
+    assert!(!stdout.contains("missing\n"));
+}
+
+#[test]
 fn list_no_issues_preserves_plain_table_output() {
     let data_home = TempDir::new().unwrap();
     let project = non_tmp_project("conflicted");
@@ -494,6 +581,29 @@ fn show_surfaces_attention_header() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.starts_with("! project has 1 issue: hooks=conflicted\n\n"));
     assert!(stdout.contains("hooks       conflicted"));
+}
+
+#[test]
+fn show_surfaces_missing_header_and_cached_features() {
+    let data_home = TempDir::new().unwrap();
+    let missing = missing_non_tmp_project("missing-show");
+    write_registry(
+        data_home.path(),
+        &[(&missing, "missing", &[("hooks", "installed")])],
+    );
+
+    let output = simit_with_data_home(data_home.path())
+        .args(["projects", "show", missing.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.starts_with("! project has 1 issue: missing\n\n"));
+    assert!(stdout.contains("feature     status (features as of last successful scan)"));
+    assert!(stdout.contains("hooks       installed"));
+
+    let value = registry_json(data_home.path());
+    assert_eq!(value[0]["features"]["hooks"], "installed");
 }
 
 #[test]
