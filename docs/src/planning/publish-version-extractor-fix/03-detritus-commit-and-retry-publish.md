@@ -7,7 +7,7 @@
 > followed by a tag/retag decision and re-running the publish
 > workflow. The judgement calls (retag in place vs bump to 0.1.1, how
 > to express the failure recovery in commit prose, when to abort if
-> the publish workflow surfaces a *different* regression) need real
+> the publish workflow surfaces a _different_ regression) need real
 > reasoning. A `low` tier would mishandle the retag question; `high`
 > is unnecessary because no design content is in play.
 
@@ -73,6 +73,7 @@ detritus crate cannot install from crates.io.
      `cargo build` to refresh lockfile, commit, tag, push.
 
    Default to bump unless the user explicitly asks for retag.
+
 5. Push the branch and (when ready) merge to `trunk` per project
    convention (this branch is `fix/remove-rust-cache` per dossier
    context).
@@ -109,14 +110,14 @@ detritus crate cannot install from crates.io.
 
 ## Pitfalls
 
-- **Symptom:** publish workflow now fails on the *wrong*-package
+- **Symptom:** publish workflow now fails on the _wrong_-package
   version comparison (workflow read detritus-client's version while
   publishing detritus-protocol). **Cause:** Phase 02 not yet landed;
   extractor still picks first package in `packages[]`. **Recovery:**
   while all three are 0.1.0 the comparison still passes; if a single
   crate is bumped independently before Phase 02 lands, hot-patch the
   affected workflow to use `cargo metadata … --manifest-path
-  crates/<pkg>/Cargo.toml` or wait for Phase 02.
+crates/<pkg>/Cargo.toml` or wait for Phase 02.
 - **Symptom:** `git push --tags --force` rejected by remote.
   **Cause:** branch protection or maintainer key policy. **Recovery:**
   prefer the bump-to-0.1.1 path; do not push `--force` to shared

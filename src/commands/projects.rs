@@ -1,5 +1,8 @@
+use std::collections::BTreeMap;
+use std::env;
 use std::error::Error;
 use std::fmt;
+use std::io::{self, IsTerminal};
 
 use anyhow::{Context, Result, bail};
 use camino::{Utf8Path, Utf8PathBuf};
@@ -61,13 +64,19 @@ struct FeatureFilter {
     status: Option<FeatureStatus>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttentionItem {
+    feature: String,
+    status: FeatureStatus,
+}
+
 #[derive(Serialize)]
 struct ProjectRecord<'a> {
     path: &'a Utf8Path,
     name: &'a str,
     first_seen: DateTime<Utc>,
     last_seen: DateTime<Utc>,
-    features: &'a std::collections::BTreeMap<String, FeatureStatus>,
+    features: &'a BTreeMap<String, FeatureStatus>,
 }
 
 fn list(args: ProjectsListArgs) -> Result<()> {
@@ -88,8 +97,17 @@ fn list(args: ProjectsListArgs) -> Result<()> {
             .collect::<Vec<_>>();
         println!("{}", serde_json::to_string_pretty(&records)?);
     } else {
+        let show_issues = args.issues || !args.no_issues;
+        let mut attention = Vec::new();
         for (path, entry) in projects {
-            println!("{}", format_list_line(path, entry));
+            let items = attention_items_for_project(path, entry);
+            println!("{}", format_list_line(path, entry, show_issues, &items));
+            if show_issues && !items.is_empty() {
+                attention.push((path, items));
+            }
+        }
+        if show_issues {
+            print_attention_footer(&attention);
         }
     }
     Ok(())
@@ -112,6 +130,18 @@ fn show(args: ProjectsShowArgs) -> Result<()> {
     if args.json {
         println!("{}", serde_json::to_string_pretty(&record(&path, entry))?);
     } else {
+        let show_issues = args.issues || !args.no_issues;
+        let attention = attention_items_for_project(&path, entry);
+        if show_issues && !attention.is_empty() {
+            println!(
+                "{} project has {} issue{}: {}",
+                attention_glyph(),
+                attention.len(),
+                if attention.len() == 1 { "" } else { "s" },
+                format_attention_items(&attention)
+            );
+            println!();
+        }
         print_project(&path, entry);
     }
     Ok(())
@@ -349,13 +379,15 @@ fn parse_feature_filter(value: &str) -> Result<FeatureFilter> {
 fn parse_feature_status(value: &str) -> Result<FeatureStatus> {
     match value {
         "managed" => Ok(FeatureStatus::Managed),
+        "managed+extra" => Ok(FeatureStatus::ManagedExtra),
         "drift" => Ok(FeatureStatus::Drift),
         "hand-rolled" => Ok(FeatureStatus::HandRolled),
         "configured" => Ok(FeatureStatus::Configured),
+        "conflicted" => Ok(FeatureStatus::Conflicted),
         "installed" => Ok(FeatureStatus::Installed),
         "absent" => Ok(FeatureStatus::Absent),
         _ => bail!(
-            "unknown feature status `{value}`; valid statuses: managed, drift, hand-rolled, configured, installed, absent"
+            "unknown feature status `{value}`; valid statuses: managed, managed+extra, drift, hand-rolled, configured, conflicted, installed, absent"
         ),
     }
 }
@@ -384,11 +416,21 @@ fn sort_projects(projects: &mut Vec<(&Utf8PathBuf, &ProjectEntry)>, sort: Projec
     });
 }
 
-fn format_list_line(path: &Utf8Path, entry: &ProjectEntry) -> String {
+fn format_list_line(
+    path: &Utf8Path,
+    entry: &ProjectEntry,
+    show_issues: bool,
+    attention: &[AttentionItem],
+) -> String {
     let indicator = if registry::uses_simit_features(&entry.features) {
         "*"
     } else {
         "-"
+    };
+    let attention_marker = if show_issues && !attention.is_empty() {
+        format!("{} ", attention_glyph())
+    } else {
+        String::new()
     };
     let features = registry::KNOWN_FEATURES
         .iter()
@@ -401,7 +443,10 @@ fn format_list_line(path: &Utf8Path, entry: &ProjectEntry) -> String {
         .map(|feature| format_feature_token(feature, entry.features.get(*feature).copied()))
         .collect::<Vec<_>>()
         .join(" ");
-    format!("{indicator} {} {}  [{features}]", entry.name, path)
+    format!(
+        "{attention_marker}{indicator} {} {}  [{features}]",
+        entry.name, path
+    )
 }
 
 fn format_feature_token(feature: &str, status: Option<FeatureStatus>) -> String {
@@ -409,7 +454,10 @@ fn format_feature_token(feature: &str, status: Option<FeatureStatus>) -> String 
         FeatureStatus::Managed | FeatureStatus::Configured | FeatureStatus::Installed => {
             feature.to_owned()
         }
-        FeatureStatus::Drift | FeatureStatus::HandRolled => {
+        FeatureStatus::ManagedExtra
+        | FeatureStatus::Drift
+        | FeatureStatus::HandRolled
+        | FeatureStatus::Conflicted => {
             format!("{feature}({})", status_label(status.unwrap()))
         }
         FeatureStatus::Absent => feature.to_owned(),
@@ -437,11 +485,74 @@ fn print_project(path: &Utf8Path, entry: &ProjectEntry) {
 fn status_label(status: FeatureStatus) -> &'static str {
     match status {
         FeatureStatus::Managed => "managed",
+        FeatureStatus::ManagedExtra => "managed+extra",
         FeatureStatus::Drift => "drift",
         FeatureStatus::HandRolled => "hand-rolled",
         FeatureStatus::Configured => "configured",
+        FeatureStatus::Conflicted => "conflicted",
         FeatureStatus::Installed => "installed",
         FeatureStatus::Absent => "absent",
+    }
+}
+
+pub fn attention_items(features: &BTreeMap<String, FeatureStatus>) -> Vec<AttentionItem> {
+    let mut items = Vec::new();
+    for feature in ["hooks", "ci", "flake", "changelog"] {
+        let Some(status) = features.get(feature).copied() else {
+            continue;
+        };
+        let needs_attention = matches!(
+            (feature, status),
+            ("hooks", FeatureStatus::Conflicted)
+                | ("ci" | "flake" | "changelog", FeatureStatus::Drift)
+        );
+        if needs_attention {
+            items.push(AttentionItem {
+                feature: feature.to_owned(),
+                status,
+            });
+        }
+    }
+    items
+}
+
+fn attention_items_for_project(path: &Utf8Path, entry: &ProjectEntry) -> Vec<AttentionItem> {
+    if is_ephemeral_project_path(path) {
+        Vec::new()
+    } else {
+        attention_items(&entry.features)
+    }
+}
+
+fn is_ephemeral_project_path(path: &Utf8Path) -> bool {
+    let path = path.as_str();
+    path == "/tmp" || path.starts_with("/tmp/")
+}
+
+fn print_attention_footer(attention: &[(&Utf8PathBuf, Vec<AttentionItem>)]) {
+    if attention.is_empty() {
+        return;
+    }
+    println!();
+    println!("{} project(s) need attention:", attention.len());
+    for (path, items) in attention {
+        println!("  {path}   {}", format_attention_items(items));
+    }
+}
+
+fn format_attention_items(items: &[AttentionItem]) -> String {
+    items
+        .iter()
+        .map(|item| format!("{}={}", item.feature, status_label(item.status)))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn attention_glyph() -> String {
+    if io::stdout().is_terminal() && env::var_os("NO_COLOR").is_none() {
+        "\x1b[33m!\x1b[0m".to_owned()
+    } else {
+        "!".to_owned()
     }
 }
 
@@ -476,4 +587,52 @@ fn normalize_registry_path(path: &Utf8Path) -> Result<Utf8PathBuf> {
     let joined = current.join(path);
     Utf8PathBuf::from_path_buf(joined)
         .map_err(|path| anyhow::anyhow!("project path is not valid UTF-8: {}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn features(items: &[(&str, FeatureStatus)]) -> BTreeMap<String, FeatureStatus> {
+        items
+            .iter()
+            .map(|(feature, status)| ((*feature).to_owned(), *status))
+            .collect()
+    }
+
+    #[test]
+    fn attention_classifier_flags_hooks_conflicted() {
+        let items = attention_items(&features(&[("hooks", FeatureStatus::Conflicted)]));
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].feature, "hooks");
+        assert_eq!(items[0].status, FeatureStatus::Conflicted);
+    }
+
+    #[test]
+    fn attention_classifier_flags_flake_drift() {
+        let items = attention_items(&features(&[("flake", FeatureStatus::Drift)]));
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].feature, "flake");
+        assert_eq!(items[0].status, FeatureStatus::Drift);
+    }
+
+    #[test]
+    fn attention_classifier_ignores_non_issue_hook_states() {
+        assert!(attention_items(&features(&[("hooks", FeatureStatus::Configured)])).is_empty());
+        assert!(attention_items(&features(&[("hooks", FeatureStatus::Installed)])).is_empty());
+    }
+
+    #[test]
+    fn attention_classifier_ignores_managed_and_installed_features() {
+        let items = attention_items(&features(&[
+            ("flake", FeatureStatus::Managed),
+            ("ci", FeatureStatus::Managed),
+            ("changelog", FeatureStatus::Managed),
+            ("hooks", FeatureStatus::Installed),
+        ]));
+
+        assert!(items.is_empty());
+    }
 }

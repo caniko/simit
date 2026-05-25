@@ -18,7 +18,7 @@ check that breaks on Cargo workspaces:
 version="$(cargo metadata --no-deps --format-version 1 | grep -m1 -o '"version":"[^"]*"' | cut -d '"' -f4)"
 ```
 
-`grep -m NUM` bounds matching *lines*, not match *occurrences*. Cargo metadata
+`grep -m NUM` bounds matching _lines_, not match _occurrences_. Cargo metadata
 emits compact single-line JSON, so on a workspace every member's
 `"version":"…"` reaches `$version`, and the equality check against `$tag`
 always fails. Root cause and full repro live in
@@ -35,18 +35,18 @@ dependents (`open-data-license`, `rs-memory-admission`, `simit` itself,
 
 ## Phases
 
-| Phase | File | Depends on | Touches | Blocking? | Parallel with |
-|-------|------|-----------|---------|-----------|---------------|
-| 01 | [01-simit-commit-and-release.md](./01-simit-commit-and-release.md) | — | simit repo | yes (gates 04) | 03 |
-| 02 | [02-simit-package-scope-extractor.md](./02-simit-package-scope-extractor.md) | 01 | simit repo | no | 03 |
-| 03 | [03-detritus-commit-and-retry-publish.md](./03-detritus-commit-and-retry-publish.md) | 01 (logical) | detritus repo | no | 01, 02 |
-| 04 | [04-sweep-latent-dependents.md](./04-sweep-latent-dependents.md) | 01 | 4 dependent repos | no | — |
+| Phase | File                                                                                 | Depends on   | Touches           | Blocking?      | Parallel with |
+| ----- | ------------------------------------------------------------------------------------ | ------------ | ----------------- | -------------- | ------------- |
+| 01    | [01-simit-commit-and-release.md](./01-simit-commit-and-release.md)                   | —            | simit repo        | yes (gates 04) | 03            |
+| 02    | [02-simit-package-scope-extractor.md](./02-simit-package-scope-extractor.md)         | 01           | simit repo        | no             | 03            |
+| 03    | [03-detritus-commit-and-retry-publish.md](./03-detritus-commit-and-retry-publish.md) | 01 (logical) | detritus repo     | no             | 01, 02        |
+| 04    | [04-sweep-latent-dependents.md](./04-sweep-latent-dependents.md)                     | 01           | 4 dependent repos | no             | —             |
 
 ## Parallelism layer
 
 - **Wave 0:** 01 and 03 can run concurrently — they touch different repos
   (simit vs detritus) and detritus's regenerated workflows are already on
-  disk. 03 only depends on 01 *logically* (so users tracing the fix find a
+  disk. 03 only depends on 01 _logically_ (so users tracing the fix find a
   released simit), not by file conflict.
 - **Wave 1:** 02 starts once 01 is committed (it builds on the same
   `validate_release_tag_step` function and would conflict with an

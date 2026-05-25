@@ -81,7 +81,7 @@ The change is one line plus a regression test; both already pass locally.
    git tag -s 0.15.1 -m '0.15.1'
    git push origin HEAD 0.15.1
    ```
-   The Forgejo publish workflow (which uses the *new* fixed generator
+   The Forgejo publish workflow (which uses the _new_ fixed generator
    only after it regenerates itself in Phase 04) should still succeed
    here because simit is single-crate — confirm.
 7. Watch the publish workflow run; if it fails for any reason other
@@ -96,7 +96,7 @@ The change is one line plus a regression test; both already pass locally.
       by `git verify-tag 0.15.1`.
 - [ ] Forgejo Actions publish run for 0.15.1 is green and the crate
       `simit = "0.15.1"` resolves on crates.io (`curl -fsS
-      https://crates.io/api/v1/crates/simit/0.15.1`).
+    https://crates.io/api/v1/crates/simit/0.15.1`).
 - [ ] `CHANGELOG.md` entry under `0.15.1` references the research
       dossier path or summarises the bug in one sentence.
 - [ ] `cargo install simit --locked --version 0.15.1` succeeds in a
@@ -114,7 +114,7 @@ The change is one line plus a regression test; both already pass locally.
 
 - **Symptom:** publish workflow re-tags `0.15.1` but fails the
   tag/version check. **Cause:** the workflow on the simit repo still
-  carries the *old* extractor at publish time, because regenerating
+  carries the _old_ extractor at publish time, because regenerating
   simit's own `.forgejo/workflows/publish-crate.yaml` is a Phase 04
   task. **Recovery:** simit is single-crate, so the old extractor still
   produces the right scalar; the workflow should pass. If it doesn't,

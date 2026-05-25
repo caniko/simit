@@ -31,6 +31,8 @@ pub enum Commands {
     Dist(DistCommand),
     #[command(about = "Manage a Keep a Changelog file")]
     Changelog(ChangelogCommand),
+    #[command(about = "Install and verify project Git hooks")]
+    Hooks(HooksCommand),
     #[command(about = "Manage user-scoped simit configuration")]
     Config(ConfigCommand),
     #[command(about = "Inspect and maintain the per-user project registry")]
@@ -943,6 +945,26 @@ pub struct ChangelogCommand {
 }
 
 #[derive(Debug, Args)]
+pub struct HooksCommand {
+    #[command(subcommand, help = "Hooks action to run")]
+    pub action: HooksAction,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum HooksAction {
+    #[command(about = "Install pre-commit hooks into this repository")]
+    Install(HooksInstallCommand),
+}
+
+#[derive(Debug, Args)]
+pub struct HooksInstallCommand {
+    #[arg(long, help = "Verify installed hook wrappers without changing files")]
+    pub check: bool,
+    #[arg(long, help = "Show a unified diff for stale hook wrappers")]
+    pub diff: bool,
+}
+
+#[derive(Debug, Args)]
 pub struct ConfigCommand {
     #[command(subcommand, help = "User config action to run")]
     pub action: ConfigAction,
@@ -985,6 +1007,17 @@ pub struct ProjectsListArgs {
     pub json: bool,
     #[arg(
         long,
+        conflicts_with = "no_issues",
+        help = "Mark projects with drift or hook conflicts and print an issues footer"
+    )]
+    pub issues: bool,
+    #[arg(
+        long = "no-issues",
+        help = "Suppress issue markers and footer in human output"
+    )]
+    pub no_issues: bool,
+    #[arg(
+        long,
         value_enum,
         value_name = "KEY",
         default_value = "last-seen",
@@ -1002,6 +1035,14 @@ pub struct ProjectsShowArgs {
     pub path: Option<Utf8PathBuf>,
     #[arg(long, help = "Print machine-readable JSON")]
     pub json: bool,
+    #[arg(
+        long,
+        conflicts_with = "no_issues",
+        help = "Print an attention header for drift or hook conflicts"
+    )]
+    pub issues: bool,
+    #[arg(long = "no-issues", help = "Suppress the attention header")]
+    pub no_issues: bool,
 }
 
 #[derive(Debug, Args)]

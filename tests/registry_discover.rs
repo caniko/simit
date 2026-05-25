@@ -1,6 +1,7 @@
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
@@ -10,6 +11,9 @@ use simit::project::{self, Languages};
 use simit::registry::{self, DiscoverOptions, FeatureStatus};
 use simit::render::flake;
 use tempfile::TempDir;
+
+#[allow(dead_code)]
+mod common;
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -111,6 +115,17 @@ resolver = "3"
     )
     .unwrap();
     init_package(&root.join(member), member);
+}
+
+fn init_managed_github_ci(root: &Path) {
+    let status = Command::new(env!("CARGO_BIN_EXE_simit"))
+        .env("SIMIT_NO_REGISTRY", "1")
+        .env("SIMIT_MAINTAINERS_GPG", common::maintainer_key_path())
+        .current_dir(root)
+        .args(["init", "ci", "--platform", "github"])
+        .status()
+        .unwrap();
+    assert!(status.success());
 }
 
 fn add_managed_flake(root: &Path) {
@@ -260,6 +275,53 @@ fn generic_ci_registers_as_hand_rolled() {
     let registry = registry::load().unwrap();
     let entry = registry.projects.get(&canonical(root.path())).unwrap();
     assert_eq!(entry.features["ci"], FeatureStatus::HandRolled);
+}
+
+#[test]
+fn marked_ci_with_unmarked_supplementary_workflow_registers_as_managed_extra() {
+    let _env = EnvGuard::new();
+    let root = TempDir::new().unwrap();
+    init_package(root.path(), "plain");
+    init_managed_github_ci(root.path());
+    fs::write(
+        root.path().join(".github/workflows/pages.yaml"),
+        "name: Pages\non: [push]\n",
+    )
+    .unwrap();
+
+    let report = discover(root.path(), DiscoverOptions::default());
+
+    assert_eq!(report.registered, [canonical(root.path())]);
+    let registry = registry::load().unwrap();
+    let entry = registry.projects.get(&canonical(root.path())).unwrap();
+    assert_eq!(entry.features["ci"], FeatureStatus::ManagedExtra);
+}
+
+#[test]
+fn edited_marked_ci_with_unmarked_supplementary_workflow_stays_drift() {
+    let _env = EnvGuard::new();
+    let root = TempDir::new().unwrap();
+    init_package(root.path(), "plain");
+    init_managed_github_ci(root.path());
+    let ci_path = root.path().join(".github/workflows/ci.yaml");
+    let ci = fs::read_to_string(&ci_path).unwrap();
+    fs::write(
+        &ci_path,
+        ci.replace("cargo test --all-features", "cargo test"),
+    )
+    .unwrap();
+    fs::write(
+        root.path().join(".github/workflows/pages.yaml"),
+        "name: Pages\non: [push]\n",
+    )
+    .unwrap();
+
+    let report = discover(root.path(), DiscoverOptions::default());
+
+    assert_eq!(report.registered, [canonical(root.path())]);
+    let registry = registry::load().unwrap();
+    let entry = registry.projects.get(&canonical(root.path())).unwrap();
+    assert_eq!(entry.features["ci"], FeatureStatus::Drift);
 }
 
 #[test]

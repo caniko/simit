@@ -51,10 +51,15 @@
       };
 
       cargoArtifacts = craneLib.buildDepsOnly commonArgs;
+      preCommitBin = pkgs.runCommand "pre-commit-bin" {} ''
+        mkdir -p $out/bin
+        ln -s ${pkgs.pre-commit}/bin/pre-commit $out/bin/pre-commit
+      '';
 
       package = craneLib.buildPackage (commonArgs
         // {
           inherit cargoArtifacts;
+          nativeBuildInputs = [preCommitBin];
           nativeCheckInputs = [pkgs.git pkgs.gnupg];
         });
 

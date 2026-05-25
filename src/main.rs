@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::Parser;
 
-use simit::cli::{Cli, Commands, DistAction, InitAction};
+use simit::cli::{Cli, Commands, DistAction, HooksAction, InitAction};
 use simit::commands;
 
 fn main() {
@@ -32,6 +32,9 @@ fn run() -> Result<()> {
             DistAction::Scoop(command) => commands::scoop::run(command),
         },
         Commands::Changelog(command) => commands::changelog::run(command),
+        Commands::Hooks(command) => match command.action {
+            HooksAction::Install(command) => commands::hooks::install(command),
+        },
         Commands::Config(command) => commands::config::run(command),
         Commands::Projects(command) => commands::projects::run(command),
         Commands::Completions(command) => commands::completions::run(command),

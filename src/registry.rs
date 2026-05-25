@@ -9,7 +9,8 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::env;
 use std::fs::{self, File, OpenOptions};
 use std::io::ErrorKind;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -20,11 +21,15 @@ use directories_next::ProjectDirs;
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
-use crate::cargo;
+use crate::cargo::{self, Package};
+use crate::cli::{Platform, Runtime};
 use crate::config::ProjectConfig;
 use crate::project;
 use crate::render::ci;
 use crate::render::flake;
+use crate::user_config::{ResolvedCiRunners, ResolvedRunner};
+
+const HOOK_TYPES: &[&str] = &["pre-commit", "pre-push", "commit-msg"];
 
 pub const SCHEMA_VERSION: u32 = 1;
 pub const KNOWN_FEATURES: &[&str] = &[
@@ -105,10 +110,13 @@ pub struct ProjectEntry {
 #[serde(rename_all = "lowercase")]
 pub enum FeatureStatus {
     Managed,
+    #[serde(rename = "managed+extra")]
+    ManagedExtra,
     Drift,
     #[serde(rename = "hand-rolled")]
     HandRolled,
     Configured,
+    Conflicted,
     Installed,
     Absent,
 }
@@ -531,60 +539,609 @@ fn detect_flake_status(workspace_root: &Path) -> FeatureStatus {
 }
 
 fn detect_ci_status(workspace_root: &Path) -> FeatureStatus {
-    let mut workflow_count = 0usize;
-    let mut managed_count = 0usize;
+    let workflows = match collect_workflow_files(workspace_root) {
+        Ok(workflows) => workflows,
+        Err(_) => return FeatureStatus::Drift,
+    };
+    let (marked, unmarked): (Vec<_>, Vec<_>) = workflows.into_iter().partition(|file| file.marked);
+
+    if marked.is_empty() && unmarked.is_empty() {
+        return FeatureStatus::Absent;
+    }
+    if marked.is_empty() {
+        return FeatureStatus::HandRolled;
+    }
+    if marked_workflows_drift(workspace_root, &marked) {
+        return FeatureStatus::Drift;
+    }
+    if unmarked.is_empty() {
+        FeatureStatus::Managed
+    } else {
+        FeatureStatus::ManagedExtra
+    }
+}
+
+#[derive(Debug, Clone)]
+struct WorkflowFile {
+    relative_path: PathBuf,
+    content: String,
+    marked: bool,
+}
+
+fn collect_workflow_files(workspace_root: &Path) -> Result<Vec<WorkflowFile>> {
+    let mut workflows = Vec::new();
 
     for relative_dir in [".forgejo/workflows", ".github/workflows"] {
         let dir = workspace_root.join(relative_dir);
         let entries = match fs::read_dir(&dir) {
             Ok(entries) => entries,
-            Err(_) => continue,
+            Err(err) if err.kind() == ErrorKind::NotFound => continue,
+            Err(err) => return Err(err).with_context(|| format!("reading {}", dir.display())),
         };
 
         for entry in entries {
-            let entry = match entry {
-                Ok(entry) => entry,
-                Err(_) => return FeatureStatus::Drift,
-            };
-            let path = entry.path();
-            let file_type = match entry.file_type() {
-                Ok(file_type) => file_type,
-                Err(_) => return FeatureStatus::Drift,
-            };
-            if !file_type.is_file() {
+            let entry = entry.with_context(|| format!("reading entry in {}", dir.display()))?;
+            if !entry
+                .file_type()
+                .with_context(|| format!("reading file type for {}", entry.path().display()))?
+                .is_file()
+            {
                 continue;
             }
+            let path = entry.path();
             let Some(extension) = path.extension().and_then(|ext| ext.to_str()) else {
                 continue;
             };
             if extension != "yaml" && extension != "yml" {
                 continue;
             }
-
-            workflow_count += 1;
-            let Ok(content) = fs::read_to_string(&path) else {
-                return FeatureStatus::Drift;
-            };
-            if content.contains(ci::GENERATED_WORKFLOW_MARKER) {
-                managed_count += 1;
-            }
+            let content =
+                fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+            workflows.push(WorkflowFile {
+                relative_path: PathBuf::from(relative_dir).join(entry.file_name()),
+                marked: content.contains(ci::GENERATED_WORKFLOW_MARKER),
+                content,
+            });
         }
     }
 
-    match (workflow_count, managed_count) {
-        (0, _) => FeatureStatus::Absent,
-        (total, managed) if managed == total => FeatureStatus::Managed,
-        (_, 0) => FeatureStatus::HandRolled,
-        _ => FeatureStatus::Drift,
+    workflows.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+    Ok(workflows)
+}
+
+fn marked_workflows_drift(workspace_root: &Path, marked: &[WorkflowFile]) -> bool {
+    let expected = match infer_expected_ci_files(workspace_root, marked) {
+        Ok(expected) => expected,
+        Err(_) => return true,
+    };
+    let expected = expected
+        .into_iter()
+        .map(|file| (file.relative_path, file.content))
+        .collect::<BTreeMap<_, _>>();
+
+    marked.iter().any(|workflow| {
+        expected
+            .get(&workflow.relative_path)
+            .is_none_or(|content| content != &workflow.content)
+    })
+}
+
+fn infer_expected_ci_files(
+    workspace_root: &Path,
+    marked: &[WorkflowFile],
+) -> Result<Vec<project::GeneratedFile>> {
+    let metadata = cargo::cargo_metadata(&cargo::find_manifest(workspace_root)?)?;
+    let config = ProjectConfig::load(workspace_root).unwrap_or_default();
+    let platform = infer_ci_platform(marked)?;
+    let runtime = infer_ci_runtime(marked)?;
+    let packages = infer_ci_packages(&metadata, marked)?;
+    let package_scoped = metadata.workspace_members.len() > 1;
+    let windows_runner = infer_windows_runner(marked);
+    let runners = ResolvedCiRunners {
+        ci: infer_primary_runner(marked, "ci")?,
+        release: infer_primary_runner(marked, "publish-crate")?,
+        windows: windows_runner,
+    };
+    let options = infer_ci_options(marked, &config)?;
+    let self_check = ci::SelfCheckOptions {
+        enabled: marked
+            .iter()
+            .any(|workflow| workflow.content.contains("Check generated CI")),
+        runner_override: None,
+        windows_runner_override: None,
+        packages: &[],
+        workspace: false,
+    };
+
+    let mut files = Vec::new();
+    for package in &packages {
+        let package_options = ci::CiOptions {
+            package_scoped,
+            homebrew: infer_homebrew_options(&config, package, marked)?,
+            chocolatey: infer_chocolatey_options(&config, package, marked)?,
+            scoop: infer_scoop_options(&config, package, marked)?,
+            ..options.clone()
+        };
+        files.extend(ci::files(
+            platform,
+            runtime,
+            package,
+            package_scoped.then_some(package.name.as_str()),
+            self_check,
+            &runners,
+            package_options,
+        )?);
+    }
+
+    Ok(files
+        .into_iter()
+        .filter(|file| is_workflow_path(&file.relative_path))
+        .collect())
+}
+
+fn infer_ci_platform(marked: &[WorkflowFile]) -> Result<Platform> {
+    let mut platform = None;
+    for workflow in marked {
+        let current = if workflow.relative_path.starts_with(".forgejo/workflows") {
+            Platform::Forgejo
+        } else if workflow.relative_path.starts_with(".github/workflows") {
+            Platform::Github
+        } else {
+            bail!("unknown workflow root {}", workflow.relative_path.display());
+        };
+        match platform {
+            Some(existing) if existing != current => {
+                bail!("mixed CI platforms in workflow tree")
+            }
+            Some(_) => {}
+            None => platform = Some(current),
+        }
+    }
+    platform.context("no marked CI workflows found")
+}
+
+fn infer_ci_runtime(marked: &[WorkflowFile]) -> Result<Runtime> {
+    let ci_workflow = marked
+        .iter()
+        .find(|workflow| workflow_name(&workflow.relative_path) == Some("ci"))
+        .or_else(|| {
+            marked
+                .iter()
+                .find(|workflow| workflow_name(&workflow.relative_path) == Some("publish-crate"))
+        })
+        .context("no CI or publish workflow available for runtime inference")?;
+
+    if ci_workflow.content.contains("      - name: Install Nix\n")
+        || ci_workflow.content.contains("run: nix flake check")
+        || ci_workflow.content.contains("run: nix develop -c cargo")
+        || ci_workflow
+            .content
+            .contains("      - name: Build package\n")
+    {
+        Ok(Runtime::Nix)
+    } else {
+        Ok(Runtime::Cargo)
+    }
+}
+
+fn infer_ci_packages(metadata: &cargo::Metadata, marked: &[WorkflowFile]) -> Result<Vec<Package>> {
+    let package_names = marked
+        .iter()
+        .filter_map(|workflow| workflow_suffix(&workflow.relative_path))
+        .collect::<BTreeSet<_>>();
+
+    if package_names.is_empty() {
+        cargo::select_packages(metadata, &[], false)
+    } else {
+        cargo::select_packages(
+            metadata,
+            &package_names.into_iter().collect::<Vec<_>>(),
+            false,
+        )
+    }
+}
+
+fn infer_ci_options(marked: &[WorkflowFile], config: &ProjectConfig) -> Result<ci::CiOptions> {
+    let all_content = marked
+        .iter()
+        .map(|workflow| workflow.content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    Ok(ci::CiOptions {
+        with_nextest: all_content.contains("cargo nextest run"),
+        with_msrv: all_content.contains("      - name: Check MSRV\n"),
+        with_audit: all_content.contains("cargo audit"),
+        with_deny: all_content.contains("cargo deny check"),
+        with_docs: all_content.contains("cargo doc --no-deps --all-features"),
+        with_artifacts: marked
+            .iter()
+            .any(|workflow| workflow_name(&workflow.relative_path) == Some("release-artifacts")),
+        om_ci: infer_om_ci_mode(&all_content),
+        omnix_ref: infer_omnix_ref(&all_content)
+            .or_else(|| config.ci.omnix_ref.clone())
+            .unwrap_or_else(|| ci::OMNIX_REF_DEFAULT.to_owned()),
+        release_smoke_command: infer_release_smoke_command(&all_content)
+            .or_else(|| config.release.smoke.command.clone()),
+        extra_setup: config.ci.extra_setup.clone(),
+        extra_env: config
+            .ci
+            .extra_env
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect(),
+        required_secrets: config.ci.required_secrets.clone(),
+        package_scoped: false,
+        homebrew: None,
+        chocolatey: None,
+        scoop: None,
+    })
+}
+
+fn infer_homebrew_options(
+    config: &ProjectConfig,
+    package: &Package,
+    marked: &[WorkflowFile],
+) -> Result<Option<ci::HomebrewOptions>> {
+    if !marked
+        .iter()
+        .any(|workflow| workflow.content.contains("name: Publish Homebrew tap"))
+    {
+        return Ok(None);
+    }
+
+    let resolved = config.resolve_homebrew(Default::default(), package)?;
+    Ok(Some(ci::HomebrewOptions {
+        name: resolved.name,
+        binaries: resolved.binaries,
+        tap_url: resolved.tap_url,
+        description: resolved.description,
+        homepage: resolved.homepage,
+        license: resolved.license,
+        archive_pattern: resolved.archive_pattern,
+        download_repo: resolved.download_repo,
+        platforms: ci::HomebrewPlatformSet {
+            darwin_arm: resolved.platforms.darwin_arm,
+            darwin_intel: resolved.platforms.darwin_intel,
+            linux_arm: resolved.platforms.linux_arm,
+            linux_intel: resolved.platforms.linux_intel,
+        },
+    }))
+}
+
+fn infer_chocolatey_options(
+    config: &ProjectConfig,
+    package: &Package,
+    marked: &[WorkflowFile],
+) -> Result<Option<ci::ChocolateyOptions>> {
+    if !marked.iter().any(|workflow| {
+        workflow
+            .content
+            .contains("name: Publish Chocolatey package")
+    }) {
+        return Ok(None);
+    }
+
+    let resolved = config.resolve_chocolatey(Default::default(), package)?;
+    Ok(Some(ci::ChocolateyOptions {
+        name: resolved.name,
+        id: resolved.id,
+        title: resolved.title,
+        authors: resolved.authors,
+        description: resolved.description,
+        project_url: resolved.project_url,
+        license_url: resolved.license_url,
+        tags: resolved.tags,
+        release_notes_url: resolved.release_notes_url,
+        download_repo: resolved.download_repo,
+        archive_pattern: resolved.archive_pattern,
+        push_source: resolved.push.source,
+    }))
+}
+
+fn infer_scoop_options(
+    config: &ProjectConfig,
+    package: &Package,
+    marked: &[WorkflowFile],
+) -> Result<Option<ci::ScoopOptions>> {
+    if !marked
+        .iter()
+        .any(|workflow| workflow.content.contains("name: Publish Scoop bucket"))
+    {
+        return Ok(None);
+    }
+
+    let resolved = config.resolve_scoop(Default::default(), package)?;
+    Ok(Some(ci::ScoopOptions {
+        name: resolved.name,
+        bucket_url: resolved.bucket_url,
+        description: resolved.description,
+        homepage: resolved.homepage,
+        license: resolved.license,
+        download_repo: resolved.download_repo,
+        archive_pattern: resolved.archive_pattern,
+        binaries: resolved.binaries,
+        x64: resolved.architectures.x64,
+        arm64: resolved.architectures.arm64,
+    }))
+}
+
+fn infer_om_ci_mode(content: &str) -> ci::OmCiMode {
+    if !content.contains("      - name: Run om ci\n") {
+        return ci::OmCiMode::Off;
+    }
+    if content.contains("run: nix flake check") {
+        ci::OmCiMode::Augment
+    } else {
+        ci::OmCiMode::Replace
+    }
+}
+
+fn infer_omnix_ref(content: &str) -> Option<String> {
+    content
+        .lines()
+        .find_map(|line| line.trim_start().strip_prefix("OMNIX_REF: "))
+        .map(shell_unquote)
+}
+
+fn infer_release_smoke_command(content: &str) -> Option<String> {
+    content.lines().find_map(|line| {
+        line.trim_start()
+            .strip_prefix(
+                "VERSION=\"${GITHUB_REF_NAME:-${FORGE_REF_NAME:-${CODEBERG_REF_NAME:-}}}\"",
+            )
+            .map(|_| ())
+    })?;
+
+    content.lines().find_map(|line| {
+        let trimmed = line.trim_start();
+        trimmed
+            .strip_suffix(" \"$VERSION\" release")
+            .and_then(|value| value.strip_prefix(""))
+            .filter(|value| !value.is_empty())
+            .filter(|value| !value.starts_with("if [ -z \"$VERSION\" ]"))
+            .filter(|value| !value.starts_with("test -n \"$VERSION\""))
+            .filter(|value| !value.starts_with("mkdir -p release"))
+            .filter(|value| !value.starts_with("set -euo pipefail"))
+            .map(shell_unquote)
+    })
+}
+
+fn infer_primary_runner(marked: &[WorkflowFile], workflow_kind: &str) -> Result<ResolvedRunner> {
+    let workflow = marked
+        .iter()
+        .find(|workflow| workflow_name(&workflow.relative_path) == Some(workflow_kind))
+        .or_else(|| {
+            (workflow_kind == "publish-crate")
+                .then(|| {
+                    marked.iter().find(|workflow| {
+                        workflow_name(&workflow.relative_path) == Some("release-artifacts")
+                    })
+                })
+                .flatten()
+        })
+        .context("missing primary workflow for runner inference")?;
+    let labels = parse_runs_on_labels(&workflow.content, 0)
+        .with_context(|| format!("parsing runs-on from {}", workflow.relative_path.display()))?;
+
+    Ok(ResolvedRunner { name: None, labels })
+}
+
+fn infer_windows_runner(marked: &[WorkflowFile]) -> Option<ResolvedRunner> {
+    let workflow = marked
+        .iter()
+        .find(|workflow| workflow_name(&workflow.relative_path) == Some("release-artifacts"))?;
+    let labels = parse_runs_on_labels(&workflow.content, 1).ok()?;
+    Some(ResolvedRunner { name: None, labels })
+}
+
+fn parse_runs_on_labels(content: &str, occurrence: usize) -> Result<Vec<String>> {
+    let line = content
+        .lines()
+        .filter_map(|line| line.trim_start().strip_prefix("runs-on: "))
+        .nth(occurrence)
+        .context("runs-on not found")?;
+    let line = line.trim();
+    if let Some(values) = line
+        .strip_prefix('[')
+        .and_then(|line| line.strip_suffix(']'))
+    {
+        Ok(values
+            .split(',')
+            .map(|value| value.trim().trim_matches('"').to_owned())
+            .filter(|value| !value.is_empty())
+            .collect())
+    } else {
+        Ok(vec![line.trim_matches('"').to_owned()])
+    }
+}
+
+fn workflow_name(path: &Path) -> Option<&str> {
+    let stem = path.file_stem()?.to_str()?;
+    if stem == "ci" || stem.starts_with("ci-") {
+        Some("ci")
+    } else if stem == "publish-crate" || stem.starts_with("publish-crate-") {
+        Some("publish-crate")
+    } else if stem == "release-artifacts" || stem.starts_with("release-artifacts-") {
+        Some("release-artifacts")
+    } else {
+        None
+    }
+}
+
+fn workflow_suffix(path: &Path) -> Option<String> {
+    let stem = path.file_stem()?.to_str()?;
+    stem.strip_prefix("ci-")
+        .or_else(|| stem.strip_prefix("publish-crate-"))
+        .or_else(|| stem.strip_prefix("release-artifacts-"))
+        .map(str::to_owned)
+}
+
+fn is_workflow_path(path: &Path) -> bool {
+    path.starts_with(".forgejo/workflows") || path.starts_with(".github/workflows")
+}
+
+fn shell_unquote(value: &str) -> String {
+    let value = value.trim();
+    if value.starts_with('\'') && value.ends_with('\'') && value.len() >= 2 {
+        value[1..value.len() - 1].replace("'\\''", "'")
+    } else {
+        value.to_owned()
     }
 }
 
 fn detect_hooks_status(workspace_root: &Path) -> FeatureStatus {
-    if workspace_root.join("nix/pre-commit.nix").exists() {
+    if !has_hooks_config(workspace_root) {
+        return FeatureStatus::Absent;
+    }
+
+    let git_common_dir = match git_output(
+        workspace_root,
+        ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    ) {
+        Ok(Some(path)) => resolve_path(workspace_root, &path),
+        Ok(None) => return detect_hooks_status_without_git(workspace_root),
+        Err(err) => {
+            debug_git_failure("resolving git hooks directory", &err);
+            return FeatureStatus::Configured;
+        }
+    };
+    classify_hooks_route(workspace_root, &git_common_dir)
+}
+
+fn detect_hooks_status_without_git(workspace_root: &Path) -> FeatureStatus {
+    if required_hooks_installed(&workspace_root.join(".git/hooks")) {
         FeatureStatus::Installed
     } else {
-        FeatureStatus::Absent
+        FeatureStatus::Configured
     }
+}
+
+fn has_hooks_config(workspace_root: &Path) -> bool {
+    workspace_root.join("nix/pre-commit.nix").exists()
+        || workspace_root.join(".pre-commit-config.yaml").exists()
+        || workspace_root.join(".pre-commit-config.yml").exists()
+}
+
+fn classify_hooks_route(workspace_root: &Path, git_common_dir: &Path) -> FeatureStatus {
+    let hooks_dir = git_common_dir.join("hooks");
+    let local_hooks_path = hooks_path_config(workspace_root, "--local");
+    let global_hooks_path = hooks_path_config(workspace_root, "--global");
+    let global_canix_dispatcher = global_hooks_path
+        .as_deref()
+        .is_some_and(is_canix_dispatcher);
+    let effective_hooks_path =
+        match git_output(workspace_root, ["config", "--get", "core.hooksPath"]) {
+            Ok(Some(path)) => resolve_path(workspace_root, &expand_home(&path)),
+            Ok(None) => hooks_dir.clone(),
+            Err(err) => {
+                debug_git_failure("resolving core.hooksPath", &err);
+                return FeatureStatus::Configured;
+            }
+        };
+
+    if let Some(local) = local_hooks_path.as_deref() {
+        if is_canix_dispatcher(local) {
+            return status_for_project_hooks(&hooks_dir);
+        }
+        if global_canix_dispatcher {
+            return FeatureStatus::Conflicted;
+        }
+        if local != hooks_dir {
+            return FeatureStatus::Conflicted;
+        }
+        return status_for_project_hooks(local);
+    }
+
+    if is_canix_dispatcher(&effective_hooks_path) {
+        return status_for_project_hooks(&hooks_dir);
+    }
+    if effective_hooks_path == hooks_dir || effective_hooks_path.starts_with(git_common_dir) {
+        return status_for_project_hooks(&effective_hooks_path);
+    }
+    FeatureStatus::Conflicted
+}
+
+fn hooks_path_config(workspace_root: &Path, scope: &str) -> Option<PathBuf> {
+    git_output(workspace_root, ["config", scope, "--get", "core.hooksPath"])
+        .ok()
+        .flatten()
+        .map(|path| resolve_path(workspace_root, &expand_home(&path)))
+}
+
+fn status_for_project_hooks(hooks_dir: &Path) -> FeatureStatus {
+    if required_hooks_installed(hooks_dir) {
+        FeatureStatus::Installed
+    } else {
+        FeatureStatus::Configured
+    }
+}
+
+fn required_hooks_installed(hooks_dir: &Path) -> bool {
+    HOOK_TYPES
+        .iter()
+        .all(|hook| is_executable_hook(&hooks_dir.join(hook)))
+}
+
+#[cfg(unix)]
+fn is_executable_hook(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::metadata(path)
+        .map(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn is_executable_hook(path: &Path) -> bool {
+    path.is_file()
+}
+
+fn is_canix_dispatcher(path: &Path) -> bool {
+    path.join("dispatched-by-canix").exists()
+}
+
+fn git_output<const N: usize>(
+    workspace_root: &Path,
+    args: [&str; N],
+) -> std::io::Result<Option<String>> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(workspace_root)
+        .args(args)
+        .output()?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    Ok((!value.is_empty()).then_some(value))
+}
+
+fn resolve_path(workspace_root: &Path, path: &str) -> PathBuf {
+    let path = Path::new(path);
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        workspace_root.join(path)
+    };
+    fs::canonicalize(&absolute).unwrap_or(absolute)
+}
+
+fn expand_home(path: &str) -> String {
+    if path == "~" {
+        return env::var("HOME").unwrap_or_else(|_| path.to_owned());
+    }
+    if let Some(rest) = path.strip_prefix("~/") {
+        if let Ok(home) = env::var("HOME") {
+            return format!("{home}/{rest}");
+        }
+    }
+    path.to_owned()
+}
+
+fn debug_git_failure(_context: &str, _err: &std::io::Error) {
+    #[cfg(debug_assertions)]
+    eprintln!("debug: could not {_context}: {_err}");
 }
 
 fn detect_file_status(workspace_root: &Path, relative: &str) -> FeatureStatus {
@@ -592,6 +1149,268 @@ fn detect_file_status(workspace_root: &Path, relative: &str) -> FeatureStatus {
         FeatureStatus::Managed
     } else {
         FeatureStatus::Absent
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::OsString;
+    use std::sync::Mutex;
+
+    use tempfile::TempDir;
+
+    use super::*;
+
+    static GIT_CONFIG_LOCK: Mutex<()> = Mutex::new(());
+
+    struct GitConfigGuard {
+        _guard: std::sync::MutexGuard<'static, ()>,
+        _global_config: TempDir,
+        old_git_config_global: Option<OsString>,
+        old_git_config_nosystem: Option<OsString>,
+        old_home: Option<OsString>,
+        old_xdg_config_home: Option<OsString>,
+    }
+
+    impl GitConfigGuard {
+        fn new() -> Self {
+            let guard = GIT_CONFIG_LOCK.lock().unwrap();
+            let global_config = TempDir::new().unwrap();
+            let old_git_config_global = env::var_os("GIT_CONFIG_GLOBAL");
+            let old_git_config_nosystem = env::var_os("GIT_CONFIG_NOSYSTEM");
+            let old_home = env::var_os("HOME");
+            let old_xdg_config_home = env::var_os("XDG_CONFIG_HOME");
+            // SAFETY: tests in this module serialize Git configuration
+            // environment changes with GIT_CONFIG_LOCK and restore them in Drop.
+            unsafe {
+                env::set_var(
+                    "GIT_CONFIG_GLOBAL",
+                    global_config.path().join("global.gitconfig"),
+                );
+                env::set_var("GIT_CONFIG_NOSYSTEM", "1");
+                env::set_var("HOME", global_config.path());
+                env::set_var("XDG_CONFIG_HOME", global_config.path().join("xdg"));
+            }
+            Self {
+                _guard: guard,
+                _global_config: global_config,
+                old_git_config_global,
+                old_git_config_nosystem,
+                old_home,
+                old_xdg_config_home,
+            }
+        }
+    }
+
+    impl Drop for GitConfigGuard {
+        fn drop(&mut self) {
+            restore_env("GIT_CONFIG_GLOBAL", self.old_git_config_global.as_ref());
+            restore_env("GIT_CONFIG_NOSYSTEM", self.old_git_config_nosystem.as_ref());
+            restore_env("HOME", self.old_home.as_ref());
+            restore_env("XDG_CONFIG_HOME", self.old_xdg_config_home.as_ref());
+        }
+    }
+
+    fn restore_env(key: &str, value: Option<&OsString>) {
+        // SAFETY: callers hold GIT_CONFIG_LOCK through GitConfigGuard while
+        // restoring process environment variables for this test module.
+        unsafe {
+            match value {
+                Some(value) => env::set_var(key, value),
+                None => env::remove_var(key),
+            }
+        }
+    }
+
+    fn git_repo() -> (GitConfigGuard, TempDir) {
+        let guard = GitConfigGuard::new();
+        let repo = TempDir::new().unwrap();
+        let status = Command::new("git")
+            .arg("init")
+            .arg("-q")
+            .current_dir(repo.path())
+            .status()
+            .unwrap();
+        assert!(status.success());
+        (guard, repo)
+    }
+
+    fn add_hooks_config(repo: &Path) {
+        fs::create_dir_all(repo.join("nix")).unwrap();
+        fs::write(repo.join("nix/pre-commit.nix"), "{ }").unwrap();
+    }
+
+    fn write_executable(path: &Path) {
+        fs::write(path, "#!/bin/sh\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let mut permissions = fs::metadata(path).unwrap().permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(path, permissions).unwrap();
+        }
+    }
+
+    fn add_default_hooks(repo: &Path) {
+        let hooks_dir = repo.join(".git/hooks");
+        fs::create_dir_all(&hooks_dir).unwrap();
+        for hook in HOOK_TYPES {
+            write_executable(&hooks_dir.join(hook));
+        }
+    }
+
+    fn add_canix_dispatcher(path: &Path) {
+        fs::create_dir_all(path).unwrap();
+        fs::write(path.join("dispatched-by-canix"), "").unwrap();
+        for hook in HOOK_TYPES {
+            write_executable(&path.join(hook));
+        }
+    }
+
+    #[test]
+    fn simit_repo_ci_detector_allows_supplementary_pages_workflow() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let workflows = collect_workflow_files(root).unwrap();
+        let (marked, unmarked): (Vec<_>, Vec<_>) =
+            workflows.into_iter().partition(|file| file.marked);
+
+        if marked.is_empty() {
+            return;
+        }
+
+        assert!(
+            unmarked
+                .iter()
+                .any(|file| file.relative_path == Path::new(".forgejo/workflows/pages.yaml"))
+        );
+        assert!(!marked_workflows_drift(root, &marked));
+        assert_eq!(detect_ci_status(root), FeatureStatus::ManagedExtra);
+    }
+
+    fn set_local_hooks_path(repo: &Path, hooks_path: &Path) {
+        let status = Command::new("git")
+            .args(["config", "--local", "core.hooksPath"])
+            .arg(hooks_path)
+            .current_dir(repo)
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
+    #[test]
+    fn feature_status_conflicted_serializes_lowercase() {
+        assert_eq!(
+            serde_json::to_string(&FeatureStatus::Conflicted).unwrap(),
+            "\"conflicted\""
+        );
+        assert_eq!(
+            serde_json::from_str::<FeatureStatus>("\"conflicted\"").unwrap(),
+            FeatureStatus::Conflicted
+        );
+    }
+
+    #[test]
+    fn detects_hooks_absent_without_pre_commit_config() {
+        let (_guard, repo) = git_repo();
+
+        assert_eq!(detect_hooks_status(repo.path()), FeatureStatus::Absent);
+    }
+
+    #[test]
+    fn detects_hooks_configured_without_installed_default_hook() {
+        let (_guard, repo) = git_repo();
+        add_hooks_config(repo.path());
+
+        assert_eq!(detect_hooks_status(repo.path()), FeatureStatus::Configured);
+    }
+
+    #[test]
+    fn detects_hooks_installed_in_default_git_hooks_dir() {
+        let (_guard, repo) = git_repo();
+        add_hooks_config(repo.path());
+        add_default_hooks(repo.path());
+
+        assert_eq!(detect_hooks_status(repo.path()), FeatureStatus::Installed);
+    }
+
+    #[test]
+    fn detects_hooks_conflicted_in_custom_hooks_path() {
+        let (_guard, repo) = git_repo();
+        add_hooks_config(repo.path());
+        let hooks_path = repo.path().join("custom-hooks");
+        fs::create_dir_all(&hooks_path).unwrap();
+        for hook in HOOK_TYPES {
+            write_executable(&hooks_path.join(hook));
+        }
+        set_local_hooks_path(repo.path(), &hooks_path);
+
+        assert_eq!(detect_hooks_status(repo.path()), FeatureStatus::Conflicted);
+    }
+
+    #[test]
+    fn detects_hooks_conflicted_when_custom_hooks_path_lacks_pre_commit() {
+        let (_guard, repo) = git_repo();
+        add_hooks_config(repo.path());
+        let hooks_path = repo.path().join("custom-hooks");
+        fs::create_dir_all(&hooks_path).unwrap();
+        set_local_hooks_path(repo.path(), &hooks_path);
+
+        assert_eq!(detect_hooks_status(repo.path()), FeatureStatus::Conflicted);
+    }
+
+    #[test]
+    fn detects_hooks_installed_through_canix_dispatcher() {
+        let (_guard, repo) = git_repo();
+        add_hooks_config(repo.path());
+        add_default_hooks(repo.path());
+        let dispatcher = repo.path().join("global-hooks");
+        add_canix_dispatcher(&dispatcher);
+        let status = Command::new("git")
+            .args(["config", "--global", "core.hooksPath"])
+            .arg(&dispatcher)
+            .current_dir(repo.path())
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        assert_eq!(detect_hooks_status(repo.path()), FeatureStatus::Installed);
+    }
+
+    #[test]
+    fn detects_hooks_configured_when_dispatcher_chain_lacks_project_hooks() {
+        let (_guard, repo) = git_repo();
+        add_hooks_config(repo.path());
+        let dispatcher = repo.path().join("global-hooks");
+        add_canix_dispatcher(&dispatcher);
+        let status = Command::new("git")
+            .args(["config", "--global", "core.hooksPath"])
+            .arg(&dispatcher)
+            .current_dir(repo.path())
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        assert_eq!(detect_hooks_status(repo.path()), FeatureStatus::Configured);
+    }
+
+    #[test]
+    fn detects_hooks_conflicted_when_local_path_bypasses_global_dispatcher() {
+        let (_guard, repo) = git_repo();
+        add_hooks_config(repo.path());
+        add_default_hooks(repo.path());
+        let dispatcher = repo.path().join("global-hooks");
+        add_canix_dispatcher(&dispatcher);
+        let status = Command::new("git")
+            .args(["config", "--global", "core.hooksPath"])
+            .arg(&dispatcher)
+            .current_dir(repo.path())
+            .status()
+            .unwrap();
+        assert!(status.success());
+        set_local_hooks_path(repo.path(), &repo.path().join(".git/hooks"));
+
+        assert_eq!(detect_hooks_status(repo.path()), FeatureStatus::Conflicted);
     }
 }
 

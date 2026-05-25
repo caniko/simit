@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.3] - 2026-05-25
+
+### Added
+
+- Add `simit hooks install` with `--check` and `--diff` modes for installing
+  project pre-commit hook wrappers even when `core.hooksPath` is set.
+- Surface drift and hook-conflict project registry issues in
+  `simit projects list`/`show`, with `--no-issues` available for scripts that
+  need the old human table shape.
+
+### Fixed
+
+- Detect dispatcher-bypassing hook paths as `hooks: conflicted`, require all
+  managed hook wrappers before reporting `hooks: installed`, and auto-repair
+  local `core.hooksPath` overrides when the canix dispatcher is available.
+
 ## [0.15.2] - 2026-05-24
 
 ### Fixed
@@ -164,7 +180,8 @@ ci`, including the `~/.cargo/bin` key, rust-cache settings, and why Nix
 
 - Prepare the first public crates.io release.
 
-[Unreleased]: https://codeberg.org/caniko/simit/compare/0.15.2...HEAD
+[Unreleased]: https://codeberg.org/caniko/simit/compare/0.15.3...HEAD
+[0.15.3]: https://codeberg.org/caniko/simit/compare/0.15.2...0.15.3
 [0.15.2]: https://codeberg.org/caniko/simit/compare/0.15.1...0.15.2
 [0.15.1]: https://codeberg.org/caniko/simit/compare/0.15.0...0.15.1
 [0.15.0]: https://codeberg.org/caniko/simit/compare/0.14.1...0.15.0

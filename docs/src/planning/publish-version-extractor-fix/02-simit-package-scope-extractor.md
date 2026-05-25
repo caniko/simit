@@ -5,7 +5,7 @@
 > Complex refactor at the orchestrator role: changes a function
 > signature, threads a new parameter through multiple call sites,
 > requires a non-trivial extractor design choice (`cargo pkgid -p
-> <name>` vs `--manifest-path` vs `jq`), and demands a multi-member
+<name>` vs `--manifest-path` vs `jq`), and demands a multi-member
 > workspace fixture in the test harness. A `medium` tier would likely
 > pick a working but suboptimal extractor and miss one of the call
 > sites or test cases; `max` is unjustified because the blast radius is
@@ -17,8 +17,8 @@
 
 ## Goal
 
-`validate_release_tag_step` extracts the version of *the package being
-published*, not of whichever package happens to appear first in
+`validate_release_tag_step` extracts the version of _the package being
+published_, not of whichever package happens to appear first in
 `packages[]`. A new workspace fixture in `tests/init_ci.rs` (≥2
 members at different versions) proves the extractor picks the
 published package's version regardless of `packages[]` ordering.
@@ -62,12 +62,12 @@ Phase 1b follow-up.
    [`tests/init_ci.rs`](../../../../tests/init_ci.rs) with two members
    at different versions (e.g., `member-a@0.1.0`, `member-b@0.2.0`).
    Initialise CI with `--workspace`, then assert the generated
-   `publish-crate-member-a.yaml` extractor resolves *only* to `0.1.0`
-   and `publish-crate-member-b.yaml` resolves *only* to `0.2.0`.
+   `publish-crate-member-a.yaml` extractor resolves _only_ to `0.1.0`
+   and `publish-crate-member-b.yaml` resolves _only_ to `0.2.0`.
    Practical assertion: pipe the extracted snippet through `bash -c`
    in the test or, more robustly, assert the workflow contains the
    exact `cargo pkgid -p member-a` (or `--manifest-path
-   crates/member-a/Cargo.toml`) form.
+crates/member-a/Cargo.toml`) form.
 5. Re-run the validation gate:
    ```sh
    cargo fmt --all -- --check
@@ -84,7 +84,7 @@ Phase 1b follow-up.
 - [ ] `validate_release_tag_step` takes a package-name parameter and
       every call site supplies it.
 - [ ] The generated publish workflow for a workspace member references
-      *only* that member's manifest/pkgid, not the workspace-wide
+      _only_ that member's manifest/pkgid, not the workspace-wide
       `cargo metadata` output.
 - [ ] New test fixture in `tests/init_ci.rs` covers a 2-member
       workspace with diverging versions; it fails on `0.15.1` and
@@ -116,7 +116,7 @@ Phase 1b follow-up.
   CHANGELOG.
 - **Symptom:** `validate_release_tag_step` is also reachable from a
   non-publish-workflow caller you missed. **Cause:** `grep -n
-  validate_release_tag_step src/` found one definition but multiple
+validate_release_tag_step src/` found one definition but multiple
   call paths to `publish_workflow`. **Recovery:** grep for every
   reference before signing the commit, not after.
 - **Symptom:** A downstream regen in Phase 04 produces a different

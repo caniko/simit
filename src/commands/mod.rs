@@ -4,6 +4,7 @@ pub mod commit;
 pub mod completions;
 pub mod config;
 pub mod homebrew;
+pub mod hooks;
 pub mod init_chocolatey;
 pub mod init_ci;
 pub mod init_flake;

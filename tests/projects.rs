@@ -31,6 +31,17 @@ rust-version = "1.85"
     fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
 }
 
+fn non_tmp_project(name: &str) -> TempDir {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/project-fixtures");
+    fs::create_dir_all(&root).unwrap();
+    let project = tempfile::Builder::new()
+        .prefix(name)
+        .tempdir_in(root)
+        .unwrap();
+    init_package(project.path(), name);
+    project
+}
+
 fn registry_file(data_home: &Path) -> PathBuf {
     data_home.join("simit/projects.toml")
 }
@@ -363,6 +374,147 @@ fn list_and_show_render_hand_rolled_ci_status() {
     assert!(show.status.success());
     let show_stdout = String::from_utf8(show.stdout).unwrap();
     assert!(show_stdout.contains("ci          hand-rolled"));
+}
+
+#[test]
+fn list_show_and_json_render_managed_extra_ci_status() {
+    let data_home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    init_package(project.path(), "demo");
+    let project_path = fs::canonicalize(project.path()).unwrap();
+    write_registry(
+        data_home.path(),
+        &[(&project_path, "demo", &[("ci", "managed+extra")])],
+    );
+
+    let list = simit_with_data_home(data_home.path())
+        .args(["projects", "list", "--sort", "path"])
+        .output()
+        .unwrap();
+    assert!(list.status.success());
+    let list_stdout = String::from_utf8(list.stdout).unwrap();
+    assert!(list_stdout.contains("[ci(managed+extra)]"));
+
+    let show = simit_with_data_home(data_home.path())
+        .args(["projects", "show", project_path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(show.status.success());
+    let show_stdout = String::from_utf8(show.stdout).unwrap();
+    assert!(show_stdout.contains("ci          managed+extra"));
+
+    let value = registry_json(data_home.path());
+    assert_eq!(value[0]["features"]["ci"], "managed+extra");
+}
+
+#[test]
+fn list_surfaces_attention_issues_by_default() {
+    let data_home = TempDir::new().unwrap();
+    let project = non_tmp_project("conflicted");
+    let project_path = fs::canonicalize(project.path()).unwrap();
+    write_registry(
+        data_home.path(),
+        &[(&project_path, "conflicted", &[("hooks", "conflicted")])],
+    );
+
+    let output = simit_with_data_home(data_home.path())
+        .args(["projects", "list", "--sort", "path"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains(&format!("! * conflicted {}", project_path.display())));
+    assert!(stdout.contains("[hooks(conflicted)]"));
+    assert!(stdout.contains("1 project(s) need attention:"));
+    assert!(stdout.contains(&format!("  {}   hooks=conflicted", project_path.display())));
+}
+
+#[test]
+fn list_no_issues_preserves_plain_table_output() {
+    let data_home = TempDir::new().unwrap();
+    let project = non_tmp_project("conflicted");
+    let project_path = fs::canonicalize(project.path()).unwrap();
+    write_registry(
+        data_home.path(),
+        &[(&project_path, "conflicted", &[("hooks", "conflicted")])],
+    );
+
+    let output = simit_with_data_home(data_home.path())
+        .args(["projects", "list", "--sort", "path", "--no-issues"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(
+        stdout,
+        format!(
+            "* conflicted {}  [hooks(conflicted)]\n",
+            project_path.display()
+        )
+    );
+}
+
+#[test]
+fn list_json_does_not_include_issue_markup() {
+    let data_home = TempDir::new().unwrap();
+    let project = non_tmp_project("conflicted");
+    let project_path = fs::canonicalize(project.path()).unwrap();
+    write_registry(
+        data_home.path(),
+        &[(&project_path, "conflicted", &[("hooks", "conflicted")])],
+    );
+
+    let output = simit_with_data_home(data_home.path())
+        .args(["projects", "list", "--json", "--sort", "path"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(!stdout.contains("need attention"));
+    assert!(!stdout.contains("! *"));
+    let value: Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(value[0]["features"]["hooks"], "conflicted");
+}
+
+#[test]
+fn show_surfaces_attention_header() {
+    let data_home = TempDir::new().unwrap();
+    let project = non_tmp_project("conflicted");
+    let project_path = fs::canonicalize(project.path()).unwrap();
+    write_registry(
+        data_home.path(),
+        &[(&project_path, "conflicted", &[("hooks", "conflicted")])],
+    );
+
+    let output = simit_with_data_home(data_home.path())
+        .args(["projects", "show", project_path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.starts_with("! project has 1 issue: hooks=conflicted\n\n"));
+    assert!(stdout.contains("hooks       conflicted"));
+}
+
+#[test]
+fn no_color_list_has_plain_glyph_without_ansi() {
+    let data_home = TempDir::new().unwrap();
+    let project = non_tmp_project("conflicted");
+    let project_path = fs::canonicalize(project.path()).unwrap();
+    write_registry(
+        data_home.path(),
+        &[(&project_path, "conflicted", &[("hooks", "conflicted")])],
+    );
+
+    let output = simit_with_data_home(data_home.path())
+        .env("NO_COLOR", "1")
+        .args(["projects", "list", "--sort", "path"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("! * conflicted"));
+    assert!(!stdout.contains("\x1b["));
 }
 
 #[test]

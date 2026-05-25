@@ -94,7 +94,7 @@ four are independent):
 
 ### simit's own publish-crate.yaml
 
-Phase 01 publishes simit 0.15.1 *with* its own `publish-crate.yaml`
+Phase 01 publishes simit 0.15.1 _with_ its own `publish-crate.yaml`
 still on the old extractor. That's safe because simit is single-crate.
 Regenerate simit's own workflow as part of this phase to prevent a
 future workspace-conversion landmine, and commit the change as a
