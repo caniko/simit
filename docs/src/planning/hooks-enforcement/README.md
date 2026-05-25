@@ -49,6 +49,12 @@ Per-phase model recommendations (also surfaced in each phase file's
 callout block): 01=`5.5 medium`, 02=`5.5 medium`, 03=`5.5 high`,
 04=`5.5 low`, 05=`5.5 medium`.
 
+Phase 04 follow-up work (defensive installer, scan-surfaces-missing,
+release propagation) lives in the sibling plan set
+[`../hooks-enforcement-followups/`](../hooks-enforcement-followups/README.md).
+See [`p04-followup-research.md`](./p04-followup-research.md) for the
+diagnosis dossier that informed it.
+
 ## Parallelism layer
 
 **Wave 0** (start from current tree):
@@ -129,7 +135,7 @@ before re-running the simit installer.
       rs-memory-admission, simit, skillnet, sorrel) without manual
       `git config --unset`.
 - [ ] `pre-push` hooks correctly receive `<local-ref> <local-sha>
-    <remote-ref> <remote-sha>` lines on stdin after passing through
+<remote-ref> <remote-sha>` lines on stdin after passing through
       the dispatcher (validated in phase 03 acceptance).
 
 ## Global constraints
@@ -137,7 +143,10 @@ before re-running the simit installer.
 - Do not bypass pre-commit framework's "cowardly refusing" check by
   modifying user config silently. The phase 02 installer should override
   `core.hooksPath` for the `pre-commit install` invocation only, never
-  rewrite the user's git config.
+  rewrite the user's git config. (The follow-up plan
+  [`../hooks-enforcement-followups/`](../hooks-enforcement-followups/README.md)
+  revisits this constraint for the narrow case where the local
+  override is a hijack bypassing the canix dispatcher.)
 - Do not delete or modify the existing canix `commit-msg` AI-strip
   behavior. It is a user requirement.
 - Do not introduce a tool dependency outside what is already in the

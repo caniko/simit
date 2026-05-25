@@ -7,15 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.15.3] - 2026-05-25
-
-### Added
-
-- Add `simit hooks install` with `--check` and `--diff` modes for installing
-  project pre-commit hook wrappers even when `core.hooksPath` is set.
-- Surface drift and hook-conflict project registry issues in
-  `simit projects list`/`show`, with `--no-issues` available for scripts that
-  need the old human table shape.
+## [0.15.4] - 2026-05-25
 
 ### Changed
 
@@ -30,9 +22,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `simit hooks install` warns when a repo-local `core.hooksPath` shadows a
   friendly system dispatcher. Pass `--fix` to unset the rogue value
   automatically.
-- Detect dispatcher-bypassing hook paths as `hooks: conflicted`, require all
-  managed hook wrappers before reporting `hooks: installed`, and auto-repair
-  local `core.hooksPath` overrides when the canix dispatcher is available.
+- Make `tests/projects.rs::list_filters_tmp_missing_paths_from_attention_footer`
+  independent of `$TMPDIR`, so the test suite passes inside the Nix build
+  sandbox where `$TMPDIR` is the build-local directory rather than `/tmp`.
+
+## [0.15.3] - 2026-05-25
+
+### Added
+
+- Add `simit hooks install` with `--check` and `--diff` modes for installing
+  project pre-commit hook wrappers even when `core.hooksPath` is set.
+- Surface drift and hook-conflict project registry issues in
+  `simit projects list`/`show`, with `--no-issues` available for scripts that
+  need the old human table shape.
+
+### Fixed
+
+- Detect dispatcher-bypassing hook paths as `hooks: conflicted`, and require
+  all managed hook wrappers before reporting `hooks: installed`.
 
 ## [0.15.2] - 2026-05-24
 

@@ -498,7 +498,10 @@ fn list_surfaces_missing_paths_in_attention_footer() {
 #[test]
 fn list_filters_tmp_missing_paths_from_attention_footer() {
     let data_home = TempDir::new().unwrap();
-    let missing = data_home.path().join("missing-tmp-project");
+    let missing = PathBuf::from(format!(
+        "/tmp/simit-test-missing-tmp-{}",
+        std::process::id()
+    ));
     write_registry(
         data_home.path(),
         &[(&missing, "missing-tmp", &[("hooks", "installed")])],
