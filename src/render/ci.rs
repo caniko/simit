@@ -242,6 +242,7 @@ fn ci_workflow(
     match runtime {
         Runtime::Nix => {
             push_install_nix_step(&mut workflow, platform);
+            push_nix_cargo_bin_path_step(&mut workflow);
             push_extra_setup_steps(&mut workflow, &options.extra_setup);
             match options.om_ci {
                 OmCiMode::Off => {
@@ -344,6 +345,7 @@ fn publish_workflow(
     match runtime {
         Runtime::Nix => {
             push_install_nix_step(&mut workflow, platform);
+            push_nix_cargo_bin_path_step(&mut workflow);
             push_extra_setup_steps(&mut workflow, &options.extra_setup);
             workflow.push_str(&validate_tag_step(command_prefix(runtime), &package.name));
             match options.om_ci {
@@ -433,6 +435,7 @@ fn artifacts_workflow(
     match runtime {
         Runtime::Nix => {
             push_install_nix_step(&mut workflow, platform);
+            push_nix_cargo_bin_path_step(&mut workflow);
             push_extra_setup_steps(&mut workflow, &options.extra_setup);
             workflow.push_str("      - name: Build package\n");
             workflow.push_str("        run: nix build\n\n");
@@ -1215,7 +1218,9 @@ fn push_job_env(workflow: &mut String, runtime: Runtime, extra_env: &[(String, S
         runtime == Runtime::Nix && !extra_env.iter().any(|(key, _)| key == "NIX_CONFIG");
     let needs_xdg_cache_home =
         runtime == Runtime::Nix && !extra_env.iter().any(|(key, _)| key == "XDG_CACHE_HOME");
-    if !needs_nix_config && !needs_xdg_cache_home && extra_env.is_empty() {
+    let needs_cargo_home =
+        runtime == Runtime::Nix && !extra_env.iter().any(|(key, _)| key == "CARGO_HOME");
+    if !needs_nix_config && !needs_xdg_cache_home && !needs_cargo_home && extra_env.is_empty() {
         return;
     }
     workflow.push_str("    env:\n");
@@ -1224,6 +1229,9 @@ fn push_job_env(workflow: &mut String, runtime: Runtime, extra_env: &[(String, S
     }
     if needs_xdg_cache_home {
         workflow.push_str("      XDG_CACHE_HOME: \"/tmp/.cache\"\n");
+    }
+    if needs_cargo_home {
+        workflow.push_str("      CARGO_HOME: \"/tmp/.cargo\"\n");
     }
     for (key, value) in extra_env {
         workflow.push_str("      ");
@@ -1291,6 +1299,11 @@ fn push_install_nix_step(workflow: &mut String, platform: Platform) {
 
     workflow.push_str("      - name: Install Nix\n");
     workflow.push_str("        uses: https://github.com/cachix/install-nix-action@v31\n\n");
+}
+
+fn push_nix_cargo_bin_path_step(workflow: &mut String) {
+    workflow.push_str("      - name: Add cargo bin to PATH\n");
+    workflow.push_str("        run: echo \"$CARGO_HOME/bin\" >> \"$GITHUB_PATH\"\n\n");
 }
 
 fn push_om_ci_step(workflow: &mut String, options: &CiOptions) {
