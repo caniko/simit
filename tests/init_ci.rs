@@ -1328,7 +1328,7 @@ rust-version = "1.85"
     assert!(status.success());
 
     let ci = read(&root.join(".forgejo/workflows/ci.yaml"));
-    assert!(ci.contains("cargo run -- init ci --platform forgejo --check"));
+    assert!(ci.contains("cargo run -- init ci --platform forgejo --runner atlas --check"));
     assert!(ci.contains("cargo run -- init flake --check"));
     assert!(!ci.contains("cargo run -- ci"));
 }

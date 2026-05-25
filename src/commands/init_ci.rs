@@ -18,7 +18,7 @@ use crate::render::ci::{
     self, ChocolateyOptions, CiOptions, HomebrewOptions, HomebrewPlatformSet, OMNIX_REF_DEFAULT,
     OmCiMode, ScoopOptions, SelfCheckOptions,
 };
-use crate::user_config::{UserConfig, validate_runner_label};
+use crate::user_config::{ResolvedRunner, UserConfig, validate_runner_label};
 
 pub fn run(command: InitCiCommand) -> Result<()> {
     validate_runner(command.runner.as_deref())?;
@@ -139,6 +139,10 @@ pub fn run(command: InitCiCommand) -> Result<()> {
             package_scoped: multi_package_workspace,
             ..options.clone()
         };
+        let self_check_runner = self_check_runner_override(command.runner.as_deref(), &runners.ci);
+        let self_check_windows_runner = runners.windows.as_ref().and_then(|runner| {
+            self_check_runner_override(command.windows_runner.as_deref(), runner)
+        });
         files.extend(ci::files(
             command.platform,
             runtime,
@@ -146,8 +150,8 @@ pub fn run(command: InitCiCommand) -> Result<()> {
             multi_package_workspace.then_some(package.name.as_str()),
             SelfCheckOptions {
                 enabled: self_check,
-                runner_override: command.runner.as_deref(),
-                windows_runner_override: command.windows_runner.as_deref(),
+                runner_override: self_check_runner,
+                windows_runner_override: self_check_windows_runner,
                 packages: &command.packages,
                 workspace: command.workspace,
             },
@@ -260,6 +264,19 @@ fn runner_overrides_cover_required_runners(
     windows_packagers: bool,
 ) -> bool {
     command.runner.is_some() && (!windows_packagers || command.windows_runner.is_some())
+}
+
+fn self_check_runner_override<'a>(
+    explicit: Option<&'a str>,
+    resolved: &'a ResolvedRunner,
+) -> Option<&'a str> {
+    explicit.or_else(|| {
+        if resolved.labels.len() == 1 {
+            Some(resolved.labels[0].as_str())
+        } else {
+            None
+        }
+    })
 }
 
 fn chocolatey_options(
