@@ -1398,6 +1398,7 @@ fn optional_strict_flags_render_expected_steps() {
 
     let deny = read(&temp.path().join("deny.toml"));
     assert!(deny.contains("\"MIT\""));
+    assert!(deny.contains("\"BSD-2-Clause\""));
     assert!(deny.contains("\"Apache-2.0\""));
     assert!(deny.contains("\"Unicode-3.0\""));
     assert!(deny.contains("\"Unlicense\""));

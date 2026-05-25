@@ -735,6 +735,7 @@ fn ci_options_emit_expected_steps_and_msrv_requires_rust_version() {
     assert!(ci.contains("cargo doc --no-deps --all-features"));
     let deny = fs::read_to_string(root.join("deny.toml")).unwrap();
     assert!(deny.contains("\"MIT\""));
+    assert!(deny.contains("\"BSD-2-Clause\""));
     assert!(deny.contains("\"Apache-2.0\""));
     assert!(
         root.join(".github/workflows/release-artifacts.yaml")
