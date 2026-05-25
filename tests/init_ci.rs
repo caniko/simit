@@ -1421,7 +1421,11 @@ fn optional_strict_flags_render_expected_steps() {
     assert!(ci.contains(
         "run: command -v cargo-audit >/dev/null 2>&1 || cargo install cargo-audit --locked"
     ));
-    assert!(ci.contains("run: cargo audit"));
+    assert!(ci.contains("      - name: Fetch RustSec advisory database"));
+    assert!(ci.contains(
+        "git -c http.lowSpeedLimit=1024 -c http.lowSpeedTime=30 clone --depth 1 https://github.com/RustSec/advisory-db.git \"$db\""
+    ));
+    assert!(ci.contains("cargo audit --db \"$db\" --no-fetch --stale"));
     assert!(ci.contains(
         "run: command -v cargo-deny >/dev/null 2>&1 || cargo install cargo-deny --locked --version 0.18.3"
     ));

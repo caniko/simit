@@ -1518,10 +1518,8 @@ fn push_optional_ci_steps(
         workflow.push_str(" --all-targets\n\n");
     }
     if options.with_audit {
-        workflow.push_str("      - name: Audit dependencies\n");
-        workflow.push_str("        run: ");
-        workflow.push_str(prefix);
-        workflow.push_str("cargo audit\n\n");
+        push_audit_database_step(workflow);
+        push_audit_step(workflow, runtime);
     }
     if options.with_deny {
         workflow.push_str("      - name: Deny dependency policy\n");
@@ -1544,10 +1542,8 @@ fn push_optional_ci_steps(
 fn push_optional_publish_steps(workflow: &mut String, runtime: Runtime, options: &CiOptions) {
     let prefix = command_prefix(runtime);
     if options.with_audit {
-        workflow.push_str("      - name: Audit dependencies\n");
-        workflow.push_str("        run: ");
-        workflow.push_str(prefix);
-        workflow.push_str("cargo audit\n\n");
+        push_audit_database_step(workflow);
+        push_audit_step(workflow, runtime);
     }
     if options.with_deny {
         workflow.push_str("      - name: Deny dependency policy\n");
@@ -1563,6 +1559,24 @@ fn push_optional_publish_steps(workflow: &mut String, runtime: Runtime, options:
         workflow.push_str(prefix);
         workflow.push_str("cargo doc --no-deps --all-features\n\n");
     }
+}
+
+fn push_audit_database_step(workflow: &mut String) {
+    workflow.push_str("      - name: Fetch RustSec advisory database\n");
+    workflow.push_str("        run: |\n");
+    workflow.push_str("          db=\"${CARGO_HOME:-$HOME/.cargo}/advisory-db\"\n");
+    workflow.push_str("          rm -rf \"$db\"\n");
+    workflow.push_str("          mkdir -p \"$(dirname \"$db\")\"\n");
+    workflow.push_str("          git -c http.lowSpeedLimit=1024 -c http.lowSpeedTime=30 clone --depth 1 https://github.com/RustSec/advisory-db.git \"$db\"\n\n");
+}
+
+fn push_audit_step(workflow: &mut String, runtime: Runtime) {
+    workflow.push_str("      - name: Audit dependencies\n");
+    workflow.push_str("        run: |\n");
+    workflow.push_str("          db=\"${CARGO_HOME:-$HOME/.cargo}/advisory-db\"\n");
+    workflow.push_str("          ");
+    workflow.push_str(command_prefix(runtime));
+    workflow.push_str("cargo audit --db \"$db\" --no-fetch --stale\n\n");
 }
 
 fn push_package_selector(workflow: &mut String, package: &Package, options: &CiOptions) {
