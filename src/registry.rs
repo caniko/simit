@@ -1402,6 +1402,7 @@ mod tests {
             description: Some("CLI interface for modde".to_owned()),
             homepage: Some("https://modde.tartanoglu.com".to_owned()),
             rust_version: Some("1.85".to_owned()),
+            publish: None,
             features: BTreeMap::new(),
             dependencies: Vec::new(),
             manifest_path: Utf8PathBuf::from("/workspace/crates/modde-cli/Cargo.toml"),

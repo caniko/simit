@@ -36,10 +36,20 @@ pub struct Package {
     #[serde(default)]
     pub rust_version: Option<String>,
     #[serde(default)]
+    pub publish: Option<Vec<String>>,
+    #[serde(default)]
     pub features: BTreeMap<String, Vec<String>>,
     #[serde(default)]
     pub dependencies: Vec<Dependency>,
     pub manifest_path: Utf8PathBuf,
+}
+
+impl Package {
+    pub fn is_publishable(&self) -> bool {
+        self.publish
+            .as_ref()
+            .is_none_or(|registries| !registries.is_empty())
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

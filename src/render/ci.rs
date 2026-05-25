@@ -162,19 +162,20 @@ pub fn files(
     let ci_name = workflow_file_name("ci", file_suffix);
     let publish_name = workflow_file_name("publish-crate", file_suffix);
     let artifacts_name = workflow_file_name("release-artifacts", file_suffix);
-    let mut files = vec![
-        GeneratedFile {
-            relative_path: dir.join(ci_name),
-            content: ci_workflow(
-                platform,
-                runtime,
-                package,
-                self_check,
-                runners,
-                options.clone(),
-            ),
-        },
-        GeneratedFile {
+    let mut files = vec![GeneratedFile {
+        relative_path: dir.join(ci_name),
+        content: ci_workflow(
+            platform,
+            runtime,
+            package,
+            self_check,
+            runners,
+            options.clone(),
+        ),
+    }];
+
+    if package.is_publishable() {
+        files.push(GeneratedFile {
             relative_path: dir.join(publish_name),
             content: publish_workflow(
                 platform,
@@ -183,8 +184,8 @@ pub fn files(
                 &runners.release,
                 options.clone(),
             ),
-        },
-    ];
+        });
+    }
 
     if options.with_artifacts {
         files.push(GeneratedFile {
@@ -291,10 +292,7 @@ fn ci_workflow(
                 push_self_check_steps(&mut workflow, platform, runtime, self_check, &options);
             }
             push_clippy_steps(&mut workflow, package, &options);
-            workflow.push_str("      - name: Package crate\n");
-            workflow.push_str("        run: cargo package");
-            push_package_selector(&mut workflow, package, &options);
-            push_package_flags(&mut workflow, package, &options);
+            push_package_crate_step(&mut workflow, package, &options);
         }
     }
 
@@ -1337,6 +1335,14 @@ fn push_nix_ci_legacy_steps(
     workflow.push_str("        run: nix develop -c cargo clippy");
     push_package_selector(workflow, package, options);
     workflow.push_str(" --all-targets -- --deny warnings\n\n");
+    push_nix_package_crate_step(workflow, package, options);
+}
+
+fn push_nix_package_crate_step(workflow: &mut String, package: &Package, options: &CiOptions) {
+    if !package.is_publishable() {
+        return;
+    }
+
     workflow.push_str("      - name: Package crate\n");
     workflow.push_str("        run: nix develop -c cargo package");
     push_package_selector(workflow, package, options);
@@ -1465,6 +1471,17 @@ fn push_clippy_steps(workflow: &mut String, package: &Package, options: &CiOptio
         push_package_selector(workflow, package, options);
         workflow.push_str(" --all-targets --no-default-features -- --deny warnings\n\n");
     }
+}
+
+fn push_package_crate_step(workflow: &mut String, package: &Package, options: &CiOptions) {
+    if !package.is_publishable() {
+        return;
+    }
+
+    workflow.push_str("      - name: Package crate\n");
+    workflow.push_str("        run: cargo package");
+    push_package_selector(workflow, package, options);
+    push_package_flags(workflow, package, options);
 }
 
 fn push_quality_tool_install_steps(workflow: &mut String, runtime: Runtime, options: &CiOptions) {

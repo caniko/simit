@@ -82,6 +82,7 @@ fn package() -> Package {
         description: Some("metadata description".to_owned()),
         homepage: Some("https://metadata.example.com".to_owned()),
         rust_version: None,
+        publish: None,
         features: BTreeMap::new(),
         dependencies: Vec::new(),
         manifest_path: Utf8PathBuf::from("/demo/Cargo.toml"),

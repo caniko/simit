@@ -1075,6 +1075,49 @@ fn workspace_flag_generates_per_package_workflows() {
 }
 
 #[test]
+fn workspace_publish_false_package_keeps_ci_but_skips_package_and_publish_workflows() {
+    let temp = init_workspace_fixture();
+    let beta_manifest = temp.path().join("crates/beta/Cargo.toml");
+    let mut beta = fs::read_to_string(&beta_manifest).unwrap();
+    beta = beta.replacen(
+        "license = \"MIT\"\n",
+        "license = \"MIT\"\npublish = false\n",
+        1,
+    );
+    fs::write(&beta_manifest, beta).unwrap();
+
+    let status = simit_with_user_config(temp.path())
+        .current_dir(temp.path())
+        .args(["init", "ci", "--platform", "forgejo", "--workspace"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let beta_ci = read(&temp.path().join(".forgejo/workflows/ci-beta.yaml"));
+    assert_yaml_parses(&beta_ci);
+    assert!(beta_ci.contains("run: cargo test -p beta --all-features"));
+    assert!(
+        beta_ci
+            .contains("run: cargo clippy -p beta --all-targets --all-features -- --deny warnings")
+    );
+    assert!(!beta_ci.contains("cargo package -p beta"));
+    assert!(
+        !temp
+            .path()
+            .join(".forgejo/workflows/publish-crate-beta.yaml")
+            .exists()
+    );
+
+    let alpha_ci = read(&temp.path().join(".forgejo/workflows/ci-alpha.yaml"));
+    assert!(alpha_ci.contains("run: cargo package -p alpha --allow-dirty"));
+    assert!(
+        temp.path()
+            .join(".forgejo/workflows/publish-crate-alpha.yaml")
+            .exists()
+    );
+}
+
+#[test]
 fn workspace_publish_tag_validation_is_package_scoped_for_diverging_versions() {
     let temp = init_diverging_workspace_fixture();
 
