@@ -6,7 +6,7 @@ use std::sync::{Mutex, OnceLock};
 use camino::Utf8PathBuf;
 use simit::cargo::Package;
 use simit::config::{
-    ChocolateyOverrides, FlakeMode, HomebrewOverrides, ProjectConfig, ScoopOverrides,
+    ChocolateyOverrides, FlakeMode, FlakeScope, HomebrewOverrides, ProjectConfig, ScoopOverrides,
 };
 use tempfile::TempDir;
 
@@ -203,6 +203,7 @@ command = "nix run .#release-smoke --"
 fn flake_and_ci_config_load() {
     let cfg = load_toml(
         r#"[flake]
+scope = "full"
 mode = "custom"
 toolchain_binding = "toolchain.rustToolchain"
 crane_lib_binding = "craneLib"
@@ -224,6 +225,7 @@ required_secrets = ["CRATES_IO_API_TOKEN"]
     )
     .unwrap();
 
+    assert_eq!(cfg.flake.scope, Some(FlakeScope::Full));
     assert_eq!(cfg.flake.mode, FlakeMode::Custom);
     assert_eq!(cfg.flake.toolchain_binding, "toolchain.rustToolchain");
     assert_eq!(
@@ -249,7 +251,7 @@ required_secrets = ["CRATES_IO_API_TOKEN"]
 #[test]
 fn flake_and_ci_config_load_from_flake_output() {
     with_fake_nix(
-        r#"{"flake":{"mode":"custom","toolchain_binding":"toolchain.rustToolchain","expected_outputs":{"checks":["hm-module"],"top_level":["hmModules"]}},"ci":{"extra_setup":["echo setup"],"extra_env":{"PG_URL":"${{ secrets.PG_URL }}"}}}"#,
+        r#"{"flake":{"scope":"hooks-only","mode":"custom","toolchain_binding":"toolchain.rustToolchain","expected_outputs":{"checks":["hm-module"],"top_level":["hmModules"]}},"ci":{"extra_setup":["echo setup"],"extra_env":{"PG_URL":"${{ secrets.PG_URL }}"}}}"#,
         |temp| {
             fs::write(
                 temp.path().join("flake.nix"),
@@ -258,6 +260,7 @@ fn flake_and_ci_config_load_from_flake_output() {
             .unwrap();
 
             let cfg = ProjectConfig::load(temp.path()).unwrap();
+            assert_eq!(cfg.flake.scope, Some(FlakeScope::HooksOnly));
             assert_eq!(cfg.flake.mode, FlakeMode::Custom);
             assert_eq!(cfg.flake.toolchain_binding, "toolchain.rustToolchain");
             assert_eq!(cfg.flake.expected_outputs.checks, ["hm-module"]);
@@ -276,6 +279,16 @@ fn invalid_flake_mode_is_rejected() {
     load_toml(
         r#"[flake]
 mode = "bespoke"
+"#,
+    )
+    .unwrap_err();
+}
+
+#[test]
+fn invalid_flake_scope_is_rejected() {
+    load_toml(
+        r#"[flake]
+scope = "everything"
 "#,
     )
     .unwrap_err();

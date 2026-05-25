@@ -6,10 +6,16 @@ use simit::commands;
 
 fn main() {
     if let Err(err) = run() {
+        if let Some(command_exit) = err.downcast_ref::<simit::commands::projects::CommandExit>() {
+            eprintln!("simit: {command_exit}");
+            std::process::exit(command_exit.code());
+        }
+        if let Some(verify_exit) = err.downcast_ref::<simit::commands::release_verify::VerifyExit>()
+        {
+            std::process::exit(verify_exit.code());
+        }
         eprintln!("simit: {err:#}");
-        let code = err
-            .downcast_ref::<simit::commands::projects::CommandExit>()
-            .map_or(1, simit::commands::projects::CommandExit::code);
+        let code = 1;
         std::process::exit(code);
     }
 }

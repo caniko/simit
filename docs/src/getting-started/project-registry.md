@@ -9,11 +9,28 @@ The registry records each project path, package name, first and last time simit
 saw it, and feature status for known surfaces such as `flake`, `ci`,
 `homebrew`, `chocolatey`, `scoop`, `changelog`, and `hooks`.
 
-For CI, the registry distinguishes `managed`, `hand-rolled`, `drift`, and
-`absent`. `hand-rolled` means workflow YAML exists under `.forgejo/workflows/`
-or `.github/workflows/` but does not carry simit's generated-workflow marker.
-`drift` means the workflow set is mixed or unreadable: some files are marked as
-simit-generated and some are not.
+For CI, the registry distinguishes `managed`, `managed+extra`, `hand-rolled`,
+`drift`, and `absent`. `hand-rolled` means workflow YAML exists under
+`.forgejo/workflows/` or `.github/workflows/` but does not carry simit's
+generated-workflow marker. `managed+extra` means simit's generated workflows are
+current and supplementary non-generated workflow files are also present.
+`drift` means a marked generated workflow no longer matches what simit would
+render for the project.
+
+CI drift detection uses the same option resolution order as
+`simit init ci --check --diff`:
+
+1. CLI flags, when running `simit init ci`.
+2. Explicit fields in `simit.toml` `[ci]`.
+3. Inference from existing generated workflow content.
+4. Generator defaults.
+
+That means a project with persisted `[ci]` settings should report the same
+result from `simit projects list` and from a bare
+`simit init ci --platform <forgejo|github> --check --diff`. Repositories that
+have not adopted `simit.toml` still get best-effort zero-config drift detection
+from the generated workflow content, but persisted `[ci]` fields win when they
+disagree with inference.
 
 ## Onboarding existing projects
 
@@ -41,6 +58,10 @@ List registered projects:
 simit projects list
 ```
 
+By default, `projects list` skips ephemeral `/tmp/...` registry entries left
+behind by scratch test runs. Pass `--include-ephemeral` when you need to see
+them again.
+
 Filter by feature status:
 
 ```sh
@@ -62,6 +83,17 @@ simit projects list --json --feature ci=drift
 simit projects list --json --feature ci=hand-rolled
 simit projects show --json .
 ```
+
+Human `simit projects show <path>` output also includes a `regen:` line for
+generated CI projects. When `simit.toml [ci]` already captures the current CI
+shape, the hint stays minimal:
+
+```sh
+regen: simit init ci --platform forgejo
+```
+
+Legacy projects without persisted `[ci]` options print the inferred flag set
+instead so the command still reproduces the current workflows.
 
 Refresh feature detection across registered projects:
 

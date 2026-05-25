@@ -171,6 +171,7 @@ fn custom_rs_harbor_flake() -> &'static str {
 
 fn custom_skillnet_flake_config() -> &'static str {
     r#"[flake]
+scope = "full"
 mode = "custom"
 toolchain_binding = "toolchain.rustToolchain"
 crane_lib_binding = "craneLib"
@@ -289,12 +290,41 @@ fn custom_skillnet_flake() -> &'static str {
 }
 
 #[test]
-fn writes_flake_and_detected_hook_files() {
+fn default_scope_writes_only_detected_hook_file() {
     let temp = init_package();
 
     let status = simit()
         .current_dir(temp.path())
         .args(["init", "flake"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    assert!(!temp.path().join("flake.nix").exists());
+    assert!(!temp.path().join("nix/treefmt.nix").exists());
+
+    let hooks = read(&temp.path().join("nix/pre-commit.nix"));
+    assert!(hooks.contains("cargo fmt --all -- --check"));
+    assert!(hooks.contains("cargo clippy --all-targets --all-features -- --deny warnings"));
+    assert!(hooks.contains("cargo-msrv"));
+    assert!(hooks.contains("cargo check MSRV"));
+    assert!(hooks.contains("pkgs.rust-bin.stable.\"1.85.0\".default"));
+    assert!(hooks.contains("cargo check --workspace --all-features"));
+    assert!(hooks.contains("stages = [\"pre-push\" \"manual\"]"));
+    assert!(hooks.contains("cargo audit"));
+    assert!(hooks.contains("pkgs.cargo-audit"));
+    assert!(hooks.contains(
+        "nix --extra-experimental-features 'nix-command flakes' flake check --cores 0 --max-jobs auto --no-update-lock-file"
+    ));
+}
+
+#[test]
+fn full_scope_writes_flake_and_formatter_files() {
+    let temp = init_package();
+
+    let status = simit()
+        .current_dir(temp.path())
+        .args(["init", "flake", "--scope", "full"])
         .status()
         .unwrap();
     assert!(status.success());
@@ -311,20 +341,6 @@ fn writes_flake_and_detected_hook_files() {
     assert!(treefmt.contains("programs.prettier"));
     assert!(treefmt.contains("\"*.md\""));
     assert!(treefmt.contains("\"*.yaml\""));
-
-    let hooks = read(&temp.path().join("nix/pre-commit.nix"));
-    assert!(hooks.contains("cargo fmt --all -- --check"));
-    assert!(hooks.contains("cargo clippy --all-targets --all-features -- --deny warnings"));
-    assert!(hooks.contains("cargo-msrv"));
-    assert!(hooks.contains("cargo check MSRV"));
-    assert!(hooks.contains("pkgs.rust-bin.stable.\"1.85.0\".default"));
-    assert!(hooks.contains("cargo check --workspace --all-features"));
-    assert!(hooks.contains("stages = [\"pre-push\" \"manual\"]"));
-    assert!(hooks.contains("cargo audit"));
-    assert!(hooks.contains("pkgs.cargo-audit"));
-    assert!(hooks.contains(
-        "nix --extra-experimental-features 'nix-command flakes' flake check --cores 0 --max-jobs auto --no-update-lock-file"
-    ));
 }
 
 #[test]
@@ -376,7 +392,7 @@ fn patches_existing_anchorable_flake() {
 
     let status = simit()
         .current_dir(temp.path())
-        .args(["init", "flake"])
+        .args(["init", "flake", "--scope", "full"])
         .status()
         .unwrap();
     assert!(status.success());
@@ -399,7 +415,7 @@ fn refuses_unpatchable_existing_flake_without_writing_hooks() {
 
     let output = simit()
         .current_dir(temp.path())
-        .args(["init", "flake"])
+        .args(["init", "flake", "--scope", "full"])
         .output()
         .unwrap();
 
@@ -449,6 +465,26 @@ fn print_outputs_without_writing() {
     assert!(output.status.success());
 
     let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(!stdout.contains("--- flake.nix"));
+    assert!(!stdout.contains("--- nix/treefmt.nix"));
+    assert!(stdout.contains("--- nix/pre-commit.nix"));
+    assert!(!stdout.contains("--- existing flake patching note"));
+    assert!(!stdout.contains("treefmt-nix.url = \"github:numtide/treefmt-nix\""));
+    assert!(!temp.path().join("flake.nix").exists());
+}
+
+#[test]
+fn full_scope_print_outputs_without_writing() {
+    let temp = init_package();
+
+    let output = simit()
+        .current_dir(temp.path())
+        .args(["init", "flake", "--scope", "full", "--print"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("--- flake.nix"));
     assert!(stdout.contains("--- nix/treefmt.nix"));
     assert!(stdout.contains("--- nix/pre-commit.nix"));
@@ -463,7 +499,7 @@ fn check_succeeds_when_flake_and_hooks_are_current() {
 
     let write_status = simit()
         .current_dir(temp.path())
-        .args(["init", "flake"])
+        .args(["init", "flake", "--scope", "full"])
         .status()
         .unwrap();
     assert!(write_status.success());
@@ -477,13 +513,84 @@ fn check_succeeds_when_flake_and_hooks_are_current() {
 }
 
 #[test]
-fn check_accepts_custom_rs_harbor_flake_with_generated_hook_wiring() {
+fn hooks_only_check_ignores_project_owned_flake() {
     let temp = init_package();
     fs::write(temp.path().join("flake.nix"), custom_rs_harbor_flake()).unwrap();
 
     let write_status = simit()
         .current_dir(temp.path())
         .args(["init", "flake"])
+        .status()
+        .unwrap();
+    assert!(write_status.success());
+    assert_eq!(
+        read(&temp.path().join("flake.nix")),
+        custom_rs_harbor_flake()
+    );
+    assert!(!temp.path().join("nix/treefmt.nix").exists());
+
+    fs::write(temp.path().join("flake.nix"), "{ custom = \"owned\"; }\n").unwrap();
+    let check_status = simit()
+        .current_dir(temp.path())
+        .args(["init", "flake", "--check", "--diff"])
+        .status()
+        .unwrap();
+    assert!(check_status.success());
+}
+
+#[test]
+fn existing_generated_flake_defaults_to_full_scope() {
+    let temp = init_package();
+
+    let write_status = simit()
+        .current_dir(temp.path())
+        .args(["init", "flake", "--scope", "full"])
+        .status()
+        .unwrap();
+    assert!(write_status.success());
+
+    fs::write(temp.path().join("nix/treefmt.nix"), "{}\n").unwrap();
+    let output = simit()
+        .current_dir(temp.path())
+        .args(["init", "flake", "--check", "--diff"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("flake and hook files are not up to date"));
+    assert!(stderr.contains("nix/treefmt.nix is missing generated formatter wiring"));
+}
+
+#[test]
+fn explicit_full_scope_reemits_full_flake_after_hooks_only_adoption() {
+    let temp = init_package();
+
+    let hooks_status = simit()
+        .current_dir(temp.path())
+        .args(["init", "flake"])
+        .status()
+        .unwrap();
+    assert!(hooks_status.success());
+    assert!(!temp.path().join("flake.nix").exists());
+
+    let full_status = simit()
+        .current_dir(temp.path())
+        .args(["init", "flake", "--scope", "full"])
+        .status()
+        .unwrap();
+    assert!(full_status.success());
+    assert!(temp.path().join("flake.nix").exists());
+    assert!(temp.path().join("nix/treefmt.nix").exists());
+}
+
+#[test]
+fn check_accepts_custom_rs_harbor_flake_with_generated_hook_wiring() {
+    let temp = init_package();
+    fs::write(temp.path().join("flake.nix"), custom_rs_harbor_flake()).unwrap();
+
+    let write_status = simit()
+        .current_dir(temp.path())
+        .args(["init", "flake", "--scope", "full"])
         .status()
         .unwrap();
     assert!(write_status.success());
@@ -509,7 +616,7 @@ fn custom_mode_accepts_skillnet_rs_harbor_flake() {
 
     let write_status = simit()
         .current_dir(temp.path())
-        .args(["init", "flake"])
+        .args(["init", "flake", "--scope", "full"])
         .status()
         .unwrap();
     assert!(write_status.success());
@@ -566,7 +673,7 @@ fn check_accepts_semantically_current_custom_hook_files() {
 
     let write_status = simit()
         .current_dir(temp.path())
-        .args(["init", "flake"])
+        .args(["init", "flake", "--scope", "full"])
         .status()
         .unwrap();
     assert!(write_status.success());
@@ -649,7 +756,7 @@ fn check_fails_when_hook_files_differ() {
 
     let write_status = simit()
         .current_dir(temp.path())
-        .args(["init", "flake"])
+        .args(["init", "flake", "--scope", "full"])
         .status()
         .unwrap();
     assert!(write_status.success());
@@ -689,6 +796,62 @@ fn check_diff_includes_stale_hook_file_diff() {
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("--- nix/pre-commit.nix"));
     assert!(stderr.contains("+++ nix/pre-commit.nix"));
+}
+
+#[test]
+fn check_diff_reports_removed_pre_commit_hook_notes() {
+    let temp = init_package();
+
+    let write_status = simit()
+        .current_dir(temp.path())
+        .args(["init", "flake"])
+        .status()
+        .unwrap();
+    assert!(write_status.success());
+
+    let hooks_path = temp.path().join("nix/pre-commit.nix");
+    fs::write(
+        &hooks_path,
+        r#"{
+  custom-check = {
+    enable = true;
+  };
+}
+"#,
+    )
+    .unwrap();
+
+    let output = simit()
+        .current_dir(temp.path())
+        .args(["init", "flake", "--check", "--diff"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("note: pre-commit hook 'custom-check' will be removed"));
+    assert!(stderr.contains("--- nix/pre-commit.nix"));
+    assert!(stderr.contains("+++ nix/pre-commit.nix"));
+}
+
+#[test]
+fn check_diff_emits_no_removed_hook_notes_when_hooks_match() {
+    let temp = init_package();
+
+    let write_status = simit()
+        .current_dir(temp.path())
+        .args(["init", "flake"])
+        .status()
+        .unwrap();
+    assert!(write_status.success());
+
+    let output = simit()
+        .current_dir(temp.path())
+        .args(["init", "flake", "--check", "--diff"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(!stderr.contains("note: removing pre-commit hook"));
 }
 
 #[test]

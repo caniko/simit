@@ -6,9 +6,10 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 
 use crate::cargo;
+use crate::ci_resolution::{CiCliOverrides, CiInference, ResolvedCiInputs, WorkflowSnapshot};
 use crate::cli::{
     ChocolateyOverridesArgs, HomebrewOverridesArgs, InitCiCommand, Platform, Runtime,
-    RuntimeChoice, ScoopOverridesArgs,
+    ScoopOverridesArgs,
 };
 use crate::config::{ProjectConfig, ResolvedChocolatey, ResolvedHomebrew, ResolvedScoop};
 use crate::project;
@@ -21,17 +22,21 @@ use crate::render::ci::{
 use crate::user_config::{ResolvedRunner, UserConfig, validate_runner_label};
 
 pub fn run(command: InitCiCommand) -> Result<()> {
-    validate_runner(command.runner.as_deref())?;
-    validate_runner(command.windows_runner.as_deref())?;
-
     let metadata = cargo::metadata_for_current_dir()?;
-    let packages = cargo::select_packages(&metadata, &command.packages, command.workspace)?;
     let workspace_root = metadata.workspace_root.as_std_path();
+    let cfg = ProjectConfig::load(workspace_root)?;
+    let workflow_snapshots = workflow_snapshots_for_platform(workspace_root, command.platform)?;
+    let inference = CiInference::from_workflows(&workflow_snapshots)?;
+    let cli_overrides = ci_cli_overrides(&command);
+    let resolved =
+        ResolvedCiInputs::resolve(workspace_root, &cfg, &cli_overrides, Some(&inference))?;
+    validate_runner(resolved.runner.as_deref())?;
+    validate_runner(resolved.windows_runner.as_deref())?;
+    let packages = cargo::select_packages(&metadata, &resolved.packages, resolved.workspace)?;
     if command.with_homebrew && command.platform != Platform::Forgejo {
         bail!("Homebrew tap publish is forgejo-only for now");
     }
-    let runtime = resolve_runtime(command.runtime, workspace_root)?;
-    if command.with_homebrew && runtime != Runtime::Nix {
+    if command.with_homebrew && resolved.runtime != Runtime::Nix {
         bail!("Homebrew tap publish requires --runtime nix");
     }
     // Chocolatey and Scoop are allowed with both runtimes: phase 3 will build
@@ -41,31 +46,22 @@ pub fn run(command: InitCiCommand) -> Result<()> {
         .iter()
         .any(|package| package.name == "simit");
     let windows_packagers = command.with_chocolatey || command.with_scoop;
-    let with_artifacts = command.with_artifacts || command.with_homebrew || windows_packagers;
-    if command.with_homebrew && !command.with_artifacts {
+    let with_artifacts = resolved.with_artifacts || command.with_homebrew || windows_packagers;
+    if command.with_homebrew && !resolved.with_artifacts {
         eprintln!("--with-homebrew implies --with-artifacts; enabling it.");
     }
-    if command.with_chocolatey && !command.with_artifacts {
+    if command.with_chocolatey && !resolved.with_artifacts {
         eprintln!("--with-chocolatey implies --with-artifacts; enabling it.");
     }
-    if command.with_scoop && !command.with_artifacts {
+    if command.with_scoop && !resolved.with_artifacts {
         eprintln!("--with-scoop implies --with-artifacts; enabling it.");
     }
     let explicit_runners_cover_required =
-        runner_overrides_cover_required_runners(&command, windows_packagers);
-    let cfg = ProjectConfig::load(workspace_root)?;
-    let om_ci_requested =
-        command.with_om_ci || command.om_ci_augment || cfg.ci.om_ci || cfg.ci.om_ci_augment;
-    let augment = command.om_ci_augment || cfg.ci.om_ci_augment;
-    let om_ci = match (om_ci_requested, augment) {
-        (false, _) => OmCiMode::Off,
-        (true, true) => OmCiMode::Augment,
-        (true, false) => OmCiMode::Replace,
-    };
-    if om_ci != OmCiMode::Off && runtime != Runtime::Nix {
+        runner_overrides_cover_required_runners(&resolved, windows_packagers);
+    if resolved.om_ci != OmCiMode::Off && resolved.runtime != Runtime::Nix {
         bail!("--with-om-ci requires --runtime nix");
     }
-    if command.omnix_ref.is_some() && om_ci == OmCiMode::Off {
+    if command.omnix_ref.is_some() && resolved.om_ci == OmCiMode::Off {
         eprintln!("--omnix-ref is ignored unless --with-om-ci or --om-ci-augment is enabled.");
     }
     let user_config = UserConfig::load().or_else(|err| {
@@ -78,42 +74,21 @@ pub fn run(command: InitCiCommand) -> Result<()> {
     let omnix_ref = command
         .omnix_ref
         .clone()
-        .or_else(|| cfg.ci.omnix_ref.clone())
         .or_else(|| user_config.ci.tools.omnix.r#ref.clone())
-        .unwrap_or_else(|| OMNIX_REF_DEFAULT.to_owned());
-    let options = CiOptions {
-        with_nextest: command.with_nextest,
-        with_msrv: command.with_msrv,
-        with_audit: command.with_audit,
-        with_deny: command.with_deny,
-        with_docs: command.with_docs,
-        with_artifacts,
-        om_ci,
-        omnix_ref: omnix_ref.clone(),
-        release_smoke_command: command
-            .release_smoke_command
-            .clone()
-            .or_else(|| cfg.release.smoke.command.clone()),
-        extra_setup: cfg.ci.extra_setup.clone(),
-        extra_env: cfg
-            .ci
-            .extra_env
-            .iter()
-            .map(|(key, value)| (key.clone(), value.clone()))
-            .collect(),
-        required_secrets: cfg.ci.required_secrets.clone(),
-        package_scoped: false,
-        homebrew: None,
-        chocolatey: None,
-        scoop: None,
-    };
+        .unwrap_or_else(|| resolved.omnix_ref.clone());
+    let options = resolved.ci_options(&cfg, with_artifacts, omnix_ref.clone());
     let runners = user_config.resolve_ci_runners(
         command.platform,
-        runtime,
-        command.runner.as_deref(),
-        command.windows_runner.as_deref(),
+        resolved.runtime,
+        resolved.runner.as_deref(),
+        resolved.windows_runner.as_deref(),
         windows_packagers,
     )?;
+    let persisted_runner =
+        self_check_runner_override(resolved.runner.as_deref(), &runners.ci).map(str::to_owned);
+    let persisted_windows_runner = runners.windows.as_ref().and_then(|runner| {
+        self_check_runner_override(resolved.windows_runner.as_deref(), runner).map(str::to_owned)
+    });
     let multi_package_workspace = metadata.workspace_members.len() > 1;
     let mut files = Vec::new();
     for package in &packages {
@@ -139,35 +114,55 @@ pub fn run(command: InitCiCommand) -> Result<()> {
             package_scoped: multi_package_workspace,
             ..options.clone()
         };
-        let self_check_runner = self_check_runner_override(command.runner.as_deref(), &runners.ci);
+        let self_check_runner = self_check_runner_override(resolved.runner.as_deref(), &runners.ci);
         let self_check_windows_runner = runners.windows.as_ref().and_then(|runner| {
-            self_check_runner_override(command.windows_runner.as_deref(), runner)
+            self_check_runner_override(resolved.windows_runner.as_deref(), runner)
         });
         files.extend(ci::files(
             command.platform,
-            runtime,
+            resolved.runtime,
             package,
             multi_package_workspace.then_some(package.name.as_str()),
             SelfCheckOptions {
                 enabled: self_check,
                 runner_override: self_check_runner,
                 windows_runner_override: self_check_windows_runner,
-                packages: &command.packages,
-                workspace: command.workspace,
+                packages: &resolved.packages,
+                workspace: resolved.workspace,
             },
             &runners,
             package_options,
         )?);
     }
+    let persisted_ci = resolved.persisted_ci(
+        &cfg,
+        with_artifacts,
+        &omnix_ref,
+        persisted_runner,
+        persisted_windows_runner,
+    );
+    let persisted_in_simit_toml =
+        workspace_root.join("simit.toml").exists() && cfg.ci == persisted_ci;
     let check_message = format!(
         "CI workflows are not up to date; run `{}`",
-        render_regeneration_command(&command, runtime, with_artifacts, om_ci, &omnix_ref)
+        render_regeneration_command(
+            &command,
+            &resolved,
+            with_artifacts,
+            &omnix_ref,
+            persisted_in_simit_toml
+        )
     );
     let trust_overrides = TrustOverrides {
         key: command.maintainer_key,
         trust_root: command.maintainers_gpg,
     };
-    maybe_push_deny_template(workspace_root, command.with_deny, command.check, &mut files);
+    maybe_push_deny_template(
+        workspace_root,
+        resolved.with_deny,
+        command.check,
+        &mut files,
+    );
     files.push(release_trust::generated_file(
         workspace_root,
         &cfg,
@@ -185,18 +180,198 @@ pub fn run(command: InitCiCommand) -> Result<()> {
         )
     } else {
         project::write_generated_files(workspace_root, &files)?;
+        ProjectConfig::write_ci(workspace_root, &persisted_ci)?;
         registry::touch_current_project_or_warn([("ci", FeatureStatus::Managed)]);
         Ok(())
     }
 }
 
-fn render_regeneration_command(
+fn ci_cli_overrides(command: &InitCiCommand) -> CiCliOverrides {
+    CiCliOverrides {
+        runtime: command.runtime,
+        runner: command.runner.clone(),
+        windows_runner: command.windows_runner.clone(),
+        workspace: command.workspace,
+        packages: command.packages.clone(),
+        with_nextest: command.with_nextest,
+        with_msrv: command.with_msrv,
+        with_audit: command.with_audit,
+        with_deny: command.with_deny,
+        with_docs: command.with_docs,
+        with_artifacts: command.with_artifacts,
+        with_om_ci: command.with_om_ci,
+        om_ci_augment: command.om_ci_augment,
+        omnix_ref: command.omnix_ref.clone(),
+        release_smoke_command: command.release_smoke_command.clone(),
+    }
+}
+
+pub(crate) fn workflow_snapshots_for_platform(
+    workspace_root: &Path,
+    platform: Platform,
+) -> Result<Vec<WorkflowSnapshot>> {
+    let workflow_dir = PathBuf::from(platform.workflow_dir());
+    let absolute_dir = workspace_root.join(&workflow_dir);
+    let entries = match fs::read_dir(&absolute_dir) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => return Err(err).with_context(|| format!("reading {}", absolute_dir.display())),
+    };
+
+    let mut snapshots = Vec::new();
+    for entry in entries {
+        let entry =
+            entry.with_context(|| format!("reading entry in {}", absolute_dir.display()))?;
+        if !entry
+            .file_type()
+            .with_context(|| format!("reading file type for {}", entry.path().display()))?
+            .is_file()
+        {
+            continue;
+        }
+        let path = entry.path();
+        let Some(extension) = path.extension().and_then(|ext| ext.to_str()) else {
+            continue;
+        };
+        if extension != "yaml" && extension != "yml" {
+            continue;
+        }
+        let content =
+            fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+        if content.contains(ci::GENERATED_WORKFLOW_MARKER) {
+            snapshots.push(WorkflowSnapshot {
+                relative_path: workflow_dir.join(entry.file_name()),
+                content,
+            });
+        }
+    }
+
+    snapshots.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+    Ok(snapshots)
+}
+
+pub(crate) fn project_regeneration_command(workspace_root: &Path) -> Result<Option<String>> {
+    let forgejo = workflow_snapshots_for_platform(workspace_root, Platform::Forgejo)?;
+    let github = workflow_snapshots_for_platform(workspace_root, Platform::Github)?;
+    let (platform, snapshots) = match (forgejo.is_empty(), github.is_empty()) {
+        (true, true) => return Ok(None),
+        (false, true) => (Platform::Forgejo, forgejo),
+        (true, false) => (Platform::Github, github),
+        (false, false) => bail!("mixed generated CI platforms in workflow tree"),
+    };
+
+    let cfg = ProjectConfig::load(workspace_root)?;
+    let inference = CiInference::from_workflows(&snapshots)?;
+    let resolved = ResolvedCiInputs::resolve(
+        workspace_root,
+        &cfg,
+        &CiCliOverrides::default(),
+        Some(&inference),
+    )?;
+    let with_homebrew = snapshots
+        .iter()
+        .any(|workflow| workflow.content.contains("name: Publish Homebrew tap"));
+    let with_chocolatey = snapshots.iter().any(|workflow| {
+        workflow
+            .content
+            .contains("name: Publish Chocolatey package")
+    });
+    let with_scoop = snapshots
+        .iter()
+        .any(|workflow| workflow.content.contains("name: Publish Scoop bucket"));
+    let windows_packagers = with_chocolatey || with_scoop;
+    let with_artifacts = resolved.with_artifacts || with_homebrew || windows_packagers;
+    let command = InitCiCommand {
+        packages: Vec::new(),
+        workspace: false,
+        platform,
+        runtime: None,
+        runner: None,
+        windows_runner: None,
+        maintainer_key: None,
+        maintainers_gpg: None,
+        release_smoke_command: None,
+        check: false,
+        diff: false,
+        with_nextest: None,
+        with_msrv: None,
+        with_audit: None,
+        with_deny: None,
+        with_docs: None,
+        with_om_ci: None,
+        om_ci_augment: None,
+        omnix_ref: None,
+        with_artifacts: None,
+        with_homebrew,
+        with_chocolatey,
+        with_scoop,
+        homebrew: HomebrewOverridesArgs {
+            name: None,
+            tap: None,
+            binary: Vec::new(),
+            description: None,
+            homepage: None,
+            license: None,
+            download_repo: None,
+            archive_pattern: None,
+            no_platform: Vec::new(),
+        },
+        chocolatey: ChocolateyOverridesArgs {
+            name: None,
+            id: None,
+            title: None,
+            authors: None,
+            description: None,
+            project_url: None,
+            license_url: None,
+            tags: None,
+            release_notes_url: None,
+            download_repo: None,
+            archive_pattern: None,
+            push_source: None,
+        },
+        scoop: ScoopOverridesArgs {
+            name: None,
+            bucket: None,
+            description: None,
+            homepage: None,
+            license: None,
+            download_repo: None,
+            archive_pattern: None,
+            binary: Vec::new(),
+            no_arch: Vec::new(),
+        },
+    };
+
+    let persisted_in_simit_toml =
+        persisted_ci_matches_simit_toml(&command, workspace_root, &cfg, &resolved, with_artifacts)
+            .unwrap_or_default();
+    let mut rendered = render_regeneration_command(
+        &command,
+        &resolved,
+        with_artifacts,
+        &resolved.omnix_ref,
+        persisted_in_simit_toml,
+    );
+    let verify_flags = regeneration_verify_flags(&cfg, &inference, windows_packagers);
+    if !verify_flags.is_empty() {
+        rendered.push_str(" # verify ");
+        rendered.push_str(&verify_flags.join(" "));
+    }
+    Ok(Some(rendered))
+}
+
+pub(crate) fn render_regeneration_command(
     command: &InitCiCommand,
-    runtime: Runtime,
+    resolved: &ResolvedCiInputs,
     with_artifacts: bool,
-    om_ci: OmCiMode,
     omnix_ref: &str,
+    persisted_in_simit_toml: bool,
 ) -> String {
+    if persisted_in_simit_toml {
+        return format!("simit init ci --platform {}", command.platform.as_str());
+    }
+
     let mut args = vec![
         "simit".to_owned(),
         "init".to_owned(),
@@ -205,49 +380,49 @@ fn render_regeneration_command(
         command.platform.as_str().to_owned(),
     ];
 
-    if runtime != Runtime::Cargo || command.runtime != RuntimeChoice::Auto {
+    if resolved.runtime != Runtime::Cargo || command.runtime.is_some() {
         args.push("--runtime".to_owned());
-        args.push(runtime_as_str(runtime).to_owned());
+        args.push(runtime_as_str(resolved.runtime).to_owned());
     }
-    if let Some(runner) = &command.runner {
+    if let Some(runner) = &resolved.runner {
         args.push("--runner".to_owned());
         args.push(shell_word(runner));
     }
-    if let Some(runner) = &command.windows_runner {
+    if let Some(runner) = &resolved.windows_runner {
         args.push("--windows-runner".to_owned());
         args.push(shell_word(runner));
     }
-    if command.workspace {
+    if resolved.workspace {
         args.push("--workspace".to_owned());
     }
-    for package in &command.packages {
+    for package in &resolved.packages {
         args.push("--package".to_owned());
         args.push(shell_word(package));
     }
-    if command.with_nextest {
+    if resolved.with_nextest {
         args.push("--with-nextest".to_owned());
     }
-    if command.with_msrv {
+    if resolved.with_msrv {
         args.push("--with-msrv".to_owned());
     }
-    if command.with_audit {
+    if resolved.with_audit {
         args.push("--with-audit".to_owned());
     }
-    if command.with_deny {
+    if resolved.with_deny {
         args.push("--with-deny".to_owned());
     }
-    if command.with_docs {
+    if resolved.with_docs {
         args.push("--with-docs".to_owned());
     }
     if with_artifacts {
         args.push("--with-artifacts".to_owned());
     }
-    match om_ci {
+    match resolved.om_ci {
         OmCiMode::Off => {}
         OmCiMode::Replace => args.push("--with-om-ci".to_owned()),
         OmCiMode::Augment => args.push("--om-ci-augment".to_owned()),
     }
-    if om_ci != OmCiMode::Off && omnix_ref != OMNIX_REF_DEFAULT {
+    if resolved.om_ci != OmCiMode::Off && omnix_ref != OMNIX_REF_DEFAULT {
         args.push("--omnix-ref".to_owned());
         args.push(shell_word(omnix_ref));
     }
@@ -301,6 +476,64 @@ fn render_regeneration_command(
     }
 
     args.join(" ")
+}
+
+fn persisted_ci_matches_simit_toml(
+    command: &InitCiCommand,
+    workspace_root: &Path,
+    cfg: &ProjectConfig,
+    resolved: &ResolvedCiInputs,
+    with_artifacts: bool,
+) -> Result<bool> {
+    if !workspace_root.join("simit.toml").exists() {
+        return Ok(false);
+    }
+
+    let windows_packagers = command.with_chocolatey || command.with_scoop;
+    let explicit_runners_cover_required =
+        runner_overrides_cover_required_runners(resolved, windows_packagers);
+    let user_config = UserConfig::load().or_else(|err| {
+        if command.platform == Platform::Github || explicit_runners_cover_required {
+            Ok(UserConfig::default())
+        } else {
+            Err(err)
+        }
+    })?;
+    let runners = user_config.resolve_ci_runners(
+        command.platform,
+        resolved.runtime,
+        resolved.runner.as_deref(),
+        resolved.windows_runner.as_deref(),
+        windows_packagers,
+    )?;
+    let persisted_runner =
+        self_check_runner_override(resolved.runner.as_deref(), &runners.ci).map(str::to_owned);
+    let persisted_windows_runner = runners.windows.as_ref().and_then(|runner| {
+        self_check_runner_override(resolved.windows_runner.as_deref(), runner).map(str::to_owned)
+    });
+    let persisted_ci = resolved.persisted_ci(
+        cfg,
+        with_artifacts,
+        &resolved.omnix_ref,
+        persisted_runner,
+        persisted_windows_runner,
+    );
+    Ok(cfg.ci == persisted_ci)
+}
+
+fn regeneration_verify_flags(
+    cfg: &ProjectConfig,
+    inference: &CiInference,
+    windows_packagers: bool,
+) -> Vec<&'static str> {
+    let mut flags = Vec::new();
+    if cfg.ci.runner.is_none() && inference.runner.is_none() {
+        flags.push("--runner");
+    }
+    if windows_packagers && cfg.ci.windows_runner.is_none() && inference.windows_runner.is_none() {
+        flags.push("--windows-runner");
+    }
+    flags
 }
 
 fn runtime_as_str(runtime: Runtime) -> &'static str {
@@ -416,10 +649,10 @@ fn extra_generated_workflows(
 }
 
 fn runner_overrides_cover_required_runners(
-    command: &InitCiCommand,
+    resolved: &ResolvedCiInputs,
     windows_packagers: bool,
 ) -> bool {
-    command.runner.is_some() && (!windows_packagers || command.windows_runner.is_some())
+    resolved.runner.is_some() && (!windows_packagers || resolved.windows_runner.is_some())
 }
 
 fn self_check_runner_override<'a>(
@@ -550,21 +783,6 @@ fn homebrew_platforms(resolved: &ResolvedHomebrew) -> HomebrewPlatformSet {
         darwin_intel: resolved.platforms.darwin_intel,
         linux_arm: resolved.platforms.linux_arm,
         linux_intel: resolved.platforms.linux_intel,
-    }
-}
-
-pub(crate) fn resolve_runtime(
-    choice: RuntimeChoice,
-    workspace_root: &std::path::Path,
-) -> Result<Runtime> {
-    match choice {
-        RuntimeChoice::Auto | RuntimeChoice::Cargo => Ok(Runtime::Cargo),
-        RuntimeChoice::Nix => {
-            if !workspace_root.join("flake.nix").exists() {
-                bail!("--runtime nix requires flake.nix at the workspace root");
-            }
-            Ok(Runtime::Nix)
-        }
     }
 }
 

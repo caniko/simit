@@ -664,6 +664,8 @@ fn generates_github_plain_cargo_workflows() {
     assert!(!ci.contains("https://code.forgejo.org/actions/cache@v4"));
     assert!(ci.contains("uses: https://github.com/Swatinem/rust-cache@v2"));
     assert!(ci.contains("path: ~/.cargo/bin"));
+    assert!(ci.contains("hashFiles('.github/workflows/*.yaml')"));
+    assert!(!ci.contains("hashFiles('.forgejo/workflows/ci.yaml', '.github/workflows/ci.yaml')"));
     assert!(ci.contains(
         "command -v cargo-nextest >/dev/null 2>&1 || cargo install cargo-nextest --locked --version 0.9.100"
     ));
@@ -676,6 +678,10 @@ fn generates_github_plain_cargo_workflows() {
     assert!(!publish.contains("https://code.forgejo.org/actions/cache@v4"));
     assert!(publish.contains("uses: https://github.com/Swatinem/rust-cache@v2"));
     assert!(publish.contains("path: ~/.cargo/bin"));
+    assert!(publish.contains("hashFiles('.github/workflows/*.yaml')"));
+    assert!(
+        !publish.contains("hashFiles('.forgejo/workflows/ci.yaml', '.github/workflows/ci.yaml')")
+    );
     assert!(publish.contains(
         "command -v cargo-nextest >/dev/null 2>&1 || cargo install cargo-nextest --locked --version 0.9.100"
     ));
@@ -748,6 +754,8 @@ fn forgejo_auto_runtime_uses_rust_container_even_when_flake_exists() {
     assert!(ci.contains("uses: https://code.forgejo.org/actions/cache@v4"));
     assert!(!ci.contains("uses: https://github.com/Swatinem/rust-cache@v2"));
     assert!(ci.contains("path: ~/.cargo/bin"));
+    assert!(ci.contains("hashFiles('.forgejo/workflows/*.yaml')"));
+    assert!(!ci.contains("hashFiles('.forgejo/workflows/ci.yaml', '.github/workflows/ci.yaml')"));
     assert!(ci.contains(
         "command -v cargo-nextest >/dev/null 2>&1 || cargo install cargo-nextest --locked --version 0.9.100"
     ));
@@ -764,6 +772,10 @@ fn forgejo_auto_runtime_uses_rust_container_even_when_flake_exists() {
     assert!(publish.contains("uses: https://code.forgejo.org/actions/cache@v4"));
     assert!(!publish.contains("uses: https://github.com/Swatinem/rust-cache@v2"));
     assert!(publish.contains("path: ~/.cargo/bin"));
+    assert!(publish.contains("hashFiles('.forgejo/workflows/*.yaml')"));
+    assert!(
+        !publish.contains("hashFiles('.forgejo/workflows/ci.yaml', '.github/workflows/ci.yaml')")
+    );
     assert!(publish.contains(
         "command -v cargo-nextest >/dev/null 2>&1 || cargo install cargo-nextest --locked --version 0.9.100"
     ));
@@ -1405,10 +1417,141 @@ fn check_failure_hint_includes_effective_generation_flags() {
 
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(stderr.contains(
-        "run `simit init ci --platform forgejo --runtime nix --runner atlas --workspace --with-deny --with-artifacts`"
-    ));
+    assert!(stderr.contains("run `simit init ci --platform forgejo`"));
     assert!(stderr.contains(".forgejo/workflows/ci-alpha.yaml differs"));
+}
+
+#[test]
+fn init_ci_persists_resolved_options_in_simit_toml() {
+    let temp = init_package(true);
+
+    let status = simit_with_user_config(temp.path())
+        .current_dir(temp.path())
+        .args([
+            "init",
+            "ci",
+            "--platform",
+            "forgejo",
+            "--runtime",
+            "nix",
+            "--with-audit",
+            "--with-deny",
+            "--with-docs",
+            "--with-msrv",
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let config = read(&temp.path().join("simit.toml"));
+    assert!(config.contains("[ci]"));
+    assert!(config.contains("runtime = \"nix\""));
+    assert!(config.contains("runner = \"atlas\""));
+    assert!(config.contains("with_audit = true"));
+    assert!(config.contains("with_deny = true"));
+    assert!(config.contains("with_docs = true"));
+    assert!(config.contains("with_msrv = true"));
+}
+
+#[test]
+fn bare_check_uses_persisted_ci_options() {
+    let temp = init_package(true);
+
+    let write_status = simit_with_user_config(temp.path())
+        .current_dir(temp.path())
+        .args([
+            "init",
+            "ci",
+            "--platform",
+            "forgejo",
+            "--runtime",
+            "nix",
+            "--with-audit",
+            "--with-deny",
+        ])
+        .status()
+        .unwrap();
+    assert!(write_status.success());
+
+    let check_status = simit_with_user_config(temp.path())
+        .current_dir(temp.path())
+        .args(["init", "ci", "--platform", "forgejo", "--check", "--diff"])
+        .status()
+        .unwrap();
+    assert!(check_status.success());
+}
+
+#[test]
+fn cli_flags_override_persisted_ci_values() {
+    let temp = init_package(false);
+    fs::write(
+        temp.path().join("simit.toml"),
+        r#"[ci]
+with_audit = false
+"#,
+    )
+    .unwrap();
+
+    let status = simit()
+        .current_dir(temp.path())
+        .args(["init", "ci", "--platform", "github", "--with-audit"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let ci = read(&temp.path().join(".github/workflows/ci.yaml"));
+    assert!(ci.contains("cargo audit --db \"$db\" --no-fetch --stale"));
+
+    let config = read(&temp.path().join("simit.toml"));
+    assert!(config.contains("with_audit = true"));
+}
+
+#[test]
+fn init_ci_write_preserves_existing_distribution_sections() {
+    let temp = init_package(true);
+    fs::write(
+        temp.path().join("simit.toml"),
+        r#"# keep this comment
+[homebrew]
+tap_url = "https://example.com/homebrew-demo.git"
+download_repo = "foo/demo"
+
+[chocolatey]
+download_repo = "foo/demo"
+
+[chocolatey.push]
+source = "https://push.chocolatey.org/"
+
+[scoop]
+bucket_url = "https://example.com/scoop-demo.git"
+download_repo = "foo/demo"
+"#,
+    )
+    .unwrap();
+
+    let status = simit_with_user_config(temp.path())
+        .current_dir(temp.path())
+        .args([
+            "init",
+            "ci",
+            "--platform",
+            "forgejo",
+            "--runtime",
+            "nix",
+            "--with-audit",
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let config = read(&temp.path().join("simit.toml"));
+    assert!(config.contains("# keep this comment"));
+    assert!(config.contains("[homebrew]"));
+    assert!(config.contains("tap_url = \"https://example.com/homebrew-demo.git\""));
+    assert!(config.contains("[chocolatey]"));
+    assert!(config.contains("[chocolatey.push]"));
+    assert!(config.contains("[scoop]"));
+    assert!(config.contains("with_audit = true"));
 }
 
 #[test]

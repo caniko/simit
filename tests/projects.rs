@@ -5,12 +5,30 @@ use std::process::Command;
 use serde_json::Value;
 use tempfile::TempDir;
 
+#[allow(dead_code)]
+mod common;
+
 type FeatureFixture<'a> = (&'a str, &'a str);
 type ProjectFixture<'a> = (&'a Path, &'a str, &'a [FeatureFixture<'a>]);
 
 fn simit_with_data_home(data_home: &Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_simit"));
     command.env("XDG_DATA_HOME", data_home);
+    command
+}
+
+fn simit_init_with_data_home(data_home: &Path) -> Command {
+    let mut command = simit_with_data_home(data_home);
+    command.env("SIMIT_MAINTAINERS_GPG", common::maintainer_key_path());
+    command
+}
+
+fn simit_with_data_and_config_home(data_home: &Path, config_home: &Path) -> Command {
+    let mut command = simit_with_data_home(data_home);
+    command.env("XDG_CONFIG_HOME", config_home);
+    command.env("HOME", config_home);
+    command.env("GIT_CONFIG_GLOBAL", config_home.join("gitconfig"));
+    command.env("GIT_CONFIG_NOSYSTEM", "true");
     command
 }
 
@@ -29,6 +47,28 @@ rust-version = "1.85"
     )
     .unwrap();
     fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
+}
+
+fn write_user_runner_config(root: &Path) {
+    let config_dir = root.join("simit");
+    fs::create_dir_all(&config_dir).unwrap();
+    fs::write(
+        config_dir.join("config.toml"),
+        r#"[ci.runners.atlas]
+platform = "forgejo"
+labels = ["atlas"]
+os = "linux"
+arch = "x86_64"
+runtimes = ["cargo", "nix"]
+trusted = true
+
+[ci.defaults.forgejo]
+cargo = "atlas"
+nix = "atlas"
+release = "atlas"
+"#,
+    )
+    .unwrap();
 }
 
 fn non_tmp_project(name: &str) -> TempDir {
@@ -82,6 +122,10 @@ fn registry_json(data_home: &Path) -> Value {
     serde_json::from_slice(&output.stdout).unwrap()
 }
 
+fn read(path: &Path) -> String {
+    fs::read_to_string(path).unwrap_or_else(|err| panic!("reading {}: {err}", path.display()))
+}
+
 #[test]
 fn help_lists_clear_state_and_its_flags() {
     let projects_help = Command::new(env!("CARGO_BIN_EXE_simit"))
@@ -104,8 +148,7 @@ fn help_lists_clear_state_and_its_flags() {
 #[test]
 fn list_json_outputs_registered_projects() {
     let data_home = TempDir::new().unwrap();
-    let project = TempDir::new().unwrap();
-    init_package(project.path(), "demo");
+    let project = non_tmp_project("demo");
     let project_path = fs::canonicalize(project.path()).unwrap();
     write_registry(
         data_home.path(),
@@ -142,8 +185,7 @@ fn show_json_missing_path_errors() {
 #[test]
 fn scan_dry_run_does_not_modify_registry_file() {
     let data_home = TempDir::new().unwrap();
-    let project = TempDir::new().unwrap();
-    init_package(project.path(), "demo");
+    let project = non_tmp_project("demo");
     let project_path = fs::canonicalize(project.path()).unwrap();
     write_registry(
         data_home.path(),
@@ -163,8 +205,7 @@ fn scan_dry_run_does_not_modify_registry_file() {
 #[test]
 fn scan_updates_last_seen_for_existing_projects() {
     let data_home = TempDir::new().unwrap();
-    let project = TempDir::new().unwrap();
-    init_package(project.path(), "demo");
+    let project = non_tmp_project("demo");
     let project_path = fs::canonicalize(project.path()).unwrap();
     write_registry(
         data_home.path(),
@@ -190,8 +231,7 @@ fn scan_updates_last_seen_for_existing_projects() {
 #[test]
 fn scan_reports_missing_paths_without_pruning() {
     let data_home = TempDir::new().unwrap();
-    let project = TempDir::new().unwrap();
-    init_package(project.path(), "demo");
+    let project = non_tmp_project("demo");
     let project_path = fs::canonicalize(project.path()).unwrap();
     let missing = missing_non_tmp_project("missing-scan");
     write_registry(
@@ -219,10 +259,9 @@ fn scan_reports_missing_paths_without_pruning() {
 #[test]
 fn scan_prune_removes_missing_paths() {
     let data_home = TempDir::new().unwrap();
-    let project = TempDir::new().unwrap();
-    init_package(project.path(), "demo");
+    let project = non_tmp_project("demo");
     let project_path = fs::canonicalize(project.path()).unwrap();
-    let missing = data_home.path().join("missing-project");
+    let missing = missing_non_tmp_project("missing-project");
     write_registry(
         data_home.path(),
         &[
@@ -261,10 +300,8 @@ fn scan_prune_removes_missing_paths() {
 #[test]
 fn forget_removes_exactly_one_entry() {
     let data_home = TempDir::new().unwrap();
-    let one = TempDir::new().unwrap();
-    let two = TempDir::new().unwrap();
-    init_package(one.path(), "one");
-    init_package(two.path(), "two");
+    let one = non_tmp_project("one");
+    let two = non_tmp_project("two");
     let one_path = fs::canonicalize(one.path()).unwrap();
     let two_path = fs::canonicalize(two.path()).unwrap();
     write_registry(
@@ -295,10 +332,8 @@ fn forget_removes_exactly_one_entry() {
 #[test]
 fn clear_state_removes_all_registry_entries() {
     let data_home = TempDir::new().unwrap();
-    let one = TempDir::new().unwrap();
-    let two = TempDir::new().unwrap();
-    init_package(one.path(), "one");
-    init_package(two.path(), "two");
+    let one = non_tmp_project("one");
+    let two = non_tmp_project("two");
     let one_path = fs::canonicalize(one.path()).unwrap();
     let two_path = fs::canonicalize(two.path()).unwrap();
     write_registry(
@@ -324,8 +359,7 @@ fn clear_state_removes_all_registry_entries() {
 #[test]
 fn clear_state_dry_run_does_not_modify_registry_file() {
     let data_home = TempDir::new().unwrap();
-    let project = TempDir::new().unwrap();
-    init_package(project.path(), "demo");
+    let project = non_tmp_project("demo");
     let project_path = fs::canonicalize(project.path()).unwrap();
     write_registry(
         data_home.path(),
@@ -347,10 +381,8 @@ fn clear_state_dry_run_does_not_modify_registry_file() {
 #[test]
 fn feature_filter_matches_requested_status() {
     let data_home = TempDir::new().unwrap();
-    let one = TempDir::new().unwrap();
-    let two = TempDir::new().unwrap();
-    init_package(one.path(), "one");
-    init_package(two.path(), "two");
+    let one = non_tmp_project("one");
+    let two = non_tmp_project("two");
     let one_path = fs::canonicalize(one.path()).unwrap();
     let two_path = fs::canonicalize(two.path()).unwrap();
     write_registry(
@@ -375,8 +407,7 @@ fn feature_filter_matches_requested_status() {
 #[test]
 fn show_without_path_uses_current_workspace_root() {
     let data_home = TempDir::new().unwrap();
-    let project = TempDir::new().unwrap();
-    init_package(project.path(), "demo");
+    let project = non_tmp_project("demo");
     let project_path = fs::canonicalize(project.path()).unwrap();
     write_registry(
         data_home.path(),
@@ -397,8 +428,7 @@ fn show_without_path_uses_current_workspace_root() {
 #[test]
 fn list_and_show_render_hand_rolled_ci_status() {
     let data_home = TempDir::new().unwrap();
-    let project = TempDir::new().unwrap();
-    init_package(project.path(), "demo");
+    let project = non_tmp_project("demo");
     let project_path = fs::canonicalize(project.path()).unwrap();
     write_registry(
         data_home.path(),
@@ -425,8 +455,7 @@ fn list_and_show_render_hand_rolled_ci_status() {
 #[test]
 fn list_show_and_json_render_managed_extra_ci_status() {
     let data_home = TempDir::new().unwrap();
-    let project = TempDir::new().unwrap();
-    init_package(project.path(), "demo");
+    let project = non_tmp_project("demo");
     let project_path = fs::canonicalize(project.path()).unwrap();
     write_registry(
         data_home.path(),
@@ -451,6 +480,120 @@ fn list_show_and_json_render_managed_extra_ci_status() {
 
     let value = registry_json(data_home.path());
     assert_eq!(value[0]["features"]["ci"], "managed+extra");
+}
+
+#[test]
+fn persisted_ci_config_and_check_agree_on_managed_status() {
+    let data_home = TempDir::new().unwrap();
+    let project = non_tmp_project("ci-persisted-audit");
+    let project_path = fs::canonicalize(project.path()).unwrap();
+
+    let write = simit_init_with_data_home(data_home.path())
+        .current_dir(project.path())
+        .args(["init", "ci", "--platform", "github", "--with-audit"])
+        .output()
+        .unwrap();
+    assert!(write.status.success());
+    assert!(read(&project.path().join("simit.toml")).contains("with_audit = true"));
+
+    let check = simit_init_with_data_home(data_home.path())
+        .current_dir(project.path())
+        .args(["init", "ci", "--platform", "github", "--check", "--diff"])
+        .output()
+        .unwrap();
+    assert!(check.status.success());
+
+    let scan = simit_with_data_home(data_home.path())
+        .args(["projects", "scan"])
+        .output()
+        .unwrap();
+    assert!(scan.status.success());
+
+    let show = simit_with_data_home(data_home.path())
+        .args(["projects", "show", project_path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(show.status.success());
+    let stdout = String::from_utf8(show.stdout).unwrap();
+    assert!(stdout.contains("ci          managed"));
+}
+
+#[test]
+fn registry_infers_ci_options_without_simit_toml() {
+    let data_home = TempDir::new().unwrap();
+    let project = non_tmp_project("ci-inferred-audit");
+    let project_path = fs::canonicalize(project.path()).unwrap();
+
+    let write = simit_init_with_data_home(data_home.path())
+        .current_dir(project.path())
+        .args(["init", "ci", "--platform", "github", "--with-audit"])
+        .output()
+        .unwrap();
+    assert!(write.status.success());
+    fs::remove_file(project.path().join("simit.toml")).unwrap();
+
+    let check = simit_init_with_data_home(data_home.path())
+        .current_dir(project.path())
+        .args(["init", "ci", "--platform", "github", "--check", "--diff"])
+        .output()
+        .unwrap();
+    assert!(check.status.success());
+
+    let scan = simit_with_data_home(data_home.path())
+        .args(["projects", "scan"])
+        .output()
+        .unwrap();
+    assert!(scan.status.success());
+
+    let show = simit_with_data_home(data_home.path())
+        .args(["projects", "show", project_path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(show.status.success());
+    let stdout = String::from_utf8(show.stdout).unwrap();
+    assert!(stdout.contains("ci          managed"));
+}
+
+#[test]
+fn config_ci_options_win_over_workflow_inference_for_drift() {
+    let data_home = TempDir::new().unwrap();
+    let project = non_tmp_project("ci-config-drift");
+    let project_path = fs::canonicalize(project.path()).unwrap();
+
+    let write = simit_init_with_data_home(data_home.path())
+        .current_dir(project.path())
+        .args(["init", "ci", "--platform", "github"])
+        .output()
+        .unwrap();
+    assert!(write.status.success());
+    fs::write(
+        project.path().join("simit.toml"),
+        "[ci]\nwith_audit = true\n",
+    )
+    .unwrap();
+
+    let check = simit_init_with_data_home(data_home.path())
+        .current_dir(project.path())
+        .args(["init", "ci", "--platform", "github", "--check", "--diff"])
+        .output()
+        .unwrap();
+    assert!(!check.status.success());
+    let stderr = String::from_utf8(check.stderr).unwrap();
+    assert!(stderr.contains("Install cargo-audit") || stderr.contains("Audit dependencies"));
+
+    let scan = simit_with_data_home(data_home.path())
+        .args(["projects", "scan"])
+        .output()
+        .unwrap();
+    assert!(scan.status.success());
+
+    let show = simit_with_data_home(data_home.path())
+        .args(["projects", "show", project_path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(show.status.success());
+    let stdout = String::from_utf8(show.stdout).unwrap();
+    assert!(stdout.contains("ci          drift"));
 }
 
 #[test]
@@ -496,6 +639,34 @@ fn list_surfaces_missing_paths_in_attention_footer() {
 }
 
 #[test]
+fn list_hides_ephemeral_projects_unless_requested() {
+    let data_home = TempDir::new().unwrap();
+    let ephemeral = PathBuf::from(format!("/tmp/simit-test-ephemeral-{}", std::process::id()));
+    write_registry(
+        data_home.path(),
+        &[(&ephemeral, "ephemeral", &[("hooks", "installed")])],
+    );
+
+    let bare = simit_with_data_home(data_home.path())
+        .args(["projects", "list", "--sort", "path"])
+        .output()
+        .unwrap();
+    assert!(bare.status.success());
+    let bare_stdout = String::from_utf8(bare.stdout).unwrap();
+    assert!(!bare_stdout.contains(&ephemeral.display().to_string()));
+    assert!(!bare_stdout.contains("ephemeral"));
+
+    let included = simit_with_data_home(data_home.path())
+        .args(["projects", "list", "--include-ephemeral", "--sort", "path"])
+        .output()
+        .unwrap();
+    assert!(included.status.success());
+    let included_stdout = String::from_utf8(included.stdout).unwrap();
+    assert!(included_stdout.contains(&ephemeral.display().to_string()));
+    assert!(included_stdout.contains("ephemeral"));
+}
+
+#[test]
 fn list_filters_tmp_missing_paths_from_attention_footer() {
     let data_home = TempDir::new().unwrap();
     let missing = PathBuf::from(format!(
@@ -508,7 +679,7 @@ fn list_filters_tmp_missing_paths_from_attention_footer() {
     );
 
     let output = simit_with_data_home(data_home.path())
-        .args(["projects", "list", "--sort", "path"])
+        .args(["projects", "list", "--include-ephemeral", "--sort", "path"])
         .output()
         .unwrap();
     assert!(output.status.success());
@@ -633,10 +804,8 @@ fn no_color_list_has_plain_glyph_without_ansi() {
 #[test]
 fn feature_filter_accepts_hand_rolled_status() {
     let data_home = TempDir::new().unwrap();
-    let one = TempDir::new().unwrap();
-    let two = TempDir::new().unwrap();
-    init_package(one.path(), "one");
-    init_package(two.path(), "two");
+    let one = non_tmp_project("one");
+    let two = non_tmp_project("two");
     let one_path = fs::canonicalize(one.path()).unwrap();
     let two_path = fs::canonicalize(two.path()).unwrap();
     write_registry(
@@ -657,4 +826,92 @@ fn feature_filter_accepts_hand_rolled_status() {
     assert_eq!(value.as_array().unwrap().len(), 1);
     assert_eq!(value[0]["name"], "two");
     assert_eq!(value[0]["features"]["ci"], "hand-rolled");
+}
+
+#[test]
+fn show_prints_bare_regen_command_when_ci_is_persisted() {
+    let data_home = TempDir::new().unwrap();
+    let config_home = TempDir::new().unwrap();
+    write_user_runner_config(config_home.path());
+    let project = non_tmp_project("demo");
+    fs::write(project.path().join("flake.nix"), "{}\n").unwrap();
+    let project_path = fs::canonicalize(project.path()).unwrap();
+
+    let status = simit_with_data_and_config_home(data_home.path(), config_home.path())
+        .current_dir(project.path())
+        .args([
+            "init",
+            "ci",
+            "--platform",
+            "forgejo",
+            "--runtime",
+            "nix",
+            "--with-deny",
+            "--maintainer-key",
+            "818D507F1E62139F8A17EAA64623DEA06FDACFE1",
+            "--maintainers-gpg",
+            "keys/maintainers.gpg",
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    write_registry(
+        data_home.path(),
+        &[(&project_path, "demo", &[("ci", "managed")])],
+    );
+
+    let output = simit_with_data_and_config_home(data_home.path(), config_home.path())
+        .args(["projects", "show", project_path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("regen: simit init ci --platform forgejo\n"));
+    assert!(!stdout.contains("--runtime nix"));
+    assert!(!stdout.contains("--with-deny"));
+}
+
+#[test]
+fn show_prints_inferred_regen_flags_when_ci_config_is_absent() {
+    let data_home = TempDir::new().unwrap();
+    let project = non_tmp_project("demo");
+    fs::write(project.path().join("flake.nix"), "{}\n").unwrap();
+    let project_path = fs::canonicalize(project.path()).unwrap();
+
+    let status = simit_with_data_home(data_home.path())
+        .current_dir(project.path())
+        .args([
+            "init",
+            "ci",
+            "--platform",
+            "github",
+            "--runtime",
+            "nix",
+            "--with-deny",
+            "--with-artifacts",
+            "--maintainer-key",
+            "818D507F1E62139F8A17EAA64623DEA06FDACFE1",
+            "--maintainers-gpg",
+            "keys/maintainers.gpg",
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    fs::remove_file(project.path().join("simit.toml")).unwrap();
+    write_registry(
+        data_home.path(),
+        &[(&project_path, "demo", &[("ci", "managed")])],
+    );
+
+    let output = simit_with_data_home(data_home.path())
+        .args(["projects", "show", project_path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains(
+        "regen: simit init ci --platform github --runtime nix --runner ubuntu-latest --with-deny --with-artifacts"
+    ));
 }

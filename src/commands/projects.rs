@@ -15,6 +15,7 @@ use crate::cli::{
     ProjectsForgetArgs, ProjectsListArgs, ProjectsPruneArgs, ProjectsScanArgs, ProjectsShowArgs,
     ProjectsSort,
 };
+use crate::commands::init_ci;
 use crate::registry::{
     self, DiscoverOptions, DiscoverReport, FeatureStatus, ProjectEntry, Registry,
 };
@@ -91,6 +92,9 @@ fn list(args: ProjectsListArgs) -> Result<()> {
         .collect::<Result<Vec<_>>>()?;
     let mut projects = registry.projects.iter().collect::<Vec<_>>();
     projects.retain(|(_, entry)| filters.iter().all(|filter| matches_filter(entry, filter)));
+    if !args.include_ephemeral {
+        projects.retain(|(path, _)| !is_ephemeral_project_path(path));
+    }
     sort_projects(&mut projects, args.sort);
 
     if args.json {
@@ -145,7 +149,7 @@ fn show(args: ProjectsShowArgs) -> Result<()> {
             );
             println!();
         }
-        print_project(&path, entry);
+        print_project(&path, entry)?;
     }
     Ok(())
 }
@@ -486,11 +490,16 @@ fn format_feature_token(feature: &str, status: Option<FeatureStatus>) -> String 
     }
 }
 
-fn print_project(path: &Utf8Path, entry: &ProjectEntry) {
+fn print_project(path: &Utf8Path, entry: &ProjectEntry) -> Result<()> {
     println!("name: {}", entry.name);
     println!("path: {path}");
     println!("first_seen: {}", entry.first_seen.to_rfc3339());
     println!("last_seen: {}", entry.last_seen.to_rfc3339());
+    if !entry_is_missing(path) {
+        if let Some(command) = init_ci::project_regeneration_command(path.as_std_path())? {
+            println!("regen: {command}");
+        }
+    }
     println!();
     if entry_is_missing(path) {
         println!("feature     status (features as of last successful scan)");
@@ -506,6 +515,7 @@ fn print_project(path: &Utf8Path, entry: &ProjectEntry) {
             .unwrap_or(FeatureStatus::Absent);
         println!("{feature:<11} {}", status_label(status));
     }
+    Ok(())
 }
 
 fn status_label(status: FeatureStatus) -> &'static str {

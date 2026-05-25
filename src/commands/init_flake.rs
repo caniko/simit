@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::Path;
@@ -5,12 +6,21 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 
 use crate::cargo;
-use crate::cli::InitFlakeCommand;
-use crate::config::{FlakeMode, ProjectConfig};
+use crate::cli::{FlakeScopeArg, InitFlakeCommand};
+use crate::config::{FlakeMode, FlakeScope, ProjectConfig};
 use crate::project::{self, GeneratedFile, Languages};
 use crate::registry::{self, FeatureStatus};
 use crate::render::diff::unified_diff;
 use crate::render::flake;
+
+const HOOK_REMOVAL_NOTES: &[(&str, &str)] = &[
+    // When a generated hook is removed, add its CI-side replacement here so
+    // `simit init flake --check --diff` can explain the migration inline.
+    (
+        "cargo-audit",
+        "the equivalent CI check now lives in .forgejo/workflows/ci.yaml::Audit dependencies",
+    ),
+];
 
 pub fn run(command: InitFlakeCommand) -> Result<()> {
     if command.check && command.print {
@@ -27,11 +37,15 @@ pub fn run(command: InitFlakeCommand) -> Result<()> {
     languages.nix = true;
     let rust_edition = rustfmt_edition(&metadata);
     let rust_version = workspace_rust_version(&metadata);
-    let files = flake::files(&languages, &rust_edition, rust_version.as_deref());
+    let all_files = flake::files(&languages, &rust_edition, rust_version.as_deref());
+    let scope = resolve_scope(command.scope, &cfg, workspace_root);
+    let files = scoped_files(&all_files, scope);
 
     if command.print {
         flake::print_files(&files);
-        flake::print_existing_flake_note();
+        if scope == FlakeScope::Full {
+            flake::print_existing_flake_note();
+        }
         return Ok(());
     }
 
@@ -43,8 +57,23 @@ pub fn run(command: InitFlakeCommand) -> Result<()> {
             &rust_edition,
             rust_version.as_deref(),
             &cfg,
+            scope,
             command.diff,
         );
+    }
+
+    if scope == FlakeScope::HooksOnly {
+        if workspace_root.join("flake.nix").exists() {
+            println!(
+                "note: hooks-only scope leaves existing flake.nix untouched; review it before taking project ownership"
+            );
+        }
+        project::write_generated_files(workspace_root, &files)?;
+        registry::touch_current_project_or_warn([
+            ("flake", FeatureStatus::Managed),
+            ("hooks", FeatureStatus::Installed),
+        ]);
+        return Ok(());
     }
 
     let flake_path = workspace_root.join("flake.nix");
@@ -124,6 +153,70 @@ fn normalize_rust_version(version: &str) -> String {
     }
 }
 
+fn resolve_scope(
+    cli_scope: Option<FlakeScopeArg>,
+    cfg: &ProjectConfig,
+    workspace_root: &Path,
+) -> FlakeScope {
+    if let Some(scope) = cli_scope {
+        return match scope {
+            FlakeScopeArg::HooksOnly => FlakeScope::HooksOnly,
+            FlakeScopeArg::Full => FlakeScope::Full,
+        };
+    }
+
+    if let Some(scope) = cfg.flake.scope {
+        return scope;
+    }
+
+    if has_existing_full_scope_adoption(workspace_root, cfg) {
+        FlakeScope::Full
+    } else {
+        FlakeScope::HooksOnly
+    }
+}
+
+fn has_existing_full_scope_adoption(workspace_root: &Path, cfg: &ProjectConfig) -> bool {
+    if cfg.flake.mode == FlakeMode::Custom {
+        return false;
+    }
+
+    let Ok(content) = fs::read_to_string(workspace_root.join("flake.nix")) else {
+        return false;
+    };
+
+    workspace_root.join("nix/treefmt.nix").exists()
+        && content.contains("crane.url = \"github:ipetkov/crane\"")
+        && content.contains("rustToolchain = pkgs.rust-bin.stable.latest.default.override")
+        && content.contains("package = craneLib.buildPackage")
+}
+
+fn scoped_files(files: &[GeneratedFile], scope: FlakeScope) -> Vec<GeneratedFile> {
+    match scope {
+        FlakeScope::HooksOnly => files
+            .iter()
+            .filter(|file| file.relative_path == Path::new("nix/pre-commit.nix"))
+            .cloned()
+            .collect(),
+        FlakeScope::Full => files.to_vec(),
+    }
+}
+
+fn checked_file_label(scope: FlakeScope) -> &'static str {
+    match scope {
+        FlakeScope::HooksOnly => "hook files",
+        FlakeScope::Full => "flake and hook files",
+    }
+}
+
+fn scope_arg_hint(scope: FlakeScope) -> &'static str {
+    match scope {
+        FlakeScope::HooksOnly => "",
+        FlakeScope::Full => " --scope full",
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn check_files(
     workspace_root: &std::path::Path,
     files: &[GeneratedFile],
@@ -131,9 +224,11 @@ fn check_files(
     rust_edition: &str,
     rust_version: Option<&str>,
     cfg: &ProjectConfig,
+    scope: FlakeScope,
     show_diff: bool,
 ) -> Result<()> {
     let mut mismatches = Vec::new();
+    let mut notes = Vec::new();
     let mut diffs = Vec::new();
 
     for file in files {
@@ -185,6 +280,7 @@ fn check_files(
                 }
                 mismatches.push("nix/pre-commit.nix is missing generated hook wiring".to_owned());
                 if show_diff {
+                    notes.extend(pre_commit_removal_notes(&actual, &file.content));
                     diffs.push(unified_diff("nix/pre-commit.nix", &actual, &file.content));
                 }
             }
@@ -210,13 +306,23 @@ fn check_files(
         Ok(())
     } else if diffs.is_empty() {
         bail!(
-            "flake and hook files are not up to date; run `simit init flake`:\n{}",
+            "{} are not up to date; run `simit init flake{}`:\n{}",
+            checked_file_label(scope),
+            scope_arg_hint(scope),
             mismatches.join("\n")
         );
     } else {
+        let note_block = if notes.is_empty() {
+            String::new()
+        } else {
+            format!("{}\n", notes.join("\n"))
+        };
         bail!(
-            "flake and hook files are not up to date; run `simit init flake`:\n{}\n{}",
+            "{} are not up to date; run `simit init flake{}`:\n{}\n{}{}",
+            checked_file_label(scope),
+            scope_arg_hint(scope),
             mismatches.join("\n"),
+            note_block,
             diffs.join("\n")
         );
     }
@@ -228,4 +334,136 @@ fn hook_files(files: &[GeneratedFile]) -> Vec<GeneratedFile> {
         .filter(|file| file.relative_path != Path::new("flake.nix"))
         .cloned()
         .collect()
+}
+
+fn pre_commit_removal_notes(actual: &str, generated: &str) -> Vec<String> {
+    let existing_hooks = extract_pre_commit_hook_names(actual);
+    let generated_hooks = extract_pre_commit_hook_names(generated);
+
+    if existing_hooks.is_empty() {
+        return Vec::new();
+    }
+
+    existing_hooks
+        .difference(&generated_hooks)
+        .map(|hook| match hook_removal_note(hook) {
+            Some(target) => format!("note: pre-commit hook '{hook}' will be removed; {target}"),
+            None => format!("note: pre-commit hook '{hook}' will be removed"),
+        })
+        .collect()
+}
+
+fn hook_removal_note(hook: &str) -> Option<&'static str> {
+    HOOK_REMOVAL_NOTES
+        .iter()
+        .find_map(|(name, note)| (*name == hook).then_some(*note))
+}
+
+fn extract_pre_commit_hook_names(content: &str) -> BTreeSet<String> {
+    let mut hooks = BTreeSet::new();
+    let mut depth = 0i32;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if depth == 1
+            && !trimmed.is_empty()
+            && !trimmed.starts_with('#')
+            && !trimmed.starts_with('{')
+            && trimmed != "}"
+        {
+            let Some((name, remainder)) = trimmed.split_once('=') else {
+                update_nix_brace_depth(&mut depth, line);
+                continue;
+            };
+            let name = name.trim();
+            if !name.is_empty()
+                && name
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+                && remainder.trim_start().starts_with('{')
+            {
+                hooks.insert(name.to_owned());
+            }
+        }
+
+        update_nix_brace_depth(&mut depth, line);
+    }
+
+    hooks
+}
+
+fn update_nix_brace_depth(depth: &mut i32, line: &str) {
+    for ch in line.chars() {
+        match ch {
+            '{' => *depth += 1,
+            '}' => *depth -= 1,
+            _ => {}
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{extract_pre_commit_hook_names, pre_commit_removal_notes};
+
+    #[test]
+    fn removal_notes_use_specific_mapping_when_available() {
+        let actual = r#"{
+  cargo-audit = {
+    enable = true;
+  };
+  cargo-fmt = {
+    enable = true;
+  };
+}
+"#;
+        let generated = r#"{
+  cargo-fmt = {
+    enable = true;
+  };
+}
+"#;
+
+        let notes = pre_commit_removal_notes(actual, generated);
+        assert_eq!(
+            notes,
+            vec![
+                "note: pre-commit hook 'cargo-audit' will be removed; the equivalent CI check now lives in .forgejo/workflows/ci.yaml::Audit dependencies"
+            ]
+        );
+    }
+
+    #[test]
+    fn removal_notes_fall_back_for_unknown_hooks() {
+        let actual = r#"{
+  custom-check = {
+    enable = true;
+  };
+}
+"#;
+
+        let notes = pre_commit_removal_notes(actual, "{}\n");
+        assert_eq!(
+            notes,
+            vec!["note: pre-commit hook 'custom-check' will be removed"]
+        );
+    }
+
+    #[test]
+    fn extractor_ignores_nested_attributes() {
+        let hooks = extract_pre_commit_hook_names(
+            r#"{
+  cargo-msrv = {
+    stages = {
+      pre-push = true;
+    };
+  };
+}
+"#,
+        );
+
+        assert!(hooks.contains("cargo-msrv"));
+        assert!(!hooks.contains("stages"));
+        assert!(!hooks.contains("pre-push"));
+    }
 }

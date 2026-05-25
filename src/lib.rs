@@ -10,6 +10,8 @@
 pub mod cargo;
 /// Keep a Changelog file helpers.
 pub mod changelog;
+/// Shared CI option resolution for generation and drift detection.
+pub mod ci_resolution;
 /// Command-line argument definitions.
 pub mod cli;
 /// Command implementations used by the binary.

@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `simit init flake` now defaults to hooks-only ownership of
+  `nix/pre-commit.nix`; use `--scope full` or `[flake].scope = "full"` to keep
+  simit managing `flake.nix` and formatter wiring. Existing full-scope adopters
+  are preserved until they opt into hooks-only.
+
+### Fixed
+
+- `simit init flake --check --diff` now explains pre-commit hook removals when
+  a generated hook has a known CI-side replacement.
+
 ## [0.15.4] - 2026-05-25
 
 ### Changed

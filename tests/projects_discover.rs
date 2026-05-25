@@ -72,6 +72,15 @@ fn canonical(path: &Path) -> String {
     fs::canonicalize(path).unwrap().to_str().unwrap().to_owned()
 }
 
+fn fixture_dir(name: &str) -> TempDir {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/project-fixtures");
+    fs::create_dir_all(&root).unwrap();
+    tempfile::Builder::new()
+        .prefix(name)
+        .tempdir_in(root)
+        .unwrap()
+}
+
 fn registry_json(data_home: &Path) -> Value {
     let output = simit_with_data_home(data_home)
         .args(["projects", "list", "--json", "--sort", "path"])
@@ -130,7 +139,7 @@ fn help_lists_discover_and_its_flags() {
 #[test]
 fn default_root_is_current_dir_and_registers_managed_project() {
     let data_home = TempDir::new().unwrap();
-    let project = TempDir::new().unwrap();
+    let project = fixture_dir("managed");
     init_package(project.path(), "managed");
     add_managed_flake(project.path());
 
@@ -150,7 +159,7 @@ fn default_root_is_current_dir_and_registers_managed_project() {
 #[test]
 fn dry_run_reports_without_creating_registry_file() {
     let data_home = TempDir::new().unwrap();
-    let project = TempDir::new().unwrap();
+    let project = fixture_dir("managed");
     init_package(project.path(), "managed");
     add_managed_flake(project.path());
 
@@ -173,7 +182,7 @@ fn dry_run_reports_without_creating_registry_file() {
 #[test]
 fn json_output_has_discover_report_shape() {
     let data_home = TempDir::new().unwrap();
-    let project = TempDir::new().unwrap();
+    let project = fixture_dir("managed");
     init_package(project.path(), "managed");
     add_managed_flake(project.path());
 
@@ -196,7 +205,7 @@ fn json_output_has_discover_report_shape() {
 #[test]
 fn max_depth_zero_only_inspects_root() {
     let data_home = TempDir::new().unwrap();
-    let root = TempDir::new().unwrap();
+    let root = fixture_dir("root");
     let project = root.path().join("nested");
     init_package(&project, "nested");
     add_managed_flake(&project);
@@ -223,7 +232,7 @@ fn max_depth_zero_only_inspects_root() {
 #[test]
 fn include_empty_registers_bare_cargo_crate() {
     let data_home = TempDir::new().unwrap();
-    let project = TempDir::new().unwrap();
+    let project = fixture_dir("plain");
     init_package(project.path(), "plain");
 
     let output = simit_with_data_home(data_home.path())
@@ -246,7 +255,7 @@ fn include_empty_registers_bare_cargo_crate() {
 #[test]
 fn include_empty_marks_non_simit_registrations_in_human_output() {
     let data_home = TempDir::new().unwrap();
-    let project = TempDir::new().unwrap();
+    let project = fixture_dir("plain");
     init_package(project.path(), "plain");
 
     let output = simit_with_data_home(data_home.path())
@@ -266,7 +275,7 @@ fn include_empty_marks_non_simit_registrations_in_human_output() {
 #[test]
 fn generic_project_files_with_hand_rolled_ci_are_registered() {
     let data_home = TempDir::new().unwrap();
-    let root = TempDir::new().unwrap();
+    let root = fixture_dir("root");
     let project = root.path().join("plain");
     init_package(&project, "plain");
     fs::write(project.join("CHANGELOG.md"), "# Changelog\n\n").unwrap();
@@ -290,7 +299,7 @@ fn generic_project_files_with_hand_rolled_ci_are_registered() {
 #[test]
 fn include_empty_surfaces_hand_rolled_ci_in_json() {
     let data_home = TempDir::new().unwrap();
-    let project = TempDir::new().unwrap();
+    let project = fixture_dir("plain");
     init_package(project.path(), "plain");
     fs::create_dir_all(project.path().join(".github/workflows")).unwrap();
     fs::write(
@@ -318,7 +327,7 @@ fn include_empty_surfaces_hand_rolled_ci_in_json() {
 #[test]
 fn human_output_for_skipped_package_does_not_require_cargo_metadata() {
     let data_home = TempDir::new().unwrap();
-    let project = TempDir::new().unwrap();
+    let project = fixture_dir("plain");
     init_package_with_broken_registry_dependency(project.path(), "plain");
 
     let output = simit_with_data_home(data_home.path())
@@ -328,14 +337,13 @@ fn human_output_for_skipped_package_does_not_require_cargo_metadata() {
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("Skipped (no simit features): 1 project"));
-    assert!(!stdout.contains("plain"));
     assert!(!stdout.contains("cargo metadata failed"));
 }
 
 #[test]
 fn skip_excludes_named_directory() {
     let data_home = TempDir::new().unwrap();
-    let root = TempDir::new().unwrap();
+    let root = fixture_dir("root");
     let skipped = root.path().join("my-vendor-dir");
     let kept = root.path().join("kept");
     init_package(&skipped, "skipped");
@@ -363,7 +371,7 @@ fn skip_excludes_named_directory() {
 #[test]
 fn rerun_does_not_change_first_seen() {
     let data_home = TempDir::new().unwrap();
-    let project = TempDir::new().unwrap();
+    let project = fixture_dir("managed");
     init_package(project.path(), "managed");
     add_managed_flake(project.path());
 

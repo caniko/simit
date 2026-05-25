@@ -162,6 +162,24 @@ pub fn check(
     }
 }
 
+pub fn check_quiet(
+    workspace_root: &Path,
+    config: &ProjectConfig,
+    overrides: &TrustOverrides,
+) -> Result<()> {
+    let trust_root = trust_root_path(config, overrides)?;
+    let existing = read_and_validate_existing(workspace_root, &trust_root)?;
+
+    match resolve(workspace_root, config, overrides) {
+        Ok(resolved) if existing == resolved.public_key => Ok(()),
+        Ok(_) => bail!(
+            "{} does not match the configured release signing key; run `simit release trust init`",
+            trust_root.display()
+        ),
+        Err(_) => Ok(()),
+    }
+}
+
 pub fn status(
     workspace_root: &Path,
     config: &ProjectConfig,

@@ -668,7 +668,7 @@ fn init_flake_creates_prints_checks_and_refuses_unpatchable_existing_flake() {
     assert!(
         String::from_utf8(print.stdout)
             .unwrap()
-            .contains("--- flake.nix")
+            .contains("--- nix/pre-commit.nix")
     );
     assert!(!root.join("flake.nix").exists());
     assert!(!root.join("nix/treefmt.nix").exists());
@@ -679,8 +679,8 @@ fn init_flake_creates_prints_checks_and_refuses_unpatchable_existing_flake() {
         .status()
         .unwrap();
     assert!(status.success());
-    assert!(root.join("flake.nix").exists());
-    assert!(root.join("nix/treefmt.nix").exists());
+    assert!(!root.join("flake.nix").exists());
+    assert!(!root.join("nix/treefmt.nix").exists());
     assert!(root.join("nix/pre-commit.nix").exists());
 
     let check = simit()
@@ -693,7 +693,7 @@ fn init_flake_creates_prints_checks_and_refuses_unpatchable_existing_flake() {
     fs::write(root.join("flake.nix"), "{}\n").unwrap();
     let output = simit()
         .current_dir(root)
-        .args(["init", "flake"])
+        .args(["init", "flake", "--scope", "full"])
         .output()
         .unwrap();
     assert!(!output.status.success());
@@ -777,7 +777,7 @@ fn generated_diff_is_printed_for_stale_hooks() {
 
     let status = simit()
         .current_dir(root)
-        .args(["init", "flake"])
+        .args(["init", "flake", "--scope", "full"])
         .status()
         .unwrap();
     assert!(status.success());

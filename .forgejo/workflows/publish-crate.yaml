@@ -36,7 +36,7 @@ jobs:
         uses: https://code.forgejo.org/actions/cache@v4
         with:
           path: ~/.cargo/bin
-          key: cargo-bin-${{ runner.os }}-${{ hashFiles('.forgejo/workflows/ci.yaml', '.github/workflows/ci.yaml') }}
+          key: cargo-bin-${{ runner.os }}-${{ hashFiles('.forgejo/workflows/*.yaml') }}
 
       - name: Validate signed release tag
         run: |

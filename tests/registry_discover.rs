@@ -142,6 +142,24 @@ fn add_managed_flake(root: &Path) {
     project::write_generated_files(root, &files).unwrap();
 }
 
+fn add_hooks_only_flake(root: &Path) {
+    let files = flake::files(
+        &Languages {
+            rust: true,
+            nix: true,
+            toml: true,
+            ..Languages::default()
+        },
+        "2024",
+        Some("1.85"),
+    );
+    let hook_files = files
+        .into_iter()
+        .filter(|file| file.relative_path == Path::new("nix/pre-commit.nix"))
+        .collect::<Vec<_>>();
+    project::write_generated_files(root, &hook_files).unwrap();
+}
+
 fn canonical(path: &Path) -> Utf8PathBuf {
     Utf8PathBuf::from_path_buf(fs::canonicalize(path).unwrap()).unwrap()
 }
@@ -169,6 +187,25 @@ fn simit_managed_crate_is_registered_with_managed_flake() {
     let root = TempDir::new().unwrap();
     init_package(root.path(), "managed");
     add_managed_flake(root.path());
+
+    let report = discover(root.path(), DiscoverOptions::default());
+    let key = canonical(root.path());
+    let registry = registry::load().unwrap();
+
+    assert_eq!(report.registered.as_slice(), std::slice::from_ref(&key));
+    assert_eq!(
+        registry.projects[&key].features["flake"],
+        FeatureStatus::Managed
+    );
+}
+
+#[test]
+fn hooks_only_crate_is_registered_with_managed_flake() {
+    let _env = EnvGuard::new();
+    let root = TempDir::new().unwrap();
+    init_package(root.path(), "managed-hooks");
+    fs::write(root.path().join("flake.nix"), "{ custom = \"owned\"; }\n").unwrap();
+    add_hooks_only_flake(root.path());
 
     let report = discover(root.path(), DiscoverOptions::default());
     let key = canonical(root.path());

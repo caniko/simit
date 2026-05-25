@@ -18,6 +18,10 @@ use std::process::Command;
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
+use toml_edit::{Array, DocumentMut, InlineTable, Item, Table, Value, value};
+
+use crate::cli::Runtime;
+use crate::user_config::validate_runner_label;
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -40,6 +44,8 @@ pub struct ProjectConfig {
 #[serde(deny_unknown_fields)]
 pub struct FlakeConfig {
     #[serde(default)]
+    pub scope: Option<FlakeScope>,
+    #[serde(default)]
     pub mode: FlakeMode,
     #[serde(default = "default_toolchain_binding")]
     pub toolchain_binding: String,
@@ -55,6 +61,13 @@ pub struct FlakeConfig {
     pub pre_commit_shell_hook: bool,
     #[serde(default)]
     pub expected_outputs: FlakeExpectedOutputs,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum FlakeScope {
+    HooksOnly,
+    Full,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
@@ -79,6 +92,7 @@ pub struct FlakeExpectedOutputs {
 impl Default for FlakeConfig {
     fn default() -> Self {
         Self {
+            scope: None,
             mode: FlakeMode::Canonical,
             toolchain_binding: default_toolchain_binding(),
             crane_lib_binding: default_crane_lib_binding(),
@@ -106,6 +120,28 @@ fn default_package_binding() -> String {
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CiConfig {
+    #[serde(default)]
+    pub runtime: Option<Runtime>,
+    #[serde(default)]
+    pub runner: Option<String>,
+    #[serde(default)]
+    pub windows_runner: Option<String>,
+    #[serde(default)]
+    pub workspace: bool,
+    #[serde(default)]
+    pub packages: Vec<String>,
+    #[serde(default)]
+    pub with_nextest: bool,
+    #[serde(default)]
+    pub with_msrv: bool,
+    #[serde(default)]
+    pub with_audit: bool,
+    #[serde(default)]
+    pub with_deny: bool,
+    #[serde(default)]
+    pub with_docs: bool,
+    #[serde(default)]
+    pub with_artifacts: bool,
     #[serde(default)]
     pub extra_setup: Vec<String>,
     #[serde(default)]
@@ -467,6 +503,12 @@ impl ProjectConfig {
     }
 
     fn validate_common(&self) -> Result<()> {
+        if self.ci.workspace && !self.ci.packages.is_empty() {
+            bail!("simit project config: [ci].workspace cannot be true when [ci].packages is set");
+        }
+        validate_nonempty_strings("simit project config: [ci].packages", &self.ci.packages)?;
+        validate_runner_label_opt("[ci].runner", self.ci.runner.as_deref())?;
+        validate_runner_label_opt("[ci].windows_runner", self.ci.windows_runner.as_deref())?;
         validate_nonempty_strings(
             "simit project config: [flake.expected_outputs].packages",
             &self.flake.expected_outputs.packages,
@@ -498,6 +540,63 @@ impl ProjectConfig {
             }
         }
         Ok(())
+    }
+
+    pub fn write_ci(workspace_root: &Path, ci: &CiConfig) -> Result<bool> {
+        let sources = Self::load_sources(workspace_root)?;
+        if sources.is_empty() && *ci == CiConfig::default() {
+            return Ok(false);
+        }
+        match sources.as_slice() {
+            [] => {}
+            [source] if source.label == "simit.toml" => {}
+            [source] => {
+                bail!(
+                    "cannot persist [ci] into simit.toml while project config comes from {}; move project config into simit.toml first",
+                    source.label
+                );
+            }
+            _ => {
+                let labels = sources
+                    .iter()
+                    .map(|source| source.label.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                bail!(
+                    "multiple simit project config sources found ({labels}); keep exactly one of simit.toml, Cargo.toml [workspace.metadata.simit], Cargo.toml [package.metadata.simit], or flake outputs.simitConfig"
+                );
+            }
+        }
+
+        if sources.len() == 1 && sources[0].config.ci == *ci {
+            return Ok(false);
+        }
+
+        let path = workspace_root.join("simit.toml");
+        let current_text = if path.exists() {
+            std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?
+        } else {
+            String::new()
+        };
+        let mut document = if current_text.trim().is_empty() {
+            DocumentMut::new()
+        } else {
+            current_text
+                .parse::<DocumentMut>()
+                .with_context(|| format!("parsing {}", path.display()))?
+        };
+        let mut table = match document.remove("ci") {
+            Some(Item::Table(table)) => table,
+            Some(_) => bail!("parsing {}: [ci] must be a table", path.display()),
+            None => Table::new(),
+        };
+        table.set_implicit(false);
+        set_ci_table(&mut table, ci);
+        document["ci"] = Item::Table(table);
+
+        std::fs::write(&path, document.to_string())
+            .with_context(|| format!("writing {}", path.display()))?;
+        Ok(true)
     }
 
     fn load_sources(workspace_root: &Path) -> Result<Vec<ProjectConfigSource>> {
@@ -868,6 +967,81 @@ fn validate_nonempty_strings(name: &str, values: &[String]) -> Result<()> {
         bail!("{name} must not contain empty values");
     }
     Ok(())
+}
+
+fn validate_runner_label_opt(name: &str, value: Option<&str>) -> Result<()> {
+    if let Some(value) = value {
+        validate_runner_label(value).map_err(|err| anyhow!("{name}: {err}"))?;
+    }
+    Ok(())
+}
+
+fn set_ci_table(table: &mut Table, ci: &CiConfig) {
+    set_optional_string(table, "runtime", ci.runtime.map(runtime_name));
+    set_optional_string(table, "runner", ci.runner.as_deref());
+    set_optional_string(table, "windows_runner", ci.windows_runner.as_deref());
+    set_bool(table, "workspace", ci.workspace);
+    set_string_array(table, "packages", &ci.packages);
+    set_bool(table, "with_nextest", ci.with_nextest);
+    set_bool(table, "with_msrv", ci.with_msrv);
+    set_bool(table, "with_audit", ci.with_audit);
+    set_bool(table, "with_deny", ci.with_deny);
+    set_bool(table, "with_docs", ci.with_docs);
+    set_bool(table, "with_artifacts", ci.with_artifacts);
+    set_string_array(table, "extra_setup", &ci.extra_setup);
+    set_string_map(table, "extra_env", &ci.extra_env);
+    set_string_array(table, "required_secrets", &ci.required_secrets);
+    set_bool(table, "om_ci", ci.om_ci);
+    set_bool(table, "om_ci_augment", ci.om_ci_augment);
+    set_optional_string(table, "omnix_ref", ci.omnix_ref.as_deref());
+}
+
+fn set_optional_string(table: &mut Table, key: &str, value_text: Option<&str>) {
+    match value_text {
+        Some(value_text) => table[key] = value(value_text),
+        None => {
+            table.remove(key);
+        }
+    }
+}
+
+fn set_bool(table: &mut Table, key: &str, enabled: bool) {
+    if enabled {
+        table[key] = value(enabled);
+    } else {
+        table.remove(key);
+    }
+}
+
+fn set_string_array(table: &mut Table, key: &str, values: &[String]) {
+    if values.is_empty() {
+        table.remove(key);
+        return;
+    }
+    let mut array = Array::new();
+    for value_text in values {
+        array.push(value_text.as_str());
+    }
+    table[key] = Item::Value(Value::Array(array));
+}
+
+fn set_string_map(table: &mut Table, key: &str, values: &BTreeMap<String, String>) {
+    if values.is_empty() {
+        table.remove(key);
+        return;
+    }
+    let mut inline = InlineTable::default();
+    for (map_key, map_value) in values {
+        inline.insert(map_key, Value::from(map_value.as_str()));
+    }
+    table[key] = Item::Value(Value::InlineTable(inline));
+}
+
+fn runtime_name(runtime: Runtime) -> &'static str {
+    match runtime {
+        Runtime::Cargo => "cargo",
+        Runtime::Nix => "nix",
+    }
 }
 
 #[derive(Debug)]

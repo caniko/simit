@@ -12,6 +12,12 @@ use crate::registry;
 use crate::release_trust::{self, TrustOverrides};
 
 pub fn run(command: ReleaseCommand) -> Result<()> {
+    if command.action == ReleaseAction::Verify {
+        return crate::commands::release_verify::run(command);
+    }
+    if command.action == ReleaseAction::Plan {
+        return crate::commands::release_plan::run(command);
+    }
     if command.action == ReleaseAction::Trust {
         return trust(command);
     }
@@ -32,6 +38,7 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
     if command.remote != "origin" {
         bail!("--remote is only valid with `simit release sync-up`");
     }
+    reject_verify_flags(&command)?;
     let bump = BumpSpec::new(
         command.action.bump_kind().expect("release bump action"),
         command.pre,
@@ -140,6 +147,7 @@ fn trust(command: ReleaseCommand) -> Result<()> {
     if command.remote != "origin" {
         bail!("--remote is not valid with `simit release trust`");
     }
+    reject_verify_flags(&command)?;
 
     let action = command
         .trust_action
@@ -172,6 +180,7 @@ fn sync_up(command: ReleaseCommand) -> Result<()> {
     if command.no_changelog {
         bail!("--no-changelog is not valid with `simit release sync-up`");
     }
+    reject_verify_flags(&command)?;
 
     let metadata = cargo::metadata_for_current_dir()?;
     let workspace_root = metadata.workspace_root.as_std_path();
@@ -222,6 +231,19 @@ fn sync_up(command: ReleaseCommand) -> Result<()> {
     }
 
     registry::refresh_current_project_or_warn();
+    Ok(())
+}
+
+fn reject_verify_flags(command: &ReleaseCommand) -> Result<()> {
+    if command.json {
+        bail!("--json is only valid with `simit release verify`");
+    }
+    if command.verify_version.is_some() {
+        bail!("--version is only valid with `simit release verify`");
+    }
+    if command.push_target.is_some() {
+        bail!("--push-target is only valid with `simit release verify`");
+    }
     Ok(())
 }
 

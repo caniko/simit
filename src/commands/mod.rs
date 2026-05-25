@@ -13,5 +13,7 @@ pub mod init_scoop_bucket;
 pub mod man;
 pub mod projects;
 pub mod release;
+pub mod release_plan;
+pub mod release_verify;
 pub mod scaffold;
 pub mod scoop;

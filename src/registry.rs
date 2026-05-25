@@ -22,8 +22,9 @@ use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
 use crate::cargo::{self, Package};
-use crate::cli::{Platform, Runtime};
-use crate::config::{HomebrewOverrides, ProjectConfig};
+use crate::ci_resolution::{CiCliOverrides, CiInference, WorkflowSnapshot};
+use crate::cli::Platform;
+use crate::config::{FlakeScope, HomebrewOverrides, ProjectConfig};
 use crate::project;
 use crate::render::ci;
 use crate::render::flake;
@@ -507,6 +508,10 @@ pub fn canonical_project_path(path: &Path) -> Result<Utf8PathBuf> {
 }
 
 fn detect_flake_status(workspace_root: &Path) -> FeatureStatus {
+    if resolved_flake_scope_for_status(workspace_root) == FlakeScope::HooksOnly {
+        return detect_hooks_only_flake_status(workspace_root);
+    }
+
     let flake_path = workspace_root.join("flake.nix");
     let Ok(content) = fs::read_to_string(&flake_path) else {
         return if flake_path.exists() {
@@ -536,6 +541,92 @@ fn detect_flake_status(workspace_root: &Path) -> FeatureStatus {
     } else {
         FeatureStatus::Drift
     }
+}
+
+fn detect_hooks_only_flake_status(workspace_root: &Path) -> FeatureStatus {
+    let path = workspace_root.join("nix/pre-commit.nix");
+    let Ok(content) = fs::read_to_string(&path) else {
+        return if path.exists() {
+            FeatureStatus::Drift
+        } else {
+            FeatureStatus::Absent
+        };
+    };
+
+    let Ok(mut languages) = project::detect_languages(workspace_root) else {
+        return FeatureStatus::Managed;
+    };
+    languages.nix = true;
+
+    if flake::has_required_pre_commit(&content, &languages, None) {
+        FeatureStatus::Managed
+    } else {
+        FeatureStatus::Drift
+    }
+}
+
+fn resolved_flake_scope_for_status(workspace_root: &Path) -> FlakeScope {
+    explicit_flake_scope(workspace_root).unwrap_or_else(|| {
+        if has_existing_full_scope_adoption(workspace_root) {
+            FlakeScope::Full
+        } else {
+            FlakeScope::HooksOnly
+        }
+    })
+}
+
+fn explicit_flake_scope(workspace_root: &Path) -> Option<FlakeScope> {
+    explicit_flake_scope_from_simit_toml(&workspace_root.join("simit.toml"))
+        .or_else(|| explicit_flake_scope_from_cargo_toml(&workspace_root.join("Cargo.toml")))
+}
+
+fn explicit_flake_scope_from_simit_toml(path: &Path) -> Option<FlakeScope> {
+    let text = fs::read_to_string(path).ok()?;
+    let doc = text.parse::<toml_edit::DocumentMut>().ok()?;
+    parse_scope(doc.get("flake")?.get("scope")?.as_str()?)
+}
+
+fn explicit_flake_scope_from_cargo_toml(path: &Path) -> Option<FlakeScope> {
+    let text = fs::read_to_string(path).ok()?;
+    let doc = text.parse::<toml_edit::DocumentMut>().ok()?;
+    let workspace_scope = doc
+        .get("workspace")
+        .and_then(|item| item.get("metadata"))
+        .and_then(|item| item.get("simit"))
+        .and_then(|item| item.get("flake"))
+        .and_then(|item| item.get("scope"))
+        .and_then(|item| item.as_str())
+        .and_then(parse_scope);
+    if workspace_scope.is_some() {
+        return workspace_scope;
+    }
+
+    doc.get("package")
+        .and_then(|item| item.get("metadata"))
+        .and_then(|item| item.get("simit"))
+        .and_then(|item| item.get("flake"))
+        .and_then(|item| item.get("scope"))
+        .and_then(|item| item.as_str())
+        .and_then(parse_scope)
+}
+
+fn parse_scope(value: &str) -> Option<FlakeScope> {
+    match value {
+        "hooks-only" => Some(FlakeScope::HooksOnly),
+        "full" => Some(FlakeScope::Full),
+        _ => None,
+    }
+}
+
+fn has_existing_full_scope_adoption(workspace_root: &Path) -> bool {
+    let Ok(content) = fs::read_to_string(workspace_root.join("flake.nix")) else {
+        return false;
+    };
+
+    workspace_root.join("nix/treefmt.nix").exists()
+        && content.contains("crane.url = \"github:ipetkov/crane\"")
+        && content.contains("rustToolchain = pkgs.rust-bin.stable.latest.default.override")
+        && content.contains("package = craneLib.buildPackage")
 }
 
 fn detect_ci_status(workspace_root: &Path) -> FeatureStatus {
@@ -633,16 +724,32 @@ fn infer_expected_ci_files(
     let metadata = cargo::cargo_metadata(&cargo::find_manifest(workspace_root)?)?;
     let config = ProjectConfig::load(workspace_root).unwrap_or_default();
     let platform = infer_ci_platform(marked)?;
-    let runtime = infer_ci_runtime(marked)?;
-    let packages = infer_ci_packages(&metadata, marked)?;
+    let snapshots = workflow_snapshots(marked);
+    let inference = CiInference::from_workflows(&snapshots)?;
+    if !workspace_root.join("simit.toml").exists() {
+        eprintln!(
+            "note: inferring CI options for {} from generated workflows because simit.toml [ci] is absent",
+            workspace_root.display()
+        );
+    }
+    let resolved = crate::ci_resolution::ResolvedCiInputs::resolve(
+        workspace_root,
+        &config,
+        &CiCliOverrides::default(),
+        Some(&inference),
+    )?;
+    let packages = cargo::select_packages(&metadata, &resolved.packages, resolved.workspace)?;
     let package_scoped = metadata.workspace_members.len() > 1;
     let windows_runner = infer_windows_runner(marked);
+    let inferred_ci_runner = infer_primary_runner(marked, "ci")?;
+    let inferred_release_runner = infer_primary_runner(marked, "publish-crate")?;
     let runners = ResolvedCiRunners {
-        ci: infer_primary_runner(marked, "ci")?,
-        release: infer_primary_runner(marked, "publish-crate")?,
-        windows: windows_runner,
+        ci: resolved_runner_override(resolved.runner.as_deref()).unwrap_or(inferred_ci_runner),
+        release: resolved_runner_override(resolved.runner.as_deref())
+            .unwrap_or(inferred_release_runner),
+        windows: resolved_runner_override(resolved.windows_runner.as_deref()).or(windows_runner),
     };
-    let options = infer_ci_options(marked, &config)?;
+    let options = resolved.ci_options(&config, resolved.with_artifacts, resolved.omnix_ref.clone());
     let self_check_runner_override = single_runner_label(&runners.ci);
     let self_check_windows_runner_override = runners.windows.as_ref().and_then(single_runner_label);
     let self_check = ci::SelfCheckOptions {
@@ -651,8 +758,8 @@ fn infer_expected_ci_files(
             .any(|workflow| workflow.content.contains("Check generated CI")),
         runner_override: self_check_runner_override,
         windows_runner_override: self_check_windows_runner_override,
-        packages: &[],
-        workspace: false,
+        packages: &resolved.packages,
+        workspace: resolved.workspace,
     };
 
     let mut files = Vec::new();
@@ -666,7 +773,7 @@ fn infer_expected_ci_files(
         };
         files.extend(ci::files(
             platform,
-            runtime,
+            resolved.runtime,
             package,
             package_scoped.then_some(package.name.as_str()),
             self_check,
@@ -679,6 +786,23 @@ fn infer_expected_ci_files(
         .into_iter()
         .filter(|file| is_workflow_path(&file.relative_path))
         .collect())
+}
+
+fn workflow_snapshots(marked: &[WorkflowFile]) -> Vec<WorkflowSnapshot> {
+    marked
+        .iter()
+        .map(|workflow| WorkflowSnapshot {
+            relative_path: workflow.relative_path.clone(),
+            content: workflow.content.clone(),
+        })
+        .collect()
+}
+
+fn resolved_runner_override(label: Option<&str>) -> Option<ResolvedRunner> {
+    label.map(|label| ResolvedRunner {
+        name: None,
+        labels: vec![label.to_owned()],
+    })
 }
 
 fn single_runner_label(runner: &ResolvedRunner) -> Option<&str> {
@@ -708,84 +832,6 @@ fn infer_ci_platform(marked: &[WorkflowFile]) -> Result<Platform> {
         }
     }
     platform.context("no marked CI workflows found")
-}
-
-fn infer_ci_runtime(marked: &[WorkflowFile]) -> Result<Runtime> {
-    let ci_workflow = marked
-        .iter()
-        .find(|workflow| workflow_name(&workflow.relative_path) == Some("ci"))
-        .or_else(|| {
-            marked
-                .iter()
-                .find(|workflow| workflow_name(&workflow.relative_path) == Some("publish-crate"))
-        })
-        .context("no CI or publish workflow available for runtime inference")?;
-
-    if ci_workflow.content.contains("      - name: Install Nix\n")
-        || ci_workflow.content.contains("run: nix flake check")
-        || ci_workflow.content.contains("run: nix develop -c cargo")
-        || ci_workflow
-            .content
-            .contains("      - name: Build package\n")
-    {
-        Ok(Runtime::Nix)
-    } else {
-        Ok(Runtime::Cargo)
-    }
-}
-
-fn infer_ci_packages(metadata: &cargo::Metadata, marked: &[WorkflowFile]) -> Result<Vec<Package>> {
-    let package_names = marked
-        .iter()
-        .filter_map(|workflow| workflow_suffix(&workflow.relative_path))
-        .collect::<BTreeSet<_>>();
-
-    if package_names.is_empty() {
-        cargo::select_packages(metadata, &[], false)
-    } else {
-        cargo::select_packages(
-            metadata,
-            &package_names.into_iter().collect::<Vec<_>>(),
-            false,
-        )
-    }
-}
-
-fn infer_ci_options(marked: &[WorkflowFile], config: &ProjectConfig) -> Result<ci::CiOptions> {
-    let all_content = marked
-        .iter()
-        .map(|workflow| workflow.content.as_str())
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    Ok(ci::CiOptions {
-        with_nextest: all_content.contains("cargo nextest run"),
-        with_msrv: all_content.contains("      - name: Check MSRV\n"),
-        with_audit: all_content.contains("cargo audit"),
-        with_deny: all_content.contains("cargo deny check"),
-        with_docs: all_content.contains("cargo doc --no-deps --all-features"),
-        with_artifacts: marked
-            .iter()
-            .any(|workflow| workflow_name(&workflow.relative_path) == Some("release-artifacts")),
-        om_ci: infer_om_ci_mode(&all_content),
-        omnix_ref: infer_omnix_ref(&all_content)
-            .or_else(|| config.ci.omnix_ref.clone())
-            .unwrap_or_else(|| ci::OMNIX_REF_DEFAULT.to_owned()),
-        release_smoke_command: infer_release_smoke_command(&all_content)
-            .or_else(|| config.release.smoke.command.clone()),
-        extra_setup: config.ci.extra_setup.clone(),
-        extra_env: config
-            .ci
-            .extra_env
-            .iter()
-            .map(|(key, value)| (key.clone(), value.clone()))
-            .collect(),
-        required_secrets: config.ci.required_secrets.clone(),
-        package_scoped: false,
-        homebrew: None,
-        chocolatey: None,
-        scoop: None,
-    })
 }
 
 fn infer_homebrew_options(
@@ -950,47 +996,6 @@ fn infer_scoop_options(
         x64: resolved.architectures.x64,
         arm64: resolved.architectures.arm64,
     }))
-}
-
-fn infer_om_ci_mode(content: &str) -> ci::OmCiMode {
-    if !content.contains("      - name: Run om ci\n") {
-        return ci::OmCiMode::Off;
-    }
-    if content.contains("run: nix flake check") {
-        ci::OmCiMode::Augment
-    } else {
-        ci::OmCiMode::Replace
-    }
-}
-
-fn infer_omnix_ref(content: &str) -> Option<String> {
-    content
-        .lines()
-        .find_map(|line| line.trim_start().strip_prefix("OMNIX_REF: "))
-        .map(shell_unquote)
-}
-
-fn infer_release_smoke_command(content: &str) -> Option<String> {
-    content.lines().find_map(|line| {
-        line.trim_start()
-            .strip_prefix(
-                "VERSION=\"${GITHUB_REF_NAME:-${FORGE_REF_NAME:-${CODEBERG_REF_NAME:-}}}\"",
-            )
-            .map(|_| ())
-    })?;
-
-    content.lines().find_map(|line| {
-        let trimmed = line.trim_start();
-        trimmed
-            .strip_suffix(" \"$VERSION\" release")
-            .and_then(|value| value.strip_prefix(""))
-            .filter(|value| !value.is_empty())
-            .filter(|value| !value.starts_with("if [ -z \"$VERSION\" ]"))
-            .filter(|value| !value.starts_with("test -n \"$VERSION\""))
-            .filter(|value| !value.starts_with("mkdir -p release"))
-            .filter(|value| !value.starts_with("set -euo pipefail"))
-            .map(shell_unquote)
-    })
 }
 
 fn infer_primary_runner(marked: &[WorkflowFile], workflow_kind: &str) -> Result<ResolvedRunner> {

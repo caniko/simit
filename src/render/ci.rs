@@ -523,11 +523,7 @@ fn push_windows_publish_job(
     workflow.push_str("          merge-multiple: true\n\n");
     push_windows_rust_setup_step(workflow, platform);
     workflow.push_str("      - name: Install simit\n");
-    workflow.push_str("        run: |\n");
-    workflow.push_str(
-        "          # TODO(cache): cache cargo install output for tagged windows-publish runs (see planning/cargo-cache-defaults out-of-scope).\n",
-    );
-    workflow.push_str("          cargo install --locked simit\n\n");
+    workflow.push_str("        run: cargo install --locked simit\n\n");
 
     if let Some(chocolatey) = &options.chocolatey {
         push_chocolatey_publish_step(workflow, chocolatey);
@@ -1409,9 +1405,13 @@ fn push_rust_cache_steps(workflow: &mut String, platform: Platform) {
     push_action_uses(workflow, platform, "cache", "v4");
     workflow.push_str("        with:\n");
     workflow.push_str("          path: ~/.cargo/bin\n");
-    workflow.push_str(
-        "          key: cargo-bin-${{ runner.os }}-${{ hashFiles('.forgejo/workflows/ci.yaml', '.github/workflows/ci.yaml') }}\n\n",
-    );
+    let workflow_glob = match platform {
+        Platform::Forgejo => ".forgejo/workflows/*.yaml",
+        Platform::Github => ".github/workflows/*.yaml",
+    };
+    workflow.push_str(&format!(
+        "          key: cargo-bin-${{{{ runner.os }}}}-${{{{ hashFiles('{workflow_glob}') }}}}\n\n",
+    ));
     if platform == Platform::Forgejo {
         return;
     }

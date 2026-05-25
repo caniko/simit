@@ -9,6 +9,10 @@
             default = "canonical";
             type = lib.types.enum ["canonical" "custom"];
           };
+          scope = lib.mkOption {
+            default = null;
+            type = lib.types.nullOr (lib.types.enum ["hooks-only" "full"]);
+          };
           toolchain_binding = lib.mkOption {
             default = "rustToolchain";
             type = lib.types.str;

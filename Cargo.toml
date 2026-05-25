@@ -24,6 +24,9 @@ include = [
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
+[package.metadata.simit.flake]
+scope = "full"
+
 [dependencies]
 anyhow = "1"
 camino = { version = "1", features = ["serde1"] }

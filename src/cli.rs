@@ -3,6 +3,7 @@ use std::ffi::OsString;
 use camino::Utf8PathBuf;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use semver::Version;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -181,6 +182,28 @@ pub struct ReleaseCommand {
         help = "Remote to push sync-up tag moves to"
     )]
     pub remote: String,
+    #[arg(
+        long,
+        help = "Print machine-readable JSON for `simit release verify` or `simit release plan`"
+    )]
+    pub json: bool,
+    #[arg(
+        long = "dry-run-package",
+        help = "Run `cargo package` checks for each crate selected by `simit release plan`"
+    )]
+    pub dry_run_package: bool,
+    #[arg(
+        long = "version",
+        value_name = "VERSION",
+        help = "Version to verify instead of the selected package's current Cargo.toml version"
+    )]
+    pub verify_version: Option<Version>,
+    #[arg(
+        long = "push-target",
+        value_name = "REMOTE",
+        help = "Remote checked by `simit release verify` for the release tag"
+    )]
+    pub push_target: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -200,6 +223,16 @@ pub enum ReleaseAction {
     SyncUp,
     #[value(name = "trust", help = "Manage release maintainer trust roots")]
     Trust,
+    #[value(
+        name = "verify",
+        help = "Run the read-only release-bar verification report"
+    )]
+    Verify,
+    #[value(
+        name = "plan",
+        help = "Print the dependency-ordered publish plan for the current workspace"
+    )]
+    Plan,
 }
 
 impl ReleaseAction {
@@ -209,7 +242,7 @@ impl ReleaseAction {
             Self::Minor => Some(BumpKind::Minor),
             Self::Major => Some(BumpKind::Major),
             Self::Prerelease => Some(BumpKind::Prerelease),
-            Self::SyncUp | Self::Trust => None,
+            Self::SyncUp | Self::Trust | Self::Verify | Self::Plan => None,
         }
     }
 }
@@ -258,10 +291,9 @@ pub struct InitCiCommand {
         long,
         value_enum,
         value_name = "RUNTIME",
-        default_value_t = RuntimeChoice::Auto,
         help = "Command runtime used inside generated workflows"
     )]
-    pub runtime: RuntimeChoice,
+    pub runtime: Option<RuntimeChoice>,
     #[arg(
         long,
         value_name = "LABEL",
@@ -296,29 +328,62 @@ pub struct InitCiCommand {
     pub check: bool,
     #[arg(long, help = "Show a unified diff when --check finds stale files")]
     pub diff: bool,
-    #[arg(long = "with-nextest", help = "Use cargo-nextest for test steps")]
-    pub with_nextest: bool,
+    #[arg(
+        long = "with-nextest",
+        num_args = 0..=1,
+        default_missing_value = "true",
+        action = clap::ArgAction::Set,
+        help = "Use cargo-nextest for test steps; pass `--with-nextest=false` to override project config"
+    )]
+    pub with_nextest: Option<bool>,
     #[arg(
         long = "with-msrv",
-        help = "Add an MSRV check using package.rust-version"
+        num_args = 0..=1,
+        default_missing_value = "true",
+        action = clap::ArgAction::Set,
+        help = "Add an MSRV check using package.rust-version; pass `--with-msrv=false` to override project config"
     )]
-    pub with_msrv: bool,
-    #[arg(long = "with-audit", help = "Install and run cargo-audit")]
-    pub with_audit: bool,
-    #[arg(long = "with-deny", help = "Install and run cargo-deny")]
-    pub with_deny: bool,
-    #[arg(long = "with-docs", help = "Build package documentation in CI")]
-    pub with_docs: bool,
+    pub with_msrv: Option<bool>,
+    #[arg(
+        long = "with-audit",
+        num_args = 0..=1,
+        default_missing_value = "true",
+        action = clap::ArgAction::Set,
+        help = "Install and run cargo-audit; pass `--with-audit=false` to override project config"
+    )]
+    pub with_audit: Option<bool>,
+    #[arg(
+        long = "with-deny",
+        num_args = 0..=1,
+        default_missing_value = "true",
+        action = clap::ArgAction::Set,
+        help = "Install and run cargo-deny; pass `--with-deny=false` to override project config"
+    )]
+    pub with_deny: Option<bool>,
+    #[arg(
+        long = "with-docs",
+        num_args = 0..=1,
+        default_missing_value = "true",
+        action = clap::ArgAction::Set,
+        help = "Build package documentation in CI; pass `--with-docs=false` to override project config"
+    )]
+    pub with_docs: Option<bool>,
     #[arg(
         long = "with-om-ci",
+        num_args = 0..=1,
+        default_missing_value = "true",
+        action = clap::ArgAction::Set,
         help = "Replace flake check and cargo dev-shell steps with om ci run (requires --runtime nix)"
     )]
-    pub with_om_ci: bool,
+    pub with_om_ci: Option<bool>,
     #[arg(
         long = "om-ci-augment",
+        num_args = 0..=1,
+        default_missing_value = "true",
+        action = clap::ArgAction::Set,
         help = "Run om ci run alongside the legacy cargo dev-shell steps; implies --with-om-ci"
     )]
-    pub om_ci_augment: bool,
+    pub om_ci_augment: Option<bool>,
     #[arg(
         long = "omnix-ref",
         value_name = "REF",
@@ -328,12 +393,11 @@ pub struct InitCiCommand {
     #[arg(
         long = "with-artifacts",
         num_args = 0..=1,
-        default_value_t = false,
         default_missing_value = "true",
         action = clap::ArgAction::Set,
-        help = "Generate a tagged-release artifact workflow"
+        help = "Generate a tagged-release artifact workflow; pass `--with-artifacts=false` to override project config"
     )]
-    pub with_artifacts: bool,
+    pub with_artifacts: Option<bool>,
     #[arg(
         long = "with-homebrew",
         help = "Add a Homebrew tap publishing step (forgejo + nix only)"
@@ -902,7 +966,8 @@ impl Platform {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, ValueEnum)]
+#[serde(rename_all = "lowercase")]
 pub enum RuntimeChoice {
     #[value(help = "Use simit's default runtime choice for the target platform")]
     Auto,
@@ -912,7 +977,8 @@ pub enum RuntimeChoice {
     Nix,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
 pub enum Runtime {
     Cargo,
     Nix,
@@ -920,6 +986,12 @@ pub enum Runtime {
 
 #[derive(Debug, Args)]
 pub struct InitFlakeCommand {
+    #[arg(
+        long,
+        value_enum,
+        help = "Generated ownership scope: hooks-only manages nix/pre-commit.nix; full also manages flake.nix and formatter wiring"
+    )]
+    pub scope: Option<FlakeScopeArg>,
     #[arg(long, help = "Verify flake and hook files match generated output")]
     pub check: bool,
     #[arg(
@@ -929,6 +1001,12 @@ pub struct InitFlakeCommand {
     pub print: bool,
     #[arg(long, help = "Show a unified diff when --check finds stale files")]
     pub diff: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum FlakeScopeArg {
+    HooksOnly,
+    Full,
 }
 
 #[derive(Debug, Args)]
@@ -1008,6 +1086,11 @@ pub struct ProjectsListArgs {
         help = "Filter to projects where feature NAME has STATUS, or any non-absent status"
     )]
     pub features: Vec<String>,
+    #[arg(
+        long = "include-ephemeral",
+        help = "Include ephemeral /tmp project paths in the listing"
+    )]
+    pub include_ephemeral: bool,
     #[arg(long, help = "Print a machine-readable JSON array")]
     pub json: bool,
     #[arg(
