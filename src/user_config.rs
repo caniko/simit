@@ -180,7 +180,11 @@ impl UserConfig {
         let release = if let Some(label) = runner_override {
             ResolvedRunner::literal(label)?
         } else {
-            self.default_runner(platform, RunnerKind::Release, RunnerOs::Linux, runtime)?
+            let release_kind = match runtime {
+                Runtime::Cargo => RunnerKind::Release,
+                Runtime::Nix => RunnerKind::Nix,
+            };
+            self.default_runner(platform, release_kind, RunnerOs::Linux, runtime)?
         };
 
         let windows = if needs_windows {

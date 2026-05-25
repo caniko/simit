@@ -230,6 +230,39 @@ release = "atlas"
     command
 }
 
+fn simit_with_split_runtime_user_config(root: &Path) -> Command {
+    let config_dir = root.join(".xdg/simit");
+    fs::create_dir_all(&config_dir).unwrap();
+    fs::write(
+        config_dir.join("config.toml"),
+        r#"[ci.runners.atlas]
+platform = "forgejo"
+labels = ["atlas"]
+os = "linux"
+arch = "x86_64"
+runtimes = ["cargo"]
+trusted = true
+
+[ci.runners.atlas_nix]
+platform = "forgejo"
+labels = ["atlas-nix-trusted"]
+os = "linux"
+arch = "x86_64"
+runtimes = ["nix"]
+trusted = true
+
+[ci.defaults.forgejo]
+cargo = "atlas"
+nix = "atlas_nix"
+release = "atlas"
+"#,
+    )
+    .unwrap();
+    let mut command = simit();
+    command.env("XDG_CONFIG_HOME", root.join(".xdg"));
+    command
+}
+
 fn read(path: &Path) -> String {
     fs::read_to_string(path).unwrap_or_else(|err| panic!("reading {}: {err}", path.display()))
 }
@@ -789,6 +822,24 @@ fn forgejo_user_config_can_render_structured_runner_labels() {
 
     let publish = read(&temp.path().join(".forgejo/workflows/publish-crate.yaml"));
     assert!(publish.contains("runs-on: [\"self-hosted\", \"atlas\"]"));
+}
+
+#[test]
+fn forgejo_nix_runtime_uses_nix_runner_for_publish_jobs() {
+    let temp = init_package(true);
+
+    let status = simit_with_split_runtime_user_config(temp.path())
+        .current_dir(temp.path())
+        .args(["init", "ci", "--platform", "forgejo", "--runtime", "nix"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let ci = read(&temp.path().join(".forgejo/workflows/ci.yaml"));
+    assert!(ci.contains("runs-on: atlas-nix-trusted"));
+
+    let publish = read(&temp.path().join(".forgejo/workflows/publish-crate.yaml"));
+    assert!(publish.contains("runs-on: atlas-nix-trusted"));
 }
 
 #[test]
