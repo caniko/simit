@@ -164,5 +164,16 @@
     "risk": "low",
     "scope": "cross-org"
   },
-  "verify": null
+  "verify": {
+    "verified_at": 1779695740,
+    "elapsed_seconds": null,
+    "outcome": "partial",
+    "phase_outcomes": {
+      "1": "passed",
+      "2": "failed",
+      "3": "failed"
+    },
+    "emergency_changes": null,
+    "surprises": "missed-signal: sandbox-tmpdir-test-brittle: tests/projects.rs:498 (list_filters_tmp_missing_paths_from_attention_footer) relies on $TMPDIR being /tmp via TempDir::new(); fails in Nix build sandbox where $TMPDIR is /build/nix-build-... and the ephemeral-path filter does not match. Fix: TempDir::new_in(\"/tmp\") or hardcode the test path. The production filter is correct.\nmissed-signal: phase03-release-sequencing-violated: phase 03 step 4 (tag v0.15.3) was executed BEFORE phases 01 and 02 landed. The followup source then went into commit ef20925 (post-tag). No 0.15.4 release was cut, so PATH simit lacks the followup behaviors despite canix flake.lock being bumped to a post-followup rev. The plan dependency table said 03 depended on 01,02 — that gate was not enforced at execution time."
+  }
 }
