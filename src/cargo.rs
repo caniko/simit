@@ -178,6 +178,35 @@ pub fn select_packages(
     }
 }
 
+/// Select one package to supply metadata fallbacks for a workspace-level
+/// packaging channel (aur/copr/apt).
+///
+/// Unlike [`select_packages`], this never errors on multi-package workspaces:
+/// with an explicit `requested` name it selects that package, otherwise it
+/// returns the alphabetically-first workspace member. Channel config is
+/// expected to provide the substantive fields; the package only fills in
+/// `description`/`license`/`homepage`/`name` fallbacks.
+pub fn representative_package(metadata: &Metadata, requested: Option<&str>) -> Result<Package> {
+    if let Some(name) = requested {
+        return select_packages(metadata, std::slice::from_ref(&name.to_owned()), false)?
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow!("package `{name}` is not a workspace member"));
+    }
+
+    let mut members = metadata
+        .packages
+        .iter()
+        .filter(|package| metadata.workspace_members.contains(&package.id))
+        .cloned()
+        .collect::<Vec<_>>();
+    members.sort_by(|left, right| left.name.cmp(&right.name));
+    members
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow!("workspace has no packages"))
+}
+
 pub fn plan_versions(packages: Vec<Package>, bump: &BumpSpec) -> Result<Vec<VersionPlan>> {
     packages
         .into_iter()

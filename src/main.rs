@@ -31,11 +31,18 @@ fn run() -> Result<()> {
             InitAction::HomebrewTap(command) => commands::init_homebrew_tap::run(command),
             InitAction::Chocolatey(command) => commands::init_chocolatey::run(command),
             InitAction::ScoopBucket(command) => commands::init_scoop_bucket::run(command),
+            InitAction::Aur(command) => commands::init_aur::run(command),
+            InitAction::Copr(command) => commands::init_copr::run(command),
+            InitAction::Apt(command) => commands::init_apt::run(command),
+            InitAction::Release(command) => commands::init_release::run(command),
         },
         Commands::Dist(command) => match command.action {
             DistAction::Homebrew(command) => commands::homebrew::run(command),
             DistAction::Chocolatey(command) => commands::chocolatey::run(command),
             DistAction::Scoop(command) => commands::scoop::run(command),
+            DistAction::Aur(command) => commands::aur::run(command),
+            DistAction::Copr(command) => commands::copr::run(command),
+            DistAction::Apt(command) => commands::apt::run(command),
         },
         Commands::Changelog(command) => commands::changelog::run(command),
         Commands::Hooks(command) => match command.action {

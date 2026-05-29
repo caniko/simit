@@ -38,6 +38,63 @@ pub struct ProjectConfig {
     pub chocolatey: Option<ChocolateyConfig>,
     #[serde(default)]
     pub scoop: Option<ScoopConfig>,
+    #[serde(default)]
+    pub aur: Option<AurConfig>,
+    #[serde(default)]
+    pub copr: Option<CoprConfig>,
+    #[serde(default)]
+    pub apt: Option<AptConfig>,
+    #[serde(default)]
+    pub flatpak: Option<FlatpakConfig>,
+    #[serde(default)]
+    pub winget: Option<WingetConfig>,
+}
+
+/// `[flatpak]` — open a Flathub manifest-update PR on stable releases.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct FlatpakConfig {
+    /// GitHub `flathub/<app-id>` repository.
+    pub repo: String,
+    /// Flatpak application id.
+    pub app_id: String,
+    /// Manifest files copied into the Flathub PR.
+    #[serde(default)]
+    pub manifest_files: Vec<String>,
+    /// Base branch the PR targets.
+    #[serde(default = "default_flatpak_base_branch")]
+    pub base_branch: String,
+    /// CI secret holding the GitHub PAT.
+    #[serde(default = "default_flathub_token_secret")]
+    pub token_secret: String,
+}
+
+fn default_flatpak_base_branch() -> String {
+    "master".to_owned()
+}
+
+fn default_flathub_token_secret() -> String {
+    "FLATHUB_TOKEN".to_owned()
+}
+
+/// `[winget]` — submit a winget-pkgs manifest PR on stable releases.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WingetConfig {
+    /// winget `PackageIdentifier`, e.g. `Caniko.Modde`.
+    pub package_id: String,
+    /// Codeberg/GitHub `<owner>/<repo>` for the installer download URL.
+    pub download_repo: String,
+    /// Windows zip file name with a literal `{version}` placeholder, used as the
+    /// installer URL, e.g. `modde-{version}-x86_64-windows.zip`.
+    pub zip_archive: String,
+    /// CI secret holding the GitHub PAT.
+    #[serde(default = "default_winget_token_secret")]
+    pub token_secret: String,
+}
+
+fn default_winget_token_secret() -> String {
+    "WINGET_PAT".to_owned()
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -163,6 +220,192 @@ pub struct ReleaseConfig {
     pub signing: ReleaseSigningConfig,
     #[serde(default)]
     pub smoke: ReleaseSmokeConfig,
+    /// Codeberg/Forgejo release publication via the REST API.
+    #[serde(default)]
+    pub codeberg: Option<CodebergReleaseConfig>,
+    /// Build matrix + signing knobs for the comprehensive release workflow.
+    #[serde(default)]
+    pub artifacts: ArtifactsConfig,
+    /// Optional Attic (Nix binary cache) push.
+    #[serde(default)]
+    pub attic: Option<AtticConfig>,
+    /// Optional Mastodon/Matrix stable-release announcements.
+    #[serde(default)]
+    pub announce: Option<AnnounceConfig>,
+    /// Optional Windows Authenticode signing of release `.exe`s.
+    #[serde(default)]
+    pub windows_signing: Option<WindowsSigningConfig>,
+}
+
+/// `[release.announce]` — post a stable-release note to Mastodon and/or Matrix.
+/// Presence enables the step; each backend is skipped when its secrets are unset.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AnnounceConfig {
+    #[serde(default = "default_mastodon_token_secret")]
+    pub mastodon_token_secret: String,
+    #[serde(default = "default_mastodon_base_url_secret")]
+    pub mastodon_base_url_secret: String,
+    #[serde(default = "default_matrix_token_secret")]
+    pub matrix_token_secret: String,
+    #[serde(default = "default_matrix_homeserver_secret")]
+    pub matrix_homeserver_secret: String,
+    #[serde(default = "default_matrix_room_secret")]
+    pub matrix_room_secret: String,
+}
+
+fn default_mastodon_token_secret() -> String {
+    "MASTODON_TOKEN".to_owned()
+}
+fn default_mastodon_base_url_secret() -> String {
+    "MASTODON_BASE_URL".to_owned()
+}
+fn default_matrix_token_secret() -> String {
+    "MATRIX_TOKEN".to_owned()
+}
+fn default_matrix_homeserver_secret() -> String {
+    "MATRIX_HOMESERVER".to_owned()
+}
+fn default_matrix_room_secret() -> String {
+    "MATRIX_ROOM".to_owned()
+}
+
+/// `[release.windows_signing]` — Authenticode-sign and package Windows `.exe`s.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WindowsSigningConfig {
+    /// Directory holding the built `.exe`s, relative to the workspace.
+    #[serde(default = "default_windows_dir")]
+    pub dir: String,
+    /// Binary basenames (without `.exe`).
+    pub binaries: Vec<String>,
+    /// osslsigncode `-n` program name.
+    pub sign_name: String,
+    /// osslsigncode `-i` info URL.
+    pub sign_url: String,
+    /// RFC3161 timestamp URL.
+    #[serde(default = "default_timestamp_url")]
+    pub timestamp_url: String,
+    /// tar.gz archive name with `{version}` placeholder.
+    pub tar_archive: String,
+    /// zip archive name with `{version}` placeholder.
+    pub zip_archive: String,
+    #[serde(default = "default_windows_pfx_secret")]
+    pub pfx_secret: String,
+    #[serde(default = "default_windows_pass_secret")]
+    pub pass_secret: String,
+    #[serde(default = "default_windows_subject_secret")]
+    pub subject_secret: String,
+}
+
+fn default_windows_dir() -> String {
+    "release/windows-x86_64".to_owned()
+}
+fn default_timestamp_url() -> String {
+    "http://timestamp.digicert.com".to_owned()
+}
+fn default_windows_pfx_secret() -> String {
+    "WINDOWS_SIGNING_PFX".to_owned()
+}
+fn default_windows_pass_secret() -> String {
+    "WINDOWS_SIGNING_PASS".to_owned()
+}
+fn default_windows_subject_secret() -> String {
+    "WINDOWS_SIGNING_SUBJECT".to_owned()
+}
+
+/// `[release.artifacts]` — release workflow build + signing configuration.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactsConfig {
+    /// Runner label for the release job; defaults to the CI runner or `atlas`.
+    pub runner: Option<String>,
+    /// `nix.conf` substituters added in the install-nix step.
+    #[serde(default)]
+    pub substituters: Vec<String>,
+    /// `nix.conf` trusted-public-keys added in the install-nix step.
+    #[serde(default)]
+    pub trusted_public_keys: Vec<String>,
+    /// Flake attribute whose `.version` must equal the tag
+    /// (`nix eval --raw .#<attr>.version`). Skipped when unset.
+    pub version_attr: Option<String>,
+    /// Optional supply-chain gate command run before building.
+    pub supply_chain_command: Option<String>,
+    /// Build-step body lines, emitted verbatim (project-specific).
+    #[serde(default)]
+    pub build_commands: Vec<String>,
+    /// SBOM / supply-chain report command lines, emitted verbatim before the
+    /// build step when non-empty.
+    #[serde(default)]
+    pub sbom_commands: Vec<String>,
+    /// `sha256sum` arguments (globs relative to `release/`) for SHA256SUMS.txt.
+    #[serde(default)]
+    pub checksum_globs: Vec<String>,
+    /// Committed minisign public key used to verify the signed checksums.
+    #[serde(default = "default_minisign_pub")]
+    pub minisign_pub: String,
+    /// Skip artifact signing (minisign + cosign) when false.
+    #[serde(default = "default_true")]
+    pub sign: bool,
+}
+
+fn default_minisign_pub() -> String {
+    "keys/minisign.pub".to_owned()
+}
+
+/// `[release.attic]` — push built Nix closures to an Attic cache.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AtticConfig {
+    /// Cache name, e.g. `canix`.
+    pub cache: String,
+    /// Attic server URL.
+    pub url: String,
+    /// Env var holding the directory of per-project token files.
+    #[serde(default = "default_attic_token_dir_env")]
+    pub token_dir_env: String,
+    /// Token file name within `$<token_dir_env>`.
+    pub token_name: String,
+    /// `--out-link` result paths pushed to the cache.
+    #[serde(default)]
+    pub result_links: Vec<String>,
+}
+
+fn default_attic_token_dir_env() -> String {
+    "ATTIC_TOKENS_DIR".to_owned()
+}
+
+/// `[release.codeberg]` — create the Codeberg/Forgejo release and upload assets.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CodebergReleaseConfig {
+    /// `<owner>/<repo>` whose release receives the uploaded assets.
+    pub repo: String,
+    /// REST API base URL.
+    #[serde(default = "default_codeberg_api_base")]
+    pub api_base: String,
+    /// CI secret holding the API token.
+    #[serde(default = "default_codeberg_token_secret")]
+    pub token_secret: String,
+    /// `target_commitish` the release tag points at.
+    #[serde(default = "default_release_target_branch")]
+    pub target_branch: String,
+    /// Use `CHANGELOG.md` as the release body.
+    #[serde(default = "default_true")]
+    pub body_from_changelog: bool,
+}
+
+fn default_release_target_branch() -> String {
+    "main".to_owned()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedCodebergRelease {
+    pub repo: String,
+    pub api_base: String,
+    pub token_secret: String,
+    pub target_branch: String,
+    pub body_from_changelog: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -296,6 +539,42 @@ pub struct ChocolateyConfig {
     /// Chocolatey push settings.
     #[serde(default)]
     pub push: ChocolateyPushConfig,
+
+    /// `nix shell` packages providing `choco` (and `simit`) for the generated
+    /// release step. Lets a project point at a fork that already ships the
+    /// chocolatey package — e.g.
+    /// `github:caniko/nixpkgs/add-chocolatey-scoop#chocolatey github:caniko/simit`
+    /// — until it lands in upstream nixpkgs. Defaults to `nixpkgs#chocolatey`.
+    #[serde(default = "default_chocolatey_nix_tool")]
+    pub nix_tool: String,
+
+    /// Env var the publish step reads the push API key from (passed to
+    /// `--api-key-env`). Defaults to `CHOCOLATEY_API_KEY`.
+    #[serde(default = "default_chocolatey_api_key_env")]
+    pub api_key_env: String,
+
+    /// Actions secret sourced into `api_key_env`. Defaults to
+    /// `chocolatey_api_key`. Ignored when `api_key_from_runner` is true.
+    #[serde(default = "default_chocolatey_api_key_secret")]
+    pub api_key_secret: String,
+
+    /// When true, do not source the key from an Actions secret — assume the
+    /// forge runner already provides `api_key_env` in the job environment (e.g.
+    /// a Forgejo runner credential exposed as a container env var).
+    #[serde(default)]
+    pub api_key_from_runner: bool,
+}
+
+fn default_chocolatey_nix_tool() -> String {
+    "nixpkgs#chocolatey".to_owned()
+}
+
+fn default_chocolatey_api_key_env() -> String {
+    "CHOCOLATEY_API_KEY".to_owned()
+}
+
+fn default_chocolatey_api_key_secret() -> String {
+    "chocolatey_api_key".to_owned()
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -396,6 +675,290 @@ fn default_true() -> bool {
     true
 }
 
+fn default_aur_arch() -> String {
+    "x86_64".to_owned()
+}
+
+fn default_aur_ssh_remote() -> String {
+    "ssh://aur@aur.archlinux.org".to_owned()
+}
+
+fn default_aur_ssh_key_secret() -> String {
+    "AUR_SSH_KEY".to_owned()
+}
+
+fn default_aur_source_archive_pattern() -> String {
+    "{repo}-{version}.tar.gz".to_owned()
+}
+
+fn default_aur_binary_archive_pattern() -> String {
+    "{name}-{version}-x86_64-linux.tar.gz".to_owned()
+}
+
+fn default_codeberg_api_base() -> String {
+    "https://codeberg.org/api/v1".to_owned()
+}
+
+fn default_codeberg_token_secret() -> String {
+    "codeberg_token".to_owned()
+}
+
+fn default_copr_spec_path() -> Option<String> {
+    None
+}
+
+fn default_apt_branch() -> String {
+    "pages".to_owned()
+}
+
+fn default_apt_distribution() -> String {
+    "stable".to_owned()
+}
+
+fn default_apt_debian_release() -> String {
+    "bookworm".to_owned()
+}
+
+fn default_aur_doc_changelog() -> Option<String> {
+    Some("CHANGELOG.md".to_owned())
+}
+
+fn default_aur_license_file() -> Option<String> {
+    Some("LICENSE".to_owned())
+}
+
+fn default_aur_readme() -> Option<String> {
+    Some("README.md".to_owned())
+}
+
+/// `[aur]` — Arch User Repository packaging across source/binary/VCS flavors.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AurConfig {
+    /// pkgbase / source pkgname; if omitted, derived from the Cargo package name.
+    pub name: Option<String>,
+    /// `pkgdesc`; if omitted, derived from Cargo metadata.
+    pub description: Option<String>,
+    /// Project `url`; if omitted, derived from Cargo package homepage.
+    pub url: Option<String>,
+    /// SPDX `license`; if omitted, derived from Cargo metadata.
+    pub license: Option<String>,
+    /// Maintainer line, e.g. `Name <email>`. Emitted as a `# Maintainer:` comment.
+    pub maintainer: Option<String>,
+    /// Maintainer OpenPGP fingerprint, emitted as a `# Maintainer GPG key:` comment.
+    pub maintainer_gpg: Option<String>,
+    #[serde(default = "default_aur_arch")]
+    pub arch: String,
+    /// Runtime `depends`.
+    #[serde(default)]
+    pub depends: Vec<String>,
+    /// Build-time `makedepends` for the source/VCS flavors (e.g. cargo, rust, cmake).
+    #[serde(default)]
+    pub makedepends: Vec<String>,
+    /// Minimum glibc for the `-bin` flavor; when set, `glibc` becomes `glibc>=<min>`.
+    pub bin_glibc_min: Option<String>,
+    /// Binaries installed into `/usr/bin`. If omitted, defaults to `[name]`.
+    #[serde(default)]
+    pub binaries: Vec<String>,
+    /// Extra non-binary install assets (desktop/icon/metainfo, ...).
+    #[serde(default)]
+    pub assets: Vec<AurAsset>,
+    /// `LICENSE` file installed into `/usr/share/licenses/<pkg>/`.
+    #[serde(default = "default_aur_license_file")]
+    pub license_file: Option<String>,
+    /// README installed into `/usr/share/doc/<pkg>/`.
+    #[serde(default = "default_aur_readme")]
+    pub readme: Option<String>,
+    /// CHANGELOG installed into `/usr/share/doc/<pkg>/`.
+    #[serde(default = "default_aur_doc_changelog")]
+    pub changelog: Option<String>,
+    /// Codeberg/GitHub `<owner>/<repo>` used for release-download source URLs.
+    pub download_repo: String,
+    /// Source tarball pattern with `{repo}`, `{version}`.
+    #[serde(default = "default_aur_source_archive_pattern")]
+    pub source_archive_pattern: String,
+    /// Prebuilt-binary archive pattern with `{name}`, `{version}`.
+    #[serde(default = "default_aur_binary_archive_pattern")]
+    pub binary_archive_pattern: String,
+    /// `git+` source URL for the `-git` flavor; defaults to `https://<host>/<repo>.git`.
+    pub git_url: Option<String>,
+    /// Which flavors to emit. Each defaults to true.
+    #[serde(default)]
+    pub flavors: AurFlavors,
+    /// SSH remote base for publishing, e.g. `ssh://aur@aur.archlinux.org`.
+    #[serde(default = "default_aur_ssh_remote")]
+    pub ssh_remote: String,
+    /// CI secret holding the AUR SSH private key.
+    #[serde(default = "default_aur_ssh_key_secret")]
+    pub ssh_key_secret: String,
+    /// Skip AUR publishing for prerelease versions.
+    #[serde(default = "default_true")]
+    pub stable_only: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AurAsset {
+    /// Source path relative to the extracted tree.
+    pub source: String,
+    /// Install destination under `$pkgdir`.
+    pub dest: String,
+    /// Install mode; defaults to `644`.
+    #[serde(default = "default_asset_mode")]
+    pub mode: String,
+}
+
+fn default_asset_mode() -> String {
+    "644".to_owned()
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AurFlavors {
+    #[serde(default = "default_true")]
+    pub source: bool,
+    #[serde(default = "default_true")]
+    pub bin: bool,
+    #[serde(default = "default_true")]
+    pub git: bool,
+}
+
+impl AurFlavors {
+    pub fn any_enabled(&self) -> bool {
+        self.source || self.bin || self.git
+    }
+}
+
+impl Default for AurFlavors {
+    fn default() -> Self {
+        Self {
+            source: true,
+            bin: true,
+            git: true,
+        }
+    }
+}
+
+/// `[copr]` — Fedora COPR packaging (RPM spec + `.copr/Makefile` SRPM build).
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CoprConfig {
+    /// `%global crate` / `Name`; if omitted, derived from the Cargo package name.
+    pub name: Option<String>,
+    /// `Summary`; if omitted, derived from Cargo metadata.
+    pub summary: Option<String>,
+    /// Longer `%description` prose; if omitted, falls back to the summary.
+    pub description: Option<String>,
+    /// SPDX `License`; if omitted, derived from Cargo metadata.
+    pub license: Option<String>,
+    /// Project `URL`; if omitted, derived from Cargo package homepage.
+    pub url: Option<String>,
+    /// Codeberg/GitHub `<owner>/<repo>` used for the source-archive URL.
+    pub download_repo: String,
+    /// `BuildRequires` entries.
+    #[serde(default)]
+    pub build_requires: Vec<String>,
+    /// Binaries installed by `%install` into `%{_bindir}`. Defaults to `[name]`.
+    #[serde(default)]
+    pub binaries: Vec<String>,
+    /// Spec path relative to the workspace root; defaults to `<name>.spec`.
+    #[serde(default = "default_copr_spec_path")]
+    pub spec_path: Option<String>,
+    /// COPR project for stable releases, e.g. `owner/project`.
+    pub project: Option<String>,
+    /// COPR project for prereleases; defaults to `<project>-testing`.
+    pub testing_project: Option<String>,
+    #[serde(default = "default_copr_login_secret")]
+    pub login_secret: String,
+    #[serde(default = "default_copr_username_secret")]
+    pub username_secret: String,
+    #[serde(default = "default_copr_token_secret")]
+    pub token_secret: String,
+}
+
+fn default_copr_login_secret() -> String {
+    "copr_login".to_owned()
+}
+
+fn default_copr_username_secret() -> String {
+    "copr_username".to_owned()
+}
+
+fn default_copr_token_secret() -> String {
+    "copr_token".to_owned()
+}
+
+/// `[apt]` — Debian packaging published via reprepro to a Codeberg Pages repo.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AptConfig {
+    /// Git remote of the apt repository, e.g.
+    /// `ssh://git@codeberg.org/<owner>/<name>-apt.git`.
+    pub repo_url: String,
+    /// Branch served by Codeberg Pages.
+    #[serde(default = "default_apt_branch")]
+    pub branch: String,
+    /// reprepro `Codename`/distribution, e.g. `stable`.
+    #[serde(default = "default_apt_distribution")]
+    pub distribution: String,
+    /// Human label for the `Origin`/`Label`; defaults to the package name.
+    pub label: Option<String>,
+    /// reprepro architectures line; defaults to `amd64`.
+    #[serde(default = "default_apt_architectures")]
+    pub architectures: String,
+    /// reprepro components line; defaults to `main`.
+    #[serde(default = "default_apt_components")]
+    pub components: String,
+    /// Debian release used for the debootstrap build chroot.
+    #[serde(default = "default_apt_debian_release")]
+    pub debian_release: String,
+    /// Cargo packages built with `cargo deb -p <pkg>`.
+    #[serde(default)]
+    pub packages: Vec<String>,
+    /// Debian build-chroot apt packages installed before `cargo deb`.
+    #[serde(default)]
+    pub build_deps: Vec<String>,
+    /// `cargo-deb` version installed in the build chroot.
+    #[serde(default = "default_cargo_deb_version")]
+    pub cargo_deb_version: String,
+    #[serde(default = "default_apt_gpg_key_secret")]
+    pub gpg_key_secret: String,
+    #[serde(default = "default_apt_gpg_key_id_secret")]
+    pub gpg_key_id_secret: String,
+    #[serde(default = "default_apt_gpg_passphrase_secret")]
+    pub gpg_passphrase_secret: String,
+    #[serde(default = "default_apt_ssh_key_secret")]
+    pub ssh_key_secret: String,
+}
+
+fn default_apt_architectures() -> String {
+    "amd64".to_owned()
+}
+
+fn default_apt_components() -> String {
+    "main".to_owned()
+}
+
+fn default_apt_gpg_key_secret() -> String {
+    "apt_repo_gpg_key".to_owned()
+}
+
+fn default_apt_gpg_key_id_secret() -> String {
+    "apt_repo_gpg_key_id".to_owned()
+}
+
+fn default_apt_gpg_passphrase_secret() -> String {
+    "apt_repo_gpg_passphrase".to_owned()
+}
+
+fn default_apt_ssh_key_secret() -> String {
+    "apt_repo_ssh_key".to_owned()
+}
+
+fn default_cargo_deb_version() -> String {
+    "2.5.0".to_owned()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedHomebrew {
     pub name: String,
@@ -436,6 +999,10 @@ pub struct ResolvedChocolatey {
     pub download_repo: String,
     pub archive_pattern: String,
     pub push: ChocolateyPushConfig,
+    pub nix_tool: String,
+    pub api_key_env: String,
+    pub api_key_secret: String,
+    pub api_key_from_runner: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -478,6 +1045,98 @@ pub struct ScoopOverrides<'a> {
     pub archive_pattern: Option<&'a str>,
     pub binaries: Option<&'a [String]>,
     pub disabled_architectures: &'a [String],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedAur {
+    pub name: String,
+    pub description: String,
+    pub url: String,
+    pub license: String,
+    pub maintainer: Option<String>,
+    pub maintainer_gpg: Option<String>,
+    pub arch: String,
+    pub depends: Vec<String>,
+    pub makedepends: Vec<String>,
+    pub bin_glibc_min: Option<String>,
+    pub binaries: Vec<String>,
+    pub assets: Vec<AurAsset>,
+    pub license_file: Option<String>,
+    pub readme: Option<String>,
+    pub changelog: Option<String>,
+    pub download_repo: String,
+    /// Repository basename (the `<repo>` of `<owner>/<repo>`).
+    pub repo: String,
+    pub source_archive_pattern: String,
+    pub binary_archive_pattern: String,
+    pub git_url: String,
+    pub flavors: AurFlavors,
+    pub ssh_remote: String,
+    pub ssh_key_secret: String,
+    pub stable_only: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct AurOverrides<'a> {
+    pub name: Option<&'a str>,
+    pub description: Option<&'a str>,
+    pub url: Option<&'a str>,
+    pub license: Option<&'a str>,
+    pub download_repo: Option<&'a str>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedCopr {
+    pub name: String,
+    pub summary: String,
+    pub description: String,
+    pub license: String,
+    pub url: String,
+    pub download_repo: String,
+    pub repo: String,
+    pub build_requires: Vec<String>,
+    pub binaries: Vec<String>,
+    pub spec_path: String,
+    pub project: Option<String>,
+    pub testing_project: Option<String>,
+    pub login_secret: String,
+    pub username_secret: String,
+    pub token_secret: String,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CoprOverrides<'a> {
+    pub name: Option<&'a str>,
+    pub summary: Option<&'a str>,
+    pub description: Option<&'a str>,
+    pub license: Option<&'a str>,
+    pub url: Option<&'a str>,
+    pub download_repo: Option<&'a str>,
+    pub project: Option<&'a str>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedApt {
+    pub label: String,
+    pub repo_url: String,
+    pub branch: String,
+    pub distribution: String,
+    pub architectures: String,
+    pub components: String,
+    pub debian_release: String,
+    pub packages: Vec<String>,
+    pub build_deps: Vec<String>,
+    pub cargo_deb_version: String,
+    pub gpg_key_secret: String,
+    pub gpg_key_id_secret: String,
+    pub gpg_passphrase_secret: String,
+    pub ssh_key_secret: String,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct AptOverrides<'a> {
+    pub repo_url: Option<&'a str>,
+    pub label: Option<&'a str>,
 }
 
 impl ProjectConfig {
@@ -880,6 +1539,16 @@ impl ProjectConfig {
             push: ChocolateyPushConfig {
                 source: push_source,
             },
+            nix_tool: cfg.map_or_else(default_chocolatey_nix_tool, |chocolatey| {
+                chocolatey.nix_tool.clone()
+            }),
+            api_key_env: cfg.map_or_else(default_chocolatey_api_key_env, |chocolatey| {
+                chocolatey.api_key_env.clone()
+            }),
+            api_key_secret: cfg.map_or_else(default_chocolatey_api_key_secret, |chocolatey| {
+                chocolatey.api_key_secret.clone()
+            }),
+            api_key_from_runner: cfg.is_some_and(|chocolatey| chocolatey.api_key_from_runner),
         })
     }
 
@@ -957,8 +1626,345 @@ impl ProjectConfig {
         })
     }
 
+    /// Validate the optional `[aur]` section.
+    pub fn validate_aur(&self) -> Result<()> {
+        let Some(aur) = &self.aur else {
+            return Ok(());
+        };
+        validate_owner_repo(
+            "simit project config: [aur].download_repo",
+            &aur.download_repo,
+        )?;
+        if !aur.flavors.any_enabled() {
+            bail!("simit project config: [aur].flavors has all flavors disabled");
+        }
+        Ok(())
+    }
+
+    /// Validate the optional `[copr]` section.
+    pub fn validate_copr(&self) -> Result<()> {
+        let Some(copr) = &self.copr else {
+            return Ok(());
+        };
+        validate_owner_repo(
+            "simit project config: [copr].download_repo",
+            &copr.download_repo,
+        )?;
+        Ok(())
+    }
+
+    /// Validate the optional `[apt]` section.
+    pub fn validate_apt(&self) -> Result<()> {
+        let Some(apt) = &self.apt else {
+            return Ok(());
+        };
+        if apt.repo_url.is_empty() {
+            bail!("simit project config: [apt].repo_url is required");
+        }
+        // The apt repo_url is an SSH git remote (e.g. ssh://git@host/...), where a
+        // `user@` userinfo is expected; only reject an embedded `:password@`.
+        reject_password_url("simit project config: [apt].repo_url", &apt.repo_url)?;
+        Ok(())
+    }
+
+    /// Resolve AUR settings for one Cargo package.
+    pub fn resolve_aur(
+        &self,
+        overrides: AurOverrides<'_>,
+        package: &crate::cargo::Package,
+    ) -> Result<ResolvedAur> {
+        self.validate_aur()?;
+        let cfg = self.aur.as_ref();
+        let name = merge_packager(
+            overrides.name.map(str::to_owned),
+            cfg.and_then(|aur| aur.name.clone()),
+            Some(package.name.clone()),
+            missing_packager_message("aur", "name", "--aur-name", "package.name"),
+        )?;
+        let description = merge_packager(
+            overrides.description.map(str::to_owned),
+            cfg.and_then(|aur| aur.description.clone()),
+            package.description.clone(),
+            missing_packager_message(
+                "aur",
+                "description",
+                "--aur-description",
+                "package.description",
+            ),
+        )?;
+        let license = merge_packager(
+            overrides.license.map(str::to_owned),
+            cfg.and_then(|aur| aur.license.clone()),
+            package.license.clone(),
+            missing_packager_message("aur", "license", "--aur-license", "package.license"),
+        )?;
+        let download_repo = merge_packager(
+            overrides.download_repo.map(str::to_owned),
+            cfg.map(|aur| aur.download_repo.clone()),
+            None,
+            missing_packager_message("aur", "download_repo", "--aur-download-repo", ""),
+        )?;
+        validate_owner_repo("aur.download_repo", &download_repo)?;
+        let repo = repo_basename(&download_repo);
+        let url = overrides
+            .url
+            .map(str::to_owned)
+            .or_else(|| cfg.and_then(|aur| aur.url.clone()))
+            .unwrap_or_else(|| format!("https://codeberg.org/{download_repo}"));
+        let binaries = resolve_named_binaries(cfg.map(|aur| aur.binaries.as_slice()), &name);
+        let git_url = cfg
+            .and_then(|aur| aur.git_url.clone())
+            .unwrap_or_else(|| format!("https://codeberg.org/{download_repo}.git"));
+
+        Ok(ResolvedAur {
+            name,
+            description,
+            url,
+            license,
+            maintainer: cfg.and_then(|aur| aur.maintainer.clone()),
+            maintainer_gpg: cfg.and_then(|aur| aur.maintainer_gpg.clone()),
+            arch: cfg.map_or_else(default_aur_arch, |aur| aur.arch.clone()),
+            depends: cfg.map(|aur| aur.depends.clone()).unwrap_or_default(),
+            makedepends: cfg.map(|aur| aur.makedepends.clone()).unwrap_or_default(),
+            bin_glibc_min: cfg.and_then(|aur| aur.bin_glibc_min.clone()),
+            binaries,
+            assets: cfg.map(|aur| aur.assets.clone()).unwrap_or_default(),
+            license_file: cfg.map_or_else(default_aur_license_file, |aur| aur.license_file.clone()),
+            readme: cfg.map_or_else(default_aur_readme, |aur| aur.readme.clone()),
+            changelog: cfg.map_or_else(default_aur_doc_changelog, |aur| aur.changelog.clone()),
+            download_repo,
+            repo,
+            source_archive_pattern: cfg.map_or_else(default_aur_source_archive_pattern, |aur| {
+                aur.source_archive_pattern.clone()
+            }),
+            binary_archive_pattern: cfg.map_or_else(default_aur_binary_archive_pattern, |aur| {
+                aur.binary_archive_pattern.clone()
+            }),
+            git_url,
+            flavors: cfg.map(|aur| aur.flavors).unwrap_or_default(),
+            ssh_remote: cfg.map_or_else(default_aur_ssh_remote, |aur| aur.ssh_remote.clone()),
+            ssh_key_secret: cfg
+                .map_or_else(default_aur_ssh_key_secret, |aur| aur.ssh_key_secret.clone()),
+            stable_only: cfg.is_none_or(|aur| aur.stable_only),
+        })
+    }
+
+    /// Resolve COPR settings for one Cargo package.
+    pub fn resolve_copr(
+        &self,
+        overrides: CoprOverrides<'_>,
+        package: &crate::cargo::Package,
+    ) -> Result<ResolvedCopr> {
+        self.validate_copr()?;
+        let cfg = self.copr.as_ref();
+        let name = merge_packager(
+            overrides.name.map(str::to_owned),
+            cfg.and_then(|copr| copr.name.clone()),
+            Some(package.name.clone()),
+            missing_packager_message("copr", "name", "--copr-name", "package.name"),
+        )?;
+        let summary = merge_packager(
+            overrides.summary.map(str::to_owned),
+            cfg.and_then(|copr| copr.summary.clone()),
+            package.description.clone(),
+            missing_packager_message("copr", "summary", "--copr-summary", "package.description"),
+        )?;
+        let description = overrides
+            .description
+            .map(str::to_owned)
+            .or_else(|| cfg.and_then(|copr| copr.description.clone()))
+            .unwrap_or_else(|| summary.clone());
+        let license = merge_packager(
+            overrides.license.map(str::to_owned),
+            cfg.and_then(|copr| copr.license.clone()),
+            package.license.clone(),
+            missing_packager_message("copr", "license", "--copr-license", "package.license"),
+        )?;
+        let download_repo = merge_packager(
+            overrides.download_repo.map(str::to_owned),
+            cfg.map(|copr| copr.download_repo.clone()),
+            None,
+            missing_packager_message("copr", "download_repo", "--copr-download-repo", ""),
+        )?;
+        validate_owner_repo("copr.download_repo", &download_repo)?;
+        let repo = repo_basename(&download_repo);
+        let url = overrides
+            .url
+            .map(str::to_owned)
+            .or_else(|| cfg.and_then(|copr| copr.url.clone()))
+            .unwrap_or_else(|| format!("https://codeberg.org/{download_repo}"));
+        let binaries = resolve_named_binaries(cfg.map(|copr| copr.binaries.as_slice()), &name);
+        let spec_path = cfg
+            .and_then(|copr| copr.spec_path.clone())
+            .unwrap_or_else(|| format!("{name}.spec"));
+        let project = overrides
+            .project
+            .map(str::to_owned)
+            .or_else(|| cfg.and_then(|copr| copr.project.clone()));
+        let testing_project = cfg
+            .and_then(|copr| copr.testing_project.clone())
+            .or_else(|| {
+                project
+                    .as_deref()
+                    .map(|project| format!("{project}-testing"))
+            });
+
+        Ok(ResolvedCopr {
+            name,
+            summary,
+            description,
+            license,
+            url,
+            download_repo,
+            repo,
+            build_requires: cfg
+                .map(|copr| copr.build_requires.clone())
+                .unwrap_or_default(),
+            binaries,
+            spec_path,
+            project,
+            testing_project,
+            login_secret: cfg
+                .map_or_else(default_copr_login_secret, |copr| copr.login_secret.clone()),
+            username_secret: cfg.map_or_else(default_copr_username_secret, |copr| {
+                copr.username_secret.clone()
+            }),
+            token_secret: cfg
+                .map_or_else(default_copr_token_secret, |copr| copr.token_secret.clone()),
+        })
+    }
+
+    /// Resolve APT settings for one Cargo package.
+    pub fn resolve_apt(
+        &self,
+        overrides: AptOverrides<'_>,
+        package: &crate::cargo::Package,
+    ) -> Result<ResolvedApt> {
+        self.validate_apt()?;
+        let cfg = self.apt.as_ref();
+        let repo_url = merge_packager(
+            overrides.repo_url.map(str::to_owned),
+            cfg.map(|apt| apt.repo_url.clone()),
+            None,
+            missing_packager_message("apt", "repo_url", "--apt-repo-url", ""),
+        )?;
+        reject_password_url("apt.repo_url", &repo_url)?;
+        let label = overrides
+            .label
+            .map(str::to_owned)
+            .or_else(|| cfg.and_then(|apt| apt.label.clone()))
+            .unwrap_or_else(|| package.name.clone());
+        let packages = cfg
+            .map(|apt| apt.packages.clone())
+            .filter(|packages| !packages.is_empty())
+            .unwrap_or_else(|| vec![package.name.clone()]);
+
+        Ok(ResolvedApt {
+            label,
+            repo_url,
+            branch: cfg.map_or_else(default_apt_branch, |apt| apt.branch.clone()),
+            distribution: cfg.map_or_else(default_apt_distribution, |apt| apt.distribution.clone()),
+            architectures: cfg
+                .map_or_else(default_apt_architectures, |apt| apt.architectures.clone()),
+            components: cfg.map_or_else(default_apt_components, |apt| apt.components.clone()),
+            debian_release: cfg
+                .map_or_else(default_apt_debian_release, |apt| apt.debian_release.clone()),
+            packages,
+            build_deps: cfg.map(|apt| apt.build_deps.clone()).unwrap_or_default(),
+            cargo_deb_version: cfg.map_or_else(default_cargo_deb_version, |apt| {
+                apt.cargo_deb_version.clone()
+            }),
+            gpg_key_secret: cfg
+                .map_or_else(default_apt_gpg_key_secret, |apt| apt.gpg_key_secret.clone()),
+            gpg_key_id_secret: cfg.map_or_else(default_apt_gpg_key_id_secret, |apt| {
+                apt.gpg_key_id_secret.clone()
+            }),
+            gpg_passphrase_secret: cfg.map_or_else(default_apt_gpg_passphrase_secret, |apt| {
+                apt.gpg_passphrase_secret.clone()
+            }),
+            ssh_key_secret: cfg
+                .map_or_else(default_apt_ssh_key_secret, |apt| apt.ssh_key_secret.clone()),
+        })
+    }
+
+    /// Resolve the `[release.codeberg]` section, if present.
+    pub fn resolve_codeberg_release(&self) -> Result<Option<ResolvedCodebergRelease>> {
+        let Some(codeberg) = &self.release.codeberg else {
+            return Ok(None);
+        };
+        validate_owner_repo(
+            "simit project config: [release.codeberg].repo",
+            &codeberg.repo,
+        )?;
+        Ok(Some(ResolvedCodebergRelease {
+            repo: codeberg.repo.clone(),
+            api_base: codeberg.api_base.clone(),
+            token_secret: codeberg.token_secret.clone(),
+            target_branch: codeberg.target_branch.clone(),
+            body_from_changelog: codeberg.body_from_changelog,
+        }))
+    }
+
     fn is_empty(&self) -> bool {
         self == &Self::default()
+    }
+}
+
+/// Reject a `scheme://user:password@host/...` URL while permitting a bare
+/// `scheme://user@host/...` userinfo, which SSH git remotes legitimately use.
+fn reject_password_url(name: &str, value: &str) -> Result<()> {
+    let Some(scheme_end) = value.find("://") else {
+        return Ok(());
+    };
+    let authority_start = scheme_end + 3;
+    let authority_end = value[authority_start..]
+        .find(['/', '?', '#'])
+        .map_or(value.len(), |offset| authority_start + offset);
+    let authority = &value[authority_start..authority_end];
+    if let Some((userinfo, _host)) = authority.rsplit_once('@') {
+        if userinfo.contains(':') {
+            bail!("{name} must not include an embedded password");
+        }
+    }
+    Ok(())
+}
+
+fn validate_owner_repo(name: &str, value: &str) -> Result<()> {
+    if value.split('/').count() != 2 || value.split('/').any(str::is_empty) {
+        bail!("{name} must be OWNER/REPO");
+    }
+    Ok(())
+}
+
+fn repo_basename(download_repo: &str) -> String {
+    download_repo
+        .rsplit('/')
+        .next()
+        .unwrap_or(download_repo)
+        .to_owned()
+}
+
+fn resolve_named_binaries(cfg: Option<&[String]>, name: &str) -> Vec<String> {
+    cfg.filter(|binaries| !binaries.is_empty())
+        .map(<[String]>::to_vec)
+        .unwrap_or_else(|| vec![name.to_owned()])
+}
+
+fn missing_packager_message(
+    channel: &str,
+    field: &str,
+    flag: &str,
+    cargo_fallback: &str,
+) -> String {
+    let config_hint = config_hint();
+    if cargo_fallback.is_empty() {
+        format!(
+            "{channel}.{field} not set: provide it via {flag} or {config_hint} [{channel}].{field}"
+        )
+    } else {
+        format!(
+            "{channel}.{field} not set: provide it via {flag}, {config_hint} [{channel}].{field}, or Cargo.toml {cargo_fallback}"
+        )
     }
 }
 

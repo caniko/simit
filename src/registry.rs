@@ -39,6 +39,11 @@ pub const KNOWN_FEATURES: &[&str] = &[
     "homebrew",
     "chocolatey",
     "scoop",
+    "aur",
+    "copr",
+    "apt",
+    "flatpak",
+    "winget",
     "changelog",
     "hooks",
 ];
@@ -476,6 +481,11 @@ pub fn detect_feature_status(workspace_root: &Path) -> BTreeMap<String, FeatureS
     features.insert("homebrew".to_owned(), FeatureStatus::Absent);
     features.insert("chocolatey".to_owned(), FeatureStatus::Absent);
     features.insert("scoop".to_owned(), FeatureStatus::Absent);
+    features.insert("aur".to_owned(), FeatureStatus::Absent);
+    features.insert("copr".to_owned(), FeatureStatus::Absent);
+    features.insert("apt".to_owned(), FeatureStatus::Absent);
+    features.insert("flatpak".to_owned(), FeatureStatus::Absent);
+    features.insert("winget".to_owned(), FeatureStatus::Absent);
     features.insert(
         "changelog".to_owned(),
         detect_file_status(workspace_root, "CHANGELOG.md"),
@@ -491,6 +501,21 @@ pub fn detect_feature_status(workspace_root: &Path) -> BTreeMap<String, FeatureS
         }
         if config.scoop.is_some() && features["scoop"] == FeatureStatus::Absent {
             features.insert("scoop".to_owned(), FeatureStatus::Configured);
+        }
+        if config.aur.is_some() && features["aur"] == FeatureStatus::Absent {
+            features.insert("aur".to_owned(), FeatureStatus::Configured);
+        }
+        if config.copr.is_some() && features["copr"] == FeatureStatus::Absent {
+            features.insert("copr".to_owned(), FeatureStatus::Configured);
+        }
+        if config.apt.is_some() && features["apt"] == FeatureStatus::Absent {
+            features.insert("apt".to_owned(), FeatureStatus::Configured);
+        }
+        if config.flatpak.is_some() && features["flatpak"] == FeatureStatus::Absent {
+            features.insert("flatpak".to_owned(), FeatureStatus::Configured);
+        }
+        if config.winget.is_some() && features["winget"] == FeatureStatus::Absent {
+            features.insert("winget".to_owned(), FeatureStatus::Configured);
         }
     }
 

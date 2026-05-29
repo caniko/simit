@@ -1,6 +1,11 @@
+pub mod apt_conf;
 pub mod chocolatey_nuspec;
 pub mod ci;
+pub mod copr_makefile;
 pub mod diff;
 pub mod flake;
 pub mod homebrew_formula;
+pub mod pkgbuild;
+pub mod release_workflow;
+pub mod rpm_spec;
 pub mod scoop_manifest;

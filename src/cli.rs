@@ -68,6 +68,14 @@ pub enum InitAction {
     Chocolatey(InitChocolateyCommand),
     #[command(about = "Bootstrap a Scoop bucket repo with a manifest skeleton")]
     ScoopBucket(InitScoopBucketCommand),
+    #[command(about = "Bootstrap AUR PKGBUILDs (source/-bin/-git flavors)")]
+    Aur(InitAurCommand),
+    #[command(about = "Bootstrap a Fedora COPR RPM spec and .copr/Makefile")]
+    Copr(InitCoprCommand),
+    #[command(about = "Bootstrap an apt (reprepro) repository config")]
+    Apt(InitAptCommand),
+    #[command(about = "Generate the comprehensive multi-channel release workflow")]
+    Release(InitReleaseCommand),
 }
 
 #[derive(Debug, Subcommand)]
@@ -78,6 +86,12 @@ pub enum DistAction {
     Chocolatey(ChocolateyCommand),
     #[command(about = "Scoop manifest helpers (render, bump, push)")]
     Scoop(ScoopCommand),
+    #[command(about = "AUR PKGBUILD helpers (render)")]
+    Aur(AurCommand),
+    #[command(about = "Fedora COPR helpers (render)")]
+    Copr(CoprCommand),
+    #[command(about = "apt repository helpers (render)")]
+    Apt(AptCommand),
 }
 
 #[derive(Debug, Args)]
@@ -940,6 +954,280 @@ pub struct ChocolateyBumpArgs {
     pub api_key_env: Option<String>,
     #[command(flatten)]
     pub chocolatey: ChocolateyOverridesArgs,
+}
+
+#[derive(Debug, Args)]
+pub struct AurOverridesArgs {
+    #[arg(long = "aur-name", value_name = "NAME", help = "AUR pkgbase")]
+    pub name: Option<String>,
+    #[arg(
+        long = "aur-description",
+        value_name = "TEXT",
+        help = "Package description (pkgdesc)"
+    )]
+    pub description: Option<String>,
+    #[arg(long = "aur-url", value_name = "URL", help = "Project url")]
+    pub url: Option<String>,
+    #[arg(
+        long = "aur-license",
+        value_name = "SPDX",
+        help = "SPDX license identifier"
+    )]
+    pub license: Option<String>,
+    #[arg(
+        long = "aur-download-repo",
+        value_name = "OWNER/REPO",
+        help = "Codeberg/GitHub owner/repo for release downloads"
+    )]
+    pub download_repo: Option<String>,
+}
+
+impl AurOverridesArgs {
+    pub fn as_overrides(&self) -> crate::config::AurOverrides<'_> {
+        crate::config::AurOverrides {
+            name: self.name.as_deref(),
+            description: self.description.as_deref(),
+            url: self.url.as_deref(),
+            license: self.license.as_deref(),
+            download_repo: self.download_repo.as_deref(),
+        }
+    }
+}
+
+#[derive(Debug, Args)]
+pub struct CoprOverridesArgs {
+    #[arg(long = "copr-name", value_name = "NAME", help = "RPM package name")]
+    pub name: Option<String>,
+    #[arg(long = "copr-summary", value_name = "TEXT", help = "RPM Summary")]
+    pub summary: Option<String>,
+    #[arg(
+        long = "copr-description",
+        value_name = "TEXT",
+        help = "RPM %description prose"
+    )]
+    pub description: Option<String>,
+    #[arg(
+        long = "copr-license",
+        value_name = "SPDX",
+        help = "SPDX license identifier"
+    )]
+    pub license: Option<String>,
+    #[arg(long = "copr-url", value_name = "URL", help = "Project URL")]
+    pub url: Option<String>,
+    #[arg(
+        long = "copr-download-repo",
+        value_name = "OWNER/REPO",
+        help = "Codeberg/GitHub owner/repo for the source archive"
+    )]
+    pub download_repo: Option<String>,
+    #[arg(
+        long = "copr-project",
+        value_name = "OWNER/PROJECT",
+        help = "COPR project for stable releases"
+    )]
+    pub project: Option<String>,
+}
+
+impl CoprOverridesArgs {
+    pub fn as_overrides(&self) -> crate::config::CoprOverrides<'_> {
+        crate::config::CoprOverrides {
+            name: self.name.as_deref(),
+            summary: self.summary.as_deref(),
+            description: self.description.as_deref(),
+            license: self.license.as_deref(),
+            url: self.url.as_deref(),
+            download_repo: self.download_repo.as_deref(),
+            project: self.project.as_deref(),
+        }
+    }
+}
+
+#[derive(Debug, Args)]
+pub struct AptOverridesArgs {
+    #[arg(
+        long = "apt-repo-url",
+        value_name = "URL",
+        help = "Git remote of the apt repository"
+    )]
+    pub repo_url: Option<String>,
+    #[arg(
+        long = "apt-label",
+        value_name = "TEXT",
+        help = "reprepro Origin/Label"
+    )]
+    pub label: Option<String>,
+}
+
+impl AptOverridesArgs {
+    pub fn as_overrides(&self) -> crate::config::AptOverrides<'_> {
+        crate::config::AptOverrides {
+            repo_url: self.repo_url.as_deref(),
+            label: self.label.as_deref(),
+        }
+    }
+}
+
+#[derive(Debug, Args)]
+pub struct InitAurCommand {
+    #[arg(
+        long = "package",
+        value_name = "NAME",
+        help = "Workspace package providing metadata fallbacks"
+    )]
+    pub package: Option<String>,
+    #[arg(long, help = "Verify dist/aur/*/PKGBUILD match the rendered template")]
+    pub check: bool,
+    #[arg(long, help = "Show a unified diff when --check finds drift")]
+    pub diff: bool,
+    #[arg(long, help = "Print the rendered PKGBUILDs without writing files")]
+    pub print: bool,
+    #[command(flatten)]
+    pub aur: AurOverridesArgs,
+}
+
+#[derive(Debug, Args)]
+pub struct InitCoprCommand {
+    #[arg(
+        long = "package",
+        value_name = "NAME",
+        help = "Workspace package providing metadata fallbacks"
+    )]
+    pub package: Option<String>,
+    #[arg(
+        long,
+        help = "Verify the spec and .copr/Makefile match the rendered template"
+    )]
+    pub check: bool,
+    #[arg(long, help = "Show a unified diff when --check finds drift")]
+    pub diff: bool,
+    #[arg(long, help = "Print the rendered files without writing them")]
+    pub print: bool,
+    #[command(flatten)]
+    pub copr: CoprOverridesArgs,
+}
+
+#[derive(Debug, Args)]
+pub struct InitAptCommand {
+    #[arg(
+        long = "package",
+        value_name = "NAME",
+        help = "Workspace package providing metadata fallbacks"
+    )]
+    pub package: Option<String>,
+    #[arg(
+        long,
+        help = "Verify dist/apt/conf/distributions matches the rendered template"
+    )]
+    pub check: bool,
+    #[arg(long, help = "Show a unified diff when --check finds drift")]
+    pub diff: bool,
+    #[arg(long, help = "Print the rendered config without writing files")]
+    pub print: bool,
+    #[command(flatten)]
+    pub apt: AptOverridesArgs,
+}
+
+#[derive(Debug, Args)]
+pub struct InitReleaseCommand {
+    #[arg(
+        long = "package",
+        value_name = "NAME",
+        help = "Workspace package providing metadata fallbacks"
+    )]
+    pub package: Option<String>,
+    #[arg(
+        long,
+        help = "Verify .forgejo/workflows/release.yml matches generated output"
+    )]
+    pub check: bool,
+    #[arg(long, help = "Show a unified diff when --check finds drift")]
+    pub diff: bool,
+    #[arg(long, help = "Print the rendered workflow without writing files")]
+    pub print: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct AurCommand {
+    #[command(subcommand)]
+    pub action: AurAction,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AurAction {
+    #[command(about = "Render PKGBUILDs to stdout for the given version")]
+    Render(AurRenderArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct AurRenderArgs {
+    #[arg(
+        long,
+        value_name = "VERSION",
+        help = "Version to render (no leading 'v')"
+    )]
+    pub version: Option<String>,
+    #[arg(
+        long = "package",
+        value_name = "NAME",
+        help = "Metadata-fallback package"
+    )]
+    pub package: Option<String>,
+    #[command(flatten)]
+    pub aur: AurOverridesArgs,
+}
+
+#[derive(Debug, Args)]
+pub struct CoprCommand {
+    #[command(subcommand)]
+    pub action: CoprAction,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum CoprAction {
+    #[command(about = "Render the RPM spec and .copr/Makefile to stdout")]
+    Render(CoprRenderArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct CoprRenderArgs {
+    #[arg(
+        long,
+        value_name = "VERSION",
+        help = "Version to render (no leading 'v')"
+    )]
+    pub version: Option<String>,
+    #[arg(
+        long = "package",
+        value_name = "NAME",
+        help = "Metadata-fallback package"
+    )]
+    pub package: Option<String>,
+    #[command(flatten)]
+    pub copr: CoprOverridesArgs,
+}
+
+#[derive(Debug, Args)]
+pub struct AptCommand {
+    #[command(subcommand)]
+    pub action: AptAction,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AptAction {
+    #[command(about = "Render the reprepro distributions config to stdout")]
+    Render(AptRenderArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct AptRenderArgs {
+    #[arg(
+        long = "package",
+        value_name = "NAME",
+        help = "Metadata-fallback package"
+    )]
+    pub package: Option<String>,
+    #[command(flatten)]
+    pub apt: AptOverridesArgs,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]

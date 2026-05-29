@@ -1,0 +1,1454 @@
+//! Generate the comprehensive single-job release workflow (`release.yml`).
+//!
+//! This reproduces a hand-rolled Forgejo/Codeberg release pipeline generically:
+//! validate the signed tag, build artifacts (project-supplied build commands
+//! plus generic SRPM/deb builds), sign checksums, create the Codeberg release,
+//! and publish to every configured distribution channel. Each channel step is
+//! gated on its config being present and (for downstream package repos) on the
+//! release being stable.
+//!
+//! The project-specific platform build (cross-compiled binaries, AppImages,
+//! Flatpak manifest, ...) is supplied verbatim via
+//! `[release.artifacts].build_commands`; simit owns the standardized scaffolding
+//! and the channel publish steps.
+
+use std::fmt::Write as _;
+
+use crate::config::{
+    AnnounceConfig, ArtifactsConfig, AtticConfig, FlatpakConfig, ResolvedApt, ResolvedAur,
+    ResolvedChocolatey, ResolvedCodebergRelease, ResolvedCopr, ResolvedHomebrew, ResolvedScoop,
+    WindowsSigningConfig, WingetConfig,
+};
+
+/// Everything the release workflow generator needs, resolved up front.
+pub struct ReleaseWorkflowInputs<'a> {
+    pub runner: &'a str,
+    pub artifacts: &'a ArtifactsConfig,
+    pub smoke_command: Option<&'a str>,
+    pub codeberg: Option<&'a ResolvedCodebergRelease>,
+    pub attic: Option<&'a AtticConfig>,
+    pub aur: Option<&'a ResolvedAur>,
+    pub copr: Option<&'a ResolvedCopr>,
+    pub apt: Option<&'a ResolvedApt>,
+    pub homebrew: Option<&'a ResolvedHomebrew>,
+    pub scoop: Option<&'a ResolvedScoop>,
+    pub chocolatey: Option<&'a ResolvedChocolatey>,
+    pub windows_signing: Option<&'a WindowsSigningConfig>,
+    pub flatpak: Option<&'a FlatpakConfig>,
+    pub winget: Option<&'a WingetConfig>,
+    pub announce: Option<&'a AnnounceConfig>,
+}
+/// The semver-with-optional-prerelease tag pattern shared by validation and gating.
+const TAG_REGEX: &str = r"^[0-9]+\.[0-9]+\.[0-9]+(-(rc|beta|alpha)\.[0-9]+)?$";
+const PRERELEASE_REGEX: &str = r"-(rc|beta|alpha)\.[0-9]+$";
+
+/// Resolve `VERSION` from whichever forge ref-name env var is set.
+const VERSION_FROM_REF: &str = r#"VERSION="${GITHUB_REF_NAME:-${FORGE_REF_NAME:-${CODEBERG_REF_NAME:-}}}"
+          if [ -z "$VERSION" ]; then ref="${GITHUB_REF:-${FORGE_REF:-${CODEBERG_REF:-}}}"; VERSION="${ref#refs/tags/}"; fi"#;
+
+pub fn render(inputs: &ReleaseWorkflowInputs<'_>) -> String {
+    let mut w = String::new();
+    w.push_str("---\n# yamllint disable rule:line-length\n");
+    w.push_str(super::ci::GENERATED_WORKFLOW_MARKER);
+    w.push('\n');
+    push_secrets_header(&mut w, inputs);
+    w.push_str("name: release\n\n");
+
+    w.push_str("'on':\n");
+    w.push_str("  push:\n    tags:\n      - '[0-9]*'\n");
+    w.push_str("  workflow_dispatch:\n    inputs:\n      force_publish:\n");
+    w.push_str("        description: 'Bypass release smoke checks and continue to publish.'\n");
+    w.push_str("        required: false\n        default: false\n        type: boolean\n\n");
+
+    w.push_str("concurrency:\n");
+    w.push_str("  group: ${{ github.workflow }}-${{ github.ref }}\n");
+    w.push_str("  cancel-in-progress: false\n\n");
+
+    w.push_str("jobs:\n  release:\n");
+    writeln!(w, "    runs-on: {}", inputs.runner).expect("write");
+    w.push_str("    enable-openid-connect: true\n");
+    w.push_str("    steps:\n");
+
+    push_checkout(&mut w);
+    push_install_nix(&mut w, inputs.artifacts);
+    push_validate_tag(&mut w, inputs.artifacts);
+    if let Some(copr) = inputs.copr {
+        push_rewrite_spec(&mut w, copr);
+    }
+    if let Some(command) = &inputs.artifacts.supply_chain_command {
+        push_supply_chain(&mut w, command);
+    }
+    if let Some(copr) = inputs.copr {
+        push_build_srpm(&mut w, copr);
+    }
+    if !inputs.artifacts.sbom_commands.is_empty() {
+        push_sbom(&mut w, &inputs.artifacts.sbom_commands);
+    }
+    push_build_artifacts(&mut w, inputs.artifacts);
+    if let Some(apt) = inputs.apt {
+        push_build_debs(&mut w, apt);
+    }
+    if let Some(windows) = inputs.windows_signing {
+        push_windows_signing(&mut w, windows);
+    }
+    push_checksums(&mut w, inputs.artifacts);
+    if inputs.artifacts.sign {
+        push_sign(&mut w, inputs.artifacts, inputs.codeberg);
+    }
+    if let Some(command) = inputs.smoke_command {
+        push_smoke(&mut w, command);
+    }
+    if let Some(attic) = inputs.attic {
+        push_attic(&mut w, attic);
+    }
+    if let Some(codeberg) = inputs.codeberg {
+        push_codeberg_release(&mut w, codeberg);
+    }
+    if let Some(apt) = inputs.apt {
+        push_publish_apt(&mut w, apt);
+    }
+    if let Some(announce) = inputs.announce {
+        push_announce(&mut w, announce, inputs.codeberg);
+    }
+    if let Some(aur) = inputs.aur {
+        push_publish_aur(&mut w, aur);
+    }
+    if let Some(flatpak) = inputs.flatpak {
+        push_publish_flathub(&mut w, flatpak);
+    }
+    if let Some(winget) = inputs.winget {
+        push_publish_winget(&mut w, winget);
+    }
+    if let Some(homebrew) = inputs.homebrew {
+        push_publish_homebrew(&mut w, homebrew);
+    }
+    if let Some(scoop) = inputs.scoop {
+        push_publish_scoop(&mut w, scoop);
+    }
+    if let Some(copr) = inputs.copr {
+        push_publish_copr(&mut w, copr);
+    }
+    if let Some(chocolatey) = inputs.chocolatey {
+        push_publish_chocolatey(&mut w, chocolatey);
+    }
+
+    w
+}
+
+fn push_secrets_header(w: &mut String, inputs: &ReleaseWorkflowInputs<'_>) {
+    w.push_str("# Required secrets:\n");
+    if let Some(codeberg) = inputs.codeberg {
+        writeln!(
+            w,
+            "# - {}: Codeberg API token for release creation and asset upload.",
+            codeberg.token_secret
+        )
+        .expect("write");
+    }
+    if inputs.artifacts.sign {
+        w.push_str(
+            "# - MINISIGN_SECRET_KEY, MINISIGN_PASSWORD: minisign signing of SHA256SUMS.txt.\n",
+        );
+        w.push_str("# - COSIGN_PRIVATE_KEY, COSIGN_PASSWORD: optional fallback when keyless Sigstore OIDC is unavailable.\n");
+    }
+    if let Some(apt) = inputs.apt {
+        writeln!(
+            w,
+            "# - {}: armored GPG private key for the apt repository.",
+            apt.gpg_key_secret
+        )
+        .expect("write");
+        writeln!(
+            w,
+            "# - {}: fingerprint for the apt repository signing key.",
+            apt.gpg_key_id_secret
+        )
+        .expect("write");
+        writeln!(
+            w,
+            "# - {}: optional passphrase for the apt signing key.",
+            apt.gpg_passphrase_secret
+        )
+        .expect("write");
+        writeln!(
+            w,
+            "# - {}: ed25519 deploy key that pushes the apt tree.",
+            apt.ssh_key_secret
+        )
+        .expect("write");
+    }
+    if let Some(aur) = inputs.aur {
+        writeln!(
+            w,
+            "# - {}: Ed25519 private key for aur.archlinux.org pushes.",
+            aur.ssh_key_secret
+        )
+        .expect("write");
+    }
+    if let Some(copr) = inputs.copr {
+        writeln!(
+            w,
+            "# - {}, {}, {}: COPR upload credentials.",
+            copr.login_secret, copr.username_secret, copr.token_secret
+        )
+        .expect("write");
+    }
+    if let Some(windows) = inputs.windows_signing {
+        writeln!(
+            w,
+            "# - {}, {}: optional Authenticode PKCS#12 cert + passphrase.",
+            windows.pfx_secret, windows.pass_secret
+        )
+        .expect("write");
+    }
+    if let Some(chocolatey) = inputs.chocolatey {
+        if chocolatey.api_key_from_runner {
+            writeln!(
+                w,
+                "# - runner-provided env {}: Chocolatey push API key.",
+                chocolatey.api_key_env
+            )
+            .expect("write");
+        } else {
+            writeln!(
+                w,
+                "# - {}: optional Chocolatey push API key (env {}).",
+                chocolatey.api_key_secret, chocolatey.api_key_env
+            )
+            .expect("write");
+        }
+    }
+    if let Some(flatpak) = inputs.flatpak {
+        writeln!(
+            w,
+            "# - {}: optional GitHub PAT for {} Flathub PRs.",
+            flatpak.token_secret, flatpak.repo
+        )
+        .expect("write");
+    }
+    if let Some(winget) = inputs.winget {
+        writeln!(
+            w,
+            "# - {}: optional GitHub PAT for winget-pkgs PRs.",
+            winget.token_secret
+        )
+        .expect("write");
+    }
+    if let Some(announce) = inputs.announce {
+        writeln!(
+            w,
+            "# - {}, {}, {}, {}, {}: optional release announcement credentials.",
+            announce.mastodon_token_secret,
+            announce.mastodon_base_url_secret,
+            announce.matrix_token_secret,
+            announce.matrix_homeserver_secret,
+            announce.matrix_room_secret
+        )
+        .expect("write");
+    }
+    if let Some(attic) = inputs.attic {
+        writeln!(
+            w,
+            "# Runner credential: ${}/{}: Attic token file.",
+            attic.token_dir_env, attic.token_name
+        )
+        .expect("write");
+    }
+    w.push('\n');
+}
+
+fn push_checkout(w: &mut String) {
+    w.push_str("      - uses: https://code.forgejo.org/actions/checkout@v4\n");
+    w.push_str("        with:\n          fetch-depth: 0\n");
+}
+
+fn push_install_nix(w: &mut String, artifacts: &ArtifactsConfig) {
+    w.push_str("      - uses: https://github.com/cachix/install-nix-action@v27\n");
+    w.push_str("        with:\n          extra_nix_config: |\n");
+    w.push_str("            experimental-features = nix-command flakes\n");
+    if !artifacts.substituters.is_empty() {
+        writeln!(
+            w,
+            "            substituters = {}",
+            artifacts.substituters.join(" ")
+        )
+        .expect("write");
+    }
+    if !artifacts.trusted_public_keys.is_empty() {
+        writeln!(
+            w,
+            "            trusted-public-keys = {}",
+            artifacts.trusted_public_keys.join(" ")
+        )
+        .expect("write");
+    }
+    w.push('\n');
+}
+
+fn push_validate_tag(w: &mut String, artifacts: &ArtifactsConfig) {
+    w.push_str("      - name: Validate tag\n        run: |\n          set -euo pipefail\n");
+    writeln!(w, "          {VERSION_FROM_REF}").expect("write");
+    writeln!(w, "          echo \"$VERSION\" | grep -Eq '{TAG_REGEX}'").expect("write");
+    if let Some(attr) = &artifacts.version_attr {
+        writeln!(
+            w,
+            "          test \"$(nix eval --raw .#{attr}.version)\" = \"$VERSION\""
+        )
+        .expect("write");
+    }
+    w.push_str("          test -s keys/maintainers.gpg\n");
+    w.push_str("          if ! grep -q \"^## \\[$VERSION\\] - [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]\" CHANGELOG.md; then\n");
+    w.push_str("            echo \"CHANGELOG.md missing section for $VERSION\" >&2\n            exit 1\n          fi\n\n");
+    w.push_str("          IS_PRERELEASE=false\n");
+    writeln!(w, "          if printf '%s\\n' \"$VERSION\" | grep -Eq -- '{PRERELEASE_REGEX}'; then IS_PRERELEASE=true; fi").expect("write");
+    w.push_str("          { printf 'VERSION=%s\\n' \"$VERSION\"; printf 'IS_PRERELEASE=%s\\n' \"$IS_PRERELEASE\"; } > release-env\n\n");
+    w.push_str("          GNUPGHOME=\"$(mktemp -d)\"; export GNUPGHOME; trap 'rm -rf \"$GNUPGHOME\"' EXIT; chmod 700 \"$GNUPGHOME\"\n");
+    w.push_str("          gpg --batch --import keys/maintainers.gpg\n");
+    w.push_str(
+        "          git fetch --force --tags origin \"refs/tags/${VERSION}:refs/tags/${VERSION}\"\n",
+    );
+    w.push_str("          git verify-tag \"$VERSION\"\n");
+}
+
+fn push_rewrite_spec(w: &mut String, copr: &ResolvedCopr) {
+    writeln!(w, "      - name: Rewrite {} Version", copr.spec_path).expect("write");
+    w.push_str("        run: |\n          . ./release-env\n");
+    writeln!(
+        w,
+        "          sed -i \"0,/^Version:.*$/s//Version:        ${{VERSION}}/\" {}",
+        copr.spec_path
+    )
+    .expect("write");
+    writeln!(w, "          grep '^Version:' {}", copr.spec_path).expect("write");
+}
+
+fn push_supply_chain(w: &mut String, command: &str) {
+    w.push_str("      - name: Check supply-chain policy\n        run: |\n");
+    for line in command.lines() {
+        writeln!(w, "          {line}").expect("write");
+    }
+}
+
+fn push_build_srpm(w: &mut String, copr: &ResolvedCopr) {
+    w.push_str("      - name: Build SRPM for COPR\n        run: |\n          set -euo pipefail\n          . ./release-env\n");
+    writeln!(
+        w,
+        "          git archive --format=tar.gz --prefix={repo}/ -o \"{repo}-${{VERSION}}.tar.gz\" HEAD",
+        repo = copr.repo
+    )
+    .expect("write");
+    w.push_str("          nix shell nixpkgs#rpm nixpkgs#cargo nixpkgs#rustc -c bash <<'SCRIPT'\n");
+    w.push_str("          set -euo pipefail\n");
+    writeln!(w, "          tar xf {repo}-*.tar.gz", repo = copr.repo).expect("write");
+    writeln!(
+        w,
+        "          ( cd {repo} && cargo vendor )",
+        repo = copr.repo
+    )
+    .expect("write");
+    writeln!(
+        w,
+        "          tar czf vendor.tar.gz -C {repo} vendor",
+        repo = copr.repo
+    )
+    .expect("write");
+    w.push_str("          rm -rf srpms && mkdir -p srpms\n");
+    writeln!(
+        w,
+        "          rpmbuild -bs {spec} --define \"_sourcedir $(pwd)\" --define \"_srcrpmdir $(pwd)/srpms\"",
+        spec = copr.spec_path
+    )
+    .expect("write");
+    w.push_str("          set -- srpms/*.src.rpm; test \"$#\" -eq 1; ls -l \"$1\"\n");
+    w.push_str("          SCRIPT\n");
+}
+
+fn push_build_artifacts(w: &mut String, artifacts: &ArtifactsConfig) {
+    w.push_str(
+        "      - name: Build release artifacts\n        run: |\n          set -euo pipefail\n",
+    );
+    w.push_str("          . ./release-env\n          mkdir -p release\n");
+    if artifacts.build_commands.is_empty() {
+        w.push_str("          echo \"[release.artifacts].build_commands is empty; nothing to build\" >&2\n          exit 1\n");
+    } else {
+        for line in &artifacts.build_commands {
+            for sub in line.split('\n') {
+                writeln!(w, "          {sub}").expect("write");
+            }
+        }
+    }
+}
+
+fn push_build_debs(w: &mut String, apt: &ResolvedApt) {
+    w.push_str("      - name: Build Debian packages\n        run: |\n          set -euo pipefail\n          . ./release-env\n          mkdir -p release\n");
+    w.push_str(
+        "          nix shell nixpkgs#debootstrap nixpkgs#cargo nixpkgs#rustc -c bash <<'SCRIPT'\n",
+    );
+    w.push_str("          set -euo pipefail\n");
+    w.push_str("          root=\"$(mktemp -d)\"\n");
+    w.push_str("          cargo_bin=\"$(readlink -f \"$(command -v cargo)\")\"; cargo_dir=\"$(dirname \"$cargo_bin\")\"\n");
+    w.push_str("          cleanup() { set +e; sudo umount \"$root/work\" 2>/dev/null; sudo umount \"$root/nix/store\" 2>/dev/null; sudo rm -rf \"$root\"; }\n");
+    w.push_str("          trap cleanup EXIT\n");
+    writeln!(
+        w,
+        "          sudo debootstrap --variant=minbase {release} \"$root\" http://deb.debian.org/debian",
+        release = apt.debian_release
+    )
+    .expect("write");
+    w.push_str("          sudo mkdir -p \"$root/work\" \"$root/nix/store\"\n");
+    w.push_str("          sudo mount --bind /nix/store \"$root/nix/store\"\n");
+    w.push_str("          sudo mount --bind \"$PWD\" \"$root/work\"\n");
+    w.push_str("          sudo chroot \"$root\" apt-get update\n");
+    if !apt.build_deps.is_empty() {
+        w.push_str(
+            "          sudo chroot \"$root\" apt-get install -y --no-install-recommends \\\n",
+        );
+        let deps = apt.build_deps.join(" ");
+        writeln!(w, "            {deps}").expect("write");
+    }
+    writeln!(
+        w,
+        "          sudo chroot \"$root\" env PATH=\"${{cargo_dir}}:/usr/sbin:/usr/bin:/bin\" CARGO_HOME=/tmp/cargo-home CARGO_TARGET_DIR=/tmp/cargo-tools-target \"$cargo_bin\" install cargo-deb --locked --version {version}",
+        version = apt.cargo_deb_version
+    )
+    .expect("write");
+    for entry in &apt.packages {
+        // `cargo-target=deb-name` lets the .deb file stem follow
+        // `[package.metadata.deb].name` (often differs from the crate name).
+        let (cargo_target, deb_name) = entry.split_once('=').unwrap_or((entry, entry));
+        writeln!(
+            w,
+            "          sudo chroot \"$root\" env PATH=\"/tmp/cargo-home/bin:${{cargo_dir}}:/usr/sbin:/usr/bin:/bin\" HOME=/tmp CARGO_HOME=/tmp/cargo-home SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt CC=/usr/bin/gcc PKG_CONFIG=/usr/bin/pkg-config \"$cargo_bin\" deb -p {cargo_target} --output \"/work/release/{deb_name}_${{VERSION}}_amd64.deb\""
+        )
+        .expect("write");
+    }
+    w.push_str("          sudo chown \"$(id -u):$(id -g)\" release/*.deb\n");
+    w.push_str("          SCRIPT\n");
+}
+
+fn push_checksums(w: &mut String, artifacts: &ArtifactsConfig) {
+    w.push_str("      - name: Generate release checksums\n        run: |\n          set -euo pipefail\n          cd release\n");
+    let globs = if artifacts.checksum_globs.is_empty() {
+        "*".to_owned()
+    } else {
+        artifacts.checksum_globs.join(" ")
+    };
+    writeln!(w, "          sha256sum {globs} > SHA256SUMS.txt").expect("write");
+}
+
+fn push_sign(
+    w: &mut String,
+    artifacts: &ArtifactsConfig,
+    codeberg: Option<&ResolvedCodebergRelease>,
+) {
+    w.push_str("      - name: Sign checksums and attest release artifacts\n");
+    w.push_str("        env:\n");
+    w.push_str("          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}\n");
+    w.push_str("          MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}\n");
+    w.push_str("          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}\n");
+    w.push_str("          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}\n");
+    w.push_str("        run: |\n          set -euo pipefail\n          . ./release-env\n");
+    writeln!(w, "          test -s {}", artifacts.minisign_pub).expect("write");
+    w.push_str("          test -n \"${MINISIGN_SECRET_KEY:-}\"\n          test -n \"${MINISIGN_PASSWORD:-}\"\n");
+    w.push_str("          umask 077\n          minisign_key=\"$(mktemp)\"; oidc_token=\"$(mktemp)\"; cosign_key=\"$(mktemp)\"; export oidc_token cosign_key\n");
+    w.push_str("          trap 'rm -f \"$minisign_key\" \"$oidc_token\" \"$cosign_key\"' EXIT\n");
+    w.push_str("          printf '%s' \"$MINISIGN_SECRET_KEY\" > \"$minisign_key\"\n");
+    w.push_str("          printf '%s\\n' \"$MINISIGN_PASSWORD\" | \\\n");
+    w.push_str("            nix shell nixpkgs#minisign -c minisign -S -s \"$minisign_key\" -m release/SHA256SUMS.txt -x release/SHA256SUMS.txt.minisig\n");
+    writeln!(
+        w,
+        "          nix shell nixpkgs#minisign -c minisign -V -m release/SHA256SUMS.txt -x release/SHA256SUMS.txt.minisig -p {}\n",
+        artifacts.minisign_pub
+    )
+    .expect("write");
+
+    // Cosign keyless (Sigstore OIDC) signing + SLSA provenance attestation, with
+    // a COSIGN_PRIVATE_KEY fallback — mirrors the hand-rolled release pipeline.
+    let repo_url = codeberg
+        .map(|c| format!("https://codeberg.org/{}", c.repo))
+        .unwrap_or_else(|| {
+            "${GITHUB_SERVER_URL:-https://codeberg.org}/${GITHUB_REPOSITORY:-unknown/unknown}"
+                .to_owned()
+        });
+    w.push_str("          nix shell nixpkgs#cosign nixpkgs#curl nixpkgs#jq -c bash <<'SCRIPT'\n");
+    w.push_str("          set -euo pipefail\n          . ./release-env\n");
+    writeln!(w, "          repo_url=\"{repo_url}\"").expect("write");
+    w.push_str("          git_sha=\"$(git rev-parse HEAD)\"\n");
+    w.push_str("          workflow_sha=\"$(sha256sum .forgejo/workflows/release.yml | awk '{print $1}')\"\n");
+    w.push_str("          flake_lock_sha=\"missing\"; if [ -f flake.lock ]; then flake_lock_sha=\"$(sha256sum flake.lock | awk '{print $1}')\"; fi\n");
+    w.push_str(
+        "          builder_id=\"${repo_url}/src/tag/${VERSION}/.forgejo/workflows/release.yml\"\n",
+    );
+    w.push_str("          sign_blob_keyless() { file=\"$1\"; if [ -n \"${ACTIONS_ID_TOKEN_REQUEST_URL:-}\" ] && [ -n \"${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}\" ]; then curl -fsSL -H \"Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}\" \"${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sigstore\" > \"$oidc_token\"; cosign sign-blob --yes --identity-token \"$oidc_token\" --bundle \"${file}.cosign.bundle\" \"$file\"; else return 1; fi; }\n");
+    w.push_str("          attest_blob_keyless() { file=\"$1\"; predicate=\"$2\"; if [ -s \"$oidc_token\" ]; then cosign attest-blob --yes --identity-token \"$oidc_token\" --predicate \"$predicate\" --type slsaprovenance1 --output-attestation \"${file}.intoto.jsonl\" --bundle \"${file}.intoto.bundle\" \"$file\"; else return 1; fi; }\n");
+    w.push_str("          sign_blob_with_key() { file=\"$1\"; test -n \"${COSIGN_PRIVATE_KEY:-}\"; printf '%s' \"$COSIGN_PRIVATE_KEY\" > \"$cosign_key\"; cosign sign-blob --yes --key \"$cosign_key\" --bundle \"${file}.cosign.bundle\" \"$file\"; }\n");
+    w.push_str("          attest_blob_with_key() { file=\"$1\"; predicate=\"$2\"; cosign attest-blob --yes --key \"$cosign_key\" --predicate \"$predicate\" --type slsaprovenance1 --output-attestation \"${file}.intoto.jsonl\" --bundle \"${file}.intoto.bundle\" \"$file\"; }\n");
+    w.push_str("          find release -maxdepth 1 -type f \\( -name '*.tar.gz' -o -name '*.zip' -o -name '*.AppImage' -o -name '*.deb' -o -name '*.src.rpm' -o -name '*.exe' \\) -print0 | sort -z | while IFS= read -r -d '' file; do\n");
+    w.push_str("            artifact_sha=\"$(sha256sum \"$file\" | awk '{print $1}')\"; predicate=\"$(mktemp)\"\n");
+    w.push_str("            jq -n --arg builder_id \"$builder_id\" --arg git_sha \"$git_sha\" --arg workflow_sha \"$workflow_sha\" --arg flake_lock_sha \"$flake_lock_sha\" --arg repo_url \"$repo_url\" --arg ref \"refs/tags/${VERSION}\" --arg artifact \"$(basename \"$file\")\" --arg artifact_sha \"$artifact_sha\" '{buildDefinition:{buildType:\"https://simit.rs/release\",externalParameters:{repository:$repo_url,ref:$ref,artifact:$artifact,artifactDigest:{sha256:$artifact_sha}},internalParameters:{},resolvedDependencies:[{uri:($repo_url+\".git\"),digest:{gitCommit:$git_sha}},{uri:\"flake.lock\",digest:{sha256:$flake_lock_sha}},{uri:\"release workflow\",digest:{sha256:$workflow_sha}}]},runDetails:{builder:{id:$builder_id}}}' > \"$predicate\"\n");
+    w.push_str("            if sign_blob_keyless \"$file\" && attest_blob_keyless \"$file\" \"$predicate\"; then echo \"signed+attested $file (keyless)\"; elif [ -n \"${COSIGN_PRIVATE_KEY:-}\" ]; then echo \"keyless failed for $file; using COSIGN_PRIVATE_KEY\"; sign_blob_with_key \"$file\"; attest_blob_with_key \"$file\" \"$predicate\"; else echo \"keyless Sigstore failed and COSIGN_PRIVATE_KEY unset\" >&2; exit 1; fi\n");
+    w.push_str("            rm -f \"$predicate\"\n          done\n          SCRIPT\n");
+}
+
+fn push_smoke(w: &mut String, command: &str) {
+    w.push_str("      - name: Run release smoke checks\n");
+    w.push_str("        env:\n          FORCE_PUBLISH: ${{ inputs.force_publish }}\n");
+    w.push_str("        run: |\n          set -euo pipefail\n          . ./release-env\n          mkdir -p release\n");
+    w.push_str("          if [ \"${FORCE_PUBLISH:-false}\" = \"true\" ]; then echo \"smoke bypassed\" | tee release/smoke-report.txt; exit 0; fi\n");
+    writeln!(w, "          {command} \"$VERSION\" release").expect("write");
+}
+
+fn push_attic(w: &mut String, attic: &AtticConfig) {
+    w.push_str(
+        "      - name: Push Nix closures to Attic\n        run: |\n          set -euo pipefail\n",
+    );
+    writeln!(
+        w,
+        "          test -r \"${}/{}\"",
+        attic.token_dir_env, attic.token_name
+    )
+    .expect("write");
+    if !attic.result_links.is_empty() {
+        w.push_str("          nix path-info -r \\\n");
+        for link in &attic.result_links {
+            writeln!(w, "            {link} \\").expect("write");
+        }
+        w.push_str("            > attic-paths.txt\n");
+    }
+    w.push_str("          nix profile install nixpkgs#attic-client\n");
+    writeln!(
+        w,
+        "          attic login {cache} {url} \"$(cat \"${dir}/{name}\")\"",
+        cache = attic.cache,
+        url = attic.url,
+        dir = attic.token_dir_env,
+        name = attic.token_name
+    )
+    .expect("write");
+    writeln!(
+        w,
+        "          attic push {cache} $(cat attic-paths.txt)",
+        cache = attic.cache
+    )
+    .expect("write");
+}
+
+fn push_codeberg_release(w: &mut String, codeberg: &ResolvedCodebergRelease) {
+    w.push_str("      - name: Publish Codeberg release\n        env:\n");
+    writeln!(
+        w,
+        "          CODEBERG_TOKEN: ${{{{ secrets.{} }}}}",
+        codeberg.token_secret
+    )
+    .expect("write");
+    writeln!(w, "          CODEBERG_API: {}", codeberg.api_base).expect("write");
+    writeln!(w, "          CODEBERG_REPO: {}", codeberg.repo).expect("write");
+    w.push_str("        run: |\n          set -euo pipefail\n          test -n \"$CODEBERG_TOKEN\"\n          . ./release-env\n");
+    w.push_str("          nix shell nixpkgs#curl nixpkgs#jq -c bash <<'SCRIPT'\n");
+    w.push_str("          set -euo pipefail\n          . ./release-env\n");
+    let body_arg = if codeberg.body_from_changelog {
+        "--rawfile body CHANGELOG.md"
+    } else {
+        "--arg body \"\""
+    };
+    writeln!(
+        w,
+        "          release_payload=$(jq -n --arg tag \"$VERSION\" --arg name \"$VERSION\" --arg branch \"{branch}\" --argjson prerelease \"$IS_PRERELEASE\" {body_arg} '{{tag_name: $tag, target_commitish: $branch, name: $name, body: $body, draft: false, prerelease: $prerelease}}')",
+        branch = codeberg.target_branch
+    )
+    .expect("write");
+    w.push_str("          status=$(curl -sS -o release.json -w '%{http_code}' -H \"Authorization: token ${CODEBERG_TOKEN}\" -H 'Content-Type: application/json' -d \"$release_payload\" \"${CODEBERG_API}/repos/${CODEBERG_REPO}/releases\")\n");
+    w.push_str("          if [ \"$status\" = \"409\" ]; then\n");
+    w.push_str("            curl -sS --fail -H \"Authorization: token ${CODEBERG_TOKEN}\" \"${CODEBERG_API}/repos/${CODEBERG_REPO}/releases/tags/${VERSION}\" > release.json\n");
+    w.push_str("          elif [ \"$status\" -lt 200 ] || [ \"$status\" -ge 300 ]; then cat release.json; exit 1; fi\n");
+    w.push_str(
+        "          release_id=\"$(jq -r '.id' release.json)\"; test \"$release_id\" != \"null\"\n",
+    );
+    w.push_str("          find release -maxdepth 1 -type f -print0 | sort -z | while IFS= read -r -d '' file; do\n");
+    w.push_str("            name=\"$(basename \"$file\")\"\n");
+    w.push_str("            asset_id=\"$(curl -sS --fail -H \"Authorization: token ${CODEBERG_TOKEN}\" \"${CODEBERG_API}/repos/${CODEBERG_REPO}/releases/${release_id}/assets\" | jq -r --arg name \"$name\" '.[] | select(.name == $name) | .id' | head -n 1)\"\n");
+    w.push_str("            if [ -n \"$asset_id\" ]; then curl -sS --fail -X DELETE -H \"Authorization: token ${CODEBERG_TOKEN}\" \"${CODEBERG_API}/repos/${CODEBERG_REPO}/releases/${release_id}/assets/${asset_id}\"; fi\n");
+    w.push_str("            curl -sS --fail -H \"Authorization: token ${CODEBERG_TOKEN}\" -H 'Content-Type: application/octet-stream' --data-binary \"@${file}\" \"${CODEBERG_API}/repos/${CODEBERG_REPO}/releases/${release_id}/assets?name=${name}\" > /dev/null\n");
+    w.push_str("          done\n          SCRIPT\n");
+}
+
+/// Emit the stable-only guard shared by downstream package-repo steps.
+fn push_stable_guard(w: &mut String, channel: &str) {
+    w.push_str("          . ./release-env\n");
+    writeln!(
+        w,
+        "          if [ \"$IS_PRERELEASE\" = \"true\" ]; then echo \"Prerelease ${{VERSION}}; skipping {channel}.\"; exit 0; fi"
+    )
+    .expect("write");
+}
+
+fn push_publish_apt(w: &mut String, apt: &ResolvedApt) {
+    w.push_str("      - name: Publish APT repository\n        env:\n");
+    writeln!(
+        w,
+        "          APT_REPO_GPG_KEY: ${{{{ secrets.{} }}}}",
+        apt.gpg_key_secret
+    )
+    .expect("write");
+    writeln!(
+        w,
+        "          APT_REPO_GPG_KEY_ID: ${{{{ secrets.{} }}}}",
+        apt.gpg_key_id_secret
+    )
+    .expect("write");
+    writeln!(
+        w,
+        "          APT_REPO_GPG_PASSPHRASE: ${{{{ secrets.{} }}}}",
+        apt.gpg_passphrase_secret
+    )
+    .expect("write");
+    writeln!(
+        w,
+        "          APT_REPO_SSH_KEY: ${{{{ secrets.{} }}}}",
+        apt.ssh_key_secret
+    )
+    .expect("write");
+    writeln!(w, "          APT_REPO_REMOTE: {}", apt.repo_url).expect("write");
+    writeln!(w, "          APT_REPO_BRANCH: {}", apt.branch).expect("write");
+    writeln!(w, "          APT_DISTRIBUTION: {}", apt.distribution).expect("write");
+    w.push_str("        run: |\n          set -euo pipefail\n");
+    push_stable_guard(w, "APT repository publish");
+    w.push_str("          if [ -z \"${APT_REPO_GPG_KEY:-}\" ] || [ -z \"${APT_REPO_GPG_KEY_ID:-}\" ] || [ -z \"${APT_REPO_SSH_KEY:-}\" ]; then echo '::warning::apt secrets unset; skipping.'; exit 0; fi\n");
+    w.push_str("          debs=(release/*.deb); if [ ! -e \"${debs[0]}\" ]; then echo '::warning::no .deb to publish'; exit 0; fi\n");
+    w.push_str("          nix shell nixpkgs#reprepro nixpkgs#gnupg nixpkgs#openssh nixpkgs#git -c bash <<'SCRIPT'\n");
+    w.push_str(
+        "          set -euo pipefail\n          work=\"$(mktemp -d)\"; chmod 700 \"$work\"\n",
+    );
+    w.push_str("          trap 'rm -rf \"$work\"; [ -n \"${SSH_AGENT_PID:-}\" ] && ssh-agent -k >/dev/null 2>&1 || true' EXIT\n");
+    w.push_str("          export GNUPGHOME=\"$work/gpg\"; mkdir -p \"$GNUPGHOME\"; chmod 700 \"$GNUPGHOME\"\n");
+    w.push_str("          printf '%s' \"$APT_REPO_GPG_KEY\" | gpg --batch --import\n");
+    w.push_str("          echo \"${APT_REPO_GPG_KEY_ID}:6:\" | gpg --batch --import-ownertrust\n");
+    w.push_str("          eval \"$(ssh-agent -s)\"; ssh_key=\"$work/id\"; printf '%s\\n' \"$APT_REPO_SSH_KEY\" > \"$ssh_key\"; chmod 600 \"$ssh_key\"; ssh-add \"$ssh_key\"\n");
+    w.push_str("          ssh_known=\"$work/known_hosts\"; ssh-keyscan codeberg.org > \"$ssh_known\" 2>/dev/null\n");
+    w.push_str("          export GIT_SSH_COMMAND=\"ssh -i $ssh_key -o IdentitiesOnly=yes -o UserKnownHostsFile=$ssh_known -o StrictHostKeyChecking=yes\"\n");
+    w.push_str("          mkdir -p \"$work/apt/conf\"; cp dist/apt/conf/distributions \"$work/apt/conf/distributions\"\n");
+    w.push_str("          for deb in release/*.deb; do reprepro -b \"$work/apt\" includedeb \"$APT_DISTRIBUTION\" \"$deb\"; done\n");
+    w.push_str("          git clone --depth 1 --branch \"$APT_REPO_BRANCH\" \"$APT_REPO_REMOTE\" \"$work/checkout\"\n");
+    w.push_str("          find \"$work/checkout\" -mindepth 1 -maxdepth 1 -not -name .git -not -name README.md -exec rm -rf {} +\n");
+    w.push_str("          cp -r \"$work/apt/dists\" \"$work/checkout/dists\"; cp -r \"$work/apt/pool\" \"$work/checkout/pool\"\n");
+    w.push_str("          if [ -f dist/apt/key.gpg.asc ]; then cp dist/apt/key.gpg.asc \"$work/checkout/key.gpg.asc\"; fi\n");
+    w.push_str("          cd \"$work/checkout\"\n");
+    w.push_str(
+        "          git -c user.name='release bot' -c user.email='release-bot@localhost' add -A\n",
+    );
+    w.push_str("          if git diff --cached --quiet; then echo 'apt: no changes'; exit 0; fi\n");
+    w.push_str("          git -c user.name='release bot' -c user.email='release-bot@localhost' commit -m \"apt: publish ${VERSION}\"\n");
+    w.push_str(
+        "          git push --force-with-lease origin \"HEAD:refs/heads/${APT_REPO_BRANCH}\"\n",
+    );
+    w.push_str("          SCRIPT\n");
+}
+
+fn push_publish_aur(w: &mut String, aur: &ResolvedAur) {
+    w.push_str("      - name: Publish AUR packages\n        env:\n");
+    writeln!(
+        w,
+        "          AUR_SSH_KEY: ${{{{ secrets.{} }}}}",
+        aur.ssh_key_secret
+    )
+    .expect("write");
+    w.push_str("        run: |\n          set -euo pipefail\n");
+    if aur.stable_only {
+        push_stable_guard(w, "AUR packages");
+    } else {
+        w.push_str("          . ./release-env\n");
+    }
+    w.push_str("          test -n \"${AUR_SSH_KEY:-}\"\n");
+    w.push_str(
+        "          nix shell nixpkgs#git nixpkgs#openssh nixpkgs#pacman -c bash <<'SCRIPT'\n",
+    );
+    w.push_str("          set -euo pipefail\n          . ./release-env\n");
+    w.push_str("          AUR_HOST='aur.archlinux.org'; AUR_SSH=\"$HOME/.ssh/aur\"\n");
+    w.push_str("          MAKEPKG_CONF=\"$(dirname \"$(dirname \"$(command -v makepkg)\")\")/etc/makepkg.conf\"; test -r \"$MAKEPKG_CONF\"\n");
+    w.push_str("          checksum_for() { awk -v a=\"$1\" '$2 == a { print $1 }' release/SHA256SUMS.txt; }\n");
+    let source_archive = pkgbuild_source_archive(aur);
+    let bin_archive = pkgbuild_binary_archive(aur);
+    writeln!(
+        w,
+        "          source_sha=\"$(checksum_for \"{source_archive}\")\""
+    )
+    .expect("write");
+    if aur.flavors.bin {
+        writeln!(
+            w,
+            "          bin_sha=\"$(checksum_for \"{bin_archive}\")\"; test -n \"$bin_sha\""
+        )
+        .expect("write");
+    }
+    w.push_str("          test -n \"$source_sha\"\n");
+    w.push_str("          install -d -m 700 \"$HOME/.ssh\"; printf '%s\\n' \"$AUR_SSH_KEY\" > \"$AUR_SSH\"; chmod 600 \"$AUR_SSH\"\n");
+    w.push_str("          ssh-keyscan \"$AUR_HOST\" >> \"$HOME/.ssh/known_hosts\"; chmod 600 \"$HOME/.ssh/known_hosts\"\n");
+    w.push_str("          export GIT_SSH_COMMAND=\"ssh -i $AUR_SSH -o IdentitiesOnly=yes\"\n");
+    w.push_str("          publish_pkg() {\n            pkg=\"$1\"\n");
+    writeln!(w, "            repo=\"{}/${{pkg}}.git\"", aur.ssh_remote).expect("write");
+    w.push_str("            rm -rf \"aur-${pkg}\"\n");
+    w.push_str("            if ! git clone \"$repo\" \"aur-${pkg}\"; then mkdir \"aur-${pkg}\"; git -C \"aur-${pkg}\" init; git -C \"aur-${pkg}\" remote add origin \"$repo\"; fi\n");
+    w.push_str("            git -C \"aur-${pkg}\" checkout -B master\n");
+    w.push_str("            cp \"dist/aur/${pkg}/PKGBUILD\" \"aur-${pkg}/PKGBUILD\"\n");
+    w.push_str("            case \"$pkg\" in\n");
+    writeln!(w, "              {})", aur.name).expect("write");
+    w.push_str("                sed -i -e \"s/^pkgver=.*/pkgver=${VERSION}/\" -e 's/^pkgrel=.*/pkgrel=1/' \"aur-${pkg}/PKGBUILD\"\n");
+    w.push_str("                awk -v sha=\"$source_sha\" '/^sha256sums=/{print \"sha256sums=(\\047\" sha \"\\047)\"; next} {print}' \"aur-${pkg}/PKGBUILD\" > \"aur-${pkg}/PKGBUILD.new\"; mv \"aur-${pkg}/PKGBUILD.new\" \"aur-${pkg}/PKGBUILD\" ;;\n");
+    if aur.flavors.bin {
+        writeln!(w, "              {}-bin)", aur.name).expect("write");
+        w.push_str("                sed -i -e \"s/^pkgver=.*/pkgver=${VERSION}/\" -e 's/^pkgrel=.*/pkgrel=1/' \"aur-${pkg}/PKGBUILD\"\n");
+        w.push_str("                awk -v b=\"$bin_sha\" -v s=\"$source_sha\" '/^sha256sums=/{print \"sha256sums=(\\047\" b \"\\047\"; print \"            \\047\" s \"\\047)\"; skip=1; next} skip && /^[[:space:]]*\\047/{next} {skip=0; print}' \"aur-${pkg}/PKGBUILD\" > \"aur-${pkg}/PKGBUILD.new\"; mv \"aur-${pkg}/PKGBUILD.new\" \"aur-${pkg}/PKGBUILD\" ;;\n");
+    }
+    if aur.flavors.git {
+        writeln!(w, "              {}-git) ;;", aur.name).expect("write");
+    }
+    w.push_str(
+        "              *) echo \"unknown AUR package: $pkg\" >&2; exit 1 ;;\n            esac\n",
+    );
+    w.push_str("            (cd \"aur-${pkg}\" && makepkg --config \"$MAKEPKG_CONF\" --printsrcinfo > .SRCINFO)\n");
+    w.push_str("            git -C \"aur-${pkg}\" add PKGBUILD .SRCINFO\n");
+    w.push_str("            if git -C \"aur-${pkg}\" diff --cached --quiet; then echo \"AUR ${pkg} already at ${VERSION}\"; return 0; fi\n");
+    w.push_str("            git -C \"aur-${pkg}\" -c user.email='ci@localhost' -c user.name='release bot' commit -m \"${VERSION}\"\n");
+    w.push_str("            git -C \"aur-${pkg}\" push origin HEAD:master\n          }\n");
+    let pkgs = aur_pkg_dirs(aur).join(" ");
+    writeln!(
+        w,
+        "          for pkg in {pkgs}; do publish_pkg \"$pkg\"; done"
+    )
+    .expect("write");
+    w.push_str("          SCRIPT\n");
+}
+
+fn push_publish_copr(w: &mut String, copr: &ResolvedCopr) {
+    w.push_str("      - name: Push SRPM to COPR\n        env:\n");
+    writeln!(
+        w,
+        "          COPR_LOGIN: ${{{{ secrets.{} }}}}",
+        copr.login_secret
+    )
+    .expect("write");
+    writeln!(
+        w,
+        "          COPR_USERNAME: ${{{{ secrets.{} }}}}",
+        copr.username_secret
+    )
+    .expect("write");
+    writeln!(
+        w,
+        "          COPR_TOKEN: ${{{{ secrets.{} }}}}",
+        copr.token_secret
+    )
+    .expect("write");
+    w.push_str("        run: |\n          set -euo pipefail\n          . ./release-env\n");
+    let stable_project = copr.project.as_deref().unwrap_or("");
+    let testing_project = copr.testing_project.as_deref().unwrap_or(stable_project);
+    writeln!(w, "          COPR_PROJECT=\"{stable_project}\"").expect("write");
+    writeln!(w, "          if [ \"$IS_PRERELEASE\" = \"true\" ]; then COPR_PROJECT=\"{testing_project}\"; fi").expect("write");
+    w.push_str("          if [ -z \"$COPR_LOGIN\" ] || [ -z \"$COPR_USERNAME\" ] || [ -z \"$COPR_TOKEN\" ]; then echo 'COPR credentials unset; skipping.'; exit 0; fi\n");
+    w.push_str("          mkdir -p ~/.config\n");
+    w.push_str("          cat > ~/.config/copr <<EOF\n          [copr-cli]\n          login = ${COPR_LOGIN}\n          username = ${COPR_USERNAME}\n          token = ${COPR_TOKEN}\n          copr_url = https://copr.fedorainfracloud.org\n          EOF\n");
+    w.push_str("          chmod 600 ~/.config/copr\n");
+    w.push_str("          nix shell nixpkgs#copr-cli -c copr-cli build --nowait \"${COPR_PROJECT}\" srpms/*.src.rpm\n");
+}
+
+fn push_publish_homebrew(w: &mut String, homebrew: &ResolvedHomebrew) {
+    w.push_str("      - name: Publish Homebrew tap\n        env:\n");
+    w.push_str("          HOMEBREW_TAP_TOKEN: ${{ secrets.homebrew_tap_token }}\n");
+    writeln!(w, "          HOMEBREW_TAP_URL: {}", homebrew.tap_url).expect("write");
+    w.push_str("        run: |\n          set -euo pipefail\n");
+    push_stable_guard(w, "Homebrew tap update");
+    w.push_str("          if [ -z \"${HOMEBREW_TAP_TOKEN:-}\" ]; then echo 'HOMEBREW_TAP_TOKEN unset; skipping.'; exit 0; fi\n");
+    w.push_str("          credential_helper='!f() { echo username=x-access-token; echo \"password=$HOMEBREW_TAP_TOKEN\"; }; f'\n");
+    w.push_str("          rm -rf tap; git -c credential.helper=\"$credential_helper\" clone \"$HOMEBREW_TAP_URL\" tap\n");
+    w.push_str("          cd tap; git config credential.helper \"$credential_helper\"; git config user.email 'ci@localhost'; git config user.name 'release bot'\n");
+    w.push_str("          git remote set-head origin -a; DEFAULT_BRANCH=\"$(git symbolic-ref --short refs/remotes/origin/HEAD | sed 's|^origin/||')\"; git checkout \"$DEFAULT_BRANCH\"; cd ..\n");
+    w.push_str("          nix run '.#rs-harbor' -- brew bump \\\n");
+    writeln!(w, "            --name {} \\", homebrew.name).expect("write");
+    w.push_str("            --version \"$VERSION\" \\\n");
+    writeln!(
+        w,
+        "            --description {} \\",
+        shell_quote(&homebrew.description)
+    )
+    .expect("write");
+    writeln!(
+        w,
+        "            --homepage {} \\",
+        shell_quote(&homebrew.homepage)
+    )
+    .expect("write");
+    writeln!(w, "            --license {} \\", homebrew.license).expect("write");
+    for (key, arch, os, enabled) in homebrew_platform_keys(homebrew) {
+        if !enabled {
+            continue;
+        }
+        let file = homebrew_archive(homebrew, arch, os);
+        writeln!(
+            w,
+            "            --archive \"{key}=https://codeberg.org/{repo}/releases/download/${{VERSION}}/{file},release/{file}\" \\",
+            repo = homebrew.download_repo
+        )
+        .expect("write");
+    }
+    for binary in &homebrew.binaries {
+        writeln!(w, "            --binary {binary} \\").expect("write");
+    }
+    w.push_str("            --tap \"$PWD/tap\"\n");
+    w.push_str("          cd tap\n");
+    writeln!(w, "          if [ -z \"$(git status --porcelain -- Formula/{}.rb)\" ]; then echo 'tap unchanged'; exit 0; fi", homebrew.name).expect("write");
+    writeln!(w, "          git add Formula/{}.rb; git commit -m \"{} ${{VERSION}}\"; git push origin \"HEAD:${{DEFAULT_BRANCH}}\"", homebrew.name, homebrew.name).expect("write");
+}
+
+fn push_publish_scoop(w: &mut String, scoop: &ResolvedScoop) {
+    w.push_str("      - name: Publish Scoop bucket\n        env:\n");
+    w.push_str("          SCOOP_BUCKET_TOKEN: ${{ secrets.SCOOP_BUCKET_TOKEN }}\n");
+    writeln!(w, "          SCOOP_BUCKET_URL: {}", scoop.bucket_url).expect("write");
+    w.push_str("        run: |\n          set -euo pipefail\n");
+    push_stable_guard(w, "Scoop bucket update");
+    w.push_str("          if [ -z \"${SCOOP_BUCKET_TOKEN:-}\" ]; then echo 'SCOOP_BUCKET_TOKEN unset; skipping.'; exit 0; fi\n");
+    let zip = scoop_windows_zip(scoop);
+    writeln!(w, "          ZIP_NAME=\"{zip}\"; test -s \"release/${{ZIP_NAME}}\"; test -s dist/scoop/{}.json", scoop.name).expect("write");
+    w.push_str("          SHA256=\"$(awk -v a=\"$ZIP_NAME\" '$2 == a { print $1 }' release/SHA256SUMS.txt)\"; test -n \"$SHA256\"\n");
+    w.push_str("          credential_helper='!f() { echo username=x-access-token; echo \"password=$SCOOP_BUCKET_TOKEN\"; }; f'\n");
+    w.push_str("          rm -rf scoop-bucket; git -c credential.helper=\"$credential_helper\" clone \"$SCOOP_BUCKET_URL\" scoop-bucket\n");
+    w.push_str("          cd scoop-bucket; git config credential.helper \"$credential_helper\"; git config user.email 'ci@localhost'; git config user.name 'release bot'\n");
+    w.push_str("          git remote set-head origin -a; DEFAULT_BRANCH=\"$(git symbolic-ref --short refs/remotes/origin/HEAD | sed 's|^origin/||')\"; git checkout \"$DEFAULT_BRANCH\"; mkdir -p bucket; cd ..\n");
+    writeln!(w, "          sed -e \"s|{{{{VERSION}}}}|${{VERSION}}|g\" -e \"s|{{{{SHA256}}}}|${{SHA256}}|g\" dist/scoop/{name}.json > scoop-bucket/bucket/{name}.json", name = scoop.name).expect("write");
+    writeln!(w, "          cd scoop-bucket; if [ -z \"$(git status --porcelain -- bucket/{name}.json)\" ]; then echo 'bucket unchanged'; exit 0; fi", name = scoop.name).expect("write");
+    writeln!(w, "          git add bucket/{name}.json; git commit -m \"{name} ${{VERSION}}\"; git push origin \"HEAD:${{DEFAULT_BRANCH}}\"", name = scoop.name).expect("write");
+}
+
+fn push_sbom(w: &mut String, commands: &[String]) {
+    w.push_str("      - name: Generate supply-chain reports\n        run: |\n          set -euo pipefail\n          . ./release-env\n          mkdir -p release\n");
+    for line in commands {
+        for sub in line.split('\n') {
+            writeln!(w, "          {sub}").expect("write");
+        }
+    }
+}
+
+fn push_windows_signing(w: &mut String, windows: &WindowsSigningConfig) {
+    let dir = &windows.dir;
+    let tar = windows.tar_archive.replace("{version}", "${VERSION}");
+    let zip = windows.zip_archive.replace("{version}", "${VERSION}");
+    w.push_str("      - name: Sign Windows Authenticode artifacts\n        env:\n");
+    writeln!(
+        w,
+        "          WINDOWS_SIGNING_PFX: ${{{{ secrets.{} }}}}",
+        windows.pfx_secret
+    )
+    .expect("write");
+    writeln!(
+        w,
+        "          WINDOWS_SIGNING_PASS: ${{{{ secrets.{} }}}}",
+        windows.pass_secret
+    )
+    .expect("write");
+    writeln!(
+        w,
+        "          WINDOWS_SIGNING_SUBJECT: ${{{{ secrets.{} }}}}",
+        windows.subject_secret
+    )
+    .expect("write");
+    w.push_str("        run: |\n          set -euo pipefail\n          . ./release-env\n");
+    let exes = windows
+        .binaries
+        .iter()
+        .map(|b| format!("{dir}/{b}.exe"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    writeln!(w, "          for exe in {exes}; do test -s \"$exe\"; done").expect("write");
+    w.push_str("          if [ -n \"${WINDOWS_SIGNING_PFX:-}\" ] && [ -n \"${WINDOWS_SIGNING_PASS:-}\" ]; then\n");
+    w.push_str("            nix shell nixpkgs#osslsigncode nixpkgs#openssl -c bash <<'SCRIPT'\n");
+    w.push_str("          set -euo pipefail\n          umask 077\n");
+    w.push_str("          pfx_file=\"$(mktemp)\"; pass_file=\"$(mktemp)\"\n");
+    w.push_str("          trap 'rm -f \"$pfx_file\" \"$pass_file\"' EXIT\n");
+    w.push_str(
+        "          printf '%s' \"$WINDOWS_SIGNING_PFX\" | base64 --decode > \"$pfx_file\"\n",
+    );
+    w.push_str("          printf '%s' \"$WINDOWS_SIGNING_PASS\" > \"$pass_file\"\n");
+    writeln!(w, "          for exe in {exes}; do").expect("write");
+    w.push_str("            osslsigncode sign -pkcs12 \"$pfx_file\" -readpass \"$pass_file\" -h sha256 \\\n");
+    writeln!(
+        w,
+        "              -n {} -i {} -ts {} \\",
+        shell_quote(&windows.sign_name),
+        shell_quote(&windows.sign_url),
+        shell_quote(&windows.timestamp_url)
+    )
+    .expect("write");
+    w.push_str("              -in \"$exe\" -out \"${exe}.signed\"\n");
+    w.push_str("            osslsigncode verify -in \"${exe}.signed\"\n");
+    w.push_str("            mv \"${exe}.signed\" \"$exe\"\n");
+    w.push_str("          done\n          SCRIPT\n");
+    w.push_str("          else\n            echo '::warning::WINDOWS_SIGNING_PFX/PASS unset; publishing unsigned Windows EXEs.'\n          fi\n");
+    let basenames = windows
+        .binaries
+        .iter()
+        .map(|b| format!("{b}.exe"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    writeln!(
+        w,
+        "          tar czf \"release/{tar}\" -C {dir} {basenames}"
+    )
+    .expect("write");
+    writeln!(w, "          nix shell nixpkgs#zip -c bash -c \"cd {dir} && zip -q \\\"$OLDPWD/release/{zip}\\\" {basenames}\"").expect("write");
+    // Individual signed .exe assets, e.g. modde-${VERSION}-x86_64-windows.exe.
+    let platform_suffix = windows
+        .zip_archive
+        .split_once("{version}")
+        .map(|(_, rest)| rest.trim_end_matches(".zip"))
+        .unwrap_or("");
+    for binary in &windows.binaries {
+        writeln!(
+            w,
+            "          cp {dir}/{binary}.exe \"release/{binary}-${{VERSION}}{platform_suffix}.exe\""
+        )
+        .expect("write");
+    }
+}
+
+fn push_announce(
+    w: &mut String,
+    announce: &AnnounceConfig,
+    codeberg: Option<&ResolvedCodebergRelease>,
+) {
+    let fallback = codeberg
+        .map(|c| format!("https://codeberg.org/{}/releases/tag/${{VERSION}}", c.repo))
+        .unwrap_or_else(|| "${VERSION}".to_owned());
+    w.push_str("      - name: Announce stable release\n        env:\n");
+    writeln!(
+        w,
+        "          MASTODON_TOKEN: ${{{{ secrets.{} }}}}",
+        announce.mastodon_token_secret
+    )
+    .expect("write");
+    writeln!(
+        w,
+        "          MASTODON_BASE_URL: ${{{{ secrets.{} }}}}",
+        announce.mastodon_base_url_secret
+    )
+    .expect("write");
+    writeln!(
+        w,
+        "          MATRIX_TOKEN: ${{{{ secrets.{} }}}}",
+        announce.matrix_token_secret
+    )
+    .expect("write");
+    writeln!(
+        w,
+        "          MATRIX_HOMESERVER: ${{{{ secrets.{} }}}}",
+        announce.matrix_homeserver_secret
+    )
+    .expect("write");
+    writeln!(
+        w,
+        "          MATRIX_ROOM: ${{{{ secrets.{} }}}}",
+        announce.matrix_room_secret
+    )
+    .expect("write");
+    w.push_str("        run: |\n          set -euo pipefail\n");
+    push_stable_guard(w, "announcements");
+    w.push_str("          nix shell nixpkgs#curl nixpkgs#jq -c bash <<'SCRIPT'\n");
+    w.push_str("          set -euo pipefail\n          . ./release-env\n");
+    w.push_str("          release_url=\"$(jq -r '.html_url // .url // empty' release.json 2>/dev/null || true)\"\n");
+    writeln!(
+        w,
+        "          if [ -z \"$release_url\" ]; then release_url=\"{fallback}\"; fi"
+    )
+    .expect("write");
+    w.push_str("          body=\"release ${VERSION} is out: ${release_url}\"\n");
+    w.push_str(
+        "          if [ -n \"${MASTODON_TOKEN:-}\" ] && [ -n \"${MASTODON_BASE_URL:-}\" ]; then\n",
+    );
+    w.push_str(
+        "            jq -n --arg status \"$body\" '{status: $status}' > mastodon-status.json\n",
+    );
+    w.push_str("            curl -sS --fail -H \"Authorization: Bearer ${MASTODON_TOKEN}\" -H 'Content-Type: application/json' -d @mastodon-status.json \"${MASTODON_BASE_URL%/}/api/v1/statuses\" > /dev/null\n");
+    w.push_str("          else echo 'Mastodon secrets unset; skipping.'; fi\n");
+    w.push_str("          if [ -n \"${MATRIX_TOKEN:-}\" ] && [ -n \"${MATRIX_HOMESERVER:-}\" ] && [ -n \"${MATRIX_ROOM:-}\" ]; then\n");
+    w.push_str("            txnid=\"release-${VERSION}-${CODEBERG_RUN_ID:-manual}\"\n");
+    w.push_str("            encoded_room=\"$(jq -rn --arg v \"$MATRIX_ROOM\" '$v|@uri')\"\n");
+    w.push_str("            jq -n --arg body \"$body\" '{msgtype: \"m.text\", body: $body}' > matrix-message.json\n");
+    w.push_str("            curl -sS --fail -X PUT -H \"Authorization: Bearer ${MATRIX_TOKEN}\" -H 'Content-Type: application/json' -d @matrix-message.json \"${MATRIX_HOMESERVER%/}/_matrix/client/r0/rooms/${encoded_room}/send/m.room.message/${txnid}\" > /dev/null\n");
+    w.push_str("          else echo 'Matrix secrets unset; skipping.'; fi\n          SCRIPT\n");
+}
+
+fn push_publish_flathub(w: &mut String, flatpak: &FlatpakConfig) {
+    w.push_str("      - name: Publish Flathub update PR\n        env:\n");
+    writeln!(
+        w,
+        "          FLATHUB_TOKEN: ${{{{ secrets.{} }}}}",
+        flatpak.token_secret
+    )
+    .expect("write");
+    w.push_str("        run: |\n          set -euo pipefail\n");
+    push_stable_guard(w, "Flathub update");
+    w.push_str("          if [ -z \"${FLATHUB_TOKEN:-}\" ]; then echo 'FLATHUB_TOKEN unset; skipping.'; exit 0; fi\n");
+    for file in &flatpak.manifest_files {
+        writeln!(w, "          test -s release/{file}").expect("write");
+    }
+    w.push_str("          nix shell nixpkgs#curl nixpkgs#git nixpkgs#jq -c bash <<'SCRIPT'\n");
+    w.push_str("          set -euo pipefail\n          . ./release-env\n");
+    w.push_str("          credential_helper='!f() { echo username=x-access-token; echo \"password=$FLATHUB_TOKEN\"; }; f'\n");
+    writeln!(w, "          rm -rf flathub-repo; git -c credential.helper=\"$credential_helper\" clone https://github.com/{}.git flathub-repo", flatpak.repo).expect("write");
+    w.push_str("          cd flathub-repo\n          git config credential.helper \"$credential_helper\"; git config user.email 'ci@localhost'; git config user.name 'release bot'\n");
+    w.push_str("          git checkout -B \"release/${VERSION}\"\n");
+    let files = flatpak.manifest_files.join(" ");
+    writeln!(
+        w,
+        "          cp {} .",
+        flatpak
+            .manifest_files
+            .iter()
+            .map(|f| format!("../release/{f}"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    )
+    .expect("write");
+    writeln!(w, "          if [ -z \"$(git status --porcelain -- {files})\" ]; then echo 'manifest unchanged'; exit 0; fi").expect("write");
+    writeln!(w, "          git add {files}; git commit -m \"${{VERSION}}\"; git push --force-with-lease origin \"release/${{VERSION}}\"").expect("write");
+    writeln!(w, "          payload=\"$(jq -n --arg title \"${{VERSION}}\" --arg head \"release/${{VERSION}}\" --arg base \"{base}\" --arg body \"Update to ${{VERSION}}.\" '{{title: $title, head: $head, base: $base, body: $body}}')\"", base = flatpak.base_branch).expect("write");
+    writeln!(w, "          status=\"$(curl -sS -o pr.json -w '%{{http_code}}' -H \"Authorization: Bearer ${{FLATHUB_TOKEN}}\" -H 'Accept: application/vnd.github+json' -d \"$payload\" https://api.github.com/repos/{}/pulls)\"", flatpak.repo).expect("write");
+    w.push_str("          if [ \"$status\" -eq 422 ]; then echo 'PR exists or rejected'; jq -r '.message' pr.json; exit 0; fi\n");
+    w.push_str("          if [ \"$status\" -lt 200 ] || [ \"$status\" -ge 300 ]; then cat pr.json; exit 1; fi\n");
+    w.push_str("          jq -r '.html_url' pr.json\n          SCRIPT\n");
+}
+
+fn push_publish_winget(w: &mut String, winget: &WingetConfig) {
+    let zip = winget.zip_archive.replace("{version}", "${VERSION}");
+    w.push_str("      - name: Publish winget manifest PR\n        env:\n");
+    writeln!(
+        w,
+        "          WINGET_PAT: ${{{{ secrets.{} }}}}",
+        winget.token_secret
+    )
+    .expect("write");
+    w.push_str("        run: |\n          set -euo pipefail\n");
+    push_stable_guard(w, "winget manifest update");
+    w.push_str("          if [ -z \"${WINGET_PAT:-}\" ]; then echo 'WINGET_PAT unset; skipping.'; exit 0; fi\n");
+    writeln!(w, "          ZIP_NAME=\"{zip}\"; ZIP_URL=\"https://codeberg.org/{}/releases/download/${{VERSION}}/${{ZIP_NAME}}\"", winget.download_repo).expect("write");
+    w.push_str("          test -s \"release/${ZIP_NAME}\"\n");
+    w.push_str("          export ZIP_URL VERSION WINGET_PAT\n");
+    w.push_str("          nix shell nixpkgs#curl nixpkgs#jq nixpkgs#unzip nixpkgs#wineWow64Packages.stable nixpkgs#util-linux -c bash <<'SCRIPT'\n");
+    w.push_str("          set -euo pipefail\n          tmpdir=\"$(mktemp -d)\"; trap 'rm -rf \"$tmpdir\"' EXIT\n");
+    w.push_str(
+        "          export WINEPREFIX=\"$tmpdir/wine\"; export WINEDEBUG=-all; export TERM=xterm\n",
+    );
+    w.push_str("          release_json=\"$(curl -fsSL https://api.github.com/repos/microsoft/winget-create/releases/latest)\"\n");
+    w.push_str("          url=\"$(printf '%s' \"$release_json\" | jq -r '.assets[] | select(.name == \"wingetcreate.exe\") | .browser_download_url' | head -n 1)\"\n");
+    w.push_str("          curl -fsSL -o \"$tmpdir/wingetcreate.exe\" \"$url\"\n");
+    writeln!(w, "          wine \"$tmpdir/wingetcreate.exe\" update {} --version \"$VERSION\" --urls \"${{ZIP_URL}}|x64\" --token \"$WINGET_PAT\" --submit", winget.package_id).expect("write");
+    w.push_str("          SCRIPT\n");
+}
+
+fn push_publish_chocolatey(w: &mut String, chocolatey: &ResolvedChocolatey) {
+    let zip = chocolatey
+        .archive_pattern
+        .replace("{name}", &chocolatey.name)
+        .replace("{version}", "${VERSION}")
+        .replace("{arch}", "x86_64");
+    let key_env = &chocolatey.api_key_env;
+    w.push_str("      - name: Publish Chocolatey package\n        env:\n");
+    // Source the key from an Actions secret, unless the runner already provides
+    // it in the job environment (e.g. a Forgejo runner credential).
+    if !chocolatey.api_key_from_runner {
+        writeln!(
+            w,
+            "          {key_env}: ${{{{ secrets.{} }}}}",
+            chocolatey.api_key_secret
+        )
+        .expect("write");
+    }
+    writeln!(w, "          CHOCO_PUSH_SOURCE: {}", chocolatey.push.source).expect("write");
+    w.push_str("        run: |\n          set -euo pipefail\n");
+    push_stable_guard(w, "Chocolatey package update");
+    writeln!(w, "          if [ -z \"${{{key_env}:-}}\" ]; then echo '{key_env} unset; skipping.'; exit 0; fi").expect("write");
+    // `nix_tool` provides choco (+ simit). Point it at a fork that ships the
+    // chocolatey package until it lands upstream; the soft-skip above keeps tags
+    // green in the meantime.
+    writeln!(w, "          ZIP=\"release/{zip}\"; test -s \"$ZIP\"").expect("write");
+    writeln!(
+        w,
+        "          nix shell {} -c simit dist chocolatey bump \\",
+        chocolatey.nix_tool
+    )
+    .expect("write");
+    w.push_str(
+        "            --version \"$VERSION\" \\\n            --package-dir chocolatey-package \\\n",
+    );
+    w.push_str("            --archive \"x64=$ZIP\" \\\n");
+    push_choco_flag(w, "--choco-name", &chocolatey.name);
+    push_choco_flag(w, "--choco-id", &chocolatey.id);
+    push_choco_flag(w, "--choco-title", &chocolatey.title);
+    if let Some(authors) = &chocolatey.authors {
+        push_choco_flag(w, "--choco-authors", authors);
+    }
+    push_choco_flag(w, "--choco-description", &chocolatey.description);
+    push_choco_flag(w, "--choco-project-url", &chocolatey.project_url);
+    push_choco_flag(w, "--choco-download-repo", &chocolatey.download_repo);
+    push_choco_flag(w, "--choco-archive-pattern", &chocolatey.archive_pattern);
+    writeln!(w, "            --push \\\n            --push-source \"$CHOCO_PUSH_SOURCE\" \\\n            --api-key-env {key_env}").expect("write");
+}
+
+fn push_choco_flag(w: &mut String, flag: &str, value: &str) {
+    writeln!(w, "            {flag} {} \\", shell_quote(value)).expect("write");
+}
+
+// --- helpers shared with the dist renderers (archive names with literal version) ---
+
+fn pkgbuild_source_archive(aur: &ResolvedAur) -> String {
+    aur.source_archive_pattern
+        .replace("{repo}", &aur.repo)
+        .replace("{name}", &aur.name)
+        .replace("{version}", "${VERSION}")
+}
+
+fn pkgbuild_binary_archive(aur: &ResolvedAur) -> String {
+    aur.binary_archive_pattern
+        .replace("{repo}", &aur.repo)
+        .replace("{name}", &aur.name)
+        .replace("{version}", "${VERSION}")
+}
+
+fn aur_pkg_dirs(aur: &ResolvedAur) -> Vec<String> {
+    let mut dirs = Vec::new();
+    if aur.flavors.source {
+        dirs.push(aur.name.clone());
+    }
+    if aur.flavors.bin {
+        dirs.push(format!("{}-bin", aur.name));
+    }
+    if aur.flavors.git {
+        dirs.push(format!("{}-git", aur.name));
+    }
+    dirs
+}
+
+fn homebrew_platform_keys(
+    homebrew: &ResolvedHomebrew,
+) -> [(&'static str, &'static str, &'static str, bool); 4] {
+    [
+        (
+            "darwin_arm",
+            "aarch64",
+            "darwin",
+            homebrew.platforms.darwin_arm,
+        ),
+        (
+            "darwin_intel",
+            "x86_64",
+            "darwin",
+            homebrew.platforms.darwin_intel,
+        ),
+        (
+            "linux_arm",
+            "aarch64",
+            "linux",
+            homebrew.platforms.linux_arm,
+        ),
+        (
+            "linux_intel",
+            "x86_64",
+            "linux",
+            homebrew.platforms.linux_intel,
+        ),
+    ]
+}
+
+fn homebrew_archive(homebrew: &ResolvedHomebrew, arch: &str, os: &str) -> String {
+    homebrew
+        .archive_pattern
+        .replace("{name}", &homebrew.name)
+        .replace("{version}", "${VERSION}")
+        .replace("{arch}", arch)
+        .replace("{os}", os)
+}
+
+fn scoop_windows_zip(scoop: &ResolvedScoop) -> String {
+    scoop
+        .archive_pattern
+        .replace("{name}", &scoop.name)
+        .replace("{version}", "${VERSION}")
+        .replace("{arch}", "x86_64")
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{AurFlavors, ChocolateyPushConfig, HomebrewPlatformsConfig, ScoopArchSet};
+
+    fn chocolatey() -> ResolvedChocolatey {
+        ResolvedChocolatey {
+            name: "modde".to_owned(),
+            id: "modde".to_owned(),
+            title: "modde".to_owned(),
+            authors: Some("Caniko".to_owned()),
+            description: "Cross-platform game mod manager".to_owned(),
+            project_url: "https://modde.rs".to_owned(),
+            license_url: None,
+            tags: None,
+            release_notes_url: None,
+            download_repo: "caniko/rs-modde".to_owned(),
+            archive_pattern: "modde-{version}-{arch}-windows.zip".to_owned(),
+            push: ChocolateyPushConfig::default(),
+            api_key_env: "CHOCOLATEY_API_KEY".to_owned(),
+            api_key_secret: "chocolatey_api_key".to_owned(),
+            api_key_from_runner: false,
+            nix_tool: "github:caniko/nixpkgs/add-chocolatey-scoop#chocolatey git+https://codeberg.org/caniko/simit"
+                .to_owned(),
+        }
+    }
+
+    fn windows_signing() -> WindowsSigningConfig {
+        WindowsSigningConfig {
+            dir: "release/windows-x86_64".to_owned(),
+            binaries: vec!["modde".to_owned(), "modde-ui".to_owned()],
+            sign_name: "modde".to_owned(),
+            sign_url: "https://modde.tartanoglu.com".to_owned(),
+            timestamp_url: "http://timestamp.digicert.com".to_owned(),
+            tar_archive: "modde-{version}-x86_64-windows.tar.gz".to_owned(),
+            zip_archive: "modde-{version}-x86_64-windows.zip".to_owned(),
+            pfx_secret: "WINDOWS_SIGNING_PFX".to_owned(),
+            pass_secret: "WINDOWS_SIGNING_PASS".to_owned(),
+            subject_secret: "WINDOWS_SIGNING_SUBJECT".to_owned(),
+        }
+    }
+
+    fn flatpak() -> FlatpakConfig {
+        FlatpakConfig {
+            repo: "flathub/com.tartanoglu.modde".to_owned(),
+            app_id: "com.tartanoglu.modde".to_owned(),
+            manifest_files: vec![
+                "com.tartanoglu.modde.json".to_owned(),
+                "cargo-sources.json".to_owned(),
+            ],
+            base_branch: "master".to_owned(),
+            token_secret: "FLATHUB_TOKEN".to_owned(),
+        }
+    }
+
+    fn winget() -> WingetConfig {
+        WingetConfig {
+            package_id: "Caniko.Modde".to_owned(),
+            download_repo: "caniko/rs-modde".to_owned(),
+            zip_archive: "modde-{version}-x86_64-windows.zip".to_owned(),
+            token_secret: "WINGET_PAT".to_owned(),
+        }
+    }
+
+    fn artifacts() -> ArtifactsConfig {
+        ArtifactsConfig {
+            runner: Some("atlas".to_owned()),
+            substituters: vec!["https://cache.example/c".to_owned()],
+            trusted_public_keys: vec!["c:abc=".to_owned()],
+            version_attr: Some("modde".to_owned()),
+            supply_chain_command: Some("cargo deny check".to_owned()),
+            build_commands: vec!["nix build .#modde --out-link release/x".to_owned()],
+            sbom_commands: vec![],
+            checksum_globs: vec!["*.tar.gz".to_owned(), "*.deb".to_owned()],
+            minisign_pub: "keys/minisign.pub".to_owned(),
+            sign: true,
+        }
+    }
+
+    fn aur() -> ResolvedAur {
+        ResolvedAur {
+            name: "modde".to_owned(),
+            description: "d".to_owned(),
+            url: "https://codeberg.org/caniko/rs-modde".to_owned(),
+            license: "GPL-3.0-only".to_owned(),
+            maintainer: None,
+            maintainer_gpg: None,
+            arch: "x86_64".to_owned(),
+            depends: vec![],
+            makedepends: vec![],
+            bin_glibc_min: None,
+            binaries: vec!["modde".to_owned()],
+            assets: vec![],
+            license_file: None,
+            readme: None,
+            changelog: None,
+            download_repo: "caniko/rs-modde".to_owned(),
+            repo: "rs-modde".to_owned(),
+            source_archive_pattern: "{repo}-{version}.tar.gz".to_owned(),
+            binary_archive_pattern: "{name}-{version}-x86_64-linux.tar.gz".to_owned(),
+            git_url: "https://codeberg.org/caniko/rs-modde.git".to_owned(),
+            flavors: AurFlavors::default(),
+            ssh_remote: "ssh://aur@aur.archlinux.org".to_owned(),
+            ssh_key_secret: "AUR_SSH_KEY".to_owned(),
+            stable_only: true,
+        }
+    }
+
+    fn copr() -> ResolvedCopr {
+        ResolvedCopr {
+            name: "modde".to_owned(),
+            summary: "s".to_owned(),
+            description: "d".to_owned(),
+            license: "GPL-3.0-only".to_owned(),
+            url: "https://codeberg.org/caniko/rs-modde".to_owned(),
+            download_repo: "caniko/rs-modde".to_owned(),
+            repo: "rs-modde".to_owned(),
+            build_requires: vec![],
+            binaries: vec!["modde".to_owned()],
+            spec_path: "modde.spec".to_owned(),
+            project: Some("caniko/rs-modde".to_owned()),
+            testing_project: Some("caniko/rs-modde-testing".to_owned()),
+            login_secret: "copr_login".to_owned(),
+            username_secret: "copr_username".to_owned(),
+            token_secret: "copr_token".to_owned(),
+        }
+    }
+
+    fn apt() -> ResolvedApt {
+        ResolvedApt {
+            label: "modde".to_owned(),
+            repo_url: "ssh://git@codeberg.org/caniko/rs-modde-apt.git".to_owned(),
+            branch: "pages".to_owned(),
+            distribution: "stable".to_owned(),
+            architectures: "amd64".to_owned(),
+            components: "main".to_owned(),
+            debian_release: "bookworm".to_owned(),
+            packages: vec!["modde-cli=modde".to_owned()],
+            build_deps: vec!["gcc".to_owned(), "pkg-config".to_owned()],
+            cargo_deb_version: "2.5.0".to_owned(),
+            gpg_key_secret: "modde_apt_repo_gpg_key".to_owned(),
+            gpg_key_id_secret: "modde_apt_repo_gpg_key_id".to_owned(),
+            gpg_passphrase_secret: "modde_apt_repo_gpg_passphrase".to_owned(),
+            ssh_key_secret: "modde_apt_repo_ssh_key".to_owned(),
+        }
+    }
+
+    fn codeberg() -> ResolvedCodebergRelease {
+        ResolvedCodebergRelease {
+            repo: "caniko/rs-modde".to_owned(),
+            api_base: "https://codeberg.org/api/v1".to_owned(),
+            token_secret: "codeberg_token".to_owned(),
+            target_branch: "trunk".to_owned(),
+            body_from_changelog: true,
+        }
+    }
+
+    fn homebrew() -> ResolvedHomebrew {
+        ResolvedHomebrew {
+            name: "modde".to_owned(),
+            binaries: vec!["modde".to_owned(), "modde-ui".to_owned()],
+            tap_url: "https://codeberg.org/caniko/homebrew-modde.git".to_owned(),
+            description: "Cross-platform game mod manager".to_owned(),
+            homepage: "https://modde.rs".to_owned(),
+            license: "GPL-3.0-only".to_owned(),
+            download_repo: "caniko/rs-modde".to_owned(),
+            archive_pattern: "modde-{version}-{arch}-{os}.tar.gz".to_owned(),
+            platforms: HomebrewPlatformsConfig::default(),
+        }
+    }
+
+    fn scoop() -> ResolvedScoop {
+        ResolvedScoop {
+            name: "modde".to_owned(),
+            bucket_url: "https://codeberg.org/caniko/scoop-modde.git".to_owned(),
+            description: "d".to_owned(),
+            homepage: "https://modde.rs".to_owned(),
+            license: "GPL-3.0-only".to_owned(),
+            download_repo: "caniko/rs-modde".to_owned(),
+            archive_pattern: "modde-{version}-{arch}-windows.zip".to_owned(),
+            binaries: vec!["modde".to_owned()],
+            architectures: ScoopArchSet::default(),
+        }
+    }
+
+    #[test]
+    fn full_pipeline_has_every_channel_mechanic() {
+        let (aur, copr, apt, codeberg, homebrew, scoop) =
+            (aur(), copr(), apt(), codeberg(), homebrew(), scoop());
+        let (chocolatey, windows, flatpak, winget) =
+            (chocolatey(), windows_signing(), flatpak(), winget());
+        let announce = AnnounceConfig::default();
+        let mut artifacts = artifacts();
+        artifacts.sbom_commands = vec!["cargo sbom > release/sbom.json".to_owned()];
+        let workflow = render(&ReleaseWorkflowInputs {
+            runner: "atlas",
+            artifacts: &artifacts,
+            smoke_command: Some("nix run .#release-smoke --"),
+            codeberg: Some(&codeberg),
+            attic: None,
+            aur: Some(&aur),
+            copr: Some(&copr),
+            apt: Some(&apt),
+            homebrew: Some(&homebrew),
+            scoop: Some(&scoop),
+            chocolatey: Some(&chocolatey),
+            windows_signing: Some(&windows),
+            flatpak: Some(&flatpak),
+            winget: Some(&winget),
+            announce: Some(&announce),
+        });
+
+        // Scaffolding
+        assert!(workflow.contains("name: release\n"));
+        assert!(workflow.contains("runs-on: atlas\n"));
+        assert!(workflow.contains("enable-openid-connect: true\n"));
+        assert!(workflow.contains("test \"$(nix eval --raw .#modde.version)\" = \"$VERSION\""));
+        assert!(workflow.contains("git verify-tag \"$VERSION\""));
+        assert!(workflow.contains("nix run .#release-smoke -- \"$VERSION\" release"));
+        // minisign + cosign SLSA attestation
+        assert!(workflow.contains("minisign -S -s \"$minisign_key\""));
+        assert!(workflow.contains("cosign sign-blob --yes --identity-token"));
+        assert!(workflow.contains("--type slsaprovenance1"));
+        // Codeberg release upload
+        assert!(workflow.contains("CODEBERG_TOKEN: ${{ secrets.codeberg_token }}"));
+        assert!(workflow.contains("${CODEBERG_API}/repos/${CODEBERG_REPO}/releases\""));
+        assert!(workflow.contains("releases/${release_id}/assets?name=${name}"));
+        assert!(workflow.contains("target_commitish: $branch"));
+        // COPR srpm build + push
+        assert!(workflow.contains("rpmbuild -bs modde.spec"));
+        assert!(workflow.contains("copr-cli build --nowait \"${COPR_PROJECT}\" srpms/*.src.rpm"));
+        assert!(workflow.contains("COPR_PROJECT=\"caniko/rs-modde\""));
+        assert!(workflow.contains("COPR_PROJECT=\"caniko/rs-modde-testing\""));
+        // APT deb build + reprepro publish
+        assert!(workflow.contains("debootstrap --variant=minbase bookworm"));
+        assert!(
+            workflow
+                .contains("deb -p modde-cli --output \"/work/release/modde_${VERSION}_amd64.deb\"")
+        );
+        assert!(workflow.contains("reprepro -b \"$work/apt\" includedeb \"$APT_DISTRIBUTION\""));
+        assert!(
+            workflow.contains(
+                "git push --force-with-lease origin \"HEAD:refs/heads/${APT_REPO_BRANCH}\""
+            )
+        );
+        // AUR ssh publish with .SRCINFO + 3 flavors
+        assert!(workflow.contains("AUR_SSH_KEY: ${{ secrets.AUR_SSH_KEY }}"));
+        assert!(workflow.contains("makepkg --config \"$MAKEPKG_CONF\" --printsrcinfo > .SRCINFO"));
+        assert!(
+            workflow
+                .contains("for pkg in modde modde-bin modde-git; do publish_pkg \"$pkg\"; done")
+        );
+        // Homebrew via rs-harbor, Scoop via sed template
+        assert!(workflow.contains("nix run '.#rs-harbor' -- brew bump"));
+        assert!(workflow.contains("dist/scoop/modde.json > scoop-bucket/bucket/modde.json"));
+        // Prerelease gating present on downstream package repos
+        assert!(workflow.contains("skipping AUR packages."));
+        assert!(workflow.contains("skipping Homebrew tap update."));
+        // Stage B channels
+        assert!(workflow.contains("cargo sbom > release/sbom.json"));
+        assert!(workflow.contains("osslsigncode sign -pkcs12"));
+        assert!(workflow.contains("https://github.com/flathub/com.tartanoglu.modde.git"));
+        assert!(workflow.contains("wine \"$tmpdir/wingetcreate.exe\" update Caniko.Modde"));
+        assert!(workflow.contains("/api/v1/statuses"));
+        assert!(workflow.contains(
+            "nix shell github:caniko/nixpkgs/add-chocolatey-scoop#chocolatey github:caniko/simit -c simit dist chocolatey bump"
+        ));
+        // Order: codeberg before downstream, copr near the end
+        let pos = |needle: &str| workflow.find(needle).unwrap();
+        assert!(pos("Publish Codeberg release") < pos("Publish APT repository"));
+        assert!(pos("Publish AUR packages") < pos("Publish Homebrew tap"));
+        assert!(pos("Build SRPM for COPR") < pos("Build release artifacts"));
+    }
+}

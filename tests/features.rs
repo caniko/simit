@@ -847,6 +847,16 @@ fn init_help_is_grouped() {
         .collect();
     assert_eq!(
         commands,
-        ["ci", "flake", "homebrew-tap", "chocolatey", "scoop-bucket"]
+        [
+            "ci",
+            "flake",
+            "homebrew-tap",
+            "chocolatey",
+            "scoop-bucket",
+            "aur",
+            "copr",
+            "apt",
+            "release"
+        ]
     );
 }
