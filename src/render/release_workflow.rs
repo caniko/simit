@@ -1443,7 +1443,7 @@ mod tests {
         assert!(workflow.contains("wine \"$tmpdir/wingetcreate.exe\" update Caniko.Modde"));
         assert!(workflow.contains("/api/v1/statuses"));
         assert!(workflow.contains(
-            "nix shell github:caniko/nixpkgs/add-chocolatey-scoop#chocolatey github:caniko/simit -c simit dist chocolatey bump"
+            "nix shell github:caniko/nixpkgs/add-chocolatey-scoop#chocolatey git+https://codeberg.org/caniko/simit -c simit dist chocolatey bump"
         ));
         // Order: codeberg before downstream, copr near the end
         let pos = |needle: &str| workflow.find(needle).unwrap();
