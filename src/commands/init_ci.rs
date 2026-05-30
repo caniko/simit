@@ -238,7 +238,9 @@ pub(crate) fn workflow_snapshots_for_platform(
         }
         let content =
             fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-        if content.contains(ci::GENERATED_WORKFLOW_MARKER) {
+        if content.contains(ci::GENERATED_WORKFLOW_MARKER)
+            && is_ci_managed_workflow_name(&entry.file_name())
+        {
             snapshots.push(WorkflowSnapshot {
                 relative_path: workflow_dir.join(entry.file_name()),
                 content,
@@ -640,12 +642,31 @@ fn extra_generated_workflows(
         }
         let content =
             fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-        if content.contains(ci::GENERATED_WORKFLOW_MARKER) {
+        if content.contains(ci::GENERATED_WORKFLOW_MARKER)
+            && is_ci_managed_workflow_name(&entry.file_name())
+        {
             extras.push(relative_path);
         }
     }
     extras.sort();
     Ok(extras)
+}
+
+fn is_ci_managed_workflow_name(name: &std::ffi::OsStr) -> bool {
+    let Some(name) = name.to_str() else {
+        return false;
+    };
+    matches!(
+        name,
+        "ci.yaml"
+            | "ci.yml"
+            | "publish-crate.yaml"
+            | "publish-crate.yml"
+            | "release-artifacts.yaml"
+            | "release-artifacts.yml"
+    ) || name.starts_with("ci-")
+        || name.starts_with("publish-crate-")
+        || name.starts_with("release-artifacts-")
 }
 
 fn runner_overrides_cover_required_runners(

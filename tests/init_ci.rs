@@ -1270,6 +1270,46 @@ fn workspace_check_rejects_extra_generated_workflow() {
 }
 
 #[test]
+fn workspace_check_ignores_generated_release_workflow() {
+    let temp = init_workspace_fixture();
+
+    let write_status = simit_with_user_config(temp.path())
+        .current_dir(temp.path())
+        .args(["init", "ci", "--platform", "forgejo", "--workspace"])
+        .status()
+        .unwrap();
+    assert!(write_status.success());
+
+    fs::write(
+        temp.path().join(".forgejo/workflows/release.yml"),
+        format!(
+            "{}\nname: release\n",
+            simit::render::ci::GENERATED_WORKFLOW_MARKER
+        ),
+    )
+    .unwrap();
+
+    let output = simit_with_user_config(temp.path())
+        .current_dir(temp.path())
+        .args([
+            "init",
+            "ci",
+            "--platform",
+            "forgejo",
+            "--workspace",
+            "--check",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn init_ci_blocks_without_exportable_maintainer_key() {
     let temp = init_package(false);
     let isolated_home = TempDir::new().unwrap();
