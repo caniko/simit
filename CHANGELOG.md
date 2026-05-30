@@ -67,8 +67,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Fix generated crates.io publish workflows so Cargo workspace metadata version
   extraction selects a single package version instead of failing tag validation
-  with concatenated workspace versions; see
-  [`docs/src/planning/publish-workflow-version-extraction-research.md`](docs/src/planning/publish-workflow-version-extraction-research.md).
+  with concatenated workspace versions.
 
 ## [0.15.0] - 2026-05-24
 

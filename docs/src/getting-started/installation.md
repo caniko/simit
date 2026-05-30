@@ -17,6 +17,29 @@ cargo install --path .
 The project is licensed under the MIT License. See the repository `LICENSE`
 file for the full license text.
 
+## Installing Hooks
+
+Use `simit hooks install` to write project-local pre-commit wrappers even when
+Git is configured with a system `core.hooksPath` dispatcher:
+
+```sh
+simit hooks install
+simit hooks install --check
+simit hooks install --diff
+```
+
+`--check` exits non-zero when the installed hooks drift from simit's expected
+wrapper content. `--diff` prints the wrapper diff without rewriting files.
+
+If a repo-local `core.hooksPath` such as `.git/hooks` shadows a friendly system
+dispatcher, simit warns because project hooks would run while dispatcher-owned
+system hooks are bypassed. Use `--fix` to unset the rogue local override when a
+dispatcher is available:
+
+```sh
+simit hooks install --fix
+```
+
 ## Flake Ownership
 
 `simit init flake` defaults to hooks-only ownership. In that mode simit writes

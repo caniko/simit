@@ -18,6 +18,10 @@ workflow validates that the tag matches the Cargo package version, verifies the
 GPG-signed tag against `keys/maintainers.gpg`, runs a publish dry run, and
 requires `CRATES_IO_API_TOKEN` to publish.
 
+For workspace repositories, each generated `publish-crate-<crate>.yaml`
+validates the version of the package it publishes rather than comparing the tag
+to the first version returned by workspace-wide metadata.
+
 `simit init ci` and `simit release trust init` generate
 `keys/maintainers.gpg` from `[release.signing].key`, `git config
 user.signingkey`, or an explicit `--key`/`--maintainer-key` override. Run

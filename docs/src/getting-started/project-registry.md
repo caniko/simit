@@ -9,6 +9,13 @@ The registry records each project path, package name, first and last time simit
 saw it, and feature status for known surfaces such as `flake`, `ci`,
 `homebrew`, `chocolatey`, `scoop`, `changelog`, and `hooks`.
 
+For hooks, the registry distinguishes `configured`, `installed`,
+`conflicted`, and `absent`. `configured` means hook config exists but Git would
+not currently execute the project's managed wrappers. `installed` means the
+resolved hook path would execute the managed wrappers. `conflicted` means hook
+config exists, but the effective or repo-local `core.hooksPath` bypasses the
+managed route and needs attention.
+
 For CI, the registry distinguishes `managed`, `managed+extra`, `hand-rolled`,
 `drift`, and `absent`. `hand-rolled` means workflow YAML exists under
 `.forgejo/workflows/` or `.github/workflows/` but does not carry simit's
@@ -51,6 +58,10 @@ currently use simit; human output marks those entries with `[no simit features]`
 and `projects list` shows them with a `-` indicator. Default human discovery
 output prints only the skipped count; use `--json` when you need the full list
 of skipped paths.
+
+When a registered project path no longer exists, `scan` reports it instead of
+silently leaving stale feature state behind. Use `--prune` to delete those
+entries after reviewing them.
 
 List registered projects:
 
