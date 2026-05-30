@@ -1966,7 +1966,7 @@ fn github_scoop_flag_resolves_when_config_is_present() {
     assert!(workflow.contains("target: aarch64-pc-windows-msvc"));
     assert!(workflow.contains("windows-${{ matrix.arch }}"));
     assert!(workflow.contains("name: Publish Scoop bucket"));
-    assert!(workflow.contains("SCOOP_BUCKET_TOKEN: ${{ secrets.scoop_bucket_token }}"));
+    assert!(workflow.contains("SCOOP_BUCKET_TOKEN: ${{ secrets.SCOOP_BUCKET_TOKEN }}"));
     assert!(workflow.contains(
         "git -c credential.helper=\"$credentialHelper\" clone \"$env:SCOOP_BUCKET_URL\" bucket"
     ));

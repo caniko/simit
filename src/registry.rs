@@ -918,6 +918,7 @@ fn infer_homebrew_options(
         name: resolved.name,
         binaries: resolved.binaries,
         tap_url: resolved.tap_url,
+        tap_token_secret: resolved.tap_token_secret,
         description: resolved.description,
         homepage: resolved.homepage,
         license: resolved.license,
@@ -1012,6 +1013,7 @@ fn infer_scoop_options(
     Ok(Some(ci::ScoopOptions {
         name: resolved.name,
         bucket_url: resolved.bucket_url,
+        bucket_token_secret: resolved.bucket_token_secret,
         description: resolved.description,
         homepage: resolved.homepage,
         license: resolved.license,
@@ -1413,6 +1415,7 @@ mod tests {
                 name: None,
                 binaries: vec!["modde".to_owned(), "modde-ui".to_owned()],
                 tap_url: "https://codeberg.org/caniko/homebrew-modde.git".to_owned(),
+                tap_token_secret: "homebrew_tap_token".to_owned(),
                 description: Some("Cross-platform game mod manager".to_owned()),
                 homepage: Some("https://modde.tartanoglu.com".to_owned()),
                 license: Some("GPL-3.0-only".to_owned()),

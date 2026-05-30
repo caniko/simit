@@ -457,6 +457,10 @@ pub struct HomebrewConfig {
     /// Tap repo URL. Required when `[homebrew]` is present.
     pub tap_url: String,
 
+    /// Actions secret sourced into `HOMEBREW_TAP_TOKEN`.
+    #[serde(default = "default_homebrew_tap_token_secret")]
+    pub tap_token_secret: String,
+
     /// Description for the formula. If omitted, derived from Cargo metadata.
     pub description: Option<String>,
 
@@ -480,6 +484,10 @@ pub struct HomebrewConfig {
 
 fn default_archive_pattern() -> String {
     "{name}-{version}-{arch}-{os}.tar.gz".to_owned()
+}
+
+fn default_homebrew_tap_token_secret() -> String {
+    "homebrew_tap_token".to_owned()
 }
 
 fn default_windows_archive_pattern() -> String {
@@ -605,6 +613,10 @@ pub struct ScoopConfig {
     /// Bucket repo URL. Required when `[scoop]` is present.
     pub bucket_url: String,
 
+    /// Actions secret sourced into `SCOOP_BUCKET_TOKEN`.
+    #[serde(default = "default_scoop_bucket_token_secret")]
+    pub bucket_token_secret: String,
+
     /// Manifest description. If omitted, derived from Cargo metadata.
     pub description: Option<String>,
 
@@ -652,6 +664,10 @@ impl Default for ScoopArchSet {
             arm64: true,
         }
     }
+}
+
+fn default_scoop_bucket_token_secret() -> String {
+    "SCOOP_BUCKET_TOKEN".to_owned()
 }
 
 impl HomebrewPlatformsConfig {
@@ -964,6 +980,7 @@ pub struct ResolvedHomebrew {
     pub name: String,
     pub binaries: Vec<String>,
     pub tap_url: String,
+    pub tap_token_secret: String,
     pub description: String,
     pub homepage: String,
     pub license: String,
@@ -1025,6 +1042,7 @@ pub struct ChocolateyOverrides<'a> {
 pub struct ResolvedScoop {
     pub name: String,
     pub bucket_url: String,
+    pub bucket_token_secret: String,
     pub description: String,
     pub homepage: String,
     pub license: String,
@@ -1434,6 +1452,9 @@ impl ProjectConfig {
             name,
             binaries,
             tap_url,
+            tap_token_secret: cfg.map_or_else(default_homebrew_tap_token_secret, |homebrew| {
+                homebrew.tap_token_secret.clone()
+            }),
             description,
             homepage,
             license,
@@ -1616,6 +1637,9 @@ impl ProjectConfig {
         Ok(ResolvedScoop {
             name,
             bucket_url,
+            bucket_token_secret: cfg.map_or_else(default_scoop_bucket_token_secret, |scoop| {
+                scoop.bucket_token_secret.clone()
+            }),
             description,
             homepage,
             license,

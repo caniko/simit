@@ -193,6 +193,26 @@ fn push_secrets_header(w: &mut String, inputs: &ReleaseWorkflowInputs<'_>) {
         )
         .expect("write");
     }
+    if let Some(homebrew) = inputs.homebrew {
+        if homebrew.tap_token_secret != "homebrew_tap_token" {
+            writeln!(
+                w,
+                "# - {}: optional Homebrew tap push token.",
+                homebrew.tap_token_secret
+            )
+            .expect("write");
+        }
+    }
+    if let Some(scoop) = inputs.scoop {
+        if scoop.bucket_token_secret != "SCOOP_BUCKET_TOKEN" {
+            writeln!(
+                w,
+                "# - {}: optional Scoop bucket push token.",
+                scoop.bucket_token_secret
+            )
+            .expect("write");
+        }
+    }
     if let Some(windows) = inputs.windows_signing {
         writeln!(
             w,
@@ -753,7 +773,12 @@ fn push_publish_copr(w: &mut String, copr: &ResolvedCopr) {
 
 fn push_publish_homebrew(w: &mut String, homebrew: &ResolvedHomebrew) {
     w.push_str("      - name: Publish Homebrew tap\n        env:\n");
-    w.push_str("          HOMEBREW_TAP_TOKEN: ${{ secrets.homebrew_tap_token }}\n");
+    writeln!(
+        w,
+        "          HOMEBREW_TAP_TOKEN: ${{{{ secrets.{} }}}}",
+        homebrew.tap_token_secret
+    )
+    .expect("write");
     writeln!(w, "          HOMEBREW_TAP_URL: {}", homebrew.tap_url).expect("write");
     w.push_str("        run: |\n          set -euo pipefail\n");
     push_stable_guard(w, "Homebrew tap update");
@@ -801,7 +826,12 @@ fn push_publish_homebrew(w: &mut String, homebrew: &ResolvedHomebrew) {
 
 fn push_publish_scoop(w: &mut String, scoop: &ResolvedScoop) {
     w.push_str("      - name: Publish Scoop bucket\n        env:\n");
-    w.push_str("          SCOOP_BUCKET_TOKEN: ${{ secrets.SCOOP_BUCKET_TOKEN }}\n");
+    writeln!(
+        w,
+        "          SCOOP_BUCKET_TOKEN: ${{{{ secrets.{} }}}}",
+        scoop.bucket_token_secret
+    )
+    .expect("write");
     writeln!(w, "          SCOOP_BUCKET_URL: {}", scoop.bucket_url).expect("write");
     w.push_str("        run: |\n          set -euo pipefail\n");
     push_stable_guard(w, "Scoop bucket update");
@@ -1340,6 +1370,7 @@ mod tests {
             name: "modde".to_owned(),
             binaries: vec!["modde".to_owned(), "modde-ui".to_owned()],
             tap_url: "https://codeberg.org/caniko/homebrew-modde.git".to_owned(),
+            tap_token_secret: "FORGEJO_HOMEBREW_TOKEN".to_owned(),
             description: "Cross-platform game mod manager".to_owned(),
             homepage: "https://modde.rs".to_owned(),
             license: "GPL-3.0-only".to_owned(),
@@ -1353,6 +1384,7 @@ mod tests {
         ResolvedScoop {
             name: "modde".to_owned(),
             bucket_url: "https://codeberg.org/caniko/scoop-modde.git".to_owned(),
+            bucket_token_secret: "FORGEJO_SCOOP_TOKEN".to_owned(),
             description: "d".to_owned(),
             homepage: "https://modde.rs".to_owned(),
             license: "GPL-3.0-only".to_owned(),
@@ -1431,6 +1463,8 @@ mod tests {
                 .contains("for pkg in modde modde-bin modde-git; do publish_pkg \"$pkg\"; done")
         );
         // Homebrew via rs-harbor, Scoop via sed template
+        assert!(workflow.contains("HOMEBREW_TAP_TOKEN: ${{ secrets.FORGEJO_HOMEBREW_TOKEN }}"));
+        assert!(workflow.contains("SCOOP_BUCKET_TOKEN: ${{ secrets.FORGEJO_SCOOP_TOKEN }}"));
         assert!(workflow.contains("nix run '.#rs-harbor' -- brew bump"));
         assert!(workflow.contains("dist/scoop/modde.json > scoop-bucket/bucket/modde.json"));
         // Prerelease gating present on downstream package repos

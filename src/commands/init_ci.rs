@@ -709,6 +709,7 @@ fn scoop_options_from_resolved(resolved: ResolvedScoop) -> ScoopOptions {
     ScoopOptions {
         name: resolved.name,
         bucket_url: resolved.bucket_url,
+        bucket_token_secret: resolved.bucket_token_secret,
         description: resolved.description,
         homepage: resolved.homepage,
         license: resolved.license,
@@ -733,6 +734,7 @@ fn homebrew_options(
         name: resolved.name,
         binaries: resolved.binaries,
         tap_url,
+        tap_token_secret: resolved.tap_token_secret,
         description: resolved.description,
         homepage: resolved.homepage,
         license: resolved.license,

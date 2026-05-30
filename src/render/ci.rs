@@ -73,6 +73,8 @@ pub struct HomebrewOptions {
     pub binaries: Vec<String>,
     /// Tap repo URL, for example `<https://codeberg.org/caniko/homebrew-modde.git>`.
     pub tap_url: String,
+    /// Actions secret sourced into `HOMEBREW_TAP_TOKEN`.
+    pub tap_token_secret: String,
     /// Project description for the formula (<= 80 chars).
     pub description: String,
     /// Homepage URL.
@@ -115,6 +117,7 @@ pub struct ChocolateyOptions {
 pub struct ScoopOptions {
     pub name: String,
     pub bucket_url: String,
+    pub bucket_token_secret: String,
     pub description: String,
     pub homepage: String,
     pub license: String,
@@ -691,7 +694,9 @@ fn push_chocolatey_publish_step(workflow: &mut String, opts: &ChocolateyOptions)
 fn push_scoop_publish_step(workflow: &mut String, opts: &ScoopOptions) {
     workflow.push_str("      - name: Publish Scoop bucket\n");
     workflow.push_str("        env:\n");
-    workflow.push_str("          SCOOP_BUCKET_TOKEN: ${{ secrets.scoop_bucket_token }}\n");
+    workflow.push_str("          SCOOP_BUCKET_TOKEN: ${{ secrets.");
+    workflow.push_str(&opts.bucket_token_secret);
+    workflow.push_str(" }}\n");
     workflow.push_str("          SCOOP_BUCKET_URL: ");
     workflow.push_str(&opts.bucket_url);
     workflow.push('\n');
@@ -817,7 +822,9 @@ fn push_homebrew_publish_step(workflow: &mut String, opts: &HomebrewOptions) {
 
     workflow.push_str("      - name: Publish Homebrew tap\n");
     workflow.push_str("        env:\n");
-    workflow.push_str("          HOMEBREW_TAP_TOKEN: ${{ secrets.homebrew_tap_token }}\n");
+    workflow.push_str("          HOMEBREW_TAP_TOKEN: ${{ secrets.");
+    workflow.push_str(&opts.tap_token_secret);
+    workflow.push_str(" }}\n");
     workflow.push_str("          HOMEBREW_TAP_REPO: ");
     workflow.push_str(&tap_repo);
     workflow.push('\n');
