@@ -9,6 +9,7 @@
 - [Release Verify](getting-started/release-verify.md)
 - [CI Caching](getting-started/ci-caching.md)
 - [CI Adoption Notes](getting-started/ci-adoption.md)
+- [Distribution Channels](getting-started/distribution-channels.md)
 - [Windows Packaging](getting-started/windows-packaging.md)
 - [Omnix CI](getting-started/om-ci.md)
 - [Public API](public-api.md)

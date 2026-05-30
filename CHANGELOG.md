@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Document and integration-test multichannel distribution packaging commands,
+  including `simit init aur|copr|apt|release` and
+  `simit dist aur|copr|apt render` flows.
+
 ### Changed
 
 - `simit init flake` now defaults to hooks-only ownership of

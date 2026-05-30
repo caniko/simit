@@ -58,8 +58,10 @@ Generated workflows read these secrets:
 - `MINISIGN_SECRET_KEY` and `MINISIGN_PASSWORD` for the signed checksum manifest.
 - `COSIGN_PRIVATE_KEY` and `COSIGN_PASSWORD` as the optional Sigstore fallback
   when keyless OIDC is unavailable.
-- `chocolatey_api_key` for Chocolatey package pushes.
-- `scoop_bucket_token` for authenticated Scoop bucket pushes.
+- `chocolatey_api_key` for Chocolatey package pushes, unless
+  `[chocolatey].api_key_secret` changes it.
+- `SCOOP_BUCKET_TOKEN` for authenticated Scoop bucket pushes, unless
+  `[scoop].bucket_token_secret` changes it.
 
 The same artifact workflow verifies signed release tags and emits signed
 checksums plus SLSA provenance. See [Release Integrity](release-integrity.md)

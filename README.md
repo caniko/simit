@@ -418,9 +418,11 @@ simit init ci --platform forgejo --with-chocolatey --with-scoop
 
 `--with-chocolatey` and `--with-scoop` imply `--with-artifacts`. GitHub uses
 `windows-latest` by default. Forgejo uses `[ci.defaults.forgejo].windows` from
-the simit user config unless `--windows-runner` overrides it. Generated workflows read
-`secrets.chocolatey_api_key` for Chocolatey pushes and
-`secrets.scoop_bucket_token` for Scoop bucket pushes.
+the simit user config unless `--windows-runner` overrides it. Generated
+workflows read `secrets.chocolatey_api_key` for Chocolatey pushes,
+`secrets.homebrew_tap_token` for Homebrew tap pushes, and
+`secrets.SCOOP_BUCKET_TOKEN` for Scoop bucket pushes unless project config
+overrides those secret names.
 
 For local inspection and iteration:
 
@@ -439,6 +441,50 @@ simit dist scoop bump \
   --archive arm64=release/foo-0.3.1-aarch64-windows.zip
 ```
 
+## Distribution channels
+
+Linux distribution packaging is configured from `simit.toml`, Cargo metadata,
+or `outputs.simitConfig` and rendered deterministically. Bootstrap committed
+channel files with:
+
+```sh
+simit init aur
+simit init copr
+simit init apt
+simit init release
+```
+
+Each command supports `--check`, `--diff`, and `--print`. `init aur` writes
+`dist/aur/<pkg>/PKGBUILD` for source, `-bin`, and `-git` flavors. `init copr`
+writes the RPM spec and `.copr/Makefile`. `init apt` writes
+`dist/apt/conf/distributions`. `init release` writes
+`.forgejo/workflows/release.yml`, which builds release artifacts, uploads them
+to Codeberg when `[release.codeberg]` is present, and publishes every configured
+channel.
+
+For local inspection, render the same templates without writing files:
+
+```sh
+simit dist aur render
+simit dist copr render
+simit dist apt render
+```
+
+Relevant project config sections are `[aur]`, `[copr]`, `[apt]`,
+`[homebrew]`, `[chocolatey]`, `[scoop]`, `[flatpak]`, `[winget]`,
+`[release.codeberg]`, `[release.artifacts]`, `[release.attic]`,
+`[release.announce]`, and `[release.windows_signing]`. The publish workflow
+secret names are configurable with `[aur].ssh_key_secret`,
+`[copr].login_secret`, `[copr].username_secret`, `[copr].token_secret`,
+`[apt].gpg_key_secret`, `[apt].gpg_key_id_secret`,
+`[apt].gpg_passphrase_secret`, `[apt].ssh_key_secret`,
+`[homebrew].tap_token_secret`, `[scoop].bucket_token_secret`,
+`[chocolatey].api_key_secret`, `[chocolatey].api_key_env`,
+`[chocolatey].api_key_from_runner`, `[release.codeberg].token_secret`,
+`[flatpak].token_secret`, `[winget].token_secret`,
+`[release.announce].*_secret`, and
+`[release.windows_signing].*_secret`.
+
 ## Project config
 
 Projects may opt in to stable simit settings with exactly one project config
@@ -450,7 +496,8 @@ source. Supported sources are:
 - `outputs.simitConfig` in `flake.nix`.
 
 All sources use the same section names: `[flake]`, `[ci]`, `[homebrew]`,
-`[chocolatey]`, and `[scoop]`.
+`[chocolatey]`, `[scoop]`, `[aur]`, `[copr]`, `[apt]`, `[flatpak]`,
+`[winget]`, and `[release.*]`.
 
 For each Homebrew setting, resolution order is: CLI flag, simit project config,
 Cargo package metadata, then an error. `tap_url` and `download_repo` have no
