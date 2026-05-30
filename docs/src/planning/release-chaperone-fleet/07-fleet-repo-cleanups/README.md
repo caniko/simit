@@ -81,7 +81,7 @@ merges; the decision becomes a separate user-owned follow-up.
 - [ ] `nix develop -c simit init --help` works in every fleet repo
       (proves the simit input is current).
 - [ ] `nix develop -c simit init ci --platform forgejo --check
-    --diff` is clean in every fleet repo. If phase 01 has not
+--diff` is clean in every fleet repo. If phase 01 has not
       landed yet, sub-layers may add a per-repo `simit.toml [ci]`
       manually as a forward-compatible workaround.
 - [ ] `nix develop -c simit init flake --check --diff` is clean in

@@ -72,7 +72,7 @@ generated_hooks`. For each removed hook, look up a static
 - [ ] `simit init flake --check --diff` on a project whose
       pre-commit file has `cargo-audit` (and the generator would
       remove it) prints a `note: removing pre-commit hook
-    'cargo-audit'; ...` line.
+'cargo-audit'; ...` line.
 - [ ] Generic fallback note appears for hooks not in the static
       table.
 - [ ] `cargo test` covers the rs-memory-admission case.

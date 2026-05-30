@@ -67,14 +67,14 @@ version-dependency; 07 is gated on both 05 and 06 green.
 - [ ] simit: every distribution channel's secret/env names are configurable
       (no hardcoded `homebrew_tap_token` / `SCOOP_BUCKET_TOKEN` remain in
       `render/release_workflow.rs`); `cargo test` + `cargo clippy --all-targets
-    -- -D warnings` clean.
+-- -D warnings` clean.
 - [ ] simit: a new release is published to crates.io and Codeberg via simit's own
       tooling, with the new `init`/`dist`/`init release` commands documented.
 - [ ] canix: every secret the rs-modde release workflow references is reachable
       by the atlas Forgejo job (as an Actions secret or a runner-provided env),
       or explicitly deferred with a soft-skip confirmed.
 - [ ] rs-modde: `simit` flake input points at the new release; `simit init
-    release --check` and `simit init ci --check` are clean; all working-tree
+release --check` and `simit init ci --check` are clean; all working-tree
       changes committed in coherent groups.
 - [ ] rs-modde: a throwaway prerelease tag drives a green Codeberg release run
       where every configured channel either publishes or soft-skips cleanly;

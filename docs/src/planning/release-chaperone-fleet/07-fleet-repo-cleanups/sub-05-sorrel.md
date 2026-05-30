@@ -167,7 +167,7 @@ origin/simit-ci-adoption-20260525` onto the working branch
 - [ ] `nix develop -c simit --version` matches current `trunk`.
 - [ ] Adoption-branch content is on the working branch.
 - [ ] `simit init ci --workspace --platform forgejo --check
-    --diff` is clean.
+--diff` is clean.
 - [ ] `simit init flake --check --diff` is clean OR the flake
       drift has been re-verified on a clean tree and either
       addressed (phase 03 path) or explicitly documented as

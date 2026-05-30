@@ -137,7 +137,7 @@ origin`. Identify the `v0.1.0` legacy tag and document in the
       `init ci` / `init flake` nested subcommands.
 - [ ] Adoption-branch content is merged onto the working branch.
 - [ ] `nix develop -c simit init ci --platform forgejo --check
-    --diff` is clean.
+--diff` is clean.
 - [ ] `nix develop -c simit init flake --check --diff` is clean
       (or, if phase 03 is not landed, the hooks-file scope is
       explicitly opted into).

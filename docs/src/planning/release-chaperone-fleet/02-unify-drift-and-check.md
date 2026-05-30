@@ -118,7 +118,7 @@ path canonical. Mark this as a design call in the commit message.
 ## Acceptance criteria
 
 - [ ] `simit projects list` and `simit init ci --platform <p>
-    --check --diff` agree on `managed` vs `drift` for every repo
+--check --diff` agree on `managed` vs `drift` for every repo
       in `simit projects list`.
 - [ ] A single `ResolvedCiInputs` builder is the only path to
       `CiOptions` in both the drift detector and `init ci`.
@@ -128,7 +128,7 @@ path canonical. Mark this as a design call in the commit message.
 - [ ] `cargo test` covers all three of the unification scenarios
       named in step 5.
 - [ ] The simit repo itself passes `cargo run -- init ci
-    --platform forgejo --check --diff` with no flags.
+--platform forgejo --check --diff` with no flags.
 
 ## Files likely touched
 

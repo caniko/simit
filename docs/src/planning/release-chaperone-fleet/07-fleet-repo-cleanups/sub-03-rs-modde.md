@@ -188,7 +188,7 @@ project-owned` change, the project deny.toml should not be
 - [ ] `nix develop -c simit --version` matches current `trunk`.
 - [ ] Adoption-branch content is on the working branch.
 - [ ] `simit init ci --workspace --platform forgejo --check
-    --diff` is clean (bare or with documented flag set).
+--diff` is clean (bare or with documented flag set).
 - [ ] `simit init flake --check --diff` is clean.
 - [ ] `simit release trust check` passes.
 - [ ] `cargo deny check bans licenses sources` passes.

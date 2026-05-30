@@ -65,7 +65,7 @@ Conflict surface is small:
       the `simit init ci` regeneration command in its output.
 - [ ] `simit init flake --check --diff` on a project that would
       lose a pre-commit hook prints an inline `note: removing
-    <hook>` line.
+<hook>` line.
 - [ ] `simit projects list` does not show `/tmp/*` ephemeral
       projects in its default output; `--include-ephemeral`
       restores them.
