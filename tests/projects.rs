@@ -838,6 +838,7 @@ fn show_prints_bare_regen_command_when_ci_is_persisted() {
     let project_path = fs::canonicalize(project.path()).unwrap();
 
     let status = simit_with_data_and_config_home(data_home.path(), config_home.path())
+        .env("SIMIT_MAINTAINERS_GPG", common::maintainer_key_path())
         .current_dir(project.path())
         .args([
             "init",
@@ -879,7 +880,7 @@ fn show_prints_inferred_regen_flags_when_ci_config_is_absent() {
     fs::write(project.path().join("flake.nix"), "{}\n").unwrap();
     let project_path = fs::canonicalize(project.path()).unwrap();
 
-    let status = simit_with_data_home(data_home.path())
+    let status = simit_init_with_data_home(data_home.path())
         .current_dir(project.path())
         .args([
             "init",
