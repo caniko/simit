@@ -7,7 +7,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use camino::Utf8PathBuf;
 use semver::{BuildMetadata, Prerelease, Version};
 use serde::Deserialize;
-use toml_edit::DocumentMut;
+use toml_edit::{DocumentMut, Item};
 
 use crate::cli::BumpKind;
 
@@ -283,6 +283,11 @@ pub fn update_manifest_version(manifest_path: &Path, version: &Version) -> Resul
         .ok_or_else(|| anyhow!("{} has no package.version", manifest_path.display()))?;
 
     if version_item.as_str().is_none() {
+        // `version.workspace = true`: the version is inherited from the workspace
+        // root and is bumped there by `update_workspace_version`, not per-crate.
+        if version_inherits_workspace(version_item) {
+            return Ok(());
+        }
         bail!(
             "{} package.version must be a literal string for simit to update it",
             manifest_path.display()
@@ -294,6 +299,103 @@ pub fn update_manifest_version(manifest_path: &Path, version: &Version) -> Resul
         .with_context(|| format!("writing {}", manifest_path.display()))?;
 
     Ok(())
+}
+
+/// Whether a `[package].version` item is `version.workspace = true`.
+fn version_inherits_workspace(version_item: &Item) -> bool {
+    version_item
+        .as_table_like()
+        .and_then(|table| table.get("workspace"))
+        .and_then(Item::as_bool)
+        == Some(true)
+}
+
+/// Names of all workspace-member packages.
+pub fn workspace_member_names(metadata: &Metadata) -> Vec<String> {
+    metadata
+        .packages
+        .iter()
+        .filter(|package| metadata.workspace_members.contains(&package.id))
+        .map(|package| package.name.clone())
+        .collect()
+}
+
+/// Bump the workspace root's `[workspace.package].version` and the matching
+/// `[workspace.dependencies]` version requirements for workspace members.
+///
+/// This is the workspace-inheritance counterpart to [`update_manifest_version`]:
+/// when crates use `version.workspace = true`, the canonical version lives only
+/// in the root `[workspace.package].version`, so a release bumps it there (and
+/// keeps intra-workspace dependency requirements in lockstep) rather than in
+/// each crate manifest. Returns `Ok(true)` when the root `Cargo.toml` was
+/// modified, `Ok(false)` when there is no `[workspace.package].version` to bump.
+pub fn update_workspace_version(
+    workspace_root: &Path,
+    version: &Version,
+    member_names: &[String],
+) -> Result<bool> {
+    let path = workspace_root.join("Cargo.toml");
+    let original =
+        fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    let mut document = original
+        .parse::<DocumentMut>()
+        .with_context(|| format!("parsing {}", path.display()))?;
+
+    let Some(workspace) = document
+        .get_mut("workspace")
+        .and_then(|item| item.as_table_mut())
+    else {
+        return Ok(false);
+    };
+
+    let new_version = version.to_string();
+    let mut changed = false;
+
+    if let Some(version_item) = workspace
+        .get_mut("package")
+        .and_then(|item| item.as_table_mut())
+        .and_then(|package| package.get_mut("version"))
+    {
+        if version_item.as_str() != Some(new_version.as_str()) {
+            *version_item = toml_edit::value(new_version.clone());
+            changed = true;
+        }
+    }
+
+    if let Some(dependencies) = workspace
+        .get_mut("dependencies")
+        .and_then(|item| item.as_table_mut())
+    {
+        for member in member_names {
+            let Some(dependency) = dependencies.get_mut(member) else {
+                continue;
+            };
+            if let Some(table) = dependency.as_table_like_mut() {
+                // `member = { version = "x", path = "..." }`
+                if table
+                    .get("version")
+                    .and_then(Item::as_str)
+                    .is_some_and(|current| current != new_version)
+                {
+                    table.insert("version", toml_edit::value(new_version.clone()));
+                    changed = true;
+                }
+            } else if dependency
+                .as_str()
+                .is_some_and(|current| current != new_version)
+            {
+                // `member = "x"`
+                *dependency = toml_edit::value(new_version.clone());
+                changed = true;
+            }
+        }
+    }
+
+    if changed {
+        fs::write(&path, document.to_string())
+            .with_context(|| format!("writing {}", path.display()))?;
+    }
+    Ok(changed)
 }
 
 pub fn update_lockfile(workspace_root: &Path, plans: &[VersionPlan]) -> Result<()> {
@@ -311,4 +413,57 @@ pub fn update_lockfile(workspace_root: &Path, plans: &[VersionPlan]) -> Result<(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod workspace_version_tests {
+    use super::*;
+
+    #[test]
+    fn detects_dotted_workspace_inheritance() {
+        let doc: DocumentMut = "[package]\nversion.workspace = true\n".parse().unwrap();
+        assert!(version_inherits_workspace(&doc["package"]["version"]));
+        let literal: DocumentMut = "[package]\nversion = \"1.0.0\"\n".parse().unwrap();
+        assert!(!version_inherits_workspace(&literal["package"]["version"]));
+    }
+
+    #[test]
+    fn bumps_workspace_package_and_member_dep_reqs() {
+        let dir = tempfile::tempdir().unwrap();
+        let cargo_toml = dir.path().join("Cargo.toml");
+        std::fs::write(
+            &cargo_toml,
+            "[workspace]\nmembers = [\"crates/a\", \"crates/b\"]\n\n\
+             [workspace.package]\nversion = \"0.2.0\"\nedition = \"2024\"\n\n\
+             [workspace.dependencies]\n\
+             a = { version = \"0.2.0\", path = \"crates/a\" }\n\
+             serde = \"1\"\n",
+        )
+        .unwrap();
+        let version = Version::parse("0.2.1").unwrap();
+        let members = vec!["a".to_owned(), "b".to_owned()];
+
+        let changed = update_workspace_version(dir.path(), &version, &members).unwrap();
+        assert!(changed);
+        let out = std::fs::read_to_string(&cargo_toml).unwrap();
+        assert!(out.contains("version = \"0.2.1\"")); // [workspace.package]
+        assert!(out.contains("path = \"crates/a\"")); // member dep preserved
+        assert!(!out.contains("0.2.0")); // member dep req bumped too
+        assert!(out.contains("serde = \"1\"")); // non-member dep untouched
+
+        // idempotent: a second bump to the same version writes nothing new.
+        assert!(!update_workspace_version(dir.path(), &version, &members).unwrap());
+    }
+
+    #[test]
+    fn noop_when_no_workspace_package_version() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"x\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        let version = Version::parse("0.2.0").unwrap();
+        assert!(!update_workspace_version(dir.path(), &version, &[]).unwrap());
+    }
 }

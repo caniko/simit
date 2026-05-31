@@ -87,6 +87,11 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
         None
     };
     git::run_project_checks(workspace_root)?;
+    let workspace_version_bumped = cargo::update_workspace_version(
+        workspace_root,
+        &new_version,
+        &cargo::workspace_member_names(&metadata),
+    )?;
     for plan in &plans {
         cargo::update_manifest_version(
             plan.package.manifest_path.as_std_path(),
@@ -101,6 +106,9 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
     }
 
     let mut paths = git::version_paths(workspace_root, &plans);
+    if workspace_version_bumped {
+        paths.push(workspace_root.join("Cargo.toml"));
+    }
     if changelog_path.exists() && !command.no_changelog {
         paths.push(changelog_path);
     }

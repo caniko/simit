@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `simit commit`/`release --workspace` now bump `[workspace.package].version`
+  (and matching `[workspace.dependencies]` requirements) for workspaces whose
+  crates inherit their version via `version.workspace = true`, instead of
+  failing on the non-literal per-crate `version`.
+
 ## [0.16.1] - 2026-05-30
 
 ### Fixed
