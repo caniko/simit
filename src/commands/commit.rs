@@ -21,13 +21,23 @@ pub fn run(command: CommitCommand) -> Result<()> {
     }
 
     git::commit_preflight(workspace_root, &plans, create_tag, sign_tag, &new_version)?;
+    let workspace_version_bumped = cargo::update_workspace_version(
+        workspace_root,
+        &new_version,
+        &cargo::workspace_member_names(&metadata),
+    )?;
     for plan in &plans {
         cargo::update_manifest_version(
             plan.package.manifest_path.as_std_path(),
             &plan.new_version,
         )?;
     }
-    let version_paths = git::version_paths(workspace_root, &plans);
+    let mut version_paths = git::version_paths(workspace_root, &plans);
+    if workspace_version_bumped {
+        version_paths.push(workspace_root.join("Cargo.toml"));
+        version_paths.sort();
+        version_paths.dedup();
+    }
     if workspace_root.join("Cargo.lock").exists() {
         cargo::update_lockfile(workspace_root, &plans)?;
     }

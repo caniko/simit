@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Declarative `[[ci.required_gates]]` for project-owned custom flakes (stable id, single-line run, bounded timeout, scoped env) rendered as dedicated required jobs in CI and as prerequisite jobs in coordinated publishing.
 - Opt-in coordinated workspace publication (`publish_strategy = "coordinated"` / `--coordinated-publish`, GitHub only) generating one `publish-workspace.yaml` in `simit release plan` order with signed-tag, lockstep, gate, checksum-conflict, and bounded-propagation gating.
 - `docs/integrations/chaosbox-v1.md` pinning handoff with exact config, commands, gate/packaging semantics, migration, and tested fixtures.
+- `simit commit`/`release --workspace` now bump `[workspace.package].version`
+  (and matching `[workspace.dependencies]` requirements) for workspaces whose
+  crates inherit their version via `version.workspace = true`, instead of
+  failing on the non-literal per-crate `version`.
 
 ### Fixed
 
