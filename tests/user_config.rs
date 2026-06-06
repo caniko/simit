@@ -122,6 +122,122 @@ fn validates_and_resolves_multi_runtime_runner() {
 }
 
 #[test]
+fn rejects_nix_default_that_is_not_trusted() {
+    // An untrusted runner is fine for cargo CI, but the Nix runner pushes
+    // builds to the Attic cache and must be trusted.
+    let config = valid_config().replace(
+        r#"[ci.runners.atlas]
+platform = "forgejo"
+labels = ["atlas"]
+os = "linux"
+arch = "x86_64"
+runtimes = ["cargo", "nix"]
+trusted = true"#,
+        r#"[ci.runners.atlas]
+platform = "forgejo"
+labels = ["atlas"]
+os = "linux"
+arch = "x86_64"
+runtimes = ["cargo", "nix"]
+trusted = false"#,
+    );
+    let config: UserConfig = toml_edit::de::from_str(&config).unwrap();
+    config.validate().unwrap();
+
+    let err = config
+        .resolve_ci_runners(Platform::Forgejo, Runtime::Nix, None, None, false)
+        .unwrap_err();
+
+    let message = format!("{err:#}");
+    assert!(message.contains("must be trusted"), "got: {message}");
+    assert!(message.contains("Attic cache"), "got: {message}");
+}
+
+#[test]
+fn untrusted_cargo_ci_runner_resolves_when_release_runner_is_trusted() {
+    // The plain cargo CI runner does not push to Attic, so it may stay
+    // untrusted as long as the release runner (which does push) is trusted.
+    let config = valid_config().replace(
+        r#"[ci.runners.atlas]
+platform = "forgejo"
+labels = ["atlas"]
+os = "linux"
+arch = "x86_64"
+runtimes = ["cargo", "nix"]
+trusted = true"#,
+        r#"[ci.runners.atlas]
+platform = "forgejo"
+labels = ["atlas"]
+os = "linux"
+arch = "x86_64"
+runtimes = ["cargo"]
+trusted = false
+
+[ci.runners.atlas_release]
+platform = "forgejo"
+labels = ["atlas-nix-trusted"]
+os = "linux"
+arch = "x86_64"
+runtimes = ["cargo", "nix"]
+trusted = true"#,
+    );
+    let config = config
+        .replace("nix = \"atlas\"", "nix = \"atlas_release\"")
+        .replace("release = \"atlas\"", "release = \"atlas_release\"");
+    let config: UserConfig = toml_edit::de::from_str(&config).unwrap();
+    config.validate().unwrap();
+
+    let runners = config
+        .resolve_ci_runners(Platform::Forgejo, Runtime::Cargo, None, None, false)
+        .unwrap();
+    // CI (cargo) runner stays untrusted; release runner is the trusted one.
+    assert_eq!(runners.ci.labels, vec!["atlas"]);
+    assert_eq!(runners.release.labels, vec!["atlas-nix-trusted"]);
+}
+
+#[test]
+fn detects_explicit_trusted_forgejo_nix_runner_label() {
+    let config = valid_config().replace(
+        r#"[ci.runners.atlas]
+platform = "forgejo"
+labels = ["atlas"]
+os = "linux"
+arch = "x86_64"
+runtimes = ["cargo", "nix"]
+trusted = true"#,
+        r#"[ci.runners.atlas]
+platform = "forgejo"
+labels = ["atlas"]
+os = "linux"
+arch = "x86_64"
+runtimes = ["cargo"]
+trusted = false
+
+[ci.runners.atlas_release]
+platform = "forgejo"
+labels = ["atlas-nix-trusted"]
+os = "linux"
+arch = "x86_64"
+runtimes = ["nix"]
+trusted = true"#,
+    );
+    let config = config.replace("nix = \"atlas\"", "nix = \"atlas_release\"");
+    let config: UserConfig = toml_edit::de::from_str(&config).unwrap();
+    config.validate().unwrap();
+
+    assert!(
+        config
+            .explicit_label_is_trusted_forgejo_nix_runner("atlas-nix-trusted")
+            .unwrap()
+    );
+    assert!(
+        !config
+            .explicit_label_is_trusted_forgejo_nix_runner("atlas")
+            .unwrap()
+    );
+}
+
+#[test]
 fn rejects_default_that_points_to_wrong_runtime() {
     let config =
         valid_config().replace("runtimes = [\"cargo\", \"nix\"]", "runtimes = [\"cargo\"]");

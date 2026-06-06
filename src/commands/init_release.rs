@@ -2,6 +2,7 @@ use anyhow::Result;
 
 use crate::cargo;
 use crate::cli::InitReleaseCommand;
+use crate::cli::{Platform, Runtime};
 use crate::commands::scaffold::{ArtifactCheck, CheckPrintMode, print_next_steps};
 use crate::config::{
     AptOverrides, AurOverrides, ChocolateyOverrides, CoprOverrides, HomebrewOverrides,
@@ -9,6 +10,7 @@ use crate::config::{
 };
 use crate::registry::{self, FeatureStatus};
 use crate::render::release_workflow::{self, ReleaseWorkflowInputs};
+use crate::user_config::{ResolvedRunner, UserConfig};
 
 const WORKFLOW_PATH: &str = ".forgejo/workflows/release.yml";
 
@@ -52,16 +54,11 @@ pub fn run(command: InitReleaseCommand) -> Result<()> {
         .map(|_| cfg.resolve_chocolatey(ChocolateyOverrides::default(), &package))
         .transpose()?;
 
-    let runner = cfg
-        .release
-        .artifacts
-        .runner
-        .clone()
-        .or_else(|| cfg.ci.runner.clone())
-        .unwrap_or_else(|| "atlas".to_owned());
+    let (runner, preinstalled_nix) = resolve_release_runner(&cfg)?;
 
     let inputs = ReleaseWorkflowInputs {
         runner: &runner,
+        preinstalled_nix,
         artifacts: &cfg.release.artifacts,
         smoke_command: cfg.release.smoke.command.as_deref(),
         codeberg: codeberg.as_ref(),
@@ -109,4 +106,39 @@ pub fn run(command: InitReleaseCommand) -> Result<()> {
             Ok(())
         }
     }
+}
+
+fn resolve_release_runner(cfg: &ProjectConfig) -> Result<(String, bool)> {
+    if let Some(runner) = cfg
+        .release
+        .artifacts
+        .runner
+        .clone()
+        .or_else(|| cfg.ci.runner.clone())
+    {
+        let preinstalled_nix = match UserConfig::load() {
+            Ok(user_config) => user_config.explicit_label_is_trusted_forgejo_nix_runner(&runner)?,
+            Err(_) => false,
+        };
+        return Ok((runner, preinstalled_nix));
+    }
+
+    let user_config = UserConfig::load()?;
+    let runners =
+        user_config.resolve_ci_runners(Platform::Forgejo, Runtime::Nix, None, None, false)?;
+    Ok((runs_on(&runners.release), true))
+}
+
+fn runs_on(runner: &ResolvedRunner) -> String {
+    if runner.labels.len() == 1 {
+        return runner.labels[0].clone();
+    }
+
+    let labels = runner
+        .labels
+        .iter()
+        .map(|label| format!("\"{}\"", label.replace('"', "\\\"")))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("[{labels}]")
 }

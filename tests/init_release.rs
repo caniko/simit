@@ -58,6 +58,65 @@ repo_url = "ssh://git@codeberg.org/example/{name}-apt.git"
     temp
 }
 
+fn init_package_without_release_runner(name: &str) -> TempDir {
+    let temp = init_package(name);
+    let simit_toml = read(&temp.path().join("simit.toml"));
+    fs::write(
+        temp.path().join("simit.toml"),
+        simit_toml.replace("runner = \"atlas\"\n", ""),
+    )
+    .unwrap();
+    temp
+}
+
+fn init_package_with_release_runner(name: &str, runner: &str) -> TempDir {
+    let temp = init_package(name);
+    let simit_toml = read(&temp.path().join("simit.toml"));
+    fs::write(
+        temp.path().join("simit.toml"),
+        simit_toml.replace("runner = \"atlas\"\n", &format!("runner = \"{runner}\"\n")),
+    )
+    .unwrap();
+    temp
+}
+
+fn write_split_runner_config(root: &Path) {
+    let config_dir = root.join(".xdg/simit");
+    fs::create_dir_all(&config_dir).unwrap();
+    fs::write(
+        config_dir.join("config.toml"),
+        r#"[ci.runners.forgejo_linux]
+platform = "forgejo"
+labels = ["atlas"]
+os = "linux"
+arch = "x86_64"
+runtimes = ["cargo"]
+trusted = false
+
+[ci.runners.forgejo_nix_trusted]
+platform = "forgejo"
+labels = ["atlas-nix-trusted"]
+os = "linux"
+arch = "x86_64"
+runtimes = ["nix"]
+trusted = true
+
+[ci.defaults.forgejo]
+cargo = "forgejo_linux"
+nix = "forgejo_nix_trusted"
+release = "forgejo_linux"
+"#,
+    )
+    .unwrap();
+}
+
+fn simit_with_split_runner_config(root: &Path) -> Command {
+    write_split_runner_config(root);
+    let mut command = simit();
+    command.env("XDG_CONFIG_HOME", root.join(".xdg"));
+    command
+}
+
 fn read(path: &Path) -> String {
     fs::read_to_string(path).unwrap_or_else(|err| panic!("reading {}: {err}", path.display()))
 }
@@ -86,6 +145,11 @@ fn bootstraps_release_workflow_for_enabled_channels() {
     assert!(workflow.contains("Publish APT repository"));
     assert!(workflow.contains("mkdir -p release"));
     assert!(workflow.contains("printf artifact > release/demo.txt"));
+    assert!(workflow.contains("      version:\n"));
+    assert!(workflow.contains("VERSION=\"${{ inputs.version }}\""));
+    assert!(workflow.contains("git worktree add --detach \"$tag_worktree\" \"$VERSION\""));
+    assert!(workflow.contains("git checkout --detach \"$validated_sha\""));
+    assert!(workflow.contains("uses: https://github.com/cachix/install-nix-action@v27"));
 
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("Generated release workflow"));
@@ -112,6 +176,53 @@ fn check_succeeds_after_bootstrap_and_rerender_is_idempotent() {
         .status()
         .unwrap();
     assert!(check.success());
+}
+
+#[test]
+fn release_without_project_runner_uses_trusted_forgejo_nix_runner() {
+    let project = init_package_without_release_runner("demo");
+
+    let output = simit_with_split_runner_config(project.path())
+        .current_dir(project.path())
+        .args(["init", "release"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let workflow = read(&project.path().join(".forgejo/workflows/release.yml"));
+    assert!(workflow.contains("runs-on: atlas-nix-trusted\n"));
+    assert!(workflow.contains("    env:\n"));
+    assert!(workflow.contains("      NIX_CONFIG: |\n"));
+    assert!(workflow.contains("        experimental-features = nix-command flakes\n"));
+    assert!(workflow.contains("        accept-flake-config = true\n"));
+    assert!(workflow.contains("      XDG_CACHE_HOME: \"/tmp/.cache\"\n"));
+    assert!(!workflow.contains("uses: https://github.com/cachix/install-nix-action"));
+}
+
+#[test]
+fn explicit_trusted_forgejo_nix_runner_uses_preinstalled_nix() {
+    let project = init_package_with_release_runner("demo", "atlas-nix-trusted");
+
+    let output = simit_with_split_runner_config(project.path())
+        .current_dir(project.path())
+        .args(["init", "release"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let workflow = read(&project.path().join(".forgejo/workflows/release.yml"));
+    assert!(workflow.contains("runs-on: atlas-nix-trusted\n"));
+    assert!(workflow.contains("      NIX_CONFIG: |\n"));
+    assert!(workflow.contains("        accept-flake-config = true\n"));
+    assert!(!workflow.contains("uses: https://github.com/cachix/install-nix-action"));
 }
 
 #[test]

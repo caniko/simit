@@ -169,11 +169,15 @@ impl UserConfig {
         let ci = if let Some(label) = runner_override {
             ResolvedRunner::literal(label)?
         } else {
+            // Nix CI jobs build derivations and push them to the Attic cache,
+            // so the resolved Nix runner must be trusted.
+            let require_trusted = runtime == Runtime::Nix;
             self.default_runner(
                 platform,
                 RunnerKind::for_runtime(runtime),
                 RunnerOs::Linux,
                 runtime,
+                require_trusted,
             )?
         };
 
@@ -184,7 +188,18 @@ impl UserConfig {
                 Runtime::Cargo => RunnerKind::Release,
                 Runtime::Nix => RunnerKind::Nix,
             };
-            self.default_runner(platform, release_kind, RunnerOs::Linux, runtime)?
+            // Only the Nix release runner pushes Nix builds to the Attic cache,
+            // so trust is required for the Nix runtime. The cargo release runner
+            // signs/publishes crates and does not write the host store, so it is
+            // not required to be trusted (preserves existing cargo configs).
+            let release_require_trusted = runtime == Runtime::Nix;
+            self.default_runner(
+                platform,
+                release_kind,
+                RunnerOs::Linux,
+                runtime,
+                release_require_trusted,
+            )?
         };
 
         let windows = if needs_windows {
@@ -196,6 +211,7 @@ impl UserConfig {
                     RunnerKind::Windows,
                     RunnerOs::Windows,
                     Runtime::Cargo,
+                    false,
                 )?
             })
         } else {
@@ -209,27 +225,57 @@ impl UserConfig {
         })
     }
 
+    pub fn explicit_label_is_trusted_forgejo_nix_runner(&self, label: &str) -> Result<bool> {
+        validate_runner_label(label)?;
+
+        for (name, runner) in &self.ci.runners {
+            if runner.labels.len() != 1 || runner.labels[0] != label {
+                continue;
+            }
+            if runner.platform != PlatformName::Forgejo
+                || runner.os != RunnerOs::Linux
+                || !runner.runtimes.contains(&RunnerRuntime::Nix)
+            {
+                continue;
+            }
+            runner.validate_for(name, PlatformName::Forgejo, RunnerOs::Linux, Runtime::Nix)?;
+            if !runner.trusted {
+                bail!(
+                    "explicit runner label `{label}` resolves to runner `{name}`, but release Nix workflows require a trusted runner; set `trusted = true` on [ci.runners.{name}] in {} (only do this for runners you control), or use a trusted runner label",
+                    Self::path().display()
+                );
+            }
+            return Ok(true);
+        }
+
+        Ok(false)
+    }
+
     fn default_runner(
         &self,
         platform: Platform,
         kind: RunnerKind,
         os: RunnerOs,
         runtime: Runtime,
+        require_trusted: bool,
     ) -> Result<ResolvedRunner> {
         if platform == Platform::Github {
-            if let Some(runner) = self.configured_default(platform, kind, os, runtime)? {
+            if let Some(runner) =
+                self.configured_default(platform, kind, os, runtime, require_trusted)?
+            {
                 return Ok(runner);
             }
             return Ok(github_builtin_runner(os));
         }
 
-        self.configured_default(platform, kind, os, runtime)?.ok_or_else(|| {
-            anyhow::anyhow!(
-                "Forgejo runner default `{}` is not configured in simit user config at {}; run `simit config init`, edit [ci.runners] and [ci.defaults.forgejo], then validate with `simit config check`",
-                kind.key(),
-                Self::path().display()
-            )
-        })
+        self.configured_default(platform, kind, os, runtime, require_trusted)?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Forgejo runner default `{}` is not configured in simit user config at {}; run `simit config init`, edit [ci.runners] and [ci.defaults.forgejo], then validate with `simit config check`",
+                    kind.key(),
+                    Self::path().display()
+                )
+            })
     }
 
     fn configured_default(
@@ -238,6 +284,7 @@ impl UserConfig {
         kind: RunnerKind,
         os: RunnerOs,
         runtime: Runtime,
+        require_trusted: bool,
     ) -> Result<Option<ResolvedRunner>> {
         let Some(defaults) = self.ci.defaults.get(platform.as_str()) else {
             return Ok(None);
@@ -254,6 +301,16 @@ impl UserConfig {
             )
         })?;
         runner.validate_for(name, platform.into(), os, runtime)?;
+        if require_trusted && !runner.trusted {
+            bail!(
+                "[ci.defaults.{}].{} resolves to runner `{}`, but that runner must be trusted because it pushes Nix builds to the Attic cache; set `trusted = true` on [ci.runners.{}] in {} (only do this for runners you control), or point the default at a trusted runner",
+                platform.as_str(),
+                kind.key(),
+                name,
+                name,
+                Self::path().display()
+            );
+        }
         Ok(Some(ResolvedRunner {
             name: Some(name.clone()),
             labels: runner.labels.clone(),
@@ -502,7 +559,15 @@ platform = "forgejo"
 labels = ["atlas"]
 os = "linux"
 arch = "x86_64"
-runtimes = ["cargo", "nix"]
+runtimes = ["cargo"]
+trusted = true
+
+[ci.runners.forgejo_nix_trusted]
+platform = "forgejo"
+labels = ["atlas-nix-trusted"]
+os = "linux"
+arch = "x86_64"
+runtimes = ["nix"]
 trusted = true
 
 [ci.runners.forgejo_windows]
@@ -514,7 +579,7 @@ runtimes = ["cargo"]
 
 [ci.defaults.forgejo]
 cargo = "forgejo_linux"
-nix = "forgejo_linux"
+nix = "forgejo_nix_trusted"
 release = "forgejo_linux"
 windows = "forgejo_windows"
 "#

@@ -23,6 +23,7 @@ use crate::config::{
 /// Everything the release workflow generator needs, resolved up front.
 pub struct ReleaseWorkflowInputs<'a> {
     pub runner: &'a str,
+    pub preinstalled_nix: bool,
     pub artifacts: &'a ArtifactsConfig,
     pub smoke_command: Option<&'a str>,
     pub codeberg: Option<&'a ResolvedCodebergRelease>,
@@ -43,7 +44,8 @@ const TAG_REGEX: &str = r"^[0-9]+\.[0-9]+\.[0-9]+(-(rc|beta|alpha)\.[0-9]+)?$";
 const PRERELEASE_REGEX: &str = r"-(rc|beta|alpha)\.[0-9]+$";
 
 /// Resolve `VERSION` from whichever forge ref-name env var is set.
-const VERSION_FROM_REF: &str = r#"VERSION="${GITHUB_REF_NAME:-${FORGE_REF_NAME:-${CODEBERG_REF_NAME:-}}}"
+const VERSION_FROM_REF: &str = r#"VERSION="${{ inputs.version }}"
+          if [ -z "$VERSION" ]; then VERSION="${GITHUB_REF_NAME:-${FORGE_REF_NAME:-${CODEBERG_REF_NAME:-}}}"; fi
           if [ -z "$VERSION" ]; then ref="${GITHUB_REF:-${FORGE_REF:-${CODEBERG_REF:-}}}"; VERSION="${ref#refs/tags/}"; fi"#;
 
 pub fn render(inputs: &ReleaseWorkflowInputs<'_>) -> String {
@@ -56,7 +58,10 @@ pub fn render(inputs: &ReleaseWorkflowInputs<'_>) -> String {
 
     w.push_str("'on':\n");
     w.push_str("  push:\n    tags:\n      - '[0-9]*'\n");
-    w.push_str("  workflow_dispatch:\n    inputs:\n      force_publish:\n");
+    w.push_str("  workflow_dispatch:\n    inputs:\n      version:\n");
+    w.push_str("        description: 'Existing release tag to build without moving the tag.'\n");
+    w.push_str("        required: false\n        default: ''\n        type: string\n");
+    w.push_str("      force_publish:\n");
     w.push_str("        description: 'Bypass release smoke checks and continue to publish.'\n");
     w.push_str("        required: false\n        default: false\n        type: boolean\n\n");
 
@@ -67,10 +72,15 @@ pub fn render(inputs: &ReleaseWorkflowInputs<'_>) -> String {
     w.push_str("jobs:\n  release:\n");
     writeln!(w, "    runs-on: {}", inputs.runner).expect("write");
     w.push_str("    enable-openid-connect: true\n");
+    if inputs.preinstalled_nix {
+        push_preinstalled_nix_env(&mut w, inputs.artifacts);
+    }
     w.push_str("    steps:\n");
 
     push_checkout(&mut w);
-    push_install_nix(&mut w, inputs.artifacts);
+    if !inputs.preinstalled_nix {
+        push_install_nix(&mut w, inputs.artifacts);
+    }
     push_validate_tag(&mut w, inputs.artifacts);
     if let Some(copr) = inputs.copr {
         push_rewrite_spec(&mut w, copr);
@@ -305,29 +315,65 @@ fn push_install_nix(w: &mut String, artifacts: &ArtifactsConfig) {
     w.push('\n');
 }
 
+fn push_preinstalled_nix_env(w: &mut String, artifacts: &ArtifactsConfig) {
+    w.push_str("    env:\n");
+    w.push_str("      NIX_CONFIG: |\n");
+    w.push_str("        experimental-features = nix-command flakes\n");
+    w.push_str("        accept-flake-config = true\n");
+    if !artifacts.substituters.is_empty() {
+        writeln!(
+            w,
+            "        substituters = {}",
+            artifacts.substituters.join(" ")
+        )
+        .expect("write");
+    }
+    if !artifacts.trusted_public_keys.is_empty() {
+        writeln!(
+            w,
+            "        trusted-public-keys = {}",
+            artifacts.trusted_public_keys.join(" ")
+        )
+        .expect("write");
+    }
+    w.push_str("      XDG_CACHE_HOME: \"/tmp/.cache\"\n");
+}
+
 fn push_validate_tag(w: &mut String, artifacts: &ArtifactsConfig) {
     w.push_str("      - name: Validate tag\n        run: |\n          set -euo pipefail\n");
     writeln!(w, "          {VERSION_FROM_REF}").expect("write");
     writeln!(w, "          echo \"$VERSION\" | grep -Eq '{TAG_REGEX}'").expect("write");
-    if let Some(attr) = &artifacts.version_attr {
-        writeln!(
-            w,
-            "          test \"$(nix eval --raw .#{attr}.version)\" = \"$VERSION\""
-        )
-        .expect("write");
-    }
-    w.push_str("          test -s keys/maintainers.gpg\n");
-    w.push_str("          if ! grep -q \"^## \\[$VERSION\\] - [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]\" CHANGELOG.md; then\n");
-    w.push_str("            echo \"CHANGELOG.md missing section for $VERSION\" >&2\n            exit 1\n          fi\n\n");
-    w.push_str("          IS_PRERELEASE=false\n");
-    writeln!(w, "          if printf '%s\\n' \"$VERSION\" | grep -Eq -- '{PRERELEASE_REGEX}'; then IS_PRERELEASE=true; fi").expect("write");
-    w.push_str("          { printf 'VERSION=%s\\n' \"$VERSION\"; printf 'IS_PRERELEASE=%s\\n' \"$IS_PRERELEASE\"; } > release-env\n\n");
-    w.push_str("          GNUPGHOME=\"$(mktemp -d)\"; export GNUPGHOME; trap 'rm -rf \"$GNUPGHOME\"' EXIT; chmod 700 \"$GNUPGHOME\"\n");
-    w.push_str("          gpg --batch --import keys/maintainers.gpg\n");
     w.push_str(
         "          git fetch --force --tags origin \"refs/tags/${VERSION}:refs/tags/${VERSION}\"\n",
     );
+    w.push_str("          tag_worktree=\"$(mktemp -d)\"\n");
+    w.push_str("          rmdir \"$tag_worktree\"\n");
+    w.push_str("          cleanup_validation() {\n");
+    w.push_str("            if [ -n \"${tag_worktree:-}\" ]; then git worktree remove --force \"$tag_worktree\" >/dev/null 2>&1 || rm -rf \"$tag_worktree\"; fi\n");
+    w.push_str("            if [ -n \"${GNUPGHOME:-}\" ]; then rm -rf \"$GNUPGHOME\"; fi\n");
+    w.push_str("          }\n");
+    w.push_str("          trap cleanup_validation EXIT\n");
+    w.push_str("          git worktree add --detach \"$tag_worktree\" \"$VERSION\"\n");
+    if let Some(attr) = &artifacts.version_attr {
+        writeln!(
+            w,
+            "          test \"$(nix eval --raw \"$tag_worktree#{attr}.version\")\" = \"$VERSION\""
+        )
+        .expect("write");
+    }
+    w.push_str("          test -s \"$tag_worktree/keys/maintainers.gpg\"\n");
+    w.push_str("          if ! grep -q \"^## \\[$VERSION\\] - [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]\" \"$tag_worktree/CHANGELOG.md\"; then\n");
+    w.push_str("            echo \"CHANGELOG.md missing section for $VERSION\" >&2\n            exit 1\n          fi\n\n");
+    w.push_str("          IS_PRERELEASE=false\n");
+    writeln!(w, "          if printf '%s\\n' \"$VERSION\" | grep -Eq -- '{PRERELEASE_REGEX}'; then IS_PRERELEASE=true; fi").expect("write");
+    w.push_str(
+        "\n          GNUPGHOME=\"$(mktemp -d)\"; export GNUPGHOME; chmod 700 \"$GNUPGHOME\"\n",
+    );
+    w.push_str("          gpg --batch --import \"$tag_worktree/keys/maintainers.gpg\"\n");
     w.push_str("          git verify-tag \"$VERSION\"\n");
+    w.push_str("          validated_sha=\"$(git -C \"$tag_worktree\" rev-parse HEAD)\"\n");
+    w.push_str("          git checkout --detach \"$validated_sha\"\n");
+    w.push_str("          { printf 'VERSION=%s\\n' \"$VERSION\"; printf 'IS_PRERELEASE=%s\\n' \"$IS_PRERELEASE\"; } > release-env\n");
 }
 
 fn push_rewrite_spec(w: &mut String, copr: &ResolvedCopr) {
@@ -387,7 +433,7 @@ fn push_build_artifacts(w: &mut String, artifacts: &ArtifactsConfig) {
     w.push_str(
         "      - name: Build release artifacts\n        run: |\n          set -euo pipefail\n",
     );
-    w.push_str("          . ./release-env\n          mkdir -p release\n");
+    w.push_str("          . ./release-env\n          export VERSION IS_PRERELEASE\n          mkdir -p release\n");
     if artifacts.build_commands.is_empty() {
         w.push_str("          echo \"[release.artifacts].build_commands is empty; nothing to build\" >&2\n          exit 1\n");
     } else {
@@ -400,7 +446,7 @@ fn push_build_artifacts(w: &mut String, artifacts: &ArtifactsConfig) {
 }
 
 fn push_build_debs(w: &mut String, apt: &ResolvedApt) {
-    w.push_str("      - name: Build Debian packages\n        run: |\n          set -euo pipefail\n          . ./release-env\n          mkdir -p release\n");
+    w.push_str("      - name: Build Debian packages\n        run: |\n          set -euo pipefail\n          . ./release-env\n          export VERSION IS_PRERELEASE\n          mkdir -p release\n");
     w.push_str(
         "          nix shell nixpkgs#debootstrap nixpkgs#cargo nixpkgs#rustc -c bash <<'SCRIPT'\n",
     );
@@ -849,7 +895,7 @@ fn push_publish_scoop(w: &mut String, scoop: &ResolvedScoop) {
 }
 
 fn push_sbom(w: &mut String, commands: &[String]) {
-    w.push_str("      - name: Generate supply-chain reports\n        run: |\n          set -euo pipefail\n          . ./release-env\n          mkdir -p release\n");
+    w.push_str("      - name: Generate supply-chain reports\n        run: |\n          set -euo pipefail\n          . ./release-env\n          export VERSION IS_PRERELEASE\n          mkdir -p release\n");
     for line in commands {
         for sub in line.split('\n') {
             writeln!(w, "          {sub}").expect("write");
@@ -1406,6 +1452,7 @@ mod tests {
         artifacts.sbom_commands = vec!["cargo sbom > release/sbom.json".to_owned()];
         let workflow = render(&ReleaseWorkflowInputs {
             runner: "atlas",
+            preinstalled_nix: false,
             artifacts: &artifacts,
             smoke_command: Some("nix run .#release-smoke --"),
             codeberg: Some(&codeberg),
@@ -1426,8 +1473,17 @@ mod tests {
         assert!(workflow.contains("name: release\n"));
         assert!(workflow.contains("runs-on: atlas\n"));
         assert!(workflow.contains("enable-openid-connect: true\n"));
-        assert!(workflow.contains("test \"$(nix eval --raw .#modde.version)\" = \"$VERSION\""));
+        assert!(workflow.contains("      version:\n"));
+        assert!(workflow.contains("VERSION=\"${{ inputs.version }}\""));
+        assert!(
+            workflow.contains(
+                "test \"$(nix eval --raw \"$tag_worktree#modde.version\")\" = \"$VERSION\""
+            )
+        );
+        assert!(workflow.contains("git worktree add --detach \"$tag_worktree\" \"$VERSION\""));
         assert!(workflow.contains("git verify-tag \"$VERSION\""));
+        assert!(workflow.contains("git checkout --detach \"$validated_sha\""));
+        assert!(workflow.contains("export VERSION IS_PRERELEASE"));
         assert!(workflow.contains("nix run .#release-smoke -- \"$VERSION\" release"));
         // minisign + cosign SLSA attestation
         assert!(workflow.contains("minisign -S -s \"$minisign_key\""));
