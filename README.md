@@ -286,6 +286,22 @@ simit release trust check
 The default trust root is `keys/maintainers.gpg`; override it with
 `[release.signing].trust_root` or `--maintainers-gpg`.
 
+Release workflows that sign checksums need matching minisign secrets in the
+remote Forgejo/Codeberg Actions secret store. `simit release secrets` verifies
+the key pair before upload and never prints secret values:
+
+```sh
+simit release secrets init --repo owner/repo \
+  --minisign-secret-key-file /path/to/minisign.sec \
+  --minisign-password-file /path/to/minisign.password
+simit release secrets check --repo owner/repo \
+  --assume-account-secret codeberg_token
+```
+
+Use `--rotate-minisign` only for a new release line: it generates a fresh
+encrypted minisign key pair, uploads `MINISIGN_SECRET_KEY` and
+`MINISIGN_PASSWORD`, and replaces `keys/minisign.pub`.
+
 Add optional CI jobs and checks when the project needs them:
 
 ```sh

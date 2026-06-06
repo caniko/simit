@@ -158,6 +158,12 @@ pub struct ReleaseCommand {
     #[arg(value_enum, value_name = "TRUST_ACTION", help = "Release trust action")]
     pub trust_action: Option<ReleaseTrustAction>,
     #[arg(
+        value_enum,
+        value_name = "SECRETS_ACTION",
+        help = "Release secrets action"
+    )]
+    pub secrets_action: Option<ReleaseSecretsAction>,
+    #[arg(
         long = "key",
         value_name = "FINGERPRINT",
         help = "OpenPGP key fingerprint for `simit release trust`"
@@ -218,6 +224,56 @@ pub struct ReleaseCommand {
         help = "Remote checked by `simit release verify` for the release tag"
     )]
     pub push_target: Option<String>,
+    #[arg(
+        long = "repo",
+        value_name = "OWNER/REPO",
+        help = "Forgejo/Codeberg repository for `simit release secrets`"
+    )]
+    pub secrets_repo: Option<String>,
+    #[arg(
+        long = "api-base",
+        value_name = "URL",
+        default_value = "https://codeberg.org/api/v1",
+        help = "Forgejo/Codeberg API base URL for `simit release secrets`"
+    )]
+    pub secrets_api_base: String,
+    #[arg(
+        long = "token-file",
+        value_name = "PATH",
+        help = "File containing the Forgejo/Codeberg API token for `simit release secrets`"
+    )]
+    pub secrets_token_file: Option<Utf8PathBuf>,
+    #[arg(
+        long = "assume-account-secret",
+        value_name = "NAME",
+        action = clap::ArgAction::Append,
+        help = "Secret name managed at account/org scope and not visible in repo secret listings"
+    )]
+    pub assumed_account_secrets: Vec<String>,
+    #[arg(
+        long = "minisign-secret-key-file",
+        value_name = "PATH",
+        help = "Existing minisign secret key file to import as MINISIGN_SECRET_KEY"
+    )]
+    pub minisign_secret_key_file: Option<Utf8PathBuf>,
+    #[arg(
+        long = "minisign-password-file",
+        value_name = "PATH",
+        help = "Existing minisign password file to import as MINISIGN_PASSWORD"
+    )]
+    pub minisign_password_file: Option<Utf8PathBuf>,
+    #[arg(
+        long = "minisign-public-key",
+        value_name = "PATH",
+        default_value = "keys/minisign.pub",
+        help = "Committed minisign public key path"
+    )]
+    pub minisign_public_key: Utf8PathBuf,
+    #[arg(
+        long = "rotate-minisign",
+        help = "Generate a new encrypted minisign keypair and replace the committed public key"
+    )]
+    pub rotate_minisign: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -247,6 +303,8 @@ pub enum ReleaseAction {
         help = "Print the dependency-ordered publish plan for the current workspace"
     )]
     Plan,
+    #[value(name = "secrets", help = "Manage remote release workflow secrets")]
+    Secrets,
 }
 
 impl ReleaseAction {
@@ -256,7 +314,7 @@ impl ReleaseAction {
             Self::Minor => Some(BumpKind::Minor),
             Self::Major => Some(BumpKind::Major),
             Self::Prerelease => Some(BumpKind::Prerelease),
-            Self::SyncUp | Self::Trust | Self::Verify | Self::Plan => None,
+            Self::SyncUp | Self::Trust | Self::Verify | Self::Plan | Self::Secrets => None,
         }
     }
 }
@@ -269,6 +327,24 @@ pub enum ReleaseTrustAction {
     Init,
     #[value(help = "Verify the release trust root exists and matches the signing key")]
     Check,
+    #[value(
+        name = "inspect-minisign-input",
+        help = "Classify minisign import inputs without printing secret values"
+    )]
+    InspectMinisignInput,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ReleaseSecretsAction {
+    #[value(help = "Upload or rotate release workflow secrets")]
+    Init,
+    #[value(help = "Check release workflow secret names without reading values")]
+    Check,
+    #[value(
+        name = "inspect-minisign-input",
+        help = "Classify minisign import inputs without printing secret values"
+    )]
+    InspectMinisignInput,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]

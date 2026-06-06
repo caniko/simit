@@ -226,6 +226,53 @@ fn explicit_trusted_forgejo_nix_runner_uses_preinstalled_nix() {
 }
 
 #[test]
+fn release_workflow_checks_credentials_before_building() {
+    let project = init_package_with_release_runner("demo", "atlas-nix-trusted");
+    let simit_toml = read(&project.path().join("simit.toml"));
+    fs::write(
+        project.path().join("simit.toml"),
+        simit_toml.replace(
+            "sign = false\n",
+            r#"sign = true
+checksum_globs = ["demo.txt"]
+
+[release.attic]
+cache = "canix"
+url = "https://attic.example"
+token_name = "rs-modde"
+result_links = ["result"]
+"#,
+        ),
+    )
+    .unwrap();
+
+    let output = simit_with_split_runner_config(project.path())
+        .current_dir(project.path())
+        .args(["init", "release"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let workflow = read(&project.path().join(".forgejo/workflows/release.yml"));
+    let credential_check = workflow
+        .find("      - name: Check release credentials")
+        .expect("credential preflight step");
+    let build = workflow
+        .find("      - name: Build release artifacts")
+        .expect("build step");
+    assert!(credential_check < build);
+    assert!(workflow.contains("CODEBERG_TOKEN: ${{ secrets.codeberg_token }}"));
+    assert!(workflow.contains("MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}"));
+    assert!(workflow.contains("MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}"));
+    assert!(workflow.contains("minisign -V -m \"$minisign_probe\""));
+    assert!(workflow.contains("test -r \"${ATTIC_TOKENS_DIR:?}/rs-modde\""));
+}
+
+#[test]
 fn print_matches_checked_workflow_without_writing_file() {
     let project = init_package("demo");
 
@@ -246,10 +293,8 @@ fn print_matches_checked_workflow_without_writing_file() {
     assert!(stdout.contains("Publish AUR packages"));
     assert!(stdout.contains("Push SRPM to COPR"));
     assert!(stdout.contains("Publish APT repository"));
-    assert!(
-        !project
-            .path()
-            .join(".forgejo/workflows/release.yml")
-            .exists()
-    );
+    assert!(!project
+        .path()
+        .join(".forgejo/workflows/release.yml")
+        .exists());
 }

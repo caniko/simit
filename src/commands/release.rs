@@ -1,11 +1,11 @@
 use std::ffi::OsString;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{anyhow, bail, Context, Result};
 use semver::Version;
 
 use crate::cargo::{self, BumpSpec, Package};
 use crate::changelog;
-use crate::cli::{ReleaseAction, ReleaseCommand, ReleaseTrustAction};
+use crate::cli::{ReleaseAction, ReleaseCommand, ReleaseSecretsAction, ReleaseTrustAction};
 use crate::config::ProjectConfig;
 use crate::git;
 use crate::registry;
@@ -21,10 +21,14 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
     if command.action == ReleaseAction::Trust {
         return trust(command);
     }
+    if command.action == ReleaseAction::Secrets {
+        return secrets(command);
+    }
     if command.trust_action.is_some() || command.trust_key.is_some() || command.trust_root.is_some()
     {
         bail!("release trust arguments are only valid with `simit release trust`");
     }
+    reject_secrets_flags(&command)?;
     if command.action == ReleaseAction::SyncUp {
         return sync_up(command);
     }
@@ -116,6 +120,66 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
     Ok(())
 }
 
+fn secrets(command: ReleaseCommand) -> Result<()> {
+    if !command.packages.is_empty() {
+        bail!("--package is not valid with `simit release secrets`");
+    }
+    if command.workspace {
+        bail!("--workspace is not valid with `simit release secrets`");
+    }
+    if command.no_tag {
+        bail!("--no-tag is not valid with `simit release secrets`");
+    }
+    if command.no_sign {
+        bail!("--no-sign is not valid with `simit release secrets`");
+    }
+    if command.dry_run {
+        bail!("--dry-run is not valid with `simit release secrets`");
+    }
+    if command.pre.is_some() {
+        bail!("--pre is not valid with `simit release secrets`");
+    }
+    if command.message.is_some() {
+        bail!("-m/--message is not valid with `simit release secrets`");
+    }
+    if command.no_changelog {
+        bail!("--no-changelog is not valid with `simit release secrets`");
+    }
+    if command.push {
+        bail!("--push is not valid with `simit release secrets`");
+    }
+    if command.remote != "origin" {
+        bail!("--remote is not valid with `simit release secrets`");
+    }
+    if command.trust_key.is_some() || command.trust_root.is_some() {
+        bail!("release trust arguments are only valid with `simit release trust`");
+    }
+    reject_verify_flags(&command)?;
+
+    let action = match (command.secrets_action, command.trust_action) {
+        (Some(action), None) => action,
+        (None, Some(ReleaseTrustAction::Init)) => ReleaseSecretsAction::Init,
+        (None, Some(ReleaseTrustAction::Check)) => ReleaseSecretsAction::Check,
+        (None, Some(ReleaseTrustAction::InspectMinisignInput)) => {
+            ReleaseSecretsAction::InspectMinisignInput
+        }
+        (None, Some(ReleaseTrustAction::Status)) => {
+            bail!("release secrets action must be init, check, or inspect-minisign-input")
+        }
+        (None, None) => {
+            bail!("release secrets action is required: init, check, or inspect-minisign-input")
+        }
+        (Some(_), Some(_)) => bail!("release secrets action specified more than once"),
+    };
+    match action {
+        ReleaseSecretsAction::Init => crate::commands::release_secrets::init(command),
+        ReleaseSecretsAction::Check => crate::commands::release_secrets::check(command),
+        ReleaseSecretsAction::InspectMinisignInput => {
+            crate::commands::release_secrets::inspect_minisign_input(command)
+        }
+    }
+}
+
 fn trust(command: ReleaseCommand) -> Result<()> {
     if !command.packages.is_empty() {
         bail!("--package is not valid with `simit release trust`");
@@ -164,6 +228,9 @@ fn trust(command: ReleaseCommand) -> Result<()> {
         ReleaseTrustAction::Status => release_trust::status(workspace_root, &config, &overrides),
         ReleaseTrustAction::Init => release_trust::init(workspace_root, &config, &overrides),
         ReleaseTrustAction::Check => release_trust::check(workspace_root, &config, &overrides),
+        ReleaseTrustAction::InspectMinisignInput => {
+            bail!("release trust action must be status, init, or check")
+        }
     }
 }
 
@@ -243,6 +310,22 @@ fn reject_verify_flags(command: &ReleaseCommand) -> Result<()> {
     }
     if command.push_target.is_some() {
         bail!("--push-target is only valid with `simit release verify`");
+    }
+    Ok(())
+}
+
+fn reject_secrets_flags(command: &ReleaseCommand) -> Result<()> {
+    if command.secrets_action.is_some()
+        || command.secrets_repo.is_some()
+        || command.secrets_token_file.is_some()
+        || !command.assumed_account_secrets.is_empty()
+        || command.minisign_secret_key_file.is_some()
+        || command.minisign_password_file.is_some()
+        || command.rotate_minisign
+        || command.minisign_public_key.as_str() != "keys/minisign.pub"
+        || command.secrets_api_base != "https://codeberg.org/api/v1"
+    {
+        bail!("release secrets arguments are only valid with `simit release secrets`");
     }
     Ok(())
 }

@@ -82,6 +82,7 @@ pub fn render(inputs: &ReleaseWorkflowInputs<'_>) -> String {
         push_install_nix(&mut w, inputs.artifacts);
     }
     push_validate_tag(&mut w, inputs.artifacts);
+    push_release_credentials_preflight(&mut w, inputs);
     if let Some(copr) = inputs.copr {
         push_rewrite_spec(&mut w, copr);
     }
@@ -374,6 +375,61 @@ fn push_validate_tag(w: &mut String, artifacts: &ArtifactsConfig) {
     w.push_str("          validated_sha=\"$(git -C \"$tag_worktree\" rev-parse HEAD)\"\n");
     w.push_str("          git checkout --detach \"$validated_sha\"\n");
     w.push_str("          { printf 'VERSION=%s\\n' \"$VERSION\"; printf 'IS_PRERELEASE=%s\\n' \"$IS_PRERELEASE\"; } > release-env\n");
+}
+
+fn push_release_credentials_preflight(w: &mut String, inputs: &ReleaseWorkflowInputs<'_>) {
+    if inputs.codeberg.is_none() && !inputs.artifacts.sign && inputs.attic.is_none() {
+        return;
+    }
+
+    w.push_str("      - name: Check release credentials\n");
+    if inputs.codeberg.is_some() || inputs.artifacts.sign {
+        w.push_str("        env:\n");
+        if let Some(codeberg) = inputs.codeberg {
+            writeln!(
+                w,
+                "          CODEBERG_TOKEN: ${{{{ secrets.{} }}}}",
+                codeberg.token_secret
+            )
+            .expect("write");
+        }
+        if inputs.artifacts.sign {
+            w.push_str("          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}\n");
+            w.push_str("          MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}\n");
+        }
+    }
+    w.push_str("        run: |\n          set -euo pipefail\n          . ./release-env\n");
+    if inputs.codeberg.is_some() {
+        w.push_str("          test -n \"${CODEBERG_TOKEN:-}\"\n");
+    }
+    if inputs.artifacts.sign {
+        writeln!(w, "          test -s {}", inputs.artifacts.minisign_pub).expect("write");
+        w.push_str("          test -n \"${MINISIGN_SECRET_KEY:-}\"\n");
+        w.push_str("          test -n \"${MINISIGN_PASSWORD:-}\"\n");
+        w.push_str("          umask 077\n");
+        w.push_str("          minisign_key=\"$(mktemp)\"; minisign_probe=\"$(mktemp)\"; minisign_sig=\"${minisign_probe}.minisig\"\n");
+        w.push_str(
+            "          trap 'rm -f \"$minisign_key\" \"$minisign_probe\" \"$minisign_sig\"' EXIT\n",
+        );
+        w.push_str("          printf '%s' \"$MINISIGN_SECRET_KEY\" > \"$minisign_key\"\n");
+        w.push_str("          printf 'simit release credentials probe\\n' > \"$minisign_probe\"\n");
+        w.push_str("          printf '%s\\n' \"$MINISIGN_PASSWORD\" | \\\n");
+        w.push_str("            nix shell nixpkgs#minisign -c minisign -S -s \"$minisign_key\" -m \"$minisign_probe\" -x \"$minisign_sig\"\n");
+        writeln!(
+            w,
+            "          nix shell nixpkgs#minisign -c minisign -V -m \"$minisign_probe\" -x \"$minisign_sig\" -p {}",
+            inputs.artifacts.minisign_pub
+        )
+        .expect("write");
+    }
+    if let Some(attic) = inputs.attic {
+        writeln!(
+            w,
+            "          test -r \"${{{}:?}}/{}\"",
+            attic.token_dir_env, attic.token_name
+        )
+        .expect("write");
+    }
 }
 
 fn push_rewrite_spec(w: &mut String, copr: &ResolvedCopr) {
@@ -1475,11 +1531,8 @@ mod tests {
         assert!(workflow.contains("enable-openid-connect: true\n"));
         assert!(workflow.contains("      version:\n"));
         assert!(workflow.contains("VERSION=\"${{ inputs.version }}\""));
-        assert!(
-            workflow.contains(
-                "test \"$(nix eval --raw \"$tag_worktree#modde.version\")\" = \"$VERSION\""
-            )
-        );
+        assert!(workflow
+            .contains("test \"$(nix eval --raw \"$tag_worktree#modde.version\")\" = \"$VERSION\""));
         assert!(workflow.contains("git worktree add --detach \"$tag_worktree\" \"$VERSION\""));
         assert!(workflow.contains("git verify-tag \"$VERSION\""));
         assert!(workflow.contains("git checkout --detach \"$validated_sha\""));
@@ -1501,23 +1554,16 @@ mod tests {
         assert!(workflow.contains("COPR_PROJECT=\"caniko/rs-modde-testing\""));
         // APT deb build + reprepro publish
         assert!(workflow.contains("debootstrap --variant=minbase bookworm"));
-        assert!(
-            workflow
-                .contains("deb -p modde-cli --output \"/work/release/modde_${VERSION}_amd64.deb\"")
-        );
+        assert!(workflow
+            .contains("deb -p modde-cli --output \"/work/release/modde_${VERSION}_amd64.deb\""));
         assert!(workflow.contains("reprepro -b \"$work/apt\" includedeb \"$APT_DISTRIBUTION\""));
-        assert!(
-            workflow.contains(
-                "git push --force-with-lease origin \"HEAD:refs/heads/${APT_REPO_BRANCH}\""
-            )
-        );
+        assert!(workflow
+            .contains("git push --force-with-lease origin \"HEAD:refs/heads/${APT_REPO_BRANCH}\""));
         // AUR ssh publish with .SRCINFO + 3 flavors
         assert!(workflow.contains("AUR_SSH_KEY: ${{ secrets.AUR_SSH_KEY }}"));
         assert!(workflow.contains("makepkg --config \"$MAKEPKG_CONF\" --printsrcinfo > .SRCINFO"));
-        assert!(
-            workflow
-                .contains("for pkg in modde modde-bin modde-git; do publish_pkg \"$pkg\"; done")
-        );
+        assert!(workflow
+            .contains("for pkg in modde modde-bin modde-git; do publish_pkg \"$pkg\"; done"));
         // Homebrew via rs-harbor, Scoop via sed template
         assert!(workflow.contains("HOMEBREW_TAP_TOKEN: ${{ secrets.FORGEJO_HOMEBREW_TOKEN }}"));
         assert!(workflow.contains("SCOOP_BUCKET_TOKEN: ${{ secrets.FORGEJO_SCOOP_TOKEN }}"));
