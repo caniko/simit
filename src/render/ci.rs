@@ -221,6 +221,7 @@ fn ci_workflow(
     workflow.push_str("on:\n");
     workflow.push_str("  push:\n");
     workflow.push_str("    branches: [\"**\"]\n");
+    workflow.push_str("    tags-ignore: [\"**\"]\n");
     if !(platform == Platform::Forgejo && runtime == Runtime::Nix) {
         workflow.push_str("  pull_request:\n");
     }

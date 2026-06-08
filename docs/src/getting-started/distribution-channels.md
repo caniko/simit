@@ -130,3 +130,7 @@ nix develop -c debootstrap --variant=minbase bookworm "$(mktemp -d)" \
 The debootstrap check must run in the same runner image/container policy used by
 Forgejo Actions. A host shell passing the check does not prove the release job
 can mount or chroot inside the runner container.
+
+Keep `release.yml` as the only automatic signed-tag workflow. Normal
+simit-managed CI workflows ignore tags explicitly so a release tag does not queue
+per-crate checks ahead of the artifact publisher on small trusted runner pools.

@@ -273,6 +273,7 @@ fn assert_yaml_parses(text: &str) {
 
 fn assert_all_branch_push_trigger(workflow: &str) {
     assert!(workflow.contains("branches: [\"**\"]"));
+    assert!(workflow.contains("tags-ignore: [\"**\"]"));
     assert!(!workflow.contains("branches: [trunk]"));
 }
 
