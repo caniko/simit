@@ -4,6 +4,7 @@ use crate::cargo;
 use crate::cli::InitAptCommand;
 use crate::commands::apt::{self, DISTRIBUTIONS_PATH};
 use crate::commands::scaffold::{ArtifactCheck, CheckPrintMode, print_next_steps};
+use crate::commands::upgrade;
 use crate::config::ProjectConfig;
 use crate::registry::{self, FeatureStatus};
 use crate::render::apt_conf;
@@ -31,12 +32,14 @@ pub fn run(command: InitAptCommand) -> Result<()> {
                 remediation: "run `simit init apt`",
             }
             .verify(diff)?;
+            upgrade::update_readme_badges_if_present(workspace_root, true, diff)?;
             return Ok(());
         }
         CheckPrintMode::Write => {}
     }
 
     apt::write_distributions(workspace_root, &resolved)?;
+    upgrade::update_readme_badges_if_present(workspace_root, false, false)?;
     print_next_steps(
         workspace_root,
         "Initialised apt repository config",

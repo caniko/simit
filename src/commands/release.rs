@@ -1,6 +1,6 @@
 use std::ffi::OsString;
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use semver::Version;
 
 use crate::cargo::{self, BumpSpec, Package};

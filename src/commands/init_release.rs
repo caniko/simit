@@ -4,6 +4,7 @@ use crate::cargo;
 use crate::cli::InitReleaseCommand;
 use crate::cli::{Platform, Runtime};
 use crate::commands::scaffold::{ArtifactCheck, CheckPrintMode, print_next_steps};
+use crate::commands::upgrade;
 use crate::config::{
     AptOverrides, AurOverrides, ChocolateyOverrides, CoprOverrides, HomebrewOverrides,
     ProjectConfig, ScoopOverrides,
@@ -88,11 +89,13 @@ pub fn run(command: InitReleaseCommand) -> Result<()> {
             expected: &content,
             remediation: "run `simit init release`",
         }
-        .verify(diff),
+        .verify(diff)
+        .and_then(|_| upgrade::update_readme_badges_if_present(workspace_root, true, diff)),
         CheckPrintMode::Write => {
             let parent = path.parent().expect("workflow path has a parent");
             std::fs::create_dir_all(parent)?;
             std::fs::write(&path, &content)?;
+            upgrade::update_readme_badges_if_present(workspace_root, false, false)?;
             print_next_steps(
                 workspace_root,
                 "Generated release workflow",

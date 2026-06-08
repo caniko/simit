@@ -331,6 +331,10 @@ fn full_scope_writes_flake_and_formatter_files() {
 
     assert!(temp.path().join("flake.nix").exists());
 
+    let flake = read(&temp.path().join("flake.nix"));
+    assert!(flake.contains("cargo-audit"));
+    assert!(!flake.contains("cargo-deny"));
+
     let treefmt = read(&temp.path().join("nix/treefmt.nix"));
     assert!(treefmt.contains("programs.rustfmt = {"));
     assert!(treefmt.contains("edition = \"2024\""));
@@ -341,6 +345,91 @@ fn full_scope_writes_flake_and_formatter_files() {
     assert!(treefmt.contains("programs.prettier"));
     assert!(treefmt.contains("\"*.md\""));
     assert!(treefmt.contains("\"*.yaml\""));
+}
+
+#[test]
+fn deny_config_adds_deny_shell_tool_and_hook() {
+    let temp = init_package();
+    fs::write(temp.path().join("simit.toml"), "[ci]\nwith_deny = true\n").unwrap();
+
+    let status = simit()
+        .current_dir(temp.path())
+        .args(["init", "flake", "--scope", "full"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let flake = read(&temp.path().join("flake.nix"));
+    assert!(flake.contains("cargo-audit"));
+    assert!(flake.contains("cargo-deny"));
+
+    let hooks = read(&temp.path().join("nix/pre-commit.nix"));
+    assert!(hooks.contains("cargo-deny"));
+    assert!(hooks.contains("cargo deny check bans licenses sources"));
+    assert!(hooks.contains("pkgs.cargo-deny"));
+}
+
+#[test]
+fn existing_deny_policy_adds_deny_shell_tool_and_hook() {
+    let temp = init_package();
+    fs::write(temp.path().join("deny.toml"), "[licenses]\n").unwrap();
+
+    let status = simit()
+        .current_dir(temp.path())
+        .args(["init", "flake", "--scope", "full"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let flake = read(&temp.path().join("flake.nix"));
+    assert!(flake.contains("cargo-deny"));
+
+    let hooks = read(&temp.path().join("nix/pre-commit.nix"));
+    assert!(hooks.contains("cargo deny check bans licenses sources"));
+}
+
+#[test]
+fn check_detects_missing_audit_shell_tool() {
+    let temp = init_package();
+
+    let status = simit()
+        .current_dir(temp.path())
+        .args(["init", "flake", "--scope", "full"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let flake_path = temp.path().join("flake.nix");
+    let flake = read(&flake_path).replace("          cargo-audit\n", "");
+    fs::write(&flake_path, flake).unwrap();
+
+    let output = simit()
+        .current_dir(temp.path())
+        .args(["init", "flake", "--scope", "full", "--check", "--diff"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("flake.nix is missing generated hook wiring"));
+    assert!(stderr.contains("cargo-audit"));
+}
+
+#[test]
+fn cross_flake_includes_audit_shell_tools() {
+    let temp = init_package();
+    fs::write(temp.path().join("deny.toml"), "[licenses]\n").unwrap();
+
+    let status = simit()
+        .current_dir(temp.path())
+        .args(["init", "flake", "--cross"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let flake = read(&temp.path().join("flake.nix"));
+    assert!(flake.contains("cargo-audit"));
+    assert!(flake.contains("cargo-deny"));
 }
 
 #[test]
@@ -852,6 +941,109 @@ fn check_diff_emits_no_removed_hook_notes_when_hooks_match() {
     assert!(output.status.success());
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(!stderr.contains("note: removing pre-commit hook"));
+}
+
+#[test]
+fn cross_print_emits_multi_target_flake_with_contract() {
+    let temp = init_package();
+
+    let output = simit()
+        .current_dir(temp.path())
+        .args(["init", "flake", "--print", "--cross"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("--- flake.nix"));
+    assert!(stdout.contains("rs-harbor.url = \"git+https://codeberg.org/caniko/rs-harbor.git\";"));
+    assert!(stdout.contains("rs-harbor.lib.mkCrossPackages {"));
+    assert!(stdout.contains(
+        "targets = [\"native\" \"aarch64-linux\" \"windows\" \"darwin-x86_64\" \"darwin-aarch64\"];"
+    ));
+    assert!(stdout.contains("default = crossPackages.${pname};"));
+    assert!(stdout.contains("rs-harbor.lib.mkDevShells {"));
+    assert!(stdout.contains("canix:lPzPzKrmYqW5Rxa5r0uQWvCqD3S5nx0h2eCy7XD5JM8="));
+    assert!(stdout.contains("cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY="));
+    assert!(!stdout.contains("uqr0"));
+    // Print never writes.
+    assert!(!temp.path().join("flake.nix").exists());
+}
+
+#[test]
+fn cross_print_honors_target_subset() {
+    let temp = init_package();
+
+    let output = simit()
+        .current_dir(temp.path())
+        .args([
+            "init", "flake", "--print", "--cross", "--target", "windows", "--target", "native",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("targets = [\"native\" \"windows\"];"));
+    assert!(!stdout.contains("darwin-x86_64"));
+    assert!(!stdout.contains("aarch64-linux"));
+}
+
+#[test]
+fn cross_write_then_check_is_clean_and_detects_drift() {
+    let temp = init_package();
+
+    let write_status = simit()
+        .current_dir(temp.path())
+        .args(["init", "flake", "--cross"])
+        .status()
+        .unwrap();
+    assert!(write_status.success());
+
+    let flake = read(&temp.path().join("flake.nix"));
+    assert!(flake.contains("rs-harbor.lib.mkCrossPackages {"));
+    assert!(flake.contains(
+        "targets = [\"native\" \"aarch64-linux\" \"windows\" \"darwin-x86_64\" \"darwin-aarch64\"];"
+    ));
+
+    // A freshly generated cross flake drift-checks clean.
+    let check_status = simit()
+        .current_dir(temp.path())
+        .args(["init", "flake", "--check", "--cross"])
+        .status()
+        .unwrap();
+    assert!(check_status.success());
+
+    // Mutating the cross flake is detected even though it still carries the
+    // generated hook wiring.
+    let drifted = flake.replace(
+        "targets = [\"native\" \"aarch64-linux\" \"windows\" \"darwin-x86_64\" \"darwin-aarch64\"];",
+        "targets = [\"native\"];",
+    );
+    fs::write(temp.path().join("flake.nix"), drifted).unwrap();
+    let output = simit()
+        .current_dir(temp.path())
+        .args(["init", "flake", "--check", "--cross"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("flake.nix does not match the generated cross flake"));
+}
+
+#[test]
+fn target_requires_cross() {
+    let temp = init_package();
+
+    let output = simit()
+        .current_dir(temp.path())
+        .args(["init", "flake", "--print", "--target", "native"])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("--cross"));
 }
 
 #[test]

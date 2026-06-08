@@ -1531,8 +1531,11 @@ mod tests {
         assert!(workflow.contains("enable-openid-connect: true\n"));
         assert!(workflow.contains("      version:\n"));
         assert!(workflow.contains("VERSION=\"${{ inputs.version }}\""));
-        assert!(workflow
-            .contains("test \"$(nix eval --raw \"$tag_worktree#modde.version\")\" = \"$VERSION\""));
+        assert!(
+            workflow.contains(
+                "test \"$(nix eval --raw \"$tag_worktree#modde.version\")\" = \"$VERSION\""
+            )
+        );
         assert!(workflow.contains("git worktree add --detach \"$tag_worktree\" \"$VERSION\""));
         assert!(workflow.contains("git verify-tag \"$VERSION\""));
         assert!(workflow.contains("git checkout --detach \"$validated_sha\""));
@@ -1554,16 +1557,23 @@ mod tests {
         assert!(workflow.contains("COPR_PROJECT=\"caniko/rs-modde-testing\""));
         // APT deb build + reprepro publish
         assert!(workflow.contains("debootstrap --variant=minbase bookworm"));
-        assert!(workflow
-            .contains("deb -p modde-cli --output \"/work/release/modde_${VERSION}_amd64.deb\""));
+        assert!(
+            workflow
+                .contains("deb -p modde-cli --output \"/work/release/modde_${VERSION}_amd64.deb\"")
+        );
         assert!(workflow.contains("reprepro -b \"$work/apt\" includedeb \"$APT_DISTRIBUTION\""));
-        assert!(workflow
-            .contains("git push --force-with-lease origin \"HEAD:refs/heads/${APT_REPO_BRANCH}\""));
+        assert!(
+            workflow.contains(
+                "git push --force-with-lease origin \"HEAD:refs/heads/${APT_REPO_BRANCH}\""
+            )
+        );
         // AUR ssh publish with .SRCINFO + 3 flavors
         assert!(workflow.contains("AUR_SSH_KEY: ${{ secrets.AUR_SSH_KEY }}"));
         assert!(workflow.contains("makepkg --config \"$MAKEPKG_CONF\" --printsrcinfo > .SRCINFO"));
-        assert!(workflow
-            .contains("for pkg in modde modde-bin modde-git; do publish_pkg \"$pkg\"; done"));
+        assert!(
+            workflow
+                .contains("for pkg in modde modde-bin modde-git; do publish_pkg \"$pkg\"; done")
+        );
         // Homebrew via rs-harbor, Scoop via sed template
         assert!(workflow.contains("HOMEBREW_TAP_TOKEN: ${{ secrets.FORGEJO_HOMEBREW_TOKEN }}"));
         assert!(workflow.contains("SCOOP_BUCKET_TOKEN: ${{ secrets.FORGEJO_SCOOP_TOKEN }}"));

@@ -558,9 +558,17 @@ fn detect_flake_status(workspace_root: &Path) -> FeatureStatus {
     if treefmt
         .as_deref()
         .is_some_and(|content| flake::has_required_treefmt(content, &languages, "2024"))
-        && pre_commit
-            .as_deref()
-            .is_some_and(|content| flake::has_required_pre_commit(content, &languages, None))
+        && pre_commit.as_deref().is_some_and(|content| {
+            flake::has_required_pre_commit(
+                content,
+                &languages,
+                None,
+                flake::AuditTools {
+                    audit: languages.rust,
+                    deny: false,
+                },
+            )
+        })
     {
         FeatureStatus::Managed
     } else {
@@ -583,7 +591,15 @@ fn detect_hooks_only_flake_status(workspace_root: &Path) -> FeatureStatus {
     };
     languages.nix = true;
 
-    if flake::has_required_pre_commit(&content, &languages, None) {
+    if flake::has_required_pre_commit(
+        &content,
+        &languages,
+        None,
+        flake::AuditTools {
+            audit: languages.rust,
+            deny: false,
+        },
+    ) {
         FeatureStatus::Managed
     } else {
         FeatureStatus::Drift
@@ -767,7 +783,8 @@ fn infer_expected_ci_files(
     let package_scoped = metadata.workspace_members.len() > 1;
     let windows_runner = infer_windows_runner(marked);
     let inferred_ci_runner = infer_primary_runner(marked, "ci")?;
-    let inferred_release_runner = infer_primary_runner(marked, "publish-crate")?;
+    let inferred_release_runner = infer_primary_runner(marked, "publish-crate")
+        .unwrap_or_else(|_| inferred_ci_runner.clone());
     let runners = ResolvedCiRunners {
         ci: resolved_runner_override(resolved.runner.as_deref()).unwrap_or(inferred_ci_runner),
         release: resolved_runner_override(resolved.runner.as_deref())

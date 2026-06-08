@@ -2,8 +2,16 @@ use std::path::PathBuf;
 
 use anyhow::{Result, bail};
 
+use crate::cli::FlakeTargetArg;
 use crate::config::FlakeConfig;
 use crate::project::{GeneratedFile, Languages};
+
+/// Current canix Attic public key. Do NOT replace with the stale `uqr0...` key.
+pub const CANIX_CACHE_KEY: &str = "canix:lPzPzKrmYqW5Rxa5r0uQWvCqD3S5nx0h2eCy7XD5JM8=";
+/// Public binary cache served by the canix Attic instance.
+pub const CANIX_CACHE_URL: &str = "https://attic.candee.baby/canix";
+/// Upstream cache.nixos.org public key, advertised alongside the canix cache.
+pub const NIXOS_CACHE_KEY: &str = "cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=";
 
 const TREEFMT_INPUT: &str = "    treefmt-nix.url = \"github:numtide/treefmt-nix\";\n";
 const GIT_HOOKS_INPUT: &str = "    git-hooks.url = \"github:cachix/git-hooks.nix\";\n";
@@ -22,18 +30,32 @@ const HOOK_BINDINGS: &str = r#"      treefmtEval = treefmt-nix.lib.evalModule pk
 const FORMATTER_OUTPUT: &str = "      formatter = treefmtEval.config.build.wrapper;\n";
 const FORMATTING_CHECK: &str = "        formatting = treefmtEval.config.build.check self;\n";
 const PRE_COMMIT_PACKAGE: &str = "          pre-commit\n";
+const CARGO_AUDIT_PACKAGE: &str = "          cargo-audit\n";
+const CARGO_DENY_PACKAGE: &str = "          cargo-deny\n";
 const PRE_COMMIT_ENABLED_PACKAGES: &str = "        ] ++ pre-commit-check.enabledPackages;\n";
 const SHELL_HOOK: &str = "        shellHook = pre-commit-check.shellHook;\n";
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AuditTools {
+    pub audit: bool,
+    pub deny: bool,
+}
 
 pub fn files(
     languages: &Languages,
     rust_edition: &str,
     rust_version: Option<&str>,
+    cross_targets: Option<&[FlakeTargetArg]>,
+    audit_tools: AuditTools,
 ) -> Vec<GeneratedFile> {
+    let flake_content = match cross_targets {
+        Some(targets) => cross_template(targets, audit_tools),
+        None => template(audit_tools),
+    };
     vec![
         GeneratedFile {
             relative_path: PathBuf::from("flake.nix"),
-            content: template(),
+            content: flake_content,
         },
         GeneratedFile {
             relative_path: PathBuf::from("nix/treefmt.nix"),
@@ -41,7 +63,7 @@ pub fn files(
         },
         GeneratedFile {
             relative_path: PathBuf::from("nix/pre-commit.nix"),
-            content: pre_commit_nix(languages, rust_version),
+            content: pre_commit_nix(languages, rust_version, audit_tools),
         },
     ]
 }
@@ -60,8 +82,8 @@ pub fn print_existing_flake_note() {
     );
 }
 
-pub fn patch_existing(content: &str) -> Result<String> {
-    if has_required_wiring(content) {
+pub fn patch_existing(content: &str, audit_tools: AuditTools) -> Result<String> {
+    if has_required_wiring_with_audit_tools(content, audit_tools) {
         return Ok(content.to_owned());
     }
 
@@ -118,7 +140,7 @@ pub fn patch_existing(content: &str) -> Result<String> {
         "checks attrset",
         "formatting check must be inserted in checks",
     )?;
-    ensure_dev_shell_packages(&mut patched)?;
+    ensure_dev_shell_packages(&mut patched, audit_tools)?;
     ensure_after(
         &mut patched,
         SHELL_HOOK,
@@ -131,6 +153,16 @@ pub fn patch_existing(content: &str) -> Result<String> {
 }
 
 pub fn has_required_wiring(content: &str) -> bool {
+    has_required_wiring_with_audit_tools(
+        content,
+        AuditTools {
+            audit: true,
+            deny: false,
+        },
+    )
+}
+
+pub fn has_required_wiring_with_audit_tools(content: &str, audit_tools: AuditTools) -> bool {
     let has_treefmt_input =
         content.contains("treefmt-nix.url") || content.contains("treefmt-nix = {");
     let has_git_hooks_input =
@@ -153,6 +185,8 @@ pub fn has_required_wiring(content: &str) -> bool {
         && has_rust_toolchain_hook_package(content)
         && has_treefmt_wrapper_argument(content)
         && has_pre_commit_shell_hook(content)
+        && (!audit_tools.audit || content.contains("cargo-audit"))
+        && (!audit_tools.deny || content.contains("cargo-deny"))
 }
 
 pub fn custom_wiring_mismatches(content: &str, config: &FlakeConfig) -> Vec<String> {
@@ -284,6 +318,7 @@ pub fn has_required_pre_commit(
     content: &str,
     languages: &Languages,
     rust_version: Option<&str>,
+    audit_tools: AuditTools,
 ) -> bool {
     (!languages.rust
         || (content.contains("cargo-fmt")
@@ -295,6 +330,10 @@ pub fn has_required_pre_commit(
             && content.contains("--deny warnings")
             && content.contains("cargo-audit")
             && content.contains("cargo audit")))
+        && (!audit_tools.deny
+            || (content.contains("cargo-deny")
+                && content.contains("cargo deny check bans licenses sources")
+                && content.contains("pkgs.cargo-deny")))
         && (!languages.nix
             || (content.contains("nix-flake-check") && content.contains("flake check")))
         && rust_version.is_none_or(|version| {
@@ -368,7 +407,24 @@ fn ensure_after_statement(
     Ok(())
 }
 
-fn ensure_dev_shell_packages(content: &mut String) -> Result<()> {
+fn ensure_dev_shell_packages(content: &mut String, audit_tools: AuditTools) -> Result<()> {
+    if audit_tools.audit {
+        ensure_explicit_dev_shell_package(
+            content,
+            CARGO_AUDIT_PACKAGE,
+            "devShell cargo audit package",
+            "cargo-audit must be available in simit-managed Rust dev shells",
+        )?;
+    }
+    if audit_tools.deny {
+        ensure_explicit_dev_shell_package(
+            content,
+            CARGO_DENY_PACKAGE,
+            "devShell cargo deny package",
+            "cargo-deny must be available when dependency policy checks are enabled",
+        )?;
+    }
+
     if !content.contains(PRE_COMMIT_PACKAGE) {
         ensure_after(
             content,
@@ -389,6 +445,25 @@ fn ensure_dev_shell_packages(content: &mut String) -> Result<()> {
         PRE_COMMIT_ENABLED_PACKAGES,
         "devShell packages closing bracket",
         "pre-commit enabled packages must be appended to devShell packages",
+    )
+}
+
+fn ensure_explicit_dev_shell_package(
+    content: &mut String,
+    package: &str,
+    anchor_name: &str,
+    reason: &str,
+) -> Result<()> {
+    if content.contains(package.trim_end()) {
+        return Ok(());
+    }
+
+    ensure_after(
+        content,
+        package,
+        "        packages = with pkgs; [\n",
+        anchor_name,
+        reason,
     )
 }
 
@@ -415,8 +490,8 @@ fn unique_anchor(content: &str, anchor: &str, anchor_name: &str, reason: &str) -
     Ok(index)
 }
 
-fn template() -> String {
-    r#"{
+fn template(audit_tools: AuditTools) -> String {
+    let mut content = r#"{
   description = "Rust project";
 
   inputs = {
@@ -489,7 +564,187 @@ fn template() -> String {
     });
 }
 "#
-    .to_owned()
+    .to_owned();
+    insert_template_audit_packages(&mut content, audit_tools);
+    content
+}
+
+/// Render the `targets = [ "native" ... ];` body shared by the mkCrossPackages
+/// call. Targets keep canonical ordering regardless of CLI order.
+fn cross_target_list(targets: &[FlakeTargetArg]) -> String {
+    let mut ordered: Vec<FlakeTargetArg> = FlakeTargetArg::all()
+        .into_iter()
+        .filter(|target| targets.contains(target))
+        .collect();
+    if ordered.is_empty() {
+        ordered.push(FlakeTargetArg::Native);
+    }
+    ordered
+        .iter()
+        .map(|target| format!("\"{}\"", target.key()))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Nix expression for `packages.default`. Prefer the native attr; otherwise
+/// fall back to the first requested target's output attr.
+fn cross_default_attr(targets: &[FlakeTargetArg]) -> String {
+    let ordered: Vec<FlakeTargetArg> = FlakeTargetArg::all()
+        .into_iter()
+        .filter(|target| targets.contains(target))
+        .collect();
+    // The native target's output attr is bare "${pname}"; everything else is
+    // suffixed. Default to native when present or when no targets are selected.
+    match ordered
+        .iter()
+        .copied()
+        .find(|target| *target != FlakeTargetArg::Native)
+    {
+        Some(first_non_native) if !ordered.contains(&FlakeTargetArg::Native) => {
+            format!("crossPackages.\"${{pname}}-{}\"", first_non_native.key())
+        }
+        _ => "crossPackages.${pname}".to_owned(),
+    }
+}
+
+/// Render an rs-harbor-based multi-target flake that builds the requested cross
+/// targets through `rs-harbor.lib.mkCrossPackages`.
+pub fn cross_template(targets: &[FlakeTargetArg], audit_tools: AuditTools) -> String {
+    let target_list = cross_target_list(targets);
+    let default_attr = cross_default_attr(targets);
+    let mut content = format!(
+        r#"{{
+  description = "Rust project";
+
+  # Advertise the canix Attic cache so cross builds substitute prebuilt
+  # toolchains and cross artifacts instead of rebuilding them locally.
+  nixConfig = {{
+    extra-substituters = ["{canix_url}"];
+    extra-trusted-public-keys = [
+      "{canix_key}"
+      "{nixos_key}"
+    ];
+  }};
+
+  inputs = {{
+    rs-harbor.url = "git+https://codeberg.org/caniko/rs-harbor.git";
+
+    nixpkgs.follows = "rs-harbor/nixpkgs";
+    rust-overlay.follows = "rs-harbor/rust-overlay";
+    crane.follows = "rs-harbor/crane";
+    flake-utils.follows = "rs-harbor/flake-utils";
+
+    treefmt-nix = {{
+      url = "github:numtide/treefmt-nix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    }};
+    git-hooks = {{
+      url = "github:cachix/git-hooks.nix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    }};
+  }};
+
+  outputs = {{
+    self,
+    nixpkgs,
+    rs-harbor,
+    rust-overlay,
+    crane,
+    flake-utils,
+    treefmt-nix,
+    git-hooks,
+    ...
+  }}:
+    flake-utils.lib.eachDefaultSystem (system: let
+      pkgs = import nixpkgs {{
+        inherit system;
+        overlays = [(import rust-overlay)];
+      }};
+
+      toolchain = rs-harbor.lib.mkToolchain {{inherit pkgs;}};
+      inherit (toolchain) craneLib;
+      rustToolchain = toolchain.rustToolchain;
+      cross = rs-harbor.lib.mkCross {{inherit pkgs system;}};
+
+      cargoToml = builtins.fromTOML (builtins.readFile ./Cargo.toml);
+      pname = cargoToml.package.name or cargoToml.workspace.package.name;
+
+      src = craneLib.cleanCargoSource ./.;
+      commonArgs = {{
+        inherit src;
+        strictDeps = true;
+      }};
+
+      crossPackages = rs-harbor.lib.mkCrossPackages {{
+        inherit pkgs cross pname commonArgs;
+        inherit (toolchain) craneLib;
+        targets = [{target_list}];
+      }};
+
+      treefmtEval = treefmt-nix.lib.evalModule pkgs (import ./nix/treefmt.nix);
+      pre-commit-check = git-hooks.lib.${{system}}.run {{
+        src = ./.;
+        hooks = import ./nix/pre-commit.nix {{
+          inherit pkgs;
+          treefmtWrapper = treefmtEval.config.build.wrapper;
+          inherit rustToolchain;
+        }};
+      }};
+    in {{
+      packages =
+        crossPackages
+        // {{
+          default = {default_attr};
+        }};
+      formatter = treefmtEval.config.build.wrapper;
+      checks = {{
+        default = {default_attr};
+        formatting = treefmtEval.config.build.check self;
+        clippy = craneLib.cargoClippy (commonArgs
+          // {{
+            cargoArtifacts = craneLib.buildDepsOnly commonArgs;
+            cargoClippyExtraArgs = "--all-targets --all-features -- --deny warnings";
+          }});
+        fmt = craneLib.cargoFmt {{inherit src;}};
+      }};
+      devShells = rs-harbor.lib.mkDevShells {{
+        inherit pkgs cross;
+        inherit (toolchain) craneLib;
+        packages = with pkgs; [
+          cargo-nextest
+          pre-commit
+          rust-analyzer
+        ] ++ pre-commit-check.enabledPackages;
+        extraShellHook = pre-commit-check.shellHook;
+      }};
+    }});
+}}
+"#,
+        canix_url = CANIX_CACHE_URL,
+        canix_key = CANIX_CACHE_KEY,
+        nixos_key = NIXOS_CACHE_KEY,
+        target_list = target_list,
+        default_attr = default_attr,
+    );
+    insert_template_audit_packages(&mut content, audit_tools);
+    content
+}
+
+fn insert_template_audit_packages(content: &mut String, audit_tools: AuditTools) {
+    if audit_tools.deny && !content.contains(CARGO_DENY_PACKAGE.trim_end()) {
+        content.insert_str(dev_shell_packages_start(content), CARGO_DENY_PACKAGE);
+    }
+    if audit_tools.audit && !content.contains(CARGO_AUDIT_PACKAGE.trim_end()) {
+        content.insert_str(dev_shell_packages_start(content), CARGO_AUDIT_PACKAGE);
+    }
+}
+
+fn dev_shell_packages_start(content: &str) -> usize {
+    let anchor = "        packages = with pkgs; [\n";
+    content
+        .find(anchor)
+        .map(|index| index + anchor.len())
+        .expect("generated flake template has dev shell packages")
 }
 
 fn treefmt_nix(languages: &Languages, rust_edition: &str) -> String {
@@ -547,7 +802,11 @@ fn has_pre_commit_shell_hook(content: &str) -> bool {
     content.contains("shellHook =") && content.contains("pre-commit-check.shellHook")
 }
 
-fn pre_commit_nix(languages: &Languages, rust_version: Option<&str>) -> String {
+fn pre_commit_nix(
+    languages: &Languages,
+    rust_version: Option<&str>,
+    audit_tools: AuditTools,
+) -> String {
     let mut content = String::new();
     content.push_str("{\n");
     content.push_str("  pkgs,\n");
@@ -604,6 +863,15 @@ fn pre_commit_nix(languages: &Languages, rust_version: Option<&str>) -> String {
         content.push_str("    extraPackages = pkgs.lib.optional (rustToolchain != null) rustToolchain ++ [pkgs.cargo-audit];\n");
         content.push_str("    pass_filenames = false;\n");
         content.push_str("  };\n");
+        if audit_tools.deny {
+            content.push_str("\n  cargo-deny = {\n");
+            content.push_str("    enable = true;\n");
+            content.push_str("    name = \"cargo deny\";\n");
+            content.push_str("    entry = \"cargo deny check bans licenses sources\";\n");
+            content.push_str("    extraPackages = pkgs.lib.optional (rustToolchain != null) rustToolchain ++ [pkgs.cargo-deny];\n");
+            content.push_str("    pass_filenames = false;\n");
+            content.push_str("  };\n");
+        }
     }
 
     if languages.nix {
@@ -645,5 +913,115 @@ fn rust_overlay_version(version: &str) -> String {
         0 => format!("{version}.0.0"),
         1 => format!("{version}.0"),
         _ => version.to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::FlakeTargetArg;
+
+    #[test]
+    fn single_target_template_is_unchanged_by_cross_support() {
+        let flake = template(AuditTools {
+            audit: true,
+            deny: false,
+        });
+        // The single-target path must keep its fixed crane build and must not
+        // mention rs-harbor or the cross helper.
+        assert!(flake.contains("package = craneLib.buildPackage"));
+        assert!(flake.contains("packages.default = package;"));
+        assert!(!flake.contains("mkCrossPackages"));
+        assert!(!flake.contains("rs-harbor"));
+    }
+
+    #[test]
+    fn cross_template_with_all_targets_pins_the_shared_contract() {
+        let flake = cross_template(
+            &FlakeTargetArg::all(),
+            AuditTools {
+                audit: true,
+                deny: true,
+            },
+        );
+
+        // rs-harbor input and follows wiring.
+        assert!(
+            flake.contains("rs-harbor.url = \"git+https://codeberg.org/caniko/rs-harbor.git\";")
+        );
+        assert!(flake.contains("nixpkgs.follows = \"rs-harbor/nixpkgs\";"));
+        assert!(flake.contains("rust-overlay.follows = \"rs-harbor/rust-overlay\";"));
+        assert!(flake.contains("crane.follows = \"rs-harbor/crane\";"));
+        assert!(flake.contains("flake-utils.follows = \"rs-harbor/flake-utils\";"));
+
+        // Toolchain + cross + mkCrossPackages call with the exact argument set.
+        assert!(flake.contains("toolchain = rs-harbor.lib.mkToolchain {inherit pkgs;};"));
+        assert!(flake.contains("cross = rs-harbor.lib.mkCross {inherit pkgs system;};"));
+        assert!(flake.contains("rs-harbor.lib.mkCrossPackages {"));
+        assert!(flake.contains("inherit pkgs cross pname commonArgs;"));
+        assert!(flake.contains("inherit (toolchain) craneLib;"));
+
+        // Full canonical target list.
+        assert!(flake.contains(
+            "targets = [\"native\" \"aarch64-linux\" \"windows\" \"darwin-x86_64\" \"darwin-aarch64\"];"
+        ));
+
+        // Native package is the default.
+        assert!(flake.contains("default = crossPackages.${pname};"));
+
+        // Dev shells via rs-harbor and treefmt/git-hooks wiring preserved.
+        assert!(flake.contains("rs-harbor.lib.mkDevShells {"));
+        assert!(flake.contains("cargo-audit"));
+        assert!(flake.contains("cargo-deny"));
+        assert!(
+            flake.contains(
+                "treefmtEval = treefmt-nix.lib.evalModule pkgs (import ./nix/treefmt.nix);"
+            )
+        );
+
+        // Correct, current canix key plus cache.nixos.org key; not the stale key.
+        assert!(flake.contains(CANIX_CACHE_KEY));
+        assert!(flake.contains("canix:lPzPzKrmYqW5Rxa5r0uQWvCqD3S5nx0h2eCy7XD5JM8="));
+        assert!(flake.contains(NIXOS_CACHE_KEY));
+        assert!(flake.contains("https://attic.candee.baby/canix"));
+        assert!(!flake.contains("uqr0"));
+
+        // The cross flake still wires treefmt + pre-commit hooks through the
+        // rs-harbor dev shell (cross-mode drift is exact-match, so this uses
+        // the mkDevShells `extraShellHook` argument rather than the bare
+        // `shellHook` the single-target path emits).
+        assert!(flake.contains("pre-commit-check.enabledPackages"));
+        assert!(flake.contains("extraShellHook = pre-commit-check.shellHook;"));
+    }
+
+    #[test]
+    fn cross_template_respects_requested_subset_and_ordering() {
+        // CLI order is windows-then-native, but canonical order must win.
+        let flake = cross_template(
+            &[FlakeTargetArg::Windows, FlakeTargetArg::Native],
+            AuditTools {
+                audit: true,
+                deny: false,
+            },
+        );
+        assert!(flake.contains("targets = [\"native\" \"windows\"];"));
+        // Native present -> default is the native attr.
+        assert!(flake.contains("default = crossPackages.${pname};"));
+        assert!(!flake.contains("darwin"));
+        assert!(!flake.contains("aarch64-linux"));
+    }
+
+    #[test]
+    fn cross_template_default_falls_back_to_first_non_native_target() {
+        let flake = cross_template(
+            &[FlakeTargetArg::Windows, FlakeTargetArg::Aarch64Linux],
+            AuditTools {
+                audit: true,
+                deny: false,
+            },
+        );
+        assert!(flake.contains("targets = [\"aarch64-linux\" \"windows\"];"));
+        // No native target -> default is the first canonical non-native attr.
+        assert!(flake.contains("default = crossPackages.\"${pname}-aarch64-linux\";"));
     }
 }

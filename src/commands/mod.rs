@@ -25,3 +25,4 @@ pub mod release_secrets;
 pub mod release_verify;
 pub mod scaffold;
 pub mod scoop;
+pub mod upgrade;

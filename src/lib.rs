@@ -22,6 +22,8 @@ pub mod config;
 pub mod git;
 /// Project language detection and generated-file management.
 pub mod project;
+/// README badge generation and project upgrade support.
+pub mod readme_badges;
 /// Per-user registry of projects simit has acted on.
 pub mod registry;
 /// Release maintainer trust-root discovery and validation.

@@ -4,6 +4,7 @@ use crate::cargo;
 use crate::cli::InitAurCommand;
 use crate::commands::aur;
 use crate::commands::scaffold::{ArtifactCheck, CheckPrintMode, print_next_steps};
+use crate::commands::upgrade;
 use crate::config::ProjectConfig;
 use crate::registry::{self, FeatureStatus};
 use crate::render::pkgbuild;
@@ -36,12 +37,14 @@ pub fn run(command: InitAurCommand) -> Result<()> {
                 }
                 .verify(diff)?;
             }
+            upgrade::update_readme_badges_if_present(workspace_root, true, diff)?;
             return Ok(());
         }
         CheckPrintMode::Write => {}
     }
 
     aur::write_flavors(workspace_root, &flavors)?;
+    upgrade::update_readme_badges_if_present(workspace_root, false, false)?;
     let pkgnames = flavors
         .iter()
         .map(|flavor| flavor.pkgname.clone())

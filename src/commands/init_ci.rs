@@ -11,6 +11,7 @@ use crate::cli::{
     ChocolateyOverridesArgs, HomebrewOverridesArgs, InitCiCommand, Platform, Runtime,
     ScoopOverridesArgs,
 };
+use crate::commands::upgrade;
 use crate::config::{ProjectConfig, ResolvedChocolatey, ResolvedHomebrew, ResolvedScoop};
 use crate::project;
 use crate::registry::{self, FeatureStatus};
@@ -177,10 +178,12 @@ pub fn run(command: InitCiCommand) -> Result<()> {
             command.platform,
             &check_message,
             command.diff,
-        )
+        )?;
+        upgrade::update_readme_badges_if_present(workspace_root, true, command.diff)
     } else {
         project::write_generated_files(workspace_root, &files)?;
         ProjectConfig::write_ci(workspace_root, &persisted_ci)?;
+        upgrade::update_readme_badges_if_present(workspace_root, false, false)?;
         registry::touch_current_project_or_warn([("ci", FeatureStatus::Managed)]);
         Ok(())
     }

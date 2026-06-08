@@ -1,5 +1,9 @@
 # simit
 
+<!-- simit:badges:start -->
+[![CI](https://img.shields.io/badge/CI-managed+extra-2088ff)](.forgejo/workflows/ci.yaml) [![Nix](https://img.shields.io/badge/Nix-managed-5277c3)](flake.nix) [![docs](https://img.shields.io/badge/docs-enabled-6f42c1)](docs) [![crates.io](https://img.shields.io/badge/crates.io-ready-f46623)](https://crates.io/crates/simit)
+<!-- simit:badges:end -->
+
 `simit` is a semver-aware commit helper for Rust projects.
 
 ```sh
@@ -79,6 +83,24 @@ The JSON output is intended for scripts and AI agents that need to find all
 projects where simit manages a feature such as flake, CI, or packaging.
 Run `simit projects discover <ROOT>` once per machine to add existing
 simit-managed projects to the registry.
+
+## Project upgrades
+
+Apply deterministic simit upgrades to the current workspace, explicit paths, or
+all registered simit-managed projects:
+
+```sh
+simit upgrade
+simit upgrade --path ../project-a --path ../project-b
+simit upgrade --all
+simit upgrade --dry-run --diff
+simit upgrade --check
+```
+
+The current upgrade maintains a simit-managed README badge block immediately
+after the top-level heading. Badges are generated from actual initialized
+features and project configuration, including CI, Nix, docs, crates.io readiness,
+release artifacts, and configured distribution channels.
 
 ## Changelog management
 

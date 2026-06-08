@@ -138,6 +138,11 @@ fn add_managed_flake(root: &Path) {
         },
         "2024",
         Some("1.85"),
+        None,
+        flake::AuditTools {
+            audit: true,
+            deny: false,
+        },
     );
     project::write_generated_files(root, &files).unwrap();
 }
@@ -152,6 +157,11 @@ fn add_hooks_only_flake(root: &Path) {
         },
         "2024",
         Some("1.85"),
+        None,
+        flake::AuditTools {
+            audit: true,
+            deny: false,
+        },
     );
     let hook_files = files
         .into_iter()

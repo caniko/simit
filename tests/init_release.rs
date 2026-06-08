@@ -293,8 +293,10 @@ fn print_matches_checked_workflow_without_writing_file() {
     assert!(stdout.contains("Publish AUR packages"));
     assert!(stdout.contains("Push SRPM to COPR"));
     assert!(stdout.contains("Publish APT repository"));
-    assert!(!project
-        .path()
-        .join(".forgejo/workflows/release.yml")
-        .exists());
+    assert!(
+        !project
+            .path()
+            .join(".forgejo/workflows/release.yml")
+            .exists()
+    );
 }

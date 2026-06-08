@@ -38,6 +38,8 @@ pub enum Commands {
     Config(ConfigCommand),
     #[command(about = "Inspect and maintain the per-user project registry")]
     Projects(ProjectsCommand),
+    #[command(about = "Apply deterministic simit project upgrades")]
+    Upgrade(UpgradeCommand),
     #[command(about = "Print shell completion scripts")]
     Completions(CompletionsCommand),
     #[command(about = "Print a roff manpage for simit")]
@@ -48,6 +50,34 @@ pub enum Commands {
 pub struct InitCommand {
     #[command(subcommand)]
     pub action: InitAction,
+}
+
+#[derive(Debug, Args)]
+pub struct UpgradeCommand {
+    #[arg(
+        long = "path",
+        value_name = "PATH",
+        action = clap::ArgAction::Append,
+        conflicts_with = "all",
+        help = "Workspace path to upgrade; repeatable. Defaults to the current workspace"
+    )]
+    pub paths: Vec<Utf8PathBuf>,
+    #[arg(
+        long,
+        conflicts_with = "paths",
+        help = "Upgrade every registered non-ephemeral simit-managed project"
+    )]
+    pub all: bool,
+    #[arg(
+        long,
+        conflicts_with = "check",
+        help = "Report intended changes without writing files"
+    )]
+    pub dry_run: bool,
+    #[arg(long, help = "Exit nonzero when an upgrade would change files")]
+    pub check: bool,
+    #[arg(long, help = "Show unified diffs; valid with --dry-run or --check")]
+    pub diff: bool,
 }
 
 #[derive(Debug, Args)]
@@ -1365,12 +1395,74 @@ pub struct InitFlakeCommand {
     pub print: bool,
     #[arg(long, help = "Show a unified diff when --check finds stale files")]
     pub diff: bool,
+    #[arg(
+        long,
+        help = "Emit an rs-harbor multi-target flake that builds via rs-harbor.lib.mkCrossPackages"
+    )]
+    pub cross: bool,
+    #[arg(
+        long = "target",
+        value_enum,
+        value_name = "TARGET",
+        requires = "cross",
+        action = clap::ArgAction::Append,
+        help = "Cross target to build; repeatable. Defaults to all targets when --cross is set without any --target"
+    )]
+    pub targets: Vec<FlakeTargetArg>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum FlakeScopeArg {
     HooksOnly,
     Full,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum FlakeTargetArg {
+    #[value(help = "Native craneLib.buildPackage for the host system")]
+    Native,
+    #[value(
+        name = "aarch64-linux",
+        help = "Cross-compile to aarch64-unknown-linux-gnu"
+    )]
+    Aarch64Linux,
+    #[value(help = "Cross-compile to x86_64-pc-windows-gnu via mingw")]
+    Windows,
+    #[value(
+        name = "darwin-x86_64",
+        help = "Cross-compile to x86_64-apple-darwin via osxcross"
+    )]
+    DarwinX86_64,
+    #[value(
+        name = "darwin-aarch64",
+        help = "Cross-compile to aarch64-apple-darwin via osxcross"
+    )]
+    DarwinAarch64,
+}
+
+impl FlakeTargetArg {
+    /// The mkCrossPackages target name (the key in the `targets = [ ... ]` list).
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Native => "native",
+            Self::Aarch64Linux => "aarch64-linux",
+            Self::Windows => "windows",
+            Self::DarwinX86_64 => "darwin-x86_64",
+            Self::DarwinAarch64 => "darwin-aarch64",
+        }
+    }
+
+    /// Every target, in canonical order. Used as the default when `--cross` is
+    /// passed without any explicit `--target`.
+    pub fn all() -> [Self; 5] {
+        [
+            Self::Native,
+            Self::Aarch64Linux,
+            Self::Windows,
+            Self::DarwinX86_64,
+            Self::DarwinAarch64,
+        ]
+    }
 }
 
 #[derive(Debug, Args)]

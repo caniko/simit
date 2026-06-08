@@ -14,6 +14,10 @@ fn main() {
         {
             std::process::exit(verify_exit.code());
         }
+        if let Some(upgrade_exit) = err.downcast_ref::<simit::commands::upgrade::UpgradeExit>() {
+            eprintln!("simit: {upgrade_exit}");
+            std::process::exit(upgrade_exit.code());
+        }
         eprintln!("simit: {err:#}");
         let code = 1;
         std::process::exit(code);
@@ -50,6 +54,7 @@ fn run() -> Result<()> {
         },
         Commands::Config(command) => commands::config::run(command),
         Commands::Projects(command) => commands::projects::run(command),
+        Commands::Upgrade(command) => commands::upgrade::run(command),
         Commands::Completions(command) => commands::completions::run(command),
         Commands::Man(command) => commands::man::run(command),
     }

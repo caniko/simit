@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use serde_json::Value;
 
 use crate::cargo;
@@ -61,7 +61,9 @@ pub fn inspect_minisign_input(command: ReleaseCommand) -> Result<()> {
     let workspace_root = metadata.workspace_root.as_std_path();
     let public_key_path = workspace_root.join(command.minisign_public_key.as_std_path());
     if command.minisign_secret_key_file.is_none() || command.minisign_password_file.is_none() {
-        bail!("inspect-minisign-input requires --minisign-secret-key-file and --minisign-password-file");
+        bail!(
+            "inspect-minisign-input requires --minisign-secret-key-file and --minisign-password-file"
+        );
     }
     let secret_path = command
         .minisign_secret_key_file

@@ -4,6 +4,7 @@ use crate::cargo;
 use crate::cli::InitCoprCommand;
 use crate::commands::copr::{self, MAKEFILE_PATH};
 use crate::commands::scaffold::{ArtifactCheck, CheckPrintMode, print_next_steps, shell_word};
+use crate::commands::upgrade;
 use crate::config::ProjectConfig;
 use crate::registry::{self, FeatureStatus};
 
@@ -41,12 +42,14 @@ pub fn run(command: InitCoprCommand) -> Result<()> {
                 remediation,
             }
             .verify(diff)?;
+            upgrade::update_readme_badges_if_present(workspace_root, true, diff)?;
             return Ok(());
         }
         CheckPrintMode::Write => {}
     }
 
     copr::write_files(workspace_root, &resolved, &rendered)?;
+    upgrade::update_readme_badges_if_present(workspace_root, false, false)?;
     print_next_steps(
         workspace_root,
         "Initialised COPR packaging",

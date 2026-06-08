@@ -6,7 +6,8 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 
 use crate::cargo;
-use crate::cli::{FlakeScopeArg, InitFlakeCommand};
+use crate::cli::{FlakeScopeArg, FlakeTargetArg, InitFlakeCommand};
+use crate::commands::upgrade;
 use crate::config::{FlakeMode, FlakeScope, ProjectConfig};
 use crate::project::{self, GeneratedFile, Languages};
 use crate::registry::{self, FeatureStatus};
@@ -30,15 +31,39 @@ pub fn run(command: InitFlakeCommand) -> Result<()> {
         bail!("init flake --diff requires --check");
     }
 
+    let cross_targets = resolve_cross_targets(&command);
+
     let metadata = cargo::metadata_for_current_dir()?;
     let workspace_root = metadata.workspace_root.as_std_path();
     let cfg = ProjectConfig::load(workspace_root)?;
+    // Cross mode generates an authoritative, project-owned multi-target flake.nix,
+    // which is fundamentally incompatible with custom flake mode (where simit only
+    // manages hook files and never touches flake.nix). Surface the conflict instead
+    // of silently dropping --cross.
+    if cross_targets.is_some() && cfg.flake.mode == FlakeMode::Custom {
+        bail!(
+            "--cross cannot be combined with flake.mode = \"custom\"; cross mode generates an authoritative multi-target flake.nix. Set flake.mode = \"canonical\" (or remove it) in simit.toml to use --cross"
+        );
+    }
     let mut languages = project::detect_languages(workspace_root)?;
     languages.nix = true;
     let rust_edition = rustfmt_edition(&metadata);
     let rust_version = workspace_rust_version(&metadata);
-    let all_files = flake::files(&languages, &rust_edition, rust_version.as_deref());
-    let scope = resolve_scope(command.scope, &cfg, workspace_root);
+    let audit_tools = resolve_audit_tools(workspace_root, &cfg, &languages)?;
+    let all_files = flake::files(
+        &languages,
+        &rust_edition,
+        rust_version.as_deref(),
+        cross_targets.as_deref(),
+        audit_tools,
+    );
+    // Cross mode generates a project-owned multi-target flake.nix, so it always
+    // operates at full scope regardless of any configured default.
+    let scope = if cross_targets.is_some() {
+        FlakeScope::Full
+    } else {
+        resolve_scope(command.scope, &cfg, workspace_root)
+    };
     let files = scoped_files(&all_files, scope);
 
     if command.print {
@@ -50,7 +75,7 @@ pub fn run(command: InitFlakeCommand) -> Result<()> {
     }
 
     if command.check {
-        return check_files(
+        check_files(
             workspace_root,
             &files,
             &languages,
@@ -59,7 +84,10 @@ pub fn run(command: InitFlakeCommand) -> Result<()> {
             &cfg,
             scope,
             command.diff,
-        );
+            cross_targets.is_some(),
+            audit_tools,
+        )?;
+        return upgrade::update_readme_badges_if_present(workspace_root, true, command.diff);
     }
 
     if scope == FlakeScope::HooksOnly {
@@ -69,6 +97,7 @@ pub fn run(command: InitFlakeCommand) -> Result<()> {
             );
         }
         project::write_generated_files(workspace_root, &files)?;
+        upgrade::update_readme_badges_if_present(workspace_root, false, false)?;
         registry::touch_current_project_or_warn([
             ("flake", FeatureStatus::Managed),
             ("hooks", FeatureStatus::Installed),
@@ -85,6 +114,7 @@ pub fn run(command: InitFlakeCommand) -> Result<()> {
         }
         let hook_files = hook_files(&files);
         project::write_generated_files(workspace_root, &hook_files)?;
+        upgrade::update_readme_badges_if_present(workspace_root, false, false)?;
         registry::touch_current_project_or_warn([
             ("flake", FeatureStatus::Managed),
             ("hooks", FeatureStatus::Installed),
@@ -92,10 +122,14 @@ pub fn run(command: InitFlakeCommand) -> Result<()> {
         return Ok(());
     }
 
-    if flake_path.exists() {
+    // In cross mode the generated flake.nix is canonical and authoritative, so
+    // never try to patch an existing single-target flake into it; overwrite it
+    // with the generated multi-target flake instead (handled by the final
+    // write below).
+    if cross_targets.is_none() && flake_path.exists() {
         let content = fs::read_to_string(&flake_path)
             .with_context(|| format!("reading {}", flake_path.display()))?;
-        let patched = flake::patch_existing(&content)?;
+        let patched = flake::patch_existing(&content, audit_tools)?;
         let mut patched_files = files.clone();
         let flake_file = patched_files
             .iter_mut()
@@ -103,6 +137,7 @@ pub fn run(command: InitFlakeCommand) -> Result<()> {
             .expect("flake.nix is generated");
         flake_file.content = patched;
         project::write_generated_files(workspace_root, &patched_files)?;
+        upgrade::update_readme_badges_if_present(workspace_root, false, false)?;
         registry::touch_current_project_or_warn([
             ("flake", FeatureStatus::Managed),
             ("hooks", FeatureStatus::Installed),
@@ -111,11 +146,70 @@ pub fn run(command: InitFlakeCommand) -> Result<()> {
     }
 
     project::write_generated_files(workspace_root, &files)?;
+    upgrade::update_readme_badges_if_present(workspace_root, false, false)?;
     registry::touch_current_project_or_warn([
         ("flake", FeatureStatus::Managed),
         ("hooks", FeatureStatus::Installed),
     ]);
     Ok(())
+}
+
+/// Resolve the cross targets for the flake. Returns `None` when `--cross` is
+/// absent (single-target mode), otherwise the requested targets, defaulting to
+/// all five targets when `--cross` is set without any `--target`.
+fn resolve_cross_targets(command: &InitFlakeCommand) -> Option<Vec<FlakeTargetArg>> {
+    if !command.cross {
+        return None;
+    }
+    if command.targets.is_empty() {
+        return Some(FlakeTargetArg::all().to_vec());
+    }
+    Some(command.targets.clone())
+}
+
+fn resolve_audit_tools(
+    workspace_root: &Path,
+    cfg: &ProjectConfig,
+    languages: &Languages,
+) -> Result<flake::AuditTools> {
+    if !languages.rust {
+        return Ok(flake::AuditTools::default());
+    }
+
+    Ok(flake::AuditTools {
+        audit: true,
+        deny: cfg.ci.with_deny
+            || workspace_root.join("deny.toml").exists()
+            || existing_ci_contains(workspace_root, "cargo deny check")?,
+    })
+}
+
+fn existing_ci_contains(workspace_root: &Path, needle: &str) -> Result<bool> {
+    for dir in [".forgejo/workflows", ".github/workflows"] {
+        let path = workspace_root.join(dir);
+        let entries = match fs::read_dir(&path) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == ErrorKind::NotFound => continue,
+            Err(error) => return Err(error).with_context(|| format!("reading {}", path.display())),
+        };
+
+        for entry in entries {
+            let entry = entry.with_context(|| format!("reading entry in {}", path.display()))?;
+            if !entry
+                .file_type()
+                .with_context(|| format!("reading file type for {}", entry.path().display()))?
+                .is_file()
+            {
+                continue;
+            }
+            let content = fs::read_to_string(entry.path())
+                .with_context(|| format!("reading {}", entry.path().display()))?;
+            if content.contains(needle) {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
 }
 
 fn rustfmt_edition(metadata: &cargo::Metadata) -> String {
@@ -226,6 +320,8 @@ fn check_files(
     cfg: &ProjectConfig,
     scope: FlakeScope,
     show_diff: bool,
+    cross: bool,
+    audit_tools: flake::AuditTools,
 ) -> Result<()> {
     let mut mismatches = Vec::new();
     let mut notes = Vec::new();
@@ -253,10 +349,21 @@ fn check_files(
         let path = workspace_root.join(&file.relative_path);
         match fs::read_to_string(&path) {
             Ok(actual) if file.relative_path == Path::new("flake.nix") => {
-                if actual == file.content || flake::has_required_wiring(&actual) {
+                // In cross mode the multi-target flake is canonical, so it must
+                // match exactly; the hook-wiring escape hatch (which a stale
+                // single-target flake would satisfy) is only valid for the
+                // single-target path.
+                if actual == file.content
+                    || (!cross && flake::has_required_wiring_with_audit_tools(&actual, audit_tools))
+                {
                     continue;
                 }
-                mismatches.push("flake.nix is missing generated hook wiring".to_owned());
+                let message = if cross {
+                    "flake.nix does not match the generated cross flake"
+                } else {
+                    "flake.nix is missing generated hook wiring"
+                };
+                mismatches.push(message.to_owned());
                 if show_diff {
                     diffs.push(unified_diff("flake.nix", &actual, &file.content));
                 }
@@ -274,7 +381,7 @@ fn check_files(
             }
             Ok(actual) if file.relative_path == Path::new("nix/pre-commit.nix") => {
                 if actual == file.content
-                    || flake::has_required_pre_commit(&actual, languages, rust_version)
+                    || flake::has_required_pre_commit(&actual, languages, rust_version, audit_tools)
                 {
                     continue;
                 }
