@@ -109,11 +109,11 @@ pub fn render(inputs: &ReleaseWorkflowInputs<'_>) -> String {
     if let Some(command) = inputs.smoke_command {
         push_smoke(&mut w, command);
     }
-    if let Some(attic) = inputs.attic {
-        push_attic(&mut w, attic);
-    }
     if let Some(codeberg) = inputs.codeberg {
         push_codeberg_release(&mut w, codeberg);
+    }
+    if let Some(attic) = inputs.attic {
+        push_attic(&mut w, attic);
     }
     if let Some(apt) = inputs.apt {
         push_publish_apt(&mut w, apt);
@@ -378,7 +378,7 @@ fn push_validate_tag(w: &mut String, artifacts: &ArtifactsConfig) {
 }
 
 fn push_release_credentials_preflight(w: &mut String, inputs: &ReleaseWorkflowInputs<'_>) {
-    if inputs.codeberg.is_none() && !inputs.artifacts.sign && inputs.attic.is_none() {
+    if inputs.codeberg.is_none() && !inputs.artifacts.sign {
         return;
     }
 
@@ -419,14 +419,6 @@ fn push_release_credentials_preflight(w: &mut String, inputs: &ReleaseWorkflowIn
             w,
             "          nix shell nixpkgs#minisign -c minisign -V -m \"$minisign_probe\" -x \"$minisign_sig\" -p {}",
             inputs.artifacts.minisign_pub
-        )
-        .expect("write");
-    }
-    if let Some(attic) = inputs.attic {
-        writeln!(
-            w,
-            "          test -r \"${{{}:?}}/{}\"",
-            attic.token_dir_env, attic.token_name
         )
         .expect("write");
     }
@@ -626,7 +618,19 @@ fn push_attic(w: &mut String, attic: &AtticConfig) {
     );
     writeln!(
         w,
-        "          test -r \"${}/{}\"",
+        "          attic_token_dir=\"${{{}:-}}\"",
+        attic.token_dir_env
+    )
+    .expect("write");
+    writeln!(
+        w,
+        "          attic_token=\"${{attic_token_dir}}/{}\"",
+        attic.token_name
+    )
+    .expect("write");
+    writeln!(
+        w,
+        "          if [ -z \"$attic_token_dir\" ] || [ ! -r \"$attic_token\" ]; then\n            echo \"::warning::Attic token ${{{}:-<unset>}}/{} is not readable; skipping optional Nix closure cache push.\"\n            exit 0\n          fi",
         attic.token_dir_env, attic.token_name
     )
     .expect("write");
@@ -640,11 +644,9 @@ fn push_attic(w: &mut String, attic: &AtticConfig) {
     w.push_str("          nix profile install nixpkgs#attic-client\n");
     writeln!(
         w,
-        "          attic login {cache} {url} \"$(cat \"${dir}/{name}\")\"",
+        "          attic login {cache} {url} \"$(cat \"$attic_token\")\"",
         cache = attic.cache,
-        url = attic.url,
-        dir = attic.token_dir_env,
-        name = attic.token_name
+        url = attic.url
     )
     .expect("write");
     writeln!(

@@ -312,9 +312,6 @@ fn publish_workflow(
     push_release_security_header(&mut workflow, false);
     workflow.push_str("name: Publish Crate\n\n");
     workflow.push_str("on:\n");
-    workflow.push_str("  push:\n");
-    workflow.push_str("    tags:\n");
-    workflow.push_str("      - \"*.*.*\"\n");
     workflow.push_str("  workflow_dispatch:\n");
     workflow.push_str("    inputs:\n");
     workflow.push_str("      force_publish:\n");

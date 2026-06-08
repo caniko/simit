@@ -269,7 +269,17 @@ result_links = ["result"]
     assert!(workflow.contains("MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}"));
     assert!(workflow.contains("MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}"));
     assert!(workflow.contains("minisign -V -m \"$minisign_probe\""));
-    assert!(workflow.contains("test -r \"${ATTIC_TOKENS_DIR:?}/rs-modde\""));
+    assert!(!workflow.contains("test -r \"${ATTIC_TOKENS_DIR:?}/rs-modde\""));
+    assert!(workflow.contains("attic_token_dir=\"${ATTIC_TOKENS_DIR:-}\""));
+    assert!(workflow.contains("skipping optional Nix closure cache push"));
+    assert!(
+        workflow
+            .find("      - name: Publish Codeberg release")
+            .expect("Codeberg release step")
+            < workflow
+                .find("      - name: Push Nix closures to Attic")
+                .expect("Attic push step")
+    );
 }
 
 #[test]

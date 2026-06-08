@@ -365,7 +365,8 @@ fn generates_forgejo_nix_workflows() {
     assert!(!publish.contains("path: ~/.cargo/bin"));
     assert!(!publish.contains("command -v cargo-nextest"));
     assert!(publish.contains("simit changelog release <version>"));
-    assert!(publish.contains("tags:"));
+    assert!(!publish.contains("  push:\n    tags:\n"));
+    assert!(publish.contains("  workflow_dispatch:\n"));
     assert!(publish.contains("grep -Eq '^[0-9]+\\.[0-9]+\\.[0-9]+$'"));
     assert!(publish.contains("keys/maintainers.gpg"));
     assert!(publish.contains("git verify-tag \"$tag\""));

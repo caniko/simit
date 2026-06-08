@@ -1276,6 +1276,25 @@ impl ProjectConfig {
         Ok(true)
     }
 
+    pub fn can_persist_ci(workspace_root: &Path) -> Result<bool> {
+        let sources = Self::load_sources(workspace_root)?;
+        match sources.as_slice() {
+            [] => Ok(true),
+            [source] if source.label == "simit.toml" => Ok(true),
+            [_] => Ok(false),
+            _ => {
+                let labels = sources
+                    .iter()
+                    .map(|source| source.label.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                bail!(
+                    "multiple simit project config sources found ({labels}); keep exactly one of simit.toml, Cargo.toml [workspace.metadata.simit], Cargo.toml [package.metadata.simit], or flake outputs.simitConfig"
+                );
+            }
+        }
+    }
+
     fn load_sources(workspace_root: &Path) -> Result<Vec<ProjectConfigSource>> {
         let mut sources = Vec::new();
 
