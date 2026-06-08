@@ -559,12 +559,26 @@ fn push_build_debs(w: &mut String, apt: &ResolvedApt) {
 
 fn push_checksums(w: &mut String, artifacts: &ArtifactsConfig) {
     w.push_str("      - name: Generate release checksums\n        run: |\n          set -euo pipefail\n          cd release\n");
-    let globs = if artifacts.checksum_globs.is_empty() {
-        "*".to_owned()
+    if artifacts.checksum_globs.is_empty() {
+        writeln!(
+            w,
+            "          find . -maxdepth 1 -type f -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS.txt\n          test -s SHA256SUMS.txt"
+        )
+        .expect("write");
     } else {
-        artifacts.checksum_globs.join(" ")
-    };
-    writeln!(w, "          sha256sum {globs} > SHA256SUMS.txt").expect("write");
+        let mut predicates = String::new();
+        for (i, glob) in artifacts.checksum_globs.iter().enumerate() {
+            if i > 0 {
+                predicates.push_str(" -o ");
+            }
+            write!(predicates, "-name '{}'", glob.replace('\'', "'\\''")).unwrap();
+        }
+        writeln!(
+            w,
+            "          find . -maxdepth 1 -type f \\( {predicates} \\) -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS.txt\n          test -s SHA256SUMS.txt"
+        )
+        .expect("write");
+    }
 }
 
 fn push_sign(
@@ -1625,11 +1639,81 @@ mod tests {
         assert!(workflow.contains(
             "nix shell github:caniko/nixpkgs/add-chocolatey-scoop#chocolatey git+https://codeberg.org/caniko/simit -c simit dist chocolatey bump"
         ));
+        // Checksum step uses find-based enumeration, not bare sha256sum globs
+        assert!(workflow.contains(
+            "find . -maxdepth 1 -type f \\( -name '*.tar.gz' -o -name '*.deb' \\) -print0"
+        ));
+        assert!(workflow.contains("xargs -0 sha256sum > SHA256SUMS.txt"));
+        assert!(workflow.contains("test -s SHA256SUMS.txt"));
         // Order: codeberg before downstream, copr near the end
         let pos = |needle: &str| workflow.find(needle).unwrap();
         assert!(pos("Build Debian packages") < pos("Publish Codeberg release"));
         assert!(pos("Publish Codeberg release") < pos("Publish APT repository"));
         assert!(pos("Publish AUR packages") < pos("Publish Homebrew tap"));
         assert!(pos("Build SRPM for COPR") < pos("Build release artifacts"));
+    }
+
+    #[test]
+    fn checksum_step_handles_empty_globs() {
+        let mut artifacts = artifacts();
+        artifacts.checksum_globs = vec![];
+        let workflow = render(&ReleaseWorkflowInputs {
+            runner: "atlas",
+            preinstalled_nix: false,
+            artifacts: &artifacts,
+            smoke_command: None,
+            codeberg: None,
+            attic: None,
+            aur: None,
+            copr: None,
+            apt: None,
+            homebrew: None,
+            scoop: None,
+            chocolatey: None,
+            windows_signing: None,
+            flatpak: None,
+            winget: None,
+            announce: None,
+        });
+        // Empty checksum_globs defaults to hashing all files with find
+        assert!(workflow.contains("find . -maxdepth 1 -type f -print0"));
+        assert!(workflow.contains("xargs -0 sha256sum > SHA256SUMS.txt"));
+        assert!(workflow.contains("test -s SHA256SUMS.txt"));
+        // No bare `sha256sum *` fallback
+        assert!(!workflow.contains("sha256sum *"));
+    }
+
+    #[test]
+    fn checksum_step_does_not_contain_bare_required_deb_glob() {
+        let (aur, copr, codeberg) = (aur(), copr(), codeberg());
+        let artifacts = artifacts();
+        // The test fixture has checksum_globs = ["*.tar.gz", "*.deb"]
+        let workflow = render(&ReleaseWorkflowInputs {
+            runner: "atlas",
+            preinstalled_nix: false,
+            artifacts: &artifacts,
+            smoke_command: Some("nix run .#release-smoke --"),
+            codeberg: Some(&codeberg),
+            attic: None,
+            aur: Some(&aur),
+            copr: Some(&copr),
+            apt: None,
+            homebrew: None,
+            scoop: None,
+            chocolatey: None,
+            windows_signing: None,
+            flatpak: None,
+            winget: None,
+            announce: None,
+        });
+        // The generated checksum command uses find + xargs, not bare `sha256sum *.deb`
+        assert!(
+            !workflow.contains("sha256sum *.deb"),
+            "checksums must not hard-require *.deb files"
+        );
+        assert!(
+            !workflow.contains("sha256sum *.tar.gz"),
+            "checksums must not use bare globs"
+        );
     }
 }
