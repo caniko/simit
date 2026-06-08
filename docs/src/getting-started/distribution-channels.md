@@ -106,3 +106,27 @@ The workflow publishes only channels whose config sections are present. AUR,
 apt, Homebrew, Scoop, Chocolatey, Flatpak, and winget are stable-release-only
 publish steps; COPR switches to its testing project for prerelease tags when
 configured.
+
+Codeberg release assets are the primary release product. The generated workflow
+therefore fails early for missing Codeberg and signing credentials, but treats
+runner-side cache and downstream packaging as secondary. Attic cache pushes skip
+with a warning when the runner token is unavailable. Debian package generation is
+also best-effort: it attempts to build `.deb` assets before checksums and
+Codeberg upload, but it warns and continues when the runner container cannot
+provide a mount-capable debootstrap/chroot environment. In that case the
+Codeberg release still publishes the artifacts that were actually produced, and
+the apt repository publish step skips because there are no `.deb` files.
+
+For projects that require `.deb` assets on every release, validate the runner
+contract before tagging:
+
+```sh
+simit init release --check --diff
+test -r "$ATTIC_TOKENS_DIR/<project>" || true
+nix develop -c debootstrap --variant=minbase bookworm "$(mktemp -d)" \
+  http://deb.debian.org/debian
+```
+
+The debootstrap check must run in the same runner image/container policy used by
+Forgejo Actions. A host shell passing the check does not prove the release job
+can mount or chroot inside the runner container.

@@ -496,7 +496,7 @@ fn push_build_artifacts(w: &mut String, artifacts: &ArtifactsConfig) {
 fn push_build_debs(w: &mut String, apt: &ResolvedApt) {
     w.push_str("      - name: Build Debian packages\n        run: |\n          set -euo pipefail\n          . ./release-env\n          export VERSION IS_PRERELEASE\n          mkdir -p release\n");
     w.push_str(
-        "          nix shell nixpkgs#debootstrap nixpkgs#cargo nixpkgs#rustc -c bash <<'SCRIPT'\n",
+        "          if ! nix shell nixpkgs#debootstrap nixpkgs#cargo nixpkgs#rustc -c bash <<'SCRIPT'\n",
     );
     w.push_str("          set -euo pipefail\n");
     w.push_str("          if [ \"$(id -u)\" -eq 0 ]; then\n");
@@ -504,13 +504,19 @@ fn push_build_debs(w: &mut String, apt: &ResolvedApt) {
     w.push_str("          elif command -v sudo >/dev/null 2>&1; then\n");
     w.push_str("            priv() { sudo \"$@\"; }\n");
     w.push_str("          else\n");
-    w.push_str("            echo \"::error::Building Debian release packages requires root privileges or sudo in the release runner image\" >&2\n");
-    w.push_str("            exit 1\n");
+    w.push_str("            echo \"::warning::Building Debian release packages requires root privileges or sudo in the release runner image\" >&2\n");
+    w.push_str("            exit 70\n");
     w.push_str("          fi\n");
     w.push_str("          root=\"$(mktemp -d)\"\n");
     w.push_str("          cargo_bin=\"$(readlink -f \"$(command -v cargo)\")\"; cargo_dir=\"$(dirname \"$cargo_bin\")\"\n");
     w.push_str("          cleanup() { set +e; priv umount \"$root/work\" 2>/dev/null; priv umount \"$root/nix/store\" 2>/dev/null; priv rm -rf \"$root\"; }\n");
     w.push_str("          trap cleanup EXIT\n");
+    w.push_str("          probe=\"$root/test-dev-null\"; : > \"$probe\"\n");
+    w.push_str("          if ! priv mount --bind /dev/null \"$probe\"; then\n");
+    w.push_str("            echo \"::warning::Debian package build requires a runner container with mount-capable chroot support; continuing without .deb artifacts.\" >&2\n");
+    w.push_str("            exit 70\n");
+    w.push_str("          fi\n");
+    w.push_str("          priv umount \"$probe\"; rm -f \"$probe\"\n");
     writeln!(
         w,
         "          priv debootstrap --variant=minbase {release} \"$root\" http://deb.debian.org/debian",
@@ -546,6 +552,9 @@ fn push_build_debs(w: &mut String, apt: &ResolvedApt) {
     }
     w.push_str("          priv chown \"$(id -u):$(id -g)\" release/*.deb\n");
     w.push_str("          SCRIPT\n");
+    w.push_str("          then\n");
+    w.push_str("            echo \"::warning::Debian package build failed; continuing without .deb release assets and APT publish.\"\n");
+    w.push_str("          fi\n");
 }
 
 fn push_checksums(w: &mut String, artifacts: &ArtifactsConfig) {
@@ -1571,6 +1580,8 @@ mod tests {
         assert!(workflow.contains("priv() { \"$@\"; }"));
         assert!(workflow.contains("priv() { sudo \"$@\"; }"));
         assert!(workflow.contains("requires root privileges or sudo in the release runner image"));
+        assert!(workflow.contains("priv mount --bind /dev/null \"$probe\""));
+        assert!(workflow.contains("continuing without .deb release assets and APT publish."));
         assert!(!workflow.contains("sudo debootstrap"));
         assert!(!workflow.contains("sudo chroot"));
         assert!(
@@ -1609,6 +1620,7 @@ mod tests {
         ));
         // Order: codeberg before downstream, copr near the end
         let pos = |needle: &str| workflow.find(needle).unwrap();
+        assert!(pos("Build Debian packages") < pos("Publish Codeberg release"));
         assert!(pos("Publish Codeberg release") < pos("Publish APT repository"));
         assert!(pos("Publish AUR packages") < pos("Publish Homebrew tap"));
         assert!(pos("Build SRPM for COPR") < pos("Build release artifacts"));
