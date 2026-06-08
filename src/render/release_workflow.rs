@@ -1044,7 +1044,12 @@ fn push_windows_signing(w: &mut String, windows: &WindowsSigningConfig) {
         "          tar czf \"release/{tar}\" -C {dir} {basenames}"
     )
     .expect("write");
-    writeln!(w, "          nix shell nixpkgs#zip -c bash -c \"cd {dir} && zip -q \\\"$OLDPWD/release/{zip}\\\" {basenames}\"").expect("write");
+    writeln!(w, "          zip_out=\"$PWD/release/{zip}\"").expect("write");
+    writeln!(
+        w,
+        "          nix shell nixpkgs#zip -c bash -c 'cd \"$1\" && shift && zip -q \"$1\" \"$@\"' _ {dir} \"$zip_out\" {basenames}"
+    )
+    .expect("write");
     // Individual signed .exe assets, e.g. modde-${VERSION}-x86_64-windows.exe.
     let platform_suffix = windows
         .zip_archive
@@ -1612,6 +1617,8 @@ mod tests {
         // Stage B channels
         assert!(workflow.contains("cargo sbom > release/sbom.json"));
         assert!(workflow.contains("osslsigncode sign -pkcs12"));
+        assert!(workflow.contains("zip_out=\"$PWD/release/modde-${VERSION}-x86_64-windows.zip\""));
+        assert!(!workflow.contains("OLDPWD"));
         assert!(workflow.contains("https://github.com/flathub/com.tartanoglu.modde.git"));
         assert!(workflow.contains("wine \"$tmpdir/wingetcreate.exe\" update Caniko.Modde"));
         assert!(workflow.contains("/api/v1/statuses"));

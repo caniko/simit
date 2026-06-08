@@ -134,3 +134,6 @@ can mount or chroot inside the runner container.
 Keep `release.yml` as the only automatic signed-tag workflow. Normal
 simit-managed CI workflows ignore tags explicitly so a release tag does not queue
 per-crate checks ahead of the artifact publisher on small trusted runner pools.
+Generated release scripts also avoid implicit shell state such as `OLDPWD`; under
+`set -u`, those variables can be unset in Forgejo runner shells and must not sit
+between successful artifact builds and Codeberg upload.
