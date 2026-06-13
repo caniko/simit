@@ -282,7 +282,7 @@ fn ci_workflow(
             push_rust_setup_step(&mut workflow, platform);
             push_rust_cache_steps(&mut workflow, platform);
             push_extra_setup_steps(&mut workflow, &options.extra_setup);
-            push_test_steps(&mut workflow, package, &options);
+            push_test_steps(&mut workflow, runtime, package, &options);
             push_quality_tool_install_steps(&mut workflow, runtime, &options);
             push_optional_ci_steps(&mut workflow, runtime, package, &options);
             if self_check.enabled {
@@ -369,7 +369,7 @@ fn publish_workflow(
             push_rust_cache_steps(&mut workflow, platform);
             push_extra_setup_steps(&mut workflow, &options.extra_setup);
             workflow.push_str(&validate_tag_step(command_prefix(runtime), &package.name));
-            push_test_steps(&mut workflow, package, &options);
+            push_test_steps(&mut workflow, runtime, package, &options);
             push_quality_tool_install_steps(&mut workflow, runtime, &options);
             push_optional_publish_steps(&mut workflow, runtime, &options);
             push_clippy_steps(&mut workflow, package, &options);
@@ -1428,11 +1428,22 @@ fn push_rust_cache_steps(workflow: &mut String, platform: Platform) {
     workflow.push_str("          save-if: ${{ github.ref == 'refs/heads/trunk' }}\n\n");
 }
 
-fn push_test_steps(workflow: &mut String, package: &Package, options: &CiOptions) {
+fn push_test_steps(
+    workflow: &mut String,
+    runtime: Runtime,
+    package: &Package,
+    options: &CiOptions,
+) {
     if options.with_nextest {
-        workflow.push_str("      - name: Install nextest\n");
-        workflow.push_str("        run: command -v cargo-nextest >/dev/null 2>&1 || cargo install cargo-nextest --locked --version ");
-        workflow.push_str(CARGO_NEXTEST_VERSION);
+        workflow.push_str("      - name: Check nextest tool\n");
+        workflow.push_str("        run: ");
+        if runtime == Runtime::Cargo {
+            workflow.push_str("command -v cargo-nextest >/dev/null 2>&1 || cargo install cargo-nextest --locked --version ");
+            workflow.push_str(CARGO_NEXTEST_VERSION);
+        } else {
+            workflow.push_str(command_prefix(runtime));
+            workflow.push_str("command -v cargo-nextest");
+        }
         workflow.push_str("\n\n");
         workflow.push_str("      - name: Test all features\n");
         workflow.push_str("        run: cargo nextest run");
@@ -1485,28 +1496,31 @@ fn push_package_crate_step(workflow: &mut String, package: &Package, options: &C
 fn push_quality_tool_install_steps(workflow: &mut String, runtime: Runtime, options: &CiOptions) {
     let prefix = command_prefix(runtime);
     if options.with_audit {
-        workflow.push_str("      - name: Install cargo-audit\n");
-        workflow.push_str("        run: ");
         if runtime == Runtime::Cargo {
+            workflow.push_str("      - name: Install cargo-audit\n");
+            workflow.push_str("        run: ");
             workflow.push_str(
                 "command -v cargo-audit >/dev/null 2>&1 || cargo install cargo-audit --locked\n\n",
             );
         } else {
+            workflow.push_str("      - name: Check cargo-audit tool\n");
+            workflow.push_str("        run: ");
             workflow.push_str(prefix);
-            workflow.push_str("cargo install cargo-audit --locked\n\n");
+            workflow.push_str("command -v cargo-audit\n\n");
         }
     }
     if options.with_deny {
-        workflow.push_str("      - name: Install cargo-deny\n");
-        workflow.push_str("        run: ");
         if runtime == Runtime::Cargo {
+            workflow.push_str("      - name: Install cargo-deny\n");
+            workflow.push_str("        run: ");
             workflow.push_str("command -v cargo-deny >/dev/null 2>&1 || cargo install cargo-deny --locked --version ");
             workflow.push_str(CARGO_DENY_VERSION);
             workflow.push_str("\n\n");
         } else {
+            workflow.push_str("      - name: Check cargo-deny tool\n");
+            workflow.push_str("        run: ");
             workflow.push_str(prefix);
-            workflow.push_str("cargo install cargo-deny --locked --version ");
-            workflow.push_str(CARGO_DENY_VERSION);
+            workflow.push_str("command -v cargo-deny");
             workflow.push_str("\n\n");
         }
     }

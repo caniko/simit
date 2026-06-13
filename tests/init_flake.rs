@@ -333,7 +333,11 @@ fn full_scope_writes_flake_and_formatter_files() {
 
     let flake = read(&temp.path().join("flake.nix"));
     assert!(flake.contains("cargo-audit"));
-    assert!(!flake.contains("cargo-deny"));
+    assert!(flake.contains("cargo-deny"));
+    assert!(flake.contains("cargo-about"));
+    assert!(flake.contains("cargo-sbom"));
+    assert!(flake.contains("apps.local-check-fast"));
+    assert!(flake.contains("apps.local-check-release"));
 
     let treefmt = read(&temp.path().join("nix/treefmt.nix"));
     assert!(treefmt.contains("programs.rustfmt = {"));

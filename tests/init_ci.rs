@@ -382,6 +382,35 @@ fn generates_forgejo_nix_workflows() {
 }
 
 #[test]
+fn forgejo_nix_runtime_uses_devshell_quality_tools_without_cargo_install() {
+    let temp = init_package(true);
+
+    let status = simit_with_user_config(temp.path())
+        .current_dir(temp.path())
+        .args([
+            "init",
+            "ci",
+            "--platform",
+            "forgejo",
+            "--runtime",
+            "nix",
+            "--with-audit",
+            "--with-deny",
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let ci = read(&temp.path().join(".forgejo/workflows/ci.yaml"));
+    assert!(ci.contains("      - name: Check cargo-audit tool\n"));
+    assert!(ci.contains("run: nix develop -c command -v cargo-audit"));
+    assert!(ci.contains("      - name: Check cargo-deny tool\n"));
+    assert!(ci.contains("run: nix develop -c command -v cargo-deny"));
+    assert!(!ci.contains("nix develop -c cargo install cargo-audit"));
+    assert!(!ci.contains("nix develop -c cargo install cargo-deny"));
+}
+
+#[test]
 fn forgejo_nix_with_om_ci_replace_emits_om_ci_step() {
     let temp = init_package(true);
 

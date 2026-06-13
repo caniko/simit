@@ -32,6 +32,22 @@ const FORMATTING_CHECK: &str = "        formatting = treefmtEval.config.build.ch
 const PRE_COMMIT_PACKAGE: &str = "          pre-commit\n";
 const CARGO_AUDIT_PACKAGE: &str = "          cargo-audit\n";
 const CARGO_DENY_PACKAGE: &str = "          cargo-deny\n";
+const RELEASE_DEV_SHELL_PACKAGES: &str = r#"          cargo-about
+          cargo-audit
+          cargo-cyclonedx
+          cargo-deny
+          cargo-llvm-cov
+          cargo-sbom
+          cosign
+          jq
+          minisign
+          nodejs
+          rpm
+          debootstrap
+          util-linux
+          reprepro
+          taplo
+"#;
 const PRE_COMMIT_ENABLED_PACKAGES: &str = "        ] ++ pre-commit-check.enabledPackages;\n";
 const SHELL_HOOK: &str = "        shellHook = pre-commit-check.shellHook;\n";
 
@@ -555,11 +571,88 @@ fn template(audit_tools: AuditTools) -> String {
       devShells.default = craneLib.devShell {
         checks = self.checks.${system};
         packages = with pkgs; [
+          cargo-about
+          cargo-audit
+          cargo-cyclonedx
+          cargo-deny
+          cargo-llvm-cov
+          cargo-sbom
           cargo-nextest
+          cosign
+          jq
+          minisign
+          nodejs
           pre-commit
+          rpm
+          debootstrap
+          util-linux
+          reprepro
           rust-analyzer
+          taplo
         ] ++ pre-commit-check.enabledPackages;
         shellHook = pre-commit-check.shellHook;
+      };
+      apps.local-check-fast = {
+        type = "app";
+        program = let
+          script = pkgs.writeShellApplication {
+            name = "local-check-fast";
+            runtimeInputs = with pkgs; [
+              cargo-deny
+              git
+              jq
+              rustToolchain
+            ];
+            text = ''
+              set -euo pipefail
+              cargo test --workspace --all-features
+              cargo clippy --workspace --all-targets --all-features -- --deny warnings
+              cargo deny check bans licenses sources
+              cargo package --workspace --allow-dirty --list >/dev/null
+            '';
+          };
+        in "${script}/bin/local-check-fast";
+      };
+      apps.local-check-release = {
+        type = "app";
+        program = let
+          script = pkgs.writeShellApplication {
+            name = "local-check-release";
+            runtimeInputs = with pkgs; [
+              cargo-about
+              cargo-cyclonedx
+              cargo-deny
+              cargo-sbom
+              cosign
+              jq
+              minisign
+              rustToolchain
+            ];
+            text = ''
+              set -euo pipefail
+              version="''${1:-}"
+              if [ -z "$version" ]; then
+                echo "usage: local-check-release <version>" >&2
+                exit 2
+              fi
+              ${self.apps.${system}.local-check-fast.program}
+              mkdir -p release
+              if [ -f about-template.hbs ]; then
+                cargo about generate --output-file release/THIRD_PARTY_LICENSES.html about-template.hbs
+              else
+                echo "warning: about-template.hbs not found; skipping cargo-about report" >&2
+              fi
+              cargo sbom --output-format cyclone_dx_json_1_5 > "release/''${version}.cdx.json"
+              cargo sbom --output-format spdx_json_2_3 > "release/''${version}.spdx.json"
+              if [ -n "''${COSIGN_PRIVATE_KEY:-}" ]; then
+                echo "COSIGN_PRIVATE_KEY present; local release parity will not sign or upload" >&2
+              else
+                echo "warning: keyless Sigstore and COSIGN_PRIVATE_KEY unavailable locally; skipping local cosign signing" >&2
+              fi
+              echo "local release parity dry-run passed for ''${version}; no external publish was attempted"
+            '';
+          };
+        in "${script}/bin/local-check-release";
       };
     });
 }
@@ -711,11 +804,88 @@ pub fn cross_template(targets: &[FlakeTargetArg], audit_tools: AuditTools) -> St
         inherit pkgs cross;
         inherit (toolchain) craneLib;
         packages = with pkgs; [
+          cargo-about
+          cargo-audit
+          cargo-cyclonedx
+          cargo-deny
+          cargo-llvm-cov
+          cargo-sbom
           cargo-nextest
+          cosign
+          jq
+          minisign
+          nodejs
           pre-commit
+          rpm
+          debootstrap
+          util-linux
+          reprepro
           rust-analyzer
+          taplo
         ] ++ pre-commit-check.enabledPackages;
         extraShellHook = pre-commit-check.shellHook;
+      }};
+      apps.local-check-fast = {{
+        type = "app";
+        program = let
+          script = pkgs.writeShellApplication {{
+            name = "local-check-fast";
+            runtimeInputs = with pkgs; [
+              cargo-deny
+              git
+              jq
+              rustToolchain
+            ];
+            text = ''
+              set -euo pipefail
+              cargo test --workspace --all-features
+              cargo clippy --workspace --all-targets --all-features -- --deny warnings
+              cargo deny check bans licenses sources
+              cargo package --workspace --allow-dirty --list >/dev/null
+            '';
+          }};
+        in "${{script}}/bin/local-check-fast";
+      }};
+      apps.local-check-release = {{
+        type = "app";
+        program = let
+          script = pkgs.writeShellApplication {{
+            name = "local-check-release";
+            runtimeInputs = with pkgs; [
+              cargo-about
+              cargo-cyclonedx
+              cargo-deny
+              cargo-sbom
+              cosign
+              jq
+              minisign
+              rustToolchain
+            ];
+            text = ''
+              set -euo pipefail
+              version="''${{1:-}}"
+              if [ -z "$version" ]; then
+                echo "usage: local-check-release <version>" >&2
+                exit 2
+              fi
+              ${{self.apps.${{system}}.local-check-fast.program}}
+              mkdir -p release
+              if [ -f about-template.hbs ]; then
+                cargo about generate --output-file release/THIRD_PARTY_LICENSES.html about-template.hbs
+              else
+                echo "warning: about-template.hbs not found; skipping cargo-about report" >&2
+              fi
+              cargo sbom --output-format cyclone_dx_json_1_5 > "release/''${{version}}.cdx.json"
+              cargo sbom --output-format spdx_json_2_3 > "release/''${{version}}.spdx.json"
+              if [ -n "''${{COSIGN_PRIVATE_KEY:-}}" ]; then
+                echo "COSIGN_PRIVATE_KEY present; local release parity will not sign or upload" >&2
+              else
+                echo "warning: keyless Sigstore and COSIGN_PRIVATE_KEY unavailable locally; skipping local cosign signing" >&2
+              fi
+              echo "local release parity dry-run passed for ''${{version}}; no external publish was attempted"
+            '';
+          }};
+        in "${{script}}/bin/local-check-release";
       }};
     }});
 }}
@@ -731,6 +901,12 @@ pub fn cross_template(targets: &[FlakeTargetArg], audit_tools: AuditTools) -> St
 }
 
 fn insert_template_audit_packages(content: &mut String, audit_tools: AuditTools) {
+    if !content.contains("cargo-about") {
+        content.insert_str(
+            dev_shell_packages_start(content),
+            RELEASE_DEV_SHELL_PACKAGES,
+        );
+    }
     if audit_tools.deny && !content.contains(CARGO_DENY_PACKAGE.trim_end()) {
         content.insert_str(dev_shell_packages_start(content), CARGO_DENY_PACKAGE);
     }
@@ -933,6 +1109,13 @@ mod tests {
         assert!(flake.contains("packages.default = package;"));
         assert!(!flake.contains("mkCrossPackages"));
         assert!(!flake.contains("rs-harbor"));
+        assert!(flake.contains("cargo-about"));
+        assert!(flake.contains("cargo-audit"));
+        assert!(flake.contains("cargo-deny"));
+        assert!(flake.contains("cargo-sbom"));
+        assert!(flake.contains("apps.local-check-fast"));
+        assert!(flake.contains("apps.local-check-release"));
+        assert!(flake.contains("no external publish was attempted"));
     }
 
     #[test]
@@ -973,6 +1156,11 @@ mod tests {
         assert!(flake.contains("rs-harbor.lib.mkDevShells {"));
         assert!(flake.contains("cargo-audit"));
         assert!(flake.contains("cargo-deny"));
+        assert!(flake.contains("cargo-about"));
+        assert!(flake.contains("cargo-sbom"));
+        assert!(flake.contains("apps.local-check-fast"));
+        assert!(flake.contains("apps.local-check-release"));
+        assert!(flake.contains("no external publish was attempted"));
         assert!(
             flake.contains(
                 "treefmtEval = treefmt-nix.lib.evalModule pkgs (import ./nix/treefmt.nix);"
