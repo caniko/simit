@@ -481,7 +481,7 @@ fn push_release_credentials_preflight(w: &mut String, inputs: &ReleaseWorkflowIn
     w.push_str("          require_credential() {\n");
     w.push_str("            scope=\"$1\"; name=\"$2\"; value=\"$3\"\n");
     w.push_str(
-        "            if [ -z \"$value\" ]; then missing=\"${missing}\n  - ${scope} ${name}\"; fi\n",
+        "            if [ -z \"$value\" ]; then missing=\"$(printf '%s\\n  - %s %s' \"$missing\" \"$scope\" \"$name\")\"; fi\n",
     );
     w.push_str("          }\n");
     if let Some(codeberg) = inputs.codeberg {
