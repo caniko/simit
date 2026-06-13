@@ -993,7 +993,7 @@ fn push_checksums(w: &mut String, artifacts: &ArtifactsConfig) {
     w.push_str("            count=$((count + 1))\n");
     w.push_str("          done < <(printf '%s\\n' \"${files[@]}\" | LC_ALL=C sort -u)\n");
     w.push_str("          test \"$count\" -gt 0\n");
-    w.push_str("          test -s SHA256SUMS.txt");
+    w.push_str("          test -s SHA256SUMS.txt\n");
 }
 
 fn shell_single_quote(value: &str) -> String {
@@ -2114,6 +2114,7 @@ mod tests {
         assert!(workflow.contains("add_matches '*.deb'"));
         assert!(workflow.contains("sha256sum \"$file\" >> SHA256SUMS.txt"));
         assert!(workflow.contains("test -s SHA256SUMS.txt"));
+        assert!(workflow.contains("test -s SHA256SUMS.txt\n      - name: Sign checksums"));
         // Order: codeberg before downstream, copr near the end
         let pos = |needle: &str| workflow.find(needle).unwrap();
         assert!(pos("Build Debian packages") < pos("Publish Codeberg release"));
