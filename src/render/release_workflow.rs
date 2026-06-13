@@ -19,6 +19,7 @@ use crate::config::{
     ResolvedChocolatey, ResolvedCodebergRelease, ResolvedCopr, ResolvedHomebrew, ResolvedScoop,
     WindowsSigningConfig, WingetConfig,
 };
+use serde::Serialize;
 
 /// Everything the release workflow generator needs, resolved up front.
 pub struct ReleaseWorkflowInputs<'a> {
@@ -38,6 +39,349 @@ pub struct ReleaseWorkflowInputs<'a> {
     pub flatpak: Option<&'a FlatpakConfig>,
     pub winget: Option<&'a WingetConfig>,
     pub announce: Option<&'a AnnounceConfig>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ReleaseCredential {
+    pub name: String,
+    pub kind: ReleaseCredentialKind,
+    pub scope: ReleaseCredentialScope,
+    pub channel: String,
+    pub required: bool,
+    pub context: ReleaseCredentialContext,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReleaseCredentialKind {
+    Secret,
+    Variable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReleaseCredentialScope {
+    User,
+    Repo,
+    Org,
+    Runner,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReleaseCredentialContext {
+    Secrets,
+    Vars,
+    Env,
+}
+
+impl ReleaseCredential {
+    fn secret(
+        name: impl Into<String>,
+        scope: ReleaseCredentialScope,
+        channel: impl Into<String>,
+        required: bool,
+        description: impl Into<String>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            kind: ReleaseCredentialKind::Secret,
+            scope,
+            channel: channel.into(),
+            required,
+            context: ReleaseCredentialContext::Secrets,
+            description: Some(description.into()),
+        }
+    }
+
+    fn variable(
+        name: impl Into<String>,
+        scope: ReleaseCredentialScope,
+        channel: impl Into<String>,
+        required: bool,
+        description: impl Into<String>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            kind: ReleaseCredentialKind::Variable,
+            scope,
+            channel: channel.into(),
+            required,
+            context: ReleaseCredentialContext::Vars,
+            description: Some(description.into()),
+        }
+    }
+
+    fn runner_env(
+        name: impl Into<String>,
+        channel: impl Into<String>,
+        required: bool,
+        description: impl Into<String>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            kind: ReleaseCredentialKind::Secret,
+            scope: ReleaseCredentialScope::Runner,
+            channel: channel.into(),
+            required,
+            context: ReleaseCredentialContext::Env,
+            description: Some(description.into()),
+        }
+    }
+}
+
+pub fn credential_contract(inputs: &ReleaseWorkflowInputs<'_>) -> Vec<ReleaseCredential> {
+    let mut credentials = Vec::new();
+    if let Some(codeberg) = inputs.codeberg {
+        credentials.push(ReleaseCredential::secret(
+            &codeberg.token_secret,
+            ReleaseCredentialScope::User,
+            "codeberg",
+            true,
+            "Codeberg/Forgejo API token for release creation and asset upload.",
+        ));
+    }
+    if inputs.artifacts.sign {
+        credentials.push(ReleaseCredential::secret(
+            "MINISIGN_SECRET_KEY",
+            ReleaseCredentialScope::Repo,
+            "minisign",
+            true,
+            "minisign secret key for signing SHA256SUMS.txt.",
+        ));
+        credentials.push(ReleaseCredential::secret(
+            "MINISIGN_PASSWORD",
+            ReleaseCredentialScope::Repo,
+            "minisign",
+            true,
+            "minisign password for the release signing key.",
+        ));
+        credentials.push(ReleaseCredential::secret(
+            "COSIGN_PRIVATE_KEY",
+            ReleaseCredentialScope::Repo,
+            "cosign",
+            false,
+            "Optional fallback cosign private key when keyless Sigstore OIDC is unavailable.",
+        ));
+        credentials.push(ReleaseCredential::secret(
+            "COSIGN_PASSWORD",
+            ReleaseCredentialScope::Repo,
+            "cosign",
+            false,
+            "Optional password for COSIGN_PRIVATE_KEY.",
+        ));
+    }
+    if let Some(apt) = inputs.apt {
+        let apt_gpg_fingerprint_variable = apt_fingerprint_variable(apt);
+        let apt_gpg_public_key_variable = apt_public_key_variable(apt);
+        credentials.push(ReleaseCredential::secret(
+            &apt.gpg_key_secret,
+            ReleaseCredentialScope::Repo,
+            "apt",
+            true,
+            "Armored GPG private key for the apt repository.",
+        ));
+        credentials.push(ReleaseCredential::variable(
+            &apt.gpg_key_id_secret,
+            ReleaseCredentialScope::Repo,
+            "apt",
+            true,
+            "Short key id for the apt repository signing key.",
+        ));
+        credentials.push(ReleaseCredential::variable(
+            apt_gpg_fingerprint_variable,
+            ReleaseCredentialScope::Repo,
+            "apt",
+            true,
+            "Fingerprint for the apt repository signing key.",
+        ));
+        credentials.push(ReleaseCredential::variable(
+            apt_gpg_public_key_variable,
+            ReleaseCredentialScope::Repo,
+            "apt",
+            true,
+            "Armored public key published with the apt repository.",
+        ));
+        credentials.push(ReleaseCredential::secret(
+            &apt.gpg_passphrase_secret,
+            ReleaseCredentialScope::Repo,
+            "apt",
+            false,
+            "Optional passphrase for the apt repository signing key.",
+        ));
+        credentials.push(ReleaseCredential::secret(
+            &apt.ssh_key_secret,
+            ReleaseCredentialScope::Repo,
+            "apt",
+            true,
+            "Deploy key that pushes the generated apt repository.",
+        ));
+    }
+    if let Some(aur) = inputs.aur {
+        credentials.push(ReleaseCredential::secret(
+            &aur.ssh_key_secret,
+            ReleaseCredentialScope::User,
+            "aur",
+            true,
+            "SSH private key for aur.archlinux.org pushes.",
+        ));
+    }
+    if let Some(copr) = inputs.copr {
+        credentials.push(ReleaseCredential::secret(
+            &copr.login_secret,
+            ReleaseCredentialScope::User,
+            "copr",
+            true,
+            "COPR API login.",
+        ));
+        credentials.push(ReleaseCredential::variable(
+            &copr.username_secret,
+            ReleaseCredentialScope::User,
+            "copr",
+            true,
+            "COPR username.",
+        ));
+        credentials.push(ReleaseCredential::secret(
+            &copr.token_secret,
+            ReleaseCredentialScope::User,
+            "copr",
+            true,
+            "COPR API token.",
+        ));
+    }
+    if let Some(homebrew) = inputs.homebrew {
+        credentials.push(ReleaseCredential::secret(
+            &homebrew.tap_token_secret,
+            ReleaseCredentialScope::User,
+            "homebrew",
+            true,
+            "Token for pushing the Homebrew tap.",
+        ));
+    }
+    if let Some(scoop) = inputs.scoop {
+        credentials.push(ReleaseCredential::secret(
+            &scoop.bucket_token_secret,
+            ReleaseCredentialScope::User,
+            "scoop",
+            true,
+            "Token for pushing the Scoop bucket.",
+        ));
+    }
+    if let Some(chocolatey) = inputs.chocolatey {
+        if chocolatey.api_key_from_runner {
+            credentials.push(ReleaseCredential::runner_env(
+                &chocolatey.api_key_env,
+                "chocolatey",
+                true,
+                "Runner-provided Chocolatey API key.",
+            ));
+        } else {
+            credentials.push(ReleaseCredential::secret(
+                &chocolatey.api_key_secret,
+                ReleaseCredentialScope::User,
+                "chocolatey",
+                true,
+                "Chocolatey push API key.",
+            ));
+        }
+    }
+    if let Some(flatpak) = inputs.flatpak {
+        credentials.push(ReleaseCredential::secret(
+            &flatpak.token_secret,
+            ReleaseCredentialScope::User,
+            "flatpak",
+            true,
+            "GitHub token for opening Flathub update PRs.",
+        ));
+    }
+    if let Some(winget) = inputs.winget {
+        credentials.push(ReleaseCredential::secret(
+            &winget.token_secret,
+            ReleaseCredentialScope::User,
+            "winget",
+            true,
+            "GitHub token for submitting winget manifests.",
+        ));
+    }
+    if let Some(windows) = inputs.windows_signing {
+        credentials.push(ReleaseCredential::secret(
+            &windows.pfx_secret,
+            ReleaseCredentialScope::Repo,
+            "windows-signing",
+            false,
+            "Optional Authenticode PKCS#12 certificate.",
+        ));
+        credentials.push(ReleaseCredential::secret(
+            &windows.pass_secret,
+            ReleaseCredentialScope::Repo,
+            "windows-signing",
+            false,
+            "Optional Authenticode certificate passphrase.",
+        ));
+        credentials.push(ReleaseCredential::secret(
+            &windows.subject_secret,
+            ReleaseCredentialScope::Repo,
+            "windows-signing",
+            false,
+            "Optional Authenticode signing subject.",
+        ));
+    }
+    if let Some(announce) = inputs.announce {
+        for (name, description) in [
+            (
+                &announce.mastodon_token_secret,
+                "Optional Mastodon token for release announcements.",
+            ),
+            (
+                &announce.mastodon_base_url_secret,
+                "Optional Mastodon base URL for release announcements.",
+            ),
+            (
+                &announce.matrix_token_secret,
+                "Optional Matrix token for release announcements.",
+            ),
+            (
+                &announce.matrix_homeserver_secret,
+                "Optional Matrix homeserver for release announcements.",
+            ),
+            (
+                &announce.matrix_room_secret,
+                "Optional Matrix room for release announcements.",
+            ),
+        ] {
+            credentials.push(ReleaseCredential::secret(
+                name,
+                ReleaseCredentialScope::User,
+                "announce",
+                false,
+                description,
+            ));
+        }
+    }
+    if let Some(attic) = inputs.attic {
+        credentials.push(ReleaseCredential::runner_env(
+            format!("{}/{}", attic.token_dir_env, attic.token_name),
+            "attic",
+            false,
+            "Runner-provided Attic token file.",
+        ));
+    }
+    credentials
+}
+
+fn apt_fingerprint_variable(apt: &ResolvedApt) -> String {
+    apt.gpg_key_id_secret
+        .replace("KEY_ID", "FINGERPRINT")
+        .replace("key_id", "fingerprint")
+}
+
+fn apt_public_key_variable(apt: &ResolvedApt) -> String {
+    apt.gpg_key_id_secret
+        .replace("KEY_ID", "PUBLIC_KEY")
+        .replace("key_id", "public_key")
 }
 /// The semver-with-optional-prerelease tag pattern shared by validation and gating.
 const TAG_REGEX: &str = r"^[0-9]+\.[0-9]+\.[0-9]+(-(rc|beta|alpha)\.[0-9]+)?$";
@@ -378,101 +722,22 @@ fn push_validate_tag(w: &mut String, artifacts: &ArtifactsConfig) {
 }
 
 fn push_release_credentials_preflight(w: &mut String, inputs: &ReleaseWorkflowInputs<'_>) {
-    if inputs.codeberg.is_none()
-        && !inputs.artifacts.sign
-        && inputs.copr.is_none()
-        && inputs.apt.is_none()
-        && inputs.aur.is_none()
-        && inputs.chocolatey.is_none()
-    {
+    let credentials = credential_contract(inputs)
+        .into_iter()
+        .filter(|credential| credential.required)
+        .collect::<Vec<_>>();
+    if credentials.is_empty() {
         return;
     }
 
     w.push_str("      - name: Check release credentials\n");
     w.push_str("        env:\n");
-    if let Some(codeberg) = inputs.codeberg {
+    for credential in &credentials {
         writeln!(
             w,
-            "          CODEBERG_TOKEN: ${{{{ secrets.{} }}}}",
-            codeberg.token_secret
-        )
-        .expect("write");
-    }
-    if inputs.artifacts.sign {
-        w.push_str("          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}\n");
-        w.push_str("          MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}\n");
-    }
-    if let Some(copr) = inputs.copr {
-        writeln!(
-            w,
-            "          COPR_LOGIN: ${{{{ secrets.{} }}}}",
-            copr.login_secret
-        )
-        .expect("write");
-        writeln!(
-            w,
-            "          COPR_USERNAME: ${{{{ vars.{} }}}}",
-            copr.username_secret
-        )
-        .expect("write");
-        writeln!(
-            w,
-            "          COPR_TOKEN: ${{{{ secrets.{} }}}}",
-            copr.token_secret
-        )
-        .expect("write");
-    }
-    if let Some(apt) = inputs.apt {
-        let apt_gpg_fingerprint_variable = apt
-            .gpg_key_id_secret
-            .replace("KEY_ID", "FINGERPRINT")
-            .replace("key_id", "fingerprint");
-        let apt_gpg_public_key_variable = apt
-            .gpg_key_id_secret
-            .replace("KEY_ID", "PUBLIC_KEY")
-            .replace("key_id", "public_key");
-        writeln!(
-            w,
-            "          APT_REPO_GPG_KEY: ${{{{ secrets.{} }}}}",
-            apt.gpg_key_secret
-        )
-        .expect("write");
-        writeln!(
-            w,
-            "          APT_REPO_GPG_KEY_ID: ${{{{ vars.{} }}}}",
-            apt.gpg_key_id_secret
-        )
-        .expect("write");
-        writeln!(
-            w,
-            "          APT_REPO_GPG_FINGERPRINT: ${{{{ vars.{apt_gpg_fingerprint_variable} }}}}"
-        )
-        .expect("write");
-        writeln!(
-            w,
-            "          APT_REPO_GPG_PUBLIC_KEY: ${{{{ vars.{apt_gpg_public_key_variable} }}}}"
-        )
-        .expect("write");
-        writeln!(
-            w,
-            "          APT_REPO_SSH_KEY: ${{{{ secrets.{} }}}}",
-            apt.ssh_key_secret
-        )
-        .expect("write");
-    }
-    if let Some(aur) = inputs.aur {
-        writeln!(
-            w,
-            "          AUR_SSH_KEY: ${{{{ secrets.{} }}}}",
-            aur.ssh_key_secret
-        )
-        .expect("write");
-    }
-    if let Some(chocolatey) = inputs.chocolatey {
-        writeln!(
-            w,
-            "          {}: ${{{{ secrets.{} }}}}",
-            chocolatey.api_key_env, chocolatey.api_key_secret
+            "          {}: {}",
+            credential_env_name(credential),
+            credential_expression(credential)
         )
         .expect("write");
     }
@@ -484,97 +749,24 @@ fn push_release_credentials_preflight(w: &mut String, inputs: &ReleaseWorkflowIn
         "            if [ -z \"$value\" ]; then missing=\"$(printf '%s\\n  - %s %s' \"$missing\" \"$scope\" \"$name\")\"; fi\n",
     );
     w.push_str("          }\n");
-    if let Some(codeberg) = inputs.codeberg {
+    for credential in &credentials {
+        let indent = if stable_only_preflight(credential) {
+            w.push_str("          if [ \"${IS_PRERELEASE}\" != \"true\" ]; then\n");
+            "            "
+        } else {
+            "          "
+        };
         writeln!(
             w,
-            "          require_credential 'global/user secret' '{}' \"${{CODEBERG_TOKEN:-}}\"",
-            codeberg.token_secret
+            "{indent}require_credential '{}' '{}' \"${{{}:-}}\"",
+            credential_scope_label(credential),
+            credential.name,
+            credential_env_name(credential)
         )
         .expect("write");
-    }
-    if inputs.artifacts.sign {
-        w.push_str("          require_credential 'repo secret' 'MINISIGN_SECRET_KEY' \"${MINISIGN_SECRET_KEY:-}\"\n");
-        w.push_str("          require_credential 'repo secret' 'MINISIGN_PASSWORD' \"${MINISIGN_PASSWORD:-}\"\n");
-    }
-    if let Some(copr) = inputs.copr {
-        writeln!(
-            w,
-            "          require_credential 'global/user secret' '{}' \"${{COPR_LOGIN:-}}\"",
-            copr.login_secret
-        )
-        .expect("write");
-        writeln!(
-            w,
-            "          require_credential 'global/user variable' '{}' \"${{COPR_USERNAME:-}}\"",
-            copr.username_secret
-        )
-        .expect("write");
-        writeln!(
-            w,
-            "          require_credential 'global/user secret' '{}' \"${{COPR_TOKEN:-}}\"",
-            copr.token_secret
-        )
-        .expect("write");
-    }
-    if let Some(apt) = inputs.apt {
-        let apt_gpg_fingerprint_variable = apt
-            .gpg_key_id_secret
-            .replace("KEY_ID", "FINGERPRINT")
-            .replace("key_id", "fingerprint");
-        let apt_gpg_public_key_variable = apt
-            .gpg_key_id_secret
-            .replace("KEY_ID", "PUBLIC_KEY")
-            .replace("key_id", "public_key");
-        w.push_str("          if [ \"${IS_PRERELEASE}\" != \"true\" ]; then\n");
-        writeln!(
-            w,
-            "            require_credential 'repo secret' '{}' \"${{APT_REPO_GPG_KEY:-}}\"",
-            apt.gpg_key_secret
-        )
-        .expect("write");
-        writeln!(
-            w,
-            "            require_credential 'repo variable' '{}' \"${{APT_REPO_GPG_KEY_ID:-}}\"",
-            apt.gpg_key_id_secret
-        )
-        .expect("write");
-        writeln!(
-            w,
-            "            require_credential 'repo variable' '{apt_gpg_fingerprint_variable}' \"${{APT_REPO_GPG_FINGERPRINT:-}}\"",
-        )
-        .expect("write");
-        writeln!(
-            w,
-            "            require_credential 'repo variable' '{apt_gpg_public_key_variable}' \"${{APT_REPO_GPG_PUBLIC_KEY:-}}\"",
-        )
-        .expect("write");
-        writeln!(
-            w,
-            "            require_credential 'repo secret' '{}' \"${{APT_REPO_SSH_KEY:-}}\"",
-            apt.ssh_key_secret
-        )
-        .expect("write");
-        w.push_str("          fi\n");
-    }
-    if let Some(aur) = inputs.aur {
-        w.push_str("          if [ \"${IS_PRERELEASE}\" != \"true\" ]; then\n");
-        writeln!(
-            w,
-            "            require_credential 'global/user secret' '{}' \"${{AUR_SSH_KEY:-}}\"",
-            aur.ssh_key_secret
-        )
-        .expect("write");
-        w.push_str("          fi\n");
-    }
-    if let Some(chocolatey) = inputs.chocolatey {
-        w.push_str("          if [ \"${IS_PRERELEASE}\" != \"true\" ]; then\n");
-        writeln!(
-            w,
-            "            require_credential 'global/user secret' '{}' \"${{{}:-}}\"",
-            chocolatey.api_key_env, chocolatey.api_key_env
-        )
-        .expect("write");
-        w.push_str("          fi\n");
+        if stable_only_preflight(credential) {
+            w.push_str("          fi\n");
+        }
     }
     w.push_str("          if [ -n \"$missing\" ]; then\n");
     w.push_str("            printf 'Missing release credentials:%s\\n' \"$missing\" >&2\n");
@@ -598,6 +790,53 @@ fn push_release_credentials_preflight(w: &mut String, inputs: &ReleaseWorkflowIn
         )
         .expect("write");
     }
+}
+
+fn credential_env_name(credential: &ReleaseCredential) -> String {
+    let mut out = credential
+        .name
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    while out.contains("__") {
+        out = out.replace("__", "_");
+    }
+    out.trim_matches('_').to_owned()
+}
+
+fn credential_expression(credential: &ReleaseCredential) -> String {
+    match credential.context {
+        ReleaseCredentialContext::Secrets => {
+            format!("${{{{ secrets.{} }}}}", credential.name)
+        }
+        ReleaseCredentialContext::Vars => format!("${{{{ vars.{} }}}}", credential.name),
+        ReleaseCredentialContext::Env => format!("${{{{ env.{} }}}}", credential.name),
+    }
+}
+
+fn credential_scope_label(credential: &ReleaseCredential) -> &'static str {
+    match (credential.scope, credential.kind) {
+        (ReleaseCredentialScope::User, ReleaseCredentialKind::Secret) => "global/user secret",
+        (ReleaseCredentialScope::User, ReleaseCredentialKind::Variable) => "global/user variable",
+        (ReleaseCredentialScope::Repo, ReleaseCredentialKind::Secret) => "repo secret",
+        (ReleaseCredentialScope::Repo, ReleaseCredentialKind::Variable) => "repo variable",
+        (ReleaseCredentialScope::Org, ReleaseCredentialKind::Secret) => "org secret",
+        (ReleaseCredentialScope::Org, ReleaseCredentialKind::Variable) => "org variable",
+        (ReleaseCredentialScope::Runner, _) => "runner credential",
+    }
+}
+
+fn stable_only_preflight(credential: &ReleaseCredential) -> bool {
+    matches!(
+        credential.channel.as_str(),
+        "apt" | "aur" | "homebrew" | "scoop" | "chocolatey" | "flatpak" | "winget"
+    )
 }
 
 fn push_rewrite_spec(w: &mut String, copr: &ResolvedCopr) {
@@ -735,26 +974,30 @@ fn push_build_debs(w: &mut String, apt: &ResolvedApt) {
 
 fn push_checksums(w: &mut String, artifacts: &ArtifactsConfig) {
     w.push_str("      - name: Generate release checksums\n        run: |\n          set -euo pipefail\n          cd release\n");
+    w.push_str("          shopt -s nullglob\n");
+    w.push_str("          files=()\n");
+    w.push_str("          add_matches() { local pattern=\"$1\" match; while IFS= read -r match; do files+=(\"$match\"); done < <(compgen -G \"$pattern\" || true); }\n");
     if artifacts.checksum_globs.is_empty() {
-        writeln!(
-            w,
-            "          find . -maxdepth 1 -type f -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS.txt\n          test -s SHA256SUMS.txt"
-        )
-        .expect("write");
+        w.push_str("          add_matches '*'\n");
     } else {
-        let mut predicates = String::new();
-        for (i, glob) in artifacts.checksum_globs.iter().enumerate() {
-            if i > 0 {
-                predicates.push_str(" -o ");
-            }
-            write!(predicates, "-name '{}'", glob.replace('\'', "'\\''")).unwrap();
+        for glob in &artifacts.checksum_globs {
+            writeln!(w, "          add_matches {}", shell_single_quote(glob)).expect("write");
         }
-        writeln!(
-            w,
-            "          find . -maxdepth 1 -type f \\( {predicates} \\) -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS.txt\n          test -s SHA256SUMS.txt"
-        )
-        .expect("write");
     }
+    w.push_str("          : > SHA256SUMS.txt\n");
+    w.push_str("          count=0\n");
+    w.push_str("          while IFS= read -r file; do\n");
+    w.push_str("            [ -f \"$file\" ] || continue\n");
+    w.push_str("            [ \"$file\" != SHA256SUMS.txt ] || continue\n");
+    w.push_str("            sha256sum \"$file\" >> SHA256SUMS.txt\n");
+    w.push_str("            count=$((count + 1))\n");
+    w.push_str("          done < <(printf '%s\\n' \"${files[@]}\" | LC_ALL=C sort -u)\n");
+    w.push_str("          test \"$count\" -gt 0\n");
+    w.push_str("          test -s SHA256SUMS.txt");
+}
+
+fn shell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 fn push_sign(
@@ -804,11 +1047,14 @@ fn push_sign(
     w.push_str("          attest_blob_keyless() { file=\"$1\"; predicate=\"$2\"; if [ -s \"$oidc_token\" ]; then cosign attest-blob --yes --identity-token \"$oidc_token\" --predicate \"$predicate\" --type slsaprovenance1 --output-attestation \"${file}.intoto.jsonl\" --bundle \"${file}.intoto.bundle\" \"$file\"; else return 1; fi; }\n");
     w.push_str("          sign_blob_with_key() { file=\"$1\"; test -n \"${COSIGN_PRIVATE_KEY:-}\"; printf '%s' \"$COSIGN_PRIVATE_KEY\" > \"$cosign_key\"; cosign sign-blob --yes --key \"$cosign_key\" --bundle \"${file}.cosign.bundle\" \"$file\"; }\n");
     w.push_str("          attest_blob_with_key() { file=\"$1\"; predicate=\"$2\"; cosign attest-blob --yes --key \"$cosign_key\" --predicate \"$predicate\" --type slsaprovenance1 --output-attestation \"${file}.intoto.jsonl\" --bundle \"${file}.intoto.bundle\" \"$file\"; }\n");
-    w.push_str("          find release -maxdepth 1 -type f \\( -name '*.tar.gz' -o -name '*.zip' -o -name '*.AppImage' -o -name '*.deb' -o -name '*.src.rpm' -o -name '*.exe' \\) -print0 | sort -z | while IFS= read -r -d '' file; do\n");
+    w.push_str("          shopt -s nullglob\n");
+    w.push_str("          files=(release/*.tar.gz release/*.zip release/*.AppImage release/*.deb release/*.src.rpm release/*.exe)\n");
+    w.push_str("          while IFS= read -r file; do\n");
+    w.push_str("            [ -f \"$file\" ] || continue\n");
     w.push_str("            artifact_sha=\"$(sha256sum \"$file\" | awk '{print $1}')\"; predicate=\"$(mktemp)\"\n");
     w.push_str("            jq -n --arg builder_id \"$builder_id\" --arg git_sha \"$git_sha\" --arg workflow_sha \"$workflow_sha\" --arg flake_lock_sha \"$flake_lock_sha\" --arg repo_url \"$repo_url\" --arg ref \"refs/tags/${VERSION}\" --arg artifact \"$(basename \"$file\")\" --arg artifact_sha \"$artifact_sha\" '{buildDefinition:{buildType:\"https://simit.rs/release\",externalParameters:{repository:$repo_url,ref:$ref,artifact:$artifact,artifactDigest:{sha256:$artifact_sha}},internalParameters:{},resolvedDependencies:[{uri:($repo_url+\".git\"),digest:{gitCommit:$git_sha}},{uri:\"flake.lock\",digest:{sha256:$flake_lock_sha}},{uri:\"release workflow\",digest:{sha256:$workflow_sha}}]},runDetails:{builder:{id:$builder_id}}}' > \"$predicate\"\n");
     w.push_str("            if sign_blob_keyless \"$file\" && attest_blob_keyless \"$file\" \"$predicate\"; then echo \"signed+attested $file (keyless)\"; elif [ -n \"${COSIGN_PRIVATE_KEY:-}\" ]; then echo \"keyless failed for $file; using COSIGN_PRIVATE_KEY\"; sign_blob_with_key \"$file\"; attest_blob_with_key \"$file\" \"$predicate\"; else echo \"keyless Sigstore failed and COSIGN_PRIVATE_KEY unset\" >&2; exit 1; fi\n");
-    w.push_str("            rm -f \"$predicate\"\n          done\n          SCRIPT\n");
+    w.push_str("            rm -f \"$predicate\"\n          done < <(printf '%s\\n' \"${files[@]}\" | LC_ALL=C sort -u)\n          SCRIPT\n");
 }
 
 fn push_smoke(w: &mut String, command: &str) {
@@ -895,12 +1141,17 @@ fn push_codeberg_release(w: &mut String, codeberg: &ResolvedCodebergRelease) {
     w.push_str(
         "          release_id=\"$(jq -r '.id' release.json)\"; test \"$release_id\" != \"null\"\n",
     );
-    w.push_str("          find release -maxdepth 1 -type f -print0 | sort -z | while IFS= read -r -d '' file; do\n");
+    w.push_str("          shopt -s nullglob\n");
+    w.push_str("          files=(release/*)\n");
+    w.push_str("          while IFS= read -r file; do\n");
+    w.push_str("            [ -f \"$file\" ] || continue\n");
     w.push_str("            name=\"$(basename \"$file\")\"\n");
     w.push_str("            asset_id=\"$(curl -sS --fail -H \"Authorization: token ${CODEBERG_TOKEN}\" \"${CODEBERG_API}/repos/${CODEBERG_REPO}/releases/${release_id}/assets\" | jq -r --arg name \"$name\" '.[] | select(.name == $name) | .id' | head -n 1)\"\n");
     w.push_str("            if [ -n \"$asset_id\" ]; then curl -sS --fail -X DELETE -H \"Authorization: token ${CODEBERG_TOKEN}\" \"${CODEBERG_API}/repos/${CODEBERG_REPO}/releases/${release_id}/assets/${asset_id}\"; fi\n");
     w.push_str("            curl -sS --fail -H \"Authorization: token ${CODEBERG_TOKEN}\" -H 'Content-Type: application/octet-stream' --data-binary \"@${file}\" \"${CODEBERG_API}/repos/${CODEBERG_REPO}/releases/${release_id}/assets?name=${name}\" > /dev/null\n");
-    w.push_str("          done\n          SCRIPT\n");
+    w.push_str(
+        "          done < <(printf '%s\\n' \"${files[@]}\" | LC_ALL=C sort -u)\n          SCRIPT\n",
+    );
 }
 
 /// Emit the stable-only guard shared by downstream package-repo steps.
@@ -960,7 +1211,9 @@ fn push_publish_apt(w: &mut String, apt: &ResolvedApt) {
     w.push_str("          mkdir -p \"$work/apt/conf\"; cp dist/apt/conf/distributions \"$work/apt/conf/distributions\"\n");
     w.push_str("          for deb in release/*.deb; do reprepro -b \"$work/apt\" includedeb \"$APT_DISTRIBUTION\" \"$deb\"; done\n");
     w.push_str("          git clone --depth 1 --branch \"$APT_REPO_BRANCH\" \"$APT_REPO_REMOTE\" \"$work/checkout\"\n");
-    w.push_str("          find \"$work/checkout\" -mindepth 1 -maxdepth 1 -not -name .git -not -name README.md -exec rm -rf {} +\n");
+    w.push_str("          shopt -s dotglob nullglob\n");
+    w.push_str("          for path in \"$work/checkout\"/*; do name=\"$(basename \"$path\")\"; case \"$name\" in .git|README.md) continue ;; esac; rm -rf \"$path\"; done\n");
+    w.push_str("          shopt -u dotglob nullglob\n");
     w.push_str("          cp -r \"$work/apt/dists\" \"$work/checkout/dists\"; cp -r \"$work/apt/pool\" \"$work/checkout/pool\"\n");
     w.push_str("          if [ -f dist/apt/key.gpg.asc ]; then cp dist/apt/key.gpg.asc \"$work/checkout/key.gpg.asc\"; fi\n");
     w.push_str("          cd \"$work/checkout\"\n");
@@ -1814,18 +2067,12 @@ mod tests {
         assert!(
             workflow.contains("APT_REPO_GPG_PUBLIC_KEY: ${{ vars.modde_apt_repo_gpg_public_key }}")
         );
-        assert!(workflow.contains(
-            "require_credential 'repo secret' 'modde_apt_repo_gpg_key' \"${APT_REPO_GPG_KEY:-}\""
-        ));
-        assert!(workflow.contains(
-            "require_credential 'repo variable' 'modde_apt_repo_gpg_key_id' \"${APT_REPO_GPG_KEY_ID:-}\""
-        ));
-        assert!(workflow.contains(
-            "require_credential 'repo variable' 'modde_apt_repo_gpg_fingerprint' \"${APT_REPO_GPG_FINGERPRINT:-}\""
-        ));
-        assert!(workflow.contains(
-            "require_credential 'repo variable' 'modde_apt_repo_gpg_public_key' \"${APT_REPO_GPG_PUBLIC_KEY:-}\""
-        ));
+        assert!(workflow.contains("require_credential 'repo secret'"));
+        assert!(workflow.contains("\"${APT_REPO_GPG_KEY:-}\""));
+        assert!(workflow.contains("require_credential 'repo variable'"));
+        assert!(workflow.contains("\"${MODDE_APT_REPO_GPG_KEY_ID:-}\""));
+        assert!(workflow.contains("\"${MODDE_APT_REPO_GPG_FINGERPRINT:-}\""));
+        assert!(workflow.contains("\"${MODDE_APT_REPO_GPG_PUBLIC_KEY:-}\""));
         assert!(
             workflow.contains(
                 "git push --force-with-lease origin \"HEAD:refs/heads/${APT_REPO_BRANCH}\""
@@ -1854,20 +2101,18 @@ mod tests {
         assert!(workflow.contains("osslsigncode sign -pkcs12"));
         assert!(workflow.contains("zip_out=\"$PWD/release/modde-${VERSION}-x86_64-windows.zip\""));
         assert!(!workflow.contains("OLDPWD"));
-        assert!(workflow.contains(
-            "require_credential 'global/user secret' 'CHOCOLATEY_API_KEY' \"${CHOCOLATEY_API_KEY:-}\""
-        ));
+        assert!(workflow.contains("require_credential 'global/user secret'"));
+        assert!(workflow.contains("\"${CHOCOLATEY_API_KEY:-}\""));
         assert!(workflow.contains("https://github.com/flathub/com.tartanoglu.modde.git"));
         assert!(workflow.contains("wine \"$tmpdir/wingetcreate.exe\" update Caniko.Modde"));
         assert!(workflow.contains("/api/v1/statuses"));
         assert!(workflow.contains(
             "nix shell github:caniko/nixpkgs/add-chocolatey-scoop#chocolatey git+https://codeberg.org/caniko/simit -c simit dist chocolatey bump"
         ));
-        // Checksum step uses find-based enumeration, not bare sha256sum globs
-        assert!(workflow.contains(
-            "find . -maxdepth 1 -type f \\( -name '*.tar.gz' -o -name '*.deb' \\) -print0"
-        ));
-        assert!(workflow.contains("xargs -0 sha256sum > SHA256SUMS.txt"));
+        // Checksum step uses runner-compatible Bash glob enumeration, not find/xargs.
+        assert!(workflow.contains("add_matches '*.tar.gz'"));
+        assert!(workflow.contains("add_matches '*.deb'"));
+        assert!(workflow.contains("sha256sum \"$file\" >> SHA256SUMS.txt"));
         assert!(workflow.contains("test -s SHA256SUMS.txt"));
         // Order: codeberg before downstream, copr near the end
         let pos = |needle: &str| workflow.find(needle).unwrap();
@@ -1899,9 +2144,9 @@ mod tests {
             winget: None,
             announce: None,
         });
-        // Empty checksum_globs defaults to hashing all files with find
-        assert!(workflow.contains("find . -maxdepth 1 -type f -print0"));
-        assert!(workflow.contains("xargs -0 sha256sum > SHA256SUMS.txt"));
+        // Empty checksum_globs defaults to hashing all release directory files.
+        assert!(workflow.contains("add_matches '*'"));
+        assert!(workflow.contains("sha256sum \"$file\" >> SHA256SUMS.txt"));
         assert!(workflow.contains("test -s SHA256SUMS.txt"));
         // No bare `sha256sum *` fallback
         assert!(!workflow.contains("sha256sum *"));
@@ -1930,7 +2175,7 @@ mod tests {
             winget: None,
             announce: None,
         });
-        // The generated checksum command uses find + xargs, not bare `sha256sum *.deb`
+        // The generated checksum command uses Bash glob enumeration, not bare `sha256sum *.deb`.
         assert!(
             !workflow.contains("sha256sum *.deb"),
             "checksums must not hard-require *.deb files"
@@ -1938,6 +2183,10 @@ mod tests {
         assert!(
             !workflow.contains("sha256sum *.tar.gz"),
             "checksums must not use bare globs"
+        );
+        assert!(
+            !workflow.contains("xargs -0 sha256sum"),
+            "runner image does not provide xargs"
         );
     }
 }

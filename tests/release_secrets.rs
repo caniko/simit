@@ -12,8 +12,7 @@ fn simit() -> Command {
 }
 
 fn write_executable(path: &Path, body: &str) {
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_owned());
-    fs::write(path, format!("#!{shell}\n{body}")).unwrap();
+    fs::write(path, format!("#!/usr/bin/env bash\n{body}")).unwrap();
     let mut permissions = fs::metadata(path).unwrap().permissions();
     permissions.set_mode(0o755);
     fs::set_permissions(path, permissions).unwrap();
@@ -96,6 +95,9 @@ fn init_project() -> TempDir {
 name = "demo"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
+description = "Demo command"
+homepage = "https://example.com/demo"
 "#,
     )
     .unwrap();
@@ -104,6 +106,50 @@ edition = "2024"
     fs::create_dir(temp.path().join("keys")).unwrap();
     fs::write(temp.path().join("keys/minisign.pub"), "public existing\n").unwrap();
     temp
+}
+
+fn init_release_project() -> TempDir {
+    let project = init_project();
+    fs::write(
+        project.path().join("simit.toml"),
+        r#"[release.codeberg]
+repo = "example/demo"
+token_secret = "CODEBERG_TOKEN"
+
+[release.artifacts]
+runner = "atlas"
+build_commands = ["mkdir -p release"]
+sign = true
+
+[aur]
+download_repo = "example/demo"
+
+[copr]
+download_repo = "example/demo"
+project = "example/demo"
+login_secret = "COPR_LOGIN"
+username_secret = "COPR_USERNAME"
+token_secret = "COPR_TOKEN"
+
+[apt]
+repo_url = "ssh://git@codeberg.org/example/demo-apt.git"
+
+[chocolatey]
+download_repo = "example/demo"
+id = "demo"
+title = "Demo"
+description = "Demo package"
+project_url = "https://example.com/demo"
+api_key_secret = "CHOCOLATEY_API_KEY"
+api_key_env = "CHOCOLATEY_API_KEY"
+
+[scoop]
+bucket_url = "https://github.com/example/scoop-bucket.git"
+download_repo = "example/demo"
+"#,
+    )
+    .unwrap();
+    project
 }
 
 #[test]
@@ -256,4 +302,57 @@ fn check_accepts_account_level_codeberg_token() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[test]
+fn contract_prints_generic_release_credentials_json() {
+    let project = init_release_project();
+    let output = simit()
+        .current_dir(project.path())
+        .args(["release", "secrets", "contract", "--json"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(!stdout.contains("canix"));
+    assert!(!stdout.contains("secret-manager"));
+    assert!(!stdout.contains("age/"));
+    let value: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let credentials = value.as_array().expect("contract is array");
+    assert!(credentials.iter().any(|credential| {
+        credential["name"] == "CODEBERG_TOKEN"
+            && credential["kind"] == "secret"
+            && credential["scope"] == "user"
+            && credential["context"] == "secrets"
+            && credential["channel"] == "codeberg"
+            && credential["required"] == true
+    }));
+    assert!(credentials.iter().any(|credential| {
+        credential["name"] == "COPR_USERNAME"
+            && credential["kind"] == "variable"
+            && credential["scope"] == "user"
+            && credential["context"] == "vars"
+            && credential["channel"] == "copr"
+            && credential["required"] == true
+    }));
+    assert!(credentials.iter().any(|credential| {
+        credential["name"] == "apt_repo_gpg_key_id"
+            && credential["kind"] == "variable"
+            && credential["scope"] == "repo"
+            && credential["context"] == "vars"
+            && credential["channel"] == "apt"
+            && credential["required"] == true
+    }));
+    assert!(credentials.iter().any(|credential| {
+        credential["name"] == "SCOOP_BUCKET_TOKEN"
+            && credential["kind"] == "secret"
+            && credential["scope"] == "user"
+            && credential["channel"] == "scoop"
+            && credential["required"] == true
+    }));
 }

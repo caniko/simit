@@ -234,7 +234,7 @@ pub struct ReleaseCommand {
     pub remote: String,
     #[arg(
         long,
-        help = "Print machine-readable JSON for `simit release verify` or `simit release plan`"
+        help = "Print machine-readable JSON for `simit release verify`, `simit release plan`, or `simit release secrets contract`"
     )]
     pub json: bool,
     #[arg(
@@ -362,6 +362,8 @@ pub enum ReleaseTrustAction {
         help = "Classify minisign import inputs without printing secret values"
     )]
     InspectMinisignInput,
+    #[value(name = "contract", help = "Print the release secrets contract")]
+    Contract,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -370,6 +372,11 @@ pub enum ReleaseSecretsAction {
     Init,
     #[value(help = "Check release workflow secret names without reading values")]
     Check,
+    #[value(
+        name = "contract",
+        help = "Print the generic release credential contract as JSON"
+    )]
+    Contract,
     #[value(
         name = "inspect-minisign-input",
         help = "Classify minisign import inputs without printing secret values"

@@ -10,6 +10,11 @@ use serde_json::Value;
 
 use crate::cargo;
 use crate::cli::ReleaseCommand;
+use crate::config::{
+    AptOverrides, AurOverrides, ChocolateyOverrides, CoprOverrides, HomebrewOverrides,
+    ProjectConfig, ScoopOverrides,
+};
+use crate::render::release_workflow::{self, ReleaseWorkflowInputs};
 
 const MINISIGN_SECRET_KEY: &str = "MINISIGN_SECRET_KEY";
 const MINISIGN_PASSWORD: &str = "MINISIGN_PASSWORD";
@@ -53,6 +58,66 @@ pub fn check(command: ReleaseCommand) -> Result<()> {
     require_secret(&names, MINISIGN_PASSWORD)?;
     require_secret(&names, "codeberg_token")?;
     println!("release secret names are configured for {repo}");
+    Ok(())
+}
+
+pub fn contract(_command: ReleaseCommand) -> Result<()> {
+    let metadata = cargo::metadata_for_current_dir()?;
+    let workspace_root = metadata.workspace_root.as_std_path();
+    let package = cargo::representative_package(&metadata, None)?;
+    let cfg = ProjectConfig::load(workspace_root)?;
+
+    let codeberg = cfg.resolve_codeberg_release()?;
+    let aur = cfg
+        .aur
+        .as_ref()
+        .map(|_| cfg.resolve_aur(AurOverrides::default(), &package))
+        .transpose()?;
+    let copr = cfg
+        .copr
+        .as_ref()
+        .map(|_| cfg.resolve_copr(CoprOverrides::default(), &package))
+        .transpose()?;
+    let apt = cfg
+        .apt
+        .as_ref()
+        .map(|_| cfg.resolve_apt(AptOverrides::default(), &package))
+        .transpose()?;
+    let homebrew = cfg
+        .homebrew
+        .as_ref()
+        .map(|_| cfg.resolve_homebrew(HomebrewOverrides::default(), &package))
+        .transpose()?;
+    let scoop = cfg
+        .scoop
+        .as_ref()
+        .map(|_| cfg.resolve_scoop(ScoopOverrides::default(), &package))
+        .transpose()?;
+    let chocolatey = cfg
+        .chocolatey
+        .as_ref()
+        .map(|_| cfg.resolve_chocolatey(ChocolateyOverrides::default(), &package))
+        .transpose()?;
+    let inputs = ReleaseWorkflowInputs {
+        runner: "",
+        preinstalled_nix: false,
+        artifacts: &cfg.release.artifacts,
+        smoke_command: cfg.release.smoke.command.as_deref(),
+        codeberg: codeberg.as_ref(),
+        attic: cfg.release.attic.as_ref(),
+        aur: aur.as_ref(),
+        copr: copr.as_ref(),
+        apt: apt.as_ref(),
+        homebrew: homebrew.as_ref(),
+        scoop: scoop.as_ref(),
+        chocolatey: chocolatey.as_ref(),
+        windows_signing: cfg.release.windows_signing.as_ref(),
+        flatpak: cfg.flatpak.as_ref(),
+        winget: cfg.winget.as_ref(),
+        announce: cfg.release.announce.as_ref(),
+    };
+    let credentials = release_workflow::credential_contract(&inputs);
+    println!("{}", serde_json::to_string_pretty(&credentials)?);
     Ok(())
 }
 

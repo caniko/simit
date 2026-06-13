@@ -268,6 +268,16 @@ result_links = ["result"]
     assert!(workflow.contains("CODEBERG_TOKEN: ${{ secrets.codeberg_token }}"));
     assert!(workflow.contains("MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}"));
     assert!(workflow.contains("MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}"));
+    assert!(workflow.contains("require_credential 'global/user secret' 'codeberg_token'"));
+    assert!(workflow.contains("require_credential 'global/user secret' 'AUR_SSH_KEY'"));
+    assert!(workflow.contains("require_credential 'global/user secret' 'copr_login'"));
+    assert!(workflow.contains("require_credential 'global/user variable' 'copr_username'"));
+    assert!(workflow.contains("require_credential 'global/user secret' 'copr_token'"));
+    assert!(workflow.contains("require_credential 'repo secret' 'apt_repo_gpg_key'"));
+    assert!(workflow.contains("require_credential 'repo variable' 'apt_repo_gpg_key_id'"));
+    assert!(workflow.contains("require_credential 'repo variable' 'apt_repo_gpg_fingerprint'"));
+    assert!(workflow.contains("require_credential 'repo variable' 'apt_repo_gpg_public_key'"));
+    assert!(workflow.contains("require_credential 'repo secret' 'apt_repo_ssh_key'"));
     assert!(workflow.contains("minisign -V -m \"$minisign_probe\""));
     assert!(!workflow.contains("test -r \"${ATTIC_TOKENS_DIR:?}/rs-modde\""));
     assert!(workflow.contains("attic_token_dir=\"${ATTIC_TOKENS_DIR:-}\""));

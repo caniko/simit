@@ -154,7 +154,11 @@ fn secrets(command: ReleaseCommand) -> Result<()> {
     if command.trust_key.is_some() || command.trust_root.is_some() {
         bail!("release trust arguments are only valid with `simit release trust`");
     }
-    reject_verify_flags(&command)?;
+    let contract_action = command.secrets_action == Some(ReleaseSecretsAction::Contract)
+        || command.trust_action == Some(ReleaseTrustAction::Contract);
+    if !(contract_action && command.json) {
+        reject_verify_flags(&command)?;
+    }
 
     let action = match (command.secrets_action, command.trust_action) {
         (Some(action), None) => action,
@@ -163,17 +167,21 @@ fn secrets(command: ReleaseCommand) -> Result<()> {
         (None, Some(ReleaseTrustAction::InspectMinisignInput)) => {
             ReleaseSecretsAction::InspectMinisignInput
         }
+        (None, Some(ReleaseTrustAction::Contract)) => ReleaseSecretsAction::Contract,
         (None, Some(ReleaseTrustAction::Status)) => {
-            bail!("release secrets action must be init, check, or inspect-minisign-input")
+            bail!("release secrets action must be init, check, contract, or inspect-minisign-input")
         }
         (None, None) => {
-            bail!("release secrets action is required: init, check, or inspect-minisign-input")
+            bail!(
+                "release secrets action is required: init, check, contract, or inspect-minisign-input"
+            )
         }
         (Some(_), Some(_)) => bail!("release secrets action specified more than once"),
     };
     match action {
         ReleaseSecretsAction::Init => crate::commands::release_secrets::init(command),
         ReleaseSecretsAction::Check => crate::commands::release_secrets::check(command),
+        ReleaseSecretsAction::Contract => crate::commands::release_secrets::contract(command),
         ReleaseSecretsAction::InspectMinisignInput => {
             crate::commands::release_secrets::inspect_minisign_input(command)
         }
@@ -228,7 +236,7 @@ fn trust(command: ReleaseCommand) -> Result<()> {
         ReleaseTrustAction::Status => release_trust::status(workspace_root, &config, &overrides),
         ReleaseTrustAction::Init => release_trust::init(workspace_root, &config, &overrides),
         ReleaseTrustAction::Check => release_trust::check(workspace_root, &config, &overrides),
-        ReleaseTrustAction::InspectMinisignInput => {
+        ReleaseTrustAction::InspectMinisignInput | ReleaseTrustAction::Contract => {
             bail!("release trust action must be status, init, or check")
         }
     }
