@@ -12,7 +12,10 @@ fn simit() -> Command {
 }
 
 fn write_executable(path: &Path, body: &str) {
-    fs::write(path, format!("#!/usr/bin/env bash\n{body}")).unwrap();
+    let shell = std::env::var("BASH")
+        .or_else(|_| std::env::var("SHELL"))
+        .unwrap_or_else(|_| "/bin/sh".to_owned());
+    fs::write(path, format!("#!{shell}\n{body}")).unwrap();
     let mut permissions = fs::metadata(path).unwrap().permissions();
     permissions.set_mode(0o755);
     fs::set_permissions(path, permissions).unwrap();
