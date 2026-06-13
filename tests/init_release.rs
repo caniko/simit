@@ -283,6 +283,12 @@ result_links = ["result"]
     assert!(!workflow.contains("test -r \"${ATTIC_TOKENS_DIR:?}/rs-modde\""));
     assert!(workflow.contains("attic_token_dir=\"${ATTIC_TOKENS_DIR:-}\""));
     assert!(workflow.contains("skipping optional Nix closure cache push"));
+    assert!(workflow.contains("Attic login failed; skipping optional Nix closure cache push"));
+    assert!(
+        workflow.contains(
+            "Attic push failed; continuing release without optional Nix closure cache push"
+        )
+    );
     assert!(workflow.contains("          nix path-info -r \\\n            ./result \\"));
     assert!(!workflow.contains("\n            result \\\n"));
     assert!(

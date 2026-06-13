@@ -1098,14 +1098,14 @@ fn push_attic(w: &mut String, attic: &AtticConfig) {
     w.push_str("          nix profile install nixpkgs#attic-client\n");
     writeln!(
         w,
-        "          attic login {cache} {url} \"$(cat \"$attic_token\")\"",
+        "          if ! attic login {cache} {url} \"$(cat \"$attic_token\")\"; then\n            echo \"::warning::Attic login failed; skipping optional Nix closure cache push.\"\n            exit 0\n          fi",
         cache = attic.cache,
         url = attic.url
     )
     .expect("write");
     writeln!(
         w,
-        "          attic push {cache} $(cat attic-paths.txt)",
+        "          if ! attic push {cache} $(cat attic-paths.txt); then\n            echo \"::warning::Attic push failed; continuing release without optional Nix closure cache push.\"\n            exit 0\n          fi",
         cache = attic.cache
     )
     .expect("write");
