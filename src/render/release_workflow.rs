@@ -1090,7 +1090,8 @@ fn push_attic(w: &mut String, attic: &AtticConfig) {
     if !attic.result_links.is_empty() {
         w.push_str("          nix path-info -r \\\n");
         for link in &attic.result_links {
-            writeln!(w, "            {link} \\").expect("write");
+            let path = nix_path_info_arg(link);
+            writeln!(w, "            {path} \\").expect("write");
         }
         w.push_str("            > attic-paths.txt\n");
     }
@@ -1780,6 +1781,14 @@ fn scoop_windows_zip(scoop: &ResolvedScoop) -> String {
 
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn nix_path_info_arg(link: &str) -> String {
+    if link.starts_with('/') || link.starts_with("./") || link.starts_with("../") {
+        link.to_owned()
+    } else {
+        format!("./{link}")
+    }
 }
 
 #[cfg(test)]
