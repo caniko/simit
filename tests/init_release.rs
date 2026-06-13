@@ -139,7 +139,8 @@ fn bootstraps_release_workflow_for_enabled_channels() {
     let workflow = read(&project.path().join(".forgejo/workflows/release.yml"));
     assert!(workflow.contains("Publish Codeberg release"));
     assert!(workflow.contains("CODEBERG_TOKEN: ${{ secrets.codeberg_token }}"));
-    assert!(workflow.contains("find release -maxdepth 1 -type f"));
+    assert!(workflow.contains("files=(release/*)"));
+    assert!(workflow.contains("done < <(printf '%s\\n' \"${files[@]}\" | LC_ALL=C sort -u)"));
     assert!(workflow.contains("Publish AUR packages"));
     assert!(workflow.contains("Push SRPM to COPR"));
     assert!(workflow.contains("Publish APT repository"));
