@@ -147,7 +147,7 @@ pub fn render(inputs: &ReleaseWorkflowInputs<'_>) -> String {
 }
 
 fn push_secrets_header(w: &mut String, inputs: &ReleaseWorkflowInputs<'_>) {
-    w.push_str("# Required secrets:\n");
+    w.push_str("# Required secrets and variables:\n");
     if let Some(codeberg) = inputs.codeberg {
         writeln!(
             w,
@@ -171,7 +171,7 @@ fn push_secrets_header(w: &mut String, inputs: &ReleaseWorkflowInputs<'_>) {
         .expect("write");
         writeln!(
             w,
-            "# - {}: fingerprint for the apt repository signing key.",
+            "# - vars.{}: fingerprint for the apt repository signing key.",
             apt.gpg_key_id_secret
         )
         .expect("write");
@@ -199,8 +199,8 @@ fn push_secrets_header(w: &mut String, inputs: &ReleaseWorkflowInputs<'_>) {
     if let Some(copr) = inputs.copr {
         writeln!(
             w,
-            "# - {}, {}, {}: COPR upload credentials.",
-            copr.login_secret, copr.username_secret, copr.token_secret
+            "# - {}, {}, {}: COPR upload credentials; {} is an Actions variable.",
+            copr.login_secret, copr.username_secret, copr.token_secret, copr.username_secret
         )
         .expect("write");
     }
@@ -747,7 +747,7 @@ fn push_publish_apt(w: &mut String, apt: &ResolvedApt) {
     .expect("write");
     writeln!(
         w,
-        "          APT_REPO_GPG_KEY_ID: ${{{{ secrets.{} }}}}",
+        "          APT_REPO_GPG_KEY_ID: ${{{{ vars.{} }}}}",
         apt.gpg_key_id_secret
     )
     .expect("write");
@@ -884,7 +884,7 @@ fn push_publish_copr(w: &mut String, copr: &ResolvedCopr) {
     .expect("write");
     writeln!(
         w,
-        "          COPR_USERNAME: ${{{{ secrets.{} }}}}",
+        "          COPR_USERNAME: ${{{{ vars.{} }}}}",
         copr.username_secret
     )
     .expect("write");
@@ -1593,6 +1593,8 @@ mod tests {
         assert!(workflow.contains("copr-cli build --nowait \"${COPR_PROJECT}\" srpms/*.src.rpm"));
         assert!(workflow.contains("COPR_PROJECT=\"caniko/rs-modde\""));
         assert!(workflow.contains("COPR_PROJECT=\"caniko/rs-modde-testing\""));
+        assert!(workflow.contains("COPR_USERNAME: ${{ vars.copr_username }}"));
+        assert!(!workflow.contains("COPR_USERNAME: ${{ secrets.copr_username }}"));
         // APT deb build + reprepro publish
         assert!(workflow.contains("debootstrap --variant=minbase bookworm"));
         assert!(workflow.contains("if [ \"$(id -u)\" -eq 0 ]; then"));
@@ -1608,6 +1610,10 @@ mod tests {
                 .contains("deb -p modde-cli --output \"/work/release/modde_${VERSION}_amd64.deb\"")
         );
         assert!(workflow.contains("reprepro -b \"$work/apt\" includedeb \"$APT_DISTRIBUTION\""));
+        assert!(workflow.contains("APT_REPO_GPG_KEY_ID: ${{ vars.modde_apt_repo_gpg_key_id }}"));
+        assert!(
+            !workflow.contains("APT_REPO_GPG_KEY_ID: ${{ secrets.modde_apt_repo_gpg_key_id }}")
+        );
         assert!(
             workflow.contains(
                 "git push --force-with-lease origin \"HEAD:refs/heads/${APT_REPO_BRANCH}\""
