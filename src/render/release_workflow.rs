@@ -257,7 +257,7 @@ pub fn credential_contract(inputs: &ReleaseWorkflowInputs<'_>) -> Vec<ReleaseCre
             &homebrew.tap_token_secret,
             ReleaseCredentialScope::User,
             "homebrew",
-            true,
+            false,
             "Token for pushing the Homebrew tap.",
         ));
     }
@@ -266,7 +266,7 @@ pub fn credential_contract(inputs: &ReleaseWorkflowInputs<'_>) -> Vec<ReleaseCre
             &scoop.bucket_token_secret,
             ReleaseCredentialScope::User,
             "scoop",
-            true,
+            false,
             "Token for pushing the Scoop bucket.",
         ));
     }
@@ -293,7 +293,7 @@ pub fn credential_contract(inputs: &ReleaseWorkflowInputs<'_>) -> Vec<ReleaseCre
             &flatpak.token_secret,
             ReleaseCredentialScope::User,
             "flatpak",
-            true,
+            false,
             "GitHub token for opening Flathub update PRs.",
         ));
     }
@@ -302,7 +302,7 @@ pub fn credential_contract(inputs: &ReleaseWorkflowInputs<'_>) -> Vec<ReleaseCre
             &winget.token_secret,
             ReleaseCredentialScope::User,
             "winget",
-            true,
+            false,
             "GitHub token for submitting winget manifests.",
         ));
     }

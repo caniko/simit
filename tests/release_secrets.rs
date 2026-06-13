@@ -356,6 +356,6 @@ fn contract_prints_generic_release_credentials_json() {
             && credential["kind"] == "secret"
             && credential["scope"] == "user"
             && credential["channel"] == "scoop"
-            && credential["required"] == true
+            && credential["required"] == false
     }));
 }
