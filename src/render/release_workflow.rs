@@ -378,34 +378,210 @@ fn push_validate_tag(w: &mut String, artifacts: &ArtifactsConfig) {
 }
 
 fn push_release_credentials_preflight(w: &mut String, inputs: &ReleaseWorkflowInputs<'_>) {
-    if inputs.codeberg.is_none() && !inputs.artifacts.sign {
+    if inputs.codeberg.is_none()
+        && !inputs.artifacts.sign
+        && inputs.copr.is_none()
+        && inputs.apt.is_none()
+        && inputs.aur.is_none()
+        && inputs.chocolatey.is_none()
+    {
         return;
     }
 
     w.push_str("      - name: Check release credentials\n");
-    if inputs.codeberg.is_some() || inputs.artifacts.sign {
-        w.push_str("        env:\n");
-        if let Some(codeberg) = inputs.codeberg {
-            writeln!(
-                w,
-                "          CODEBERG_TOKEN: ${{{{ secrets.{} }}}}",
-                codeberg.token_secret
-            )
-            .expect("write");
-        }
-        if inputs.artifacts.sign {
-            w.push_str("          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}\n");
-            w.push_str("          MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}\n");
-        }
-    }
-    w.push_str("        run: |\n          set -euo pipefail\n          . ./release-env\n");
-    if inputs.codeberg.is_some() {
-        w.push_str("          test -n \"${CODEBERG_TOKEN:-}\"\n");
+    w.push_str("        env:\n");
+    if let Some(codeberg) = inputs.codeberg {
+        writeln!(
+            w,
+            "          CODEBERG_TOKEN: ${{{{ secrets.{} }}}}",
+            codeberg.token_secret
+        )
+        .expect("write");
     }
     if inputs.artifacts.sign {
+        w.push_str("          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}\n");
+        w.push_str("          MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}\n");
+    }
+    if let Some(copr) = inputs.copr {
+        writeln!(
+            w,
+            "          COPR_LOGIN: ${{{{ secrets.{} }}}}",
+            copr.login_secret
+        )
+        .expect("write");
+        writeln!(
+            w,
+            "          COPR_USERNAME: ${{{{ vars.{} }}}}",
+            copr.username_secret
+        )
+        .expect("write");
+        writeln!(
+            w,
+            "          COPR_TOKEN: ${{{{ secrets.{} }}}}",
+            copr.token_secret
+        )
+        .expect("write");
+    }
+    if let Some(apt) = inputs.apt {
+        let apt_gpg_fingerprint_variable = apt
+            .gpg_key_id_secret
+            .replace("KEY_ID", "FINGERPRINT")
+            .replace("key_id", "fingerprint");
+        let apt_gpg_public_key_variable = apt
+            .gpg_key_id_secret
+            .replace("KEY_ID", "PUBLIC_KEY")
+            .replace("key_id", "public_key");
+        writeln!(
+            w,
+            "          APT_REPO_GPG_KEY: ${{{{ secrets.{} }}}}",
+            apt.gpg_key_secret
+        )
+        .expect("write");
+        writeln!(
+            w,
+            "          APT_REPO_GPG_KEY_ID: ${{{{ vars.{} }}}}",
+            apt.gpg_key_id_secret
+        )
+        .expect("write");
+        writeln!(
+            w,
+            "          APT_REPO_GPG_FINGERPRINT: ${{{{ vars.{apt_gpg_fingerprint_variable} }}}}"
+        )
+        .expect("write");
+        writeln!(
+            w,
+            "          APT_REPO_GPG_PUBLIC_KEY: ${{{{ vars.{apt_gpg_public_key_variable} }}}}"
+        )
+        .expect("write");
+        writeln!(
+            w,
+            "          APT_REPO_SSH_KEY: ${{{{ secrets.{} }}}}",
+            apt.ssh_key_secret
+        )
+        .expect("write");
+    }
+    if let Some(aur) = inputs.aur {
+        writeln!(
+            w,
+            "          AUR_SSH_KEY: ${{{{ secrets.{} }}}}",
+            aur.ssh_key_secret
+        )
+        .expect("write");
+    }
+    if let Some(chocolatey) = inputs.chocolatey {
+        writeln!(
+            w,
+            "          {}: ${{{{ secrets.{} }}}}",
+            chocolatey.api_key_env, chocolatey.api_key_secret
+        )
+        .expect("write");
+    }
+    w.push_str("        run: |\n          set -euo pipefail\n          . ./release-env\n");
+    w.push_str("          missing=''\n");
+    w.push_str("          require_credential() {\n");
+    w.push_str("            scope=\"$1\"; name=\"$2\"; value=\"$3\"\n");
+    w.push_str(
+        "            if [ -z \"$value\" ]; then missing=\"${missing}\n  - ${scope} ${name}\"; fi\n",
+    );
+    w.push_str("          }\n");
+    if let Some(codeberg) = inputs.codeberg {
+        writeln!(
+            w,
+            "          require_credential 'global/user secret' '{}' \"${{CODEBERG_TOKEN:-}}\"",
+            codeberg.token_secret
+        )
+        .expect("write");
+    }
+    if inputs.artifacts.sign {
+        w.push_str("          require_credential 'repo secret' 'MINISIGN_SECRET_KEY' \"${MINISIGN_SECRET_KEY:-}\"\n");
+        w.push_str("          require_credential 'repo secret' 'MINISIGN_PASSWORD' \"${MINISIGN_PASSWORD:-}\"\n");
+    }
+    if let Some(copr) = inputs.copr {
+        writeln!(
+            w,
+            "          require_credential 'global/user secret' '{}' \"${{COPR_LOGIN:-}}\"",
+            copr.login_secret
+        )
+        .expect("write");
+        writeln!(
+            w,
+            "          require_credential 'global/user variable' '{}' \"${{COPR_USERNAME:-}}\"",
+            copr.username_secret
+        )
+        .expect("write");
+        writeln!(
+            w,
+            "          require_credential 'global/user secret' '{}' \"${{COPR_TOKEN:-}}\"",
+            copr.token_secret
+        )
+        .expect("write");
+    }
+    if let Some(apt) = inputs.apt {
+        let apt_gpg_fingerprint_variable = apt
+            .gpg_key_id_secret
+            .replace("KEY_ID", "FINGERPRINT")
+            .replace("key_id", "fingerprint");
+        let apt_gpg_public_key_variable = apt
+            .gpg_key_id_secret
+            .replace("KEY_ID", "PUBLIC_KEY")
+            .replace("key_id", "public_key");
+        w.push_str("          if [ \"${IS_PRERELEASE}\" != \"true\" ]; then\n");
+        writeln!(
+            w,
+            "            require_credential 'repo secret' '{}' \"${{APT_REPO_GPG_KEY:-}}\"",
+            apt.gpg_key_secret
+        )
+        .expect("write");
+        writeln!(
+            w,
+            "            require_credential 'repo variable' '{}' \"${{APT_REPO_GPG_KEY_ID:-}}\"",
+            apt.gpg_key_id_secret
+        )
+        .expect("write");
+        writeln!(
+            w,
+            "            require_credential 'repo variable' '{apt_gpg_fingerprint_variable}' \"${{APT_REPO_GPG_FINGERPRINT:-}}\"",
+        )
+        .expect("write");
+        writeln!(
+            w,
+            "            require_credential 'repo variable' '{apt_gpg_public_key_variable}' \"${{APT_REPO_GPG_PUBLIC_KEY:-}}\"",
+        )
+        .expect("write");
+        writeln!(
+            w,
+            "            require_credential 'repo secret' '{}' \"${{APT_REPO_SSH_KEY:-}}\"",
+            apt.ssh_key_secret
+        )
+        .expect("write");
+        w.push_str("          fi\n");
+    }
+    if let Some(aur) = inputs.aur {
+        w.push_str("          if [ \"${IS_PRERELEASE}\" != \"true\" ]; then\n");
+        writeln!(
+            w,
+            "            require_credential 'global/user secret' '{}' \"${{AUR_SSH_KEY:-}}\"",
+            aur.ssh_key_secret
+        )
+        .expect("write");
+        w.push_str("          fi\n");
+    }
+    if let Some(chocolatey) = inputs.chocolatey {
+        w.push_str("          if [ \"${IS_PRERELEASE}\" != \"true\" ]; then\n");
+        writeln!(
+            w,
+            "            require_credential 'global/user secret' '{}' \"${{{}:-}}\"",
+            chocolatey.api_key_env, chocolatey.api_key_env
+        )
+        .expect("write");
+        w.push_str("          fi\n");
+    }
+    w.push_str("          if [ -n \"$missing\" ]; then\n");
+    w.push_str("            printf 'Missing release credentials:%s\\n' \"$missing\" >&2\n");
+    w.push_str("            exit 1\n");
+    w.push_str("          fi\n");
+    if inputs.artifacts.sign {
         writeln!(w, "          test -s {}", inputs.artifacts.minisign_pub).expect("write");
-        w.push_str("          test -n \"${MINISIGN_SECRET_KEY:-}\"\n");
-        w.push_str("          test -n \"${MINISIGN_PASSWORD:-}\"\n");
         w.push_str("          umask 077\n");
         w.push_str("          minisign_key=\"$(mktemp)\"; minisign_probe=\"$(mktemp)\"; minisign_sig=\"${minisign_probe}.minisig\"\n");
         w.push_str(
@@ -1585,6 +1761,10 @@ mod tests {
         assert!(workflow.contains("--type slsaprovenance1"));
         // Codeberg release upload
         assert!(workflow.contains("CODEBERG_TOKEN: ${{ secrets.codeberg_token }}"));
+        assert!(workflow.contains(
+            "require_credential 'global/user secret' 'codeberg_token' \"${CODEBERG_TOKEN:-}\""
+        ));
+        assert!(workflow.contains("Missing release credentials:%s\\n"));
         assert!(workflow.contains("${CODEBERG_API}/repos/${CODEBERG_REPO}/releases\""));
         assert!(workflow.contains("releases/${release_id}/assets?name=${name}"));
         assert!(workflow.contains("target_commitish: $branch"));
@@ -1595,6 +1775,19 @@ mod tests {
         assert!(workflow.contains("COPR_PROJECT=\"caniko/rs-modde-testing\""));
         assert!(workflow.contains("COPR_USERNAME: ${{ vars.copr_username }}"));
         assert!(!workflow.contains("COPR_USERNAME: ${{ secrets.copr_username }}"));
+        assert!(
+            workflow.contains(
+                "require_credential 'global/user secret' 'copr_login' \"${COPR_LOGIN:-}\""
+            )
+        );
+        assert!(workflow.contains(
+            "require_credential 'global/user variable' 'copr_username' \"${COPR_USERNAME:-}\""
+        ));
+        assert!(
+            workflow.contains(
+                "require_credential 'global/user secret' 'copr_token' \"${COPR_TOKEN:-}\""
+            )
+        );
         // APT deb build + reprepro publish
         assert!(workflow.contains("debootstrap --variant=minbase bookworm"));
         assert!(workflow.contains("if [ \"$(id -u)\" -eq 0 ]; then"));
@@ -1615,12 +1808,34 @@ mod tests {
             !workflow.contains("APT_REPO_GPG_KEY_ID: ${{ secrets.modde_apt_repo_gpg_key_id }}")
         );
         assert!(
+            workflow
+                .contains("APT_REPO_GPG_FINGERPRINT: ${{ vars.modde_apt_repo_gpg_fingerprint }}")
+        );
+        assert!(
+            workflow.contains("APT_REPO_GPG_PUBLIC_KEY: ${{ vars.modde_apt_repo_gpg_public_key }}")
+        );
+        assert!(workflow.contains(
+            "require_credential 'repo secret' 'modde_apt_repo_gpg_key' \"${APT_REPO_GPG_KEY:-}\""
+        ));
+        assert!(workflow.contains(
+            "require_credential 'repo variable' 'modde_apt_repo_gpg_key_id' \"${APT_REPO_GPG_KEY_ID:-}\""
+        ));
+        assert!(workflow.contains(
+            "require_credential 'repo variable' 'modde_apt_repo_gpg_fingerprint' \"${APT_REPO_GPG_FINGERPRINT:-}\""
+        ));
+        assert!(workflow.contains(
+            "require_credential 'repo variable' 'modde_apt_repo_gpg_public_key' \"${APT_REPO_GPG_PUBLIC_KEY:-}\""
+        ));
+        assert!(
             workflow.contains(
                 "git push --force-with-lease origin \"HEAD:refs/heads/${APT_REPO_BRANCH}\""
             )
         );
         // AUR ssh publish with .SRCINFO + 3 flavors
         assert!(workflow.contains("AUR_SSH_KEY: ${{ secrets.AUR_SSH_KEY }}"));
+        assert!(workflow.contains(
+            "require_credential 'global/user secret' 'AUR_SSH_KEY' \"${AUR_SSH_KEY:-}\""
+        ));
         assert!(workflow.contains("makepkg --config \"$MAKEPKG_CONF\" --printsrcinfo > .SRCINFO"));
         assert!(
             workflow
@@ -1639,6 +1854,9 @@ mod tests {
         assert!(workflow.contains("osslsigncode sign -pkcs12"));
         assert!(workflow.contains("zip_out=\"$PWD/release/modde-${VERSION}-x86_64-windows.zip\""));
         assert!(!workflow.contains("OLDPWD"));
+        assert!(workflow.contains(
+            "require_credential 'global/user secret' 'CHOCOLATEY_API_KEY' \"${CHOCOLATEY_API_KEY:-}\""
+        ));
         assert!(workflow.contains("https://github.com/flathub/com.tartanoglu.modde.git"));
         assert!(workflow.contains("wine \"$tmpdir/wingetcreate.exe\" update Caniko.Modde"));
         assert!(workflow.contains("/api/v1/statuses"));
