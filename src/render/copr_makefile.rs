@@ -58,6 +58,7 @@ mod tests {
             login_secret: "copr_login".to_owned(),
             username_secret: "copr_username".to_owned(),
             token_secret: "copr_token".to_owned(),
+            nix_tool: "nixpkgs#copr-cli".to_owned(),
         }
     }
 

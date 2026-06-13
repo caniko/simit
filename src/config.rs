@@ -890,6 +890,9 @@ pub struct CoprConfig {
     pub username_secret: String,
     #[serde(default = "default_copr_token_secret")]
     pub token_secret: String,
+    /// Nix installable that provides `copr-cli` for publish steps.
+    #[serde(default = "default_copr_nix_tool")]
+    pub nix_tool: String,
 }
 
 fn default_copr_login_secret() -> String {
@@ -902,6 +905,10 @@ fn default_copr_username_secret() -> String {
 
 fn default_copr_token_secret() -> String {
     "copr_token".to_owned()
+}
+
+fn default_copr_nix_tool() -> String {
+    "nixpkgs#copr-cli".to_owned()
 }
 
 /// `[apt]` — Debian packaging published via reprepro to a Codeberg Pages repo.
@@ -1120,6 +1127,7 @@ pub struct ResolvedCopr {
     pub login_secret: String,
     pub username_secret: String,
     pub token_secret: String,
+    pub nix_tool: String,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -1874,6 +1882,7 @@ impl ProjectConfig {
             }),
             token_secret: cfg
                 .map_or_else(default_copr_token_secret, |copr| copr.token_secret.clone()),
+            nix_tool: cfg.map_or_else(default_copr_nix_tool, |copr| copr.nix_tool.clone()),
         })
     }
 

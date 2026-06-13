@@ -1332,7 +1332,12 @@ fn push_publish_copr(w: &mut String, copr: &ResolvedCopr) {
     w.push_str("          mkdir -p ~/.config\n");
     w.push_str("          cat > ~/.config/copr <<EOF\n          [copr-cli]\n          login = ${COPR_LOGIN}\n          username = ${COPR_USERNAME}\n          token = ${COPR_TOKEN}\n          copr_url = https://copr.fedorainfracloud.org\n          EOF\n");
     w.push_str("          chmod 600 ~/.config/copr\n");
-    w.push_str("          nix shell nixpkgs#copr-cli -c copr-cli build --nowait \"${COPR_PROJECT}\" srpms/*.src.rpm\n");
+    writeln!(
+        w,
+        "          nix run {} -- build --nowait \"${{COPR_PROJECT}}\" srpms/*.src.rpm",
+        copr.nix_tool
+    )
+    .expect("write");
 }
 
 fn push_publish_homebrew(w: &mut String, homebrew: &ResolvedHomebrew) {
@@ -1902,6 +1907,7 @@ mod tests {
             login_secret: "copr_login".to_owned(),
             username_secret: "copr_username".to_owned(),
             token_secret: "copr_token".to_owned(),
+            nix_tool: ".#copr-cli".to_owned(),
         }
     }
 
@@ -2024,7 +2030,11 @@ mod tests {
         assert!(workflow.contains("target_commitish: $branch"));
         // COPR srpm build + push
         assert!(workflow.contains("rpmbuild -bs modde.spec"));
-        assert!(workflow.contains("copr-cli build --nowait \"${COPR_PROJECT}\" srpms/*.src.rpm"));
+        assert!(
+            workflow.contains(
+                "nix run .#copr-cli -- build --nowait \"${COPR_PROJECT}\" srpms/*.src.rpm"
+            )
+        );
         assert!(workflow.contains("COPR_PROJECT=\"caniko/rs-modde\""));
         assert!(workflow.contains("COPR_PROJECT=\"caniko/rs-modde-testing\""));
         assert!(workflow.contains("COPR_USERNAME: ${{ vars.copr_username }}"));
