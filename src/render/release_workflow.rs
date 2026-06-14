@@ -908,65 +908,9 @@ fn push_build_artifacts(w: &mut String, artifacts: &ArtifactsConfig) {
     }
 }
 
-fn push_build_debs(w: &mut String, apt: &ResolvedApt) {
+fn push_build_debs(w: &mut String, _apt: &ResolvedApt) {
     w.push_str("      - name: Build Debian packages\n        run: |\n          set -euo pipefail\n          . ./release-env\n          export VERSION IS_PRERELEASE\n          mkdir -p release\n");
-    w.push_str(
-        "          if ! nix shell nixpkgs#debootstrap nixpkgs#util-linux nixpkgs#cargo nixpkgs#rustc -c bash <<'SCRIPT'\n",
-    );
-    w.push_str("          set -euo pipefail\n");
-    w.push_str("          if [ \"$(id -u)\" -eq 0 ]; then\n");
-    w.push_str("            priv() { \"$@\"; }\n");
-    w.push_str("          elif command -v sudo >/dev/null 2>&1; then\n");
-    w.push_str("            priv() { sudo \"$@\"; }\n");
-    w.push_str("          else\n");
-    w.push_str("            echo \"::warning::Building Debian release packages requires root privileges or sudo in the release runner image\" >&2\n");
-    w.push_str("            exit 70\n");
-    w.push_str("          fi\n");
-    w.push_str("          root=\"$(mktemp -d)\"\n");
-    w.push_str("          cargo_bin=\"$(readlink -f \"$(command -v cargo)\")\"; cargo_dir=\"$(dirname \"$cargo_bin\")\"\n");
-    w.push_str("          cleanup() { set +e; priv umount \"$root/work\" 2>/dev/null; priv umount \"$root/nix/store\" 2>/dev/null; priv rm -rf \"$root\"; }\n");
-    w.push_str("          trap cleanup EXIT\n");
-    w.push_str("          probe=\"$root/test-dev-null\"; : > \"$probe\"\n");
-    w.push_str("          if ! priv mount --bind /dev/null \"$probe\"; then\n");
-    w.push_str("            echo \"::warning::Debian package build requires a runner container with mount-capable chroot support; continuing without .deb artifacts.\" >&2\n");
-    w.push_str("            exit 70\n");
-    w.push_str("          fi\n");
-    w.push_str("          priv umount \"$probe\"; rm -f \"$probe\"\n");
-    writeln!(
-        w,
-        "          priv debootstrap --variant=minbase {release} \"$root\" http://deb.debian.org/debian",
-        release = apt.debian_release
-    )
-    .expect("write");
-    w.push_str("          priv mkdir -p \"$root/work\" \"$root/nix/store\"\n");
-    w.push_str("          priv mount --bind /nix/store \"$root/nix/store\"\n");
-    w.push_str("          priv mount --bind \"$PWD\" \"$root/work\"\n");
-    w.push_str("          priv chroot \"$root\" apt-get update\n");
-    if !apt.build_deps.is_empty() {
-        w.push_str(
-            "          priv chroot \"$root\" apt-get install -y --no-install-recommends \\\n",
-        );
-        let deps = apt.build_deps.join(" ");
-        writeln!(w, "            {deps}").expect("write");
-    }
-    writeln!(
-        w,
-        "          priv chroot \"$root\" env PATH=\"${{cargo_dir}}:/usr/sbin:/usr/bin:/bin\" CARGO_HOME=/tmp/cargo-home CARGO_TARGET_DIR=/tmp/cargo-tools-target \"$cargo_bin\" install cargo-deb --locked --version {version}",
-        version = apt.cargo_deb_version
-    )
-    .expect("write");
-    for entry in &apt.packages {
-        // `cargo-target=deb-name` lets the .deb file stem follow
-        // `[package.metadata.deb].name` (often differs from the crate name).
-        let (cargo_target, deb_name) = entry.split_once('=').unwrap_or((entry, entry));
-        writeln!(
-            w,
-            "          priv chroot \"$root\" env PATH=\"/tmp/cargo-home/bin:${{cargo_dir}}:/usr/sbin:/usr/bin:/bin\" HOME=/tmp CARGO_HOME=/tmp/cargo-home SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt CC=/usr/bin/gcc PKG_CONFIG=/usr/bin/pkg-config \"$cargo_bin\" deb -p {cargo_target} --output \"/work/release/{deb_name}_${{VERSION}}_amd64.deb\""
-        )
-        .expect("write");
-    }
-    w.push_str("          priv chown \"$(id -u):$(id -g)\" release/*.deb\n");
-    w.push_str("          SCRIPT\n");
+    w.push_str("          if ! nix develop -c bash scripts/build-deb.sh \"$VERSION\" release\n");
     w.push_str("          then\n");
     w.push_str("            echo \"::warning::Debian package build failed; continuing without .deb release assets and APT publish.\"\n");
     w.push_str("          fi\n");
@@ -2063,20 +2007,12 @@ mod tests {
             )
         );
         // APT deb build + reprepro publish
-        assert!(workflow.contains("debootstrap --variant=minbase bookworm"));
-        assert!(workflow.contains("nixpkgs#debootstrap nixpkgs#util-linux"));
-        assert!(workflow.contains("if [ \"$(id -u)\" -eq 0 ]; then"));
-        assert!(workflow.contains("priv() { \"$@\"; }"));
-        assert!(workflow.contains("priv() { sudo \"$@\"; }"));
-        assert!(workflow.contains("requires root privileges or sudo in the release runner image"));
-        assert!(workflow.contains("priv mount --bind /dev/null \"$probe\""));
+        assert!(workflow.contains("nix develop -c bash scripts/build-deb.sh \"$VERSION\" release"));
         assert!(workflow.contains("continuing without .deb release assets and APT publish."));
-        assert!(!workflow.contains("sudo debootstrap"));
+        assert!(!workflow.contains("debootstrap --variant=minbase"));
+        assert!(!workflow.contains("nixpkgs#debootstrap"));
+        assert!(!workflow.contains("priv chroot"));
         assert!(!workflow.contains("sudo chroot"));
-        assert!(
-            workflow
-                .contains("deb -p modde-cli --output \"/work/release/modde_${VERSION}_amd64.deb\"")
-        );
         assert!(workflow.contains("reprepro -b \"$work/apt\" includedeb \"$APT_DISTRIBUTION\""));
         assert!(workflow.contains("APT_REPO_GPG_KEY_ID: ${{ vars.modde_apt_repo_gpg_key_id }}"));
         assert!(
