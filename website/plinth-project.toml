@@ -43,4 +43,3 @@ description = "Project technology detected from repository manifests."
 [[pages.sections.features]]
 title = "Nix"
 description = "Project technology detected from repository manifests."
-

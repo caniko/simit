@@ -218,11 +218,7 @@ fn upgrade_one(
                     );
                     print!(
                         "{}",
-                        unified_diff(
-                            diff_path.as_ref(),
-                            &upgrade.current,
-                            &upgrade.upgraded,
-                        )
+                        unified_diff(diff_path.as_ref(), &upgrade.current, &upgrade.upgraded,)
                     );
                 }
             }

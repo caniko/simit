@@ -372,6 +372,13 @@ fn contains_attr_assignment(content: &str, name: &str) -> bool {
 }
 
 fn has_docs_shell(content: &str) -> bool {
+    if content.contains("docs = pkgs.mkShell")
+        || content.contains("docs = py.mkUvDevShell")
+        || content.contains("docs = craneLib.devShell")
+    {
+        return true;
+    }
+
     let mut in_dev_shells = false;
     let mut dev_shell_depth = 0i32;
 
@@ -1446,7 +1453,8 @@ fn has_formatting_check(content: &str) -> bool {
 }
 
 fn has_pre_commit_shell_hook(content: &str) -> bool {
-    content.contains("shellHook =") && content.contains("pre-commit-check.shellHook")
+    (content.contains("shellHook =") || content.contains("shellHookSuffix ="))
+        && content.contains("pre-commit-check.shellHook")
 }
 
 fn pre_commit_nix(

@@ -194,13 +194,10 @@
           shellHook = pre-commit-check.shellHook;
         };
 
-        docs = rs-harbor.lib.mkDocsShell {
-          inherit pkgs;
-          craneLib = toolchain.craneLib;
-          cross = rs-harbor.lib.mkCross {inherit pkgs system;};
-          packages = docsPackages ++ pre-commit-check.enabledPackages;
+        docs = craneLib.devShell {
           checks = self.checks.${system};
-          extraShellHook = pre-commit-check.shellHook;
+          packages = docsPackages ++ pre-commit-check.enabledPackages;
+          shellHook = pre-commit-check.shellHook;
         };
       };
     })
