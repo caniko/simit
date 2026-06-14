@@ -84,7 +84,7 @@ pub fn run(command: UpgradeCommand) -> Result<()> {
     let fleet = command.all || targets.len() > 1;
     let mut outcomes = Vec::new();
     for target in targets {
-        let outcome = upgrade_one(&target, mode, command.diff, fleet);
+        let outcome = upgrade_one(&target, mode, command.diff, fleet, command.pages_only);
         if !fleet {
             match outcome.error {
                 Some(error) => bail!("{error}"),
@@ -110,6 +110,9 @@ pub fn update_readme_badges_if_present(
     show_diff: bool,
 ) -> Result<()> {
     if !workspace_root.join("README.md").exists() {
+        return Ok(());
+    }
+    if !workspace_root.join("Cargo.toml").exists() {
         return Ok(());
     }
     let upgrade = readme_badges::plan(workspace_root)?;
@@ -198,25 +201,25 @@ fn upgrade_one(
     mode: Mode,
     show_diff: bool,
     print_diff_header: bool,
+    pages_only: bool,
 ) -> ProjectOutcome {
-    match plan_project_upgrade(path.as_std_path()) {
+    match plan_project_upgrade(path.as_std_path(), pages_only) {
         Ok(upgrades) => {
             if show_diff && !upgrades.is_empty() {
                 if print_diff_header {
                     println!("==> {path}");
                 }
                 for upgrade in &upgrades {
+                    let diff_path = path.join(
+                        upgrade
+                            .relative_path
+                            .to_str()
+                            .unwrap_or("<non-utf8-generated-path>"),
+                    );
                     print!(
                         "{}",
                         unified_diff(
-                            &path
-                                .join(
-                                    upgrade
-                                        .relative_path
-                                        .to_str()
-                                        .unwrap_or("<non-utf8-generated-path>"),
-                                )
-                                .to_string(),
+                            diff_path.as_ref(),
                             &upgrade.current,
                             &upgrade.upgraded,
                         )
@@ -248,11 +251,15 @@ fn upgrade_one(
     }
 }
 
-fn plan_project_upgrade(workspace_root: &Path) -> Result<Vec<FileUpgrade>> {
+fn plan_project_upgrade(workspace_root: &Path, pages_only: bool) -> Result<Vec<FileUpgrade>> {
     let mut upgrades = Vec::new();
 
     if let Some(pages) = plan_codeberg_pages_upgrade(workspace_root)? {
         upgrades.push(pages);
+    }
+
+    if pages_only {
+        return Ok(upgrades);
     }
 
     match readme_badges::plan(workspace_root) {

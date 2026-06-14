@@ -94,7 +94,9 @@ fn read(path: &Path) -> String {
     fs::read_to_string(path).unwrap_or_else(|err| panic!("reading {}: {err}", path.display()))
 }
 
-fn write_registry(data_home: &Path, projects: &[(&Path, &str, &[(&str, &str)])]) {
+type RegistryProject<'a> = (&'a Path, &'a str, &'a [(&'a str, &'a str)]);
+
+fn write_registry(data_home: &Path, projects: &[RegistryProject<'_>]) {
     let path = data_home.join("simit/projects.toml");
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     let mut text = String::from("schema_version = 1\n");
@@ -295,4 +297,21 @@ fn upgrade_check_reports_stale_codeberg_pages_workflow() {
     assert!(stderr.contains("need `simit upgrade`"));
     let workflow = read(&project.path().join(".forgejo/workflows/pages.yaml"));
     assert!(!workflow.contains("CODEBERG_TOKEN"));
+}
+
+#[test]
+fn pages_only_upgrade_skips_readme_badges() {
+    let project = init_pages_project("upgrade-pages-only");
+
+    let output = simit()
+        .current_dir(project.path())
+        .args(["upgrade", "--pages-only"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+
+    let readme = read(&project.path().join("README.md"));
+    assert!(!readme.contains("simit:badges:start"));
+    let workflow = read(&project.path().join(".forgejo/workflows/pages.yaml"));
+    assert!(workflow.contains("CODEBERG_TOKEN: ${{ secrets.codeberg_token }}"));
 }

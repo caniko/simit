@@ -78,6 +78,11 @@ pub struct UpgradeCommand {
     pub check: bool,
     #[arg(long, help = "Show unified diffs; valid with --dry-run or --check")]
     pub diff: bool,
+    #[arg(
+        long = "pages-only",
+        help = "Only apply Codeberg Pages workflow upgrades, skipping README badge upgrades"
+    )]
+    pub pages_only: bool,
 }
 
 #[derive(Debug, Args)]
