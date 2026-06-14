@@ -29,7 +29,11 @@ pub fn render_makefile(copr: &ResolvedCopr) -> String {
     )
     .expect("write");
     writeln!(out, "\ttar xf {repo}-v$(VERSION).tar.gz").expect("write");
-    writeln!(out, "\tcd {repo} && cargo vendor").expect("write");
+    writeln!(
+        out,
+        "\tcd {repo} && cargo vendor vendor > ../cargo-vendor-config.toml"
+    )
+    .expect("write");
     writeln!(out, "\ttar czf vendor.tar.gz -C {repo} vendor").expect("write");
     writeln!(out, "\trpmbuild -bs {spec} \\").expect("write");
     out.push_str("\t\t--define \"_sourcedir $(CURDIR)\" \\\n");
@@ -74,7 +78,10 @@ mod tests {
                 "\t\t\"https://codeberg.org/caniko/rs-modde/archive/v$(VERSION).tar.gz\"\n"
             )
         );
-        assert!(makefile.contains("\tcd rs-modde && cargo vendor\n"));
+        assert!(
+            makefile
+                .contains("\tcd rs-modde && cargo vendor vendor > ../cargo-vendor-config.toml\n")
+        );
         assert!(makefile.contains("\trpmbuild -bs modde.spec \\\n"));
     }
 }

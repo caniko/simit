@@ -654,6 +654,31 @@ fn template(audit_tools: AuditTools) -> String {
           };
         in "${script}/bin/local-check-release";
       };
+      apps.local-release-deploy = {
+        type = "app";
+        program = let
+          script = pkgs.writeShellApplication {
+            name = "local-release-deploy";
+            runtimeInputs = with pkgs; [
+              git
+              jq
+            ];
+            text = ''
+              set -euo pipefail
+              version="''${1:-}"
+              publish_flag="''${2:-}"
+              publish_version="''${3:-}"
+              if [ -z "$version" ] || [ "$publish_flag" != "--publish" ] || [ "$publish_version" != "$version" ]; then
+                echo "usage: local-release-deploy <version> --publish <version>" >&2
+                echo "refusing to publish without an explicit matching confirmation" >&2
+                exit 2
+              fi
+              echo "local-release-deploy is a project-specific hook; add publisher steps before using it" >&2
+              exit 2
+            '';
+          };
+        in "${script}/bin/local-release-deploy";
+      };
     });
 }
 "#
@@ -887,6 +912,31 @@ pub fn cross_template(targets: &[FlakeTargetArg], audit_tools: AuditTools) -> St
           }};
         in "${{script}}/bin/local-check-release";
       }};
+      apps.local-release-deploy = {{
+        type = "app";
+        program = let
+          script = pkgs.writeShellApplication {{
+            name = "local-release-deploy";
+            runtimeInputs = with pkgs; [
+              git
+              jq
+            ];
+            text = ''
+              set -euo pipefail
+              version="''${{1:-}}"
+              publish_flag="''${{2:-}}"
+              publish_version="''${{3:-}}"
+              if [ -z "$version" ] || [ "$publish_flag" != "--publish" ] || [ "$publish_version" != "$version" ]; then
+                echo "usage: local-release-deploy <version> --publish <version>" >&2
+                echo "refusing to publish without an explicit matching confirmation" >&2
+                exit 2
+              fi
+              echo "local-release-deploy is a project-specific hook; add publisher steps before using it" >&2
+              exit 2
+            '';
+          }};
+        in "${{script}}/bin/local-release-deploy";
+      }};
     }});
 }}
 "#,
@@ -1115,7 +1165,11 @@ mod tests {
         assert!(flake.contains("cargo-sbom"));
         assert!(flake.contains("apps.local-check-fast"));
         assert!(flake.contains("apps.local-check-release"));
+        assert!(flake.contains("apps.local-release-deploy"));
         assert!(flake.contains("no external publish was attempted"));
+        assert!(flake.contains("local-release-deploy <version> --publish <version>"));
+        assert!(flake.contains("project-specific hook"));
+        assert!(!flake.contains("cargo publish -p"));
     }
 
     #[test]
@@ -1160,7 +1214,11 @@ mod tests {
         assert!(flake.contains("cargo-sbom"));
         assert!(flake.contains("apps.local-check-fast"));
         assert!(flake.contains("apps.local-check-release"));
+        assert!(flake.contains("apps.local-release-deploy"));
         assert!(flake.contains("no external publish was attempted"));
+        assert!(flake.contains("local-release-deploy <version> --publish <version>"));
+        assert!(flake.contains("project-specific hook"));
+        assert!(!flake.contains("cargo publish -p"));
         assert!(
             flake.contains(
                 "treefmtEval = treefmt-nix.lib.evalModule pkgs (import ./nix/treefmt.nix);"

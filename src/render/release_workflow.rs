@@ -871,7 +871,7 @@ fn push_build_srpm(w: &mut String, copr: &ResolvedCopr) {
     writeln!(w, "          tar xf {repo}-*.tar.gz", repo = copr.repo).expect("write");
     writeln!(
         w,
-        "          ( cd {repo} && cargo vendor )",
+        "          ( cd {repo} && cargo vendor vendor > ../cargo-vendor-config.toml )",
         repo = copr.repo
     )
     .expect("write");
@@ -2039,6 +2039,7 @@ mod tests {
         assert!(workflow.contains("target_commitish: $branch"));
         // COPR srpm build + push
         assert!(workflow.contains("rpmbuild -bs modde.spec"));
+        assert!(workflow.contains("cargo vendor vendor > ../cargo-vendor-config.toml"));
         assert!(
             workflow.contains(
                 "nix run .#copr-cli -- build --nowait \"${COPR_PROJECT}\" srpms/*.src.rpm"

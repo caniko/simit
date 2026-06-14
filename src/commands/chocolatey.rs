@@ -80,10 +80,7 @@ pub(crate) fn resolve(
 ) -> Result<(ResolvedChocolatey, String)> {
     let metadata = cargo::metadata_for_current_dir()?;
     let workspace_root = metadata.workspace_root.as_std_path();
-    let package = cargo::select_packages(&metadata, &[], false)?
-        .into_iter()
-        .next()
-        .expect("single package selected");
+    let package = cargo::representative_package(&metadata, None)?;
     let cfg = ProjectConfig::load(workspace_root)?;
     let resolved = cfg.resolve_chocolatey(overrides, &package)?;
     Ok((resolved, package.version))
@@ -169,16 +166,23 @@ fn sha256_set(archives: &BTreeMap<Architecture, PathBuf>) -> Result<Sha256Set> {
 }
 
 fn pack_and_push(package_dir: &Path, source: &str, api_key: &str) -> Result<()> {
+    let package_dir = package_dir
+        .canonicalize()
+        .with_context(|| format!("canonicalizing {}", package_dir.display()))?;
+    let nuspec = package_nuspec(&package_dir)?;
     let pack = Command::new("choco")
         .arg("pack")
-        .current_dir(package_dir)
+        .arg(&nuspec)
+        .arg("--output-directory")
+        .arg(&package_dir)
+        .current_dir(&package_dir)
         .status()
         .with_context(choco_missing_context)?;
     if !pack.success() {
         bail!("choco pack failed");
     }
 
-    let nupkg = newest_nupkg(package_dir)?;
+    let nupkg = newest_nupkg(&package_dir)?;
     let push = Command::new("choco")
         .arg("push")
         .arg(&nupkg)
@@ -186,13 +190,32 @@ fn pack_and_push(package_dir: &Path, source: &str, api_key: &str) -> Result<()> 
         .arg(source)
         .arg("--api-key")
         .arg(api_key)
-        .current_dir(package_dir)
+        .current_dir(&package_dir)
         .status()
         .with_context(choco_missing_context)?;
     if !push.success() {
         bail!("choco push failed; Chocolatey rejects duplicate version pushes");
     }
     Ok(())
+}
+
+fn package_nuspec(package_dir: &Path) -> Result<PathBuf> {
+    let mut nuspecs = fs::read_dir(package_dir)
+        .with_context(|| format!("reading {}", package_dir.display()))?
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| {
+            let path = entry.path();
+            (path.extension().and_then(|ext| ext.to_str()) == Some("nuspec")).then_some(path)
+        })
+        .collect::<Vec<_>>();
+    nuspecs.sort();
+    match nuspecs.as_slice() {
+        [nuspec] => nuspec
+            .canonicalize()
+            .with_context(|| format!("canonicalizing {}", nuspec.display())),
+        [] => bail!("no .nuspec file found in {}", package_dir.display()),
+        _ => bail!("multiple .nuspec files found in {}", package_dir.display()),
+    }
 }
 
 fn newest_nupkg(package_dir: &Path) -> Result<PathBuf> {
@@ -205,12 +228,16 @@ fn newest_nupkg(package_dir: &Path) -> Result<PathBuf> {
         })
         .collect::<Vec<_>>();
     packages.sort();
-    packages.pop().ok_or_else(|| {
-        anyhow::anyhow!(
-            "choco pack did not create a .nupkg in {}",
-            package_dir.display()
-        )
-    })
+    packages
+        .pop()
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "choco pack did not create a .nupkg in {}",
+                package_dir.display()
+            )
+        })?
+        .canonicalize()
+        .with_context(|| format!("canonicalizing newest .nupkg in {}", package_dir.display()))
 }
 
 fn choco_missing_context() -> String {
