@@ -42,6 +42,15 @@ pub struct CiOptions {
     pub scoop: Option<ScoopOptions>,
 }
 
+#[derive(Debug, Clone)]
+pub struct CodebergPagesOptions {
+    pub repo: String,
+    pub owner: String,
+    pub token_secret: String,
+    pub source_branch: String,
+    pub deploy_app: String,
+}
+
 impl Default for CiOptions {
     fn default() -> Self {
         Self {
@@ -199,11 +208,137 @@ pub fn files(
     Ok(files)
 }
 
+pub fn codeberg_pages_file(
+    platform: Platform,
+    runner: &ResolvedRunner,
+    pages: &CodebergPagesOptions,
+) -> Result<GeneratedFile> {
+    if platform != Platform::Forgejo {
+        bail!("Codeberg Pages workflow generation is forgejo-only");
+    }
+
+    Ok(GeneratedFile {
+        relative_path: PathBuf::from(platform.workflow_dir()).join("pages.yaml"),
+        content: codeberg_pages_workflow(runner, pages),
+    })
+}
+
+pub fn python_ci_file(
+    platform: Platform,
+    runtime: Runtime,
+    runner: &ResolvedRunner,
+    options: &CiOptions,
+    check_outputs: &[String],
+) -> Result<GeneratedFile> {
+    if runtime != Runtime::Nix {
+        bail!("Python uv CI generation requires --runtime nix");
+    }
+
+    Ok(GeneratedFile {
+        relative_path: PathBuf::from(platform.workflow_dir()).join("ci.yaml"),
+        content: python_ci_workflow(platform, runner, options, check_outputs),
+    })
+}
+
 fn workflow_file_name(stem: &str, suffix: Option<&str>) -> String {
     match suffix {
         Some(suffix) => format!("{stem}-{suffix}.yaml"),
         None => format!("{stem}.yaml"),
     }
+}
+
+fn codeberg_pages_workflow(runner: &ResolvedRunner, pages: &CodebergPagesOptions) -> String {
+    let mut workflow = String::new();
+    push_generated_workflow_header(&mut workflow);
+    workflow.push_str("name: pages\n\n");
+    workflow.push_str("'on':\n");
+    workflow.push_str("  push:\n");
+    workflow.push_str("    branches:\n");
+    workflow.push_str("      - ");
+    workflow.push_str(&pages.source_branch);
+    workflow.push_str("\n\n");
+    push_codeberg_concurrency(&mut workflow);
+    workflow.push_str("jobs:\n");
+    workflow.push_str("  publish:\n");
+    workflow.push_str("    runs-on: ");
+    workflow.push_str(&runs_on(runner));
+    workflow.push('\n');
+    workflow.push_str("    env:\n");
+    workflow.push_str("      NIX_CONFIG: \"experimental-features = nix-command flakes\"\n");
+    workflow.push_str("    steps:\n");
+    push_checkout_step(&mut workflow, Platform::Forgejo);
+    workflow.push_str("      - name: Deploy Codeberg Pages\n");
+    workflow.push_str("        env:\n");
+    workflow.push_str("          CODEBERG_TOKEN: ${{ secrets.");
+    workflow.push_str(&pages.token_secret);
+    workflow.push_str(" }}\n");
+    workflow.push_str("        run: |\n");
+    workflow.push_str("          test -n \"$CODEBERG_TOKEN\"\n");
+    workflow.push_str("          git config user.name \"forgejo-actions\"\n");
+    workflow.push_str("          git config user.email \"forgejo-actions@noreply.codeberg.org\"\n");
+    workflow.push_str("          git remote add pages-origin \"https://");
+    workflow.push_str(&pages.owner);
+    workflow.push_str(":${CODEBERG_TOKEN}@codeberg.org/");
+    workflow.push_str(&pages.repo);
+    workflow.push_str(".git\"\n");
+    workflow.push_str("          DEPLOY_REMOTE=pages-origin nix run ");
+    workflow.push_str(&pages.deploy_app);
+    workflow.push('\n');
+    workflow
+}
+
+fn python_ci_workflow(
+    platform: Platform,
+    runner: &ResolvedRunner,
+    options: &CiOptions,
+    check_outputs: &[String],
+) -> String {
+    let mut workflow = String::new();
+    push_generated_workflow_header(&mut workflow);
+    push_required_secrets_header(&mut workflow, &options.required_secrets);
+    workflow.push_str("name: CI\n\n");
+    workflow.push_str("on:\n");
+    workflow.push_str("  push:\n");
+    workflow.push_str("    branches: [\"**\"]\n");
+    workflow.push_str("    tags-ignore: [\"**\"]\n");
+    if platform != Platform::Forgejo {
+        workflow.push_str("  pull_request:\n");
+    }
+    workflow.push('\n');
+    push_concurrency(&mut workflow);
+    workflow.push_str("jobs:\n");
+    workflow.push_str("  test:\n");
+    workflow.push_str("    runs-on: ");
+    workflow.push_str(&runs_on(runner));
+    workflow.push('\n');
+    push_job_env(&mut workflow, Runtime::Nix, &options.extra_env);
+    workflow.push_str("    steps:\n");
+    push_checkout_step(&mut workflow, platform);
+    push_install_nix_step(&mut workflow, platform);
+    push_extra_setup_steps(&mut workflow, &options.extra_setup);
+    workflow.push_str("      - name: Check generated flake wiring\n");
+    workflow.push_str(
+        "        run: nix run git+https://codeberg.org/caniko/simit.git -- init flake --check --diff\n\n",
+    );
+    workflow.push_str("      - name: Check flake evaluation\n");
+    workflow.push_str("        run: nix flake check --no-build\n\n");
+
+    let checks = if check_outputs.is_empty() {
+        vec!["offline-tests".to_owned(), "typecheck".to_owned()]
+    } else {
+        check_outputs.to_vec()
+    };
+    for check in checks {
+        workflow.push_str("      - name: Build check ");
+        workflow.push_str(&check);
+        workflow.push('\n');
+        workflow.push_str("        run: nix build .#checks.x86_64-linux.");
+        workflow.push_str(&check);
+        workflow.push_str("\n\n");
+    }
+
+    trim_trailing_blank_lines(&mut workflow);
+    workflow
 }
 
 fn ci_workflow(
@@ -1180,6 +1315,12 @@ fn push_concurrency(workflow: &mut String) {
     workflow.push_str("  cancel-in-progress: true\n\n");
 }
 
+fn push_codeberg_concurrency(workflow: &mut String) {
+    workflow.push_str("concurrency:\n");
+    workflow.push_str("  group: ${{ codeberg.workflow }}-${{ codeberg.ref }}\n");
+    workflow.push_str("  cancel-in-progress: true\n\n");
+}
+
 fn push_generated_workflow_header(workflow: &mut String) {
     workflow.push_str(GENERATED_WORKFLOW_MARKER);
     workflow.push('\n');
@@ -1561,7 +1702,7 @@ fn push_optional_ci_steps(
     if options.with_docs {
         workflow.push_str("      - name: Build docs\n");
         workflow.push_str("        run: ");
-        workflow.push_str(prefix);
+        workflow.push_str(docs_command_prefix(runtime));
         workflow.push_str("cargo doc");
         push_package_selector(workflow, package, options);
         workflow.push_str(" --no-deps --all-features\n\n");
@@ -1585,7 +1726,7 @@ fn push_optional_publish_steps(workflow: &mut String, runtime: Runtime, options:
     if options.with_docs {
         workflow.push_str("      - name: Build docs\n");
         workflow.push_str("        run: ");
-        workflow.push_str(prefix);
+        workflow.push_str(docs_command_prefix(runtime));
         workflow.push_str("cargo doc --no-deps --all-features\n\n");
     }
 }
@@ -1634,6 +1775,13 @@ fn command_prefix(runtime: Runtime) -> &'static str {
     match runtime {
         Runtime::Cargo => "",
         Runtime::Nix => "nix develop -c ",
+    }
+}
+
+fn docs_command_prefix(runtime: Runtime) -> &'static str {
+    match runtime {
+        Runtime::Cargo => "",
+        Runtime::Nix => "nix develop .#docs -c ",
     }
 }
 

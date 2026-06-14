@@ -16,6 +16,11 @@
       url = "github:cachix/git-hooks.nix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    plinth = {
+      url = "git+https://codeberg.org/caniko/plinth.git";
+      inputs.nixpkgs.follows = "nixpkgs";
+      inputs.flake-utils.follows = "flake-utils";
+    };
     advisory-db = {
       url = "github:rustsec/advisory-db";
       flake = false;
@@ -27,6 +32,7 @@
     advisory-db,
     nixpkgs,
     rs-harbor,
+    plinth,
     flake-utils,
     rust-overlay,
     treefmt-nix,
@@ -119,11 +125,22 @@
           cp -r docs/book $out
         '';
       };
+      website = plinth.lib.${system}.mkProjectSite {
+        pname = "simit-website";
+        domain = "simit.tartanoglu.com";
+        configPath = ./website/plinth-project.toml;
+        docsPackage = docs;
+      };
     in {
       packages = {
         default = package;
         docs = docs;
-        site = docs;
+        website = website;
+        site = website;
+      };
+
+      apps.deploy-pages = plinth.lib.${system}.mkDeployPagesApp {
+        domain = "simit.tartanoglu.com";
       };
 
       formatter = treefmtEval.config.build.wrapper;
@@ -150,23 +167,41 @@
         deny = denyCheck;
       };
 
-      devShells.default = craneLib.devShell {
-        checks = self.checks.${system};
-        packages = with pkgs;
-          [
-            alejandra
-            cargo-audit
-            cargo-deny
-            cargo-nextest
-            git
-            mdbook
-            prettier
-            pre-commit
-            rust-analyzer
-            taplo
-          ]
-          ++ pre-commit-check.enabledPackages;
-        shellHook = pre-commit-check.shellHook;
+      devShells = let
+        docsPackages = with pkgs; [
+          mdbook
+          plinth.packages.${system}.plinth-project
+          pre-commit
+          rust-analyzer
+        ];
+      in {
+        default = craneLib.devShell {
+          checks = self.checks.${system};
+          packages = with pkgs;
+            [
+              alejandra
+              cargo-audit
+              cargo-deny
+              cargo-nextest
+              git
+              mdbook
+              prettier
+              pre-commit
+              rust-analyzer
+              taplo
+            ]
+            ++ pre-commit-check.enabledPackages;
+          shellHook = pre-commit-check.shellHook;
+        };
+
+        docs = rs-harbor.lib.mkDocsShell {
+          inherit pkgs;
+          craneLib = toolchain.craneLib;
+          cross = rs-harbor.lib.mkCross {inherit pkgs system;};
+          packages = docsPackages ++ pre-commit-check.enabledPackages;
+          checks = self.checks.${system};
+          extraShellHook = pre-commit-check.shellHook;
+        };
       };
     })
     // {

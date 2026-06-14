@@ -15,9 +15,9 @@
 use std::fmt::Write as _;
 
 use crate::config::{
-    AnnounceConfig, ArtifactsConfig, AtticConfig, FlatpakConfig, ResolvedApt, ResolvedAur,
-    ResolvedChocolatey, ResolvedCodebergRelease, ResolvedCopr, ResolvedHomebrew, ResolvedScoop,
-    WindowsSigningConfig, WingetConfig,
+    AnnounceConfig, ArtifactsConfig, AtticConfig, FlatpakConfig, ReleasePublisherEnforcement,
+    ResolvedApt, ResolvedAur, ResolvedChocolatey, ResolvedCodebergRelease, ResolvedCopr,
+    ResolvedHomebrew, ResolvedScoop, WindowsSigningConfig, WingetConfig,
 };
 use serde::Serialize;
 
@@ -25,6 +25,7 @@ use serde::Serialize;
 pub struct ReleaseWorkflowInputs<'a> {
     pub runner: &'a str,
     pub preinstalled_nix: bool,
+    pub publish_enforcement: ReleasePublisherEnforcement,
     pub artifacts: &'a ArtifactsConfig,
     pub smoke_command: Option<&'a str>,
     pub codeberg: Option<&'a ResolvedCodebergRelease>,
@@ -394,6 +395,8 @@ const VERSION_FROM_REF: &str = r#"VERSION="${{ inputs.version }}"
 
 pub fn render(inputs: &ReleaseWorkflowInputs<'_>) -> String {
     let mut w = String::new();
+    let activated_remote =
+        inputs.publish_enforcement == ReleasePublisherEnforcement::ActivatedRemote;
     w.push_str("---\n# yamllint disable rule:line-length\n");
     w.push_str(super::ci::GENERATED_WORKFLOW_MARKER);
     w.push('\n');
@@ -459,32 +462,35 @@ pub fn render(inputs: &ReleaseWorkflowInputs<'_>) -> String {
     if let Some(attic) = inputs.attic {
         push_attic(&mut w, attic);
     }
+    if activated_remote {
+        push_publisher_state_probe(&mut w, inputs);
+    }
     if let Some(apt) = inputs.apt {
-        push_publish_apt(&mut w, apt);
+        push_publish_apt(&mut w, apt, activated_remote);
     }
     if let Some(announce) = inputs.announce {
         push_announce(&mut w, announce, inputs.codeberg);
     }
     if let Some(aur) = inputs.aur {
-        push_publish_aur(&mut w, aur);
+        push_publish_aur(&mut w, aur, activated_remote);
     }
     if let Some(flatpak) = inputs.flatpak {
-        push_publish_flathub(&mut w, flatpak);
+        push_publish_flathub(&mut w, flatpak, activated_remote);
     }
     if let Some(winget) = inputs.winget {
-        push_publish_winget(&mut w, winget);
+        push_publish_winget(&mut w, winget, activated_remote);
     }
     if let Some(homebrew) = inputs.homebrew {
-        push_publish_homebrew(&mut w, homebrew);
+        push_publish_homebrew(&mut w, homebrew, activated_remote);
     }
     if let Some(scoop) = inputs.scoop {
-        push_publish_scoop(&mut w, scoop);
+        push_publish_scoop(&mut w, scoop, activated_remote);
     }
     if let Some(copr) = inputs.copr {
-        push_publish_copr(&mut w, copr);
+        push_publish_copr(&mut w, copr, activated_remote);
     }
     if let Some(chocolatey) = inputs.chocolatey {
-        push_publish_chocolatey(&mut w, chocolatey);
+        push_publish_chocolatey(&mut w, chocolatey, activated_remote);
     }
 
     w
@@ -724,7 +730,11 @@ fn push_validate_tag(w: &mut String, artifacts: &ArtifactsConfig) {
 fn push_release_credentials_preflight(w: &mut String, inputs: &ReleaseWorkflowInputs<'_>) {
     let credentials = credential_contract(inputs)
         .into_iter()
-        .filter(|credential| credential.required)
+        .filter(|credential| {
+            credential.required
+                && (inputs.publish_enforcement == ReleasePublisherEnforcement::Declared
+                    || !downstream_publisher_credential(credential))
+        })
         .collect::<Vec<_>>();
     if credentials.is_empty() {
         return;
@@ -836,6 +846,13 @@ fn stable_only_preflight(credential: &ReleaseCredential) -> bool {
     matches!(
         credential.channel.as_str(),
         "apt" | "aur" | "homebrew" | "scoop" | "chocolatey" | "flatpak" | "winget"
+    )
+}
+
+fn downstream_publisher_credential(credential: &ReleaseCredential) -> bool {
+    matches!(
+        credential.channel.as_str(),
+        "apt" | "aur" | "copr" | "homebrew" | "scoop" | "chocolatey" | "flatpak" | "winget"
     )
 }
 
@@ -1109,7 +1126,204 @@ fn push_stable_guard(w: &mut String, channel: &str) {
     .expect("write");
 }
 
-fn push_publish_apt(w: &mut String, apt: &ResolvedApt) {
+fn push_publisher_state_probe(w: &mut String, inputs: &ReleaseWorkflowInputs<'_>) {
+    w.push_str("      - name: Probe downstream publisher state\n");
+    w.push_str("        run: |\n          set -euo pipefail\n          . ./release-env\n");
+    w.push_str("          : > release-publisher-state.env\n");
+    w.push_str("          write_state() {\n");
+    w.push_str("            channel=\"$1\"; state=\"$2\"; detail=\"$3\"\n");
+    w.push_str("            var=\"PUBLISH_$(printf '%s' \"$channel\" | tr '[:lower:]-' '[:upper:]_')_STATE\"\n");
+    w.push_str(
+        "            printf '%s=%s\\n' \"$var\" \"$state\" >> release-publisher-state.env\n",
+    );
+    w.push_str("            printf '%-10s %s %s\\n' \"$channel\" \"$state\" \"$detail\"\n");
+    w.push_str("          }\n");
+    w.push_str("          public_git_url() {\n");
+    w.push_str("            case \"$1\" in\n");
+    w.push_str("              ssh://git@codeberg.org/*) path=\"${1#ssh://git@codeberg.org/}\"; printf 'https://codeberg.org/%s\\n' \"$path\" ;;\n");
+    w.push_str("              git@codeberg.org:*) path=\"${1#git@codeberg.org:}\"; printf 'https://codeberg.org/%s\\n' \"$path\" ;;\n");
+    w.push_str("              *) printf '%s\\n' \"$1\" ;;\n");
+    w.push_str("            esac\n");
+    w.push_str("          }\n");
+    w.push_str("          probe_git_file() {\n");
+    w.push_str("            repo=\"$1\"; ref=\"$2\"; path=\"$3\"\n");
+    w.push_str("            tmp=\"$(mktemp -d)\"\n");
+    w.push_str("            trap 'rm -rf \"$tmp\"' RETURN\n");
+    w.push_str("            git clone --depth 1 --branch \"$ref\" \"$(public_git_url \"$repo\")\" \"$tmp/repo\" >/dev/null 2>&1 && test -e \"$tmp/repo/$path\"\n");
+    w.push_str("          }\n");
+    w.push_str("          probe_git_tree() {\n");
+    w.push_str(
+        "            repo=\"$1\"; ref=\"$2\"; path_a=\"$3\"; path_b=\"$4\"; tmp=\"$(mktemp -d)\"\n",
+    );
+    w.push_str("            trap 'rm -rf \"$tmp\"' RETURN\n");
+    w.push_str("            git clone --depth 1 --branch \"$ref\" \"$(public_git_url \"$repo\")\" \"$tmp/repo\" >/dev/null 2>&1 && test -e \"$tmp/repo/$path_a\" && test -e \"$tmp/repo/$path_b\"\n");
+    w.push_str("          }\n");
+    w.push_str("          active_or_soft() {\n");
+    w.push_str("            channel=\"$1\"; detail=\"$2\"; shift 2\n");
+    w.push_str("            if \"$@\"; then write_state \"$channel\" active-required \"$detail\"; else write_state \"$channel\" inactive-soft \"$detail\"; fi\n");
+    w.push_str("          }\n");
+    w.push_str("          stable_or_state() {\n");
+    w.push_str("            channel=\"$1\"; detail=\"$2\"; shift 2\n");
+    w.push_str("            if [ \"$IS_PRERELEASE\" = \"true\" ]; then write_state \"$channel\" skipped-prerelease \"$detail\"; else active_or_soft \"$channel\" \"$detail\" \"$@\"; fi\n");
+    w.push_str("          }\n");
+    if let Some(apt) = inputs.apt {
+        writeln!(
+            w,
+            "          stable_or_state apt {} probe_git_tree {} {} dists pool",
+            shell_quote(&format!("{} {}", apt.repo_url, apt.branch)),
+            shell_quote(&apt.repo_url),
+            shell_quote(&apt.branch)
+        )
+        .expect("write");
+    } else {
+        w.push_str("          write_state apt not-configured '-'\n");
+    }
+    if let Some(aur) = inputs.aur {
+        let pkgs = aur_pkg_dirs(aur)
+            .into_iter()
+            .map(|pkg| format!("https://aur.archlinux.org/{pkg}.git"))
+            .collect::<Vec<_>>();
+        let checks = pkgs
+            .iter()
+            .map(|repo| {
+                format!(
+                    "git ls-remote --exit-code {} HEAD >/dev/null 2>&1",
+                    shell_quote(repo)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" && ");
+        if aur.stable_only {
+            writeln!(
+                w,
+                "          stable_or_state aur {} bash -c {}",
+                shell_quote(&aur.name),
+                shell_quote(&checks)
+            )
+            .expect("write");
+        } else {
+            writeln!(
+                w,
+                "          active_or_soft aur {} bash -c {}",
+                shell_quote(&aur.name),
+                shell_quote(&checks)
+            )
+            .expect("write");
+        }
+    } else {
+        w.push_str("          write_state aur not-configured '-'\n");
+    }
+    if let Some(copr) = inputs.copr {
+        let stable_project = copr.project.as_deref().unwrap_or("");
+        let testing_project = copr.testing_project.as_deref().unwrap_or(stable_project);
+        writeln!(
+            w,
+            "          COPR_PROBE_PROJECT={}",
+            shell_quote(stable_project)
+        )
+        .expect("write");
+        writeln!(
+            w,
+            "          if [ \"$IS_PRERELEASE\" = \"true\" ]; then COPR_PROBE_PROJECT={}; fi",
+            shell_quote(testing_project)
+        )
+        .expect("write");
+        w.push_str("          active_or_soft copr \"$COPR_PROBE_PROJECT\" curl -fsSL \"https://copr.fedorainfracloud.org/coprs/${COPR_PROBE_PROJECT}/\"\n");
+    } else {
+        w.push_str("          write_state copr not-configured '-'\n");
+    }
+    if let Some(chocolatey) = inputs.chocolatey {
+        let filter = format!(
+            "Id eq '{}' and IsLatestVersion",
+            chocolatey.id.replace('\'', "''")
+        );
+        writeln!(
+            w,
+            "          export CHOCO_FILTER=\"$(printf {} | jq -sRr @uri)\"",
+            shell_quote(&filter)
+        )
+        .expect("write");
+        writeln!(
+            w,
+            "          stable_or_state chocolatey {} bash -c 'curl -fsSL \"https://community.chocolatey.org/api/v2/Packages()?%24filter=${{CHOCO_FILTER}}\" | grep -q \"<entry>\"'",
+            shell_quote(&chocolatey.id)
+        )
+        .expect("write");
+    } else {
+        w.push_str("          write_state chocolatey not-configured '-'\n");
+    }
+    if let Some(homebrew) = inputs.homebrew {
+        writeln!(
+            w,
+            "          stable_or_state homebrew {} probe_git_file {} HEAD {}",
+            shell_quote(&homebrew.tap_url),
+            shell_quote(&homebrew.tap_url),
+            shell_quote(&format!("Formula/{}.rb", homebrew.name))
+        )
+        .expect("write");
+    } else {
+        w.push_str("          write_state homebrew not-configured '-'\n");
+    }
+    if let Some(scoop) = inputs.scoop {
+        writeln!(
+            w,
+            "          stable_or_state scoop {} probe_git_file {} HEAD {}",
+            shell_quote(&scoop.bucket_url),
+            shell_quote(&scoop.bucket_url),
+            shell_quote(&format!("bucket/{}.json", scoop.name))
+        )
+        .expect("write");
+    } else {
+        w.push_str("          write_state scoop not-configured '-'\n");
+    }
+    if let Some(flatpak) = inputs.flatpak {
+        writeln!(
+            w,
+            "          stable_or_state flathub {} curl -fsSL {}",
+            shell_quote(&flatpak.repo),
+            shell_quote(&format!("https://api.github.com/repos/{}", flatpak.repo))
+        )
+        .expect("write");
+    } else {
+        w.push_str("          write_state flathub not-configured '-'\n");
+    }
+    if let Some(winget) = inputs.winget {
+        writeln!(
+            w,
+            "          stable_or_state winget {} curl -fsSL {}",
+            shell_quote(&winget.package_id),
+            shell_quote(&format!(
+                "https://api.github.com/repos/microsoft/winget-pkgs/contents/{}",
+                winget_manifest_dir(&winget.package_id)
+            ))
+        )
+        .expect("write");
+    } else {
+        w.push_str("          write_state winget not-configured '-'\n");
+    }
+}
+
+fn push_publisher_state_source(w: &mut String) {
+    w.push_str("          if [ -f release-publisher-state.env ]; then . ./release-publisher-state.env; fi\n");
+}
+
+fn push_publisher_missing_helper(w: &mut String) {
+    w.push_str("          publisher_missing() {\n");
+    w.push_str("            channel=\"$1\"; message=\"$2\"\n");
+    w.push_str("            var=\"PUBLISH_$(printf '%s' \"$channel\" | tr '[:lower:]-' '[:upper:]_')_STATE\"\n");
+    w.push_str("            state=\"${!var:-inactive-soft}\"\n");
+    w.push_str("            if [ \"$state\" = active-required ]; then echo \"::error::${channel}: ${message}\" >&2; exit 1; fi\n");
+    w.push_str("            echo \"::warning::${channel}: ${message}; bootstrap channel is inactive, skipping.\" >&2\n");
+    w.push_str("            exit 0\n");
+    w.push_str("          }\n");
+}
+
+fn push_active_or_skip_prelude(w: &mut String) {
+    push_publisher_state_source(w);
+    push_publisher_missing_helper(w);
+}
+
+fn push_publish_apt(w: &mut String, apt: &ResolvedApt, activated_remote: bool) {
     w.push_str("      - name: Publish APT repository\n        env:\n");
     writeln!(
         w,
@@ -1140,8 +1354,14 @@ fn push_publish_apt(w: &mut String, apt: &ResolvedApt) {
     writeln!(w, "          APT_DISTRIBUTION: {}", apt.distribution).expect("write");
     w.push_str("        run: |\n          set -euo pipefail\n");
     push_stable_guard(w, "APT repository publish");
-    w.push_str("          if [ -z \"${APT_REPO_GPG_KEY:-}\" ] || [ -z \"${APT_REPO_GPG_KEY_ID:-}\" ] || [ -z \"${APT_REPO_SSH_KEY:-}\" ]; then echo '::warning::apt secrets unset; skipping.'; exit 0; fi\n");
-    w.push_str("          debs=(release/*.deb); if [ ! -e \"${debs[0]}\" ]; then echo '::warning::no .deb to publish'; exit 0; fi\n");
+    if activated_remote {
+        push_active_or_skip_prelude(w);
+        w.push_str("          if [ -z \"${APT_REPO_GPG_KEY:-}\" ] || [ -z \"${APT_REPO_GPG_KEY_ID:-}\" ] || [ -z \"${APT_REPO_SSH_KEY:-}\" ]; then publisher_missing apt 'apt secrets unset'; fi\n");
+        w.push_str("          debs=(release/*.deb); if [ ! -e \"${debs[0]}\" ]; then publisher_missing apt 'no .deb to publish'; fi\n");
+    } else {
+        w.push_str("          if [ -z \"${APT_REPO_GPG_KEY:-}\" ] || [ -z \"${APT_REPO_GPG_KEY_ID:-}\" ] || [ -z \"${APT_REPO_SSH_KEY:-}\" ]; then echo '::warning::apt secrets unset; skipping.'; exit 0; fi\n");
+        w.push_str("          debs=(release/*.deb); if [ ! -e \"${debs[0]}\" ]; then echo '::warning::no .deb to publish'; exit 0; fi\n");
+    }
     w.push_str("          nix shell nixpkgs#reprepro nixpkgs#gnupg nixpkgs#openssh nixpkgs#git -c bash <<'SCRIPT'\n");
     w.push_str(
         "          set -euo pipefail\n          work=\"$(mktemp -d)\"; chmod 700 \"$work\"\n",
@@ -1173,7 +1393,7 @@ fn push_publish_apt(w: &mut String, apt: &ResolvedApt) {
     w.push_str("          SCRIPT\n");
 }
 
-fn push_publish_aur(w: &mut String, aur: &ResolvedAur) {
+fn push_publish_aur(w: &mut String, aur: &ResolvedAur, activated_remote: bool) {
     w.push_str("      - name: Publish AUR packages\n        env:\n");
     writeln!(
         w,
@@ -1187,7 +1407,12 @@ fn push_publish_aur(w: &mut String, aur: &ResolvedAur) {
     } else {
         w.push_str("          . ./release-env\n");
     }
-    w.push_str("          test -n \"${AUR_SSH_KEY:-}\"\n");
+    if activated_remote {
+        push_active_or_skip_prelude(w);
+        w.push_str("          if [ -z \"${AUR_SSH_KEY:-}\" ]; then publisher_missing aur 'AUR_SSH_KEY unset'; fi\n");
+    } else {
+        w.push_str("          test -n \"${AUR_SSH_KEY:-}\"\n");
+    }
     w.push_str(
         "          nix shell nixpkgs#git nixpkgs#openssh nixpkgs#pacman -c bash <<'SCRIPT'\n",
     );
@@ -1248,7 +1473,7 @@ fn push_publish_aur(w: &mut String, aur: &ResolvedAur) {
     w.push_str("          SCRIPT\n");
 }
 
-fn push_publish_copr(w: &mut String, copr: &ResolvedCopr) {
+fn push_publish_copr(w: &mut String, copr: &ResolvedCopr, activated_remote: bool) {
     w.push_str("      - name: Push SRPM to COPR\n        env:\n");
     writeln!(
         w,
@@ -1273,7 +1498,13 @@ fn push_publish_copr(w: &mut String, copr: &ResolvedCopr) {
     let testing_project = copr.testing_project.as_deref().unwrap_or(stable_project);
     writeln!(w, "          COPR_PROJECT=\"{stable_project}\"").expect("write");
     writeln!(w, "          if [ \"$IS_PRERELEASE\" = \"true\" ]; then COPR_PROJECT=\"{testing_project}\"; fi").expect("write");
-    w.push_str("          if [ -z \"$COPR_LOGIN\" ] || [ -z \"$COPR_USERNAME\" ] || [ -z \"$COPR_TOKEN\" ]; then echo 'COPR credentials unset; skipping.'; exit 0; fi\n");
+    if activated_remote {
+        push_active_or_skip_prelude(w);
+        w.push_str("          if [ -z \"$COPR_LOGIN\" ] || [ -z \"$COPR_USERNAME\" ] || [ -z \"$COPR_TOKEN\" ]; then publisher_missing copr 'COPR credentials unset'; fi\n");
+        w.push_str("          srpms=(srpms/*.src.rpm); if [ ! -e \"${srpms[0]}\" ]; then publisher_missing copr 'no SRPM to publish'; fi\n");
+    } else {
+        w.push_str("          if [ -z \"$COPR_LOGIN\" ] || [ -z \"$COPR_USERNAME\" ] || [ -z \"$COPR_TOKEN\" ]; then echo 'COPR credentials unset; skipping.'; exit 0; fi\n");
+    }
     w.push_str("          mkdir -p ~/.config\n");
     w.push_str("          cat > ~/.config/copr <<EOF\n          [copr-cli]\n          login = ${COPR_LOGIN}\n          username = ${COPR_USERNAME}\n          token = ${COPR_TOKEN}\n          copr_url = https://copr.fedorainfracloud.org\n          EOF\n");
     w.push_str("          chmod 600 ~/.config/copr\n");
@@ -1285,7 +1516,7 @@ fn push_publish_copr(w: &mut String, copr: &ResolvedCopr) {
     .expect("write");
 }
 
-fn push_publish_homebrew(w: &mut String, homebrew: &ResolvedHomebrew) {
+fn push_publish_homebrew(w: &mut String, homebrew: &ResolvedHomebrew, activated_remote: bool) {
     w.push_str("      - name: Publish Homebrew tap\n        env:\n");
     writeln!(
         w,
@@ -1296,7 +1527,18 @@ fn push_publish_homebrew(w: &mut String, homebrew: &ResolvedHomebrew) {
     writeln!(w, "          HOMEBREW_TAP_URL: {}", homebrew.tap_url).expect("write");
     w.push_str("        run: |\n          set -euo pipefail\n");
     push_stable_guard(w, "Homebrew tap update");
-    w.push_str("          if [ -z \"${HOMEBREW_TAP_TOKEN:-}\" ]; then echo 'HOMEBREW_TAP_TOKEN unset; skipping.'; exit 0; fi\n");
+    if activated_remote {
+        push_active_or_skip_prelude(w);
+        w.push_str("          if [ -z \"${HOMEBREW_TAP_TOKEN:-}\" ]; then publisher_missing homebrew 'HOMEBREW_TAP_TOKEN unset'; fi\n");
+        for (_, arch, os, enabled) in homebrew_platform_keys(homebrew) {
+            if enabled {
+                let file = homebrew_archive(homebrew, arch, os);
+                writeln!(w, "          test -s release/{file} || publisher_missing homebrew 'missing release/{file}'").expect("write");
+            }
+        }
+    } else {
+        w.push_str("          if [ -z \"${HOMEBREW_TAP_TOKEN:-}\" ]; then echo 'HOMEBREW_TAP_TOKEN unset; skipping.'; exit 0; fi\n");
+    }
     w.push_str("          credential_helper='!f() { echo username=x-access-token; echo \"password=$HOMEBREW_TAP_TOKEN\"; }; f'\n");
     w.push_str("          rm -rf tap; git -c credential.helper=\"$credential_helper\" clone \"$HOMEBREW_TAP_URL\" tap\n");
     w.push_str("          cd tap; git config credential.helper \"$credential_helper\"; git config user.email 'ci@localhost'; git config user.name 'release bot'\n");
@@ -1338,7 +1580,7 @@ fn push_publish_homebrew(w: &mut String, homebrew: &ResolvedHomebrew) {
     writeln!(w, "          git add Formula/{}.rb; git commit -m \"{} ${{VERSION}}\"; git push origin \"HEAD:${{DEFAULT_BRANCH}}\"", homebrew.name, homebrew.name).expect("write");
 }
 
-fn push_publish_scoop(w: &mut String, scoop: &ResolvedScoop) {
+fn push_publish_scoop(w: &mut String, scoop: &ResolvedScoop, activated_remote: bool) {
     w.push_str("      - name: Publish Scoop bucket\n        env:\n");
     writeln!(
         w,
@@ -1349,9 +1591,18 @@ fn push_publish_scoop(w: &mut String, scoop: &ResolvedScoop) {
     writeln!(w, "          SCOOP_BUCKET_URL: {}", scoop.bucket_url).expect("write");
     w.push_str("        run: |\n          set -euo pipefail\n");
     push_stable_guard(w, "Scoop bucket update");
-    w.push_str("          if [ -z \"${SCOOP_BUCKET_TOKEN:-}\" ]; then echo 'SCOOP_BUCKET_TOKEN unset; skipping.'; exit 0; fi\n");
+    if activated_remote {
+        push_active_or_skip_prelude(w);
+        w.push_str("          if [ -z \"${SCOOP_BUCKET_TOKEN:-}\" ]; then publisher_missing scoop 'SCOOP_BUCKET_TOKEN unset'; fi\n");
+    } else {
+        w.push_str("          if [ -z \"${SCOOP_BUCKET_TOKEN:-}\" ]; then echo 'SCOOP_BUCKET_TOKEN unset; skipping.'; exit 0; fi\n");
+    }
     let zip = scoop_windows_zip(scoop);
-    writeln!(w, "          ZIP_NAME=\"{zip}\"; test -s \"release/${{ZIP_NAME}}\"; test -s dist/scoop/{}.json", scoop.name).expect("write");
+    if activated_remote {
+        writeln!(w, "          ZIP_NAME=\"{zip}\"; test -s \"release/${{ZIP_NAME}}\" || publisher_missing scoop \"missing release/${{ZIP_NAME}}\"; test -s dist/scoop/{}.json || publisher_missing scoop 'missing dist/scoop/{}.json'", scoop.name, scoop.name).expect("write");
+    } else {
+        writeln!(w, "          ZIP_NAME=\"{zip}\"; test -s \"release/${{ZIP_NAME}}\"; test -s dist/scoop/{}.json", scoop.name).expect("write");
+    }
     w.push_str("          SHA256=\"$(awk -v a=\"$ZIP_NAME\" '$2 == a { print $1 }' release/SHA256SUMS.txt)\"; test -n \"$SHA256\"\n");
     w.push_str("          credential_helper='!f() { echo username=x-access-token; echo \"password=$SCOOP_BUCKET_TOKEN\"; }; f'\n");
     w.push_str("          rm -rf scoop-bucket; git -c credential.helper=\"$credential_helper\" clone \"$SCOOP_BUCKET_URL\" scoop-bucket\n");
@@ -1524,7 +1775,7 @@ fn push_announce(
     w.push_str("          else echo 'Matrix secrets unset; skipping.'; fi\n          SCRIPT\n");
 }
 
-fn push_publish_flathub(w: &mut String, flatpak: &FlatpakConfig) {
+fn push_publish_flathub(w: &mut String, flatpak: &FlatpakConfig, activated_remote: bool) {
     w.push_str("      - name: Publish Flathub update PR\n        env:\n");
     writeln!(
         w,
@@ -1534,9 +1785,18 @@ fn push_publish_flathub(w: &mut String, flatpak: &FlatpakConfig) {
     .expect("write");
     w.push_str("        run: |\n          set -euo pipefail\n");
     push_stable_guard(w, "Flathub update");
-    w.push_str("          if [ -z \"${FLATHUB_TOKEN:-}\" ]; then echo 'FLATHUB_TOKEN unset; skipping.'; exit 0; fi\n");
+    if activated_remote {
+        push_active_or_skip_prelude(w);
+        w.push_str("          if [ -z \"${FLATHUB_TOKEN:-}\" ]; then publisher_missing flathub 'FLATHUB_TOKEN unset'; fi\n");
+    } else {
+        w.push_str("          if [ -z \"${FLATHUB_TOKEN:-}\" ]; then echo 'FLATHUB_TOKEN unset; skipping.'; exit 0; fi\n");
+    }
     for file in &flatpak.manifest_files {
-        writeln!(w, "          test -s release/{file}").expect("write");
+        if activated_remote {
+            writeln!(w, "          test -s release/{file} || publisher_missing flathub 'missing release/{file}'").expect("write");
+        } else {
+            writeln!(w, "          test -s release/{file}").expect("write");
+        }
     }
     w.push_str("          nix shell nixpkgs#curl nixpkgs#git nixpkgs#jq -c bash <<'SCRIPT'\n");
     w.push_str("          set -euo pipefail\n          . ./release-env\n");
@@ -1565,7 +1825,7 @@ fn push_publish_flathub(w: &mut String, flatpak: &FlatpakConfig) {
     w.push_str("          jq -r '.html_url' pr.json\n          SCRIPT\n");
 }
 
-fn push_publish_winget(w: &mut String, winget: &WingetConfig) {
+fn push_publish_winget(w: &mut String, winget: &WingetConfig, activated_remote: bool) {
     let zip = winget.zip_archive.replace("{version}", "${VERSION}");
     w.push_str("      - name: Publish winget manifest PR\n        env:\n");
     writeln!(
@@ -1576,9 +1836,18 @@ fn push_publish_winget(w: &mut String, winget: &WingetConfig) {
     .expect("write");
     w.push_str("        run: |\n          set -euo pipefail\n");
     push_stable_guard(w, "winget manifest update");
-    w.push_str("          if [ -z \"${WINGET_PAT:-}\" ]; then echo 'WINGET_PAT unset; skipping.'; exit 0; fi\n");
+    if activated_remote {
+        push_active_or_skip_prelude(w);
+        w.push_str("          if [ -z \"${WINGET_PAT:-}\" ]; then publisher_missing winget 'WINGET_PAT unset'; fi\n");
+    } else {
+        w.push_str("          if [ -z \"${WINGET_PAT:-}\" ]; then echo 'WINGET_PAT unset; skipping.'; exit 0; fi\n");
+    }
     writeln!(w, "          ZIP_NAME=\"{zip}\"; ZIP_URL=\"https://codeberg.org/{}/releases/download/${{VERSION}}/${{ZIP_NAME}}\"", winget.download_repo).expect("write");
-    w.push_str("          test -s \"release/${ZIP_NAME}\"\n");
+    if activated_remote {
+        w.push_str("          test -s \"release/${ZIP_NAME}\" || publisher_missing winget \"missing release/${ZIP_NAME}\"\n");
+    } else {
+        w.push_str("          test -s \"release/${ZIP_NAME}\"\n");
+    }
     w.push_str("          export ZIP_URL VERSION WINGET_PAT\n");
     w.push_str("          nix shell nixpkgs#curl nixpkgs#jq nixpkgs#unzip nixpkgs#wineWow64Packages.stable nixpkgs#util-linux -c bash <<'SCRIPT'\n");
     w.push_str("          set -euo pipefail\n          tmpdir=\"$(mktemp -d)\"; trap 'rm -rf \"$tmpdir\"' EXIT\n");
@@ -1592,7 +1861,11 @@ fn push_publish_winget(w: &mut String, winget: &WingetConfig) {
     w.push_str("          SCRIPT\n");
 }
 
-fn push_publish_chocolatey(w: &mut String, chocolatey: &ResolvedChocolatey) {
+fn push_publish_chocolatey(
+    w: &mut String,
+    chocolatey: &ResolvedChocolatey,
+    activated_remote: bool,
+) {
     let zip = chocolatey
         .archive_pattern
         .replace("{name}", &chocolatey.name)
@@ -1613,11 +1886,20 @@ fn push_publish_chocolatey(w: &mut String, chocolatey: &ResolvedChocolatey) {
     writeln!(w, "          CHOCO_PUSH_SOURCE: {}", chocolatey.push.source).expect("write");
     w.push_str("        run: |\n          set -euo pipefail\n");
     push_stable_guard(w, "Chocolatey package update");
-    writeln!(w, "          if [ -z \"${{{key_env}:-}}\" ]; then echo '{key_env} unset; skipping.'; exit 0; fi").expect("write");
+    if activated_remote {
+        push_active_or_skip_prelude(w);
+        writeln!(w, "          if [ -z \"${{{key_env}:-}}\" ]; then publisher_missing chocolatey '{key_env} unset'; fi").expect("write");
+    } else {
+        writeln!(w, "          if [ -z \"${{{key_env}:-}}\" ]; then echo '{key_env} unset; skipping.'; exit 0; fi").expect("write");
+    }
     // `nix_tool` provides choco (+ simit). Point it at a fork that ships the
     // chocolatey package until it lands upstream; the soft-skip above keeps tags
     // green in the meantime.
-    writeln!(w, "          ZIP=\"release/{zip}\"; test -s \"$ZIP\"").expect("write");
+    if activated_remote {
+        writeln!(w, "          ZIP=\"release/{zip}\"; test -s \"$ZIP\" || publisher_missing chocolatey \"missing $ZIP\"").expect("write");
+    } else {
+        writeln!(w, "          ZIP=\"release/{zip}\"; test -s \"$ZIP\"").expect("write");
+    }
     writeln!(
         w,
         "          nix shell {} -c simit dist chocolatey bump \\",
@@ -1721,6 +2003,21 @@ fn scoop_windows_zip(scoop: &ResolvedScoop) -> String {
         .replace("{name}", &scoop.name)
         .replace("{version}", "${VERSION}")
         .replace("{arch}", "x86_64")
+}
+
+fn winget_manifest_dir(package_id: &str) -> String {
+    let mut parts = package_id.split('.').collect::<Vec<_>>();
+    if parts.is_empty() {
+        return "manifests".to_owned();
+    }
+    let first = parts[0]
+        .chars()
+        .next()
+        .map(|ch| ch.to_ascii_lowercase())
+        .unwrap_or('x');
+    let mut segments = vec!["manifests".to_owned(), first.to_string()];
+    segments.extend(parts.drain(..).map(str::to_owned));
+    segments.join("/")
 }
 
 fn shell_quote(value: &str) -> String {
@@ -1935,6 +2232,7 @@ mod tests {
         let workflow = render(&ReleaseWorkflowInputs {
             runner: "atlas",
             preinstalled_nix: false,
+            publish_enforcement: ReleasePublisherEnforcement::Declared,
             artifacts: &artifacts,
             smoke_command: Some("nix run .#release-smoke --"),
             codeberg: Some(&codeberg),
@@ -2082,12 +2380,64 @@ mod tests {
     }
 
     #[test]
+    fn activated_remote_policy_probes_and_hardens_active_publishers() {
+        let (aur, copr, apt, codeberg, homebrew, scoop) =
+            (aur(), copr(), apt(), codeberg(), homebrew(), scoop());
+        let (chocolatey, flatpak, winget) = (chocolatey(), flatpak(), winget());
+        let artifacts = artifacts();
+        let workflow = render(&ReleaseWorkflowInputs {
+            runner: "atlas",
+            preinstalled_nix: false,
+            publish_enforcement: ReleasePublisherEnforcement::ActivatedRemote,
+            artifacts: &artifacts,
+            smoke_command: None,
+            codeberg: Some(&codeberg),
+            attic: None,
+            aur: Some(&aur),
+            copr: Some(&copr),
+            apt: Some(&apt),
+            homebrew: Some(&homebrew),
+            scoop: Some(&scoop),
+            chocolatey: Some(&chocolatey),
+            windows_signing: None,
+            flatpak: Some(&flatpak),
+            winget: Some(&winget),
+            announce: None,
+        });
+
+        assert!(workflow.contains("      - name: Probe downstream publisher state\n"));
+        assert!(workflow.contains(": > release-publisher-state.env"));
+        assert!(workflow.contains("write_state \"$channel\" active-required \"$detail\""));
+        assert!(workflow.contains("write_state \"$channel\" inactive-soft \"$detail\""));
+        assert!(workflow.contains("write_state \"$channel\" skipped-prerelease \"$detail\""));
+        assert!(workflow.contains("stable_or_state apt"));
+        assert!(workflow.contains("active_or_soft copr \"$COPR_PROBE_PROJECT\""));
+        assert!(workflow.contains("stable_or_state chocolatey"));
+        assert!(workflow.contains("stable_or_state homebrew"));
+        assert!(workflow.contains("stable_or_state scoop"));
+        assert!(workflow.contains("stable_or_state flathub"));
+        assert!(workflow.contains("manifests/c/Caniko/Modde"));
+        assert!(workflow.contains("publisher_missing apt 'apt secrets unset'"));
+        assert!(workflow.contains("publisher_missing aur 'AUR_SSH_KEY unset'"));
+        assert!(workflow.contains("publisher_missing copr 'COPR credentials unset'"));
+        assert!(workflow.contains("publisher_missing chocolatey 'CHOCOLATEY_API_KEY unset'"));
+        assert!(workflow.contains("publisher_missing homebrew 'HOMEBREW_TAP_TOKEN unset'"));
+        assert!(workflow.contains("publisher_missing scoop 'SCOOP_BUCKET_TOKEN unset'"));
+        assert!(workflow.contains("publisher_missing flathub 'FLATHUB_TOKEN unset'"));
+        assert!(workflow.contains("publisher_missing winget 'WINGET_PAT unset'"));
+        assert!(!workflow.contains("require_credential 'repo secret' 'modde_apt_repo_gpg_key'"));
+        assert!(!workflow.contains("require_credential 'global/user secret' 'AUR_SSH_KEY'"));
+        assert!(!workflow.contains("require_credential 'global/user secret' 'copr_login'"));
+    }
+
+    #[test]
     fn checksum_step_handles_empty_globs() {
         let mut artifacts = artifacts();
         artifacts.checksum_globs = vec![];
         let workflow = render(&ReleaseWorkflowInputs {
             runner: "atlas",
             preinstalled_nix: false,
+            publish_enforcement: ReleasePublisherEnforcement::Declared,
             artifacts: &artifacts,
             smoke_command: None,
             codeberg: None,
@@ -2119,6 +2469,7 @@ mod tests {
         let workflow = render(&ReleaseWorkflowInputs {
             runner: "atlas",
             preinstalled_nix: false,
+            publish_enforcement: ReleasePublisherEnforcement::Declared,
             artifacts: &artifacts,
             smoke_command: Some("nix run .#release-smoke --"),
             codeberg: Some(&codeberg),

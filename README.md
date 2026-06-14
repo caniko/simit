@@ -1,7 +1,7 @@
 # simit
 
 <!-- simit:badges:start -->
-[![CI](https://img.shields.io/badge/CI-managed+extra-2088ff)](.forgejo/workflows/ci.yaml) [![Nix](https://img.shields.io/badge/Nix-managed-5277c3)](flake.nix) [![docs](https://img.shields.io/badge/docs-enabled-6f42c1)](docs) [![crates.io](https://img.shields.io/badge/crates.io-ready-f46623)](https://crates.io/crates/simit)
+[![CI](https://img.shields.io/badge/CI-drift-2088ff)](.forgejo/workflows/ci.yaml) [![Nix](https://img.shields.io/badge/Nix-managed-5277c3)](flake.nix) [![docs](https://img.shields.io/badge/docs-enabled-6f42c1)](docs) [![crates.io](https://img.shields.io/badge/crates.io-ready-f46623)](https://crates.io/crates/simit)
 <!-- simit:badges:end -->
 
 `simit` is a semver-aware commit helper for Rust projects.
@@ -182,6 +182,26 @@ pull-request events:
 
 ```sh
 simit init ci --platform forgejo --runtime nix
+```
+
+Projects that expose a generated `.#site` and `.#deploy-pages` app, such as
+`plinth-project` Codeberg Pages sites, can opt into the repository-local Pages
+deployment hook:
+
+```sh
+simit init ci --platform forgejo --runtime nix \
+  --with-codeberg-pages --pages-repo caniko/my-project
+```
+
+This writes `.forgejo/workflows/pages.yaml`, reads
+`secrets.codeberg_token`, configures the `forgejo-actions` git identity, adds an
+authenticated `pages-origin` remote for the same Codeberg repository, and runs
+`DEPLOY_REMOTE=pages-origin nix run .#deploy-pages`. The same settings can live
+in project config:
+
+```toml
+[ci.pages]
+repo = "caniko/my-project"
 ```
 
 ### Omnix CI (`--with-om-ci`)

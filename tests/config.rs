@@ -205,6 +205,7 @@ fn flake_and_ci_config_load() {
         r#"[flake]
 scope = "full"
 mode = "custom"
+backend = "py-harbor"
 toolchain_binding = "toolchain.rustToolchain"
 crane_lib_binding = "craneLib"
 package_binding = "package"
@@ -214,6 +215,8 @@ pre_commit_shell_hook = true
 
 [flake.expected_outputs]
 packages = ["default", "docs", "site"]
+apps = ["default"]
+dev_shells = ["default", "docs"]
 checks = ["default", "formatting", "hm-module"]
 top_level = ["hmModules"]
 
@@ -221,12 +224,16 @@ top_level = ["hmModules"]
 extra_setup = ["apt-get update && apt-get install -y --no-install-recommends postgresql-client"]
 extra_env = { SKILLNET_TEST_PG_URL = "${{ secrets.SKILLNET_TEST_PG_URL }}" }
 required_secrets = ["CRATES_IO_API_TOKEN"]
+
+[ci.pages]
+repo = "caniko/plinth"
 "#,
     )
     .unwrap();
 
     assert_eq!(cfg.flake.scope, Some(FlakeScope::Full));
     assert_eq!(cfg.flake.mode, FlakeMode::Custom);
+    assert_eq!(cfg.flake.backend, simit::config::FlakeBackend::PyHarbor);
     assert_eq!(cfg.flake.toolchain_binding, "toolchain.rustToolchain");
     assert_eq!(
         cfg.flake.expected_outputs.packages,
@@ -236,6 +243,8 @@ required_secrets = ["CRATES_IO_API_TOKEN"]
         cfg.flake.expected_outputs.checks,
         ["default", "formatting", "hm-module"]
     );
+    assert_eq!(cfg.flake.expected_outputs.apps, ["default"]);
+    assert_eq!(cfg.flake.expected_outputs.dev_shells, ["default", "docs"]);
     assert_eq!(cfg.flake.expected_outputs.top_level, ["hmModules"]);
     assert_eq!(cfg.ci.extra_setup.len(), 1);
     assert_eq!(
@@ -246,12 +255,18 @@ required_secrets = ["CRATES_IO_API_TOKEN"]
         Some("${{ secrets.SKILLNET_TEST_PG_URL }}")
     );
     assert_eq!(cfg.ci.required_secrets, ["CRATES_IO_API_TOKEN"]);
+    let pages = cfg.resolve_codeberg_pages().unwrap().unwrap();
+    assert_eq!(pages.repo, "caniko/plinth");
+    assert_eq!(pages.owner, "caniko");
+    assert_eq!(pages.token_secret, "codeberg_token");
+    assert_eq!(pages.source_branch, "trunk");
+    assert_eq!(pages.deploy_app, ".#deploy-pages");
 }
 
 #[test]
 fn flake_and_ci_config_load_from_flake_output() {
     with_fake_nix(
-        r#"{"flake":{"scope":"hooks-only","mode":"custom","toolchain_binding":"toolchain.rustToolchain","expected_outputs":{"checks":["hm-module"],"top_level":["hmModules"]}},"ci":{"extra_setup":["echo setup"],"extra_env":{"PG_URL":"${{ secrets.PG_URL }}"}}}"#,
+        r#"{"flake":{"scope":"hooks-only","mode":"custom","backend":"py-harbor","toolchain_binding":"toolchain.rustToolchain","expected_outputs":{"apps":["default"],"dev_shells":["default"],"checks":["hm-module"],"top_level":["hmModules"]}},"ci":{"extra_setup":["echo setup"],"extra_env":{"PG_URL":"${{ secrets.PG_URL }}"}}}"#,
         |temp| {
             fs::write(
                 temp.path().join("flake.nix"),
@@ -262,7 +277,10 @@ fn flake_and_ci_config_load_from_flake_output() {
             let cfg = ProjectConfig::load(temp.path()).unwrap();
             assert_eq!(cfg.flake.scope, Some(FlakeScope::HooksOnly));
             assert_eq!(cfg.flake.mode, FlakeMode::Custom);
+            assert_eq!(cfg.flake.backend, simit::config::FlakeBackend::PyHarbor);
             assert_eq!(cfg.flake.toolchain_binding, "toolchain.rustToolchain");
+            assert_eq!(cfg.flake.expected_outputs.apps, ["default"]);
+            assert_eq!(cfg.flake.expected_outputs.dev_shells, ["default"]);
             assert_eq!(cfg.flake.expected_outputs.checks, ["hm-module"]);
             assert_eq!(cfg.flake.expected_outputs.top_level, ["hmModules"]);
             assert_eq!(cfg.ci.extra_setup, ["echo setup"]);

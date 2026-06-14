@@ -60,6 +60,7 @@ pub fn run(command: InitReleaseCommand) -> Result<()> {
     let inputs = ReleaseWorkflowInputs {
         runner: &runner,
         preinstalled_nix,
+        publish_enforcement: cfg.release.publish.enforcement,
         artifacts: &cfg.release.artifacts,
         smoke_command: cfg.release.smoke.command.as_deref(),
         codeberg: codeberg.as_ref(),

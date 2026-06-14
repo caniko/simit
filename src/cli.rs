@@ -540,6 +540,39 @@ pub struct InitCiCommand {
         help = "Validate Scoop bucket publishing configuration"
     )]
     pub with_scoop: bool,
+    #[arg(
+        long = "with-codeberg-pages",
+        help = "Generate a Forgejo workflow that publishes .#site with .#deploy-pages"
+    )]
+    pub with_codeberg_pages: bool,
+    #[arg(
+        long = "pages-repo",
+        value_name = "OWNER/REPO",
+        requires = "with_codeberg_pages",
+        help = "Codeberg repository receiving the generated pages branch"
+    )]
+    pub pages_repo: Option<String>,
+    #[arg(
+        long = "pages-token-secret",
+        value_name = "SECRET",
+        requires = "with_codeberg_pages",
+        help = "Actions secret exposed as CODEBERG_TOKEN for Pages deployment"
+    )]
+    pub pages_token_secret: Option<String>,
+    #[arg(
+        long = "pages-source-branch",
+        value_name = "BRANCH",
+        requires = "with_codeberg_pages",
+        help = "Branch whose pushes publish Codeberg Pages"
+    )]
+    pub pages_source_branch: Option<String>,
+    #[arg(
+        long = "pages-deploy-app",
+        value_name = "INSTALLABLE",
+        requires = "with_codeberg_pages",
+        help = "Nix app used to build and push the generated Pages branch"
+    )]
+    pub pages_deploy_app: Option<String>,
     #[command(flatten)]
     pub homebrew: HomebrewOverridesArgs,
     #[command(flatten)]

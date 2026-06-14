@@ -104,6 +104,8 @@ pub struct FlakeConfig {
     pub scope: Option<FlakeScope>,
     #[serde(default)]
     pub mode: FlakeMode,
+    #[serde(default)]
+    pub backend: FlakeBackend,
     #[serde(default = "default_toolchain_binding")]
     pub toolchain_binding: String,
     #[serde(default = "default_crane_lib_binding")]
@@ -135,11 +137,23 @@ pub enum FlakeMode {
     Custom,
 }
 
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum FlakeBackend {
+    #[default]
+    RustCrane,
+    PyHarbor,
+}
+
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct FlakeExpectedOutputs {
     #[serde(default)]
     pub packages: Vec<String>,
+    #[serde(default)]
+    pub apps: Vec<String>,
+    #[serde(default)]
+    pub dev_shells: Vec<String>,
     #[serde(default)]
     pub checks: Vec<String>,
     #[serde(default)]
@@ -151,6 +165,7 @@ impl Default for FlakeConfig {
         Self {
             scope: None,
             mode: FlakeMode::Canonical,
+            backend: FlakeBackend::RustCrane,
             toolchain_binding: default_toolchain_binding(),
             crane_lib_binding: default_crane_lib_binding(),
             package_binding: default_package_binding(),
@@ -211,6 +226,25 @@ pub struct CiConfig {
     pub om_ci_augment: bool,
     #[serde(default)]
     pub omnix_ref: Option<String>,
+    #[serde(default)]
+    pub pages: Option<CodebergPagesConfig>,
+}
+
+/// `[ci.pages]` — Codeberg Pages publication through a repository-local deploy app.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CodebergPagesConfig {
+    /// Codeberg `<owner>/<repo>` receiving the generated `pages` branch.
+    pub repo: String,
+    /// CI secret exposed as `CODEBERG_TOKEN` for authenticated branch pushes.
+    #[serde(default = "default_codeberg_token_secret")]
+    pub token_secret: String,
+    /// Source branch that triggers the Pages deployment workflow.
+    #[serde(default = "default_pages_source_branch")]
+    pub source_branch: String,
+    /// Nix app that builds and pushes the generated site.
+    #[serde(default = "default_pages_deploy_app")]
+    pub deploy_app: String,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
@@ -218,6 +252,8 @@ pub struct CiConfig {
 pub struct ReleaseConfig {
     #[serde(default)]
     pub signing: ReleaseSigningConfig,
+    #[serde(default)]
+    pub publish: ReleasePublishConfig,
     #[serde(default)]
     pub smoke: ReleaseSmokeConfig,
     /// Codeberg/Forgejo release publication via the REST API.
@@ -235,6 +271,28 @@ pub struct ReleaseConfig {
     /// Optional Windows Authenticode signing of release `.exe`s.
     #[serde(default)]
     pub windows_signing: Option<WindowsSigningConfig>,
+}
+
+/// `[release.publish]` — downstream publisher failure policy.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ReleasePublishConfig {
+    /// How generated CI decides whether downstream publishers are hard-required.
+    #[serde(default)]
+    pub enforcement: ReleasePublisherEnforcement,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ReleasePublisherEnforcement {
+    /// Preserve the historical behavior: credentials marked required by the
+    /// generated contract fail preflight; optional publishers may skip.
+    #[default]
+    Declared,
+    /// Probe public package destinations. Missing credentials/artifacts are
+    /// soft until the channel has evidence of a previous successful publish,
+    /// then become hard failures.
+    ActivatedRemote,
 }
 
 /// `[release.announce]` — post a stable-release note to Mastodon and/or Matrix.
@@ -406,6 +464,15 @@ pub struct ResolvedCodebergRelease {
     pub token_secret: String,
     pub target_branch: String,
     pub body_from_changelog: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedCodebergPages {
+    pub repo: String,
+    pub owner: String,
+    pub token_secret: String,
+    pub source_branch: String,
+    pub deploy_app: String,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -719,6 +786,14 @@ fn default_codeberg_token_secret() -> String {
     "codeberg_token".to_owned()
 }
 
+fn default_pages_source_branch() -> String {
+    "trunk".to_owned()
+}
+
+fn default_pages_deploy_app() -> String {
+    ".#deploy-pages".to_owned()
+}
+
 fn default_copr_spec_path() -> Option<String> {
     None
 }
@@ -932,16 +1007,20 @@ pub struct AptConfig {
     /// reprepro components line; defaults to `main`.
     #[serde(default = "default_apt_components")]
     pub components: String,
-    /// Debian release used for the debootstrap build chroot.
+    /// Debian release used by legacy downstream configuration.
+    ///
+    /// Generated release flows build Debian packages through the project
+    /// devshell and `cargo-deb`; they do not require debootstrap or sudo.
     #[serde(default = "default_apt_debian_release")]
     pub debian_release: String,
     /// Cargo packages built with `cargo deb -p <pkg>`.
     #[serde(default)]
     pub packages: Vec<String>,
-    /// Debian build-chroot apt packages installed before `cargo deb`.
+    /// Legacy Debian build dependencies retained for configuration
+    /// compatibility. Generated local release flows do not create a chroot.
     #[serde(default)]
     pub build_deps: Vec<String>,
-    /// `cargo-deb` version installed in the build chroot.
+    /// `cargo-deb` version expected by legacy downstream configuration.
     #[serde(default = "default_cargo_deb_version")]
     pub cargo_deb_version: String,
     #[serde(default = "default_apt_gpg_key_secret")]
@@ -1199,6 +1278,14 @@ impl ProjectConfig {
             &self.flake.expected_outputs.packages,
         )?;
         validate_nonempty_strings(
+            "simit project config: [flake.expected_outputs].apps",
+            &self.flake.expected_outputs.apps,
+        )?;
+        validate_nonempty_strings(
+            "simit project config: [flake.expected_outputs].dev_shells",
+            &self.flake.expected_outputs.dev_shells,
+        )?;
+        validate_nonempty_strings(
             "simit project config: [flake.expected_outputs].checks",
             &self.flake.expected_outputs.checks,
         )?;
@@ -1214,6 +1301,21 @@ impl ProjectConfig {
             "simit project config: [ci].extra_setup",
             &self.ci.extra_setup,
         )?;
+        if let Some(pages) = &self.ci.pages {
+            validate_owner_repo("simit project config: [ci.pages].repo", &pages.repo)?;
+            validate_nonempty_string(
+                "simit project config: [ci.pages].token_secret",
+                &pages.token_secret,
+            )?;
+            validate_nonempty_string(
+                "simit project config: [ci.pages].source_branch",
+                &pages.source_branch,
+            )?;
+            validate_nonempty_string(
+                "simit project config: [ci.pages].deploy_app",
+                &pages.deploy_app,
+            )?;
+        }
         for (key, value) in &self.ci.extra_env {
             if key.trim().is_empty() {
                 bail!("simit project config: [ci].extra_env keys must not be empty");
@@ -1957,6 +2059,27 @@ impl ProjectConfig {
         }))
     }
 
+    /// Resolve the `[ci.pages]` section, if present.
+    pub fn resolve_codeberg_pages(&self) -> Result<Option<ResolvedCodebergPages>> {
+        let Some(pages) = &self.ci.pages else {
+            return Ok(None);
+        };
+        validate_owner_repo("simit project config: [ci.pages].repo", &pages.repo)?;
+        let owner = pages
+            .repo
+            .split_once('/')
+            .expect("validated owner/repo")
+            .0
+            .to_owned();
+        Ok(Some(ResolvedCodebergPages {
+            repo: pages.repo.clone(),
+            owner,
+            token_secret: pages.token_secret.clone(),
+            source_branch: pages.source_branch.clone(),
+            deploy_app: pages.deploy_app.clone(),
+        }))
+    }
+
     fn is_empty(&self) -> bool {
         self == &Self::default()
     }
@@ -2027,6 +2150,13 @@ fn validate_nonempty_strings(name: &str, values: &[String]) -> Result<()> {
     Ok(())
 }
 
+fn validate_nonempty_string(name: &str, value: &str) -> Result<()> {
+    if value.trim().is_empty() {
+        bail!("{name} must not be empty");
+    }
+    Ok(())
+}
+
 fn validate_runner_label_opt(name: &str, value: Option<&str>) -> Result<()> {
     if let Some(value) = value {
         validate_runner_label(value).map_err(|err| anyhow!("{name}: {err}"))?;
@@ -2052,6 +2182,28 @@ fn set_ci_table(table: &mut Table, ci: &CiConfig) {
     set_bool(table, "om_ci", ci.om_ci);
     set_bool(table, "om_ci_augment", ci.om_ci_augment);
     set_optional_string(table, "omnix_ref", ci.omnix_ref.as_deref());
+    set_optional_pages_table(table, ci.pages.as_ref());
+}
+
+fn set_optional_pages_table(table: &mut Table, pages: Option<&CodebergPagesConfig>) {
+    let Some(pages) = pages else {
+        table.remove("pages");
+        return;
+    };
+
+    let mut pages_table = Table::new();
+    pages_table.set_implicit(false);
+    pages_table["repo"] = value(pages.repo.as_str());
+    if pages.token_secret != default_codeberg_token_secret() {
+        pages_table["token_secret"] = value(pages.token_secret.as_str());
+    }
+    if pages.source_branch != default_pages_source_branch() {
+        pages_table["source_branch"] = value(pages.source_branch.as_str());
+    }
+    if pages.deploy_app != default_pages_deploy_app() {
+        pages_table["deploy_app"] = value(pages.deploy_app.as_str());
+    }
+    table["pages"] = Item::Table(pages_table);
 }
 
 fn set_optional_string(table: &mut Table, key: &str, value_text: Option<&str>) {

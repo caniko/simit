@@ -9,25 +9,36 @@ use crate::cargo;
 use crate::ci_resolution::{CiCliOverrides, CiInference, ResolvedCiInputs, WorkflowSnapshot};
 use crate::cli::{
     ChocolateyOverridesArgs, HomebrewOverridesArgs, InitCiCommand, Platform, Runtime,
-    ScoopOverridesArgs,
+    RuntimeChoice, ScoopOverridesArgs,
 };
 use crate::commands::upgrade;
-use crate::config::{ProjectConfig, ResolvedChocolatey, ResolvedHomebrew, ResolvedScoop};
+use crate::config::{
+    CodebergPagesConfig, ProjectConfig, ResolvedChocolatey, ResolvedCodebergPages,
+    ResolvedHomebrew, ResolvedScoop,
+};
 use crate::project;
+use crate::python;
 use crate::registry::{self, FeatureStatus};
 use crate::release_trust::{self, TrustOverrides};
 use crate::render::ci::{
-    self, ChocolateyOptions, CiOptions, HomebrewOptions, HomebrewPlatformSet, OMNIX_REF_DEFAULT,
-    OmCiMode, ScoopOptions, SelfCheckOptions,
+    self, ChocolateyOptions, CiOptions, CodebergPagesOptions, HomebrewOptions, HomebrewPlatformSet,
+    OMNIX_REF_DEFAULT, OmCiMode, ScoopOptions, SelfCheckOptions,
 };
 use crate::user_config::{ResolvedRunner, UserConfig, validate_runner_label};
 
 pub fn run(command: InitCiCommand) -> Result<()> {
+    if cargo::find_manifest(&std::env::current_dir().context("reading current directory")?).is_err()
+        && python::project_for_current_dir().is_ok()
+    {
+        return run_python(command);
+    }
+
     let metadata = cargo::metadata_for_current_dir()?;
     let workspace_root = metadata.workspace_root.as_std_path();
     let cfg = ProjectConfig::load(workspace_root)?;
     let workflow_snapshots = workflow_snapshots_for_platform(workspace_root, command.platform)?;
     let inference = CiInference::from_workflows(&workflow_snapshots)?;
+    let inferred_pages = infer_codeberg_pages_from_workflows(&workflow_snapshots)?;
     let cli_overrides = ci_cli_overrides(&command);
     let resolved =
         ResolvedCiInputs::resolve(workspace_root, &cfg, &cli_overrides, Some(&inference))?;
@@ -56,6 +67,14 @@ pub fn run(command: InitCiCommand) -> Result<()> {
     }
     if command.with_scoop && !resolved.with_artifacts {
         eprintln!("--with-scoop implies --with-artifacts; enabling it.");
+    }
+    let wants_codeberg_pages =
+        command.with_codeberg_pages || cfg.ci.pages.is_some() || inferred_pages.is_some();
+    if wants_codeberg_pages && command.platform != Platform::Forgejo {
+        bail!("Codeberg Pages workflow generation is forgejo-only");
+    }
+    if wants_codeberg_pages && resolved.runtime != Runtime::Nix {
+        bail!("Codeberg Pages workflow generation requires --runtime nix");
     }
     let explicit_runners_cover_required =
         runner_overrides_cover_required_runners(&resolved, windows_packagers);
@@ -135,6 +154,14 @@ pub fn run(command: InitCiCommand) -> Result<()> {
             package_options,
         )?);
     }
+    let pages = codeberg_pages_options(&cfg, &command, inferred_pages.as_ref())?;
+    if let Some(pages) = &pages {
+        files.push(ci::codeberg_pages_file(
+            command.platform,
+            &runners.ci,
+            pages,
+        )?);
+    }
     let persisted_ci = resolved.persisted_ci(
         &cfg,
         with_artifacts,
@@ -142,6 +169,12 @@ pub fn run(command: InitCiCommand) -> Result<()> {
         persisted_runner,
         persisted_windows_runner,
     );
+    let mut persisted_ci = persisted_ci;
+    if command.with_codeberg_pages {
+        persisted_ci.pages = Some(codeberg_pages_config(&pages)?);
+    } else if let Some(pages) = inferred_pages {
+        persisted_ci.pages = Some(pages);
+    }
     let persisted_in_simit_toml =
         workspace_root.join("simit.toml").exists() && cfg.ci == persisted_ci;
     let check_message = format!(
@@ -170,6 +203,110 @@ pub fn run(command: InitCiCommand) -> Result<()> {
         &trust_overrides,
         command.check,
     )?);
+
+    if command.check {
+        check_generated_ci_files(
+            workspace_root,
+            &files,
+            command.platform,
+            &check_message,
+            command.diff,
+        )?;
+        upgrade::update_readme_badges_if_present(workspace_root, true, command.diff)
+    } else {
+        project::write_generated_files(workspace_root, &files)?;
+        if ProjectConfig::can_persist_ci(workspace_root)? {
+            ProjectConfig::write_ci(workspace_root, &persisted_ci)?;
+        }
+        upgrade::update_readme_badges_if_present(workspace_root, false, false)?;
+        registry::touch_current_project_or_warn([("ci", FeatureStatus::Managed)]);
+        Ok(())
+    }
+}
+
+fn run_python(command: InitCiCommand) -> Result<()> {
+    let project = python::project_for_current_dir()?;
+    let workspace_root = project.workspace_root.as_std_path();
+    let cfg = ProjectConfig::load(workspace_root)?;
+
+    if command.workspace || !command.packages.is_empty() {
+        bail!("Python uv CI does not support --workspace or --package");
+    }
+    if command.with_homebrew
+        || command.with_chocolatey
+        || command.with_scoop
+        || command.with_artifacts == Some(true)
+    {
+        bail!("Python uv CI currently supports CI only, not release packaging workflows");
+    }
+    if command.with_nextest == Some(true)
+        || command.with_msrv == Some(true)
+        || command.with_audit == Some(true)
+        || command.with_deny == Some(true)
+        || command.with_docs == Some(true)
+    {
+        bail!("Rust-specific CI options are not supported for Python uv projects");
+    }
+    let workflow_snapshots = workflow_snapshots_for_platform(workspace_root, command.platform)?;
+    let inferred_pages = infer_codeberg_pages_from_workflows(&workflow_snapshots)?;
+    if command.with_codeberg_pages || cfg.ci.pages.is_some() || inferred_pages.is_some() {
+        bail!("Codeberg Pages generation is not supported for Python uv CI yet");
+    }
+    let inference = CiInference::from_workflows(&workflow_snapshots)?;
+    let mut cli_overrides = ci_cli_overrides(&command);
+    if cli_overrides.runtime.is_none() && cfg.ci.runtime.is_none() {
+        cli_overrides.runtime = Some(RuntimeChoice::Nix);
+    }
+    let resolved =
+        ResolvedCiInputs::resolve(workspace_root, &cfg, &cli_overrides, Some(&inference))?;
+    if resolved.runtime != Runtime::Nix {
+        bail!("Python uv CI generation requires --runtime nix");
+    }
+    validate_runner(resolved.runner.as_deref())?;
+
+    let explicit_runners_cover_required = runner_overrides_cover_required_runners(&resolved, false);
+    let user_config = UserConfig::load().or_else(|err| {
+        if command.platform == Platform::Github || explicit_runners_cover_required {
+            Ok(UserConfig::default())
+        } else {
+            Err(err)
+        }
+    })?;
+    let omnix_ref = command
+        .omnix_ref
+        .clone()
+        .or_else(|| user_config.ci.tools.omnix.r#ref.clone())
+        .unwrap_or_else(|| resolved.omnix_ref.clone());
+    let options = resolved.ci_options(&cfg, false, omnix_ref.clone());
+    let runners = user_config.resolve_ci_runners(
+        command.platform,
+        resolved.runtime,
+        resolved.runner.as_deref(),
+        resolved.windows_runner.as_deref(),
+        false,
+    )?;
+    let persisted_runner =
+        self_check_runner_override(resolved.runner.as_deref(), &runners.ci).map(str::to_owned);
+    let files = vec![ci::python_ci_file(
+        command.platform,
+        resolved.runtime,
+        &runners.ci,
+        &options,
+        &cfg.flake.expected_outputs.checks,
+    )?];
+    let persisted_ci = resolved.persisted_ci(&cfg, false, &omnix_ref, persisted_runner, None);
+    let persisted_in_simit_toml =
+        workspace_root.join("simit.toml").exists() && cfg.ci == persisted_ci;
+    let check_message = format!(
+        "CI workflows are not up to date; run `{}`",
+        render_regeneration_command(
+            &command,
+            &resolved,
+            false,
+            &omnix_ref,
+            persisted_in_simit_toml,
+        )
+    );
 
     if command.check {
         check_generated_ci_files(
@@ -288,6 +425,7 @@ pub(crate) fn project_regeneration_command(workspace_root: &Path) -> Result<Opti
         .any(|workflow| workflow.content.contains("name: Publish Scoop bucket"));
     let windows_packagers = with_chocolatey || with_scoop;
     let with_artifacts = resolved.with_artifacts || with_homebrew || windows_packagers;
+    let inferred_pages = infer_codeberg_pages_from_workflows(&snapshots)?;
     let command = InitCiCommand {
         packages: Vec::new(),
         workspace: false,
@@ -348,6 +486,17 @@ pub(crate) fn project_regeneration_command(workspace_root: &Path) -> Result<Opti
             binary: Vec::new(),
             no_arch: Vec::new(),
         },
+        with_codeberg_pages: inferred_pages.is_some(),
+        pages_repo: inferred_pages.as_ref().map(|pages| pages.repo.clone()),
+        pages_token_secret: inferred_pages
+            .as_ref()
+            .map(|pages| pages.token_secret.clone()),
+        pages_source_branch: inferred_pages
+            .as_ref()
+            .map(|pages| pages.source_branch.clone()),
+        pages_deploy_app: inferred_pages
+            .as_ref()
+            .map(|pages| pages.deploy_app.clone()),
     };
 
     let persisted_in_simit_toml =
@@ -481,6 +630,25 @@ pub(crate) fn render_regeneration_command(
     if command.with_scoop {
         args.push("--with-scoop".to_owned());
     }
+    if command.with_codeberg_pages {
+        args.push("--with-codeberg-pages".to_owned());
+        push_optional_arg(&mut args, "--pages-repo", command.pages_repo.as_deref());
+        push_optional_arg(
+            &mut args,
+            "--pages-token-secret",
+            command.pages_token_secret.as_deref(),
+        );
+        push_optional_arg(
+            &mut args,
+            "--pages-source-branch",
+            command.pages_source_branch.as_deref(),
+        );
+        push_optional_arg(
+            &mut args,
+            "--pages-deploy-app",
+            command.pages_deploy_app.as_deref(),
+        );
+    }
 
     args.join(" ")
 }
@@ -525,6 +693,10 @@ fn persisted_ci_matches_simit_toml(
         persisted_runner,
         persisted_windows_runner,
     );
+    let mut persisted_ci = persisted_ci;
+    if command.with_codeberg_pages && cfg.ci.pages.is_some() {
+        persisted_ci.pages = cfg.ci.pages.clone();
+    }
     Ok(cfg.ci == persisted_ci)
 }
 
@@ -669,9 +841,15 @@ fn is_ci_managed_workflow_name(name: &std::ffi::OsStr) -> bool {
             | "publish-crate.yml"
             | "release-artifacts.yaml"
             | "release-artifacts.yml"
+            | "pages.yaml"
+            | "pages.yml"
     ) || name.starts_with("ci-")
         || name.starts_with("publish-crate-")
         || name.starts_with("release-artifacts-")
+}
+
+fn workflow_name(path: &Path) -> Option<&str> {
+    path.file_stem().and_then(|stem| stem.to_str())
 }
 
 fn runner_overrides_cover_required_runners(
@@ -691,6 +869,169 @@ fn self_check_runner_override<'a>(
         } else {
             None
         }
+    })
+}
+
+fn codeberg_pages_options(
+    cfg: &ProjectConfig,
+    command: &InitCiCommand,
+    inferred: Option<&CodebergPagesConfig>,
+) -> Result<Option<CodebergPagesOptions>> {
+    if !command.with_codeberg_pages && cfg.ci.pages.is_none() && inferred.is_none() {
+        return Ok(None);
+    }
+
+    let resolved = resolve_codeberg_pages(cfg, command, inferred)?;
+    Ok(Some(CodebergPagesOptions {
+        repo: resolved.repo,
+        owner: resolved.owner,
+        token_secret: resolved.token_secret,
+        source_branch: resolved.source_branch,
+        deploy_app: resolved.deploy_app,
+    }))
+}
+
+fn resolve_codeberg_pages(
+    cfg: &ProjectConfig,
+    command: &InitCiCommand,
+    inferred: Option<&CodebergPagesConfig>,
+) -> Result<ResolvedCodebergPages> {
+    let config = cfg.resolve_codeberg_pages()?;
+    let repo = command
+        .pages_repo
+        .clone()
+        .or_else(|| config.as_ref().map(|pages| pages.repo.clone()))
+        .or_else(|| inferred.map(|pages| pages.repo.clone()))
+        .context("--with-codeberg-pages requires --pages-repo or [ci.pages].repo")?;
+    validate_download_repo_for("--pages-repo", &repo)?;
+    let owner = repo
+        .split_once('/')
+        .expect("validated owner/repo")
+        .0
+        .to_owned();
+    let token_secret = command
+        .pages_token_secret
+        .clone()
+        .or_else(|| config.as_ref().map(|pages| pages.token_secret.clone()))
+        .or_else(|| inferred.map(|pages| pages.token_secret.clone()))
+        .unwrap_or_else(|| "codeberg_token".to_owned());
+    let source_branch = command
+        .pages_source_branch
+        .clone()
+        .or_else(|| config.as_ref().map(|pages| pages.source_branch.clone()))
+        .or_else(|| inferred.map(|pages| pages.source_branch.clone()))
+        .unwrap_or_else(|| "trunk".to_owned());
+    let deploy_app = command
+        .pages_deploy_app
+        .clone()
+        .or_else(|| config.as_ref().map(|pages| pages.deploy_app.clone()))
+        .or_else(|| inferred.map(|pages| pages.deploy_app.clone()))
+        .unwrap_or_else(|| ".#deploy-pages".to_owned());
+    if token_secret.trim().is_empty() {
+        bail!("--pages-token-secret must not be empty");
+    }
+    if source_branch.trim().is_empty() {
+        bail!("--pages-source-branch must not be empty");
+    }
+    if deploy_app.trim().is_empty() {
+        bail!("--pages-deploy-app must not be empty");
+    }
+
+    Ok(ResolvedCodebergPages {
+        repo,
+        owner,
+        token_secret,
+        source_branch,
+        deploy_app,
+    })
+}
+
+fn infer_codeberg_pages_from_workflows(
+    snapshots: &[WorkflowSnapshot],
+) -> Result<Option<CodebergPagesConfig>> {
+    let Some(workflow) = snapshots
+        .iter()
+        .find(|workflow| workflow_name(&workflow.relative_path) == Some("pages"))
+    else {
+        return Ok(None);
+    };
+
+    let Some(repo) = infer_pages_repo(&workflow.content) else {
+        return Ok(None);
+    };
+    validate_download_repo_for("--pages-repo", &repo)?;
+    Ok(Some(CodebergPagesConfig {
+        repo,
+        token_secret: infer_pages_token_secret(&workflow.content)
+            .unwrap_or_else(|| "codeberg_token".to_owned()),
+        source_branch: infer_pages_source_branch(&workflow.content)
+            .unwrap_or_else(|| "trunk".to_owned()),
+        deploy_app: infer_pages_deploy_app(&workflow.content)
+            .unwrap_or_else(|| ".#deploy-pages".to_owned()),
+    }))
+}
+
+fn infer_pages_repo(content: &str) -> Option<String> {
+    let marker = "@codeberg.org/";
+    let line = content.lines().find(|line| line.contains(marker))?;
+    let repo_start = line.find(marker)? + marker.len();
+    let repo_tail = &line[repo_start..];
+    let repo_end = repo_tail.find(".git").unwrap_or(repo_tail.len());
+    Some(repo_tail[..repo_end].trim_matches('"').to_owned())
+}
+
+fn infer_pages_token_secret(content: &str) -> Option<String> {
+    let marker = "CODEBERG_TOKEN: ${{ secrets.";
+    let line = content.lines().find(|line| line.contains(marker))?;
+    let start = line.find(marker)? + marker.len();
+    let tail = &line[start..];
+    let end = tail.find(" }}")?;
+    Some(tail[..end].to_owned())
+}
+
+fn infer_pages_source_branch(content: &str) -> Option<String> {
+    let mut lines = content.lines().peekable();
+    while let Some(line) = lines.next() {
+        if !line.trim_start().starts_with("branches:") {
+            continue;
+        }
+        let trimmed = line.trim();
+        if let Some(inline) = trimmed
+            .strip_prefix("branches: [")
+            .and_then(|value| value.strip_suffix(']'))
+        {
+            return Some(inline.trim_matches('"').to_owned());
+        }
+        while let Some(next) = lines.peek() {
+            let trimmed = next.trim();
+            if let Some(branch) = trimmed.strip_prefix("- ") {
+                return Some(branch.trim_matches('"').to_owned());
+            }
+            if !next.starts_with(' ') {
+                break;
+            }
+            lines.next();
+        }
+    }
+    None
+}
+
+fn infer_pages_deploy_app(content: &str) -> Option<String> {
+    let marker = "DEPLOY_REMOTE=pages-origin nix run ";
+    let line = content.lines().find(|line| line.contains(marker))?;
+    let start = line.find(marker)? + marker.len();
+    Some(line[start..].trim().to_owned())
+}
+
+fn codeberg_pages_config(pages: &Option<CodebergPagesOptions>) -> Result<CodebergPagesConfig> {
+    let pages = pages
+        .as_ref()
+        .context("--with-codeberg-pages did not resolve a Pages configuration")?;
+    Ok(CodebergPagesConfig {
+        repo: pages.repo.clone(),
+        token_secret: pages.token_secret.clone(),
+        source_branch: pages.source_branch.clone(),
+        deploy_app: pages.deploy_app.clone(),
     })
 }
 
