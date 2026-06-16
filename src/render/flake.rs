@@ -995,7 +995,17 @@ fn python_template(project: &python::Project) -> String {
             ${{checkEnv}}/bin/python -m mypy .
             echo ok > $out/result
           '';
+          uv-format = pkgs.runCommand "{name}-uv-format" {{ }} ''
+            export HOME=$TMPDIR/home
+            export XDG_CACHE_HOME=$TMPDIR/cache
+            export UV_NO_SYNC=1
+            mkdir -p "$HOME" "$XDG_CACHE_HOME" "$out"
+            cd ${{./.}}
+            ${{checkEnv}}/bin/uv run --no-sync ruff format --check .
+            echo ok > $out/result
+          '';
         }};
+
     in
     {{
       devShells = py.forAllSystems mkDevShells;
@@ -1616,6 +1626,20 @@ mod tests {
         assert!(!flake.contains("cargo publish -p"));
     }
 
+    /// Bidirectional rs-harbor ↔ simit contract test.
+    ///
+    /// This test verifies that the cross-compilation flake template calls
+    /// rs-harbor's `mkDevShells` with the parameters rs-harbor now expects
+    /// (packages list, extraShellHook, checks).  The rs-harbor side of the
+    /// contract is enforced by rs-harbor's own `checks.nix`:
+    ///
+    ///   - `mkDevShells-accepts-simit-parameters` — mkDevShells accepts
+    ///     the full package set simit passes
+    ///   - `mkDevShells-audit-tools-in-path` — cargo-audit, cargo-deny
+    ///     resolve and land on PATH
+    ///
+    /// If this test fails, simit's generated cross-template expects an API
+    /// shape that rs-harbor's mkDevShells no longer supports.
     #[test]
     fn cross_template_with_all_targets_pins_the_shared_contract() {
         let flake = cross_template(

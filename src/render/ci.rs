@@ -30,6 +30,7 @@ pub struct CiOptions {
     pub with_deny: bool,
     pub with_docs: bool,
     pub with_artifacts: bool,
+    pub with_pypi_publish: bool,
     pub om_ci: OmCiMode,
     pub omnix_ref: String,
     pub release_smoke_command: Option<String>,
@@ -60,6 +61,7 @@ impl Default for CiOptions {
             with_deny: false,
             with_docs: false,
             with_artifacts: false,
+            with_pypi_publish: false,
             om_ci: OmCiMode::default(),
             omnix_ref: OMNIX_REF_DEFAULT.to_owned(),
             release_smoke_command: None,
@@ -324,7 +326,11 @@ fn python_ci_workflow(
     workflow.push_str("        run: nix flake check --no-build\n\n");
 
     let checks = if check_outputs.is_empty() {
-        vec!["offline-tests".to_owned(), "typecheck".to_owned()]
+        vec![
+            "offline-tests".to_owned(),
+            "typecheck".to_owned(),
+            "uv-format".to_owned(),
+        ]
     } else {
         check_outputs.to_vec()
     };
@@ -336,6 +342,60 @@ fn python_ci_workflow(
         workflow.push_str(&check);
         workflow.push_str("\n\n");
     }
+
+    trim_trailing_blank_lines(&mut workflow);
+    workflow
+}
+
+pub fn python_publish_file(
+    platform: Platform,
+    runtime: Runtime,
+    runner: &ResolvedRunner,
+    options: &CiOptions,
+) -> Result<GeneratedFile> {
+    if runtime != Runtime::Nix {
+        bail!("Python uv publish generation requires --runtime nix");
+    }
+
+    Ok(GeneratedFile {
+        relative_path: PathBuf::from(platform.workflow_dir()).join("publish-pypi.yaml"),
+        content: python_publish_workflow(platform, runner, options),
+    })
+}
+
+fn python_publish_workflow(
+    platform: Platform,
+    runner: &ResolvedRunner,
+    options: &CiOptions,
+) -> String {
+    let mut workflow = String::new();
+    push_generated_workflow_header(&mut workflow);
+    push_required_secrets_header(&mut workflow, &options.required_secrets);
+    workflow.push_str("name: Publish to PyPI\n\n");
+    workflow.push_str("on:\n");
+    workflow.push_str("  push:\n");
+    workflow.push_str("    tags: [\"[0-9]*\"]\n\n");
+    push_concurrency(&mut workflow);
+    workflow.push_str("jobs:\n");
+    workflow.push_str("  publish:\n");
+    workflow.push_str("    runs-on: ");
+    workflow.push_str(&runs_on(runner));
+    workflow.push('\n');
+    push_job_env(&mut workflow, Runtime::Nix, &options.extra_env);
+    workflow.push_str("    steps:\n");
+    push_checkout_step(&mut workflow, platform);
+    push_install_nix_step(&mut workflow, platform);
+    push_extra_setup_steps(&mut workflow, &options.extra_setup);
+    workflow.push_str("      - name: Build Nix package\n");
+    workflow.push_str(
+        "        run: nix build .# --no-link\n\n",
+    );
+    workflow.push_str("      - name: Publish to PyPI\n");
+    workflow.push_str("        env:\n");
+    workflow.push_str("          UV_PUBLISH_TOKEN: ${{ secrets.PYPI_TOKEN }}\n");
+    workflow.push_str("        run: |\n");
+    workflow.push_str("          nix develop -c uv build\n");
+    workflow.push_str("          nix develop -c uv publish\n\n");
 
     trim_trailing_blank_lines(&mut workflow);
     workflow

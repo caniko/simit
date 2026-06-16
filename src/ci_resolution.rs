@@ -22,6 +22,7 @@ pub struct CiCliOverrides {
     pub with_deny: Option<bool>,
     pub with_docs: Option<bool>,
     pub with_artifacts: Option<bool>,
+    pub with_pypi_publish: Option<bool>,
     pub with_om_ci: Option<bool>,
     pub om_ci_augment: Option<bool>,
     pub omnix_ref: Option<String>,
@@ -47,6 +48,7 @@ pub struct CiInference {
     pub with_deny: Option<bool>,
     pub with_docs: Option<bool>,
     pub with_artifacts: Option<bool>,
+    pub with_pypi_publish: Option<bool>,
     pub om_ci: Option<OmCiMode>,
     pub omnix_ref: Option<String>,
     pub release_smoke_command: Option<String>,
@@ -104,6 +106,9 @@ impl CiInference {
             with_artifacts: Some(marked.iter().any(|workflow| {
                 workflow_name(&workflow.relative_path) == Some("release-artifacts")
             })),
+            with_pypi_publish: Some(marked.iter().any(|workflow| {
+                workflow_name(&workflow.relative_path) == Some("publish-pypi")
+            })),
             om_ci: Some(infer_om_ci_mode(&all_content)),
             omnix_ref: infer_omnix_ref(&all_content),
             release_smoke_command: infer_release_smoke_command(&all_content),
@@ -124,6 +129,7 @@ pub struct ResolvedCiInputs {
     pub with_deny: bool,
     pub with_docs: bool,
     pub with_artifacts: bool,
+    pub with_pypi_publish: bool,
     pub om_ci: OmCiMode,
     pub omnix_ref: String,
     pub release_smoke_command: Option<String>,
@@ -221,6 +227,11 @@ impl ResolvedCiInputs {
                 .or(config.with_artifacts)
                 .or(inference.with_artifacts)
                 .unwrap_or(false),
+            with_pypi_publish: cli
+                .with_pypi_publish
+                .or(config.with_pypi_publish)
+                .or(inference.with_pypi_publish)
+                .unwrap_or(false),
             om_ci,
             omnix_ref: cli
                 .omnix_ref
@@ -249,6 +260,7 @@ impl ResolvedCiInputs {
             with_deny: self.with_deny,
             with_docs: self.with_docs,
             with_artifacts,
+            with_pypi_publish: self.with_pypi_publish,
             om_ci: self.om_ci,
             omnix_ref,
             release_smoke_command: self.release_smoke_command.clone(),
@@ -287,6 +299,7 @@ impl ResolvedCiInputs {
         ci.with_deny = self.with_deny;
         ci.with_docs = self.with_docs;
         ci.with_artifacts = with_artifacts;
+        ci.with_pypi_publish = self.with_pypi_publish;
         ci.om_ci = self.om_ci != OmCiMode::Off;
         ci.om_ci_augment = self.om_ci == OmCiMode::Augment;
         ci.omnix_ref = (self.om_ci != OmCiMode::Off && omnix_ref != OMNIX_REF_DEFAULT)
@@ -308,6 +321,7 @@ struct CiConfigLayer {
     with_deny: Option<bool>,
     with_docs: Option<bool>,
     with_artifacts: Option<bool>,
+    with_pypi_publish: Option<bool>,
     om_ci: Option<bool>,
     om_ci_augment: Option<bool>,
     omnix_ref: Option<String>,
@@ -343,6 +357,7 @@ impl CiConfigLayer {
             with_deny: present(ci_table, "with_deny").map(|_| cfg.ci.with_deny),
             with_docs: present(ci_table, "with_docs").map(|_| cfg.ci.with_docs),
             with_artifacts: present(ci_table, "with_artifacts").map(|_| cfg.ci.with_artifacts),
+            with_pypi_publish: present(ci_table, "with_pypi_publish").map(|_| cfg.ci.with_pypi_publish),
             om_ci: present(ci_table, "om_ci").map(|_| cfg.ci.om_ci),
             om_ci_augment: present(ci_table, "om_ci_augment").map(|_| cfg.ci.om_ci_augment),
             omnix_ref: present(ci_table, "omnix_ref").and_then(|_| cfg.ci.omnix_ref.clone()),
@@ -362,6 +377,7 @@ impl CiConfigLayer {
             with_deny: cfg.ci.with_deny.then_some(true),
             with_docs: cfg.ci.with_docs.then_some(true),
             with_artifacts: cfg.ci.with_artifacts.then_some(true),
+            with_pypi_publish: cfg.ci.with_pypi_publish.then_some(true),
             om_ci: cfg.ci.om_ci.then_some(true),
             om_ci_augment: cfg.ci.om_ci_augment.then_some(true),
             omnix_ref: cfg.ci.omnix_ref.clone(),
@@ -400,6 +416,11 @@ fn infer_ci_runtime(marked: &[WorkflowSnapshot]) -> Result<Runtime> {
             marked
                 .iter()
                 .find(|workflow| workflow_name(&workflow.relative_path) == Some("publish-crate"))
+        })
+        .or_else(|| {
+            marked
+                .iter()
+                .find(|workflow| workflow_name(&workflow.relative_path) == Some("publish-pypi"))
         })
         .context("no CI or publish workflow available for runtime inference")?;
 
@@ -519,6 +540,8 @@ fn workflow_name(path: &Path) -> Option<&str> {
         Some("publish-crate")
     } else if stem == "release-artifacts" || stem.starts_with("release-artifacts-") {
         Some("release-artifacts")
+    } else if stem == "publish-pypi" {
+        Some("publish-pypi")
     } else {
         None
     }
@@ -529,6 +552,7 @@ fn workflow_suffix(path: &Path) -> Option<String> {
     stem.strip_prefix("ci-")
         .or_else(|| stem.strip_prefix("publish-crate-"))
         .or_else(|| stem.strip_prefix("release-artifacts-"))
+        .or_else(|| stem.strip_prefix("publish-pypi-"))
         .map(str::to_owned)
 }
 

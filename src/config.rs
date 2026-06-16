@@ -215,6 +215,8 @@ pub struct CiConfig {
     #[serde(default)]
     pub with_artifacts: bool,
     #[serde(default)]
+    pub with_pypi_publish: bool,
+    #[serde(default)]
     pub extra_setup: Vec<String>,
     #[serde(default)]
     pub extra_env: BTreeMap<String, String>,
@@ -2176,6 +2178,7 @@ fn set_ci_table(table: &mut Table, ci: &CiConfig) {
     set_bool(table, "with_deny", ci.with_deny);
     set_bool(table, "with_docs", ci.with_docs);
     set_bool(table, "with_artifacts", ci.with_artifacts);
+    set_bool(table, "with_pypi_publish", ci.with_pypi_publish);
     set_string_array(table, "extra_setup", &ci.extra_setup);
     set_string_map(table, "extra_env", &ci.extra_env);
     set_string_array(table, "required_secrets", &ci.required_secrets);

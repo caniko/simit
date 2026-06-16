@@ -531,6 +531,14 @@ pub struct InitCiCommand {
     )]
     pub with_artifacts: Option<bool>,
     #[arg(
+        long = "with-pypi-publish",
+        num_args = 0..=1,
+        default_missing_value = "true",
+        action = clap::ArgAction::Set,
+        help = "Generate a PyPI publish workflow for Python uv projects; pass `--with-pypi-publish=false` to override project config"
+    )]
+    pub with_pypi_publish: Option<bool>,
+    #[arg(
         long = "with-homebrew",
         help = "Add a Homebrew tap publishing step (forgejo + nix only)"
     )]

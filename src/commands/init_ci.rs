@@ -287,13 +287,22 @@ fn run_python(command: InitCiCommand) -> Result<()> {
     )?;
     let persisted_runner =
         self_check_runner_override(resolved.runner.as_deref(), &runners.ci).map(str::to_owned);
-    let files = vec![ci::python_ci_file(
+    let with_pypi_publish = resolved.with_pypi_publish;
+    let mut files = vec![ci::python_ci_file(
         command.platform,
         resolved.runtime,
         &runners.ci,
         &options,
         &cfg.flake.expected_outputs.checks,
     )?];
+    if with_pypi_publish {
+        files.push(ci::python_publish_file(
+            command.platform,
+            resolved.runtime,
+            &runners.ci,
+            &options,
+        )?);
+    }
     let persisted_ci = resolved.persisted_ci(&cfg, false, &omnix_ref, persisted_runner, None);
     let persisted_in_simit_toml =
         workspace_root.join("simit.toml").exists() && cfg.ci == persisted_ci;
@@ -341,6 +350,7 @@ fn ci_cli_overrides(command: &InitCiCommand) -> CiCliOverrides {
         with_deny: command.with_deny,
         with_docs: command.with_docs,
         with_artifacts: command.with_artifacts,
+        with_pypi_publish: command.with_pypi_publish,
         with_om_ci: command.with_om_ci,
         om_ci_augment: command.om_ci_augment,
         omnix_ref: command.omnix_ref.clone(),
@@ -486,6 +496,7 @@ pub(crate) fn project_regeneration_command(workspace_root: &Path) -> Result<Opti
             binary: Vec::new(),
             no_arch: Vec::new(),
         },
+        with_pypi_publish: None,
         with_codeberg_pages: inferred_pages.is_some(),
         pages_repo: inferred_pages.as_ref().map(|pages| pages.repo.clone()),
         pages_token_secret: inferred_pages
@@ -572,6 +583,9 @@ pub(crate) fn render_regeneration_command(
     }
     if with_artifacts {
         args.push("--with-artifacts".to_owned());
+    }
+    if resolved.with_pypi_publish {
+        args.push("--with-pypi-publish".to_owned());
     }
     match resolved.om_ci {
         OmCiMode::Off => {}
