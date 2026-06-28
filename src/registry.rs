@@ -821,6 +821,7 @@ fn infer_expected_ci_files(
             self_check,
             &runners,
             package_options,
+            &BTreeMap::new(),
         )?);
     }
     if let Some(pages) = infer_codeberg_pages_options(marked)? {

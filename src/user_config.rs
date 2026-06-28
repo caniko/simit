@@ -425,7 +425,7 @@ impl UserCiPlatformDefaults {
 }
 
 impl ResolvedRunner {
-    fn literal(label: &str) -> Result<Self> {
+    pub(crate) fn literal(label: &str) -> Result<Self> {
         validate_runner_label(label)?;
         Ok(Self {
             name: None,

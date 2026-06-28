@@ -1,6 +1,6 @@
 //! Shared CI option resolution for generation and drift detection.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -14,6 +14,7 @@ pub struct CiCliOverrides {
     pub runtime: Option<RuntimeChoice>,
     pub runner: Option<String>,
     pub windows_runner: Option<String>,
+    pub step_runner: Vec<(String, String)>,
     pub workspace: bool,
     pub packages: Vec<String>,
     pub with_nextest: Option<bool>,
@@ -121,6 +122,7 @@ pub struct ResolvedCiInputs {
     pub runtime: Runtime,
     pub runner: Option<String>,
     pub windows_runner: Option<String>,
+    pub step_runners: BTreeMap<String, String>,
     pub workspace: bool,
     pub packages: Vec<String>,
     pub with_nextest: bool,
@@ -195,6 +197,13 @@ impl ResolvedCiInputs {
                 .clone()
                 .or(config.windows_runner)
                 .or(inference.windows_runner),
+            step_runners: {
+                let mut m = config.step_runners.unwrap_or_default();
+                for (step, runner) in &cli.step_runner {
+                    m.insert(step.clone(), runner.clone());
+                }
+                m
+            },
             workspace,
             packages,
             with_nextest: cli
@@ -313,6 +322,7 @@ struct CiConfigLayer {
     runtime: Option<Runtime>,
     runner: Option<String>,
     windows_runner: Option<String>,
+    step_runners: Option<BTreeMap<String, String>>,
     workspace: Option<bool>,
     packages: Option<Vec<String>>,
     with_nextest: Option<bool>,
@@ -344,12 +354,18 @@ impl CiConfigLayer {
             .with_context(|| format!("parsing {}", path.display()))?;
         let ci_table = document.get("ci").and_then(|item| item.as_table());
 
+        let step_runners = present(ci_table, "step_runners").and_then(|_| {
+            let m = &cfg.ci.step_runners;
+            if m.is_empty() { None } else { Some(m.clone()) }
+        });
+
         Ok(Self {
             runtime: present(ci_table, "runtime").and(cfg.ci.runtime),
             runner: present(ci_table, "runner").and_then(|_| cfg.ci.runner.clone()),
             windows_runner: present(ci_table, "windows_runner")
                 .and_then(|_| cfg.ci.windows_runner.clone()),
             workspace: present(ci_table, "workspace").map(|_| cfg.ci.workspace),
+            step_runners,
             packages: present(ci_table, "packages").map(|_| cfg.ci.packages.clone()),
             with_nextest: present(ci_table, "with_nextest").map(|_| cfg.ci.with_nextest),
             with_msrv: present(ci_table, "with_msrv").map(|_| cfg.ci.with_msrv),
@@ -365,10 +381,16 @@ impl CiConfigLayer {
     }
 
     fn from_non_simit_config(cfg: &ProjectConfig) -> Self {
+        let step_runners = if cfg.ci.step_runners.is_empty() {
+            None
+        } else {
+            Some(cfg.ci.step_runners.clone())
+        };
         Self {
             runtime: cfg.ci.runtime,
             runner: cfg.ci.runner.clone(),
             windows_runner: cfg.ci.windows_runner.clone(),
+            step_runners,
             workspace: cfg.ci.workspace.then_some(true),
             packages: (!cfg.ci.packages.is_empty()).then(|| cfg.ci.packages.clone()),
             with_nextest: cfg.ci.with_nextest.then_some(true),

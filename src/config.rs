@@ -230,6 +230,8 @@ pub struct CiConfig {
     pub omnix_ref: Option<String>,
     #[serde(default)]
     pub pages: Option<CodebergPagesConfig>,
+    #[serde(default)]
+    pub step_runners: BTreeMap<String, String>,
 }
 
 /// `[ci.pages]` — Codeberg Pages publication through a repository-local deploy app.
@@ -2181,6 +2183,7 @@ fn set_ci_table(table: &mut Table, ci: &CiConfig) {
     set_bool(table, "with_pypi_publish", ci.with_pypi_publish);
     set_string_array(table, "extra_setup", &ci.extra_setup);
     set_string_map(table, "extra_env", &ci.extra_env);
+    set_string_map(table, "step_runners", &ci.step_runners);
     set_string_array(table, "required_secrets", &ci.required_secrets);
     set_bool(table, "om_ci", ci.om_ci);
     set_bool(table, "om_ci_augment", ci.om_ci_augment);

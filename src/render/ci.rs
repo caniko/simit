@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use anyhow::{Result, bail};
@@ -13,6 +14,15 @@ pub const GENERATED_WORKFLOW_MARKER: &str =
 const CARGO_NEXTEST_VERSION: &str = "0.9.100";
 const CARGO_DENY_VERSION: &str = "0.18.3";
 const CARGO_DENY_POLICY_CHECKS: &str = "bans licenses sources";
+
+pub const STEP_FLAKE_CHECK: &str = "nix-check";
+pub const STEP_CARGO_TEST: &str = "cargo-test";
+pub const STEP_CARGO_DOC: &str = "cargo-doc";
+pub const STEP_CARGO_CLIPPY: &str = "cargo-clippy";
+pub const STEP_CARGO_PACKAGE: &str = "cargo-package";
+pub const STEP_EXTRA_SETUP: &str = "extra-setup";
+pub const STEP_SELF_CHECK: &str = "self-check";
+pub const STEP_QUALITY_TOOLS: &str = "quality-tools";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum OmCiMode {
@@ -167,6 +177,7 @@ pub fn files(
     self_check: SelfCheckOptions<'_>,
     runners: &ResolvedCiRunners,
     options: CiOptions,
+    step_runners: &BTreeMap<String, ResolvedRunner>,
 ) -> Result<Vec<GeneratedFile>> {
     if options.with_msrv && package.rust_version.is_none() {
         bail!("--with-msrv requires package.rust-version in Cargo.toml");
@@ -185,6 +196,7 @@ pub fn files(
             self_check,
             runners,
             options.clone(),
+            step_runners,
         ),
     }];
 
@@ -408,6 +420,31 @@ fn ci_workflow(
     self_check: SelfCheckOptions<'_>,
     runners: &ResolvedCiRunners,
     options: CiOptions,
+    step_runners: &BTreeMap<String, ResolvedRunner>,
+) -> String {
+    if step_runners.is_empty() {
+        ci_workflow_single_job(platform, runtime, package, self_check, runners, options)
+    } else {
+        ci_workflow_multi_job(
+            platform,
+            runtime,
+            package,
+            self_check,
+            runners,
+            options,
+            step_runners,
+        )
+    }
+}
+
+/// Single-job CI workflow (backward-compatible path).
+fn ci_workflow_single_job(
+    platform: Platform,
+    runtime: Runtime,
+    package: &Package,
+    self_check: SelfCheckOptions<'_>,
+    runners: &ResolvedCiRunners,
+    options: CiOptions,
 ) -> String {
     let mut workflow = String::new();
     push_generated_workflow_header(&mut workflow);
@@ -491,6 +528,195 @@ fn ci_workflow(
     trim_trailing_blank_lines(&mut workflow);
     workflow
 }
+
+fn runner_for_step<'a>(
+    step_runners: &'a BTreeMap<String, ResolvedRunner>,
+    runners: &'a ResolvedCiRunners,
+    key: &str,
+) -> &'a ResolvedRunner {
+    step_runners.get(key).unwrap_or(&runners.ci)
+}
+
+/// Multi-job CI workflow that splits steps across jobs by their step-runner label.
+fn ci_workflow_multi_job(
+    platform: Platform,
+    runtime: Runtime,
+    package: &Package,
+    self_check: SelfCheckOptions<'_>,
+    runners: &ResolvedCiRunners,
+    options: CiOptions,
+    step_runners: &BTreeMap<String, ResolvedRunner>,
+) -> String {
+    let mut workflow = String::new();
+    push_generated_workflow_header(&mut workflow);
+    push_required_secrets_header(&mut workflow, &options.required_secrets);
+    workflow.push_str("name: CI\n\n");
+    workflow.push_str("on:\n");
+    workflow.push_str("  push:\n");
+    workflow.push_str("    branches: [\"**\"]\n");
+    workflow.push_str("    tags-ignore: [\"**\"]\n");
+    workflow.push('\n');
+    push_concurrency(&mut workflow);
+    workflow.push_str("jobs:\n");
+
+    struct StepDef<'a> {
+        runner: &'a ResolvedRunner,
+        yaml: String,
+    }
+    let mut steps: Vec<StepDef> = Vec::new();
+
+    let mut capture = |key: &str, s: &str| {
+        let r = runner_for_step(step_runners, runners, key);
+        steps.push(StepDef { runner: r, yaml: s.to_string() });
+    };
+
+    match runtime {
+        Runtime::Nix => {
+            capture(STEP_FLAKE_CHECK, "      - name: Check flake\n        run: nix flake check\n\n");
+
+            let mut test = "      - name: Test\n        run: nix develop -c cargo test".to_string();
+            push_package_selector(&mut test, package, &options);
+            test.push_str("\n\n");
+            capture(STEP_CARGO_TEST, &test);
+
+            let mut q = String::new();
+            if options.with_audit {
+                q.push_str("      - name: Check cargo-audit tool\n        run: nix develop -c command -v cargo-audit\n\n");
+            }
+            if options.with_deny {
+                q.push_str("      - name: Check cargo-deny tool\n        run: nix develop -c command -v cargo-deny\n\n");
+            }
+            if !q.is_empty() {
+                capture(STEP_QUALITY_TOOLS, &q);
+            }
+
+            let mut opt = String::new();
+            if options.with_msrv {
+                opt.push_str("      - name: Check MSRV\n        run: nix develop -c cargo check\n\n");
+            }
+            if options.with_docs {
+                opt.push_str("      - name: Build docs\n        run: nix develop -c cargo doc --no-deps --all-features\n\n");
+            }
+            if !opt.is_empty() {
+                capture(STEP_CARGO_DOC, &opt);
+            }
+
+            if self_check.enabled {
+                let mut sc = String::from("      - name: Check generated CI\n        run: nix develop -c cargo run -- init ci");
+                if runtime == Runtime::Nix { sc.push_str(" --runtime nix"); }
+                sc.push_str("\n      - name: Check generated flake and hooks\n        run: nix develop -c cargo run -- init flake --check\n\n");
+                capture(STEP_SELF_CHECK, &sc);
+            }
+
+            let mut clippy = "      - name: Clippy\n        run: nix develop -c cargo clippy".to_string();
+            push_package_selector(&mut clippy, package, &options);
+            clippy.push_str(" --all-targets -- --deny warnings\n\n");
+            capture(STEP_CARGO_CLIPPY, &clippy);
+
+            if package.is_publishable() {
+                let mut pkg = "      - name: Package crate\n        run: nix develop -c cargo package".to_string();
+                push_package_selector(&mut pkg, package, &options);
+                pkg.push('\n');
+                capture(STEP_CARGO_PACKAGE, &pkg);
+            }
+        }
+        Runtime::Cargo => {
+            let mut test = String::from("      - name: Test\n        run: cargo test");
+            push_package_selector(&mut test, package, &options);
+            test.push_str("\n\n");
+            capture(STEP_CARGO_TEST, &test);
+
+            let mut q = String::new();
+            if options.with_audit {
+                q.push_str("      - name: Install cargo-audit\n        run: command -v cargo-audit >/dev/null 2>&1 || cargo install cargo-audit --locked\n\n");
+            }
+            if options.with_deny {
+                q.push_str(&format!("      - name: Install cargo-deny\n        run: command -v cargo-deny >/dev/null 2>&1 || cargo install cargo-deny --locked --version {CARGO_DENY_VERSION}\n\n"));
+            }
+            if !q.is_empty() {
+                capture(STEP_QUALITY_TOOLS, &q);
+            }
+
+            let mut opt = String::new();
+            if options.with_msrv {
+                opt.push_str("      - name: Check MSRV\n        run: cargo check\n\n");
+            }
+            if options.with_docs {
+                opt.push_str("      - name: Build docs\n        run: cargo doc --no-deps --all-features\n\n");
+            }
+            if !opt.is_empty() {
+                capture(STEP_CARGO_DOC, &opt);
+            }
+
+            if self_check.enabled {
+                let mut sc = String::from("      - name: Check generated CI\n        run: cargo run -- init ci");
+                sc.push_str("\n      - name: Check generated flake and hooks\n        run: cargo run -- init flake --check\n\n");
+                capture(STEP_SELF_CHECK, &sc);
+            }
+
+            let mut clippy = String::from("      - name: Clippy\n        run: cargo clippy");
+            push_package_selector(&mut clippy, package, &options);
+            clippy.push_str(" --all-targets -- --deny warnings\n\n");
+            capture(STEP_CARGO_CLIPPY, &clippy);
+
+            if package.is_publishable() {
+                let mut pkg = String::from("      - name: Package crate\n        run: cargo package");
+                push_package_selector(&mut pkg, package, &options);
+                pkg.push('\n');
+                capture(STEP_CARGO_PACKAGE, &pkg);
+            }
+        }
+    }
+
+    // Group consecutive steps with the same runner into jobs.
+    let mut job_index = 0usize;
+    let mut step_idx = 0;
+    while step_idx < steps.len() {
+        let current_runner = steps[step_idx].runner;
+        let label = current_runner.labels.first().map(|s| s.as_str()).unwrap_or("runner");
+        let sanitized: String = label.chars().filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_').collect();
+        let job_name_ref: &str = if sanitized.is_empty() { "job" } else { &sanitized };
+
+        let mut job_steps = String::new();
+        while step_idx < steps.len() && std::ptr::eq(steps[step_idx].runner, current_runner) {
+            job_steps.push_str(&steps[step_idx].yaml);
+            step_idx += 1;
+        }
+
+        workflow.push_str(&format!("  {job_name_ref}:\n"));
+        if job_index > 0 {
+            workflow.push_str("    needs: [test]\n");
+        }
+        workflow.push_str("    runs-on: ");
+        workflow.push_str(&runs_on(current_runner));
+        workflow.push('\n');
+        push_container(&mut workflow, platform, runtime, package);
+        push_job_env(&mut workflow, runtime, &options.extra_env);
+        workflow.push_str("    steps:\n");
+        push_checkout_step(&mut workflow, platform);
+
+        match runtime {
+            Runtime::Nix => {
+                push_install_nix_step(&mut workflow, platform);
+                push_nix_cargo_bin_path_step(&mut workflow);
+                push_extra_setup_steps(&mut workflow, &options.extra_setup);
+            }
+            Runtime::Cargo => {
+                push_rust_setup_step(&mut workflow, platform);
+                push_rust_cache_steps(&mut workflow, platform);
+                push_extra_setup_steps(&mut workflow, &options.extra_setup);
+            }
+        }
+
+        workflow.push_str(&job_steps);
+        job_index += 1;
+    }
+
+    trim_trailing_blank_lines(&mut workflow);
+    workflow
+}
+
+
 
 fn publish_workflow(
     platform: Platform,

@@ -439,6 +439,12 @@ pub struct InitCiCommand {
     )]
     pub windows_runner: Option<String>,
     #[arg(
+        long = "step-runner",
+        value_name = "STEP=LABEL",
+        help = "Override runner for a specific step key (repeatable, e.g. --step-runner nix-check=atlas-nix-trusted)"
+    )]
+    pub step_runner: Vec<String>,
+    #[arg(
         long = "maintainer-key",
         value_name = "FINGERPRINT",
         help = "OpenPGP key fingerprint to export into keys/maintainers.gpg"

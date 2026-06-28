@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -104,6 +104,18 @@ pub fn run(command: InitCiCommand) -> Result<()> {
         resolved.windows_runner.as_deref(),
         windows_packagers,
     )?;
+    let step_runners: BTreeMap<String, ResolvedRunner> = resolved
+        .step_runners
+        .iter()
+        .map(|(step, label)| {
+            Ok((
+                step.clone(),
+                ResolvedRunner::literal(label).map_err(|e| {
+                    anyhow::anyhow!("invalid step runner label for '{step}': {e}")
+                })?,
+            ))
+        })
+        .collect::<Result<_>>()?;
     let persisted_runner =
         self_check_runner_override(resolved.runner.as_deref(), &runners.ci).map(str::to_owned);
     let persisted_windows_runner = runners.windows.as_ref().and_then(|runner| {
@@ -152,6 +164,7 @@ pub fn run(command: InitCiCommand) -> Result<()> {
             },
             &runners,
             package_options,
+            &step_runners,
         )?);
     }
     let pages = codeberg_pages_options(&cfg, &command, inferred_pages.as_ref())?;
@@ -338,10 +351,19 @@ fn run_python(command: InitCiCommand) -> Result<()> {
 }
 
 fn ci_cli_overrides(command: &InitCiCommand) -> CiCliOverrides {
+    let step_runner = command
+        .step_runner
+        .iter()
+        .filter_map(|arg| {
+            let (step, runner) = arg.split_once('=')?;
+            Some((step.to_string(), runner.to_string()))
+        })
+        .collect();
     CiCliOverrides {
         runtime: command.runtime,
         runner: command.runner.clone(),
         windows_runner: command.windows_runner.clone(),
+        step_runner,
         workspace: command.workspace,
         packages: command.packages.clone(),
         with_nextest: command.with_nextest,
@@ -456,6 +478,7 @@ pub(crate) fn project_regeneration_command(workspace_root: &Path) -> Result<Opti
         with_om_ci: None,
         om_ci_augment: None,
         omnix_ref: None,
+        step_runner: Vec::new(),
         with_artifacts: None,
         with_homebrew,
         with_chocolatey,
