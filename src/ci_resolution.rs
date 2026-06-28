@@ -309,6 +309,7 @@ impl ResolvedCiInputs {
         ci.with_docs = self.with_docs;
         ci.with_artifacts = with_artifacts;
         ci.with_pypi_publish = self.with_pypi_publish;
+        ci.step_runners = self.step_runners.clone();
         ci.om_ci = self.om_ci != OmCiMode::Off;
         ci.om_ci_augment = self.om_ci == OmCiMode::Augment;
         ci.omnix_ref = (self.om_ci != OmCiMode::Off && omnix_ref != OMNIX_REF_DEFAULT)
