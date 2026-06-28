@@ -668,14 +668,19 @@ fn ci_workflow_multi_job(
         }
     }
 
-    // Group consecutive steps with the same runner into jobs.
-    let mut job_index = 0usize;
+    // Collect all job names first, then emit with correct dependencies.
+    struct JobEmit<'a> {
+        name: String,
+        runner: &'a ResolvedRunner,
+        steps: String,
+    }
+    let mut jobs: Vec<JobEmit> = Vec::new();
     let mut step_idx = 0;
     while step_idx < steps.len() {
         let current_runner = steps[step_idx].runner;
         let label = current_runner.labels.first().map(|s| s.as_str()).unwrap_or("runner");
         let sanitized: String = label.chars().filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_').collect();
-        let job_name_ref: &str = if sanitized.is_empty() { "job" } else { &sanitized };
+        let job_name = if sanitized.is_empty() { "job".to_string() } else { sanitized };
 
         let mut job_steps = String::new();
         while step_idx < steps.len() && std::ptr::eq(steps[step_idx].runner, current_runner) {
@@ -683,12 +688,21 @@ fn ci_workflow_multi_job(
             step_idx += 1;
         }
 
-        workflow.push_str(&format!("  {job_name_ref}:\n"));
-        if job_index > 0 {
-            workflow.push_str("    needs: [test]\n");
+        jobs.push(JobEmit {
+            name: job_name,
+            runner: current_runner,
+            steps: job_steps,
+        });
+    }
+
+    let first_job_name = jobs.first().map(|j| j.name.clone()).unwrap_or_default();
+    for (idx, job) in jobs.iter().enumerate() {
+        workflow.push_str(&format!("  {}:\n", job.name));
+        if idx > 0 {
+            workflow.push_str(&format!("    needs: [{first_job_name}]\n"));
         }
         workflow.push_str("    runs-on: ");
-        workflow.push_str(&runs_on(current_runner));
+        workflow.push_str(&runs_on(job.runner));
         workflow.push('\n');
         push_container(&mut workflow, platform, runtime, package);
         push_job_env(&mut workflow, runtime, &options.extra_env);
@@ -708,8 +722,7 @@ fn ci_workflow_multi_job(
             }
         }
 
-        workflow.push_str(&job_steps);
-        job_index += 1;
+        workflow.push_str(&job.steps);
     }
 
     trim_trailing_blank_lines(&mut workflow);

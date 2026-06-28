@@ -11,8 +11,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  test:
-    runs-on: atlas
+  atlas-nix-trusted:
+    runs-on: atlas-nix-trusted
     env:
       NIX_CONFIG: "experimental-features = nix-command flakes"
       XDG_CACHE_HOME: "/tmp/.cache"
@@ -27,12 +27,28 @@ jobs:
       - name: Check flake
         run: nix flake check
 
+  codeberg-medium:
+    needs: [test]
+    runs-on: codeberg-medium
+    env:
+      NIX_CONFIG: "experimental-features = nix-command flakes"
+      XDG_CACHE_HOME: "/tmp/.cache"
+      CARGO_HOME: "/tmp/.cargo"
+    steps:
+      - name: Checkout
+        uses: https://code.forgejo.org/actions/checkout@v4
+
+      - name: Add cargo bin to PATH
+        run: echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
+
       - name: Test
         run: nix develop -c cargo test
 
-      - name: Check generated CI
-        run: nix develop -c cargo run -- init ci --platform forgejo --runtime nix --runner atlas --check
+      - name: Build docs
+        run: nix develop -c cargo doc --no-deps --all-features
 
+      - name: Check generated CI
+        run: nix develop -c cargo run -- init ci --runtime nix
       - name: Check generated flake and hooks
         run: nix develop -c cargo run -- init flake --check
 
@@ -40,4 +56,4 @@ jobs:
         run: nix develop -c cargo clippy --all-targets -- --deny warnings
 
       - name: Package crate
-        run: nix develop -c cargo package --allow-dirty
+        run: nix develop -c cargo package
