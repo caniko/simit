@@ -448,6 +448,8 @@ fn forgejo_nix_can_generate_codeberg_pages_workflow() {
             "--with-codeberg-pages",
             "--pages-repo",
             "caniko/plinth",
+            "--pages-canonical-domain",
+            "plinth.tartanoglu.com",
         ])
         .status()
         .unwrap();
@@ -460,6 +462,9 @@ fn forgejo_nix_can_generate_codeberg_pages_workflow() {
     assert!(pages.contains("      - trunk"));
     assert!(pages.contains("group: ${{ codeberg.workflow }}-${{ codeberg.ref }}"));
     assert!(pages.contains("runs-on: atlas"));
+    assert!(pages.contains("      - name: Validate Pages domain"));
+    assert!(pages.contains("nix build .#site --no-link --out-link result-pages-site"));
+    assert!(pages.contains("grep -qx plinth.tartanoglu.com result-pages-site/.domains"));
     assert!(pages.contains("CODEBERG_TOKEN: ${{ secrets.codeberg_token }}"));
     assert!(pages.contains("test -n \"$CODEBERG_TOKEN\""));
     assert!(pages.contains("git config user.name \"forgejo-actions\""));
@@ -471,6 +476,7 @@ fn forgejo_nix_can_generate_codeberg_pages_workflow() {
     let simit_toml = read(&temp.path().join("simit.toml"));
     assert!(simit_toml.contains("[ci.pages]"));
     assert!(simit_toml.contains("repo = \"caniko/plinth\""));
+    assert!(simit_toml.contains("canonical_domain = \"plinth.tartanoglu.com\""));
 
     let check = simit_with_user_config(temp.path())
         .current_dir(temp.path())

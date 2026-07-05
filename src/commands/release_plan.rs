@@ -498,6 +498,7 @@ mod tests {
             dependencies: dependencies
                 .iter()
                 .map(|dependency| Dependency {
+                    name: dependency.to_string(),
                     source: None,
                     path: Some(Utf8PathBuf::from(format!("../{dependency}"))),
                 })

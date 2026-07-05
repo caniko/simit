@@ -15,6 +15,7 @@ pub struct CiCliOverrides {
     pub runner: Option<String>,
     pub windows_runner: Option<String>,
     pub step_runner: Vec<(String, String)>,
+    pub granular: bool,
     pub workspace: bool,
     pub packages: Vec<String>,
     pub with_nextest: Option<bool>,
@@ -107,9 +108,11 @@ impl CiInference {
             with_artifacts: Some(marked.iter().any(|workflow| {
                 workflow_name(&workflow.relative_path) == Some("release-artifacts")
             })),
-            with_pypi_publish: Some(marked.iter().any(|workflow| {
-                workflow_name(&workflow.relative_path) == Some("publish-pypi")
-            })),
+            with_pypi_publish: Some(
+                marked
+                    .iter()
+                    .any(|workflow| workflow_name(&workflow.relative_path) == Some("publish-pypi")),
+            ),
             om_ci: Some(infer_om_ci_mode(&all_content)),
             omnix_ref: infer_omnix_ref(&all_content),
             release_smoke_command: infer_release_smoke_command(&all_content),
@@ -123,6 +126,7 @@ pub struct ResolvedCiInputs {
     pub runner: Option<String>,
     pub windows_runner: Option<String>,
     pub step_runners: BTreeMap<String, String>,
+    pub granular: bool,
     pub workspace: bool,
     pub packages: Vec<String>,
     pub with_nextest: bool,
@@ -192,6 +196,7 @@ impl ResolvedCiInputs {
         Ok(Self {
             runtime,
             runner: cli.runner.clone().or(config.runner).or(inference.runner),
+            granular: cli.granular,
             windows_runner: cli
                 .windows_runner
                 .clone()
@@ -374,7 +379,8 @@ impl CiConfigLayer {
             with_deny: present(ci_table, "with_deny").map(|_| cfg.ci.with_deny),
             with_docs: present(ci_table, "with_docs").map(|_| cfg.ci.with_docs),
             with_artifacts: present(ci_table, "with_artifacts").map(|_| cfg.ci.with_artifacts),
-            with_pypi_publish: present(ci_table, "with_pypi_publish").map(|_| cfg.ci.with_pypi_publish),
+            with_pypi_publish: present(ci_table, "with_pypi_publish")
+                .map(|_| cfg.ci.with_pypi_publish),
             om_ci: present(ci_table, "om_ci").map(|_| cfg.ci.om_ci),
             om_ci_augment: present(ci_table, "om_ci_augment").map(|_| cfg.ci.om_ci_augment),
             omnix_ref: present(ci_table, "omnix_ref").and_then(|_| cfg.ci.omnix_ref.clone()),
@@ -432,7 +438,7 @@ fn validate_config_runtime(runtime: Runtime, workspace_root: &Path) -> Result<()
 }
 
 fn infer_ci_runtime(marked: &[WorkflowSnapshot]) -> Result<Runtime> {
-    let ci_workflow = marked
+    let Some(ci_workflow) = marked
         .iter()
         .find(|workflow| workflow_name(&workflow.relative_path) == Some("ci"))
         .or_else(|| {
@@ -445,7 +451,9 @@ fn infer_ci_runtime(marked: &[WorkflowSnapshot]) -> Result<Runtime> {
                 .iter()
                 .find(|workflow| workflow_name(&workflow.relative_path) == Some("publish-pypi"))
         })
-        .context("no CI or publish workflow available for runtime inference")?;
+    else {
+        return Ok(Runtime::Cargo);
+    };
 
     if ci_workflow.content.contains("      - name: Install Nix\n")
         || ci_workflow.content.contains("run: nix flake check")

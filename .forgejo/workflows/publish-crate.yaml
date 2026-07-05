@@ -20,7 +20,7 @@ concurrency:
 jobs:
   publish:
     enable-openid-connect: true
-    runs-on: codeberg-medium
+    runs-on: atlas-nix-trusted
     env:
       NIX_CONFIG: "experimental-features = nix-command flakes"
       XDG_CACHE_HOME: "/tmp/.cache"

@@ -56,7 +56,7 @@ pub fn run(command: InitFlakeCommand) -> Result<()> {
     languages.nix = true;
     let rust_edition = rustfmt_edition(&metadata);
     let rust_version = workspace_rust_version(&metadata);
-    let audit_tools = resolve_audit_tools(workspace_root, &cfg, &languages)?;
+    let audit_tools = resolve_audit_tools(workspace_root, &cfg, &languages, &metadata)?;
     let all_files = flake::files(
         &languages,
         &rust_edition,
@@ -270,6 +270,7 @@ fn resolve_audit_tools(
     workspace_root: &Path,
     cfg: &ProjectConfig,
     languages: &Languages,
+    metadata: &cargo::Metadata,
 ) -> Result<flake::AuditTools> {
     if !languages.rust {
         return Ok(flake::AuditTools::default());
@@ -280,6 +281,7 @@ fn resolve_audit_tools(
         deny: cfg.ci.with_deny
             || workspace_root.join("deny.toml").exists()
             || existing_ci_contains(workspace_root, "cargo deny check")?,
+        pyo3: cargo::has_pyo3_dep(&metadata.packages),
     })
 }
 

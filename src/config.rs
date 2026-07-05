@@ -240,6 +240,12 @@ pub struct CiConfig {
 pub struct CodebergPagesConfig {
     /// Codeberg `<owner>/<repo>` receiving the generated `pages` branch.
     pub repo: String,
+    /// Canonical hostname expected in the generated `.domains` file.
+    #[serde(default)]
+    pub canonical_domain: Option<String>,
+    /// Nix installable that builds the generated static site.
+    #[serde(default = "default_pages_site_output")]
+    pub site_output: String,
     /// CI secret exposed as `CODEBERG_TOKEN` for authenticated branch pushes.
     #[serde(default = "default_codeberg_token_secret")]
     pub token_secret: String,
@@ -474,6 +480,8 @@ pub struct ResolvedCodebergRelease {
 pub struct ResolvedCodebergPages {
     pub repo: String,
     pub owner: String,
+    pub canonical_domain: Option<String>,
+    pub site_output: String,
     pub token_secret: String,
     pub source_branch: String,
     pub deploy_app: String,
@@ -796,6 +804,10 @@ fn default_pages_source_branch() -> String {
 
 fn default_pages_deploy_app() -> String {
     ".#deploy-pages".to_owned()
+}
+
+fn default_pages_site_output() -> String {
+    ".#site".to_owned()
 }
 
 fn default_copr_spec_path() -> Option<String> {
@@ -1307,6 +1319,16 @@ impl ProjectConfig {
         )?;
         if let Some(pages) = &self.ci.pages {
             validate_owner_repo("simit project config: [ci.pages].repo", &pages.repo)?;
+            if let Some(canonical_domain) = &pages.canonical_domain {
+                validate_nonempty_string(
+                    "simit project config: [ci.pages].canonical_domain",
+                    canonical_domain,
+                )?;
+            }
+            validate_nonempty_string(
+                "simit project config: [ci.pages].site_output",
+                &pages.site_output,
+            )?;
             validate_nonempty_string(
                 "simit project config: [ci.pages].token_secret",
                 &pages.token_secret,
@@ -2078,6 +2100,8 @@ impl ProjectConfig {
         Ok(Some(ResolvedCodebergPages {
             repo: pages.repo.clone(),
             owner,
+            canonical_domain: pages.canonical_domain.clone(),
+            site_output: pages.site_output.clone(),
             token_secret: pages.token_secret.clone(),
             source_branch: pages.source_branch.clone(),
             deploy_app: pages.deploy_app.clone(),
@@ -2200,6 +2224,12 @@ fn set_optional_pages_table(table: &mut Table, pages: Option<&CodebergPagesConfi
     let mut pages_table = Table::new();
     pages_table.set_implicit(false);
     pages_table["repo"] = value(pages.repo.as_str());
+    if let Some(canonical_domain) = &pages.canonical_domain {
+        pages_table["canonical_domain"] = value(canonical_domain.as_str());
+    }
+    if pages.site_output != default_pages_site_output() {
+        pages_table["site_output"] = value(pages.site_output.as_str());
+    }
     if pages.token_secret != default_codeberg_token_secret() {
         pages_table["token_secret"] = value(pages.token_secret.as_str());
     }

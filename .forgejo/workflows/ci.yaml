@@ -27,8 +27,30 @@ jobs:
       - name: Check flake
         run: nix flake check
 
+      - name: Check generated CI
+        run: nix develop -c cargo run -- init ci --runtime nix
+      - name: Check generated flake and hooks
+        run: nix develop -c cargo run -- init flake --check
+
+  codeberg-tiny:
+    needs: [atlas-nix-trusted]
+    runs-on: codeberg-tiny
+    env:
+      NIX_CONFIG: "experimental-features = nix-command flakes"
+      XDG_CACHE_HOME: "/tmp/.cache"
+      CARGO_HOME: "/tmp/.cargo"
+    steps:
+      - name: Checkout
+        uses: https://code.forgejo.org/actions/checkout@v4
+
+      - name: Add cargo bin to PATH
+        run: echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
+
+      - name: Format check
+        run: nix develop -c cargo fmt --all -- --check
+
   codeberg-medium:
-    needs: [test]
+    needs: [atlas-nix-trusted]
     runs-on: codeberg-medium
     env:
       NIX_CONFIG: "experimental-features = nix-command flakes"
@@ -44,16 +66,24 @@ jobs:
       - name: Test
         run: nix develop -c cargo test
 
+      - name: Package crate
+        run: nix develop -c cargo package
+  codeberg-small:
+    needs: [atlas-nix-trusted]
+    runs-on: codeberg-small
+    env:
+      NIX_CONFIG: "experimental-features = nix-command flakes"
+      XDG_CACHE_HOME: "/tmp/.cache"
+      CARGO_HOME: "/tmp/.cargo"
+    steps:
+      - name: Checkout
+        uses: https://code.forgejo.org/actions/checkout@v4
+
+      - name: Add cargo bin to PATH
+        run: echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
+
       - name: Build docs
         run: nix develop -c cargo doc --no-deps --all-features
 
-      - name: Check generated CI
-        run: nix develop -c cargo run -- init ci --runtime nix
-      - name: Check generated flake and hooks
-        run: nix develop -c cargo run -- init flake --check
-
       - name: Clippy
         run: nix develop -c cargo clippy --all-targets -- --deny warnings
-
-      - name: Package crate
-        run: nix develop -c cargo package

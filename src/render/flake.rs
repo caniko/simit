@@ -52,8 +52,9 @@ const RELEASE_DEV_SHELL_PACKAGES: &str = r#"          cargo-about
           unzip
           zip
           reprepro
-          taplo
+           taplo
 "#;
+const MATURIN_PACKAGE: &str = "          maturin\n";
 const PRE_COMMIT_ENABLED_PACKAGES: &str = "        ] ++ pre-commit-check.enabledPackages;\n";
 const SHELL_HOOK: &str = "        shellHook = pre-commit-check.shellHook;\n";
 
@@ -61,6 +62,7 @@ const SHELL_HOOK: &str = "        shellHook = pre-commit-check.shellHook;\n";
 pub struct AuditTools {
     pub audit: bool,
     pub deny: bool,
+    pub pyo3: bool,
 }
 
 pub fn files(
@@ -197,6 +199,7 @@ pub fn has_required_wiring(content: &str) -> bool {
         AuditTools {
             audit: true,
             deny: false,
+            pyo3: false,
         },
     )
 }
@@ -1384,6 +1387,9 @@ fn insert_template_audit_packages(content: &mut String, audit_tools: AuditTools)
     if audit_tools.audit && !content.contains(CARGO_AUDIT_PACKAGE.trim_end()) {
         content.insert_str(dev_shell_packages_start(content), CARGO_AUDIT_PACKAGE);
     }
+    if audit_tools.pyo3 && !content.contains(MATURIN_PACKAGE.trim_end()) {
+        content.insert_str(dev_shell_packages_start(content), MATURIN_PACKAGE);
+    }
 }
 
 fn dev_shell_packages_start(content: &str) -> usize {
@@ -1591,6 +1597,7 @@ mod tests {
         let flake = template(AuditTools {
             audit: true,
             deny: false,
+            pyo3: false,
         });
         // The single-target path must keep its fixed crane build and must not
         // mention rs-harbor or the cross helper.
@@ -1647,6 +1654,7 @@ mod tests {
             AuditTools {
                 audit: true,
                 deny: true,
+                pyo3: false,
             },
         );
 
@@ -1731,6 +1739,7 @@ mod tests {
             AuditTools {
                 audit: true,
                 deny: false,
+                pyo3: false,
             },
         );
         assert!(flake.contains("targets = [\"native\" \"windows\"];"));
@@ -1747,6 +1756,7 @@ mod tests {
             AuditTools {
                 audit: true,
                 deny: false,
+                pyo3: false,
             },
         );
         assert!(flake.contains("targets = [\"aarch64-linux\" \"windows\"];"));

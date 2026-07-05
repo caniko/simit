@@ -258,6 +258,8 @@ repo = "caniko/plinth"
     let pages = cfg.resolve_codeberg_pages().unwrap().unwrap();
     assert_eq!(pages.repo, "caniko/plinth");
     assert_eq!(pages.owner, "caniko");
+    assert_eq!(pages.canonical_domain, None);
+    assert_eq!(pages.site_output, ".#site");
     assert_eq!(pages.token_secret, "codeberg_token");
     assert_eq!(pages.source_branch, "trunk");
     assert_eq!(pages.deploy_app, ".#deploy-pages");

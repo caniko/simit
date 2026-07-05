@@ -142,6 +142,7 @@ fn add_managed_flake(root: &Path) {
         flake::AuditTools {
             audit: true,
             deny: false,
+            pyo3: false,
         },
     );
     project::write_generated_files(root, &files).unwrap();
@@ -161,6 +162,7 @@ fn add_hooks_only_flake(root: &Path) {
         flake::AuditTools {
             audit: true,
             deny: false,
+            pyo3: false,
         },
     );
     let hook_files = files

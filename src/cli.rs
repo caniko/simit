@@ -445,6 +445,11 @@ pub struct InitCiCommand {
     )]
     pub step_runner: Vec<String>,
     #[arg(
+        long,
+        help = "Generate granular split of CI steps across Codeberg runner tiers (fmt→tiny, clippy/deny/audit→small, test/doc/package→medium); forgejo-only"
+    )]
+    pub granular: bool,
+    #[arg(
         long = "maintainer-key",
         value_name = "FINGERPRINT",
         help = "OpenPGP key fingerprint to export into keys/maintainers.gpg"
@@ -571,6 +576,20 @@ pub struct InitCiCommand {
         help = "Codeberg repository receiving the generated pages branch"
     )]
     pub pages_repo: Option<String>,
+    #[arg(
+        long = "pages-canonical-domain",
+        value_name = "DOMAIN",
+        requires = "with_codeberg_pages",
+        help = "Canonical domain that must appear in the generated Pages .domains file"
+    )]
+    pub pages_canonical_domain: Option<String>,
+    #[arg(
+        long = "pages-site-output",
+        value_name = "INSTALLABLE",
+        requires = "with_codeberg_pages",
+        help = "Nix installable used to build the Pages site for domain validation"
+    )]
+    pub pages_site_output: Option<String>,
     #[arg(
         long = "pages-token-secret",
         value_name = "SECRET",

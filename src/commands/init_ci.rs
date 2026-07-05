@@ -40,8 +40,11 @@ pub fn run(command: InitCiCommand) -> Result<()> {
     let inference = CiInference::from_workflows(&workflow_snapshots)?;
     let inferred_pages = infer_codeberg_pages_from_workflows(&workflow_snapshots)?;
     let cli_overrides = ci_cli_overrides(&command);
-    let resolved =
+    let mut resolved =
         ResolvedCiInputs::resolve(workspace_root, &cfg, &cli_overrides, Some(&inference))?;
+    if resolved.granular && command.platform == Platform::Forgejo {
+        apply_granular_step_runners(&mut resolved.step_runners, resolved.runtime);
+    }
     validate_runner(resolved.runner.as_deref())?;
     validate_runner(resolved.windows_runner.as_deref())?;
     let packages = cargo::select_packages(&metadata, &resolved.packages, resolved.workspace)?;
@@ -110,9 +113,8 @@ pub fn run(command: InitCiCommand) -> Result<()> {
         .map(|(step, label)| {
             Ok((
                 step.clone(),
-                ResolvedRunner::literal(label).map_err(|e| {
-                    anyhow::anyhow!("invalid step runner label for '{step}': {e}")
-                })?,
+                ResolvedRunner::literal(label)
+                    .map_err(|e| anyhow::anyhow!("invalid step runner label for '{step}': {e}"))?,
             ))
         })
         .collect::<Result<_>>()?;
@@ -165,6 +167,14 @@ pub fn run(command: InitCiCommand) -> Result<()> {
             &runners,
             package_options,
             &step_runners,
+        )?);
+    }
+    if resolved.with_pypi_publish && cargo::has_pyo3_dep(&metadata.packages) {
+        files.push(ci::maturin_publish_file(
+            command.platform,
+            resolved.runtime,
+            &runners.ci,
+            &options,
         )?);
     }
     let pages = codeberg_pages_options(&cfg, &command, inferred_pages.as_ref())?;
@@ -364,6 +374,7 @@ fn ci_cli_overrides(command: &InitCiCommand) -> CiCliOverrides {
         runner: command.runner.clone(),
         windows_runner: command.windows_runner.clone(),
         step_runner,
+        granular: command.granular,
         workspace: command.workspace,
         packages: command.packages.clone(),
         with_nextest: command.with_nextest,
@@ -465,6 +476,7 @@ pub(crate) fn project_regeneration_command(workspace_root: &Path) -> Result<Opti
         runtime: None,
         runner: None,
         windows_runner: None,
+        granular: resolved.granular,
         maintainer_key: None,
         maintainers_gpg: None,
         release_smoke_command: None,
@@ -522,6 +534,12 @@ pub(crate) fn project_regeneration_command(workspace_root: &Path) -> Result<Opti
         with_pypi_publish: None,
         with_codeberg_pages: inferred_pages.is_some(),
         pages_repo: inferred_pages.as_ref().map(|pages| pages.repo.clone()),
+        pages_canonical_domain: inferred_pages
+            .as_ref()
+            .and_then(|pages| pages.canonical_domain.clone()),
+        pages_site_output: inferred_pages
+            .as_ref()
+            .map(|pages| pages.site_output.clone()),
         pages_token_secret: inferred_pages
             .as_ref()
             .map(|pages| pages.token_secret.clone()),
@@ -573,6 +591,9 @@ pub(crate) fn render_regeneration_command(
     if resolved.runtime != Runtime::Cargo || command.runtime.is_some() {
         args.push("--runtime".to_owned());
         args.push(runtime_as_str(resolved.runtime).to_owned());
+    }
+    if resolved.granular {
+        args.push("--granular".to_owned());
     }
     if let Some(runner) = &resolved.runner {
         args.push("--runner".to_owned());
@@ -670,6 +691,16 @@ pub(crate) fn render_regeneration_command(
     if command.with_codeberg_pages {
         args.push("--with-codeberg-pages".to_owned());
         push_optional_arg(&mut args, "--pages-repo", command.pages_repo.as_deref());
+        push_optional_arg(
+            &mut args,
+            "--pages-canonical-domain",
+            command.pages_canonical_domain.as_deref(),
+        );
+        push_optional_arg(
+            &mut args,
+            "--pages-site-output",
+            command.pages_site_output.as_deref(),
+        );
         push_optional_arg(
             &mut args,
             "--pages-token-secret",
@@ -922,6 +953,8 @@ fn codeberg_pages_options(
     Ok(Some(CodebergPagesOptions {
         repo: resolved.repo,
         owner: resolved.owner,
+        canonical_domain: resolved.canonical_domain,
+        site_output: resolved.site_output,
         token_secret: resolved.token_secret,
         source_branch: resolved.source_branch,
         deploy_app: resolved.deploy_app,
@@ -952,6 +985,21 @@ fn resolve_codeberg_pages(
         .or_else(|| config.as_ref().map(|pages| pages.token_secret.clone()))
         .or_else(|| inferred.map(|pages| pages.token_secret.clone()))
         .unwrap_or_else(|| "codeberg_token".to_owned());
+    let canonical_domain = command
+        .pages_canonical_domain
+        .clone()
+        .or_else(|| {
+            config
+                .as_ref()
+                .and_then(|pages| pages.canonical_domain.clone())
+        })
+        .or_else(|| inferred.and_then(|pages| pages.canonical_domain.clone()));
+    let site_output = command
+        .pages_site_output
+        .clone()
+        .or_else(|| config.as_ref().map(|pages| pages.site_output.clone()))
+        .or_else(|| inferred.map(|pages| pages.site_output.clone()))
+        .unwrap_or_else(|| ".#site".to_owned());
     let source_branch = command
         .pages_source_branch
         .clone()
@@ -967,6 +1015,15 @@ fn resolve_codeberg_pages(
     if token_secret.trim().is_empty() {
         bail!("--pages-token-secret must not be empty");
     }
+    if canonical_domain
+        .as_ref()
+        .is_some_and(|domain| domain.trim().is_empty())
+    {
+        bail!("--pages-canonical-domain must not be empty");
+    }
+    if site_output.trim().is_empty() {
+        bail!("--pages-site-output must not be empty");
+    }
     if source_branch.trim().is_empty() {
         bail!("--pages-source-branch must not be empty");
     }
@@ -977,6 +1034,8 @@ fn resolve_codeberg_pages(
     Ok(ResolvedCodebergPages {
         repo,
         owner,
+        canonical_domain,
+        site_output,
         token_secret,
         source_branch,
         deploy_app,
@@ -999,6 +1058,9 @@ fn infer_codeberg_pages_from_workflows(
     validate_download_repo_for("--pages-repo", &repo)?;
     Ok(Some(CodebergPagesConfig {
         repo,
+        canonical_domain: infer_pages_canonical_domain(&workflow.content),
+        site_output: infer_pages_site_output(&workflow.content)
+            .unwrap_or_else(|| ".#site".to_owned()),
         token_secret: infer_pages_token_secret(&workflow.content)
             .unwrap_or_else(|| "codeberg_token".to_owned()),
         source_branch: infer_pages_source_branch(&workflow.content)
@@ -1024,6 +1086,30 @@ fn infer_pages_token_secret(content: &str) -> Option<String> {
     let tail = &line[start..];
     let end = tail.find(" }}")?;
     Some(tail[..end].to_owned())
+}
+
+fn infer_pages_canonical_domain(content: &str) -> Option<String> {
+    let marker = "grep -qx ";
+    let suffix = " result-pages-site/.domains";
+    let line = content
+        .lines()
+        .find(|line| line.contains(marker) && line.contains(suffix))?;
+    let start = line.find(marker)? + marker.len();
+    let tail = &line[start..];
+    let end = tail.find(suffix)?;
+    Some(shell_unquote(tail[..end].trim()))
+}
+
+fn infer_pages_site_output(content: &str) -> Option<String> {
+    let marker = "nix build ";
+    let suffix = " --no-link --out-link result-pages-site";
+    let line = content
+        .lines()
+        .find(|line| line.contains(marker) && line.contains(suffix))?;
+    let start = line.find(marker)? + marker.len();
+    let tail = &line[start..];
+    let end = tail.find(suffix)?;
+    Some(shell_unquote(tail[..end].trim()))
 }
 
 fn infer_pages_source_branch(content: &str) -> Option<String> {
@@ -1060,12 +1146,22 @@ fn infer_pages_deploy_app(content: &str) -> Option<String> {
     Some(line[start..].trim().to_owned())
 }
 
+fn shell_unquote(value: &str) -> String {
+    let value = value.trim();
+    if value.len() >= 2 && value.starts_with('\'') && value.ends_with('\'') {
+        return value[1..value.len() - 1].replace("'\"'\"'", "'");
+    }
+    value.to_owned()
+}
+
 fn codeberg_pages_config(pages: &Option<CodebergPagesOptions>) -> Result<CodebergPagesConfig> {
     let pages = pages
         .as_ref()
         .context("--with-codeberg-pages did not resolve a Pages configuration")?;
     Ok(CodebergPagesConfig {
         repo: pages.repo.clone(),
+        canonical_domain: pages.canonical_domain.clone(),
+        site_output: pages.site_output.clone(),
         token_secret: pages.token_secret.clone(),
         source_branch: pages.source_branch.clone(),
         deploy_app: pages.deploy_app.clone(),
@@ -1195,4 +1291,33 @@ fn homebrew_platforms(resolved: &ResolvedHomebrew) -> HomebrewPlatformSet {
 pub(crate) fn validate_runner(value: Option<&str>) -> Result<()> {
     value.map(validate_runner_label).transpose()?;
     Ok(())
+}
+
+pub(crate) fn apply_granular_step_runners(
+    step_runners: &mut BTreeMap<String, String>,
+    runtime: Runtime,
+) {
+    if runtime == Runtime::Nix {
+        step_runners
+            .entry(crate::render::ci::STEP_FLAKE_CHECK.to_string())
+            .or_insert_with(|| "atlas-nix-trusted".to_string());
+    }
+    step_runners
+        .entry(crate::render::ci::STEP_CARGO_FMT.to_string())
+        .or_insert_with(|| "codeberg-tiny".to_string());
+    step_runners
+        .entry(crate::render::ci::STEP_CARGO_CLIPPY.to_string())
+        .or_insert_with(|| "codeberg-small".to_string());
+    step_runners
+        .entry(crate::render::ci::STEP_CARGO_TEST.to_string())
+        .or_insert_with(|| "codeberg-medium".to_string());
+    step_runners
+        .entry(crate::render::ci::STEP_CARGO_DOC.to_string())
+        .or_insert_with(|| "codeberg-small".to_string());
+    step_runners
+        .entry(crate::render::ci::STEP_CARGO_PACKAGE.to_string())
+        .or_insert_with(|| "codeberg-medium".to_string());
+    step_runners
+        .entry(crate::render::ci::STEP_QUALITY_TOOLS.to_string())
+        .or_insert_with(|| "codeberg-small".to_string());
 }

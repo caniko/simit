@@ -566,6 +566,7 @@ fn detect_flake_status(workspace_root: &Path) -> FeatureStatus {
                 flake::AuditTools {
                     audit: languages.rust,
                     deny: false,
+                    pyo3: false,
                 },
             )
         })
@@ -598,6 +599,7 @@ fn detect_hooks_only_flake_status(workspace_root: &Path) -> FeatureStatus {
         flake::AuditTools {
             audit: languages.rust,
             deny: false,
+            pyo3: false,
         },
     ) {
         FeatureStatus::Managed
@@ -773,12 +775,36 @@ fn infer_expected_ci_files(
             workspace_root.display()
         );
     }
-    let resolved = crate::ci_resolution::ResolvedCiInputs::resolve(
+    let has_granular_jobs = marked
+        .iter()
+        .any(|wf| wf.content.contains("  codeberg-") || wf.content.contains("  codeberg_"));
+    let mut cli = CiCliOverrides::default();
+    if has_granular_jobs {
+        cli.granular = true;
+    }
+    let mut resolved = crate::ci_resolution::ResolvedCiInputs::resolve(
         workspace_root,
         &config,
-        &CiCliOverrides::default(),
+        &cli,
         Some(&inference),
     )?;
+    if has_granular_jobs {
+        crate::commands::init_ci::apply_granular_step_runners(
+            &mut resolved.step_runners,
+            resolved.runtime,
+        );
+    }
+    let step_runners: BTreeMap<String, ResolvedRunner> = resolved
+        .step_runners
+        .iter()
+        .map(|(step, label)| {
+            Ok((
+                step.clone(),
+                ResolvedRunner::literal(label)
+                    .map_err(|e| anyhow::anyhow!("invalid step runner label for '{step}': {e}"))?,
+            ))
+        })
+        .collect::<Result<_>>()?;
     let packages = cargo::select_packages(&metadata, &resolved.packages, resolved.workspace)?;
     let package_scoped = metadata.workspace_members.len() > 1;
     let windows_runner = infer_windows_runner(marked);
@@ -821,7 +847,7 @@ fn infer_expected_ci_files(
             self_check,
             &runners,
             package_options,
-            &BTreeMap::new(),
+            &step_runners,
         )?);
     }
     if let Some(pages) = infer_codeberg_pages_options(marked)? {
@@ -1069,6 +1095,9 @@ fn infer_codeberg_pages_options(
     Ok(Some(ci::CodebergPagesOptions {
         repo,
         owner,
+        canonical_domain: infer_pages_canonical_domain(&workflow.content),
+        site_output: infer_pages_site_output(&workflow.content)
+            .unwrap_or_else(|| ".#site".to_owned()),
         token_secret: infer_pages_token_secret(&workflow.content)
             .unwrap_or_else(|| "codeberg_token".to_owned()),
         source_branch: infer_pages_source_branch(&workflow.content)
@@ -1109,6 +1138,30 @@ fn infer_pages_deploy_app(content: &str) -> Option<String> {
     let line = content.lines().find(|line| line.contains(marker))?;
     let start = line.find(marker)? + marker.len();
     Some(line[start..].trim().to_owned())
+}
+
+fn infer_pages_canonical_domain(content: &str) -> Option<String> {
+    let marker = "grep -qx ";
+    let suffix = " result-pages-site/.domains";
+    let line = content
+        .lines()
+        .find(|line| line.contains(marker) && line.contains(suffix))?;
+    let start = line.find(marker)? + marker.len();
+    let tail = &line[start..];
+    let end = tail.find(suffix)?;
+    Some(shell_unquote(tail[..end].trim()))
+}
+
+fn infer_pages_site_output(content: &str) -> Option<String> {
+    let marker = "nix build ";
+    let suffix = " --no-link --out-link result-pages-site";
+    let line = content
+        .lines()
+        .find(|line| line.contains(marker) && line.contains(suffix))?;
+    let start = line.find(marker)? + marker.len();
+    let tail = &line[start..];
+    let end = tail.find(suffix)?;
+    Some(shell_unquote(tail[..end].trim()))
 }
 
 fn infer_primary_runner(marked: &[WorkflowFile], workflow_kind: &str) -> Result<ResolvedRunner> {

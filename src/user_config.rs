@@ -577,6 +577,27 @@ os = "windows"
 arch = "x86_64"
 runtimes = ["cargo"]
 
+[ci.runners.codeberg_tiny]
+platform = "forgejo"
+labels = ["codeberg-tiny"]
+os = "linux"
+arch = "x86_64"
+runtimes = ["cargo"]
+
+[ci.runners.codeberg_small]
+platform = "forgejo"
+labels = ["codeberg-small"]
+os = "linux"
+arch = "x86_64"
+runtimes = ["cargo"]
+
+[ci.runners.codeberg_medium]
+platform = "forgejo"
+labels = ["codeberg-medium"]
+os = "linux"
+arch = "x86_64"
+runtimes = ["cargo"]
+
 [ci.defaults.forgejo]
 cargo = "forgejo_linux"
 nix = "forgejo_nix_trusted"

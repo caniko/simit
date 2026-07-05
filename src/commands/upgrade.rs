@@ -320,6 +320,8 @@ fn plan_codeberg_pages_upgrade(workspace_root: &Path) -> Result<Option<FileUpgra
         &CodebergPagesOptions {
             repo,
             owner,
+            canonical_domain: infer_pages_canonical_domain(&current),
+            site_output: infer_pages_site_output(&current).unwrap_or_else(|| ".#site".to_owned()),
             token_secret: "codeberg_token".to_owned(),
             source_branch,
             deploy_app: ".#deploy-pages".to_owned(),
@@ -465,6 +467,38 @@ fn infer_pages_source_branch(content: &str) -> Option<String> {
         }
     }
     None
+}
+
+fn infer_pages_canonical_domain(content: &str) -> Option<String> {
+    let marker = "grep -qx ";
+    let suffix = " result-pages-site/.domains";
+    let line = content
+        .lines()
+        .find(|line| line.contains(marker) && line.contains(suffix))?;
+    let start = line.find(marker)? + marker.len();
+    let tail = &line[start..];
+    let end = tail.find(suffix)?;
+    Some(shell_unquote(tail[..end].trim()))
+}
+
+fn infer_pages_site_output(content: &str) -> Option<String> {
+    let marker = "nix build ";
+    let suffix = " --no-link --out-link result-pages-site";
+    let line = content
+        .lines()
+        .find(|line| line.contains(marker) && line.contains(suffix))?;
+    let start = line.find(marker)? + marker.len();
+    let tail = &line[start..];
+    let end = tail.find(suffix)?;
+    Some(shell_unquote(tail[..end].trim()))
+}
+
+fn shell_unquote(value: &str) -> String {
+    let value = value.trim();
+    if value.len() >= 2 && value.starts_with('\'') && value.ends_with('\'') {
+        return value[1..value.len() - 1].replace("'\"'\"'", "'");
+    }
+    value.to_owned()
 }
 
 fn print_single_outcome(outcome: &ProjectOutcome, mode: Mode) {
