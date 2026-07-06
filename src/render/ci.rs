@@ -5,6 +5,7 @@ use anyhow::{Result, bail};
 
 use crate::cargo::Package;
 use crate::cli::{Platform, Runtime};
+use crate::config::{ResolvedVscode, VscodePatSource};
 use crate::project::GeneratedFile;
 use crate::user_config::{ResolvedCiRunners, ResolvedRunner};
 
@@ -42,12 +43,14 @@ pub struct CiOptions {
     pub with_docs: bool,
     pub with_artifacts: bool,
     pub with_pypi_publish: bool,
+    pub publish_crates: bool,
     pub om_ci: OmCiMode,
     pub omnix_ref: String,
     pub release_smoke_command: Option<String>,
     pub extra_setup: Vec<String>,
     pub extra_env: Vec<(String, String)>,
     pub required_secrets: Vec<String>,
+    pub required_env: Vec<String>,
     pub package_scoped: bool,
     pub homebrew: Option<HomebrewOptions>,
     pub chocolatey: Option<ChocolateyOptions>,
@@ -75,12 +78,14 @@ impl Default for CiOptions {
             with_docs: false,
             with_artifacts: false,
             with_pypi_publish: false,
+            publish_crates: false,
             om_ci: OmCiMode::default(),
             omnix_ref: OMNIX_REF_DEFAULT.to_owned(),
             release_smoke_command: None,
             extra_setup: Vec::new(),
             extra_env: Vec::new(),
             required_secrets: Vec::new(),
+            required_env: Vec::new(),
             package_scoped: false,
             homebrew: None,
             chocolatey: None,
@@ -128,8 +133,14 @@ pub struct ChocolateyOptions {
     pub title: String,
     pub authors: Option<String>,
     pub description: String,
+    pub summary: Option<String>,
     pub project_url: String,
     pub license_url: Option<String>,
+    pub icon_url: Option<String>,
+    pub package_source_url: Option<String>,
+    pub docs_url: Option<String>,
+    pub bug_tracker_url: Option<String>,
+    pub project_source_url: Option<String>,
     pub tags: Option<String>,
     pub release_notes_url: Option<String>,
     pub download_repo: String,
@@ -161,6 +172,17 @@ pub struct SelfCheckOptions<'a> {
     pub workspace: bool,
 }
 
+pub struct FilesRequest<'a> {
+    pub platform: Platform,
+    pub runtime: Runtime,
+    pub package: &'a Package,
+    pub file_suffix: Option<&'a str>,
+    pub self_check: SelfCheckOptions<'a>,
+    pub runners: &'a ResolvedCiRunners,
+    pub options: CiOptions,
+    pub step_runners: &'a BTreeMap<String, ResolvedRunner>,
+}
+
 impl Default for HomebrewPlatformSet {
     fn default() -> Self {
         Self {
@@ -172,16 +194,18 @@ impl Default for HomebrewPlatformSet {
     }
 }
 
-pub fn files(
-    platform: Platform,
-    runtime: Runtime,
-    package: &Package,
-    file_suffix: Option<&str>,
-    self_check: SelfCheckOptions<'_>,
-    runners: &ResolvedCiRunners,
-    options: CiOptions,
-    step_runners: &BTreeMap<String, ResolvedRunner>,
-) -> Result<Vec<GeneratedFile>> {
+pub fn files(request: FilesRequest<'_>) -> Result<Vec<GeneratedFile>> {
+    let FilesRequest {
+        platform,
+        runtime,
+        package,
+        file_suffix,
+        self_check,
+        runners,
+        options,
+        step_runners,
+    } = request;
+
     if options.with_msrv && package.rust_version.is_none() {
         bail!("--with-msrv requires package.rust-version in Cargo.toml");
     }
@@ -203,7 +227,7 @@ pub fn files(
         ),
     }];
 
-    if package.is_publishable() {
+    if options.publish_crates && package.is_publishable() {
         files.push(GeneratedFile {
             relative_path: dir.join(publish_name),
             content: publish_workflow(
@@ -237,6 +261,25 @@ pub fn codeberg_pages_file(
     Ok(GeneratedFile {
         relative_path: PathBuf::from(platform.workflow_dir()).join("pages.yaml"),
         content: codeberg_pages_workflow(runner, pages),
+    })
+}
+
+pub fn vscode_extension_file(
+    platform: Platform,
+    runtime: Runtime,
+    runner: &ResolvedRunner,
+    vscode: &ResolvedVscode,
+) -> Result<GeneratedFile> {
+    if platform != Platform::Forgejo {
+        bail!("VS Code extension workflow generation is forgejo-only");
+    }
+    if runtime != Runtime::Nix {
+        bail!("VS Code extension workflow generation requires --runtime nix");
+    }
+
+    Ok(GeneratedFile {
+        relative_path: PathBuf::from(platform.workflow_dir()).join("publish-vscode-extension.yaml"),
+        content: vscode_extension_workflow(platform, runner, vscode),
     })
 }
 
@@ -315,6 +358,250 @@ fn codeberg_pages_workflow(runner: &ResolvedRunner, pages: &CodebergPagesOptions
     workflow
 }
 
+fn vscode_extension_workflow(
+    platform: Platform,
+    runner: &ResolvedRunner,
+    vscode: &ResolvedVscode,
+) -> String {
+    let mut workflow = String::new();
+    push_generated_workflow_header(&mut workflow);
+    workflow.push_str("name: Publish VS Code Extension\n\n");
+    workflow.push_str("on:\n");
+    workflow.push_str("  push:\n");
+    workflow.push_str("    tags: [\"[0-9]*.[0-9]*.[0-9]*\"]\n");
+    workflow.push_str("  workflow_dispatch:\n\n");
+    push_codeberg_concurrency(&mut workflow);
+    workflow.push_str("jobs:\n");
+    workflow.push_str("  publish:\n");
+    workflow.push_str("    runs-on: ");
+    workflow.push_str(&runs_on(runner));
+    workflow.push('\n');
+    workflow.push_str("    env:\n");
+    workflow.push_str("      NIX_CONFIG: \"experimental-features = nix-command flakes\"\n");
+    workflow.push_str("    steps:\n");
+    push_checkout_step(&mut workflow, platform);
+    push_install_nix_step(&mut workflow, platform);
+    push_vscode_credential_preflight(&mut workflow, vscode);
+    push_vscode_version_validation(&mut workflow, vscode);
+    for (index, command) in vscode.prepublish_commands.iter().enumerate() {
+        workflow.push_str("      - name: Prepublish command ");
+        workflow.push_str(&(index + 1).to_string());
+        workflow.push('\n');
+        workflow.push_str("        run: |\n");
+        push_indented_lines(&mut workflow, command, 10);
+        workflow.push('\n');
+    }
+    workflow.push_str("      - name: Package release assets\n");
+    workflow.push_str("        run: |\n");
+    workflow.push_str("          set -euo pipefail\n");
+    workflow.push_str("          VERSION=\"${GITHUB_REF_NAME#v}\"\n");
+    workflow.push_str("          export VERSION\n");
+    push_indented_lines(&mut workflow, &vscode.package_command, 10);
+    workflow.push('\n');
+    push_vscode_codeberg_upload(&mut workflow, vscode);
+    push_vscode_publish_step(&mut workflow, vscode, VscodePublisher::Vsce);
+    push_vscode_publish_step(&mut workflow, vscode, VscodePublisher::Ovsx);
+    trim_trailing_blank_lines(&mut workflow);
+    workflow
+}
+
+fn push_vscode_credential_preflight(workflow: &mut String, vscode: &ResolvedVscode) {
+    workflow.push_str("      - name: Validate publish credentials\n");
+    if matches!(
+        vscode.pat_source,
+        VscodePatSource::ActionsSecret | VscodePatSource::Both
+    ) {
+        workflow.push_str("        env:\n");
+        workflow.push_str("          CODEBERG_TOKEN: ${{ secrets.");
+        workflow.push_str(&vscode.codeberg_token_secret);
+        workflow.push_str(" }}\n");
+        workflow.push_str("          VSCE_PAT_FROM_SECRET: ${{ secrets.");
+        workflow.push_str(&vscode.vsce_pat_secret);
+        workflow.push_str(" }}\n");
+        workflow.push_str("          OVSX_PAT_FROM_SECRET: ${{ secrets.");
+        workflow.push_str(&vscode.ovsx_pat_secret);
+        workflow.push_str(" }}\n");
+    } else {
+        workflow.push_str("        env:\n");
+        workflow.push_str("          CODEBERG_TOKEN: ${{ secrets.");
+        workflow.push_str(&vscode.codeberg_token_secret);
+        workflow.push_str(" }}\n");
+    }
+    workflow.push_str("        run: |\n");
+    workflow.push_str("          set -euo pipefail\n");
+    workflow
+        .push_str("          test -n \"${CODEBERG_TOKEN:-}\" || { echo \"missing Actions secret ");
+    workflow.push_str(&vscode.codeberg_token_secret);
+    workflow.push_str("\"; exit 1; }\n");
+    push_vscode_pat_resolution_function(workflow, vscode);
+    workflow.push_str("          resolve_pat vsce >/dev/null\n");
+    workflow.push_str("          resolve_pat ovsx >/dev/null\n\n");
+}
+
+fn push_vscode_version_validation(workflow: &mut String, vscode: &ResolvedVscode) {
+    workflow.push_str("      - name: Validate release tag and extension version\n");
+    workflow.push_str("        run: |\n");
+    workflow.push_str("          set -euo pipefail\n");
+    workflow.push_str("          VERSION=\"${GITHUB_REF_NAME#v}\"\n");
+    workflow.push_str("          printf '%s\\n' \"$VERSION\" | grep -Eq '^[0-9]+\\.[0-9]+\\.[0-9]+$' || { echo \"release tag must be an exact semver version\"; exit 1; }\n");
+    if let Some(cargo_package) = &vscode.cargo_package {
+        workflow.push_str("          cargo_version=$(nix develop -c cargo metadata --no-deps --format-version 1 | jq -r --arg name ");
+        workflow.push_str(&shell_word(cargo_package));
+        workflow.push_str(" '.packages[] | select(.name == $name) | .version')\n");
+        workflow
+            .push_str("          test -n \"$cargo_version\" || { echo \"missing Cargo package ");
+        workflow.push_str(cargo_package);
+        workflow.push_str("\"; exit 1; }\n");
+        workflow.push_str("          test \"$cargo_version\" = \"$VERSION\" || { echo \"Cargo version $cargo_version does not match tag $VERSION\"; exit 1; }\n");
+    }
+    workflow.push_str("          extension_version=$(jq -r '.version' ");
+    workflow.push_str(&shell_word(&format!(
+        "{}/package.json",
+        vscode.extension_dir
+    )));
+    workflow.push_str(")\n");
+    workflow.push_str("          test \"$extension_version\" = \"$VERSION\" || { echo \"extension version $extension_version does not match tag $VERSION\"; exit 1; }\n\n");
+    workflow.push_str("          test -s keys/maintainers.gpg\n");
+    workflow.push_str("          GNUPGHOME=\"$(mktemp -d)\"\n");
+    workflow.push_str("          export GNUPGHOME\n");
+    workflow.push_str("          trap 'rm -rf \"$GNUPGHOME\"' EXIT\n");
+    workflow.push_str("          chmod 700 \"$GNUPGHOME\"\n");
+    workflow.push_str("          gpg --batch --import keys/maintainers.gpg\n");
+    workflow.push_str("          git fetch --force --tags origin \"refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}\"\n");
+    workflow.push_str("          git verify-tag \"$GITHUB_REF_NAME\"\n\n");
+}
+
+fn push_vscode_codeberg_upload(workflow: &mut String, vscode: &ResolvedVscode) {
+    workflow.push_str("      - name: Upload Codeberg release assets\n");
+    workflow.push_str("        env:\n");
+    workflow.push_str("          CODEBERG_TOKEN: ${{ secrets.");
+    workflow.push_str(&vscode.codeberg_token_secret);
+    workflow.push_str(" }}\n");
+    workflow.push_str("        run: |\n");
+    workflow.push_str("          set -euo pipefail\n");
+    workflow
+        .push_str("          test -n \"${CODEBERG_TOKEN:-}\" || { echo \"missing Actions secret ");
+    workflow.push_str(&vscode.codeberg_token_secret);
+    workflow.push_str("\"; exit 1; }\n");
+    workflow.push_str("          VERSION=\"${GITHUB_REF_NAME#v}\"\n");
+    workflow.push_str("          tag=\"${GITHUB_REF_NAME}\"\n");
+    workflow.push_str("          api=");
+    workflow.push_str(&shell_word(&vscode.codeberg_api_base));
+    workflow.push('\n');
+    workflow.push_str("          repo=");
+    workflow.push_str(&shell_word(&vscode.codeberg_repo));
+    workflow.push('\n');
+    workflow.push_str("          auth_header=\"Authorization: token ${CODEBERG_TOKEN}\"\n");
+    workflow.push_str("          release_json=$(curl --fail --silent --show-error --header \"$auth_header\" \"$api/repos/$repo/releases/tags/$tag\" || true)\n");
+    workflow.push_str("          release_id=$(printf '%s' \"$release_json\" | jq -r '.id // empty' 2>/dev/null || true)\n");
+    workflow.push_str("          if test -z \"$release_id\"; then\n");
+    workflow.push_str("            release_json=$(curl --fail --silent --show-error --request POST --header \"$auth_header\" --header \"Content-Type: application/json\" --data \"{\\\"tag_name\\\":\\\"$tag\\\",\\\"name\\\":\\\"$tag\\\",\\\"draft\\\":false,\\\"prerelease\\\":false}\" \"$api/repos/$repo/releases\")\n");
+    workflow.push_str("            release_id=$(printf '%s' \"$release_json\" | jq -r '.id')\n");
+    workflow.push_str("          fi\n");
+    workflow.push_str("          for asset in release/*; do\n");
+    workflow.push_str("            test -f \"$asset\" || continue\n");
+    workflow.push_str("            name=$(basename \"$asset\")\n");
+    workflow.push_str("            curl --fail --silent --show-error --request POST --header \"$auth_header\" --form \"attachment=@${asset}\" \"$api/repos/$repo/releases/$release_id/assets?name=$name\" >/dev/null\n");
+    workflow.push_str("          done\n\n");
+}
+
+#[derive(Debug, Clone, Copy)]
+enum VscodePublisher {
+    Vsce,
+    Ovsx,
+}
+
+fn push_vscode_publish_step(
+    workflow: &mut String,
+    vscode: &ResolvedVscode,
+    publisher: VscodePublisher,
+) {
+    let (name, command, key) = match publisher {
+        VscodePublisher::Vsce => (
+            "Publish to VS Code Marketplace",
+            "nix develop -c npx --yes @vscode/vsce publish --packagePath release/*.vsix --pat \"$PUBLISH_PAT\"",
+            "vsce",
+        ),
+        VscodePublisher::Ovsx => (
+            "Publish to Open VSX",
+            "nix develop -c npx --yes ovsx publish release/*.vsix --pat \"$PUBLISH_PAT\"",
+            "ovsx",
+        ),
+    };
+    workflow.push_str("      - name: ");
+    workflow.push_str(name);
+    workflow.push('\n');
+    if matches!(
+        vscode.pat_source,
+        VscodePatSource::ActionsSecret | VscodePatSource::Both
+    ) {
+        workflow.push_str("        env:\n");
+        workflow.push_str("          VSCE_PAT_FROM_SECRET: ${{ secrets.");
+        workflow.push_str(&vscode.vsce_pat_secret);
+        workflow.push_str(" }}\n");
+        workflow.push_str("          OVSX_PAT_FROM_SECRET: ${{ secrets.");
+        workflow.push_str(&vscode.ovsx_pat_secret);
+        workflow.push_str(" }}\n");
+    }
+    workflow.push_str("        run: |\n");
+    workflow.push_str("          set -euo pipefail\n");
+    push_vscode_pat_resolution_function(workflow, vscode);
+    workflow.push_str("          PUBLISH_PAT=$(resolve_pat ");
+    workflow.push_str(key);
+    workflow.push_str(")\n");
+    workflow.push_str("          ");
+    workflow.push_str(command);
+    workflow.push_str("\n\n");
+}
+
+fn push_vscode_pat_resolution_function(workflow: &mut String, vscode: &ResolvedVscode) {
+    workflow.push_str("          resolve_pat() {\n");
+    workflow.push_str("            case \"$1\" in\n");
+    workflow.push_str("              vsce) file_env=");
+    workflow.push_str(&shell_word(&vscode.vsce_pat_file_env));
+    workflow.push_str("; secret=\"${VSCE_PAT_FROM_SECRET:-}\" ;;\n");
+    workflow.push_str("              ovsx) file_env=");
+    workflow.push_str(&shell_word(&vscode.ovsx_pat_file_env));
+    workflow.push_str("; secret=\"${OVSX_PAT_FROM_SECRET:-}\" ;;\n");
+    workflow.push_str("              *) echo \"unknown publisher $1\" >&2; exit 1 ;;\n");
+    workflow.push_str("            esac\n");
+    match vscode.pat_source {
+        VscodePatSource::FileEnv => {
+            workflow.push_str("            file_path=\"${!file_env:-}\"\n");
+            workflow.push_str("            test -n \"$file_path\" || { echo \"missing runner file env ${file_env}\" >&2; exit 1; }\n");
+            workflow.push_str("            test -s \"$file_path\" || { echo \"runner file env ${file_env} points at an empty or missing file\" >&2; exit 1; }\n");
+            workflow.push_str("            cat \"$file_path\"\n");
+        }
+        VscodePatSource::ActionsSecret => {
+            workflow.push_str("            test -n \"$secret\" || { echo \"missing Actions secret for $1\" >&2; exit 1; }\n");
+            workflow.push_str("            printf '%s' \"$secret\"\n");
+        }
+        VscodePatSource::Both => {
+            workflow.push_str("            file_path=\"${!file_env:-}\"\n");
+            workflow.push_str(
+                "            if test -n \"$file_path\" && test -s \"$file_path\"; then\n",
+            );
+            workflow.push_str("              cat \"$file_path\"\n");
+            workflow.push_str("            elif test -n \"$secret\"; then\n");
+            workflow.push_str("              printf '%s' \"$secret\"\n");
+            workflow.push_str("            else\n");
+            workflow.push_str("              echo \"missing runner file env ${file_env} and fallback Actions secret for $1\" >&2\n");
+            workflow.push_str("              exit 1\n");
+            workflow.push_str("            fi\n");
+        }
+    }
+    workflow.push_str("          }\n");
+}
+
+fn push_indented_lines(workflow: &mut String, command: &str, spaces: usize) {
+    let indent = " ".repeat(spaces);
+    for line in command.lines() {
+        workflow.push_str(&indent);
+        workflow.push_str(line);
+        workflow.push('\n');
+    }
+}
+
 fn python_ci_workflow(
     platform: Platform,
     runner: &ResolvedRunner,
@@ -342,6 +629,7 @@ fn python_ci_workflow(
     push_job_env(&mut workflow, Runtime::Nix, &options.extra_env);
     workflow.push_str("    steps:\n");
     push_checkout_step(&mut workflow, platform);
+    push_required_env_step(&mut workflow, &options.required_env);
     push_install_nix_step(&mut workflow, platform);
     push_extra_setup_steps(&mut workflow, &options.extra_setup);
     workflow.push_str("      - name: Check generated flake wiring\n");
@@ -410,6 +698,7 @@ fn python_publish_workflow(
     push_job_env(&mut workflow, Runtime::Nix, &options.extra_env);
     workflow.push_str("    steps:\n");
     push_checkout_step(&mut workflow, platform);
+    push_required_env_step(&mut workflow, &options.required_env);
     push_install_nix_step(&mut workflow, platform);
     push_extra_setup_steps(&mut workflow, &options.extra_setup);
     workflow.push_str("      - name: Build Nix package\n");
@@ -462,6 +751,7 @@ fn maturin_publish_workflow(
     push_job_env(&mut workflow, Runtime::Nix, &options.extra_env);
     workflow.push_str("    steps:\n");
     push_checkout_step(&mut workflow, platform);
+    push_required_env_step(&mut workflow, &options.required_env);
     push_install_nix_step(&mut workflow, platform);
     push_extra_setup_steps(&mut workflow, &options.extra_setup);
     workflow.push_str("      - name: Build and publish to PyPI\n");
@@ -530,6 +820,7 @@ fn ci_workflow_single_job(
     push_job_env(&mut workflow, runtime, &options.extra_env);
     workflow.push_str("    steps:\n");
     push_checkout_step(&mut workflow, platform);
+    push_required_env_step(&mut workflow, &options.required_env);
 
     match runtime {
         Runtime::Nix => {
@@ -815,6 +1106,7 @@ fn ci_workflow_multi_job(
         push_job_env(&mut workflow, runtime, &options.extra_env);
         workflow.push_str("    steps:\n");
         push_checkout_step(&mut workflow, platform);
+        push_required_env_step(&mut workflow, &options.required_env);
 
         match runtime {
             Runtime::Nix => {
@@ -872,6 +1164,7 @@ fn publish_workflow(
     push_job_env(&mut workflow, runtime, &options.extra_env);
     workflow.push_str("    steps:\n");
     push_checkout_step(&mut workflow, platform);
+    push_required_env_step(&mut workflow, &options.required_env);
 
     match runtime {
         Runtime::Nix => {
@@ -962,6 +1255,7 @@ fn artifacts_workflow(
     push_job_env(&mut workflow, runtime, &options.extra_env);
     workflow.push_str("    steps:\n");
     push_checkout_step(&mut workflow, platform);
+    push_required_env_step(&mut workflow, &options.required_env);
     workflow.push_str(&validate_release_tag_step(None, None));
     match runtime {
         Runtime::Nix => {
@@ -1212,7 +1506,7 @@ fn push_chocolatey_publish_step(workflow: &mut String, opts: &ChocolateyOptions)
     workflow.push('\n');
     workflow.push_str("        shell: pwsh\n");
     workflow.push_str("        run: |\n");
-    workflow.push_str("          if (-not $env:CHOCOLATEY_API_KEY) { Write-Host 'CHOCOLATEY_API_KEY not configured; skipping Chocolatey package update.'; exit 0 }\n");
+    workflow.push_str("          if (-not $env:CHOCOLATEY_API_KEY) { Write-Error 'CHOCOLATEY_API_KEY is required because Chocolatey package publishing is configured.'; exit 1 }\n");
     push_windows_version_lines(workflow);
     workflow.push_str("          simit dist chocolatey bump `\n");
     workflow.push_str("            --version $version `\n");
@@ -1239,7 +1533,7 @@ fn push_scoop_publish_step(workflow: &mut String, opts: &ScoopOptions) {
     workflow.push('\n');
     workflow.push_str("        shell: pwsh\n");
     workflow.push_str("        run: |\n");
-    workflow.push_str("          if (-not $env:SCOOP_BUCKET_TOKEN) { Write-Host 'SCOOP_BUCKET_TOKEN not configured; skipping Scoop bucket update.'; exit 0 }\n");
+    workflow.push_str("          if (-not $env:SCOOP_BUCKET_TOKEN) { Write-Error 'SCOOP_BUCKET_TOKEN is required because Scoop bucket publishing is configured.'; exit 1 }\n");
     push_windows_version_lines(workflow);
     workflow.push_str("          $credentialHelper = '!f() { echo username=caniko; echo \"password=$SCOOP_BUCKET_TOKEN\"; }; f'\n");
     workflow.push_str("          if (Test-Path bucket) { Remove-Item -Recurse -Force bucket }\n");
@@ -1283,9 +1577,27 @@ fn push_chocolatey_cli_flags(workflow: &mut String, opts: &ChocolateyOptions) {
         push_ps_arg(workflow, "--choco-authors", authors);
     }
     push_ps_arg(workflow, "--choco-description", &opts.description);
+    if let Some(summary) = &opts.summary {
+        push_ps_arg(workflow, "--choco-summary", summary);
+    }
     push_ps_arg(workflow, "--choco-project-url", &opts.project_url);
     if let Some(license_url) = &opts.license_url {
         push_ps_arg(workflow, "--choco-license-url", license_url);
+    }
+    if let Some(icon_url) = &opts.icon_url {
+        push_ps_arg(workflow, "--choco-icon-url", icon_url);
+    }
+    if let Some(package_source_url) = &opts.package_source_url {
+        push_ps_arg(workflow, "--choco-package-source-url", package_source_url);
+    }
+    if let Some(docs_url) = &opts.docs_url {
+        push_ps_arg(workflow, "--choco-docs-url", docs_url);
+    }
+    if let Some(bug_tracker_url) = &opts.bug_tracker_url {
+        push_ps_arg(workflow, "--choco-bug-tracker-url", bug_tracker_url);
+    }
+    if let Some(project_source_url) = &opts.project_source_url {
+        push_ps_arg(workflow, "--choco-project-source-url", project_source_url);
     }
     if let Some(tags) = &opts.tags {
         push_ps_arg(workflow, "--choco-tags", tags);
@@ -1372,9 +1684,9 @@ fn push_homebrew_publish_step(workflow: &mut String, opts: &HomebrewOptions) {
     workflow.push_str("          set -euo pipefail\n\n");
     workflow.push_str("          if [ -z \"${HOMEBREW_TAP_TOKEN:-}\" ]; then\n");
     workflow.push_str(
-        "            echo \"HOMEBREW_TAP_TOKEN not configured; skipping Homebrew tap update.\"\n",
+        "            echo \"HOMEBREW_TAP_TOKEN is required because Homebrew tap publishing is configured.\" >&2\n",
     );
-    workflow.push_str("            exit 0\n");
+    workflow.push_str("            exit 1\n");
     workflow.push_str("          fi\n\n");
     workflow.push_str("          VERSION=\"$CODEBERG_REF_NAME\"\n");
     workflow.push_str("          for artifact in \\\n");
@@ -1810,6 +2122,39 @@ fn push_extra_setup_steps(workflow: &mut String, extra_setup: &[String]) {
             workflow.push_str("\n\n");
         }
     }
+}
+
+fn push_required_env_step(workflow: &mut String, required_env: &[String]) {
+    if required_env.is_empty() {
+        return;
+    }
+    workflow.push_str("      - name: Validate required environment\n");
+    workflow.push_str("        run: |\n");
+    workflow.push_str("          set -euo pipefail\n");
+    for name in required_env {
+        workflow.push_str("          if [ -z \"${");
+        workflow.push_str(name);
+        workflow.push_str(":-}\" ]; then echo ");
+        workflow.push_str(&shell_word(&format!(
+            "{name} is required by simit project configuration."
+        )));
+        workflow.push_str(" >&2; exit 1; fi\n");
+        if name.ends_with("_FILE") {
+            workflow.push_str("          if [ ! -r \"${");
+            workflow.push_str(name);
+            workflow.push_str("}\" ] || [ ! -s \"${");
+            workflow.push_str(name);
+            workflow.push_str("}\" ]; then echo ");
+            workflow.push_str(&shell_word(&format!(
+                "{name} must point to a readable, non-empty file."
+            )));
+            workflow.push_str(" >&2; exit 1; fi\n");
+        }
+        workflow.push_str("          printf 'validated required environment: %s\\n' ");
+        workflow.push_str(&shell_word(name));
+        workflow.push('\n');
+    }
+    workflow.push('\n');
 }
 
 fn push_action_uses(workflow: &mut String, platform: Platform, action: &str, version: &str) {
@@ -2258,6 +2603,9 @@ fn push_self_check_suffix(
     }
     if options.with_artifacts {
         workflow.push_str(" --with-artifacts");
+    }
+    if options.publish_crates {
+        workflow.push_str(" --publish-crates");
     }
     match options.om_ci {
         OmCiMode::Off => {}

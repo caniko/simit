@@ -48,6 +48,85 @@ pub struct ProjectConfig {
     pub flatpak: Option<FlatpakConfig>,
     #[serde(default)]
     pub winget: Option<WingetConfig>,
+    #[serde(default)]
+    pub vscode: Option<VscodeConfig>,
+}
+
+/// `[vscode]` — publish a VS Code/Open VSX extension from Forgejo CI.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct VscodeConfig {
+    /// Extension package directory, relative to the repository root.
+    #[serde(default = "default_vscode_extension_dir")]
+    pub extension_dir: String,
+    /// Optional runner override. Defaults to the normal release/CI runner.
+    #[serde(default)]
+    pub runner: Option<String>,
+    /// Codeberg `<owner>/<repo>` receiving release assets.
+    pub codeberg_repo: String,
+    /// REST API base URL.
+    #[serde(default = "default_codeberg_api_base")]
+    pub codeberg_api_base: String,
+    /// Actions secret exposed as `CODEBERG_TOKEN`.
+    #[serde(default = "default_codeberg_token_secret")]
+    pub codeberg_token_secret: String,
+    /// Source used for Marketplace/Open VSX PATs.
+    #[serde(default)]
+    pub pat_source: VscodePatSource,
+    /// Runner file-env variable pointing at the VS Code Marketplace PAT file.
+    #[serde(default = "default_vscode_vsce_pat_file_env")]
+    pub vsce_pat_file_env: String,
+    /// Runner file-env variable pointing at the Open VSX PAT file.
+    #[serde(default = "default_vscode_ovsx_pat_file_env")]
+    pub ovsx_pat_file_env: String,
+    /// Actions secret containing the VS Code Marketplace PAT.
+    #[serde(default = "default_vscode_vsce_pat_secret")]
+    pub vsce_pat_secret: String,
+    /// Actions secret containing the Open VSX PAT.
+    #[serde(default = "default_vscode_ovsx_pat_secret")]
+    pub ovsx_pat_secret: String,
+    /// Command that packages release assets. `$VERSION` contains the tag version.
+    #[serde(default = "default_vscode_package_command")]
+    pub package_command: String,
+    /// Optional Cargo package whose version must match the release tag.
+    #[serde(default)]
+    pub cargo_package: Option<String>,
+    /// Project-specific checks/build commands run before packaging/publishing.
+    #[serde(default)]
+    pub prepublish_commands: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum VscodePatSource {
+    FileEnv,
+    ActionsSecret,
+    #[default]
+    Both,
+}
+
+fn default_vscode_extension_dir() -> String {
+    "vscode".to_owned()
+}
+
+fn default_vscode_vsce_pat_file_env() -> String {
+    "VSCE_PAT_FILE".to_owned()
+}
+
+fn default_vscode_ovsx_pat_file_env() -> String {
+    "OVSX_PAT_FILE".to_owned()
+}
+
+fn default_vscode_vsce_pat_secret() -> String {
+    "VSCE_PAT".to_owned()
+}
+
+fn default_vscode_ovsx_pat_secret() -> String {
+    "OVSX_PAT".to_owned()
+}
+
+fn default_vscode_package_command() -> String {
+    "nix run .#package-release-assets -- \"$VERSION\"".to_owned()
 }
 
 /// `[flatpak]` — open a Flathub manifest-update PR on stable releases.
@@ -217,11 +296,15 @@ pub struct CiConfig {
     #[serde(default)]
     pub with_pypi_publish: bool,
     #[serde(default)]
+    pub publish_crates: bool,
+    #[serde(default)]
     pub extra_setup: Vec<String>,
     #[serde(default)]
     pub extra_env: BTreeMap<String, String>,
     #[serde(default)]
     pub required_secrets: Vec<String>,
+    #[serde(default)]
+    pub required_env: Vec<String>,
     #[serde(default)]
     pub om_ci: bool,
     #[serde(default)]
@@ -487,6 +570,24 @@ pub struct ResolvedCodebergPages {
     pub deploy_app: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedVscode {
+    pub extension_dir: String,
+    pub runner: Option<String>,
+    pub codeberg_repo: String,
+    pub codeberg_owner: String,
+    pub codeberg_api_base: String,
+    pub codeberg_token_secret: String,
+    pub pat_source: VscodePatSource,
+    pub vsce_pat_file_env: String,
+    pub ovsx_pat_file_env: String,
+    pub vsce_pat_secret: String,
+    pub ovsx_pat_secret: String,
+    pub package_command: String,
+    pub cargo_package: Option<String>,
+    pub prepublish_commands: Vec<String>,
+}
+
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ReleaseSigningConfig {
@@ -604,11 +705,29 @@ pub struct ChocolateyConfig {
     /// Nuspec description. If omitted, derived from Cargo metadata.
     pub description: Option<String>,
 
+    /// Nuspec summary.
+    pub summary: Option<String>,
+
     /// Project URL. If omitted, derived from Cargo package homepage.
     pub project_url: Option<String>,
 
     /// License URL.
     pub license_url: Option<String>,
+
+    /// Package icon URL.
+    pub icon_url: Option<String>,
+
+    /// URL for the package source.
+    pub package_source_url: Option<String>,
+
+    /// Documentation URL.
+    pub docs_url: Option<String>,
+
+    /// Bug tracker URL.
+    pub bug_tracker_url: Option<String>,
+
+    /// Project source URL.
+    pub project_source_url: Option<String>,
 
     /// Space-separated Chocolatey tags.
     pub tags: Option<String>,
@@ -1111,8 +1230,14 @@ pub struct ResolvedChocolatey {
     pub title: String,
     pub authors: Option<String>,
     pub description: String,
+    pub summary: Option<String>,
     pub project_url: String,
     pub license_url: Option<String>,
+    pub icon_url: Option<String>,
+    pub package_source_url: Option<String>,
+    pub docs_url: Option<String>,
+    pub bug_tracker_url: Option<String>,
+    pub project_source_url: Option<String>,
     pub tags: Option<String>,
     pub release_notes_url: Option<String>,
     pub download_repo: String,
@@ -1131,8 +1256,14 @@ pub struct ChocolateyOverrides<'a> {
     pub title: Option<&'a str>,
     pub authors: Option<&'a str>,
     pub description: Option<&'a str>,
+    pub summary: Option<&'a str>,
     pub project_url: Option<&'a str>,
     pub license_url: Option<&'a str>,
+    pub icon_url: Option<&'a str>,
+    pub package_source_url: Option<&'a str>,
+    pub docs_url: Option<&'a str>,
+    pub bug_tracker_url: Option<&'a str>,
+    pub project_source_url: Option<&'a str>,
     pub tags: Option<&'a str>,
     pub release_notes_url: Option<&'a str>,
     pub download_repo: Option<&'a str>,
@@ -1314,6 +1445,10 @@ impl ProjectConfig {
             &self.ci.required_secrets,
         )?;
         validate_nonempty_strings(
+            "simit project config: [ci].required_env",
+            &self.ci.required_env,
+        )?;
+        validate_nonempty_strings(
             "simit project config: [ci].extra_setup",
             &self.ci.extra_setup,
         )?;
@@ -1340,6 +1475,55 @@ impl ProjectConfig {
             validate_nonempty_string(
                 "simit project config: [ci.pages].deploy_app",
                 &pages.deploy_app,
+            )?;
+        }
+        if let Some(vscode) = &self.vscode {
+            validate_nonempty_string(
+                "simit project config: [vscode].extension_dir",
+                &vscode.extension_dir,
+            )?;
+            validate_runner_label_opt("[vscode].runner", vscode.runner.as_deref())?;
+            validate_owner_repo(
+                "simit project config: [vscode].codeberg_repo",
+                &vscode.codeberg_repo,
+            )?;
+            validate_nonempty_string(
+                "simit project config: [vscode].codeberg_api_base",
+                &vscode.codeberg_api_base,
+            )?;
+            validate_nonempty_string(
+                "simit project config: [vscode].codeberg_token_secret",
+                &vscode.codeberg_token_secret,
+            )?;
+            validate_nonempty_string(
+                "simit project config: [vscode].vsce_pat_file_env",
+                &vscode.vsce_pat_file_env,
+            )?;
+            validate_nonempty_string(
+                "simit project config: [vscode].ovsx_pat_file_env",
+                &vscode.ovsx_pat_file_env,
+            )?;
+            validate_nonempty_string(
+                "simit project config: [vscode].vsce_pat_secret",
+                &vscode.vsce_pat_secret,
+            )?;
+            validate_nonempty_string(
+                "simit project config: [vscode].ovsx_pat_secret",
+                &vscode.ovsx_pat_secret,
+            )?;
+            validate_nonempty_string(
+                "simit project config: [vscode].package_command",
+                &vscode.package_command,
+            )?;
+            if let Some(cargo_package) = &vscode.cargo_package {
+                validate_nonempty_string(
+                    "simit project config: [vscode].cargo_package",
+                    cargo_package,
+                )?;
+            }
+            validate_nonempty_strings(
+                "simit project config: [vscode].prepublish_commands",
+                &vscode.prepublish_commands,
             )?;
         }
         for (key, value) in &self.ci.extra_env {
@@ -1665,6 +1849,10 @@ impl ProjectConfig {
         if description.chars().count() > 4000 {
             bail!("chocolatey.description must be 4000 characters or fewer");
         }
+        let summary = overrides
+            .summary
+            .map(str::to_owned)
+            .or_else(|| cfg.and_then(|chocolatey| chocolatey.summary.clone()));
         let project_url = merge_packager(
             overrides.project_url.map(str::to_owned),
             cfg.and_then(|chocolatey| chocolatey.project_url.clone()),
@@ -1675,6 +1863,26 @@ impl ProjectConfig {
             .license_url
             .map(str::to_owned)
             .or_else(|| cfg.and_then(|chocolatey| chocolatey.license_url.clone()));
+        let icon_url = overrides
+            .icon_url
+            .map(str::to_owned)
+            .or_else(|| cfg.and_then(|chocolatey| chocolatey.icon_url.clone()));
+        let package_source_url = overrides
+            .package_source_url
+            .map(str::to_owned)
+            .or_else(|| cfg.and_then(|chocolatey| chocolatey.package_source_url.clone()));
+        let docs_url = overrides
+            .docs_url
+            .map(str::to_owned)
+            .or_else(|| cfg.and_then(|chocolatey| chocolatey.docs_url.clone()));
+        let bug_tracker_url = overrides
+            .bug_tracker_url
+            .map(str::to_owned)
+            .or_else(|| cfg.and_then(|chocolatey| chocolatey.bug_tracker_url.clone()));
+        let project_source_url = overrides
+            .project_source_url
+            .map(str::to_owned)
+            .or_else(|| cfg.and_then(|chocolatey| chocolatey.project_source_url.clone()));
         let tags = overrides
             .tags
             .map(str::to_owned)
@@ -1706,8 +1914,14 @@ impl ProjectConfig {
             title,
             authors,
             description,
+            summary,
             project_url,
             license_url,
+            icon_url,
+            package_source_url,
+            docs_url,
+            bug_tracker_url,
+            project_source_url,
             tags,
             release_notes_url,
             download_repo,
@@ -2108,6 +2322,39 @@ impl ProjectConfig {
         }))
     }
 
+    /// Resolve the `[vscode]` section, if present.
+    pub fn resolve_vscode(&self) -> Result<Option<ResolvedVscode>> {
+        let Some(vscode) = &self.vscode else {
+            return Ok(None);
+        };
+        validate_owner_repo(
+            "simit project config: [vscode].codeberg_repo",
+            &vscode.codeberg_repo,
+        )?;
+        let codeberg_owner = vscode
+            .codeberg_repo
+            .split_once('/')
+            .expect("validated owner/repo")
+            .0
+            .to_owned();
+        Ok(Some(ResolvedVscode {
+            extension_dir: vscode.extension_dir.clone(),
+            runner: vscode.runner.clone(),
+            codeberg_repo: vscode.codeberg_repo.clone(),
+            codeberg_owner,
+            codeberg_api_base: vscode.codeberg_api_base.clone(),
+            codeberg_token_secret: vscode.codeberg_token_secret.clone(),
+            pat_source: vscode.pat_source,
+            vsce_pat_file_env: vscode.vsce_pat_file_env.clone(),
+            ovsx_pat_file_env: vscode.ovsx_pat_file_env.clone(),
+            vsce_pat_secret: vscode.vsce_pat_secret.clone(),
+            ovsx_pat_secret: vscode.ovsx_pat_secret.clone(),
+            package_command: vscode.package_command.clone(),
+            cargo_package: vscode.cargo_package.clone(),
+            prepublish_commands: vscode.prepublish_commands.clone(),
+        }))
+    }
+
     fn is_empty(&self) -> bool {
         self == &Self::default()
     }
@@ -2205,10 +2452,12 @@ fn set_ci_table(table: &mut Table, ci: &CiConfig) {
     set_bool(table, "with_docs", ci.with_docs);
     set_bool(table, "with_artifacts", ci.with_artifacts);
     set_bool(table, "with_pypi_publish", ci.with_pypi_publish);
+    set_bool(table, "publish_crates", ci.publish_crates);
     set_string_array(table, "extra_setup", &ci.extra_setup);
     set_string_map(table, "extra_env", &ci.extra_env);
     set_string_map(table, "step_runners", &ci.step_runners);
     set_string_array(table, "required_secrets", &ci.required_secrets);
+    set_string_array(table, "required_env", &ci.required_env);
     set_bool(table, "om_ci", ci.om_ci);
     set_bool(table, "om_ci_augment", ci.om_ci_augment);
     set_optional_string(table, "omnix_ref", ci.omnix_ref.as_deref());

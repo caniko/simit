@@ -14,7 +14,7 @@ use crate::cli::{
 use crate::commands::upgrade;
 use crate::config::{
     CodebergPagesConfig, ProjectConfig, ResolvedChocolatey, ResolvedCodebergPages,
-    ResolvedHomebrew, ResolvedScoop,
+    ResolvedHomebrew, ResolvedScoop, ResolvedVscode,
 };
 use crate::project;
 use crate::python;
@@ -62,6 +62,8 @@ pub fn run(command: InitCiCommand) -> Result<()> {
         .any(|package| package.name == "simit");
     let windows_packagers = command.with_chocolatey || command.with_scoop;
     let with_artifacts = resolved.with_artifacts || command.with_homebrew || windows_packagers;
+    let publish_crates =
+        resolved.publish_crates || with_artifacts || command.with_homebrew || windows_packagers;
     if command.with_homebrew && !resolved.with_artifacts {
         eprintln!("--with-homebrew implies --with-artifacts; enabling it.");
     }
@@ -78,6 +80,13 @@ pub fn run(command: InitCiCommand) -> Result<()> {
     }
     if wants_codeberg_pages && resolved.runtime != Runtime::Nix {
         bail!("Codeberg Pages workflow generation requires --runtime nix");
+    }
+    let wants_vscode = command.with_vscode || cfg.vscode.is_some();
+    if wants_vscode && command.platform != Platform::Forgejo {
+        bail!("VS Code extension workflow generation is forgejo-only");
+    }
+    if wants_vscode && resolved.runtime != Runtime::Nix {
+        bail!("VS Code extension workflow generation requires --runtime nix");
     }
     let explicit_runners_cover_required =
         runner_overrides_cover_required_runners(&resolved, windows_packagers);
@@ -99,7 +108,8 @@ pub fn run(command: InitCiCommand) -> Result<()> {
         .clone()
         .or_else(|| user_config.ci.tools.omnix.r#ref.clone())
         .unwrap_or_else(|| resolved.omnix_ref.clone());
-    let options = resolved.ci_options(&cfg, with_artifacts, omnix_ref.clone());
+    let mut options = resolved.ci_options(&cfg, with_artifacts, omnix_ref.clone());
+    options.publish_crates = publish_crates;
     let runners = user_config.resolve_ci_runners(
         command.platform,
         resolved.runtime,
@@ -152,22 +162,22 @@ pub fn run(command: InitCiCommand) -> Result<()> {
         let self_check_windows_runner = runners.windows.as_ref().and_then(|runner| {
             self_check_runner_override(resolved.windows_runner.as_deref(), runner)
         });
-        files.extend(ci::files(
-            command.platform,
-            resolved.runtime,
+        files.extend(ci::files(ci::FilesRequest {
+            platform: command.platform,
+            runtime: resolved.runtime,
             package,
-            multi_package_workspace.then_some(package.name.as_str()),
-            SelfCheckOptions {
+            file_suffix: multi_package_workspace.then_some(package.name.as_str()),
+            self_check: SelfCheckOptions {
                 enabled: self_check,
                 runner_override: self_check_runner,
                 windows_runner_override: self_check_windows_runner,
                 packages: &resolved.packages,
                 workspace: resolved.workspace,
             },
-            &runners,
-            package_options,
-            &step_runners,
-        )?);
+            runners: &runners,
+            options: package_options,
+            step_runners: &step_runners,
+        })?);
     }
     if resolved.with_pypi_publish && cargo::has_pyo3_dep(&metadata.packages) {
         files.push(ci::maturin_publish_file(
@@ -185,6 +195,16 @@ pub fn run(command: InitCiCommand) -> Result<()> {
             pages,
         )?);
     }
+    if wants_vscode {
+        let vscode = vscode_options(&cfg)?;
+        let vscode_runner = vscode_runner(&vscode, &runners.release)?;
+        files.push(ci::vscode_extension_file(
+            command.platform,
+            resolved.runtime,
+            &vscode_runner,
+            &vscode,
+        )?);
+    }
     let persisted_ci = resolved.persisted_ci(
         &cfg,
         with_artifacts,
@@ -193,6 +213,7 @@ pub fn run(command: InitCiCommand) -> Result<()> {
         persisted_windows_runner,
     );
     let mut persisted_ci = persisted_ci;
+    persisted_ci.publish_crates = publish_crates;
     if command.with_codeberg_pages {
         persisted_ci.pages = Some(codeberg_pages_config(&pages)?);
     } else if let Some(pages) = inferred_pages {
@@ -206,6 +227,7 @@ pub fn run(command: InitCiCommand) -> Result<()> {
             &command,
             &resolved,
             with_artifacts,
+            publish_crates,
             &omnix_ref,
             persisted_in_simit_toml
         )
@@ -220,12 +242,14 @@ pub fn run(command: InitCiCommand) -> Result<()> {
         command.check,
         &mut files,
     );
-    files.push(release_trust::generated_file(
-        workspace_root,
-        &cfg,
-        &trust_overrides,
-        command.check,
-    )?);
+    if publish_crates || with_artifacts {
+        files.push(release_trust::generated_file(
+            workspace_root,
+            &cfg,
+            &trust_overrides,
+            command.check,
+        )?);
+    }
 
     if command.check {
         check_generated_ci_files(
@@ -259,6 +283,7 @@ fn run_python(command: InitCiCommand) -> Result<()> {
         || command.with_chocolatey
         || command.with_scoop
         || command.with_artifacts == Some(true)
+        || command.publish_crates == Some(true)
     {
         bail!("Python uv CI currently supports CI only, not release packaging workflows");
     }
@@ -335,6 +360,7 @@ fn run_python(command: InitCiCommand) -> Result<()> {
             &command,
             &resolved,
             false,
+            false,
             &omnix_ref,
             persisted_in_simit_toml,
         )
@@ -384,6 +410,7 @@ fn ci_cli_overrides(command: &InitCiCommand) -> CiCliOverrides {
         with_docs: command.with_docs,
         with_artifacts: command.with_artifacts,
         with_pypi_publish: command.with_pypi_publish,
+        publish_crates: command.publish_crates,
         with_om_ci: command.with_om_ci,
         om_ci_augment: command.om_ci_augment,
         omnix_ref: command.omnix_ref.clone(),
@@ -468,6 +495,8 @@ pub(crate) fn project_regeneration_command(workspace_root: &Path) -> Result<Opti
         .any(|workflow| workflow.content.contains("name: Publish Scoop bucket"));
     let windows_packagers = with_chocolatey || with_scoop;
     let with_artifacts = resolved.with_artifacts || with_homebrew || windows_packagers;
+    let publish_crates =
+        resolved.publish_crates || with_artifacts || with_homebrew || windows_packagers;
     let inferred_pages = infer_codeberg_pages_from_workflows(&snapshots)?;
     let command = InitCiCommand {
         packages: Vec::new(),
@@ -512,8 +541,14 @@ pub(crate) fn project_regeneration_command(workspace_root: &Path) -> Result<Opti
             title: None,
             authors: None,
             description: None,
+            summary: None,
             project_url: None,
             license_url: None,
+            icon_url: None,
+            package_source_url: None,
+            docs_url: None,
+            bug_tracker_url: None,
+            project_source_url: None,
             tags: None,
             release_notes_url: None,
             download_repo: None,
@@ -532,6 +567,7 @@ pub(crate) fn project_regeneration_command(workspace_root: &Path) -> Result<Opti
             no_arch: Vec::new(),
         },
         with_pypi_publish: None,
+        publish_crates: publish_crates.then_some(true),
         with_codeberg_pages: inferred_pages.is_some(),
         pages_repo: inferred_pages.as_ref().map(|pages| pages.repo.clone()),
         pages_canonical_domain: inferred_pages
@@ -549,15 +585,23 @@ pub(crate) fn project_regeneration_command(workspace_root: &Path) -> Result<Opti
         pages_deploy_app: inferred_pages
             .as_ref()
             .map(|pages| pages.deploy_app.clone()),
+        with_vscode: cfg.vscode.is_some(),
     };
 
-    let persisted_in_simit_toml =
-        persisted_ci_matches_simit_toml(&command, workspace_root, &cfg, &resolved, with_artifacts)
-            .unwrap_or_default();
+    let persisted_in_simit_toml = persisted_ci_matches_simit_toml(
+        &command,
+        workspace_root,
+        &cfg,
+        &resolved,
+        with_artifacts,
+        publish_crates,
+    )
+    .unwrap_or_default();
     let mut rendered = render_regeneration_command(
         &command,
         &resolved,
         with_artifacts,
+        publish_crates,
         &resolved.omnix_ref,
         persisted_in_simit_toml,
     );
@@ -573,6 +617,7 @@ pub(crate) fn render_regeneration_command(
     command: &InitCiCommand,
     resolved: &ResolvedCiInputs,
     with_artifacts: bool,
+    publish_crates: bool,
     omnix_ref: &str,
     persisted_in_simit_toml: bool,
 ) -> String {
@@ -627,6 +672,9 @@ pub(crate) fn render_regeneration_command(
     }
     if with_artifacts {
         args.push("--with-artifacts".to_owned());
+    }
+    if publish_crates {
+        args.push("--publish-crates".to_owned());
     }
     if resolved.with_pypi_publish {
         args.push("--with-pypi-publish".to_owned());
@@ -717,6 +765,9 @@ pub(crate) fn render_regeneration_command(
             command.pages_deploy_app.as_deref(),
         );
     }
+    if command.with_vscode {
+        args.push("--with-vscode".to_owned());
+    }
 
     args.join(" ")
 }
@@ -727,6 +778,7 @@ fn persisted_ci_matches_simit_toml(
     cfg: &ProjectConfig,
     resolved: &ResolvedCiInputs,
     with_artifacts: bool,
+    publish_crates: bool,
 ) -> Result<bool> {
     if !workspace_root.join("simit.toml").exists() {
         return Ok(false);
@@ -762,6 +814,7 @@ fn persisted_ci_matches_simit_toml(
         persisted_windows_runner,
     );
     let mut persisted_ci = persisted_ci;
+    persisted_ci.publish_crates = publish_crates;
     if command.with_codeberg_pages && cfg.ci.pages.is_some() {
         persisted_ci.pages = cfg.ci.pages.clone();
     }
@@ -911,6 +964,8 @@ fn is_ci_managed_workflow_name(name: &std::ffi::OsStr) -> bool {
             | "release-artifacts.yml"
             | "pages.yaml"
             | "pages.yml"
+            | "publish-vscode-extension.yaml"
+            | "publish-vscode-extension.yml"
     ) || name.starts_with("ci-")
         || name.starts_with("publish-crate-")
         || name.starts_with("release-artifacts-")
@@ -1168,6 +1223,19 @@ fn codeberg_pages_config(pages: &Option<CodebergPagesOptions>) -> Result<Codeber
     })
 }
 
+fn vscode_options(cfg: &ProjectConfig) -> Result<ResolvedVscode> {
+    cfg.resolve_vscode()?
+        .context("--with-vscode requires a [vscode] section with codeberg_repo")
+}
+
+fn vscode_runner(vscode: &ResolvedVscode, fallback: &ResolvedRunner) -> Result<ResolvedRunner> {
+    if let Some(runner) = &vscode.runner {
+        return ResolvedRunner::literal(runner)
+            .map_err(|err| anyhow::anyhow!("invalid [vscode].runner: {err}"));
+    }
+    Ok(fallback.clone())
+}
+
 fn chocolatey_options(
     cfg: &ProjectConfig,
     args: &ChocolateyOverridesArgs,
@@ -1185,8 +1253,14 @@ fn chocolatey_options_from_resolved(resolved: ResolvedChocolatey) -> ChocolateyO
         title: resolved.title,
         authors: resolved.authors,
         description: resolved.description,
+        summary: resolved.summary,
         project_url: resolved.project_url,
         license_url: resolved.license_url,
+        icon_url: resolved.icon_url,
+        package_source_url: resolved.package_source_url,
+        docs_url: resolved.docs_url,
+        bug_tracker_url: resolved.bug_tracker_url,
+        project_source_url: resolved.project_source_url,
         tags: resolved.tags,
         release_notes_url: resolved.release_notes_url,
         download_repo: resolved.download_repo,
