@@ -18,15 +18,22 @@ workflow validates that the tag matches the Cargo package version, verifies the
 GPG-signed tag against `keys/maintainers.gpg`, runs a publish dry run, and
 requires `CRATES_IO_API_TOKEN` to publish.
 
+Generate or refresh crates.io publish workflows explicitly:
+
+```sh
+simit init ci --platform forgejo --publish-crates
+```
+
 For workspace repositories, each generated `publish-crate-<crate>.yaml`
 validates the version of the package it publishes rather than comparing the tag
 to the first version returned by workspace-wide metadata.
 
-`simit init ci` and `simit release trust init` generate
+Release-enabled `simit init ci` runs and `simit release trust init` generate
 `keys/maintainers.gpg` from `[release.signing].key`, `git config
-user.signingkey`, or an explicit `--key`/`--maintainer-key` override. Run
-`simit release trust check` before publishing if you want to validate the
-committed trust root separately from workflow generation.
+user.signingkey`, or an explicit `--key`/`--maintainer-key` override. Generic
+CI-only runs do not require this trust root. Run `simit release trust check`
+before publishing if you want to validate the committed trust root separately
+from workflow generation.
 
 If a release workflow fails after its tag has already been pushed, commit the
 fix and move the current-version tag to the fixed commit:
