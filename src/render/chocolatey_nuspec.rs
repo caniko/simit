@@ -100,9 +100,27 @@ pub fn render_nuspec(opts: &ChocolateyRenderOptions<'_>) -> String {
         resolved.authors.as_deref().unwrap_or("UNKNOWN"),
     );
     field(&mut out, "description", &resolved.description);
+    if let Some(summary) = &resolved.summary {
+        field(&mut out, "summary", summary);
+    }
     field(&mut out, "projectUrl", &resolved.project_url);
     if let Some(license_url) = &resolved.license_url {
         field(&mut out, "licenseUrl", license_url);
+    }
+    if let Some(icon_url) = &resolved.icon_url {
+        field(&mut out, "iconUrl", icon_url);
+    }
+    if let Some(package_source_url) = &resolved.package_source_url {
+        field(&mut out, "packageSourceUrl", package_source_url);
+    }
+    if let Some(docs_url) = &resolved.docs_url {
+        field(&mut out, "docsUrl", docs_url);
+    }
+    if let Some(bug_tracker_url) = &resolved.bug_tracker_url {
+        field(&mut out, "bugTrackerUrl", bug_tracker_url);
+    }
+    if let Some(project_source_url) = &resolved.project_source_url {
+        field(&mut out, "projectSourceUrl", project_source_url);
     }
     if let Some(tags) = &resolved.tags {
         field(&mut out, "tags", tags);
@@ -164,7 +182,7 @@ pub fn render_install_script(opts: &ChocolateyRenderOptions<'_>, checksums: &Sha
     out.push_str("  -Url64bit $url64 `\n");
     out.push_str("  -UnzipLocation $toolsDir");
     if checksums.get(Architecture::X64).is_some() {
-        out.push_str(" `\n  -Checksum64 $checksum64 `\n  -ChecksumType64 'sha256'");
+        out.push_str(" `\n  -Checksum $checksum64 `\n  -ChecksumType 'sha256' `\n  -Checksum64 $checksum64 `\n  -ChecksumType64 'sha256'");
     }
     out.push('\n');
     out

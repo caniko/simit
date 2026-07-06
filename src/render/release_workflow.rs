@@ -334,23 +334,23 @@ pub fn credential_contract(inputs: &ReleaseWorkflowInputs<'_>) -> Vec<ReleaseCre
         for (name, description) in [
             (
                 &announce.mastodon_token_secret,
-                "Optional Mastodon token for release announcements.",
+                "Mastodon token for configured release announcements.",
             ),
             (
                 &announce.mastodon_base_url_secret,
-                "Optional Mastodon base URL for release announcements.",
+                "Mastodon base URL for configured release announcements.",
             ),
             (
                 &announce.matrix_token_secret,
-                "Optional Matrix token for release announcements.",
+                "Matrix token for configured release announcements.",
             ),
             (
                 &announce.matrix_homeserver_secret,
-                "Optional Matrix homeserver for release announcements.",
+                "Matrix homeserver for configured release announcements.",
             ),
             (
                 &announce.matrix_room_secret,
-                "Optional Matrix room for release announcements.",
+                "Matrix room for configured release announcements.",
             ),
         ] {
             credentials.push(ReleaseCredential::secret(
@@ -618,7 +618,7 @@ fn push_secrets_header(w: &mut String, inputs: &ReleaseWorkflowInputs<'_>) {
     if let Some(announce) = inputs.announce {
         writeln!(
             w,
-            "# - {}, {}, {}, {}, {}: optional release announcement credentials.",
+            "# - {}, {}, {}, {}, {}: required when release announcements are configured.",
             announce.mastodon_token_secret,
             announce.mastodon_base_url_secret,
             announce.matrix_token_secret,
@@ -1044,7 +1044,7 @@ fn push_attic(w: &mut String, attic: &AtticConfig) {
     .expect("write");
     writeln!(
         w,
-        "          if [ -z \"$attic_token_dir\" ] || [ ! -r \"$attic_token\" ]; then\n            echo \"::warning::Attic token ${{{}:-<unset>}}/{} is not readable; skipping optional Nix closure cache push.\"\n            exit 0\n          fi",
+        "          if [ -z \"$attic_token_dir\" ] || [ ! -r \"$attic_token\" ]; then\n            echo \"::error::Attic token ${{{}:-<unset>}}/{} is required because Nix closure cache publishing is configured.\" >&2\n            exit 1\n          fi",
         attic.token_dir_env, attic.token_name
     )
     .expect("write");
@@ -1059,14 +1059,14 @@ fn push_attic(w: &mut String, attic: &AtticConfig) {
     w.push_str("          nix profile install nixpkgs#attic-client\n");
     writeln!(
         w,
-        "          if ! attic login {cache} {url} \"$(cat \"$attic_token\")\"; then\n            echo \"::warning::Attic login failed; skipping optional Nix closure cache push.\"\n            exit 0\n          fi",
+        "          if ! attic login {cache} {url} \"$(cat \"$attic_token\")\"; then\n            echo \"::error::Attic login failed for configured Nix closure cache publishing.\" >&2\n            exit 1\n          fi",
         cache = attic.cache,
         url = attic.url
     )
     .expect("write");
     writeln!(
         w,
-        "          if ! attic push {cache} $(cat attic-paths.txt); then\n            echo \"::warning::Attic push failed; continuing release without optional Nix closure cache push.\"\n            exit 0\n          fi",
+        "          if ! attic push {cache} $(cat attic-paths.txt); then\n            echo \"::error::Attic push failed for configured Nix closure cache publishing.\" >&2\n            exit 1\n          fi",
         cache = attic.cache
     )
     .expect("write");
@@ -1085,14 +1085,20 @@ fn push_codeberg_release(w: &mut String, codeberg: &ResolvedCodebergRelease) {
     w.push_str("        run: |\n          set -euo pipefail\n          test -n \"$CODEBERG_TOKEN\"\n          . ./release-env\n");
     w.push_str("          nix shell nixpkgs#curl nixpkgs#jq -c bash <<'SCRIPT'\n");
     w.push_str("          set -euo pipefail\n          . ./release-env\n");
-    let body_arg = if codeberg.body_from_changelog {
-        "--rawfile body CHANGELOG.md"
+    if codeberg.body_from_changelog {
+        w.push_str("          awk -v version=\"$VERSION\" '\n");
+        w.push_str("            $0 ~ \"^## \\\\[\" version \"\\\\] - [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]$\" { found = 1; print; next }\n");
+        w.push_str("            found && /^## \\[/ { exit }\n");
+        w.push_str("            found && /^\\[[^]]+\\]: / { exit }\n");
+        w.push_str("            found { print }\n");
+        w.push_str("            END { if (!found) exit 1 }\n");
+        w.push_str("          ' CHANGELOG.md > release-notes.md || { echo \"CHANGELOG.md missing section for $VERSION\" >&2; exit 1; }\n");
     } else {
-        "--arg body \"\""
-    };
+        w.push_str("          : > release-notes.md\n");
+    }
     writeln!(
         w,
-        "          release_payload=$(jq -n --arg tag \"$VERSION\" --arg name \"$VERSION\" --arg branch \"{branch}\" --argjson prerelease \"$IS_PRERELEASE\" {body_arg} '{{tag_name: $tag, target_commitish: $branch, name: $name, body: $body, draft: false, prerelease: $prerelease}}')",
+        "          release_payload=$(jq -n --arg tag \"$VERSION\" --arg name \"$VERSION\" --arg branch \"{branch}\" --argjson prerelease \"$IS_PRERELEASE\" --rawfile body release-notes.md '{{tag_name: $tag, target_commitish: $branch, name: $name, body: $body, draft: false, prerelease: $prerelease}}')",
         branch = codeberg.target_branch
     )
     .expect("write");
@@ -1313,8 +1319,8 @@ fn push_publisher_missing_helper(w: &mut String) {
     w.push_str("            var=\"PUBLISH_$(printf '%s' \"$channel\" | tr '[:lower:]-' '[:upper:]_')_STATE\"\n");
     w.push_str("            state=\"${!var:-inactive-soft}\"\n");
     w.push_str("            if [ \"$state\" = active-required ]; then echo \"::error::${channel}: ${message}\" >&2; exit 1; fi\n");
-    w.push_str("            echo \"::warning::${channel}: ${message}; bootstrap channel is inactive, skipping.\" >&2\n");
-    w.push_str("            exit 0\n");
+    w.push_str("            echo \"::error::${channel}: ${message}; configured publisher cannot run without required credentials/artifacts.\" >&2\n");
+    w.push_str("            exit 1\n");
     w.push_str("          }\n");
 }
 
@@ -1359,8 +1365,8 @@ fn push_publish_apt(w: &mut String, apt: &ResolvedApt, activated_remote: bool) {
         w.push_str("          if [ -z \"${APT_REPO_GPG_KEY:-}\" ] || [ -z \"${APT_REPO_GPG_KEY_ID:-}\" ] || [ -z \"${APT_REPO_SSH_KEY:-}\" ]; then publisher_missing apt 'apt secrets unset'; fi\n");
         w.push_str("          debs=(release/*.deb); if [ ! -e \"${debs[0]}\" ]; then publisher_missing apt 'no .deb to publish'; fi\n");
     } else {
-        w.push_str("          if [ -z \"${APT_REPO_GPG_KEY:-}\" ] || [ -z \"${APT_REPO_GPG_KEY_ID:-}\" ] || [ -z \"${APT_REPO_SSH_KEY:-}\" ]; then echo '::warning::apt secrets unset; skipping.'; exit 0; fi\n");
-        w.push_str("          debs=(release/*.deb); if [ ! -e \"${debs[0]}\" ]; then echo '::warning::no .deb to publish'; exit 0; fi\n");
+        w.push_str("          if [ -z \"${APT_REPO_GPG_KEY:-}\" ] || [ -z \"${APT_REPO_GPG_KEY_ID:-}\" ] || [ -z \"${APT_REPO_SSH_KEY:-}\" ]; then echo '::error::apt secrets are required because APT repository publishing is configured.' >&2; exit 1; fi\n");
+        w.push_str("          debs=(release/*.deb); if [ ! -e \"${debs[0]}\" ]; then echo '::error::release .deb artifacts are required because APT repository publishing is configured.' >&2; exit 1; fi\n");
     }
     w.push_str("          nix shell nixpkgs#reprepro nixpkgs#gnupg nixpkgs#openssh nixpkgs#git -c bash <<'SCRIPT'\n");
     w.push_str(
@@ -1503,7 +1509,7 @@ fn push_publish_copr(w: &mut String, copr: &ResolvedCopr, activated_remote: bool
         w.push_str("          if [ -z \"$COPR_LOGIN\" ] || [ -z \"$COPR_USERNAME\" ] || [ -z \"$COPR_TOKEN\" ]; then publisher_missing copr 'COPR credentials unset'; fi\n");
         w.push_str("          srpms=(srpms/*.src.rpm); if [ ! -e \"${srpms[0]}\" ]; then publisher_missing copr 'no SRPM to publish'; fi\n");
     } else {
-        w.push_str("          if [ -z \"$COPR_LOGIN\" ] || [ -z \"$COPR_USERNAME\" ] || [ -z \"$COPR_TOKEN\" ]; then echo 'COPR credentials unset; skipping.'; exit 0; fi\n");
+        w.push_str("          if [ -z \"$COPR_LOGIN\" ] || [ -z \"$COPR_USERNAME\" ] || [ -z \"$COPR_TOKEN\" ]; then echo 'COPR credentials are required because COPR publishing is configured.' >&2; exit 1; fi\n");
     }
     w.push_str("          mkdir -p ~/.config\n");
     w.push_str("          cat > ~/.config/copr <<EOF\n          [copr-cli]\n          login = ${COPR_LOGIN}\n          username = ${COPR_USERNAME}\n          token = ${COPR_TOKEN}\n          copr_url = https://copr.fedorainfracloud.org\n          EOF\n");
@@ -1537,7 +1543,7 @@ fn push_publish_homebrew(w: &mut String, homebrew: &ResolvedHomebrew, activated_
             }
         }
     } else {
-        w.push_str("          if [ -z \"${HOMEBREW_TAP_TOKEN:-}\" ]; then echo 'HOMEBREW_TAP_TOKEN unset; skipping.'; exit 0; fi\n");
+        w.push_str("          if [ -z \"${HOMEBREW_TAP_TOKEN:-}\" ]; then echo 'HOMEBREW_TAP_TOKEN is required because Homebrew tap publishing is configured.' >&2; exit 1; fi\n");
     }
     w.push_str("          credential_helper='!f() { echo username=x-access-token; echo \"password=$HOMEBREW_TAP_TOKEN\"; }; f'\n");
     w.push_str("          rm -rf tap; git -c credential.helper=\"$credential_helper\" clone \"$HOMEBREW_TAP_URL\" tap\n");
@@ -1595,7 +1601,7 @@ fn push_publish_scoop(w: &mut String, scoop: &ResolvedScoop, activated_remote: b
         push_active_or_skip_prelude(w);
         w.push_str("          if [ -z \"${SCOOP_BUCKET_TOKEN:-}\" ]; then publisher_missing scoop 'SCOOP_BUCKET_TOKEN unset'; fi\n");
     } else {
-        w.push_str("          if [ -z \"${SCOOP_BUCKET_TOKEN:-}\" ]; then echo 'SCOOP_BUCKET_TOKEN unset; skipping.'; exit 0; fi\n");
+        w.push_str("          if [ -z \"${SCOOP_BUCKET_TOKEN:-}\" ]; then echo 'SCOOP_BUCKET_TOKEN is required because Scoop bucket publishing is configured.' >&2; exit 1; fi\n");
     }
     let zip = scoop_windows_zip(scoop);
     if activated_remote {
@@ -1766,13 +1772,13 @@ fn push_announce(
         "            jq -n --arg status \"$body\" '{status: $status}' > mastodon-status.json\n",
     );
     w.push_str("            curl -sS --fail -H \"Authorization: Bearer ${MASTODON_TOKEN}\" -H 'Content-Type: application/json' -d @mastodon-status.json \"${MASTODON_BASE_URL%/}/api/v1/statuses\" > /dev/null\n");
-    w.push_str("          else echo 'Mastodon secrets unset; skipping.'; fi\n");
+    w.push_str("          else echo 'Mastodon secrets are required because release announcements are configured.' >&2; exit 1; fi\n");
     w.push_str("          if [ -n \"${MATRIX_TOKEN:-}\" ] && [ -n \"${MATRIX_HOMESERVER:-}\" ] && [ -n \"${MATRIX_ROOM:-}\" ]; then\n");
     w.push_str("            txnid=\"release-${VERSION}-${CODEBERG_RUN_ID:-manual}\"\n");
     w.push_str("            encoded_room=\"$(jq -rn --arg v \"$MATRIX_ROOM\" '$v|@uri')\"\n");
     w.push_str("            jq -n --arg body \"$body\" '{msgtype: \"m.text\", body: $body}' > matrix-message.json\n");
     w.push_str("            curl -sS --fail -X PUT -H \"Authorization: Bearer ${MATRIX_TOKEN}\" -H 'Content-Type: application/json' -d @matrix-message.json \"${MATRIX_HOMESERVER%/}/_matrix/client/r0/rooms/${encoded_room}/send/m.room.message/${txnid}\" > /dev/null\n");
-    w.push_str("          else echo 'Matrix secrets unset; skipping.'; fi\n          SCRIPT\n");
+    w.push_str("          else echo 'Matrix secrets are required because release announcements are configured.' >&2; exit 1; fi\n          SCRIPT\n");
 }
 
 fn push_publish_flathub(w: &mut String, flatpak: &FlatpakConfig, activated_remote: bool) {
@@ -1789,7 +1795,7 @@ fn push_publish_flathub(w: &mut String, flatpak: &FlatpakConfig, activated_remot
         push_active_or_skip_prelude(w);
         w.push_str("          if [ -z \"${FLATHUB_TOKEN:-}\" ]; then publisher_missing flathub 'FLATHUB_TOKEN unset'; fi\n");
     } else {
-        w.push_str("          if [ -z \"${FLATHUB_TOKEN:-}\" ]; then echo 'FLATHUB_TOKEN unset; skipping.'; exit 0; fi\n");
+        w.push_str("          if [ -z \"${FLATHUB_TOKEN:-}\" ]; then echo 'FLATHUB_TOKEN is required because Flathub publishing is configured.' >&2; exit 1; fi\n");
     }
     for file in &flatpak.manifest_files {
         if activated_remote {
@@ -1840,7 +1846,7 @@ fn push_publish_winget(w: &mut String, winget: &WingetConfig, activated_remote: 
         push_active_or_skip_prelude(w);
         w.push_str("          if [ -z \"${WINGET_PAT:-}\" ]; then publisher_missing winget 'WINGET_PAT unset'; fi\n");
     } else {
-        w.push_str("          if [ -z \"${WINGET_PAT:-}\" ]; then echo 'WINGET_PAT unset; skipping.'; exit 0; fi\n");
+        w.push_str("          if [ -z \"${WINGET_PAT:-}\" ]; then echo 'WINGET_PAT is required because WinGet publishing is configured.' >&2; exit 1; fi\n");
     }
     writeln!(w, "          ZIP_NAME=\"{zip}\"; ZIP_URL=\"https://codeberg.org/{}/releases/download/${{VERSION}}/${{ZIP_NAME}}\"", winget.download_repo).expect("write");
     if activated_remote {
@@ -1890,7 +1896,7 @@ fn push_publish_chocolatey(
         push_active_or_skip_prelude(w);
         writeln!(w, "          if [ -z \"${{{key_env}:-}}\" ]; then publisher_missing chocolatey '{key_env} unset'; fi").expect("write");
     } else {
-        writeln!(w, "          if [ -z \"${{{key_env}:-}}\" ]; then echo '{key_env} unset; skipping.'; exit 0; fi").expect("write");
+        writeln!(w, "          if [ -z \"${{{key_env}:-}}\" ]; then echo '{key_env} is required because Chocolatey package publishing is configured.' >&2; exit 1; fi").expect("write");
     }
     // `nix_tool` provides choco (+ simit). Point it at a fork that ships the
     // chocolatey package until it lands upstream; the soft-skip above keeps tags
@@ -1917,7 +1923,34 @@ fn push_publish_chocolatey(
         push_choco_flag(w, "--choco-authors", authors);
     }
     push_choco_flag(w, "--choco-description", &chocolatey.description);
+    if let Some(summary) = &chocolatey.summary {
+        push_choco_flag(w, "--choco-summary", summary);
+    }
     push_choco_flag(w, "--choco-project-url", &chocolatey.project_url);
+    if let Some(license_url) = &chocolatey.license_url {
+        push_choco_flag(w, "--choco-license-url", license_url);
+    }
+    if let Some(icon_url) = &chocolatey.icon_url {
+        push_choco_flag(w, "--choco-icon-url", icon_url);
+    }
+    if let Some(package_source_url) = &chocolatey.package_source_url {
+        push_choco_flag(w, "--choco-package-source-url", package_source_url);
+    }
+    if let Some(docs_url) = &chocolatey.docs_url {
+        push_choco_flag(w, "--choco-docs-url", docs_url);
+    }
+    if let Some(bug_tracker_url) = &chocolatey.bug_tracker_url {
+        push_choco_flag(w, "--choco-bug-tracker-url", bug_tracker_url);
+    }
+    if let Some(project_source_url) = &chocolatey.project_source_url {
+        push_choco_flag(w, "--choco-project-source-url", project_source_url);
+    }
+    if let Some(tags) = &chocolatey.tags {
+        push_choco_flag(w, "--choco-tags", tags);
+    }
+    if let Some(release_notes_url) = &chocolatey.release_notes_url {
+        push_choco_flag(w, "--choco-release-notes-url", release_notes_url);
+    }
     push_choco_flag(w, "--choco-download-repo", &chocolatey.download_repo);
     push_choco_flag(w, "--choco-archive-pattern", &chocolatey.archive_pattern);
     writeln!(w, "            --push \\\n            --push-source \"$CHOCO_PUSH_SOURCE\" \\\n            --api-key-env {key_env}").expect("write");
@@ -2044,8 +2077,14 @@ mod tests {
             title: "modde".to_owned(),
             authors: Some("Caniko".to_owned()),
             description: "Cross-platform game mod manager".to_owned(),
+            summary: None,
             project_url: "https://modde.rs".to_owned(),
             license_url: None,
+            icon_url: None,
+            package_source_url: None,
+            docs_url: None,
+            bug_tracker_url: None,
+            project_source_url: None,
             tags: None,
             release_notes_url: None,
             download_repo: "caniko/rs-modde".to_owned(),
@@ -2352,6 +2391,39 @@ mod tests {
         // Prerelease gating present on downstream package repos
         assert!(workflow.contains("skipping AUR packages."));
         assert!(workflow.contains("skipping Homebrew tap update."));
+        assert!(workflow.contains(
+            "HOMEBREW_TAP_TOKEN is required because Homebrew tap publishing is configured."
+        ));
+        assert!(workflow.contains(
+            "SCOOP_BUCKET_TOKEN is required because Scoop bucket publishing is configured."
+        ));
+        assert!(
+            workflow
+                .contains("FLATHUB_TOKEN is required because Flathub publishing is configured.")
+        );
+        assert!(
+            workflow.contains("WINGET_PAT is required because WinGet publishing is configured.")
+        );
+        assert!(workflow.contains(
+            "CHOCOLATEY_API_KEY is required because Chocolatey package publishing is configured."
+        ));
+        assert!(workflow.contains(
+            "Mastodon secrets are required because release announcements are configured."
+        ));
+        assert!(
+            workflow.contains(
+                "Matrix secrets are required because release announcements are configured."
+            )
+        );
+        assert!(!workflow.contains("apt secrets unset; skipping."));
+        assert!(!workflow.contains("COPR credentials unset; skipping."));
+        assert!(!workflow.contains("HOMEBREW_TAP_TOKEN unset; skipping."));
+        assert!(!workflow.contains("SCOOP_BUCKET_TOKEN unset; skipping."));
+        assert!(!workflow.contains("FLATHUB_TOKEN unset; skipping."));
+        assert!(!workflow.contains("WINGET_PAT unset; skipping."));
+        assert!(!workflow.contains("CHOCOLATEY_API_KEY unset; skipping."));
+        assert!(!workflow.contains("Mastodon secrets unset; skipping."));
+        assert!(!workflow.contains("Matrix secrets unset; skipping."));
         // Stage B channels
         assert!(workflow.contains("cargo sbom > release/sbom.json"));
         assert!(workflow.contains("osslsigncode sign -pkcs12"));
@@ -2425,6 +2497,12 @@ mod tests {
         assert!(workflow.contains("publisher_missing scoop 'SCOOP_BUCKET_TOKEN unset'"));
         assert!(workflow.contains("publisher_missing flathub 'FLATHUB_TOKEN unset'"));
         assert!(workflow.contains("publisher_missing winget 'WINGET_PAT unset'"));
+        assert!(
+            workflow.contains(
+                "configured publisher cannot run without required credentials/artifacts."
+            )
+        );
+        assert!(!workflow.contains("bootstrap channel is inactive, skipping."));
         assert!(!workflow.contains("require_credential 'repo secret' 'modde_apt_repo_gpg_key'"));
         assert!(!workflow.contains("require_credential 'global/user secret' 'AUR_SSH_KEY'"));
         assert!(!workflow.contains("require_credential 'global/user secret' 'copr_login'"));

@@ -727,6 +727,7 @@ fn template(audit_tools: AuditTools) -> String {
             '';
           };
         in "${script}/bin/local-check-fast";
+        meta.description = "Run fast local validation checks";
       };
       apps.local-check-release = {
         type = "app";
@@ -801,6 +802,7 @@ fn template(audit_tools: AuditTools) -> String {
             '';
           };
         in "${script}/bin/local-check-release";
+        meta.description = "Run local release parity checks without publishing";
       };
       apps.local-release-deploy = {
         type = "app";
@@ -838,6 +840,7 @@ fn template(audit_tools: AuditTools) -> String {
             '';
           };
         in "${script}/bin/local-release-deploy";
+        meta.description = "Run the guarded local release deployment hook";
       };
     });
 }
@@ -1249,6 +1252,7 @@ pub fn cross_template(targets: &[FlakeTargetArg], audit_tools: AuditTools) -> St
             '';
           }};
         in "${{script}}/bin/local-check-fast";
+        meta.description = "Run fast local validation checks";
       }};
       apps.local-check-release = {{
         type = "app";
@@ -1323,6 +1327,7 @@ pub fn cross_template(targets: &[FlakeTargetArg], audit_tools: AuditTools) -> St
             '';
           }};
         in "${{script}}/bin/local-check-release";
+        meta.description = "Run local release parity checks without publishing";
       }};
       apps.local-release-deploy = {{
         type = "app";
@@ -1360,6 +1365,7 @@ pub fn cross_template(targets: &[FlakeTargetArg], audit_tools: AuditTools) -> St
             '';
           }};
         in "${{script}}/bin/local-release-deploy";
+        meta.description = "Run the guarded local release deployment hook";
       }};
     }});
 }}
@@ -1616,6 +1622,13 @@ mod tests {
         assert!(flake.contains("apps.local-check-fast"));
         assert!(flake.contains("apps.local-check-release"));
         assert!(flake.contains("apps.local-release-deploy"));
+        assert!(flake.contains("meta.description = \"Run fast local validation checks\";"));
+        assert!(flake.contains(
+            "meta.description = \"Run local release parity checks without publishing\";"
+        ));
+        assert!(
+            flake.contains("meta.description = \"Run the guarded local release deployment hook\";")
+        );
         assert!(flake.contains("no external publish was attempted"));
         assert!(flake.contains("release/artifacts.json"));
         assert!(flake.contains("generated_by: \"simit local-check-release\""));
@@ -1695,6 +1708,13 @@ mod tests {
         assert!(flake.contains("apps.local-check-fast"));
         assert!(flake.contains("apps.local-check-release"));
         assert!(flake.contains("apps.local-release-deploy"));
+        assert!(flake.contains("meta.description = \"Run fast local validation checks\";"));
+        assert!(flake.contains(
+            "meta.description = \"Run local release parity checks without publishing\";"
+        ));
+        assert!(
+            flake.contains("meta.description = \"Run the guarded local release deployment hook\";")
+        );
         assert!(flake.contains("no external publish was attempted"));
         assert!(flake.contains("release/artifacts.json"));
         assert!(flake.contains("generated_by: \"simit local-check-release\""));

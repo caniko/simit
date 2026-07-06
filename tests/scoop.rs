@@ -82,6 +82,16 @@ fn sha256(path: &Path) -> String {
     simit::sha256::sha256_of_file(path).unwrap()
 }
 
+fn git(dir: &Path, args: &[&str]) {
+    let status = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .status()
+        .unwrap();
+    assert!(status.success(), "git {}", args.join(" "));
+}
+
 #[test]
 fn render_version_outputs_stable_manifest() {
     let temp = init_package("0.9.0", "");
@@ -267,4 +277,72 @@ fn bump_without_push_writes_expected_git_diff() {
         String::from_utf8(git_status.stdout).unwrap(),
         "?? bucket/\n"
     );
+}
+
+#[test]
+fn bump_can_clone_commit_and_push_bucket_repo() {
+    let temp = init_package(
+        "0.9.0",
+        r#"[scoop.architectures]
+arm64 = false
+"#,
+    );
+    let remote = temp.path().join("remote.git");
+    let seed = temp.path().join("seed");
+    fs::create_dir(&remote).unwrap();
+    fs::create_dir(&seed).unwrap();
+    git(&remote, &["init", "--bare", "--initial-branch", "main"]);
+    git(&seed, &["init", "--initial-branch", "main"]);
+    fs::create_dir(seed.join("bucket")).unwrap();
+    fs::write(seed.join("bucket/demo-app.json"), "{}\n").unwrap();
+    git(&seed, &["config", "user.email", "test@example.com"]);
+    git(&seed, &["config", "user.name", "test"]);
+    git(&seed, &["add", "bucket/demo-app.json"]);
+    git(&seed, &["commit", "-m", "seed"]);
+    git(
+        &seed,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
+    git(&seed, &["push", "origin", "HEAD:main"]);
+
+    let archives = fixture_archives(temp.path());
+    let x64 = archives
+        .iter()
+        .find(|(architecture, _)| architecture == "x64")
+        .unwrap();
+    let output = simit()
+        .current_dir(temp.path())
+        .env("SCOOP_BUCKET_TOKEN", "local-token")
+        .args([
+            "dist",
+            "scoop",
+            "bump",
+            "--version",
+            "1.2.3",
+            "--archive",
+            &format!("x64={}", x64.1.display()),
+            "--bucket-url",
+            remote.to_str().unwrap(),
+            "--work-dir",
+            temp.path().join("work").to_str().unwrap(),
+            "--push",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let verify = temp.path().join("verify");
+    let status = Command::new("git")
+        .args(["clone", remote.to_str().unwrap(), verify.to_str().unwrap()])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let manifest = read(&verify.join("bucket/demo-app.json"));
+    assert!(manifest.contains(r#""version": "1.2.3""#));
+    assert!(manifest.contains(&sha256(&x64.1)));
 }

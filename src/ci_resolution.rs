@@ -1,6 +1,7 @@
 //! Shared CI option resolution for generation and drift detection.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -25,6 +26,7 @@ pub struct CiCliOverrides {
     pub with_docs: Option<bool>,
     pub with_artifacts: Option<bool>,
     pub with_pypi_publish: Option<bool>,
+    pub publish_crates: Option<bool>,
     pub with_om_ci: Option<bool>,
     pub om_ci_augment: Option<bool>,
     pub omnix_ref: Option<String>,
@@ -51,6 +53,7 @@ pub struct CiInference {
     pub with_docs: Option<bool>,
     pub with_artifacts: Option<bool>,
     pub with_pypi_publish: Option<bool>,
+    pub publish_crates: Option<bool>,
     pub om_ci: Option<OmCiMode>,
     pub omnix_ref: Option<String>,
     pub release_smoke_command: Option<String>,
@@ -113,6 +116,11 @@ impl CiInference {
                     .iter()
                     .any(|workflow| workflow_name(&workflow.relative_path) == Some("publish-pypi")),
             ),
+            publish_crates: Some(
+                marked.iter().any(|workflow| {
+                    workflow_name(&workflow.relative_path) == Some("publish-crate")
+                }),
+            ),
             om_ci: Some(infer_om_ci_mode(&all_content)),
             omnix_ref: infer_omnix_ref(&all_content),
             release_smoke_command: infer_release_smoke_command(&all_content),
@@ -136,6 +144,7 @@ pub struct ResolvedCiInputs {
     pub with_docs: bool,
     pub with_artifacts: bool,
     pub with_pypi_publish: bool,
+    pub publish_crates: bool,
     pub om_ci: OmCiMode,
     pub omnix_ref: String,
     pub release_smoke_command: Option<String>,
@@ -158,7 +167,7 @@ impl ResolvedCiInputs {
         } else if let Some(runtime) = inference.runtime {
             runtime
         } else {
-            Runtime::Cargo
+            auto_runtime(workspace_root)?
         };
 
         let replace_om_ci = cli
@@ -246,6 +255,11 @@ impl ResolvedCiInputs {
                 .or(config.with_pypi_publish)
                 .or(inference.with_pypi_publish)
                 .unwrap_or(false),
+            publish_crates: cli
+                .publish_crates
+                .or(config.publish_crates)
+                .or(inference.publish_crates)
+                .unwrap_or(false),
             om_ci,
             omnix_ref: cli
                 .omnix_ref
@@ -275,6 +289,7 @@ impl ResolvedCiInputs {
             with_docs: self.with_docs,
             with_artifacts,
             with_pypi_publish: self.with_pypi_publish,
+            publish_crates: self.publish_crates,
             om_ci: self.om_ci,
             omnix_ref,
             release_smoke_command: self.release_smoke_command.clone(),
@@ -286,6 +301,7 @@ impl ResolvedCiInputs {
                 .map(|(key, value)| (key.clone(), value.clone()))
                 .collect(),
             required_secrets: cfg.ci.required_secrets.clone(),
+            required_env: cfg.ci.required_env.clone(),
             package_scoped: false,
             homebrew: None,
             chocolatey: None,
@@ -314,6 +330,7 @@ impl ResolvedCiInputs {
         ci.with_docs = self.with_docs;
         ci.with_artifacts = with_artifacts;
         ci.with_pypi_publish = self.with_pypi_publish;
+        ci.publish_crates = self.publish_crates;
         ci.step_runners = self.step_runners.clone();
         ci.om_ci = self.om_ci != OmCiMode::Off;
         ci.om_ci_augment = self.om_ci == OmCiMode::Augment;
@@ -338,6 +355,7 @@ struct CiConfigLayer {
     with_docs: Option<bool>,
     with_artifacts: Option<bool>,
     with_pypi_publish: Option<bool>,
+    publish_crates: Option<bool>,
     om_ci: Option<bool>,
     om_ci_augment: Option<bool>,
     omnix_ref: Option<String>,
@@ -381,6 +399,7 @@ impl CiConfigLayer {
             with_artifacts: present(ci_table, "with_artifacts").map(|_| cfg.ci.with_artifacts),
             with_pypi_publish: present(ci_table, "with_pypi_publish")
                 .map(|_| cfg.ci.with_pypi_publish),
+            publish_crates: present(ci_table, "publish_crates").map(|_| cfg.ci.publish_crates),
             om_ci: present(ci_table, "om_ci").map(|_| cfg.ci.om_ci),
             om_ci_augment: present(ci_table, "om_ci_augment").map(|_| cfg.ci.om_ci_augment),
             omnix_ref: present(ci_table, "omnix_ref").and_then(|_| cfg.ci.omnix_ref.clone()),
@@ -407,6 +426,7 @@ impl CiConfigLayer {
             with_docs: cfg.ci.with_docs.then_some(true),
             with_artifacts: cfg.ci.with_artifacts.then_some(true),
             with_pypi_publish: cfg.ci.with_pypi_publish.then_some(true),
+            publish_crates: cfg.ci.publish_crates.then_some(true),
             om_ci: cfg.ci.om_ci.then_some(true),
             om_ci_augment: cfg.ci.om_ci_augment.then_some(true),
             omnix_ref: cfg.ci.omnix_ref.clone(),
@@ -420,7 +440,8 @@ fn present(table: Option<&toml_edit::Table>, key: &str) -> Option<()> {
 
 fn resolve_runtime_choice(choice: RuntimeChoice, workspace_root: &Path) -> Result<Runtime> {
     match choice {
-        RuntimeChoice::Auto | RuntimeChoice::Cargo => Ok(Runtime::Cargo),
+        RuntimeChoice::Auto => auto_runtime(workspace_root),
+        RuntimeChoice::Cargo => Ok(Runtime::Cargo),
         RuntimeChoice::Nix => {
             if !workspace_root.join("flake.nix").exists() {
                 bail!("--runtime nix requires flake.nix at the workspace root");
@@ -428,6 +449,37 @@ fn resolve_runtime_choice(choice: RuntimeChoice, workspace_root: &Path) -> Resul
             Ok(Runtime::Nix)
         }
     }
+}
+
+fn auto_runtime(workspace_root: &Path) -> Result<Runtime> {
+    if meaningful_flake_outputs(workspace_root)? {
+        Ok(Runtime::Nix)
+    } else {
+        Ok(Runtime::Cargo)
+    }
+}
+
+fn meaningful_flake_outputs(workspace_root: &Path) -> Result<bool> {
+    let path = workspace_root.join("flake.nix");
+    let content = match fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(err) => return Err(err).with_context(|| format!("reading {}", path.display())),
+    };
+    Ok([
+        "packages",
+        "apps",
+        "checks",
+        "devShells",
+        "nixosModules",
+        "nixosModule",
+        "homeModules",
+        "homeModule",
+        "lib =",
+        "lib.",
+    ]
+    .iter()
+    .any(|needle| content.contains(needle)))
 }
 
 fn validate_config_runtime(runtime: Runtime, workspace_root: &Path) -> Result<()> {

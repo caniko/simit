@@ -839,16 +839,16 @@ fn infer_expected_ci_files(
             scoop: infer_scoop_options(&config, package, marked)?,
             ..options.clone()
         };
-        files.extend(ci::files(
+        files.extend(ci::files(ci::FilesRequest {
             platform,
-            resolved.runtime,
+            runtime: resolved.runtime,
             package,
-            package_scoped.then_some(package.name.as_str()),
+            file_suffix: package_scoped.then_some(package.name.as_str()),
             self_check,
-            &runners,
-            package_options,
-            &step_runners,
-        )?);
+            runners: &runners,
+            options: package_options,
+            step_runners: &step_runners,
+        })?);
     }
     if let Some(pages) = infer_codeberg_pages_options(marked)? {
         let pages_runner = infer_primary_runner(marked, "pages")?;
@@ -1035,8 +1035,14 @@ fn infer_chocolatey_options(
         title: resolved.title,
         authors: resolved.authors,
         description: resolved.description,
+        summary: resolved.summary,
         project_url: resolved.project_url,
         license_url: resolved.license_url,
+        icon_url: resolved.icon_url,
+        package_source_url: resolved.package_source_url,
+        docs_url: resolved.docs_url,
+        bug_tracker_url: resolved.bug_tracker_url,
+        project_source_url: resolved.project_source_url,
         tags: resolved.tags,
         release_notes_url: resolved.release_notes_url,
         download_repo: resolved.download_repo,
