@@ -644,6 +644,11 @@ fn push_vscode_marketplace_visibility_gate(workflow: &mut String, vscode: &Resol
     workflow.push_str("                }\n");
     workflow.push_str("                throw error;\n");
     workflow.push_str("              }\n");
+    workflow.push_str("              if (!ext) {\n");
+    workflow.push_str("                last = 'not found via authenticated Gallery API';\n");
+    workflow.push_str("                await sleep(10000);\n");
+    workflow.push_str("                continue;\n");
+    workflow.push_str("              }\n");
     workflow.push_str("              let value = Number(ext.flags || 0);\n");
     workflow.push_str("              if ((value & flags.Public) === 0) {\n");
     workflow.push_str("                console.log(`Marketplace extension is missing Public flag; setting it for ${publisher}.${extension}`);\n");
