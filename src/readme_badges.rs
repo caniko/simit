@@ -298,7 +298,7 @@ fn encode_shields_part(value: &str) -> String {
 fn render_block(badges: &[Badge]) -> String {
     let mut block = String::new();
     block.push_str(START_MARKER);
-    block.push('\n');
+    block.push_str("\n\n");
     if !badges.is_empty() {
         block.push_str(
             &badges
@@ -307,7 +307,7 @@ fn render_block(badges: &[Badge]) -> String {
                 .collect::<Vec<_>>()
                 .join(" "),
         );
-        block.push('\n');
+        block.push_str("\n\n");
     }
     block.push_str(END_MARKER);
     block.push('\n');
@@ -408,6 +408,8 @@ mod tests {
             ),
             static_badge("Nix", "managed", "5277c3", Some("flake.nix".to_owned())),
         ]);
+        assert!(rendered.starts_with("<!-- simit:badges:start -->\n\n"));
+        assert!(rendered.ends_with("\n\n<!-- simit:badges:end -->\n"));
         assert!(rendered.contains("[![CI](https://img.shields.io/badge/CI-managed-2088ff)](.forgejo/workflows/ci.yaml) [![Nix](https://img.shields.io/badge/Nix-managed-5277c3)](flake.nix)"));
     }
 }

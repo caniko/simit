@@ -633,6 +633,14 @@ prepublish_commands = ["nix flake check --no-build"]
     assert!(!workflow.contains("skipping VS Code"));
     assert!(!workflow.contains("skipping Open VSX"));
     assert!(workflow.contains("git verify-tag \"$GITHUB_REF_NAME\""));
+    assert!(workflow.contains(
+        "cargo_metadata=$(nix shell nixpkgs#cargo -c cargo metadata --no-deps --format-version 1)"
+    ));
+    assert!(workflow.contains("nix shell nixpkgs#jq -c jq -r --arg name pkl-lsp-server"));
+    assert!(workflow.contains(
+        "extension_version=$(nix shell nixpkgs#jq -c jq -r '.version' pkl-lsp-vscode/package.json)"
+    ));
+    assert!(workflow.contains("nix shell nixpkgs#jq -c jq -r '.id // empty'"));
     assert!(workflow.contains("nix flake check --no-build"));
 
     let check = simit_with_user_config(temp.path())

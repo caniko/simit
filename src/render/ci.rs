@@ -445,7 +445,8 @@ fn push_vscode_version_validation(workflow: &mut String, vscode: &ResolvedVscode
     workflow.push_str("          VERSION=\"${GITHUB_REF_NAME#v}\"\n");
     workflow.push_str("          printf '%s\\n' \"$VERSION\" | grep -Eq '^[0-9]+\\.[0-9]+\\.[0-9]+$' || { echo \"release tag must be an exact semver version\"; exit 1; }\n");
     if let Some(cargo_package) = &vscode.cargo_package {
-        workflow.push_str("          cargo_version=$(nix develop -c cargo metadata --no-deps --format-version 1 | jq -r --arg name ");
+        workflow.push_str("          cargo_metadata=$(nix shell nixpkgs#cargo -c cargo metadata --no-deps --format-version 1)\n");
+        workflow.push_str("          cargo_version=$(printf '%s' \"$cargo_metadata\" | nix shell nixpkgs#jq -c jq -r --arg name ");
         workflow.push_str(&shell_word(cargo_package));
         workflow.push_str(" '.packages[] | select(.name == $name) | .version')\n");
         workflow
@@ -454,7 +455,7 @@ fn push_vscode_version_validation(workflow: &mut String, vscode: &ResolvedVscode
         workflow.push_str("\"; exit 1; }\n");
         workflow.push_str("          test \"$cargo_version\" = \"$VERSION\" || { echo \"Cargo version $cargo_version does not match tag $VERSION\"; exit 1; }\n");
     }
-    workflow.push_str("          extension_version=$(jq -r '.version' ");
+    workflow.push_str("          extension_version=$(nix shell nixpkgs#jq -c jq -r '.version' ");
     workflow.push_str(&shell_word(&format!(
         "{}/package.json",
         vscode.extension_dir
@@ -493,10 +494,10 @@ fn push_vscode_codeberg_upload(workflow: &mut String, vscode: &ResolvedVscode) {
     workflow.push('\n');
     workflow.push_str("          auth_header=\"Authorization: token ${CODEBERG_TOKEN}\"\n");
     workflow.push_str("          release_json=$(curl --fail --silent --show-error --header \"$auth_header\" \"$api/repos/$repo/releases/tags/$tag\" || true)\n");
-    workflow.push_str("          release_id=$(printf '%s' \"$release_json\" | jq -r '.id // empty' 2>/dev/null || true)\n");
+    workflow.push_str("          release_id=$(printf '%s' \"$release_json\" | nix shell nixpkgs#jq -c jq -r '.id // empty' 2>/dev/null || true)\n");
     workflow.push_str("          if test -z \"$release_id\"; then\n");
     workflow.push_str("            release_json=$(curl --fail --silent --show-error --request POST --header \"$auth_header\" --header \"Content-Type: application/json\" --data \"{\\\"tag_name\\\":\\\"$tag\\\",\\\"name\\\":\\\"$tag\\\",\\\"draft\\\":false,\\\"prerelease\\\":false}\" \"$api/repos/$repo/releases\")\n");
-    workflow.push_str("            release_id=$(printf '%s' \"$release_json\" | jq -r '.id')\n");
+    workflow.push_str("            release_id=$(printf '%s' \"$release_json\" | nix shell nixpkgs#jq -c jq -r '.id')\n");
     workflow.push_str("          fi\n");
     workflow.push_str("          for asset in release/*; do\n");
     workflow.push_str("            test -f \"$asset\" || continue\n");
