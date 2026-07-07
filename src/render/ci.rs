@@ -568,6 +568,122 @@ fn push_vscode_publish_step(
     workflow.push_str("          ");
     workflow.push_str(command);
     workflow.push_str("\n\n");
+    if matches!(publisher, VscodePublisher::Vsce) {
+        push_vscode_marketplace_visibility_gate(workflow, vscode);
+    }
+}
+
+fn push_vscode_marketplace_visibility_gate(workflow: &mut String, vscode: &ResolvedVscode) {
+    workflow.push_str("      - name: Verify VS Code Marketplace visibility\n");
+    if matches!(
+        vscode.pat_source,
+        VscodePatSource::ActionsSecret | VscodePatSource::Both
+    ) {
+        workflow.push_str("        env:\n");
+        workflow.push_str("          VSCE_PAT_FROM_SECRET: ${{ secrets.");
+        workflow.push_str(&vscode.vsce_pat_secret);
+        workflow.push_str(" }}\n");
+        workflow.push_str("          OVSX_PAT_FROM_SECRET: ${{ secrets.");
+        workflow.push_str(&vscode.ovsx_pat_secret);
+        workflow.push_str(" }}\n");
+    }
+    workflow.push_str("        run: |\n");
+    workflow.push_str("          set -euo pipefail\n");
+    push_vscode_pat_resolution_function(workflow, vscode);
+    workflow.push_str("          PUBLISH_PAT=$(resolve_pat vsce)\n");
+    workflow.push_str("          export PUBLISH_PAT\n");
+    workflow
+        .push_str("          EXTENSION_PUBLISHER=$(nix shell nixpkgs#jq -c jq -r '.publisher' ");
+    workflow.push_str(&shell_word(&format!(
+        "{}/package.json",
+        vscode.extension_dir
+    )));
+    workflow.push_str(")\n");
+    workflow.push_str("          EXTENSION_NAME=$(nix shell nixpkgs#jq -c jq -r '.name' ");
+    workflow.push_str(&shell_word(&format!(
+        "{}/package.json",
+        vscode.extension_dir
+    )));
+    workflow.push_str(")\n");
+    workflow.push_str("          EXTENSION_ID=\"$EXTENSION_PUBLISHER.$EXTENSION_NAME\"\n");
+    workflow.push_str("          export EXTENSION_PUBLISHER EXTENSION_NAME EXTENSION_ID\n");
+    workflow.push_str("          diag_dir=$(mktemp -d)\n");
+    workflow.push_str("          trap 'rm -rf \"$diag_dir\"' EXIT\n");
+    workflow.push_str("          nix develop -c npm --prefix \"$diag_dir\" install --silent azure-devops-node-api@15.1.2 >/dev/null\n");
+    workflow
+        .push_str("          NODE_PATH=\"$diag_dir/node_modules\" nix develop -c node <<'NODE'\n");
+    workflow.push_str("          const azdev = require('azure-devops-node-api');\n");
+    workflow.push_str(
+        "          const { GalleryApi } = require('azure-devops-node-api/GalleryApi');\n",
+    );
+    workflow.push_str("          const Gallery = require('azure-devops-node-api/interfaces/GalleryInterfaces');\n");
+    workflow.push_str("          const publisher = process.env.EXTENSION_PUBLISHER;\n");
+    workflow.push_str("          const extension = process.env.EXTENSION_NAME;\n");
+    workflow.push_str("          const pat = process.env.PUBLISH_PAT;\n");
+    workflow.push_str("          const flags = Gallery.PublishedExtensionFlags;\n");
+    workflow.push_str("          const queryFlags = Gallery.ExtensionQueryFlags.IncludeVersions | Gallery.ExtensionQueryFlags.IncludeMetadata;\n");
+    workflow.push_str(
+        "          const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));\n",
+    );
+    workflow.push_str("          const flagNames = value => Object.entries(flags)\n");
+    workflow.push_str("            .filter(([name, flag]) => typeof flag === 'number' && flag !== 0 && (value & flag) !== 0)\n");
+    workflow.push_str("            .map(([name]) => name)\n");
+    workflow.push_str("            .sort();\n");
+    workflow.push_str("          async function main() {\n");
+    workflow.push_str("            const api = new GalleryApi('https://marketplace.visualstudio.com', [azdev.getPersonalAccessTokenHandler(pat)]);\n");
+    workflow.push_str("            let last;\n");
+    workflow.push_str("            for (let attempt = 1; attempt <= 60; attempt += 1) {\n");
+    workflow.push_str("              let ext;\n");
+    workflow.push_str("              try {\n");
+    workflow.push_str("                ext = await api.getExtension(null, publisher, extension, undefined, queryFlags);\n");
+    workflow.push_str("              } catch (error) {\n");
+    workflow.push_str("                if (error && error.statusCode === 404) {\n");
+    workflow.push_str("                  last = 'not found via authenticated Gallery API';\n");
+    workflow.push_str("                  await sleep(10000);\n");
+    workflow.push_str("                  continue;\n");
+    workflow.push_str("                }\n");
+    workflow.push_str("                throw error;\n");
+    workflow.push_str("              }\n");
+    workflow.push_str("              let value = Number(ext.flags || 0);\n");
+    workflow.push_str("              if ((value & flags.Public) === 0) {\n");
+    workflow.push_str("                console.log(`Marketplace extension is missing Public flag; setting it for ${publisher}.${extension}`);\n");
+    workflow.push_str(
+        "                ext = await api.updateExtensionProperties(publisher, extension, flags.Public);\n",
+    );
+    workflow.push_str("                value = Number(ext.flags || 0);\n");
+    workflow.push_str("              }\n");
+    workflow.push_str("              const versions = (ext.versions || []).map(version => ({ version: version.version, targetPlatform: version.targetPlatform || null, flags: version.flags || null }));\n");
+    workflow.push_str("              console.log(JSON.stringify({ id: `${publisher}.${extension}`, flags: value, flagNames: flagNames(value), versions }, null, 2));\n");
+    workflow.push_str(
+        "              if ((value & flags.Public) !== 0 && (value & flags.Validated) !== 0) {\n",
+    );
+    workflow.push_str("                return;\n");
+    workflow.push_str("              }\n");
+    workflow.push_str(
+        "              last = `flags=${value} (${flagNames(value).join(',') || 'none'})`;\n",
+    );
+    workflow.push_str("              await sleep(10000);\n");
+    workflow.push_str("            }\n");
+    workflow.push_str("            throw new Error(`Marketplace extension did not become public and validated: ${last}`);\n");
+    workflow.push_str("          }\n");
+    workflow.push_str("          main().catch(error => {\n");
+    workflow.push_str("            console.error(error && error.stack ? error.stack : error);\n");
+    workflow.push_str("            process.exit(1);\n");
+    workflow.push_str("          });\n");
+    workflow.push_str("          NODE\n");
+    workflow.push_str("          for attempt in $(seq 1 60); do\n");
+    workflow.push_str("            query=$(nix shell nixpkgs#jq -c jq -cn --arg id \"$EXTENSION_ID\" '{filters:[{criteria:[{filterType:7,value:$id}]}],flags:2151}')\n");
+    workflow.push_str("            result=$(curl --fail --silent --show-error --header 'Content-Type: application/json' --header 'Accept: application/json;api-version=7.2-preview.1' --data \"$query\" https://marketplace.visualstudio.com/_apis/public/gallery/extensionquery)\n");
+    workflow.push_str("            visible=$(printf '%s' \"$result\" | nix shell nixpkgs#jq -c jq -r --arg id \"$EXTENSION_ID\" '.results[0].extensions[]? | select((.publisher.publisherName + \".\" + .extensionName | ascii_downcase) == ($id | ascii_downcase)) | .flags')\n");
+    workflow.push_str("            if printf '%s\\n' \"$visible\" | grep -Eq '(^|, )public(,|$)' && printf '%s\\n' \"$visible\" | grep -Eq '(^|, )validated(,|$)'; then\n");
+    workflow.push_str("              echo \"$EXTENSION_ID is visible in the public VS Code Marketplace Gallery API\"\n");
+    workflow.push_str("              exit 0\n");
+    workflow.push_str("            fi\n");
+    workflow.push_str("            echo \"waiting for $EXTENSION_ID to become public in Marketplace Gallery API (attempt $attempt/60)\"\n");
+    workflow.push_str("            sleep 10\n");
+    workflow.push_str("          done\n");
+    workflow.push_str("          echo \"$EXTENSION_ID did not become visible in the public VS Code Marketplace Gallery API\" >&2\n");
+    workflow.push_str("          exit 1\n\n");
 }
 
 fn push_vscode_pat_resolution_function(workflow: &mut String, vscode: &ResolvedVscode) {

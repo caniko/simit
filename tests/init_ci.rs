@@ -651,6 +651,20 @@ prepublish_commands = ["nix flake check --no-build"]
     assert!(workflow.contains(
         "nix develop -c npx --yes @vscode/vsce publish --packagePath release/*.vsix --pat \"$PUBLISH_PAT\" --skip-duplicate"
     ));
+    assert!(workflow.contains("Verify VS Code Marketplace visibility"));
+    assert!(workflow.contains(
+        "nix develop -c npm --prefix \"$diag_dir\" install --silent azure-devops-node-api@15.1.2 >/dev/null"
+    ));
+    assert!(workflow.contains(
+        "Marketplace extension is missing Public flag; setting it for ${publisher}.${extension}"
+    ));
+    assert!(
+        workflow
+            .contains("https://marketplace.visualstudio.com/_apis/public/gallery/extensionquery")
+    );
+    assert!(
+        workflow.contains("$EXTENSION_ID is visible in the public VS Code Marketplace Gallery API")
+    );
     assert!(workflow.contains(
         "OVSX_NAMESPACE=$(nix shell nixpkgs#jq -c jq -r '.publisher' pkl-lsp-vscode/package.json)"
     ));
