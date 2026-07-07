@@ -628,6 +628,13 @@ prepublish_commands = ["nix flake check --no-build"]
     assert!(workflow.contains("CODEBERG_TOKEN: ${{ secrets.codeberg_token }}"));
     assert!(workflow.contains("file_env=VSCE_PAT_FILE"));
     assert!(workflow.contains("file_env=OVSX_PAT_FILE"));
+    assert!(workflow.contains(
+        "VSCE_PUBLISHER=$(nix shell nixpkgs#jq -c jq -r '.publisher' pkl-lsp-vscode/package.json)"
+    ));
+    assert!(workflow.contains(
+        "nix develop -c npx --yes @vscode/vsce verify-pat \"$VSCE_PUBLISHER\" --pat \"$VSCE_PUBLISH_PAT\""
+    ));
+    assert!(workflow.contains("https://aka.ms/vsm-create-publisher"));
     assert!(!workflow.contains("secrets.VSCE_PAT"));
     assert!(!workflow.contains("secrets.OVSX_PAT"));
     assert!(!workflow.contains("skipping VS Code"));

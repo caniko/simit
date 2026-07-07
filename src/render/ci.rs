@@ -434,7 +434,17 @@ fn push_vscode_credential_preflight(workflow: &mut String, vscode: &ResolvedVsco
     workflow.push_str(&vscode.codeberg_token_secret);
     workflow.push_str("\"; exit 1; }\n");
     push_vscode_pat_resolution_function(workflow, vscode);
-    workflow.push_str("          resolve_pat vsce >/dev/null\n");
+    workflow.push_str("          VSCE_PUBLISH_PAT=$(resolve_pat vsce)\n");
+    workflow.push_str("          VSCE_PUBLISHER=$(nix shell nixpkgs#jq -c jq -r '.publisher' ");
+    workflow.push_str(&shell_word(&format!(
+        "{}/package.json",
+        vscode.extension_dir
+    )));
+    workflow.push_str(")\n");
+    workflow.push_str("          test -n \"$VSCE_PUBLISHER\" && test \"$VSCE_PUBLISHER\" != null || { echo \"missing VS Code extension publisher in ");
+    workflow.push_str(&format!("{}/package.json", vscode.extension_dir));
+    workflow.push_str("\"; exit 1; }\n");
+    workflow.push_str("          nix develop -c npx --yes @vscode/vsce verify-pat \"$VSCE_PUBLISHER\" --pat \"$VSCE_PUBLISH_PAT\" || { echo \"VS Code Marketplace publisher $VSCE_PUBLISHER is missing or the VSCE PAT lacks publisher permissions. Create/repair it at https://aka.ms/vsm-create-publisher before publishing.\"; exit 1; }\n");
     workflow.push_str("          resolve_pat ovsx >/dev/null\n\n");
 }
 
