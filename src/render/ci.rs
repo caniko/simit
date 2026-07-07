@@ -580,6 +580,7 @@ fn push_vscode_publish_step(
     workflow.push_str("\n\n");
     if matches!(publisher, VscodePublisher::Vsce) {
         push_vscode_marketplace_visibility_gate(workflow, vscode);
+        push_vscode_marketplace_signature_gate(workflow, vscode);
     }
 }
 
@@ -699,6 +700,68 @@ fn push_vscode_marketplace_visibility_gate(workflow: &mut String, vscode: &Resol
     workflow.push_str("          done\n");
     workflow.push_str("          echo \"$EXTENSION_ID did not become visible in the public VS Code Marketplace Gallery API\" >&2\n");
     workflow.push_str("          exit 1\n\n");
+}
+
+fn push_vscode_marketplace_signature_gate(workflow: &mut String, vscode: &ResolvedVscode) {
+    workflow.push_str("      - name: Verify VS Code Marketplace signatures\n");
+    workflow.push_str("        run: |\n");
+    workflow.push_str("          set -euo pipefail\n");
+    workflow
+        .push_str("          EXTENSION_PUBLISHER=$(nix shell nixpkgs#jq -c jq -r '.publisher' ");
+    workflow.push_str(&shell_word(&format!(
+        "{}/package.json",
+        vscode.extension_dir
+    )));
+    workflow.push_str(")\n");
+    workflow.push_str("          EXTENSION_NAME=$(nix shell nixpkgs#jq -c jq -r '.name' ");
+    workflow.push_str(&shell_word(&format!(
+        "{}/package.json",
+        vscode.extension_dir
+    )));
+    workflow.push_str(")\n");
+    workflow.push_str("          EXTENSION_ID=\"$EXTENSION_PUBLISHER.$EXTENSION_NAME\"\n");
+    workflow.push_str("          tmp_dir=$(mktemp -d)\n");
+    workflow.push_str("          trap 'rm -rf \"$tmp_dir\"' EXIT\n");
+    workflow.push_str("          query=$(nix shell nixpkgs#jq -c jq -cn --arg id \"$EXTENSION_ID\" '{filters:[{criteria:[{filterType:7,value:$id}]}],flags:2151}')\n");
+    workflow.push_str("          result=$(curl --fail --silent --show-error --header 'Content-Type: application/json' --header 'Accept: application/json;api-version=7.2-preview.1' --data \"$query\" https://marketplace.visualstudio.com/_apis/public/gallery/extensionquery)\n");
+    workflow.push_str("          versions_tsv=\"$tmp_dir/versions.tsv\"\n");
+    workflow.push_str("          printf '%s' \"$result\" | nix shell nixpkgs#jq -c jq -r --arg id \"$EXTENSION_ID\" '\n");
+    workflow.push_str("            .results[0].extensions[]?\n");
+    workflow.push_str("            | select((.publisher.publisherName + \".\" + .extensionName | ascii_downcase) == ($id | ascii_downcase))\n");
+    workflow.push_str("            | .versions[]\n");
+    workflow.push_str("            | [\n");
+    workflow.push_str("                .version,\n");
+    workflow.push_str("                (.targetPlatform // \"universal\"),\n");
+    workflow.push_str("                ((.files[]? | select(.assetType == \"Microsoft.VisualStudio.Services.VSIXPackage\") | .source) // \"\"),\n");
+    workflow.push_str("                ((.files[]? | select(.assetType == \"Microsoft.VisualStudio.Services.VsixSignature\") | .source) // \"\")\n");
+    workflow.push_str("              ]\n");
+    workflow.push_str("            | @tsv\n");
+    workflow.push_str("          ' > \"$versions_tsv\"\n");
+    workflow.push_str("          test -s \"$versions_tsv\" || { echo \"no Marketplace versions found for $EXTENSION_ID\" >&2; exit 1; }\n");
+    workflow.push_str(
+        "          while IFS=$'\\t' read -r version target package_url signature_url; do\n",
+    );
+    workflow.push_str("            test -n \"$package_url\" || { echo \"missing VSIXPackage asset for $EXTENSION_ID@$version ($target)\" >&2; exit 1; }\n");
+    workflow.push_str("            test -n \"$signature_url\" || { echo \"missing VsixSignature asset for $EXTENSION_ID@$version ($target)\" >&2; exit 1; }\n");
+    workflow.push_str("            target_dir=\"$tmp_dir/$version-$target\"\n");
+    workflow.push_str("            mkdir -p \"$target_dir/signature\"\n");
+    workflow.push_str("            package_path=\"$target_dir/package.vsix\"\n");
+    workflow.push_str("            signature_zip=\"$target_dir/signature.zip\"\n");
+    workflow.push_str("            manifest_path=\"$target_dir/signature.manifest\"\n");
+    workflow.push_str("            signature_path=\"$target_dir/signature.p7s\"\n");
+    workflow.push_str("            curl --fail --silent --show-error --location \"$package_url\" --output \"$package_path\"\n");
+    workflow.push_str("            curl --fail --silent --show-error --location \"$signature_url\" --output \"$signature_zip\"\n");
+    workflow.push_str("            nix shell nixpkgs#unzip -c unzip -q \"$signature_zip\" -d \"$target_dir/signature\"\n");
+    workflow.push_str("            test -s \"$target_dir/signature/.signature.manifest\" || { echo \"signature archive missing .signature.manifest for $EXTENSION_ID@$version ($target)\" >&2; exit 1; }\n");
+    workflow.push_str("            test -s \"$target_dir/signature/.signature.p7s\" || { echo \"signature archive missing .signature.p7s for $EXTENSION_ID@$version ($target)\" >&2; exit 1; }\n");
+    workflow.push_str(
+        "            cp \"$target_dir/signature/.signature.manifest\" \"$manifest_path\"\n",
+    );
+    workflow
+        .push_str("            cp \"$target_dir/signature/.signature.p7s\" \"$signature_path\"\n");
+    workflow.push_str("            nix develop -c npx --yes @vscode/vsce@latest verify-signature --packagePath \"$package_path\" --manifestPath \"$manifest_path\" --signaturePath \"$signature_path\"\n");
+    workflow.push_str("            echo \"verified Marketplace signature for $EXTENSION_ID@$version ($target)\"\n");
+    workflow.push_str("          done < \"$versions_tsv\"\n\n");
 }
 
 fn push_vscode_pat_resolution_function(workflow: &mut String, vscode: &ResolvedVscode) {

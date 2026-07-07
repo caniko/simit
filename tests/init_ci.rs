@@ -672,6 +672,15 @@ prepublish_commands = ["nix flake check --no-build"]
     assert!(
         workflow.contains("$EXTENSION_ID is visible in the public VS Code Marketplace Gallery API")
     );
+    assert!(workflow.contains("Verify VS Code Marketplace signatures"));
+    assert!(workflow.contains("Microsoft.VisualStudio.Services.VSIXPackage"));
+    assert!(workflow.contains("Microsoft.VisualStudio.Services.VsixSignature"));
+    assert!(workflow.contains(".signature.manifest"));
+    assert!(workflow.contains(".signature.p7s"));
+    assert!(workflow.contains("nix shell nixpkgs#unzip -c unzip -q \"$signature_zip\""));
+    assert!(workflow.contains(
+        "nix develop -c npx --yes @vscode/vsce@latest verify-signature --packagePath \"$package_path\" --manifestPath \"$manifest_path\" --signaturePath \"$signature_path\""
+    ));
     assert!(workflow.contains(
         "OVSX_NAMESPACE=$(nix shell nixpkgs#jq -c jq -r '.publisher' pkl-lsp-vscode/package.json)"
     ));
