@@ -98,7 +98,8 @@ fn render_version_outputs_no_check_formula() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert_eq!(stdout.lines().next(), Some("class DemoApp < Formula"));
     assert!(stdout.contains("version \"1.2.3\""));
-    assert_eq!(stdout.matches("sha256 :no_check").count(), 4);
+    assert_eq!(stdout.matches("sha256 :no_check").count(), 3);
+    assert!(!stdout.contains("demo-app-1.2.3-x86_64-darwin.tar.gz"));
 }
 
 #[test]
@@ -124,7 +125,8 @@ fn render_output_writes_file_without_stdout() {
     assert!(output.stdout.is_empty());
     let formula = read(&output_path);
     assert!(formula.contains("version \"1.2.3\""));
-    assert_eq!(formula.matches("sha256 :no_check").count(), 4);
+    assert_eq!(formula.matches("sha256 :no_check").count(), 3);
+    assert!(!formula.contains("demo-app-1.2.3-x86_64-darwin.tar.gz"));
 }
 
 #[test]
@@ -144,7 +146,13 @@ fn render_without_version_uses_package_version() {
 
 #[test]
 fn bump_writes_formula_with_real_sha256s() {
-    let temp = init_package("0.9.0", "");
+    let temp = init_package(
+        "0.9.0",
+        r#"
+[homebrew.platforms]
+darwin_intel = true
+"#,
+    );
     let tap = temp.path().join("tap");
     let archives = fixture_archives(temp.path());
     let mut args = vec![
@@ -183,7 +191,7 @@ linux_arm = false
     let tap = temp.path().join("tap");
     let archives = fixture_archives(temp.path())
         .into_iter()
-        .filter(|(platform, _)| platform != "linux_arm")
+        .filter(|(platform, _)| platform != "linux_arm" && platform != "darwin_intel")
         .collect::<Vec<_>>();
     let mut args = vec![
         "dist".to_owned(),
@@ -204,15 +212,19 @@ linux_arm = false
 
     assert!(status.success());
     let formula = read(&tap.join("Formula/demo-app.rb"));
-    assert_eq!(formula.matches("sha256 \"").count(), 3);
+    assert_eq!(formula.matches("sha256 \"").count(), 2);
     assert!(!formula.contains("demo-app-1.2.3-aarch64-linux.tar.gz"));
+    assert!(!formula.contains("demo-app-1.2.3-x86_64-darwin.tar.gz"));
 }
 
 #[test]
 fn bump_push_rejects_non_git_tap() {
     let temp = init_package("0.9.0", "");
     let tap = temp.path().join("tap");
-    let archives = fixture_archives(temp.path());
+    let archives = fixture_archives(temp.path())
+        .into_iter()
+        .filter(|(platform, _)| platform != "darwin_intel")
+        .collect::<Vec<_>>();
     let mut args = vec![
         "dist".to_owned(),
         "homebrew".to_owned(),
@@ -252,7 +264,10 @@ fn bump_push_rejects_unrelated_dirty_file() {
             .success()
     );
     fs::write(tap.join("README.md"), "dirty\n").unwrap();
-    let archives = fixture_archives(temp.path());
+    let archives = fixture_archives(temp.path())
+        .into_iter()
+        .filter(|(platform, _)| platform != "darwin_intel")
+        .collect::<Vec<_>>();
     let mut args = vec![
         "dist".to_owned(),
         "homebrew".to_owned(),

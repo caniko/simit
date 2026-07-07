@@ -74,7 +74,8 @@ fn bootstraps_fresh_tap_repo() {
     );
     let formula = read(&tap.join("Formula/my-app.rb"));
     assert!(formula.starts_with("class MyApp < Formula\n"));
-    assert_eq!(formula.matches("sha256 :no_check").count(), 4);
+    assert_eq!(formula.matches("sha256 :no_check").count(), 3);
+    assert!(!formula.contains("my-app-0.1.0-x86_64-darwin.tar.gz"));
     assert!(formula.contains("bin.install \"my-app\""));
     assert!(tap.join(".git").is_dir());
 
@@ -195,7 +196,8 @@ fn print_writes_formula_to_stdout_without_creating_target() {
     );
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.starts_with("class Demo < Formula\n"));
-    assert_eq!(stdout.matches("sha256 :no_check").count(), 4);
+    assert_eq!(stdout.matches("sha256 :no_check").count(), 3);
+    assert!(!stdout.contains("demo-0.1.0-x86_64-darwin.tar.gz"));
     assert!(!tap.exists());
 }
 

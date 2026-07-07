@@ -624,8 +624,27 @@ platforms = { linux_arm = false }
     cfg.validate_homebrew().unwrap();
     let platforms = cfg.homebrew.unwrap().platforms;
     assert!(platforms.darwin_arm);
-    assert!(platforms.darwin_intel);
+    assert!(!platforms.darwin_intel);
     assert!(!platforms.linux_arm);
+    assert!(platforms.linux_intel);
+}
+
+#[test]
+fn darwin_intel_homebrew_platform_is_opt_in() {
+    let cfg = load_toml(
+        r#"[homebrew]
+tap_url = "https://codeberg.org/caniko/homebrew-mythos.git"
+download_repo = "caniko/mythos"
+platforms = { darwin_intel = true }
+"#,
+    )
+    .unwrap();
+
+    cfg.validate_homebrew().unwrap();
+    let platforms = cfg.homebrew.unwrap().platforms;
+    assert!(platforms.darwin_arm);
+    assert!(platforms.darwin_intel);
+    assert!(platforms.linux_arm);
     assert!(platforms.linux_intel);
 }
 

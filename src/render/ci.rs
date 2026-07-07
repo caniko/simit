@@ -187,7 +187,7 @@ impl Default for HomebrewPlatformSet {
     fn default() -> Self {
         Self {
             darwin_arm: true,
-            darwin_intel: true,
+            darwin_intel: false,
             linux_arm: true,
             linux_intel: true,
         }
@@ -550,6 +550,17 @@ fn push_vscode_publish_step(
     workflow.push_str("          PUBLISH_PAT=$(resolve_pat ");
     workflow.push_str(key);
     workflow.push_str(")\n");
+    if matches!(publisher, VscodePublisher::Ovsx) {
+        workflow.push_str("          OVSX_NAMESPACE=$(nix shell nixpkgs#jq -c jq -r '.publisher' ");
+        workflow.push_str(&shell_word(&format!(
+            "{}/package.json",
+            vscode.extension_dir
+        )));
+        workflow.push_str(")\n");
+        workflow.push_str(
+            "          nix develop -c npx --yes ovsx create-namespace \"$OVSX_NAMESPACE\" --pat \"$PUBLISH_PAT\" || true\n",
+        );
+    }
     workflow.push_str("          ");
     workflow.push_str(command);
     workflow.push_str("\n\n");

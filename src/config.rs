@@ -679,7 +679,7 @@ fn default_windows_archive_pattern() -> String {
 pub struct HomebrewPlatformsConfig {
     #[serde(default = "default_true")]
     pub darwin_arm: bool,
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub darwin_intel: bool,
     #[serde(default = "default_true")]
     pub linux_arm: bool,
@@ -878,7 +878,7 @@ impl Default for HomebrewPlatformsConfig {
     fn default() -> Self {
         Self {
             darwin_arm: true,
-            darwin_intel: true,
+            darwin_intel: false,
             linux_arm: true,
             linux_intel: true,
         }

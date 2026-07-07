@@ -642,6 +642,12 @@ prepublish_commands = ["nix flake check --no-build"]
     ));
     assert!(workflow.contains("nix shell nixpkgs#jq -c jq -r '.id // empty'"));
     assert!(workflow.contains("nix flake check --no-build"));
+    assert!(workflow.contains(
+        "OVSX_NAMESPACE=$(nix shell nixpkgs#jq -c jq -r '.publisher' pkl-lsp-vscode/package.json)"
+    ));
+    assert!(workflow.contains(
+        "nix develop -c npx --yes ovsx create-namespace \"$OVSX_NAMESPACE\" --pat \"$PUBLISH_PAT\" || true"
+    ));
 
     let check = simit_with_user_config(temp.path())
         .current_dir(temp.path())
@@ -2167,7 +2173,7 @@ fn forgejo_nix_homebrew_step_matches_hardened_shape() {
         )
     );
     assert!(workflow.contains("\"release/demo-${VERSION}-aarch64-darwin.tar.gz\""));
-    assert!(workflow.contains("\"release/demo-${VERSION}-x86_64-darwin.tar.gz\""));
+    assert!(!workflow.contains("\"release/demo-${VERSION}-x86_64-darwin.tar.gz\""));
     assert!(workflow.contains("\"release/demo-${VERSION}-aarch64-linux.tar.gz\""));
     assert!(workflow.contains("\"release/demo-${VERSION}-x86_64-linux.tar.gz\""));
     assert!(workflow.contains("credential_helper='!f() { echo username=caniko; echo \"password=$HOMEBREW_TAP_TOKEN\"; }; f'"));
@@ -2181,7 +2187,7 @@ fn forgejo_nix_homebrew_step_matches_hardened_shape() {
     assert!(workflow.contains("--homepage 'https://example.com' \\"));
     assert!(workflow.contains("--license MIT \\"));
     assert!(workflow.contains("--archive \"darwin_arm=https://codeberg.org/foo/demo/releases/download/${VERSION}/demo-${VERSION}-aarch64-darwin.tar.gz,release/demo-${VERSION}-aarch64-darwin.tar.gz\" \\"));
-    assert!(workflow.contains("--archive \"darwin_intel=https://codeberg.org/foo/demo/releases/download/${VERSION}/demo-${VERSION}-x86_64-darwin.tar.gz,release/demo-${VERSION}-x86_64-darwin.tar.gz\" \\"));
+    assert!(!workflow.contains("--archive \"darwin_intel=https://codeberg.org/foo/demo/releases/download/${VERSION}/demo-${VERSION}-x86_64-darwin.tar.gz,release/demo-${VERSION}-x86_64-darwin.tar.gz\" \\"));
     assert!(workflow.contains("--archive \"linux_arm=https://codeberg.org/foo/demo/releases/download/${VERSION}/demo-${VERSION}-aarch64-linux.tar.gz,release/demo-${VERSION}-aarch64-linux.tar.gz\" \\"));
     assert!(workflow.contains("--archive \"linux_intel=https://codeberg.org/foo/demo/releases/download/${VERSION}/demo-${VERSION}-x86_64-linux.tar.gz,release/demo-${VERSION}-x86_64-linux.tar.gz\" \\"));
     assert_eq!(workflow.matches("--binary ").count(), 2);
