@@ -641,12 +641,24 @@ prepublish_commands = ["nix flake check --no-build"]
         "extension_version=$(nix shell nixpkgs#jq -c jq -r '.version' pkl-lsp-vscode/package.json)"
     ));
     assert!(workflow.contains("nix shell nixpkgs#jq -c jq -r '.id // empty'"));
+    assert!(workflow.contains(
+        "existing_ids=$(printf '%s' \"$release_json\" | nix shell nixpkgs#jq -c jq -r --arg name \"$name\" '.assets[]? | select(.name == $name) | .id')"
+    ));
+    assert!(workflow.contains(
+        "curl --fail --silent --show-error --request DELETE --header \"$auth_header\" \"$api/repos/$repo/releases/$release_id/assets/$asset_id\" >/dev/null"
+    ));
     assert!(workflow.contains("nix flake check --no-build"));
+    assert!(workflow.contains(
+        "nix develop -c npx --yes @vscode/vsce publish --packagePath release/*.vsix --pat \"$PUBLISH_PAT\" --skip-duplicate"
+    ));
     assert!(workflow.contains(
         "OVSX_NAMESPACE=$(nix shell nixpkgs#jq -c jq -r '.publisher' pkl-lsp-vscode/package.json)"
     ));
     assert!(workflow.contains(
         "nix develop -c npx --yes ovsx create-namespace \"$OVSX_NAMESPACE\" --pat \"$PUBLISH_PAT\" || true"
+    ));
+    assert!(workflow.contains(
+        "nix develop -c npx --yes ovsx publish release/*.vsix --pat \"$PUBLISH_PAT\" --skip-duplicate"
     ));
 
     let check = simit_with_user_config(temp.path())

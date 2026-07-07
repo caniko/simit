@@ -502,6 +502,10 @@ fn push_vscode_codeberg_upload(workflow: &mut String, vscode: &ResolvedVscode) {
     workflow.push_str("          for asset in release/*; do\n");
     workflow.push_str("            test -f \"$asset\" || continue\n");
     workflow.push_str("            name=$(basename \"$asset\")\n");
+    workflow.push_str("            existing_ids=$(printf '%s' \"$release_json\" | nix shell nixpkgs#jq -c jq -r --arg name \"$name\" '.assets[]? | select(.name == $name) | .id')\n");
+    workflow.push_str("            for asset_id in $existing_ids; do\n");
+    workflow.push_str("              curl --fail --silent --show-error --request DELETE --header \"$auth_header\" \"$api/repos/$repo/releases/$release_id/assets/$asset_id\" >/dev/null\n");
+    workflow.push_str("            done\n");
     workflow.push_str("            curl --fail --silent --show-error --request POST --header \"$auth_header\" --form \"attachment=@${asset}\" \"$api/repos/$repo/releases/$release_id/assets?name=$name\" >/dev/null\n");
     workflow.push_str("          done\n\n");
 }
@@ -520,12 +524,12 @@ fn push_vscode_publish_step(
     let (name, command, key) = match publisher {
         VscodePublisher::Vsce => (
             "Publish to VS Code Marketplace",
-            "nix develop -c npx --yes @vscode/vsce publish --packagePath release/*.vsix --pat \"$PUBLISH_PAT\"",
+            "nix develop -c npx --yes @vscode/vsce publish --packagePath release/*.vsix --pat \"$PUBLISH_PAT\" --skip-duplicate",
             "vsce",
         ),
         VscodePublisher::Ovsx => (
             "Publish to Open VSX",
-            "nix develop -c npx --yes ovsx publish release/*.vsix --pat \"$PUBLISH_PAT\"",
+            "nix develop -c npx --yes ovsx publish release/*.vsix --pat \"$PUBLISH_PAT\" --skip-duplicate",
             "ovsx",
         ),
     };
