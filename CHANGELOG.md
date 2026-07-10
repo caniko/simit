@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.2] - 2026-07-10
+
 ### Fixed
 
 - Keep Codeberg/Gitea-compatible dispatch triggers scalar instead of emitting
@@ -254,7 +256,8 @@ ci`, including the `~/.cargo/bin` key, rust-cache settings, and why Nix
 
 - Prepare the first public crates.io release.
 
-[Unreleased]: https://codeberg.org/caniko/simit/compare/0.17.1...HEAD
+[Unreleased]: https://codeberg.org/caniko/simit/compare/0.17.2...HEAD
+[0.17.2]: https://codeberg.org/caniko/simit/compare/0.17.1...0.17.2
 [0.17.1]: https://codeberg.org/caniko/simit/compare/0.17.0...0.17.1
 [0.17.0]: https://codeberg.org/caniko/simit/compare/0.16.1...0.17.0
 [0.16.1]: https://codeberg.org/caniko/simit/compare/0.16.0...0.16.1
