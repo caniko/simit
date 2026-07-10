@@ -724,9 +724,9 @@ fn forgejo_nix_runtime_uses_devshell_quality_tools_without_cargo_install() {
 
     let ci = read(&temp.path().join(".forgejo/workflows/ci.yaml"));
     assert!(ci.contains("      - name: Check cargo-audit tool\n"));
-    assert!(ci.contains("run: nix develop -c command -v cargo-audit"));
+    assert!(ci.contains("run: nix develop -c cargo-audit --version"));
     assert!(ci.contains("      - name: Check cargo-deny tool\n"));
-    assert!(ci.contains("run: nix develop -c command -v cargo-deny"));
+    assert!(ci.contains("run: nix develop -c cargo-deny --version"));
     assert!(!ci.contains("nix develop -c cargo install cargo-audit"));
     assert!(!ci.contains("nix develop -c cargo install cargo-deny"));
 }

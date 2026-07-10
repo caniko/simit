@@ -1158,10 +1158,10 @@ fn ci_workflow_multi_job(
 
             let mut q = String::new();
             if options.with_audit {
-                q.push_str("      - name: Check cargo-audit tool\n        run: nix develop -c command -v cargo-audit\n\n");
+                q.push_str("      - name: Check cargo-audit tool\n        run: nix develop -c cargo-audit --version\n\n");
             }
             if options.with_deny {
-                q.push_str("      - name: Check cargo-deny tool\n        run: nix develop -c command -v cargo-deny\n\n");
+                q.push_str("      - name: Check cargo-deny tool\n        run: nix develop -c cargo-deny --version\n\n");
             }
             if !q.is_empty() {
                 capture(STEP_QUALITY_TOOLS, &q);
@@ -2592,7 +2592,7 @@ fn push_quality_tool_install_steps(workflow: &mut String, runtime: Runtime, opti
             workflow.push_str("      - name: Check cargo-audit tool\n");
             workflow.push_str("        run: ");
             workflow.push_str(prefix);
-            workflow.push_str("command -v cargo-audit\n\n");
+            workflow.push_str("cargo-audit --version\n\n");
         }
     }
     if options.with_deny {
@@ -2606,7 +2606,7 @@ fn push_quality_tool_install_steps(workflow: &mut String, runtime: Runtime, opti
             workflow.push_str("      - name: Check cargo-deny tool\n");
             workflow.push_str("        run: ");
             workflow.push_str(prefix);
-            workflow.push_str("command -v cargo-deny");
+            workflow.push_str("cargo-deny --version");
             workflow.push_str("\n\n");
         }
     }
