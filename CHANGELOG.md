@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Use executable version checks for cargo-audit and cargo-deny in Nix
   workflows instead of passing the shell builtin `command` to `nix develop`.
+- Use `cargo package --allow-dirty --list` for generated CI package gates so
+  unpublished workspace dependencies do not block first-publication CI.
 
 ## [0.17.3] - 2026-07-10
 

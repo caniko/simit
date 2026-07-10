@@ -2701,19 +2701,9 @@ fn push_package_selector(workflow: &mut String, package: &Package, options: &CiO
     }
 }
 
-fn push_package_flags(workflow: &mut String, package: &Package, options: &CiOptions) {
-    workflow.push_str(" --allow-dirty");
-    if options.package_scoped && has_local_path_dependencies(package) {
-        workflow.push_str(" --list");
-    }
+fn push_package_flags(workflow: &mut String, _package: &Package, _options: &CiOptions) {
+    workflow.push_str(" --allow-dirty --list");
     workflow.push('\n');
-}
-
-fn has_local_path_dependencies(package: &Package) -> bool {
-    package
-        .dependencies
-        .iter()
-        .any(|dependency| dependency.source.is_none() && dependency.path.is_some())
 }
 
 fn command_prefix(runtime: Runtime) -> &'static str {

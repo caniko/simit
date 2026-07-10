@@ -1034,7 +1034,7 @@ fn generates_github_plain_cargo_workflows() {
     ));
     assert!(!ci.contains("&>/dev/null"));
     assert!(ci.contains("run: cargo nextest run --all-features"));
-    assert!(ci.contains("run: cargo package --allow-dirty"));
+    assert!(ci.contains("run: cargo package --allow-dirty --list"));
 
     let publish = read(&temp.path().join(".github/workflows/publish-crate.yaml"));
     assert!(publish.contains("uses: actions/cache@v4"));
@@ -1465,8 +1465,7 @@ fn workspace_flag_generates_per_package_workflows() {
         alpha_ci
             .contains("run: cargo clippy -p alpha --all-targets --all-features -- --deny warnings")
     );
-    assert!(alpha_ci.contains("run: cargo package -p alpha --allow-dirty"));
-    assert!(!alpha_ci.contains("run: cargo package -p alpha --allow-dirty --list"));
+    assert!(alpha_ci.contains("run: cargo package -p alpha --allow-dirty --list"));
     assert!(!alpha_ci.contains("--no-default-features"));
 
     let beta_ci = read(&temp.path().join(".forgejo/workflows/ci-beta.yaml"));
@@ -1539,7 +1538,7 @@ fn workspace_publish_false_package_keeps_ci_but_skips_package_and_publish_workfl
     );
 
     let alpha_ci = read(&temp.path().join(".forgejo/workflows/ci-alpha.yaml"));
-    assert!(alpha_ci.contains("run: cargo package -p alpha --allow-dirty"));
+    assert!(alpha_ci.contains("run: cargo package -p alpha --allow-dirty --list"));
     assert!(
         temp.path()
             .join(".forgejo/workflows/publish-crate-alpha.yaml")

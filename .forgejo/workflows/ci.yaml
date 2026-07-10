@@ -46,4 +46,4 @@ jobs:
         run: nix develop -c cargo clippy --all-targets -- --deny warnings
 
       - name: Package crate
-        run: nix develop -c cargo package --allow-dirty
+        run: nix develop -c cargo package --allow-dirty --list
