@@ -1,0 +1,1197 @@
+<!DOCTYPE HTML>
+<html lang="en" class="coal sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>simit Documentation</title>
+        <meta name="robots" content="noindex">
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="favicon-de23e50b.svg">
+        <link rel="shortcut icon" href="favicon-8114d1fc.png">
+        <link rel="stylesheet" href="css/variables-8adf115d.css">
+        <link rel="stylesheet" href="css/general-2459343d.css">
+        <link rel="stylesheet" href="css/chrome-ae938929.css">
+        <link rel="stylesheet" href="css/print-9e4910d8.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="fonts/fonts-9644e21d.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="mdbook-highlight-css" href="highlight-493f70e1.css">
+        <link rel="stylesheet" id="mdbook-tomorrow-night-css" href="tomorrow-night-4c0ae647.css">
+        <link rel="stylesheet" id="mdbook-ayu-highlight-css" href="ayu-highlight-3fdfc3ac.css">
+
+        <!-- Custom theme stylesheets -->
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "";
+            const default_light_theme = "coal";
+            const default_dark_theme = "coal";
+            window.path_to_searchindex_js = "searchindex-9122527f.js";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="toc-a5f7a169.js"></script>
+    </head>
+    <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
+    <div id="mdbook-body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('coal')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="mdbook-sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("mdbook-sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+                sidebar_toggle.checked = false;
+            }
+            if (sidebar === 'visible') {
+                sidebar_toggle.checked = true;
+            } else {
+                html.classList.remove('sidebar-visible');
+            }
+        </script>
+
+        <nav id="mdbook-sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="toc.html"></iframe>
+            </noscript>
+            <div id="mdbook-sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="mdbook-page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="mdbook-menu-bar-hover-placeholder"></div>
+                <div id="mdbook-menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="mdbook-sidebar-toggle" class="icon-button" for="mdbook-sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="mdbook-sidebar">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M0 96C0 78.3 14.3 64 32 64H416c17.7 0 32 14.3 32 32s-14.3 32-32 32H32C14.3 128 0 113.7 0 96zM0 256c0-17.7 14.3-32 32-32H416c17.7 0 32 14.3 32 32s-14.3 32-32 32H32c-17.7 0-32-14.3-32-32zM448 416c0 17.7-14.3 32-32 32H32c-17.7 0-32-14.3-32-32s14.3-32 32-32H416c17.7 0 32 14.3 32 32z"/></svg></span>
+                        </label>
+                        <button id="mdbook-theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="mdbook-theme-list">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 576 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M371.3 367.1c27.3-3.9 51.9-19.4 67.2-42.9L600.2 74.1c12.6-19.5 9.4-45.3-7.6-61.2S549.7-4.4 531.1 9.6L294.4 187.2c-24 18-38.2 46.1-38.4 76.1L371.3 367.1zm-19.6 25.4l-116-104.4C175.9 290.3 128 339.6 128 400c0 3.9 .2 7.8 .6 11.6c1.8 17.5-10.2 36.4-27.8 36.4H96c-17.7 0-32 14.3-32 32s14.3 32 32 32H240c61.9 0 112-50.1 112-112c0-2.5-.1-5-.2-7.5z"/></svg></span>
+                        </button>
+                        <ul id="mdbook-theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-ayu">Ayu</button></li>
+                        </ul>
+                        <button id="mdbook-search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="mdbook-searchbar">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M416 208c0 45.9-14.9 88.3-40 122.7L502.6 457.4c12.5 12.5 12.5 32.8 0 45.3s-32.8 12.5-45.3 0L330.7 376c-34.4 25.2-76.8 40-122.7 40C93.1 416 0 322.9 0 208S93.1 0 208 0S416 93.1 416 208zM208 352c79.5 0 144-64.5 144-144s-64.5-144-144-144S64 128.5 64 208s64.5 144 144 144z"/></svg></span>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">simit Documentation</h1>
+
+                    <div class="right-buttons">
+                        <a href="print.html" title="Print this book" aria-label="Print this book">
+                            <span class=fa-svg id="print-button"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M128 0C92.7 0 64 28.7 64 64v96h64V64H354.7L384 93.3V160h64V93.3c0-17-6.7-33.3-18.7-45.3L400 18.7C388 6.7 371.7 0 354.7 0H128zM384 352v32 64H128V384 368 352H384zm64 32h32c17.7 0 32-14.3 32-32V256c0-35.3-28.7-64-64-64H64c-35.3 0-64 28.7-64 64v96c0 17.7 14.3 32 32 32H64v64c0 35.3 28.7 64 64 64H384c35.3 0 64-28.7 64-64V384zm-16-88c-13.3 0-24-10.7-24-24s10.7-24 24-24s24 10.7 24 24s-10.7 24-24 24z"/></svg></span>
+                        </a>
+                        <a href="https://codeberg.org/caniko/simit" title="Git repository" aria-label="Git repository">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 496 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M165.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3zm44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM244.8 8C106.1 8 0 113.3 0 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C428.2 457.8 496 362.9 496 252 496 113.3 383.5 8 244.8 8zM97.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1zm-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7zm32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1zm-11.4-14.7c-1.6 1-1.6 3.6 0 5.9 1.6 2.3 4.3 3.3 5.6 2.3 1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2z"/></svg></span>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="mdbook-search-wrapper" class="hidden">
+                    <form id="mdbook-searchbar-outer" class="searchbar-outer">
+                        <div class="search-wrapper">
+                            <input type="search" id="mdbook-searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="mdbook-searchresults-outer" aria-describedby="searchresults-header">
+                            <div class="spinner-wrapper">
+                                <span class=fa-svg id="fa-spin"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M304 48c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zm0 416c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zM48 304c26.5 0 48-21.5 48-48s-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48zm464-48c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zM142.9 437c18.7-18.7 18.7-49.1 0-67.9s-49.1-18.7-67.9 0s-18.7 49.1 0 67.9s49.1 18.7 67.9 0zm0-294.2c18.7-18.7 18.7-49.1 0-67.9S93.7 56.2 75 75s-18.7 49.1 0 67.9s49.1 18.7 67.9 0zM369.1 437c18.7 18.7 49.1 18.7 67.9 0s18.7-49.1 0-67.9s-49.1-18.7-67.9 0s-18.7 49.1 0 67.9z"/></svg></span>
+                            </div>
+                        </div>
+                    </form>
+                    <div id="mdbook-searchresults-outer" class="searchresults-outer hidden">
+                        <div id="mdbook-searchresults-header" class="searchresults-header"></div>
+                        <ul id="mdbook-searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('mdbook-sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('mdbook-sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#mdbook-sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="mdbook-content" class="content">
+                    <main>
+                        <h1 id="introduction"><a class="header" href="#introduction">Introduction</a></h1>
+<p><code>simit</code> is a semver-aware commit helper for Rust projects.</p>
+<p>It bumps selected Cargo package versions, updates <code>Cargo.lock</code> when present,
+stages only the version files it changed, delegates commit creation to <code>git</code>,
+and creates a release tag named exactly like the new version.</p>
+<p>The tool also provides helpers for Keep a Changelog files, generated Rust CI,
+user-scoped runner configuration, release maintainer trust roots, crane-based
+Nix flakes, shell completions, manpages, and Homebrew tap release automation.</p>
+<h2 id="scope"><a class="header" href="#scope">Scope</a></h2>
+<p><code>simit</code> is intended for repositories that use Cargo package metadata as the
+source of truth for crate versions. It performs local release preparation and
+tagging; it does not push commits or tags to a remote.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="installation"><a class="header" href="#installation">Installation</a></h1>
+<p>Install from crates.io:</p>
+<pre><code class="language-sh">cargo install simit
+</code></pre>
+<p>For source builds, clone the canonical repository and use Cargo:</p>
+<pre><code class="language-sh">git clone https://codeberg.org/caniko/simit.git
+cd simit
+cargo install --path .
+</code></pre>
+<p>The project is licensed under the MIT License. See the repository <code>LICENSE</code>
+file for the full license text.</p>
+<h2 id="installing-hooks"><a class="header" href="#installing-hooks">Installing Hooks</a></h2>
+<p>Use <code>simit hooks install</code> to write project-local pre-commit wrappers even when
+Git is configured with a system <code>core.hooksPath</code> dispatcher:</p>
+<pre><code class="language-sh">simit hooks install
+simit hooks install --check
+simit hooks install --diff
+</code></pre>
+<p><code>--check</code> exits non-zero when the installed hooks drift from simit’s expected
+wrapper content. <code>--diff</code> prints the wrapper diff without rewriting files.</p>
+<p>If a repo-local <code>core.hooksPath</code> such as <code>.git/hooks</code> shadows a friendly system
+dispatcher, simit warns because project hooks would run while dispatcher-owned
+system hooks are bypassed. Use <code>--fix</code> to unset the rogue local override when a
+dispatcher is available:</p>
+<pre><code class="language-sh">simit hooks install --fix
+</code></pre>
+<h2 id="flake-ownership"><a class="header" href="#flake-ownership">Flake Ownership</a></h2>
+<p><code>simit init flake</code> defaults to hooks-only ownership. In that mode simit writes
+and checks <code>nix/pre-commit.nix</code> only; an existing <code>flake.nix</code> remains
+project-owned and is ignored by <code>simit init flake --check --diff</code>.</p>
+<p>Use full ownership only for repositories that want simit to manage the whole
+canonical crane flake:</p>
+<pre><code class="language-sh">simit init flake --scope full
+</code></pre>
+<p>Persist the choice in project config when a repository should always use full
+ownership:</p>
+<pre><code class="language-toml">[flake]
+scope = "full"
+</code></pre>
+<p>Existing repositories that already have simit’s full flake files keep full
+behavior until maintainers opt into hooks-only. To migrate from full to
+hooks-only, set <code>scope = "hooks-only"</code> or run <code>simit init flake --scope hooks-only</code>; simit will not delete the existing <code>flake.nix</code>.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="quick-start"><a class="header" href="#quick-start">Quick Start</a></h1>
+<p>Create a patch release commit and signed release tag:</p>
+<pre><code class="language-sh">simit commit patch -m "fix admission edge case"
+</code></pre>
+<p>Create a release commit without creating a tag:</p>
+<pre><code class="language-sh">simit commit --no-tag patch -m "prepare unreleased patch"
+</code></pre>
+<p>Preview a release commit without modifying the worktree:</p>
+<pre><code class="language-sh">simit commit --dry-run patch -m "preview patch release"
+</code></pre>
+<p>Run the local release flow with checks and changelog promotion:</p>
+<pre><code class="language-sh">simit release patch -m "release patch"
+</code></pre>
+<p><code>simit release</code> runs Cargo tests, Clippy with warnings denied, promotes
+<code>CHANGELOG.md</code> when present, commits, and tags locally.</p>
+<p>Generate CI workflows for a single-package project:</p>
+<pre><code class="language-sh">simit init ci --platform forgejo
+</code></pre>
+<p>Generic Rust CI writes test, lint, and optional quality-gate workflows only. It
+does not create crates.io publish workflows unless release publishing is
+explicitly enabled:</p>
+<pre><code class="language-sh">simit init ci --platform forgejo --publish-crates
+</code></pre>
+<p>For Cargo workspaces, select the generated workflow set explicitly:</p>
+<pre><code class="language-sh">simit init ci --platform forgejo --workspace
+simit init ci --platform forgejo --package my-crate
+</code></pre>
+<p>Workspace CI is rendered per package as <code>ci-&lt;crate&gt;.yaml</code>; single-package
+projects keep the stable <code>ci.yaml</code> path. With <code>--publish-crates</code>, publishable
+workspace members also get <code>publish-crate-&lt;crate&gt;.yaml</code>; single-package release
+projects get <code>publish-crate.yaml</code>.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="project-registry"><a class="header" href="#project-registry">Project Registry</a></h1>
+<p>Simit keeps a per-user project registry at <code>$XDG_DATA_HOME/simit/projects.toml</code>,
+or the platform default data directory when <code>XDG_DATA_HOME</code> is unset. Mutating
+commands update this registry after their primary work succeeds, so registry
+failures warn but do not fail the command that generated project files.</p>
+<p>The registry records each project path, package name, first and last time simit
+saw it, and feature status for known surfaces such as <code>flake</code>, <code>ci</code>,
+<code>homebrew</code>, <code>chocolatey</code>, <code>scoop</code>, <code>changelog</code>, and <code>hooks</code>.</p>
+<p>For hooks, the registry distinguishes <code>configured</code>, <code>installed</code>,
+<code>conflicted</code>, and <code>absent</code>. <code>configured</code> means hook config exists but Git would
+not currently execute the project’s managed wrappers. <code>installed</code> means the
+resolved hook path would execute the managed wrappers. <code>conflicted</code> means hook
+config exists, but the effective or repo-local <code>core.hooksPath</code> bypasses the
+managed route and needs attention.</p>
+<p>For CI, the registry distinguishes <code>managed</code>, <code>managed+extra</code>, <code>hand-rolled</code>,
+<code>drift</code>, and <code>absent</code>. <code>hand-rolled</code> means workflow YAML exists under
+<code>.forgejo/workflows/</code> or <code>.github/workflows/</code> but does not carry simit’s
+generated-workflow marker. <code>managed+extra</code> means simit’s generated workflows are
+current and supplementary non-generated workflow files are also present.
+<code>drift</code> means a marked generated workflow no longer matches what simit would
+render for the project.</p>
+<p>CI drift detection uses the same option resolution order as
+<code>simit init ci --check --diff</code>:</p>
+<ol>
+<li>CLI flags, when running <code>simit init ci</code>.</li>
+<li>Explicit fields in <code>simit.toml</code> <code>[ci]</code>.</li>
+<li>Inference from existing generated workflow content.</li>
+<li>Generator defaults.</li>
+</ol>
+<p>That means a project with persisted <code>[ci]</code> settings should report the same
+result from <code>simit projects list</code> and from a bare
+<code>simit init ci --platform &lt;forgejo|github&gt; --check --diff</code>. Repositories that
+have not adopted <code>simit.toml</code> still get best-effort zero-config drift detection
+from the generated workflow content, but persisted <code>[ci]</code> fields win when they
+disagree with inference.</p>
+<h2 id="onboarding-existing-projects"><a class="header" href="#onboarding-existing-projects">Onboarding existing projects</a></h2>
+<p>Run discovery once per machine to populate the registry from projects simit
+already manages:</p>
+<pre><code class="language-sh"># one-shot per machine
+simit projects discover ~/Projects --dry-run
+simit projects discover ~/Projects
+</code></pre>
+<p><code>discover</code> walks a filesystem subtree and adds new registry entries it finds.
+<code>scan</code> refreshes feature status for projects that are already registered; use
+<code>simit projects scan --prune</code> afterwards if you also want stale paths removed.
+Pass <code>--include-empty</code> when you want to register Cargo workspaces that do not
+currently use simit; human output marks those entries with <code>[no simit features]</code>
+and <code>projects list</code> shows them with a <code>-</code> indicator. Default human discovery
+output prints only the skipped count; use <code>--json</code> when you need the full list
+of skipped paths.</p>
+<p>When a registered project path no longer exists, <code>scan</code> reports it instead of
+silently leaving stale feature state behind. Use <code>--prune</code> to delete those
+entries after reviewing them.</p>
+<p>List registered projects:</p>
+<pre><code class="language-sh">simit projects list
+</code></pre>
+<p>By default, <code>projects list</code> skips ephemeral <code>/tmp/...</code> registry entries left
+behind by scratch test runs. Pass <code>--include-ephemeral</code> when you need to see
+them again.</p>
+<p>Filter by feature status:</p>
+<pre><code class="language-sh">simit projects list --feature flake=managed
+simit projects list --feature ci=drift
+simit projects list --feature ci=hand-rolled
+</code></pre>
+<p>Omitting <code>=STATUS</code> matches any non-absent status:</p>
+<pre><code class="language-sh">simit projects list --feature homebrew
+</code></pre>
+<p>Use JSON output when another tool or an AI agent needs structured state:</p>
+<pre><code class="language-sh">simit projects list --json --feature ci=drift
+simit projects list --json --feature ci=hand-rolled
+simit projects show --json .
+</code></pre>
+<p>Human <code>simit projects show &lt;path&gt;</code> output also includes a <code>regen:</code> line for
+generated CI projects. When <code>simit.toml [ci]</code> already captures the current CI
+shape, the hint stays minimal:</p>
+<pre><code class="language-sh">regen: simit init ci --platform forgejo
+</code></pre>
+<p>Legacy projects without persisted <code>[ci]</code> options print the inferred flag set
+instead so the command still reproduces the current workflows.</p>
+<p>Refresh feature detection across registered projects:</p>
+<pre><code class="language-sh">simit projects scan
+simit projects scan --prune
+</code></pre>
+<p>Use <code>--dry-run</code> to inspect a scan or prune without changing the registry:</p>
+<pre><code class="language-sh">simit projects scan --dry-run --prune
+simit projects prune --dry-run
+</code></pre>
+<p>Clear all registry state when you want to rebuild it from discovery:</p>
+<pre><code class="language-sh">simit projects clear-state --dry-run
+simit projects clear-state
+</code></pre>
+<p>Remove one entry when you no longer want simit to track it:</p>
+<pre><code class="language-sh">simit projects forget /absolute/project/path
+</code></pre>
+<h2 id="disabling-the-registry"><a class="header" href="#disabling-the-registry">Disabling the registry</a></h2>
+<p>Set <code>SIMIT_NO_REGISTRY=1</code> to skip all registry IO. Sandboxed CI runs
+that should not leak per-project state into a shared home directory
+should export this. Registry IO failures already warn-and-continue, so
+this env var is only needed when you want zero filesystem touches.</p>
+<h2 id="writing-integration-tests"><a class="header" href="#writing-integration-tests">Writing integration tests</a></h2>
+<p>Integration tests under <code>tests/</code> route through the shared
+<code>tests/common/</code> harness, which points <code>XDG_DATA_HOME</code> at a per-test
+temporary directory so the developer’s real registry is never touched.
+New tests that exercise mutating commands should use the same harness
+and avoid spawning <code>simit</code> with the inherited environment.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="release-integrity"><a class="header" href="#release-integrity">Release Integrity</a></h1>
+<p>Generated release workflows treat signed tags and signed artifacts as part of
+the release contract.</p>
+<h2 id="trust-roots"><a class="header" href="#trust-roots">Trust Roots</a></h2>
+<p>Commit these files in each project that uses generated release workflows:</p>
+<pre><code class="language-text">keys/maintainers.gpg
+keys/minisign.pub
+</code></pre>
+<p><code>keys/maintainers.gpg</code> is the OpenPGP public keyring used by CI to run
+<code>git verify-tag</code> before publishing. <code>simit init ci</code> writes it automatically
+from the configured release signing key. You can manage it directly:</p>
+<pre><code class="language-sh">simit release trust status
+simit release trust init
+simit release trust check
+</code></pre>
+<p>The key is discovered from <code>[release.signing].key</code>, <code>git config user.signingkey</code>, or <code>--key</code>/<code>--maintainer-key</code>. If no exportable key is
+available, simit blocks instead of generating an unsigned publish path.</p>
+<p><code>keys/minisign.pub</code> is the public half of the offline minisign key used to
+sign <code>SHA256SUMS.txt</code>. Generate the keypair on the maintainer-controlled
+machine and store the secret key outside the repository:</p>
+<pre><code class="language-sh">mkdir -p keys
+minisign -G -p keys/minisign.pub -s minisign.sec
+</code></pre>
+<h2 id="workflow-secrets"><a class="header" href="#workflow-secrets">Workflow Secrets</a></h2>
+<p><code>simit init ci --with-artifacts</code> generates an artifact workflow that requires:</p>
+<ul>
+<li><code>MINISIGN_SECRET_KEY</code>: contents of the password-protected minisign secret key.</li>
+<li><code>MINISIGN_PASSWORD</code>: password for <code>MINISIGN_SECRET_KEY</code>.</li>
+<li><code>COSIGN_PRIVATE_KEY</code>: optional fallback when keyless Sigstore OIDC is unavailable.</li>
+<li><code>COSIGN_PASSWORD</code>: optional password for <code>COSIGN_PRIVATE_KEY</code>.</li>
+</ul>
+<p>GitHub workflows request <code>id-token: write</code>. Forgejo workflows set
+<code>enable-openid-connect: true</code>. If the platform cannot obtain a Fulcio/Rekor
+keyless certificate, the generated workflow falls back to <code>COSIGN_PRIVATE_KEY</code>
+when that secret is configured; otherwise the release fails.</p>
+<h2 id="generated-artifacts"><a class="header" href="#generated-artifacts">Generated Artifacts</a></h2>
+<p>The artifact workflow expects the project build to place release assets in the
+top-level <code>release/</code> directory. It then writes and publishes:</p>
+<ul>
+<li><code>SHA256SUMS.txt</code></li>
+<li><code>SHA256SUMS.txt.minisig</code></li>
+<li><code>*.cosign.bundle</code> for tarballs, zip files, AppImages, and source RPMs</li>
+<li><code>*.intoto.jsonl</code> and <code>*.intoto.bundle</code> SLSA v1 attestations for those assets</li>
+</ul>
+<p>The SLSA predicate records the source commit, release workflow digest, optional
+<code>flake.lock</code> digest, artifact name, and artifact SHA-256.</p>
+<h2 id="consumer-verification"><a class="header" href="#consumer-verification">Consumer Verification</a></h2>
+<p>Verify the signed checksum manifest first:</p>
+<pre><code class="language-sh">minisign -Vm SHA256SUMS.txt -p keys/minisign.pub
+sha256sum -c SHA256SUMS.txt --ignore-missing
+</code></pre>
+<p>For keyless Sigstore bundles, constrain the expected identity and issuer for
+the specific forge before trusting a release:</p>
+<pre><code class="language-sh">cosign verify-blob \
+  --bundle foo-&lt;version&gt;-x86_64-linux.tar.gz.cosign.bundle \
+  --certificate-identity-regexp '.*OWNER/REPO.*' \
+  --certificate-oidc-issuer-regexp '.*' \
+  foo-&lt;version&gt;-x86_64-linux.tar.gz
+
+cosign verify-blob-attestation \
+  --bundle foo-&lt;version&gt;-x86_64-linux.tar.gz.intoto.bundle \
+  --type slsaprovenance1 \
+  --certificate-identity-regexp '.*OWNER/REPO.*' \
+  --certificate-oidc-issuer-regexp '.*' \
+  foo-&lt;version&gt;-x86_64-linux.tar.gz
+</code></pre>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="release-plan"><a class="header" href="#release-plan">Release Plan</a></h1>
+<p><code>simit release plan</code> prints the publish order for the current workspace by
+reading <code>cargo metadata --no-deps</code> and sorting local path dependencies before
+their dependents.</p>
+<pre><code class="language-sh">simit release plan
+simit release plan --json
+simit release plan --dry-run-package
+simit release plan --package sorrel-ui
+</code></pre>
+<p>The default text output is stable across runs. Ties between independent crates
+are broken alphabetically by package name.</p>
+<pre><code class="language-text">publish order (3 crates):
+  1. a 0.1.0
+  2. b 0.1.0
+  3. c 0.1.0
+non-publishable members skipped: xtask
+</code></pre>
+<p>Non-publishable workspace members (<code>publish = false</code>) are never emitted in the
+publish order. They are listed separately in text output so the chaperone can
+see exactly what was skipped.</p>
+<h2 id="package-selection"><a class="header" href="#package-selection">Package Selection</a></h2>
+<p>Without <code>--package</code>, simit plans every publishable workspace member. When
+<code>--package &lt;name&gt;</code> is present, simit treats the named crate as a publish root
+and includes any publishable local path dependencies needed to reach it.</p>
+<p>If a selected publishable crate depends on a non-publishable workspace member,
+the command fails instead of silently omitting the dependency.</p>
+<h2 id="dry-run-packaging"><a class="header" href="#dry-run-packaging">Dry-Run Packaging</a></h2>
+<p><code>--dry-run-package</code> executes:</p>
+<pre><code class="language-sh">cargo package -p &lt;crate&gt; --allow-dirty --no-verify
+</code></pre>
+<p>for each crate in publish order. Current Cargo does not accept
+<code>cargo package --dry-run</code>, so simit uses the local packaging command that checks
+the package archive without publishing it. simit stops on the first packaging
+failure and returns exit code <code>1</code>.</p>
+<h2 id="json-schema"><a class="header" href="#json-schema">JSON Schema</a></h2>
+<p><code>--json</code> prints one ordered array. Each item has this shape:</p>
+<pre><code class="language-json">[
+  {
+    "name": "sorrel-ui",
+    "version": "0.1.0",
+    "manifest_path": "/abs/path/to/Cargo.toml",
+    "publish": true,
+    "depends_on": ["sorrel-render"]
+  }
+]
+</code></pre>
+<p>The array order is the publish order. <code>depends_on</code> lists only local publishable
+workspace dependencies that must be published first.</p>
+<p><code>--json</code> and <code>--dry-run-package</code> are mutually exclusive so the JSON stream stays
+machine-readable.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="release-verify"><a class="header" href="#release-verify">Release Verify</a></h1>
+<p><code>simit release verify</code> runs the read-only release bar and reports every check
+before choosing an exit code.</p>
+<pre><code class="language-sh">simit release verify --push-target origin
+simit release verify --json --version 0.5.1
+</code></pre>
+<p>The text output is deterministic: one line per check, followed by a summary.
+Failures and blocked checks include a remediation line naming the command or
+upstream action that should produce the missing evidence.</p>
+<pre><code class="language-text">simit release verify
+  [pass   ] worktree clean
+  [pass   ] simit ci managed (no drift)
+  [pass   ] simit flake managed (no drift)
+  [pass   ] release trust root present (keys/maintainers.gpg)
+  [pass   ] CHANGELOG entry exists for 0.5.1
+  [fail   ] crates.io: simit 0.5.1 not yet published
+            remediation: publish the crate or verify that this pre-release check is being run before publication
+  [pass   ] tag presence: 0.5.1 present locally and on origin
+  [blocked] remote secrets: CRATES_IO_API_TOKEN presence not verifiable locally
+            remediation: run `simit release secrets` once available; until then verify the remote secret in Forgejo/GitHub settings
+summary: 1 fail, 1 blocked
+</code></pre>
+<h2 id="exit-codes"><a class="header" href="#exit-codes">Exit Codes</a></h2>
+<ul>
+<li><code>0</code>: every check passed.</li>
+<li><code>1</code>: at least one check failed.</li>
+<li><code>2</code>: no checks failed, but at least one check was blocked because the
+required evidence cannot be verified locally.</li>
+</ul>
+<p>Blocked is distinct from failed. The current remote-secret check is blocked by
+design because local code cannot prove whether a Forgejo or GitHub repository
+has <code>CRATES_IO_API_TOKEN</code> configured.</p>
+<h2 id="json-schema-1"><a class="header" href="#json-schema-1">JSON Schema</a></h2>
+<p><code>--json</code> prints one object:</p>
+<pre><code class="language-json">{
+  "command": "simit release verify",
+  "results": [
+    {
+      "check": "worktree clean",
+      "status": "pass",
+      "message": "worktree clean",
+      "remediation": "optional remediation text"
+    }
+  ],
+  "summary": {
+    "pass": 1,
+    "fail": 0,
+    "blocked": 0,
+    "exit_code": 0
+  }
+}
+</code></pre>
+<p><code>status</code> is one of <code>pass</code>, <code>fail</code>, or <code>blocked</code>. <code>remediation</code> is omitted when
+there is nothing to fix.</p>
+<h2 id="checks"><a class="header" href="#checks">Checks</a></h2>
+<p>The command checks, in order:</p>
+<ul>
+<li>clean git worktree;</li>
+<li>simit-managed CI without generated workflow drift;</li>
+<li>simit-managed flake support without generated file drift;</li>
+<li>release trust root presence and parseability;</li>
+<li>a released <code>CHANGELOG.md</code> entry for <code>--version</code> or the selected package
+version;</li>
+<li>crates.io reachability for publishable workspace members;</li>
+<li>local tag presence, plus remote tag presence when <code>--push-target</code> is set;</li>
+<li>remote publish secrets, currently reported as blocked.</li>
+</ul>
+<p>Non-publishable packages are skipped for the crates.io check.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="ci-caching"><a class="header" href="#ci-caching">CI Caching</a></h1>
+<p>Generated Cargo-runtime workflows include two cache layers by default.</p>
+<p>The first cache stores <code>~/.cargo/bin</code> so CI tools installed by the workflow can
+be reused on later runs. The cache key includes the runner operating system and
+the generated workflow files:</p>
+<pre><code class="language-text">cargo-bin-${{ runner.os }}-${{ hashFiles('.forgejo/workflows/*.yaml') }}
+</code></pre>
+<p>Forgejo workflows hash <code>.forgejo/workflows/*.yaml</code>; GitHub workflows hash
+<code>.github/workflows/*.yaml</code>. Changing generated workflows for the active
+platform invalidates the tool cache. Ordinary source changes do not.</p>
+<p>The second cache uses <code>Swatinem/rust-cache@v2</code> for Cargo registry and target
+state. Simit enables <code>cache-all-crates</code> and <code>cache-on-failure</code>, and generated
+workflows only save the rust-cache entry from <code>refs/heads/trunk</code>. Pull requests
+and short-lived branches can restore existing cache entries without becoming
+cache writers.</p>
+<p>When a cached CI tool is missing, generated workflows install it explicitly:</p>
+<pre><code class="language-sh">command -v cargo-nextest &gt;/dev/null 2&gt;&amp;1 || cargo install cargo-nextest --locked
+</code></pre>
+<p>The same guard is used for optional <code>cargo-audit</code> and <code>cargo-deny</code> installs in
+Cargo-runtime workflows.</p>
+<p>Nix-runtime workflows do not emit these Cargo cache steps. They rely on the
+runner’s Nix store and binary cache behavior instead of caching Cargo build
+directories from inside the workflow.</p>
+<h2 id="measured-speedup"><a class="header" href="#measured-speedup">Measured speedup</a></h2>
+<p>Reference numbers from
+<a href="https://codeberg.org/caniko/rs-memory-admission"><code>rs-memory-admission</code></a> on
+its self-hosted <code>atlas</code> runner, after adopting simit-managed CI in commit
+<code>d40f905</code>:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Run</th><th>Cache state</th><th>Wall-time</th></tr>
+</thead>
+<tbody>
+<tr><td>First seeding runs (<code>run#57</code>–<code>#59</code>)</td><td>writes only, no restore</td><td>failed early, ≤ 2 min</td></tr>
+<tr><td>First green warm run (<code>run#60</code>)</td><td>warm restore</td><td><strong>2m03s</strong></td></tr>
+<tr><td>Subsequent warm run (<code>run#61</code>)</td><td>warm restore</td><td><strong>3m18s</strong></td></tr>
+</tbody>
+</table>
+</div>
+<p>The warm runs include <code>cargo nextest run --all-features</code>, both clippy
+profiles, <code>cargo doc</code>, <code>cargo audit</code>, <code>cargo deny</code>, and <code>cargo package</code> —
+i.e. the full quality-gate suite, not a stripped-down subset.</p>
+<p>Your numbers will vary with crate-graph size and how often <code>Cargo.lock</code>
+invalidates the rust-cache key. Expect the first run after a lockfile bump
+to recompile from scratch; subsequent runs at the same lock should restore
+in under a minute.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="ci-adoption-notes"><a class="header" href="#ci-adoption-notes">CI Adoption Notes</a></h1>
+<p>This page captures the operational rules learned while moving existing
+Codeberg-hosted Rust repositories from hand-rolled Forgejo Actions workflows to
+<code>simit init ci</code>.</p>
+<h2 id="generator-contract"><a class="header" href="#generator-contract">Generator Contract</a></h2>
+<p>Generated workflow files are owned by simit and include:</p>
+<pre><code class="language-text"># Generated by simit. Manual edits will be reported as ci=drift.
+</code></pre>
+<p>After the first non-check <code>simit init ci</code> run, simit persists the effective CI
+options into <code>simit.toml</code> under <code>[ci]</code>. The canonical drift check is then:</p>
+<pre><code class="language-sh">simit init ci --platform &lt;forgejo|github&gt; --check --diff
+</code></pre>
+<p>When a project has not yet persisted its CI options, the drift error still
+prints the full regeneration command with the effective runtime, runner,
+workspace, and optional gates so the migration path stays explicit.</p>
+<p>Persisted CI settings look like:</p>
+<pre><code class="language-toml">[ci]
+runtime = "nix"
+runner = "atlas"
+workspace = true
+with_deny = true
+with_audit = true
+with_docs = true
+with_msrv = true
+</code></pre>
+<h2 id="generic-ci-vs-release-publishing"><a class="header" href="#generic-ci-vs-release-publishing">Generic CI vs Release Publishing</a></h2>
+<p>Rust CI and crates.io publishing are separate modes. By default, <code>simit init ci</code>
+generates ordinary CI workflows even when a package has crates.io metadata. It
+does not generate <code>publish-crate*.yaml</code> or <code>keys/maintainers.gpg</code> unless release
+publishing is enabled explicitly or inferred from existing generated release
+workflows.</p>
+<p>Enable crates.io release workflows with:</p>
+<pre><code class="language-sh">simit init ci --platform forgejo --publish-crates
+</code></pre>
+<p>Persist the choice when a project owns release publishing:</p>
+<pre><code class="language-toml">[ci]
+publish_crates = true
+</code></pre>
+<p>Pass <code>--publish-crates=false</code> or set <code>publish_crates = false</code> to keep a project
+CI-only even when stale generated publish workflows are present. Release
+artifact and package-manager publishing flags such as <code>--with-artifacts</code>,
+<code>--with-homebrew</code>, <code>--with-chocolatey</code>, and <code>--with-scoop</code> imply release mode.</p>
+<p>For a Forgejo Nix workspace with release artifacts and cargo-deny:</p>
+<pre><code class="language-sh">simit init ci --platform forgejo --runtime nix --runner atlas-nix-trusted \
+  --workspace --with-artifacts --with-deny --check --diff
+</code></pre>
+<p>If the project also publishes a Homebrew tap, keep the tap metadata in project
+config when possible. Command-line overrides work, but config makes future
+checks shorter and reproducible.</p>
+<h2 id="flake-integrated-rust-projects"><a class="header" href="#flake-integrated-rust-projects">Flake-Integrated Rust Projects</a></h2>
+<p><code>--runtime auto</code> selects the Nix runtime when <code>flake.nix</code> exposes meaningful
+project outputs such as <code>packages</code>, <code>apps</code>, <code>checks</code>, <code>devShells</code>, NixOS or
+Home Manager modules, or top-level <code>lib</code>. Cargo-only projects and placeholder
+flakes stay on direct Cargo CI.</p>
+<p>For existing custom flakes, keep project-owned outputs intact and let simit
+manage hook wiring with:</p>
+<pre><code class="language-sh">simit init flake --scope hooks-only
+simit init ci --platform forgejo --runtime nix
+</code></pre>
+<h2 id="non-publishable-crates"><a class="header" href="#non-publishable-crates">Non-Publishable Crates</a></h2>
+<p>Cargo represents <code>publish = false</code> in metadata as an empty <code>publish</code> list.
+Simit treats that as a hard opt-out from crates.io publication:</p>
+<ul>
+<li>CI still runs tests, optional policy gates, and clippy for the package.</li>
+<li>CI skips <code>cargo package</code> for that package.</li>
+<li>Simit does not generate <code>publish-crate-&lt;package&gt;.yaml</code> for that package.</li>
+</ul>
+<p>This matters for workspace utility crates such as <code>xtask</code>. They often depend on
+unpublished git-only helper crates, so <code>cargo package -p xtask</code> fails even
+though the crate is intentionally not publishable.</p>
+<p>When converting a workspace, delete any stale generated <code>publish-crate-*.yaml</code>
+for <code>publish = false</code> members after regenerating CI. Check mode reports those
+stale generated files as <code>extra</code>.</p>
+<h2 id="cargo-deny-policy"><a class="header" href="#cargo-deny-policy">Cargo-Deny Policy</a></h2>
+<p><code>--with-deny</code> means generated workflows install and run:</p>
+<pre><code class="language-sh">cargo deny check bans licenses sources
+</code></pre>
+<p>The policy file is project-owned:</p>
+<ul>
+<li>If <code>deny.toml</code> is missing, simit bootstraps a conservative default.</li>
+<li>If <code>deny.toml</code> already exists, simit leaves it alone.</li>
+<li>Check mode does not treat local license or source allow-list changes as
+generated CI drift.</li>
+</ul>
+<p>Validate policy changes with the same cargo-deny version used by generated CI:</p>
+<pre><code class="language-sh">CARGO_HOME=/tmp/simit-cargo-deny-0183
+cargo install cargo-deny --locked --version 0.18.3
+"$CARGO_HOME/bin/cargo-deny" check bans licenses sources
+</code></pre>
+<p>Do not assume a newer local <code>cargo-deny</code> accepts the same license identifiers as
+the pinned CI version. For example, <code>cargo-deny 0.18.3</code> expects the older GPL
+allow-list spelling <code>GPL-3.0</code> rather than <code>GPL-3.0-only</code>.</p>
+<h2 id="forgejo-nix-runtime-details"><a class="header" href="#forgejo-nix-runtime-details">Forgejo Nix Runtime Details</a></h2>
+<p>Forgejo Nix-runtime workflows intentionally set:</p>
+<pre><code class="language-yaml">env:
+  NIX_CONFIG: "experimental-features = nix-command flakes"
+  XDG_CACHE_HOME: "/tmp/.cache"
+  CARGO_HOME: "/tmp/.cargo"
+</code></pre>
+<p><code>CARGO_HOME</code> must be absolute. Relative cargo homes can make <code>cargo install</code>
+panic or write into surprising paths under Forgejo/act containers.</p>
+<p>Generated Nix-runtime workflows also add <code>$CARGO_HOME/bin</code> to <code>PATH</code> before
+installing optional cargo tools. Optional tools should be installed into the
+workflow cargo home, not assumed from the runner image.</p>
+<p>MSRV checks under Nix use the dev shell’s cargo:</p>
+<pre><code class="language-sh">nix develop -c cargo check --all-targets
+</code></pre>
+<p>They do not use <code>cargo +&lt;msrv&gt;</code> because Nix dev shells do not imply rustup
+toolchains.</p>
+<h2 id="cargo-audit-reliability"><a class="header" href="#cargo-audit-reliability">Cargo-Audit Reliability</a></h2>
+<p>Generated cargo-audit steps fetch the RustSec advisory database explicitly and
+then run audit with a local database:</p>
+<pre><code class="language-sh">git clone --depth 1 https://github.com/RustSec/advisory-db.git "$db"
+cargo audit --db "$db" --no-fetch --stale
+</code></pre>
+<p>This avoids repeated network fetch behavior inside <code>cargo audit</code> itself and
+makes failures easier to separate into “could not fetch advisory DB” versus
+“advisory gate failed”.</p>
+<h2 id="runner-debugging"><a class="header" href="#runner-debugging">Runner Debugging</a></h2>
+<p>When Codeberg/Forgejo runners are flaky, separate stale runs from fresh runs:</p>
+<ol>
+<li>Push or rerun on a new commit so the head SHA changes.</li>
+<li>Poll only runs created for that head.</li>
+<li>Inspect exact run logs before changing code.</li>
+</ol>
+<p>Use the repository metadata command first when using the Codeberg workflow:</p>
+<pre><code class="language-sh">berg --owner-repo caniko/&lt;repo&gt; repo info
+</code></pre>
+<p>Then poll runs through the Codeberg API if the local <code>berg</code> build does not have
+Actions subcommands:</p>
+<pre><code class="language-sh">curl -fsSL "https://codeberg.org/api/v1/repos/caniko/&lt;repo&gt;/actions/runs?limit=10" |
+  jq -r '.workflow_runs[] | [.id, (.html_url|split("/")[-1]), .status, .workflow_id] | @tsv'
+</code></pre>
+<p>A failure like <code>Input/output error (os error 5)</code> while rustc writes metadata is
+runner/storage instability. A failure from <code>cargo package</code>, <code>cargo deny</code>, or a
+crate test is a project or generator issue until reproduced otherwise.</p>
+<h2 id="fleet-adoption-checklist"><a class="header" href="#fleet-adoption-checklist">Fleet Adoption Checklist</a></h2>
+<p>For each repository:</p>
+<ol>
+<li>Rebase the adoption branch onto the default branch.</li>
+<li>Regenerate CI with the project’s intended options.</li>
+<li>Run <code>simit init ci ... --check --diff</code>.</li>
+<li>Run the relevant local package checks that failed in CI.</li>
+<li>Push one repo-scoped branch.</li>
+<li>Watch fresh Codeberg runs for that branch head only.</li>
+<li>After merge, verify at least one green default-branch CI run.</li>
+</ol>
+<p>Fleet-level verification:</p>
+<pre><code class="language-sh">simit projects scan
+simit projects list
+</code></pre>
+<p>The converted repositories should no longer show <code>ci(hand-rolled)</code>. Projects
+with only generated workflows show <code>ci(managed)</code>. Projects with generated CI
+plus supplementary non-generated workflows show <code>ci(managed+extra)</code>.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="distribution-channels"><a class="header" href="#distribution-channels">Distribution Channels</a></h1>
+<p><code>simit</code> can keep distribution packaging files and the tag-triggered release
+workflow in sync with project config. The Linux channels are:</p>
+<ul>
+<li>AUR: <code>simit init aur</code> writes <code>dist/aur/&lt;pkg&gt;/PKGBUILD</code> files for source,
+<code>-bin</code>, and <code>-git</code> flavors.</li>
+<li>COPR: <code>simit init copr</code> writes the RPM spec and <code>.copr/Makefile</code>.</li>
+<li>apt: <code>simit init apt</code> writes <code>dist/apt/conf/distributions</code> for reprepro.</li>
+<li>Release workflow: <code>simit init release</code> writes
+<code>.forgejo/workflows/release.yml</code> for artifact build, Codeberg upload, and
+configured channel publish steps.</li>
+</ul>
+<p>All four init commands support <code>--check</code>, <code>--diff</code>, and <code>--print</code>.</p>
+<pre><code class="language-sh">simit init aur
+simit init aur --check --diff
+simit init copr
+simit init apt
+simit init release
+</code></pre>
+<p>Render the same channel templates to stdout for inspection:</p>
+<pre><code class="language-sh">simit dist aur render
+simit dist copr render
+simit dist apt render
+</code></pre>
+<h2 id="configuration"><a class="header" href="#configuration">Configuration</a></h2>
+<p>The same schema can live in <code>simit.toml</code>, root Cargo metadata under
+<code>[workspace.metadata.simit]</code> or <code>[package.metadata.simit]</code>, or flake
+<code>outputs.simitConfig</code>. Keep exactly one simit project config source in a repo.</p>
+<pre><code class="language-toml">[release.codeberg]
+repo = "example/foo"
+
+[release.artifacts]
+runner = "atlas"
+build_commands = [
+  "mkdir -p release",
+  "cargo build --release --locked",
+]
+
+[aur]
+download_repo = "example/foo"
+
+[copr]
+download_repo = "example/foo"
+project = "example/foo"
+
+[apt]
+repo_url = "ssh://git@codeberg.org/example/foo-apt.git"
+</code></pre>
+<p>The public distribution and release sections are <code>[aur]</code>, <code>[copr]</code>, <code>[apt]</code>,
+<code>[homebrew]</code>, <code>[chocolatey]</code>, <code>[scoop]</code>, <code>[flatpak]</code>, <code>[winget]</code>,
+<code>[release.codeberg]</code>, <code>[release.artifacts]</code>, <code>[release.attic]</code>,
+<code>[release.announce]</code>, and <code>[release.windows_signing]</code>.</p>
+<h2 id="release-secrets"><a class="header" href="#release-secrets">Release Secrets</a></h2>
+<p>Generated release workflows name required or optional secrets in the workflow
+header. These names are configurable:</p>
+<ul>
+<li>AUR: <code>[aur].ssh_key_secret</code> defaults to <code>AUR_SSH_KEY</code>.</li>
+<li>COPR: <code>[copr].login_secret</code>, <code>[copr].username_secret</code>, and
+<code>[copr].token_secret</code> default to <code>copr_login</code>, <code>copr_username</code>, and
+<code>copr_token</code>.</li>
+<li>apt: <code>[apt].gpg_key_secret</code>, <code>[apt].gpg_key_id_secret</code>,
+<code>[apt].gpg_passphrase_secret</code>, and <code>[apt].ssh_key_secret</code> default to
+<code>apt_repo_gpg_key</code>, <code>apt_repo_gpg_key_id</code>, <code>apt_repo_gpg_passphrase</code>, and
+<code>apt_repo_ssh_key</code>.</li>
+<li>Codeberg release upload: <code>[release.codeberg].token_secret</code> defaults to
+<code>codeberg_token</code>.</li>
+<li>Homebrew: <code>[homebrew].tap_token_secret</code> defaults to <code>homebrew_tap_token</code>.</li>
+<li>Scoop: <code>[scoop].bucket_token_secret</code> defaults to <code>SCOOP_BUCKET_TOKEN</code>.</li>
+<li>Chocolatey: <code>[chocolatey].api_key_secret</code> defaults to <code>chocolatey_api_key</code>;
+<code>[chocolatey].api_key_env</code> defaults to <code>CHOCOLATEY_API_KEY</code>; set
+<code>[chocolatey].api_key_from_runner = true</code> when the runner already exposes
+that environment variable.</li>
+<li>Flatpak and winget: <code>[flatpak].token_secret</code> and <code>[winget].token_secret</code>
+default to <code>FLATHUB_TOKEN</code> and <code>WINGET_PAT</code>.</li>
+<li>Announcements: <code>[release.announce].mastodon_token_secret</code>,
+<code>mastodon_base_url_secret</code>, <code>matrix_token_secret</code>,
+<code>matrix_homeserver_secret</code>, and <code>matrix_room_secret</code> default to their
+matching uppercase environment-style names.</li>
+<li>Windows signing: <code>[release.windows_signing].pfx_secret</code>, <code>pass_secret</code>, and
+<code>subject_secret</code> default to <code>WINDOWS_SIGNING_PFX</code>, <code>WINDOWS_SIGNING_PASS</code>,
+and <code>WINDOWS_SIGNING_SUBJECT</code>.</li>
+</ul>
+<h2 id="release-workflow"><a class="header" href="#release-workflow">Release Workflow</a></h2>
+<p><code>simit init release</code> requires <code>[release.codeberg]</code> to upload artifacts to a
+Codeberg or Forgejo release. <code>[release.artifacts]</code> controls the runner, Nix
+substituters, artifact build commands, SBOM commands, checksum globs, signing,
+and the committed minisign public key path. Optional <code>[release.attic]</code>,
+<code>[release.announce]</code>, and <code>[release.windows_signing]</code> sections add cache push,
+stable-release announcements, and Authenticode signing steps.</p>
+<p>The workflow publishes only channels whose config sections are present. AUR,
+apt, Homebrew, Scoop, Chocolatey, Flatpak, and winget are stable-release-only
+publish steps; COPR switches to its testing project for prerelease tags when
+configured.</p>
+<p>Codeberg release assets are the primary release product. The generated workflow
+therefore fails early for missing Codeberg and signing credentials, but treats
+runner-side cache and downstream packaging as secondary. Attic cache pushes skip
+with a warning when the runner token is unavailable. Debian package generation is
+also best-effort: it attempts to build <code>.deb</code> assets before checksums and
+Codeberg upload, but it warns and continues when the runner container cannot
+provide a mount-capable debootstrap/chroot environment. In that case the
+Codeberg release still publishes the artifacts that were actually produced, and
+the apt repository publish step skips because there are no <code>.deb</code> files.</p>
+<p>For projects that require <code>.deb</code> assets on every release, validate the runner
+contract before tagging:</p>
+<pre><code class="language-sh">simit init release --check --diff
+test -r "$ATTIC_TOKENS_DIR/&lt;project&gt;" || true
+nix develop -c debootstrap --variant=minbase bookworm "$(mktemp -d)" \
+  http://deb.debian.org/debian
+</code></pre>
+<p>The debootstrap check must run in the same runner image/container policy used by
+Forgejo Actions. A host shell passing the check does not prove the release job
+can mount or chroot inside the runner container.</p>
+<p>Keep <code>release.yml</code> as the only automatic signed-tag workflow. Normal
+simit-managed CI workflows ignore tags explicitly so a release tag does not queue
+per-crate checks ahead of the artifact publisher on small trusted runner pools.
+Generated release scripts also avoid implicit shell state such as <code>OLDPWD</code>; under
+<code>set -u</code>, those variables can be unset in Forgejo runner shells and must not sit
+between successful artifact builds and Codeberg upload.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="windows-packaging"><a class="header" href="#windows-packaging">Windows Packaging</a></h1>
+<p><code>simit</code> supports Chocolatey packages and Scoop bucket manifests for tagged
+Windows releases. Both flows use simit project config as the source of package
+metadata, render deterministic skeleton files, and can be wired into <code>init ci</code>.</p>
+<h2 id="configuration-1"><a class="header" href="#configuration-1">Configuration</a></h2>
+<pre><code class="language-toml">[chocolatey]
+id = "foo"
+title = "Foo"
+authors = "Example Maintainers"
+description = "Cross-platform foo manager"
+project_url = "https://foo.example.com"
+download_repo = "caniko/foo"
+archive_pattern = "foo-{version}-{arch}-windows.zip"
+
+[scoop]
+name = "foo"
+bucket_url = "https://codeberg.org/caniko/scoop-foo.git"
+download_repo = "caniko/foo"
+binaries = ["foo"]
+archive_pattern = "foo-{version}-{arch}-windows.zip"
+</code></pre>
+<p>The same schema can live in <code>simit.toml</code>, in root Cargo metadata under
+<code>[workspace.metadata.simit]</code> or <code>[package.metadata.simit]</code>, or in flake
+<code>outputs.simitConfig</code>. Keep exactly one simit project config source in a repo.</p>
+<p>Chocolatey requires <code>download_repo</code> plus package metadata. Scoop requires
+<code>bucket_url</code> and <code>download_repo</code>. Fields not listed here can usually fall back
+to Cargo package metadata.</p>
+<h2 id="bootstrap"><a class="header" href="#bootstrap">Bootstrap</a></h2>
+<pre><code class="language-sh">simit init chocolatey --target packaging/chocolatey
+simit init scoop-bucket --target ../scoop-foo
+</code></pre>
+<p>Both commands support <code>--check</code>, <code>--diff</code>, and <code>--print</code>. <code>init scoop-bucket</code>
+also supports <code>--no-git</code> for writing only <code>bucket/&lt;name&gt;.json</code>.</p>
+<h2 id="release-ci"><a class="header" href="#release-ci">Release CI</a></h2>
+<pre><code class="language-sh">simit init ci --platform github --with-chocolatey --with-scoop
+simit init ci --platform forgejo --with-chocolatey --with-scoop
+</code></pre>
+<p><code>--with-chocolatey</code> and <code>--with-scoop</code> imply <code>--with-artifacts</code>. GitHub uses
+<code>windows-latest</code> unless <code>--windows-runner</code> overrides it. Forgejo uses the
+<code>windows</code> default from simit user config unless <code>--windows-runner</code> overrides it.</p>
+<p>Generated workflows read these secrets:</p>
+<ul>
+<li><code>MINISIGN_SECRET_KEY</code> and <code>MINISIGN_PASSWORD</code> for the signed checksum manifest.</li>
+<li><code>COSIGN_PRIVATE_KEY</code> and <code>COSIGN_PASSWORD</code> as the optional Sigstore fallback
+when keyless OIDC is unavailable.</li>
+<li><code>chocolatey_api_key</code> for Chocolatey package pushes, unless
+<code>[chocolatey].api_key_secret</code> changes it.</li>
+<li><code>SCOOP_BUCKET_TOKEN</code> for authenticated Scoop bucket pushes, unless
+<code>[scoop].bucket_token_secret</code> changes it.</li>
+</ul>
+<p>The same artifact workflow verifies signed release tags and emits signed
+checksums plus SLSA provenance. See <a href="#release-integrity">Release Integrity</a>
+for the required <code>keys/maintainers.gpg</code> and <code>keys/minisign.pub</code> trust roots.</p>
+<h2 id="local-render-and-bump"><a class="header" href="#local-render-and-bump">Local Render and Bump</a></h2>
+<pre><code class="language-sh">simit dist chocolatey render --output-dir packaging/chocolatey
+simit dist chocolatey bump \
+  --version 0.3.1 \
+  --package-dir packaging/chocolatey \
+  --archive x64=release/foo-0.3.1-x86_64-windows.zip
+
+simit dist scoop render --output packaging/scoop/foo.json
+simit dist scoop bump \
+  --version 0.3.1 \
+  --bucket ../scoop-foo \
+  --archive x64=release/foo-0.3.1-x86_64-windows.zip \
+  --archive arm64=release/foo-0.3.1-aarch64-windows.zip
+</code></pre>
+<p>Use <code>--scoop-no-arch arm64</code> or <code>[scoop.architectures] arm64 = false</code> when a
+project only publishes x64 Windows archives. Use <code>--choco-archive-pattern</code> and
+<code>--scoop-archive-pattern</code> when release archive names do not match the default
+<code>{name}-{version}-{arch}-windows.zip</code> shape.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="omnix-ci"><a class="header" href="#omnix-ci">Omnix CI</a></h1>
+<p><code>simit init ci --runtime nix --with-om-ci</code> wires generated Nix CI through
+<a href="https://omnix.page/om/ci.html">Omnix <code>om ci</code></a>. Use it when the project has a
+flake and <code>checks.*</code> already covers test, clippy, formatting, and documentation
+work that CI must enforce.</p>
+<p>Replace mode is the default. It trades the legacy generated sequence of <code>nix flake check</code> plus <code>nix develop -c cargo ...</code> steps for one <code>om ci run</code> step.
+That is fast for projects using simit’s generated crane flake because the flake
+checks are the CI contract.</p>
+<p>Do not enable replace mode for a custom flake until its checks are audited. If
+the project relies on the cargo dev-shell steps to exercise behavior that is
+not represented in <code>checks.*</code>, use augment mode or keep the legacy Nix runtime
+workflow.</p>
+<h2 id="enable-replace-mode"><a class="header" href="#enable-replace-mode">Enable Replace Mode</a></h2>
+<pre><code class="language-sh">simit init ci --platform forgejo --runtime nix --with-om-ci
+</code></pre>
+<p>For Forgejo, replace mode emits this CI workflow:</p>
+<pre><code class="language-yaml">name: CI
+
+on:
+  push:
+    branches: ["**"]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: atlas
+    steps:
+      - name: Checkout
+        uses: https://code.forgejo.org/actions/checkout@v4
+
+      - name: Run om ci
+        env:
+          OMNIX_REF: "github:juspay/omnix/v1.3.2"
+        run: nix run "$OMNIX_REF" -- ci run
+</code></pre>
+<p>Forgejo + Nix workflows keep the existing trigger rule: they run on branch
+pushes and skip <code>pull_request</code> events.</p>
+<h2 id="enable-augment-mode"><a class="header" href="#enable-augment-mode">Enable Augment Mode</a></h2>
+<pre><code class="language-sh">simit init ci --platform forgejo --runtime nix --om-ci-augment
+</code></pre>
+<p>Augment mode runs <code>om ci</code> first, then keeps the legacy Nix-runtime cargo steps:</p>
+<pre><code class="language-yaml">name: CI
+
+on:
+  push:
+    branches: ["**"]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: atlas
+    steps:
+      - name: Checkout
+        uses: https://code.forgejo.org/actions/checkout@v4
+
+      - name: Run om ci
+        env:
+          OMNIX_REF: "github:juspay/omnix/v1.3.2"
+        run: nix run "$OMNIX_REF" -- ci run
+
+      - name: Check flake
+        run: nix flake check
+
+      - name: Test
+        run: nix develop -c cargo test
+
+      - name: Clippy
+        run: nix develop -c cargo clippy --all-targets -- --deny warnings
+
+      - name: Package crate
+        run: nix develop -c cargo package --allow-dirty
+</code></pre>
+<h2 id="pin-omnix"><a class="header" href="#pin-omnix">Pin Omnix</a></h2>
+<p>The Omnix flakeref resolves in this order:</p>
+<ol>
+<li>CLI <code>--omnix-ref</code></li>
+<li>Project config <code>[ci].omnix_ref</code></li>
+<li>User config <code>[ci.tools.omnix].ref</code></li>
+<li>simit’s pinned default</li>
+</ol>
+<pre><code class="language-sh">simit init ci --platform forgejo --runtime nix --with-om-ci \
+  --omnix-ref github:juspay/omnix/v1.3.2
+</code></pre>
+<pre><code class="language-toml">[ci]
+om_ci = true
+omnix_ref = "github:juspay/omnix/v1.3.2"
+</code></pre>
+<pre><code class="language-toml">[ci.tools.omnix]
+ref = "github:juspay/omnix/v1.3.2"
+</code></pre>
+<h2 id="caveats"><a class="header" href="#caveats">Caveats</a></h2>
+<p><code>--with-om-ci</code> requires <code>--runtime nix</code>.</p>
+<p>Replace mode assumes the flake checks are complete. For custom flakes, audit
+<code>[flake.expected_outputs].checks</code> before replacing the generated cargo
+dev-shell steps.</p>
+<p><code>cargo-audit</code> and <code>cargo-deny</code> still render as discrete generated steps when
+requested, even under replace mode. Projects that also run those tools from
+<code>checks.*</code> will run them twice.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="public-api"><a class="header" href="#public-api">Public API</a></h1>
+<p>The Rust library exposes the modules used by the <code>simit</code> binary.</p>
+<ul>
+<li><code>cargo</code> parses Cargo metadata, selects workspace packages, plans semantic
+version bumps, and updates manifests and lockfiles.</li>
+<li><code>changelog</code> initializes, updates, validates, promotes, and displays Keep a
+Changelog files.</li>
+<li><code>cli</code> defines the command-line parser structures.</li>
+<li><code>commands</code> contains the command implementations used by the binary.
+Shared scaffolding (<code>run_git</code>, <code>shell_word</code>, <code>redact_url</code>,
+<code>prepare_target</code>, <code>bootstrap_repo</code>, <code>ArtifactCheck</code>, <code>WriteArtifact</code>,
+<code>CheckPrintMode</code>, <code>BumpFlow</code>, <code>print_next_steps</code>) lives in the
+<code>commands::scaffold</code> submodule; new <code>init</code>/<code>dist</code> subcommands should
+reuse it instead of re-deriving these helpers.</li>
+<li><code>config</code> loads simit project config and resolves package release settings.</li>
+<li><code>registry</code> persists the per-user project registry under
+<code>$XDG_DATA_HOME/simit/projects.toml</code>. Mutating commands should call
+<code>registry::touch_current_project_or_warn</code> (or
+<code>refresh_current_project_or_warn</code> for non-feature-changing actions
+such as <code>commit</code>/<code>release</code>) on their success path; registry IO must
+warn and continue rather than failing the primary command. The
+<code>SIMIT_NO_REGISTRY=1</code> env var fully suppresses registry IO and is the
+intended opt-out for sandboxed CI. Bulk onboarding uses
+<code>registry::discover_under</code> (and <code>discover_under_dry_run</code>), which walk
+a filesystem subtree, identify Cargo workspaces via a cheap top-level
+<code>Cargo.toml</code> table sniff (no <code>cargo metadata</code> per candidate), apply
+the documented deny list and hidden-dir skip rules, stop descent at
+the outermost workspace, and only register projects with at least
+one non-<code>Absent</code> simit feature (override with
+<code>DiscoverOptions::include_empty</code>).</li>
+<li><code>git</code> performs release preflight checks, stages changed version files,
+delegates commits, and creates release tags.</li>
+<li><code>project</code> detects repository languages and manages generated files.</li>
+<li><code>release_trust</code> discovers and validates release maintainer trust roots.</li>
+<li><code>render</code> renders generated CI, flake, diff, and Homebrew formula content.</li>
+<li><code>sha256</code> computes release artifact hashes.</li>
+<li><code>user_config</code> loads and validates user-scoped infrastructure defaults such
+as CI runner labels.</li>
+</ul>
+<p>Full API documentation is published on docs.rs:</p>
+<pre><code class="language-text">https://docs.rs/simit
+</code></pre>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="release-maintenance"><a class="header" href="#release-maintenance">Release Maintenance</a></h1>
+<p>Before publishing a release, add intended changes under <code>## [Unreleased]</code> in
+<code>CHANGELOG.md</code> and validate the changelog:</p>
+<pre><code class="language-sh">simit changelog check
+</code></pre>
+<p>Run the local release flow:</p>
+<pre><code class="language-sh">simit release patch -m "release patch"
+</code></pre>
+<p>The crates.io publish workflow runs when an exact semver tag is pushed. The
+workflow validates that the tag matches the Cargo package version, verifies the
+GPG-signed tag against <code>keys/maintainers.gpg</code>, runs a publish dry run, and
+requires <code>CRATES_IO_API_TOKEN</code> to publish.</p>
+<p>Generate or refresh crates.io publish workflows explicitly:</p>
+<pre><code class="language-sh">simit init ci --platform forgejo --publish-crates
+</code></pre>
+<p>For workspace repositories, each generated <code>publish-crate-&lt;crate&gt;.yaml</code>
+validates the version of the package it publishes rather than comparing the tag
+to the first version returned by workspace-wide metadata.</p>
+<p>Release-enabled <code>simit init ci</code> runs and <code>simit release trust init</code> generate
+<code>keys/maintainers.gpg</code> from <code>[release.signing].key</code>, <code>git config user.signingkey</code>, or an explicit <code>--key</code>/<code>--maintainer-key</code> override. Generic
+CI-only runs do not require this trust root. Run <code>simit release trust check</code>
+before publishing if you want to validate the committed trust root separately
+from workflow generation.</p>
+<p>If a release workflow fails after its tag has already been pushed, commit the
+fix and move the current-version tag to the fixed commit:</p>
+<pre><code class="language-sh">simit release sync-up --push
+</code></pre>
+<p>The command reruns local release checks, retargets the existing version tag to
+<code>HEAD</code>, and force-updates only that tag on the remote. Without <code>--push</code>, it only
+moves the local tag.</p>
+<p>Projects that publish Windows packages can add Chocolatey and Scoop jobs to
+the release artifact workflow. See
+<a href="#windows-packaging">Windows Packaging</a> for the required
+simit project config sections, CI flags, and secrets.</p>
+<p>Projects that publish release artifacts must also commit the artifact signing
+trust roots and configure signing secrets. See
+<a href="#release-integrity">Release Integrity</a> for the
+<code>keys/minisign.pub</code>, minisign, cosign, and SLSA requirements generated by
+<code>simit init ci --with-artifacts</code>.</p>
+<p>Release candidate validation commands:</p>
+<pre><code class="language-sh">nix flake check --keep-going --print-build-logs
+nix develop --command cargo publish --dry-run
+</code></pre>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+
+            </nav>
+
+        </div>
+
+        <template id=fa-eye><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 576 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M288 32c-80.8 0-145.5 36.8-192.6 80.6C48.6 156 17.3 208 2.5 243.7c-3.3 7.9-3.3 16.7 0 24.6C17.3 304 48.6 356 95.4 399.4C142.5 443.2 207.2 480 288 480s145.5-36.8 192.6-80.6c46.8-43.5 78.1-95.4 93-131.1c3.3-7.9 3.3-16.7 0-24.6c-14.9-35.7-46.2-87.7-93-131.1C433.5 68.8 368.8 32 288 32zM432 256c0 79.5-64.5 144-144 144s-144-64.5-144-144s64.5-144 144-144s144 64.5 144 144zM288 192c0 35.3-28.7 64-64 64c-11.5 0-22.3-3-31.6-8.4c-.2 2.8-.4 5.5-.4 8.4c0 53 43 96 96 96s96-43 96-96s-43-96-96-96c-2.8 0-5.6 .1-8.4 .4c5.3 9.3 8.4 20.1 8.4 31.6z"/></svg></span></template>
+        <template id=fa-eye-slash><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M38.8 5.1C28.4-3.1 13.3-1.2 5.1 9.2S-1.2 34.7 9.2 42.9l592 464c10.4 8.2 25.5 6.3 33.7-4.1s6.3-25.5-4.1-33.7L525.6 386.7c39.6-40.6 66.4-86.1 79.9-118.4c3.3-7.9 3.3-16.7 0-24.6c-14.9-35.7-46.2-87.7-93-131.1C465.5 68.8 400.8 32 320 32c-68.2 0-125 26.3-169.3 60.8L38.8 5.1zM223.1 149.5C248.6 126.2 282.7 112 320 112c79.5 0 144 64.5 144 144c0 24.9-6.3 48.3-17.4 68.7L408 294.5c5.2-11.8 8-24.8 8-38.5c0-53-43-96-96-96c-2.8 0-5.6 .1-8.4 .4c5.3 9.3 8.4 20.1 8.4 31.6c0 10.2-2.4 19.8-6.6 28.3l-90.3-70.8zm223.1 298L373 389.9c-16.4 6.5-34.3 10.1-53 10.1c-79.5 0-144-64.5-144-144c0-6.9 .5-13.6 1.4-20.2L83.1 161.5C60.3 191.2 44 220.8 34.5 243.7c-3.3 7.9-3.3 16.7 0 24.6c14.9 35.7 46.2 87.7 93 131.1C174.5 443.2 239.2 480 320 480c47.8 0 89.9-12.9 126.2-32.5z"/></svg></span></template>
+        <template id=fa-copy><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M502.6 70.63l-61.25-61.25C435.4 3.371 427.2 0 418.7 0H255.1c-35.35 0-64 28.66-64 64l.0195 256C192 355.4 220.7 384 256 384h192c35.2 0 64-28.8 64-64V93.25C512 84.77 508.6 76.63 502.6 70.63zM464 320c0 8.836-7.164 16-16 16H255.1c-8.838 0-16-7.164-16-16L239.1 64.13c0-8.836 7.164-16 16-16h128L384 96c0 17.67 14.33 32 32 32h47.1V320zM272 448c0 8.836-7.164 16-16 16H63.1c-8.838 0-16-7.164-16-16L47.98 192.1c0-8.836 7.164-16 16-16H160V128H63.99c-35.35 0-64 28.65-64 64l.0098 256C.002 483.3 28.66 512 64 512h192c35.2 0 64-28.8 64-64v-32h-47.1L272 448z"/></svg></span></template>
+        <template id=fa-play><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 384 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M73 39c-14.8-9.1-33.4-9.4-48.5-.9S0 62.6 0 80V432c0 17.4 9.4 33.4 24.5 41.9s33.7 8.1 48.5-.9L361 297c14.3-8.7 23-24.2 23-41s-8.7-32.2-23-41L73 39z"/></svg></span></template>
+        <template id=fa-clock-rotate-left><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M75 75L41 41C25.9 25.9 0 36.6 0 57.9V168c0 13.3 10.7 24 24 24H134.1c21.4 0 32.1-25.9 17-41l-30.8-30.8C155 85.5 203 64 256 64c106 0 192 86 192 192s-86 192-192 192c-40.8 0-78.6-12.7-109.7-34.4c-14.5-10.1-34.4-6.6-44.6 7.9s-6.6 34.4 7.9 44.6C151.2 495 201.7 512 256 512c141.4 0 256-114.6 256-256S397.4 0 256 0C185.3 0 121.3 28.7 75 75zm181 53c-13.3 0-24 10.7-24 24V256c0 6.4 2.5 12.5 7 17l72 72c9.4 9.4 24.6 9.4 33.9 0s9.4-24.6 0-33.9l-65-65V152c0-13.3-10.7-24-24-24z"/></svg></span></template>
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="elasticlunr-ef4e11c1.min.js"></script>
+        <script src="mark-09e88c2c.min.js"></script>
+        <script src="searcher-c2a407aa.js"></script>
+
+        <script src="clipboard-1626706a.min.js"></script>
+        <script src="highlight-abc7f01d.js"></script>
+        <script src="book-a0b12cfe.js"></script>
+
+        <!-- Custom JS scripts -->
+
+        <script>
+        window.addEventListener('load', function() {
+            window.setTimeout(window.print, 100);
+        });
+        </script>
+
+
+    </div>
+    </body>
+</html>
