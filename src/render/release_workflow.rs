@@ -389,8 +389,7 @@ const TAG_REGEX: &str = r"^[0-9]+\.[0-9]+\.[0-9]+(-(rc|beta|alpha)\.[0-9]+)?$";
 const PRERELEASE_REGEX: &str = r"-(rc|beta|alpha)\.[0-9]+$";
 
 /// Resolve `VERSION` from whichever forge ref-name env var is set.
-const VERSION_FROM_REF: &str = r#"VERSION="${{ inputs.version }}"
-          if [ -z "$VERSION" ]; then VERSION="${GITHUB_REF_NAME:-${FORGE_REF_NAME:-${CODEBERG_REF_NAME:-}}}"; fi
+const VERSION_FROM_REF: &str = r#"VERSION="${GITHUB_REF_NAME:-${FORGE_REF_NAME:-${CODEBERG_REF_NAME:-}}}"
           if [ -z "$VERSION" ]; then ref="${GITHUB_REF:-${FORGE_REF:-${CODEBERG_REF:-}}}"; VERSION="${ref#refs/tags/}"; fi"#;
 
 pub fn render(inputs: &ReleaseWorkflowInputs<'_>) -> String {
@@ -405,12 +404,10 @@ pub fn render(inputs: &ReleaseWorkflowInputs<'_>) -> String {
 
     w.push_str("'on':\n");
     w.push_str("  push:\n    tags:\n      - '[0-9]*'\n");
-    w.push_str("  workflow_dispatch:\n    inputs:\n      version:\n");
-    w.push_str("        description: 'Existing release tag to build without moving the tag.'\n");
-    w.push_str("        required: false\n        default: ''\n        type: string\n");
-    w.push_str("      force_publish:\n");
-    w.push_str("        description: 'Bypass release smoke checks and continue to publish.'\n");
-    w.push_str("        required: false\n        default: false\n        type: boolean\n\n");
+    // Codeberg's current Gitea 1.22-derived Actions service rejects nested
+    // workflow_dispatch input mappings.  Release publication is tag-driven;
+    // an operator can dispatch this workflow against the tag ref directly.
+    w.push_str("  workflow_dispatch:\n\n");
 
     w.push_str("concurrency:\n");
     w.push_str("  group: ${{ github.workflow }}-${{ github.ref }}\n");
@@ -1020,9 +1017,7 @@ fn push_sign(
 
 fn push_smoke(w: &mut String, command: &str) {
     w.push_str("      - name: Run release smoke checks\n");
-    w.push_str("        env:\n          FORCE_PUBLISH: ${{ inputs.force_publish }}\n");
     w.push_str("        run: |\n          set -euo pipefail\n          . ./release-env\n          mkdir -p release\n");
-    w.push_str("          if [ \"${FORCE_PUBLISH:-false}\" = \"true\" ]; then echo \"smoke bypassed\" | tee release/smoke-report.txt; exit 0; fi\n");
     writeln!(w, "          {command} \"$VERSION\" release").expect("write");
 }
 
@@ -2292,8 +2287,12 @@ mod tests {
         assert!(workflow.contains("name: release\n"));
         assert!(workflow.contains("runs-on: atlas\n"));
         assert!(workflow.contains("enable-openid-connect: true\n"));
-        assert!(workflow.contains("      version:\n"));
-        assert!(workflow.contains("VERSION=\"${{ inputs.version }}\""));
+        assert!(
+            workflow.contains(
+                "VERSION=\"${GITHUB_REF_NAME:-${FORGE_REF_NAME:-${CODEBERG_REF_NAME:-}}}\""
+            )
+        );
+        assert!(!workflow.contains("inputs.version"));
         assert!(
             workflow.contains(
                 "test \"$(nix eval --raw \"$tag_worktree#modde.version\")\" = \"$VERSION\""

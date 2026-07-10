@@ -146,8 +146,9 @@ fn bootstraps_release_workflow_for_enabled_channels() {
     assert!(workflow.contains("Publish APT repository"));
     assert!(workflow.contains("mkdir -p release"));
     assert!(workflow.contains("printf artifact > release/demo.txt"));
-    assert!(workflow.contains("      version:\n"));
-    assert!(workflow.contains("VERSION=\"${{ inputs.version }}\""));
+    assert!(workflow.contains("  workflow_dispatch:\n\n"));
+    assert!(!workflow.contains("      version:\n"));
+    assert!(!workflow.contains("inputs.version"));
     assert!(workflow.contains("git worktree add --detach \"$tag_worktree\" \"$VERSION\""));
     assert!(workflow.contains("git checkout --detach \"$validated_sha\""));
     assert!(workflow.contains("uses: https://github.com/cachix/install-nix-action@v27"));

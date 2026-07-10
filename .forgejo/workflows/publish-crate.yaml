@@ -6,12 +6,6 @@ name: Publish Crate
 
 on:
   workflow_dispatch:
-    inputs:
-      force_publish:
-        description: "Bypass release smoke checks and continue publishing."
-        required: false
-        default: false
-        type: boolean
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -47,7 +41,7 @@ jobs:
           fi
 
           # cargo pkgid scopes the version lookup to the crate this workflow publishes.
-          version="$(nix develop -c cargo pkgid -p simit | awk -F'[#@]' '{print $NF}')"
+          version="$(nix develop -c cargo pkgid -p simit | awk -F'[#@]' '/@/ {print $NF}' | tail -n 1)"
           if [ -z "$version" ]; then
             echo "Could not read package version from cargo pkgid" >&2
             exit 1

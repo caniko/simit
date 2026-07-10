@@ -431,7 +431,10 @@ fn generates_forgejo_nix_workflows() {
     assert!(publish.contains("grep -Eq '^[0-9]+\\.[0-9]+\\.[0-9]+$'"));
     assert!(publish.contains("keys/maintainers.gpg"));
     assert!(publish.contains("git verify-tag \"$tag\""));
-    assert!(publish.contains(r#"nix develop -c cargo pkgid -p demo | awk -F'[#@]' '{print $NF}'"#));
+    assert!(publish.contains(
+        r#"nix develop -c cargo pkgid -p demo | awk -F'[#@]' '/@/ {print $NF}' | tail -n 1"#
+    ));
+    assert!(!publish.contains("inputs:\n"));
     assert!(publish.contains("CRATES_IO_API_TOKEN: ${{ secrets.CRATES_IO_API_TOKEN }}"));
     assert!(publish.contains("CRATES_IO_API_TOKEN is required"));
     assert!(publish.contains("export CARGO_REGISTRY_TOKEN="));
@@ -763,7 +766,9 @@ fn forgejo_nix_with_om_ci_replace_emits_om_ci_step() {
     let publish = read(&temp.path().join(".forgejo/workflows/publish-crate.yaml"));
     assert!(publish.contains("OMNIX_REF:"));
     assert!(publish.contains("nix run \"$OMNIX_REF\" -- ci run"));
-    assert!(publish.contains(r#"nix develop -c cargo pkgid -p demo | awk -F'[#@]' '{print $NF}'"#));
+    assert!(publish.contains(
+        r#"nix develop -c cargo pkgid -p demo | awk -F'[#@]' '/@/ {print $NF}' | tail -n 1"#
+    ));
     assert!(publish.contains("nix develop -c cargo publish --dry-run"));
     assert!(!publish.contains("run: nix flake check"));
     assert!(!publish.contains("nix develop -c cargo test"));
@@ -1045,7 +1050,9 @@ fn generates_github_plain_cargo_workflows() {
     ));
     assert!(publish.contains("simit changelog release <version>"));
     assert!(publish.contains("run: cargo publish --dry-run"));
-    assert!(publish.contains(r#"cargo pkgid -p demo | awk -F'[#@]' '{print $NF}'"#));
+    assert!(
+        publish.contains(r#"cargo pkgid -p demo | awk -F'[#@]' '/@/ {print $NF}' | tail -n 1"#)
+    );
     assert!(publish.contains("export CARGO_REGISTRY_TOKEN="));
     assert!(publish.contains("already published on crates.io; skipping publish"));
     assert!(!publish.contains("cargo login"));
@@ -1157,7 +1164,9 @@ fn forgejo_auto_runtime_uses_rust_container_even_when_flake_exists() {
     assert!(publish.contains(
         "command -v cargo-nextest >/dev/null 2>&1 || cargo install cargo-nextest --locked --version 0.9.100"
     ));
-    assert!(publish.contains(r#"cargo pkgid -p demo | awk -F'[#@]' '{print $NF}'"#));
+    assert!(
+        publish.contains(r#"cargo pkgid -p demo | awk -F'[#@]' '/@/ {print $NF}' | tail -n 1"#)
+    );
 }
 
 #[test]
@@ -1562,7 +1571,10 @@ fn workspace_publish_tag_validation_is_package_scoped_for_diverging_versions() {
             .join(".forgejo/workflows/publish-crate-member-a.yaml"),
     );
     assert_yaml_parses(&member_a_publish);
-    assert!(member_a_publish.contains(r#"cargo pkgid -p member-a | awk -F'[#@]' '{print $NF}'"#));
+    assert!(
+        member_a_publish
+            .contains(r#"cargo pkgid -p member-a | awk -F'[#@]' '/@/ {print $NF}' | tail -n 1"#)
+    );
     assert!(!member_a_publish.contains("cargo pkgid -p member-b"));
     assert!(!member_a_publish.contains("cargo metadata --no-deps --format-version 1"));
 
@@ -1572,7 +1584,10 @@ fn workspace_publish_tag_validation_is_package_scoped_for_diverging_versions() {
             .join(".forgejo/workflows/publish-crate-member-b.yaml"),
     );
     assert_yaml_parses(&member_b_publish);
-    assert!(member_b_publish.contains(r#"cargo pkgid -p member-b | awk -F'[#@]' '{print $NF}'"#));
+    assert!(
+        member_b_publish
+            .contains(r#"cargo pkgid -p member-b | awk -F'[#@]' '/@/ {print $NF}' | tail -n 1"#)
+    );
     assert!(!member_b_publish.contains("cargo pkgid -p member-a"));
     assert!(!member_b_publish.contains("cargo metadata --no-deps --format-version 1"));
 }
@@ -2397,8 +2412,8 @@ fn release_artifact_workflow_runs_configured_smoke_before_publish() {
     );
     assert_yaml_parses(&workflow);
     assert!(workflow.contains("name: Run release smoke checks"));
-    assert!(workflow.contains("FORCE_PUBLISH: ${{ inputs.force_publish }}"));
-    assert!(workflow.contains("release/smoke-report.txt"));
+    assert!(!workflow.contains("FORCE_PUBLISH: ${{ inputs.force_publish }}"));
+    assert!(!workflow.contains("inputs.force_publish"));
     assert!(workflow.contains("nix run .#release-smoke -- \"$VERSION\" release"));
     assert!(
         workflow

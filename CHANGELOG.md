@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Keep Codeberg/Gitea-compatible dispatch triggers scalar instead of emitting
+  unsupported nested workflow inputs.
+- Filter Nix development-shell hook output when extracting a package version
+  from `cargo pkgid` in publish workflows.
+
 ## [0.17.1] - 2026-07-10
 
 ### Fixed

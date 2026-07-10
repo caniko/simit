@@ -1354,15 +1354,12 @@ fn publish_workflow(
     push_release_security_header(&mut workflow, false);
     workflow.push_str("name: Publish Crate\n\n");
     workflow.push_str("on:\n");
-    workflow.push_str("  workflow_dispatch:\n");
-    workflow.push_str("    inputs:\n");
-    workflow.push_str("      force_publish:\n");
-    workflow.push_str(
-        "        description: \"Bypass release smoke checks and continue publishing.\"\n",
-    );
-    workflow.push_str("        required: false\n");
-    workflow.push_str("        default: false\n");
-    workflow.push_str("        type: boolean\n\n");
+    // Codeberg currently runs a Gitea 1.22-derived Actions service.  It
+    // accepts workflow_dispatch as an event, but rejects nested dispatch
+    // input mappings during workflow validation.  The publish workflow has
+    // no meaningful input, so keep the trigger scalar and use the selected
+    // tag ref for the release version.
+    workflow.push_str("  workflow_dispatch:\n\n");
     push_concurrency(&mut workflow);
     workflow.push_str("jobs:\n");
     workflow.push_str("  publish:\n");
@@ -2151,19 +2148,9 @@ fn push_release_integrity_steps(workflow: &mut String, platform: Platform) {
 
 fn push_release_smoke_step(workflow: &mut String, command: &str) {
     workflow.push_str("      - name: Run release smoke checks\n");
-    workflow.push_str("        env:\n");
-    workflow.push_str("          FORCE_PUBLISH: ${{ inputs.force_publish }}\n");
     workflow.push_str("        run: |\n");
     workflow.push_str("          set -euo pipefail\n");
     workflow.push_str("          mkdir -p release\n\n");
-    workflow.push_str("          if [ \"${FORCE_PUBLISH:-false}\" = \"true\" ]; then\n");
-    workflow.push_str("            {\n");
-    workflow.push_str("              echo \"release smoke report\"\n");
-    workflow.push_str("              echo \"force_publish: true\"\n");
-    workflow.push_str("              echo \"smoke checks bypassed by workflow_dispatch input; external publish continued by explicit operator override\"\n");
-    workflow.push_str("            } | tee release/smoke-report.txt\n");
-    workflow.push_str("            exit 0\n");
-    workflow.push_str("          fi\n\n");
     workflow.push_str(
         "          VERSION=\"${GITHUB_REF_NAME:-${FORGE_REF_NAME:-${CODEBERG_REF_NAME:-}}}\"\n",
     );
@@ -2867,7 +2854,7 @@ fn validate_release_tag_step(
         format!(
             r#"
           # cargo pkgid scopes the version lookup to the crate this workflow publishes.
-          version="$({cargo_command_prefix}cargo pkgid -p {package_name} | awk -F'[#@]' '{{print $NF}}')"
+          version="$({cargo_command_prefix}cargo pkgid -p {package_name} | awk -F'[#@]' '/@/ {{print $NF}}' | tail -n 1)"
           if [ -z "$version" ]; then
             echo "Could not read package version from cargo pkgid" >&2
             exit 1
