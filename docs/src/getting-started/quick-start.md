@@ -33,6 +33,14 @@ Generate CI workflows for a single-package project:
 simit init ci --platform forgejo
 ```
 
+Generic Rust CI writes test, lint, and optional quality-gate workflows only. It
+does not create crates.io publish workflows unless release publishing is
+explicitly enabled:
+
+```sh
+simit init ci --platform forgejo --publish-crates
+```
+
 For Cargo workspaces, select the generated workflow set explicitly:
 
 ```sh
@@ -40,6 +48,7 @@ simit init ci --platform forgejo --workspace
 simit init ci --platform forgejo --package my-crate
 ```
 
-Workspace CI is rendered per package as `ci-<crate>.yaml` and
-`publish-crate-<crate>.yaml`; single-package projects keep the stable
-`ci.yaml` and `publish-crate.yaml` paths.
+Workspace CI is rendered per package as `ci-<crate>.yaml`; single-package
+projects keep the stable `ci.yaml` path. With `--publish-crates`, publishable
+workspace members also get `publish-crate-<crate>.yaml`; single-package release
+projects get `publish-crate.yaml`.

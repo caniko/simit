@@ -7,6 +7,7 @@ use camino::Utf8PathBuf;
 use simit::cargo::Package;
 use simit::config::{
     ChocolateyOverrides, FlakeMode, FlakeScope, HomebrewOverrides, ProjectConfig, ScoopOverrides,
+    VscodePatSource,
 };
 use tempfile::TempDir;
 
@@ -205,6 +206,7 @@ fn flake_and_ci_config_load() {
         r#"[flake]
 scope = "full"
 mode = "custom"
+backend = "py-harbor"
 toolchain_binding = "toolchain.rustToolchain"
 crane_lib_binding = "craneLib"
 package_binding = "package"
@@ -214,6 +216,8 @@ pre_commit_shell_hook = true
 
 [flake.expected_outputs]
 packages = ["default", "docs", "site"]
+apps = ["default"]
+dev_shells = ["default", "docs"]
 checks = ["default", "formatting", "hm-module"]
 top_level = ["hmModules"]
 
@@ -221,12 +225,29 @@ top_level = ["hmModules"]
 extra_setup = ["apt-get update && apt-get install -y --no-install-recommends postgresql-client"]
 extra_env = { SKILLNET_TEST_PG_URL = "${{ secrets.SKILLNET_TEST_PG_URL }}" }
 required_secrets = ["CRATES_IO_API_TOKEN"]
+required_env = ["VSCE_PAT_FILE", "OVSX_PAT_FILE"]
+publish_crates = true
+
+[ci.pages]
+repo = "caniko/plinth"
+
+[vscode]
+extension_dir = "pkl-lsp-vscode"
+runner = "atlas-nix-trusted"
+codeberg_repo = "caniko/pkl-lsp"
+codeberg_token_secret = "codeberg_token"
+pat_source = "file-env"
+vsce_pat_file_env = "VSCE_PAT_FILE"
+ovsx_pat_file_env = "OVSX_PAT_FILE"
+cargo_package = "pkl-lsp-server"
+prepublish_commands = ["nix flake check --no-build"]
 "#,
     )
     .unwrap();
 
     assert_eq!(cfg.flake.scope, Some(FlakeScope::Full));
     assert_eq!(cfg.flake.mode, FlakeMode::Custom);
+    assert_eq!(cfg.flake.backend, simit::config::FlakeBackend::PyHarbor);
     assert_eq!(cfg.flake.toolchain_binding, "toolchain.rustToolchain");
     assert_eq!(
         cfg.flake.expected_outputs.packages,
@@ -236,6 +257,8 @@ required_secrets = ["CRATES_IO_API_TOKEN"]
         cfg.flake.expected_outputs.checks,
         ["default", "formatting", "hm-module"]
     );
+    assert_eq!(cfg.flake.expected_outputs.apps, ["default"]);
+    assert_eq!(cfg.flake.expected_outputs.dev_shells, ["default", "docs"]);
     assert_eq!(cfg.flake.expected_outputs.top_level, ["hmModules"]);
     assert_eq!(cfg.ci.extra_setup.len(), 1);
     assert_eq!(
@@ -246,12 +269,42 @@ required_secrets = ["CRATES_IO_API_TOKEN"]
         Some("${{ secrets.SKILLNET_TEST_PG_URL }}")
     );
     assert_eq!(cfg.ci.required_secrets, ["CRATES_IO_API_TOKEN"]);
+    assert_eq!(cfg.ci.required_env, ["VSCE_PAT_FILE", "OVSX_PAT_FILE"]);
+    assert!(cfg.ci.publish_crates);
+    let pages = cfg.resolve_codeberg_pages().unwrap().unwrap();
+    assert_eq!(pages.repo, "caniko/plinth");
+    assert_eq!(pages.owner, "caniko");
+    assert_eq!(pages.canonical_domain, None);
+    assert_eq!(pages.site_output, ".#site");
+    assert_eq!(pages.token_secret, "codeberg_token");
+    assert_eq!(pages.source_branch, "trunk");
+    assert_eq!(pages.deploy_app, ".#deploy-pages");
+    let vscode = cfg.resolve_vscode().unwrap().unwrap();
+    assert_eq!(vscode.extension_dir, "pkl-lsp-vscode");
+    assert_eq!(vscode.runner.as_deref(), Some("atlas-nix-trusted"));
+    assert_eq!(vscode.codeberg_repo, "caniko/pkl-lsp");
+    assert_eq!(vscode.codeberg_owner, "caniko");
+    assert_eq!(vscode.codeberg_token_secret, "codeberg_token");
+    assert_eq!(vscode.pat_source, VscodePatSource::FileEnv);
+    assert_eq!(vscode.vsce_pat_file_env, "VSCE_PAT_FILE");
+    assert_eq!(vscode.ovsx_pat_file_env, "OVSX_PAT_FILE");
+    assert_eq!(vscode.vsce_pat_secret, "VSCE_PAT");
+    assert_eq!(vscode.ovsx_pat_secret, "OVSX_PAT");
+    assert_eq!(
+        vscode.package_command,
+        "nix run .#package-release-assets -- \"$VERSION\""
+    );
+    assert_eq!(vscode.cargo_package.as_deref(), Some("pkl-lsp-server"));
+    assert_eq!(
+        vscode.prepublish_commands,
+        ["nix flake check --no-build".to_owned()]
+    );
 }
 
 #[test]
 fn flake_and_ci_config_load_from_flake_output() {
     with_fake_nix(
-        r#"{"flake":{"scope":"hooks-only","mode":"custom","toolchain_binding":"toolchain.rustToolchain","expected_outputs":{"checks":["hm-module"],"top_level":["hmModules"]}},"ci":{"extra_setup":["echo setup"],"extra_env":{"PG_URL":"${{ secrets.PG_URL }}"}}}"#,
+        r#"{"flake":{"scope":"hooks-only","mode":"custom","backend":"py-harbor","toolchain_binding":"toolchain.rustToolchain","expected_outputs":{"apps":["default"],"dev_shells":["default"],"checks":["hm-module"],"top_level":["hmModules"]}},"ci":{"extra_setup":["echo setup"],"extra_env":{"PG_URL":"${{ secrets.PG_URL }}"}}}"#,
         |temp| {
             fs::write(
                 temp.path().join("flake.nix"),
@@ -262,7 +315,10 @@ fn flake_and_ci_config_load_from_flake_output() {
             let cfg = ProjectConfig::load(temp.path()).unwrap();
             assert_eq!(cfg.flake.scope, Some(FlakeScope::HooksOnly));
             assert_eq!(cfg.flake.mode, FlakeMode::Custom);
+            assert_eq!(cfg.flake.backend, simit::config::FlakeBackend::PyHarbor);
             assert_eq!(cfg.flake.toolchain_binding, "toolchain.rustToolchain");
+            assert_eq!(cfg.flake.expected_outputs.apps, ["default"]);
+            assert_eq!(cfg.flake.expected_outputs.dev_shells, ["default"]);
             assert_eq!(cfg.flake.expected_outputs.checks, ["hm-module"]);
             assert_eq!(cfg.flake.expected_outputs.top_level, ["hmModules"]);
             assert_eq!(cfg.ci.extra_setup, ["echo setup"]);
@@ -568,8 +624,27 @@ platforms = { linux_arm = false }
     cfg.validate_homebrew().unwrap();
     let platforms = cfg.homebrew.unwrap().platforms;
     assert!(platforms.darwin_arm);
-    assert!(platforms.darwin_intel);
+    assert!(!platforms.darwin_intel);
     assert!(!platforms.linux_arm);
+    assert!(platforms.linux_intel);
+}
+
+#[test]
+fn darwin_intel_homebrew_platform_is_opt_in() {
+    let cfg = load_toml(
+        r#"[homebrew]
+tap_url = "https://codeberg.org/caniko/homebrew-mythos.git"
+download_repo = "caniko/mythos"
+platforms = { darwin_intel = true }
+"#,
+    )
+    .unwrap();
+
+    cfg.validate_homebrew().unwrap();
+    let platforms = cfg.homebrew.unwrap().platforms;
+    assert!(platforms.darwin_arm);
+    assert!(platforms.darwin_intel);
+    assert!(platforms.linux_arm);
     assert!(platforms.linux_intel);
 }
 
@@ -711,8 +786,14 @@ id = "mythos"
 title = "Mythos"
 authors = "Can"
 description = "Mythos command line"
+summary = "Mythos CLI summary"
 project_url = "https://codeberg.org/caniko/mythos"
 license_url = "https://codeberg.org/caniko/mythos/src/branch/trunk/LICENSE"
+icon_url = "https://codeberg.org/caniko/mythos/raw/branch/trunk/icon.png"
+package_source_url = "https://codeberg.org/caniko/mythos-package"
+docs_url = "https://mythos.example.com/docs"
+bug_tracker_url = "https://codeberg.org/caniko/mythos/issues"
+project_source_url = "https://codeberg.org/caniko/mythos"
 tags = "mythos cli"
 release_notes_url = "https://codeberg.org/caniko/mythos/releases"
 download_repo = "caniko/mythos"
@@ -753,8 +834,14 @@ id = "config-id"
 title = "Config Title"
 authors = "Config Authors"
 description = "config description"
+summary = "config summary"
 project_url = "https://config.example.com"
 license_url = "https://config.example.com/license"
+icon_url = "https://config.example.com/icon.png"
+package_source_url = "https://config.example.com/package-source"
+docs_url = "https://config.example.com/docs"
+bug_tracker_url = "https://config.example.com/issues"
+project_source_url = "https://config.example.com/source"
 tags = "config tags"
 release_notes_url = "https://config.example.com/releases"
 download_repo = "config/demo"
@@ -774,8 +861,14 @@ source = "https://config.example.com/choco"
                 title: Some("CLI Title"),
                 authors: Some("CLI Authors"),
                 description: Some("cli description"),
+                summary: Some("cli summary"),
                 project_url: Some("https://cli.example.com"),
                 license_url: Some("https://cli.example.com/license"),
+                icon_url: Some("https://cli.example.com/icon.png"),
+                package_source_url: Some("https://cli.example.com/package-source"),
+                docs_url: Some("https://cli.example.com/docs"),
+                bug_tracker_url: Some("https://cli.example.com/issues"),
+                project_source_url: Some("https://cli.example.com/source"),
                 tags: Some("cli tags"),
                 release_notes_url: Some("https://cli.example.com/releases"),
                 download_repo: Some("cli/demo"),
@@ -791,10 +884,31 @@ source = "https://config.example.com/choco"
     assert_eq!(resolved.title, "CLI Title");
     assert_eq!(resolved.authors.as_deref(), Some("CLI Authors"));
     assert_eq!(resolved.description, "cli description");
+    assert_eq!(resolved.summary.as_deref(), Some("cli summary"));
     assert_eq!(resolved.project_url, "https://cli.example.com");
     assert_eq!(
         resolved.license_url.as_deref(),
         Some("https://cli.example.com/license")
+    );
+    assert_eq!(
+        resolved.icon_url.as_deref(),
+        Some("https://cli.example.com/icon.png")
+    );
+    assert_eq!(
+        resolved.package_source_url.as_deref(),
+        Some("https://cli.example.com/package-source")
+    );
+    assert_eq!(
+        resolved.docs_url.as_deref(),
+        Some("https://cli.example.com/docs")
+    );
+    assert_eq!(
+        resolved.bug_tracker_url.as_deref(),
+        Some("https://cli.example.com/issues")
+    );
+    assert_eq!(
+        resolved.project_source_url.as_deref(),
+        Some("https://cli.example.com/source")
     );
     assert_eq!(resolved.tags.as_deref(), Some("cli tags"));
     assert_eq!(
@@ -810,6 +924,7 @@ source = "https://config.example.com/choco"
         .unwrap();
     assert_eq!(config_wins.name, "config-name");
     assert_eq!(config_wins.description, "config description");
+    assert_eq!(config_wins.summary.as_deref(), Some("config summary"));
     assert_eq!(config_wins.project_url, "https://config.example.com");
 }
 

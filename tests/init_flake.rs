@@ -32,6 +32,40 @@ rust-version = "1.85"
     temp
 }
 
+fn init_python_project() -> TempDir {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    fs::write(
+        root.join("pyproject.toml"),
+        r#"[project]
+name = "py-demo"
+version = "0.1.0"
+requires-python = "==3.13.*"
+
+[project.scripts]
+py-demo = "py_demo:main"
+pyd = "py_demo:main"
+
+[project.optional-dependencies]
+cpu = ["pytest"]
+nvidia = ["torch"]
+
+[dependency-groups]
+dev = ["mypy", "pytest", "ruff"]
+
+[tool.uv]
+conflicts = [
+  [{ extra = "cpu" }, { extra = "nvidia" }],
+]
+"#,
+    )
+    .unwrap();
+    fs::write(root.join("uv.lock"), "").unwrap();
+    fs::create_dir(root.join("src")).unwrap();
+    fs::write(root.join("src/py_demo.py"), "def main(): pass\n").unwrap();
+    temp
+}
+
 fn read(path: &Path) -> String {
     fs::read_to_string(path).unwrap_or_else(|err| panic!("reading {}: {err}", path.display()))
 }
@@ -280,6 +314,17 @@ fn custom_skillnet_flake() -> &'static str {
           rust-analyzer
         ] ++ pre-commit-check.enabledPackages;
         shellHook = pre-commit-check.shellHook;
+      };
+      devShells.docs = rs-harbor.lib.mkDocsShell {
+        inherit pkgs;
+        inherit (toolchain) craneLib;
+        cross = rs-harbor.lib.mkCross {inherit pkgs system;};
+        packages = with pkgs; [
+          mdbook
+          pre-commit
+          rust-analyzer
+        ] ++ pre-commit-check.enabledPackages;
+        extraShellHook = pre-commit-check.shellHook;
       };
     })
     // {
@@ -547,6 +592,119 @@ version = "0.1.0"
 }
 
 #[test]
+fn pure_uv_python_project_generates_py_harbor_flake() {
+    let temp = init_python_project();
+
+    let status = simit()
+        .current_dir(temp.path())
+        .args(["init", "flake"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let flake = read(&temp.path().join("flake.nix"));
+    assert!(flake.contains("py-harbor"));
+    assert!(flake.contains("py-harbor.lib"));
+    assert!(flake.contains("mkUvDevShell"));
+    assert!(flake.contains("mkUvCheckEnv"));
+    assert!(flake.contains("mkUvAppPackage"));
+    assert!(flake.contains("py-demo-cpu"));
+    assert!(flake.contains("\"py-demo\""));
+    assert!(flake.contains("\"pyd\""));
+
+    let hooks = read(&temp.path().join("nix/pre-commit.nix"));
+    assert!(hooks.contains("uv-ruff-format"));
+    assert!(hooks.contains("uv-mypy"));
+
+    let check_status = simit()
+        .current_dir(temp.path())
+        .args(["init", "flake", "--check"])
+        .status()
+        .unwrap();
+    assert!(check_status.success());
+}
+
+#[test]
+fn custom_py_harbor_flake_checks_expected_outputs() {
+    let temp = init_python_project();
+    fs::write(
+        temp.path().join("simit.toml"),
+        r#"[flake]
+scope = "full"
+mode = "custom"
+backend = "py-harbor"
+
+[flake.expected_outputs]
+packages = ["py-demo-cpu"]
+apps = ["py-demo-cpu"]
+dev_shells = ["default"]
+checks = ["offline-tests", "typecheck"]
+"#,
+    )
+    .unwrap();
+    fs::write(
+        temp.path().join("flake.nix"),
+        r#"{
+  inputs = {
+    py-harbor.url = "git+https://codeberg.org/caniko/py-harbor.git";
+    treefmt-nix.url = "github:numtide/treefmt-nix";
+    git-hooks.url = "github:cachix/git-hooks.nix";
+  };
+  outputs = { self, py-harbor, treefmt-nix, git-hooks, ... }:
+    let
+      py = py-harbor.lib;
+      mkChecks = system: {
+        offline-tests = {};
+        typecheck = {};
+      };
+    in {
+      packages.x86_64-linux.py-demo-cpu = {};
+      apps.x86_64-linux.py-demo-cpu = {};
+      devShells.x86_64-linux.default = {};
+      checks.x86_64-linux = mkChecks "x86_64-linux";
+      formatter.x86_64-linux =
+        let
+          pkgs = py.mkPkgs { system = "x86_64-linux"; };
+          treefmtEval = treefmt-nix.lib.evalModule pkgs (import ./nix/treefmt.nix);
+          pre-commit-check = git-hooks.lib.x86_64-linux.run {
+            src = ./.;
+            hooks = import ./nix/pre-commit.nix {
+              inherit pkgs;
+              treefmtWrapper = treefmtEval.config.build.wrapper;
+            };
+          };
+        in treefmtEval.config.build.wrapper;
+      checks.x86_64-linux.formatting =
+        let
+          pkgs = py.mkPkgs { system = "x86_64-linux"; };
+          treefmtEval = treefmt-nix.lib.evalModule pkgs (import ./nix/treefmt.nix);
+        in treefmtEval.config.build.check self;
+      devShells.x86_64-linux.hooks = {
+        packages = [] ++ pre-commit-check.enabledPackages;
+        shellHook = pre-commit-check.shellHook;
+      };
+    };
+}
+"#,
+    )
+    .unwrap();
+
+    let write_status = simit()
+        .current_dir(temp.path())
+        .args(["init", "flake"])
+        .status()
+        .unwrap();
+    assert!(write_status.success());
+
+    let check_status = simit()
+        .current_dir(temp.path())
+        .args(["init", "flake", "--check"])
+        .status()
+        .unwrap();
+    assert!(check_status.success());
+}
+
+#[test]
 fn print_outputs_without_writing() {
     let temp = init_package();
 
@@ -758,6 +916,44 @@ fn custom_mode_reports_missing_owned_wiring_without_template_diff() {
     assert!(stderr.contains("flake.nix custom mode: missing pre-commit-check binding"));
     assert!(!stderr.contains("+++ flake.nix"));
     assert!(!stderr.contains("description = \"Rust project\""));
+}
+
+#[test]
+fn custom_mode_requires_docs_shell_when_docs_outputs_are_advertised() {
+    let temp = init_package();
+    fs::write(
+        temp.path().join("simit.toml"),
+        custom_skillnet_flake_config(),
+    )
+    .unwrap();
+    let flake = custom_skillnet_flake().replace(
+        r#"      devShells.docs = rs-harbor.lib.mkDocsShell {
+        inherit pkgs;
+        inherit (toolchain) craneLib;
+        cross = rs-harbor.lib.mkCross {inherit pkgs system;};
+        packages = with pkgs; [
+          mdbook
+          pre-commit
+          rust-analyzer
+        ] ++ pre-commit-check.enabledPackages;
+        extraShellHook = pre-commit-check.shellHook;
+      };
+"#,
+        "",
+    );
+    fs::write(temp.path().join("flake.nix"), flake).unwrap();
+
+    let output = simit()
+        .current_dir(temp.path())
+        .args(["init", "flake", "--check"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8(output.stderr)
+            .unwrap()
+            .contains("flake.nix custom mode: missing devShells.docs")
+    );
 }
 
 #[test]

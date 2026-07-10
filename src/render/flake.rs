@@ -3,8 +3,9 @@ use std::path::PathBuf;
 use anyhow::{Result, bail};
 
 use crate::cli::FlakeTargetArg;
-use crate::config::FlakeConfig;
+use crate::config::{FlakeBackend, FlakeConfig};
 use crate::project::{GeneratedFile, Languages};
+use crate::python;
 
 /// Current canix Attic public key. Do NOT replace with the stale `uqr0...` key.
 pub const CANIX_CACHE_KEY: &str = "canix:lPzPzKrmYqW5Rxa5r0uQWvCqD3S5nx0h2eCy7XD5JM8=";
@@ -39,15 +40,21 @@ const RELEASE_DEV_SHELL_PACKAGES: &str = r#"          cargo-about
           cargo-llvm-cov
           cargo-sbom
           cosign
+          file
+          gnutar
+          gzip
           jq
           minisign
           nodejs
           rpm
           debootstrap
           util-linux
+          unzip
+          zip
           reprepro
-          taplo
+           taplo
 "#;
+const MATURIN_PACKAGE: &str = "          maturin\n";
 const PRE_COMMIT_ENABLED_PACKAGES: &str = "        ] ++ pre-commit-check.enabledPackages;\n";
 const SHELL_HOOK: &str = "        shellHook = pre-commit-check.shellHook;\n";
 
@@ -55,6 +62,7 @@ const SHELL_HOOK: &str = "        shellHook = pre-commit-check.shellHook;\n";
 pub struct AuditTools {
     pub audit: bool,
     pub deny: bool,
+    pub pyo3: bool,
 }
 
 pub fn files(
@@ -96,6 +104,23 @@ pub fn print_existing_flake_note() {
     println!(
         "Existing flake.nix files are patched only when simit can find safe anchors. If patching fails, apply the printed wiring manually."
     );
+}
+
+pub fn python_files(languages: &Languages, project: &python::Project) -> Vec<GeneratedFile> {
+    vec![
+        GeneratedFile {
+            relative_path: PathBuf::from("flake.nix"),
+            content: python_template(project),
+        },
+        GeneratedFile {
+            relative_path: PathBuf::from("nix/treefmt.nix"),
+            content: treefmt_nix(languages, "2024"),
+        },
+        GeneratedFile {
+            relative_path: PathBuf::from("nix/pre-commit.nix"),
+            content: pre_commit_nix(languages, None, AuditTools::default()),
+        },
+    ]
 }
 
 pub fn patch_existing(content: &str, audit_tools: AuditTools) -> Result<String> {
@@ -174,6 +199,7 @@ pub fn has_required_wiring(content: &str) -> bool {
         AuditTools {
             audit: true,
             deny: false,
+            pyo3: false,
         },
     )
 }
@@ -205,7 +231,11 @@ pub fn has_required_wiring_with_audit_tools(content: &str, audit_tools: AuditToo
         && (!audit_tools.deny || content.contains("cargo-deny"))
 }
 
-pub fn custom_wiring_mismatches(content: &str, config: &FlakeConfig) -> Vec<String> {
+pub fn custom_wiring_mismatches(
+    content: &str,
+    config: &FlakeConfig,
+    require_docs_shell: bool,
+) -> Vec<String> {
     let mut missing = Vec::new();
     if !(content.contains("treefmt-nix.url") || content.contains("treefmt-nix = {")) {
         missing.push("flake.nix custom mode: missing treefmt-nix input".to_owned());
@@ -220,7 +250,7 @@ pub fn custom_wiring_mismatches(content: &str, config: &FlakeConfig) -> Vec<Stri
             "flake.nix custom mode: missing treefmtEval import of ./nix/treefmt.nix".to_owned(),
         );
     }
-    if !content.contains("pre-commit-check = git-hooks.lib.${system}.run") {
+    if !has_pre_commit_check_binding(content) {
         missing.push("flake.nix custom mode: missing pre-commit-check binding".to_owned());
     }
     if !content.contains("hooks = import ./nix/pre-commit.nix") {
@@ -235,31 +265,41 @@ pub fn custom_wiring_mismatches(content: &str, config: &FlakeConfig) -> Vec<Stri
                 .to_owned(),
         );
     }
-    if !contains_binding(content, &config.toolchain_binding) {
-        missing.push(format!(
-            "flake.nix custom mode: missing configured toolchain binding `{}`",
-            config.toolchain_binding
-        ));
+    match config.backend {
+        FlakeBackend::RustCrane => {
+            if !contains_binding(content, &config.toolchain_binding) {
+                missing.push(format!(
+                    "flake.nix custom mode: missing configured toolchain binding `{}`",
+                    config.toolchain_binding
+                ));
+            }
+            if !contains_binding(content, &config.crane_lib_binding) {
+                missing.push(format!(
+                    "flake.nix custom mode: missing configured crane lib binding `{}`",
+                    config.crane_lib_binding
+                ));
+            }
+            if !contains_binding(content, &config.package_binding) {
+                missing.push(format!(
+                    "flake.nix custom mode: missing configured package binding `{}`",
+                    config.package_binding
+                ));
+            }
+        }
+        FlakeBackend::PyHarbor => {
+            if !content.contains("py-harbor") {
+                missing
+                    .push("flake.nix custom mode: missing py-harbor input or binding".to_owned());
+            }
+            if !content.contains("py-harbor.lib") {
+                missing.push("flake.nix custom mode: missing py-harbor.lib usage".to_owned());
+            }
+        }
     }
-    if !contains_binding(content, &config.crane_lib_binding) {
-        missing.push(format!(
-            "flake.nix custom mode: missing configured crane lib binding `{}`",
-            config.crane_lib_binding
-        ));
-    }
-    if !contains_binding(content, &config.package_binding) {
-        missing.push(format!(
-            "flake.nix custom mode: missing configured package binding `{}`",
-            config.package_binding
-        ));
-    }
-    if config.formatter_output && !content.contains("formatter = treefmtEval.config.build.wrapper;")
-    {
+    if config.formatter_output && !has_formatter_output(content) {
         missing.push("flake.nix custom mode: missing formatter output".to_owned());
     }
-    if config.formatting_check
-        && !content.contains("formatting = treefmtEval.config.build.check self;")
-    {
+    if config.formatting_check && !has_formatting_check(content) {
         missing.push("flake.nix custom mode: missing formatting check".to_owned());
     }
     if config.pre_commit_shell_hook {
@@ -275,10 +315,27 @@ pub fn custom_wiring_mismatches(content: &str, config: &FlakeConfig) -> Vec<Stri
             );
         }
     }
+    if require_docs_shell && !has_docs_shell(content) {
+        missing.push("flake.nix custom mode: missing devShells.docs".to_owned());
+    }
     for package in &config.expected_outputs.packages {
         if !contains_attr_assignment(content, package) {
             missing.push(format!(
                 "flake.nix custom mode: missing expected package output `{package}`"
+            ));
+        }
+    }
+    for app in &config.expected_outputs.apps {
+        if !contains_attr_assignment(content, app) {
+            missing.push(format!(
+                "flake.nix custom mode: missing expected app output `{app}`"
+            ));
+        }
+    }
+    for shell in &config.expected_outputs.dev_shells {
+        if !contains_attr_assignment(content, shell) {
+            missing.push(format!(
+                "flake.nix custom mode: missing expected dev shell output `{shell}`"
             ));
         }
     }
@@ -317,6 +374,55 @@ fn contains_attr_assignment(content: &str, name: &str) -> bool {
         || content.contains(&format!("inherit {name}"))
 }
 
+fn has_docs_shell(content: &str) -> bool {
+    if content.contains("docs = pkgs.mkShell")
+        || content.contains("docs = py.mkUvDevShell")
+        || content.contains("docs = craneLib.devShell")
+    {
+        return true;
+    }
+
+    let mut in_dev_shells = false;
+    let mut dev_shell_depth = 0i32;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+
+        if trimmed.starts_with("devShells.docs") {
+            return true;
+        }
+
+        if !in_dev_shells {
+            if trimmed.starts_with("devShells =") {
+                in_dev_shells = true;
+                dev_shell_depth = brace_delta(trimmed);
+                if trimmed.contains("docs =") {
+                    return true;
+                }
+                continue;
+            }
+            continue;
+        }
+
+        if trimmed.starts_with("docs =") {
+            return true;
+        }
+
+        dev_shell_depth += brace_delta(trimmed);
+        if dev_shell_depth <= 0 {
+            in_dev_shells = false;
+        }
+    }
+
+    false
+}
+
+fn brace_delta(line: &str) -> i32 {
+    let opens = line.chars().filter(|&ch| ch == '{').count() as i32;
+    let closes = line.chars().filter(|&ch| ch == '}').count() as i32;
+    opens - closes
+}
+
 pub fn has_required_treefmt(content: &str, languages: &Languages, rust_edition: &str) -> bool {
     content.contains("projectRootFile = \"flake.nix\";")
         && (!languages.rust
@@ -352,6 +458,11 @@ pub fn has_required_pre_commit(
                 && content.contains("pkgs.cargo-deny")))
         && (!languages.nix
             || (content.contains("nix-flake-check") && content.contains("flake check")))
+        && (!languages.uv_python
+            || (content.contains("uv-ruff-format")
+                && content.contains("uv run ruff format --check .")
+                && content.contains("uv-mypy")
+                && content.contains("uv run mypy .")))
         && rust_version.is_none_or(|version| {
             let toolchain_version = rust_overlay_version(version);
             content.contains("cargo-msrv")
@@ -579,13 +690,17 @@ fn template(audit_tools: AuditTools) -> String {
           cargo-sbom
           cargo-nextest
           cosign
+          file
+          gnutar
+          gzip
           jq
           minisign
           nodejs
           pre-commit
           rpm
-          debootstrap
           util-linux
+          unzip
+          zip
           reprepro
           rust-analyzer
           taplo
@@ -612,6 +727,7 @@ fn template(audit_tools: AuditTools) -> String {
             '';
           };
         in "${script}/bin/local-check-fast";
+        meta.description = "Run fast local validation checks";
       };
       apps.local-check-release = {
         type = "app";
@@ -635,24 +751,58 @@ fn template(audit_tools: AuditTools) -> String {
                 echo "usage: local-check-release <version>" >&2
                 exit 2
               fi
+              repo="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+              cd "$repo"
               ${self.apps.${system}.local-check-fast.program}
+              manifest="release/artifacts.json"
               mkdir -p release
+              jq -n --arg version "$version" \
+                '{version: $version, artifacts: [], skipped: [], generated_by: "simit local-check-release"}' \
+                > "$manifest.tmp"
+              mv "$manifest.tmp" "$manifest"
+              manifest_add_file() {
+                path="$1"
+                producer="$2"
+                [ -f "$path" ] || return 0
+                sha256="$(sha256sum "$path" | awk '{print $1}')"
+                jq --arg path "$path" --arg sha256 "$sha256" --arg producer "$producer" \
+                  '.artifacts += [{path: $path, sha256: $sha256, producer: $producer}]' \
+                  "$manifest" > "$manifest.tmp"
+                mv "$manifest.tmp" "$manifest"
+              }
+              manifest_skip() {
+                name="$1"
+                reason="$2"
+                jq --arg name "$name" --arg reason "$reason" \
+                  '.skipped += [{name: $name, reason: $reason}]' \
+                  "$manifest" > "$manifest.tmp"
+                mv "$manifest.tmp" "$manifest"
+              }
               if [ -f about-template.hbs ]; then
                 cargo about generate --output-file release/THIRD_PARTY_LICENSES.html about-template.hbs
+                manifest_add_file release/THIRD_PARTY_LICENSES.html cargo-about
               else
                 echo "warning: about-template.hbs not found; skipping cargo-about report" >&2
+                manifest_skip cargo-about "about-template.hbs not found"
               fi
               cargo sbom --output-format cyclone_dx_json_1_5 > "release/''${version}.cdx.json"
               cargo sbom --output-format spdx_json_2_3 > "release/''${version}.spdx.json"
+              manifest_add_file "release/''${version}.cdx.json" cargo-sbom-cyclonedx
+              manifest_add_file "release/''${version}.spdx.json" cargo-sbom-spdx
               if [ -n "''${COSIGN_PRIVATE_KEY:-}" ]; then
                 echo "COSIGN_PRIVATE_KEY present; local release parity will not sign or upload" >&2
               else
                 echo "warning: keyless Sigstore and COSIGN_PRIVATE_KEY unavailable locally; skipping local cosign signing" >&2
+                manifest_skip cosign "keyless Sigstore and COSIGN_PRIVATE_KEY unavailable locally"
+              fi
+              if [ -x scripts/release-local-check.sh ]; then
+                bash scripts/release-local-check.sh "$version"
               fi
               echo "local release parity dry-run passed for ''${version}; no external publish was attempted"
             '';
           };
         in "${script}/bin/local-check-release";
+        meta.description = "Run local release parity checks without publishing";
       };
       apps.local-release-deploy = {
         type = "app";
@@ -673,18 +823,246 @@ fn template(audit_tools: AuditTools) -> String {
                 echo "refusing to publish without an explicit matching confirmation" >&2
                 exit 2
               fi
-              echo "local-release-deploy is a project-specific hook; add publisher steps before using it" >&2
+              repo="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+              cd "$repo"
+              ${self.apps.${system}.local-check-release.program} "$version"
+              if ! jq -e --arg version "$version" '.version == $version' release/artifacts.json >/dev/null; then
+                echo "release/artifacts.json is missing or does not match version $version" >&2
+                exit 1
+              fi
+              if [ -x scripts/local-release-deploy.sh ]; then
+                SIMIT_LOCAL_RELEASE_CHECK_DONE=1 exec bash scripts/local-release-deploy.sh "$version" --publish "$version"
+              fi
+              echo "local-release-deploy has no project publisher hook at scripts/local-release-deploy.sh" >&2
+              echo "Homebrew-capable hooks must build Darwin tarballs and gate tap pushes on HOMEBREW_TAP_TOKEN" >&2
+              echo "local-check-release must remain non-publishing: no brew bump, git push, upload, or cargo publish" >&2
               exit 2
             '';
           };
         in "${script}/bin/local-release-deploy";
+        meta.description = "Run the guarded local release deployment hook";
       };
     });
 }
+
 "#
     .to_owned();
     insert_template_audit_packages(&mut content, audit_tools);
     content
+}
+
+fn python_template(project: &python::Project) -> String {
+    let package_name = format!("{}-cpu", project.name);
+    let env_name = format!("{}-cpu-env", project.name);
+    let scripts = if project.scripts.is_empty() {
+        format!("            \"{}\"\n", project.name)
+    } else {
+        project
+            .scripts
+            .iter()
+            .map(|script| format!("            \"{script}\"\n"))
+            .collect::<String>()
+    };
+    let dev_group = if project.dependency_groups.iter().any(|group| group == "dev") {
+        "dev"
+    } else {
+        "default"
+    };
+    let cpu_extra = if project.optional_extras.iter().any(|extra| extra == "cpu") {
+        "cpu"
+    } else {
+        "default"
+    };
+    let python_comment = project
+        .requires_python
+        .as_deref()
+        .map(|requires| format!("  # Python requirement from pyproject.toml: {requires}\n"))
+        .unwrap_or_default();
+    let first_script = project
+        .scripts
+        .first()
+        .map(String::as_str)
+        .unwrap_or(project.name.as_str());
+
+    format!(
+        r#"{{
+  description = "{name}: Python uv project";
+{python_comment}
+  inputs = {{
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+
+    py-harbor = {{
+      url = "git+https://codeberg.org/caniko/py-harbor.git";
+      inputs.nixpkgs.follows = "nixpkgs";
+    }};
+
+    treefmt-nix.url = "github:numtide/treefmt-nix";
+    git-hooks.url = "github:cachix/git-hooks.nix";
+  }};
+
+  outputs = {{
+    self,
+    nixpkgs,
+    py-harbor,
+    treefmt-nix,
+    git-hooks,
+    ...
+  }}:
+    let
+      py = py-harbor.lib;
+
+      mkDevShells =
+        system:
+        let
+          pkgs = py.mkPkgs {{ inherit system; }};
+          treefmtEval = treefmt-nix.lib.evalModule pkgs (import ./nix/treefmt.nix);
+          pre-commit-check = git-hooks.lib.${{system}}.run {{
+            src = ./.;
+            hooks = import ./nix/pre-commit.nix {{
+              inherit pkgs;
+              treefmtWrapper = treefmtEval.config.build.wrapper;
+            }};
+          }};
+        in
+        {{
+          default = py.mkUvDevShell {{
+            inherit pkgs;
+            uvExtra = "{cpu_extra}";
+            devGroup = "{dev_group}";
+            extraPackages = pre-commit-check.enabledPackages;
+            shellHookSuffix = pre-commit-check.shellHook;
+          }};
+        }};
+
+      mkPythonPackage =
+        system:
+        let
+          pkgs = py.mkPkgs {{ inherit system; }};
+          python = pkgs.python313;
+        in
+        py.mkUvAppPackage {{
+          inherit pkgs python;
+          name = "{package_name}";
+          envName = "{env_name}";
+          workspaceRoot = ./.;
+          dependencies = {{
+            {name} = [ "{cpu_extra}" ];
+          }};
+          scripts = [
+{scripts}          ];
+        }};
+
+      mkPythonCheckEnv =
+        system:
+        let
+          pkgs = py.mkPkgs {{ inherit system; }};
+          python = pkgs.python313;
+        in
+        py.mkUvCheckEnv {{
+          inherit pkgs python;
+          name = "{env_name}-check";
+          workspaceRoot = ./.;
+          dependencies = {{
+            {name} = [
+              "{cpu_extra}"
+              "{dev_group}"
+            ];
+          }};
+        }};
+
+      mkChecks =
+        system:
+        let
+          pkgs = py.mkPkgs {{ inherit system; }};
+          treefmtEval = treefmt-nix.lib.evalModule pkgs (import ./nix/treefmt.nix);
+          checkEnv = mkPythonCheckEnv system;
+          package = self.packages.${{system}}.{package_name};
+        in
+        {{
+          flake-eval = pkgs.runCommand "{name}-flake-eval" {{ }} ''
+            test -x ${{package}}/bin/{first_script}
+            mkdir -p $out
+            echo ok > $out/result
+          '';
+          formatting = treefmtEval.config.build.check self;
+          offline-tests = pkgs.runCommand "{name}-offline-tests" {{ }} ''
+            export HOME=$TMPDIR/home
+            export XDG_CACHE_HOME=$TMPDIR/cache
+            mkdir -p "$HOME" "$XDG_CACHE_HOME" "$out"
+            cd ${{./.}}
+            ${{checkEnv}}/bin/python -m pytest -p no:cacheprovider
+            echo ok > $out/result
+          '';
+          typecheck = pkgs.runCommand "{name}-typecheck" {{ }} ''
+            export HOME=$TMPDIR/home
+            export XDG_CACHE_HOME=$TMPDIR/cache
+            mkdir -p "$HOME" "$XDG_CACHE_HOME" "$out"
+            cd ${{./.}}
+            ${{checkEnv}}/bin/python -m mypy .
+            echo ok > $out/result
+          '';
+          uv-format = pkgs.runCommand "{name}-uv-format" {{ }} ''
+            export HOME=$TMPDIR/home
+            export XDG_CACHE_HOME=$TMPDIR/cache
+            export UV_NO_SYNC=1
+            mkdir -p "$HOME" "$XDG_CACHE_HOME" "$out"
+            cd ${{./.}}
+            ${{checkEnv}}/bin/uv run --no-sync ruff format --check .
+            echo ok > $out/result
+          '';
+        }};
+
+    in
+    {{
+      devShells = py.forAllSystems mkDevShells;
+
+      packages = py.forPackageSystems (
+        system:
+        let
+          package = mkPythonPackage system;
+        in
+        {{
+          {package_name} = package;
+          default = package;
+        }}
+      );
+
+      apps = py.forPackageSystems (
+        system:
+        let
+          package = self.packages.${{system}}.{package_name};
+        in
+        {{
+          {package_name} = {{
+            type = "app";
+            program = "${{package}}/bin/{first_script}";
+          }};
+          default = self.apps.${{system}}.{package_name};
+        }}
+      );
+
+      formatter = py.forAllSystems (
+        system:
+        let
+          pkgs = py.mkPkgs {{ inherit system; }};
+          treefmtEval = treefmt-nix.lib.evalModule pkgs (import ./nix/treefmt.nix);
+        in
+        treefmtEval.config.build.wrapper
+      );
+
+      checks = py.forPackageSystems mkChecks;
+    }};
+}}
+"#,
+        name = project.name,
+        python_comment = python_comment,
+        cpu_extra = cpu_extra,
+        dev_group = dev_group,
+        package_name = package_name,
+        env_name = env_name,
+        scripts = scripts,
+        first_script = first_script,
+    )
 }
 
 /// Render the `targets = [ "native" ... ];` body shared by the mkCrossPackages
@@ -837,13 +1215,17 @@ pub fn cross_template(targets: &[FlakeTargetArg], audit_tools: AuditTools) -> St
           cargo-sbom
           cargo-nextest
           cosign
+          file
+          gnutar
+          gzip
           jq
           minisign
           nodejs
           pre-commit
           rpm
-          debootstrap
           util-linux
+          unzip
+          zip
           reprepro
           rust-analyzer
           taplo
@@ -870,6 +1252,7 @@ pub fn cross_template(targets: &[FlakeTargetArg], audit_tools: AuditTools) -> St
             '';
           }};
         in "${{script}}/bin/local-check-fast";
+        meta.description = "Run fast local validation checks";
       }};
       apps.local-check-release = {{
         type = "app";
@@ -893,24 +1276,58 @@ pub fn cross_template(targets: &[FlakeTargetArg], audit_tools: AuditTools) -> St
                 echo "usage: local-check-release <version>" >&2
                 exit 2
               fi
+              repo="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+              cd "$repo"
               ${{self.apps.${{system}}.local-check-fast.program}}
+              manifest="release/artifacts.json"
               mkdir -p release
+              jq -n --arg version "$version" \
+                '{{version: $version, artifacts: [], skipped: [], generated_by: "simit local-check-release"}}' \
+                > "$manifest.tmp"
+              mv "$manifest.tmp" "$manifest"
+              manifest_add_file() {{
+                path="$1"
+                producer="$2"
+                [ -f "$path" ] || return 0
+                sha256="$(sha256sum "$path" | awk '{{print $1}}')"
+                jq --arg path "$path" --arg sha256 "$sha256" --arg producer "$producer" \
+                  '.artifacts += [{{path: $path, sha256: $sha256, producer: $producer}}]' \
+                  "$manifest" > "$manifest.tmp"
+                mv "$manifest.tmp" "$manifest"
+              }}
+              manifest_skip() {{
+                name="$1"
+                reason="$2"
+                jq --arg name "$name" --arg reason "$reason" \
+                  '.skipped += [{{name: $name, reason: $reason}}]' \
+                  "$manifest" > "$manifest.tmp"
+                mv "$manifest.tmp" "$manifest"
+              }}
               if [ -f about-template.hbs ]; then
                 cargo about generate --output-file release/THIRD_PARTY_LICENSES.html about-template.hbs
+                manifest_add_file release/THIRD_PARTY_LICENSES.html cargo-about
               else
                 echo "warning: about-template.hbs not found; skipping cargo-about report" >&2
+                manifest_skip cargo-about "about-template.hbs not found"
               fi
               cargo sbom --output-format cyclone_dx_json_1_5 > "release/''${{version}}.cdx.json"
               cargo sbom --output-format spdx_json_2_3 > "release/''${{version}}.spdx.json"
+              manifest_add_file "release/''${{version}}.cdx.json" cargo-sbom-cyclonedx
+              manifest_add_file "release/''${{version}}.spdx.json" cargo-sbom-spdx
               if [ -n "''${{COSIGN_PRIVATE_KEY:-}}" ]; then
                 echo "COSIGN_PRIVATE_KEY present; local release parity will not sign or upload" >&2
               else
                 echo "warning: keyless Sigstore and COSIGN_PRIVATE_KEY unavailable locally; skipping local cosign signing" >&2
+                manifest_skip cosign "keyless Sigstore and COSIGN_PRIVATE_KEY unavailable locally"
+              fi
+              if [ -x scripts/release-local-check.sh ]; then
+                bash scripts/release-local-check.sh "$version"
               fi
               echo "local release parity dry-run passed for ''${{version}}; no external publish was attempted"
             '';
           }};
         in "${{script}}/bin/local-check-release";
+        meta.description = "Run local release parity checks without publishing";
       }};
       apps.local-release-deploy = {{
         type = "app";
@@ -931,11 +1348,24 @@ pub fn cross_template(targets: &[FlakeTargetArg], audit_tools: AuditTools) -> St
                 echo "refusing to publish without an explicit matching confirmation" >&2
                 exit 2
               fi
-              echo "local-release-deploy is a project-specific hook; add publisher steps before using it" >&2
+              repo="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+              cd "$repo"
+              ${{self.apps.${{system}}.local-check-release.program}} "$version"
+              if ! jq -e --arg version "$version" '.version == $version' release/artifacts.json >/dev/null; then
+                echo "release/artifacts.json is missing or does not match version $version" >&2
+                exit 1
+              fi
+              if [ -x scripts/local-release-deploy.sh ]; then
+                SIMIT_LOCAL_RELEASE_CHECK_DONE=1 exec bash scripts/local-release-deploy.sh "$version" --publish "$version"
+              fi
+              echo "local-release-deploy has no project publisher hook at scripts/local-release-deploy.sh" >&2
+              echo "Homebrew-capable hooks must build Darwin tarballs and gate tap pushes on HOMEBREW_TAP_TOKEN" >&2
+              echo "local-check-release must remain non-publishing: no brew bump, git push, upload, or cargo publish" >&2
               exit 2
             '';
           }};
         in "${{script}}/bin/local-release-deploy";
+        meta.description = "Run the guarded local release deployment hook";
       }};
     }});
 }}
@@ -962,6 +1392,9 @@ fn insert_template_audit_packages(content: &mut String, audit_tools: AuditTools)
     }
     if audit_tools.audit && !content.contains(CARGO_AUDIT_PACKAGE.trim_end()) {
         content.insert_str(dev_shell_packages_start(content), CARGO_AUDIT_PACKAGE);
+    }
+    if audit_tools.pyo3 && !content.contains(MATURIN_PACKAGE.trim_end()) {
+        content.insert_str(dev_shell_packages_start(content), MATURIN_PACKAGE);
     }
 }
 
@@ -1024,8 +1457,26 @@ fn has_treefmt_wrapper_argument(content: &str) -> bool {
     content.contains("treefmtWrapper = treefmtEval.config.build.wrapper;")
 }
 
+fn has_pre_commit_check_binding(content: &str) -> bool {
+    content.contains("pre-commit-check = git-hooks.lib.${system}.run")
+        || ((content.contains("pre-commit-check =") || content.contains("pre-commit-check="))
+            && content.contains("git-hooks.lib")
+            && content.contains(".run"))
+}
+
+fn has_formatter_output(content: &str) -> bool {
+    (content.contains("formatter =") || content.contains("formatter."))
+        && content.contains("treefmtEval.config.build.wrapper")
+}
+
+fn has_formatting_check(content: &str) -> bool {
+    (content.contains("formatting =") || content.contains(".formatting ="))
+        && content.contains("treefmtEval.config.build.check self")
+}
+
 fn has_pre_commit_shell_hook(content: &str) -> bool {
-    content.contains("shellHook =") && content.contains("pre-commit-check.shellHook")
+    (content.contains("shellHook =") || content.contains("shellHookSuffix ="))
+        && content.contains("pre-commit-check.shellHook")
 }
 
 fn pre_commit_nix(
@@ -1152,6 +1603,7 @@ mod tests {
         let flake = template(AuditTools {
             audit: true,
             deny: false,
+            pyo3: false,
         });
         // The single-target path must keep its fixed crane build and must not
         // mention rs-harbor or the cross helper.
@@ -1163,15 +1615,51 @@ mod tests {
         assert!(flake.contains("cargo-audit"));
         assert!(flake.contains("cargo-deny"));
         assert!(flake.contains("cargo-sbom"));
+        assert!(flake.contains("file"));
+        assert!(flake.contains("gnutar"));
+        assert!(flake.contains("gzip"));
+        assert!(flake.contains("zip"));
         assert!(flake.contains("apps.local-check-fast"));
         assert!(flake.contains("apps.local-check-release"));
         assert!(flake.contains("apps.local-release-deploy"));
+        assert!(flake.contains("meta.description = \"Run fast local validation checks\";"));
+        assert!(flake.contains(
+            "meta.description = \"Run local release parity checks without publishing\";"
+        ));
+        assert!(
+            flake.contains("meta.description = \"Run the guarded local release deployment hook\";")
+        );
         assert!(flake.contains("no external publish was attempted"));
+        assert!(flake.contains("release/artifacts.json"));
+        assert!(flake.contains("generated_by: \"simit local-check-release\""));
+        assert!(flake.contains("scripts/release-local-check.sh"));
+        assert!(flake.contains("scripts/local-release-deploy.sh"));
         assert!(flake.contains("local-release-deploy <version> --publish <version>"));
-        assert!(flake.contains("project-specific hook"));
+        assert!(flake.contains("project publisher hook"));
+        assert!(flake.contains("Homebrew-capable hooks must build Darwin tarballs"));
+        assert!(flake.contains("gate tap pushes on HOMEBREW_TAP_TOKEN"));
+        assert!(flake.contains("local-check-release must remain non-publishing"));
+        assert!(!flake.contains("nix run '.#rs-harbor' -- brew bump"));
+        assert!(!flake.contains("debootstrap"));
+        assert!(!flake.contains("copr-cli build"));
+        assert!(!flake.contains("choco push"));
         assert!(!flake.contains("cargo publish -p"));
     }
 
+    /// Bidirectional rs-harbor ↔ simit contract test.
+    ///
+    /// This test verifies that the cross-compilation flake template calls
+    /// rs-harbor's `mkDevShells` with the parameters rs-harbor now expects
+    /// (packages list, extraShellHook, checks).  The rs-harbor side of the
+    /// contract is enforced by rs-harbor's own `checks.nix`:
+    ///
+    ///   - `mkDevShells-accepts-simit-parameters` — mkDevShells accepts
+    ///     the full package set simit passes
+    ///   - `mkDevShells-audit-tools-in-path` — cargo-audit, cargo-deny
+    ///     resolve and land on PATH
+    ///
+    /// If this test fails, simit's generated cross-template expects an API
+    /// shape that rs-harbor's mkDevShells no longer supports.
     #[test]
     fn cross_template_with_all_targets_pins_the_shared_contract() {
         let flake = cross_template(
@@ -1179,6 +1667,7 @@ mod tests {
             AuditTools {
                 audit: true,
                 deny: true,
+                pyo3: false,
             },
         );
 
@@ -1212,12 +1701,34 @@ mod tests {
         assert!(flake.contains("cargo-deny"));
         assert!(flake.contains("cargo-about"));
         assert!(flake.contains("cargo-sbom"));
+        assert!(flake.contains("file"));
+        assert!(flake.contains("gnutar"));
+        assert!(flake.contains("gzip"));
+        assert!(flake.contains("zip"));
         assert!(flake.contains("apps.local-check-fast"));
         assert!(flake.contains("apps.local-check-release"));
         assert!(flake.contains("apps.local-release-deploy"));
+        assert!(flake.contains("meta.description = \"Run fast local validation checks\";"));
+        assert!(flake.contains(
+            "meta.description = \"Run local release parity checks without publishing\";"
+        ));
+        assert!(
+            flake.contains("meta.description = \"Run the guarded local release deployment hook\";")
+        );
         assert!(flake.contains("no external publish was attempted"));
+        assert!(flake.contains("release/artifacts.json"));
+        assert!(flake.contains("generated_by: \"simit local-check-release\""));
+        assert!(flake.contains("scripts/release-local-check.sh"));
+        assert!(flake.contains("scripts/local-release-deploy.sh"));
         assert!(flake.contains("local-release-deploy <version> --publish <version>"));
-        assert!(flake.contains("project-specific hook"));
+        assert!(flake.contains("project publisher hook"));
+        assert!(flake.contains("Homebrew-capable hooks must build Darwin tarballs"));
+        assert!(flake.contains("gate tap pushes on HOMEBREW_TAP_TOKEN"));
+        assert!(flake.contains("local-check-release must remain non-publishing"));
+        assert!(!flake.contains("nix run '.#rs-harbor' -- brew bump"));
+        assert!(!flake.contains("debootstrap"));
+        assert!(!flake.contains("copr-cli build"));
+        assert!(!flake.contains("choco push"));
         assert!(!flake.contains("cargo publish -p"));
         assert!(
             flake.contains(
@@ -1248,6 +1759,7 @@ mod tests {
             AuditTools {
                 audit: true,
                 deny: false,
+                pyo3: false,
             },
         );
         assert!(flake.contains("targets = [\"native\" \"windows\"];"));
@@ -1264,6 +1776,7 @@ mod tests {
             AuditTools {
                 audit: true,
                 deny: false,
+                pyo3: false,
             },
         );
         assert!(flake.contains("targets = [\"aarch64-linux\" \"windows\"];"));

@@ -36,6 +36,32 @@ with_docs = true
 with_msrv = true
 ```
 
+## Generic CI vs Release Publishing
+
+Rust CI and crates.io publishing are separate modes. By default, `simit init ci`
+generates ordinary CI workflows even when a package has crates.io metadata. It
+does not generate `publish-crate*.yaml` or `keys/maintainers.gpg` unless release
+publishing is enabled explicitly or inferred from existing generated release
+workflows.
+
+Enable crates.io release workflows with:
+
+```sh
+simit init ci --platform forgejo --publish-crates
+```
+
+Persist the choice when a project owns release publishing:
+
+```toml
+[ci]
+publish_crates = true
+```
+
+Pass `--publish-crates=false` or set `publish_crates = false` to keep a project
+CI-only even when stale generated publish workflows are present. Release
+artifact and package-manager publishing flags such as `--with-artifacts`,
+`--with-homebrew`, `--with-chocolatey`, and `--with-scoop` imply release mode.
+
 For a Forgejo Nix workspace with release artifacts and cargo-deny:
 
 ```sh
@@ -46,6 +72,21 @@ simit init ci --platform forgejo --runtime nix --runner atlas-nix-trusted \
 If the project also publishes a Homebrew tap, keep the tap metadata in project
 config when possible. Command-line overrides work, but config makes future
 checks shorter and reproducible.
+
+## Flake-Integrated Rust Projects
+
+`--runtime auto` selects the Nix runtime when `flake.nix` exposes meaningful
+project outputs such as `packages`, `apps`, `checks`, `devShells`, NixOS or
+Home Manager modules, or top-level `lib`. Cargo-only projects and placeholder
+flakes stay on direct Cargo CI.
+
+For existing custom flakes, keep project-owned outputs intact and let simit
+manage hook wiring with:
+
+```sh
+simit init flake --scope hooks-only
+simit init ci --platform forgejo --runtime nix
+```
 
 ## Non-Publishable Crates
 

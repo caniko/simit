@@ -78,6 +78,29 @@
             default = [];
             type = lib.types.listOf lib.types.str;
           };
+          pages = lib.mkOption {
+            default = null;
+            type = lib.types.nullOr (lib.types.submodule {
+              freeformType = lib.types.attrsOf lib.types.anything;
+              options = {
+                repo = lib.mkOption {
+                  type = lib.types.str;
+                };
+                token_secret = lib.mkOption {
+                  default = "codeberg_token";
+                  type = lib.types.str;
+                };
+                source_branch = lib.mkOption {
+                  default = "trunk";
+                  type = lib.types.str;
+                };
+                deploy_app = lib.mkOption {
+                  default = ".#deploy-pages";
+                  type = lib.types.str;
+                };
+              };
+            });
+          };
         };
       };
     };

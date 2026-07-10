@@ -1,7 +1,7 @@
 # simit
 
 <!-- simit:badges:start -->
-[![CI](https://img.shields.io/badge/CI-managed+extra-2088ff)](.forgejo/workflows/ci.yaml) [![Nix](https://img.shields.io/badge/Nix-managed-5277c3)](flake.nix) [![docs](https://img.shields.io/badge/docs-enabled-6f42c1)](docs) [![crates.io](https://img.shields.io/badge/crates.io-ready-f46623)](https://crates.io/crates/simit)
+[![CI](https://img.shields.io/badge/CI-drift-2088ff)](.forgejo/workflows/ci.yaml) [![Nix](https://img.shields.io/badge/Nix-managed-5277c3)](flake.nix) [![docs](https://img.shields.io/badge/docs-enabled-6f42c1)](docs) [![crates.io](https://img.shields.io/badge/crates.io-ready-f46623)](https://crates.io/crates/simit) [![release](https://img.shields.io/badge/release-configured-2ea44f)](.forgejo/workflows/release.yml)
 <!-- simit:badges:end -->
 
 `simit` is a semver-aware commit helper for Rust projects.
@@ -184,6 +184,26 @@ pull-request events:
 simit init ci --platform forgejo --runtime nix
 ```
 
+Projects that expose a generated `.#site` and `.#deploy-pages` app, such as
+`plinth-project` Codeberg Pages sites, can opt into the repository-local Pages
+deployment hook:
+
+```sh
+simit init ci --platform forgejo --runtime nix \
+  --with-codeberg-pages --pages-repo caniko/my-project
+```
+
+This writes `.forgejo/workflows/pages.yaml`, reads
+`secrets.codeberg_token`, configures the `forgejo-actions` git identity, adds an
+authenticated `pages-origin` remote for the same Codeberg repository, and runs
+`DEPLOY_REMOTE=pages-origin nix run .#deploy-pages`. The same settings can live
+in project config:
+
+```toml
+[ci.pages]
+repo = "caniko/my-project"
+```
+
 ### Omnix CI (`--with-om-ci`)
 
 Use `--with-om-ci` with `--runtime nix` to replace the generated Nix flake
@@ -287,15 +307,17 @@ artifact workflow. Extra setup runs after checkout/toolchain setup and before
 tests or builds; extra env is job-level environment; required secrets are
 documented as workflow comments but are not read locally.
 
-For publishable crates, `init ci` renders a separate `publish-crate.yaml`
-workflow. That workflow runs only on exact semver tag pushes such as `0.9.0`,
-verifies that the tag matches the Cargo package version, verifies the signed
-tag against `keys/maintainers.gpg`, runs a publish dry run, and publishes with
-the `CRATES_IO_API_TOKEN` secret. Workspace members with `publish = false` keep
-test and clippy CI but do not get `cargo package` or `publish-crate` gates.
-On generation, `init ci` discovers the release signing key from
-`[release.signing].key`, `git config user.signingkey`, or `--maintainer-key`,
-then writes the maintainer public keyring.
+Generic `init ci` runs render test, lint, and optional quality-gate workflows
+without crates.io publishing. Add `--publish-crates` for release projects that
+need a separate `publish-crate.yaml` workflow. That workflow runs only on exact
+semver tag pushes such as `0.9.0`, verifies that the tag matches the Cargo
+package version, verifies the signed tag against `keys/maintainers.gpg`, runs a
+publish dry run, and publishes with the `CRATES_IO_API_TOKEN` secret. Workspace
+members with `publish = false` keep test and clippy CI but do not get
+`cargo package` or `publish-crate` gates. On release-enabled generation,
+`init ci` discovers the release signing key from `[release.signing].key`,
+`git config user.signingkey`, or `--maintainer-key`, then writes the maintainer
+public keyring.
 
 You can manage that trust root explicitly:
 
@@ -424,7 +446,13 @@ id = "foo"
 title = "Foo"
 authors = "Example Maintainers"
 description = "Cross-platform foo manager"
+summary = "Cross-platform foo manager for Windows users"
 project_url = "https://foo.example.com"
+icon_url = "https://foo.example.com/icon.png"
+package_source_url = "https://codeberg.org/example/foo-package"
+docs_url = "https://foo.example.com/docs"
+bug_tracker_url = "https://codeberg.org/example/foo/issues"
+project_source_url = "https://codeberg.org/example/foo"
 download_repo = "caniko/foo"
 archive_pattern = "foo-{version}-{arch}-windows.zip"
 
@@ -477,6 +505,12 @@ simit dist scoop bump \
   --bucket ../scoop-foo \
   --archive x64=release/foo-0.3.1-x86_64-windows.zip \
   --archive arm64=release/foo-0.3.1-aarch64-windows.zip
+
+simit dist windows publish \
+  --version 0.3.1 \
+  --archive x64=release/foo-0.3.1-x86_64-windows.zip \
+  --work-dir target/simit-windows \
+  --chocolatey --scoop --winget
 ```
 
 ## Distribution channels
@@ -709,8 +743,8 @@ simit release patch -m "release patch"
 
 The crates.io publish workflow runs when the release tag is pushed and requires
 `CRATES_IO_API_TOKEN`. It also requires `keys/maintainers.gpg`, which
-`simit init ci` and `simit release trust init` generate from the configured
-release signing key.
+`simit init ci --publish-crates` and `simit release trust init` generate from
+the configured release signing key.
 
 If that tag-triggered workflow fails after the tag has already been pushed,
 commit the fix and rerun the release pipeline with:

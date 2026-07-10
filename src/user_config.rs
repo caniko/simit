@@ -425,7 +425,7 @@ impl UserCiPlatformDefaults {
 }
 
 impl ResolvedRunner {
-    fn literal(label: &str) -> Result<Self> {
+    pub(crate) fn literal(label: &str) -> Result<Self> {
         validate_runner_label(label)?;
         Ok(Self {
             name: None,
@@ -574,6 +574,27 @@ trusted = true
 platform = "forgejo"
 labels = ["windows-atlas"]
 os = "windows"
+arch = "x86_64"
+runtimes = ["cargo"]
+
+[ci.runners.codeberg_tiny]
+platform = "forgejo"
+labels = ["codeberg-tiny"]
+os = "linux"
+arch = "x86_64"
+runtimes = ["cargo"]
+
+[ci.runners.codeberg_small]
+platform = "forgejo"
+labels = ["codeberg-small"]
+os = "linux"
+arch = "x86_64"
+runtimes = ["cargo"]
+
+[ci.runners.codeberg_medium]
+platform = "forgejo"
+labels = ["codeberg-medium"]
+os = "linux"
 arch = "x86_64"
 runtimes = ["cargo"]
 

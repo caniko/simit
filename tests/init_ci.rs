@@ -35,6 +35,57 @@ license = "MIT"
     temp
 }
 
+fn init_python_project() -> TempDir {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    fs::write(
+        root.join("pyproject.toml"),
+        r#"[project]
+name = "py-demo"
+version = "0.1.0"
+
+[project.scripts]
+py-demo = "py_demo:main"
+
+[project.optional-dependencies]
+cpu = ["pytest"]
+
+[dependency-groups]
+dev = ["mypy", "pytest", "ruff"]
+"#,
+    )
+    .unwrap();
+    fs::write(root.join("uv.lock"), "").unwrap();
+    fs::write(
+        root.join("flake.nix"),
+        r#"{
+  inputs.py-harbor.url = "git+https://codeberg.org/caniko/py-harbor.git";
+  outputs = { self, py-harbor, ... }: {
+    checks.x86_64-linux.offline-tests = {};
+    checks.x86_64-linux.typecheck = {};
+  };
+}
+"#,
+    )
+    .unwrap();
+    fs::write(
+        root.join("simit.toml"),
+        r#"[flake]
+scope = "full"
+mode = "custom"
+backend = "py-harbor"
+
+[flake.expected_outputs]
+checks = ["offline-tests", "typecheck"]
+
+[ci]
+runtime = "nix"
+"#,
+    )
+    .unwrap();
+    temp
+}
+
 fn init_workspace_fixture() -> TempDir {
     let temp = TempDir::new().unwrap();
     copy_dir(Path::new("tests/fixtures/workspace-ci"), temp.path());
@@ -130,6 +181,7 @@ extra_setup = [
 ]
 extra_env = { SKILLNET_TEST_PG_URL = "${{ secrets.SKILLNET_TEST_PG_URL }}" }
 required_secrets = ["SKILLNET_TEST_PG_URL"]
+required_env = ["VSCE_PAT_FILE", "OVSX_PAT_FILE"]
 "#,
     )
     .unwrap();
@@ -333,7 +385,15 @@ fn generates_forgejo_nix_workflows() {
 
     let status = simit_with_user_config(temp.path())
         .current_dir(temp.path())
-        .args(["init", "ci", "--platform", "forgejo", "--runtime", "nix"])
+        .args([
+            "init",
+            "ci",
+            "--platform",
+            "forgejo",
+            "--runtime",
+            "nix",
+            "--publish-crates",
+        ])
         .status()
         .unwrap();
     assert!(status.success());
@@ -382,6 +442,264 @@ fn generates_forgejo_nix_workflows() {
 }
 
 #[test]
+fn generic_rust_ci_does_not_generate_publish_workflow_by_default() {
+    let temp = init_package(true);
+
+    let status = simit_with_user_config(temp.path())
+        .current_dir(temp.path())
+        .args(["init", "ci", "--platform", "forgejo"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let ci = read(&temp.path().join(".forgejo/workflows/ci.yaml"));
+    assert_yaml_parses(&ci);
+    assert!(temp.path().join(".forgejo/workflows/ci.yaml").exists());
+    assert!(
+        !temp
+            .path()
+            .join(".forgejo/workflows/publish-crate.yaml")
+            .exists()
+    );
+    assert!(!temp.path().join("keys/maintainers.gpg").exists());
+}
+
+#[test]
+fn generic_flake_integrated_rust_ci_auto_selects_nix_without_publish() {
+    let temp = init_package(true);
+    fs::write(
+        temp.path().join("flake.nix"),
+        r#"{
+  outputs = { self }: {
+    packages.x86_64-linux.default = {};
+    apps.x86_64-linux.default = { type = "app"; program = "/bin/demo"; };
+    checks.x86_64-linux.demo = {};
+    devShells.x86_64-linux.default = {};
+    nixosModules.default = {};
+    homeModules.default = {};
+    lib = {};
+  };
+}
+"#,
+    )
+    .unwrap();
+
+    let status = simit_with_user_config(temp.path())
+        .current_dir(temp.path())
+        .args([
+            "init",
+            "ci",
+            "--platform",
+            "forgejo",
+            "--with-audit",
+            "--with-deny",
+            "--with-docs",
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let ci = read(&temp.path().join(".forgejo/workflows/ci.yaml"));
+    assert_yaml_parses(&ci);
+    assert!(ci.contains("NIX_CONFIG: \"experimental-features = nix-command flakes\""));
+    assert!(ci.contains("run: nix flake check"));
+    assert!(ci.contains("nix develop -c cargo test"));
+    assert!(ci.contains("nix develop"));
+    assert!(ci.contains("cargo doc"));
+    assert!(ci.contains("--no-deps --all-features"));
+    assert!(
+        !temp
+            .path()
+            .join(".forgejo/workflows/publish-crate.yaml")
+            .exists()
+    );
+    assert!(!temp.path().join("keys/maintainers.gpg").exists());
+
+    let simit_toml = read(&temp.path().join("simit.toml"));
+    assert!(simit_toml.contains("runtime = \"nix\""));
+    assert!(simit_toml.contains("with_audit = true"));
+    assert!(simit_toml.contains("with_deny = true"));
+    assert!(simit_toml.contains("with_docs = true"));
+    assert!(!simit_toml.contains("publish_crates = true"));
+}
+
+#[test]
+fn forgejo_nix_can_generate_codeberg_pages_workflow() {
+    let temp = init_package(true);
+
+    let status = simit_with_user_config(temp.path())
+        .current_dir(temp.path())
+        .args([
+            "init",
+            "ci",
+            "--platform",
+            "forgejo",
+            "--runtime",
+            "nix",
+            "--with-codeberg-pages",
+            "--pages-repo",
+            "caniko/plinth",
+            "--pages-canonical-domain",
+            "plinth.tartanoglu.com",
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let pages = read(&temp.path().join(".forgejo/workflows/pages.yaml"));
+    assert_yaml_parses(&pages);
+    assert!(pages.contains("# Generated by simit."));
+    assert!(pages.contains("name: pages"));
+    assert!(pages.contains("      - trunk"));
+    assert!(pages.contains("group: ${{ codeberg.workflow }}-${{ codeberg.ref }}"));
+    assert!(pages.contains("runs-on: atlas"));
+    assert!(pages.contains("      - name: Validate Pages domain"));
+    assert!(pages.contains("nix build .#site --no-link --out-link result-pages-site"));
+    assert!(pages.contains("grep -qx plinth.tartanoglu.com result-pages-site/.domains"));
+    assert!(pages.contains("CODEBERG_TOKEN: ${{ secrets.codeberg_token }}"));
+    assert!(pages.contains("test -n \"$CODEBERG_TOKEN\""));
+    assert!(pages.contains("git config user.name \"forgejo-actions\""));
+    assert!(pages.contains(
+        "git remote add pages-origin \"https://caniko:${CODEBERG_TOKEN}@codeberg.org/caniko/plinth.git\""
+    ));
+    assert!(pages.contains("DEPLOY_REMOTE=pages-origin nix run .#deploy-pages"));
+
+    let simit_toml = read(&temp.path().join("simit.toml"));
+    assert!(simit_toml.contains("[ci.pages]"));
+    assert!(simit_toml.contains("repo = \"caniko/plinth\""));
+    assert!(simit_toml.contains("canonical_domain = \"plinth.tartanoglu.com\""));
+
+    let check = simit_with_user_config(temp.path())
+        .current_dir(temp.path())
+        .args(["init", "ci", "--platform", "forgejo", "--check"])
+        .status()
+        .unwrap();
+    assert!(check.success());
+}
+
+#[test]
+fn forgejo_nix_can_generate_vscode_publish_workflow_with_file_env_pats() {
+    let temp = init_package(true);
+    fs::write(
+        temp.path().join("simit.toml"),
+        r#"[ci]
+runtime = "nix"
+runner = "atlas-nix-trusted"
+
+[vscode]
+extension_dir = "pkl-lsp-vscode"
+runner = "atlas-nix-trusted"
+codeberg_repo = "caniko/pkl-lsp"
+codeberg_token_secret = "codeberg_token"
+pat_source = "file-env"
+vsce_pat_file_env = "VSCE_PAT_FILE"
+ovsx_pat_file_env = "OVSX_PAT_FILE"
+cargo_package = "pkl-lsp-server"
+prepublish_commands = ["nix flake check --no-build"]
+"#,
+    )
+    .unwrap();
+
+    let status = simit_with_user_config(temp.path())
+        .current_dir(temp.path())
+        .args([
+            "init",
+            "ci",
+            "--platform",
+            "forgejo",
+            "--runtime",
+            "nix",
+            "--with-vscode",
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let workflow = read(
+        &temp
+            .path()
+            .join(".forgejo/workflows/publish-vscode-extension.yaml"),
+    );
+    assert_yaml_parses(&workflow);
+    assert!(workflow.contains("# Generated by simit."));
+    assert!(workflow.contains("name: Publish VS Code Extension"));
+    assert!(workflow.contains("tags: [\"[0-9]*.[0-9]*.[0-9]*\"]"));
+    assert!(workflow.contains("runs-on: atlas-nix-trusted"));
+    assert!(workflow.contains("CODEBERG_TOKEN: ${{ secrets.codeberg_token }}"));
+    assert!(workflow.contains("file_env=VSCE_PAT_FILE"));
+    assert!(workflow.contains("file_env=OVSX_PAT_FILE"));
+    assert!(workflow.contains(
+        "VSCE_PUBLISHER=$(nix shell nixpkgs#jq -c jq -r '.publisher' pkl-lsp-vscode/package.json)"
+    ));
+    assert!(workflow.contains(
+        "nix develop -c npx --yes @vscode/vsce verify-pat \"$VSCE_PUBLISHER\" --pat \"$VSCE_PUBLISH_PAT\""
+    ));
+    assert!(workflow.contains("https://aka.ms/vsm-create-publisher"));
+    assert!(!workflow.contains("secrets.VSCE_PAT"));
+    assert!(!workflow.contains("secrets.OVSX_PAT"));
+    assert!(!workflow.contains("skipping VS Code"));
+    assert!(!workflow.contains("skipping Open VSX"));
+    assert!(workflow.contains("git verify-tag \"$GITHUB_REF_NAME\""));
+    assert!(workflow.contains(
+        "cargo_metadata=$(nix shell nixpkgs#cargo -c cargo metadata --no-deps --format-version 1)"
+    ));
+    assert!(workflow.contains("nix shell nixpkgs#jq -c jq -r --arg name pkl-lsp-server"));
+    assert!(workflow.contains(
+        "extension_version=$(nix shell nixpkgs#jq -c jq -r '.version' pkl-lsp-vscode/package.json)"
+    ));
+    assert!(workflow.contains("nix shell nixpkgs#jq -c jq -r '.id // empty'"));
+    assert!(workflow.contains(
+        "existing_ids=$(printf '%s' \"$release_json\" | nix shell nixpkgs#jq -c jq -r --arg name \"$name\" '.assets[]? | select(.name == $name) | .id')"
+    ));
+    assert!(workflow.contains(
+        "curl --fail --silent --show-error --request DELETE --header \"$auth_header\" \"$api/repos/$repo/releases/$release_id/assets/$asset_id\" >/dev/null"
+    ));
+    assert!(workflow.contains("nix flake check --no-build"));
+    assert!(workflow.contains(
+        "nix develop -c npx --yes @vscode/vsce publish --packagePath release/*.vsix --pat \"$PUBLISH_PAT\" --skip-duplicate"
+    ));
+    assert!(workflow.contains("Verify VS Code Marketplace visibility"));
+    assert!(workflow.contains(
+        "nix develop -c npm --prefix \"$diag_dir\" install --silent azure-devops-node-api@15.1.2 >/dev/null"
+    ));
+    assert!(workflow.contains(
+        "Marketplace extension is missing Public flag; setting it for ${publisher}.${extension}"
+    ));
+    assert!(
+        workflow
+            .contains("https://marketplace.visualstudio.com/_apis/public/gallery/extensionquery")
+    );
+    assert!(
+        workflow.contains("$EXTENSION_ID is visible in the public VS Code Marketplace Gallery API")
+    );
+    assert!(workflow.contains("Verify VS Code Marketplace signatures"));
+    assert!(workflow.contains("Microsoft.VisualStudio.Services.VSIXPackage"));
+    assert!(workflow.contains("Microsoft.VisualStudio.Services.VsixSignature"));
+    assert!(workflow.contains(".signature.manifest"));
+    assert!(workflow.contains(".signature.p7s"));
+    assert!(workflow.contains("nix shell nixpkgs#unzip -c unzip -q \"$signature_zip\""));
+    assert!(workflow.contains(
+        "nix develop -c npx --yes @vscode/vsce@latest verify-signature --packagePath \"$package_path\" --manifestPath \"$manifest_path\" --signaturePath \"$signature_path\""
+    ));
+    assert!(workflow.contains(
+        "OVSX_NAMESPACE=$(nix shell nixpkgs#jq -c jq -r '.publisher' pkl-lsp-vscode/package.json)"
+    ));
+    assert!(workflow.contains(
+        "nix develop -c npx --yes ovsx create-namespace \"$OVSX_NAMESPACE\" --pat \"$PUBLISH_PAT\" || true"
+    ));
+    assert!(workflow.contains(
+        "nix develop -c npx --yes ovsx publish release/*.vsix --pat \"$PUBLISH_PAT\" --skip-duplicate"
+    ));
+
+    let check = simit_with_user_config(temp.path())
+        .current_dir(temp.path())
+        .args(["init", "ci", "--platform", "forgejo", "--check"])
+        .status()
+        .unwrap();
+    assert!(check.success());
+}
+
+#[test]
 fn forgejo_nix_runtime_uses_devshell_quality_tools_without_cargo_install() {
     let temp = init_package(true);
 
@@ -425,6 +743,7 @@ fn forgejo_nix_with_om_ci_replace_emits_om_ci_step() {
             "nix",
             "--with-om-ci",
             "--with-docs",
+            "--publish-crates",
         ])
         .status()
         .unwrap();
@@ -433,7 +752,8 @@ fn forgejo_nix_with_om_ci_replace_emits_om_ci_step() {
     let ci = read(&temp.path().join(".forgejo/workflows/ci.yaml"));
     assert!(ci.contains("OMNIX_REF:"));
     assert!(ci.contains("nix run \"$OMNIX_REF\" -- ci run"));
-    assert!(ci.contains("run: nix develop -c cargo doc --no-deps --all-features"));
+    assert!(ci.contains("run: nix develop .#docs -c cargo doc --no-deps --all-features"));
+    assert!(!ci.contains("run: nix develop -c cargo doc --no-deps --all-features"));
     assert!(!ci.ends_with("\n\n"));
     assert!(!ci.contains("run: nix flake check"));
     assert!(!ci.contains("nix develop -c cargo test"));
@@ -681,7 +1001,14 @@ fn generates_github_plain_cargo_workflows() {
 
     let status = simit_with_user_config(temp.path())
         .current_dir(temp.path())
-        .args(["init", "ci", "--platform", "github", "--with-nextest"])
+        .args([
+            "init",
+            "ci",
+            "--platform",
+            "github",
+            "--with-nextest",
+            "--publish-crates",
+        ])
         .status()
         .unwrap();
     assert!(status.success());
@@ -761,6 +1088,19 @@ fn generated_workflows_include_project_ci_setup_and_env() {
         assert!(workflow.contains(
             "    env:\n      NIX_CONFIG: \"experimental-features = nix-command flakes\"\n      XDG_CACHE_HOME: \"/tmp/.cache\"\n      CARGO_HOME: \"/tmp/.cargo\"\n      SKILLNET_TEST_PG_URL: \"${{ secrets.SKILLNET_TEST_PG_URL }}\""
         ));
+        assert!(workflow.contains("      - name: Validate required environment"));
+        assert!(workflow.contains(
+            "if [ -z \"${VSCE_PAT_FILE:-}\" ]; then echo 'VSCE_PAT_FILE is required by simit project configuration.' >&2; exit 1; fi"
+        ));
+        assert!(workflow.contains(
+            "if [ ! -r \"${VSCE_PAT_FILE}\" ] || [ ! -s \"${VSCE_PAT_FILE}\" ]; then echo 'VSCE_PAT_FILE must point to a readable, non-empty file.' >&2; exit 1; fi"
+        ));
+        assert!(workflow.contains(
+            "if [ -z \"${OVSX_PAT_FILE:-}\" ]; then echo 'OVSX_PAT_FILE is required by simit project configuration.' >&2; exit 1; fi"
+        ));
+        assert!(workflow.contains(
+            "if [ ! -r \"${OVSX_PAT_FILE}\" ] || [ ! -s \"${OVSX_PAT_FILE}\" ]; then echo 'OVSX_PAT_FILE must point to a readable, non-empty file.' >&2; exit 1; fi"
+        ));
         assert!(workflow.contains("      - name: Project setup\n        run: apt-get update && apt-get install -y --no-install-recommends postgresql-client"));
     }
 }
@@ -771,7 +1111,14 @@ fn forgejo_auto_runtime_uses_rust_container_even_when_flake_exists() {
 
     let status = simit_with_user_config(temp.path())
         .current_dir(temp.path())
-        .args(["init", "ci", "--platform", "forgejo", "--with-nextest"])
+        .args([
+            "init",
+            "ci",
+            "--platform",
+            "forgejo",
+            "--with-nextest",
+            "--publish-crates",
+        ])
         .status()
         .unwrap();
     assert!(status.success());
@@ -851,6 +1198,7 @@ fn forgejo_runner_override_applies_to_all_jobs() {
             "nix",
             "--runner",
             "codeberg-medium-lazy",
+            "--publish-crates",
         ])
         .status()
         .unwrap();
@@ -869,7 +1217,15 @@ fn forgejo_runner_override_does_not_require_user_config() {
 
     let status = simit()
         .current_dir(temp.path())
-        .args(["init", "ci", "--platform", "forgejo", "--runner", "atlas"])
+        .args([
+            "init",
+            "ci",
+            "--platform",
+            "forgejo",
+            "--runner",
+            "atlas",
+            "--publish-crates",
+        ])
         .status()
         .unwrap();
     assert!(status.success());
@@ -887,7 +1243,7 @@ fn forgejo_user_config_can_render_structured_runner_labels() {
 
     let status = simit_with_multilabel_user_config(temp.path())
         .current_dir(temp.path())
-        .args(["init", "ci", "--platform", "forgejo"])
+        .args(["init", "ci", "--platform", "forgejo", "--publish-crates"])
         .status()
         .unwrap();
     assert!(status.success());
@@ -905,7 +1261,15 @@ fn forgejo_nix_runtime_uses_nix_runner_for_publish_jobs() {
 
     let status = simit_with_split_runtime_user_config(temp.path())
         .current_dir(temp.path())
-        .args(["init", "ci", "--platform", "forgejo", "--runtime", "nix"])
+        .args([
+            "init",
+            "ci",
+            "--platform",
+            "forgejo",
+            "--runtime",
+            "nix",
+            "--publish-crates",
+        ])
         .status()
         .unwrap();
     assert!(status.success());
@@ -1035,7 +1399,7 @@ homepage = "https://example.com/demo"
 
     let ci = read(&root.join(".github/workflows/ci.yaml"));
     assert!(ci.contains(
-        "cargo run -- init ci --platform github --runner ubuntu-latest --windows-runner windows-latest --with-artifacts --with-chocolatey --with-scoop --check"
+        "cargo run -- init ci --platform github --runner ubuntu-latest --windows-runner windows-latest --with-artifacts --publish-crates --with-chocolatey --with-scoop --check"
     ));
 }
 
@@ -1045,7 +1409,7 @@ fn check_succeeds_when_workflows_are_current() {
 
     let write_status = simit_with_user_config(temp.path())
         .current_dir(temp.path())
-        .args(["init", "ci", "--platform", "forgejo"])
+        .args(["init", "ci", "--platform", "forgejo", "--publish-crates"])
         .status()
         .unwrap();
     assert!(write_status.success());
@@ -1064,7 +1428,14 @@ fn workspace_flag_generates_per_package_workflows() {
 
     let status = simit_with_user_config(temp.path())
         .current_dir(temp.path())
-        .args(["init", "ci", "--platform", "forgejo", "--workspace"])
+        .args([
+            "init",
+            "ci",
+            "--platform",
+            "forgejo",
+            "--workspace",
+            "--publish-crates",
+        ])
         .status()
         .unwrap();
     assert!(status.success());
@@ -1131,7 +1502,14 @@ fn workspace_publish_false_package_keeps_ci_but_skips_package_and_publish_workfl
 
     let status = simit_with_user_config(temp.path())
         .current_dir(temp.path())
-        .args(["init", "ci", "--platform", "forgejo", "--workspace"])
+        .args([
+            "init",
+            "ci",
+            "--platform",
+            "forgejo",
+            "--workspace",
+            "--publish-crates",
+        ])
         .status()
         .unwrap();
     assert!(status.success());
@@ -1166,7 +1544,14 @@ fn workspace_publish_tag_validation_is_package_scoped_for_diverging_versions() {
 
     let status = simit_with_user_config(temp.path())
         .current_dir(temp.path())
-        .args(["init", "ci", "--platform", "forgejo", "--workspace"])
+        .args([
+            "init",
+            "ci",
+            "--platform",
+            "forgejo",
+            "--workspace",
+            "--publish-crates",
+        ])
         .status()
         .unwrap();
     assert!(status.success());
@@ -1198,7 +1583,15 @@ fn package_flag_generates_selected_package_workflows() {
 
     let status = simit_with_user_config(temp.path())
         .current_dir(temp.path())
-        .args(["init", "ci", "--platform", "forgejo", "--package", "beta"])
+        .args([
+            "init",
+            "ci",
+            "--platform",
+            "forgejo",
+            "--package",
+            "beta",
+            "--publish-crates",
+        ])
         .status()
         .unwrap();
     assert!(status.success());
@@ -1354,7 +1747,7 @@ fn init_ci_blocks_without_exportable_maintainer_key() {
         .env("XDG_DATA_HOME", common::data_home_path())
         .env("GIT_CONFIG_GLOBAL", isolated_home.path().join("gitconfig"))
         .env("GIT_CONFIG_NOSYSTEM", "true")
-        .args(["init", "ci", "--platform", "forgejo"])
+        .args(["init", "ci", "--platform", "forgejo", "--publish-crates"])
         .output()
         .unwrap();
 
@@ -1413,7 +1806,7 @@ fn check_fails_when_workflows_differ() {
 
     let write_status = simit_with_user_config(temp.path())
         .current_dir(temp.path())
-        .args(["init", "ci", "--platform", "forgejo"])
+        .args(["init", "ci", "--platform", "forgejo", "--publish-crates"])
         .status()
         .unwrap();
     assert!(write_status.success());
@@ -1426,7 +1819,14 @@ fn check_fails_when_workflows_differ() {
 
     let output = simit_with_user_config(temp.path())
         .current_dir(temp.path())
-        .args(["init", "ci", "--platform", "forgejo", "--check"])
+        .args([
+            "init",
+            "ci",
+            "--platform",
+            "forgejo",
+            "--publish-crates",
+            "--check",
+        ])
         .output()
         .unwrap();
 
@@ -1631,7 +2031,7 @@ fn check_fails_when_publish_workflow_is_missing() {
 
     let write_status = simit_with_user_config(temp.path())
         .current_dir(temp.path())
-        .args(["init", "ci", "--platform", "forgejo"])
+        .args(["init", "ci", "--platform", "forgejo", "--publish-crates"])
         .status()
         .unwrap();
     assert!(write_status.success());
@@ -1809,9 +2209,13 @@ fn forgejo_nix_homebrew_step_matches_hardened_shape() {
     assert!(workflow.contains("HOMEBREW_TAP_REPO: homebrew-demo"));
     assert!(workflow.contains("HOMEBREW_TAP_URL: https://example.com/homebrew-demo.git"));
     assert!(workflow.contains("set -euo pipefail"));
-    assert!(workflow.contains("HOMEBREW_TAP_TOKEN not configured; skipping Homebrew tap update."));
+    assert!(
+        workflow.contains(
+            "HOMEBREW_TAP_TOKEN is required because Homebrew tap publishing is configured."
+        )
+    );
     assert!(workflow.contains("\"release/demo-${VERSION}-aarch64-darwin.tar.gz\""));
-    assert!(workflow.contains("\"release/demo-${VERSION}-x86_64-darwin.tar.gz\""));
+    assert!(!workflow.contains("\"release/demo-${VERSION}-x86_64-darwin.tar.gz\""));
     assert!(workflow.contains("\"release/demo-${VERSION}-aarch64-linux.tar.gz\""));
     assert!(workflow.contains("\"release/demo-${VERSION}-x86_64-linux.tar.gz\""));
     assert!(workflow.contains("credential_helper='!f() { echo username=caniko; echo \"password=$HOMEBREW_TAP_TOKEN\"; }; f'"));
@@ -1825,7 +2229,7 @@ fn forgejo_nix_homebrew_step_matches_hardened_shape() {
     assert!(workflow.contains("--homepage 'https://example.com' \\"));
     assert!(workflow.contains("--license MIT \\"));
     assert!(workflow.contains("--archive \"darwin_arm=https://codeberg.org/foo/demo/releases/download/${VERSION}/demo-${VERSION}-aarch64-darwin.tar.gz,release/demo-${VERSION}-aarch64-darwin.tar.gz\" \\"));
-    assert!(workflow.contains("--archive \"darwin_intel=https://codeberg.org/foo/demo/releases/download/${VERSION}/demo-${VERSION}-x86_64-darwin.tar.gz,release/demo-${VERSION}-x86_64-darwin.tar.gz\" \\"));
+    assert!(!workflow.contains("--archive \"darwin_intel=https://codeberg.org/foo/demo/releases/download/${VERSION}/demo-${VERSION}-x86_64-darwin.tar.gz,release/demo-${VERSION}-x86_64-darwin.tar.gz\" \\"));
     assert!(workflow.contains("--archive \"linux_arm=https://codeberg.org/foo/demo/releases/download/${VERSION}/demo-${VERSION}-aarch64-linux.tar.gz,release/demo-${VERSION}-aarch64-linux.tar.gz\" \\"));
     assert!(workflow.contains("--archive \"linux_intel=https://codeberg.org/foo/demo/releases/download/${VERSION}/demo-${VERSION}-x86_64-linux.tar.gz,release/demo-${VERSION}-x86_64-linux.tar.gz\" \\"));
     assert_eq!(workflow.matches("--binary ").count(), 2);
@@ -1958,6 +2362,9 @@ fn github_chocolatey_flag_resolves_when_config_is_present() {
     assert!(workflow.contains("name: Install Chocolatey"));
     assert!(workflow.contains("name: Publish Chocolatey package"));
     assert!(workflow.contains("CHOCOLATEY_API_KEY: ${{ secrets.chocolatey_api_key }}"));
+    assert!(workflow.contains(
+        "CHOCOLATEY_API_KEY is required because Chocolatey package publishing is configured."
+    ));
     assert!(workflow.contains("simit dist chocolatey bump `"));
     assert!(workflow.contains("--archive \"x64=release/demo-$version-x86_64-windows.zip\" `"));
     assert!(workflow.contains("--push-source \"$env:CHOCO_PUSH_SOURCE\" `"));
@@ -2038,6 +2445,11 @@ fn github_scoop_flag_resolves_when_config_is_present() {
     assert!(workflow.contains("windows-${{ matrix.arch }}"));
     assert!(workflow.contains("name: Publish Scoop bucket"));
     assert!(workflow.contains("SCOOP_BUCKET_TOKEN: ${{ secrets.SCOOP_BUCKET_TOKEN }}"));
+    assert!(
+        workflow.contains(
+            "SCOOP_BUCKET_TOKEN is required because Scoop bucket publishing is configured."
+        )
+    );
     assert!(workflow.contains(
         "git -c credential.helper=\"$credentialHelper\" clone \"$env:SCOOP_BUCKET_URL\" bucket"
     ));
@@ -2299,4 +2711,46 @@ fn check_ignores_existing_deny_policy_customization() {
         .unwrap();
 
     assert!(output.status.success());
+}
+
+#[test]
+fn forgejo_python_uv_ci_uses_nix_checks() {
+    let temp = init_python_project();
+
+    let status = simit_with_user_config(temp.path())
+        .current_dir(temp.path())
+        .args(["init", "ci", "--platform", "forgejo"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let workflow = read(&temp.path().join(".forgejo/workflows/ci.yaml"));
+    assert_yaml_parses(&workflow);
+    assert!(workflow.contains("runs-on: atlas"));
+    assert!(workflow.contains(
+        "nix run git+https://codeberg.org/caniko/simit.git -- init flake --check --diff"
+    ));
+    assert!(workflow.contains("nix flake check --no-build"));
+    assert!(workflow.contains("nix build .#checks.x86_64-linux.offline-tests"));
+    assert!(workflow.contains("nix build .#checks.x86_64-linux.typecheck"));
+    assert!(!workflow.contains("cargo test"));
+    assert!(
+        !temp
+            .path()
+            .join(".forgejo/workflows/publish-crate.yaml")
+            .exists()
+    );
+    assert!(
+        !temp
+            .path()
+            .join(".forgejo/workflows/release-artifacts.yaml")
+            .exists()
+    );
+
+    let check_status = simit_with_user_config(temp.path())
+        .current_dir(temp.path())
+        .args(["init", "ci", "--platform", "forgejo", "--check"])
+        .status()
+        .unwrap();
+    assert!(check_status.success());
 }

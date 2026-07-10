@@ -1,0 +1,45 @@
+[site]
+title = "simit"
+description = "<!-- simit:badges:start -->"
+base_url = "/"
+footer_note = "Generated from repository metadata by the plinth-project FOSS sweep."
+
+[[nav]]
+label = "Overview"
+href = "#overview"
+
+[[nav]]
+label = "Source"
+href = "ssh://git@codeberg.org/caniko/simit.git"
+
+[[footer_links]]
+label = "Source"
+href = "ssh://git@codeberg.org/caniko/simit.git"
+
+[[pages]]
+slug = "index"
+title = "simit"
+description = "<!-- simit:badges:start -->"
+
+[[pages.sections]]
+type = "hero"
+title = "simit"
+tagline = "<!-- simit:badges:start -->"
+subtitle = "<!-- simit:badges:start -->"
+
+[[pages.sections.ctas]]
+label = "View source"
+href = "ssh://git@codeberg.org/caniko/simit.git"
+primary = true
+
+[[pages.sections]]
+type = "feature_grid"
+id = "overview"
+
+[[pages.sections.features]]
+title = "Rust"
+description = "Project technology detected from repository manifests."
+
+[[pages.sections.features]]
+title = "Nix"
+description = "Project technology detected from repository manifests."

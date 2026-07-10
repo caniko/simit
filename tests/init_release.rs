@@ -282,15 +282,19 @@ result_links = ["result"]
     assert!(workflow.contains("minisign -V -m \"$minisign_probe\""));
     assert!(!workflow.contains("test -r \"${ATTIC_TOKENS_DIR:?}/rs-modde\""));
     assert!(workflow.contains("attic_token_dir=\"${ATTIC_TOKENS_DIR:-}\""));
-    assert!(workflow.contains("skipping optional Nix closure cache push"));
-    assert!(workflow.contains("Attic login failed; skipping optional Nix closure cache push"));
-    assert!(
-        workflow.contains(
-            "Attic push failed; continuing release without optional Nix closure cache push"
-        )
-    );
+    assert!(workflow.contains("is required because Nix closure cache publishing is configured."));
+    assert!(workflow.contains("Attic login failed for configured Nix closure cache publishing."));
+    assert!(workflow.contains("Attic push failed for configured Nix closure cache publishing."));
     assert!(workflow.contains("          nix path-info -r \\\n            ./result \\"));
     assert!(!workflow.contains("\n            result \\\n"));
+    assert!(workflow.contains("awk -v version=\"$VERSION\""));
+    assert!(
+        workflow
+            .contains("^## \\\\[\" version \"\\\\] - [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]$")
+    );
+    assert!(workflow.contains("found && /^## \\[/ { exit }"));
+    assert!(workflow.contains("--rawfile body release-notes.md"));
+    assert!(!workflow.contains("--rawfile body CHANGELOG.md"));
     assert!(
         workflow
             .find("      - name: Publish Codeberg release")

@@ -48,6 +48,85 @@ pub struct ProjectConfig {
     pub flatpak: Option<FlatpakConfig>,
     #[serde(default)]
     pub winget: Option<WingetConfig>,
+    #[serde(default)]
+    pub vscode: Option<VscodeConfig>,
+}
+
+/// `[vscode]` — publish a VS Code/Open VSX extension from Forgejo CI.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct VscodeConfig {
+    /// Extension package directory, relative to the repository root.
+    #[serde(default = "default_vscode_extension_dir")]
+    pub extension_dir: String,
+    /// Optional runner override. Defaults to the normal release/CI runner.
+    #[serde(default)]
+    pub runner: Option<String>,
+    /// Codeberg `<owner>/<repo>` receiving release assets.
+    pub codeberg_repo: String,
+    /// REST API base URL.
+    #[serde(default = "default_codeberg_api_base")]
+    pub codeberg_api_base: String,
+    /// Actions secret exposed as `CODEBERG_TOKEN`.
+    #[serde(default = "default_codeberg_token_secret")]
+    pub codeberg_token_secret: String,
+    /// Source used for Marketplace/Open VSX PATs.
+    #[serde(default)]
+    pub pat_source: VscodePatSource,
+    /// Runner file-env variable pointing at the VS Code Marketplace PAT file.
+    #[serde(default = "default_vscode_vsce_pat_file_env")]
+    pub vsce_pat_file_env: String,
+    /// Runner file-env variable pointing at the Open VSX PAT file.
+    #[serde(default = "default_vscode_ovsx_pat_file_env")]
+    pub ovsx_pat_file_env: String,
+    /// Actions secret containing the VS Code Marketplace PAT.
+    #[serde(default = "default_vscode_vsce_pat_secret")]
+    pub vsce_pat_secret: String,
+    /// Actions secret containing the Open VSX PAT.
+    #[serde(default = "default_vscode_ovsx_pat_secret")]
+    pub ovsx_pat_secret: String,
+    /// Command that packages release assets. `$VERSION` contains the tag version.
+    #[serde(default = "default_vscode_package_command")]
+    pub package_command: String,
+    /// Optional Cargo package whose version must match the release tag.
+    #[serde(default)]
+    pub cargo_package: Option<String>,
+    /// Project-specific checks/build commands run before packaging/publishing.
+    #[serde(default)]
+    pub prepublish_commands: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum VscodePatSource {
+    FileEnv,
+    ActionsSecret,
+    #[default]
+    Both,
+}
+
+fn default_vscode_extension_dir() -> String {
+    "vscode".to_owned()
+}
+
+fn default_vscode_vsce_pat_file_env() -> String {
+    "VSCE_PAT_FILE".to_owned()
+}
+
+fn default_vscode_ovsx_pat_file_env() -> String {
+    "OVSX_PAT_FILE".to_owned()
+}
+
+fn default_vscode_vsce_pat_secret() -> String {
+    "VSCE_PAT".to_owned()
+}
+
+fn default_vscode_ovsx_pat_secret() -> String {
+    "OVSX_PAT".to_owned()
+}
+
+fn default_vscode_package_command() -> String {
+    "nix run .#package-release-assets -- \"$VERSION\"".to_owned()
 }
 
 /// `[flatpak]` — open a Flathub manifest-update PR on stable releases.
@@ -104,6 +183,8 @@ pub struct FlakeConfig {
     pub scope: Option<FlakeScope>,
     #[serde(default)]
     pub mode: FlakeMode,
+    #[serde(default)]
+    pub backend: FlakeBackend,
     #[serde(default = "default_toolchain_binding")]
     pub toolchain_binding: String,
     #[serde(default = "default_crane_lib_binding")]
@@ -135,11 +216,23 @@ pub enum FlakeMode {
     Custom,
 }
 
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum FlakeBackend {
+    #[default]
+    RustCrane,
+    PyHarbor,
+}
+
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct FlakeExpectedOutputs {
     #[serde(default)]
     pub packages: Vec<String>,
+    #[serde(default)]
+    pub apps: Vec<String>,
+    #[serde(default)]
+    pub dev_shells: Vec<String>,
     #[serde(default)]
     pub checks: Vec<String>,
     #[serde(default)]
@@ -151,6 +244,7 @@ impl Default for FlakeConfig {
         Self {
             scope: None,
             mode: FlakeMode::Canonical,
+            backend: FlakeBackend::RustCrane,
             toolchain_binding: default_toolchain_binding(),
             crane_lib_binding: default_crane_lib_binding(),
             package_binding: default_package_binding(),
@@ -200,17 +294,50 @@ pub struct CiConfig {
     #[serde(default)]
     pub with_artifacts: bool,
     #[serde(default)]
+    pub with_pypi_publish: bool,
+    #[serde(default)]
+    pub publish_crates: bool,
+    #[serde(default)]
     pub extra_setup: Vec<String>,
     #[serde(default)]
     pub extra_env: BTreeMap<String, String>,
     #[serde(default)]
     pub required_secrets: Vec<String>,
     #[serde(default)]
+    pub required_env: Vec<String>,
+    #[serde(default)]
     pub om_ci: bool,
     #[serde(default)]
     pub om_ci_augment: bool,
     #[serde(default)]
     pub omnix_ref: Option<String>,
+    #[serde(default)]
+    pub pages: Option<CodebergPagesConfig>,
+    #[serde(default)]
+    pub step_runners: BTreeMap<String, String>,
+}
+
+/// `[ci.pages]` — Codeberg Pages publication through a repository-local deploy app.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CodebergPagesConfig {
+    /// Codeberg `<owner>/<repo>` receiving the generated `pages` branch.
+    pub repo: String,
+    /// Canonical hostname expected in the generated `.domains` file.
+    #[serde(default)]
+    pub canonical_domain: Option<String>,
+    /// Nix installable that builds the generated static site.
+    #[serde(default = "default_pages_site_output")]
+    pub site_output: String,
+    /// CI secret exposed as `CODEBERG_TOKEN` for authenticated branch pushes.
+    #[serde(default = "default_codeberg_token_secret")]
+    pub token_secret: String,
+    /// Source branch that triggers the Pages deployment workflow.
+    #[serde(default = "default_pages_source_branch")]
+    pub source_branch: String,
+    /// Nix app that builds and pushes the generated site.
+    #[serde(default = "default_pages_deploy_app")]
+    pub deploy_app: String,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
@@ -218,6 +345,8 @@ pub struct CiConfig {
 pub struct ReleaseConfig {
     #[serde(default)]
     pub signing: ReleaseSigningConfig,
+    #[serde(default)]
+    pub publish: ReleasePublishConfig,
     #[serde(default)]
     pub smoke: ReleaseSmokeConfig,
     /// Codeberg/Forgejo release publication via the REST API.
@@ -235,6 +364,28 @@ pub struct ReleaseConfig {
     /// Optional Windows Authenticode signing of release `.exe`s.
     #[serde(default)]
     pub windows_signing: Option<WindowsSigningConfig>,
+}
+
+/// `[release.publish]` — downstream publisher failure policy.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ReleasePublishConfig {
+    /// How generated CI decides whether downstream publishers are hard-required.
+    #[serde(default)]
+    pub enforcement: ReleasePublisherEnforcement,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ReleasePublisherEnforcement {
+    /// Preserve the historical behavior: credentials marked required by the
+    /// generated contract fail preflight; optional publishers may skip.
+    #[default]
+    Declared,
+    /// Probe public package destinations. Missing credentials/artifacts are
+    /// soft until the channel has evidence of a previous successful publish,
+    /// then become hard failures.
+    ActivatedRemote,
 }
 
 /// `[release.announce]` — post a stable-release note to Mastodon and/or Matrix.
@@ -408,6 +559,35 @@ pub struct ResolvedCodebergRelease {
     pub body_from_changelog: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedCodebergPages {
+    pub repo: String,
+    pub owner: String,
+    pub canonical_domain: Option<String>,
+    pub site_output: String,
+    pub token_secret: String,
+    pub source_branch: String,
+    pub deploy_app: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedVscode {
+    pub extension_dir: String,
+    pub runner: Option<String>,
+    pub codeberg_repo: String,
+    pub codeberg_owner: String,
+    pub codeberg_api_base: String,
+    pub codeberg_token_secret: String,
+    pub pat_source: VscodePatSource,
+    pub vsce_pat_file_env: String,
+    pub ovsx_pat_file_env: String,
+    pub vsce_pat_secret: String,
+    pub ovsx_pat_secret: String,
+    pub package_command: String,
+    pub cargo_package: Option<String>,
+    pub prepublish_commands: Vec<String>,
+}
+
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ReleaseSigningConfig {
@@ -499,7 +679,7 @@ fn default_windows_archive_pattern() -> String {
 pub struct HomebrewPlatformsConfig {
     #[serde(default = "default_true")]
     pub darwin_arm: bool,
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub darwin_intel: bool,
     #[serde(default = "default_true")]
     pub linux_arm: bool,
@@ -525,11 +705,29 @@ pub struct ChocolateyConfig {
     /// Nuspec description. If omitted, derived from Cargo metadata.
     pub description: Option<String>,
 
+    /// Nuspec summary.
+    pub summary: Option<String>,
+
     /// Project URL. If omitted, derived from Cargo package homepage.
     pub project_url: Option<String>,
 
     /// License URL.
     pub license_url: Option<String>,
+
+    /// Package icon URL.
+    pub icon_url: Option<String>,
+
+    /// URL for the package source.
+    pub package_source_url: Option<String>,
+
+    /// Documentation URL.
+    pub docs_url: Option<String>,
+
+    /// Bug tracker URL.
+    pub bug_tracker_url: Option<String>,
+
+    /// Project source URL.
+    pub project_source_url: Option<String>,
 
     /// Space-separated Chocolatey tags.
     pub tags: Option<String>,
@@ -680,7 +878,7 @@ impl Default for HomebrewPlatformsConfig {
     fn default() -> Self {
         Self {
             darwin_arm: true,
-            darwin_intel: true,
+            darwin_intel: false,
             linux_arm: true,
             linux_intel: true,
         }
@@ -717,6 +915,18 @@ fn default_codeberg_api_base() -> String {
 
 fn default_codeberg_token_secret() -> String {
     "codeberg_token".to_owned()
+}
+
+fn default_pages_source_branch() -> String {
+    "trunk".to_owned()
+}
+
+fn default_pages_deploy_app() -> String {
+    ".#deploy-pages".to_owned()
+}
+
+fn default_pages_site_output() -> String {
+    ".#site".to_owned()
 }
 
 fn default_copr_spec_path() -> Option<String> {
@@ -932,16 +1142,20 @@ pub struct AptConfig {
     /// reprepro components line; defaults to `main`.
     #[serde(default = "default_apt_components")]
     pub components: String,
-    /// Debian release used for the debootstrap build chroot.
+    /// Debian release used by legacy downstream configuration.
+    ///
+    /// Generated release flows build Debian packages through the project
+    /// devshell and `cargo-deb`; they do not require debootstrap or sudo.
     #[serde(default = "default_apt_debian_release")]
     pub debian_release: String,
     /// Cargo packages built with `cargo deb -p <pkg>`.
     #[serde(default)]
     pub packages: Vec<String>,
-    /// Debian build-chroot apt packages installed before `cargo deb`.
+    /// Legacy Debian build dependencies retained for configuration
+    /// compatibility. Generated local release flows do not create a chroot.
     #[serde(default)]
     pub build_deps: Vec<String>,
-    /// `cargo-deb` version installed in the build chroot.
+    /// `cargo-deb` version expected by legacy downstream configuration.
     #[serde(default = "default_cargo_deb_version")]
     pub cargo_deb_version: String,
     #[serde(default = "default_apt_gpg_key_secret")]
@@ -1016,8 +1230,14 @@ pub struct ResolvedChocolatey {
     pub title: String,
     pub authors: Option<String>,
     pub description: String,
+    pub summary: Option<String>,
     pub project_url: String,
     pub license_url: Option<String>,
+    pub icon_url: Option<String>,
+    pub package_source_url: Option<String>,
+    pub docs_url: Option<String>,
+    pub bug_tracker_url: Option<String>,
+    pub project_source_url: Option<String>,
     pub tags: Option<String>,
     pub release_notes_url: Option<String>,
     pub download_repo: String,
@@ -1036,8 +1256,14 @@ pub struct ChocolateyOverrides<'a> {
     pub title: Option<&'a str>,
     pub authors: Option<&'a str>,
     pub description: Option<&'a str>,
+    pub summary: Option<&'a str>,
     pub project_url: Option<&'a str>,
     pub license_url: Option<&'a str>,
+    pub icon_url: Option<&'a str>,
+    pub package_source_url: Option<&'a str>,
+    pub docs_url: Option<&'a str>,
+    pub bug_tracker_url: Option<&'a str>,
+    pub project_source_url: Option<&'a str>,
     pub tags: Option<&'a str>,
     pub release_notes_url: Option<&'a str>,
     pub download_repo: Option<&'a str>,
@@ -1199,6 +1425,14 @@ impl ProjectConfig {
             &self.flake.expected_outputs.packages,
         )?;
         validate_nonempty_strings(
+            "simit project config: [flake.expected_outputs].apps",
+            &self.flake.expected_outputs.apps,
+        )?;
+        validate_nonempty_strings(
+            "simit project config: [flake.expected_outputs].dev_shells",
+            &self.flake.expected_outputs.dev_shells,
+        )?;
+        validate_nonempty_strings(
             "simit project config: [flake.expected_outputs].checks",
             &self.flake.expected_outputs.checks,
         )?;
@@ -1211,9 +1445,87 @@ impl ProjectConfig {
             &self.ci.required_secrets,
         )?;
         validate_nonempty_strings(
+            "simit project config: [ci].required_env",
+            &self.ci.required_env,
+        )?;
+        validate_nonempty_strings(
             "simit project config: [ci].extra_setup",
             &self.ci.extra_setup,
         )?;
+        if let Some(pages) = &self.ci.pages {
+            validate_owner_repo("simit project config: [ci.pages].repo", &pages.repo)?;
+            if let Some(canonical_domain) = &pages.canonical_domain {
+                validate_nonempty_string(
+                    "simit project config: [ci.pages].canonical_domain",
+                    canonical_domain,
+                )?;
+            }
+            validate_nonempty_string(
+                "simit project config: [ci.pages].site_output",
+                &pages.site_output,
+            )?;
+            validate_nonempty_string(
+                "simit project config: [ci.pages].token_secret",
+                &pages.token_secret,
+            )?;
+            validate_nonempty_string(
+                "simit project config: [ci.pages].source_branch",
+                &pages.source_branch,
+            )?;
+            validate_nonempty_string(
+                "simit project config: [ci.pages].deploy_app",
+                &pages.deploy_app,
+            )?;
+        }
+        if let Some(vscode) = &self.vscode {
+            validate_nonempty_string(
+                "simit project config: [vscode].extension_dir",
+                &vscode.extension_dir,
+            )?;
+            validate_runner_label_opt("[vscode].runner", vscode.runner.as_deref())?;
+            validate_owner_repo(
+                "simit project config: [vscode].codeberg_repo",
+                &vscode.codeberg_repo,
+            )?;
+            validate_nonempty_string(
+                "simit project config: [vscode].codeberg_api_base",
+                &vscode.codeberg_api_base,
+            )?;
+            validate_nonempty_string(
+                "simit project config: [vscode].codeberg_token_secret",
+                &vscode.codeberg_token_secret,
+            )?;
+            validate_nonempty_string(
+                "simit project config: [vscode].vsce_pat_file_env",
+                &vscode.vsce_pat_file_env,
+            )?;
+            validate_nonempty_string(
+                "simit project config: [vscode].ovsx_pat_file_env",
+                &vscode.ovsx_pat_file_env,
+            )?;
+            validate_nonempty_string(
+                "simit project config: [vscode].vsce_pat_secret",
+                &vscode.vsce_pat_secret,
+            )?;
+            validate_nonempty_string(
+                "simit project config: [vscode].ovsx_pat_secret",
+                &vscode.ovsx_pat_secret,
+            )?;
+            validate_nonempty_string(
+                "simit project config: [vscode].package_command",
+                &vscode.package_command,
+            )?;
+            if let Some(cargo_package) = &vscode.cargo_package {
+                validate_nonempty_string(
+                    "simit project config: [vscode].cargo_package",
+                    cargo_package,
+                )?;
+            }
+            validate_nonempty_strings(
+                "simit project config: [vscode].prepublish_commands",
+                &vscode.prepublish_commands,
+            )?;
+        }
         for (key, value) in &self.ci.extra_env {
             if key.trim().is_empty() {
                 bail!("simit project config: [ci].extra_env keys must not be empty");
@@ -1537,6 +1849,10 @@ impl ProjectConfig {
         if description.chars().count() > 4000 {
             bail!("chocolatey.description must be 4000 characters or fewer");
         }
+        let summary = overrides
+            .summary
+            .map(str::to_owned)
+            .or_else(|| cfg.and_then(|chocolatey| chocolatey.summary.clone()));
         let project_url = merge_packager(
             overrides.project_url.map(str::to_owned),
             cfg.and_then(|chocolatey| chocolatey.project_url.clone()),
@@ -1547,6 +1863,26 @@ impl ProjectConfig {
             .license_url
             .map(str::to_owned)
             .or_else(|| cfg.and_then(|chocolatey| chocolatey.license_url.clone()));
+        let icon_url = overrides
+            .icon_url
+            .map(str::to_owned)
+            .or_else(|| cfg.and_then(|chocolatey| chocolatey.icon_url.clone()));
+        let package_source_url = overrides
+            .package_source_url
+            .map(str::to_owned)
+            .or_else(|| cfg.and_then(|chocolatey| chocolatey.package_source_url.clone()));
+        let docs_url = overrides
+            .docs_url
+            .map(str::to_owned)
+            .or_else(|| cfg.and_then(|chocolatey| chocolatey.docs_url.clone()));
+        let bug_tracker_url = overrides
+            .bug_tracker_url
+            .map(str::to_owned)
+            .or_else(|| cfg.and_then(|chocolatey| chocolatey.bug_tracker_url.clone()));
+        let project_source_url = overrides
+            .project_source_url
+            .map(str::to_owned)
+            .or_else(|| cfg.and_then(|chocolatey| chocolatey.project_source_url.clone()));
         let tags = overrides
             .tags
             .map(str::to_owned)
@@ -1578,8 +1914,14 @@ impl ProjectConfig {
             title,
             authors,
             description,
+            summary,
             project_url,
             license_url,
+            icon_url,
+            package_source_url,
+            docs_url,
+            bug_tracker_url,
+            project_source_url,
             tags,
             release_notes_url,
             download_repo,
@@ -1957,6 +2299,62 @@ impl ProjectConfig {
         }))
     }
 
+    /// Resolve the `[ci.pages]` section, if present.
+    pub fn resolve_codeberg_pages(&self) -> Result<Option<ResolvedCodebergPages>> {
+        let Some(pages) = &self.ci.pages else {
+            return Ok(None);
+        };
+        validate_owner_repo("simit project config: [ci.pages].repo", &pages.repo)?;
+        let owner = pages
+            .repo
+            .split_once('/')
+            .expect("validated owner/repo")
+            .0
+            .to_owned();
+        Ok(Some(ResolvedCodebergPages {
+            repo: pages.repo.clone(),
+            owner,
+            canonical_domain: pages.canonical_domain.clone(),
+            site_output: pages.site_output.clone(),
+            token_secret: pages.token_secret.clone(),
+            source_branch: pages.source_branch.clone(),
+            deploy_app: pages.deploy_app.clone(),
+        }))
+    }
+
+    /// Resolve the `[vscode]` section, if present.
+    pub fn resolve_vscode(&self) -> Result<Option<ResolvedVscode>> {
+        let Some(vscode) = &self.vscode else {
+            return Ok(None);
+        };
+        validate_owner_repo(
+            "simit project config: [vscode].codeberg_repo",
+            &vscode.codeberg_repo,
+        )?;
+        let codeberg_owner = vscode
+            .codeberg_repo
+            .split_once('/')
+            .expect("validated owner/repo")
+            .0
+            .to_owned();
+        Ok(Some(ResolvedVscode {
+            extension_dir: vscode.extension_dir.clone(),
+            runner: vscode.runner.clone(),
+            codeberg_repo: vscode.codeberg_repo.clone(),
+            codeberg_owner,
+            codeberg_api_base: vscode.codeberg_api_base.clone(),
+            codeberg_token_secret: vscode.codeberg_token_secret.clone(),
+            pat_source: vscode.pat_source,
+            vsce_pat_file_env: vscode.vsce_pat_file_env.clone(),
+            ovsx_pat_file_env: vscode.ovsx_pat_file_env.clone(),
+            vsce_pat_secret: vscode.vsce_pat_secret.clone(),
+            ovsx_pat_secret: vscode.ovsx_pat_secret.clone(),
+            package_command: vscode.package_command.clone(),
+            cargo_package: vscode.cargo_package.clone(),
+            prepublish_commands: vscode.prepublish_commands.clone(),
+        }))
+    }
+
     fn is_empty(&self) -> bool {
         self == &Self::default()
     }
@@ -2027,6 +2425,13 @@ fn validate_nonempty_strings(name: &str, values: &[String]) -> Result<()> {
     Ok(())
 }
 
+fn validate_nonempty_string(name: &str, value: &str) -> Result<()> {
+    if value.trim().is_empty() {
+        bail!("{name} must not be empty");
+    }
+    Ok(())
+}
+
 fn validate_runner_label_opt(name: &str, value: Option<&str>) -> Result<()> {
     if let Some(value) = value {
         validate_runner_label(value).map_err(|err| anyhow!("{name}: {err}"))?;
@@ -2046,12 +2451,44 @@ fn set_ci_table(table: &mut Table, ci: &CiConfig) {
     set_bool(table, "with_deny", ci.with_deny);
     set_bool(table, "with_docs", ci.with_docs);
     set_bool(table, "with_artifacts", ci.with_artifacts);
+    set_bool(table, "with_pypi_publish", ci.with_pypi_publish);
+    set_bool(table, "publish_crates", ci.publish_crates);
     set_string_array(table, "extra_setup", &ci.extra_setup);
     set_string_map(table, "extra_env", &ci.extra_env);
+    set_string_map(table, "step_runners", &ci.step_runners);
     set_string_array(table, "required_secrets", &ci.required_secrets);
+    set_string_array(table, "required_env", &ci.required_env);
     set_bool(table, "om_ci", ci.om_ci);
     set_bool(table, "om_ci_augment", ci.om_ci_augment);
     set_optional_string(table, "omnix_ref", ci.omnix_ref.as_deref());
+    set_optional_pages_table(table, ci.pages.as_ref());
+}
+
+fn set_optional_pages_table(table: &mut Table, pages: Option<&CodebergPagesConfig>) {
+    let Some(pages) = pages else {
+        table.remove("pages");
+        return;
+    };
+
+    let mut pages_table = Table::new();
+    pages_table.set_implicit(false);
+    pages_table["repo"] = value(pages.repo.as_str());
+    if let Some(canonical_domain) = &pages.canonical_domain {
+        pages_table["canonical_domain"] = value(canonical_domain.as_str());
+    }
+    if pages.site_output != default_pages_site_output() {
+        pages_table["site_output"] = value(pages.site_output.as_str());
+    }
+    if pages.token_secret != default_codeberg_token_secret() {
+        pages_table["token_secret"] = value(pages.token_secret.as_str());
+    }
+    if pages.source_branch != default_pages_source_branch() {
+        pages_table["source_branch"] = value(pages.source_branch.as_str());
+    }
+    if pages.deploy_app != default_pages_deploy_app() {
+        pages_table["deploy_app"] = value(pages.deploy_app.as_str());
+    }
+    table["pages"] = Item::Table(pages_table);
 }
 
 fn set_optional_string(table: &mut Table, key: &str, value_text: Option<&str>) {

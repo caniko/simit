@@ -37,7 +37,7 @@ fn render(args: ChocolateyRenderArgs) -> Result<()> {
     Ok(())
 }
 
-fn bump(args: ChocolateyBumpArgs) -> Result<()> {
+pub(crate) fn bump(args: ChocolateyBumpArgs) -> Result<()> {
     validate_version(&args.version)?;
     let mut overrides = args.chocolatey.as_overrides();
     if let Some(source) = args.push_source.as_deref() {
@@ -52,12 +52,31 @@ fn bump(args: ChocolateyBumpArgs) -> Result<()> {
     let sha256s = sha256_set(&archives)?;
     let package = render_package(&resolved, &args.version, include_x86, &sha256s);
     let package_dir = args.package_dir.as_std_path();
+    if args.dry_run {
+        println!(
+            "would write Chocolatey package {} {} to {}",
+            resolved.id,
+            args.version,
+            package_dir.display()
+        );
+        if args.push {
+            println!(
+                "would push Chocolatey package to {} using ${}",
+                resolved.push.source,
+                args.api_key_env
+                    .as_deref()
+                    .unwrap_or(resolved.api_key_env.as_str())
+            );
+        }
+        return Ok(());
+    }
     write_package(package_dir, &package)?;
 
     if args.push {
         let api_key_env = args
             .api_key_env
             .as_deref()
+            .or(Some(resolved.api_key_env.as_str()))
             .filter(|value| !value.is_empty())
             .ok_or_else(|| {
                 anyhow::anyhow!(
@@ -68,6 +87,14 @@ fn bump(args: ChocolateyBumpArgs) -> Result<()> {
             .with_context(|| format!("reading Chocolatey API key from ${api_key_env}"))?;
         if api_key.is_empty() {
             bail!("Chocolatey API key environment variable ${api_key_env} is empty");
+        }
+        if !args.force_resubmit && package_version_exists(&resolved.id, &args.version)? {
+            println!(
+                "already-current: Chocolatey {} {}",
+                resolved.id, args.version
+            );
+            registry::touch_current_project_or_warn([("chocolatey", FeatureStatus::Managed)]);
+            return Ok(());
         }
         pack_and_push(package_dir, &resolved.push.source, &api_key)?;
     }
@@ -197,6 +224,43 @@ fn pack_and_push(package_dir: &Path, source: &str, api_key: &str) -> Result<()> 
         bail!("choco push failed; Chocolatey rejects duplicate version pushes");
     }
     Ok(())
+}
+
+pub(crate) fn package_version_exists(id: &str, version: &str) -> Result<bool> {
+    let filter = format!(
+        "Id eq '{}' and Version eq '{}'",
+        odata_quote(id),
+        odata_quote(version)
+    );
+    let url = format!(
+        "https://community.chocolatey.org/api/v2/Packages()?%24filter={}",
+        percent_encode(&filter)
+    );
+    let output = Command::new("curl")
+        .arg("-fsSL")
+        .arg(&url)
+        .output()
+        .with_context(|| "checking Chocolatey package version with curl")?;
+    if !output.status.success() {
+        bail!("Chocolatey package version check failed");
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).contains("<entry>"))
+}
+
+fn odata_quote(value: &str) -> String {
+    value.replace('\'', "''")
+}
+
+fn percent_encode(value: &str) -> String {
+    let mut encoded = String::new();
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            encoded.push(byte as char);
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    encoded
 }
 
 fn package_nuspec(package_dir: &Path) -> Result<PathBuf> {

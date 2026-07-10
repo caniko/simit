@@ -101,6 +101,7 @@ pub fn contract(_command: ReleaseCommand) -> Result<()> {
     let inputs = ReleaseWorkflowInputs {
         runner: "",
         preinstalled_nix: false,
+        publish_enforcement: cfg.release.publish.enforcement,
         artifacts: &cfg.release.artifacts,
         smoke_command: cfg.release.smoke.command.as_deref(),
         codeberg: codeberg.as_ref(),

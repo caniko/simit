@@ -10,6 +10,7 @@ use crate::cli::{FlakeScopeArg, FlakeTargetArg, InitFlakeCommand};
 use crate::commands::upgrade;
 use crate::config::{FlakeMode, FlakeScope, ProjectConfig};
 use crate::project::{self, GeneratedFile, Languages};
+use crate::python;
 use crate::registry::{self, FeatureStatus};
 use crate::render::diff::unified_diff;
 use crate::render::flake;
@@ -24,6 +25,12 @@ const HOOK_REMOVAL_NOTES: &[(&str, &str)] = &[
 ];
 
 pub fn run(command: InitFlakeCommand) -> Result<()> {
+    if cargo::find_manifest(&std::env::current_dir().context("reading current directory")?).is_err()
+        && python::project_for_current_dir().is_ok()
+    {
+        return run_python(command);
+    }
+
     if command.check && command.print {
         bail!("init flake accepts only one of --check or --print");
     }
@@ -49,7 +56,7 @@ pub fn run(command: InitFlakeCommand) -> Result<()> {
     languages.nix = true;
     let rust_edition = rustfmt_edition(&metadata);
     let rust_version = workspace_rust_version(&metadata);
-    let audit_tools = resolve_audit_tools(workspace_root, &cfg, &languages)?;
+    let audit_tools = resolve_audit_tools(workspace_root, &cfg, &languages, &metadata)?;
     let all_files = flake::files(
         &languages,
         &rust_edition,
@@ -154,6 +161,98 @@ pub fn run(command: InitFlakeCommand) -> Result<()> {
     Ok(())
 }
 
+pub fn run_python(command: InitFlakeCommand) -> Result<()> {
+    if command.check && command.print {
+        bail!("init flake accepts only one of --check or --print");
+    }
+    if command.diff && !command.check {
+        bail!("init flake --diff requires --check");
+    }
+    if command.cross {
+        bail!("--cross is only supported for Rust projects");
+    }
+
+    let project = python::project_for_current_dir()?;
+    let workspace_root = project.workspace_root.as_std_path();
+    let cfg = ProjectConfig::load(workspace_root)?;
+    let mut languages = project::detect_languages(workspace_root)?;
+    languages.nix = true;
+    languages.uv_python = true;
+    let all_files = flake::python_files(&languages, &project);
+    let scope = resolve_python_scope(command.scope, &cfg, workspace_root);
+    let files = scoped_files(&all_files, scope);
+
+    if command.print {
+        flake::print_files(&files);
+        if scope == FlakeScope::Full {
+            flake::print_existing_flake_note();
+        }
+        return Ok(());
+    }
+
+    if command.check {
+        check_files(
+            workspace_root,
+            &files,
+            &languages,
+            "2024",
+            None,
+            &cfg,
+            scope,
+            command.diff,
+            false,
+            flake::AuditTools::default(),
+        )?;
+        return upgrade::update_readme_badges_if_present(workspace_root, true, command.diff);
+    }
+
+    if scope == FlakeScope::HooksOnly {
+        if workspace_root.join("flake.nix").exists() {
+            println!(
+                "note: hooks-only scope leaves existing flake.nix untouched; review it before taking project ownership"
+            );
+        }
+        project::write_generated_files(workspace_root, &files)?;
+        upgrade::update_readme_badges_if_present(workspace_root, false, false)?;
+        registry::touch_current_project_or_warn([
+            ("flake", FeatureStatus::Managed),
+            ("hooks", FeatureStatus::Installed),
+        ]);
+        return Ok(());
+    }
+
+    let flake_path = workspace_root.join("flake.nix");
+    if cfg.flake.mode == FlakeMode::Custom {
+        if !flake_path.exists() {
+            bail!(
+                "custom flake mode requires an existing flake.nix; simit will manage hook files but will not generate a canonical flake"
+            );
+        }
+        let hook_files = hook_files(&files);
+        project::write_generated_files(workspace_root, &hook_files)?;
+        upgrade::update_readme_badges_if_present(workspace_root, false, false)?;
+        registry::touch_current_project_or_warn([
+            ("flake", FeatureStatus::Managed),
+            ("hooks", FeatureStatus::Installed),
+        ]);
+        return Ok(());
+    }
+
+    if flake_path.exists() {
+        bail!(
+            "refusing to replace existing Python flake.nix; set [flake].mode = \"custom\" and [flake].backend = \"py-harbor\" in simit.toml, or move the existing flake before rerunning"
+        );
+    }
+
+    project::write_generated_files(workspace_root, &files)?;
+    upgrade::update_readme_badges_if_present(workspace_root, false, false)?;
+    registry::touch_current_project_or_warn([
+        ("flake", FeatureStatus::Managed),
+        ("hooks", FeatureStatus::Installed),
+    ]);
+    Ok(())
+}
+
 /// Resolve the cross targets for the flake. Returns `None` when `--cross` is
 /// absent (single-target mode), otherwise the requested targets, defaulting to
 /// all five targets when `--cross` is set without any `--target`.
@@ -171,6 +270,7 @@ fn resolve_audit_tools(
     workspace_root: &Path,
     cfg: &ProjectConfig,
     languages: &Languages,
+    metadata: &cargo::Metadata,
 ) -> Result<flake::AuditTools> {
     if !languages.rust {
         return Ok(flake::AuditTools::default());
@@ -181,6 +281,7 @@ fn resolve_audit_tools(
         deny: cfg.ci.with_deny
             || workspace_root.join("deny.toml").exists()
             || existing_ci_contains(workspace_root, "cargo deny check")?,
+        pyo3: cargo::has_pyo3_dep(&metadata.packages),
     })
 }
 
@@ -210,6 +311,30 @@ fn existing_ci_contains(workspace_root: &Path, needle: &str) -> Result<bool> {
         }
     }
     Ok(false)
+}
+
+fn flake_requires_docs_shell(workspace_root: &Path, flake_content: &str) -> Result<bool> {
+    let advertises_docs_or_site_outputs = [
+        "docs =",
+        "site =",
+        "website =",
+        "docsPackage =",
+        "mdbook",
+        "plinth-project.toml",
+    ]
+    .iter()
+    .any(|snippet| flake_content.contains(snippet));
+
+    if advertises_docs_or_site_outputs {
+        return Ok(true);
+    }
+
+    Ok(
+        existing_ci_contains(workspace_root, "cargo doc --no-deps --all-features")?
+            || existing_ci_contains(workspace_root, "nix build .#docs")?
+            || existing_ci_contains(workspace_root, "nix build .#site")?
+            || existing_ci_contains(workspace_root, "nix build .#website")?,
+    )
 }
 
 fn rustfmt_edition(metadata: &cargo::Metadata) -> String {
@@ -267,6 +392,29 @@ fn resolve_scope(
         FlakeScope::Full
     } else {
         FlakeScope::HooksOnly
+    }
+}
+
+fn resolve_python_scope(
+    cli_scope: Option<FlakeScopeArg>,
+    cfg: &ProjectConfig,
+    workspace_root: &Path,
+) -> FlakeScope {
+    if let Some(scope) = cli_scope {
+        return match scope {
+            FlakeScopeArg::HooksOnly => FlakeScope::HooksOnly,
+            FlakeScopeArg::Full => FlakeScope::Full,
+        };
+    }
+
+    if let Some(scope) = cfg.flake.scope {
+        return scope;
+    }
+
+    if workspace_root.join("flake.nix").exists() {
+        FlakeScope::HooksOnly
+    } else {
+        FlakeScope::Full
     }
 }
 
@@ -332,7 +480,11 @@ fn check_files(
             let path = workspace_root.join(&file.relative_path);
             match fs::read_to_string(&path) {
                 Ok(actual) => {
-                    let missing = flake::custom_wiring_mismatches(&actual, &cfg.flake);
+                    let missing = flake::custom_wiring_mismatches(
+                        &actual,
+                        &cfg.flake,
+                        flake_requires_docs_shell(workspace_root, &actual)?,
+                    );
                     if missing.is_empty() {
                         continue;
                     }

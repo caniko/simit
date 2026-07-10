@@ -78,6 +78,11 @@ pub struct UpgradeCommand {
     pub check: bool,
     #[arg(long, help = "Show unified diffs; valid with --dry-run or --check")]
     pub diff: bool,
+    #[arg(
+        long = "pages-only",
+        help = "Only apply Codeberg Pages workflow upgrades, skipping README badge upgrades"
+    )]
+    pub pages_only: bool,
 }
 
 #[derive(Debug, Args)]
@@ -95,7 +100,7 @@ pub enum InitAction {
     #[command(about = "Bootstrap a Homebrew tap repo with a formula skeleton")]
     HomebrewTap(InitHomebrewTapCommand),
     #[command(about = "Bootstrap a Chocolatey package directory")]
-    Chocolatey(InitChocolateyCommand),
+    Chocolatey(Box<InitChocolateyCommand>),
     #[command(about = "Bootstrap a Scoop bucket repo with a manifest skeleton")]
     ScoopBucket(InitScoopBucketCommand),
     #[command(about = "Bootstrap AUR PKGBUILDs (source/-bin/-git flavors)")]
@@ -116,6 +121,10 @@ pub enum DistAction {
     Chocolatey(ChocolateyCommand),
     #[command(about = "Scoop manifest helpers (render, bump, push)")]
     Scoop(ScoopCommand),
+    #[command(about = "Winget manifest submission helpers")]
+    Winget(WingetCommand),
+    #[command(about = "Windows community packager publishing helpers")]
+    Windows(WindowsCommand),
     #[command(about = "AUR PKGBUILD helpers (render)")]
     Aur(AurCommand),
     #[command(about = "Fedora COPR helpers (render)")]
@@ -434,6 +443,17 @@ pub struct InitCiCommand {
     )]
     pub windows_runner: Option<String>,
     #[arg(
+        long = "step-runner",
+        value_name = "STEP=LABEL",
+        help = "Override runner for a specific step key (repeatable, e.g. --step-runner nix-check=atlas-nix-trusted)"
+    )]
+    pub step_runner: Vec<String>,
+    #[arg(
+        long,
+        help = "Generate granular split of CI steps across Codeberg runner tiers (fmt→tiny, clippy/deny/audit→small, test/doc/package→medium); forgejo-only"
+    )]
+    pub granular: bool,
+    #[arg(
         long = "maintainer-key",
         value_name = "FINGERPRINT",
         help = "OpenPGP key fingerprint to export into keys/maintainers.gpg"
@@ -526,6 +546,22 @@ pub struct InitCiCommand {
     )]
     pub with_artifacts: Option<bool>,
     #[arg(
+        long = "with-pypi-publish",
+        num_args = 0..=1,
+        default_missing_value = "true",
+        action = clap::ArgAction::Set,
+        help = "Generate a PyPI publish workflow for Python uv projects; pass `--with-pypi-publish=false` to override project config"
+    )]
+    pub with_pypi_publish: Option<bool>,
+    #[arg(
+        long = "publish-crates",
+        num_args = 0..=1,
+        default_missing_value = "true",
+        action = clap::ArgAction::Set,
+        help = "Generate crates.io publish workflows for publishable Rust packages; pass `--publish-crates=false` for CI-only projects"
+    )]
+    pub publish_crates: Option<bool>,
+    #[arg(
         long = "with-homebrew",
         help = "Add a Homebrew tap publishing step (forgejo + nix only)"
     )]
@@ -540,6 +576,58 @@ pub struct InitCiCommand {
         help = "Validate Scoop bucket publishing configuration"
     )]
     pub with_scoop: bool,
+    #[arg(
+        long = "with-codeberg-pages",
+        help = "Generate a Forgejo workflow that publishes .#site with .#deploy-pages"
+    )]
+    pub with_codeberg_pages: bool,
+    #[arg(
+        long = "with-vscode",
+        help = "Generate a Forgejo workflow that publishes a VS Code/Open VSX extension"
+    )]
+    pub with_vscode: bool,
+    #[arg(
+        long = "pages-repo",
+        value_name = "OWNER/REPO",
+        requires = "with_codeberg_pages",
+        help = "Codeberg repository receiving the generated pages branch"
+    )]
+    pub pages_repo: Option<String>,
+    #[arg(
+        long = "pages-canonical-domain",
+        value_name = "DOMAIN",
+        requires = "with_codeberg_pages",
+        help = "Canonical domain that must appear in the generated Pages .domains file"
+    )]
+    pub pages_canonical_domain: Option<String>,
+    #[arg(
+        long = "pages-site-output",
+        value_name = "INSTALLABLE",
+        requires = "with_codeberg_pages",
+        help = "Nix installable used to build the Pages site for domain validation"
+    )]
+    pub pages_site_output: Option<String>,
+    #[arg(
+        long = "pages-token-secret",
+        value_name = "SECRET",
+        requires = "with_codeberg_pages",
+        help = "Actions secret exposed as CODEBERG_TOKEN for Pages deployment"
+    )]
+    pub pages_token_secret: Option<String>,
+    #[arg(
+        long = "pages-source-branch",
+        value_name = "BRANCH",
+        requires = "with_codeberg_pages",
+        help = "Branch whose pushes publish Codeberg Pages"
+    )]
+    pub pages_source_branch: Option<String>,
+    #[arg(
+        long = "pages-deploy-app",
+        value_name = "INSTALLABLE",
+        requires = "with_codeberg_pages",
+        help = "Nix app used to build and push the generated Pages branch"
+    )]
+    pub pages_deploy_app: Option<String>,
     #[command(flatten)]
     pub homebrew: HomebrewOverridesArgs,
     #[command(flatten)]
@@ -623,7 +711,7 @@ impl HomebrewOverridesArgs {
     }
 }
 
-#[derive(Debug, Args)]
+#[derive(Debug, Default, Args)]
 pub struct ChocolateyOverridesArgs {
     #[arg(
         long = "choco-name",
@@ -661,6 +749,13 @@ pub struct ChocolateyOverridesArgs {
     )]
     pub description: Option<String>,
     #[arg(
+        long = "choco-summary",
+        id = "choco_summary",
+        value_name = "TEXT",
+        help = "Chocolatey package summary"
+    )]
+    pub summary: Option<String>,
+    #[arg(
         long = "choco-project-url",
         id = "choco_project_url",
         value_name = "URL",
@@ -674,6 +769,41 @@ pub struct ChocolateyOverridesArgs {
         help = "Chocolatey license URL"
     )]
     pub license_url: Option<String>,
+    #[arg(
+        long = "choco-icon-url",
+        id = "choco_icon_url",
+        value_name = "URL",
+        help = "Chocolatey icon URL"
+    )]
+    pub icon_url: Option<String>,
+    #[arg(
+        long = "choco-package-source-url",
+        id = "choco_package_source_url",
+        value_name = "URL",
+        help = "Chocolatey package source URL"
+    )]
+    pub package_source_url: Option<String>,
+    #[arg(
+        long = "choco-docs-url",
+        id = "choco_docs_url",
+        value_name = "URL",
+        help = "Chocolatey documentation URL"
+    )]
+    pub docs_url: Option<String>,
+    #[arg(
+        long = "choco-bug-tracker-url",
+        id = "choco_bug_tracker_url",
+        value_name = "URL",
+        help = "Chocolatey bug tracker URL"
+    )]
+    pub bug_tracker_url: Option<String>,
+    #[arg(
+        long = "choco-project-source-url",
+        id = "choco_project_source_url",
+        value_name = "URL",
+        help = "Chocolatey project source URL"
+    )]
+    pub project_source_url: Option<String>,
     #[arg(
         long = "choco-tags",
         id = "choco_tags",
@@ -719,8 +849,14 @@ impl ChocolateyOverridesArgs {
             title: self.title.as_deref(),
             authors: self.authors.as_deref(),
             description: self.description.as_deref(),
+            summary: self.summary.as_deref(),
             project_url: self.project_url.as_deref(),
             license_url: self.license_url.as_deref(),
+            icon_url: self.icon_url.as_deref(),
+            package_source_url: self.package_source_url.as_deref(),
+            docs_url: self.docs_url.as_deref(),
+            bug_tracker_url: self.bug_tracker_url.as_deref(),
+            project_source_url: self.project_source_url.as_deref(),
             tags: self.tags.as_deref(),
             release_notes_url: self.release_notes_url.as_deref(),
             download_repo: self.download_repo.as_deref(),
@@ -730,7 +866,7 @@ impl ChocolateyOverridesArgs {
     }
 }
 
-#[derive(Debug, Args)]
+#[derive(Debug, Default, Args)]
 pub struct ScoopOverridesArgs {
     #[arg(
         long = "scoop-name",
@@ -963,7 +1099,25 @@ pub struct ScoopBumpArgs {
         value_name = "DIR",
         help = "Bucket repo directory (bucket/<name>.json written here)"
     )]
-    pub bucket: Utf8PathBuf,
+    pub bucket: Option<Utf8PathBuf>,
+    #[arg(
+        long = "bucket-url",
+        value_name = "URL",
+        help = "Clone this bucket repo URL before writing when --bucket is omitted"
+    )]
+    pub bucket_url: Option<String>,
+    #[arg(
+        long = "bucket-token-env",
+        value_name = "ENV",
+        help = "Environment variable containing a token for authenticated HTTPS bucket pushes"
+    )]
+    pub bucket_token_env: Option<String>,
+    #[arg(
+        long = "work-dir",
+        value_name = "DIR",
+        help = "Working directory for cloned bucket repos (defaults to target/simit-scoop)"
+    )]
+    pub work_dir: Option<Utf8PathBuf>,
     #[arg(
         long,
         value_name = "ARCH=PATH",
@@ -981,8 +1135,152 @@ pub struct ScoopBumpArgs {
         help = "Commit message (defaults to '<name> <version>')"
     )]
     pub commit_message: Option<String>,
+    #[arg(
+        long,
+        help = "Print the planned bucket update without writing or pushing"
+    )]
+    pub dry_run: bool,
     #[command(flatten)]
     pub scoop: ScoopOverridesArgs,
+}
+
+#[derive(Debug, Args)]
+pub struct WingetCommand {
+    #[command(subcommand)]
+    pub action: WingetAction,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum WingetAction {
+    #[command(about = "Submit a winget-pkgs manifest update with wingetcreate")]
+    Submit(WingetSubmitArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct WingetSubmitArgs {
+    #[arg(
+        long,
+        value_name = "VERSION",
+        help = "Release version (no leading 'v')"
+    )]
+    pub version: String,
+    #[arg(
+        long = "package-id",
+        value_name = "ID",
+        help = "Winget PackageIdentifier"
+    )]
+    pub package_id: Option<String>,
+    #[arg(
+        long = "download-repo",
+        value_name = "OWNER/REPO",
+        help = "Release download repo"
+    )]
+    pub download_repo: Option<String>,
+    #[arg(
+        long = "zip-archive",
+        value_name = "NAME",
+        help = "Windows zip filename or pattern containing {version}"
+    )]
+    pub zip_archive: Option<String>,
+    #[arg(long = "url", value_name = "URL", help = "Installer URL to submit")]
+    pub url: Option<String>,
+    #[arg(
+        long = "token-env",
+        value_name = "ENV",
+        help = "Environment variable containing the GitHub PAT"
+    )]
+    pub token_env: Option<String>,
+    #[arg(
+        long = "wingetcreate",
+        value_name = "PATH",
+        help = "wingetcreate executable path"
+    )]
+    pub wingetcreate: Option<Utf8PathBuf>,
+    #[arg(
+        long = "wingetcreate-url",
+        value_name = "URL",
+        help = "Download wingetcreate.exe from this URL instead of GitHub latest"
+    )]
+    pub wingetcreate_url: Option<String>,
+    #[arg(
+        long = "work-dir",
+        value_name = "DIR",
+        help = "Working directory for downloaded wingetcreate.exe"
+    )]
+    pub work_dir: Option<Utf8PathBuf>,
+    #[arg(
+        long = "wine",
+        value_name = "PATH",
+        default_value = "wine",
+        help = "Wine executable used to run wingetcreate"
+    )]
+    pub wine: String,
+    #[arg(long, help = "Print the wingetcreate command without running it")]
+    pub dry_run: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct WindowsCommand {
+    #[command(subcommand)]
+    pub action: WindowsAction,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum WindowsAction {
+    #[command(about = "Publish configured Windows package channels")]
+    Publish(WindowsPublishArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct WindowsPublishArgs {
+    #[arg(
+        long,
+        value_name = "VERSION",
+        help = "Release version (no leading 'v')"
+    )]
+    pub version: String,
+    #[arg(
+        long,
+        value_name = "ARCH=PATH_OR_URL",
+        help = "Per-architecture release archive; local paths are required for checksum-based channels"
+    )]
+    pub archive: Vec<String>,
+    #[arg(
+        long,
+        value_name = "DIR",
+        help = "Working directory for generated package state"
+    )]
+    pub work_dir: Utf8PathBuf,
+    #[arg(long, help = "Publish Chocolatey")]
+    pub chocolatey: bool,
+    #[arg(long, help = "Publish Scoop")]
+    pub scoop: bool,
+    #[arg(long, help = "Submit Winget")]
+    pub winget: bool,
+    #[arg(long, help = "Run all configured Windows channels")]
+    pub all: bool,
+    #[arg(long, help = "Print planned work without writing or publishing")]
+    pub dry_run: bool,
+    #[arg(long, help = "Bypass Chocolatey duplicate-version protection")]
+    pub force_resubmit: bool,
+    #[arg(
+        long = "choco-push-source",
+        value_name = "URL",
+        help = "Chocolatey push source override"
+    )]
+    pub choco_push_source: Option<String>,
+    #[arg(
+        long = "scoop-bucket-url",
+        value_name = "URL",
+        help = "Scoop bucket URL override"
+    )]
+    pub scoop_bucket_url: Option<String>,
+    #[arg(
+        long = "scoop-bucket-token-env",
+        value_name = "ENV",
+        help = "Scoop bucket token environment variable override"
+    )]
+    pub scoop_bucket_token_env: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -1065,6 +1363,13 @@ pub struct ChocolateyBumpArgs {
         help = "Environment variable containing the Chocolatey API key"
     )]
     pub api_key_env: Option<String>,
+    #[arg(
+        long,
+        help = "Bypass Chocolatey duplicate-version protection before pushing"
+    )]
+    pub force_resubmit: bool,
+    #[arg(long, help = "Print planned work without writing or pushing")]
+    pub dry_run: bool,
     #[command(flatten)]
     pub chocolatey: ChocolateyOverridesArgs,
 }

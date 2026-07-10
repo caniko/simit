@@ -55,9 +55,18 @@ impl Package {
 #[derive(Debug, Clone, Deserialize)]
 pub struct Dependency {
     #[serde(default)]
+    pub name: String,
+    #[serde(default)]
     pub source: Option<String>,
     #[serde(default)]
     pub path: Option<Utf8PathBuf>,
+}
+
+/// Returns true if any workspace member depends on `pyo3`.
+pub fn has_pyo3_dep(packages: &[Package]) -> bool {
+    packages
+        .iter()
+        .any(|pkg| pkg.dependencies.iter().any(|dep| dep.name == "pyo3"))
 }
 
 #[derive(Debug, Clone)]

@@ -1,9 +1,11 @@
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use anyhow::{Result, bail};
 
 use crate::cargo::Package;
 use crate::cli::{Platform, Runtime};
+use crate::config::{ResolvedVscode, VscodePatSource};
 use crate::project::GeneratedFile;
 use crate::user_config::{ResolvedCiRunners, ResolvedRunner};
 
@@ -13,6 +15,16 @@ pub const GENERATED_WORKFLOW_MARKER: &str =
 const CARGO_NEXTEST_VERSION: &str = "0.9.100";
 const CARGO_DENY_VERSION: &str = "0.18.3";
 const CARGO_DENY_POLICY_CHECKS: &str = "bans licenses sources";
+
+pub const STEP_FLAKE_CHECK: &str = "nix-check";
+pub const STEP_CARGO_FMT: &str = "cargo-fmt";
+pub const STEP_CARGO_TEST: &str = "cargo-test";
+pub const STEP_CARGO_DOC: &str = "cargo-doc";
+pub const STEP_CARGO_CLIPPY: &str = "cargo-clippy";
+pub const STEP_CARGO_PACKAGE: &str = "cargo-package";
+pub const STEP_EXTRA_SETUP: &str = "extra-setup";
+pub const STEP_SELF_CHECK: &str = "self-check";
+pub const STEP_QUALITY_TOOLS: &str = "quality-tools";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum OmCiMode {
@@ -30,16 +42,30 @@ pub struct CiOptions {
     pub with_deny: bool,
     pub with_docs: bool,
     pub with_artifacts: bool,
+    pub with_pypi_publish: bool,
+    pub publish_crates: bool,
     pub om_ci: OmCiMode,
     pub omnix_ref: String,
     pub release_smoke_command: Option<String>,
     pub extra_setup: Vec<String>,
     pub extra_env: Vec<(String, String)>,
     pub required_secrets: Vec<String>,
+    pub required_env: Vec<String>,
     pub package_scoped: bool,
     pub homebrew: Option<HomebrewOptions>,
     pub chocolatey: Option<ChocolateyOptions>,
     pub scoop: Option<ScoopOptions>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CodebergPagesOptions {
+    pub repo: String,
+    pub owner: String,
+    pub canonical_domain: Option<String>,
+    pub site_output: String,
+    pub token_secret: String,
+    pub source_branch: String,
+    pub deploy_app: String,
 }
 
 impl Default for CiOptions {
@@ -51,12 +77,15 @@ impl Default for CiOptions {
             with_deny: false,
             with_docs: false,
             with_artifacts: false,
+            with_pypi_publish: false,
+            publish_crates: false,
             om_ci: OmCiMode::default(),
             omnix_ref: OMNIX_REF_DEFAULT.to_owned(),
             release_smoke_command: None,
             extra_setup: Vec::new(),
             extra_env: Vec::new(),
             required_secrets: Vec::new(),
+            required_env: Vec::new(),
             package_scoped: false,
             homebrew: None,
             chocolatey: None,
@@ -104,8 +133,14 @@ pub struct ChocolateyOptions {
     pub title: String,
     pub authors: Option<String>,
     pub description: String,
+    pub summary: Option<String>,
     pub project_url: String,
     pub license_url: Option<String>,
+    pub icon_url: Option<String>,
+    pub package_source_url: Option<String>,
+    pub docs_url: Option<String>,
+    pub bug_tracker_url: Option<String>,
+    pub project_source_url: Option<String>,
     pub tags: Option<String>,
     pub release_notes_url: Option<String>,
     pub download_repo: String,
@@ -137,26 +172,40 @@ pub struct SelfCheckOptions<'a> {
     pub workspace: bool,
 }
 
+pub struct FilesRequest<'a> {
+    pub platform: Platform,
+    pub runtime: Runtime,
+    pub package: &'a Package,
+    pub file_suffix: Option<&'a str>,
+    pub self_check: SelfCheckOptions<'a>,
+    pub runners: &'a ResolvedCiRunners,
+    pub options: CiOptions,
+    pub step_runners: &'a BTreeMap<String, ResolvedRunner>,
+}
+
 impl Default for HomebrewPlatformSet {
     fn default() -> Self {
         Self {
             darwin_arm: true,
-            darwin_intel: true,
+            darwin_intel: false,
             linux_arm: true,
             linux_intel: true,
         }
     }
 }
 
-pub fn files(
-    platform: Platform,
-    runtime: Runtime,
-    package: &Package,
-    file_suffix: Option<&str>,
-    self_check: SelfCheckOptions<'_>,
-    runners: &ResolvedCiRunners,
-    options: CiOptions,
-) -> Result<Vec<GeneratedFile>> {
+pub fn files(request: FilesRequest<'_>) -> Result<Vec<GeneratedFile>> {
+    let FilesRequest {
+        platform,
+        runtime,
+        package,
+        file_suffix,
+        self_check,
+        runners,
+        options,
+        step_runners,
+    } = request;
+
     if options.with_msrv && package.rust_version.is_none() {
         bail!("--with-msrv requires package.rust-version in Cargo.toml");
     }
@@ -174,10 +223,11 @@ pub fn files(
             self_check,
             runners,
             options.clone(),
+            step_runners,
         ),
     }];
 
-    if package.is_publishable() {
+    if options.publish_crates && package.is_publishable() {
         files.push(GeneratedFile {
             relative_path: dir.join(publish_name),
             content: publish_workflow(
@@ -199,6 +249,57 @@ pub fn files(
     Ok(files)
 }
 
+pub fn codeberg_pages_file(
+    platform: Platform,
+    runner: &ResolvedRunner,
+    pages: &CodebergPagesOptions,
+) -> Result<GeneratedFile> {
+    if platform != Platform::Forgejo {
+        bail!("Codeberg Pages workflow generation is forgejo-only");
+    }
+
+    Ok(GeneratedFile {
+        relative_path: PathBuf::from(platform.workflow_dir()).join("pages.yaml"),
+        content: codeberg_pages_workflow(runner, pages),
+    })
+}
+
+pub fn vscode_extension_file(
+    platform: Platform,
+    runtime: Runtime,
+    runner: &ResolvedRunner,
+    vscode: &ResolvedVscode,
+) -> Result<GeneratedFile> {
+    if platform != Platform::Forgejo {
+        bail!("VS Code extension workflow generation is forgejo-only");
+    }
+    if runtime != Runtime::Nix {
+        bail!("VS Code extension workflow generation requires --runtime nix");
+    }
+
+    Ok(GeneratedFile {
+        relative_path: PathBuf::from(platform.workflow_dir()).join("publish-vscode-extension.yaml"),
+        content: vscode_extension_workflow(platform, runner, vscode),
+    })
+}
+
+pub fn python_ci_file(
+    platform: Platform,
+    runtime: Runtime,
+    runner: &ResolvedRunner,
+    options: &CiOptions,
+    check_outputs: &[String],
+) -> Result<GeneratedFile> {
+    if runtime != Runtime::Nix {
+        bail!("Python uv CI generation requires --runtime nix");
+    }
+
+    Ok(GeneratedFile {
+        relative_path: PathBuf::from(platform.workflow_dir()).join("ci.yaml"),
+        content: python_ci_workflow(platform, runner, options, check_outputs),
+    })
+}
+
 fn workflow_file_name(stem: &str, suffix: Option<&str>) -> String {
     match suffix {
         Some(suffix) => format!("{stem}-{suffix}.yaml"),
@@ -206,7 +307,700 @@ fn workflow_file_name(stem: &str, suffix: Option<&str>) -> String {
     }
 }
 
+fn codeberg_pages_workflow(runner: &ResolvedRunner, pages: &CodebergPagesOptions) -> String {
+    let mut workflow = String::new();
+    push_generated_workflow_header(&mut workflow);
+    workflow.push_str("name: pages\n\n");
+    workflow.push_str("'on':\n");
+    workflow.push_str("  push:\n");
+    workflow.push_str("    branches:\n");
+    workflow.push_str("      - ");
+    workflow.push_str(&pages.source_branch);
+    workflow.push_str("\n\n");
+    push_codeberg_concurrency(&mut workflow);
+    workflow.push_str("jobs:\n");
+    workflow.push_str("  publish:\n");
+    workflow.push_str("    runs-on: ");
+    workflow.push_str(&runs_on(runner));
+    workflow.push('\n');
+    workflow.push_str("    env:\n");
+    workflow.push_str("      NIX_CONFIG: \"experimental-features = nix-command flakes\"\n");
+    workflow.push_str("    steps:\n");
+    push_checkout_step(&mut workflow, Platform::Forgejo);
+    if let Some(canonical_domain) = &pages.canonical_domain {
+        workflow.push_str("      - name: Validate Pages domain\n");
+        workflow.push_str("        run: |\n");
+        workflow.push_str("          nix build ");
+        workflow.push_str(&shell_word(&pages.site_output));
+        workflow.push_str(" --no-link --out-link result-pages-site\n");
+        workflow.push_str("          test -f result-pages-site/.domains\n");
+        workflow.push_str("          grep -qx ");
+        workflow.push_str(&shell_word(canonical_domain));
+        workflow.push_str(" result-pages-site/.domains\n");
+    }
+    workflow.push_str("      - name: Deploy Codeberg Pages\n");
+    workflow.push_str("        env:\n");
+    workflow.push_str("          CODEBERG_TOKEN: ${{ secrets.");
+    workflow.push_str(&pages.token_secret);
+    workflow.push_str(" }}\n");
+    workflow.push_str("        run: |\n");
+    workflow.push_str("          test -n \"$CODEBERG_TOKEN\"\n");
+    workflow.push_str("          git config user.name \"forgejo-actions\"\n");
+    workflow.push_str("          git config user.email \"forgejo-actions@noreply.codeberg.org\"\n");
+    workflow.push_str("          git remote add pages-origin \"https://");
+    workflow.push_str(&pages.owner);
+    workflow.push_str(":${CODEBERG_TOKEN}@codeberg.org/");
+    workflow.push_str(&pages.repo);
+    workflow.push_str(".git\"\n");
+    workflow.push_str("          DEPLOY_REMOTE=pages-origin nix run ");
+    workflow.push_str(&pages.deploy_app);
+    workflow.push('\n');
+    workflow
+}
+
+fn vscode_extension_workflow(
+    platform: Platform,
+    runner: &ResolvedRunner,
+    vscode: &ResolvedVscode,
+) -> String {
+    let mut workflow = String::new();
+    push_generated_workflow_header(&mut workflow);
+    workflow.push_str("name: Publish VS Code Extension\n\n");
+    workflow.push_str("on:\n");
+    workflow.push_str("  push:\n");
+    workflow.push_str("    tags: [\"[0-9]*.[0-9]*.[0-9]*\"]\n");
+    workflow.push_str("  workflow_dispatch:\n\n");
+    push_codeberg_concurrency(&mut workflow);
+    workflow.push_str("jobs:\n");
+    workflow.push_str("  publish:\n");
+    workflow.push_str("    runs-on: ");
+    workflow.push_str(&runs_on(runner));
+    workflow.push('\n');
+    workflow.push_str("    env:\n");
+    workflow.push_str("      NIX_CONFIG: \"experimental-features = nix-command flakes\"\n");
+    workflow.push_str("    steps:\n");
+    push_checkout_step(&mut workflow, platform);
+    push_install_nix_step(&mut workflow, platform);
+    push_vscode_credential_preflight(&mut workflow, vscode);
+    push_vscode_version_validation(&mut workflow, vscode);
+    for (index, command) in vscode.prepublish_commands.iter().enumerate() {
+        workflow.push_str("      - name: Prepublish command ");
+        workflow.push_str(&(index + 1).to_string());
+        workflow.push('\n');
+        workflow.push_str("        run: |\n");
+        push_indented_lines(&mut workflow, command, 10);
+        workflow.push('\n');
+    }
+    workflow.push_str("      - name: Package release assets\n");
+    workflow.push_str("        run: |\n");
+    workflow.push_str("          set -euo pipefail\n");
+    workflow.push_str("          VERSION=\"${GITHUB_REF_NAME#v}\"\n");
+    workflow.push_str("          export VERSION\n");
+    push_indented_lines(&mut workflow, &vscode.package_command, 10);
+    workflow.push('\n');
+    push_vscode_codeberg_upload(&mut workflow, vscode);
+    push_vscode_publish_step(&mut workflow, vscode, VscodePublisher::Vsce);
+    push_vscode_publish_step(&mut workflow, vscode, VscodePublisher::Ovsx);
+    trim_trailing_blank_lines(&mut workflow);
+    workflow
+}
+
+fn push_vscode_credential_preflight(workflow: &mut String, vscode: &ResolvedVscode) {
+    workflow.push_str("      - name: Validate publish credentials\n");
+    if matches!(
+        vscode.pat_source,
+        VscodePatSource::ActionsSecret | VscodePatSource::Both
+    ) {
+        workflow.push_str("        env:\n");
+        workflow.push_str("          CODEBERG_TOKEN: ${{ secrets.");
+        workflow.push_str(&vscode.codeberg_token_secret);
+        workflow.push_str(" }}\n");
+        workflow.push_str("          VSCE_PAT_FROM_SECRET: ${{ secrets.");
+        workflow.push_str(&vscode.vsce_pat_secret);
+        workflow.push_str(" }}\n");
+        workflow.push_str("          OVSX_PAT_FROM_SECRET: ${{ secrets.");
+        workflow.push_str(&vscode.ovsx_pat_secret);
+        workflow.push_str(" }}\n");
+    } else {
+        workflow.push_str("        env:\n");
+        workflow.push_str("          CODEBERG_TOKEN: ${{ secrets.");
+        workflow.push_str(&vscode.codeberg_token_secret);
+        workflow.push_str(" }}\n");
+    }
+    workflow.push_str("        run: |\n");
+    workflow.push_str("          set -euo pipefail\n");
+    workflow
+        .push_str("          test -n \"${CODEBERG_TOKEN:-}\" || { echo \"missing Actions secret ");
+    workflow.push_str(&vscode.codeberg_token_secret);
+    workflow.push_str("\"; exit 1; }\n");
+    push_vscode_pat_resolution_function(workflow, vscode);
+    workflow.push_str("          VSCE_PUBLISH_PAT=$(resolve_pat vsce)\n");
+    workflow.push_str("          VSCE_PUBLISHER=$(nix shell nixpkgs#jq -c jq -r '.publisher' ");
+    workflow.push_str(&shell_word(&format!(
+        "{}/package.json",
+        vscode.extension_dir
+    )));
+    workflow.push_str(")\n");
+    workflow.push_str("          test -n \"$VSCE_PUBLISHER\" && test \"$VSCE_PUBLISHER\" != null || { echo \"missing VS Code extension publisher in ");
+    workflow.push_str(&format!("{}/package.json", vscode.extension_dir));
+    workflow.push_str("\"; exit 1; }\n");
+    workflow.push_str("          nix develop -c npx --yes @vscode/vsce verify-pat \"$VSCE_PUBLISHER\" --pat \"$VSCE_PUBLISH_PAT\" || { echo \"VS Code Marketplace publisher $VSCE_PUBLISHER is missing or the VSCE PAT lacks publisher permissions. Create/repair it at https://aka.ms/vsm-create-publisher before publishing.\"; exit 1; }\n");
+    workflow.push_str("          resolve_pat ovsx >/dev/null\n\n");
+}
+
+fn push_vscode_version_validation(workflow: &mut String, vscode: &ResolvedVscode) {
+    workflow.push_str("      - name: Validate release tag and extension version\n");
+    workflow.push_str("        run: |\n");
+    workflow.push_str("          set -euo pipefail\n");
+    workflow.push_str("          VERSION=\"${GITHUB_REF_NAME#v}\"\n");
+    workflow.push_str("          printf '%s\\n' \"$VERSION\" | grep -Eq '^[0-9]+\\.[0-9]+\\.[0-9]+$' || { echo \"release tag must be an exact semver version\"; exit 1; }\n");
+    if let Some(cargo_package) = &vscode.cargo_package {
+        workflow.push_str("          cargo_metadata=$(nix shell nixpkgs#cargo -c cargo metadata --no-deps --format-version 1)\n");
+        workflow.push_str("          cargo_version=$(printf '%s' \"$cargo_metadata\" | nix shell nixpkgs#jq -c jq -r --arg name ");
+        workflow.push_str(&shell_word(cargo_package));
+        workflow.push_str(" '.packages[] | select(.name == $name) | .version')\n");
+        workflow
+            .push_str("          test -n \"$cargo_version\" || { echo \"missing Cargo package ");
+        workflow.push_str(cargo_package);
+        workflow.push_str("\"; exit 1; }\n");
+        workflow.push_str("          test \"$cargo_version\" = \"$VERSION\" || { echo \"Cargo version $cargo_version does not match tag $VERSION\"; exit 1; }\n");
+    }
+    workflow.push_str("          extension_version=$(nix shell nixpkgs#jq -c jq -r '.version' ");
+    workflow.push_str(&shell_word(&format!(
+        "{}/package.json",
+        vscode.extension_dir
+    )));
+    workflow.push_str(")\n");
+    workflow.push_str("          test \"$extension_version\" = \"$VERSION\" || { echo \"extension version $extension_version does not match tag $VERSION\"; exit 1; }\n\n");
+    workflow.push_str("          test -s keys/maintainers.gpg\n");
+    workflow.push_str("          GNUPGHOME=\"$(mktemp -d)\"\n");
+    workflow.push_str("          export GNUPGHOME\n");
+    workflow.push_str("          trap 'rm -rf \"$GNUPGHOME\"' EXIT\n");
+    workflow.push_str("          chmod 700 \"$GNUPGHOME\"\n");
+    workflow.push_str("          gpg --batch --import keys/maintainers.gpg\n");
+    workflow.push_str("          git fetch --force --tags origin \"refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}\"\n");
+    workflow.push_str("          git verify-tag \"$GITHUB_REF_NAME\"\n\n");
+}
+
+fn push_vscode_codeberg_upload(workflow: &mut String, vscode: &ResolvedVscode) {
+    workflow.push_str("      - name: Upload Codeberg release assets\n");
+    workflow.push_str("        env:\n");
+    workflow.push_str("          CODEBERG_TOKEN: ${{ secrets.");
+    workflow.push_str(&vscode.codeberg_token_secret);
+    workflow.push_str(" }}\n");
+    workflow.push_str("        run: |\n");
+    workflow.push_str("          set -euo pipefail\n");
+    workflow
+        .push_str("          test -n \"${CODEBERG_TOKEN:-}\" || { echo \"missing Actions secret ");
+    workflow.push_str(&vscode.codeberg_token_secret);
+    workflow.push_str("\"; exit 1; }\n");
+    workflow.push_str("          VERSION=\"${GITHUB_REF_NAME#v}\"\n");
+    workflow.push_str("          tag=\"${GITHUB_REF_NAME}\"\n");
+    workflow.push_str("          api=");
+    workflow.push_str(&shell_word(&vscode.codeberg_api_base));
+    workflow.push('\n');
+    workflow.push_str("          repo=");
+    workflow.push_str(&shell_word(&vscode.codeberg_repo));
+    workflow.push('\n');
+    workflow.push_str("          auth_header=\"Authorization: token ${CODEBERG_TOKEN}\"\n");
+    workflow.push_str("          release_json=$(curl --fail --silent --show-error --header \"$auth_header\" \"$api/repos/$repo/releases/tags/$tag\" || true)\n");
+    workflow.push_str("          release_id=$(printf '%s' \"$release_json\" | nix shell nixpkgs#jq -c jq -r '.id // empty' 2>/dev/null || true)\n");
+    workflow.push_str("          if test -z \"$release_id\"; then\n");
+    workflow.push_str("            release_json=$(curl --fail --silent --show-error --request POST --header \"$auth_header\" --header \"Content-Type: application/json\" --data \"{\\\"tag_name\\\":\\\"$tag\\\",\\\"name\\\":\\\"$tag\\\",\\\"draft\\\":false,\\\"prerelease\\\":false}\" \"$api/repos/$repo/releases\")\n");
+    workflow.push_str("            release_id=$(printf '%s' \"$release_json\" | nix shell nixpkgs#jq -c jq -r '.id')\n");
+    workflow.push_str("          fi\n");
+    workflow.push_str("          for asset in release/*; do\n");
+    workflow.push_str("            test -f \"$asset\" || continue\n");
+    workflow.push_str("            name=$(basename \"$asset\")\n");
+    workflow.push_str("            existing_ids=$(printf '%s' \"$release_json\" | nix shell nixpkgs#jq -c jq -r --arg name \"$name\" '.assets[]? | select(.name == $name) | .id')\n");
+    workflow.push_str("            for asset_id in $existing_ids; do\n");
+    workflow.push_str("              curl --fail --silent --show-error --request DELETE --header \"$auth_header\" \"$api/repos/$repo/releases/$release_id/assets/$asset_id\" >/dev/null\n");
+    workflow.push_str("            done\n");
+    workflow.push_str("            curl --fail --silent --show-error --request POST --header \"$auth_header\" --form \"attachment=@${asset}\" \"$api/repos/$repo/releases/$release_id/assets?name=$name\" >/dev/null\n");
+    workflow.push_str("          done\n\n");
+}
+
+#[derive(Debug, Clone, Copy)]
+enum VscodePublisher {
+    Vsce,
+    Ovsx,
+}
+
+fn push_vscode_publish_step(
+    workflow: &mut String,
+    vscode: &ResolvedVscode,
+    publisher: VscodePublisher,
+) {
+    let (name, command, key) = match publisher {
+        VscodePublisher::Vsce => (
+            "Publish to VS Code Marketplace",
+            "nix develop -c npx --yes @vscode/vsce publish --packagePath release/*.vsix --pat \"$PUBLISH_PAT\" --skip-duplicate",
+            "vsce",
+        ),
+        VscodePublisher::Ovsx => (
+            "Publish to Open VSX",
+            "nix develop -c npx --yes ovsx publish release/*.vsix --pat \"$PUBLISH_PAT\" --skip-duplicate",
+            "ovsx",
+        ),
+    };
+    workflow.push_str("      - name: ");
+    workflow.push_str(name);
+    workflow.push('\n');
+    if matches!(
+        vscode.pat_source,
+        VscodePatSource::ActionsSecret | VscodePatSource::Both
+    ) {
+        workflow.push_str("        env:\n");
+        workflow.push_str("          VSCE_PAT_FROM_SECRET: ${{ secrets.");
+        workflow.push_str(&vscode.vsce_pat_secret);
+        workflow.push_str(" }}\n");
+        workflow.push_str("          OVSX_PAT_FROM_SECRET: ${{ secrets.");
+        workflow.push_str(&vscode.ovsx_pat_secret);
+        workflow.push_str(" }}\n");
+    }
+    workflow.push_str("        run: |\n");
+    workflow.push_str("          set -euo pipefail\n");
+    push_vscode_pat_resolution_function(workflow, vscode);
+    workflow.push_str("          PUBLISH_PAT=$(resolve_pat ");
+    workflow.push_str(key);
+    workflow.push_str(")\n");
+    if matches!(publisher, VscodePublisher::Ovsx) {
+        workflow.push_str("          OVSX_NAMESPACE=$(nix shell nixpkgs#jq -c jq -r '.publisher' ");
+        workflow.push_str(&shell_word(&format!(
+            "{}/package.json",
+            vscode.extension_dir
+        )));
+        workflow.push_str(")\n");
+        workflow.push_str(
+            "          nix develop -c npx --yes ovsx create-namespace \"$OVSX_NAMESPACE\" --pat \"$PUBLISH_PAT\" || true\n",
+        );
+    }
+    workflow.push_str("          ");
+    workflow.push_str(command);
+    workflow.push_str("\n\n");
+    if matches!(publisher, VscodePublisher::Vsce) {
+        push_vscode_marketplace_visibility_gate(workflow, vscode);
+        push_vscode_marketplace_signature_gate(workflow, vscode);
+    }
+}
+
+fn push_vscode_marketplace_visibility_gate(workflow: &mut String, vscode: &ResolvedVscode) {
+    workflow.push_str("      - name: Verify VS Code Marketplace visibility\n");
+    if matches!(
+        vscode.pat_source,
+        VscodePatSource::ActionsSecret | VscodePatSource::Both
+    ) {
+        workflow.push_str("        env:\n");
+        workflow.push_str("          VSCE_PAT_FROM_SECRET: ${{ secrets.");
+        workflow.push_str(&vscode.vsce_pat_secret);
+        workflow.push_str(" }}\n");
+        workflow.push_str("          OVSX_PAT_FROM_SECRET: ${{ secrets.");
+        workflow.push_str(&vscode.ovsx_pat_secret);
+        workflow.push_str(" }}\n");
+    }
+    workflow.push_str("        run: |\n");
+    workflow.push_str("          set -euo pipefail\n");
+    push_vscode_pat_resolution_function(workflow, vscode);
+    workflow.push_str("          PUBLISH_PAT=$(resolve_pat vsce)\n");
+    workflow.push_str("          export PUBLISH_PAT\n");
+    workflow
+        .push_str("          EXTENSION_PUBLISHER=$(nix shell nixpkgs#jq -c jq -r '.publisher' ");
+    workflow.push_str(&shell_word(&format!(
+        "{}/package.json",
+        vscode.extension_dir
+    )));
+    workflow.push_str(")\n");
+    workflow.push_str("          EXTENSION_NAME=$(nix shell nixpkgs#jq -c jq -r '.name' ");
+    workflow.push_str(&shell_word(&format!(
+        "{}/package.json",
+        vscode.extension_dir
+    )));
+    workflow.push_str(")\n");
+    workflow.push_str("          EXTENSION_ID=\"$EXTENSION_PUBLISHER.$EXTENSION_NAME\"\n");
+    workflow.push_str("          export EXTENSION_PUBLISHER EXTENSION_NAME EXTENSION_ID\n");
+    workflow.push_str("          diag_dir=$(mktemp -d)\n");
+    workflow.push_str("          trap 'rm -rf \"$diag_dir\"' EXIT\n");
+    workflow.push_str("          nix develop -c npm --prefix \"$diag_dir\" install --silent azure-devops-node-api@15.1.2 >/dev/null\n");
+    workflow
+        .push_str("          NODE_PATH=\"$diag_dir/node_modules\" nix develop -c node <<'NODE'\n");
+    workflow.push_str("          const azdev = require('azure-devops-node-api');\n");
+    workflow.push_str(
+        "          const { GalleryApi } = require('azure-devops-node-api/GalleryApi');\n",
+    );
+    workflow.push_str("          const Gallery = require('azure-devops-node-api/interfaces/GalleryInterfaces');\n");
+    workflow.push_str("          const publisher = process.env.EXTENSION_PUBLISHER;\n");
+    workflow.push_str("          const extension = process.env.EXTENSION_NAME;\n");
+    workflow.push_str("          const pat = process.env.PUBLISH_PAT;\n");
+    workflow.push_str("          const flags = Gallery.PublishedExtensionFlags;\n");
+    workflow.push_str("          const queryFlags = Gallery.ExtensionQueryFlags.IncludeVersions | Gallery.ExtensionQueryFlags.IncludeMetadata;\n");
+    workflow.push_str(
+        "          const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));\n",
+    );
+    workflow.push_str("          const flagNames = value => Object.entries(flags)\n");
+    workflow.push_str("            .filter(([name, flag]) => typeof flag === 'number' && flag !== 0 && (value & flag) !== 0)\n");
+    workflow.push_str("            .map(([name]) => name)\n");
+    workflow.push_str("            .sort();\n");
+    workflow.push_str("          async function main() {\n");
+    workflow.push_str("            const api = new GalleryApi('https://marketplace.visualstudio.com', [azdev.getPersonalAccessTokenHandler(pat)]);\n");
+    workflow.push_str("            let last;\n");
+    workflow.push_str("            for (let attempt = 1; attempt <= 60; attempt += 1) {\n");
+    workflow.push_str("              let ext;\n");
+    workflow.push_str("              try {\n");
+    workflow.push_str("                ext = await api.getExtension(null, publisher, extension, undefined, queryFlags);\n");
+    workflow.push_str("              } catch (error) {\n");
+    workflow.push_str("                if (error && error.statusCode === 404) {\n");
+    workflow.push_str("                  last = 'not found via authenticated Gallery API';\n");
+    workflow.push_str("                  await sleep(10000);\n");
+    workflow.push_str("                  continue;\n");
+    workflow.push_str("                }\n");
+    workflow.push_str("                throw error;\n");
+    workflow.push_str("              }\n");
+    workflow.push_str("              if (!ext) {\n");
+    workflow.push_str("                last = 'not found via authenticated Gallery API';\n");
+    workflow.push_str("                await sleep(10000);\n");
+    workflow.push_str("                continue;\n");
+    workflow.push_str("              }\n");
+    workflow.push_str("              let value = Number(ext.flags || 0);\n");
+    workflow.push_str("              if ((value & flags.Public) === 0) {\n");
+    workflow.push_str("                console.log(`Marketplace extension is missing Public flag; setting it for ${publisher}.${extension}`);\n");
+    workflow.push_str(
+        "                ext = await api.updateExtensionProperties(publisher, extension, flags.Public);\n",
+    );
+    workflow.push_str("                value = Number(ext.flags || 0);\n");
+    workflow.push_str("              }\n");
+    workflow.push_str("              const versions = (ext.versions || []).map(version => ({ version: version.version, targetPlatform: version.targetPlatform || null, flags: version.flags || null }));\n");
+    workflow.push_str("              console.log(JSON.stringify({ id: `${publisher}.${extension}`, flags: value, flagNames: flagNames(value), versions }, null, 2));\n");
+    workflow.push_str(
+        "              if ((value & flags.Public) !== 0 && (value & flags.Validated) !== 0) {\n",
+    );
+    workflow.push_str("                return;\n");
+    workflow.push_str("              }\n");
+    workflow.push_str(
+        "              last = `flags=${value} (${flagNames(value).join(',') || 'none'})`;\n",
+    );
+    workflow.push_str("              await sleep(10000);\n");
+    workflow.push_str("            }\n");
+    workflow.push_str("            throw new Error(`Marketplace extension did not become public and validated: ${last}`);\n");
+    workflow.push_str("          }\n");
+    workflow.push_str("          main().catch(error => {\n");
+    workflow.push_str("            console.error(error && error.stack ? error.stack : error);\n");
+    workflow.push_str("            process.exit(1);\n");
+    workflow.push_str("          });\n");
+    workflow.push_str("          NODE\n");
+    workflow.push_str("          for attempt in $(seq 1 60); do\n");
+    workflow.push_str("            query=$(nix shell nixpkgs#jq -c jq -cn --arg id \"$EXTENSION_ID\" '{filters:[{criteria:[{filterType:7,value:$id}]}],flags:2151}')\n");
+    workflow.push_str("            result=$(curl --fail --silent --show-error --header 'Content-Type: application/json' --header 'Accept: application/json;api-version=7.2-preview.1' --data \"$query\" https://marketplace.visualstudio.com/_apis/public/gallery/extensionquery)\n");
+    workflow.push_str("            visible=$(printf '%s' \"$result\" | nix shell nixpkgs#jq -c jq -r --arg id \"$EXTENSION_ID\" '.results[0].extensions[]? | select((.publisher.publisherName + \".\" + .extensionName | ascii_downcase) == ($id | ascii_downcase)) | .flags')\n");
+    workflow.push_str("            if printf '%s\\n' \"$visible\" | grep -Eq '(^|, )public(,|$)' && printf '%s\\n' \"$visible\" | grep -Eq '(^|, )validated(,|$)'; then\n");
+    workflow.push_str("              echo \"$EXTENSION_ID is visible in the public VS Code Marketplace Gallery API\"\n");
+    workflow.push_str("              exit 0\n");
+    workflow.push_str("            fi\n");
+    workflow.push_str("            echo \"waiting for $EXTENSION_ID to become public in Marketplace Gallery API (attempt $attempt/60)\"\n");
+    workflow.push_str("            sleep 10\n");
+    workflow.push_str("          done\n");
+    workflow.push_str("          echo \"$EXTENSION_ID did not become visible in the public VS Code Marketplace Gallery API\" >&2\n");
+    workflow.push_str("          exit 1\n\n");
+}
+
+fn push_vscode_marketplace_signature_gate(workflow: &mut String, vscode: &ResolvedVscode) {
+    workflow.push_str("      - name: Verify VS Code Marketplace signatures\n");
+    workflow.push_str("        run: |\n");
+    workflow.push_str("          set -euo pipefail\n");
+    workflow
+        .push_str("          EXTENSION_PUBLISHER=$(nix shell nixpkgs#jq -c jq -r '.publisher' ");
+    workflow.push_str(&shell_word(&format!(
+        "{}/package.json",
+        vscode.extension_dir
+    )));
+    workflow.push_str(")\n");
+    workflow.push_str("          EXTENSION_NAME=$(nix shell nixpkgs#jq -c jq -r '.name' ");
+    workflow.push_str(&shell_word(&format!(
+        "{}/package.json",
+        vscode.extension_dir
+    )));
+    workflow.push_str(")\n");
+    workflow.push_str("          EXTENSION_ID=\"$EXTENSION_PUBLISHER.$EXTENSION_NAME\"\n");
+    workflow.push_str("          tmp_dir=$(mktemp -d)\n");
+    workflow.push_str("          trap 'rm -rf \"$tmp_dir\"' EXIT\n");
+    workflow.push_str("          query=$(nix shell nixpkgs#jq -c jq -cn --arg id \"$EXTENSION_ID\" '{filters:[{criteria:[{filterType:7,value:$id}]}],flags:2151}')\n");
+    workflow.push_str("          result=$(curl --fail --silent --show-error --header 'Content-Type: application/json' --header 'Accept: application/json;api-version=7.2-preview.1' --data \"$query\" https://marketplace.visualstudio.com/_apis/public/gallery/extensionquery)\n");
+    workflow.push_str("          versions_tsv=\"$tmp_dir/versions.tsv\"\n");
+    workflow.push_str("          printf '%s' \"$result\" | nix shell nixpkgs#jq -c jq -r --arg id \"$EXTENSION_ID\" '\n");
+    workflow.push_str("            .results[0].extensions[]?\n");
+    workflow.push_str("            | select((.publisher.publisherName + \".\" + .extensionName | ascii_downcase) == ($id | ascii_downcase))\n");
+    workflow.push_str("            | .versions[]\n");
+    workflow.push_str("            | [\n");
+    workflow.push_str("                .version,\n");
+    workflow.push_str("                (.targetPlatform // \"universal\"),\n");
+    workflow.push_str("                ((.files[]? | select(.assetType == \"Microsoft.VisualStudio.Services.VSIXPackage\") | .source) // \"\"),\n");
+    workflow.push_str("                ((.files[]? | select(.assetType == \"Microsoft.VisualStudio.Services.VsixSignature\") | .source) // \"\")\n");
+    workflow.push_str("              ]\n");
+    workflow.push_str("            | @tsv\n");
+    workflow.push_str("          ' > \"$versions_tsv\"\n");
+    workflow.push_str("          test -s \"$versions_tsv\" || { echo \"no Marketplace versions found for $EXTENSION_ID\" >&2; exit 1; }\n");
+    workflow.push_str(
+        "          while IFS=$'\\t' read -r version target package_url signature_url; do\n",
+    );
+    workflow.push_str("            test -n \"$package_url\" || { echo \"missing VSIXPackage asset for $EXTENSION_ID@$version ($target)\" >&2; exit 1; }\n");
+    workflow.push_str("            test -n \"$signature_url\" || { echo \"missing VsixSignature asset for $EXTENSION_ID@$version ($target)\" >&2; exit 1; }\n");
+    workflow.push_str("            target_dir=\"$tmp_dir/$version-$target\"\n");
+    workflow.push_str("            mkdir -p \"$target_dir/signature\"\n");
+    workflow.push_str("            package_path=\"$target_dir/package.vsix\"\n");
+    workflow.push_str("            signature_zip=\"$target_dir/signature.zip\"\n");
+    workflow.push_str("            manifest_path=\"$target_dir/signature.manifest\"\n");
+    workflow.push_str("            signature_path=\"$target_dir/signature.p7s\"\n");
+    workflow.push_str("            curl --fail --silent --show-error --location \"$package_url\" --output \"$package_path\"\n");
+    workflow.push_str("            curl --fail --silent --show-error --location \"$signature_url\" --output \"$signature_zip\"\n");
+    workflow.push_str("            nix shell nixpkgs#unzip -c unzip -q \"$signature_zip\" -d \"$target_dir/signature\"\n");
+    workflow.push_str("            test -s \"$target_dir/signature/.signature.manifest\" || { echo \"signature archive missing .signature.manifest for $EXTENSION_ID@$version ($target)\" >&2; exit 1; }\n");
+    workflow.push_str("            test -s \"$target_dir/signature/.signature.p7s\" || { echo \"signature archive missing .signature.p7s for $EXTENSION_ID@$version ($target)\" >&2; exit 1; }\n");
+    workflow.push_str(
+        "            cp \"$target_dir/signature/.signature.manifest\" \"$manifest_path\"\n",
+    );
+    workflow
+        .push_str("            cp \"$target_dir/signature/.signature.p7s\" \"$signature_path\"\n");
+    workflow.push_str("            nix develop -c npx --yes @vscode/vsce@latest verify-signature --packagePath \"$package_path\" --manifestPath \"$manifest_path\" --signaturePath \"$signature_path\"\n");
+    workflow.push_str("            echo \"verified Marketplace signature for $EXTENSION_ID@$version ($target)\"\n");
+    workflow.push_str("          done < \"$versions_tsv\"\n\n");
+}
+
+fn push_vscode_pat_resolution_function(workflow: &mut String, vscode: &ResolvedVscode) {
+    workflow.push_str("          resolve_pat() {\n");
+    workflow.push_str("            case \"$1\" in\n");
+    workflow.push_str("              vsce) file_env=");
+    workflow.push_str(&shell_word(&vscode.vsce_pat_file_env));
+    workflow.push_str("; secret=\"${VSCE_PAT_FROM_SECRET:-}\" ;;\n");
+    workflow.push_str("              ovsx) file_env=");
+    workflow.push_str(&shell_word(&vscode.ovsx_pat_file_env));
+    workflow.push_str("; secret=\"${OVSX_PAT_FROM_SECRET:-}\" ;;\n");
+    workflow.push_str("              *) echo \"unknown publisher $1\" >&2; exit 1 ;;\n");
+    workflow.push_str("            esac\n");
+    match vscode.pat_source {
+        VscodePatSource::FileEnv => {
+            workflow.push_str("            file_path=\"${!file_env:-}\"\n");
+            workflow.push_str("            test -n \"$file_path\" || { echo \"missing runner file env ${file_env}\" >&2; exit 1; }\n");
+            workflow.push_str("            test -s \"$file_path\" || { echo \"runner file env ${file_env} points at an empty or missing file\" >&2; exit 1; }\n");
+            workflow.push_str("            cat \"$file_path\"\n");
+        }
+        VscodePatSource::ActionsSecret => {
+            workflow.push_str("            test -n \"$secret\" || { echo \"missing Actions secret for $1\" >&2; exit 1; }\n");
+            workflow.push_str("            printf '%s' \"$secret\"\n");
+        }
+        VscodePatSource::Both => {
+            workflow.push_str("            file_path=\"${!file_env:-}\"\n");
+            workflow.push_str(
+                "            if test -n \"$file_path\" && test -s \"$file_path\"; then\n",
+            );
+            workflow.push_str("              cat \"$file_path\"\n");
+            workflow.push_str("            elif test -n \"$secret\"; then\n");
+            workflow.push_str("              printf '%s' \"$secret\"\n");
+            workflow.push_str("            else\n");
+            workflow.push_str("              echo \"missing runner file env ${file_env} and fallback Actions secret for $1\" >&2\n");
+            workflow.push_str("              exit 1\n");
+            workflow.push_str("            fi\n");
+        }
+    }
+    workflow.push_str("          }\n");
+}
+
+fn push_indented_lines(workflow: &mut String, command: &str, spaces: usize) {
+    let indent = " ".repeat(spaces);
+    for line in command.lines() {
+        workflow.push_str(&indent);
+        workflow.push_str(line);
+        workflow.push('\n');
+    }
+}
+
+fn python_ci_workflow(
+    platform: Platform,
+    runner: &ResolvedRunner,
+    options: &CiOptions,
+    check_outputs: &[String],
+) -> String {
+    let mut workflow = String::new();
+    push_generated_workflow_header(&mut workflow);
+    push_required_secrets_header(&mut workflow, &options.required_secrets);
+    workflow.push_str("name: CI\n\n");
+    workflow.push_str("on:\n");
+    workflow.push_str("  push:\n");
+    workflow.push_str("    branches: [\"**\"]\n");
+    workflow.push_str("    tags-ignore: [\"**\"]\n");
+    if platform != Platform::Forgejo {
+        workflow.push_str("  pull_request:\n");
+    }
+    workflow.push('\n');
+    push_concurrency(&mut workflow);
+    workflow.push_str("jobs:\n");
+    workflow.push_str("  test:\n");
+    workflow.push_str("    runs-on: ");
+    workflow.push_str(&runs_on(runner));
+    workflow.push('\n');
+    push_job_env(&mut workflow, Runtime::Nix, &options.extra_env);
+    workflow.push_str("    steps:\n");
+    push_checkout_step(&mut workflow, platform);
+    push_required_env_step(&mut workflow, &options.required_env);
+    push_install_nix_step(&mut workflow, platform);
+    push_extra_setup_steps(&mut workflow, &options.extra_setup);
+    workflow.push_str("      - name: Check generated flake wiring\n");
+    workflow.push_str(
+        "        run: nix run git+https://codeberg.org/caniko/simit.git -- init flake --check --diff\n\n",
+    );
+    workflow.push_str("      - name: Check flake evaluation\n");
+    workflow.push_str("        run: nix flake check --no-build\n\n");
+
+    let checks = if check_outputs.is_empty() {
+        vec![
+            "offline-tests".to_owned(),
+            "typecheck".to_owned(),
+            "uv-format".to_owned(),
+        ]
+    } else {
+        check_outputs.to_vec()
+    };
+    for check in checks {
+        workflow.push_str("      - name: Build check ");
+        workflow.push_str(&check);
+        workflow.push('\n');
+        workflow.push_str("        run: nix build .#checks.x86_64-linux.");
+        workflow.push_str(&check);
+        workflow.push_str("\n\n");
+    }
+
+    trim_trailing_blank_lines(&mut workflow);
+    workflow
+}
+
+pub fn python_publish_file(
+    platform: Platform,
+    runtime: Runtime,
+    runner: &ResolvedRunner,
+    options: &CiOptions,
+) -> Result<GeneratedFile> {
+    if runtime != Runtime::Nix {
+        bail!("Python uv publish generation requires --runtime nix");
+    }
+
+    Ok(GeneratedFile {
+        relative_path: PathBuf::from(platform.workflow_dir()).join("publish-pypi.yaml"),
+        content: python_publish_workflow(platform, runner, options),
+    })
+}
+
+fn python_publish_workflow(
+    platform: Platform,
+    runner: &ResolvedRunner,
+    options: &CiOptions,
+) -> String {
+    let mut workflow = String::new();
+    push_generated_workflow_header(&mut workflow);
+    push_required_secrets_header(&mut workflow, &options.required_secrets);
+    workflow.push_str("name: Publish to PyPI\n\n");
+    workflow.push_str("on:\n");
+    workflow.push_str("  push:\n");
+    workflow.push_str("    tags: [\"[0-9]*\"]\n\n");
+    push_concurrency(&mut workflow);
+    workflow.push_str("jobs:\n");
+    workflow.push_str("  publish:\n");
+    workflow.push_str("    runs-on: ");
+    workflow.push_str(&runs_on(runner));
+    workflow.push('\n');
+    push_job_env(&mut workflow, Runtime::Nix, &options.extra_env);
+    workflow.push_str("    steps:\n");
+    push_checkout_step(&mut workflow, platform);
+    push_required_env_step(&mut workflow, &options.required_env);
+    push_install_nix_step(&mut workflow, platform);
+    push_extra_setup_steps(&mut workflow, &options.extra_setup);
+    workflow.push_str("      - name: Build Nix package\n");
+    workflow.push_str("        run: nix build .# --no-link\n\n");
+    workflow.push_str("      - name: Publish to PyPI\n");
+    workflow.push_str("        env:\n");
+    workflow.push_str("          UV_PUBLISH_TOKEN: ${{ secrets.PYPI_TOKEN }}\n");
+    workflow.push_str("        run: |\n");
+    workflow.push_str("          nix develop -c uv build\n");
+    workflow.push_str("          nix develop -c uv publish\n\n");
+
+    trim_trailing_blank_lines(&mut workflow);
+    workflow
+}
+
+pub fn maturin_publish_file(
+    platform: Platform,
+    runtime: Runtime,
+    runner: &ResolvedRunner,
+    options: &CiOptions,
+) -> Result<GeneratedFile> {
+    if runtime != Runtime::Nix {
+        bail!("PyPI publish generation for PyO3 projects requires --runtime nix");
+    }
+
+    Ok(GeneratedFile {
+        relative_path: PathBuf::from(platform.workflow_dir()).join("publish-pypi.yaml"),
+        content: maturin_publish_workflow(platform, runner, options),
+    })
+}
+
+fn maturin_publish_workflow(
+    platform: Platform,
+    runner: &ResolvedRunner,
+    options: &CiOptions,
+) -> String {
+    let mut workflow = String::new();
+    push_generated_workflow_header(&mut workflow);
+    push_required_secrets_header(&mut workflow, &options.required_secrets);
+    workflow.push_str("name: Publish to PyPI\n\n");
+    workflow.push_str("on:\n");
+    workflow.push_str("  push:\n");
+    workflow.push_str("    tags: [\"[0-9]*\"]\n\n");
+    push_concurrency(&mut workflow);
+    workflow.push_str("jobs:\n");
+    workflow.push_str("  publish:\n");
+    workflow.push_str("    runs-on: ");
+    workflow.push_str(&runs_on(runner));
+    workflow.push('\n');
+    push_job_env(&mut workflow, Runtime::Nix, &options.extra_env);
+    workflow.push_str("    steps:\n");
+    push_checkout_step(&mut workflow, platform);
+    push_required_env_step(&mut workflow, &options.required_env);
+    push_install_nix_step(&mut workflow, platform);
+    push_extra_setup_steps(&mut workflow, &options.extra_setup);
+    workflow.push_str("      - name: Build and publish to PyPI\n");
+    workflow.push_str("        env:\n");
+    workflow.push_str("          MATURIN_PYPI_TOKEN: ${{ secrets.PYPI_TOKEN }}\n");
+    workflow.push_str("        run: |\n");
+    workflow.push_str("          nix develop -c maturin build --release --sdist\n");
+    workflow.push_str("          nix develop -c maturin publish --skip-existing\n\n");
+
+    trim_trailing_blank_lines(&mut workflow);
+    workflow
+}
+
 fn ci_workflow(
+    platform: Platform,
+    runtime: Runtime,
+    package: &Package,
+    self_check: SelfCheckOptions<'_>,
+    runners: &ResolvedCiRunners,
+    options: CiOptions,
+    step_runners: &BTreeMap<String, ResolvedRunner>,
+) -> String {
+    if step_runners.is_empty() {
+        ci_workflow_single_job(platform, runtime, package, self_check, runners, options)
+    } else {
+        ci_workflow_multi_job(
+            platform,
+            runtime,
+            package,
+            self_check,
+            runners,
+            options,
+            step_runners,
+        )
+    }
+}
+
+/// Single-job CI workflow (backward-compatible path).
+fn ci_workflow_single_job(
     platform: Platform,
     runtime: Runtime,
     package: &Package,
@@ -236,12 +1030,14 @@ fn ci_workflow(
     push_job_env(&mut workflow, runtime, &options.extra_env);
     workflow.push_str("    steps:\n");
     push_checkout_step(&mut workflow, platform);
+    push_required_env_step(&mut workflow, &options.required_env);
 
     match runtime {
         Runtime::Nix => {
             push_install_nix_step(&mut workflow, platform);
             push_nix_cargo_bin_path_step(&mut workflow);
             push_extra_setup_steps(&mut workflow, &options.extra_setup);
+            workflow.push_str("      - name: Format check\n        run: nix develop -c cargo fmt --all -- --check\n\n");
             match options.om_ci {
                 OmCiMode::Off => {
                     push_nix_ci_legacy_steps(
@@ -282,6 +1078,9 @@ fn ci_workflow(
             push_rust_setup_step(&mut workflow, platform);
             push_rust_cache_steps(&mut workflow, platform);
             push_extra_setup_steps(&mut workflow, &options.extra_setup);
+            workflow.push_str(
+                "      - name: Format check\n        run: cargo fmt --all -- --check\n\n",
+            );
             push_test_steps(&mut workflow, runtime, package, &options);
             push_quality_tool_install_steps(&mut workflow, runtime, &options);
             push_optional_ci_steps(&mut workflow, runtime, package, &options);
@@ -291,6 +1090,248 @@ fn ci_workflow(
             push_clippy_steps(&mut workflow, package, &options);
             push_package_crate_step(&mut workflow, package, &options);
         }
+    }
+
+    trim_trailing_blank_lines(&mut workflow);
+    workflow
+}
+
+fn runner_for_step<'a>(
+    step_runners: &'a BTreeMap<String, ResolvedRunner>,
+    runners: &'a ResolvedCiRunners,
+    key: &str,
+) -> &'a ResolvedRunner {
+    step_runners.get(key).unwrap_or(&runners.ci)
+}
+
+/// Multi-job CI workflow that splits steps across jobs by their step-runner label.
+fn ci_workflow_multi_job(
+    platform: Platform,
+    runtime: Runtime,
+    package: &Package,
+    self_check: SelfCheckOptions<'_>,
+    runners: &ResolvedCiRunners,
+    options: CiOptions,
+    step_runners: &BTreeMap<String, ResolvedRunner>,
+) -> String {
+    let mut workflow = String::new();
+    push_generated_workflow_header(&mut workflow);
+    push_required_secrets_header(&mut workflow, &options.required_secrets);
+    workflow.push_str("name: CI\n\n");
+    workflow.push_str("on:\n");
+    workflow.push_str("  push:\n");
+    workflow.push_str("    branches: [\"**\"]\n");
+    workflow.push_str("    tags-ignore: [\"**\"]\n");
+    workflow.push('\n');
+    push_concurrency(&mut workflow);
+    workflow.push_str("jobs:\n");
+
+    struct StepDef<'a> {
+        runner: &'a ResolvedRunner,
+        yaml: String,
+    }
+    let mut steps: Vec<StepDef> = Vec::new();
+
+    let mut capture = |key: &str, s: &str| {
+        let r = runner_for_step(step_runners, runners, key);
+        steps.push(StepDef {
+            runner: r,
+            yaml: s.to_string(),
+        });
+    };
+
+    match runtime {
+        Runtime::Nix => {
+            capture(
+                STEP_FLAKE_CHECK,
+                "      - name: Check flake\n        run: nix flake check\n\n",
+            );
+            capture(
+                STEP_CARGO_FMT,
+                "      - name: Format check\n        run: nix develop -c cargo fmt --all -- --check\n\n",
+            );
+
+            let mut test = "      - name: Test\n        run: nix develop -c cargo test".to_string();
+            push_package_selector(&mut test, package, &options);
+            test.push_str("\n\n");
+            capture(STEP_CARGO_TEST, &test);
+
+            let mut q = String::new();
+            if options.with_audit {
+                q.push_str("      - name: Check cargo-audit tool\n        run: nix develop -c command -v cargo-audit\n\n");
+            }
+            if options.with_deny {
+                q.push_str("      - name: Check cargo-deny tool\n        run: nix develop -c command -v cargo-deny\n\n");
+            }
+            if !q.is_empty() {
+                capture(STEP_QUALITY_TOOLS, &q);
+            }
+
+            let mut opt = String::new();
+            if options.with_msrv {
+                opt.push_str(
+                    "      - name: Check MSRV\n        run: nix develop -c cargo check\n\n",
+                );
+            }
+            if options.with_docs {
+                opt.push_str("      - name: Build docs\n        run: nix develop -c cargo doc --no-deps --all-features\n\n");
+            }
+            if !opt.is_empty() {
+                capture(STEP_CARGO_DOC, &opt);
+            }
+
+            if self_check.enabled {
+                let mut sc = String::from(
+                    "      - name: Check generated CI\n        run: nix develop -c cargo run -- init ci",
+                );
+                if runtime == Runtime::Nix {
+                    sc.push_str(" --runtime nix");
+                }
+                sc.push_str("\n      - name: Check generated flake and hooks\n        run: nix develop -c cargo run -- init flake --check\n\n");
+                capture(STEP_SELF_CHECK, &sc);
+            }
+
+            let mut clippy =
+                "      - name: Clippy\n        run: nix develop -c cargo clippy".to_string();
+            push_package_selector(&mut clippy, package, &options);
+            clippy.push_str(" --all-targets -- --deny warnings\n\n");
+            capture(STEP_CARGO_CLIPPY, &clippy);
+
+            if package.is_publishable() {
+                let mut pkg =
+                    "      - name: Package crate\n        run: nix develop -c cargo package"
+                        .to_string();
+                push_package_selector(&mut pkg, package, &options);
+                pkg.push('\n');
+                capture(STEP_CARGO_PACKAGE, &pkg);
+            }
+        }
+        Runtime::Cargo => {
+            capture(
+                STEP_CARGO_FMT,
+                "      - name: Format check\n        run: cargo fmt --all -- --check\n\n",
+            );
+
+            let mut test = String::from("      - name: Test\n        run: cargo test");
+            push_package_selector(&mut test, package, &options);
+            test.push_str("\n\n");
+            capture(STEP_CARGO_TEST, &test);
+
+            let mut q = String::new();
+            if options.with_audit {
+                q.push_str("      - name: Install cargo-audit\n        run: command -v cargo-audit >/dev/null 2>&1 || cargo install cargo-audit --locked\n\n");
+            }
+            if options.with_deny {
+                q.push_str(&format!("      - name: Install cargo-deny\n        run: command -v cargo-deny >/dev/null 2>&1 || cargo install cargo-deny --locked --version {CARGO_DENY_VERSION}\n\n"));
+            }
+            if !q.is_empty() {
+                capture(STEP_QUALITY_TOOLS, &q);
+            }
+
+            let mut opt = String::new();
+            if options.with_msrv {
+                opt.push_str("      - name: Check MSRV\n        run: cargo check\n\n");
+            }
+            if options.with_docs {
+                opt.push_str(
+                    "      - name: Build docs\n        run: cargo doc --no-deps --all-features\n\n",
+                );
+            }
+            if !opt.is_empty() {
+                capture(STEP_CARGO_DOC, &opt);
+            }
+
+            if self_check.enabled {
+                let mut sc = String::from(
+                    "      - name: Check generated CI\n        run: cargo run -- init ci",
+                );
+                sc.push_str("\n      - name: Check generated flake and hooks\n        run: cargo run -- init flake --check\n\n");
+                capture(STEP_SELF_CHECK, &sc);
+            }
+
+            let mut clippy = String::from("      - name: Clippy\n        run: cargo clippy");
+            push_package_selector(&mut clippy, package, &options);
+            clippy.push_str(" --all-targets -- --deny warnings\n\n");
+            capture(STEP_CARGO_CLIPPY, &clippy);
+
+            if package.is_publishable() {
+                let mut pkg =
+                    String::from("      - name: Package crate\n        run: cargo package");
+                push_package_selector(&mut pkg, package, &options);
+                pkg.push('\n');
+                capture(STEP_CARGO_PACKAGE, &pkg);
+            }
+        }
+    }
+
+    struct JobEmit<'a> {
+        name: String,
+        runner: &'a ResolvedRunner,
+        steps: String,
+    }
+
+    // Group steps by runner label, deduplicating job names.
+    let mut jobs: Vec<JobEmit> = Vec::new();
+    {
+        let mut label_to_idx: BTreeMap<&str, usize> = BTreeMap::new();
+        for step in &steps {
+            let label = step
+                .runner
+                .labels
+                .first()
+                .map(|s| s.as_str())
+                .unwrap_or("runner");
+            let idx = label_to_idx.len();
+            let entry = label_to_idx.entry(label).or_insert(idx);
+            if *entry == jobs.len() {
+                let sanitized: String = label
+                    .chars()
+                    .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
+                    .collect();
+                let name = if sanitized.is_empty() {
+                    "job".to_string()
+                } else {
+                    sanitized
+                };
+                jobs.push(JobEmit {
+                    name,
+                    runner: step.runner,
+                    steps: String::new(),
+                });
+            }
+            jobs[*entry].steps.push_str(&step.yaml);
+        }
+    }
+
+    let first_job_name = jobs.first().map(|j| j.name.clone()).unwrap_or_default();
+    for (idx, job) in jobs.iter().enumerate() {
+        workflow.push_str(&format!("  {}:\n", job.name));
+        if idx > 0 {
+            workflow.push_str(&format!("    needs: [{first_job_name}]\n"));
+        }
+        workflow.push_str("    runs-on: ");
+        workflow.push_str(&runs_on(job.runner));
+        workflow.push('\n');
+        push_container(&mut workflow, platform, runtime, package);
+        push_job_env(&mut workflow, runtime, &options.extra_env);
+        workflow.push_str("    steps:\n");
+        push_checkout_step(&mut workflow, platform);
+        push_required_env_step(&mut workflow, &options.required_env);
+
+        match runtime {
+            Runtime::Nix => {
+                push_install_nix_step(&mut workflow, platform);
+                push_nix_cargo_bin_path_step(&mut workflow);
+                push_extra_setup_steps(&mut workflow, &options.extra_setup);
+            }
+            Runtime::Cargo => {
+                push_rust_setup_step(&mut workflow, platform);
+                push_rust_cache_steps(&mut workflow, platform);
+                push_extra_setup_steps(&mut workflow, &options.extra_setup);
+            }
+        }
+
+        workflow.push_str(&job.steps);
     }
 
     trim_trailing_blank_lines(&mut workflow);
@@ -333,6 +1374,7 @@ fn publish_workflow(
     push_job_env(&mut workflow, runtime, &options.extra_env);
     workflow.push_str("    steps:\n");
     push_checkout_step(&mut workflow, platform);
+    push_required_env_step(&mut workflow, &options.required_env);
 
     match runtime {
         Runtime::Nix => {
@@ -423,6 +1465,7 @@ fn artifacts_workflow(
     push_job_env(&mut workflow, runtime, &options.extra_env);
     workflow.push_str("    steps:\n");
     push_checkout_step(&mut workflow, platform);
+    push_required_env_step(&mut workflow, &options.required_env);
     workflow.push_str(&validate_release_tag_step(None, None));
     match runtime {
         Runtime::Nix => {
@@ -673,7 +1716,7 @@ fn push_chocolatey_publish_step(workflow: &mut String, opts: &ChocolateyOptions)
     workflow.push('\n');
     workflow.push_str("        shell: pwsh\n");
     workflow.push_str("        run: |\n");
-    workflow.push_str("          if (-not $env:CHOCOLATEY_API_KEY) { Write-Host 'CHOCOLATEY_API_KEY not configured; skipping Chocolatey package update.'; exit 0 }\n");
+    workflow.push_str("          if (-not $env:CHOCOLATEY_API_KEY) { Write-Error 'CHOCOLATEY_API_KEY is required because Chocolatey package publishing is configured.'; exit 1 }\n");
     push_windows_version_lines(workflow);
     workflow.push_str("          simit dist chocolatey bump `\n");
     workflow.push_str("            --version $version `\n");
@@ -700,7 +1743,7 @@ fn push_scoop_publish_step(workflow: &mut String, opts: &ScoopOptions) {
     workflow.push('\n');
     workflow.push_str("        shell: pwsh\n");
     workflow.push_str("        run: |\n");
-    workflow.push_str("          if (-not $env:SCOOP_BUCKET_TOKEN) { Write-Host 'SCOOP_BUCKET_TOKEN not configured; skipping Scoop bucket update.'; exit 0 }\n");
+    workflow.push_str("          if (-not $env:SCOOP_BUCKET_TOKEN) { Write-Error 'SCOOP_BUCKET_TOKEN is required because Scoop bucket publishing is configured.'; exit 1 }\n");
     push_windows_version_lines(workflow);
     workflow.push_str("          $credentialHelper = '!f() { echo username=caniko; echo \"password=$SCOOP_BUCKET_TOKEN\"; }; f'\n");
     workflow.push_str("          if (Test-Path bucket) { Remove-Item -Recurse -Force bucket }\n");
@@ -744,9 +1787,27 @@ fn push_chocolatey_cli_flags(workflow: &mut String, opts: &ChocolateyOptions) {
         push_ps_arg(workflow, "--choco-authors", authors);
     }
     push_ps_arg(workflow, "--choco-description", &opts.description);
+    if let Some(summary) = &opts.summary {
+        push_ps_arg(workflow, "--choco-summary", summary);
+    }
     push_ps_arg(workflow, "--choco-project-url", &opts.project_url);
     if let Some(license_url) = &opts.license_url {
         push_ps_arg(workflow, "--choco-license-url", license_url);
+    }
+    if let Some(icon_url) = &opts.icon_url {
+        push_ps_arg(workflow, "--choco-icon-url", icon_url);
+    }
+    if let Some(package_source_url) = &opts.package_source_url {
+        push_ps_arg(workflow, "--choco-package-source-url", package_source_url);
+    }
+    if let Some(docs_url) = &opts.docs_url {
+        push_ps_arg(workflow, "--choco-docs-url", docs_url);
+    }
+    if let Some(bug_tracker_url) = &opts.bug_tracker_url {
+        push_ps_arg(workflow, "--choco-bug-tracker-url", bug_tracker_url);
+    }
+    if let Some(project_source_url) = &opts.project_source_url {
+        push_ps_arg(workflow, "--choco-project-source-url", project_source_url);
     }
     if let Some(tags) = &opts.tags {
         push_ps_arg(workflow, "--choco-tags", tags);
@@ -833,9 +1894,9 @@ fn push_homebrew_publish_step(workflow: &mut String, opts: &HomebrewOptions) {
     workflow.push_str("          set -euo pipefail\n\n");
     workflow.push_str("          if [ -z \"${HOMEBREW_TAP_TOKEN:-}\" ]; then\n");
     workflow.push_str(
-        "            echo \"HOMEBREW_TAP_TOKEN not configured; skipping Homebrew tap update.\"\n",
+        "            echo \"HOMEBREW_TAP_TOKEN is required because Homebrew tap publishing is configured.\" >&2\n",
     );
-    workflow.push_str("            exit 0\n");
+    workflow.push_str("            exit 1\n");
     workflow.push_str("          fi\n\n");
     workflow.push_str("          VERSION=\"$CODEBERG_REF_NAME\"\n");
     workflow.push_str("          for artifact in \\\n");
@@ -1118,10 +2179,9 @@ fn shell_quote(value: &str) -> String {
 }
 
 fn shell_word(value: &str) -> String {
-    if value
-        .bytes()
-        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b'/'))
-    {
+    if value.bytes().all(|byte| {
+        byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b'/' | b'#')
+    }) {
         value.to_owned()
     } else {
         shell_quote(value)
@@ -1177,6 +2237,12 @@ allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 fn push_concurrency(workflow: &mut String) {
     workflow.push_str("concurrency:\n");
     workflow.push_str("  group: ${{ github.workflow }}-${{ github.ref }}\n");
+    workflow.push_str("  cancel-in-progress: true\n\n");
+}
+
+fn push_codeberg_concurrency(workflow: &mut String) {
+    workflow.push_str("concurrency:\n");
+    workflow.push_str("  group: ${{ codeberg.workflow }}-${{ codeberg.ref }}\n");
     workflow.push_str("  cancel-in-progress: true\n\n");
 }
 
@@ -1266,6 +2332,39 @@ fn push_extra_setup_steps(workflow: &mut String, extra_setup: &[String]) {
             workflow.push_str("\n\n");
         }
     }
+}
+
+fn push_required_env_step(workflow: &mut String, required_env: &[String]) {
+    if required_env.is_empty() {
+        return;
+    }
+    workflow.push_str("      - name: Validate required environment\n");
+    workflow.push_str("        run: |\n");
+    workflow.push_str("          set -euo pipefail\n");
+    for name in required_env {
+        workflow.push_str("          if [ -z \"${");
+        workflow.push_str(name);
+        workflow.push_str(":-}\" ]; then echo ");
+        workflow.push_str(&shell_word(&format!(
+            "{name} is required by simit project configuration."
+        )));
+        workflow.push_str(" >&2; exit 1; fi\n");
+        if name.ends_with("_FILE") {
+            workflow.push_str("          if [ ! -r \"${");
+            workflow.push_str(name);
+            workflow.push_str("}\" ] || [ ! -s \"${");
+            workflow.push_str(name);
+            workflow.push_str("}\" ]; then echo ");
+            workflow.push_str(&shell_word(&format!(
+                "{name} must point to a readable, non-empty file."
+            )));
+            workflow.push_str(" >&2; exit 1; fi\n");
+        }
+        workflow.push_str("          printf 'validated required environment: %s\\n' ");
+        workflow.push_str(&shell_word(name));
+        workflow.push('\n');
+    }
+    workflow.push('\n');
 }
 
 fn push_action_uses(workflow: &mut String, platform: Platform, action: &str, version: &str) {
@@ -1561,7 +2660,7 @@ fn push_optional_ci_steps(
     if options.with_docs {
         workflow.push_str("      - name: Build docs\n");
         workflow.push_str("        run: ");
-        workflow.push_str(prefix);
+        workflow.push_str(docs_command_prefix(runtime));
         workflow.push_str("cargo doc");
         push_package_selector(workflow, package, options);
         workflow.push_str(" --no-deps --all-features\n\n");
@@ -1585,7 +2684,7 @@ fn push_optional_publish_steps(workflow: &mut String, runtime: Runtime, options:
     if options.with_docs {
         workflow.push_str("      - name: Build docs\n");
         workflow.push_str("        run: ");
-        workflow.push_str(prefix);
+        workflow.push_str(docs_command_prefix(runtime));
         workflow.push_str("cargo doc --no-deps --all-features\n\n");
     }
 }
@@ -1634,6 +2733,13 @@ fn command_prefix(runtime: Runtime) -> &'static str {
     match runtime {
         Runtime::Cargo => "",
         Runtime::Nix => "nix develop -c ",
+    }
+}
+
+fn docs_command_prefix(runtime: Runtime) -> &'static str {
+    match runtime {
+        Runtime::Cargo => "",
+        Runtime::Nix => "nix develop .#docs -c ",
     }
 }
 
@@ -1707,6 +2813,9 @@ fn push_self_check_suffix(
     }
     if options.with_artifacts {
         workflow.push_str(" --with-artifacts");
+    }
+    if options.publish_crates {
+        workflow.push_str(" --publish-crates");
     }
     match options.om_ci {
         OmCiMode::Off => {}
