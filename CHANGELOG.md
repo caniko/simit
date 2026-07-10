@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.1] - 2026-07-10
+
+### Fixed
+
+- Keep generated release workflows out of CI drift detection so projects with
+  both managed CI and release automation report a managed CI status.
+
 ## [0.17.0] - 2026-07-10
 
 ### Added
@@ -240,7 +247,8 @@ ci`, including the `~/.cargo/bin` key, rust-cache settings, and why Nix
 
 - Prepare the first public crates.io release.
 
-[Unreleased]: https://codeberg.org/caniko/simit/compare/0.17.0...HEAD
+[Unreleased]: https://codeberg.org/caniko/simit/compare/0.17.1...HEAD
+[0.17.1]: https://codeberg.org/caniko/simit/compare/0.17.0...0.17.1
 [0.17.0]: https://codeberg.org/caniko/simit/compare/0.16.1...0.17.0
 [0.16.1]: https://codeberg.org/caniko/simit/compare/0.16.0...0.16.1
 [0.16.0]: https://codeberg.org/caniko/simit/compare/0.15.4...0.16.0
