@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-07-10
+
+### Added
+
+- Add persisted per-step runner routing and multi-job Forgejo CI rendering,
+  including crate publishing and required environment handling.
+- Add enforced tag-driven release publisher workflows with cross-platform
+  artifact and Windows package support.
+- Add regression fixtures for flake-provided `simitConfig` and Sorrel-like
+  `simit.toml` configurations.
+
+### Changed
+
+- Extend `init release` to render comprehensive publisher workflows and make
+  configured publisher enforcement explicit.
+
 ## [0.16.1] - 2026-05-30
 
 ### Fixed
@@ -224,7 +240,8 @@ ci`, including the `~/.cargo/bin` key, rust-cache settings, and why Nix
 
 - Prepare the first public crates.io release.
 
-[Unreleased]: https://codeberg.org/caniko/simit/compare/0.16.1...HEAD
+[Unreleased]: https://codeberg.org/caniko/simit/compare/0.17.0...HEAD
+[0.17.0]: https://codeberg.org/caniko/simit/compare/0.16.1...0.17.0
 [0.16.1]: https://codeberg.org/caniko/simit/compare/0.16.0...0.16.1
 [0.16.0]: https://codeberg.org/caniko/simit/compare/0.15.4...0.16.0
 [0.15.3]: https://codeberg.org/caniko/simit/compare/0.15.2...0.15.3
