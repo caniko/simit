@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.6] - 2026-07-10
+
 ### Fixed
 
 - Apply the list-only package gate to multi-job workflows created by
@@ -283,7 +285,8 @@ ci`, including the `~/.cargo/bin` key, rust-cache settings, and why Nix
 
 - Prepare the first public crates.io release.
 
-[Unreleased]: https://codeberg.org/caniko/simit/compare/0.17.5...HEAD
+[Unreleased]: https://codeberg.org/caniko/simit/compare/0.17.6...HEAD
+[0.17.6]: https://codeberg.org/caniko/simit/compare/0.17.5...0.17.6
 [0.17.5]: https://codeberg.org/caniko/simit/compare/0.17.4...0.17.5
 [0.17.4]: https://codeberg.org/caniko/simit/compare/0.17.3...0.17.4
 [0.17.3]: https://codeberg.org/caniko/simit/compare/0.17.2...0.17.3
