@@ -2854,7 +2854,7 @@ fn validate_release_tag_step(
         format!(
             r#"
           # cargo pkgid scopes the version lookup to the crate this workflow publishes.
-          version="$({cargo_command_prefix}cargo pkgid -p {package_name} | awk -F'[#@]' '/@/ {{print $NF}}' | tail -n 1)"
+          version="$({cargo_command_prefix}cargo pkgid -p {package_name} | awk -F'[#@]' 'NF > 1 {{print $NF}}' | tail -n 1)"
           if [ -z "$version" ]; then
             echo "Could not read package version from cargo pkgid" >&2
             exit 1
