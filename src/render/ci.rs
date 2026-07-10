@@ -1202,7 +1202,7 @@ fn ci_workflow_multi_job(
                     "      - name: Package crate\n        run: nix develop -c cargo package"
                         .to_string();
                 push_package_selector(&mut pkg, package, &options);
-                pkg.push('\n');
+                push_package_flags(&mut pkg, package, &options);
                 capture(STEP_CARGO_PACKAGE, &pkg);
             }
         }
@@ -1258,7 +1258,7 @@ fn ci_workflow_multi_job(
                 let mut pkg =
                     String::from("      - name: Package crate\n        run: cargo package");
                 push_package_selector(&mut pkg, package, &options);
-                pkg.push('\n');
+                push_package_flags(&mut pkg, package, &options);
                 capture(STEP_CARGO_PACKAGE, &pkg);
             }
         }

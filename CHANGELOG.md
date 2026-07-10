@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Apply the list-only package gate to multi-job workflows created by
+  per-step runner routing.
+
 ## [0.17.5] - 2026-07-10
 
 ### Fixed
