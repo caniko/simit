@@ -97,6 +97,8 @@ pub enum InitAction {
     Ci(Box<InitCiCommand>),
     #[command(about = "Generate or verify a canonical Rust crane flake and hook wiring")]
     Flake(InitFlakeCommand),
+    #[command(about = "Generate or verify a language-aware .gitignore")]
+    Gitignore(InitGitignoreCommand),
     #[command(about = "Bootstrap a Homebrew tap repo with a formula skeleton")]
     HomebrewTap(InitHomebrewTapCommand),
     #[command(about = "Bootstrap a Chocolatey package directory")]
@@ -1721,6 +1723,16 @@ pub struct InitFlakeCommand {
         help = "Cross target to build; repeatable. Defaults to all targets when --cross is set without any --target"
     )]
     pub targets: Vec<FlakeTargetArg>,
+}
+
+#[derive(Debug, Args)]
+pub struct InitGitignoreCommand {
+    #[arg(long, help = "Verify .gitignore matches the generated template")]
+    pub check: bool,
+    #[arg(long, help = "Print the generated .gitignore without writing it")]
+    pub print: bool,
+    #[arg(long, help = "Show a unified diff when --check finds drift")]
+    pub diff: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]

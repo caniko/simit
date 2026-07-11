@@ -32,6 +32,7 @@ fn run() -> Result<()> {
         Commands::Init(command) => match command.action {
             InitAction::Ci(command) => commands::init_ci::run(*command),
             InitAction::Flake(command) => commands::init_flake::run(command),
+            InitAction::Gitignore(command) => commands::init_gitignore::run(command),
             InitAction::HomebrewTap(command) => commands::init_homebrew_tap::run(command),
             InitAction::Chocolatey(command) => commands::init_chocolatey::run(*command),
             InitAction::ScoopBucket(command) => commands::init_scoop_bucket::run(command),

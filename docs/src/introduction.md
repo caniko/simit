@@ -8,7 +8,8 @@ and creates a release tag named exactly like the new version.
 
 The tool also provides helpers for Keep a Changelog files, generated Rust CI,
 user-scoped runner configuration, release maintainer trust roots, crane-based
-Nix flakes, shell completions, manpages, and Homebrew tap release automation.
+Nix flakes, language-aware `.gitignore` files, shell completions, manpages, and
+Homebrew tap release automation.
 
 ## Scope
 

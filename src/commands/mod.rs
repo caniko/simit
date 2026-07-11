@@ -14,6 +14,7 @@ pub mod init_chocolatey;
 pub mod init_ci;
 pub mod init_copr;
 pub mod init_flake;
+pub mod init_gitignore;
 pub mod init_homebrew_tap;
 pub mod init_release;
 pub mod init_scoop_bucket;

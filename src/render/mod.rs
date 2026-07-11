@@ -4,6 +4,7 @@ pub mod ci;
 pub mod copr_makefile;
 pub mod diff;
 pub mod flake;
+pub mod gitignore;
 pub mod homebrew_formula;
 pub mod pkgbuild;
 pub mod release_workflow;

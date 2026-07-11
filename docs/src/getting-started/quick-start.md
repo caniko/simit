@@ -27,6 +27,19 @@ simit release patch -m "release patch"
 `simit release` runs Cargo tests, Clippy with warnings denied, promotes
 `CHANGELOG.md` when present, commits, and tags locally.
 
+Generate a compact, language-aware `.gitignore` for the current project:
+
+```sh
+simit init gitignore
+simit init gitignore --check
+simit init gitignore --print
+```
+
+The generated entries cover local build, cache, editor, environment, and
+documentation outputs. Rust and uv/Python-specific entries are added when
+those project types are detected. Review project-specific rules before
+replacing an existing `.gitignore`.
+
 Generate CI workflows for a single-package project:
 
 ```sh

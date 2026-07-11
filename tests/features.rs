@@ -850,6 +850,7 @@ fn init_help_is_grouped() {
         [
             "ci",
             "flake",
+            "gitignore",
             "homebrew-tap",
             "chocolatey",
             "scoop-bucket",

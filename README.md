@@ -142,6 +142,16 @@ simit changelog add added "describe the release"
 simit release patch -m "release patch"
 ```
 
+## Project hygiene
+
+Generate a compact, language-aware .gitignore for the current project with
+simit init gitignore. Use --check to verify it in CI and --print to inspect the
+rendered template without writing it.
+
+The template covers common local outputs and adds Rust or uv/Python entries
+when those project types are detected. Existing project-specific ignore rules
+should be reviewed before replacing an older .gitignore.
+
 ## CI wiring
 
 Generate lightweight Rust CI and crates.io publish workflows for a repository:
