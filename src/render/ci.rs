@@ -1481,7 +1481,7 @@ fn artifacts_workflow(
             push_package_selector(&mut workflow, package, options);
             workflow.push_str("\n\n");
             workflow.push_str("      - name: Install Nix release tools\n");
-            workflow.push_str("        uses: https://github.com/cachix/install-nix-action@v31\n\n");
+            workflow.push_str("        uses: cachix/install-nix-action@v31\n\n");
         }
     }
     push_release_integrity_steps(&mut workflow, platform);
@@ -2376,7 +2376,7 @@ fn push_install_nix_step(workflow: &mut String, platform: Platform) {
     }
 
     workflow.push_str("      - name: Install Nix\n");
-    workflow.push_str("        uses: https://github.com/cachix/install-nix-action@v31\n\n");
+    workflow.push_str("        uses: cachix/install-nix-action@v31\n\n");
 }
 
 fn push_nix_cargo_bin_path_step(workflow: &mut String) {
