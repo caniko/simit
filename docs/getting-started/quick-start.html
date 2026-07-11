@@ -35,7 +35,7 @@
             const path_to_root = "../";
             const default_light_theme = "coal";
             const default_dark_theme = "coal";
-            window.path_to_searchindex_js = "../searchindex-9122527f.js";
+            window.path_to_searchindex_js = "../searchindex-b196edf9.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../toc-a5f7a169.js"></script>
@@ -192,6 +192,15 @@
 </code></pre>
 <p><code>simit release</code> runs Cargo tests, Clippy with warnings denied, promotes
 <code>CHANGELOG.md</code> when present, commits, and tags locally.</p>
+<p>Generate a compact, language-aware <code>.gitignore</code> for the current project:</p>
+<pre><code class="language-sh">simit init gitignore
+simit init gitignore --check
+simit init gitignore --print
+</code></pre>
+<p>The generated entries cover local build, cache, editor, environment, and
+documentation outputs. Rust and uv/Python-specific entries are added when
+those project types are detected. Review project-specific rules before
+replacing an existing <code>.gitignore</code>.</p>
 <p>Generate CI workflows for a single-package project:</p>
 <pre><code class="language-sh">simit init ci --platform forgejo
 </code></pre>
