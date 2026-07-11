@@ -129,7 +129,10 @@ fn detect_languages_in_dir(root: &Path, dir: &Path, languages: &mut Languages) -
             Some("toml") => languages.toml = true,
             Some("yaml" | "yml") => languages.yaml = true,
             Some("md" | "markdown") => languages.markdown = true,
-            Some("rs") => languages.rust = true,
+            // Rust is a project component only when the repository root owns
+            // a Cargo manifest. Source fixtures in Python or documentation
+            // projects must not activate Rust tooling.
+            Some("rs") => {}
             _ => {}
         }
     }

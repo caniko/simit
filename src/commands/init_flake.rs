@@ -57,12 +57,13 @@ pub fn run(command: InitFlakeCommand) -> Result<()> {
     let rust_edition = rustfmt_edition(&metadata);
     let rust_version = workspace_rust_version(&metadata);
     let audit_tools = resolve_audit_tools(workspace_root, &cfg, &languages, &metadata)?;
-    let all_files = flake::files(
+    let all_files = flake::files_with_components(
         &languages,
         &rust_edition,
         rust_version.as_deref(),
         cross_targets.as_deref(),
         audit_tools,
+        &cfg.flake.components,
     );
     // Cross mode generates a project-owned multi-target flake.nix, so it always
     // operates at full scope regardless of any configured default.
@@ -178,7 +179,7 @@ pub fn run_python(command: InitFlakeCommand) -> Result<()> {
     let mut languages = project::detect_languages(workspace_root)?;
     languages.nix = true;
     languages.uv_python = true;
-    let all_files = flake::python_files(&languages, &project);
+    let all_files = flake::python_files(&languages, &project, &cfg.flake.components);
     let scope = resolve_python_scope(command.scope, &cfg, workspace_root);
     let files = scoped_files(&all_files, scope);
 

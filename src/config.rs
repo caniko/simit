@@ -199,6 +199,24 @@ pub struct FlakeConfig {
     pub pre_commit_shell_hook: bool,
     #[serde(default)]
     pub expected_outputs: FlakeExpectedOutputs,
+    /// Generated pre-commit components. An empty list keeps language-based
+    /// auto-detection for backwards compatibility.
+    #[serde(default)]
+    pub components: Vec<FlakeComponent>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum FlakeComponent {
+    Treefmt,
+    CargoFmt,
+    CargoClippy,
+    CargoMsrv,
+    CargoAudit,
+    CargoDeny,
+    NixFlakeCheck,
+    UvRuffFormat,
+    UvMypy,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
@@ -252,6 +270,7 @@ impl Default for FlakeConfig {
             formatting_check: true,
             pre_commit_shell_hook: true,
             expected_outputs: FlakeExpectedOutputs::default(),
+            components: Vec::new(),
         }
     }
 }
@@ -315,6 +334,18 @@ pub struct CiConfig {
     pub pages: Option<CodebergPagesConfig>,
     #[serde(default)]
     pub step_runners: BTreeMap<String, String>,
+    /// Workflow components. Currently used by Python/Nix CI; an empty list
+    /// selects the complete project-appropriate default set.
+    #[serde(default)]
+    pub components: Vec<CiComponent>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CiComponent {
+    FlakeWiring,
+    FlakeEvaluation,
+    Checks,
 }
 
 /// `[ci.pages]` — Codeberg Pages publication through a repository-local deploy app.

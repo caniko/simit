@@ -625,6 +625,42 @@ fn pure_uv_python_project_generates_py_harbor_flake() {
 }
 
 #[test]
+fn python_component_selection_excludes_rust_and_unselected_hooks() {
+    let temp = init_python_project();
+    fs::create_dir_all(temp.path().join("tests/fixtures/demo/src")).unwrap();
+    fs::write(
+        temp.path().join("tests/fixtures/demo/Cargo.toml"),
+        "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    fs::write(
+        temp.path().join("tests/fixtures/demo/src/lib.rs"),
+        "pub fn fixture() {}\n",
+    )
+    .unwrap();
+    fs::write(
+        temp.path().join("simit.toml"),
+        "[flake]\ncomponents = [\"treefmt\", \"nix-flake-check\", \"uv-ruff-format\"]\n",
+    )
+    .unwrap();
+
+    let status = simit()
+        .current_dir(temp.path())
+        .args(["init", "flake"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let hooks = read(&temp.path().join("nix/pre-commit.nix"));
+    assert!(hooks.contains("treefmt"));
+    assert!(hooks.contains("nix-flake-check"));
+    assert!(hooks.contains("uv-ruff-format"));
+    assert!(!hooks.contains("uv-mypy"));
+    assert!(!hooks.contains("cargo-"));
+    assert!(!hooks.contains("rustToolchain"));
+}
+
+#[test]
 fn custom_py_harbor_flake_checks_expected_outputs() {
     let temp = init_python_project();
     fs::write(

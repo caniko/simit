@@ -2748,6 +2748,7 @@ fn forgejo_python_uv_ci_uses_nix_checks() {
     assert!(workflow.contains("nix build .#checks.x86_64-linux.offline-tests"));
     assert!(workflow.contains("nix build .#checks.x86_64-linux.typecheck"));
     assert!(!workflow.contains("cargo test"));
+    assert!(!workflow.contains("CARGO_HOME"));
     assert!(
         !temp
             .path()
@@ -2767,4 +2768,38 @@ fn forgejo_python_uv_ci_uses_nix_checks() {
         .status()
         .unwrap();
     assert!(check_status.success());
+}
+
+#[test]
+fn python_ci_component_selection_is_granular() {
+    let temp = init_python_project();
+    fs::write(
+        temp.path().join("simit.toml"),
+        r#"[flake]
+scope = "full"
+mode = "custom"
+backend = "py-harbor"
+
+[flake.expected_outputs]
+checks = ["offline-tests", "typecheck"]
+
+[ci]
+runtime = "nix"
+components = ["checks"]
+"#,
+    )
+    .unwrap();
+
+    let status = simit()
+        .current_dir(temp.path())
+        .args(["init", "ci", "--platform", "github"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let workflow = read(&temp.path().join(".github/workflows/ci.yaml"));
+    assert!(workflow.contains("nix build .#checks.x86_64-linux.offline-tests"));
+    assert!(!workflow.contains("Check generated flake wiring"));
+    assert!(!workflow.contains("Check flake evaluation"));
+    assert!(!workflow.contains("CARGO_HOME"));
 }

@@ -5,6 +5,7 @@ use anyhow::{Result, bail};
 
 use crate::cargo::Package;
 use crate::cli::{Platform, Runtime};
+use crate::config::CiComponent;
 use crate::config::{ResolvedVscode, VscodePatSource};
 use crate::project::GeneratedFile;
 use crate::user_config::{ResolvedCiRunners, ResolvedRunner};
@@ -289,6 +290,7 @@ pub fn python_ci_file(
     runner: &ResolvedRunner,
     options: &CiOptions,
     check_outputs: &[String],
+    components: &[CiComponent],
 ) -> Result<GeneratedFile> {
     if runtime != Runtime::Nix {
         bail!("Python uv CI generation requires --runtime nix");
@@ -296,7 +298,7 @@ pub fn python_ci_file(
 
     Ok(GeneratedFile {
         relative_path: PathBuf::from(platform.workflow_dir()).join("ci.yaml"),
-        content: python_ci_workflow(platform, runner, options, check_outputs),
+        content: python_ci_workflow(platform, runner, options, check_outputs, components),
     })
 }
 
@@ -817,7 +819,10 @@ fn python_ci_workflow(
     runner: &ResolvedRunner,
     options: &CiOptions,
     check_outputs: &[String],
+    components: &[CiComponent],
 ) -> String {
+    let selected =
+        |component: CiComponent| components.is_empty() || components.contains(&component);
     let mut workflow = String::new();
     push_generated_workflow_header(&mut workflow);
     push_required_secrets_header(&mut workflow, &options.required_secrets);
@@ -836,20 +841,26 @@ fn python_ci_workflow(
     workflow.push_str("    runs-on: ");
     workflow.push_str(&runs_on(runner));
     workflow.push('\n');
-    push_job_env(&mut workflow, Runtime::Nix, &options.extra_env);
+    push_job_env(&mut workflow, Runtime::Nix, &options.extra_env, false);
     workflow.push_str("    steps:\n");
     push_checkout_step(&mut workflow, platform);
     push_required_env_step(&mut workflow, &options.required_env);
     push_install_nix_step(&mut workflow, platform);
     push_extra_setup_steps(&mut workflow, &options.extra_setup);
-    workflow.push_str("      - name: Check generated flake wiring\n");
-    workflow.push_str(
-        "        run: nix run git+https://codeberg.org/caniko/simit.git -- init flake --check --diff\n\n",
-    );
-    workflow.push_str("      - name: Check flake evaluation\n");
-    workflow.push_str("        run: nix flake check --no-build\n\n");
+    if selected(CiComponent::FlakeWiring) {
+        workflow.push_str("      - name: Check generated flake wiring\n");
+        workflow.push_str(
+            "        run: nix run git+https://codeberg.org/caniko/simit.git -- init flake --check --diff\n\n",
+        );
+    }
+    if selected(CiComponent::FlakeEvaluation) {
+        workflow.push_str("      - name: Check flake evaluation\n");
+        workflow.push_str("        run: nix flake check --no-build\n\n");
+    }
 
-    let checks = if check_outputs.is_empty() {
+    let checks = if !selected(CiComponent::Checks) {
+        Vec::new()
+    } else if check_outputs.is_empty() {
         vec![
             "offline-tests".to_owned(),
             "typecheck".to_owned(),
@@ -905,7 +916,7 @@ fn python_publish_workflow(
     workflow.push_str("    runs-on: ");
     workflow.push_str(&runs_on(runner));
     workflow.push('\n');
-    push_job_env(&mut workflow, Runtime::Nix, &options.extra_env);
+    push_job_env(&mut workflow, Runtime::Nix, &options.extra_env, false);
     workflow.push_str("    steps:\n");
     push_checkout_step(&mut workflow, platform);
     push_required_env_step(&mut workflow, &options.required_env);
@@ -958,7 +969,7 @@ fn maturin_publish_workflow(
     workflow.push_str("    runs-on: ");
     workflow.push_str(&runs_on(runner));
     workflow.push('\n');
-    push_job_env(&mut workflow, Runtime::Nix, &options.extra_env);
+    push_job_env(&mut workflow, Runtime::Nix, &options.extra_env, true);
     workflow.push_str("    steps:\n");
     push_checkout_step(&mut workflow, platform);
     push_required_env_step(&mut workflow, &options.required_env);
@@ -1027,7 +1038,7 @@ fn ci_workflow_single_job(
     workflow.push_str(&runs_on(&runners.ci));
     workflow.push('\n');
     push_container(&mut workflow, platform, runtime, package);
-    push_job_env(&mut workflow, runtime, &options.extra_env);
+    push_job_env(&mut workflow, runtime, &options.extra_env, true);
     workflow.push_str("    steps:\n");
     push_checkout_step(&mut workflow, platform);
     push_required_env_step(&mut workflow, &options.required_env);
@@ -1313,7 +1324,7 @@ fn ci_workflow_multi_job(
         workflow.push_str(&runs_on(job.runner));
         workflow.push('\n');
         push_container(&mut workflow, platform, runtime, package);
-        push_job_env(&mut workflow, runtime, &options.extra_env);
+        push_job_env(&mut workflow, runtime, &options.extra_env, true);
         workflow.push_str("    steps:\n");
         push_checkout_step(&mut workflow, platform);
         push_required_env_step(&mut workflow, &options.required_env);
@@ -1368,7 +1379,7 @@ fn publish_workflow(
     workflow.push_str(&runs_on(runner));
     workflow.push('\n');
     push_container(&mut workflow, platform, runtime, package);
-    push_job_env(&mut workflow, runtime, &options.extra_env);
+    push_job_env(&mut workflow, runtime, &options.extra_env, true);
     workflow.push_str("    steps:\n");
     push_checkout_step(&mut workflow, platform);
     push_required_env_step(&mut workflow, &options.required_env);
@@ -1459,7 +1470,7 @@ fn artifacts_workflow(
     workflow.push_str(&runs_on(&runners.release));
     workflow.push('\n');
     push_container(&mut workflow, platform, runtime, package);
-    push_job_env(&mut workflow, runtime, &options.extra_env);
+    push_job_env(&mut workflow, runtime, &options.extra_env, true);
     workflow.push_str("    steps:\n");
     push_checkout_step(&mut workflow, platform);
     push_required_env_step(&mut workflow, &options.required_env);
@@ -2258,13 +2269,19 @@ fn push_container(workflow: &mut String, platform: Platform, runtime: Runtime, p
     }
 }
 
-fn push_job_env(workflow: &mut String, runtime: Runtime, extra_env: &[(String, String)]) {
+fn push_job_env(
+    workflow: &mut String,
+    runtime: Runtime,
+    extra_env: &[(String, String)],
+    include_cargo_home: bool,
+) {
     let needs_nix_config =
         runtime == Runtime::Nix && !extra_env.iter().any(|(key, _)| key == "NIX_CONFIG");
     let needs_xdg_cache_home =
         runtime == Runtime::Nix && !extra_env.iter().any(|(key, _)| key == "XDG_CACHE_HOME");
-    let needs_cargo_home =
-        runtime == Runtime::Nix && !extra_env.iter().any(|(key, _)| key == "CARGO_HOME");
+    let needs_cargo_home = include_cargo_home
+        && runtime == Runtime::Nix
+        && !extra_env.iter().any(|(key, _)| key == "CARGO_HOME");
     if !needs_nix_config && !needs_xdg_cache_home && !needs_cargo_home && extra_env.is_empty() {
         return;
     }

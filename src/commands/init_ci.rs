@@ -342,6 +342,7 @@ fn run_python(command: InitCiCommand) -> Result<()> {
         &runners.ci,
         &options,
         &cfg.flake.expected_outputs.checks,
+        &cfg.ci.components,
     )?];
     if with_pypi_publish {
         files.push(ci::python_publish_file(

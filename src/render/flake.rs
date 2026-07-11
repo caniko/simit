@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use anyhow::{Result, bail};
 
 use crate::cli::FlakeTargetArg;
-use crate::config::{FlakeBackend, FlakeConfig};
+use crate::config::{FlakeBackend, FlakeComponent, FlakeConfig};
 use crate::project::{GeneratedFile, Languages};
 use crate::python;
 
@@ -72,6 +72,24 @@ pub fn files(
     cross_targets: Option<&[FlakeTargetArg]>,
     audit_tools: AuditTools,
 ) -> Vec<GeneratedFile> {
+    files_with_components(
+        languages,
+        rust_edition,
+        rust_version,
+        cross_targets,
+        audit_tools,
+        &[],
+    )
+}
+
+pub fn files_with_components(
+    languages: &Languages,
+    rust_edition: &str,
+    rust_version: Option<&str>,
+    cross_targets: Option<&[FlakeTargetArg]>,
+    audit_tools: AuditTools,
+    components: &[FlakeComponent],
+) -> Vec<GeneratedFile> {
     let flake_content = match cross_targets {
         Some(targets) => cross_template(targets, audit_tools),
         None => template(audit_tools),
@@ -87,7 +105,7 @@ pub fn files(
         },
         GeneratedFile {
             relative_path: PathBuf::from("nix/pre-commit.nix"),
-            content: pre_commit_nix(languages, rust_version, audit_tools),
+            content: pre_commit_nix(languages, rust_version, audit_tools, components),
         },
     ]
 }
@@ -106,7 +124,11 @@ pub fn print_existing_flake_note() {
     );
 }
 
-pub fn python_files(languages: &Languages, project: &python::Project) -> Vec<GeneratedFile> {
+pub fn python_files(
+    languages: &Languages,
+    project: &python::Project,
+    components: &[FlakeComponent],
+) -> Vec<GeneratedFile> {
     vec![
         GeneratedFile {
             relative_path: PathBuf::from("flake.nix"),
@@ -118,7 +140,7 @@ pub fn python_files(languages: &Languages, project: &python::Project) -> Vec<Gen
         },
         GeneratedFile {
             relative_path: PathBuf::from("nix/pre-commit.nix"),
-            content: pre_commit_nix(languages, None, AuditTools::default()),
+            content: pre_commit_nix(languages, None, AuditTools::default(), components),
         },
     ]
 }
@@ -1483,21 +1505,44 @@ fn pre_commit_nix(
     languages: &Languages,
     rust_version: Option<&str>,
     audit_tools: AuditTools,
+    components: &[FlakeComponent],
 ) -> String {
+    let selected = |component: FlakeComponent, detected: bool| {
+        if components.is_empty() {
+            detected
+        } else {
+            components.contains(&component)
+        }
+    };
+    let has_rust_component = [
+        FlakeComponent::CargoFmt,
+        FlakeComponent::CargoClippy,
+        FlakeComponent::CargoMsrv,
+        FlakeComponent::CargoAudit,
+        FlakeComponent::CargoDeny,
+    ]
+    .into_iter()
+    .any(|component| selected(component, languages.rust));
     let mut content = String::new();
     content.push_str("{\n");
     content.push_str("  pkgs,\n");
-    content.push_str("  treefmtWrapper,\n");
-    content.push_str("  rustToolchain ? null,\n");
+    if selected(FlakeComponent::Treefmt, true) {
+        content.push_str("  treefmtWrapper,\n");
+    }
+    if has_rust_component {
+        content.push_str("  rustToolchain ? null,\n");
+    }
     content.push_str("}: {\n");
-    content.push_str("  treefmt = {\n");
-    content.push_str("    enable = true;\n");
-    content.push_str("    name = \"treefmt\";\n");
-    content.push_str("    entry = \"${treefmtWrapper}/bin/treefmt --fail-on-change\";\n");
-    content.push_str("    pass_filenames = false;\n");
-    content.push_str("  };\n");
+    if selected(FlakeComponent::Treefmt, true) {
+        content.push_str("  treefmt = {\n");
+        content.push_str("    enable = true;\n");
+        content.push_str("    name = \"treefmt\";\n");
+        content.push_str("    entry = \"${treefmtWrapper}/bin/treefmt --fail-on-change\";\n");
+        content.push_str("    pass_filenames = false;\n");
+        content.push_str("  };\n");
+    }
 
-    if languages.rust {
+    if selected(FlakeComponent::CargoFmt, languages.rust) {
         content.push_str("\n  cargo-fmt = {\n");
         content.push_str("    enable = true;\n");
         content.push_str("    name = \"cargo fmt\";\n");
@@ -1507,6 +1552,8 @@ fn pre_commit_nix(
         );
         content.push_str("    pass_filenames = false;\n");
         content.push_str("  };\n");
+    }
+    if selected(FlakeComponent::CargoClippy, languages.rust) {
         content.push_str("\n  cargo-clippy = {\n");
         content.push_str("    enable = true;\n");
         content.push_str("    name = \"cargo clippy\";\n");
@@ -1518,6 +1565,11 @@ fn pre_commit_nix(
         );
         content.push_str("    pass_filenames = false;\n");
         content.push_str("  };\n");
+    }
+    if selected(
+        FlakeComponent::CargoMsrv,
+        languages.rust && rust_version.is_some(),
+    ) {
         if let Some(rust_version) = rust_version {
             let toolchain_version = rust_overlay_version(rust_version);
             content.push_str("\n  cargo-msrv = {\n");
@@ -1533,6 +1585,8 @@ fn pre_commit_nix(
             content.push_str("    stages = [\"pre-push\" \"manual\"];\n");
             content.push_str("  };\n");
         }
+    }
+    if selected(FlakeComponent::CargoAudit, languages.rust) {
         content.push_str("\n  cargo-audit = {\n");
         content.push_str("    enable = true;\n");
         content.push_str("    name = \"cargo audit\";\n");
@@ -1540,18 +1594,21 @@ fn pre_commit_nix(
         content.push_str("    extraPackages = pkgs.lib.optional (rustToolchain != null) rustToolchain ++ [pkgs.cargo-audit];\n");
         content.push_str("    pass_filenames = false;\n");
         content.push_str("  };\n");
-        if audit_tools.deny {
-            content.push_str("\n  cargo-deny = {\n");
-            content.push_str("    enable = true;\n");
-            content.push_str("    name = \"cargo deny\";\n");
-            content.push_str("    entry = \"cargo deny check bans licenses sources\";\n");
-            content.push_str("    extraPackages = pkgs.lib.optional (rustToolchain != null) rustToolchain ++ [pkgs.cargo-deny];\n");
-            content.push_str("    pass_filenames = false;\n");
-            content.push_str("  };\n");
-        }
+    }
+    if selected(
+        FlakeComponent::CargoDeny,
+        languages.rust && audit_tools.deny,
+    ) {
+        content.push_str("\n  cargo-deny = {\n");
+        content.push_str("    enable = true;\n");
+        content.push_str("    name = \"cargo deny\";\n");
+        content.push_str("    entry = \"cargo deny check bans licenses sources\";\n");
+        content.push_str("    extraPackages = pkgs.lib.optional (rustToolchain != null) rustToolchain ++ [pkgs.cargo-deny];\n");
+        content.push_str("    pass_filenames = false;\n");
+        content.push_str("  };\n");
     }
 
-    if languages.nix {
+    if selected(FlakeComponent::NixFlakeCheck, languages.nix) {
         content.push_str("\n  nix-flake-check = {\n");
         content.push_str("    enable = true;\n");
         content.push_str("    name = \"nix flake check\";\n");
@@ -1564,7 +1621,7 @@ fn pre_commit_nix(
         content.push_str("  };\n");
     }
 
-    if languages.uv_python {
+    if selected(FlakeComponent::UvRuffFormat, languages.uv_python) {
         content.push_str("\n  uv-ruff-format = {\n");
         content.push_str("    enable = true;\n");
         content.push_str("    name = \"uv ruff format\";\n");
@@ -1572,6 +1629,8 @@ fn pre_commit_nix(
         content.push_str("    extraPackages = [pkgs.uv];\n");
         content.push_str("    pass_filenames = false;\n");
         content.push_str("  };\n");
+    }
+    if selected(FlakeComponent::UvMypy, languages.uv_python) {
         content.push_str("\n  uv-mypy = {\n");
         content.push_str("    enable = true;\n");
         content.push_str("    name = \"uv mypy\";\n");
