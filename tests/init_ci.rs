@@ -846,7 +846,7 @@ fn github_nix_with_om_ci_replace_keeps_install_nix_action() {
     assert!(status.success());
 
     let ci = read(&temp.path().join(".github/workflows/ci.yaml"));
-    assert!(ci.contains("uses: https://github.com/cachix/install-nix-action@v31"));
+    assert!(ci.contains("uses: cachix/install-nix-action@v31"));
     assert!(ci.contains("OMNIX_REF:"));
     assert!(ci.contains("nix run \"$OMNIX_REF\" -- ci run"));
     assert!(!ci.contains("run: nix flake check"));
