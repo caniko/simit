@@ -454,7 +454,7 @@ pub fn render(inputs: &ReleaseWorkflowInputs<'_>) -> String {
         push_smoke(&mut w, command);
     }
     if let Some(codeberg) = inputs.codeberg {
-        push_codeberg_release(&mut w, codeberg);
+        push_codeberg_release(&mut w, codeberg, inputs.artifacts);
     }
     if let Some(attic) = inputs.attic {
         push_attic(&mut w, attic);
@@ -1067,7 +1067,11 @@ fn push_attic(w: &mut String, attic: &AtticConfig) {
     .expect("write");
 }
 
-fn push_codeberg_release(w: &mut String, codeberg: &ResolvedCodebergRelease) {
+fn push_codeberg_release(
+    w: &mut String,
+    codeberg: &ResolvedCodebergRelease,
+    artifacts: &ArtifactsConfig,
+) {
     w.push_str("      - name: Publish Codeberg release\n        env:\n");
     writeln!(
         w,
@@ -1105,7 +1109,36 @@ fn push_codeberg_release(w: &mut String, codeberg: &ResolvedCodebergRelease) {
         "          release_id=\"$(jq -r '.id' release.json)\"; test \"$release_id\" != \"null\"\n",
     );
     w.push_str("          shopt -s nullglob\n");
-    w.push_str("          files=(release/*)\n");
+    w.push_str("          files=()\n");
+    w.push_str("          add_matches() { local pattern=\"$1\" match; while IFS= read -r match; do files+=(\"$match\"); done < <(compgen -G \"$pattern\" || true); }\n");
+    w.push_str("          add_matches 'release/SHA256SUMS.txt'\n");
+    w.push_str("          add_matches 'release/SHA256SUMS.txt.minisig'\n");
+    if artifacts.checksum_globs.is_empty() {
+        for glob in [
+            "*.tar.gz",
+            "*.zip",
+            "*.AppImage",
+            "*.deb",
+            "*.src.rpm",
+            "*.exe",
+        ] {
+            writeln!(
+                w,
+                "          add_matches {}",
+                shell_single_quote(&format!("release/{glob}"))
+            )
+            .expect("write");
+        }
+    } else {
+        for glob in &artifacts.checksum_globs {
+            writeln!(
+                w,
+                "          add_matches {}",
+                shell_single_quote(&format!("release/{glob}"))
+            )
+            .expect("write");
+        }
+    }
     w.push_str("          while IFS= read -r file; do\n");
     w.push_str("            [ -f \"$file\" ] || continue\n");
     w.push_str("            name=\"$(basename \"$file\")\"\n");
@@ -2439,6 +2472,9 @@ mod tests {
         // Checksum step uses runner-compatible Bash glob enumeration, not find/xargs.
         assert!(workflow.contains("add_matches '*.tar.gz'"));
         assert!(workflow.contains("add_matches '*.deb'"));
+        assert!(workflow.contains("add_matches 'release/SHA256SUMS.txt'"));
+        assert!(workflow.contains("add_matches 'release/*.tar.gz'"));
+        assert!(!workflow.contains("files=(release/*)"));
         assert!(workflow.contains("sha256sum \"$file\" >> SHA256SUMS.txt"));
         assert!(workflow.contains("test -s SHA256SUMS.txt"));
         assert!(workflow.contains("test -s SHA256SUMS.txt\n      - name: Sign checksums"));

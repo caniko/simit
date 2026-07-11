@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.7] - 2026-07-11
+
+### Fixed
+
+- Restrict Codeberg release uploads to configured release artifacts and
+  checksum/signature files instead of every file in `release/`.
+
 ## [0.17.6] - 2026-07-10
 
 ### Fixed
@@ -285,7 +292,8 @@ ci`, including the `~/.cargo/bin` key, rust-cache settings, and why Nix
 
 - Prepare the first public crates.io release.
 
-[Unreleased]: https://codeberg.org/caniko/simit/compare/0.17.6...HEAD
+[Unreleased]: https://codeberg.org/caniko/simit/compare/0.17.7...HEAD
+[0.17.7]: https://codeberg.org/caniko/simit/compare/0.17.6...0.17.7
 [0.17.6]: https://codeberg.org/caniko/simit/compare/0.17.5...0.17.6
 [0.17.5]: https://codeberg.org/caniko/simit/compare/0.17.4...0.17.5
 [0.17.4]: https://codeberg.org/caniko/simit/compare/0.17.3...0.17.4
