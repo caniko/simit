@@ -2,7 +2,7 @@
   description = "Semver-aware git commit helper for Rust projects";
 
   inputs = {
-    rs-harbor.url = "git+https://codeberg.org/caniko/rs-harbor.git";
+    rs-harbor.url = "git+https://codeberg.org/caniko/rs-harbor.git?ref=trunk";
 
     nixpkgs.follows = "rs-harbor/nixpkgs";
     rust-overlay.follows = "rs-harbor/rust-overlay";
@@ -40,6 +40,7 @@
       };
 
       toolchain = rs-harbor.lib.mkToolchain {inherit pkgs;};
+      cross = rs-harbor.lib.mkCross {inherit pkgs system;};
       inherit (toolchain) craneLib;
 
       src = craneLib.cleanCargoSource ./.;
@@ -150,23 +151,37 @@
         deny = denyCheck;
       };
 
-      devShells.default = craneLib.devShell {
-        checks = self.checks.${system};
-        packages = with pkgs;
-          [
-            alejandra
-            cargo-audit
-            cargo-deny
-            cargo-nextest
-            git
+      devShells = {
+        default = craneLib.devShell {
+          checks = self.checks.${system};
+          packages = with pkgs;
+            [
+              alejandra
+              cargo-audit
+              cargo-deny
+              cargo-nextest
+              git
+              mdbook
+              prettier
+              pre-commit
+              rust-analyzer
+              taplo
+            ]
+            ++ pre-commit-check.enabledPackages;
+          shellHook = pre-commit-check.shellHook;
+        };
+
+        docs = rs-harbor.lib.mkDocsShell {
+          inherit pkgs cross;
+          inherit (toolchain) craneLib;
+          checks = self.checks.${system};
+          packages = with pkgs; [
             mdbook
-            prettier
             pre-commit
             rust-analyzer
-            taplo
-          ]
-          ++ pre-commit-check.enabledPackages;
-        shellHook = pre-commit-check.shellHook;
+          ] ++ pre-commit-check.enabledPackages;
+          extraShellHook = pre-commit-check.shellHook;
+        };
       };
     })
     // {
