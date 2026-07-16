@@ -250,7 +250,7 @@ jobs:
     runs-on: atlas
     steps:
       - name: Checkout
-        uses: https://code.forgejo.org/actions/checkout@v4
+        uses: https://code.forgejo.org/actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       - name: Run om ci
         env:
@@ -277,7 +277,7 @@ jobs:
     runs-on: atlas
     steps:
       - name: Checkout
-        uses: https://code.forgejo.org/actions/checkout@v4
+        uses: https://code.forgejo.org/actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       - name: Run om ci
         env:

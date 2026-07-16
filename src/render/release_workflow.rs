@@ -19,6 +19,7 @@ use crate::config::{
     ResolvedApt, ResolvedAur, ResolvedChocolatey, ResolvedCodebergRelease, ResolvedCopr,
     ResolvedHomebrew, ResolvedScoop, WindowsSigningConfig, WingetConfig,
 };
+use crate::render::ci::{forgejo_action_ref, immutable_action_ref};
 use serde::Serialize;
 
 /// Everything the release workflow generator needs, resolved up front.
@@ -636,12 +637,19 @@ fn push_secrets_header(w: &mut String, inputs: &ReleaseWorkflowInputs<'_>) {
 }
 
 fn push_checkout(w: &mut String) {
-    w.push_str("      - uses: https://code.forgejo.org/actions/checkout@v4\n");
+    w.push_str("      - uses: ");
+    w.push_str(&forgejo_action_ref("checkout", "v4.3.1"));
+    w.push('\n');
     w.push_str("        with:\n          fetch-depth: 0\n");
 }
 
 fn push_install_nix(w: &mut String, artifacts: &ArtifactsConfig) {
-    w.push_str("      - uses: https://github.com/cachix/install-nix-action@v27\n");
+    w.push_str("      - uses: ");
+    w.push_str(&immutable_action_ref(
+        "https://github.com/cachix/install-nix-action",
+        "v27",
+    ));
+    w.push('\n');
     w.push_str("        with:\n          extra_nix_config: |\n");
     w.push_str("            experimental-features = nix-command flakes\n");
     if !artifacts.substituters.is_empty() {
@@ -2097,6 +2105,18 @@ fn nix_path_info_arg(link: &str) -> String {
 mod tests {
     use super::*;
     use crate::config::{AurFlavors, ChocolateyPushConfig, HomebrewPlatformsConfig, ScoopArchSet};
+
+    #[test]
+    fn forgejo_action_references_are_immutable_and_versioned() {
+        assert_eq!(
+            forgejo_action_ref("checkout", "v4.3.1"),
+            "https://code.forgejo.org/actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1"
+        );
+        assert_eq!(
+            forgejo_action_ref("cache", "v4.3.0"),
+            "https://code.forgejo.org/actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0"
+        );
+    }
 
     fn chocolatey() -> ResolvedChocolatey {
         ResolvedChocolatey {

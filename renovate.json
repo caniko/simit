@@ -1,0 +1,26 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended"],
+  "dependencyDashboard": true,
+  "enabledManagers": ["cargo", "custom.regex"],
+  "ignorePaths": [".forgejo/workflows/**"],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "managerFilePatterns": ["/^ci-actions\\.json$/"],
+      "matchStrings": [
+        "\\\"name\\\":\\s*\\\"(?<depName>https?://[^\\\"]+)\\\"\\s*,\\s*\\\"version\\\":\\s*\\\"(?<currentValue>[^\\\"]+)\\\"\\s*,\\s*\\\"sha\\\":\\s*\\\"(?<currentDigest>[0-9a-f]{40})\\\""
+      ],
+      "datasourceTemplate": "git-tags",
+      "registryUrlTemplate": "{{{depName}}}.git",
+      "versioningTemplate": "loose"
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "Keep generated workflow action pins reviewable",
+      "matchManagers": ["custom.regex"],
+      "automerge": false
+    }
+  ]
+}
