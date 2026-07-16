@@ -406,7 +406,7 @@ fn generates_forgejo_nix_workflows() {
     assert!(ci.contains("CARGO_HOME: \"/tmp/.cargo\""));
     assert!(ci.contains("run: echo \"$CARGO_HOME/bin\" >> \"$GITHUB_PATH\""));
     assert!(ci.contains("group: ${{ github.workflow }}-${{ github.ref }}"));
-    assert!(ci.contains("uses: https://code.forgejo.org/actions/checkout@v4"));
+    assert!(ci.contains("uses: https://code.forgejo.org/actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1"));
     assert!(!ci.contains("pull_request:"));
     assert!(!ci.contains("uses: https://github.com/cachix/install-nix-action@v31"));
     assert!(!ci.contains("uses: https://github.com/Swatinem/rust-cache@v2"));
@@ -703,6 +703,69 @@ prepublish_commands = ["nix flake check --no-build"]
 }
 
 #[test]
+fn forgejo_nix_can_generate_jetbrains_publish_workflow() {
+    let temp = init_package(true);
+    let plugin_xml = temp
+        .path()
+        .join("pkl-lsp-jetbrains/src/main/resources/META-INF");
+    fs::create_dir_all(&plugin_xml).unwrap();
+    fs::write(
+        plugin_xml.join("plugin.xml"),
+        "<idea-plugin><id>com.example.demo</id></idea-plugin>\n",
+    )
+    .unwrap();
+    fs::write(
+        temp.path().join("simit.toml"),
+        r#"[ci]
+runtime = "nix"
+runner = "atlas-nix-trusted"
+
+[jetbrains]
+plugin_dir = "pkl-lsp-jetbrains"
+plugin_xml_id = "com.example.demo"
+package_installable = ".#jetbrains-plugin"
+runner = "atlas-nix-trusted"
+credential_source = "file-env"
+prepublish_commands = ["nix flake check --no-build"]
+"#,
+    )
+    .unwrap();
+
+    let status = simit_with_user_config(temp.path())
+        .current_dir(temp.path())
+        .args([
+            "init",
+            "ci",
+            "--platform",
+            "forgejo",
+            "--runtime",
+            "nix",
+            "--with-jetbrains",
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let workflow = read(
+        &temp
+            .path()
+            .join(".forgejo/workflows/publish-jetbrains-plugin.yaml"),
+    );
+    assert_yaml_parses(&workflow);
+    assert!(workflow.contains("name: Publish JetBrains Plugin"));
+    assert!(workflow.contains("runs-on: atlas-nix-trusted"));
+    assert!(workflow.contains("INSTALLABLE: .#jetbrains-plugin"));
+    assert!(workflow.contains("<id>$PLUGIN_XML_ID</id>"));
+    assert!(workflow.contains("CERTIFICATE_CHAIN_FILE=\"$RUNNER_TEMP/certificate-chain.pem\""));
+    assert!(workflow.contains(
+        "nix shell nixpkgs#gradle_9 nixpkgs#jdk21 -c gradle --no-daemon -x buildPlugin signPlugin verifyPluginSignature"
+    ));
+    assert!(workflow.contains("pluginId=com.example.demo"));
+    assert!(workflow.contains("upload-artifact"));
+    assert!(!workflow.contains("secrets.JETBRAINS_MARKETPLACE_TOKEN"));
+}
+
+#[test]
 fn forgejo_nix_runtime_uses_devshell_quality_tools_without_cargo_install() {
     let temp = init_package(true);
 
@@ -846,7 +909,9 @@ fn github_nix_with_om_ci_replace_keeps_install_nix_action() {
     assert!(status.success());
 
     let ci = read(&temp.path().join(".github/workflows/ci.yaml"));
-    assert!(ci.contains("uses: cachix/install-nix-action@v31"));
+    assert!(ci.contains(
+        "uses: https://github.com/cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31"
+    ));
     assert!(ci.contains("OMNIX_REF:"));
     assert!(ci.contains("nix run \"$OMNIX_REF\" -- ci run"));
     assert!(!ci.contains("run: nix flake check"));
@@ -1021,11 +1086,17 @@ fn generates_github_plain_cargo_workflows() {
     let ci = read(&temp.path().join(".github/workflows/ci.yaml"));
     assert_all_branch_push_trigger(&ci);
     assert!(ci.contains("runs-on: ubuntu-latest"));
-    assert!(ci.contains("uses: dtolnay/rust-toolchain@stable"));
+    assert!(ci.contains(
+        "uses: https://github.com/dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable"
+    ));
     assert!(ci.contains("toolchain: stable"));
-    assert!(ci.contains("uses: actions/cache@v4"));
+    assert!(ci.contains(
+        "uses: https://github.com/actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0"
+    ));
     assert!(!ci.contains("https://code.forgejo.org/actions/cache@v4"));
-    assert!(ci.contains("uses: https://github.com/Swatinem/rust-cache@v2"));
+    assert!(ci.contains(
+        "uses: https://github.com/Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2"
+    ));
     assert!(ci.contains("path: ~/.cargo/bin"));
     assert!(ci.contains("hashFiles('.github/workflows/*.yaml')"));
     assert!(!ci.contains("hashFiles('.forgejo/workflows/ci.yaml', '.github/workflows/ci.yaml')"));
@@ -1037,9 +1108,13 @@ fn generates_github_plain_cargo_workflows() {
     assert!(ci.contains("run: cargo package --allow-dirty --list"));
 
     let publish = read(&temp.path().join(".github/workflows/publish-crate.yaml"));
-    assert!(publish.contains("uses: actions/cache@v4"));
+    assert!(publish.contains(
+        "uses: https://github.com/actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0"
+    ));
     assert!(!publish.contains("https://code.forgejo.org/actions/cache@v4"));
-    assert!(publish.contains("uses: https://github.com/Swatinem/rust-cache@v2"));
+    assert!(publish.contains(
+        "uses: https://github.com/Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2"
+    ));
     assert!(publish.contains("path: ~/.cargo/bin"));
     assert!(publish.contains("hashFiles('.github/workflows/*.yaml')"));
     assert!(
@@ -1135,8 +1210,8 @@ fn forgejo_auto_runtime_uses_rust_container_even_when_flake_exists() {
     assert!(ci.contains("runs-on: atlas"));
     assert!(ci.contains("cancel-in-progress: true"));
     assert!(ci.contains("container: rust:1.85-bookworm"));
-    assert!(ci.contains("uses: https://code.forgejo.org/actions/checkout@v4"));
-    assert!(ci.contains("uses: https://code.forgejo.org/actions/cache@v4"));
+    assert!(ci.contains("uses: https://code.forgejo.org/actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1"));
+    assert!(ci.contains("uses: https://code.forgejo.org/actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0"));
     assert!(!ci.contains("uses: https://github.com/Swatinem/rust-cache@v2"));
     assert!(ci.contains("path: ~/.cargo/bin"));
     assert!(ci.contains("hashFiles('.forgejo/workflows/*.yaml')"));
@@ -1154,7 +1229,7 @@ fn forgejo_auto_runtime_uses_rust_container_even_when_flake_exists() {
     assert!(publish.contains("simit changelog release <version>"));
     assert!(publish.contains("runs-on: atlas"));
     assert!(publish.contains("container: rust:1.85-bookworm"));
-    assert!(publish.contains("uses: https://code.forgejo.org/actions/cache@v4"));
+    assert!(publish.contains("uses: https://code.forgejo.org/actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0"));
     assert!(!publish.contains("uses: https://github.com/Swatinem/rust-cache@v2"));
     assert!(publish.contains("path: ~/.cargo/bin"));
     assert!(publish.contains("hashFiles('.forgejo/workflows/*.yaml')"));

@@ -50,6 +50,8 @@ pub struct ProjectConfig {
     pub winget: Option<WingetConfig>,
     #[serde(default)]
     pub vscode: Option<VscodeConfig>,
+    #[serde(default)]
+    pub jetbrains: Option<JetbrainsConfig>,
 }
 
 /// `[vscode]` — publish a VS Code/Open VSX extension from Forgejo CI.
@@ -127,6 +129,83 @@ fn default_vscode_ovsx_pat_secret() -> String {
 
 fn default_vscode_package_command() -> String {
     "nix run .#package-release-assets -- \"$VERSION\"".to_owned()
+}
+
+/// `[jetbrains]` — publish an IntelliJ Platform plugin from Forgejo CI.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct JetbrainsConfig {
+    #[serde(default = "default_jetbrains_plugin_dir")]
+    pub plugin_dir: String,
+    pub plugin_xml_id: String,
+    #[serde(default = "default_jetbrains_package_installable")]
+    pub package_installable: String,
+    #[serde(default)]
+    pub runner: Option<String>,
+    #[serde(default)]
+    pub cargo_package: Option<String>,
+    #[serde(default)]
+    pub channel: Option<String>,
+    #[serde(default)]
+    pub credential_source: JetbrainsCredentialSource,
+    #[serde(default = "default_jetbrains_marketplace_token_file_env")]
+    pub marketplace_token_file_env: String,
+    #[serde(default = "default_jetbrains_certificate_chain_file_env")]
+    pub certificate_chain_file_env: String,
+    #[serde(default = "default_jetbrains_private_key_file_env")]
+    pub private_key_file_env: String,
+    #[serde(default = "default_jetbrains_private_key_password_file_env")]
+    pub private_key_password_file_env: String,
+    #[serde(default = "default_jetbrains_marketplace_token_secret")]
+    pub marketplace_token_secret: String,
+    #[serde(default = "default_jetbrains_certificate_chain_secret")]
+    pub certificate_chain_secret: String,
+    #[serde(default = "default_jetbrains_private_key_secret")]
+    pub private_key_secret: String,
+    #[serde(default = "default_jetbrains_private_key_password_secret")]
+    pub private_key_password_secret: String,
+    #[serde(default)]
+    pub prepublish_commands: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum JetbrainsCredentialSource {
+    FileEnv,
+    ActionsSecret,
+    #[default]
+    Both,
+}
+
+fn default_jetbrains_plugin_dir() -> String {
+    "pkl-lsp-jetbrains".to_owned()
+}
+fn default_jetbrains_package_installable() -> String {
+    ".#jetbrains-plugin".to_owned()
+}
+fn default_jetbrains_marketplace_token_file_env() -> String {
+    "JETBRAINS_MARKETPLACE_TOKEN_FILE".to_owned()
+}
+fn default_jetbrains_certificate_chain_file_env() -> String {
+    "JETBRAINS_CERTIFICATE_CHAIN_FILE".to_owned()
+}
+fn default_jetbrains_private_key_file_env() -> String {
+    "JETBRAINS_PRIVATE_KEY_FILE".to_owned()
+}
+fn default_jetbrains_private_key_password_file_env() -> String {
+    "JETBRAINS_PRIVATE_KEY_PASSWORD_FILE".to_owned()
+}
+fn default_jetbrains_marketplace_token_secret() -> String {
+    "JETBRAINS_MARKETPLACE_TOKEN".to_owned()
+}
+fn default_jetbrains_certificate_chain_secret() -> String {
+    "JETBRAINS_CERTIFICATE_CHAIN".to_owned()
+}
+fn default_jetbrains_private_key_secret() -> String {
+    "JETBRAINS_PRIVATE_KEY".to_owned()
+}
+fn default_jetbrains_private_key_password_secret() -> String {
+    "JETBRAINS_PRIVATE_KEY_PASSWORD".to_owned()
 }
 
 /// `[flatpak]` — open a Flathub manifest-update PR on stable releases.
@@ -616,6 +695,26 @@ pub struct ResolvedVscode {
     pub ovsx_pat_secret: String,
     pub package_command: String,
     pub cargo_package: Option<String>,
+    pub prepublish_commands: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedJetbrains {
+    pub plugin_dir: String,
+    pub plugin_xml_id: String,
+    pub package_installable: String,
+    pub runner: Option<String>,
+    pub cargo_package: Option<String>,
+    pub channel: Option<String>,
+    pub credential_source: JetbrainsCredentialSource,
+    pub marketplace_token_file_env: String,
+    pub certificate_chain_file_env: String,
+    pub private_key_file_env: String,
+    pub private_key_password_file_env: String,
+    pub marketplace_token_secret: String,
+    pub certificate_chain_secret: String,
+    pub private_key_secret: String,
+    pub private_key_password_secret: String,
     pub prepublish_commands: Vec<String>,
 }
 
@@ -1557,6 +1656,66 @@ impl ProjectConfig {
                 &vscode.prepublish_commands,
             )?;
         }
+        if let Some(jetbrains) = &self.jetbrains {
+            validate_nonempty_string(
+                "simit project config: [jetbrains].plugin_dir",
+                &jetbrains.plugin_dir,
+            )?;
+            validate_nonempty_string(
+                "simit project config: [jetbrains].plugin_xml_id",
+                &jetbrains.plugin_xml_id,
+            )?;
+            validate_nonempty_string(
+                "simit project config: [jetbrains].package_installable",
+                &jetbrains.package_installable,
+            )?;
+            validate_runner_label_opt("[jetbrains].runner", jetbrains.runner.as_deref())?;
+            if let Some(cargo_package) = &jetbrains.cargo_package {
+                validate_nonempty_string(
+                    "simit project config: [jetbrains].cargo_package",
+                    cargo_package,
+                )?;
+            }
+            if let Some(channel) = &jetbrains.channel {
+                validate_nonempty_string("simit project config: [jetbrains].channel", channel)?;
+            }
+            validate_nonempty_string(
+                "simit project config: [jetbrains].marketplace_token_file_env",
+                &jetbrains.marketplace_token_file_env,
+            )?;
+            validate_nonempty_string(
+                "simit project config: [jetbrains].certificate_chain_file_env",
+                &jetbrains.certificate_chain_file_env,
+            )?;
+            validate_nonempty_string(
+                "simit project config: [jetbrains].private_key_file_env",
+                &jetbrains.private_key_file_env,
+            )?;
+            validate_nonempty_string(
+                "simit project config: [jetbrains].private_key_password_file_env",
+                &jetbrains.private_key_password_file_env,
+            )?;
+            validate_nonempty_string(
+                "simit project config: [jetbrains].marketplace_token_secret",
+                &jetbrains.marketplace_token_secret,
+            )?;
+            validate_nonempty_string(
+                "simit project config: [jetbrains].certificate_chain_secret",
+                &jetbrains.certificate_chain_secret,
+            )?;
+            validate_nonempty_string(
+                "simit project config: [jetbrains].private_key_secret",
+                &jetbrains.private_key_secret,
+            )?;
+            validate_nonempty_string(
+                "simit project config: [jetbrains].private_key_password_secret",
+                &jetbrains.private_key_password_secret,
+            )?;
+            validate_nonempty_strings(
+                "simit project config: [jetbrains].prepublish_commands",
+                &jetbrains.prepublish_commands,
+            )?;
+        }
         for (key, value) in &self.ci.extra_env {
             if key.trim().is_empty() {
                 bail!("simit project config: [ci].extra_env keys must not be empty");
@@ -2383,6 +2542,31 @@ impl ProjectConfig {
             package_command: vscode.package_command.clone(),
             cargo_package: vscode.cargo_package.clone(),
             prepublish_commands: vscode.prepublish_commands.clone(),
+        }))
+    }
+
+    /// Resolve the `[jetbrains]` section, if present.
+    pub fn resolve_jetbrains(&self) -> Result<Option<ResolvedJetbrains>> {
+        let Some(jetbrains) = &self.jetbrains else {
+            return Ok(None);
+        };
+        Ok(Some(ResolvedJetbrains {
+            plugin_dir: jetbrains.plugin_dir.clone(),
+            plugin_xml_id: jetbrains.plugin_xml_id.clone(),
+            package_installable: jetbrains.package_installable.clone(),
+            runner: jetbrains.runner.clone(),
+            cargo_package: jetbrains.cargo_package.clone(),
+            channel: jetbrains.channel.clone(),
+            credential_source: jetbrains.credential_source,
+            marketplace_token_file_env: jetbrains.marketplace_token_file_env.clone(),
+            certificate_chain_file_env: jetbrains.certificate_chain_file_env.clone(),
+            private_key_file_env: jetbrains.private_key_file_env.clone(),
+            private_key_password_file_env: jetbrains.private_key_password_file_env.clone(),
+            marketplace_token_secret: jetbrains.marketplace_token_secret.clone(),
+            certificate_chain_secret: jetbrains.certificate_chain_secret.clone(),
+            private_key_secret: jetbrains.private_key_secret.clone(),
+            private_key_password_secret: jetbrains.private_key_password_secret.clone(),
+            prepublish_commands: jetbrains.prepublish_commands.clone(),
         }))
     }
 

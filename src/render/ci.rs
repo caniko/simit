@@ -1,12 +1,16 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
 use anyhow::{Result, bail};
+use serde::Deserialize;
 
 use crate::cargo::Package;
 use crate::cli::{Platform, Runtime};
 use crate::config::CiComponent;
-use crate::config::{ResolvedVscode, VscodePatSource};
+use crate::config::{
+    JetbrainsCredentialSource, ResolvedJetbrains, ResolvedVscode, VscodePatSource,
+};
 use crate::project::GeneratedFile;
 use crate::user_config::{ResolvedCiRunners, ResolvedRunner};
 
@@ -16,6 +20,54 @@ pub const GENERATED_WORKFLOW_MARKER: &str =
 const CARGO_NEXTEST_VERSION: &str = "0.9.100";
 const CARGO_DENY_VERSION: &str = "0.18.3";
 const CARGO_DENY_POLICY_CHECKS: &str = "bans licenses sources";
+
+#[derive(Debug, Deserialize)]
+struct ActionPin {
+    name: String,
+    version: String,
+    sha: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ActionPinRegistry {
+    actions: Vec<ActionPin>,
+}
+
+static ACTION_PINS: OnceLock<ActionPinRegistry> = OnceLock::new();
+
+fn action_pin(name: &str, version: &str) -> String {
+    let registry = ACTION_PINS.get_or_init(|| {
+        serde_json::from_str(include_str!("../../ci-actions.json"))
+            .expect("ci-actions.json must contain a valid action pin registry")
+    });
+    let pin = registry
+        .actions
+        .iter()
+        .find(|pin| pin.name == name && pin.version == version)
+        .unwrap_or_else(|| panic!("missing immutable action pin for {name}@{version}"));
+    format!("{}@{} # {}", pin.name, pin.sha, pin.version)
+}
+
+/// Return the immutable Forgejo action reference for a generated workflow.
+///
+/// Forgejo accepts a full URL followed by a tag or commit SHA. Generated
+/// workflows are a fleet-wide supply-chain boundary, so they use the exact
+/// commit that was reviewed while retaining the release tag in a YAML comment
+/// for Renovate and human review. Keep this table in simit (the generator),
+/// rather than letting a dependency bot rewrite every generated consumer.
+pub fn forgejo_action_ref(action: &str, version: &str) -> String {
+    action_pin(
+        &format!("https://code.forgejo.org/actions/{action}"),
+        version,
+    )
+}
+
+/// Return an immutable reference for an external action used by a generated
+/// workflow. The registry is shared with Renovate so updates happen once in
+/// simit and then flow to every generated consumer.
+pub fn immutable_action_ref(name: &str, version: &str) -> String {
+    action_pin(name, version)
+}
 
 pub const STEP_FLAKE_CHECK: &str = "nix-check";
 pub const STEP_CARGO_FMT: &str = "cargo-fmt";
@@ -284,6 +336,25 @@ pub fn vscode_extension_file(
     })
 }
 
+pub fn jetbrains_plugin_file(
+    platform: Platform,
+    runtime: Runtime,
+    runner: &ResolvedRunner,
+    jetbrains: &ResolvedJetbrains,
+) -> Result<GeneratedFile> {
+    if platform != Platform::Forgejo {
+        bail!("JetBrains plugin workflow generation is forgejo-only");
+    }
+    if runtime != Runtime::Nix {
+        bail!("JetBrains plugin workflow generation requires --runtime nix");
+    }
+
+    Ok(GeneratedFile {
+        relative_path: PathBuf::from(platform.workflow_dir()).join("publish-jetbrains-plugin.yaml"),
+        content: jetbrains_plugin_workflow(platform, runner, jetbrains),
+    })
+}
+
 pub fn python_ci_file(
     platform: Platform,
     runtime: Runtime,
@@ -405,6 +476,249 @@ fn vscode_extension_workflow(
     push_vscode_publish_step(&mut workflow, vscode, VscodePublisher::Ovsx);
     trim_trailing_blank_lines(&mut workflow);
     workflow
+}
+
+fn jetbrains_plugin_workflow(
+    platform: Platform,
+    runner: &ResolvedRunner,
+    jetbrains: &ResolvedJetbrains,
+) -> String {
+    let mut workflow = String::new();
+    push_generated_workflow_header(&mut workflow);
+    workflow.push_str("name: Publish JetBrains Plugin\n\n");
+    workflow.push_str("on:\n");
+    workflow.push_str("  push:\n");
+    workflow.push_str("    tags: [\"[0-9]*.[0-9]*.[0-9]*\"]\n");
+    workflow.push_str("  workflow_dispatch:\n\n");
+    push_codeberg_concurrency(&mut workflow);
+    workflow.push_str("jobs:\n");
+    workflow.push_str("  publish:\n");
+    workflow.push_str("    runs-on: ");
+    workflow.push_str(&runs_on(runner));
+    workflow.push('\n');
+    workflow.push_str("    env:\n");
+    workflow.push_str("      NIX_CONFIG: \"experimental-features = nix-command flakes\"\n");
+    workflow.push_str("    steps:\n");
+    push_checkout_step(&mut workflow, platform);
+    push_install_nix_step(&mut workflow, platform);
+    push_jetbrains_credential_preflight(&mut workflow, jetbrains);
+    push_jetbrains_version_validation(&mut workflow, jetbrains);
+    for (index, command) in jetbrains.prepublish_commands.iter().enumerate() {
+        workflow.push_str("      - name: Prepublish command ");
+        workflow.push_str(&(index + 1).to_string());
+        workflow.push_str("\n        run: |\n");
+        push_indented_lines(&mut workflow, command, 10);
+        workflow.push('\n');
+    }
+    workflow.push_str("      - name: Build installable plugin\n");
+    workflow.push_str("        env:\n");
+    workflow.push_str("          INSTALLABLE: ");
+    workflow.push_str(&shell_word(&jetbrains.package_installable));
+    workflow.push_str("\n        run: |\n");
+    workflow.push_str("          set -euo pipefail\n");
+    workflow.push_str(
+        "          result=$(nix build --no-link --print-out-paths \"$INSTALLABLE\" | tail -n1)\n",
+    );
+    workflow
+        .push_str("          mapfile -t zips < <(find \"$result\" -type f -name '*.zip' -print)\n");
+    workflow.push_str("          test \"${#zips[@]}\" -eq 1\n");
+    workflow
+        .push_str("          cp \"${zips[0]}\" \"$RUNNER_TEMP/pkl-lsp-jetbrains-unsigned.zip\"\n");
+    workflow.push_str("          chmod u+w \"$RUNNER_TEMP/pkl-lsp-jetbrains-unsigned.zip\"\n");
+    workflow.push_str("          sha256sum \"$RUNNER_TEMP/pkl-lsp-jetbrains-unsigned.zip\"\n");
+    workflow.push_str("          stat --printf='plugin archive size: %s bytes\\n' \"$RUNNER_TEMP/pkl-lsp-jetbrains-unsigned.zip\"\n\n");
+    push_jetbrains_sign_and_publish(&mut workflow, jetbrains);
+    workflow.push_str("      - name: Upload signed plugin artifact\n");
+    push_action_uses(&mut workflow, platform, "upload-artifact", "v4.6.2");
+    workflow.push_str("        with:\n");
+    workflow.push_str("          name: pkl-lsp-jetbrains-${{ github.ref_name }}\n");
+    workflow.push_str("          path: ${{ runner.temp }}/pkl-lsp-jetbrains-signed.zip\n");
+    trim_trailing_blank_lines(&mut workflow);
+    workflow
+}
+
+fn push_jetbrains_credential_preflight(workflow: &mut String, jetbrains: &ResolvedJetbrains) {
+    let use_file_env = matches!(
+        jetbrains.credential_source,
+        JetbrainsCredentialSource::FileEnv | JetbrainsCredentialSource::Both
+    );
+    let use_actions_secret = matches!(
+        jetbrains.credential_source,
+        JetbrainsCredentialSource::ActionsSecret | JetbrainsCredentialSource::Both
+    );
+    workflow.push_str("      - name: Validate JetBrains publishing credentials\n");
+    if use_actions_secret {
+        workflow.push_str("        env:\n");
+        for (name, secret) in [
+            (
+                "MARKETPLACE_TOKEN_FROM_SECRET",
+                &jetbrains.marketplace_token_secret,
+            ),
+            (
+                "CERTIFICATE_CHAIN_FROM_SECRET",
+                &jetbrains.certificate_chain_secret,
+            ),
+            ("PRIVATE_KEY_FROM_SECRET", &jetbrains.private_key_secret),
+            (
+                "PRIVATE_KEY_PASSWORD_FROM_SECRET",
+                &jetbrains.private_key_password_secret,
+            ),
+        ] {
+            workflow.push_str("          ");
+            workflow.push_str(name);
+            workflow.push_str(": ${{ secrets.");
+            workflow.push_str(secret);
+            workflow.push_str(" }}\n");
+        }
+    }
+    workflow.push_str("        run: |\n");
+    workflow.push_str("          set -euo pipefail\n");
+    workflow.push_str("          umask 077\n");
+    if use_file_env {
+        workflow.push_str("          use_file_env=false\n");
+        workflow.push_str("          if ");
+        for (index, env_name) in [
+            &jetbrains.marketplace_token_file_env,
+            &jetbrains.certificate_chain_file_env,
+            &jetbrains.private_key_file_env,
+            &jetbrains.private_key_password_file_env,
+        ]
+        .iter()
+        .enumerate()
+        {
+            if index > 0 {
+                workflow.push_str(" && ");
+            }
+            workflow.push_str("[ -n \"${");
+            workflow.push_str(env_name);
+            workflow.push_str(":-}\" ] && [ -s \"${");
+            workflow.push_str(env_name);
+            workflow.push_str("}\" ]");
+        }
+        workflow.push_str("; then\n");
+        workflow.push_str("            use_file_env=true\n");
+        workflow.push_str("          fi\n");
+    } else if use_actions_secret {
+        workflow.push_str("          use_file_env=false\n");
+    }
+    if use_actions_secret {
+        workflow.push_str("          : \"${MARKETPLACE_TOKEN_FROM_SECRET}\" > \"$RUNNER_TEMP/marketplace-token\"\n");
+        workflow.push_str("          : \"${CERTIFICATE_CHAIN_FROM_SECRET}\" > \"$RUNNER_TEMP/certificate-chain.pem\"\n");
+        workflow.push_str(
+            "          : \"${PRIVATE_KEY_FROM_SECRET}\" > \"$RUNNER_TEMP/private-key.pem\"\n",
+        );
+        workflow.push_str("          : \"${PRIVATE_KEY_PASSWORD_FROM_SECRET}\" > \"$RUNNER_TEMP/private-key-password\"\n");
+    }
+    if use_file_env {
+        workflow.push_str("          if [ \"$use_file_env\" = true ]; then\n");
+        for (env_name, target) in [
+            (&jetbrains.marketplace_token_file_env, "marketplace-token"),
+            (
+                &jetbrains.certificate_chain_file_env,
+                "certificate-chain.pem",
+            ),
+            (&jetbrains.private_key_file_env, "private-key.pem"),
+            (
+                &jetbrains.private_key_password_file_env,
+                "private-key-password",
+            ),
+        ] {
+            workflow.push_str("            cp \"${");
+            workflow.push_str(env_name);
+            workflow.push_str("}\" \"$RUNNER_TEMP/");
+            workflow.push_str(target);
+            workflow.push_str("\"\n");
+        }
+        workflow.push_str("          fi\n");
+    }
+    if use_actions_secret {
+        workflow.push_str("          if [ \"$use_file_env\" != true ]; then\n");
+        workflow.push_str("            test -s \"$RUNNER_TEMP/marketplace-token\"\n");
+        workflow.push_str("            test -s \"$RUNNER_TEMP/certificate-chain.pem\"\n");
+        workflow.push_str("            test -s \"$RUNNER_TEMP/private-key.pem\"\n");
+        workflow.push_str("            test -s \"$RUNNER_TEMP/private-key-password\"\n");
+        workflow.push_str("          fi\n");
+    } else if use_file_env {
+        workflow.push_str("          test \"$use_file_env\" = true\n");
+    }
+    workflow.push_str("          printf '%s\\n' 'JetBrains publishing credentials validated'\n\n");
+}
+
+fn push_jetbrains_version_validation(workflow: &mut String, jetbrains: &ResolvedJetbrains) {
+    workflow.push_str("      - name: Validate plugin version and metadata\n");
+    workflow.push_str("        env:\n");
+    workflow.push_str("          PLUGIN_DIR: ");
+    workflow.push_str(&shell_word(&jetbrains.plugin_dir));
+    workflow.push_str("\n          PLUGIN_XML_ID: ");
+    workflow.push_str(&shell_word(&jetbrains.plugin_xml_id));
+    workflow.push_str("\n        run: |\n");
+    workflow.push_str("          set -euo pipefail\n");
+    workflow.push_str("          VERSION=\"${GITHUB_REF_NAME#v}\"\n");
+    workflow.push_str("          [[ \"$VERSION\" =~ ^[0-9]+\\.[0-9]+\\.[0-9]+$ ]]\n");
+    if let Some(cargo_package) = &jetbrains.cargo_package {
+        workflow.push_str("          cargo_metadata=$(nix shell nixpkgs#cargo -c cargo metadata --format-version 1 --no-deps)\n");
+        workflow.push_str("          cargo_version=$(printf '%s' \"$cargo_metadata\" | nix shell nixpkgs#jq -c jq -r --arg package ");
+        workflow.push_str(&shell_word(cargo_package));
+        workflow.push_str(" '.packages[] | select(.name == $package) | .version' | head -n1)\n");
+        workflow.push_str("          test \"$cargo_version\" = \"$VERSION\"\n");
+    }
+    workflow.push_str("          test -f \"$PLUGIN_DIR/src/main/resources/META-INF/plugin.xml\"\n");
+    workflow.push_str("          grep -Fq \"<id>$PLUGIN_XML_ID</id>\" \"$PLUGIN_DIR/src/main/resources/META-INF/plugin.xml\"\n\n");
+    workflow.push_str("          grep -Eq \"^[[:space:]]*pluginVersion[[:space:]]*=[[:space:]]*$VERSION$\" \"$PLUGIN_DIR/gradle.properties\"\n\n");
+}
+
+fn push_jetbrains_sign_and_publish(workflow: &mut String, jetbrains: &ResolvedJetbrains) {
+    workflow.push_str("      - name: Sign plugin\n");
+    workflow.push_str("        env:\n");
+    workflow.push_str("          PLUGIN_DIR: ");
+    workflow.push_str(&shell_word(&jetbrains.plugin_dir));
+    workflow.push('\n');
+    workflow.push_str("        run: |\n");
+    workflow.push_str("          set -euo pipefail\n");
+    workflow.push_str("          VERSION=\"${GITHUB_REF_NAME#v}\"\n");
+    workflow.push_str("          cd \"$PLUGIN_DIR\"\n");
+    workflow.push_str("          mkdir -p build/distributions\n");
+    workflow.push_str("          cp \"$RUNNER_TEMP/pkl-lsp-jetbrains-unsigned.zip\" \"build/distributions/pkl-lsp-$VERSION.zip\"\n");
+    workflow
+        .push_str("          CERTIFICATE_CHAIN_FILE=\"$RUNNER_TEMP/certificate-chain.pem\" \\\n");
+    workflow.push_str("          PRIVATE_KEY_FILE=\"$RUNNER_TEMP/private-key.pem\" \\\n");
+    workflow.push_str(
+        "          PRIVATE_KEY_PASSWORD=\"$(cat \"$RUNNER_TEMP/private-key-password\")\" \\\n",
+    );
+    workflow.push_str(
+        "          nix shell nixpkgs#gradle_9 nixpkgs#jdk21 -c gradle --no-daemon -x buildPlugin signPlugin verifyPluginSignature\n",
+    );
+    workflow.push_str("          signed=$(find build/distributions -maxdepth 1 -type f -name '*.zip' ! -name '*unsigned*' | sort | tail -n1)\n");
+    workflow.push_str("          test -n \"$signed\"\n");
+    workflow.push_str("          cp \"$signed\" \"$RUNNER_TEMP/pkl-lsp-jetbrains-signed.zip\"\n\n");
+    workflow.push_str("      - name: Publish to JetBrains Marketplace\n");
+    workflow.push_str("        run: |\n");
+    workflow.push_str("          set -euo pipefail\n");
+    workflow.push_str(
+        "          JETBRAINS_MARKETPLACE_TOKEN=$(cat \"$RUNNER_TEMP/marketplace-token\")\n",
+    );
+    workflow.push_str(
+        "          upload_url=\"https://plugins.jetbrains.com/api/updates/upload?pluginId=",
+    );
+    workflow.push_str(&url_encode_literal(&jetbrains.plugin_xml_id));
+    if let Some(channel) = &jetbrains.channel {
+        workflow.push_str("&channel=");
+        workflow.push_str(&url_encode_literal(channel));
+    }
+    workflow.push_str("\"\n");
+    workflow.push_str("          curl --fail-with-body --retry 3 -X POST -H \"Authorization: Bearer $JETBRAINS_MARKETPLACE_TOKEN\" -F \"file=@$RUNNER_TEMP/pkl-lsp-jetbrains-signed.zip\" \"$upload_url\"\n");
+}
+
+fn url_encode_literal(value: &str) -> String {
+    value
+        .bytes()
+        .map(|byte| match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (byte as char).to_string()
+            }
+            _ => format!("%{:02X}", byte),
+        })
+        .collect()
 }
 
 fn push_vscode_credential_preflight(workflow: &mut String, vscode: &ResolvedVscode) {
@@ -1492,7 +1806,12 @@ fn artifacts_workflow(
             push_package_selector(&mut workflow, package, options);
             workflow.push_str("\n\n");
             workflow.push_str("      - name: Install Nix release tools\n");
-            workflow.push_str("        uses: cachix/install-nix-action@v31\n\n");
+            workflow.push_str("        uses: ");
+            workflow.push_str(&immutable_action_ref(
+                "https://github.com/cachix/install-nix-action",
+                "v31",
+            ));
+            workflow.push_str("\n\n");
         }
     }
     push_release_integrity_steps(&mut workflow, platform);
@@ -1548,7 +1867,7 @@ fn push_windows_build_job(
     workflow.push_str(" --target ${{ matrix.target }}\n\n");
     push_windows_archive_step(workflow, package, options);
     workflow.push_str("      - name: Upload Windows archives\n");
-    push_action_uses(workflow, platform, "upload-artifact", "v4");
+    push_action_uses(workflow, platform, "upload-artifact", "v4.6.2");
     workflow.push_str("        with:\n");
     workflow.push_str("          name: windows-${{ matrix.arch }}\n");
     workflow.push_str("          path: release/*.zip\n");
@@ -1568,7 +1887,7 @@ fn push_windows_publish_job(
     workflow.push_str("    steps:\n");
     push_checkout_step(workflow, platform);
     workflow.push_str("      - name: Download Windows archives\n");
-    push_action_uses(workflow, platform, "download-artifact", "v4");
+    push_action_uses(workflow, platform, "download-artifact", "v4.3.0");
     workflow.push_str("        with:\n");
     workflow.push_str("          pattern: windows-*\n");
     workflow.push_str("          path: release\n");
@@ -1612,7 +1931,12 @@ fn push_windows_rust_setup_step(workflow: &mut String, platform: Platform) {
     match platform {
         Platform::Github => {
             workflow.push_str("      - name: Install Rust\n");
-            workflow.push_str("        uses: dtolnay/rust-toolchain@stable\n");
+            workflow.push_str("        uses: ");
+            workflow.push_str(&immutable_action_ref(
+                "https://github.com/dtolnay/rust-toolchain",
+                "stable",
+            ));
+            workflow.push('\n');
             workflow.push_str("        with:\n");
             workflow.push_str("          toolchain: stable\n\n");
         }
@@ -2310,7 +2634,7 @@ fn yaml_double_quote(value: &str) -> String {
 
 fn push_checkout_step(workflow: &mut String, platform: Platform) {
     workflow.push_str("      - name: Checkout\n");
-    push_action_uses(workflow, platform, "checkout", "v4");
+    push_action_uses(workflow, platform, "checkout", "v4.3.1");
     workflow.push('\n');
 }
 
@@ -2373,16 +2697,18 @@ fn push_required_env_step(workflow: &mut String, required_env: &[String]) {
 
 fn push_action_uses(workflow: &mut String, platform: Platform, action: &str, version: &str) {
     if platform == Platform::Forgejo {
-        workflow.push_str("        uses: https://code.forgejo.org/actions/");
-        workflow.push_str(action);
-        workflow.push('@');
-        workflow.push_str(version);
+        // The generated Forgejo workflows use exact commits. The helper is
+        // deliberately called for every action so a newly added action cannot
+        // silently reintroduce a mutable tag.
+        workflow.push_str("        uses: ");
+        workflow.push_str(&forgejo_action_ref(action, version));
         workflow.push('\n');
     } else {
-        workflow.push_str("        uses: actions/");
-        workflow.push_str(action);
-        workflow.push('@');
-        workflow.push_str(version);
+        workflow.push_str("        uses: ");
+        workflow.push_str(&immutable_action_ref(
+            &format!("https://github.com/actions/{action}"),
+            version,
+        ));
         workflow.push('\n');
     }
 }
@@ -2393,7 +2719,12 @@ fn push_install_nix_step(workflow: &mut String, platform: Platform) {
     }
 
     workflow.push_str("      - name: Install Nix\n");
-    workflow.push_str("        uses: cachix/install-nix-action@v31\n\n");
+    workflow.push_str("        uses: ");
+    workflow.push_str(&immutable_action_ref(
+        "https://github.com/cachix/install-nix-action",
+        "v31",
+    ));
+    workflow.push_str("\n\n");
 }
 
 fn push_nix_cargo_bin_path_step(workflow: &mut String) {
@@ -2500,7 +2831,12 @@ fn push_rust_setup_step(workflow: &mut String, platform: Platform) {
         }
         Platform::Github => {
             workflow.push_str("      - name: Install Rust\n");
-            workflow.push_str("        uses: dtolnay/rust-toolchain@stable\n");
+            workflow.push_str("        uses: ");
+            workflow.push_str(&immutable_action_ref(
+                "https://github.com/dtolnay/rust-toolchain",
+                "stable",
+            ));
+            workflow.push('\n');
             workflow.push_str("        with:\n");
             workflow.push_str("          toolchain: stable\n");
             workflow.push_str("          components: rustfmt, clippy\n\n");
@@ -2510,7 +2846,7 @@ fn push_rust_setup_step(workflow: &mut String, platform: Platform) {
 
 fn push_rust_cache_steps(workflow: &mut String, platform: Platform) {
     workflow.push_str("      - name: Cache cargo bin (tools)\n");
-    push_action_uses(workflow, platform, "cache", "v4");
+    push_action_uses(workflow, platform, "cache", "v4.3.0");
     workflow.push_str("        with:\n");
     workflow.push_str("          path: ~/.cargo/bin\n");
     let workflow_glob = match platform {
@@ -2524,7 +2860,12 @@ fn push_rust_cache_steps(workflow: &mut String, platform: Platform) {
         return;
     }
     workflow.push_str("      - name: Cache cargo registry + target\n");
-    workflow.push_str("        uses: https://github.com/Swatinem/rust-cache@v2\n");
+    workflow.push_str("        uses: ");
+    workflow.push_str(&immutable_action_ref(
+        "https://github.com/Swatinem/rust-cache",
+        "v2",
+    ));
+    workflow.push('\n');
     workflow.push_str("        with:\n");
     workflow.push_str("          cache-all-crates: \"true\"\n");
     workflow.push_str("          cache-on-failure: \"true\"\n");

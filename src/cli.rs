@@ -589,6 +589,11 @@ pub struct InitCiCommand {
     )]
     pub with_vscode: bool,
     #[arg(
+        long = "with-jetbrains",
+        help = "Generate a Forgejo workflow that publishes an IntelliJ Platform plugin"
+    )]
+    pub with_jetbrains: bool,
+    #[arg(
         long = "pages-repo",
         value_name = "OWNER/REPO",
         requires = "with_codeberg_pages",

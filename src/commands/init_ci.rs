@@ -14,7 +14,7 @@ use crate::cli::{
 use crate::commands::upgrade;
 use crate::config::{
     CodebergPagesConfig, ProjectConfig, ResolvedChocolatey, ResolvedCodebergPages,
-    ResolvedHomebrew, ResolvedScoop, ResolvedVscode,
+    ResolvedHomebrew, ResolvedJetbrains, ResolvedScoop, ResolvedVscode,
 };
 use crate::project;
 use crate::python;
@@ -87,6 +87,13 @@ pub fn run(command: InitCiCommand) -> Result<()> {
     }
     if wants_vscode && resolved.runtime != Runtime::Nix {
         bail!("VS Code extension workflow generation requires --runtime nix");
+    }
+    let wants_jetbrains = command.with_jetbrains || cfg.jetbrains.is_some();
+    if wants_jetbrains && command.platform != Platform::Forgejo {
+        bail!("JetBrains plugin workflow generation is forgejo-only");
+    }
+    if wants_jetbrains && resolved.runtime != Runtime::Nix {
+        bail!("JetBrains plugin workflow generation requires --runtime nix");
     }
     let explicit_runners_cover_required =
         runner_overrides_cover_required_runners(&resolved, windows_packagers);
@@ -205,6 +212,16 @@ pub fn run(command: InitCiCommand) -> Result<()> {
             &vscode,
         )?);
     }
+    if wants_jetbrains {
+        let jetbrains = jetbrains_options(&cfg)?;
+        let jetbrains_runner = jetbrains_runner(&jetbrains, &runners.release)?;
+        files.push(ci::jetbrains_plugin_file(
+            command.platform,
+            resolved.runtime,
+            &jetbrains_runner,
+            &jetbrains,
+        )?);
+    }
     let persisted_ci = resolved.persisted_ci(
         &cfg,
         with_artifacts,
@@ -282,6 +299,7 @@ fn run_python(command: InitCiCommand) -> Result<()> {
     if command.with_homebrew
         || command.with_chocolatey
         || command.with_scoop
+        || command.with_jetbrains
         || command.with_artifacts == Some(true)
         || command.publish_crates == Some(true)
     {
@@ -587,6 +605,7 @@ pub(crate) fn project_regeneration_command(workspace_root: &Path) -> Result<Opti
             .as_ref()
             .map(|pages| pages.deploy_app.clone()),
         with_vscode: cfg.vscode.is_some(),
+        with_jetbrains: cfg.jetbrains.is_some(),
     };
 
     let persisted_in_simit_toml = persisted_ci_matches_simit_toml(
@@ -768,6 +787,9 @@ pub(crate) fn render_regeneration_command(
     }
     if command.with_vscode {
         args.push("--with-vscode".to_owned());
+    }
+    if command.with_jetbrains {
+        args.push("--with-jetbrains".to_owned());
     }
 
     args.join(" ")
@@ -967,6 +989,8 @@ fn is_ci_managed_workflow_name(name: &std::ffi::OsStr) -> bool {
             | "pages.yml"
             | "publish-vscode-extension.yaml"
             | "publish-vscode-extension.yml"
+            | "publish-jetbrains-plugin.yaml"
+            | "publish-jetbrains-plugin.yml"
     ) || name.starts_with("ci-")
         || name.starts_with("publish-crate-")
         || name.starts_with("release-artifacts-")
@@ -1233,6 +1257,22 @@ fn vscode_runner(vscode: &ResolvedVscode, fallback: &ResolvedRunner) -> Result<R
     if let Some(runner) = &vscode.runner {
         return ResolvedRunner::literal(runner)
             .map_err(|err| anyhow::anyhow!("invalid [vscode].runner: {err}"));
+    }
+    Ok(fallback.clone())
+}
+
+fn jetbrains_options(cfg: &ProjectConfig) -> Result<ResolvedJetbrains> {
+    cfg.resolve_jetbrains()?
+        .context("--with-jetbrains requires a [jetbrains] section with plugin_xml_id")
+}
+
+fn jetbrains_runner(
+    jetbrains: &ResolvedJetbrains,
+    fallback: &ResolvedRunner,
+) -> Result<ResolvedRunner> {
+    if let Some(runner) = &jetbrains.runner {
+        return ResolvedRunner::literal(runner)
+            .map_err(|err| anyhow::anyhow!("invalid [jetbrains].runner: {err}"));
     }
     Ok(fallback.clone())
 }
