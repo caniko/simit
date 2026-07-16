@@ -47,7 +47,15 @@
       toolchain = rs-harbor.lib.mkToolchain {inherit pkgs;};
       inherit (toolchain) craneLib;
 
-      src = craneLib.cleanCargoSource ./.;
+      # The generator embeds the immutable action registry at compile time.
+      # crane's default Cargo filter intentionally drops root JSON files, so
+      # keep this one alongside the normal Cargo source set.
+      src = pkgs.lib.cleanSourceWith {
+        src = ./.;
+        filter = path: type:
+          (craneLib.filterCargoSources path type)
+          || pkgs.lib.hasSuffix "ci-actions.json" (toString path);
+      };
 
       commonArgs = {
         inherit src;
