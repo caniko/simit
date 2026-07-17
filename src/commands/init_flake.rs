@@ -429,9 +429,12 @@ fn has_existing_full_scope_adoption(workspace_root: &Path, cfg: &ProjectConfig) 
     };
 
     workspace_root.join("nix/treefmt.nix").exists()
-        && content.contains("crane.url = \"github:ipetkov/crane\"")
-        && content.contains("rustToolchain = pkgs.rust-bin.stable.latest.default.override")
-        && content.contains("package = craneLib.buildPackage")
+        && (content.contains("crane.url = \"github:ipetkov/crane\"")
+            || content.contains("crane.follows = \"rs-harbor/crane\""))
+        && (content.contains("rustToolchain = pkgs.rust-bin.stable.latest.default.override")
+            || content.contains("rs-harbor.lib.mkToolchain"))
+        && (content.contains("package = craneLib.buildPackage")
+            || content.contains("package = buildCache.withRustCache"))
 }
 
 fn scoped_files(files: &[GeneratedFile], scope: FlakeScope) -> Vec<GeneratedFile> {

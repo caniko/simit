@@ -554,9 +554,9 @@ pub fn validate_runner_label(value: &str) -> Result<()> {
 }
 
 fn starter_config() -> &'static str {
-    r#"[ci.runners.forgejo_linux]
+    r#"[ci.runners.forgejo_sccache_trusted]
 platform = "forgejo"
-labels = ["atlas"]
+labels = ["atlas-sccache-trusted"]
 os = "linux"
 arch = "x86_64"
 runtimes = ["cargo"]
@@ -599,9 +599,9 @@ arch = "x86_64"
 runtimes = ["cargo"]
 
 [ci.defaults.forgejo]
-cargo = "forgejo_linux"
+cargo = "forgejo_sccache_trusted"
 nix = "forgejo_nix_trusted"
-release = "forgejo_linux"
+release = "forgejo_sccache_trusted"
 windows = "forgejo_windows"
 "#
 }

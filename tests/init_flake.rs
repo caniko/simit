@@ -114,6 +114,7 @@ fn patchable_flake() -> &'static str {
       devShells.default = craneLib.devShell {
         checks = self.checks.${system};
         packages = with pkgs; [
+          cargo-audit
           cargo-nextest
           rust-analyzer
         ];
@@ -128,7 +129,7 @@ fn custom_rs_harbor_flake() -> &'static str {
   description = "Memory-aware admission gate for Rust work pipelines";
 
   inputs = {
-    rs-harbor.url = "git+https://codeberg.org/caniko/rs-harbor.git";
+    rs-harbor.url = "git+https://codeberg.org/caniko/rs-harbor.git?ref=trunk&rev=9bfa8bdb0ecb22d7bc11448665f7fbaebae7a759";
 
     nixpkgs.follows = "rs-harbor/nixpkgs";
     rust-overlay.follows = "rs-harbor/rust-overlay";
@@ -161,13 +162,23 @@ fn custom_rs_harbor_flake() -> &'static str {
       };
       toolchain = rs-harbor.lib.mkToolchain {inherit pkgs;};
       inherit (toolchain) craneLib;
+      buildCache = rs-harbor.lib.mkBuildCachePolicy {
+        inherit pkgs;
+        buildPackageSet = pkgs.buildPackages;
+        sccachePackage = rs-harbor.packages.${system}.sccache;
+        cacheRoot = null;
+        namespaceScope = "canix-rust";
+        namespaceGeneration = 5;
+      };
       src = craneLib.cleanCargoSource ./.;
       commonArgs = {
         inherit src;
         strictDeps = true;
       };
       cargoArtifacts = craneLib.buildDepsOnly commonArgs;
-      package = craneLib.buildPackage (commonArgs // {inherit cargoArtifacts;});
+      package = buildCache.withRustCache {
+        package = craneLib.buildPackage (commonArgs // {inherit cargoArtifacts;});
+      };
       treefmtEval = treefmt-nix.lib.evalModule pkgs (import ./nix/treefmt.nix);
       pre-commit-check = git-hooks.lib.${system}.run {
         src = ./.;
@@ -189,6 +200,7 @@ fn custom_rs_harbor_flake() -> &'static str {
       devShells.default = craneLib.devShell {
         checks = self.checks.${system};
         packages = with pkgs; [
+          cargo-audit
           cargo-nextest
           pre-commit
           rust-analyzer
@@ -1192,7 +1204,7 @@ fn cross_print_emits_multi_target_flake_with_contract() {
 
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("--- flake.nix"));
-    assert!(stdout.contains("rs-harbor.url = \"git+https://codeberg.org/caniko/rs-harbor.git\";"));
+    assert!(stdout.contains("rs-harbor.url = \"git+https://codeberg.org/caniko/rs-harbor.git?ref=trunk&rev=9bfa8bdb0ecb22d7bc11448665f7fbaebae7a759\";"));
     assert!(stdout.contains("rs-harbor.lib.mkCrossPackages {"));
     assert!(stdout.contains(
         "targets = [\"native\" \"aarch64-linux\" \"windows\" \"darwin-x86_64\" \"darwin-aarch64\"];"

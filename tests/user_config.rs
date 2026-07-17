@@ -296,7 +296,7 @@ fn config_cli_path_show_check_and_init_work() {
         .unwrap();
     assert!(show_output.status.success());
     let show = String::from_utf8(show_output.stdout).unwrap();
-    assert!(show.contains("[ci.runners.forgejo_linux]"));
+    assert!(show.contains("[ci.runners.forgejo_sccache_trusted]"));
 
     let second_init = simit_with_xdg(&temp)
         .args(["config", "init"])

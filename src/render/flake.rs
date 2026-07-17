@@ -644,9 +644,10 @@ fn template(audit_tools: AuditTools) -> String {
   description = "Rust project";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    rust-overlay.url = "github:oxalica/rust-overlay";
-    crane.url = "github:ipetkov/crane";
+    rs-harbor.url = "git+https://codeberg.org/caniko/rs-harbor.git?ref=trunk&rev=9bfa8bdb0ecb22d7bc11448665f7fbaebae7a759";
+    nixpkgs.follows = "rs-harbor/nixpkgs";
+    rust-overlay.follows = "rs-harbor/rust-overlay";
+    crane.follows = "rs-harbor/crane";
     flake-utils.url = "github:numtide/flake-utils";
     treefmt-nix.url = "github:numtide/treefmt-nix";
     git-hooks.url = "github:cachix/git-hooks.nix";
@@ -654,6 +655,7 @@ fn template(audit_tools: AuditTools) -> String {
 
   outputs = {
     self,
+    rs-harbor,
     nixpkgs,
     rust-overlay,
     crane,
@@ -668,17 +670,25 @@ fn template(audit_tools: AuditTools) -> String {
         overlays = [(import rust-overlay)];
       };
 
-      rustToolchain = pkgs.rust-bin.stable.latest.default.override {
-        extensions = ["rustfmt" "clippy"];
+      toolchain = rs-harbor.lib.mkToolchain {inherit pkgs;};
+      inherit (toolchain) craneLib rustToolchain;
+      buildCache = rs-harbor.lib.mkBuildCachePolicy {
+        inherit pkgs;
+        buildPackageSet = pkgs.buildPackages;
+        sccachePackage = rs-harbor.packages.${system}.sccache;
+        cacheRoot = null;
+        namespaceScope = "canix-rust";
+        namespaceGeneration = 5;
       };
-      craneLib = (crane.mkLib pkgs).overrideToolchain rustToolchain;
       src = craneLib.cleanCargoSource ./.;
       commonArgs = {
         inherit src;
         strictDeps = true;
       };
       cargoArtifacts = craneLib.buildDepsOnly commonArgs;
-      package = craneLib.buildPackage (commonArgs // {inherit cargoArtifacts;});
+      package = buildCache.withRustCache {
+        package = craneLib.buildPackage (commonArgs // {inherit cargoArtifacts;});
+      };
       treefmtEval = treefmt-nix.lib.evalModule pkgs (import ./nix/treefmt.nix);
       pre-commit-check = git-hooks.lib.${system}.run {
         src = ./.;
@@ -1145,7 +1155,7 @@ pub fn cross_template(targets: &[FlakeTargetArg], audit_tools: AuditTools) -> St
   }};
 
   inputs = {{
-    rs-harbor.url = "git+https://codeberg.org/caniko/rs-harbor.git";
+    rs-harbor.url = "git+https://codeberg.org/caniko/rs-harbor.git?ref=trunk&rev=9bfa8bdb0ecb22d7bc11448665f7fbaebae7a759";
 
     nixpkgs.follows = "rs-harbor/nixpkgs";
     rust-overlay.follows = "rs-harbor/rust-overlay";
@@ -1183,6 +1193,14 @@ pub fn cross_template(targets: &[FlakeTargetArg], audit_tools: AuditTools) -> St
       inherit (toolchain) craneLib;
       rustToolchain = toolchain.rustToolchain;
       cross = rs-harbor.lib.mkCross {{inherit pkgs system;}};
+      buildCache = rs-harbor.lib.mkBuildCachePolicy {{
+        inherit pkgs;
+        buildPackageSet = pkgs.buildPackages;
+        sccachePackage = rs-harbor.packages.${{system}}.sccache;
+        cacheRoot = null;
+        namespaceScope = "canix-rust";
+        namespaceGeneration = 5;
+      }};
 
       cargoToml = builtins.fromTOML (builtins.readFile ./Cargo.toml);
       pname = cargoToml.package.name or cargoToml.workspace.package.name;
@@ -1196,6 +1214,7 @@ pub fn cross_template(targets: &[FlakeTargetArg], audit_tools: AuditTools) -> St
       crossPackages = rs-harbor.lib.mkCrossPackages {{
         inherit pkgs cross pname commonArgs;
         inherit (toolchain) craneLib;
+        inherit buildCache;
         targets = [{target_list}];
       }};
 
@@ -1664,12 +1683,13 @@ mod tests {
             deny: false,
             pyo3: false,
         });
-        // The single-target path must keep its fixed crane build and must not
-        // mention rs-harbor or the cross helper.
+        // Every generated Rust flake consumes the canonical rs-harbor cache
+        // contract, while the single-target path remains non-cross.
         assert!(flake.contains("package = craneLib.buildPackage"));
         assert!(flake.contains("packages.default = package;"));
         assert!(!flake.contains("mkCrossPackages"));
-        assert!(!flake.contains("rs-harbor"));
+        assert!(flake.contains("rs-harbor.lib.mkBuildCachePolicy"));
+        assert!(flake.contains("namespaceGeneration = 5;"));
         assert!(flake.contains("cargo-about"));
         assert!(flake.contains("cargo-audit"));
         assert!(flake.contains("cargo-deny"));
@@ -1732,7 +1752,7 @@ mod tests {
 
         // rs-harbor input and follows wiring.
         assert!(
-            flake.contains("rs-harbor.url = \"git+https://codeberg.org/caniko/rs-harbor.git\";")
+            flake.contains("rs-harbor.url = \"git+https://codeberg.org/caniko/rs-harbor.git?ref=trunk&rev=9bfa8bdb0ecb22d7bc11448665f7fbaebae7a759\";")
         );
         assert!(flake.contains("nixpkgs.follows = \"rs-harbor/nixpkgs\";"));
         assert!(flake.contains("rust-overlay.follows = \"rs-harbor/rust-overlay\";"));

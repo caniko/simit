@@ -1178,7 +1178,13 @@ fn python_ci_workflow(
     workflow.push_str("    runs-on: ");
     workflow.push_str(&runs_on(runner));
     workflow.push('\n');
-    push_job_env(&mut workflow, Runtime::Nix, &options.extra_env, false);
+    push_job_env(
+        &mut workflow,
+        platform,
+        Runtime::Nix,
+        &options.extra_env,
+        false,
+    );
     workflow.push_str("    steps:\n");
     push_checkout_step(&mut workflow, platform);
     push_required_env_step(&mut workflow, &options.required_env);
@@ -1253,7 +1259,13 @@ fn python_publish_workflow(
     workflow.push_str("    runs-on: ");
     workflow.push_str(&runs_on(runner));
     workflow.push('\n');
-    push_job_env(&mut workflow, Runtime::Nix, &options.extra_env, false);
+    push_job_env(
+        &mut workflow,
+        platform,
+        Runtime::Nix,
+        &options.extra_env,
+        false,
+    );
     workflow.push_str("    steps:\n");
     push_checkout_step(&mut workflow, platform);
     push_required_env_step(&mut workflow, &options.required_env);
@@ -1306,7 +1318,13 @@ fn maturin_publish_workflow(
     workflow.push_str("    runs-on: ");
     workflow.push_str(&runs_on(runner));
     workflow.push('\n');
-    push_job_env(&mut workflow, Runtime::Nix, &options.extra_env, true);
+    push_job_env(
+        &mut workflow,
+        platform,
+        Runtime::Nix,
+        &options.extra_env,
+        true,
+    );
     workflow.push_str("    steps:\n");
     push_checkout_step(&mut workflow, platform);
     push_required_env_step(&mut workflow, &options.required_env);
@@ -1375,7 +1393,7 @@ fn ci_workflow_single_job(
     workflow.push_str(&runs_on(&runners.ci));
     workflow.push('\n');
     push_container(&mut workflow, platform, runtime, package);
-    push_job_env(&mut workflow, runtime, &options.extra_env, true);
+    push_job_env(&mut workflow, platform, runtime, &options.extra_env, true);
     workflow.push_str("    steps:\n");
     push_checkout_step(&mut workflow, platform);
     push_required_env_step(&mut workflow, &options.required_env);
@@ -1661,7 +1679,7 @@ fn ci_workflow_multi_job(
         workflow.push_str(&runs_on(job.runner));
         workflow.push('\n');
         push_container(&mut workflow, platform, runtime, package);
-        push_job_env(&mut workflow, runtime, &options.extra_env, true);
+        push_job_env(&mut workflow, platform, runtime, &options.extra_env, true);
         workflow.push_str("    steps:\n");
         push_checkout_step(&mut workflow, platform);
         push_required_env_step(&mut workflow, &options.required_env);
@@ -1716,7 +1734,7 @@ fn publish_workflow(
     workflow.push_str(&runs_on(runner));
     workflow.push('\n');
     push_container(&mut workflow, platform, runtime, package);
-    push_job_env(&mut workflow, runtime, &options.extra_env, true);
+    push_job_env(&mut workflow, platform, runtime, &options.extra_env, true);
     workflow.push_str("    steps:\n");
     push_checkout_step(&mut workflow, platform);
     push_required_env_step(&mut workflow, &options.required_env);
@@ -1807,7 +1825,7 @@ fn artifacts_workflow(
     workflow.push_str(&runs_on(&runners.release));
     workflow.push('\n');
     push_container(&mut workflow, platform, runtime, package);
-    push_job_env(&mut workflow, runtime, &options.extra_env, true);
+    push_job_env(&mut workflow, platform, runtime, &options.extra_env, true);
     workflow.push_str("    steps:\n");
     push_checkout_step(&mut workflow, platform);
     push_required_env_step(&mut workflow, &options.required_env);
@@ -2618,10 +2636,16 @@ fn push_container(workflow: &mut String, platform: Platform, runtime: Runtime, p
 
 fn push_job_env(
     workflow: &mut String,
+    platform: Platform,
     runtime: Runtime,
     extra_env: &[(String, String)],
     include_cargo_home: bool,
 ) {
+    // All generated Forgejo Cargo jobs run on the trusted Atlas runner and
+    // use the host Redis transport exposed by that runner.  Keeping this
+    // contract in the generator makes every Rust project share the same
+    // cache without hand-maintained workflow fragments.
+    let needs_sccache = platform == Platform::Forgejo && runtime == Runtime::Cargo;
     let needs_nix_config =
         runtime == Runtime::Nix && !extra_env.iter().any(|(key, _)| key == "NIX_CONFIG");
     let needs_xdg_cache_home =
@@ -2629,7 +2653,12 @@ fn push_job_env(
     let needs_cargo_home = include_cargo_home
         && runtime == Runtime::Nix
         && !extra_env.iter().any(|(key, _)| key == "CARGO_HOME");
-    if !needs_nix_config && !needs_xdg_cache_home && !needs_cargo_home && extra_env.is_empty() {
+    if !needs_sccache
+        && !needs_nix_config
+        && !needs_xdg_cache_home
+        && !needs_cargo_home
+        && extra_env.is_empty()
+    {
         return;
     }
     workflow.push_str("    env:\n");
@@ -2641,6 +2670,18 @@ fn push_job_env(
     }
     if needs_cargo_home {
         workflow.push_str("      CARGO_HOME: \"/tmp/.cargo\"\n");
+    }
+    if needs_sccache {
+        workflow.push_str("      RUSTC_WRAPPER: \"/usr/local/bin/sccache\"\n");
+        workflow
+            .push_str("      SCCACHE_REDIS_ENDPOINT: \"unix:///run/redis-sccache/redis.sock\"\n");
+        workflow
+            .push_str("      SCCACHE_REDIS_KEY_PREFIX: \"canix/canix-rust-v5-sccache-0.16.0\"\n");
+        workflow.push_str("      SCCACHE_REDIS_RW_MODE: \"READ_WRITE\"\n");
+        workflow.push_str("      SCCACHE_MULTILEVEL_CHAIN: \"redis\"\n");
+        workflow.push_str("      SCCACHE_MULTILEVEL_WRITE_ERROR_POLICY: \"ignore\"\n");
+        workflow.push_str("      SCCACHE_BASEDIRS: \"/workspace\"\n");
+        workflow.push_str("      CARGO_INCREMENTAL: \"0\"\n");
     }
     for (key, value) in extra_env {
         workflow.push_str("      ");
