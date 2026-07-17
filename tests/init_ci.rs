@@ -707,7 +707,7 @@ fn forgejo_nix_can_generate_jetbrains_publish_workflow() {
     let temp = init_package(true);
     let plugin_xml = temp
         .path()
-        .join("pkl-lsp-jetbrains/src/main/resources/META-INF");
+        .join("example-jetbrains/src/main/resources/META-INF");
     fs::create_dir_all(&plugin_xml).unwrap();
     fs::write(
         plugin_xml.join("plugin.xml"),
@@ -721,7 +721,7 @@ runtime = "nix"
 runner = "atlas-nix-trusted"
 
 [jetbrains]
-plugin_dir = "pkl-lsp-jetbrains"
+        plugin_dir = "example-jetbrains"
 plugin_xml_id = "com.example.demo"
 package_installable = ".#jetbrains-plugin"
 runner = "atlas-nix-trusted"
@@ -755,12 +755,24 @@ prepublish_commands = ["nix flake check --no-build"]
     assert!(workflow.contains("name: Publish JetBrains Plugin"));
     assert!(workflow.contains("runs-on: atlas-nix-trusted"));
     assert!(workflow.contains("INSTALLABLE: .#jetbrains-plugin"));
+    assert!(workflow.contains("tags: [\"[0-9]*.[0-9]*.[0-9]*\", \"v[0-9]*.[0-9]*.[0-9]*\"]"));
+    assert!(workflow.contains("  workflow_dispatch:\n    inputs:\n      version:"));
+    assert!(workflow.contains("VERSION=\"${{ github.event.inputs.version || github.ref_name }}\""));
+    assert!(workflow.contains("VERSION=\"${VERSION#v}\""));
     assert!(workflow.contains("<id>$PLUGIN_XML_ID</id>"));
     assert!(workflow.contains("CERTIFICATE_CHAIN_FILE=\"$RUNNER_TEMP/certificate-chain.pem\""));
     assert!(workflow.contains(
         "nix shell nixpkgs#gradle_9 nixpkgs#jdk21 -c gradle --no-daemon -x buildPlugin signPlugin verifyPluginSignature"
     ));
-    assert!(workflow.contains("pluginId=com.example.demo"));
+    assert!(workflow.contains("-F \"xmlId=$PLUGIN_XML_ID\""));
+    assert!(
+        workflow
+            .contains("-F \"file=@$RUNNER_TEMP/jetbrains-plugin-signed.zip;type=application/zip\"")
+    );
+    assert!(workflow.contains("name: example-jetbrains-${{ github.ref_name }}"));
+    assert!(workflow.contains("jetbrains-plugin-archive-name"));
+    assert!(!workflow.contains("pluginId="));
+    assert!(!workflow.contains("pkl-lsp-jetbrains"));
     assert!(workflow.contains("upload-artifact"));
     assert!(!workflow.contains("secrets.JETBRAINS_MARKETPLACE_TOKEN"));
 }

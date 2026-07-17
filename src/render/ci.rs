@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use anyhow::{Result, bail};
@@ -483,13 +483,23 @@ fn jetbrains_plugin_workflow(
     runner: &ResolvedRunner,
     jetbrains: &ResolvedJetbrains,
 ) -> String {
+    let artifact_label = Path::new(&jetbrains.plugin_dir)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("jetbrains-plugin");
     let mut workflow = String::new();
     push_generated_workflow_header(&mut workflow);
     workflow.push_str("name: Publish JetBrains Plugin\n\n");
     workflow.push_str("on:\n");
     workflow.push_str("  push:\n");
-    workflow.push_str("    tags: [\"[0-9]*.[0-9]*.[0-9]*\"]\n");
-    workflow.push_str("  workflow_dispatch:\n\n");
+    workflow.push_str("    tags: [\"[0-9]*.[0-9]*.[0-9]*\", \"v[0-9]*.[0-9]*.[0-9]*\"]\n");
+    workflow.push_str("  workflow_dispatch:\n");
+    workflow.push_str("    inputs:\n");
+    workflow.push_str("      version:\n");
+    workflow.push_str("        description: Plugin version to publish (for example 0.2.1)\n");
+    workflow.push_str("        required: true\n");
+    workflow.push_str("        type: string\n\n");
     push_codeberg_concurrency(&mut workflow);
     workflow.push_str("jobs:\n");
     workflow.push_str("  publish:\n");
@@ -522,17 +532,22 @@ fn jetbrains_plugin_workflow(
     workflow
         .push_str("          mapfile -t zips < <(find \"$result\" -type f -name '*.zip' -print)\n");
     workflow.push_str("          test \"${#zips[@]}\" -eq 1\n");
+    workflow.push_str(
+        "          basename \"${zips[0]}\" > \"$RUNNER_TEMP/jetbrains-plugin-archive-name\"\n",
+    );
     workflow
-        .push_str("          cp \"${zips[0]}\" \"$RUNNER_TEMP/pkl-lsp-jetbrains-unsigned.zip\"\n");
-    workflow.push_str("          chmod u+w \"$RUNNER_TEMP/pkl-lsp-jetbrains-unsigned.zip\"\n");
-    workflow.push_str("          sha256sum \"$RUNNER_TEMP/pkl-lsp-jetbrains-unsigned.zip\"\n");
-    workflow.push_str("          stat --printf='plugin archive size: %s bytes\\n' \"$RUNNER_TEMP/pkl-lsp-jetbrains-unsigned.zip\"\n\n");
+        .push_str("          cp \"${zips[0]}\" \"$RUNNER_TEMP/jetbrains-plugin-unsigned.zip\"\n");
+    workflow.push_str("          chmod u+w \"$RUNNER_TEMP/jetbrains-plugin-unsigned.zip\"\n");
+    workflow.push_str("          sha256sum \"$RUNNER_TEMP/jetbrains-plugin-unsigned.zip\"\n");
+    workflow.push_str("          stat --printf='plugin archive size: %s bytes\\n' \"$RUNNER_TEMP/jetbrains-plugin-unsigned.zip\"\n\n");
     push_jetbrains_sign_and_publish(&mut workflow, jetbrains);
     workflow.push_str("      - name: Upload signed plugin artifact\n");
     push_action_uses(&mut workflow, platform, "upload-artifact", "v4.6.2");
     workflow.push_str("        with:\n");
-    workflow.push_str("          name: pkl-lsp-jetbrains-${{ github.ref_name }}\n");
-    workflow.push_str("          path: ${{ runner.temp }}/pkl-lsp-jetbrains-signed.zip\n");
+    workflow.push_str("          name: ");
+    workflow.push_str(artifact_label);
+    workflow.push_str("-${{ github.ref_name }}\n");
+    workflow.push_str("          path: ${{ runner.temp }}/jetbrains-plugin-signed.zip\n");
     trim_trailing_blank_lines(&mut workflow);
     workflow
 }
@@ -602,6 +617,16 @@ fn push_jetbrains_credential_preflight(workflow: &mut String, jetbrains: &Resolv
         workflow.push_str("          use_file_env=false\n");
     }
     if use_actions_secret {
+        for name in [
+            "MARKETPLACE_TOKEN_FROM_SECRET",
+            "CERTIFICATE_CHAIN_FROM_SECRET",
+            "PRIVATE_KEY_FROM_SECRET",
+            "PRIVATE_KEY_PASSWORD_FROM_SECRET",
+        ] {
+            workflow.push_str("          test -n \"${");
+            workflow.push_str(name);
+            workflow.push_str("}\"\n");
+        }
         workflow.push_str("          : \"${MARKETPLACE_TOKEN_FROM_SECRET}\" > \"$RUNNER_TEMP/marketplace-token\"\n");
         workflow.push_str("          : \"${CERTIFICATE_CHAIN_FROM_SECRET}\" > \"$RUNNER_TEMP/certificate-chain.pem\"\n");
         workflow.push_str(
@@ -653,7 +678,9 @@ fn push_jetbrains_version_validation(workflow: &mut String, jetbrains: &Resolved
     workflow.push_str(&shell_word(&jetbrains.plugin_xml_id));
     workflow.push_str("\n        run: |\n");
     workflow.push_str("          set -euo pipefail\n");
-    workflow.push_str("          VERSION=\"${GITHUB_REF_NAME#v}\"\n");
+    workflow
+        .push_str("          VERSION=\"${{ github.event.inputs.version || github.ref_name }}\"\n");
+    workflow.push_str("          VERSION=\"${VERSION#v}\"\n");
     workflow.push_str("          [[ \"$VERSION\" =~ ^[0-9]+\\.[0-9]+\\.[0-9]+$ ]]\n");
     if let Some(cargo_package) = &jetbrains.cargo_package {
         workflow.push_str("          cargo_metadata=$(nix shell nixpkgs#cargo -c cargo metadata --format-version 1 --no-deps)\n");
@@ -675,10 +702,15 @@ fn push_jetbrains_sign_and_publish(workflow: &mut String, jetbrains: &ResolvedJe
     workflow.push('\n');
     workflow.push_str("        run: |\n");
     workflow.push_str("          set -euo pipefail\n");
-    workflow.push_str("          VERSION=\"${GITHUB_REF_NAME#v}\"\n");
+    workflow
+        .push_str("          VERSION=\"${{ github.event.inputs.version || github.ref_name }}\"\n");
+    workflow.push_str("          VERSION=\"${VERSION#v}\"\n");
     workflow.push_str("          cd \"$PLUGIN_DIR\"\n");
     workflow.push_str("          mkdir -p build/distributions\n");
-    workflow.push_str("          cp \"$RUNNER_TEMP/pkl-lsp-jetbrains-unsigned.zip\" \"build/distributions/pkl-lsp-$VERSION.zip\"\n");
+    workflow
+        .push_str("          archive_name=$(cat \"$RUNNER_TEMP/jetbrains-plugin-archive-name\")\n");
+    workflow.push_str("          test -n \"$archive_name\"\n");
+    workflow.push_str("          cp \"$RUNNER_TEMP/jetbrains-plugin-unsigned.zip\" \"build/distributions/$archive_name\"\n");
     workflow
         .push_str("          CERTIFICATE_CHAIN_FILE=\"$RUNNER_TEMP/certificate-chain.pem\" \\\n");
     workflow.push_str("          PRIVATE_KEY_FILE=\"$RUNNER_TEMP/private-key.pem\" \\\n");
@@ -690,35 +722,26 @@ fn push_jetbrains_sign_and_publish(workflow: &mut String, jetbrains: &ResolvedJe
     );
     workflow.push_str("          signed=$(find build/distributions -maxdepth 1 -type f -name '*.zip' ! -name '*unsigned*' | sort | tail -n1)\n");
     workflow.push_str("          test -n \"$signed\"\n");
-    workflow.push_str("          cp \"$signed\" \"$RUNNER_TEMP/pkl-lsp-jetbrains-signed.zip\"\n\n");
+    workflow.push_str("          cp \"$signed\" \"$RUNNER_TEMP/jetbrains-plugin-signed.zip\"\n\n");
     workflow.push_str("      - name: Publish to JetBrains Marketplace\n");
+    workflow.push_str("        env:\n");
+    workflow.push_str("          PLUGIN_XML_ID: ");
+    workflow.push_str(&shell_word(&jetbrains.plugin_xml_id));
+    workflow.push_str("\n          CHANNEL: ");
+    workflow.push_str(&shell_word(jetbrains.channel.as_deref().unwrap_or("")));
+    workflow.push_str("\n");
     workflow.push_str("        run: |\n");
     workflow.push_str("          set -euo pipefail\n");
     workflow.push_str(
         "          JETBRAINS_MARKETPLACE_TOKEN=$(cat \"$RUNNER_TEMP/marketplace-token\")\n",
     );
-    workflow.push_str(
-        "          upload_url=\"https://plugins.jetbrains.com/api/updates/upload?pluginId=",
-    );
-    workflow.push_str(&url_encode_literal(&jetbrains.plugin_xml_id));
-    if let Some(channel) = &jetbrains.channel {
-        workflow.push_str("&channel=");
-        workflow.push_str(&url_encode_literal(channel));
-    }
-    workflow.push_str("\"\n");
-    workflow.push_str("          curl --fail-with-body --retry 3 -X POST -H \"Authorization: Bearer $JETBRAINS_MARKETPLACE_TOKEN\" -F \"file=@$RUNNER_TEMP/pkl-lsp-jetbrains-signed.zip\" \"$upload_url\"\n");
-}
-
-fn url_encode_literal(value: &str) -> String {
-    value
-        .bytes()
-        .map(|byte| match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                (byte as char).to_string()
-            }
-            _ => format!("%{:02X}", byte),
-        })
-        .collect()
+    workflow
+        .push_str("          upload_url=\"https://plugins.jetbrains.com/api/updates/upload\"\n");
+    workflow.push_str("          upload_args=(-F \"xmlId=$PLUGIN_XML_ID\" -F \"file=@$RUNNER_TEMP/jetbrains-plugin-signed.zip;type=application/zip\")\n");
+    workflow.push_str("          if [ -n \"$CHANNEL\" ]; then\n");
+    workflow.push_str("            upload_args+=(-F \"channel=$CHANNEL\")\n");
+    workflow.push_str("          fi\n");
+    workflow.push_str("          curl --fail-with-body --retry 3 -X POST -H \"Authorization: Bearer $JETBRAINS_MARKETPLACE_TOKEN\" \"${upload_args[@]}\" \"$upload_url\"\n");
 }
 
 fn push_vscode_credential_preflight(workflow: &mut String, vscode: &ResolvedVscode) {
