@@ -729,7 +729,7 @@ fn push_jetbrains_sign_and_publish(workflow: &mut String, jetbrains: &ResolvedJe
     workflow.push_str(&shell_word(&jetbrains.plugin_xml_id));
     workflow.push_str("\n          CHANNEL: ");
     workflow.push_str(&shell_word(jetbrains.channel.as_deref().unwrap_or("")));
-    workflow.push_str("\n");
+    workflow.push('\n');
     workflow.push_str("        run: |\n");
     workflow.push_str("          set -euo pipefail\n");
     workflow.push_str(
