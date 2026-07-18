@@ -644,7 +644,7 @@ fn template(audit_tools: AuditTools) -> String {
   description = "Rust project";
 
   inputs = {
-    rs-harbor.url = "git+https://codeberg.org/caniko/rs-harbor.git?ref=trunk&rev=04362c20e4b4e84c7964cb9cd085c9065dec470f";
+    rs-harbor.url = "git+https://codeberg.org/caniko/rs-harbor.git?ref=trunk&rev=a637857a3c59a277bb89e889efb62a6c1c801e9a";
     nixpkgs.follows = "rs-harbor/nixpkgs";
     rust-overlay.follows = "rs-harbor/rust-overlay";
     crane.follows = "rs-harbor/crane";
@@ -1145,7 +1145,7 @@ pub fn cross_template(targets: &[FlakeTargetArg], audit_tools: AuditTools) -> St
   }};
 
   inputs = {{
-    rs-harbor.url = "git+https://codeberg.org/caniko/rs-harbor.git?ref=trunk&rev=04362c20e4b4e84c7964cb9cd085c9065dec470f";
+    rs-harbor.url = "git+https://codeberg.org/caniko/rs-harbor.git?ref=trunk&rev=a637857a3c59a277bb89e889efb62a6c1c801e9a";
 
     nixpkgs.follows = "rs-harbor/nixpkgs";
     rust-overlay.follows = "rs-harbor/rust-overlay";
@@ -1735,7 +1735,7 @@ mod tests {
 
         // rs-harbor input and follows wiring.
         assert!(
-            flake.contains("rs-harbor.url = \"git+https://codeberg.org/caniko/rs-harbor.git?ref=trunk&rev=04362c20e4b4e84c7964cb9cd085c9065dec470f\";")
+            flake.contains("rs-harbor.url = \"git+https://codeberg.org/caniko/rs-harbor.git?ref=trunk&rev=a637857a3c59a277bb89e889efb62a6c1c801e9a\";")
         );
         assert!(flake.contains("nixpkgs.follows = \"rs-harbor/nixpkgs\";"));
         assert!(flake.contains("rust-overlay.follows = \"rs-harbor/rust-overlay\";"));
