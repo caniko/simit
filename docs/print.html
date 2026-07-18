@@ -36,7 +36,7 @@
             const path_to_root = "";
             const default_light_theme = "coal";
             const default_dark_theme = "coal";
-            window.path_to_searchindex_js = "searchindex-7329a7f6.js";
+            window.path_to_searchindex_js = "searchindex-9298d92a.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-507d1757.js"></script>
@@ -311,6 +311,19 @@ result from <code>simit projects list</code> and from a bare
 have not adopted <code>simit.toml</code> still get best-effort zero-config drift detection
 from the generated workflow content, but persisted <code>[ci]</code> fields win when they
 disagree with inference.</p>
+<h2 id="live-fleet-audits"><a class="header" href="#live-fleet-audits">Live fleet audits</a></h2>
+<p><code>projects list</code>, <code>show</code>, and <code>scan</code> intentionally operate on cached registry
+state. Use <code>projects audit</code> when the question is whether the current checkout
+matches the current generator:</p>
+<pre><code class="language-sh">simit projects audit /path/to/project
+simit projects audit --json /path/to/project
+</code></pre>
+<p>The audit never reads or writes the project registry. Its JSON report is stable
+for automation and includes the generator version, platform, CI status,
+changed/missing/extra generated workflow paths, a regeneration command when it
+can be inferred, and per-project errors. Exit status <code>0</code> means clean, <code>1</code>
+means attention is required, and <code>2</code> means the live comparison could not be
+completed for one or more projects.</p>
 <h2 id="onboarding-existing-projects"><a class="header" href="#onboarding-existing-projects">Onboarding existing projects</a></h2>
 <p>Run discovery once per machine to populate the registry from projects simit
 already manages:</p>
@@ -634,6 +647,7 @@ prints the full regeneration command with the effective runtime, runner,
 workspace, and optional gates so the migration path stays explicit.</p>
 <p>Persisted CI settings look like:</p>
 <pre><code class="language-toml">[ci]
+platform = "forgejo"
 runtime = "nix"
 runner = "atlas"
 workspace = true
