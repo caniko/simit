@@ -69,6 +69,17 @@ pub fn immutable_action_ref(name: &str, version: &str) -> String {
     action_pin(name, version)
 }
 
+/// Return the immutable native GitHub Actions reference for a generated
+/// workflow. GitHub accepts `owner/repository@sha`; URL-form references are
+/// reserved for Forgejo, which supports them explicitly.
+pub fn github_action_ref(action: &str, version: &str) -> String {
+    let pinned = action_pin(&format!("https://github.com/{action}"), version);
+    pinned
+        .strip_prefix("https://github.com/")
+        .expect("GitHub action pin must use the GitHub URL prefix")
+        .to_owned()
+}
+
 pub const STEP_FLAKE_CHECK: &str = "nix-check";
 pub const STEP_CARGO_FMT: &str = "cargo-fmt";
 pub const STEP_CARGO_TEST: &str = "cargo-test";
@@ -1848,10 +1859,14 @@ fn artifacts_workflow(
             workflow.push_str("\n\n");
             workflow.push_str("      - name: Install Nix release tools\n");
             workflow.push_str("        uses: ");
-            workflow.push_str(&immutable_action_ref(
-                "https://github.com/cachix/install-nix-action",
-                "v31",
-            ));
+            if platform == Platform::Forgejo {
+                workflow.push_str(&immutable_action_ref(
+                    "https://github.com/cachix/install-nix-action",
+                    "v31",
+                ));
+            } else {
+                workflow.push_str(&github_action_ref("cachix/install-nix-action", "v31"));
+            }
             workflow.push_str("\n\n");
         }
     }
@@ -1973,10 +1988,7 @@ fn push_windows_rust_setup_step(workflow: &mut String, platform: Platform) {
         Platform::Github => {
             workflow.push_str("      - name: Install Rust\n");
             workflow.push_str("        uses: ");
-            workflow.push_str(&immutable_action_ref(
-                "https://github.com/dtolnay/rust-toolchain",
-                "stable",
-            ));
+            workflow.push_str(&github_action_ref("dtolnay/rust-toolchain", "stable"));
             workflow.push('\n');
             workflow.push_str("        with:\n");
             workflow.push_str("          toolchain: stable\n\n");
@@ -2770,10 +2782,7 @@ fn push_action_uses(workflow: &mut String, platform: Platform, action: &str, ver
         workflow.push('\n');
     } else {
         workflow.push_str("        uses: ");
-        workflow.push_str(&immutable_action_ref(
-            &format!("https://github.com/actions/{action}"),
-            version,
-        ));
+        workflow.push_str(&github_action_ref(&format!("actions/{action}"), version));
         workflow.push('\n');
     }
 }
@@ -2785,10 +2794,7 @@ fn push_install_nix_step(workflow: &mut String, platform: Platform) {
 
     workflow.push_str("      - name: Install Nix\n");
     workflow.push_str("        uses: ");
-    workflow.push_str(&immutable_action_ref(
-        "https://github.com/cachix/install-nix-action",
-        "v31",
-    ));
+    workflow.push_str(&github_action_ref("cachix/install-nix-action", "v31"));
     workflow.push_str("\n\n");
 }
 
@@ -2897,10 +2903,7 @@ fn push_rust_setup_step(workflow: &mut String, platform: Platform) {
         Platform::Github => {
             workflow.push_str("      - name: Install Rust\n");
             workflow.push_str("        uses: ");
-            workflow.push_str(&immutable_action_ref(
-                "https://github.com/dtolnay/rust-toolchain",
-                "stable",
-            ));
+            workflow.push_str(&github_action_ref("dtolnay/rust-toolchain", "stable"));
             workflow.push('\n');
             workflow.push_str("        with:\n");
             workflow.push_str("          toolchain: stable\n");
@@ -2926,10 +2929,7 @@ fn push_rust_cache_steps(workflow: &mut String, platform: Platform) {
     }
     workflow.push_str("      - name: Cache cargo registry + target\n");
     workflow.push_str("        uses: ");
-    workflow.push_str(&immutable_action_ref(
-        "https://github.com/Swatinem/rust-cache",
-        "v2",
-    ));
+    workflow.push_str(&github_action_ref("Swatinem/rust-cache", "v2"));
     workflow.push('\n');
     workflow.push_str("        with:\n");
     workflow.push_str("          cache-all-crates: \"true\"\n");

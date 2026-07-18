@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Make generated flake-wiring CI checks read-only so fetching Simit cannot
   mutate its lock file in the consumer workspace.
+- Emit native `owner/repository@sha` action references for GitHub workflows;
+  keep URL-form references for Forgejo workflows.
 
 ## [0.17.7] - 2026-07-11
 

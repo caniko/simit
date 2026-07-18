@@ -922,7 +922,7 @@ fn github_nix_with_om_ci_replace_keeps_install_nix_action() {
 
     let ci = read(&temp.path().join(".github/workflows/ci.yaml"));
     assert!(ci.contains(
-        "uses: https://github.com/cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31"
+        "uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31"
     ));
     assert!(ci.contains("OMNIX_REF:"));
     assert!(ci.contains("nix run \"$OMNIX_REF\" -- ci run"));
@@ -1099,16 +1099,12 @@ fn generates_github_plain_cargo_workflows() {
     assert_all_branch_push_trigger(&ci);
     assert!(ci.contains("runs-on: ubuntu-latest"));
     assert!(ci.contains(
-        "uses: https://github.com/dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable"
+        "uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable"
     ));
     assert!(ci.contains("toolchain: stable"));
-    assert!(ci.contains(
-        "uses: https://github.com/actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0"
-    ));
+    assert!(ci.contains("uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0"));
     assert!(!ci.contains("https://code.forgejo.org/actions/cache@v4"));
-    assert!(ci.contains(
-        "uses: https://github.com/Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2"
-    ));
+    assert!(ci.contains("uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2"));
     assert!(ci.contains("path: ~/.cargo/bin"));
     assert!(ci.contains("hashFiles('.github/workflows/*.yaml')"));
     assert!(!ci.contains("hashFiles('.forgejo/workflows/ci.yaml', '.github/workflows/ci.yaml')"));
@@ -1120,13 +1116,13 @@ fn generates_github_plain_cargo_workflows() {
     assert!(ci.contains("run: cargo package --allow-dirty --list"));
 
     let publish = read(&temp.path().join(".github/workflows/publish-crate.yaml"));
-    assert!(publish.contains(
-        "uses: https://github.com/actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0"
-    ));
+    assert!(
+        publish.contains("uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0")
+    );
     assert!(!publish.contains("https://code.forgejo.org/actions/cache@v4"));
-    assert!(publish.contains(
-        "uses: https://github.com/Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2"
-    ));
+    assert!(
+        publish.contains("uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2")
+    );
     assert!(publish.contains("path: ~/.cargo/bin"));
     assert!(publish.contains("hashFiles('.github/workflows/*.yaml')"));
     assert!(
