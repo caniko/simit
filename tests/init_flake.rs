@@ -129,7 +129,7 @@ fn custom_rs_harbor_flake() -> &'static str {
   description = "Memory-aware admission gate for Rust work pipelines";
 
   inputs = {
-    rs-harbor.url = "git+https://codeberg.org/caniko/rs-harbor.git?ref=trunk&rev=d94c87d073cca4696629d6b6bbfef4eb58ce1025";
+    rs-harbor.url = "git+https://codeberg.org/caniko/rs-harbor.git?ref=trunk&rev=04362c20e4b4e84c7964cb9cd085c9065dec470f";
 
     nixpkgs.follows = "rs-harbor/nixpkgs";
     rust-overlay.follows = "rs-harbor/rust-overlay";
@@ -1204,7 +1204,7 @@ fn cross_print_emits_multi_target_flake_with_contract() {
 
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("--- flake.nix"));
-    assert!(stdout.contains("rs-harbor.url = \"git+https://codeberg.org/caniko/rs-harbor.git?ref=trunk&rev=d94c87d073cca4696629d6b6bbfef4eb58ce1025\";"));
+    assert!(stdout.contains("rs-harbor.url = \"git+https://codeberg.org/caniko/rs-harbor.git?ref=trunk&rev=04362c20e4b4e84c7964cb9cd085c9065dec470f\";"));
     assert!(stdout.contains("rs-harbor.lib.mkCrossPackages {"));
     assert!(stdout.contains(
         "targets = [\"native\" \"aarch64-linux\" \"windows\" \"darwin-x86_64\" \"darwin-aarch64\"];"
