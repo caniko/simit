@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Make generated flake-wiring CI checks read-only so fetching Simit cannot
+  mutate its lock file in the consumer workspace.
+
 ## [0.17.7] - 2026-07-11
 
 ### Fixed

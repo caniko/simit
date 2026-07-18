@@ -2834,6 +2834,9 @@ fn forgejo_python_uv_ci_uses_nix_checks() {
     assert_yaml_parses(&workflow);
     assert!(workflow.contains("runs-on: atlas"));
     assert!(workflow.contains(
+        "nix run --no-write-lock-file git+https://codeberg.org/caniko/simit.git -- init flake --check --diff"
+    ));
+    assert!(!workflow.contains(
         "nix run git+https://codeberg.org/caniko/simit.git -- init flake --check --diff"
     ));
     assert!(workflow.contains("nix flake check --no-build"));

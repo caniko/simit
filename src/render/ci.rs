@@ -1193,7 +1193,7 @@ fn python_ci_workflow(
     if selected(CiComponent::FlakeWiring) {
         workflow.push_str("      - name: Check generated flake wiring\n");
         workflow.push_str(
-            "        run: nix run git+https://codeberg.org/caniko/simit.git -- init flake --check --diff\n\n",
+            "        run: nix run --no-write-lock-file git+https://codeberg.org/caniko/simit.git -- init flake --check --diff\n\n",
         );
     }
     if selected(CiComponent::FlakeEvaluation) {
@@ -2673,8 +2673,9 @@ fn push_job_env(
     }
     if needs_sccache {
         workflow.push_str("      RUSTC_WRAPPER: \"/usr/local/bin/sccache\"\n");
-        workflow
-            .push_str("      SCCACHE_REDIS_ENDPOINT: \"redis+unix:///run/redis-sccache/redis.sock\"\n");
+        workflow.push_str(
+            "      SCCACHE_REDIS_ENDPOINT: \"redis+unix:///run/redis-sccache/redis.sock\"\n",
+        );
         workflow
             .push_str("      SCCACHE_REDIS_KEY_PREFIX: \"canix/canix-rust-v5-sccache-0.16.0\"\n");
         workflow.push_str("      SCCACHE_REDIS_RW_MODE: \"READ_WRITE\"\n");
