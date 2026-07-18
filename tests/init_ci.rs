@@ -1223,7 +1223,8 @@ fn forgejo_auto_runtime_uses_rust_container_even_when_flake_exists() {
     assert!(ci.contains("cancel-in-progress: true"));
     assert!(ci.contains("container: rust:1.85-bookworm"));
     assert!(ci.contains("RUSTC_WRAPPER: \"/usr/local/bin/sccache\""));
-    assert!(ci.contains("SCCACHE_REDIS_ENDPOINT: \"unix:///run/redis-sccache/redis.sock\""));
+    assert!(ci.contains("SCCACHE_REDIS_ENDPOINT: \"redis+unix:///run/redis-sccache/redis.sock\""));
+    assert!(!ci.contains("SCCACHE_REDIS_ENDPOINT: \"unix:///run/redis-sccache/redis.sock\""));
     assert!(ci.contains("SCCACHE_REDIS_KEY_PREFIX: \"canix/canix-rust-v5-sccache-0.16.0\""));
     assert!(ci.contains("CARGO_INCREMENTAL: \"0\""));
     assert!(ci.contains("uses: https://code.forgejo.org/actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1"));
