@@ -1160,7 +1160,7 @@ pub fn cross_template(targets: &[FlakeTargetArg], audit_tools: AuditTools) -> St
     nixpkgs.follows = "rs-harbor/nixpkgs";
     rust-overlay.follows = "rs-harbor/rust-overlay";
     crane.follows = "rs-harbor/crane";
-    flake-utils.follows = "rs-harbor/flake-utils";
+    flake-utils.url = "github:numtide/flake-utils";
 
     treefmt-nix = {{
       url = "github:numtide/treefmt-nix";
@@ -1757,7 +1757,7 @@ mod tests {
         assert!(flake.contains("nixpkgs.follows = \"rs-harbor/nixpkgs\";"));
         assert!(flake.contains("rust-overlay.follows = \"rs-harbor/rust-overlay\";"));
         assert!(flake.contains("crane.follows = \"rs-harbor/crane\";"));
-        assert!(flake.contains("flake-utils.follows = \"rs-harbor/flake-utils\";"));
+        assert!(flake.contains("flake-utils.url = \"github:numtide/flake-utils\";"));
 
         // Toolchain + cross + mkCrossPackages call with the exact argument set.
         assert!(flake.contains("toolchain = rs-harbor.lib.mkToolchain {inherit pkgs;};"));
