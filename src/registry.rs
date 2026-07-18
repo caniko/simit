@@ -127,6 +127,16 @@ pub enum FeatureStatus {
     Absent,
 }
 
+/// Live comparison of generated CI files in one checkout.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CiAudit {
+    pub status: FeatureStatus,
+    pub platform: Option<String>,
+    pub changed_files: Vec<PathBuf>,
+    pub missing_files: Vec<PathBuf>,
+    pub extra_generated_files: Vec<PathBuf>,
+}
+
 impl Default for Registry {
     fn default() -> Self {
         Self {
@@ -522,6 +532,78 @@ pub fn detect_feature_status(workspace_root: &Path) -> BTreeMap<String, FeatureS
     features
 }
 
+/// Compare the checkout's marked CI workflows with the files Simit would
+/// generate today. This deliberately bypasses the per-user project registry.
+pub fn audit_ci(workspace_root: &Path) -> Result<CiAudit> {
+    let workflows = collect_workflow_files(workspace_root)?
+        .into_iter()
+        .filter(|file| !is_release_workflow(file))
+        .collect::<Vec<_>>();
+    let (marked, unmarked): (Vec<_>, Vec<_>) = workflows.into_iter().partition(|file| file.marked);
+
+    if marked.is_empty() {
+        return Ok(CiAudit {
+            status: if unmarked.is_empty() {
+                FeatureStatus::Absent
+            } else {
+                FeatureStatus::HandRolled
+            },
+            platform: None,
+            changed_files: Vec::new(),
+            missing_files: Vec::new(),
+            extra_generated_files: Vec::new(),
+        });
+    }
+
+    let platform = infer_ci_platform(&marked)?;
+    let expected = infer_expected_ci_files(workspace_root, &marked)?
+        .into_iter()
+        .filter(|file| is_workflow_path(&file.relative_path))
+        .map(|file| (file.relative_path, file.content))
+        .collect::<BTreeMap<_, _>>();
+    let actual = marked
+        .iter()
+        .map(|file| (file.relative_path.clone(), file.content.as_str()))
+        .collect::<BTreeMap<_, _>>();
+
+    let mut changed_files = Vec::new();
+    let mut missing_files = Vec::new();
+    for (path, content) in &expected {
+        match actual.get(path) {
+            Some(actual) if *actual == content.as_str() => {}
+            Some(_) => changed_files.push(path.clone()),
+            None => missing_files.push(path.clone()),
+        }
+    }
+    let mut extra_generated_files = actual
+        .keys()
+        .filter(|path| !expected.contains_key(*path))
+        .cloned()
+        .collect::<Vec<_>>();
+    changed_files.sort();
+    missing_files.sort();
+    extra_generated_files.sort();
+
+    let status = if !changed_files.is_empty()
+        || !missing_files.is_empty()
+        || !extra_generated_files.is_empty()
+    {
+        FeatureStatus::Drift
+    } else if !unmarked.is_empty() {
+        FeatureStatus::ManagedExtra
+    } else {
+        FeatureStatus::Managed
+    };
+
+    Ok(CiAudit {
+        status,
+        platform: Some(platform.as_str().to_owned()),
+        changed_files,
+        missing_files,
+        extra_generated_files,
+    })
+}
+
 pub fn uses_simit_features(features: &BTreeMap<String, FeatureStatus>) -> bool {
     features.iter().any(|(feature, status)| {
         *status != FeatureStatus::Absent && feature.as_str() != "changelog"
@@ -805,6 +887,9 @@ fn infer_expected_ci_files(
         &cli,
         Some(&inference),
     )?;
+    if metadata.workspace_members.len() > 1 && resolved.packages.is_empty() {
+        resolved.workspace = true;
+    }
     if has_granular_jobs {
         crate::commands::init_ci::apply_granular_step_runners(
             &mut resolved.step_runners,
@@ -1200,6 +1285,11 @@ fn infer_primary_runner(marked: &[WorkflowFile], workflow_kind: &str) -> Result<
                 })
                 .flatten()
         })
+        .or_else(|| {
+            marked
+                .iter()
+                .find(|workflow| workflow_name(&workflow.relative_path) == Some("pages"))
+        })
         .context("missing primary workflow for runner inference")?;
     let labels = parse_runs_on_labels(&workflow.content, 0)
         .with_context(|| format!("parsing runs-on from {}", workflow.relative_path.display()))?;
@@ -1571,6 +1661,24 @@ mod tests {
         assert!(unmarked.is_empty());
         assert!(!marked_workflows_drift(root, &marked));
         assert_eq!(detect_ci_status(root), FeatureStatus::Managed);
+    }
+
+    #[test]
+    fn live_ci_audit_reports_absent_without_registry_state() {
+        let root = TempDir::new().unwrap();
+        fs::write(
+            root.path().join("Cargo.toml"),
+            "[package]\nname = \"audit-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+
+        let audit = audit_ci(root.path()).unwrap();
+
+        assert_eq!(audit.status, FeatureStatus::Absent);
+        assert!(audit.platform.is_none());
+        assert!(audit.changed_files.is_empty());
+        assert!(audit.missing_files.is_empty());
+        assert!(audit.extra_generated_files.is_empty());
     }
 
     #[test]

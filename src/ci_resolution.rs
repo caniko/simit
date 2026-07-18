@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
-use crate::cli::{Runtime, RuntimeChoice};
+use crate::cli::{Platform, Runtime, RuntimeChoice};
 use crate::config::{CiConfig, ProjectConfig};
 use crate::render::ci::{CiOptions, OMNIX_REF_DEFAULT, OmCiMode};
 
@@ -312,12 +312,14 @@ impl ResolvedCiInputs {
     pub fn persisted_ci(
         &self,
         cfg: &ProjectConfig,
+        platform: Platform,
         with_artifacts: bool,
         omnix_ref: &str,
         runner: Option<String>,
         windows_runner: Option<String>,
     ) -> CiConfig {
         let mut ci = cfg.ci.clone();
+        ci.platform = Some(platform);
         ci.runtime = (self.runtime != Runtime::Cargo).then_some(self.runtime);
         ci.runner = runner;
         ci.windows_runner = windows_runner;

@@ -39,6 +39,24 @@ have not adopted `simit.toml` still get best-effort zero-config drift detection
 from the generated workflow content, but persisted `[ci]` fields win when they
 disagree with inference.
 
+## Live fleet audits
+
+`projects list`, `show`, and `scan` intentionally operate on cached registry
+state. Use `projects audit` when the question is whether the current checkout
+matches the current generator:
+
+```sh
+simit projects audit /path/to/project
+simit projects audit --json /path/to/project
+```
+
+The audit never reads or writes the project registry. Its JSON report is stable
+for automation and includes the generator version, platform, CI status,
+changed/missing/extra generated workflow paths, a regeneration command when it
+can be inferred, and per-project errors. Exit status `0` means clean, `1`
+means attention is required, and `2` means the live comparison could not be
+completed for one or more projects.
+
 ## Onboarding existing projects
 
 Run discovery once per machine to populate the registry from projects simit

@@ -27,6 +27,7 @@ Persisted CI settings look like:
 
 ```toml
 [ci]
+platform = "forgejo"
 runtime = "nix"
 runner = "atlas"
 workspace = true

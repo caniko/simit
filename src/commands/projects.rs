@@ -11,9 +11,9 @@ use serde::Serialize;
 
 use crate::cargo;
 use crate::cli::{
-    ProjectsAction, ProjectsClearStateArgs, ProjectsCommand, ProjectsDiscoverArgs,
-    ProjectsForgetArgs, ProjectsListArgs, ProjectsPruneArgs, ProjectsScanArgs, ProjectsShowArgs,
-    ProjectsSort,
+    ProjectsAction, ProjectsAuditArgs, ProjectsClearStateArgs, ProjectsCommand,
+    ProjectsDiscoverArgs, ProjectsForgetArgs, ProjectsListArgs, ProjectsPruneArgs,
+    ProjectsScanArgs, ProjectsShowArgs, ProjectsSort,
 };
 use crate::commands::init_ci;
 use crate::registry::{
@@ -52,6 +52,7 @@ pub fn run(command: ProjectsCommand) -> Result<()> {
         ProjectsAction::List(args) => list(args),
         ProjectsAction::Show(args) => show(args),
         ProjectsAction::Scan(args) => scan(args),
+        ProjectsAction::Audit(args) => audit(args),
         ProjectsAction::Discover(args) => discover(args),
         ProjectsAction::Forget(args) => forget(args),
         ProjectsAction::Prune(args) => prune(args),
@@ -81,6 +82,29 @@ struct ProjectRecord<'a> {
     first_seen: DateTime<Utc>,
     last_seen: DateTime<Utc>,
     features: &'a BTreeMap<String, FeatureStatus>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AuditReport {
+    schema_version: u32,
+    generator_version: &'static str,
+    projects: Vec<AuditProject>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AuditProject {
+    path: Utf8PathBuf,
+    name: Option<String>,
+    applicable: bool,
+    ci_status: FeatureStatus,
+    platform: Option<String>,
+    changed_files: Vec<String>,
+    missing_files: Vec<String>,
+    extra_generated_files: Vec<String>,
+    regenerate_command: Option<String>,
+    errors: Vec<String>,
 }
 
 fn list(args: ProjectsListArgs) -> Result<()> {
@@ -225,6 +249,136 @@ fn scan(args: ProjectsScanArgs) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn audit(args: ProjectsAuditArgs) -> Result<()> {
+    let paths = if args.paths.is_empty() {
+        vec![current_workspace_root()?]
+    } else {
+        args.paths
+    };
+    let mut projects = Vec::with_capacity(paths.len());
+    let mut attention = 0usize;
+    let mut tool_errors = 0usize;
+
+    for path in paths {
+        let path = normalize_audit_path(&path)?;
+        let manifest = path.join("Cargo.toml");
+        let applicable = manifest.is_file();
+        let mut project = AuditProject {
+            path: path.clone(),
+            name: None,
+            applicable,
+            ci_status: FeatureStatus::Absent,
+            platform: None,
+            changed_files: Vec::new(),
+            missing_files: Vec::new(),
+            extra_generated_files: Vec::new(),
+            regenerate_command: None,
+            errors: Vec::new(),
+        };
+
+        if applicable {
+            project.name = registry::package_name_for_workspace(path.as_std_path()).ok();
+            match registry::audit_ci(path.as_std_path()) {
+                Ok(ci) => {
+                    project.ci_status = ci.status;
+                    project.platform = ci.platform;
+                    project.changed_files = ci
+                        .changed_files
+                        .into_iter()
+                        .map(|file| file.display().to_string())
+                        .collect();
+                    project.missing_files = ci
+                        .missing_files
+                        .into_iter()
+                        .map(|file| file.display().to_string())
+                        .collect();
+                    project.extra_generated_files = ci
+                        .extra_generated_files
+                        .into_iter()
+                        .map(|file| file.display().to_string())
+                        .collect();
+                    match init_ci::project_regeneration_command(path.as_std_path()) {
+                        Ok(command) => project.regenerate_command = command,
+                        Err(err) => {
+                            project.errors.push(format!("{err:#}"));
+                            tool_errors += 1;
+                        }
+                    }
+                }
+                Err(err) => {
+                    project.ci_status = FeatureStatus::Drift;
+                    project.errors.push(format!("{err:#}"));
+                    tool_errors += 1;
+                }
+            }
+        }
+
+        if project.applicable && project.ci_status != FeatureStatus::Managed {
+            attention += 1;
+        }
+        projects.push(project);
+    }
+
+    if args.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&AuditReport {
+                schema_version: 1,
+                generator_version: env!("CARGO_PKG_VERSION"),
+                projects,
+            })?
+        );
+    } else {
+        for project in &projects {
+            let status = status_label(project.ci_status);
+            let detail = if project.errors.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", project.errors.join("; "))
+            };
+            println!("{status:<12} {}{detail}", project.path);
+            if !project.changed_files.is_empty() {
+                println!("  changed: {}", project.changed_files.join(", "));
+            }
+            if !project.missing_files.is_empty() {
+                println!("  missing: {}", project.missing_files.join(", "));
+            }
+            if !project.extra_generated_files.is_empty() {
+                println!(
+                    "  extra-generated: {}",
+                    project.extra_generated_files.join(", ")
+                );
+            }
+            if let Some(command) = &project.regenerate_command {
+                println!("  regenerate: {command}");
+            }
+        }
+    }
+
+    if tool_errors > 0 {
+        Err(CommandExit::new(
+            2,
+            format!("live CI audit failed for {tool_errors} project(s)"),
+        )
+        .into())
+    } else if attention > 0 {
+        Err(CommandExit::new(
+            1,
+            format!("live CI audit found attention items in {attention} project(s)"),
+        )
+        .into())
+    } else {
+        Ok(())
+    }
+}
+
+fn normalize_audit_path(path: &Utf8PathBuf) -> Result<Utf8PathBuf> {
+    if !path.as_std_path().is_dir() {
+        bail!("audit path is not a directory: {path}");
+    }
+    registry::canonical_project_path(path.as_std_path())
 }
 
 fn discover(args: ProjectsDiscoverArgs) -> Result<()> {

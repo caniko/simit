@@ -20,7 +20,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
 use toml_edit::{Array, DocumentMut, InlineTable, Item, Table, Value, value};
 
-use crate::cli::Runtime;
+use crate::cli::{Platform, Runtime};
 use crate::user_config::validate_runner_label;
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
@@ -369,6 +369,8 @@ fn default_package_binding() -> String {
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CiConfig {
+    #[serde(default)]
+    pub platform: Option<Platform>,
     #[serde(default)]
     pub runtime: Option<Runtime>,
     #[serde(default)]
@@ -2655,6 +2657,7 @@ fn validate_runner_label_opt(name: &str, value: Option<&str>) -> Result<()> {
 }
 
 fn set_ci_table(table: &mut Table, ci: &CiConfig) {
+    set_optional_string(table, "platform", ci.platform.map(Platform::as_str));
     set_optional_string(table, "runtime", ci.runtime.map(runtime_name));
     set_optional_string(table, "runner", ci.runner.as_deref());
     set_optional_string(table, "windows_runner", ci.windows_runner.as_deref());

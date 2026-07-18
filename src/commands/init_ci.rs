@@ -224,6 +224,7 @@ pub fn run(command: InitCiCommand) -> Result<()> {
     }
     let persisted_ci = resolved.persisted_ci(
         &cfg,
+        command.platform,
         with_artifacts,
         &omnix_ref,
         persisted_runner,
@@ -370,7 +371,14 @@ fn run_python(command: InitCiCommand) -> Result<()> {
             &options,
         )?);
     }
-    let persisted_ci = resolved.persisted_ci(&cfg, false, &omnix_ref, persisted_runner, None);
+    let persisted_ci = resolved.persisted_ci(
+        &cfg,
+        command.platform,
+        false,
+        &omnix_ref,
+        persisted_runner,
+        None,
+    );
     let persisted_in_simit_toml =
         workspace_root.join("simit.toml").exists() && cfg.ci == persisted_ci;
     let check_message = format!(
@@ -495,12 +503,16 @@ pub(crate) fn project_regeneration_command(workspace_root: &Path) -> Result<Opti
 
     let cfg = ProjectConfig::load(workspace_root)?;
     let inference = CiInference::from_workflows(&snapshots)?;
-    let resolved = ResolvedCiInputs::resolve(
+    let mut resolved = ResolvedCiInputs::resolve(
         workspace_root,
         &cfg,
         &CiCliOverrides::default(),
         Some(&inference),
     )?;
+    let metadata = cargo::cargo_metadata(&cargo::find_manifest(workspace_root)?)?;
+    if metadata.workspace_members.len() > 1 && resolved.packages.is_empty() {
+        resolved.workspace = true;
+    }
     let with_homebrew = snapshots
         .iter()
         .any(|workflow| workflow.content.contains("name: Publish Homebrew tap"));
@@ -831,6 +843,7 @@ fn persisted_ci_matches_simit_toml(
     });
     let persisted_ci = resolved.persisted_ci(
         cfg,
+        command.platform,
         with_artifacts,
         &resolved.omnix_ref,
         persisted_runner,

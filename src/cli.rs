@@ -1655,7 +1655,8 @@ pub struct AptRenderArgs {
     pub apt: AptOverridesArgs,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, ValueEnum)]
+#[serde(rename_all = "lowercase")]
 pub enum Platform {
     #[value(help = "Forgejo Actions workflows under .forgejo/workflows")]
     Forgejo,
@@ -1852,6 +1853,8 @@ pub enum ProjectsAction {
     Show(ProjectsShowArgs),
     #[command(about = "Re-run feature detection across registered projects")]
     Scan(ProjectsScanArgs),
+    #[command(about = "Audit live project CI without reading or writing the registry")]
+    Audit(ProjectsAuditArgs),
     #[command(about = "Discover Rust workspaces under a filesystem subtree")]
     Discover(ProjectsDiscoverArgs),
     #[command(about = "Forget one registered project")]
@@ -1924,6 +1927,17 @@ pub struct ProjectsScanArgs {
     pub prune: bool,
     #[arg(long, help = "Print intended changes without writing the registry")]
     pub dry_run: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct ProjectsAuditArgs {
+    #[arg(
+        value_name = "PATH",
+        help = "Project path; defaults to the current workspace root; may be repeated"
+    )]
+    pub paths: Vec<Utf8PathBuf>,
+    #[arg(long, help = "Print a stable machine-readable JSON report")]
+    pub json: bool,
 }
 
 #[derive(Debug, Args)]
