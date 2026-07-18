@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   mutate its lock file in the consumer workspace.
 - Emit native `owner/repository@sha` action references for GitHub workflows;
   keep URL-form references for Forgejo workflows.
+- Keep the default `nix run` package independent of canix's managed compiler
+  cache so public CI runners can build Simit without private cache transport.
 
 ## [0.17.7] - 2026-07-11
 

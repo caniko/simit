@@ -46,6 +46,15 @@
 
       toolchain = rs-harbor.lib.mkToolchain {inherit pkgs;};
       inherit (toolchain) craneLib;
+      # `nix run git+https://codeberg.org/caniko/simit.git` is the public CLI
+      # distribution path and must work on runners without canix's managed
+      # sccache transport. Keep cached derivations for Simit's own checks,
+      # but make the default runnable package self-contained.
+      publicCraneLib =
+        (rs-harbor.lib.mkToolchain {
+          inherit pkgs;
+          cache.enable = false;
+        }).craneLib;
 
       # The generator embeds the immutable action registry at compile time.
       # crane's default Cargo filter intentionally drops root JSON files, so
@@ -72,6 +81,12 @@
       package = craneLib.buildPackage (commonArgs
         // {
           inherit cargoArtifacts;
+          nativeBuildInputs = [preCommitBin];
+          nativeCheckInputs = [pkgs.git pkgs.gnupg];
+        });
+
+      publicPackage = publicCraneLib.buildPackage (commonArgs
+        // {
           nativeBuildInputs = [preCommitBin];
           nativeCheckInputs = [pkgs.git pkgs.gnupg];
         });
@@ -140,7 +155,7 @@
       };
     in {
       packages = {
-        default = package;
+        default = publicPackage;
         docs = docs;
         website = website;
         site = website;
@@ -172,6 +187,9 @@
         doc = docCheck;
         audit = auditCheck;
         deny = denyCheck;
+        default-package-is-publicly-buildable =
+          assert !(publicPackage.passthru.rsHarborBuildCacheWrapped or false);
+            pkgs.runCommand "check-simit-default-package-cache-policy" {} "touch $out";
       };
 
       devShells = let
