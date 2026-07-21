@@ -13,6 +13,8 @@ pub const CANIX_CACHE_KEY: &str = "canix:lPzPzKrmYqW5Rxa5r0uQWvCqD3S5nx0h2eCy7XD
 pub const CANIX_CACHE_URL: &str = "https://attic.candee.baby/canix";
 /// Upstream cache.nixos.org public key, advertised alongside the canix cache.
 pub const NIXOS_CACHE_KEY: &str = "cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=";
+/// Pinned rs-harbor revision providing the fleet-wide Rust cache contract.
+pub const RS_HARBOR_REV: &str = "b40cd4c4fdf6133962f67bd68a48bfd5d554d47f";
 
 const TREEFMT_INPUT: &str = "    treefmt-nix.url = \"github:numtide/treefmt-nix\";\n";
 const GIT_HOOKS_INPUT: &str = "    git-hooks.url = \"github:cachix/git-hooks.nix\";\n";
@@ -869,6 +871,7 @@ fn template(audit_tools: AuditTools) -> String {
 
 "#
     .to_owned();
+    content = content.replace("a3e5f76326f0f02de230cb2fba66fa3c1c7171cb", RS_HARBOR_REV);
     insert_template_audit_packages(&mut content, audit_tools);
     content
 }
@@ -1399,6 +1402,7 @@ pub fn cross_template(targets: &[FlakeTargetArg], audit_tools: AuditTools) -> St
         target_list = target_list,
         default_attr = default_attr,
     );
+    content = content.replace("a3e5f76326f0f02de230cb2fba66fa3c1c7171cb", RS_HARBOR_REV);
     insert_template_audit_packages(&mut content, audit_tools);
     content
 }
@@ -1734,9 +1738,9 @@ mod tests {
         );
 
         // rs-harbor input and follows wiring.
-        assert!(
-            flake.contains("rs-harbor.url = \"git+https://codeberg.org/caniko/rs-harbor.git?ref=trunk&rev=a3e5f76326f0f02de230cb2fba66fa3c1c7171cb\";")
-        );
+        assert!(flake.contains(&format!(
+            "rs-harbor.url = \"git+https://codeberg.org/caniko/rs-harbor.git?ref=trunk&rev={RS_HARBOR_REV}\";"
+        )));
         assert!(flake.contains("nixpkgs.follows = \"rs-harbor/nixpkgs\";"));
         assert!(flake.contains("rust-overlay.follows = \"rs-harbor/rust-overlay\";"));
         assert!(flake.contains("crane.follows = \"rs-harbor/crane\";"));
