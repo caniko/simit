@@ -1469,6 +1469,7 @@ fn ci_workflow_single_job(
         }
     }
 
+    push_sccache_stats_step(&mut workflow, platform, runtime);
     trim_trailing_blank_lines(&mut workflow);
     workflow
 }
@@ -1709,6 +1710,7 @@ fn ci_workflow_multi_job(
         }
 
         workflow.push_str(&job.steps);
+        push_sccache_stats_step(&mut workflow, platform, runtime);
     }
 
     trim_trailing_blank_lines(&mut workflow);
@@ -1798,6 +1800,7 @@ fn publish_workflow(
                 "cargo publish",
                 options.package_scoped,
             ));
+            push_sccache_stats_step(&mut workflow, platform, runtime);
         }
     }
 
@@ -1868,6 +1871,7 @@ fn artifacts_workflow(
                 workflow.push_str(&github_action_ref("cachix/install-nix-action", "v31"));
             }
             workflow.push_str("\n\n");
+            push_sccache_stats_step(&mut workflow, platform, runtime);
         }
     }
     push_release_integrity_steps(&mut workflow, platform);
@@ -2648,16 +2652,11 @@ fn push_container(workflow: &mut String, platform: Platform, runtime: Runtime, p
 
 fn push_job_env(
     workflow: &mut String,
-    platform: Platform,
+    _platform: Platform,
     runtime: Runtime,
     extra_env: &[(String, String)],
     include_cargo_home: bool,
 ) {
-    // All generated Forgejo Cargo jobs run on the trusted Atlas runner and
-    // use the host Redis transport exposed by that runner.  Keeping this
-    // contract in the generator makes every Rust project share the same
-    // cache without hand-maintained workflow fragments.
-    let needs_sccache = platform == Platform::Forgejo && runtime == Runtime::Cargo;
     let needs_nix_config =
         runtime == Runtime::Nix && !extra_env.iter().any(|(key, _)| key == "NIX_CONFIG");
     let needs_xdg_cache_home =
@@ -2665,12 +2664,7 @@ fn push_job_env(
     let needs_cargo_home = include_cargo_home
         && runtime == Runtime::Nix
         && !extra_env.iter().any(|(key, _)| key == "CARGO_HOME");
-    if !needs_sccache
-        && !needs_nix_config
-        && !needs_xdg_cache_home
-        && !needs_cargo_home
-        && extra_env.is_empty()
-    {
+    if !needs_nix_config && !needs_xdg_cache_home && !needs_cargo_home && extra_env.is_empty() {
         return;
     }
     workflow.push_str("    env:\n");
@@ -2682,19 +2676,6 @@ fn push_job_env(
     }
     if needs_cargo_home {
         workflow.push_str("      CARGO_HOME: \"/tmp/.cargo\"\n");
-    }
-    if needs_sccache {
-        workflow.push_str("      RUSTC_WRAPPER: \"/usr/local/bin/sccache\"\n");
-        workflow.push_str(
-            "      SCCACHE_REDIS_ENDPOINT: \"redis+unix:///run/redis-sccache/redis.sock\"\n",
-        );
-        workflow
-            .push_str("      SCCACHE_REDIS_KEY_PREFIX: \"canix/canix-rust-v5-sccache-0.16.0\"\n");
-        workflow.push_str("      SCCACHE_REDIS_RW_MODE: \"READ_WRITE\"\n");
-        workflow.push_str("      SCCACHE_MULTILEVEL_CHAIN: \"redis\"\n");
-        workflow.push_str("      SCCACHE_MULTILEVEL_WRITE_ERROR_POLICY: \"ignore\"\n");
-        workflow.push_str("      SCCACHE_BASEDIRS: \"/workspace\"\n");
-        workflow.push_str("      CARGO_INCREMENTAL: \"0\"\n");
     }
     for (key, value) in extra_env {
         workflow.push_str("      ");
@@ -2925,6 +2906,12 @@ fn push_rust_cache_steps(workflow: &mut String, platform: Platform) {
         "          key: cargo-bin-${{{{ runner.os }}}}-${{{{ hashFiles('{workflow_glob}') }}}}\n\n",
     ));
     if platform == Platform::Forgejo {
+        workflow.push_str("      - name: Verify compiler cache\n");
+        workflow.push_str("        run: |\n");
+        workflow.push_str("          set -eu\n");
+        workflow.push_str("          test -x /usr/local/bin/sccache\n");
+        workflow.push_str("          test -S /run/redis-sccache/redis.sock\n");
+        workflow.push_str("          /usr/local/bin/sccache --zero-stats\n\n");
         return;
     }
     workflow.push_str("      - name: Cache cargo registry + target\n");
@@ -2935,6 +2922,15 @@ fn push_rust_cache_steps(workflow: &mut String, platform: Platform) {
     workflow.push_str("          cache-all-crates: \"true\"\n");
     workflow.push_str("          cache-on-failure: \"true\"\n");
     workflow.push_str("          save-if: ${{ github.ref == 'refs/heads/trunk' }}\n\n");
+}
+
+fn push_sccache_stats_step(workflow: &mut String, platform: Platform, runtime: Runtime) {
+    if platform != Platform::Forgejo || runtime != Runtime::Cargo {
+        return;
+    }
+    workflow.push_str("      - name: Record compiler cache stats\n");
+    workflow.push_str("        if: always()\n");
+    workflow.push_str("        run: /usr/local/bin/sccache --show-adv-stats || true\n\n");
 }
 
 fn push_test_steps(
