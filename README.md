@@ -569,6 +569,13 @@ secret names are configurable with `[aur].ssh_key_secret`,
 `[release.announce].*_secret`, and
 `[release.windows_signing].*_secret`.
 
+For rs-harbor-compatible Nix projects, set
+`[release.artifacts].nix_bundle_attrs` to an explicit list of flake attributes
+whose outputs are flat release bundles. Each bundle must contain exactly one
+versioned `*-release-manifest.json`; Simit validates that manifest against the
+tag before checksums and Codeberg upload. Existing `build_commands` remain
+additive for installers and other project-specific formats.
+
 ## Project config
 
 Projects may opt in to stable simit settings with exactly one project config

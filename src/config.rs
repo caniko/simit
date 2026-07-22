@@ -597,6 +597,14 @@ pub struct ArtifactsConfig {
     /// Build-step body lines, emitted verbatim (project-specific).
     #[serde(default)]
     pub build_commands: Vec<String>,
+    /// Explicit Nix output attributes that produce flat release bundles.
+    ///
+    /// Each bundle must contain regular top-level release files and exactly
+    /// one `*-release-manifest.json` whose version matches the release tag.
+    /// Project-specific `build_commands` remain additive for formats that
+    /// cannot be represented by the generic bundle contract.
+    #[serde(default)]
+    pub nix_bundle_attrs: Vec<String>,
     /// SBOM / supply-chain report command lines, emitted verbatim before the
     /// build step when non-empty.
     #[serde(default)]

@@ -164,6 +164,32 @@ fn bootstraps_release_workflow_for_enabled_channels() {
 }
 
 #[test]
+fn bootstraps_explicit_nix_release_bundle() {
+    let project = init_package("bundle-demo");
+    let config_path = project.path().join("simit.toml");
+    let config = read(&config_path).replace(
+        "runner = \"atlas\"\n",
+        "runner = \"atlas\"\nnix_bundle_attrs = [\"release-bundle\"]\n",
+    );
+    fs::write(config_path, config).unwrap();
+
+    let output = simit()
+        .current_dir(project.path())
+        .args(["init", "release"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let workflow = read(&project.path().join(".forgejo/workflows/release.yml"));
+    assert!(workflow.contains("nix build '.#release-bundle'"));
+    assert!(workflow.contains("expected exactly one release manifest from Nix bundles"));
+    assert!(workflow.contains(".schemaVersion == 2"));
+}
+
+#[test]
 fn check_succeeds_after_bootstrap_and_rerender_is_idempotent() {
     let project = init_package("demo");
 

@@ -919,8 +919,37 @@ fn push_build_artifacts(w: &mut String, artifacts: &ArtifactsConfig) {
         "      - name: Build release artifacts\n        run: |\n          set -euo pipefail\n",
     );
     w.push_str("          . ./release-env\n          export VERSION IS_PRERELEASE\n          mkdir -p release\n");
+    if !artifacts.nix_bundle_attrs.is_empty() {
+        w.push_str("          mkdir -p target\n");
+    }
+    for (index, attr) in artifacts.nix_bundle_attrs.iter().enumerate() {
+        let link = format!("target/simit-release-bundle-{index}");
+        writeln!(
+            w,
+            "          nix build {} --out-link {}",
+            shell_single_quote(&format!(".#{}", attr)),
+            shell_single_quote(&link)
+        )
+        .expect("write");
+        writeln!(w, "          test -d {}", shell_single_quote(&link)).expect("write");
+        w.push_str("          while IFS= read -r file; do\n");
+        w.push_str("            name=\"$(basename \"$file\")\"\n");
+        w.push_str("            test ! -e \"release/$name\" || { echo \"release bundle asset collision: $name\" >&2; exit 1; }\n");
+        w.push_str("            cp -L \"$file\" \"release/$name\"\n");
+        w.push_str("          done < <(find -L ");
+        w.push_str(&shell_single_quote(&link));
+        w.push_str(" -mindepth 1 -maxdepth 1 -type f -print | LC_ALL=C sort)\n");
+    }
+    if !artifacts.nix_bundle_attrs.is_empty() {
+        w.push_str("          shopt -s nullglob\n");
+        w.push_str("          manifests=(release/*-release-manifest.json)\n");
+        w.push_str("          test \"${#manifests[@]}\" -eq 1 || { echo \"expected exactly one release manifest from Nix bundles\" >&2; exit 1; }\n");
+        w.push_str("          jq -e --arg version \"$VERSION\" '(.schemaVersion == 2) and (.version == $version) and (.artifacts | length > 0)' \"${manifests[0]}\" >/dev/null\n");
+    }
     if artifacts.build_commands.is_empty() {
-        w.push_str("          echo \"[release.artifacts].build_commands is empty; nothing to build\" >&2\n          exit 1\n");
+        if artifacts.nix_bundle_attrs.is_empty() {
+            w.push_str("          echo \"[release.artifacts] has no Nix bundles or build_commands\" >&2\n          exit 1\n");
+        }
     } else {
         for line in &artifacts.build_commands {
             for sub in line.split('\n') {
@@ -2191,6 +2220,7 @@ mod tests {
             version_attr: Some("modde".to_owned()),
             supply_chain_command: Some("cargo deny check".to_owned()),
             build_commands: vec!["nix build .#modde --out-link release/x".to_owned()],
+            nix_bundle_attrs: vec![],
             sbom_commands: vec![],
             checksum_globs: vec!["*.tar.gz".to_owned(), "*.deb".to_owned()],
             minisign_pub: "keys/minisign.pub".to_owned(),
@@ -2561,6 +2591,34 @@ mod tests {
         assert!(!workflow.contains("require_credential 'repo secret' 'modde_apt_repo_gpg_key'"));
         assert!(!workflow.contains("require_credential 'global/user secret' 'AUR_SSH_KEY'"));
         assert!(!workflow.contains("require_credential 'global/user secret' 'copr_login'"));
+    }
+
+    #[test]
+    fn nix_bundle_attributes_are_built_and_manifest_checked() {
+        let mut artifacts = artifacts();
+        artifacts.nix_bundle_attrs = vec!["release-bundle".to_owned()];
+        let workflow = render(&ReleaseWorkflowInputs {
+            runner: "atlas",
+            preinstalled_nix: false,
+            publish_enforcement: ReleasePublisherEnforcement::Declared,
+            artifacts: &artifacts,
+            smoke_command: None,
+            codeberg: None,
+            attic: None,
+            aur: None,
+            copr: None,
+            apt: None,
+            homebrew: None,
+            scoop: None,
+            chocolatey: None,
+            windows_signing: None,
+            flatpak: None,
+            winget: None,
+            announce: None,
+        });
+        assert!(workflow.contains("nix build '.#release-bundle'"));
+        assert!(workflow.contains("expected exactly one release manifest from Nix bundles"));
+        assert!(workflow.contains(".schemaVersion == 2"));
     }
 
     #[test]
