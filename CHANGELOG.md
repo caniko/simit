@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Add provider-aware GitHub Actions and Crow CI templates, including Crow YAML
+  and Jsonnet workflows under `.crow`.
+- Add `[release.artifacts].prebuild_binaries` as shorthand for the
+  conventional rs-harbor `release-bundle` output, while preserving explicit
+  `nix_bundle_attrs` overrides.
+
 ### Fixed
 
 - Make generated flake-wiring CI checks read-only so fetching Simit cannot

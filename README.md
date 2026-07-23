@@ -159,7 +159,50 @@ Generate lightweight Rust CI and crates.io publish workflows for a repository:
 ```sh
 simit init ci --platform forgejo
 simit init ci --platform github
+simit init ci --ci-provider crow
 ```
+
+GitHub output is written under `.github/workflows`, uses native pinned GitHub
+Actions, and defaults to GitHub-hosted runners (`ubuntu-latest` and
+`windows-latest`). Forgejo output remains under `.forgejo/workflows` and keeps
+its Forgejo action references and runner-fleet defaults.
+
+Crow output is project-side configuration under `.crow`; simit does not invoke
+the Crow CLI or contact a Crow server. It emits Crow v6.1 YAML by default, or
+Jsonnet when selected, and renders the same CI, publishing, Pages, extension,
+plugin, artifact, and release options into Crow workflows:
+
+```sh
+simit init ci --ci-provider crow --runtime cargo
+simit init ci --ci-provider crow --crow-format jsonnet --runtime nix
+simit init release --ci-provider crow
+```
+
+Crow-specific settings live below `[ci.crow]`:
+
+```toml
+[ci]
+provider = "crow"
+
+[ci.crow]
+format = "yaml" # or "jsonnet"
+image = "rust:bookworm"
+nix_image = "ghcr.io/cachix/devenv:latest"
+platform = "linux/amd64"
+labels = { location = "europe" }
+workspace_base = "/crow"
+skip_clone = false
+
+[ci.crow.variables.DEPLOY_ENV]
+description = "Target environment"
+options = ["staging", "production"]
+default = "staging"
+required = true
+```
+
+Generated Crow workflows use Crow's native `labels`, `platform`, `when`,
+`workspace`, `variables`, `skip_clone`, step `commands`, and `from_secret`
+bindings. Shell variables are escaped as `$${NAME}` for Crow interpolation.
 
 Forgejo workflows use direct Rust container jobs by default, even when the
 repository has a `flake.nix`. The default container is derived from
@@ -210,6 +253,11 @@ This writes `.forgejo/workflows/pages.yaml`, reads
 authenticated `pages-origin` remote for the same Codeberg repository, and runs
 `DEPLOY_REMOTE=pages-origin nix run .#deploy-pages`. The same settings can live
 in project config:
+
+On GitHub, use the same flag with `--platform github`. Simit writes
+`.github/workflows/pages.yaml`, builds the site, uploads it with the pinned
+`actions/upload-pages-artifact` action, and deploys it with
+`actions/deploy-pages` using `pages: write` and OIDC permissions.
 
 ```toml
 [ci.pages]
@@ -343,7 +391,7 @@ The default trust root is `keys/maintainers.gpg`; override it with
 `[release.signing].trust_root` or `--maintainers-gpg`.
 
 Release workflows that sign checksums need matching minisign secrets in the
-remote Forgejo/Codeberg Actions secret store. `simit release secrets` verifies
+remote Actions secret store. `simit release secrets` verifies
 the key pair before upload and never prints secret values:
 
 ```sh
@@ -352,6 +400,15 @@ simit release secrets init --repo owner/repo \
   --minisign-password-file /path/to/minisign.password
 simit release secrets check --repo owner/repo \
   --assume-account-secret codeberg_token
+```
+
+For GitHub, add `--platform github`; the command delegates secret encryption and
+listing to the local `gh` CLI and uses the Actions secret store:
+
+```sh
+simit release secrets init --platform github --repo owner/repo \
+  --minisign-secret-key-file /path/to/minisign.sec \
+  --minisign-password-file /path/to/minisign.password
 ```
 
 Use `--rotate-minisign` only for a new release line: it generates a fresh
@@ -375,7 +432,7 @@ cargo install ... --locked` so a cache hit skips the download while a cache miss
 still installs the required binary. Nix-runtime workflows skip these Cargo
 caches and rely on the runner's Nix store and binary cache behavior.
 
-Forgejo + Nix artifact workflows can also publish a Homebrew tap:
+Forgejo or GitHub + Nix artifact workflows can also publish a Homebrew tap:
 
 ```sh
 simit init ci --platform forgejo --runtime nix --with-artifacts --with-homebrew \
@@ -386,7 +443,7 @@ simit init ci --platform forgejo --runtime nix --with-artifacts --with-homebrew 
   --homebrew-binary demo
 ```
 
-`--with-homebrew` is Forgejo + Nix only and implies `--with-artifacts`. The
+`--with-homebrew` requires Nix and implies `--with-artifacts`. The
 project workflow must stage each enabled platform archive under
 `release/{name}-{version}-{arch}-{os}.tar.gz` before the Homebrew step runs;
 the generated step verifies those files exist but does not build project-shaped
@@ -542,9 +599,10 @@ Each command supports `--check`, `--diff`, and `--print`. `init aur` writes
 `dist/aur/<pkg>/PKGBUILD` for source, `-bin`, and `-git` flavors. `init copr`
 writes the RPM spec and `.copr/Makefile`. `init apt` writes
 `dist/apt/conf/distributions`. `init release` writes
-`.forgejo/workflows/release.yml`, which builds release artifacts, uploads them
-to Codeberg when `[release.codeberg]` is present, and publishes every configured
-channel.
+`.forgejo/workflows/release.yml` by default, or `.github/workflows/release.yml`
+with `--platform github`. It uploads artifacts to Codeberg when
+`[release.codeberg]` is present or to GitHub when `[release.github]` is present,
+then publishes every configured channel.
 
 For local inspection, render the same templates without writing files:
 
@@ -556,7 +614,7 @@ simit dist apt render
 
 Relevant project config sections are `[aur]`, `[copr]`, `[apt]`,
 `[homebrew]`, `[chocolatey]`, `[scoop]`, `[flatpak]`, `[winget]`,
-`[release.codeberg]`, `[release.artifacts]`, `[release.attic]`,
+`[release.codeberg]`, `[release.github]`, `[release.artifacts]`, `[release.attic]`,
 `[release.announce]`, and `[release.windows_signing]`. The publish workflow
 secret names are configurable with `[aur].ssh_key_secret`,
 `[copr].login_secret`, `[copr].username_secret`, `[copr].token_secret`,
@@ -565,16 +623,23 @@ secret names are configurable with `[aur].ssh_key_secret`,
 `[homebrew].tap_token_secret`, `[scoop].bucket_token_secret`,
 `[chocolatey].api_key_secret`, `[chocolatey].api_key_env`,
 `[chocolatey].api_key_from_runner`, `[release.codeberg].token_secret`,
+`[release.github].token_secret`,
 `[flatpak].token_secret`, `[winget].token_secret`,
 `[release.announce].*_secret`, and
 `[release.windows_signing].*_secret`.
 
 For rs-harbor-compatible Nix projects, set
 `[release.artifacts].nix_bundle_attrs` to an explicit list of flake attributes
-whose outputs are flat release bundles. Each bundle must contain exactly one
-versioned `*-release-manifest.json`; Simit validates that manifest against the
-tag before checksums and Codeberg upload. Existing `build_commands` remain
-additive for installers and other project-specific formats.
+whose outputs are flat release bundles. The configured bundle set must contain
+exactly one versioned `*-release-manifest.json`; Simit validates that manifest
+against the tag before checksums and hosted-release upload. Existing
+`build_commands` remain additive for installers and other project-specific
+formats.
+
+Projects using the conventional rs-harbor output can opt in with the shorter
+`[release.artifacts].prebuild_binaries = true`; this is equivalent to
+`nix_bundle_attrs = ["release-bundle"]` unless an explicit attribute list is
+provided.
 
 ## Project config
 
