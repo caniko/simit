@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::cargo::{self, Package};
 use crate::ci_resolution::{CiCliOverrides, CiInference, WorkflowSnapshot};
-use crate::cli::Platform;
+use crate::cli::{CiProvider, CrowWorkflowFormat, Platform};
 use crate::config::{FlakeScope, HomebrewOverrides, ProjectConfig};
 use crate::project;
 use crate::render::ci;
@@ -555,7 +555,7 @@ pub fn audit_ci(workspace_root: &Path) -> Result<CiAudit> {
         });
     }
 
-    let platform = infer_ci_platform(&marked)?;
+    let (provider, platform) = infer_ci_target(&marked)?;
     let expected = infer_expected_ci_files(workspace_root, &marked)?
         .into_iter()
         .filter(|file| is_workflow_path(&file.relative_path))
@@ -597,7 +597,10 @@ pub fn audit_ci(workspace_root: &Path) -> Result<CiAudit> {
 
     Ok(CiAudit {
         status,
-        platform: Some(platform.as_str().to_owned()),
+        platform: Some(match provider {
+            CiProvider::Actions => platform.as_str().to_owned(),
+            CiProvider::Crow => "crow".to_owned(),
+        }),
         changed_files,
         missing_files,
         extra_generated_files,
@@ -790,7 +793,7 @@ fn is_release_workflow(file: &WorkflowFile) -> bool {
         file.relative_path
             .file_name()
             .and_then(|name| name.to_str()),
-        Some("release.yml" | "release.yaml")
+        Some("release.yml" | "release.yaml" | "release.jsonnet")
     )
 }
 
@@ -804,7 +807,7 @@ struct WorkflowFile {
 fn collect_workflow_files(workspace_root: &Path) -> Result<Vec<WorkflowFile>> {
     let mut workflows = Vec::new();
 
-    for relative_dir in [".forgejo/workflows", ".github/workflows"] {
+    for relative_dir in [".forgejo/workflows", ".github/workflows", ".crow"] {
         let dir = workspace_root.join(relative_dir);
         let entries = match fs::read_dir(&dir) {
             Ok(entries) => entries,
@@ -825,14 +828,14 @@ fn collect_workflow_files(workspace_root: &Path) -> Result<Vec<WorkflowFile>> {
             let Some(extension) = path.extension().and_then(|ext| ext.to_str()) else {
                 continue;
             };
-            if extension != "yaml" && extension != "yml" {
+            if !matches!(extension, "yaml" | "yml" | "jsonnet") {
                 continue;
             }
             let content =
                 fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
             workflows.push(WorkflowFile {
                 relative_path: PathBuf::from(relative_dir).join(entry.file_name()),
-                marked: content.contains(ci::GENERATED_WORKFLOW_MARKER),
+                marked: generated_workflow_marker_present(&content),
                 content,
             });
         }
@@ -865,8 +868,11 @@ fn infer_expected_ci_files(
 ) -> Result<Vec<project::GeneratedFile>> {
     let metadata = cargo::cargo_metadata(&cargo::find_manifest(workspace_root)?)?;
     let config = ProjectConfig::load(workspace_root).unwrap_or_default();
-    let platform = infer_ci_platform(marked)?;
+    let (provider, platform) = infer_ci_target(marked)?;
     let snapshots = workflow_snapshots(marked);
+    if provider == CiProvider::Crow {
+        return infer_expected_crow_files(workspace_root, marked, &snapshots);
+    }
     let inference = CiInference::from_workflows(&snapshots)?;
     if !workspace_root.join("simit.toml").exists() {
         eprintln!(
@@ -942,7 +948,9 @@ fn infer_expected_ci_files(
             ..options.clone()
         };
         files.extend(ci::files(ci::FilesRequest {
+            provider,
             platform,
+            crow: &config.ci.crow,
             runtime: resolved.runtime,
             package,
             file_suffix: package_scoped.then_some(package.name.as_str()),
@@ -988,7 +996,20 @@ fn single_runner_label(runner: &ResolvedRunner) -> Option<&str> {
     }
 }
 
-fn infer_ci_platform(marked: &[WorkflowFile]) -> Result<Platform> {
+fn infer_ci_target(marked: &[WorkflowFile]) -> Result<(CiProvider, Platform)> {
+    let has_crow = marked
+        .iter()
+        .any(|workflow| workflow.relative_path.starts_with(".crow"));
+    if has_crow {
+        if marked
+            .iter()
+            .any(|workflow| !workflow.relative_path.starts_with(".crow"))
+        {
+            bail!("mixed CI providers in workflow tree");
+        }
+        return Ok((CiProvider::Crow, Platform::Forgejo));
+    }
+
     let mut platform = None;
     for workflow in marked {
         let current = if workflow.relative_path.starts_with(".forgejo/workflows") {
@@ -1006,7 +1027,136 @@ fn infer_ci_platform(marked: &[WorkflowFile]) -> Result<Platform> {
             None => platform = Some(current),
         }
     }
-    platform.context("no marked CI workflows found")
+    Ok((
+        CiProvider::Actions,
+        platform.context("no marked CI workflows found")?,
+    ))
+}
+
+fn infer_expected_crow_files(
+    workspace_root: &Path,
+    marked: &[WorkflowFile],
+    snapshots: &[WorkflowSnapshot],
+) -> Result<Vec<project::GeneratedFile>> {
+    let metadata = cargo::cargo_metadata(&cargo::find_manifest(workspace_root)?)?;
+    let config = ProjectConfig::load(workspace_root).unwrap_or_default();
+    let inference = CiInference::from_workflows(snapshots)?;
+    let resolved = crate::ci_resolution::ResolvedCiInputs::resolve(
+        workspace_root,
+        &config,
+        &CiCliOverrides::default(),
+        Some(&inference),
+    )?;
+    let packages = cargo::select_packages(&metadata, &resolved.packages, resolved.workspace)?;
+    let format = if marked.iter().any(|workflow| {
+        workflow
+            .relative_path
+            .extension()
+            .is_some_and(|extension| extension == "jsonnet")
+    }) {
+        CrowWorkflowFormat::Jsonnet
+    } else {
+        CrowWorkflowFormat::Yaml
+    };
+    let crow = config.ci.crow.clone();
+    let runner = resolved_runner_override(resolved.runner.as_deref()).unwrap_or(ResolvedRunner {
+        name: None,
+        labels: vec!["crow-default".to_owned()],
+    });
+    let runners = ResolvedCiRunners {
+        ci: runner.clone(),
+        release: runner.clone(),
+        windows: None,
+    };
+    let options = resolved.ci_options(&config, resolved.with_artifacts, resolved.omnix_ref.clone());
+    let package_scoped = metadata.workspace_members.len() > 1;
+    let mut files = Vec::new();
+    for package in &packages {
+        files.extend(crate::render::crow::files(crate::render::crow::FilesRequest {
+            format,
+            crow: &crow,
+            runtime: resolved.runtime,
+            package,
+            file_suffix: package_scoped.then_some(package.name.as_str()),
+            self_check: ci::SelfCheckOptions {
+                enabled: snapshots.iter().any(|workflow| workflow.content.contains("--check")),
+                runner_override: None,
+                windows_runner_override: None,
+                packages: &resolved.packages,
+                workspace: resolved.workspace,
+            },
+            runners: &runners,
+            options: ci::CiOptions { package_scoped, ..options.clone() },
+            step_runners: &BTreeMap::new(),
+        })?);
+    }
+    if marked
+        .iter()
+        .any(|workflow| workflow_name(&workflow.relative_path) == Some("pages"))
+    {
+        if let Some(pages) = config.resolve_codeberg_pages()? {
+            files.push(crate::render::crow::codeberg_pages_file(
+                format,
+                &crow,
+                &runners.ci,
+                &ci::CodebergPagesOptions {
+                    repo: pages.repo,
+                    owner: pages.owner,
+                    canonical_domain: pages.canonical_domain,
+                    site_output: pages.site_output,
+                    token_secret: pages.token_secret,
+                    source_branch: pages.source_branch,
+                    deploy_app: pages.deploy_app,
+                },
+            )?);
+        }
+    }
+    if marked.iter().any(|workflow| {
+        workflow_name(&workflow.relative_path) == Some("publish-vscode-extension")
+    }) {
+        if let Some(vscode) = config.resolve_vscode()? {
+            files.push(crate::render::crow::vscode_extension_file(
+                format,
+                &crow,
+                &runners.release,
+                &vscode,
+            )?);
+        }
+    }
+    if marked
+        .iter()
+        .any(|workflow| workflow_name(&workflow.relative_path) == Some("publish-jetbrains-plugin"))
+    {
+        if let Some(jetbrains) = config.resolve_jetbrains()? {
+            files.push(crate::render::crow::jetbrains_plugin_file(
+                format,
+                &crow,
+                &runners.release,
+                &jetbrains,
+            )?);
+        }
+    }
+    if marked
+        .iter()
+        .any(|workflow| workflow_name(&workflow.relative_path) == Some("publish-pypi"))
+        && cargo::has_pyo3_dep(&metadata.packages)
+    {
+        files.push(crate::render::crow::maturin_publish_file(
+            format,
+            &crow,
+            &runners.release,
+            &options,
+        )?);
+    }
+    Ok(files
+        .into_iter()
+        .filter(|file| is_workflow_path(&file.relative_path))
+        .collect())
+}
+
+fn generated_workflow_marker_present(content: &str) -> bool {
+    content.contains(ci::GENERATED_WORKFLOW_MARKER)
+        || content.contains("Generated by simit. Manual edits will be reported as ci=drift.")
 }
 
 fn infer_homebrew_options(
@@ -1328,7 +1478,7 @@ fn parse_runs_on_labels(content: &str, occurrence: usize) -> Result<Vec<String>>
 
 fn workflow_name(path: &Path) -> Option<&str> {
     let stem = path.file_stem()?.to_str()?;
-    if stem == "ci" || stem.starts_with("ci-") {
+    if stem == "ci" || stem == "build" || stem.starts_with("ci-") || stem.starts_with("build-") {
         Some("ci")
     } else if stem == "publish-crate" || stem.starts_with("publish-crate-") {
         Some("publish-crate")
@@ -1336,6 +1486,12 @@ fn workflow_name(path: &Path) -> Option<&str> {
         Some("release-artifacts")
     } else if stem == "pages" {
         Some("pages")
+    } else if stem == "publish-vscode-extension" {
+        Some("publish-vscode-extension")
+    } else if stem == "publish-jetbrains-plugin" {
+        Some("publish-jetbrains-plugin")
+    } else if stem == "publish-pypi" {
+        Some("publish-pypi")
     } else {
         None
     }
@@ -1344,13 +1500,16 @@ fn workflow_name(path: &Path) -> Option<&str> {
 fn workflow_suffix(path: &Path) -> Option<String> {
     let stem = path.file_stem()?.to_str()?;
     stem.strip_prefix("ci-")
+        .or_else(|| stem.strip_prefix("build-"))
         .or_else(|| stem.strip_prefix("publish-crate-"))
         .or_else(|| stem.strip_prefix("release-artifacts-"))
         .map(str::to_owned)
 }
 
 fn is_workflow_path(path: &Path) -> bool {
-    path.starts_with(".forgejo/workflows") || path.starts_with(".github/workflows")
+    path.starts_with(".forgejo/workflows")
+        || path.starts_with(".github/workflows")
+        || path.starts_with(".crow")
 }
 
 fn shell_unquote(value: &str) -> String {
@@ -1658,9 +1817,13 @@ mod tests {
                 .iter()
                 .any(|file| file.relative_path == Path::new(".forgejo/workflows/pages.yaml"))
         );
-        assert!(unmarked.is_empty());
+        assert!(
+            unmarked
+                .iter()
+                .all(|file| file.relative_path.starts_with(".github/workflows"))
+        );
         assert!(!marked_workflows_drift(root, &marked));
-        assert_eq!(detect_ci_status(root), FeatureStatus::Managed);
+        assert_eq!(detect_ci_status(root), FeatureStatus::ManagedExtra);
     }
 
     #[test]

@@ -2,7 +2,7 @@ use anyhow::Result;
 
 use crate::cargo;
 use crate::cli::InitReleaseCommand;
-use crate::cli::{Platform, Runtime};
+use crate::cli::{CiProvider, Platform, Runtime};
 use crate::commands::scaffold::{ArtifactCheck, CheckPrintMode, print_next_steps};
 use crate::commands::upgrade;
 use crate::config::{
@@ -13,8 +13,6 @@ use crate::registry::{self, FeatureStatus};
 use crate::render::release_workflow::{self, ReleaseWorkflowInputs};
 use crate::user_config::{ResolvedRunner, UserConfig};
 
-const WORKFLOW_PATH: &str = ".forgejo/workflows/release.yml";
-
 pub fn run(command: InitReleaseCommand) -> Result<()> {
     let mode = CheckPrintMode::parse("init release", command.check, command.print, command.diff)?;
 
@@ -23,16 +21,24 @@ pub fn run(command: InitReleaseCommand) -> Result<()> {
     let package = cargo::representative_package(&metadata, command.package.as_deref())?;
     let cfg = ProjectConfig::load(workspace_root)?;
 
-    let codeberg = cfg.resolve_codeberg_release()?;
+    let platform = command
+        .platform
+        .or(cfg.ci.platform)
+        .unwrap_or(Platform::Forgejo);
+    let provider = command
+        .ci_provider
+        .or(cfg.ci.provider)
+        .unwrap_or(CiProvider::Actions);
+    let release = cfg.resolve_release_target(platform)?;
     let aur = cfg
         .aur
         .as_ref()
-        .map(|_| cfg.resolve_aur(AurOverrides::default(), &package))
+        .map(|_| cfg.resolve_aur_for_platform(AurOverrides::default(), &package, platform))
         .transpose()?;
     let copr = cfg
         .copr
         .as_ref()
-        .map(|_| cfg.resolve_copr(CoprOverrides::default(), &package))
+        .map(|_| cfg.resolve_copr_for_platform(CoprOverrides::default(), &package, platform))
         .transpose()?;
     let apt = cfg
         .apt
@@ -55,15 +61,28 @@ pub fn run(command: InitReleaseCommand) -> Result<()> {
         .map(|_| cfg.resolve_chocolatey(ChocolateyOverrides::default(), &package))
         .transpose()?;
 
-    let (runner, preinstalled_nix) = resolve_release_runner(&cfg)?;
+    let (runner, preinstalled_nix) = if provider == CiProvider::Crow {
+        (
+            cfg.release
+                .artifacts
+                .runner
+                .clone()
+                .or_else(|| cfg.ci.runner.clone())
+                .unwrap_or_else(|| "crow-default".to_owned()),
+            false,
+        )
+    } else {
+        resolve_release_runner(&cfg, platform)?
+    };
 
     let inputs = ReleaseWorkflowInputs {
+        platform,
         runner: &runner,
         preinstalled_nix,
         publish_enforcement: cfg.release.publish.enforcement,
         artifacts: &cfg.release.artifacts,
         smoke_command: cfg.release.smoke.command.as_deref(),
-        codeberg: codeberg.as_ref(),
+        release: release.as_ref(),
         attic: cfg.release.attic.as_ref(),
         aur: aur.as_ref(),
         copr: copr.as_ref(),
@@ -76,8 +95,16 @@ pub fn run(command: InitReleaseCommand) -> Result<()> {
         winget: cfg.winget.as_ref(),
         announce: cfg.release.announce.as_ref(),
     };
-    let content = release_workflow::render(&inputs);
-    let path = workspace_root.join(WORKFLOW_PATH);
+    let (content, workflow_path) = if provider == CiProvider::Crow {
+        let file = crate::render::crow::release_file(cfg.ci.crow.format, &cfg.ci.crow, &inputs)?;
+        (file.content, file.relative_path.to_string_lossy().into_owned())
+    } else {
+        (
+            release_workflow::render(&inputs),
+            format!("{}/release.yml", platform.workflow_dir()),
+        )
+    };
+    let path = workspace_root.join(&workflow_path);
 
     match mode {
         CheckPrintMode::Print => {
@@ -101,7 +128,7 @@ pub fn run(command: InitReleaseCommand) -> Result<()> {
                 workspace_root,
                 "Generated release workflow",
                 &[
-                    format!("git add {WORKFLOW_PATH}"),
+                    format!("git add {workflow_path}"),
                     "configure the secrets listed at the top of the workflow".to_owned(),
                     "push a signed tag like 0.1.0 to trigger it".to_owned(),
                 ],
@@ -112,7 +139,7 @@ pub fn run(command: InitReleaseCommand) -> Result<()> {
     }
 }
 
-fn resolve_release_runner(cfg: &ProjectConfig) -> Result<(String, bool)> {
+fn resolve_release_runner(cfg: &ProjectConfig, platform: Platform) -> Result<(String, bool)> {
     if let Some(runner) = cfg
         .release
         .artifacts
@@ -121,16 +148,18 @@ fn resolve_release_runner(cfg: &ProjectConfig) -> Result<(String, bool)> {
         .or_else(|| cfg.ci.runner.clone())
     {
         let preinstalled_nix = match UserConfig::load() {
-            Ok(user_config) => user_config.explicit_label_is_trusted_forgejo_nix_runner(&runner)?,
+            Ok(user_config) if platform == Platform::Forgejo => {
+                user_config.explicit_label_is_trusted_forgejo_nix_runner(&runner)?
+            }
             Err(_) => false,
+            Ok(_) => false,
         };
         return Ok((runner, preinstalled_nix));
     }
 
     let user_config = UserConfig::load()?;
-    let runners =
-        user_config.resolve_ci_runners(Platform::Forgejo, Runtime::Nix, None, None, false)?;
-    Ok((runs_on(&runners.release), true))
+    let runners = user_config.resolve_ci_runners(platform, Runtime::Nix, None, None, false)?;
+    Ok((runs_on(&runners.release), platform == Platform::Forgejo))
 }
 
 fn runs_on(runner: &ResolvedRunner) -> String {

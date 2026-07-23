@@ -581,6 +581,86 @@ fn forgejo_nix_can_generate_codeberg_pages_workflow() {
 }
 
 #[test]
+fn github_nix_can_generate_github_pages_workflow() {
+    let temp = init_package(true);
+
+    let status = simit_with_user_config(temp.path())
+        .current_dir(temp.path())
+        .args([
+            "init",
+            "ci",
+            "--platform",
+            "github",
+            "--runtime",
+            "nix",
+            "--runner",
+            "ubuntu-latest",
+            "--with-codeberg-pages",
+            "--pages-repo",
+            "caniko/plinth",
+            "--pages-canonical-domain",
+            "plinth.tartanoglu.com",
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let pages = read(&temp.path().join(".github/workflows/pages.yaml"));
+    assert_yaml_parses(&pages);
+    assert!(pages.contains("permissions:\n  contents: read\n  pages: write\n  id-token: write"));
+    assert!(pages.contains("uses: actions/checkout@"));
+    assert!(pages.contains("uses: actions/upload-pages-artifact@"));
+    assert!(pages.contains("uses: actions/deploy-pages@"));
+    assert!(pages.contains("nix build .#site --no-link --out-link result-pages-site"));
+    assert!(pages.contains("grep -qx plinth.tartanoglu.com result-pages-site/.domains"));
+    assert!(!pages.contains("CODEBERG_TOKEN"));
+    assert!(!pages.contains("codeberg.workflow"));
+}
+
+#[test]
+fn persisted_codeberg_pages_overrides_survive_regeneration() {
+    let temp = init_package(true);
+
+    let status = simit_with_user_config(temp.path())
+        .current_dir(temp.path())
+        .args([
+            "init",
+            "ci",
+            "--platform",
+            "forgejo",
+            "--runtime",
+            "nix",
+            "--with-codeberg-pages",
+            "--pages-repo",
+            "caniko/rs-harbor",
+            "--pages-canonical-domain",
+            "rs-harbor.tartanoglu.com",
+            "--pages-site-output",
+            "./site#site",
+            "--pages-deploy-app",
+            "./site#deploy-pages",
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let simit_toml = read(&temp.path().join("simit.toml"));
+    assert!(simit_toml.contains("site_output = \"./site#site\""));
+    assert!(simit_toml.contains("deploy_app = \"./site#deploy-pages\""));
+
+    let check = simit_with_user_config(temp.path())
+        .current_dir(temp.path())
+        .args(["init", "ci", "--platform", "forgejo", "--check"])
+        .status()
+        .unwrap();
+    assert!(check.success());
+
+    let pages = read(&temp.path().join(".forgejo/workflows/pages.yaml"));
+    assert!(pages.contains("nix build ./site#site --no-link --out-link result-pages-site"));
+    assert!(pages.contains("DEPLOY_REMOTE=pages-origin nix run ./site#deploy-pages"));
+}
+
+#[test]
 fn forgejo_nix_can_generate_vscode_publish_workflow_with_file_env_pats() {
     let temp = init_package(true);
     fs::write(
@@ -2403,7 +2483,7 @@ fn homebrew_rejects_cargo_runtime() {
 }
 
 #[test]
-fn homebrew_rejects_github_platform() {
+fn homebrew_supports_github_platform() {
     let temp = init_package(true);
 
     let output = simit_with_user_config(temp.path())
@@ -2413,6 +2493,8 @@ fn homebrew_rejects_github_platform() {
             "ci",
             "--platform",
             "github",
+            "--runtime",
+            "nix",
             "--with-homebrew",
             "--homebrew-tap",
             "https://example.com/homebrew-demo.git",
@@ -2426,9 +2508,16 @@ fn homebrew_rejects_github_platform() {
         .output()
         .unwrap();
 
-    assert!(!output.status.success());
-    let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(stderr.contains("Homebrew tap publish is forgejo-only for now"));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let workflow = read(&temp.path().join(".github/workflows/release-artifacts.yaml"));
+    assert_yaml_parses(&workflow);
+    assert!(workflow.contains("name: Publish Homebrew tap"));
+    assert!(workflow.contains("https://github.com/foo/demo/releases/download/"));
+    assert!(workflow.contains("VERSION=\"${GITHUB_REF_NAME:-"));
 }
 
 #[test]
@@ -2893,4 +2982,45 @@ components = ["checks"]
     assert!(!workflow.contains("Check generated flake wiring"));
     assert!(!workflow.contains("Check flake evaluation"));
     assert!(!workflow.contains("CARGO_HOME"));
+}
+
+#[test]
+fn generates_crow_yaml_and_jsonnet_without_a_crow_cli() {
+    let project = init_package(false);
+    let output = simit()
+        .current_dir(project.path())
+        .args(["init", "ci", "--ci-provider", "crow", "--runner", "crow-agent"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let yaml = read(&project.path().join(".crow/build.yaml"));
+    assert!(yaml.contains("name: build"));
+    assert!(yaml.contains("labels:"));
+    assert!(yaml.contains("platform:"));
+
+    let project = init_package(false);
+    let output = simit()
+        .current_dir(project.path())
+        .args([
+            "init",
+            "ci",
+            "--ci-provider",
+            "crow",
+            "--crow-format",
+            "jsonnet",
+            "--runner",
+            "crow-agent",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(read(&project.path().join(".crow/build.jsonnet")).starts_with("// Generated by simit."));
 }

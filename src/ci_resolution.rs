@@ -619,7 +619,7 @@ fn infer_self_check_packages(content: &str) -> Vec<String> {
 
 fn workflow_name(path: &Path) -> Option<&str> {
     let stem = path.file_stem()?.to_str()?;
-    if stem == "ci" || stem.starts_with("ci-") {
+    if stem == "ci" || stem == "build" || stem.starts_with("ci-") || stem.starts_with("build-") {
         Some("ci")
     } else if stem == "publish-crate" || stem.starts_with("publish-crate-") {
         Some("publish-crate")

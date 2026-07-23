@@ -174,6 +174,12 @@ pub struct CommitCommand {
 #[derive(Debug, Args)]
 pub struct ReleaseCommand {
     #[arg(
+        long,
+        value_enum,
+        help = "Hosted Git provider for release secret management"
+    )]
+    pub platform: Option<Platform>,
+    #[arg(
         long = "package",
         value_name = "NAME",
         help = "Workspace package to release; may be repeated"
@@ -268,20 +274,20 @@ pub struct ReleaseCommand {
     #[arg(
         long = "repo",
         value_name = "OWNER/REPO",
-        help = "Forgejo/Codeberg repository for `simit release secrets`"
+        help = "Hosted Git repository for `simit release secrets`"
     )]
     pub secrets_repo: Option<String>,
     #[arg(
         long = "api-base",
         value_name = "URL",
         default_value = "https://codeberg.org/api/v1",
-        help = "Forgejo/Codeberg API base URL for `simit release secrets`"
+        help = "Forgejo/Codeberg API base URL for Forgejo secret management"
     )]
     pub secrets_api_base: String,
     #[arg(
         long = "token-file",
         value_name = "PATH",
-        help = "File containing the Forgejo/Codeberg API token for `simit release secrets`"
+        help = "File containing the hosted Git provider token for `simit release secrets`"
     )]
     pub secrets_token_file: Option<Utf8PathBuf>,
     #[arg(
@@ -422,9 +428,23 @@ pub struct InitCiCommand {
         long,
         value_enum,
         value_name = "PLATFORM",
-        help = "Workflow platform to generate"
+        help = "Hosted forge for Actions workflows, or source forge hint for Crow"
     )]
-    pub platform: Platform,
+    pub platform: Option<Platform>,
+    #[arg(
+        long = "ci-provider",
+        value_enum,
+        value_name = "PROVIDER",
+        help = "CI provider to generate; defaults to Actions for backward compatibility"
+    )]
+    pub ci_provider: Option<CiProvider>,
+    #[arg(
+        long = "crow-format",
+        value_enum,
+        value_name = "FORMAT",
+        help = "Crow workflow format when --ci-provider crow is selected"
+    )]
+    pub crow_format: Option<CrowWorkflowFormat>,
     #[arg(
         long,
         value_enum,
@@ -565,7 +585,7 @@ pub struct InitCiCommand {
     pub publish_crates: Option<bool>,
     #[arg(
         long = "with-homebrew",
-        help = "Add a Homebrew tap publishing step (forgejo + nix only)"
+        help = "Add a Homebrew tap publishing step (Nix runtime)"
     )]
     pub with_homebrew: bool,
     #[arg(
@@ -580,17 +600,17 @@ pub struct InitCiCommand {
     pub with_scoop: bool,
     #[arg(
         long = "with-codeberg-pages",
-        help = "Generate a Forgejo workflow that publishes .#site with .#deploy-pages"
+        help = "Generate a Pages workflow that publishes .#site with .#deploy-pages"
     )]
     pub with_codeberg_pages: bool,
     #[arg(
         long = "with-vscode",
-        help = "Generate a Forgejo workflow that publishes a VS Code/Open VSX extension"
+        help = "Generate a workflow that publishes a VS Code/Open VSX extension"
     )]
     pub with_vscode: bool,
     #[arg(
         long = "with-jetbrains",
-        help = "Generate a Forgejo workflow that publishes an IntelliJ Platform plugin"
+        help = "Generate a workflow that publishes an IntelliJ Platform plugin"
     )]
     pub with_jetbrains: bool,
     #[arg(
@@ -1562,7 +1582,20 @@ pub struct InitReleaseCommand {
     pub package: Option<String>,
     #[arg(
         long,
-        help = "Verify .forgejo/workflows/release.yml matches generated output"
+        value_enum,
+        help = "Workflow platform; defaults to [ci].platform or forgejo"
+    )]
+    pub platform: Option<Platform>,
+    #[arg(
+        long = "ci-provider",
+        value_enum,
+        value_name = "PROVIDER",
+        help = "CI provider for the generated release workflow"
+    )]
+    pub ci_provider: Option<CiProvider>,
+    #[arg(
+        long,
+        help = "Verify the platform release workflow matches generated output"
     )]
     pub check: bool,
     #[arg(long, help = "Show a unified diff when --check finds drift")]
@@ -1664,6 +1697,28 @@ pub enum Platform {
     Github,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum CiProvider {
+    #[value(name = "actions", help = "Forgejo or GitHub Actions")]
+    Actions,
+    #[value(name = "crow", help = "Crow CI workflows under .crow")]
+    Crow,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum CrowWorkflowFormat {
+    Yaml,
+    Jsonnet,
+}
+
+impl Default for CrowWorkflowFormat {
+    fn default() -> Self {
+        Self::Yaml
+    }
+}
+
 impl Platform {
     pub fn workflow_dir(self) -> &'static str {
         match self {
@@ -1677,6 +1732,34 @@ impl Platform {
             Self::Forgejo => "forgejo",
             Self::Github => "github",
         }
+    }
+
+    pub fn web_base_url(self) -> &'static str {
+        match self {
+            Self::Forgejo => "https://codeberg.org",
+            Self::Github => "https://github.com",
+        }
+    }
+
+    pub fn api_base_url(self) -> &'static str {
+        match self {
+            Self::Forgejo => "https://codeberg.org/api/v1",
+            Self::Github => "https://api.github.com",
+        }
+    }
+
+    pub fn release_download_url(self, repo: &str, version: &str, file: &str) -> String {
+        format!(
+            "{}/{}/releases/download/{}/{}",
+            self.web_base_url(),
+            repo,
+            version,
+            file
+        )
+    }
+
+    pub fn release_tag_url(self, repo: &str, version: &str) -> String {
+        format!("{}/{}/releases/tag/{}", self.web_base_url(), repo, version)
     }
 }
 

@@ -5,7 +5,7 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 
 use crate::cargo;
-use crate::cli::{WingetAction, WingetCommand, WingetSubmitArgs};
+use crate::cli::{Platform, WingetAction, WingetCommand, WingetSubmitArgs};
 use crate::config::{ProjectConfig, WingetConfig};
 use crate::registry::{self, FeatureStatus};
 
@@ -17,12 +17,12 @@ pub fn run(command: WingetCommand) -> Result<()> {
 
 pub(crate) fn submit(args: WingetSubmitArgs) -> Result<()> {
     validate_version(&args.version)?;
-    let resolved = resolve(&args)?;
+    let (resolved, platform) = resolve(&args)?;
     validate_download_repo(&resolved.download_repo)?;
     let url = args
         .url
         .clone()
-        .unwrap_or_else(|| release_url(&resolved, &args.version));
+        .unwrap_or_else(|| release_url(&resolved, &args.version, platform));
     let token_env = args
         .token_env
         .as_deref()
@@ -144,7 +144,7 @@ fn latest_wingetcreate_url() -> Result<String> {
         .context("latest winget-create release did not contain wingetcreate.exe")
 }
 
-fn resolve(args: &WingetSubmitArgs) -> Result<WingetConfig> {
+fn resolve(args: &WingetSubmitArgs) -> Result<(WingetConfig, Platform)> {
     let metadata = cargo::metadata_for_current_dir()?;
     let workspace_root = metadata.workspace_root.as_std_path();
     let cfg = ProjectConfig::load(workspace_root)?;
@@ -171,20 +171,20 @@ fn resolve(args: &WingetSubmitArgs) -> Result<WingetConfig> {
         .clone()
         .or_else(|| configured.map(|winget| winget.token_secret.clone()))
         .unwrap_or_else(|| "WINGET_PAT".to_owned());
-    Ok(WingetConfig {
-        package_id,
-        download_repo,
-        zip_archive,
-        token_secret,
-    })
+    Ok((
+        WingetConfig {
+            package_id,
+            download_repo,
+            zip_archive,
+            token_secret,
+        },
+        cfg.ci.platform.unwrap_or(Platform::Forgejo),
+    ))
 }
 
-fn release_url(resolved: &WingetConfig, version: &str) -> String {
+fn release_url(resolved: &WingetConfig, version: &str, platform: Platform) -> String {
     let zip = resolved.zip_archive.replace("{version}", version);
-    format!(
-        "https://codeberg.org/{}/releases/download/{}/{}",
-        resolved.download_repo, version, zip
-    )
+    platform.release_download_url(&resolved.download_repo, version, &zip)
 }
 
 fn validate_version(version: &str) -> Result<()> {

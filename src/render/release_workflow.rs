@@ -14,22 +14,24 @@
 
 use std::fmt::Write as _;
 
+use crate::cli::Platform;
 use crate::config::{
-    AnnounceConfig, ArtifactsConfig, AtticConfig, FlatpakConfig, ReleasePublisherEnforcement,
-    ResolvedApt, ResolvedAur, ResolvedChocolatey, ResolvedCodebergRelease, ResolvedCopr,
-    ResolvedHomebrew, ResolvedScoop, WindowsSigningConfig, WingetConfig,
+    AnnounceConfig, ArtifactsConfig, AtticConfig, FlatpakConfig, ReleaseProvider,
+    ReleasePublisherEnforcement, ResolvedApt, ResolvedAur, ResolvedChocolatey, ResolvedCopr,
+    ResolvedHomebrew, ResolvedReleaseTarget, ResolvedScoop, WindowsSigningConfig, WingetConfig,
 };
-use crate::render::ci::{forgejo_action_ref, immutable_action_ref};
+use crate::render::ci::{forgejo_action_ref, github_action_ref, immutable_action_ref};
 use serde::Serialize;
 
 /// Everything the release workflow generator needs, resolved up front.
 pub struct ReleaseWorkflowInputs<'a> {
+    pub platform: Platform,
     pub runner: &'a str,
     pub preinstalled_nix: bool,
     pub publish_enforcement: ReleasePublisherEnforcement,
     pub artifacts: &'a ArtifactsConfig,
     pub smoke_command: Option<&'a str>,
-    pub codeberg: Option<&'a ResolvedCodebergRelease>,
+    pub release: Option<&'a ResolvedReleaseTarget>,
     pub attic: Option<&'a AtticConfig>,
     pub aur: Option<&'a ResolvedAur>,
     pub copr: Option<&'a ResolvedCopr>,
@@ -137,13 +139,16 @@ impl ReleaseCredential {
 
 pub fn credential_contract(inputs: &ReleaseWorkflowInputs<'_>) -> Vec<ReleaseCredential> {
     let mut credentials = Vec::new();
-    if let Some(codeberg) = inputs.codeberg {
+    if let Some(release) = inputs.release {
         credentials.push(ReleaseCredential::secret(
-            &codeberg.token_secret,
+            &release.token_secret,
             ReleaseCredentialScope::User,
-            "codeberg",
+            match release.provider {
+                ReleaseProvider::Forgejo => "codeberg",
+                ReleaseProvider::Github => "github",
+            },
             true,
-            "Codeberg/Forgejo API token for release creation and asset upload.",
+            "Hosted release API token for release creation and asset upload.",
         ));
     }
     if inputs.artifacts.sign {
@@ -416,15 +421,26 @@ pub fn render(inputs: &ReleaseWorkflowInputs<'_>) -> String {
 
     w.push_str("jobs:\n  release:\n");
     writeln!(w, "    runs-on: {}", inputs.runner).expect("write");
-    w.push_str("    enable-openid-connect: true\n");
+    match inputs.platform {
+        Platform::Github => {
+            w.push_str("    permissions:\n      contents: ");
+            w.push_str(if inputs.release.is_some() {
+                "write\n"
+            } else {
+                "read\n"
+            });
+            w.push_str("      id-token: write\n");
+        }
+        Platform::Forgejo => w.push_str("    enable-openid-connect: true\n"),
+    }
     if inputs.preinstalled_nix {
         push_preinstalled_nix_env(&mut w, inputs.artifacts);
     }
     w.push_str("    steps:\n");
 
-    push_checkout(&mut w);
+    push_checkout(&mut w, inputs.platform);
     if !inputs.preinstalled_nix {
-        push_install_nix(&mut w, inputs.artifacts);
+        push_install_nix(&mut w, inputs.platform, inputs.artifacts);
     }
     push_validate_tag(&mut w, inputs.artifacts);
     push_release_credentials_preflight(&mut w, inputs);
@@ -449,13 +465,13 @@ pub fn render(inputs: &ReleaseWorkflowInputs<'_>) -> String {
     }
     push_checksums(&mut w, inputs.artifacts);
     if inputs.artifacts.sign {
-        push_sign(&mut w, inputs.artifacts, inputs.codeberg);
+        push_sign(&mut w, inputs.artifacts, inputs.release, inputs.platform);
     }
     if let Some(command) = inputs.smoke_command {
         push_smoke(&mut w, command);
     }
-    if let Some(codeberg) = inputs.codeberg {
-        push_codeberg_release(&mut w, codeberg, inputs.artifacts);
+    if let Some(release) = inputs.release {
+        push_hosted_release(&mut w, release, inputs.artifacts);
     }
     if let Some(attic) = inputs.attic {
         push_attic(&mut w, attic);
@@ -467,7 +483,7 @@ pub fn render(inputs: &ReleaseWorkflowInputs<'_>) -> String {
         push_publish_apt(&mut w, apt, activated_remote);
     }
     if let Some(announce) = inputs.announce {
-        push_announce(&mut w, announce, inputs.codeberg);
+        push_announce(&mut w, announce, inputs.release, inputs.platform);
     }
     if let Some(aur) = inputs.aur {
         push_publish_aur(&mut w, aur, activated_remote);
@@ -476,10 +492,10 @@ pub fn render(inputs: &ReleaseWorkflowInputs<'_>) -> String {
         push_publish_flathub(&mut w, flatpak, activated_remote);
     }
     if let Some(winget) = inputs.winget {
-        push_publish_winget(&mut w, winget, activated_remote);
+        push_publish_winget(&mut w, winget, activated_remote, inputs.platform);
     }
     if let Some(homebrew) = inputs.homebrew {
-        push_publish_homebrew(&mut w, homebrew, activated_remote);
+        push_publish_homebrew(&mut w, homebrew, activated_remote, inputs.platform);
     }
     if let Some(scoop) = inputs.scoop {
         push_publish_scoop(&mut w, scoop, activated_remote);
@@ -496,11 +512,11 @@ pub fn render(inputs: &ReleaseWorkflowInputs<'_>) -> String {
 
 fn push_secrets_header(w: &mut String, inputs: &ReleaseWorkflowInputs<'_>) {
     w.push_str("# Required secrets and variables:\n");
-    if let Some(codeberg) = inputs.codeberg {
+    if let Some(release) = inputs.release {
         writeln!(
             w,
-            "# - {}: Codeberg API token for release creation and asset upload.",
-            codeberg.token_secret
+            "# - {}: hosted release API token for release creation and asset upload.",
+            release.token_secret
         )
         .expect("write");
     }
@@ -636,19 +652,27 @@ fn push_secrets_header(w: &mut String, inputs: &ReleaseWorkflowInputs<'_>) {
     w.push('\n');
 }
 
-fn push_checkout(w: &mut String) {
+fn push_checkout(w: &mut String, platform: Platform) {
     w.push_str("      - uses: ");
-    w.push_str(&forgejo_action_ref("checkout", "v4.3.1"));
+    if platform == Platform::Forgejo {
+        w.push_str(&forgejo_action_ref("checkout", "v4.3.1"));
+    } else {
+        w.push_str(&github_action_ref("actions/checkout", "v4.3.1"));
+    }
     w.push('\n');
     w.push_str("        with:\n          fetch-depth: 0\n");
 }
 
-fn push_install_nix(w: &mut String, artifacts: &ArtifactsConfig) {
+fn push_install_nix(w: &mut String, platform: Platform, artifacts: &ArtifactsConfig) {
     w.push_str("      - uses: ");
-    w.push_str(&immutable_action_ref(
-        "https://github.com/cachix/install-nix-action",
-        "v27",
-    ));
+    if platform == Platform::Forgejo {
+        w.push_str(&immutable_action_ref(
+            "https://github.com/cachix/install-nix-action",
+            "v27",
+        ));
+    } else {
+        w.push_str(&github_action_ref("cachix/install-nix-action", "v27"));
+    }
     w.push('\n');
     w.push_str("        with:\n          extra_nix_config: |\n");
     w.push_str("            experimental-features = nix-command flakes\n");
@@ -915,14 +939,15 @@ fn push_build_srpm(w: &mut String, copr: &ResolvedCopr) {
 }
 
 fn push_build_artifacts(w: &mut String, artifacts: &ArtifactsConfig) {
+    let bundle_attrs = artifacts.effective_nix_bundle_attrs();
     w.push_str(
         "      - name: Build release artifacts\n        run: |\n          set -euo pipefail\n",
     );
     w.push_str("          . ./release-env\n          export VERSION IS_PRERELEASE\n          mkdir -p release\n");
-    if !artifacts.nix_bundle_attrs.is_empty() {
+    if !bundle_attrs.is_empty() {
         w.push_str("          mkdir -p target\n");
     }
-    for (index, attr) in artifacts.nix_bundle_attrs.iter().enumerate() {
+    for (index, attr) in bundle_attrs.iter().enumerate() {
         let link = format!("target/simit-release-bundle-{index}");
         writeln!(
             w,
@@ -940,14 +965,14 @@ fn push_build_artifacts(w: &mut String, artifacts: &ArtifactsConfig) {
         w.push_str(&shell_single_quote(&link));
         w.push_str(" -mindepth 1 -maxdepth 1 -type f -print | LC_ALL=C sort)\n");
     }
-    if !artifacts.nix_bundle_attrs.is_empty() {
+    if !bundle_attrs.is_empty() {
         w.push_str("          shopt -s nullglob\n");
         w.push_str("          manifests=(release/*-release-manifest.json)\n");
         w.push_str("          test \"${#manifests[@]}\" -eq 1 || { echo \"expected exactly one release manifest from Nix bundles\" >&2; exit 1; }\n");
         w.push_str("          jq -e --arg version \"$VERSION\" '(.schemaVersion == 2) and (.version == $version) and (.artifacts | length > 0)' \"${manifests[0]}\" >/dev/null\n");
     }
     if artifacts.build_commands.is_empty() {
-        if artifacts.nix_bundle_attrs.is_empty() {
+        if bundle_attrs.is_empty() {
             w.push_str("          echo \"[release.artifacts] has no Nix bundles or build_commands\" >&2\n          exit 1\n");
         }
     } else {
@@ -998,7 +1023,8 @@ fn shell_single_quote(value: &str) -> String {
 fn push_sign(
     w: &mut String,
     artifacts: &ArtifactsConfig,
-    codeberg: Option<&ResolvedCodebergRelease>,
+    release: Option<&ResolvedReleaseTarget>,
+    platform: Platform,
 ) {
     w.push_str("      - name: Sign checksums and attest release artifacts\n");
     w.push_str("        env:\n");
@@ -1023,21 +1049,30 @@ fn push_sign(
 
     // Cosign keyless (Sigstore OIDC) signing + SLSA provenance attestation, with
     // a COSIGN_PRIVATE_KEY fallback — mirrors the hand-rolled release pipeline.
-    let repo_url = codeberg
-        .map(|c| format!("https://codeberg.org/{}", c.repo))
-        .unwrap_or_else(|| {
-            "${GITHUB_SERVER_URL:-https://codeberg.org}/${GITHUB_REPOSITORY:-unknown/unknown}"
-                .to_owned()
-        });
+    let repo_url = release
+        .map(|c| {
+            let host = match c.provider {
+                ReleaseProvider::Forgejo => "https://codeberg.org",
+                ReleaseProvider::Github => "https://github.com",
+            };
+            format!("{host}/{}", c.repo)
+        })
+        .unwrap_or_else(|| format!("{}/unknown/unknown", platform.web_base_url()));
     w.push_str("          nix shell nixpkgs#cosign nixpkgs#curl nixpkgs#jq -c bash <<'SCRIPT'\n");
     w.push_str("          set -euo pipefail\n          . ./release-env\n");
     writeln!(w, "          repo_url=\"{repo_url}\"").expect("write");
     w.push_str("          git_sha=\"$(git rev-parse HEAD)\"\n");
-    w.push_str("          workflow_sha=\"$(sha256sum .forgejo/workflows/release.yml | awk '{print $1}')\"\n");
+    w.push_str("          workflow_sha=\"$(sha256sum ");
+    w.push_str(platform.workflow_dir());
+    w.push_str("/release.yml | awk '{print $1}')\"\n");
     w.push_str("          flake_lock_sha=\"missing\"; if [ -f flake.lock ]; then flake_lock_sha=\"$(sha256sum flake.lock | awk '{print $1}')\"; fi\n");
-    w.push_str(
-        "          builder_id=\"${repo_url}/src/tag/${VERSION}/.forgejo/workflows/release.yml\"\n",
-    );
+    w.push_str("          builder_id=\"");
+    w.push('$');
+    w.push_str("{repo_url}/src/tag/");
+    w.push('$');
+    w.push_str("{VERSION}/");
+    w.push_str(platform.workflow_dir());
+    w.push_str("/release.yml\"\n");
     w.push_str("          sign_blob_keyless() { file=\"$1\"; if [ -n \"${ACTIONS_ID_TOKEN_REQUEST_URL:-}\" ] && [ -n \"${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}\" ]; then curl -fsSL -H \"Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}\" \"${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sigstore\" > \"$oidc_token\"; cosign sign-blob --yes --identity-token \"$oidc_token\" --bundle \"${file}.cosign.bundle\" \"$file\"; else return 1; fi; }\n");
     w.push_str("          attest_blob_keyless() { file=\"$1\"; predicate=\"$2\"; if [ -s \"$oidc_token\" ]; then cosign attest-blob --yes --identity-token \"$oidc_token\" --predicate \"$predicate\" --type slsaprovenance1 --output-attestation \"${file}.intoto.jsonl\" --bundle \"${file}.intoto.bundle\" \"$file\"; else return 1; fi; }\n");
     w.push_str("          sign_blob_with_key() { file=\"$1\"; test -n \"${COSIGN_PRIVATE_KEY:-}\"; printf '%s' \"$COSIGN_PRIVATE_KEY\" > \"$cosign_key\"; cosign sign-blob --yes --key \"$cosign_key\" --bundle \"${file}.cosign.bundle\" \"$file\"; }\n");
@@ -1104,9 +1139,98 @@ fn push_attic(w: &mut String, attic: &AtticConfig) {
     .expect("write");
 }
 
+fn push_hosted_release(
+    w: &mut String,
+    target: &ResolvedReleaseTarget,
+    artifacts: &ArtifactsConfig,
+) {
+    match target.provider {
+        ReleaseProvider::Forgejo => push_codeberg_release(w, target, artifacts),
+        ReleaseProvider::Github => push_github_release(w, target, artifacts),
+    }
+}
+
+fn push_github_release(
+    w: &mut String,
+    github: &ResolvedReleaseTarget,
+    artifacts: &ArtifactsConfig,
+) {
+    w.push_str("      - name: Publish GitHub release\n        env:\n");
+    w.push_str("          GITHUB_TOKEN: $");
+    w.push_str("{{ secrets.");
+    w.push_str(&github.token_secret);
+    w.push_str(" }}\n");
+    writeln!(w, "          GITHUB_API: {}", github.api_base).expect("write");
+    writeln!(w, "          GITHUB_REPO: {}", github.repo).expect("write");
+    w.push_str("        run: |\n          set -euo pipefail\n          test -n \"$GITHUB_TOKEN\"\n          . ./release-env\n");
+    w.push_str("          nix shell nixpkgs#curl nixpkgs#jq -c bash <<'SCRIPT'\n");
+    w.push_str("          set -euo pipefail\n          . ./release-env\n");
+    if github.body_from_changelog {
+        w.push_str("          awk -v version=\"$VERSION\" '\n");
+        w.push_str("            $0 ~ \"^## \\\\[\" version \"\\\\] - [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]$\" { found = 1; print; next }\n");
+        w.push_str("            found && /^## \\[/ { exit }\n");
+        w.push_str("            found && /^\\[[^]]+\\]: / { exit }\n");
+        w.push_str("            found { print }\n");
+        w.push_str("            END { if (!found) exit 1 }\n");
+        w.push_str("          ' CHANGELOG.md > release-notes.md || { echo \"CHANGELOG.md missing section for $VERSION\" >&2; exit 1; }\n");
+    } else {
+        w.push_str("          : > release-notes.md\n");
+    }
+    w.push_str("          release_payload=$(jq -n --arg tag \"$VERSION\" --arg name \"$VERSION\" --arg branch \"");
+    w.push_str(&github.target_branch);
+    w.push_str("\" --argjson prerelease \"$IS_PRERELEASE\" --rawfile body release-notes.md '{tag_name: $tag, target_commitish: $branch, name: $name, body: $body, draft: false, prerelease: $prerelease}')\n");
+    w.push_str("          status=$(curl -sS -o release.json -w '%{http_code}' -H \"Authorization: Bearer $GITHUB_TOKEN\" -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28' -d \"$release_payload\" \"$GITHUB_API/repos/$GITHUB_REPO/releases\")\n");
+    w.push_str("          if [ \"$status\" = \"409\" ] || [ \"$status\" = \"422\" ]; then\n");
+    w.push_str("            curl -sS --fail -H \"Authorization: Bearer $GITHUB_TOKEN\" -H 'Accept: application/vnd.github+json' \"$GITHUB_API/repos/$GITHUB_REPO/releases/tags/$VERSION\" > release.json\n");
+    w.push_str("          elif [ \"$status\" -lt 200 ] || [ \"$status\" -ge 300 ]; then cat release.json; exit 1; fi\n");
+    w.push_str(
+        "          release_id=$(jq -r '.id' release.json); test \"$release_id\" != \"null\"\n",
+    );
+    w.push_str("          upload_url=$(jq -r '.upload_url' release.json | cut -d '{' -f 1); test -n \"$upload_url\"\n");
+    w.push_str("          shopt -s nullglob\n          files=()\n");
+    w.push_str("          add_matches() { local pattern=\"$1\" match; while IFS= read -r match; do files+=(\"$match\"); done < <(compgen -G \"$pattern\" || true); }\n");
+    w.push_str("          add_matches 'release/SHA256SUMS.txt'\n          add_matches 'release/SHA256SUMS.txt.minisig'\n");
+    if artifacts.checksum_globs.is_empty() {
+        for glob in [
+            "*.tar.gz",
+            "*.zip",
+            "*.AppImage",
+            "*.deb",
+            "*.src.rpm",
+            "*.exe",
+        ] {
+            writeln!(
+                w,
+                "          add_matches {}",
+                shell_single_quote(&format!("release/{glob}"))
+            )
+            .expect("write");
+        }
+    } else {
+        for glob in &artifacts.checksum_globs {
+            writeln!(
+                w,
+                "          add_matches {}",
+                shell_single_quote(&format!("release/{glob}"))
+            )
+            .expect("write");
+        }
+    }
+    w.push_str("          while IFS= read -r file; do\n");
+    w.push_str(
+        "            [ -f \"$file\" ] || continue\n            name=$(basename \"$file\")\n",
+    );
+    w.push_str("            asset_id=$(curl -sS --fail -H \"Authorization: Bearer $GITHUB_TOKEN\" -H 'Accept: application/vnd.github+json' \"$GITHUB_API/repos/$GITHUB_REPO/releases/$release_id/assets\" | jq -r --arg name \"$name\" '.[] | select(.name == $name) | .id' | head -n 1)\n");
+    w.push_str("            if [ -n \"$asset_id\" ]; then curl -sS --fail -X DELETE -H \"Authorization: Bearer $GITHUB_TOKEN\" -H 'Accept: application/vnd.github+json' \"$GITHUB_API/repos/$GITHUB_REPO/releases/$release_id/assets/$asset_id\"; fi\n");
+    w.push_str("            curl -sS --fail -H \"Authorization: Bearer $GITHUB_TOKEN\" -H 'Accept: application/vnd.github+json' -H 'Content-Type: application/octet-stream' --data-binary \"@$file\" \"$upload_url?name=$name\" > /dev/null\n");
+    w.push_str("          done < <(printf '%s\\n' \"");
+    w.push('$');
+    w.push_str("{files[@]}\" | LC_ALL=C sort -u)\n          SCRIPT\n");
+}
+
 fn push_codeberg_release(
     w: &mut String,
-    codeberg: &ResolvedCodebergRelease,
+    codeberg: &ResolvedReleaseTarget,
     artifacts: &ArtifactsConfig,
 ) {
     w.push_str("      - name: Publish Codeberg release\n        env:\n");
@@ -1213,6 +1337,8 @@ fn push_publisher_state_probe(w: &mut String, inputs: &ReleaseWorkflowInputs<'_>
     w.push_str("            case \"$1\" in\n");
     w.push_str("              ssh://git@codeberg.org/*) path=\"${1#ssh://git@codeberg.org/}\"; printf 'https://codeberg.org/%s\\n' \"$path\" ;;\n");
     w.push_str("              git@codeberg.org:*) path=\"${1#git@codeberg.org:}\"; printf 'https://codeberg.org/%s\\n' \"$path\" ;;\n");
+    w.push_str("              ssh://git@github.com/*) path=\"${1#ssh://git@github.com/}\"; printf 'https://github.com/%s\\n' \"$path\" ;;\n");
+    w.push_str("              git@github.com:*) path=\"${1#git@github.com:}\"; printf 'https://github.com/%s\\n' \"$path\" ;;\n");
     w.push_str("              *) printf '%s\\n' \"$1\" ;;\n");
     w.push_str("            esac\n");
     w.push_str("          }\n");
@@ -1442,7 +1568,8 @@ fn push_publish_apt(w: &mut String, apt: &ResolvedApt, activated_remote: bool) {
     w.push_str("          printf '%s' \"$APT_REPO_GPG_KEY\" | gpg --batch --import\n");
     w.push_str("          echo \"${APT_REPO_GPG_KEY_ID}:6:\" | gpg --batch --import-ownertrust\n");
     w.push_str("          eval \"$(ssh-agent -s)\"; ssh_key=\"$work/id\"; printf '%s\\n' \"$APT_REPO_SSH_KEY\" > \"$ssh_key\"; chmod 600 \"$ssh_key\"; ssh-add \"$ssh_key\"\n");
-    w.push_str("          ssh_known=\"$work/known_hosts\"; ssh-keyscan codeberg.org > \"$ssh_known\" 2>/dev/null\n");
+    w.push_str("          ssh_host=codeberg.org; case \"$APT_REPO_REMOTE\" in *github.com*) ssh_host=github.com ;; esac\n");
+    w.push_str("          ssh_known=\"$work/known_hosts\"; ssh-keyscan \"$ssh_host\" > \"$ssh_known\" 2>/dev/null\n");
     w.push_str("          export GIT_SSH_COMMAND=\"ssh -i $ssh_key -o IdentitiesOnly=yes -o UserKnownHostsFile=$ssh_known -o StrictHostKeyChecking=yes\"\n");
     w.push_str("          mkdir -p \"$work/apt/conf\"; cp dist/apt/conf/distributions \"$work/apt/conf/distributions\"\n");
     w.push_str("          for deb in release/*.deb; do reprepro -b \"$work/apt\" includedeb \"$APT_DISTRIBUTION\" \"$deb\"; done\n");
@@ -1587,7 +1714,12 @@ fn push_publish_copr(w: &mut String, copr: &ResolvedCopr, activated_remote: bool
     .expect("write");
 }
 
-fn push_publish_homebrew(w: &mut String, homebrew: &ResolvedHomebrew, activated_remote: bool) {
+fn push_publish_homebrew(
+    w: &mut String,
+    homebrew: &ResolvedHomebrew,
+    activated_remote: bool,
+    platform: Platform,
+) {
     w.push_str("      - name: Publish Homebrew tap\n        env:\n");
     writeln!(
         w,
@@ -1637,7 +1769,8 @@ fn push_publish_homebrew(w: &mut String, homebrew: &ResolvedHomebrew, activated_
         let file = homebrew_archive(homebrew, arch, os);
         writeln!(
             w,
-            "            --archive \"{key}=https://codeberg.org/{repo}/releases/download/${{VERSION}}/{file},release/{file}\" \\",
+            "            --archive \"{key}={host}/{repo}/releases/download/${{VERSION}}/{file},release/{file}\" \\",
+            host = platform.web_base_url(),
             repo = homebrew.download_repo
         )
         .expect("write");
@@ -1783,10 +1916,11 @@ fn push_windows_signing(w: &mut String, windows: &WindowsSigningConfig) {
 fn push_announce(
     w: &mut String,
     announce: &AnnounceConfig,
-    codeberg: Option<&ResolvedCodebergRelease>,
+    release: Option<&ResolvedReleaseTarget>,
+    platform: Platform,
 ) {
-    let fallback = codeberg
-        .map(|c| format!("https://codeberg.org/{}/releases/tag/${{VERSION}}", c.repo))
+    let fallback = release
+        .map(|c| platform.release_tag_url(&c.repo, "${VERSION}"))
         .unwrap_or_else(|| "${VERSION}".to_owned());
     w.push_str("      - name: Announce stable release\n        env:\n");
     writeln!(
@@ -1896,7 +2030,12 @@ fn push_publish_flathub(w: &mut String, flatpak: &FlatpakConfig, activated_remot
     w.push_str("          jq -r '.html_url' pr.json\n          SCRIPT\n");
 }
 
-fn push_publish_winget(w: &mut String, winget: &WingetConfig, activated_remote: bool) {
+fn push_publish_winget(
+    w: &mut String,
+    winget: &WingetConfig,
+    activated_remote: bool,
+    platform: Platform,
+) {
     let zip = winget.zip_archive.replace("{version}", "${VERSION}");
     w.push_str("      - name: Publish winget manifest PR\n        env:\n");
     writeln!(
@@ -1913,7 +2052,13 @@ fn push_publish_winget(w: &mut String, winget: &WingetConfig, activated_remote: 
     } else {
         w.push_str("          if [ -z \"${WINGET_PAT:-}\" ]; then echo 'WINGET_PAT is required because WinGet publishing is configured.' >&2; exit 1; fi\n");
     }
-    writeln!(w, "          ZIP_NAME=\"{zip}\"; ZIP_URL=\"https://codeberg.org/{}/releases/download/${{VERSION}}/${{ZIP_NAME}}\"", winget.download_repo).expect("write");
+    w.push_str("          ZIP_NAME=\"");
+    w.push_str(&zip);
+    w.push_str("\"; ZIP_URL=\"");
+    w.push_str(platform.web_base_url());
+    w.push('/');
+    w.push_str(&winget.download_repo);
+    w.push_str("/releases/download/${VERSION}/${ZIP_NAME}\"\n");
     if activated_remote {
         w.push_str("          test -s \"release/${ZIP_NAME}\" || publisher_missing winget \"missing release/${ZIP_NAME}\"\n");
     } else {
@@ -2133,7 +2278,9 @@ fn nix_path_info_arg(link: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{AurFlavors, ChocolateyPushConfig, HomebrewPlatformsConfig, ScoopArchSet};
+    use crate::config::{
+        AurFlavors, ChocolateyPushConfig, HomebrewPlatformsConfig, ReleaseProvider, ScoopArchSet,
+    };
 
     #[test]
     fn forgejo_action_references_are_immutable_and_versioned() {
@@ -2214,6 +2361,7 @@ mod tests {
 
     fn artifacts() -> ArtifactsConfig {
         ArtifactsConfig {
+            prebuild_binaries: false,
             runner: Some("atlas".to_owned()),
             substituters: vec!["https://cache.example/c".to_owned()],
             trusted_public_keys: vec!["c:abc=".to_owned()],
@@ -2297,8 +2445,9 @@ mod tests {
         }
     }
 
-    fn codeberg() -> ResolvedCodebergRelease {
-        ResolvedCodebergRelease {
+    fn codeberg() -> ResolvedReleaseTarget {
+        ResolvedReleaseTarget {
+            provider: ReleaseProvider::Forgejo,
             repo: "caniko/rs-modde".to_owned(),
             api_base: "https://codeberg.org/api/v1".to_owned(),
             token_secret: "codeberg_token".to_owned(),
@@ -2347,12 +2496,13 @@ mod tests {
         let mut artifacts = artifacts();
         artifacts.sbom_commands = vec!["cargo sbom > release/sbom.json".to_owned()];
         let workflow = render(&ReleaseWorkflowInputs {
+            platform: Platform::Forgejo,
             runner: "atlas",
             preinstalled_nix: false,
             publish_enforcement: ReleasePublisherEnforcement::Declared,
             artifacts: &artifacts,
             smoke_command: Some("nix run .#release-smoke --"),
-            codeberg: Some(&codeberg),
+            release: Some(&codeberg),
             attic: None,
             aur: Some(&aur),
             copr: Some(&copr),
@@ -2543,12 +2693,13 @@ mod tests {
         let (chocolatey, flatpak, winget) = (chocolatey(), flatpak(), winget());
         let artifacts = artifacts();
         let workflow = render(&ReleaseWorkflowInputs {
+            platform: Platform::Forgejo,
             runner: "atlas",
             preinstalled_nix: false,
             publish_enforcement: ReleasePublisherEnforcement::ActivatedRemote,
             artifacts: &artifacts,
             smoke_command: None,
-            codeberg: Some(&codeberg),
+            release: Some(&codeberg),
             attic: None,
             aur: Some(&aur),
             copr: Some(&copr),
@@ -2598,12 +2749,13 @@ mod tests {
         let mut artifacts = artifacts();
         artifacts.nix_bundle_attrs = vec!["release-bundle".to_owned()];
         let workflow = render(&ReleaseWorkflowInputs {
+            platform: Platform::Forgejo,
             runner: "atlas",
             preinstalled_nix: false,
             publish_enforcement: ReleasePublisherEnforcement::Declared,
             artifacts: &artifacts,
             smoke_command: None,
-            codeberg: None,
+            release: None,
             attic: None,
             aur: None,
             copr: None,
@@ -2622,16 +2774,33 @@ mod tests {
     }
 
     #[test]
+    fn prebuild_toggle_uses_conventional_bundle_and_explicit_attrs_win() {
+        let mut artifacts = artifacts();
+        artifacts.prebuild_binaries = true;
+        assert_eq!(
+            artifacts.effective_nix_bundle_attrs(),
+            vec!["release-bundle".to_owned()]
+        );
+
+        artifacts.nix_bundle_attrs = vec!["packages.x86_64-linux.release".to_owned()];
+        assert_eq!(
+            artifacts.effective_nix_bundle_attrs(),
+            vec!["packages.x86_64-linux.release".to_owned()]
+        );
+    }
+
+    #[test]
     fn checksum_step_handles_empty_globs() {
         let mut artifacts = artifacts();
         artifacts.checksum_globs = vec![];
         let workflow = render(&ReleaseWorkflowInputs {
+            platform: Platform::Forgejo,
             runner: "atlas",
             preinstalled_nix: false,
             publish_enforcement: ReleasePublisherEnforcement::Declared,
             artifacts: &artifacts,
             smoke_command: None,
-            codeberg: None,
+            release: None,
             attic: None,
             aur: None,
             copr: None,
@@ -2658,12 +2827,13 @@ mod tests {
         let artifacts = artifacts();
         // The test fixture has checksum_globs = ["*.tar.gz", "*.deb"]
         let workflow = render(&ReleaseWorkflowInputs {
+            platform: Platform::Forgejo,
             runner: "atlas",
             preinstalled_nix: false,
             publish_enforcement: ReleasePublisherEnforcement::Declared,
             artifacts: &artifacts,
             smoke_command: Some("nix run .#release-smoke --"),
-            codeberg: Some(&codeberg),
+            release: Some(&codeberg),
             attic: None,
             aur: Some(&aur),
             copr: Some(&copr),

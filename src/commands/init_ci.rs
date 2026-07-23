@@ -8,8 +8,8 @@ use anyhow::{Context, Result, bail};
 use crate::cargo;
 use crate::ci_resolution::{CiCliOverrides, CiInference, ResolvedCiInputs, WorkflowSnapshot};
 use crate::cli::{
-    ChocolateyOverridesArgs, HomebrewOverridesArgs, InitCiCommand, Platform, Runtime,
-    RuntimeChoice, ScoopOverridesArgs,
+    CiProvider, ChocolateyOverridesArgs, HomebrewOverridesArgs,
+    InitCiCommand, Platform, Runtime, RuntimeChoice, ScoopOverridesArgs,
 };
 use crate::commands::upgrade;
 use crate::config::{
@@ -36,21 +36,29 @@ pub fn run(command: InitCiCommand) -> Result<()> {
     let metadata = cargo::metadata_for_current_dir()?;
     let workspace_root = metadata.workspace_root.as_std_path();
     let cfg = ProjectConfig::load(workspace_root)?;
-    let workflow_snapshots = workflow_snapshots_for_platform(workspace_root, command.platform)?;
+    let provider = command
+        .ci_provider
+        .or(cfg.ci.provider)
+        .unwrap_or(CiProvider::Actions);
+    let platform = command
+        .platform
+        .or(cfg.ci.platform)
+        .unwrap_or(Platform::Forgejo);
+    if provider == CiProvider::Crow {
+        return run_crow(command, &metadata, workspace_root, &cfg, platform);
+    }
+    let workflow_snapshots = workflow_snapshots_for_platform(workspace_root, platform)?;
     let inference = CiInference::from_workflows(&workflow_snapshots)?;
     let inferred_pages = infer_codeberg_pages_from_workflows(&workflow_snapshots)?;
     let cli_overrides = ci_cli_overrides(&command);
     let mut resolved =
         ResolvedCiInputs::resolve(workspace_root, &cfg, &cli_overrides, Some(&inference))?;
-    if resolved.granular && command.platform == Platform::Forgejo {
+    if resolved.granular && platform == Platform::Forgejo {
         apply_granular_step_runners(&mut resolved.step_runners, resolved.runtime);
     }
     validate_runner(resolved.runner.as_deref())?;
     validate_runner(resolved.windows_runner.as_deref())?;
     let packages = cargo::select_packages(&metadata, &resolved.packages, resolved.workspace)?;
-    if command.with_homebrew && command.platform != Platform::Forgejo {
-        bail!("Homebrew tap publish is forgejo-only for now");
-    }
     if command.with_homebrew && resolved.runtime != Runtime::Nix {
         bail!("Homebrew tap publish requires --runtime nix");
     }
@@ -75,23 +83,14 @@ pub fn run(command: InitCiCommand) -> Result<()> {
     }
     let wants_codeberg_pages =
         command.with_codeberg_pages || cfg.ci.pages.is_some() || inferred_pages.is_some();
-    if wants_codeberg_pages && command.platform != Platform::Forgejo {
-        bail!("Codeberg Pages workflow generation is forgejo-only");
-    }
     if wants_codeberg_pages && resolved.runtime != Runtime::Nix {
         bail!("Codeberg Pages workflow generation requires --runtime nix");
     }
     let wants_vscode = command.with_vscode || cfg.vscode.is_some();
-    if wants_vscode && command.platform != Platform::Forgejo {
-        bail!("VS Code extension workflow generation is forgejo-only");
-    }
     if wants_vscode && resolved.runtime != Runtime::Nix {
         bail!("VS Code extension workflow generation requires --runtime nix");
     }
     let wants_jetbrains = command.with_jetbrains || cfg.jetbrains.is_some();
-    if wants_jetbrains && command.platform != Platform::Forgejo {
-        bail!("JetBrains plugin workflow generation is forgejo-only");
-    }
     if wants_jetbrains && resolved.runtime != Runtime::Nix {
         bail!("JetBrains plugin workflow generation requires --runtime nix");
     }
@@ -104,7 +103,7 @@ pub fn run(command: InitCiCommand) -> Result<()> {
         eprintln!("--omnix-ref is ignored unless --with-om-ci or --om-ci-augment is enabled.");
     }
     let user_config = UserConfig::load().or_else(|err| {
-        if command.platform == Platform::Github || explicit_runners_cover_required {
+        if platform == Platform::Github || explicit_runners_cover_required {
             Ok(UserConfig::default())
         } else {
             Err(err)
@@ -118,7 +117,7 @@ pub fn run(command: InitCiCommand) -> Result<()> {
     let mut options = resolved.ci_options(&cfg, with_artifacts, omnix_ref.clone());
     options.publish_crates = publish_crates;
     let runners = user_config.resolve_ci_runners(
-        command.platform,
+        platform,
         resolved.runtime,
         resolved.runner.as_deref(),
         resolved.windows_runner.as_deref(),
@@ -170,7 +169,9 @@ pub fn run(command: InitCiCommand) -> Result<()> {
             self_check_runner_override(resolved.windows_runner.as_deref(), runner)
         });
         files.extend(ci::files(ci::FilesRequest {
-            platform: command.platform,
+            provider,
+            platform,
+            crow: &cfg.ci.crow,
             runtime: resolved.runtime,
             package,
             file_suffix: multi_package_workspace.then_some(package.name.as_str()),
@@ -188,7 +189,7 @@ pub fn run(command: InitCiCommand) -> Result<()> {
     }
     if resolved.with_pypi_publish && cargo::has_pyo3_dep(&metadata.packages) {
         files.push(ci::maturin_publish_file(
-            command.platform,
+            platform,
             resolved.runtime,
             &runners.ci,
             &options,
@@ -197,7 +198,7 @@ pub fn run(command: InitCiCommand) -> Result<()> {
     let pages = codeberg_pages_options(&cfg, &command, inferred_pages.as_ref())?;
     if let Some(pages) = &pages {
         files.push(ci::codeberg_pages_file(
-            command.platform,
+            platform,
             &runners.ci,
             pages,
         )?);
@@ -206,7 +207,7 @@ pub fn run(command: InitCiCommand) -> Result<()> {
         let vscode = vscode_options(&cfg)?;
         let vscode_runner = vscode_runner(&vscode, &runners.release)?;
         files.push(ci::vscode_extension_file(
-            command.platform,
+            platform,
             resolved.runtime,
             &vscode_runner,
             &vscode,
@@ -216,7 +217,7 @@ pub fn run(command: InitCiCommand) -> Result<()> {
         let jetbrains = jetbrains_options(&cfg)?;
         let jetbrains_runner = jetbrains_runner(&jetbrains, &runners.release)?;
         files.push(ci::jetbrains_plugin_file(
-            command.platform,
+            platform,
             resolved.runtime,
             &jetbrains_runner,
             &jetbrains,
@@ -224,17 +225,20 @@ pub fn run(command: InitCiCommand) -> Result<()> {
     }
     let persisted_ci = resolved.persisted_ci(
         &cfg,
-        command.platform,
+        platform,
         with_artifacts,
         &omnix_ref,
         persisted_runner,
         persisted_windows_runner,
     );
     let mut persisted_ci = persisted_ci;
+    persisted_ci.provider = Some(provider);
     persisted_ci.publish_crates = publish_crates;
     if command.with_codeberg_pages {
         persisted_ci.pages = Some(codeberg_pages_config(&pages)?);
-    } else if let Some(pages) = inferred_pages {
+    } else if let Some(pages) = cfg.ci.pages.clone().or(inferred_pages) {
+        // Explicit project config owns Pages overrides. Workflow inference is
+        // only a fallback for repositories that have not persisted them yet.
         persisted_ci.pages = Some(pages);
     }
     let persisted_in_simit_toml =
@@ -273,7 +277,7 @@ pub fn run(command: InitCiCommand) -> Result<()> {
         check_generated_ci_files(
             workspace_root,
             &files,
-            command.platform,
+            platform,
             &check_message,
             command.diff,
         )?;
@@ -314,11 +318,19 @@ fn run_python(command: InitCiCommand) -> Result<()> {
     {
         bail!("Rust-specific CI options are not supported for Python uv projects");
     }
-    let workflow_snapshots = workflow_snapshots_for_platform(workspace_root, command.platform)?;
-    let inferred_pages = infer_codeberg_pages_from_workflows(&workflow_snapshots)?;
-    if command.with_codeberg_pages || cfg.ci.pages.is_some() || inferred_pages.is_some() {
-        bail!("Codeberg Pages generation is not supported for Python uv CI yet");
+    let provider = command
+        .ci_provider
+        .or(cfg.ci.provider)
+        .unwrap_or(CiProvider::Actions);
+    let platform = command
+        .platform
+        .or(cfg.ci.platform)
+        .unwrap_or(Platform::Forgejo);
+    if provider == CiProvider::Crow {
+        return run_crow_python(command, workspace_root, &cfg, platform);
     }
+    let workflow_snapshots = workflow_snapshots_for_platform(workspace_root, platform)?;
+    let inferred_pages = infer_codeberg_pages_from_workflows(&workflow_snapshots)?;
     let inference = CiInference::from_workflows(&workflow_snapshots)?;
     let mut cli_overrides = ci_cli_overrides(&command);
     if cli_overrides.runtime.is_none() && cfg.ci.runtime.is_none() {
@@ -333,7 +345,7 @@ fn run_python(command: InitCiCommand) -> Result<()> {
 
     let explicit_runners_cover_required = runner_overrides_cover_required_runners(&resolved, false);
     let user_config = UserConfig::load().or_else(|err| {
-        if command.platform == Platform::Github || explicit_runners_cover_required {
+        if platform == Platform::Github || explicit_runners_cover_required {
             Ok(UserConfig::default())
         } else {
             Err(err)
@@ -346,7 +358,7 @@ fn run_python(command: InitCiCommand) -> Result<()> {
         .unwrap_or_else(|| resolved.omnix_ref.clone());
     let options = resolved.ci_options(&cfg, false, omnix_ref.clone());
     let runners = user_config.resolve_ci_runners(
-        command.platform,
+        platform,
         resolved.runtime,
         resolved.runner.as_deref(),
         resolved.windows_runner.as_deref(),
@@ -356,7 +368,7 @@ fn run_python(command: InitCiCommand) -> Result<()> {
         self_check_runner_override(resolved.runner.as_deref(), &runners.ci).map(str::to_owned);
     let with_pypi_publish = resolved.with_pypi_publish;
     let mut files = vec![ci::python_ci_file(
-        command.platform,
+        platform,
         resolved.runtime,
         &runners.ci,
         &options,
@@ -365,20 +377,34 @@ fn run_python(command: InitCiCommand) -> Result<()> {
     )?];
     if with_pypi_publish {
         files.push(ci::python_publish_file(
-            command.platform,
+            platform,
             resolved.runtime,
             &runners.ci,
             &options,
         )?);
     }
-    let persisted_ci = resolved.persisted_ci(
+    let pages = codeberg_pages_options(&cfg, &command, inferred_pages.as_ref())?;
+    if let Some(pages) = &pages {
+        files.push(ci::codeberg_pages_file(
+            platform,
+            &runners.ci,
+            pages,
+        )?);
+    }
+    let mut persisted_ci = resolved.persisted_ci(
         &cfg,
-        command.platform,
+        platform,
         false,
         &omnix_ref,
         persisted_runner,
         None,
     );
+    persisted_ci.provider = Some(provider);
+    if command.with_codeberg_pages {
+        persisted_ci.pages = Some(codeberg_pages_config(&pages)?);
+    } else if let Some(pages) = cfg.ci.pages.clone().or(inferred_pages) {
+        persisted_ci.pages = Some(pages);
+    }
     let persisted_in_simit_toml =
         workspace_root.join("simit.toml").exists() && cfg.ci == persisted_ci;
     let check_message = format!(
@@ -397,7 +423,7 @@ fn run_python(command: InitCiCommand) -> Result<()> {
         check_generated_ci_files(
             workspace_root,
             &files,
-            command.platform,
+            platform,
             &check_message,
             command.diff,
         )?;
@@ -411,6 +437,249 @@ fn run_python(command: InitCiCommand) -> Result<()> {
         registry::touch_current_project_or_warn([("ci", FeatureStatus::Managed)]);
         Ok(())
     }
+}
+
+fn run_crow(
+    command: InitCiCommand,
+    metadata: &cargo::Metadata,
+    workspace_root: &Path,
+    cfg: &ProjectConfig,
+    platform: Platform,
+) -> Result<()> {
+    let snapshots = workflow_snapshots_for_crow(workspace_root)?;
+    let inference = CiInference::from_workflows(&snapshots)?;
+    let cli_overrides = ci_cli_overrides(&command);
+    let resolved = ResolvedCiInputs::resolve(workspace_root, cfg, &cli_overrides, Some(&inference))?;
+    let packages = cargo::select_packages(metadata, &resolved.packages, resolved.workspace)?;
+    let windows_packagers = command.with_chocolatey || command.with_scoop;
+    let with_artifacts = resolved.with_artifacts || command.with_homebrew || windows_packagers;
+    let publish_crates = resolved.publish_crates || with_artifacts;
+    let omnix_ref = resolved.omnix_ref.clone();
+    let mut crow = cfg.ci.crow.clone();
+    if let Some(format) = command.crow_format {
+        crow.format = format;
+    }
+    let runners = crow_runners(&resolved, windows_packagers);
+    let step_runners = resolved
+        .step_runners
+        .iter()
+        .map(|(step, label)| {
+            (
+                step.clone(),
+                ResolvedRunner {
+                    name: None,
+                    labels: vec![label.clone()],
+                },
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let self_check = metadata
+        .packages
+        .iter()
+        .any(|package| package.name == "simit");
+    let mut options = resolved.ci_options(cfg, with_artifacts, omnix_ref);
+    options.publish_crates = publish_crates;
+    let multi_package_workspace = metadata.workspace_members.len() > 1;
+    let mut files = Vec::new();
+    for package in &packages {
+        let homebrew = if command.with_homebrew {
+            Some(homebrew_options(cfg, &command.homebrew, package)?)
+        } else {
+            None
+        };
+        let chocolatey = if command.with_chocolatey {
+            Some(chocolatey_options(cfg, &command.chocolatey, package)?)
+        } else {
+            None
+        };
+        let scoop = if command.with_scoop {
+            Some(scoop_options(cfg, &command.scoop, package)?)
+        } else {
+            None
+        };
+        let package_options = CiOptions {
+            package_scoped: multi_package_workspace,
+            homebrew,
+            chocolatey,
+            scoop,
+            ..options.clone()
+        };
+        files.extend(ci::files(ci::FilesRequest {
+            provider: CiProvider::Crow,
+            platform,
+            crow: &crow,
+            runtime: resolved.runtime,
+            package,
+            file_suffix: multi_package_workspace.then_some(package.name.as_str()),
+            self_check: SelfCheckOptions {
+                enabled: self_check,
+                runner_override: resolved.runner.as_deref(),
+                windows_runner_override: resolved.windows_runner.as_deref(),
+                packages: &resolved.packages,
+                workspace: resolved.workspace,
+            },
+            runners: &runners,
+            options: package_options,
+            step_runners: &step_runners,
+        })?);
+    }
+
+    if resolved.with_pypi_publish && cargo::has_pyo3_dep(&metadata.packages) {
+        files.push(crate::render::crow::maturin_publish_file(
+            crow.format,
+            &crow,
+            &runners.ci,
+            &options,
+        )?);
+    }
+
+    let inferred_pages = infer_codeberg_pages_from_workflows(&snapshots)?;
+    let pages = codeberg_pages_options(&cfg, &command, inferred_pages.as_ref())?;
+    if let Some(pages) = &pages {
+        files.push(crate::render::crow::codeberg_pages_file(
+            crow.format,
+            &crow,
+            &runners.ci,
+            pages,
+        )?);
+    }
+    if command.with_vscode || cfg.vscode.is_some() {
+        let vscode = vscode_options(cfg)?;
+        files.push(crate::render::crow::vscode_extension_file(
+            crow.format,
+            &crow,
+            &runners.release,
+            &vscode,
+        )?);
+    }
+    if command.with_jetbrains || cfg.jetbrains.is_some() {
+        let jetbrains = jetbrains_options(cfg)?;
+        files.push(crate::render::crow::jetbrains_plugin_file(
+            crow.format,
+            &crow,
+            &runners.release,
+            &jetbrains,
+        )?);
+    }
+
+    let mut persisted_ci = resolved.persisted_ci(
+        cfg,
+        platform,
+        with_artifacts,
+        &options.omnix_ref,
+        resolved.runner.clone(),
+        resolved.windows_runner.clone(),
+    );
+    persisted_ci.provider = Some(CiProvider::Crow);
+    persisted_ci.crow = crow;
+    persisted_ci.publish_crates = publish_crates;
+
+    let check_message = format!(
+        "Crow CI workflows are not up to date; run `simit init ci --ci-provider crow`"
+    );
+    if command.check {
+        check_generated_crow_files(workspace_root, &files, &check_message, command.diff)?;
+        Ok(())
+    } else {
+        project::write_generated_files(workspace_root, &files)?;
+        if ProjectConfig::can_persist_ci(workspace_root)? {
+            ProjectConfig::write_ci(workspace_root, &persisted_ci)?;
+        }
+        upgrade::update_readme_badges_if_present(workspace_root, false, false)?;
+        registry::touch_current_project_or_warn([("ci", FeatureStatus::Managed)]);
+        Ok(())
+    }
+}
+
+fn run_crow_python(
+    command: InitCiCommand,
+    workspace_root: &Path,
+    cfg: &ProjectConfig,
+    platform: Platform,
+) -> Result<()> {
+    if command.workspace || !command.packages.is_empty() {
+        bail!("Python uv Crow CI does not support --workspace or --package");
+    }
+    let mut crow = cfg.ci.crow.clone();
+    if let Some(format) = command.crow_format {
+        crow.format = format;
+    }
+    let resolved = ResolvedCiInputs::resolve(
+        workspace_root,
+        cfg,
+        &ci_cli_overrides(&command),
+        None,
+    )?;
+    let runner = ResolvedRunner {
+        name: None,
+        labels: vec![resolved
+            .runner
+            .clone()
+            .unwrap_or_else(|| "crow-default".to_owned())],
+    };
+    let options = resolved.ci_options(cfg, false, resolved.omnix_ref.clone());
+    let mut files = vec![crate::render::crow::python_ci_file(
+        crow.format,
+        &crow,
+        &runner,
+        &options,
+        &cfg.flake.expected_outputs.checks,
+        &cfg.ci.components,
+    )?];
+    if resolved.with_pypi_publish {
+        files.push(crate::render::crow::python_publish_file(
+            crow.format,
+            &crow,
+            &runner,
+            &options,
+        )?);
+    }
+    let mut persisted_ci = resolved.persisted_ci(
+        cfg,
+        platform,
+        false,
+        &resolved.omnix_ref,
+        resolved.runner.clone(),
+        None,
+    );
+    persisted_ci.provider = Some(CiProvider::Crow);
+    persisted_ci.crow = crow;
+    persisted_ci.with_pypi_publish = resolved.with_pypi_publish;
+    if command.check {
+        check_generated_crow_files(
+            workspace_root,
+            &files,
+            "Crow Python CI workflows are not up to date; run `simit init ci --ci-provider crow`",
+            command.diff,
+        )?;
+    } else {
+        project::write_generated_files(workspace_root, &files)?;
+        if ProjectConfig::can_persist_ci(workspace_root)? {
+            ProjectConfig::write_ci(workspace_root, &persisted_ci)?;
+        }
+        registry::touch_current_project_or_warn([("ci", FeatureStatus::Managed)]);
+    }
+    let _ = platform;
+    Ok(())
+}
+
+fn crow_runners(resolved: &ResolvedCiInputs, needs_windows: bool) -> crate::user_config::ResolvedCiRunners {
+    let ci = ResolvedRunner {
+        name: None,
+        labels: vec![resolved
+            .runner
+            .clone()
+            .unwrap_or_else(|| "crow-default".to_owned())],
+    };
+    let release = ci.clone();
+    let windows = needs_windows.then(|| ResolvedRunner {
+        name: None,
+        labels: vec![resolved
+            .windows_runner
+            .clone()
+            .unwrap_or_else(|| "platform=windows/amd64".to_owned())],
+    });
+    crate::user_config::ResolvedCiRunners { ci, release, windows }
 }
 
 fn ci_cli_overrides(command: &InitCiCommand) -> CiCliOverrides {
@@ -477,7 +746,7 @@ pub(crate) fn workflow_snapshots_for_platform(
         }
         let content =
             fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-        if content.contains(ci::GENERATED_WORKFLOW_MARKER)
+        if generated_workflow_marker_present(&content)
             && is_ci_managed_workflow_name(&entry.file_name())
         {
             snapshots.push(WorkflowSnapshot {
@@ -491,7 +760,65 @@ pub(crate) fn workflow_snapshots_for_platform(
     Ok(snapshots)
 }
 
+pub(crate) fn workflow_snapshots_for_crow(
+    workspace_root: &Path,
+) -> Result<Vec<WorkflowSnapshot>> {
+    let workflow_dir = PathBuf::from(".crow");
+    let absolute_dir = workspace_root.join(&workflow_dir);
+    let entries = match fs::read_dir(&absolute_dir) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => return Err(err).with_context(|| format!("reading {}", absolute_dir.display())),
+    };
+
+    let mut snapshots = Vec::new();
+    for entry in entries {
+        let entry = entry.with_context(|| format!("reading entry in {}", absolute_dir.display()))?;
+        if !entry
+            .file_type()
+            .with_context(|| format!("reading file type for {}", entry.path().display()))?
+            .is_file()
+        {
+            continue;
+        }
+        let path = entry.path();
+        let Some(extension) = path.extension().and_then(|ext| ext.to_str()) else {
+            continue;
+        };
+        if !matches!(extension, "yaml" | "yml" | "jsonnet") {
+            continue;
+        }
+        let content = fs::read_to_string(&path)
+            .with_context(|| format!("reading {}", path.display()))?;
+        if generated_workflow_marker_present(&content) {
+            snapshots.push(WorkflowSnapshot {
+                relative_path: workflow_dir.join(entry.file_name()),
+                content,
+            });
+        }
+    }
+    snapshots.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+    Ok(snapshots)
+}
+
+fn generated_workflow_marker_present(content: &str) -> bool {
+    content.contains(ci::GENERATED_WORKFLOW_MARKER)
+        || content.contains("Generated by simit. Manual edits will be reported as ci=drift.")
+}
+
 pub(crate) fn project_regeneration_command(workspace_root: &Path) -> Result<Option<String>> {
+    let crow = workflow_snapshots_for_crow(workspace_root)?;
+    if !crow.is_empty() {
+        let format = if crow
+            .iter()
+            .any(|workflow| workflow.relative_path.extension().is_some_and(|ext| ext == "jsonnet"))
+        {
+            " --crow-format jsonnet"
+        } else {
+            ""
+        };
+        return Ok(Some(format!("simit init ci --ci-provider crow{format}")));
+    }
     let forgejo = workflow_snapshots_for_platform(workspace_root, Platform::Forgejo)?;
     let github = workflow_snapshots_for_platform(workspace_root, Platform::Github)?;
     let (platform, snapshots) = match (forgejo.is_empty(), github.is_empty()) {
@@ -532,7 +859,9 @@ pub(crate) fn project_regeneration_command(workspace_root: &Path) -> Result<Opti
     let command = InitCiCommand {
         packages: Vec::new(),
         workspace: false,
-        platform,
+        platform: Some(platform),
+        ci_provider: Some(CiProvider::Actions),
+        crow_format: None,
         runtime: None,
         runner: None,
         windows_runner: None,
@@ -654,7 +983,7 @@ pub(crate) fn render_regeneration_command(
     persisted_in_simit_toml: bool,
 ) -> String {
     if persisted_in_simit_toml {
-        return format!("simit init ci --platform {}", command.platform.as_str());
+        return format!("simit init ci --platform {}", command.platform.unwrap_or(Platform::Forgejo).as_str());
     }
 
     let mut args = vec![
@@ -662,7 +991,7 @@ pub(crate) fn render_regeneration_command(
         "init".to_owned(),
         "ci".to_owned(),
         "--platform".to_owned(),
-        command.platform.as_str().to_owned(),
+        command.platform.unwrap_or(Platform::Forgejo).as_str().to_owned(),
     ];
 
     if resolved.runtime != Runtime::Cargo || command.runtime.is_some() {
@@ -823,14 +1152,14 @@ fn persisted_ci_matches_simit_toml(
     let explicit_runners_cover_required =
         runner_overrides_cover_required_runners(resolved, windows_packagers);
     let user_config = UserConfig::load().or_else(|err| {
-        if command.platform == Platform::Github || explicit_runners_cover_required {
+        if command.platform.unwrap_or(Platform::Forgejo) == Platform::Github || explicit_runners_cover_required {
             Ok(UserConfig::default())
         } else {
             Err(err)
         }
     })?;
     let runners = user_config.resolve_ci_runners(
-        command.platform,
+        command.platform.unwrap_or(Platform::Forgejo),
         resolved.runtime,
         resolved.runner.as_deref(),
         resolved.windows_runner.as_deref(),
@@ -843,7 +1172,7 @@ fn persisted_ci_matches_simit_toml(
     });
     let persisted_ci = resolved.persisted_ci(
         cfg,
-        command.platform,
+        command.platform.unwrap_or(Platform::Forgejo),
         with_artifacts,
         &resolved.omnix_ref,
         persisted_runner,
@@ -851,7 +1180,7 @@ fn persisted_ci_matches_simit_toml(
     );
     let mut persisted_ci = persisted_ci;
     persisted_ci.publish_crates = publish_crates;
-    if command.with_codeberg_pages && cfg.ci.pages.is_some() {
+    if cfg.ci.pages.is_some() {
         persisted_ci.pages = cfg.ci.pages.clone();
     }
     Ok(cfg.ci == persisted_ci)
@@ -984,6 +1313,59 @@ fn extra_generated_workflows(
     }
     extras.sort();
     Ok(extras)
+}
+
+fn check_generated_crow_files(
+    workspace_root: &Path,
+    files: &[project::GeneratedFile],
+    message: &str,
+    show_diff: bool,
+) -> Result<()> {
+    project::check_generated_files(workspace_root, files, message, show_diff)?;
+    let expected = files
+        .iter()
+        .map(|file| file.relative_path.clone())
+        .collect::<BTreeSet<_>>();
+    let directory = workspace_root.join(".crow");
+    let entries = match fs::read_dir(&directory) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err).with_context(|| format!("reading {}", directory.display())),
+    };
+    let mut extras = Vec::new();
+    for entry in entries {
+        let entry = entry.with_context(|| format!("reading entry in {}", directory.display()))?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let entry_path = entry.path();
+        let Some(extension) = entry_path.extension().and_then(|ext| ext.to_str()) else {
+            continue;
+        };
+        if !matches!(extension, "yaml" | "yml" | "jsonnet") {
+            continue;
+        }
+        let relative = PathBuf::from(".crow").join(entry.file_name());
+        if expected.contains(&relative) {
+            continue;
+        }
+        let content = fs::read_to_string(entry_path)?;
+        if generated_workflow_marker_present(&content) {
+            extras.push(relative);
+        }
+    }
+    if extras.is_empty() {
+        return Ok(());
+    }
+    extras.sort();
+    bail!(
+        "{message}:\n{}",
+        extras
+            .into_iter()
+            .map(|path| format!("{} is extra", path.display()))
+            .collect::<Vec<_>>()
+            .join("\n")
+    )
 }
 
 fn is_ci_managed_workflow_name(name: &std::ffi::OsStr) -> bool {

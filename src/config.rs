@@ -17,10 +17,10 @@ use std::path::Path;
 use std::process::Command;
 
 use anyhow::{Context, Result, anyhow, bail};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use toml_edit::{Array, DocumentMut, InlineTable, Item, Table, Value, value};
 
-use crate::cli::{Platform, Runtime};
+use crate::cli::{CiProvider, CrowWorkflowFormat, Platform, Runtime};
 use crate::user_config::validate_runner_label;
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
@@ -370,6 +370,8 @@ fn default_package_binding() -> String {
 #[serde(deny_unknown_fields)]
 pub struct CiConfig {
     #[serde(default)]
+    pub provider: Option<CiProvider>,
+    #[serde(default)]
     pub platform: Option<Platform>,
     #[serde(default)]
     pub runtime: Option<Runtime>,
@@ -419,6 +421,46 @@ pub struct CiConfig {
     /// selects the complete project-appropriate default set.
     #[serde(default)]
     pub components: Vec<CiComponent>,
+    #[serde(default)]
+    pub crow: CrowCiConfig,
+}
+
+/// `[ci.crow]` — project-side Crow workflow rendering options.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct CrowCiConfig {
+    pub format: CrowWorkflowFormat,
+    pub image: Option<String>,
+    pub nix_image: Option<String>,
+    pub platform: Option<String>,
+    pub labels: BTreeMap<String, String>,
+    pub workspace_base: Option<String>,
+    pub skip_clone: bool,
+    pub variables: BTreeMap<String, CrowVariable>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct CrowVariable {
+    pub description: Option<String>,
+    pub options: Vec<String>,
+    pub default: Option<String>,
+    pub required: bool,
+}
+
+impl Default for CrowCiConfig {
+    fn default() -> Self {
+        Self {
+            format: CrowWorkflowFormat::Yaml,
+            image: None,
+            nix_image: None,
+            platform: None,
+            labels: BTreeMap::new(),
+            workspace_base: None,
+            skip_clone: false,
+            variables: BTreeMap::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
@@ -464,6 +506,9 @@ pub struct ReleaseConfig {
     /// Codeberg/Forgejo release publication via the REST API.
     #[serde(default)]
     pub codeberg: Option<CodebergReleaseConfig>,
+    /// GitHub release publication via the GitHub REST API.
+    #[serde(default)]
+    pub github: Option<GithubReleaseConfig>,
     /// Build matrix + signing knobs for the comprehensive release workflow.
     #[serde(default)]
     pub artifacts: ArtifactsConfig,
@@ -581,6 +626,13 @@ fn default_windows_subject_secret() -> String {
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ArtifactsConfig {
+    /// Opt into the conventional rs-harbor `release-bundle` output.
+    ///
+    /// This is deliberately a small project-facing switch. Projects may keep
+    /// an explicit `nix_bundle_attrs` list when they publish more than one
+    /// bundle; the explicit list wins in that case.
+    #[serde(default)]
+    pub prebuild_binaries: bool,
     /// Runner label for the release job; defaults to the CI runner or `atlas`.
     pub runner: Option<String>,
     /// `nix.conf` substituters added in the install-nix step.
@@ -618,6 +670,19 @@ pub struct ArtifactsConfig {
     /// Skip artifact signing (minisign + cosign) when false.
     #[serde(default = "default_true")]
     pub sign: bool,
+}
+
+impl ArtifactsConfig {
+    /// Resolve the Nix outputs that the release workflow must build.
+    pub fn effective_nix_bundle_attrs(&self) -> Vec<String> {
+        if !self.nix_bundle_attrs.is_empty() {
+            self.nix_bundle_attrs.clone()
+        } else if self.prebuild_binaries {
+            vec!["release-bundle".to_owned()]
+        } else {
+            Vec::new()
+        }
+    }
 }
 
 fn default_minisign_pub() -> String {
@@ -666,12 +731,48 @@ pub struct CodebergReleaseConfig {
     pub body_from_changelog: bool,
 }
 
+/// `[release.github]` — create a GitHub release and upload assets.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GithubReleaseConfig {
+    /// `<owner>/<repo>` whose release receives the uploaded assets.
+    pub repo: String,
+    /// REST API base URL.
+    #[serde(default = "default_github_api_base")]
+    pub api_base: String,
+    /// CI secret holding the API token. Defaults to GitHub's built-in token.
+    #[serde(default = "default_github_token_secret")]
+    pub token_secret: String,
+    /// `target_commitish` the release tag points at.
+    #[serde(default = "default_release_target_branch")]
+    pub target_branch: String,
+    /// Use `CHANGELOG.md` as the release body.
+    #[serde(default = "default_true")]
+    pub body_from_changelog: bool,
+}
+
 fn default_release_target_branch() -> String {
     "main".to_owned()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedCodebergRelease {
+    pub repo: String,
+    pub api_base: String,
+    pub token_secret: String,
+    pub target_branch: String,
+    pub body_from_changelog: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReleaseProvider {
+    Forgejo,
+    Github,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedReleaseTarget {
+    pub provider: ReleaseProvider,
     pub repo: String,
     pub api_base: String,
     pub token_secret: String,
@@ -1055,6 +1156,14 @@ fn default_codeberg_api_base() -> String {
 
 fn default_codeberg_token_secret() -> String {
     "codeberg_token".to_owned()
+}
+
+fn default_github_api_base() -> String {
+    "https://api.github.com".to_owned()
+}
+
+fn default_github_token_secret() -> String {
+    "GITHUB_TOKEN".to_owned()
 }
 
 fn default_pages_source_branch() -> String {
@@ -1560,6 +1669,30 @@ impl ProjectConfig {
         validate_nonempty_strings("simit project config: [ci].packages", &self.ci.packages)?;
         validate_runner_label_opt("[ci].runner", self.ci.runner.as_deref())?;
         validate_runner_label_opt("[ci].windows_runner", self.ci.windows_runner.as_deref())?;
+        if let Some(image) = &self.ci.crow.image {
+            validate_nonempty_string("simit project config: [ci.crow].image", image)?;
+        }
+        if let Some(image) = &self.ci.crow.nix_image {
+            validate_nonempty_string("simit project config: [ci.crow].nix_image", image)?;
+        }
+        if let Some(base) = &self.ci.crow.workspace_base {
+            validate_nonempty_string("simit project config: [ci.crow].workspace_base", base)?;
+        }
+        for (key, value) in &self.ci.crow.labels {
+            if key.trim().is_empty() || value.trim().is_empty() || key.contains('\n') || value.contains('\n') {
+                bail!("simit project config: [ci.crow].labels must contain non-empty single-line keys and values");
+            }
+        }
+        for (name, variable) in &self.ci.crow.variables {
+            validate_nonempty_string("simit project config: [ci.crow.variables] name", name)?;
+            if let Some(description) = &variable.description {
+                validate_nonempty_string("simit project config: [ci.crow.variables].description", description)?;
+            }
+            validate_nonempty_strings("simit project config: [ci.crow.variables].options", &variable.options)?;
+            if let Some(default) = &variable.default {
+                validate_nonempty_string("simit project config: [ci.crow.variables].default", default)?;
+            }
+        }
         validate_nonempty_strings(
             "simit project config: [flake.expected_outputs].packages",
             &self.flake.expected_outputs.packages,
@@ -2266,6 +2399,24 @@ impl ProjectConfig {
         overrides: AurOverrides<'_>,
         package: &crate::cargo::Package,
     ) -> Result<ResolvedAur> {
+        self.resolve_aur_with_host(overrides, package, "https://codeberg.org")
+    }
+
+    pub fn resolve_aur_for_platform(
+        &self,
+        overrides: AurOverrides<'_>,
+        package: &crate::cargo::Package,
+        platform: crate::cli::Platform,
+    ) -> Result<ResolvedAur> {
+        self.resolve_aur_with_host(overrides, package, platform.web_base_url())
+    }
+
+    fn resolve_aur_with_host(
+        &self,
+        overrides: AurOverrides<'_>,
+        package: &crate::cargo::Package,
+        host: &str,
+    ) -> Result<ResolvedAur> {
         self.validate_aur()?;
         let cfg = self.aur.as_ref();
         let name = merge_packager(
@@ -2303,11 +2454,11 @@ impl ProjectConfig {
             .url
             .map(str::to_owned)
             .or_else(|| cfg.and_then(|aur| aur.url.clone()))
-            .unwrap_or_else(|| format!("https://codeberg.org/{download_repo}"));
+            .unwrap_or_else(|| format!("{host}/{download_repo}"));
         let binaries = resolve_named_binaries(cfg.map(|aur| aur.binaries.as_slice()), &name);
         let git_url = cfg
             .and_then(|aur| aur.git_url.clone())
-            .unwrap_or_else(|| format!("https://codeberg.org/{download_repo}.git"));
+            .unwrap_or_else(|| format!("{host}/{download_repo}.git"));
 
         Ok(ResolvedAur {
             name,
@@ -2348,6 +2499,24 @@ impl ProjectConfig {
         overrides: CoprOverrides<'_>,
         package: &crate::cargo::Package,
     ) -> Result<ResolvedCopr> {
+        self.resolve_copr_with_host(overrides, package, "https://codeberg.org")
+    }
+
+    pub fn resolve_copr_for_platform(
+        &self,
+        overrides: CoprOverrides<'_>,
+        package: &crate::cargo::Package,
+        platform: crate::cli::Platform,
+    ) -> Result<ResolvedCopr> {
+        self.resolve_copr_with_host(overrides, package, platform.web_base_url())
+    }
+
+    fn resolve_copr_with_host(
+        &self,
+        overrides: CoprOverrides<'_>,
+        package: &crate::cargo::Package,
+        host: &str,
+    ) -> Result<ResolvedCopr> {
         self.validate_copr()?;
         let cfg = self.copr.as_ref();
         let name = merge_packager(
@@ -2385,7 +2554,7 @@ impl ProjectConfig {
             .url
             .map(str::to_owned)
             .or_else(|| cfg.and_then(|copr| copr.url.clone()))
-            .unwrap_or_else(|| format!("https://codeberg.org/{download_repo}"));
+            .unwrap_or_else(|| format!("{host}/{download_repo}"));
         let binaries = resolve_named_binaries(cfg.map(|copr| copr.binaries.as_slice()), &name);
         let spec_path = cfg
             .and_then(|copr| copr.spec_path.clone())
@@ -2496,6 +2665,58 @@ impl ProjectConfig {
             token_secret: codeberg.token_secret.clone(),
             target_branch: codeberg.target_branch.clone(),
             body_from_changelog: codeberg.body_from_changelog,
+        }))
+    }
+
+    /// Resolve the selected hosted release target, if configured.
+    pub fn resolve_release_target(
+        &self,
+        platform: crate::cli::Platform,
+    ) -> Result<Option<ResolvedReleaseTarget>> {
+        let (provider, target) = match platform {
+            crate::cli::Platform::Forgejo => (
+                ReleaseProvider::Forgejo,
+                self.release.codeberg.as_ref().map(|target| {
+                    (
+                        target.repo.clone(),
+                        target.api_base.clone(),
+                        target.token_secret.clone(),
+                        target.target_branch.clone(),
+                        target.body_from_changelog,
+                    )
+                }),
+            ),
+            crate::cli::Platform::Github => (
+                ReleaseProvider::Github,
+                self.release.github.as_ref().map(|target| {
+                    (
+                        target.repo.clone(),
+                        target.api_base.clone(),
+                        target.token_secret.clone(),
+                        target.target_branch.clone(),
+                        target.body_from_changelog,
+                    )
+                }),
+            ),
+        };
+        let Some((repo, api_base, token_secret, target_branch, body_from_changelog)) = target
+        else {
+            return Ok(None);
+        };
+        validate_owner_repo(
+            match provider {
+                ReleaseProvider::Forgejo => "simit project config: [release.codeberg].repo",
+                ReleaseProvider::Github => "simit project config: [release.github].repo",
+            },
+            &repo,
+        )?;
+        Ok(Some(ResolvedReleaseTarget {
+            provider,
+            repo,
+            api_base,
+            token_secret,
+            target_branch,
+            body_from_changelog,
         }))
     }
 
@@ -2665,6 +2886,7 @@ fn validate_runner_label_opt(name: &str, value: Option<&str>) -> Result<()> {
 }
 
 fn set_ci_table(table: &mut Table, ci: &CiConfig) {
+    set_optional_string(table, "provider", ci.provider.map(ci_provider_name));
     set_optional_string(table, "platform", ci.platform.map(Platform::as_str));
     set_optional_string(table, "runtime", ci.runtime.map(runtime_name));
     set_optional_string(table, "runner", ci.runner.as_deref());
@@ -2688,6 +2910,60 @@ fn set_ci_table(table: &mut Table, ci: &CiConfig) {
     set_bool(table, "om_ci_augment", ci.om_ci_augment);
     set_optional_string(table, "omnix_ref", ci.omnix_ref.as_deref());
     set_optional_pages_table(table, ci.pages.as_ref());
+    set_crow_table(table, &ci.crow);
+}
+
+fn set_crow_table(table: &mut Table, crow: &CrowCiConfig) {
+    if *crow == CrowCiConfig::default() {
+        table.remove("crow");
+        return;
+    }
+    let mut crow_table = Table::new();
+    crow_table.set_implicit(false);
+    if crow.format != CrowWorkflowFormat::Yaml {
+        crow_table["format"] = value(match crow.format {
+            CrowWorkflowFormat::Yaml => "yaml",
+            CrowWorkflowFormat::Jsonnet => "jsonnet",
+        });
+    }
+    if let Some(image) = &crow.image {
+        crow_table["image"] = value(image.as_str());
+    }
+    if let Some(nix_image) = &crow.nix_image {
+        crow_table["nix_image"] = value(nix_image.as_str());
+    }
+    if let Some(platform) = &crow.platform {
+        crow_table["platform"] = value(platform.as_str());
+    }
+    if !crow.labels.is_empty() {
+        set_string_map(&mut crow_table, "labels", &crow.labels);
+    }
+    if let Some(workspace_base) = &crow.workspace_base {
+        crow_table["workspace_base"] = value(workspace_base.as_str());
+    }
+    set_bool(&mut crow_table, "skip_clone", crow.skip_clone);
+    if !crow.variables.is_empty() {
+        let mut variables = Table::new();
+        variables.set_implicit(false);
+        for (name, variable) in &crow.variables {
+            let mut item = Table::new();
+            item.set_implicit(false);
+            set_optional_string(&mut item, "description", variable.description.as_deref());
+            set_string_array(&mut item, "options", &variable.options);
+            set_optional_string(&mut item, "default", variable.default.as_deref());
+            set_bool(&mut item, "required", variable.required);
+            variables[name] = Item::Table(item);
+        }
+        crow_table["variables"] = Item::Table(variables);
+    }
+    table["crow"] = Item::Table(crow_table);
+}
+
+fn ci_provider_name(provider: CiProvider) -> &'static str {
+    match provider {
+        CiProvider::Actions => "actions",
+        CiProvider::Crow => "crow",
+    }
 }
 
 fn set_optional_pages_table(table: &mut Table, pages: Option<&CodebergPagesConfig>) {

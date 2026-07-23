@@ -9,7 +9,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use serde_json::Value;
 
 use crate::cargo;
-use crate::cli::ReleaseCommand;
+use crate::cli::{Platform, ReleaseCommand};
 use crate::config::{
     AptOverrides, AurOverrides, ChocolateyOverrides, CoprOverrides, HomebrewOverrides,
     ProjectConfig, ScoopOverrides,
@@ -21,11 +21,12 @@ const MINISIGN_PASSWORD: &str = "MINISIGN_PASSWORD";
 const DEFAULT_TOKEN_PATH: &str = ".local/share/berg-cli/codeberg.org/TOKEN";
 
 pub fn init(command: ReleaseCommand) -> Result<()> {
+    let platform = command.platform.unwrap_or(Platform::Forgejo);
     let metadata = cargo::metadata_for_current_dir()?;
     let workspace_root = metadata.workspace_root.as_std_path();
     let repo = required_repo(&command)?;
     validate_repo(repo)?;
-    let token = read_token(&command)?;
+    let token = read_token(&command, platform)?;
     let public_key_path = workspace_root.join(command.minisign_public_key.as_std_path());
 
     let minisign = if command.rotate_minisign {
@@ -35,11 +36,20 @@ pub fn init(command: ReleaseCommand) -> Result<()> {
     };
     verify_minisign_pair(&minisign.secret_key, &minisign.password, &public_key_path)?;
 
-    let client = ForgejoClient::new(&command.secrets_api_base, repo, token)?;
-    client.put_secret(MINISIGN_SECRET_KEY, &minisign.secret_key)?;
-    client.put_secret(MINISIGN_PASSWORD, &minisign.password)?;
-
-    let names = client.list_repo_secret_names()?;
+    let names = match platform {
+        Platform::Forgejo => {
+            let client = ForgejoClient::new(&command.secrets_api_base, repo, token)?;
+            client.put_secret(MINISIGN_SECRET_KEY, &minisign.secret_key)?;
+            client.put_secret(MINISIGN_PASSWORD, &minisign.password)?;
+            client.list_repo_secret_names()?
+        }
+        Platform::Github => {
+            let client = GithubClient::new(repo, token)?;
+            client.put_secret(MINISIGN_SECRET_KEY, &minisign.secret_key)?;
+            client.put_secret(MINISIGN_PASSWORD, &minisign.password)?;
+            client.list_repo_secret_names()?
+        }
+    };
     require_secret(&names, MINISIGN_SECRET_KEY)?;
     require_secret(&names, MINISIGN_PASSWORD)?;
     println!("uploaded release secrets for {repo}: {MINISIGN_SECRET_KEY}, {MINISIGN_PASSWORD}");
@@ -47,36 +57,47 @@ pub fn init(command: ReleaseCommand) -> Result<()> {
 }
 
 pub fn check(command: ReleaseCommand) -> Result<()> {
+    let platform = command.platform.unwrap_or(Platform::Forgejo);
     let repo = required_repo(&command)?;
     validate_repo(repo)?;
-    let token = read_token(&command)?;
-    let client = ForgejoClient::new(&command.secrets_api_base, repo, token)?;
-    let mut names = client.list_repo_secret_names()?;
+    let token = read_token(&command, platform)?;
+    let mut names = match platform {
+        Platform::Forgejo => {
+            ForgejoClient::new(&command.secrets_api_base, repo, token)?.list_repo_secret_names()?
+        }
+        Platform::Github => GithubClient::new(repo, token)?.list_repo_secret_names()?,
+    };
     names.extend(command.assumed_account_secrets.iter().cloned());
 
     require_secret(&names, MINISIGN_SECRET_KEY)?;
     require_secret(&names, MINISIGN_PASSWORD)?;
-    require_secret(&names, "codeberg_token")?;
+    if platform == Platform::Forgejo {
+        require_secret(&names, "codeberg_token")?;
+    }
     println!("release secret names are configured for {repo}");
     Ok(())
 }
 
-pub fn contract(_command: ReleaseCommand) -> Result<()> {
+pub fn contract(command: ReleaseCommand) -> Result<()> {
     let metadata = cargo::metadata_for_current_dir()?;
     let workspace_root = metadata.workspace_root.as_std_path();
     let package = cargo::representative_package(&metadata, None)?;
     let cfg = ProjectConfig::load(workspace_root)?;
 
-    let codeberg = cfg.resolve_codeberg_release()?;
+    let platform = command
+        .platform
+        .or(cfg.ci.platform)
+        .unwrap_or(Platform::Forgejo);
+    let release = cfg.resolve_release_target(platform)?;
     let aur = cfg
         .aur
         .as_ref()
-        .map(|_| cfg.resolve_aur(AurOverrides::default(), &package))
+        .map(|_| cfg.resolve_aur_for_platform(AurOverrides::default(), &package, platform))
         .transpose()?;
     let copr = cfg
         .copr
         .as_ref()
-        .map(|_| cfg.resolve_copr(CoprOverrides::default(), &package))
+        .map(|_| cfg.resolve_copr_for_platform(CoprOverrides::default(), &package, platform))
         .transpose()?;
     let apt = cfg
         .apt
@@ -99,12 +120,13 @@ pub fn contract(_command: ReleaseCommand) -> Result<()> {
         .map(|_| cfg.resolve_chocolatey(ChocolateyOverrides::default(), &package))
         .transpose()?;
     let inputs = ReleaseWorkflowInputs {
+        platform,
         runner: "",
         preinstalled_nix: false,
         publish_enforcement: cfg.release.publish.enforcement,
         artifacts: &cfg.release.artifacts,
         smoke_command: cfg.release.smoke.command.as_deref(),
-        codeberg: codeberg.as_ref(),
+        release: release.as_ref(),
         attic: cfg.release.attic.as_ref(),
         aur: aur.as_ref(),
         copr: copr.as_ref(),
@@ -221,12 +243,25 @@ fn validate_repo(repo: &str) -> Result<()> {
     Ok(())
 }
 
-fn read_token(command: &ReleaseCommand) -> Result<String> {
-    if let Ok(token) = std::env::var("CODEBERG_TOKEN") {
-        return clean_token(token);
-    }
-    if let Ok(token) = std::env::var("FORGEJO_TOKEN") {
-        return clean_token(token);
+fn read_token(command: &ReleaseCommand, platform: Platform) -> Result<String> {
+    let token_names = match platform {
+        Platform::Forgejo => [
+            "CODEBERG_TOKEN",
+            "FORGEJO_TOKEN",
+            "GITEA_TOKEN",
+            "GITHUB_TOKEN",
+        ],
+        Platform::Github => [
+            "GITHUB_TOKEN",
+            "CODEBERG_TOKEN",
+            "FORGEJO_TOKEN",
+            "GITEA_TOKEN",
+        ],
+    };
+    for name in token_names {
+        if let Ok(token) = std::env::var(name) {
+            return clean_token(token);
+        }
     }
     if let Ok(token) = std::env::var("GITEA_TOKEN") {
         return clean_token(token);
@@ -651,6 +686,77 @@ impl ForgejoClient {
 
     fn curl_config(&self) -> String {
         format!("header = \"Authorization: token {}\"\n", self.token)
+    }
+}
+
+struct GithubClient {
+    repo: String,
+    token: String,
+}
+
+impl GithubClient {
+    fn new(repo: &str, token: String) -> Result<Self> {
+        if token.trim().is_empty() {
+            bail!("GitHub token is empty");
+        }
+        Ok(Self {
+            repo: repo.to_owned(),
+            token,
+        })
+    }
+
+    fn put_secret(&self, name: &str, value: &str) -> Result<()> {
+        let mut child = Command::new("gh")
+            .args([
+                "secret", "set", name, "--repo", &self.repo, "--app", "actions",
+            ])
+            .env("GH_TOKEN", &self.token)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .with_context(
+                || "starting gh secret set; install GitHub CLI for GitHub secret management",
+            )?;
+        child
+            .stdin
+            .take()
+            .expect("piped stdin")
+            .write_all(value.as_bytes())?;
+        let output = child.wait_with_output()?;
+        if !output.status.success() {
+            bail!(
+                "uploading secret {name} to {} failed: {}",
+                self.repo,
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        Ok(())
+    }
+
+    fn list_repo_secret_names(&self) -> Result<BTreeSet<String>> {
+        let output = Command::new("gh")
+            .args([
+                "secret", "list", "--repo", &self.repo, "--app", "actions", "--json", "name",
+                "--jq", ".[].name",
+            ])
+            .env("GH_TOKEN", &self.token)
+            .output()
+            .with_context(
+                || "starting gh secret list; install GitHub CLI for GitHub secret management",
+            )?;
+        if !output.status.success() {
+            bail!(
+                "listing release secrets for {} failed: {}",
+                self.repo,
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        Ok(String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|name| !name.trim().is_empty())
+            .map(str::to_owned)
+            .collect())
     }
 }
 

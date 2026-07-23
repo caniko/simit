@@ -6,8 +6,8 @@ use anyhow::{Result, bail};
 use serde::Deserialize;
 
 use crate::cargo::Package;
-use crate::cli::{Platform, Runtime};
-use crate::config::CiComponent;
+use crate::cli::{CiProvider, Platform, Runtime};
+use crate::config::{CiComponent, CrowCiConfig};
 use crate::config::{
     JetbrainsCredentialSource, ResolvedJetbrains, ResolvedVscode, VscodePatSource,
 };
@@ -237,7 +237,9 @@ pub struct SelfCheckOptions<'a> {
 }
 
 pub struct FilesRequest<'a> {
+    pub provider: CiProvider,
     pub platform: Platform,
+    pub crow: &'a CrowCiConfig,
     pub runtime: Runtime,
     pub package: &'a Package,
     pub file_suffix: Option<&'a str>,
@@ -259,8 +261,23 @@ impl Default for HomebrewPlatformSet {
 }
 
 pub fn files(request: FilesRequest<'_>) -> Result<Vec<GeneratedFile>> {
+    if request.provider == CiProvider::Crow {
+        return crate::render::crow::files(crate::render::crow::FilesRequest {
+            format: request.crow.format,
+            crow: request.crow,
+            runtime: request.runtime,
+            package: request.package,
+            file_suffix: request.file_suffix,
+            self_check: request.self_check,
+            runners: request.runners,
+            options: request.options,
+            step_runners: request.step_runners,
+        });
+    }
     let FilesRequest {
+        provider: _,
         platform,
+        crow: _,
         runtime,
         package,
         file_suffix,
@@ -318,13 +335,12 @@ pub fn codeberg_pages_file(
     runner: &ResolvedRunner,
     pages: &CodebergPagesOptions,
 ) -> Result<GeneratedFile> {
-    if platform != Platform::Forgejo {
-        bail!("Codeberg Pages workflow generation is forgejo-only");
-    }
-
     Ok(GeneratedFile {
         relative_path: PathBuf::from(platform.workflow_dir()).join("pages.yaml"),
-        content: codeberg_pages_workflow(runner, pages),
+        content: match platform {
+            Platform::Forgejo => codeberg_pages_workflow(runner, pages),
+            Platform::Github => github_pages_workflow(runner, pages),
+        },
     })
 }
 
@@ -334,9 +350,6 @@ pub fn vscode_extension_file(
     runner: &ResolvedRunner,
     vscode: &ResolvedVscode,
 ) -> Result<GeneratedFile> {
-    if platform != Platform::Forgejo {
-        bail!("VS Code extension workflow generation is forgejo-only");
-    }
     if runtime != Runtime::Nix {
         bail!("VS Code extension workflow generation requires --runtime nix");
     }
@@ -353,9 +366,6 @@ pub fn jetbrains_plugin_file(
     runner: &ResolvedRunner,
     jetbrains: &ResolvedJetbrains,
 ) -> Result<GeneratedFile> {
-    if platform != Platform::Forgejo {
-        bail!("JetBrains plugin workflow generation is forgejo-only");
-    }
     if runtime != Runtime::Nix {
         bail!("JetBrains plugin workflow generation requires --runtime nix");
     }
@@ -442,6 +452,37 @@ fn codeberg_pages_workflow(runner: &ResolvedRunner, pages: &CodebergPagesOptions
     workflow
 }
 
+fn github_pages_workflow(runner: &ResolvedRunner, pages: &CodebergPagesOptions) -> String {
+    let mut workflow = String::new();
+    push_generated_workflow_header(&mut workflow);
+    workflow.push_str("name: pages\n\n");
+    workflow.push_str("'on':\n  push:\n    branches:\n      - ");
+    workflow.push_str(&pages.source_branch);
+    workflow.push_str("\n  workflow_dispatch:\n\n");
+    push_concurrency(&mut workflow);
+    workflow.push_str("permissions:\n  contents: read\n  pages: write\n  id-token: write\n\n");
+    workflow.push_str("jobs:\n  publish:\n    runs-on: ");
+    workflow.push_str(&runs_on(runner));
+    workflow.push_str("\n    env:\n      NIX_CONFIG: \"experimental-features = nix-command flakes\"\n    steps:\n");
+    push_checkout_step(&mut workflow, Platform::Github);
+    push_install_nix_step(&mut workflow, Platform::Github);
+    workflow.push_str("      - name: Build Pages site\n        run: |\n          nix build ");
+    workflow.push_str(&shell_word(&pages.site_output));
+    workflow.push_str(" --no-link --out-link result-pages-site\n");
+    if let Some(canonical_domain) = &pages.canonical_domain {
+        workflow.push_str("          test -f result-pages-site/.domains\n          grep -qx ");
+        workflow.push_str(&shell_word(canonical_domain));
+        workflow.push_str(" result-pages-site/.domains\n");
+    }
+    workflow.push_str("      - name: Upload Pages artifact\n        uses: ");
+    workflow.push_str(&github_action_ref("actions/upload-pages-artifact", "v3"));
+    workflow.push_str("\n        with:\n          path: result-pages-site\n");
+    workflow.push_str("      - name: Deploy GitHub Pages\n        id: deployment\n        uses: ");
+    workflow.push_str(&github_action_ref("actions/deploy-pages", "v4"));
+    workflow.push('\n');
+    workflow
+}
+
 fn vscode_extension_workflow(
     platform: Platform,
     runner: &ResolvedRunner,
@@ -454,7 +495,7 @@ fn vscode_extension_workflow(
     workflow.push_str("  push:\n");
     workflow.push_str("    tags: [\"[0-9]*.[0-9]*.[0-9]*\"]\n");
     workflow.push_str("  workflow_dispatch:\n\n");
-    push_codeberg_concurrency(&mut workflow);
+    push_platform_concurrency(&mut workflow, platform);
     workflow.push_str("jobs:\n");
     workflow.push_str("  publish:\n");
     workflow.push_str("    runs-on: ");
@@ -511,7 +552,7 @@ fn jetbrains_plugin_workflow(
     workflow.push_str("        description: Plugin version to publish (for example 0.2.1)\n");
     workflow.push_str("        required: true\n");
     workflow.push_str("        type: string\n\n");
-    push_codeberg_concurrency(&mut workflow);
+    push_platform_concurrency(&mut workflow, platform);
     workflow.push_str("jobs:\n");
     workflow.push_str("  publish:\n");
     workflow.push_str("    runs-on: ");
@@ -1879,7 +1920,7 @@ fn artifacts_workflow(
         push_release_smoke_step(&mut workflow, command);
     }
     if let Some(homebrew) = &options.homebrew {
-        push_homebrew_publish_step(&mut workflow, homebrew);
+        push_homebrew_publish_step(&mut workflow, platform, homebrew);
     }
     if has_windows_packagers {
         let windows_runner = runners
@@ -2259,7 +2300,7 @@ fn push_ps_arg(workflow: &mut String, flag: &str, value: &str) {
     workflow.push_str(" `\n");
 }
 
-fn push_homebrew_publish_step(workflow: &mut String, opts: &HomebrewOptions) {
+fn push_homebrew_publish_step(workflow: &mut String, platform: Platform, opts: &HomebrewOptions) {
     let tap_repo = homebrew_tap_repo(&opts.tap_url);
     let archives = homebrew_archives(opts);
     let binaries = if opts.binaries.is_empty() {
@@ -2287,7 +2328,9 @@ fn push_homebrew_publish_step(workflow: &mut String, opts: &HomebrewOptions) {
     );
     workflow.push_str("            exit 1\n");
     workflow.push_str("          fi\n\n");
-    workflow.push_str("          VERSION=\"$CODEBERG_REF_NAME\"\n");
+    workflow.push_str(
+        "          VERSION=\"${GITHUB_REF_NAME:-${FORGE_REF_NAME:-${CODEBERG_REF_NAME:-}}}\"\n",
+    );
     workflow.push_str("          for artifact in \\\n");
     for (index, archive) in archives.iter().enumerate() {
         workflow.push_str("            \"release/");
@@ -2334,7 +2377,8 @@ fn push_homebrew_publish_step(workflow: &mut String, opts: &HomebrewOptions) {
         workflow.push_str("            --archive \"");
         workflow.push_str(archive.key);
         workflow.push('=');
-        workflow.push_str("https://codeberg.org/");
+        workflow.push_str(platform.web_base_url());
+        workflow.push('/');
         workflow.push_str(&opts.download_repo);
         workflow.push_str("/releases/download/${VERSION}/");
         workflow.push_str(&archive.file_name);
@@ -2623,6 +2667,13 @@ fn push_codeberg_concurrency(workflow: &mut String) {
     workflow.push_str("concurrency:\n");
     workflow.push_str("  group: ${{ codeberg.workflow }}-${{ codeberg.ref }}\n");
     workflow.push_str("  cancel-in-progress: true\n\n");
+}
+
+fn push_platform_concurrency(workflow: &mut String, platform: Platform) {
+    match platform {
+        Platform::Forgejo => push_codeberg_concurrency(workflow),
+        Platform::Github => push_concurrency(workflow),
+    }
 }
 
 fn push_generated_workflow_header(workflow: &mut String) {
@@ -3352,7 +3403,7 @@ fn publish_step(package: &Package, command: &str, package_scoped: bool) -> Strin
               exit 1
             fi
           fi
-          if ! status="$(curl --retry 3 -sS -o /dev/null -w '%{{http_code}}' -A 'simit init-ci publish check' "https://crates.io/api/v1/crates/${{crate_name}}/${{version}}")"; then
+          if ! status="$(curl --retry 3 -sS -o /dev/null -w '%{{http_code}}' -A 'simit init ci publish check' "https://crates.io/api/v1/crates/${{crate_name}}/${{version}}")"; then
             status=000
           fi
           case "$status" in

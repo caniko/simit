@@ -1,0 +1,65 @@
+# Native GitHub Actions equivalent of the generated Forgejo publish workflow.
+# Before creating and pushing a release tag, run `simit changelog release <version>` locally.
+name: Publish Crate
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    env:
+      NIX_CONFIG: "experimental-features = nix-command flakes"
+      XDG_CACHE_HOME: "/tmp/.cache"
+      CARGO_HOME: "/tmp/.cargo"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - name: Install Nix
+        uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31
+      - name: Add cargo bin to PATH
+        run: echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
+      - name: Validate signed release tag
+        run: |
+          set -euo pipefail
+          tag="$GITHUB_REF_NAME"
+          printf '%s\n' "$tag" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'
+          version="$(nix develop -c cargo pkgid -p simit | awk -F'[#@]' 'NF > 1 {print $NF}' | tail -n 1)"
+          test "$tag" = "$version"
+          test -s keys/maintainers.gpg
+          GNUPGHOME="$(mktemp -d)"
+          export GNUPGHOME
+          trap 'rm -rf "$GNUPGHOME"' EXIT
+          chmod 700 "$GNUPGHOME"
+          gpg --batch --import keys/maintainers.gpg
+          git fetch --force --tags origin "refs/tags/${tag}:refs/tags/${tag}"
+          git verify-tag "$tag"
+      - name: Check flake
+        run: nix flake check
+      - name: Test
+        run: nix develop -c cargo test
+      - name: Build docs
+        run: nix develop .#docs -c cargo doc --no-deps --all-features
+      - name: Clippy
+        run: nix develop -c cargo clippy --all-targets -- --deny warnings
+      - name: Dry-run publish
+        run: nix develop -c cargo publish --dry-run
+      - name: Publish
+        env:
+          CRATES_IO_API_TOKEN: ${{ secrets.CRATES_IO_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CRATES_IO_API_TOKEN:-}" ] && [ -z "${CARGO_REGISTRY_TOKEN:-}" ]; then
+            echo "CRATES_IO_API_TOKEN is required to publish to crates.io" >&2
+            exit 1
+          fi
+          export CARGO_REGISTRY_TOKEN="${CARGO_REGISTRY_TOKEN:-$CRATES_IO_API_TOKEN}"
+          nix develop -c cargo publish

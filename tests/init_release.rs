@@ -164,6 +164,51 @@ fn bootstraps_release_workflow_for_enabled_channels() {
 }
 
 #[test]
+fn bootstraps_github_release_workflow_with_native_permissions_and_uploads() {
+    let project = init_package("github-demo");
+    let config_path = project.path().join("simit.toml");
+    let config = read(&config_path)
+        .replace(
+            "[release.codeberg]\nrepo = \"example/github-demo\"",
+            "[release.github]\nrepo = \"example/github-demo\"",
+        )
+        .replace(
+            "[release.artifacts]",
+            "[ci]\nplatform = \"github\"\n\n[release.artifacts]",
+        )
+        .replace(
+            "[aur]",
+            "[homebrew]\ntap_url = \"https://example.com/homebrew-github-demo.git\"\ndescription = \"Demo\"\nhomepage = \"https://example.com\"\nlicense = \"MIT\"\ndownload_repo = \"example/github-demo\"\n\n[aur]",
+        );
+    fs::write(config_path, config).unwrap();
+
+    let output = simit()
+        .current_dir(project.path())
+        .args(["init", "release", "--platform", "github"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let workflow = read(&project.path().join(".github/workflows/release.yml"));
+    assert!(workflow.contains("Publish GitHub release"));
+    assert!(workflow.contains("GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}"));
+    assert!(workflow.contains("contents: write"));
+    assert!(workflow.contains("id-token: write"));
+    assert!(workflow.contains("upload_url=$(jq -r '.upload_url' release.json"));
+    assert!(workflow.contains("Authorization: Bearer $GITHUB_TOKEN"));
+    assert!(!workflow.contains("enable-openid-connect: true"));
+    assert!(!workflow.contains("Publish Codeberg release"));
+    assert!(workflow.contains("https://github.com/example/github-demo"));
+    assert!(!workflow.contains("https://codeberg.org/example/github-demo"));
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("git add .github/workflows/release.yml")
+    );
+}
+
+#[test]
 fn bootstraps_explicit_nix_release_bundle() {
     let project = init_package("bundle-demo");
     let config_path = project.path().join("simit.toml");
@@ -187,6 +232,31 @@ fn bootstraps_explicit_nix_release_bundle() {
     assert!(workflow.contains("nix build '.#release-bundle'"));
     assert!(workflow.contains("expected exactly one release manifest from Nix bundles"));
     assert!(workflow.contains(".schemaVersion == 2"));
+}
+
+#[test]
+fn prebuild_binaries_enables_conventional_release_bundle() {
+    let project = init_package("prebuilt-demo");
+    let config_path = project.path().join("simit.toml");
+    let config = read(&config_path).replace(
+        "runner = \"atlas\"\n",
+        "runner = \"atlas\"\nprebuild_binaries = true\n",
+    );
+    fs::write(config_path, config).unwrap();
+
+    let output = simit()
+        .current_dir(project.path())
+        .args(["init", "release"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let workflow = read(&project.path().join(".forgejo/workflows/release.yml"));
+    assert!(workflow.contains("nix build '.#release-bundle'"));
+    assert!(workflow.contains("expected exactly one release manifest from Nix bundles"));
 }
 
 #[test]
