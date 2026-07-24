@@ -36,7 +36,7 @@
             const path_to_root = "";
             const default_light_theme = "coal";
             const default_dark_theme = "coal";
-            window.path_to_searchindex_js = "searchindex-9298d92a.js";
+            window.path_to_searchindex_js = "searchindex-462a4537.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-507d1757.js"></script>
@@ -795,8 +795,13 @@ workflow in sync with project config. The Linux channels are:</p>
 <li>COPR: <code>simit init copr</code> writes the RPM spec and <code>.copr/Makefile</code>.</li>
 <li>apt: <code>simit init apt</code> writes <code>dist/apt/conf/distributions</code> for reprepro.</li>
 <li>Release workflow: <code>simit init release</code> writes
-<code>.forgejo/workflows/release.yml</code> for artifact build, Codeberg upload, and
-configured channel publish steps.</li>
+<code>.forgejo/workflows/release.yml</code> by default, or
+<code>.github/workflows/release.yml</code> for GitHub, for artifact build, hosted release
+upload, and configured channel publish steps.</li>
+<li>Crow: <code>simit init ci --ci-provider crow</code> and
+<code>simit init release --ci-provider crow</code> write project-side Crow v6.1
+workflows under <code>.crow</code> without invoking a Crow CLI or server. YAML is the
+default; set <code>[ci.crow].format = "jsonnet"</code> for Jsonnet output.</li>
 </ul>
 <p>All four init commands support <code>--check</code>, <code>--diff</code>, and <code>--print</code>.</p>
 <pre><code class="language-sh">simit init aur
@@ -804,6 +809,8 @@ simit init aur --check --diff
 simit init copr
 simit init apt
 simit init release
+simit init ci --ci-provider crow --runtime nix
+simit init release --ci-provider crow
 </code></pre>
 <p>Render the same channel templates to stdout for inspection:</p>
 <pre><code class="language-sh">simit dist aur render
@@ -814,8 +821,19 @@ simit dist apt render
 <p>The same schema can live in <code>simit.toml</code>, root Cargo metadata under
 <code>[workspace.metadata.simit]</code> or <code>[package.metadata.simit]</code>, or flake
 <code>outputs.simitConfig</code>. Keep exactly one simit project config source in a repo.</p>
-<pre><code class="language-toml">[release.codeberg]
+<pre><code class="language-toml">[ci]
+provider = "crow"
+
+[ci.crow]
+format = "yaml"
+nix_image = "ghcr.io/cachix/devenv:latest"
+
+[release.codeberg]
 repo = "example/foo"
+
+# Use this instead for GitHub releases:
+# [release.github]
+# repo = "example/foo"
 
 [release.artifacts]
 runner = "atlas"
@@ -834,9 +852,17 @@ project = "example/foo"
 [apt]
 repo_url = "ssh://git@codeberg.org/example/foo-apt.git"
 </code></pre>
+<p>For an rs-harbor project whose flake exposes the conventional
+<code>packages.&lt;system&gt;.release-bundle</code>, the release artifact section can instead
+use the simple opt-in:</p>
+<pre><code class="language-toml">[release.artifacts]
+prebuild_binaries = true
+</code></pre>
+<p>An explicit <code>nix_bundle_attrs</code> list still takes precedence when a project
+publishes multiple bundles.</p>
 <p>The public distribution and release sections are <code>[aur]</code>, <code>[copr]</code>, <code>[apt]</code>,
 <code>[homebrew]</code>, <code>[chocolatey]</code>, <code>[scoop]</code>, <code>[flatpak]</code>, <code>[winget]</code>,
-<code>[release.codeberg]</code>, <code>[release.artifacts]</code>, <code>[release.attic]</code>,
+<code>[release.codeberg]</code>, <code>[release.github]</code>, <code>[release.artifacts]</code>, <code>[release.attic]</code>,
 <code>[release.announce]</code>, and <code>[release.windows_signing]</code>.</p>
 <h2 id="release-secrets"><a class="header" href="#release-secrets">Release Secrets</a></h2>
 <p>Generated release workflows name required or optional secrets in the workflow
@@ -852,6 +878,8 @@ header. These names are configurable:</p>
 <code>apt_repo_ssh_key</code>.</li>
 <li>Codeberg release upload: <code>[release.codeberg].token_secret</code> defaults to
 <code>codeberg_token</code>.</li>
+<li>GitHub release upload: <code>[release.github].token_secret</code> defaults to
+<code>GITHUB_TOKEN</code>.</li>
 <li>Homebrew: <code>[homebrew].tap_token_secret</code> defaults to <code>homebrew_tap_token</code>.</li>
 <li>Scoop: <code>[scoop].bucket_token_secret</code> defaults to <code>SCOOP_BUCKET_TOKEN</code>.</li>
 <li>Chocolatey: <code>[chocolatey].api_key_secret</code> defaults to <code>chocolatey_api_key</code>;
@@ -869,8 +897,9 @@ matching uppercase environment-style names.</li>
 and <code>WINDOWS_SIGNING_SUBJECT</code>.</li>
 </ul>
 <h2 id="release-workflow"><a class="header" href="#release-workflow">Release Workflow</a></h2>
-<p><code>simit init release</code> requires <code>[release.codeberg]</code> to upload artifacts to a
-Codeberg or Forgejo release. <code>[release.artifacts]</code> controls the runner, Nix
+<p><code>simit init release</code> uses <code>[release.codeberg]</code> for Forgejo/Codeberg or
+<code>[release.github]</code> for GitHub, selected with <code>--platform</code> (or <code>[ci].platform</code>).
+<code>[release.artifacts]</code> controls the runner, Nix
 substituters, artifact build commands, SBOM commands, checksum globs, signing,
 and the committed minisign public key path. Optional <code>[release.attic]</code>,
 <code>[release.announce]</code>, and <code>[release.windows_signing]</code> sections add cache push,
@@ -879,14 +908,14 @@ stable-release announcements, and Authenticode signing steps.</p>
 apt, Homebrew, Scoop, Chocolatey, Flatpak, and winget are stable-release-only
 publish steps; COPR switches to its testing project for prerelease tags when
 configured.</p>
-<p>Codeberg release assets are the primary release product. The generated workflow
-therefore fails early for missing Codeberg and signing credentials, but treats
+<p>Hosted release assets are the primary release product. The generated workflow
+therefore fails early for missing hosted-release and signing credentials, but treats
 runner-side cache and downstream packaging as secondary. Attic cache pushes skip
 with a warning when the runner token is unavailable. Debian package generation is
 also best-effort: it attempts to build <code>.deb</code> assets before checksums and
-Codeberg upload, but it warns and continues when the runner container cannot
+hosted-release upload, but it warns and continues when the runner container cannot
 provide a mount-capable debootstrap/chroot environment. In that case the
-Codeberg release still publishes the artifacts that were actually produced, and
+the hosted release still publishes the artifacts that were actually produced, and
 the apt repository publish step skips because there are no <code>.deb</code> files.</p>
 <p>For projects that require <code>.deb</code> assets on every release, validate the runner
 contract before tagging:</p>
@@ -903,7 +932,7 @@ simit-managed CI workflows ignore tags explicitly so a release tag does not queu
 per-crate checks ahead of the artifact publisher on small trusted runner pools.
 Generated release scripts also avoid implicit shell state such as <code>OLDPWD</code>; under
 <code>set -u</code>, those variables can be unset in Forgejo runner shells and must not sit
-between successful artifact builds and Codeberg upload.</p>
+between successful artifact builds and hosted-release upload.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="windows-packaging"><a class="header" href="#windows-packaging">Windows Packaging</a></h1>
 <p><code>simit</code> supports Chocolatey packages and Scoop bucket manifests for tagged
@@ -1164,6 +1193,12 @@ trust roots and configure signing secrets. See
 <a href="#release-integrity">Release Integrity</a> for the
 <code>keys/minisign.pub</code>, minisign, cosign, and SLSA requirements generated by
 <code>simit init ci --with-artifacts</code>.</p>
+<p>For Nix projects using rs-harbor, configure an explicit
+<code>[release.artifacts].nix_bundle_attrs</code> list. Each configured output must be a
+flat bundle, and the complete configured set must produce exactly one
+versioned <code>*-release-manifest.json</code>; Simit validates its schema and release
+version before checksums and hosted-release upload. Project-specific
+<code>build_commands</code> remain additive for formats outside this contract.</p>
 <p>Release candidate validation commands:</p>
 <pre><code class="language-sh">nix flake check --keep-going --print-build-logs
 nix develop --command cargo publish --dry-run
