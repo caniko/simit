@@ -144,7 +144,7 @@ pub fn credential_contract(inputs: &ReleaseWorkflowInputs<'_>) -> Vec<ReleaseCre
             &release.token_secret,
             ReleaseCredentialScope::User,
             match release.provider {
-                ReleaseProvider::Forgejo => "codeberg",
+                ReleaseProvider::Forgejo => "forgejo",
                 ReleaseProvider::Github => "github",
             },
             true,
@@ -395,8 +395,8 @@ const TAG_REGEX: &str = r"^[0-9]+\.[0-9]+\.[0-9]+(-(rc|beta|alpha)\.[0-9]+)?$";
 const PRERELEASE_REGEX: &str = r"-(rc|beta|alpha)\.[0-9]+$";
 
 /// Resolve `VERSION` from whichever forge ref-name env var is set.
-const VERSION_FROM_REF: &str = r#"VERSION="${GITHUB_REF_NAME:-${FORGE_REF_NAME:-${CODEBERG_REF_NAME:-}}}"
-          if [ -z "$VERSION" ]; then ref="${GITHUB_REF:-${FORGE_REF:-${CODEBERG_REF:-}}}"; VERSION="${ref#refs/tags/}"; fi"#;
+const VERSION_FROM_REF: &str = r#"VERSION="${GITHUB_REF_NAME:-${FORGE_REF_NAME:-${FORGEJO_REF_NAME:-}}}"
+          if [ -z "$VERSION" ]; then ref="${GITHUB_REF:-${FORGE_REF:-${FORGEJO_REF:-}}}"; VERSION="${ref#refs/tags/}"; fi"#;
 
 pub fn render(inputs: &ReleaseWorkflowInputs<'_>) -> String {
     let mut w = String::new();
@@ -432,6 +432,7 @@ pub fn render(inputs: &ReleaseWorkflowInputs<'_>) -> String {
             w.push_str("      id-token: write\n");
         }
         Platform::Forgejo => w.push_str("    enable-openid-connect: true\n"),
+        Platform::Gitlab => w.push_str("    # GitLab release rendering is unsupported\n"),
     }
     if inputs.preinstalled_nix {
         push_preinstalled_nix_env(&mut w, inputs.artifacts);
@@ -832,6 +833,9 @@ fn push_release_credentials_preflight(w: &mut String, inputs: &ReleaseWorkflowIn
 }
 
 fn credential_env_name(credential: &ReleaseCredential) -> String {
+    if credential.channel == "forgejo" {
+        return "FORGEJO_TOKEN".to_owned();
+    }
     let mut out = credential
         .name
         .chars()
@@ -1052,8 +1056,8 @@ fn push_sign(
     let repo_url = release
         .map(|c| {
             let host = match c.provider {
-                ReleaseProvider::Forgejo => "https://codeberg.org",
-                ReleaseProvider::Github => "https://github.com",
+                ReleaseProvider::Forgejo => forgejo_web_base(&c.api_base),
+                ReleaseProvider::Github => "https://github.com".to_owned(),
             };
             format!("{host}/{}", c.repo)
         })
@@ -1145,9 +1149,18 @@ fn push_hosted_release(
     artifacts: &ArtifactsConfig,
 ) {
     match target.provider {
-        ReleaseProvider::Forgejo => push_codeberg_release(w, target, artifacts),
+        ReleaseProvider::Forgejo => push_forgejo_release(w, target, artifacts),
         ReleaseProvider::Github => push_github_release(w, target, artifacts),
     }
+}
+
+fn forgejo_web_base(api_base: &str) -> String {
+    api_base
+        .trim_end_matches('/')
+        .strip_suffix("/api/v1")
+        .or_else(|| api_base.trim_end_matches('/').strip_suffix("/api"))
+        .unwrap_or(api_base.trim_end_matches('/'))
+        .to_owned()
 }
 
 fn push_github_release(
@@ -1228,24 +1241,24 @@ fn push_github_release(
     w.push_str("{files[@]}\" | LC_ALL=C sort -u)\n          SCRIPT\n");
 }
 
-fn push_codeberg_release(
+fn push_forgejo_release(
     w: &mut String,
-    codeberg: &ResolvedReleaseTarget,
+    forgejo: &ResolvedReleaseTarget,
     artifacts: &ArtifactsConfig,
 ) {
-    w.push_str("      - name: Publish Codeberg release\n        env:\n");
+    w.push_str("      - name: Publish Forgejo release\n        env:\n");
     writeln!(
         w,
-        "          CODEBERG_TOKEN: ${{{{ secrets.{} }}}}",
-        codeberg.token_secret
+        "          FORGEJO_TOKEN: ${{{{ secrets.{} }}}}",
+        forgejo.token_secret
     )
     .expect("write");
-    writeln!(w, "          CODEBERG_API: {}", codeberg.api_base).expect("write");
-    writeln!(w, "          CODEBERG_REPO: {}", codeberg.repo).expect("write");
-    w.push_str("        run: |\n          set -euo pipefail\n          test -n \"$CODEBERG_TOKEN\"\n          . ./release-env\n");
+    writeln!(w, "          FORGEJO_API: {}", forgejo.api_base).expect("write");
+    writeln!(w, "          FORGEJO_REPO: {}", forgejo.repo).expect("write");
+    w.push_str("        run: |\n          set -euo pipefail\n          test -n \"$FORGEJO_TOKEN\"\n          . ./release-env\n");
     w.push_str("          nix shell nixpkgs#curl nixpkgs#jq -c bash <<'SCRIPT'\n");
     w.push_str("          set -euo pipefail\n          . ./release-env\n");
-    if codeberg.body_from_changelog {
+    if forgejo.body_from_changelog {
         w.push_str("          awk -v version=\"$VERSION\" '\n");
         w.push_str("            $0 ~ \"^## \\\\[\" version \"\\\\] - [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]$\" { found = 1; print; next }\n");
         w.push_str("            found && /^## \\[/ { exit }\n");
@@ -1259,12 +1272,12 @@ fn push_codeberg_release(
     writeln!(
         w,
         "          release_payload=$(jq -n --arg tag \"$VERSION\" --arg name \"$VERSION\" --arg branch \"{branch}\" --argjson prerelease \"$IS_PRERELEASE\" --rawfile body release-notes.md '{{tag_name: $tag, target_commitish: $branch, name: $name, body: $body, draft: false, prerelease: $prerelease}}')",
-        branch = codeberg.target_branch
+        branch = forgejo.target_branch
     )
     .expect("write");
-    w.push_str("          status=$(curl -sS -o release.json -w '%{http_code}' -H \"Authorization: token ${CODEBERG_TOKEN}\" -H 'Content-Type: application/json' -d \"$release_payload\" \"${CODEBERG_API}/repos/${CODEBERG_REPO}/releases\")\n");
+    w.push_str("          status=$(curl -sS -o release.json -w '%{http_code}' -H \"Authorization: token ${FORGEJO_TOKEN}\" -H 'Content-Type: application/json' -d \"$release_payload\" \"${FORGEJO_API}/repos/${FORGEJO_REPO}/releases\")\n");
     w.push_str("          if [ \"$status\" = \"409\" ]; then\n");
-    w.push_str("            curl -sS --fail -H \"Authorization: token ${CODEBERG_TOKEN}\" \"${CODEBERG_API}/repos/${CODEBERG_REPO}/releases/tags/${VERSION}\" > release.json\n");
+    w.push_str("            curl -sS --fail -H \"Authorization: token ${FORGEJO_TOKEN}\" \"${FORGEJO_API}/repos/${FORGEJO_REPO}/releases/tags/${VERSION}\" > release.json\n");
     w.push_str("          elif [ \"$status\" -lt 200 ] || [ \"$status\" -ge 300 ]; then cat release.json; exit 1; fi\n");
     w.push_str(
         "          release_id=\"$(jq -r '.id' release.json)\"; test \"$release_id\" != \"null\"\n",
@@ -1303,9 +1316,9 @@ fn push_codeberg_release(
     w.push_str("          while IFS= read -r file; do\n");
     w.push_str("            [ -f \"$file\" ] || continue\n");
     w.push_str("            name=\"$(basename \"$file\")\"\n");
-    w.push_str("            asset_id=\"$(curl -sS --fail -H \"Authorization: token ${CODEBERG_TOKEN}\" \"${CODEBERG_API}/repos/${CODEBERG_REPO}/releases/${release_id}/assets\" | jq -r --arg name \"$name\" '.[] | select(.name == $name) | .id' | head -n 1)\"\n");
-    w.push_str("            if [ -n \"$asset_id\" ]; then curl -sS --fail -X DELETE -H \"Authorization: token ${CODEBERG_TOKEN}\" \"${CODEBERG_API}/repos/${CODEBERG_REPO}/releases/${release_id}/assets/${asset_id}\"; fi\n");
-    w.push_str("            curl -sS --fail -H \"Authorization: token ${CODEBERG_TOKEN}\" -H 'Content-Type: application/octet-stream' --data-binary \"@${file}\" \"${CODEBERG_API}/repos/${CODEBERG_REPO}/releases/${release_id}/assets?name=${name}\" > /dev/null\n");
+    w.push_str("            asset_id=\"$(curl -sS --fail -H \"Authorization: token ${FORGEJO_TOKEN}\" \"${FORGEJO_API}/repos/${FORGEJO_REPO}/releases/${release_id}/assets\" | jq -r --arg name \"$name\" '.[] | select(.name == $name) | .id' | head -n 1)\"\n");
+    w.push_str("            if [ -n \"$asset_id\" ]; then curl -sS --fail -X DELETE -H \"Authorization: token ${FORGEJO_TOKEN}\" \"${FORGEJO_API}/repos/${FORGEJO_REPO}/releases/${release_id}/assets/${asset_id}\"; fi\n");
+    w.push_str("            curl -sS --fail -H \"Authorization: token ${FORGEJO_TOKEN}\" -H 'Content-Type: application/octet-stream' --data-binary \"@${file}\" \"${FORGEJO_API}/repos/${FORGEJO_REPO}/releases/${release_id}/assets?name=${name}\" > /dev/null\n");
     w.push_str(
         "          done < <(printf '%s\\n' \"${files[@]}\" | LC_ALL=C sort -u)\n          SCRIPT\n",
     );
@@ -1337,6 +1350,8 @@ fn push_publisher_state_probe(w: &mut String, inputs: &ReleaseWorkflowInputs<'_>
     w.push_str("            case \"$1\" in\n");
     w.push_str("              ssh://git@codeberg.org/*) path=\"${1#ssh://git@codeberg.org/}\"; printf 'https://codeberg.org/%s\\n' \"$path\" ;;\n");
     w.push_str("              git@codeberg.org:*) path=\"${1#git@codeberg.org:}\"; printf 'https://codeberg.org/%s\\n' \"$path\" ;;\n");
+    w.push_str("              ssh://git@codefloe.com/*) path=\"${1#ssh://git@codefloe.com/}\"; printf 'https://codefloe.com/%s\\n' \"$path\" ;;\n");
+    w.push_str("              git@codefloe.com:*) path=\"${1#git@codefloe.com:}\"; printf 'https://codefloe.com/%s\\n' \"$path\" ;;\n");
     w.push_str("              ssh://git@github.com/*) path=\"${1#ssh://git@github.com/}\"; printf 'https://github.com/%s\\n' \"$path\" ;;\n");
     w.push_str("              git@github.com:*) path=\"${1#git@github.com:}\"; printf 'https://github.com/%s\\n' \"$path\" ;;\n");
     w.push_str("              *) printf '%s\\n' \"$1\" ;;\n");
@@ -2456,6 +2471,18 @@ mod tests {
         }
     }
 
+    #[test]
+    fn forgejo_web_base_follows_configured_api_host() {
+        assert_eq!(
+            forgejo_web_base("https://codefloe.com/api/v1"),
+            "https://codefloe.com"
+        );
+        assert_eq!(
+            forgejo_web_base("https://codeberg.org/api/v1/"),
+            "https://codeberg.org"
+        );
+    }
+
     fn homebrew() -> ResolvedHomebrew {
         ResolvedHomebrew {
             name: "modde".to_owned(),
@@ -2522,7 +2549,7 @@ mod tests {
         assert!(workflow.contains("enable-openid-connect: true\n"));
         assert!(
             workflow.contains(
-                "VERSION=\"${GITHUB_REF_NAME:-${FORGE_REF_NAME:-${CODEBERG_REF_NAME:-}}}\""
+                "VERSION=\"${GITHUB_REF_NAME:-${FORGE_REF_NAME:-${FORGEJO_REF_NAME:-}}}\""
             )
         );
         assert!(!workflow.contains("inputs.version"));
@@ -2541,13 +2568,13 @@ mod tests {
         assert!(workflow.contains("cosign sign-blob --yes --identity-token"));
         assert!(workflow.contains("--type slsaprovenance1"));
         assert!(workflow.contains("continuing without cosign signature or attestation for $file"));
-        // Codeberg release upload
-        assert!(workflow.contains("CODEBERG_TOKEN: ${{ secrets.codeberg_token }}"));
+        // Forgejo-compatible release upload
+        assert!(workflow.contains("FORGEJO_TOKEN: ${{ secrets.codeberg_token }}"));
         assert!(workflow.contains(
-            "require_credential 'global/user secret' 'codeberg_token' \"${CODEBERG_TOKEN:-}\""
+            "require_credential 'global/user secret' 'codeberg_token' \"${FORGEJO_TOKEN:-}\""
         ));
         assert!(workflow.contains("Missing release credentials:%s\\n"));
-        assert!(workflow.contains("${CODEBERG_API}/repos/${CODEBERG_REPO}/releases\""));
+        assert!(workflow.contains("${FORGEJO_API}/repos/${FORGEJO_REPO}/releases\""));
         assert!(workflow.contains("releases/${release_id}/assets?name=${name}"));
         assert!(workflow.contains("target_commitish: $branch"));
         // COPR srpm build + push
@@ -2680,8 +2707,8 @@ mod tests {
         assert!(workflow.contains("test -s SHA256SUMS.txt\n      - name: Sign checksums"));
         // Order: codeberg before downstream, copr near the end
         let pos = |needle: &str| workflow.find(needle).unwrap();
-        assert!(pos("Build Debian packages") < pos("Publish Codeberg release"));
-        assert!(pos("Publish Codeberg release") < pos("Publish APT repository"));
+        assert!(pos("Build Debian packages") < pos("Publish Forgejo release"));
+        assert!(pos("Publish Forgejo release") < pos("Publish APT repository"));
         assert!(pos("Publish AUR packages") < pos("Publish Homebrew tap"));
         assert!(pos("Build SRPM for COPR") < pos("Build release artifacts"));
     }

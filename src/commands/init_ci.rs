@@ -27,10 +27,17 @@ use crate::render::ci::{
 use crate::user_config::{ResolvedRunner, UserConfig, validate_runner_label};
 
 pub fn run(command: InitCiCommand) -> Result<()> {
-    if cargo::find_manifest(&std::env::current_dir().context("reading current directory")?).is_err()
-        && python::project_for_current_dir().is_ok()
-    {
-        return run_python(command);
+    let current_dir = std::env::current_dir().context("reading current directory")?;
+    if command.platform == Some(Platform::Gitlab) {
+        return run_nix_only(command);
+    }
+    if cargo::find_manifest(&current_dir).is_err() {
+        if python::find_project_root(&current_dir).is_ok() {
+            return run_python(command);
+        }
+        if current_dir.join("flake.nix").is_file() {
+            return run_nix_only(command);
+        }
     }
 
     let metadata = cargo::metadata_for_current_dir()?;
@@ -291,6 +298,90 @@ pub fn run(command: InitCiCommand) -> Result<()> {
         registry::touch_current_project_or_warn([("ci", FeatureStatus::Managed)]);
         Ok(())
     }
+}
+
+fn run_nix_only(command: InitCiCommand) -> Result<()> {
+    let workspace_root = std::env::current_dir().context("reading current directory")?;
+    if !workspace_root.join("flake.nix").is_file() {
+        bail!("Nix CI generation requires flake.nix at the workspace root");
+    }
+    let platform = command.platform.unwrap_or(Platform::Forgejo);
+    let provider = command.ci_provider.unwrap_or(CiProvider::Actions);
+    if provider != CiProvider::Actions {
+        bail!("Nix-only CI currently supports the Actions provider only");
+    }
+    if command.with_homebrew
+        || command.with_chocolatey
+        || command.with_scoop
+        || command.with_vscode
+        || command.with_jetbrains
+        || command.with_pypi_publish == Some(true)
+        || command.publish_crates == Some(true)
+    {
+        bail!("release and language-specific options are not supported for Nix-only CI");
+    }
+
+    let runner = match platform {
+        Platform::Github => command.runner.as_deref().unwrap_or("ubuntu-latest"),
+        Platform::Forgejo => command
+            .runner
+            .as_deref()
+            .context("Nix-only Forgejo CI requires --runner")?,
+        Platform::Gitlab => command.runner.as_deref().unwrap_or("shared"),
+    };
+    let cfg = ProjectConfig::load(&workspace_root)?;
+    let pages = codeberg_pages_options(&cfg, &command, None)?;
+    let generated = match platform {
+        Platform::Gitlab => project::GeneratedFile {
+            relative_path: PathBuf::from(".gitlab-ci.yml"),
+            content: ci::gitlab_nix_flake_workflow(),
+        },
+        _ => ci::nix_flake_ci_file(
+            platform,
+            &ResolvedRunner::literal(runner)?,
+        )?,
+    };
+    let mut files = vec![generated];
+    if let Some(pages) = &pages {
+        files.push(ci::codeberg_pages_file(
+            platform,
+            &ResolvedRunner::literal(runner)?,
+            pages,
+        )?);
+    }
+    let message = format!(
+        "Nix-only CI is not up to date; run `simit init ci --platform {} --runtime nix --runner {}`",
+        platform.as_str(),
+        runner
+    );
+    if command.check {
+        if platform == Platform::Gitlab {
+            project::check_generated_files(&workspace_root, &files, &message, command.diff)?;
+        } else {
+            check_generated_ci_files(
+                &workspace_root,
+                &files,
+                platform,
+                &message,
+                command.diff,
+            )?;
+        }
+    } else {
+        project::write_generated_files(&workspace_root, &files)?;
+        let mut persisted_ci = cfg.ci;
+        persisted_ci.provider = Some(CiProvider::Actions);
+        persisted_ci.platform = Some(platform);
+        persisted_ci.runtime = Some(Runtime::Nix);
+        persisted_ci.runner = Some(runner.to_owned());
+        if command.with_codeberg_pages {
+            persisted_ci.pages = Some(codeberg_pages_config(&pages)?);
+        }
+        if ProjectConfig::can_persist_ci(&workspace_root)? {
+            ProjectConfig::write_ci(&workspace_root, &persisted_ci)?;
+        }
+        registry::touch_current_project_or_warn([("ci", FeatureStatus::Managed)]);
+    }
+    Ok(())
 }
 
 fn run_python(command: InitCiCommand) -> Result<()> {
@@ -807,6 +898,43 @@ fn generated_workflow_marker_present(content: &str) -> bool {
 }
 
 pub(crate) fn project_regeneration_command(workspace_root: &Path) -> Result<Option<String>> {
+    if let Ok(content) = fs::read_to_string(workspace_root.join(".gitlab-ci.yml")) {
+        if generated_workflow_marker_present(&content) {
+            return Ok(Some(
+                "simit init ci --platform gitlab --runtime nix".to_owned(),
+            ));
+        }
+    }
+    if !workspace_root.join("Cargo.toml").is_file() && workspace_root.join("flake.nix").is_file() {
+        for platform in [Platform::Forgejo, Platform::Github] {
+            let snapshots = workflow_snapshots_for_platform(workspace_root, platform)?;
+            if snapshots.is_empty() {
+                continue;
+            }
+            let cfg = ProjectConfig::load(workspace_root).unwrap_or_default();
+            let runner = cfg
+                .ci
+                .runner
+                .clone()
+                .or_else(|| {
+                    snapshots.iter().find_map(|snapshot| {
+                        snapshot
+                            .content
+                            .lines()
+                            .find_map(|line| line.trim().strip_prefix("runs-on: ").map(str::to_owned))
+                    })
+                });
+            let mut command = format!(
+                "simit init ci --platform {} --runtime nix",
+                platform.as_str()
+            );
+            if let Some(runner) = runner {
+                command.push_str(" --runner ");
+                command.push_str(&runner);
+            }
+            return Ok(Some(command));
+        }
+    }
     let crow = workflow_snapshots_for_crow(workspace_root)?;
     if !crow.is_empty() {
         let format = if crow

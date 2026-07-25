@@ -332,7 +332,7 @@ fn contract_prints_generic_release_credentials_json() {
             && credential["kind"] == "secret"
             && credential["scope"] == "user"
             && credential["context"] == "secrets"
-            && credential["channel"] == "codeberg"
+            && credential["channel"] == "forgejo"
             && credential["required"] == true
     }));
     assert!(credentials.iter().any(|credential| {

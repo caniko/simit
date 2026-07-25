@@ -137,8 +137,8 @@ fn bootstraps_release_workflow_for_enabled_channels() {
         String::from_utf8_lossy(&output.stderr)
     );
     let workflow = read(&project.path().join(".forgejo/workflows/release.yml"));
-    assert!(workflow.contains("Publish Codeberg release"));
-    assert!(workflow.contains("CODEBERG_TOKEN: ${{ secrets.codeberg_token }}"));
+    assert!(workflow.contains("Publish Forgejo release"));
+    assert!(workflow.contains("FORGEJO_TOKEN: ${{ secrets.codeberg_token }}"));
     assert!(workflow.contains("add_matches 'release/SHA256SUMS.txt'"));
     assert!(workflow.contains("add_matches 'release/*.tar.gz'"));
     assert!(!workflow.contains("files=(release/*)"));
@@ -200,7 +200,7 @@ fn bootstraps_github_release_workflow_with_native_permissions_and_uploads() {
     assert!(workflow.contains("upload_url=$(jq -r '.upload_url' release.json"));
     assert!(workflow.contains("Authorization: Bearer $GITHUB_TOKEN"));
     assert!(!workflow.contains("enable-openid-connect: true"));
-    assert!(!workflow.contains("Publish Codeberg release"));
+    assert!(!workflow.contains("Publish Forgejo release"));
     assert!(workflow.contains("https://github.com/example/github-demo"));
     assert!(!workflow.contains("https://codeberg.org/example/github-demo"));
     assert!(
@@ -367,7 +367,7 @@ result_links = ["result"]
         .find("      - name: Build release artifacts")
         .expect("build step");
     assert!(credential_check < build);
-    assert!(workflow.contains("CODEBERG_TOKEN: ${{ secrets.codeberg_token }}"));
+    assert!(workflow.contains("FORGEJO_TOKEN: ${{ secrets.codeberg_token }}"));
     assert!(workflow.contains("MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}"));
     assert!(workflow.contains("MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}"));
     assert!(workflow.contains("require_credential 'global/user secret' 'codeberg_token'"));
@@ -398,8 +398,8 @@ result_links = ["result"]
     assert!(!workflow.contains("--rawfile body CHANGELOG.md"));
     assert!(
         workflow
-            .find("      - name: Publish Codeberg release")
-            .expect("Codeberg release step")
+            .find("      - name: Publish Forgejo release")
+            .expect("Forgejo release step")
             < workflow
                 .find("      - name: Push Nix closures to Attic")
                 .expect("Attic push step")
@@ -423,7 +423,7 @@ fn print_matches_checked_workflow_without_writing_file() {
     );
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("name: release"));
-    assert!(stdout.contains("Publish Codeberg release"));
+    assert!(stdout.contains("Publish Forgejo release"));
     assert!(stdout.contains("Publish AUR packages"));
     assert!(stdout.contains("Push SRPM to COPR"));
     assert!(stdout.contains("Publish APT repository"));

@@ -263,8 +263,10 @@ fn audit(args: ProjectsAuditArgs) -> Result<()> {
 
     for path in paths {
         let path = normalize_audit_path(&path)?;
-        let manifest = path.join("Cargo.toml");
-        let applicable = manifest.is_file();
+        let applicable = path.join("Cargo.toml").is_file()
+            || path.join("pyproject.toml").is_file()
+            || path.join("uv.lock").is_file()
+            || path.join("flake.nix").is_file();
         let mut project = AuditProject {
             path: path.clone(),
             name: None,

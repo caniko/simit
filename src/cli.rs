@@ -1695,6 +1695,8 @@ pub enum Platform {
     Forgejo,
     #[value(help = "GitHub Actions workflows under .github/workflows")]
     Github,
+    #[value(help = "GitLab CI configuration in .gitlab-ci.yml")]
+    Gitlab,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, ValueEnum)]
@@ -1724,6 +1726,7 @@ impl Platform {
         match self {
             Self::Forgejo => ".forgejo/workflows",
             Self::Github => ".github/workflows",
+            Self::Gitlab => ".gitlab",
         }
     }
 
@@ -1731,6 +1734,7 @@ impl Platform {
         match self {
             Self::Forgejo => "forgejo",
             Self::Github => "github",
+            Self::Gitlab => "gitlab",
         }
     }
 
@@ -1738,6 +1742,7 @@ impl Platform {
         match self {
             Self::Forgejo => "https://codeberg.org",
             Self::Github => "https://github.com",
+            Self::Gitlab => "https://gitlab.com",
         }
     }
 
@@ -1745,6 +1750,7 @@ impl Platform {
         match self {
             Self::Forgejo => "https://codeberg.org/api/v1",
             Self::Github => "https://api.github.com",
+            Self::Gitlab => "https://gitlab.com/api/v4",
         }
     }
 

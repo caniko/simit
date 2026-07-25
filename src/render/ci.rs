@@ -340,6 +340,7 @@ pub fn codeberg_pages_file(
         content: match platform {
             Platform::Forgejo => codeberg_pages_workflow(runner, pages),
             Platform::Github => github_pages_workflow(runner, pages),
+            Platform::Gitlab => bail!("Codeberg Pages workflow is not supported on GitLab"),
         },
     })
 }
@@ -392,6 +393,39 @@ pub fn python_ci_file(
         relative_path: PathBuf::from(platform.workflow_dir()).join("ci.yaml"),
         content: python_ci_workflow(platform, runner, options, check_outputs, components),
     })
+}
+
+/// Generate CI for a flake-only project without inventing a Cargo or Python
+/// project model. The workflow intentionally has one contract: `nix flake
+/// check` must pass on pushes and pull requests.
+pub fn nix_flake_ci_file(
+    platform: Platform,
+    runner: &ResolvedRunner,
+) -> Result<GeneratedFile> {
+    if platform == Platform::Gitlab {
+        bail!("GitLab flake CI uses .gitlab-ci.yml");
+    }
+    let mut workflow = String::new();
+    push_generated_workflow_header(&mut workflow);
+    workflow.push_str("name: Nix flake check\n\n'on':\n  push:\n  pull_request:\n\n");
+    push_platform_concurrency(&mut workflow, platform);
+    workflow.push_str("jobs:\n  flake-check:\n    runs-on: ");
+    workflow.push_str(&runs_on(runner));
+    workflow.push_str("\n    env:\n      NIX_CONFIG: \"experimental-features = nix-command flakes\"\n    steps:\n");
+    push_checkout_step(&mut workflow, platform);
+    push_install_nix_step(&mut workflow, platform);
+    workflow.push_str("      - name: Check flake\n        run: nix flake check\n");
+    Ok(GeneratedFile {
+        relative_path: PathBuf::from(platform.workflow_dir()).join("ci.yaml"),
+        content: workflow,
+    })
+}
+
+pub fn gitlab_nix_flake_workflow() -> String {
+    format!(
+        "{}\nimage: nixos/nix:2.28.3\n\nstages:\n  - check\n\nflake-check:\n  stage: check\n  script:\n    - nix --extra-experimental-features 'nix-command flakes' flake check\n",
+        GENERATED_WORKFLOW_MARKER
+    )
 }
 
 fn workflow_file_name(stem: &str, suffix: Option<&str>) -> String {
@@ -2044,6 +2078,10 @@ fn push_windows_rust_setup_step(workflow: &mut String, platform: Platform) {
             workflow.push_str("          rustup toolchain install stable --profile minimal\n");
             workflow.push_str("          rustup default stable\n\n");
         }
+        Platform::Gitlab => {
+            workflow.push_str("      - name: Install Rust\n");
+            workflow.push_str("        run: rustup toolchain install stable --profile minimal\n\n");
+        }
     }
 }
 
@@ -2480,6 +2518,9 @@ fn push_release_permissions(workflow: &mut String, platform: Platform) {
         Platform::Forgejo => {
             workflow.push_str("    enable-openid-connect: true\n");
         }
+        Platform::Gitlab => {
+            workflow.push_str("    # GitLab release permissions are configured by the project\n");
+        }
     }
 }
 
@@ -2673,6 +2714,7 @@ fn push_platform_concurrency(workflow: &mut String, platform: Platform) {
     match platform {
         Platform::Forgejo => push_codeberg_concurrency(workflow),
         Platform::Github => push_concurrency(workflow),
+        Platform::Gitlab => push_concurrency(workflow),
     }
 }
 
@@ -2941,6 +2983,10 @@ fn push_rust_setup_step(workflow: &mut String, platform: Platform) {
             workflow.push_str("          toolchain: stable\n");
             workflow.push_str("          components: rustfmt, clippy\n\n");
         }
+        Platform::Gitlab => {
+            workflow.push_str("      - name: Install Rust components\n");
+            workflow.push_str("        run: rustup component add clippy rustfmt\n\n");
+        }
     }
 }
 
@@ -2952,6 +2998,7 @@ fn push_rust_cache_steps(workflow: &mut String, platform: Platform) {
     let workflow_glob = match platform {
         Platform::Forgejo => ".forgejo/workflows/*.yaml",
         Platform::Github => ".github/workflows/*.yaml",
+        Platform::Gitlab => ".gitlab-ci.yml",
     };
     workflow.push_str(&format!(
         "          key: cargo-bin-${{{{ runner.os }}}}-${{{{ hashFiles('{workflow_glob}') }}}}\n\n",

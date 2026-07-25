@@ -67,6 +67,7 @@ pub struct UserCiPlatformDefaults {
 pub enum PlatformName {
     Forgejo,
     Github,
+    Gitlab,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -466,6 +467,7 @@ impl From<Platform> for PlatformName {
         match value {
             Platform::Forgejo => Self::Forgejo,
             Platform::Github => Self::Github,
+            Platform::Gitlab => Self::Gitlab,
         }
     }
 }
@@ -484,6 +486,7 @@ impl fmt::Display for PlatformName {
         f.write_str(match self {
             Self::Forgejo => "forgejo",
             Self::Github => "github",
+            Self::Gitlab => "gitlab",
         })
     }
 }
@@ -523,6 +526,7 @@ fn parse_platform_name(value: &str) -> Result<PlatformName> {
     match value {
         "forgejo" => Ok(PlatformName::Forgejo),
         "github" => Ok(PlatformName::Github),
+        "gitlab" => Ok(PlatformName::Gitlab),
         _ => bail!("unsupported platform `{value}`; expected `forgejo` or `github`"),
     }
 }

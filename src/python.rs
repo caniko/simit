@@ -19,9 +19,18 @@ pub struct Project {
 
 #[derive(Debug, Deserialize)]
 struct Pyproject {
-    project: ProjectTable,
+    #[serde(default)]
+    project: Option<ProjectTable>,
+    #[serde(default)]
+    tool: Option<ToolTable>,
     #[serde(default, rename = "dependency-groups")]
-    dependency_groups: BTreeMap<String, Vec<String>>,
+    dependency_groups: BTreeMap<String, serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ToolTable {
+    #[serde(default)]
+    poetry: Option<PoetryProjectTable>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -34,6 +43,20 @@ struct ProjectTable {
     scripts: BTreeMap<String, String>,
     #[serde(default, rename = "optional-dependencies")]
     optional_dependencies: BTreeMap<String, Vec<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PoetryProjectTable {
+    name: String,
+    version: String,
+    #[serde(default)]
+    python: Option<String>,
+    #[serde(default)]
+    scripts: BTreeMap<String, serde_json::Value>,
+    #[serde(default)]
+    extras: BTreeMap<String, serde_json::Value>,
+    #[serde(default)]
+    group: BTreeMap<String, serde_json::Value>,
 }
 
 pub fn project_for_current_dir() -> Result<Project> {
@@ -62,31 +85,44 @@ pub fn load_project(root: &Path) -> Result<Project> {
     let pyproject = toml_edit::de::from_str::<Pyproject>(&content)
         .with_context(|| format!("parsing {}", pyproject_path.display()))?;
 
-    let mut scripts = pyproject
-        .project
-        .scripts
-        .keys()
-        .cloned()
-        .collect::<Vec<_>>();
+    let (name, version, requires_python, mut scripts, mut optional_extras, mut dependency_groups) =
+        if let Some(project) = pyproject.project {
+            (
+                project.name,
+                project.version,
+                project.requires_python,
+                project.scripts.keys().cloned().collect::<Vec<_>>(),
+                project
+                    .optional_dependencies
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                pyproject
+                    .dependency_groups
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>(),
+            )
+        } else if let Some(poetry) = pyproject.tool.and_then(|tool| tool.poetry) {
+            (
+                poetry.name,
+                poetry.version,
+                poetry.python,
+                poetry.scripts.keys().cloned().collect::<Vec<_>>(),
+                poetry.extras.keys().cloned().collect::<Vec<_>>(),
+                poetry.group.keys().cloned().collect::<Vec<_>>(),
+            )
+        } else {
+            bail!("pyproject.toml has neither [project] nor [tool.poetry]");
+        };
     scripts.sort();
-    let mut optional_extras = pyproject
-        .project
-        .optional_dependencies
-        .keys()
-        .cloned()
-        .collect::<Vec<_>>();
     optional_extras.sort();
-    let mut dependency_groups = pyproject
-        .dependency_groups
-        .keys()
-        .cloned()
-        .collect::<Vec<_>>();
     dependency_groups.sort();
 
     Ok(Project {
-        name: pyproject.project.name,
-        version: pyproject.project.version,
-        requires_python: pyproject.project.requires_python,
+        name,
+        version,
+        requires_python,
         scripts,
         optional_extras,
         dependency_groups,

@@ -25,8 +25,9 @@ const HOOK_REMOVAL_NOTES: &[(&str, &str)] = &[
 ];
 
 pub fn run(command: InitFlakeCommand) -> Result<()> {
-    if cargo::find_manifest(&std::env::current_dir().context("reading current directory")?).is_err()
-        && python::project_for_current_dir().is_ok()
+    let current_dir = std::env::current_dir().context("reading current directory")?;
+    if cargo::find_manifest(&current_dir).is_err()
+        && python::find_project_root(&current_dir).is_ok()
     {
         return run_python(command);
     }

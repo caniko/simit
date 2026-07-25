@@ -49,6 +49,7 @@ pub fn init(command: ReleaseCommand) -> Result<()> {
             client.put_secret(MINISIGN_PASSWORD, &minisign.password)?;
             client.list_repo_secret_names()?
         }
+        Platform::Gitlab => bail!("GitLab release secret management is not implemented"),
     };
     require_secret(&names, MINISIGN_SECRET_KEY)?;
     require_secret(&names, MINISIGN_PASSWORD)?;
@@ -66,6 +67,7 @@ pub fn check(command: ReleaseCommand) -> Result<()> {
             ForgejoClient::new(&command.secrets_api_base, repo, token)?.list_repo_secret_names()?
         }
         Platform::Github => GithubClient::new(repo, token)?.list_repo_secret_names()?,
+        Platform::Gitlab => bail!("GitLab release secret management is not implemented"),
     };
     names.extend(command.assumed_account_secrets.iter().cloned());
 
@@ -257,6 +259,7 @@ fn read_token(command: &ReleaseCommand, platform: Platform) -> Result<String> {
             "FORGEJO_TOKEN",
             "GITEA_TOKEN",
         ],
+        Platform::Gitlab => bail!("GitLab release secret management is not implemented"),
     };
     for name in token_names {
         if let Ok(token) = std::env::var(name) {

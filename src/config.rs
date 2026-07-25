@@ -2673,6 +2673,9 @@ impl ProjectConfig {
         &self,
         platform: crate::cli::Platform,
     ) -> Result<Option<ResolvedReleaseTarget>> {
+        if platform == crate::cli::Platform::Gitlab {
+            return Ok(None);
+        }
         let (provider, target) = match platform {
             crate::cli::Platform::Forgejo => (
                 ReleaseProvider::Forgejo,
@@ -2698,6 +2701,7 @@ impl ProjectConfig {
                     )
                 }),
             ),
+            crate::cli::Platform::Gitlab => (ReleaseProvider::Github, None),
         };
         let Some((repo, api_base, token_secret, target_branch, body_from_changelog)) = target
         else {
