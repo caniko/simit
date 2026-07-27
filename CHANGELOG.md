@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.10] - 2026-07-27
+
+### Fixed
+
+- Keep empty APT repository directories tracked so a freshly bootstrapped
+  Codeberg Pages workflow can deploy before the first release.
+
 ## [0.17.9] - 2026-07-27
 
 ### Fixed
@@ -329,7 +336,8 @@ ci`, including the `~/.cargo/bin` key, rust-cache settings, and why Nix
 
 - Prepare the first public crates.io release.
 
-[Unreleased]: https://codeberg.org/caniko/simit/compare/0.17.9...HEAD
+[Unreleased]: https://codeberg.org/caniko/simit/compare/0.17.10...HEAD
+[0.17.10]: https://codeberg.org/caniko/simit/compare/0.17.9...0.17.10
 [0.17.9]: https://codeberg.org/caniko/simit/compare/0.17.8...0.17.9
 [0.17.8]: https://codeberg.org/caniko/simit/compare/0.17.7...0.17.8
 [0.17.7]: https://codeberg.org/caniko/simit/compare/0.17.6...0.17.7
