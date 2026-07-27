@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.9] - 2026-07-27
+
+### Fixed
+
+- Bootstrap Scoop buckets from multi-package workspaces by using the same
+  representative-package selection as other workspace-level channels.
+
 ## [0.17.8] - 2026-07-27
 
 ### Added
@@ -320,7 +327,8 @@ ci`, including the `~/.cargo/bin` key, rust-cache settings, and why Nix
 
 - Prepare the first public crates.io release.
 
-[Unreleased]: https://codeberg.org/caniko/simit/compare/0.17.8...HEAD
+[Unreleased]: https://codeberg.org/caniko/simit/compare/0.17.9...HEAD
+[0.17.9]: https://codeberg.org/caniko/simit/compare/0.17.8...0.17.9
 [0.17.8]: https://codeberg.org/caniko/simit/compare/0.17.7...0.17.8
 [0.17.7]: https://codeberg.org/caniko/simit/compare/0.17.6...0.17.7
 [0.17.6]: https://codeberg.org/caniko/simit/compare/0.17.5...0.17.6
