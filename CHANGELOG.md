@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Bootstrap Scoop buckets from multi-package workspaces by using the same
   representative-package selection as other workspace-level channels.
+- Keep empty APT repository directories tracked so a freshly bootstrapped
+  Codeberg Pages workflow can deploy before the first release.
 
 ## [0.17.8] - 2026-07-27
 

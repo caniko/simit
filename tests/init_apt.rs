@@ -171,6 +171,8 @@ fn bootstraps_repository_backed_apt_pages_site() {
     assert!(workflow.contains("mkdir -p _site/dists _site/pool"));
     assert!(read(&target.join("README.md")).contains("apt.demo.example"));
     assert_eq!(read(&target.join("key.gpg.asc")), "test public key\n");
+    assert_eq!(read(&target.join("dists/.gitkeep")), "");
+    assert_eq!(read(&target.join("pool/.gitkeep")), "");
 
     let check = simit()
         .current_dir(project.path())

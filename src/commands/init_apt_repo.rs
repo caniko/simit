@@ -12,6 +12,8 @@ use crate::render::apt_conf;
 const WORKFLOW_PATH: &str = ".forgejo/workflows/pages.yml";
 const README_PATH: &str = "README.md";
 const CONF_PATH: &str = "conf/distributions";
+const DISTS_KEEP_PATH: &str = "dists/.gitkeep";
+const POOL_KEEP_PATH: &str = "pool/.gitkeep";
 
 pub fn run(command: InitAptRepoCommand) -> Result<()> {
     let mode = CheckPrintMode::parse("init apt-repo", command.check, command.print, command.diff)?;
@@ -90,6 +92,20 @@ pub fn run(command: InitAptRepoCommand) -> Result<()> {
                 expected: &public_key,
                 remediation: &format!("run `simit init apt-repo --target {}`", target.display()),
             }
+            .verify(diff)?;
+            ArtifactCheck {
+                label: "apt repository dists placeholder",
+                path: &target.join(DISTS_KEEP_PATH),
+                expected: "",
+                remediation: &format!("run `simit init apt-repo --target {}`", target.display()),
+            }
+            .verify(diff)?;
+            ArtifactCheck {
+                label: "apt repository pool placeholder",
+                path: &target.join(POOL_KEEP_PATH),
+                expected: "",
+                remediation: &format!("run `simit init apt-repo --target {}`", target.display()),
+            }
             .verify(diff)
         }
         CheckPrintMode::Write => {
@@ -114,11 +130,29 @@ pub fn run(command: InitAptRepoCommand) -> Result<()> {
                 contents: &public_key,
             }
             .commit()?;
+            WriteArtifact {
+                path: &target.join(DISTS_KEEP_PATH),
+                contents: "",
+            }
+            .commit()?;
+            WriteArtifact {
+                path: &target.join(POOL_KEEP_PATH),
+                contents: "",
+            }
+            .commit()?;
             if !command.no_git {
                 bootstrap_repo(target, &resolved.repo_url, &resolved.branch, README_PATH)?;
                 crate::commands::scaffold::run_git(
                     target,
-                    &["add", "--", WORKFLOW_PATH, CONF_PATH, "key.gpg.asc"],
+                    &[
+                        "add",
+                        "--",
+                        WORKFLOW_PATH,
+                        CONF_PATH,
+                        "key.gpg.asc",
+                        DISTS_KEEP_PATH,
+                        POOL_KEEP_PATH,
+                    ],
                 )?;
             }
             print_next_steps(
