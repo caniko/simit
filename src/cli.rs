@@ -1074,6 +1074,12 @@ pub struct InitScoopBucketCommand {
     pub target: Utf8PathBuf,
     #[arg(
         long,
+        value_name = "NAME",
+        help = "Workspace package providing metadata fallbacks"
+    )]
+    pub package: Option<String>,
+    #[arg(
+        long,
         help = "Verify the existing bucket/<name>.json matches the rendered template"
     )]
     pub check: bool,

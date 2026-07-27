@@ -22,10 +22,7 @@ pub fn run(command: InitScoopBucketCommand) -> Result<()> {
 
     let metadata = cargo::metadata_for_current_dir()?;
     let workspace_root = metadata.workspace_root.as_std_path();
-    let package = cargo::select_packages(&metadata, &[], false)?
-        .into_iter()
-        .next()
-        .expect("single package selected");
+    let package = cargo::representative_package(&metadata, command.package.as_deref())?;
     let cfg = ProjectConfig::load(workspace_root)?;
     let resolved = cfg.resolve_scoop(command.scoop.as_overrides(), &package)?;
     let manifest_text = scoop_manifest::render(

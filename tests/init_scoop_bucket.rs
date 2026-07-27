@@ -51,6 +51,44 @@ download_repo = "caniko/{name}"
     temp
 }
 
+fn init_workspace() -> TempDir {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    fs::write(
+        root.join("Cargo.toml"),
+        r#"[workspace]
+members = ["cli", "ui"]
+resolver = "2"
+"#,
+    )
+    .unwrap();
+    fs::write(
+        root.join("simit.toml"),
+        r#"[scoop]
+name = "modde"
+bucket_url = "https://codeberg.org/caniko/scoop-modde.git"
+download_repo = "caniko/rs-modde"
+description = "Cross-platform game mod manager"
+homepage = "https://modde.tartanoglu.com"
+license = "GPL-3.0-only"
+"#,
+    )
+    .unwrap();
+    for (name, version) in [("cli", "1.2.3"), ("ui", "9.8.7")] {
+        let package = root.join(name);
+        fs::create_dir_all(package.join("src")).unwrap();
+        fs::write(
+            package.join("Cargo.toml"),
+            format!(
+                "[package]\nname = \"{name}\"\nversion = \"{version}\"\nedition = \"2024\"\n"
+            ),
+        )
+        .unwrap();
+        fs::write(package.join("src/main.rs"), "fn main() {}\n").unwrap();
+    }
+    temp
+}
+
 fn read(path: &Path) -> String {
     fs::read_to_string(path).unwrap_or_else(|err| panic!("reading {}: {err}", path.display()))
 }
@@ -112,6 +150,27 @@ fn bootstraps_fresh_bucket_repo() {
     assert!(stdout.contains("git -C"));
     assert!(stdout.contains("commit -m 'Initial my-app manifest'"));
     assert!(stdout.contains("push -u origin trunk"));
+}
+
+#[test]
+fn bootstraps_representative_package_in_multi_package_workspace() {
+    let project = init_workspace();
+    let bucket_parent = TempDir::new().unwrap();
+    let bucket = bucket_parent.path().join("scoop-modde");
+
+    let output = simit()
+        .current_dir(project.path())
+        .args(["init", "scoop-bucket", "--target", bucket.to_str().unwrap()])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let manifest = read(&bucket.join("bucket/modde.json"));
+    assert!(manifest.contains(r#""version": "1.2.3""#));
 }
 
 #[test]
