@@ -625,7 +625,7 @@ fn run_crow(
     }
 
     let inferred_pages = infer_codeberg_pages_from_workflows(&snapshots)?;
-    let pages = codeberg_pages_options(&cfg, &command, inferred_pages.as_ref())?;
+    let pages = codeberg_pages_options(cfg, &command, inferred_pages.as_ref())?;
     if let Some(pages) = &pages {
         files.push(crate::render::crow::codeberg_pages_file(
             crow.format,
@@ -665,9 +665,8 @@ fn run_crow(
     persisted_ci.crow = crow;
     persisted_ci.publish_crates = publish_crates;
 
-    let check_message = format!(
-        "Crow CI workflows are not up to date; run `simit init ci --ci-provider crow`"
-    );
+    let check_message =
+        "Crow CI workflows are not up to date; run `simit init ci --ci-provider crow`".to_owned();
     if command.check {
         check_generated_crow_files(workspace_root, &files, &check_message, command.diff)?;
         Ok(())

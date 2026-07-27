@@ -80,6 +80,7 @@ pub fn run(command: InitReleaseCommand) -> Result<()> {
         runner: &runner,
         preinstalled_nix,
         publish_enforcement: cfg.release.publish.enforcement,
+        publish: &cfg.release.publish,
         artifacts: &cfg.release.artifacts,
         smoke_command: cfg.release.smoke.command.as_deref(),
         release: release.as_ref(),

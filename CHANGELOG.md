@@ -14,6 +14,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add `[release.artifacts].prebuild_binaries` as shorthand for the
   conventional rs-harbor `release-bundle` output, while preserving explicit
   `nix_bundle_attrs` overrides.
+- Add repository-backed APT Pages bootstrapping and `dist apt build`,
+  `dist apt publish`, and `dist apt verify` commands.
+- Add explicit per-channel release publisher policies for staged, required,
+  and disabled rollout states.
+
+### Changed
+
+- Route generated APT and Scoop release publication through Simit's shared
+  distribution helpers so consumers do not need project-local publisher scripts.
 
 ### Fixed
 

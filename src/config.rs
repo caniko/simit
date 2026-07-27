@@ -530,6 +530,24 @@ pub struct ReleasePublishConfig {
     /// How generated CI decides whether downstream publishers are hard-required.
     #[serde(default)]
     pub enforcement: ReleasePublisherEnforcement,
+    /// Per-channel lifecycle overrides. Explicit entries take precedence over
+    /// the legacy global enforcement setting.
+    #[serde(default)]
+    pub channels: BTreeMap<String, ReleasePublisherPolicy>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ReleasePublisherPolicy {
+    Disabled,
+    Staged,
+    Required,
+}
+
+impl ReleasePublishConfig {
+    pub fn policy(&self, channel: &str) -> Option<ReleasePublisherPolicy> {
+        self.channels.get(channel).copied()
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
@@ -1377,6 +1395,12 @@ pub struct AptConfig {
     /// Git remote of the apt repository, e.g.
     /// `ssh://git@codeberg.org/<owner>/<name>-apt.git`.
     pub repo_url: String,
+    /// Public URL served by the package repository deployment.
+    #[serde(default)]
+    pub public_url: Option<String>,
+    /// Pages deployment settings for a repository-backed APT site.
+    #[serde(default)]
+    pub pages: AptPagesConfig,
     /// Branch served by Codeberg Pages.
     #[serde(default = "default_apt_branch")]
     pub branch: String,
@@ -1415,6 +1439,30 @@ pub struct AptConfig {
     pub gpg_passphrase_secret: String,
     #[serde(default = "default_apt_ssh_key_secret")]
     pub ssh_key_secret: String,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AptPagesConfig {
+    /// Pages provider used by `simit init apt-repo`.
+    #[serde(default = "default_apt_pages_provider")]
+    pub provider: String,
+    /// Runner label for the tiny Pages deployment workflow.
+    #[serde(default)]
+    pub runner: Option<String>,
+}
+
+impl Default for AptPagesConfig {
+    fn default() -> Self {
+        Self {
+            provider: default_apt_pages_provider(),
+            runner: None,
+        }
+    }
+}
+
+fn default_apt_pages_provider() -> String {
+    "codeberg-git-pages".to_owned()
 }
 
 fn default_apt_architectures() -> String {
@@ -1620,6 +1668,9 @@ pub struct CoprOverrides<'a> {
 pub struct ResolvedApt {
     pub label: String,
     pub repo_url: String,
+    pub public_url: Option<String>,
+    pub pages_provider: String,
+    pub pages_runner: Option<String>,
     pub branch: String,
     pub distribution: String,
     pub architectures: String,
@@ -1638,6 +1689,7 @@ pub struct ResolvedApt {
 pub struct AptOverrides<'a> {
     pub repo_url: Option<&'a str>,
     pub label: Option<&'a str>,
+    pub public_url: Option<&'a str>,
 }
 
 impl ProjectConfig {
@@ -2390,6 +2442,15 @@ impl ProjectConfig {
         // The apt repo_url is an SSH git remote (e.g. ssh://git@host/...), where a
         // `user@` userinfo is expected; only reject an embedded `:password@`.
         reject_password_url("simit project config: [apt].repo_url", &apt.repo_url)?;
+        if let Some(public_url) = &apt.public_url {
+            if !public_url.starts_with("https://") {
+                bail!("simit project config: [apt].public_url must start with https://");
+            }
+        }
+        if apt.pages.provider != "codeberg-git-pages" {
+            bail!("simit project config: [apt].pages.provider must be codeberg-git-pages");
+        }
+        validate_runner_label_opt("[apt.pages].runner", apt.pages.runner.as_deref())?;
         Ok(())
     }
 
@@ -2625,6 +2686,13 @@ impl ProjectConfig {
         Ok(ResolvedApt {
             label,
             repo_url,
+            public_url: overrides
+                .public_url
+                .map(str::to_owned)
+                .or_else(|| cfg.and_then(|apt| apt.public_url.clone())),
+            pages_provider: cfg
+                .map_or_else(default_apt_pages_provider, |apt| apt.pages.provider.clone()),
+            pages_runner: cfg.and_then(|apt| apt.pages.runner.clone()),
             branch: cfg.map_or_else(default_apt_branch, |apt| apt.branch.clone()),
             distribution: cfg.map_or_else(default_apt_distribution, |apt| apt.distribution.clone()),
             architectures: cfg

@@ -17,8 +17,9 @@ use std::fmt::Write as _;
 use crate::cli::Platform;
 use crate::config::{
     AnnounceConfig, ArtifactsConfig, AtticConfig, FlatpakConfig, ReleaseProvider,
-    ReleasePublisherEnforcement, ResolvedApt, ResolvedAur, ResolvedChocolatey, ResolvedCopr,
-    ResolvedHomebrew, ResolvedReleaseTarget, ResolvedScoop, WindowsSigningConfig, WingetConfig,
+    ReleasePublishConfig, ReleasePublisherEnforcement, ReleasePublisherPolicy, ResolvedApt,
+    ResolvedAur, ResolvedChocolatey, ResolvedCopr, ResolvedHomebrew, ResolvedReleaseTarget,
+    ResolvedScoop, WindowsSigningConfig, WingetConfig,
 };
 use crate::render::ci::{forgejo_action_ref, github_action_ref, immutable_action_ref};
 use serde::Serialize;
@@ -29,6 +30,7 @@ pub struct ReleaseWorkflowInputs<'a> {
     pub runner: &'a str,
     pub preinstalled_nix: bool,
     pub publish_enforcement: ReleasePublisherEnforcement,
+    pub publish: &'a ReleasePublishConfig,
     pub artifacts: &'a ArtifactsConfig,
     pub smoke_command: Option<&'a str>,
     pub release: Option<&'a ResolvedReleaseTarget>,
@@ -181,35 +183,36 @@ pub fn credential_contract(inputs: &ReleaseWorkflowInputs<'_>) -> Vec<ReleaseCre
             "Optional password for COSIGN_PRIVATE_KEY.",
         ));
     }
-    if let Some(apt) = inputs.apt {
+    if let Some(apt) = inputs.apt.filter(|_| channel_enabled(inputs, "apt")) {
+        let required = channel_credential_required(inputs, "apt", true);
         let apt_gpg_fingerprint_variable = apt_fingerprint_variable(apt);
         let apt_gpg_public_key_variable = apt_public_key_variable(apt);
         credentials.push(ReleaseCredential::secret(
             &apt.gpg_key_secret,
             ReleaseCredentialScope::Repo,
             "apt",
-            true,
+            required,
             "Armored GPG private key for the apt repository.",
         ));
         credentials.push(ReleaseCredential::variable(
             &apt.gpg_key_id_secret,
             ReleaseCredentialScope::Repo,
             "apt",
-            true,
+            required,
             "Short key id for the apt repository signing key.",
         ));
         credentials.push(ReleaseCredential::variable(
             apt_gpg_fingerprint_variable,
             ReleaseCredentialScope::Repo,
             "apt",
-            true,
+            required,
             "Fingerprint for the apt repository signing key.",
         ));
         credentials.push(ReleaseCredential::variable(
             apt_gpg_public_key_variable,
             ReleaseCredentialScope::Repo,
             "apt",
-            true,
+            required,
             "Armored public key published with the apt repository.",
         ));
         credentials.push(ReleaseCredential::secret(
@@ -223,7 +226,7 @@ pub fn credential_contract(inputs: &ReleaseWorkflowInputs<'_>) -> Vec<ReleaseCre
             &apt.ssh_key_secret,
             ReleaseCredentialScope::Repo,
             "apt",
-            true,
+            required,
             "Deploy key that pushes the generated apt repository.",
         ));
     }
@@ -268,12 +271,12 @@ pub fn credential_contract(inputs: &ReleaseWorkflowInputs<'_>) -> Vec<ReleaseCre
             "Token for pushing the Homebrew tap.",
         ));
     }
-    if let Some(scoop) = inputs.scoop {
+    if let Some(scoop) = inputs.scoop.filter(|_| channel_enabled(inputs, "scoop")) {
         credentials.push(ReleaseCredential::secret(
             &scoop.bucket_token_secret,
             ReleaseCredentialScope::User,
             "scoop",
-            false,
+            channel_credential_required(inputs, "scoop", false),
             "Token for pushing the Scoop bucket.",
         ));
     }
@@ -379,6 +382,42 @@ pub fn credential_contract(inputs: &ReleaseWorkflowInputs<'_>) -> Vec<ReleaseCre
     credentials
 }
 
+fn channel_policy(
+    inputs: &ReleaseWorkflowInputs<'_>,
+    channel: &str,
+) -> Option<ReleasePublisherPolicy> {
+    inputs.publish.policy(channel)
+}
+
+fn channel_enabled(inputs: &ReleaseWorkflowInputs<'_>, channel: &str) -> bool {
+    channel_policy(inputs, channel) != Some(ReleasePublisherPolicy::Disabled)
+}
+
+fn channel_credential_required(
+    inputs: &ReleaseWorkflowInputs<'_>,
+    channel: &str,
+    legacy_required: bool,
+) -> bool {
+    match channel_policy(inputs, channel) {
+        Some(ReleasePublisherPolicy::Required) => true,
+        Some(ReleasePublisherPolicy::Staged | ReleasePublisherPolicy::Disabled) => false,
+        None => legacy_required,
+    }
+}
+
+fn channel_soft_skip(
+    inputs: &ReleaseWorkflowInputs<'_>,
+    channel: &str,
+    activated_remote: bool,
+) -> bool {
+    match channel_policy(inputs, channel) {
+        Some(ReleasePublisherPolicy::Required) => false,
+        Some(ReleasePublisherPolicy::Staged) => true,
+        Some(ReleasePublisherPolicy::Disabled) => true,
+        None => activated_remote,
+    }
+}
+
 fn apt_fingerprint_variable(apt: &ResolvedApt) -> String {
     apt.gpg_key_id_secret
         .replace("KEY_ID", "FINGERPRINT")
@@ -458,7 +497,7 @@ pub fn render(inputs: &ReleaseWorkflowInputs<'_>) -> String {
         push_sbom(&mut w, &inputs.artifacts.sbom_commands);
     }
     push_build_artifacts(&mut w, inputs.artifacts);
-    if let Some(apt) = inputs.apt {
+    if let Some(apt) = inputs.apt.filter(|_| channel_enabled(inputs, "apt")) {
         push_build_debs(&mut w, apt);
     }
     if let Some(windows) = inputs.windows_signing {
@@ -480,8 +519,12 @@ pub fn render(inputs: &ReleaseWorkflowInputs<'_>) -> String {
     if activated_remote {
         push_publisher_state_probe(&mut w, inputs);
     }
-    if let Some(apt) = inputs.apt {
-        push_publish_apt(&mut w, apt, activated_remote);
+    if let Some(apt) = inputs.apt.filter(|_| channel_enabled(inputs, "apt")) {
+        push_publish_apt(
+            &mut w,
+            apt,
+            channel_soft_skip(inputs, "apt", activated_remote),
+        );
     }
     if let Some(announce) = inputs.announce {
         push_announce(&mut w, announce, inputs.release, inputs.platform);
@@ -498,8 +541,12 @@ pub fn render(inputs: &ReleaseWorkflowInputs<'_>) -> String {
     if let Some(homebrew) = inputs.homebrew {
         push_publish_homebrew(&mut w, homebrew, activated_remote, inputs.platform);
     }
-    if let Some(scoop) = inputs.scoop {
-        push_publish_scoop(&mut w, scoop, activated_remote);
+    if let Some(scoop) = inputs.scoop.filter(|_| channel_enabled(inputs, "scoop")) {
+        push_publish_scoop(
+            &mut w,
+            scoop,
+            channel_soft_skip(inputs, "scoop", activated_remote),
+        );
     }
     if let Some(copr) = inputs.copr {
         push_publish_copr(&mut w, copr, activated_remote);
@@ -527,7 +574,7 @@ fn push_secrets_header(w: &mut String, inputs: &ReleaseWorkflowInputs<'_>) {
         );
         w.push_str("# - COSIGN_PRIVATE_KEY, COSIGN_PASSWORD: optional fallback when keyless Sigstore OIDC is unavailable.\n");
     }
-    if let Some(apt) = inputs.apt {
+    if let Some(apt) = inputs.apt.filter(|_| channel_enabled(inputs, "apt")) {
         writeln!(
             w,
             "# - {}: armored GPG private key for the apt repository.",
@@ -579,7 +626,7 @@ fn push_secrets_header(w: &mut String, inputs: &ReleaseWorkflowInputs<'_>) {
             .expect("write");
         }
     }
-    if let Some(scoop) = inputs.scoop {
+    if let Some(scoop) = inputs.scoop.filter(|_| channel_enabled(inputs, "scoop")) {
         if scoop.bucket_token_secret != "SCOOP_BUCKET_TOKEN" {
             writeln!(
                 w,
@@ -763,7 +810,9 @@ fn push_release_credentials_preflight(w: &mut String, inputs: &ReleaseWorkflowIn
         .filter(|credential| {
             credential.required
                 && (inputs.publish_enforcement == ReleasePublisherEnforcement::Declared
-                    || !downstream_publisher_credential(credential))
+                    || !downstream_publisher_credential(credential)
+                    || inputs.publish.policy(&credential.channel)
+                        == Some(ReleasePublisherPolicy::Required))
         })
         .collect::<Vec<_>>();
     if credentials.is_empty() {
@@ -990,10 +1039,7 @@ fn push_build_artifacts(w: &mut String, artifacts: &ArtifactsConfig) {
 
 fn push_build_debs(w: &mut String, _apt: &ResolvedApt) {
     w.push_str("      - name: Build Debian packages\n        run: |\n          set -euo pipefail\n          . ./release-env\n          export VERSION IS_PRERELEASE\n          mkdir -p release\n");
-    w.push_str("          if ! nix develop -c bash scripts/build-deb.sh \"$VERSION\" release\n");
-    w.push_str("          then\n");
-    w.push_str("            echo \"::warning::Debian package build failed; continuing without .deb release assets and APT publish.\"\n");
-    w.push_str("          fi\n");
+    w.push_str("          nix develop -c simit dist apt build --version \"$VERSION\" --release-dir release\n");
 }
 
 fn push_checksums(w: &mut String, artifacts: &ArtifactsConfig) {
@@ -1378,7 +1424,7 @@ fn push_publisher_state_probe(w: &mut String, inputs: &ReleaseWorkflowInputs<'_>
     w.push_str("            channel=\"$1\"; detail=\"$2\"; shift 2\n");
     w.push_str("            if [ \"$IS_PRERELEASE\" = \"true\" ]; then write_state \"$channel\" skipped-prerelease \"$detail\"; else active_or_soft \"$channel\" \"$detail\" \"$@\"; fi\n");
     w.push_str("          }\n");
-    if let Some(apt) = inputs.apt {
+    if let Some(apt) = inputs.apt.filter(|_| channel_enabled(inputs, "apt")) {
         writeln!(
             w,
             "          stable_or_state apt {} probe_git_tree {} {} dists pool",
@@ -1476,7 +1522,7 @@ fn push_publisher_state_probe(w: &mut String, inputs: &ReleaseWorkflowInputs<'_>
     } else {
         w.push_str("          write_state homebrew not-configured '-'\n");
     }
-    if let Some(scoop) = inputs.scoop {
+    if let Some(scoop) = inputs.scoop.filter(|_| channel_enabled(inputs, "scoop")) {
         writeln!(
             w,
             "          stable_or_state scoop {} probe_git_file {} HEAD {}",
@@ -1525,8 +1571,8 @@ fn push_publisher_missing_helper(w: &mut String) {
     w.push_str("            var=\"PUBLISH_$(printf '%s' \"$channel\" | tr '[:lower:]-' '[:upper:]_')_STATE\"\n");
     w.push_str("            state=\"${!var:-inactive-soft}\"\n");
     w.push_str("            if [ \"$state\" = active-required ]; then echo \"::error::${channel}: ${message}\" >&2; exit 1; fi\n");
-    w.push_str("            echo \"::error::${channel}: ${message}; configured publisher cannot run without required credentials/artifacts.\" >&2\n");
-    w.push_str("            exit 1\n");
+    w.push_str("            echo \"::warning::${channel}: ${message}; staged publisher is not active yet.\" >&2\n");
+    w.push_str("            exit 0\n");
     w.push_str("          }\n");
 }
 
@@ -1535,7 +1581,7 @@ fn push_active_or_skip_prelude(w: &mut String) {
     push_publisher_missing_helper(w);
 }
 
-fn push_publish_apt(w: &mut String, apt: &ResolvedApt, activated_remote: bool) {
+fn push_publish_apt(w: &mut String, apt: &ResolvedApt, soft_skip: bool) {
     w.push_str("      - name: Publish APT repository\n        env:\n");
     writeln!(
         w,
@@ -1561,12 +1607,9 @@ fn push_publish_apt(w: &mut String, apt: &ResolvedApt, activated_remote: bool) {
         apt.ssh_key_secret
     )
     .expect("write");
-    writeln!(w, "          APT_REPO_REMOTE: {}", apt.repo_url).expect("write");
-    writeln!(w, "          APT_REPO_BRANCH: {}", apt.branch).expect("write");
-    writeln!(w, "          APT_DISTRIBUTION: {}", apt.distribution).expect("write");
     w.push_str("        run: |\n          set -euo pipefail\n");
     push_stable_guard(w, "APT repository publish");
-    if activated_remote {
+    if soft_skip {
         push_active_or_skip_prelude(w);
         w.push_str("          if [ -z \"${APT_REPO_GPG_KEY:-}\" ] || [ -z \"${APT_REPO_GPG_KEY_ID:-}\" ] || [ -z \"${APT_REPO_SSH_KEY:-}\" ]; then publisher_missing apt 'apt secrets unset'; fi\n");
         w.push_str("          debs=(release/*.deb); if [ ! -e \"${debs[0]}\" ]; then publisher_missing apt 'no .deb to publish'; fi\n");
@@ -1574,36 +1617,7 @@ fn push_publish_apt(w: &mut String, apt: &ResolvedApt, activated_remote: bool) {
         w.push_str("          if [ -z \"${APT_REPO_GPG_KEY:-}\" ] || [ -z \"${APT_REPO_GPG_KEY_ID:-}\" ] || [ -z \"${APT_REPO_SSH_KEY:-}\" ]; then echo '::error::apt secrets are required because APT repository publishing is configured.' >&2; exit 1; fi\n");
         w.push_str("          debs=(release/*.deb); if [ ! -e \"${debs[0]}\" ]; then echo '::error::release .deb artifacts are required because APT repository publishing is configured.' >&2; exit 1; fi\n");
     }
-    w.push_str("          nix shell nixpkgs#reprepro nixpkgs#gnupg nixpkgs#openssh nixpkgs#git -c bash <<'SCRIPT'\n");
-    w.push_str(
-        "          set -euo pipefail\n          work=\"$(mktemp -d)\"; chmod 700 \"$work\"\n",
-    );
-    w.push_str("          trap 'rm -rf \"$work\"; [ -n \"${SSH_AGENT_PID:-}\" ] && ssh-agent -k >/dev/null 2>&1 || true' EXIT\n");
-    w.push_str("          export GNUPGHOME=\"$work/gpg\"; mkdir -p \"$GNUPGHOME\"; chmod 700 \"$GNUPGHOME\"\n");
-    w.push_str("          printf '%s' \"$APT_REPO_GPG_KEY\" | gpg --batch --import\n");
-    w.push_str("          echo \"${APT_REPO_GPG_KEY_ID}:6:\" | gpg --batch --import-ownertrust\n");
-    w.push_str("          eval \"$(ssh-agent -s)\"; ssh_key=\"$work/id\"; printf '%s\\n' \"$APT_REPO_SSH_KEY\" > \"$ssh_key\"; chmod 600 \"$ssh_key\"; ssh-add \"$ssh_key\"\n");
-    w.push_str("          ssh_host=codeberg.org; case \"$APT_REPO_REMOTE\" in *github.com*) ssh_host=github.com ;; esac\n");
-    w.push_str("          ssh_known=\"$work/known_hosts\"; ssh-keyscan \"$ssh_host\" > \"$ssh_known\" 2>/dev/null\n");
-    w.push_str("          export GIT_SSH_COMMAND=\"ssh -i $ssh_key -o IdentitiesOnly=yes -o UserKnownHostsFile=$ssh_known -o StrictHostKeyChecking=yes\"\n");
-    w.push_str("          mkdir -p \"$work/apt/conf\"; cp dist/apt/conf/distributions \"$work/apt/conf/distributions\"\n");
-    w.push_str("          for deb in release/*.deb; do reprepro -b \"$work/apt\" includedeb \"$APT_DISTRIBUTION\" \"$deb\"; done\n");
-    w.push_str("          git clone --depth 1 --branch \"$APT_REPO_BRANCH\" \"$APT_REPO_REMOTE\" \"$work/checkout\"\n");
-    w.push_str("          shopt -s dotglob nullglob\n");
-    w.push_str("          for path in \"$work/checkout\"/*; do name=\"$(basename \"$path\")\"; case \"$name\" in .git|README.md) continue ;; esac; rm -rf \"$path\"; done\n");
-    w.push_str("          shopt -u dotglob nullglob\n");
-    w.push_str("          cp -r \"$work/apt/dists\" \"$work/checkout/dists\"; cp -r \"$work/apt/pool\" \"$work/checkout/pool\"\n");
-    w.push_str("          if [ -f dist/apt/key.gpg.asc ]; then cp dist/apt/key.gpg.asc \"$work/checkout/key.gpg.asc\"; fi\n");
-    w.push_str("          cd \"$work/checkout\"\n");
-    w.push_str(
-        "          git -c user.name='release bot' -c user.email='release-bot@localhost' add -A\n",
-    );
-    w.push_str("          if git diff --cached --quiet; then echo 'apt: no changes'; exit 0; fi\n");
-    w.push_str("          git -c user.name='release bot' -c user.email='release-bot@localhost' commit -m \"apt: publish ${VERSION}\"\n");
-    w.push_str(
-        "          git push --force-with-lease origin \"HEAD:refs/heads/${APT_REPO_BRANCH}\"\n",
-    );
-    w.push_str("          SCRIPT\n");
+    w.push_str("          nix develop -c simit dist apt publish --version \"$VERSION\" --release-dir release --push\n");
 }
 
 fn push_publish_aur(w: &mut String, aur: &ResolvedAur, activated_remote: bool) {
@@ -1799,7 +1813,7 @@ fn push_publish_homebrew(
     writeln!(w, "          git add Formula/{}.rb; git commit -m \"{} ${{VERSION}}\"; git push origin \"HEAD:${{DEFAULT_BRANCH}}\"", homebrew.name, homebrew.name).expect("write");
 }
 
-fn push_publish_scoop(w: &mut String, scoop: &ResolvedScoop, activated_remote: bool) {
+fn push_publish_scoop(w: &mut String, scoop: &ResolvedScoop, soft_skip: bool) {
     w.push_str("      - name: Publish Scoop bucket\n        env:\n");
     writeln!(
         w,
@@ -1810,26 +1824,33 @@ fn push_publish_scoop(w: &mut String, scoop: &ResolvedScoop, activated_remote: b
     writeln!(w, "          SCOOP_BUCKET_URL: {}", scoop.bucket_url).expect("write");
     w.push_str("        run: |\n          set -euo pipefail\n");
     push_stable_guard(w, "Scoop bucket update");
-    if activated_remote {
+    if soft_skip {
         push_active_or_skip_prelude(w);
         w.push_str("          if [ -z \"${SCOOP_BUCKET_TOKEN:-}\" ]; then publisher_missing scoop 'SCOOP_BUCKET_TOKEN unset'; fi\n");
     } else {
         w.push_str("          if [ -z \"${SCOOP_BUCKET_TOKEN:-}\" ]; then echo 'SCOOP_BUCKET_TOKEN is required because Scoop bucket publishing is configured.' >&2; exit 1; fi\n");
     }
-    let zip = scoop_windows_zip(scoop);
-    if activated_remote {
-        writeln!(w, "          ZIP_NAME=\"{zip}\"; test -s \"release/${{ZIP_NAME}}\" || publisher_missing scoop \"missing release/${{ZIP_NAME}}\"; test -s dist/scoop/{}.json || publisher_missing scoop 'missing dist/scoop/{}.json'", scoop.name, scoop.name).expect("write");
+    let x64_zip = scoop_windows_archive(scoop, "x86_64");
+    if soft_skip {
+        writeln!(w, "          test -s \"release/{x64_zip}\" || publisher_missing scoop \"missing release/{x64_zip}\"").expect("write");
+        if scoop.architectures.arm64 {
+            let arm64_zip = scoop_windows_archive(scoop, "aarch64");
+            writeln!(w, "          test -s \"release/{arm64_zip}\" || publisher_missing scoop \"missing release/{arm64_zip}\"").expect("write");
+        }
     } else {
-        writeln!(w, "          ZIP_NAME=\"{zip}\"; test -s \"release/${{ZIP_NAME}}\"; test -s dist/scoop/{}.json", scoop.name).expect("write");
+        writeln!(w, "          test -s \"release/{x64_zip}\"").expect("write");
+        if scoop.architectures.arm64 {
+            let arm64_zip = scoop_windows_archive(scoop, "aarch64");
+            writeln!(w, "          test -s \"release/{arm64_zip}\"").expect("write");
+        }
     }
-    w.push_str("          SHA256=\"$(awk -v a=\"$ZIP_NAME\" '$2 == a { print $1 }' release/SHA256SUMS.txt)\"; test -n \"$SHA256\"\n");
-    w.push_str("          credential_helper='!f() { echo username=x-access-token; echo \"password=$SCOOP_BUCKET_TOKEN\"; }; f'\n");
-    w.push_str("          rm -rf scoop-bucket; git -c credential.helper=\"$credential_helper\" clone \"$SCOOP_BUCKET_URL\" scoop-bucket\n");
-    w.push_str("          cd scoop-bucket; git config credential.helper \"$credential_helper\"; git config user.email 'ci@localhost'; git config user.name 'release bot'\n");
-    w.push_str("          git remote set-head origin -a; DEFAULT_BRANCH=\"$(git symbolic-ref --short refs/remotes/origin/HEAD | sed 's|^origin/||')\"; git checkout \"$DEFAULT_BRANCH\"; mkdir -p bucket; cd ..\n");
-    writeln!(w, "          sed -e \"s|{{{{VERSION}}}}|${{VERSION}}|g\" -e \"s|{{{{SHA256}}}}|${{SHA256}}|g\" dist/scoop/{name}.json > scoop-bucket/bucket/{name}.json", name = scoop.name).expect("write");
-    writeln!(w, "          cd scoop-bucket; if [ -z \"$(git status --porcelain -- bucket/{name}.json)\" ]; then echo 'bucket unchanged'; exit 0; fi", name = scoop.name).expect("write");
-    writeln!(w, "          git add bucket/{name}.json; git commit -m \"{name} ${{VERSION}}\"; git push origin \"HEAD:${{DEFAULT_BRANCH}}\"", name = scoop.name).expect("write");
+    w.push_str("          nix develop -c simit dist scoop bump --version \"$VERSION\" --bucket-url \"$SCOOP_BUCKET_URL\" --bucket-token-env SCOOP_BUCKET_TOKEN --work-dir scoop-bucket \\\n");
+    writeln!(w, "            --archive \"x64=release/{x64_zip}\" \\").expect("write");
+    if scoop.architectures.arm64 {
+        let arm64_zip = scoop_windows_archive(scoop, "aarch64");
+        writeln!(w, "            --archive \"arm64=release/{arm64_zip}\" \\").expect("write");
+    }
+    w.push_str("            --push\n");
 }
 
 fn push_sbom(w: &mut String, commands: &[String]) {
@@ -2255,12 +2276,12 @@ fn homebrew_archive(homebrew: &ResolvedHomebrew, arch: &str, os: &str) -> String
         .replace("{os}", os)
 }
 
-fn scoop_windows_zip(scoop: &ResolvedScoop) -> String {
+fn scoop_windows_archive(scoop: &ResolvedScoop, architecture: &str) -> String {
     scoop
         .archive_pattern
         .replace("{name}", &scoop.name)
         .replace("{version}", "${VERSION}")
-        .replace("{arch}", "x86_64")
+        .replace("{arch}", architecture)
 }
 
 fn winget_manifest_dir(package_id: &str) -> String {
@@ -2294,7 +2315,8 @@ fn nix_path_info_arg(link: &str) -> String {
 mod tests {
     use super::*;
     use crate::config::{
-        AurFlavors, ChocolateyPushConfig, HomebrewPlatformsConfig, ReleaseProvider, ScoopArchSet,
+        AurFlavors, ChocolateyPushConfig, HomebrewPlatformsConfig, ReleaseProvider,
+        ReleasePublishConfig, ReleasePublisherEnforcement, ReleasePublisherPolicy, ScoopArchSet,
     };
 
     #[test]
@@ -2445,6 +2467,9 @@ mod tests {
         ResolvedApt {
             label: "modde".to_owned(),
             repo_url: "ssh://git@codeberg.org/caniko/rs-modde-apt.git".to_owned(),
+            public_url: Some("https://apt.modde.example/".to_owned()),
+            pages_provider: "codeberg-git-pages".to_owned(),
+            pages_runner: Some("atlas".to_owned()),
             branch: "pages".to_owned(),
             distribution: "stable".to_owned(),
             architectures: "amd64".to_owned(),
@@ -2527,6 +2552,7 @@ mod tests {
             runner: "atlas",
             preinstalled_nix: false,
             publish_enforcement: ReleasePublisherEnforcement::Declared,
+            publish: &ReleasePublishConfig::default(),
             artifacts: &artifacts,
             smoke_command: Some("nix run .#release-smoke --"),
             release: Some(&codeberg),
@@ -2603,13 +2629,16 @@ mod tests {
             )
         );
         // APT deb build + reprepro publish
-        assert!(workflow.contains("nix develop -c bash scripts/build-deb.sh \"$VERSION\" release"));
-        assert!(workflow.contains("continuing without .deb release assets and APT publish."));
+        assert!(workflow.contains(
+            "nix develop -c simit dist apt build --version \"$VERSION\" --release-dir release"
+        ));
+        assert!(workflow.contains(
+            "nix develop -c simit dist apt publish --version \"$VERSION\" --release-dir release --push"
+        ));
         assert!(!workflow.contains("debootstrap --variant=minbase"));
         assert!(!workflow.contains("nixpkgs#debootstrap"));
         assert!(!workflow.contains("priv chroot"));
         assert!(!workflow.contains("sudo chroot"));
-        assert!(workflow.contains("reprepro -b \"$work/apt\" includedeb \"$APT_DISTRIBUTION\""));
         assert!(workflow.contains("APT_REPO_GPG_KEY_ID: ${{ vars.modde_apt_repo_gpg_key_id }}"));
         assert!(
             !workflow.contains("APT_REPO_GPG_KEY_ID: ${{ secrets.modde_apt_repo_gpg_key_id }}")
@@ -2627,11 +2656,6 @@ mod tests {
         assert!(workflow.contains("\"${MODDE_APT_REPO_GPG_KEY_ID:-}\""));
         assert!(workflow.contains("\"${MODDE_APT_REPO_GPG_FINGERPRINT:-}\""));
         assert!(workflow.contains("\"${MODDE_APT_REPO_GPG_PUBLIC_KEY:-}\""));
-        assert!(
-            workflow.contains(
-                "git push --force-with-lease origin \"HEAD:refs/heads/${APT_REPO_BRANCH}\""
-            )
-        );
         // AUR ssh publish with .SRCINFO + 3 flavors
         assert!(workflow.contains("AUR_SSH_KEY: ${{ secrets.AUR_SSH_KEY }}"));
         assert!(workflow.contains(
@@ -2646,7 +2670,8 @@ mod tests {
         assert!(workflow.contains("HOMEBREW_TAP_TOKEN: ${{ secrets.FORGEJO_HOMEBREW_TOKEN }}"));
         assert!(workflow.contains("SCOOP_BUCKET_TOKEN: ${{ secrets.FORGEJO_SCOOP_TOKEN }}"));
         assert!(workflow.contains("nix run '.#rs-harbor' -- brew bump"));
-        assert!(workflow.contains("dist/scoop/modde.json > scoop-bucket/bucket/modde.json"));
+        assert!(workflow.contains("nix develop -c simit dist scoop bump"));
+        assert!(workflow.contains("--archive \"x64=release/modde-${VERSION}-x86_64-windows.zip\""));
         // Prerelease gating present on downstream package repos
         assert!(workflow.contains("skipping AUR packages."));
         assert!(workflow.contains("skipping Homebrew tap update."));
@@ -2724,6 +2749,7 @@ mod tests {
             runner: "atlas",
             preinstalled_nix: false,
             publish_enforcement: ReleasePublisherEnforcement::ActivatedRemote,
+            publish: &ReleasePublishConfig::default(),
             artifacts: &artifacts,
             smoke_command: None,
             release: Some(&codeberg),
@@ -2760,15 +2786,56 @@ mod tests {
         assert!(workflow.contains("publisher_missing scoop 'SCOOP_BUCKET_TOKEN unset'"));
         assert!(workflow.contains("publisher_missing flathub 'FLATHUB_TOKEN unset'"));
         assert!(workflow.contains("publisher_missing winget 'WINGET_PAT unset'"));
-        assert!(
-            workflow.contains(
-                "configured publisher cannot run without required credentials/artifacts."
-            )
-        );
+        assert!(workflow.contains("staged publisher is not active yet."));
         assert!(!workflow.contains("bootstrap channel is inactive, skipping."));
         assert!(!workflow.contains("require_credential 'repo secret' 'modde_apt_repo_gpg_key'"));
         assert!(!workflow.contains("require_credential 'global/user secret' 'AUR_SSH_KEY'"));
         assert!(!workflow.contains("require_credential 'global/user secret' 'copr_login'"));
+    }
+
+    #[test]
+    fn explicit_channel_policies_override_legacy_publisher_behavior() {
+        let (apt, scoop) = (apt(), scoop());
+        let artifacts = artifacts();
+        let mut publish = ReleasePublishConfig {
+            enforcement: ReleasePublisherEnforcement::ActivatedRemote,
+            ..ReleasePublishConfig::default()
+        };
+        publish
+            .channels
+            .insert("apt".to_owned(), ReleasePublisherPolicy::Required);
+        publish
+            .channels
+            .insert("scoop".to_owned(), ReleasePublisherPolicy::Disabled);
+
+        let workflow = render(&ReleaseWorkflowInputs {
+            platform: Platform::Forgejo,
+            runner: "atlas",
+            preinstalled_nix: false,
+            publish_enforcement: publish.enforcement,
+            publish: &publish,
+            artifacts: &artifacts,
+            smoke_command: None,
+            release: None,
+            attic: None,
+            aur: None,
+            copr: None,
+            apt: Some(&apt),
+            homebrew: None,
+            scoop: Some(&scoop),
+            chocolatey: None,
+            windows_signing: None,
+            flatpak: None,
+            winget: None,
+            announce: None,
+        });
+
+        assert!(workflow.contains("name: Publish APT repository"));
+        assert!(workflow.contains("nix develop -c simit dist apt build"));
+        assert!(workflow.contains("nix develop -c simit dist apt publish"));
+        assert!(!workflow.contains("name: Publish Scoop bucket"));
+        assert!(!workflow.contains("SCOOP_BUCKET_TOKEN"));
+        assert!(!workflow.contains("stable_or_state scoop"));
     }
 
     #[test]
@@ -2780,6 +2847,7 @@ mod tests {
             runner: "atlas",
             preinstalled_nix: false,
             publish_enforcement: ReleasePublisherEnforcement::Declared,
+            publish: &ReleasePublishConfig::default(),
             artifacts: &artifacts,
             smoke_command: None,
             release: None,
@@ -2825,6 +2893,7 @@ mod tests {
             runner: "atlas",
             preinstalled_nix: false,
             publish_enforcement: ReleasePublisherEnforcement::Declared,
+            publish: &ReleasePublishConfig::default(),
             artifacts: &artifacts,
             smoke_command: None,
             release: None,
@@ -2858,6 +2927,7 @@ mod tests {
             runner: "atlas",
             preinstalled_nix: false,
             publish_enforcement: ReleasePublisherEnforcement::Declared,
+            publish: &ReleasePublishConfig::default(),
             artifacts: &artifacts,
             smoke_command: Some("nix run .#release-smoke --"),
             release: Some(&codeberg),

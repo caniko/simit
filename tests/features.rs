@@ -857,6 +857,7 @@ fn init_help_is_grouped() {
             "aur",
             "copr",
             "apt",
+            "apt-repo",
             "release"
         ]
     );

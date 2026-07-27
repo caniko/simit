@@ -111,6 +111,8 @@ pub enum InitAction {
     Copr(InitCoprCommand),
     #[command(about = "Bootstrap an apt (reprepro) repository config")]
     Apt(InitAptCommand),
+    #[command(about = "Bootstrap a repository-backed apt Pages repo")]
+    AptRepo(InitAptRepoCommand),
     #[command(about = "Generate the comprehensive multi-channel release workflow")]
     Release(InitReleaseCommand),
 }
@@ -1501,6 +1503,12 @@ pub struct AptOverridesArgs {
         help = "reprepro Origin/Label"
     )]
     pub label: Option<String>,
+    #[arg(
+        long = "apt-public-url",
+        value_name = "URL",
+        help = "Public HTTPS URL served by the apt Pages site"
+    )]
+    pub public_url: Option<String>,
 }
 
 impl AptOverridesArgs {
@@ -1508,6 +1516,7 @@ impl AptOverridesArgs {
         crate::config::AptOverrides {
             repo_url: self.repo_url.as_deref(),
             label: self.label.as_deref(),
+            public_url: self.public_url.as_deref(),
         }
     }
 }
@@ -1568,6 +1577,32 @@ pub struct InitAptCommand {
     pub diff: bool,
     #[arg(long, help = "Print the rendered config without writing files")]
     pub print: bool,
+    #[command(flatten)]
+    pub apt: AptOverridesArgs,
+}
+
+#[derive(Debug, Args)]
+pub struct InitAptRepoCommand {
+    #[arg(
+        long,
+        value_name = "DIR",
+        help = "Path to the apt repository to bootstrap (created if missing)"
+    )]
+    pub target: Utf8PathBuf,
+    #[arg(long, help = "Verify generated Pages workflow and README")]
+    pub check: bool,
+    #[arg(long, help = "Show unified diffs when --check finds drift")]
+    pub diff: bool,
+    #[arg(long, help = "Print the generated Pages workflow")]
+    pub print: bool,
+    #[arg(long, help = "Skip git init and remote wiring")]
+    pub no_git: bool,
+    #[arg(
+        long = "package",
+        value_name = "NAME",
+        help = "Workspace package providing metadata fallbacks"
+    )]
+    pub package: Option<String>,
     #[command(flatten)]
     pub apt: AptOverridesArgs,
 }
@@ -1674,6 +1709,12 @@ pub struct AptCommand {
 pub enum AptAction {
     #[command(about = "Render the reprepro distributions config to stdout")]
     Render(AptRenderArgs),
+    #[command(about = "Build Debian packages into a release directory")]
+    Build(AptBuildArgs),
+    #[command(about = "Publish Debian packages into an apt repository")]
+    Publish(AptPublishArgs),
+    #[command(about = "Verify an apt repository contains the configured release")]
+    Verify(AptVerifyArgs),
 }
 
 #[derive(Debug, Args)]
@@ -1684,6 +1725,69 @@ pub struct AptRenderArgs {
         help = "Metadata-fallback package"
     )]
     pub package: Option<String>,
+    #[command(flatten)]
+    pub apt: AptOverridesArgs,
+}
+
+#[derive(Debug, Args)]
+pub struct AptBuildArgs {
+    #[arg(
+        long,
+        value_name = "VERSION",
+        help = "Release version (no leading 'v')"
+    )]
+    pub version: String,
+    #[arg(long = "release-dir", value_name = "DIR", default_value = "release")]
+    pub release_dir: Utf8PathBuf,
+    #[arg(
+        long = "package",
+        value_name = "NAME",
+        help = "Metadata-fallback package"
+    )]
+    pub package: Option<String>,
+    #[command(flatten)]
+    pub apt: AptOverridesArgs,
+}
+
+#[derive(Debug, Args)]
+pub struct AptPublishArgs {
+    #[arg(
+        long,
+        value_name = "VERSION",
+        help = "Release version (no leading 'v')"
+    )]
+    pub version: String,
+    #[arg(long = "release-dir", value_name = "DIR", default_value = "release")]
+    pub release_dir: Utf8PathBuf,
+    #[arg(long, value_name = "DIR", help = "Existing apt repository checkout")]
+    pub repo: Option<Utf8PathBuf>,
+    #[arg(
+        long = "work-dir",
+        value_name = "DIR",
+        default_value = "target/simit-apt",
+        help = "Working directory for the cloned apt repository"
+    )]
+    pub work_dir: Utf8PathBuf,
+    #[arg(long, help = "Push the committed apt repository branch")]
+    pub push: bool,
+    #[arg(long, help = "Render and validate without modifying the repository")]
+    pub dry_run: bool,
+    #[arg(
+        long = "package",
+        value_name = "NAME",
+        help = "Metadata-fallback package"
+    )]
+    pub package: Option<String>,
+    #[command(flatten)]
+    pub apt: AptOverridesArgs,
+}
+
+#[derive(Debug, Args)]
+pub struct AptVerifyArgs {
+    #[arg(long, value_name = "VERSION", help = "Expected release version")]
+    pub version: Option<String>,
+    #[arg(long, value_name = "DIR", help = "A local apt repository checkout")]
+    pub repo: Utf8PathBuf,
     #[command(flatten)]
     pub apt: AptOverridesArgs,
 }
@@ -1708,17 +1812,12 @@ pub enum CiProvider {
     Crow,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, ValueEnum)]
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq, ValueEnum)]
 #[serde(rename_all = "lowercase")]
 pub enum CrowWorkflowFormat {
+    #[default]
     Yaml,
     Jsonnet,
-}
-
-impl Default for CrowWorkflowFormat {
-    fn default() -> Self {
-        Self::Yaml
-    }
 }
 
 impl Platform {

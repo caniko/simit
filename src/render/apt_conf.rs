@@ -29,6 +29,9 @@ mod tests {
         ResolvedApt {
             label: "modde".to_owned(),
             repo_url: "ssh://git@codeberg.org/caniko/rs-modde-apt.git".to_owned(),
+            public_url: None,
+            pages_provider: "codeberg-git-pages".to_owned(),
+            pages_runner: None,
             branch: "pages".to_owned(),
             distribution: "stable".to_owned(),
             architectures: "amd64".to_owned(),

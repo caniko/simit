@@ -592,13 +592,18 @@ channel files with:
 simit init aur
 simit init copr
 simit init apt
+simit init apt-repo --target ../apt-foo
 simit init release
 ```
 
 Each command supports `--check`, `--diff`, and `--print`. `init aur` writes
 `dist/aur/<pkg>/PKGBUILD` for source, `-bin`, and `-git` flavors. `init copr`
 writes the RPM spec and `.copr/Makefile`. `init apt` writes
-`dist/apt/conf/distributions`. `init release` writes
+`dist/apt/conf/distributions`. `init apt-repo` bootstraps a separate
+repository-backed Codeberg Pages site with `conf/distributions`, the public
+signing key, a generated Pages workflow, and a README. It requires
+`[apt].public_url` and `dist/apt/key.gpg.asc`; run it from the package project
+and push the target repository's configured Pages branch once. `init release` writes
 `.forgejo/workflows/release.yml` by default, or `.github/workflows/release.yml`
 with `--platform github`. It uploads artifacts to Codeberg when
 `[release.codeberg]` is present or to GitHub when `[release.github]` is present,
@@ -610,6 +615,9 @@ For local inspection, render the same templates without writing files:
 simit dist aur render
 simit dist copr render
 simit dist apt render
+simit dist apt build --version 0.3.1 --release-dir release
+simit dist apt publish --version 0.3.1 --release-dir release --push
+simit dist apt verify --repo ../apt-foo --version 0.3.1
 ```
 
 Relevant project config sections are `[aur]`, `[copr]`, `[apt]`,
@@ -627,6 +635,35 @@ secret names are configurable with `[aur].ssh_key_secret`,
 `[flatpak].token_secret`, `[winget].token_secret`,
 `[release.announce].*_secret`, and
 `[release.windows_signing].*_secret`.
+
+APT uses a repository-backed Pages branch rather than rebuilding a fresh
+repository tree on every release:
+
+```toml
+[apt]
+repo_url = "ssh://git@codeberg.org/example/apt-foo.git"
+public_url = "https://apt.foo.example/"
+branch = "pages"
+packages = ["foo=foo"]
+
+[apt.pages]
+provider = "codeberg-git-pages"
+runner = "atlas-nix-trusted"
+
+[release.publish]
+enforcement = "activated-remote"
+
+[release.publish.channels]
+apt = "required"
+scoop = "required"
+homebrew = "staged"
+```
+
+The release template builds `.deb` files with `simit dist apt build`, then
+uses `simit dist apt publish` to update the existing reprepro database and
+push its history-preserving commit. Scoop publication is likewise delegated
+to `simit dist scoop bump`; explicit channel policies allow a repository to
+make APT/Scoop required while keeping another channel staged during rollout.
 
 For rs-harbor-compatible Nix projects, set
 `[release.artifacts].nix_bundle_attrs` to an explicit list of flake attributes

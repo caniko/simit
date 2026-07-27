@@ -48,6 +48,28 @@ fn read(path: &Path) -> String {
     fs::read_to_string(path).unwrap_or_else(|err| panic!("reading {}: {err}", path.display()))
 }
 
+fn init_pages_package() -> TempDir {
+    let project = init_package("demo");
+    fs::write(
+        project.path().join("simit.toml"),
+        r#"[apt]
+repo_url = "ssh://git@codeberg.org/example/apt-demo.git"
+public_url = "https://apt.demo.example/"
+
+[apt.pages]
+runner = "atlas"
+"#,
+    )
+    .unwrap();
+    fs::create_dir_all(project.path().join("dist/apt")).unwrap();
+    fs::write(
+        project.path().join("dist/apt/key.gpg.asc"),
+        "test public key\n",
+    )
+    .unwrap();
+    project
+}
+
 #[test]
 fn bootstraps_fresh_apt_distributions_config() {
     let project = init_package("demo");
@@ -117,4 +139,50 @@ fn print_matches_checked_config_without_writing_files() {
     assert!(stdout.contains("Codename: stable\n"));
     assert!(stdout.contains("SignWith: yes\n"));
     assert!(!project.path().join("dist/apt").exists());
+}
+
+#[test]
+fn bootstraps_repository_backed_apt_pages_site() {
+    let project = init_pages_package();
+    let target = project.path().join("apt-demo");
+
+    let output = simit()
+        .current_dir(project.path())
+        .args([
+            "init",
+            "apt-repo",
+            "--target",
+            target.to_str().unwrap(),
+            "--no-git",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        read(&target.join(".forgejo/workflows/pages.yml"))
+            .contains("https://codeberg.org/git-pages/action@v2")
+    );
+    let workflow = read(&target.join(".forgejo/workflows/pages.yml"));
+    assert!(workflow.contains("mkdir -p _site/dists _site/pool"));
+    assert!(read(&target.join("README.md")).contains("apt.demo.example"));
+    assert_eq!(read(&target.join("key.gpg.asc")), "test public key\n");
+
+    let check = simit()
+        .current_dir(project.path())
+        .args([
+            "init",
+            "apt-repo",
+            "--target",
+            target.to_str().unwrap(),
+            "--no-git",
+            "--check",
+        ])
+        .status()
+        .unwrap();
+    assert!(check.success());
 }

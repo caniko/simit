@@ -1151,7 +1151,7 @@ fn infer_ci_target(marked: &[WorkflowFile]) -> Result<(CiProvider, Platform)> {
             Platform::Forgejo
         } else if workflow.relative_path.starts_with(".github/workflows") {
             Platform::Github
-        } else if workflow.relative_path == PathBuf::from(".gitlab-ci.yml") {
+        } else if workflow.relative_path == Path::new(".gitlab-ci.yml") {
             Platform::Gitlab
         } else {
             bail!("unknown workflow root {}", workflow.relative_path.display());

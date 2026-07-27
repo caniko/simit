@@ -9,6 +9,7 @@ pub mod copr;
 pub mod homebrew;
 pub mod hooks;
 pub mod init_apt;
+pub mod init_apt_repo;
 pub mod init_aur;
 pub mod init_chocolatey;
 pub mod init_ci;

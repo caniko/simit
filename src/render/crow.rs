@@ -169,6 +169,7 @@ pub fn files(request: FilesRequest<'_>) -> Result<Vec<GeneratedFile>> {
     Ok(files)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_workflow(
     config: &CrowCiConfig,
     runtime: Runtime,
@@ -755,9 +756,10 @@ pub fn release_file(
         ));
     }
     if inputs.artifacts.sign {
-        build = build.command(format!(
-            "minisign -Sm release/SHA256SUMS.txt -s \"$${{MINISIGN_SECRET_KEY}}\" -t \"$${{CI_COMMIT_TAG}}\""
-        ));
+        build = build.command(
+            "minisign -Sm release/SHA256SUMS.txt -s \"$${MINISIGN_SECRET_KEY}\" -t \"$${CI_COMMIT_TAG}\""
+                .to_owned(),
+        );
         build = build.secret("MINISIGN_SECRET_KEY");
     }
     if let Some(release) = inputs.release {

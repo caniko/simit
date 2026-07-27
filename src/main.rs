@@ -39,6 +39,7 @@ fn run() -> Result<()> {
             InitAction::Aur(command) => commands::init_aur::run(command),
             InitAction::Copr(command) => commands::init_copr::run(command),
             InitAction::Apt(command) => commands::init_apt::run(command),
+            InitAction::AptRepo(command) => commands::init_apt_repo::run(command),
             InitAction::Release(command) => commands::init_release::run(command),
         },
         Commands::Dist(command) => match command.action {
