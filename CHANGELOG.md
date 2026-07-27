@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.8] - 2026-07-27
+
 ### Added
 
 - Add provider-aware GitHub Actions and Crow CI templates, including Crow YAML
@@ -318,7 +320,8 @@ ci`, including the `~/.cargo/bin` key, rust-cache settings, and why Nix
 
 - Prepare the first public crates.io release.
 
-[Unreleased]: https://codeberg.org/caniko/simit/compare/0.17.7...HEAD
+[Unreleased]: https://codeberg.org/caniko/simit/compare/0.17.8...HEAD
+[0.17.8]: https://codeberg.org/caniko/simit/compare/0.17.7...0.17.8
 [0.17.7]: https://codeberg.org/caniko/simit/compare/0.17.6...0.17.7
 [0.17.6]: https://codeberg.org/caniko/simit/compare/0.17.5...0.17.6
 [0.17.5]: https://codeberg.org/caniko/simit/compare/0.17.4...0.17.5
