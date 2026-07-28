@@ -1624,14 +1624,14 @@ pub struct InitReleaseCommand {
     #[arg(
         long,
         value_enum,
-        help = "Workflow platform; defaults to [ci].platform or forgejo"
+        help = "Workflow platform; defaults to the sole configured release target, [ci].platform, or forgejo"
     )]
     pub platform: Option<Platform>,
     #[arg(
         long = "ci-provider",
         value_enum,
         value_name = "PROVIDER",
-        help = "CI provider for the generated release workflow"
+        help = "CI provider; defaults to Actions for GitHub, otherwise [ci].provider or Actions"
     )]
     pub ci_provider: Option<CiProvider>,
     #[arg(

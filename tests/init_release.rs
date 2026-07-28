@@ -194,12 +194,11 @@ fn bootstraps_github_release_workflow_with_native_permissions_and_uploads() {
     );
     let workflow = read(&project.path().join(".github/workflows/release.yml"));
     assert!(workflow.contains("Publish GitHub release"));
-    assert!(workflow.contains(
-        "\"$GITHUB_API/repos/$GITHUB_REPO/releases/assets/$asset_id\""
-    ));
-    assert!(!workflow.contains(
-        "\"$GITHUB_API/repos/$GITHUB_REPO/releases/$release_id/assets/$asset_id\""
-    ));
+    assert!(workflow.contains("\"$GITHUB_API/repos/$GITHUB_REPO/releases/assets/$asset_id\""));
+    assert!(
+        !workflow
+            .contains("\"$GITHUB_API/repos/$GITHUB_REPO/releases/$release_id/assets/$asset_id\"")
+    );
     assert!(workflow.contains("GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}"));
     assert!(workflow.contains("contents: write"));
     assert!(workflow.contains("id-token: write"));
@@ -212,6 +211,40 @@ fn bootstraps_github_release_workflow_with_native_permissions_and_uploads() {
     assert!(
         String::from_utf8_lossy(&output.stdout).contains("git add .github/workflows/release.yml")
     );
+}
+
+#[test]
+fn sole_github_release_target_uses_actions_without_changing_crow_ci() {
+    let project = init_package("github-crow-demo");
+    let config_path = project.path().join("simit.toml");
+    let config = read(&config_path)
+        .replace(
+            "[release.codeberg]\nrepo = \"example/github-crow-demo\"",
+            "[release.github]\nrepo = \"example/github-crow-demo\"",
+        )
+        .replace(
+            "[release.artifacts]",
+            "[ci]\nplatform = \"forgejo\"\nprovider = \"crow\"\n\n[release.artifacts]",
+        );
+    fs::write(config_path, config).unwrap();
+
+    let output = simit()
+        .current_dir(project.path())
+        .args(["init", "release"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        project
+            .path()
+            .join(".github/workflows/release.yml")
+            .is_file()
+    );
+    assert!(!project.path().join(".crow/release.yaml").exists());
 }
 
 #[test]

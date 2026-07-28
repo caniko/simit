@@ -23,12 +23,19 @@ pub fn run(command: InitReleaseCommand) -> Result<()> {
 
     let platform = command
         .platform
-        .or(cfg.ci.platform)
+        .or(match (&cfg.release.github, &cfg.release.codeberg) {
+            (Some(_), None) => Some(Platform::Github),
+            (None, Some(_)) => Some(Platform::Forgejo),
+            _ => cfg.ci.platform,
+        })
         .unwrap_or(Platform::Forgejo);
-    let provider = command
-        .ci_provider
-        .or(cfg.ci.provider)
-        .unwrap_or(CiProvider::Actions);
+    let provider = command.ci_provider.unwrap_or_else(|| {
+        if platform == Platform::Github {
+            CiProvider::Actions
+        } else {
+            cfg.ci.provider.unwrap_or(CiProvider::Actions)
+        }
+    });
     let release = cfg.resolve_release_target(platform)?;
     let aur = cfg
         .aur
@@ -98,7 +105,10 @@ pub fn run(command: InitReleaseCommand) -> Result<()> {
     };
     let (content, workflow_path) = if provider == CiProvider::Crow {
         let file = crate::render::crow::release_file(cfg.ci.crow.format, &cfg.ci.crow, &inputs)?;
-        (file.content, file.relative_path.to_string_lossy().into_owned())
+        (
+            file.content,
+            file.relative_path.to_string_lossy().into_owned(),
+        )
     } else {
         (
             release_workflow::render(&inputs),
