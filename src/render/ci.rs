@@ -6,7 +6,7 @@ use anyhow::{Result, bail};
 use serde::Deserialize;
 
 use crate::cargo::Package;
-use crate::cli::{CiProvider, Platform, Runtime};
+use crate::cli::{CiProvider, Platform, Runtime, WorkspaceStrategy};
 use crate::config::{CiComponent, CrowCiConfig};
 use crate::config::{
     JetbrainsCredentialSource, ResolvedJetbrains, ResolvedVscode, VscodePatSource,
@@ -115,6 +115,7 @@ pub struct CiOptions {
     pub extra_env: Vec<(String, String)>,
     pub required_secrets: Vec<String>,
     pub required_env: Vec<String>,
+    pub workspace_strategy: WorkspaceStrategy,
     pub package_scoped: bool,
     pub homebrew: Option<HomebrewOptions>,
     pub chocolatey: Option<ChocolateyOptions>,
@@ -150,6 +151,7 @@ impl Default for CiOptions {
             extra_env: Vec::new(),
             required_secrets: Vec::new(),
             required_env: Vec::new(),
+            workspace_strategy: WorkspaceStrategy::Members,
             package_scoped: false,
             homebrew: None,
             chocolatey: None,
@@ -2911,7 +2913,7 @@ fn push_nix_ci_legacy_steps(
 }
 
 fn push_nix_package_crate_step(workflow: &mut String, package: &Package, options: &CiOptions) {
-    if !package.is_publishable() {
+    if options.workspace_strategy == WorkspaceStrategy::Aggregate || !package.is_publishable() {
         return;
     }
 
@@ -3085,7 +3087,7 @@ fn push_clippy_steps(workflow: &mut String, package: &Package, options: &CiOptio
 }
 
 fn push_package_crate_step(workflow: &mut String, package: &Package, options: &CiOptions) {
-    if !package.is_publishable() {
+    if options.workspace_strategy == WorkspaceStrategy::Aggregate || !package.is_publishable() {
         return;
     }
 
@@ -3211,7 +3213,9 @@ fn push_audit_step(workflow: &mut String, runtime: Runtime) {
 }
 
 fn push_package_selector(workflow: &mut String, package: &Package, options: &CiOptions) {
-    if options.package_scoped {
+    if options.workspace_strategy == WorkspaceStrategy::Aggregate {
+        workflow.push_str(" --workspace");
+    } else if options.package_scoped {
         workflow.push_str(" -p ");
         workflow.push_str(&shell_word(&package.name));
     }
@@ -3284,6 +3288,9 @@ fn push_self_check_suffix(
     }
     if self_check.workspace {
         workflow.push_str(" --workspace");
+    }
+    if options.workspace_strategy == WorkspaceStrategy::Aggregate {
+        workflow.push_str(" --workspace-strategy aggregate");
     }
     for package in self_check.packages {
         workflow.push_str(" --package ");

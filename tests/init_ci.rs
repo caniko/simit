@@ -1674,6 +1674,41 @@ fn workspace_flag_generates_per_package_workflows() {
 }
 
 #[test]
+fn aggregate_workspace_strategy_generates_one_workspace_workflow() {
+    let temp = init_workspace_fixture();
+
+    let status = simit_with_user_config(temp.path())
+        .current_dir(temp.path())
+        .args([
+            "init",
+            "ci",
+            "--platform",
+            "github",
+            "--runtime",
+            "nix",
+            "--workspace",
+            "--workspace-strategy",
+            "aggregate",
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let workflow = temp.path().join(".github/workflows/ci.yaml");
+    assert!(workflow.exists());
+    assert!(!temp.path().join(".github/workflows/ci-alpha.yaml").exists());
+    assert!(!temp.path().join(".github/workflows/ci-beta.yaml").exists());
+
+    let ci = read(&workflow);
+    assert_yaml_parses(&ci);
+    assert!(ci.contains("run: nix develop -c cargo test --workspace --all-features"));
+    assert!(ci.contains(
+        "run: nix develop -c cargo clippy --workspace --all-targets --all-features -- --deny warnings"
+    ));
+    assert!(!ci.contains("cargo package"));
+}
+
+#[test]
 fn workspace_publish_false_package_keeps_ci_but_skips_package_and_publish_workflows() {
     let temp = init_workspace_fixture();
     let beta_manifest = temp.path().join("crates/beta/Cargo.toml");

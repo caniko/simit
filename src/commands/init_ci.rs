@@ -66,6 +66,11 @@ pub fn run(command: InitCiCommand) -> Result<()> {
     validate_runner(resolved.runner.as_deref())?;
     validate_runner(resolved.windows_runner.as_deref())?;
     let packages = cargo::select_packages(&metadata, &resolved.packages, resolved.workspace)?;
+    if resolved.workspace_strategy == crate::cli::WorkspaceStrategy::Aggregate
+        && (resolved.publish_crates || command.with_homebrew || command.with_chocolatey || command.with_scoop)
+    {
+        bail!("aggregate workspace CI cannot be combined with crate or platform publishing");
+    }
     if command.with_homebrew && resolved.runtime != Runtime::Nix {
         bail!("Homebrew tap publish requires --runtime nix");
     }
@@ -146,9 +151,15 @@ pub fn run(command: InitCiCommand) -> Result<()> {
     let persisted_windows_runner = runners.windows.as_ref().and_then(|runner| {
         self_check_runner_override(resolved.windows_runner.as_deref(), runner).map(str::to_owned)
     });
-    let multi_package_workspace = metadata.workspace_members.len() > 1;
+    let multi_package_workspace = metadata.workspace_members.len() > 1
+        && resolved.workspace_strategy == crate::cli::WorkspaceStrategy::Members;
+    let generation_packages = if resolved.workspace_strategy == crate::cli::WorkspaceStrategy::Aggregate {
+        packages.first().into_iter().collect::<Vec<_>>()
+    } else {
+        packages.iter().collect::<Vec<_>>()
+    };
     let mut files = Vec::new();
-    for package in &packages {
+    for package in generation_packages {
         let homebrew = if command.with_homebrew {
             Some(homebrew_options(&cfg, &command.homebrew, package)?)
         } else {
@@ -169,6 +180,7 @@ pub fn run(command: InitCiCommand) -> Result<()> {
             chocolatey,
             scoop,
             package_scoped: multi_package_workspace,
+            workspace_strategy: resolved.workspace_strategy,
             ..options.clone()
         };
         let self_check_runner = self_check_runner_override(resolved.runner.as_deref(), &runners.ci);
@@ -788,6 +800,7 @@ fn ci_cli_overrides(command: &InitCiCommand) -> CiCliOverrides {
         step_runner,
         granular: command.granular,
         workspace: command.workspace,
+        workspace_strategy: command.workspace_strategy,
         packages: command.packages.clone(),
         with_nextest: command.with_nextest,
         with_msrv: command.with_msrv,
@@ -986,6 +999,7 @@ pub(crate) fn project_regeneration_command(workspace_root: &Path) -> Result<Opti
     let command = InitCiCommand {
         packages: Vec::new(),
         workspace: false,
+        workspace_strategy: None,
         platform: Some(platform),
         ci_provider: Some(CiProvider::Actions),
         crow_format: None,
@@ -1138,6 +1152,10 @@ pub(crate) fn render_regeneration_command(
     }
     if resolved.workspace {
         args.push("--workspace".to_owned());
+    }
+    if resolved.workspace_strategy == crate::cli::WorkspaceStrategy::Aggregate {
+        args.push("--workspace-strategy".to_owned());
+        args.push("aggregate".to_owned());
     }
     for package in &resolved.packages {
         args.push("--package".to_owned());
