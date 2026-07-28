@@ -7,10 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.11] - 2026-07-28
+
 ### Added
 
 - Draft validated Keep a Changelog entries from Git history with `simit changelog draft` and optional project guidance.
 - Publish the rs-harbor static binary bundle from tagged GitHub releases with runner capacity gates and signed provenance.
+- GitHub prebuild releases.
+- Documentation for automatic changelog drafting.
+
+### Changed
+
+- CI workflows migrated to Crow on CodeFloe.
+- Crow Nix workflows now default to the devenv image.
 
 ## [0.17.10] - 2026-07-27
 
@@ -341,7 +350,8 @@ ci`, including the `~/.cargo/bin` key, rust-cache settings, and why Nix
 
 - Prepare the first public crates.io release.
 
-[Unreleased]: https://codeberg.org/caniko/simit/compare/0.17.10...HEAD
+[Unreleased]: https://codeberg.org/caniko/simit/compare/0.17.11...HEAD
+[0.17.11]: https://codeberg.org/caniko/simit/compare/0.17.10...0.17.11
 [0.17.10]: https://codeberg.org/caniko/simit/compare/0.17.9...0.17.10
 [0.17.9]: https://codeberg.org/caniko/simit/compare/0.17.8...0.17.9
 [0.17.8]: https://codeberg.org/caniko/simit/compare/0.17.7...0.17.8
