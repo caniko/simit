@@ -1306,7 +1306,7 @@ fn push_github_release(
         "            [ -f \"$file\" ] || continue\n            name=$(basename \"$file\")\n",
     );
     w.push_str("            asset_id=$(curl -sS --fail -H \"Authorization: Bearer $GITHUB_TOKEN\" -H 'Accept: application/vnd.github+json' \"$GITHUB_API/repos/$GITHUB_REPO/releases/$release_id/assets\" | jq -r --arg name \"$name\" '.[] | select(.name == $name) | .id' | head -n 1)\n");
-    w.push_str("            if [ -n \"$asset_id\" ]; then curl -sS --fail -X DELETE -H \"Authorization: Bearer $GITHUB_TOKEN\" -H 'Accept: application/vnd.github+json' \"$GITHUB_API/repos/$GITHUB_REPO/releases/$release_id/assets/$asset_id\"; fi\n");
+    w.push_str("            if [ -n \"$asset_id\" ]; then curl -sS --fail -X DELETE -H \"Authorization: Bearer $GITHUB_TOKEN\" -H 'Accept: application/vnd.github+json' \"$GITHUB_API/repos/$GITHUB_REPO/releases/assets/$asset_id\"; fi\n");
     w.push_str("            curl -sS --fail -H \"Authorization: Bearer $GITHUB_TOKEN\" -H 'Accept: application/vnd.github+json' -H 'Content-Type: application/octet-stream' --data-binary \"@$file\" \"$upload_url?name=$name\" > /dev/null\n");
     w.push_str("          done < <(printf '%s\\n' \"");
     w.push('$');

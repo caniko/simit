@@ -227,7 +227,7 @@ jobs:
             [ -f "$file" ] || continue
             name=$(basename "$file")
             asset_id=$(curl -sS --fail -H "Authorization: Bearer $GITHUB_TOKEN" -H 'Accept: application/vnd.github+json' "$GITHUB_API/repos/$GITHUB_REPO/releases/$release_id/assets" | jq -r --arg name "$name" '.[] | select(.name == $name) | .id' | head -n 1)
-            if [ -n "$asset_id" ]; then curl -sS --fail -X DELETE -H "Authorization: Bearer $GITHUB_TOKEN" -H 'Accept: application/vnd.github+json' "$GITHUB_API/repos/$GITHUB_REPO/releases/$release_id/assets/$asset_id"; fi
+            if [ -n "$asset_id" ]; then curl -sS --fail -X DELETE -H "Authorization: Bearer $GITHUB_TOKEN" -H 'Accept: application/vnd.github+json' "$GITHUB_API/repos/$GITHUB_REPO/releases/assets/$asset_id"; fi
             curl -sS --fail -H "Authorization: Bearer $GITHUB_TOKEN" -H 'Accept: application/vnd.github+json' -H 'Content-Type: application/octet-stream' --data-binary "@$file" "$upload_url?name=$name" > /dev/null
           done < <(printf '%s\n' "${files[@]}" | LC_ALL=C sort -u)
           SCRIPT

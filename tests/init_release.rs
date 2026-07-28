@@ -194,6 +194,12 @@ fn bootstraps_github_release_workflow_with_native_permissions_and_uploads() {
     );
     let workflow = read(&project.path().join(".github/workflows/release.yml"));
     assert!(workflow.contains("Publish GitHub release"));
+    assert!(workflow.contains(
+        "\"$GITHUB_API/repos/$GITHUB_REPO/releases/assets/$asset_id\""
+    ));
+    assert!(!workflow.contains(
+        "\"$GITHUB_API/repos/$GITHUB_REPO/releases/$release_id/assets/$asset_id\""
+    ));
     assert!(workflow.contains("GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}"));
     assert!(workflow.contains("contents: write"));
     assert!(workflow.contains("id-token: write"));
