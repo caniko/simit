@@ -82,15 +82,25 @@ use the simple opt-in:
 ```toml
 [release.artifacts]
 prebuild_binaries = true
+
+[release.changelog]
+auto_draft = true
 ```
 
 An explicit `nix_bundle_attrs` list still takes precedence when a project
 publishes multiple bundles.
 
+With `auto_draft`, `simit release` runs `simit changelog draft` before
+promoting `[Unreleased]`. The draft uses the latest reachable semver tag (or
+the root commit for a first release), accepts optional guidance from
+`.skills/release-changelog/SKILL.md`, and fails closed when Codex returns no
+valid notable entries. Use `--no-changelog` only as an explicit release escape
+hatch.
+
 The public distribution and release sections are `[aur]`, `[copr]`, `[apt]`,
 `[homebrew]`, `[chocolatey]`, `[scoop]`, `[flatpak]`, `[winget]`,
 `[release.codeberg]`, `[release.github]`, `[release.artifacts]`, `[release.attic]`,
-`[release.announce]`, and `[release.windows_signing]`.
+`[release.changelog]`, `[release.announce]`, and `[release.windows_signing]`.
 
 ## Release Secrets
 

@@ -2,7 +2,7 @@
 
 <!-- simit:badges:start -->
 
-[![CI](https://img.shields.io/badge/CI-drift-2088ff)](.forgejo/workflows/ci.yaml) [![Nix](https://img.shields.io/badge/Nix-drift-5277c3)](flake.nix) [![docs](https://img.shields.io/badge/docs-enabled-6f42c1)](docs) [![crates.io](https://img.shields.io/badge/crates.io-ready-f46623)](https://crates.io/crates/simit)
+[![CI](https://img.shields.io/badge/CI-drift-2088ff)](.github/workflows/ci.yaml) [![Nix](https://img.shields.io/badge/Nix-drift-5277c3)](flake.nix) [![docs](https://img.shields.io/badge/docs-enabled-6f42c1)](docs) [![crates.io](https://img.shields.io/badge/crates.io-ready-f46623)](https://crates.io/crates/simit) [![artifacts](https://img.shields.io/badge/artifacts-configured-2ea44f)](.github/workflows/release.yml)
 
 <!-- simit:badges:end -->
 
@@ -609,6 +609,13 @@ with `--platform github`. It uploads artifacts to Codeberg when
 `[release.codeberg]` is present or to GitHub when `[release.github]` is present,
 then publishes every configured channel.
 
+Changelog candidates can be drafted independently with
+`simit changelog draft [--base-ref REF] [--dry-run]`. Set
+`[release.changelog] auto_draft = true` to run the same fail-closed drafting
+step before `simit release` promotes `[Unreleased]`. A project may add
+`.skills/release-changelog/SKILL.md` for project-specific guidance; Codex is
+kept read-only and Simit validates and inserts the returned entries.
+
 For local inspection, render the same templates without writing files:
 
 ```sh
@@ -623,7 +630,7 @@ simit dist apt verify --repo ../apt-foo --version 0.3.1
 Relevant project config sections are `[aur]`, `[copr]`, `[apt]`,
 `[homebrew]`, `[chocolatey]`, `[scoop]`, `[flatpak]`, `[winget]`,
 `[release.codeberg]`, `[release.github]`, `[release.artifacts]`, `[release.attic]`,
-`[release.announce]`, and `[release.windows_signing]`. The publish workflow
+`[release.changelog]`, `[release.announce]`, and `[release.windows_signing]`. The publish workflow
 secret names are configurable with `[aur].ssh_key_secret`,
 `[copr].login_secret`, `[copr].username_secret`, `[copr].token_secret`,
 `[apt].gpg_key_secret`, `[apt].gpg_key_id_secret`,

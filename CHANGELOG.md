@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Draft validated Keep a Changelog entries from Git history with `simit changelog draft` and optional project guidance.
+- Publish the rs-harbor static binary bundle from tagged GitHub releases with runner capacity gates and signed provenance.
+
 ## [0.17.10] - 2026-07-27
 
 ### Fixed
