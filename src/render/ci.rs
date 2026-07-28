@@ -2586,7 +2586,7 @@ fn push_release_integrity_steps(workflow: &mut String, platform: Platform) {
     workflow.push_str("          attest_blob_keyless() {\n");
     workflow.push_str("            file=\"$1\" predicate=\"$2\"\n");
     workflow.push_str("            if [ -s \"$oidc_token\" ]; then\n");
-    workflow.push_str("              cosign attest-blob --yes --identity-token \"$(cat \"$oidc_token\")\" --predicate \"$predicate\" --type slsaprovenance1 --output-attestation \"${file}.intoto.jsonl\" --bundle \"${file}.intoto.bundle\" \"$file\"\n");
+    workflow.push_str("              cosign attest-blob --yes --identity-token \"$(cat \"$oidc_token\")\" --predicate \"$predicate\" --type slsaprovenance1 --bundle \"${file}.intoto.bundle\" \"$file\"\n");
     workflow.push_str("            else\n");
     workflow.push_str("              return 1\n");
     workflow.push_str("            fi\n");
@@ -2599,7 +2599,7 @@ fn push_release_integrity_steps(workflow: &mut String, platform: Platform) {
     workflow.push_str("          }\n\n");
     workflow.push_str("          attest_blob_with_key() {\n");
     workflow.push_str("            file=\"$1\" predicate=\"$2\"\n");
-    workflow.push_str("            cosign attest-blob --yes --key \"$cosign_key\" --predicate \"$predicate\" --type slsaprovenance1 --output-attestation \"${file}.intoto.jsonl\" --bundle \"${file}.intoto.bundle\" \"$file\"\n");
+    workflow.push_str("            cosign attest-blob --yes --key \"$cosign_key\" --predicate \"$predicate\" --type slsaprovenance1 --bundle \"${file}.intoto.bundle\" \"$file\"\n");
     workflow.push_str("          }\n\n");
     workflow.push_str("          find release -maxdepth 1 -type f \\( -name '*.tar.gz' -o -name '*.zip' -o -name '*.AppImage' -o -name '*.src.rpm' \\) -print0 | sort -z | while IFS= read -r -d '' file; do\n");
     workflow.push_str("            artifact_sha=\"$(sha256sum \"$file\" | awk '{print $1}')\"\n");
@@ -2616,7 +2616,6 @@ fn push_release_integrity_steps(workflow: &mut String, platform: Platform) {
     workflow.push_str("              exit 1\n");
     workflow.push_str("            fi\n");
     workflow.push_str("            test -s \"${file}.cosign.bundle\"\n");
-    workflow.push_str("            test -s \"${file}.intoto.jsonl\"\n");
     workflow.push_str("            test -s \"${file}.intoto.bundle\"\n");
     workflow.push_str("            rm -f \"$predicate\"\n");
     workflow.push_str("          done\n");

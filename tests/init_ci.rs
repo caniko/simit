@@ -374,7 +374,7 @@ fn assert_release_integrity_steps(workflow: &str) {
         workflow.contains("cosign attest-blob --yes --identity-token \"$(cat \"$oidc_token\")\"")
     );
     assert!(workflow.contains("--type slsaprovenance1"));
-    assert!(workflow.contains("--output-attestation \"${file}.intoto.jsonl\""));
+    assert!(!workflow.contains("--output-attestation"));
     assert!(workflow.contains("--bundle \"${file}.intoto.bundle\""));
     assert!(
         workflow
