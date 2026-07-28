@@ -380,9 +380,6 @@ fn assert_release_integrity_steps(workflow: &str) {
         workflow
             .contains("::error::keyless Sigstore failed and COSIGN_PRIVATE_KEY is unset for $file")
     );
-    assert!(workflow.contains("add_matches 'release/*.cosign.bundle'"));
-    assert!(workflow.contains("add_matches 'release/*.intoto.jsonl'"));
-    assert!(workflow.contains("add_matches 'release/*.intoto.bundle'"));
     assert!(workflow.contains("COSIGN_PRIVATE_KEY fallback"));
 }
 

@@ -398,10 +398,7 @@ pub fn python_ci_file(
 /// Generate CI for a flake-only project without inventing a Cargo or Python
 /// project model. The workflow intentionally has one contract: `nix flake
 /// check` must pass on pushes and pull requests.
-pub fn nix_flake_ci_file(
-    platform: Platform,
-    runner: &ResolvedRunner,
-) -> Result<GeneratedFile> {
+pub fn nix_flake_ci_file(platform: Platform, runner: &ResolvedRunner) -> Result<GeneratedFile> {
     if platform == Platform::Gitlab {
         bail!("GitLab flake CI uses .gitlab-ci.yml");
     }
@@ -2580,8 +2577,8 @@ fn push_release_integrity_steps(workflow: &mut String, platform: Platform) {
     workflow.push_str("          sign_blob_keyless() {\n");
     workflow.push_str("            file=\"$1\"\n");
     workflow.push_str("            if [ -n \"${ACTIONS_ID_TOKEN_REQUEST_URL:-}\" ] && [ -n \"${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}\" ]; then\n");
-    workflow.push_str("              curl -fsSL -H \"Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}\" \"${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sigstore\" > \"$oidc_token\"\n");
-    workflow.push_str("              cosign sign-blob --yes --identity-token \"$oidc_token\" --bundle \"${file}.cosign.bundle\" \"$file\"\n");
+    workflow.push_str("              curl -fsSL -H \"Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}\" \"${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sigstore\" | jq -er '.value' > \"$oidc_token\"\n");
+    workflow.push_str("              cosign sign-blob --yes --identity-token \"$(cat \"$oidc_token\")\" --bundle \"${file}.cosign.bundle\" \"$file\"\n");
     workflow.push_str("            else\n");
     workflow.push_str("              return 1\n");
     workflow.push_str("            fi\n");
@@ -2589,7 +2586,7 @@ fn push_release_integrity_steps(workflow: &mut String, platform: Platform) {
     workflow.push_str("          attest_blob_keyless() {\n");
     workflow.push_str("            file=\"$1\" predicate=\"$2\"\n");
     workflow.push_str("            if [ -s \"$oidc_token\" ]; then\n");
-    workflow.push_str("              cosign attest-blob --yes --identity-token \"$oidc_token\" --predicate \"$predicate\" --type slsaprovenance1 --output-attestation \"${file}.intoto.jsonl\" --bundle \"${file}.intoto.bundle\" \"$file\"\n");
+    workflow.push_str("              cosign attest-blob --yes --identity-token \"$(cat \"$oidc_token\")\" --predicate \"$predicate\" --type slsaprovenance1 --output-attestation \"${file}.intoto.jsonl\" --bundle \"${file}.intoto.bundle\" \"$file\"\n");
     workflow.push_str("            else\n");
     workflow.push_str("              return 1\n");
     workflow.push_str("            fi\n");
@@ -2615,9 +2612,12 @@ fn push_release_integrity_steps(workflow: &mut String, platform: Platform) {
     workflow.push_str("              sign_blob_with_key \"$file\"\n");
     workflow.push_str("              attest_blob_with_key \"$file\" \"$predicate\"\n");
     workflow.push_str("            else\n");
-    workflow.push_str("              echo \"keyless Sigstore failed for $file, and COSIGN_PRIVATE_KEY is not configured\" >&2\n");
+    workflow.push_str("              echo \"::error::keyless Sigstore failed and COSIGN_PRIVATE_KEY is unset for $file\" >&2\n");
     workflow.push_str("              exit 1\n");
     workflow.push_str("            fi\n");
+    workflow.push_str("            test -s \"${file}.cosign.bundle\"\n");
+    workflow.push_str("            test -s \"${file}.intoto.jsonl\"\n");
+    workflow.push_str("            test -s \"${file}.intoto.bundle\"\n");
     workflow.push_str("            rm -f \"$predicate\"\n");
     workflow.push_str("          done\n");
     workflow.push_str("          SCRIPT\n\n");
