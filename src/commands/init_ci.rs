@@ -138,17 +138,27 @@ pub fn run(command: InitCiCommand) -> Result<()> {
         resolved.windows_runner.as_deref(),
         windows_packagers,
     )?;
-    let step_runners: BTreeMap<String, ResolvedRunner> = resolved
-        .step_runners
-        .iter()
-        .map(|(step, label)| {
-            Ok((
-                step.clone(),
-                ResolvedRunner::literal(label)
-                    .map_err(|e| anyhow::anyhow!("invalid step runner label for '{step}': {e}"))?,
-            ))
-        })
-        .collect::<Result<_>>()?;
+    // Step-runner labels such as `atlas-nix-trusted` and `codeberg-small`
+    // belong to the Forgejo/Crow runner fleet.  Reusing them for a GitHub
+    // workflow produces a syntactically valid file that cannot be scheduled
+    // on a hosted GitHub runner.  GitHub uses the resolved hosted runner for
+    // every ordinary step unless a future GitHub-specific runner map is added.
+    let step_runners: BTreeMap<String, ResolvedRunner> = if platform == Platform::Github {
+        BTreeMap::new()
+    } else {
+        resolved
+            .step_runners
+            .iter()
+            .map(|(step, label)| {
+                Ok((
+                    step.clone(),
+                    ResolvedRunner::literal(label).map_err(|e| {
+                        anyhow::anyhow!("invalid step runner label for '{step}': {e}")
+                    })?,
+                ))
+            })
+            .collect::<Result<_>>()?
+    };
     let persisted_runner =
         self_check_runner_override(resolved.runner.as_deref(), &runners.ci).map(str::to_owned);
     let persisted_windows_runner = runners.windows.as_ref().and_then(|runner| {
