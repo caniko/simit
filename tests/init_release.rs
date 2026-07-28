@@ -297,6 +297,7 @@ fn github_prebuild_release_limits_nix_and_checks_disk_capacity() {
     assert!(workflow.contains("disk after bundle release-bundle"));
     assert!(workflow.contains("nix store gc"));
     assert!(workflow.contains("less than 2 GiB free before release publication"));
+    assert!(workflow.contains("add_matches 'release/*.intoto.bundle'"));
 }
 
 #[test]

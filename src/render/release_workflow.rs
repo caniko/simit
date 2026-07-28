@@ -1147,8 +1147,8 @@ fn push_sign(
     w.push_str("{VERSION}/");
     w.push_str(platform.workflow_dir());
     w.push_str("/release.yml\"\n");
-    w.push_str("          sign_blob_keyless() { file=\"$1\"; if [ -n \"${ACTIONS_ID_TOKEN_REQUEST_URL:-}\" ] && [ -n \"${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}\" ]; then curl -fsSL -H \"Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}\" \"${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sigstore\" > \"$oidc_token\"; cosign sign-blob --yes --identity-token \"$oidc_token\" --bundle \"${file}.cosign.bundle\" \"$file\"; else return 1; fi; }\n");
-    w.push_str("          attest_blob_keyless() { file=\"$1\"; predicate=\"$2\"; if [ -s \"$oidc_token\" ]; then cosign attest-blob --yes --identity-token \"$oidc_token\" --predicate \"$predicate\" --type slsaprovenance1 --output-attestation \"${file}.intoto.jsonl\" --bundle \"${file}.intoto.bundle\" \"$file\"; else return 1; fi; }\n");
+    w.push_str("          sign_blob_keyless() { file=\"$1\"; if [ -n \"${ACTIONS_ID_TOKEN_REQUEST_URL:-}\" ] && [ -n \"${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}\" ]; then curl -fsSL -H \"Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}\" \"${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sigstore\" | jq -er '.value' > \"$oidc_token\"; cosign sign-blob --yes --identity-token \"$(cat \"$oidc_token\")\" --bundle \"${file}.cosign.bundle\" \"$file\"; else return 1; fi; }\n");
+    w.push_str("          attest_blob_keyless() { file=\"$1\"; predicate=\"$2\"; if [ -s \"$oidc_token\" ]; then cosign attest-blob --yes --identity-token \"$(cat \"$oidc_token\")\" --predicate \"$predicate\" --type slsaprovenance1 --output-attestation \"${file}.intoto.jsonl\" --bundle \"${file}.intoto.bundle\" \"$file\"; else return 1; fi; }\n");
     w.push_str("          sign_blob_with_key() { file=\"$1\"; test -n \"${COSIGN_PRIVATE_KEY:-}\"; printf '%s' \"$COSIGN_PRIVATE_KEY\" > \"$cosign_key\"; cosign sign-blob --yes --key \"$cosign_key\" --bundle \"${file}.cosign.bundle\" \"$file\"; }\n");
     w.push_str("          attest_blob_with_key() { file=\"$1\"; predicate=\"$2\"; cosign attest-blob --yes --key \"$cosign_key\" --predicate \"$predicate\" --type slsaprovenance1 --output-attestation \"${file}.intoto.jsonl\" --bundle \"${file}.intoto.bundle\" \"$file\"; }\n");
     w.push_str("          shopt -s nullglob\n");
@@ -1157,7 +1157,8 @@ fn push_sign(
     w.push_str("            [ -f \"$file\" ] || continue\n");
     w.push_str("            artifact_sha=\"$(sha256sum \"$file\" | awk '{print $1}')\"; predicate=\"$(mktemp)\"\n");
     w.push_str("            jq -n --arg builder_id \"$builder_id\" --arg git_sha \"$git_sha\" --arg workflow_sha \"$workflow_sha\" --arg flake_lock_sha \"$flake_lock_sha\" --arg repo_url \"$repo_url\" --arg ref \"refs/tags/${VERSION}\" --arg artifact \"$(basename \"$file\")\" --arg artifact_sha \"$artifact_sha\" '{buildDefinition:{buildType:\"https://simit.rs/release\",externalParameters:{repository:$repo_url,ref:$ref,artifact:$artifact,artifactDigest:{sha256:$artifact_sha}},internalParameters:{},resolvedDependencies:[{uri:($repo_url+\".git\"),digest:{gitCommit:$git_sha}},{uri:\"flake.lock\",digest:{sha256:$flake_lock_sha}},{uri:\"release workflow\",digest:{sha256:$workflow_sha}}]},runDetails:{builder:{id:$builder_id}}}' > \"$predicate\"\n");
-    w.push_str("            if sign_blob_keyless \"$file\" && attest_blob_keyless \"$file\" \"$predicate\"; then echo \"signed+attested $file (keyless)\"; elif [ -n \"${COSIGN_PRIVATE_KEY:-}\" ]; then echo \"keyless failed for $file; using COSIGN_PRIVATE_KEY\"; sign_blob_with_key \"$file\"; attest_blob_with_key \"$file\" \"$predicate\"; else echo \"::warning::keyless Sigstore failed and COSIGN_PRIVATE_KEY unset; continuing without cosign signature or attestation for $file\" >&2; fi\n");
+    w.push_str("            if sign_blob_keyless \"$file\" && attest_blob_keyless \"$file\" \"$predicate\"; then echo \"signed+attested $file (keyless)\"; elif [ -n \"${COSIGN_PRIVATE_KEY:-}\" ]; then echo \"keyless failed for $file; using COSIGN_PRIVATE_KEY\"; sign_blob_with_key \"$file\"; attest_blob_with_key \"$file\" \"$predicate\"; else echo \"::error::keyless Sigstore failed and COSIGN_PRIVATE_KEY is unset for $file\" >&2; exit 1; fi\n");
+    w.push_str("            test -s \"${file}.cosign.bundle\"\n            test -s \"${file}.intoto.jsonl\"\n            test -s \"${file}.intoto.bundle\"\n");
     w.push_str("            rm -f \"$predicate\"\n          done < <(printf '%s\\n' \"${files[@]}\" | LC_ALL=C sort -u)\n          SCRIPT\n");
 }
 
@@ -1273,6 +1274,7 @@ fn push_github_release(
     w.push_str("          shopt -s nullglob\n          files=()\n");
     w.push_str("          add_matches() { local pattern=\"$1\" match; while IFS= read -r match; do files+=(\"$match\"); done < <(compgen -G \"$pattern\" || true); }\n");
     w.push_str("          add_matches 'release/SHA256SUMS.txt'\n          add_matches 'release/SHA256SUMS.txt.minisig'\n");
+    w.push_str("          add_matches 'release/*.cosign.bundle'\n          add_matches 'release/*.intoto.jsonl'\n          add_matches 'release/*.intoto.bundle'\n");
     if artifacts.checksum_globs.is_empty() {
         for glob in [
             "*.tar.gz",
@@ -1357,6 +1359,9 @@ fn push_forgejo_release(
     w.push_str("          add_matches() { local pattern=\"$1\" match; while IFS= read -r match; do files+=(\"$match\"); done < <(compgen -G \"$pattern\" || true); }\n");
     w.push_str("          add_matches 'release/SHA256SUMS.txt'\n");
     w.push_str("          add_matches 'release/SHA256SUMS.txt.minisig'\n");
+    w.push_str("          add_matches 'release/*.cosign.bundle'\n");
+    w.push_str("          add_matches 'release/*.intoto.jsonl'\n");
+    w.push_str("          add_matches 'release/*.intoto.bundle'\n");
     if artifacts.checksum_globs.is_empty() {
         for glob in [
             "*.tar.gz",
@@ -2617,7 +2622,9 @@ mod tests {
         assert!(workflow.contains("minisign -S -s \"$minisign_key\""));
         assert!(workflow.contains("cosign sign-blob --yes --identity-token"));
         assert!(workflow.contains("--type slsaprovenance1"));
-        assert!(workflow.contains("continuing without cosign signature or attestation for $file"));
+        assert!(workflow.contains(
+            "::error::keyless Sigstore failed and COSIGN_PRIVATE_KEY is unset for $file"
+        ));
         // Forgejo-compatible release upload
         assert!(workflow.contains("FORGEJO_TOKEN: ${{ secrets.codeberg_token }}"));
         assert!(workflow.contains(
