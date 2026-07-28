@@ -63,9 +63,14 @@
       # keep this one alongside the normal Cargo source set.
       src = pkgs.lib.cleanSourceWith {
         src = ./.;
-        filter = path: type:
+        filter = path: type: let
+          pathString = toString path;
+        in
           (craneLib.filterCargoSources path type)
-          || pkgs.lib.hasSuffix "ci-actions.json" (toString path);
+          || pkgs.lib.hasSuffix "ci-actions.json" pathString
+          || pkgs.lib.hasSuffix "/.github" pathString
+          || pkgs.lib.hasSuffix "/.github/workflows" pathString
+          || pkgs.lib.hasInfix "/.github/workflows/" pathString;
       };
 
       commonArgs = {
