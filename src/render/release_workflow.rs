@@ -1011,6 +1011,10 @@ fn push_build_artifacts(w: &mut String, platform: Platform, artifacts: &Artifact
     }
     for (index, attr) in bundle_attrs.iter().enumerate() {
         let link = format!("target/simit-release-bundle-{index}");
+        if platform == Platform::Github {
+            writeln!(w, "          echo 'disk before bundle {}'", attr).expect("write");
+            w.push_str("          df -h /\n");
+        }
         writeln!(
             w,
             "          nix build {} --out-link {}",
@@ -1026,6 +1030,10 @@ fn push_build_artifacts(w: &mut String, platform: Platform, artifacts: &Artifact
         w.push_str("          done < <(find -L ");
         w.push_str(&shell_single_quote(&link));
         w.push_str(" -mindepth 1 -maxdepth 1 -type f -print | LC_ALL=C sort)\n");
+        if platform == Platform::Github {
+            writeln!(w, "          echo 'disk after bundle {}'", attr).expect("write");
+            w.push_str("          df -h /\n");
+        }
     }
     if !bundle_attrs.is_empty() {
         w.push_str("          shopt -s nullglob\n");

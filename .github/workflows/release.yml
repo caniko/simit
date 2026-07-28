@@ -107,6 +107,8 @@ jobs:
           free_kib="$(df -Pk / | awk 'NR == 2 { print $4 }')"
           test "$free_kib" -ge 8388608 || { echo "GitHub runner has less than 8 GiB free before Nix realization" >&2; exit 1; }
           mkdir -p target
+          echo 'disk before bundle release-bundle'
+          df -h /
           nix build '.#release-bundle' --out-link 'target/simit-release-bundle-0'
           test -d 'target/simit-release-bundle-0'
           while IFS= read -r file; do
@@ -114,6 +116,8 @@ jobs:
             test ! -e "release/$name" || { echo "release bundle asset collision: $name" >&2; exit 1; }
             cp -L "$file" "release/$name"
           done < <(find -L 'target/simit-release-bundle-0' -mindepth 1 -maxdepth 1 -type f -print | LC_ALL=C sort)
+          echo 'disk after bundle release-bundle'
+          df -h /
           shopt -s nullglob
           manifests=(release/*-release-manifest.json)
           test "${#manifests[@]}" -eq 1 || { echo "expected exactly one release manifest from Nix bundles" >&2; exit 1; }

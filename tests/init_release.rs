@@ -293,6 +293,8 @@ fn github_prebuild_release_limits_nix_and_checks_disk_capacity() {
     assert!(workflow.contains("max-jobs = 1"));
     assert!(workflow.contains("cores = 2"));
     assert!(workflow.contains("less than 8 GiB free before Nix realization"));
+    assert!(workflow.contains("disk before bundle release-bundle"));
+    assert!(workflow.contains("disk after bundle release-bundle"));
     assert!(workflow.contains("nix store gc"));
     assert!(workflow.contains("less than 2 GiB free before release publication"));
 }
