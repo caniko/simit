@@ -35,6 +35,7 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
 
     let metadata = cargo::metadata_for_current_dir()?;
     let workspace_root = metadata.workspace_root.as_std_path();
+    let config = ProjectConfig::load(workspace_root)?;
     let packages = cargo::select_packages(&metadata, &command.packages, command.workspace)?;
     if command.push {
         bail!("--push is only valid with `simit release sync-up`");
@@ -68,6 +69,9 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
         }
         println!("would run cargo test and cargo clippy");
         if !command.no_changelog && changelog_path.exists() {
+            if config.release.changelog.auto_draft {
+                println!("would draft CHANGELOG.md [Unreleased] from git history");
+            }
             println!("would promote CHANGELOG.md [Unreleased] to {new_version}");
         }
         println!("would run git commit with {:?}", git_args);
@@ -79,8 +83,14 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
 
     git::release_preflight(workspace_root, create_tag, sign_tag, &new_version)?;
     let changelog_update = if !command.no_changelog && changelog_path.exists() {
+        let content = std::fs::read_to_string(&changelog_path)?;
+        let content = if config.release.changelog.auto_draft {
+            changelog::draft_content(&content, workspace_root, None)?
+        } else {
+            content
+        };
         Some(changelog::release_content(
-            &std::fs::read_to_string(&changelog_path)?,
+            &content,
             &new_version,
             changelog::today_utc()?,
             None,

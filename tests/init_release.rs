@@ -260,6 +260,44 @@ fn prebuild_binaries_enables_conventional_release_bundle() {
 }
 
 #[test]
+fn github_prebuild_release_limits_nix_and_checks_disk_capacity() {
+    let project = init_package("github-prebuilt-demo");
+    let config_path = project.path().join("simit.toml");
+    let config = read(&config_path)
+        .replace(
+            "[release.codeberg]\nrepo = \"example/github-prebuilt-demo\"",
+            "[release.github]\nrepo = \"example/github-prebuilt-demo\"",
+        )
+        .replace(
+            "[release.artifacts]",
+            "[ci]\nplatform = \"github\"\n\n[release.artifacts]",
+        )
+        .replace(
+            "runner = \"atlas\"\n",
+            "runner = \"ubuntu-24.04\"\nprebuild_binaries = true\n",
+        );
+    fs::write(config_path, config).unwrap();
+
+    let output = simit()
+        .current_dir(project.path())
+        .args(["init", "release", "--platform", "github"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let workflow = read(&project.path().join(".github/workflows/release.yml"));
+    assert!(workflow.contains("runs-on: ubuntu-24.04"));
+    assert!(workflow.contains("max-jobs = 1"));
+    assert!(workflow.contains("cores = 2"));
+    assert!(workflow.contains("less than 8 GiB free before Nix realization"));
+    assert!(workflow.contains("nix store gc"));
+    assert!(workflow.contains("less than 2 GiB free before release publication"));
+}
+
+#[test]
 fn check_succeeds_after_bootstrap_and_rerender_is_idempotent() {
     let project = init_package("demo");
 

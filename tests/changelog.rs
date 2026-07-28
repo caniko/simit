@@ -1,4 +1,6 @@
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
 use std::process::Command;
 
@@ -39,6 +41,29 @@ fn output(dir: &Path, program: &str, args: &[&str]) -> String {
 
 fn read(path: &Path) -> String {
     fs::read_to_string(path).unwrap_or_else(|err| panic!("reading {}: {err}", path.display()))
+}
+
+#[cfg(unix)]
+fn fake_codex(root: &Path, body: &str) -> std::path::PathBuf {
+    let bin = root.join("fake-bin");
+    fs::create_dir_all(&bin).unwrap();
+    let script = bin.join("codex");
+    fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\nout=''\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = '-o' ]; then shift; out=\"$1\"; fi\n  shift\ndone\ncat >/dev/null\ncat > \"$out\" <<'EOF'\n{body}\nEOF\n"
+        ),
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&script).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&script, permissions).unwrap();
+    script
+}
+
+#[cfg(unix)]
+fn with_fake_codex(command: &mut Command, script: &Path) {
+    command.env("SIMIT_CODEX", script);
 }
 
 fn init_release_repo() -> TempDir {
@@ -120,6 +145,71 @@ fn add_creates_missing_sections_and_appends_existing_ones() {
 
     let changelog = read(&temp.path().join("CHANGELOG.md"));
     assert!(changelog.contains("### Added\n\n- Support a new API\n\n### Fixed\n\n- Fix panic on empty input\n- Fix race in release flow\n"));
+}
+
+#[cfg(unix)]
+#[test]
+fn draft_uses_git_history_and_deduplicates_entries() {
+    let temp = init_release_repo();
+    run(
+        temp.path(),
+        env!("CARGO_BIN_EXE_simit"),
+        &["changelog", "init"],
+    );
+    run(
+        temp.path(),
+        env!("CARGO_BIN_EXE_simit"),
+        &["changelog", "add", "fixed", "Keep existing fix"],
+    );
+    run(temp.path(), "git", &["add", "CHANGELOG.md"]);
+    run(
+        temp.path(),
+        "git",
+        &["commit", "-m", "feat: add release drafting"],
+    );
+    let bin = fake_codex(
+        temp.path(),
+        "### Added\n\n- Generate release notes from git history\n\n### Fixed\n\n- Keep existing fix",
+    );
+
+    let mut command = simit();
+    with_fake_codex(&mut command, &bin);
+    let status = command
+        .current_dir(temp.path())
+        .args(["changelog", "draft"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let changelog = read(&temp.path().join("CHANGELOG.md"));
+    assert!(changelog.contains("- Generate release notes from git history"));
+    assert_eq!(changelog.matches("- Keep existing fix").count(), 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn draft_rejects_unstructured_codex_output_without_writing() {
+    let temp = init_release_repo();
+    run(
+        temp.path(),
+        env!("CARGO_BIN_EXE_simit"),
+        &["changelog", "init"],
+    );
+    run(temp.path(), "git", &["add", "CHANGELOG.md"]);
+    run(temp.path(), "git", &["commit", "-m", "feat: add changelog"]);
+    let before = read(&temp.path().join("CHANGELOG.md"));
+    let bin = fake_codex(temp.path(), "Here are some changes.");
+
+    let mut command = simit();
+    with_fake_codex(&mut command, &bin);
+    let output = command
+        .current_dir(temp.path())
+        .args(["changelog", "draft"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("unsupported line"));
+    assert_eq!(read(&temp.path().join("CHANGELOG.md")), before);
 }
 
 #[test]
@@ -404,4 +494,39 @@ fn release_command_promotes_changelog_and_honors_no_changelog() {
     let changelog = read(&skipped.path().join("CHANGELOG.md"));
     assert!(changelog.contains("### Fixed\n\n- Keep unreleased notes intact"));
     assert!(!changelog.contains("## [0.1.1] - "));
+}
+
+#[cfg(unix)]
+#[test]
+fn release_auto_drafts_before_promoting_changelog() {
+    let temp = init_release_repo();
+    run(
+        temp.path(),
+        env!("CARGO_BIN_EXE_simit"),
+        &["changelog", "init"],
+    );
+    fs::write(
+        temp.path().join("simit.toml"),
+        "[release.changelog]\nauto_draft = true\n",
+    )
+    .unwrap();
+    run(temp.path(), "git", &["add", "CHANGELOG.md", "simit.toml"]);
+    run(
+        temp.path(),
+        "git",
+        &["commit", "-m", "feat: automate releases"],
+    );
+    let bin = fake_codex(temp.path(), "### Added\n\n- Automate release changelogs");
+
+    let mut command = simit();
+    with_fake_codex(&mut command, &bin);
+    let status = command
+        .current_dir(temp.path())
+        .args(["release", "--no-sign", "patch", "-m", "release patch"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let changelog = read(&temp.path().join("CHANGELOG.md"));
+    assert!(changelog.contains("## [0.1.1] - "));
+    assert!(changelog.contains("- Automate release changelogs"));
 }

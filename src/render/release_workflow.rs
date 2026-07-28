@@ -496,7 +496,7 @@ pub fn render(inputs: &ReleaseWorkflowInputs<'_>) -> String {
     if !inputs.artifacts.sbom_commands.is_empty() {
         push_sbom(&mut w, &inputs.artifacts.sbom_commands);
     }
-    push_build_artifacts(&mut w, inputs.artifacts);
+    push_build_artifacts(&mut w, inputs.platform, inputs.artifacts);
     if let Some(apt) = inputs.apt.filter(|_| channel_enabled(inputs, "apt")) {
         push_build_debs(&mut w, apt);
     }
@@ -724,6 +724,10 @@ fn push_install_nix(w: &mut String, platform: Platform, artifacts: &ArtifactsCon
     w.push('\n');
     w.push_str("        with:\n          extra_nix_config: |\n");
     w.push_str("            experimental-features = nix-command flakes\n");
+    if platform == Platform::Github {
+        w.push_str("            max-jobs = 1\n");
+        w.push_str("            cores = 2\n");
+    }
     if !artifacts.substituters.is_empty() {
         writeln!(
             w,
@@ -991,13 +995,18 @@ fn push_build_srpm(w: &mut String, copr: &ResolvedCopr) {
     w.push_str("          SCRIPT\n");
 }
 
-fn push_build_artifacts(w: &mut String, artifacts: &ArtifactsConfig) {
+fn push_build_artifacts(w: &mut String, platform: Platform, artifacts: &ArtifactsConfig) {
     let bundle_attrs = artifacts.effective_nix_bundle_attrs();
     w.push_str(
         "      - name: Build release artifacts\n        run: |\n          set -euo pipefail\n",
     );
     w.push_str("          . ./release-env\n          export VERSION IS_PRERELEASE\n          mkdir -p release\n");
     if !bundle_attrs.is_empty() {
+        if platform == Platform::Github {
+            w.push_str("          df -h /\n");
+            w.push_str("          free_kib=\"$(df -Pk / | awk 'NR == 2 { print $4 }')\"\n");
+            w.push_str("          test \"$free_kib\" -ge 8388608 || { echo \"GitHub runner has less than 8 GiB free before Nix realization\" >&2; exit 1; }\n");
+        }
         w.push_str("          mkdir -p target\n");
     }
     for (index, attr) in bundle_attrs.iter().enumerate() {
@@ -1034,6 +1043,13 @@ fn push_build_artifacts(w: &mut String, artifacts: &ArtifactsConfig) {
                 writeln!(w, "          {sub}").expect("write");
             }
         }
+    }
+    if !bundle_attrs.is_empty() && platform == Platform::Github {
+        w.push_str("          rm -f target/simit-release-bundle-*\n");
+        w.push_str("          nix store gc\n");
+        w.push_str("          df -h /\n");
+        w.push_str("          free_kib=\"$(df -Pk / | awk 'NR == 2 { print $4 }')\"\n");
+        w.push_str("          test \"$free_kib\" -ge 2097152 || { echo \"GitHub runner has less than 2 GiB free before release publication\" >&2; exit 1; }\n");
     }
 }
 

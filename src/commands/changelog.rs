@@ -11,6 +11,13 @@ pub fn run(command: ChangelogCommand) -> Result<()> {
             registry::touch_current_project_or_warn([("changelog", FeatureStatus::Managed)]);
             Ok(())
         }
+        ChangelogAction::Draft { base_ref, dry_run } => {
+            changelog::draft_file(command.file.as_std_path(), base_ref.as_deref(), dry_run)?;
+            if !dry_run {
+                registry::touch_current_project_or_warn([("changelog", FeatureStatus::Managed)]);
+            }
+            Ok(())
+        }
         ChangelogAction::Add { kind, text } => {
             changelog::add_entry_file(command.file.as_std_path(), entry_kind(kind), &text)
         }

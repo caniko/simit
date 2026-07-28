@@ -1,7 +1,8 @@
 use std::fmt;
 use std::fs;
+use std::io::Write as _;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -138,6 +139,52 @@ pub fn add_entry_file(path: &Path, kind: EntryKind, text: &str) -> Result<()> {
     let content = read_file(path)?;
     let updated = add_entry(&content, kind, text)?;
     write_file(path, &updated)
+}
+
+pub fn draft_file(path: &Path, base_ref: Option<&str>, dry_run: bool) -> Result<()> {
+    let search_root = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let root = git_output(search_root, &["rev-parse", "--show-toplevel"])?;
+    let content = read_file(path)?;
+    let updated = draft_content(&content, Path::new(root.trim()), base_ref)?;
+    if dry_run {
+        print!("{updated}");
+        Ok(())
+    } else {
+        write_file(path, &updated)
+    }
+}
+
+pub fn draft_content(content: &str, repo_root: &Path, base_ref: Option<&str>) -> Result<String> {
+    check_content(content)?;
+    let range = changelog_range(repo_root, base_ref)?;
+    let subjects = commit_subjects(repo_root, &range)?;
+    if subjects.is_empty() {
+        bail!(
+            "no non-noise commits found for changelog range {}",
+            range.label
+        );
+    }
+    let prompt = draft_prompt(
+        repo_root,
+        &range,
+        &subjects,
+        &area_summary(repo_root, &range)?,
+        &shortstat(repo_root, &range)?,
+    )?;
+    let candidate = run_codex(repo_root, &prompt)?;
+    let entries = parse_draft_entries(&candidate)?;
+    let mut updated = content.to_owned();
+    for (kind, text) in entries {
+        updated = add_entry(&updated, kind, &text)?;
+    }
+    check_content(&updated)?;
+    if updated == content {
+        bail!("Codex draft contained no new changelog entries");
+    }
+    Ok(updated)
 }
 
 pub fn release_file(
@@ -463,6 +510,9 @@ fn section_has_entries(lines: &[String]) -> bool {
 fn insert_entry(body: &mut Vec<String>, kind: EntryKind, text: &str) {
     let heading = kind.heading().to_owned();
     let bullet = format!("- {text}");
+    if body.iter().any(|line| line.trim() == bullet) {
+        return;
+    }
 
     if let Some(index) = body.iter().position(|line| line.trim() == heading) {
         let next_heading = body[index + 1..]
@@ -511,6 +561,238 @@ fn insert_entry(body: &mut Vec<String>, kind: EntryKind, text: &str) {
     }
 
     body.splice(start..end, block);
+}
+
+struct ChangelogRange {
+    git: String,
+    label: String,
+    initial: bool,
+}
+
+fn changelog_range(repo_root: &Path, requested: Option<&str>) -> Result<ChangelogRange> {
+    if let Some(requested) = requested {
+        let requested = requested.trim();
+        if requested.is_empty() {
+            bail!("--base-ref cannot be empty");
+        }
+        let merge_base = git_output(repo_root, &["merge-base", "HEAD", requested])?;
+        return Ok(ChangelogRange {
+            git: format!("{}..HEAD", merge_base.trim()),
+            label: requested.to_owned(),
+            initial: false,
+        });
+    }
+
+    let tags = git_output(repo_root, &["tag", "--merged", "HEAD", "--sort=-v:refname"])?;
+    if let Some(tag) = tags.lines().find(|tag| Version::parse(tag.trim()).is_ok()) {
+        return Ok(ChangelogRange {
+            git: format!("{}..HEAD", tag.trim()),
+            label: tag.trim().to_owned(),
+            initial: false,
+        });
+    }
+
+    Ok(ChangelogRange {
+        git: "HEAD".to_owned(),
+        label: "initial snapshot".to_owned(),
+        initial: true,
+    })
+}
+
+fn commit_subjects(repo_root: &Path, range: &ChangelogRange) -> Result<Vec<String>> {
+    let output = git_output(
+        repo_root,
+        &["log", "--no-merges", "--format=%s", &range.git],
+    )?;
+    Ok(output
+        .lines()
+        .map(str::trim)
+        .filter(|subject| !subject.is_empty() && !is_noise_subject(subject))
+        .take(40)
+        .map(ToOwned::to_owned)
+        .collect())
+}
+
+fn is_noise_subject(subject: &str) -> bool {
+    let subject = subject.to_ascii_lowercase();
+    let subject = subject.trim();
+    subject == "wip"
+        || subject == "working checkpoint"
+        || subject == "style: cargo fmt"
+        || subject == "housekeeping"
+        || subject == "clippy"
+        || subject == "checkpoint"
+        || subject.starts_with("checkpoint ")
+}
+
+fn area_summary(repo_root: &Path, range: &ChangelogRange) -> Result<String> {
+    let output = if range.initial {
+        git_output(
+            repo_root,
+            &[
+                "diff-tree",
+                "--stat",
+                "--root",
+                "--no-commit-id",
+                "-r",
+                "HEAD",
+            ],
+        )?
+    } else {
+        git_output(repo_root, &["diff", "--dirstat=files,0", &range.git])?
+    };
+    Ok(output.lines().take(30).collect::<Vec<_>>().join("\n"))
+}
+
+fn shortstat(repo_root: &Path, range: &ChangelogRange) -> Result<String> {
+    if range.initial {
+        git_output(
+            repo_root,
+            &[
+                "diff-tree",
+                "--shortstat",
+                "--root",
+                "--no-commit-id",
+                "-r",
+                "HEAD",
+            ],
+        )
+    } else {
+        git_output(repo_root, &["diff", "--shortstat", &range.git])
+    }
+}
+
+fn draft_prompt(
+    repo_root: &Path,
+    range: &ChangelogRange,
+    subjects: &[String],
+    areas: &str,
+    shortstat: &str,
+) -> Result<String> {
+    let guidance_path = repo_root.join(".skills/release-changelog/SKILL.md");
+    let guidance = if guidance_path.is_file() {
+        fs::read_to_string(&guidance_path)
+            .with_context(|| format!("reading {}", guidance_path.display()))?
+    } else {
+        String::new()
+    };
+    Ok(format!(
+        "Draft notable changes for CHANGELOG.md from the evidence below.\n\
+         Return Markdown only, with one or more of these exact headings: \
+         ### Added, ### Changed, ### Deprecated, ### Removed, ### Fixed, ### Security.\n\
+         Under each heading return concise `- ` bullets. Do not use code fences, \
+         version headings, prose outside the sections, or edit files.\n\
+         Omit refactors, formatting, tests, checkpoints, and internal details unless \
+         they materially affect users. Do not invent changes.\n\n\
+         Project guidance:\n{guidance}\n\n\
+         Base: {}\nHead: HEAD\n\nCommit subjects:\n- {}\n\n\
+         Area summary:\n{areas}\n\nShortstat:\n{shortstat}\n",
+        range.label,
+        subjects.join("\n- ")
+    ))
+}
+
+fn run_codex(repo_root: &Path, prompt: &str) -> Result<String> {
+    let output = DraftOutput::new()?;
+    let codex = std::env::var_os("SIMIT_CODEX").unwrap_or_else(|| "codex".into());
+    let mut child = Command::new(codex)
+        .current_dir(repo_root)
+        .args(["exec", "--ephemeral", "--sandbox", "read-only", "-C"])
+        .arg(repo_root)
+        .args(["-o"])
+        .arg(&output.path)
+        .arg("-")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("codex not found in PATH or could not be started")?;
+    child
+        .stdin
+        .take()
+        .context("opening Codex stdin")?
+        .write_all(prompt.as_bytes())
+        .context("writing Codex changelog prompt")?;
+    let status = child.wait_with_output().context("waiting for Codex")?;
+    if !status.status.success() {
+        bail!(
+            "Codex changelog draft failed:\n{}{}",
+            String::from_utf8_lossy(&status.stdout),
+            String::from_utf8_lossy(&status.stderr)
+        );
+    }
+    fs::read_to_string(&output.path)
+        .with_context(|| format!("reading Codex output {}", output.path.display()))
+}
+
+fn parse_draft_entries(candidate: &str) -> Result<Vec<(EntryKind, String)>> {
+    let mut kind = None;
+    let mut entries = Vec::new();
+    for line in candidate.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(found) = EntryKind::from_heading(line) {
+            kind = Some(found);
+            continue;
+        }
+        let Some(text) = line.strip_prefix("- ").map(str::trim) else {
+            bail!("Codex changelog output contains unsupported line `{line}`");
+        };
+        if text.is_empty() {
+            bail!("Codex changelog output contains an empty bullet");
+        }
+        entries.push((
+            kind.context("Codex changelog bullet appears before a supported heading")?,
+            text.to_owned(),
+        ));
+    }
+    if entries.is_empty() {
+        bail!("Codex changelog output contains no entries");
+    }
+    Ok(entries)
+}
+
+fn git_output(repo_root: &Path, args: &[&str]) -> Result<String> {
+    let output = Command::new("git")
+        .current_dir(repo_root)
+        .args(args)
+        .output()
+        .with_context(|| format!("running git {}", args.join(" ")))?;
+    if !output.status.success() {
+        bail!(
+            "git {} failed:\n{}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    String::from_utf8(output.stdout).context("git output was not valid UTF-8")
+}
+
+struct DraftOutput {
+    dir: std::path::PathBuf,
+    path: std::path::PathBuf,
+}
+
+impl DraftOutput {
+    fn new() -> Result<Self> {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .context("system clock is before the Unix epoch")?
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("simit-changelog-{}-{nonce}", std::process::id()));
+        fs::create_dir(&dir).with_context(|| format!("creating {}", dir.display()))?;
+        let path = dir.join("draft.md");
+        Ok(Self { dir, path })
+    }
+}
+
+impl Drop for DraftOutput {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.dir);
+    }
 }
 
 fn detect_footer_start(lines: &[String]) -> Option<usize> {

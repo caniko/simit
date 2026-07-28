@@ -497,6 +497,9 @@ pub struct CodebergPagesConfig {
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ReleaseConfig {
+    /// Changelog drafting performed before a release commit is created.
+    #[serde(default)]
+    pub changelog: ReleaseChangelogConfig,
     #[serde(default)]
     pub signing: ReleaseSigningConfig,
     #[serde(default)]
@@ -521,6 +524,15 @@ pub struct ReleaseConfig {
     /// Optional Windows Authenticode signing of release `.exe`s.
     #[serde(default)]
     pub windows_signing: Option<WindowsSigningConfig>,
+}
+
+/// `[release.changelog]` — optional Codex-assisted Keep a Changelog drafting.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ReleaseChangelogConfig {
+    /// Draft `[Unreleased]` from commits before `simit release` promotes it.
+    #[serde(default)]
+    pub auto_draft: bool,
 }
 
 /// `[release.publish]` — downstream publisher failure policy.

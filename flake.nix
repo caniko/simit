@@ -2,7 +2,7 @@
   description = "Semver-aware git commit helper for Rust projects";
 
   inputs = {
-    rs-harbor.url = "git+https://codeberg.org/caniko/rs-harbor.git?ref=trunk&rev=a3e5f76326f0f02de230cb2fba66fa3c1c7171cb";
+    rs-harbor.url = "github:caniko/rs-harbor/811da8fdf371432cf1ae47de5fe3487b73dc5ca5";
 
     nixpkgs.follows = "rs-harbor/nixpkgs";
     rust-overlay.follows = "rs-harbor/rust-overlay";
@@ -46,6 +46,8 @@
 
       toolchain = rs-harbor.lib.mkToolchain {inherit pkgs;};
       inherit (toolchain) craneLib;
+      cross = rs-harbor.lib.mkCross {inherit pkgs system;};
+      simitVersion = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).package.version;
       # `nix run git+https://codeberg.org/caniko/simit.git` is the public CLI
       # distribution path and must work on runners without canix's managed
       # sccache transport. Keep cached derivations for Simit's own checks,
@@ -90,6 +92,42 @@
           nativeBuildInputs = [preCommitBin];
           nativeCheckInputs = [pkgs.git pkgs.gnupg];
         });
+
+      staticPackages =
+        if system == "x86_64-linux"
+        then
+          rs-harbor.lib.mkCrossPackages {
+            inherit pkgs cross;
+            inherit (toolchain) craneLib;
+            pname = "simit";
+            commonArgs =
+              commonArgs
+              // {
+                version = simitVersion;
+                doCheck = false;
+              };
+            targets = ["x86_64-linux-musl"];
+          }
+        else {};
+
+      binaryRelease =
+        if system == "x86_64-linux"
+        then
+          rs-harbor.lib.mkBinaryRelease {
+            inherit pkgs;
+            pname = "simit";
+            version = simitVersion;
+            artifacts.x86_64-linux-musl = {
+              package = staticPackages.simit-x86_64-linux-musl;
+              system = "x86_64-linux";
+              rustTarget = "x86_64-unknown-linux-musl";
+              binutils = pkgs.pkgsStatic.stdenv.cc.bintools;
+              strip = "${pkgs.pkgsStatic.stdenv.cc.bintools}/bin/x86_64-unknown-linux-musl-strip";
+              readelf = "${pkgs.pkgsStatic.stdenv.cc.bintools.bintools}/bin/x86_64-unknown-linux-musl-readelf";
+              binaries = ["simit"];
+            };
+          }
+        else null;
 
       treefmtEval = treefmt-nix.lib.evalModule pkgs (import ./nix/treefmt.nix);
       pre-commit-check = git-hooks.lib.${system}.run {
@@ -154,12 +192,21 @@
         docsPackage = docs;
       };
     in {
-      packages = {
-        default = publicPackage;
-        docs = docs;
-        website = website;
-        site = website;
-      };
+      packages =
+        {
+          default = publicPackage;
+          docs = docs;
+          website = website;
+          site = website;
+        }
+        // (
+          if binaryRelease != null
+          then {
+            simit-x86_64-linux-musl = staticPackages.simit-x86_64-linux-musl;
+            release-bundle = binaryRelease.releaseBundle;
+          }
+          else {}
+        );
 
       apps.deploy-pages = plinth.lib.${system}.mkDeployPagesApp {
         domain = "simit.tartanoglu.com";

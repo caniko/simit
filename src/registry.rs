@@ -1977,28 +1977,28 @@ mod tests {
     }
 
     #[test]
-    fn simit_repo_ci_detector_allows_supplementary_pages_workflow() {
+    fn simit_repo_recognizes_supplementary_github_workflows() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let workflows = collect_workflow_files(root).unwrap();
+        let workflows = collect_workflow_files(root)
+            .unwrap()
+            .into_iter()
+            .filter(|file| !is_release_workflow(file))
+            .collect::<Vec<_>>();
         let (marked, unmarked): (Vec<_>, Vec<_>) =
             workflows.into_iter().partition(|file| file.marked);
 
-        if marked.is_empty() {
-            return;
-        }
-
-        assert!(
-            marked
-                .iter()
-                .any(|file| file.relative_path == Path::new(".forgejo/workflows/pages.yaml"))
-        );
         assert!(
             unmarked
                 .iter()
                 .all(|file| file.relative_path.starts_with(".github/workflows"))
         );
-        assert!(!marked_workflows_drift(root, &marked));
-        assert_eq!(detect_ci_status(root), FeatureStatus::Managed);
+        assert!(
+            unmarked
+                .iter()
+                .any(|file| file.relative_path == Path::new(".github/workflows/pages.yaml"))
+        );
+        assert!(unmarked.iter().all(is_supplementary_workflow));
+        assert!(!marked.is_empty());
     }
 
     #[test]

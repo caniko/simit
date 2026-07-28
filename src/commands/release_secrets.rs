@@ -247,19 +247,14 @@ fn validate_repo(repo: &str) -> Result<()> {
 }
 
 fn read_token(command: &ReleaseCommand, platform: Platform) -> Result<String> {
-    let token_names = match platform {
-        Platform::Forgejo => [
+    let token_names: &[&str] = match platform {
+        Platform::Forgejo => &[
             "CODEBERG_TOKEN",
             "FORGEJO_TOKEN",
             "GITEA_TOKEN",
             "GITHUB_TOKEN",
         ],
-        Platform::Github => [
-            "GITHUB_TOKEN",
-            "CODEBERG_TOKEN",
-            "FORGEJO_TOKEN",
-            "GITEA_TOKEN",
-        ],
+        Platform::Github => &["GITHUB_TOKEN", "GH_TOKEN"],
         Platform::Gitlab => bail!("GitLab release secret management is not implemented"),
     };
     for name in token_names {
@@ -267,12 +262,23 @@ fn read_token(command: &ReleaseCommand, platform: Platform) -> Result<String> {
             return clean_token(token);
         }
     }
-    if let Ok(token) = std::env::var("GITEA_TOKEN") {
-        return clean_token(token);
+    if platform == Platform::Github && command.secrets_token_file.is_none() {
+        let output = Command::new("gh")
+            .args(["auth", "token"])
+            .output()
+            .context("reading GitHub token from gh auth")?;
+        if output.status.success() {
+            return clean_token(
+                String::from_utf8(output.stdout).context("GitHub token was not UTF-8")?,
+            );
+        }
+        bail!(
+            "GitHub token is unavailable; authenticate gh, set GITHUB_TOKEN/GH_TOKEN, or pass --token-file"
+        );
     }
     let path = match &command.secrets_token_file {
         Some(path) => PathBuf::from(path.as_std_path()),
-        None => default_token_path()?,
+        None => default_forgejo_token_path()?,
     };
     let token = fs::read_to_string(&path)
         .with_context(|| format!("reading Forgejo/Codeberg token from {}", path.display()))?;
@@ -287,7 +293,7 @@ fn clean_token(token: String) -> Result<String> {
     Ok(token)
 }
 
-fn default_token_path() -> Result<PathBuf> {
+fn default_forgejo_token_path() -> Result<PathBuf> {
     let home = std::env::var_os("HOME").ok_or_else(|| {
         anyhow!("HOME is unset; pass --token-file or set CODEBERG_TOKEN/FORGEJO_TOKEN")
     })?;

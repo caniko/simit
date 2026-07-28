@@ -2217,6 +2217,17 @@ pub enum ConfigAction {
 pub enum ChangelogAction {
     #[command(about = "Create a Keep a Changelog skeleton")]
     Init,
+    #[command(about = "Draft [Unreleased] entries from git history with Codex")]
+    Draft {
+        #[arg(
+            long,
+            value_name = "REF",
+            help = "Base ref; defaults to the latest reachable semver tag"
+        )]
+        base_ref: Option<String>,
+        #[arg(long, help = "Print the updated changelog without writing it")]
+        dry_run: bool,
+    },
     #[command(about = "Add an entry under [Unreleased]")]
     Add {
         #[arg(value_enum, value_name = "KIND", help = "Entry kind to append")]
