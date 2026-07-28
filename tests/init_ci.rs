@@ -1253,7 +1253,14 @@ step_runners = { nix-check = "atlas-nix-trusted", cargo-test = "codeberg-medium"
 
     let status = simit_with_user_config(temp.path())
         .current_dir(temp.path())
-        .args(["init", "ci", "--ci-provider", "actions", "--platform", "github"])
+        .args([
+            "init",
+            "ci",
+            "--ci-provider",
+            "actions",
+            "--platform",
+            "github",
+        ])
         .status()
         .unwrap();
     assert!(status.success());
