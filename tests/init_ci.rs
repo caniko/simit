@@ -1676,6 +1676,7 @@ fn workspace_flag_generates_per_package_workflows() {
 #[test]
 fn aggregate_workspace_strategy_generates_one_workspace_workflow() {
     let temp = init_workspace_fixture();
+    fs::write(temp.path().join("flake.nix"), "{ outputs = _: {}; }\n").unwrap();
 
     let status = simit_with_user_config(temp.path())
         .current_dir(temp.path())
