@@ -406,7 +406,7 @@ pub fn nix_flake_ci_file(platform: Platform, runner: &ResolvedRunner) -> Result<
     }
     let mut workflow = String::new();
     push_generated_workflow_header(&mut workflow);
-    workflow.push_str("name: Nix flake check\n\n'on':\n  push:\n  pull_request:\n\n");
+    workflow.push_str("name: Nix flake check\n\non:\n  push:\n  pull_request:\n\n");
     push_platform_concurrency(&mut workflow, platform);
     workflow.push_str("jobs:\n  flake-check:\n    runs-on: ");
     workflow.push_str(&runs_on(runner));
@@ -438,7 +438,7 @@ fn codeberg_pages_workflow(runner: &ResolvedRunner, pages: &CodebergPagesOptions
     let mut workflow = String::new();
     push_generated_workflow_header(&mut workflow);
     workflow.push_str("name: pages\n\n");
-    workflow.push_str("'on':\n");
+    workflow.push_str("on:\n");
     workflow.push_str("  push:\n");
     workflow.push_str("    branches:\n");
     workflow.push_str("      - ");
@@ -489,7 +489,7 @@ fn github_pages_workflow(runner: &ResolvedRunner, pages: &CodebergPagesOptions) 
     let mut workflow = String::new();
     push_generated_workflow_header(&mut workflow);
     workflow.push_str("name: pages\n\n");
-    workflow.push_str("'on':\n  push:\n    branches:\n      - ");
+    workflow.push_str("on:\n  push:\n    branches:\n      - ");
     workflow.push_str(&pages.source_branch);
     workflow.push_str("\n  workflow_dispatch:\n\n");
     push_concurrency(&mut workflow);
