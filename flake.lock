@@ -388,21 +388,20 @@
         "nix-opencode-lsp": "nix-opencode-lsp",
         "nixpkgs": "nixpkgs",
         "osxcross": "osxcross",
-        "rust-overlay": "rust-overlay_2",
-        "sccache": "sccache"
+        "rust-overlay": "rust-overlay_2"
       },
       "locked": {
-        "lastModified": 1785236015,
-        "narHash": "sha256-A6SJygPmJkmIPNiQC7NnjUCWPAfpE9kJbTGmEAcCQ8A=",
+        "lastModified": 1785258661,
+        "narHash": "sha256-zVrjXXXY08s7MAgyXBbbpQv5pE/ZEsNcoBya32/JXk0=",
         "owner": "caniko",
         "repo": "rs-harbor",
-        "rev": "811da8fdf371432cf1ae47de5fe3487b73dc5ca5",
+        "rev": "18c2b94351a428c89be328ae53ef83e2e1cd19e3",
         "type": "github"
       },
       "original": {
         "owner": "caniko",
         "repo": "rs-harbor",
-        "rev": "811da8fdf371432cf1ae47de5fe3487b73dc5ca5",
+        "rev": "18c2b94351a428c89be328ae53ef83e2e1cd19e3",
         "type": "github"
       }
     },
@@ -447,25 +446,6 @@
         "repo": "rust-overlay",
         "type": "github"
       }
-    },
-    "sccache": {
-      "inputs": {
-        "nixpkgs": [
-          "rs-harbor",
-          "nixpkgs"
-        ]
-      },
-      "locked": {
-        "path": "./sccache",
-        "type": "path"
-      },
-      "original": {
-        "path": "./sccache",
-        "type": "path"
-      },
-      "parent": [
-        "rs-harbor"
-      ]
     },
     "systems": {
       "locked": {

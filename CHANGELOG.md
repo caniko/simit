@@ -21,6 +21,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CI workflows migrated to Crow on CodeFloe.
 - Crow Nix workflows now default to the devenv image.
 
+### Fixed
+
+- Keep rs-harbor's bundled sccache library portable when consumed through a locked GitHub flake input.
+- Validate tagged versions against the release artifact package exposed by the flake.
+
 ## [0.17.10] - 2026-07-27
 
 ### Fixed

@@ -52,7 +52,7 @@ jobs:
           }
           trap cleanup_validation EXIT
           git worktree add --detach "$tag_worktree" "$VERSION"
-          test "$(nix eval --raw "$tag_worktree#simit.version")" = "$VERSION"
+          test "$(nix eval --raw "$tag_worktree#simit-x86_64-linux-musl.version")" = "$VERSION"
           test -s "$tag_worktree/keys/maintainers.gpg"
           if ! grep -q "^## \[$VERSION\] - [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]" "$tag_worktree/CHANGELOG.md"; then
             echo "CHANGELOG.md missing section for $VERSION" >&2
