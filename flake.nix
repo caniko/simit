@@ -93,6 +93,8 @@
           nativeCheckInputs = [pkgs.git pkgs.gnupg];
         });
 
+      publicCargoArtifacts = publicCraneLib.buildDepsOnly commonArgs;
+
       staticPackages =
         if system == "x86_64-linux"
         then
@@ -139,35 +141,35 @@
         };
       };
 
-      depsCheck = cargoArtifacts;
+      depsCheck = publicCargoArtifacts;
 
-      clippyCheck = craneLib.cargoClippy (commonArgs
+      clippyCheck = publicCraneLib.cargoClippy (commonArgs
         // {
-          inherit cargoArtifacts;
+          cargoArtifacts = publicCargoArtifacts;
           cargoClippyExtraArgs = "--all-targets -- --deny warnings";
         });
 
-      fmtCheck = craneLib.cargoFmt {
+      fmtCheck = publicCraneLib.cargoFmt {
         inherit src;
       };
 
-      nextestCheck = craneLib.cargoNextest (commonArgs
+      nextestCheck = publicCraneLib.cargoNextest (commonArgs
         // {
-          inherit cargoArtifacts;
+          cargoArtifacts = publicCargoArtifacts;
           nativeCheckInputs = [pkgs.git pkgs.gnupg];
         });
 
-      docCheck = craneLib.cargoDoc (commonArgs
+      docCheck = publicCraneLib.cargoDoc (commonArgs
         // {
-          inherit cargoArtifacts;
+          cargoArtifacts = publicCargoArtifacts;
           cargoDocExtraArgs = "--no-deps";
         });
 
-      auditCheck = craneLib.cargoAudit {
+      auditCheck = publicCraneLib.cargoAudit {
         inherit advisory-db src;
       };
 
-      denyCheck = craneLib.cargoDeny {
+      denyCheck = publicCraneLib.cargoDeny {
         inherit src;
       };
 
@@ -215,7 +217,7 @@
       formatter = treefmtEval.config.build.wrapper;
 
       checks = {
-        default = package;
+        default = publicPackage;
         formatting = treefmtEval.config.build.check self;
 
         # Exposes the crane deps closure so atlas's post-build hook and CI
@@ -246,7 +248,7 @@
           rust-analyzer
         ];
       in {
-        default = craneLib.devShell {
+        default = publicCraneLib.devShell {
           checks = self.checks.${system};
           packages = with pkgs;
             [
@@ -265,7 +267,7 @@
           shellHook = pre-commit-check.shellHook;
         };
 
-        docs = craneLib.devShell {
+        docs = publicCraneLib.devShell {
           checks = self.checks.${system};
           packages = docsPackages ++ pre-commit-check.enabledPackages;
           shellHook = pre-commit-check.shellHook;
