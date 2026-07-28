@@ -391,17 +391,17 @@
         "rust-overlay": "rust-overlay_2"
       },
       "locked": {
-        "lastModified": 1785258661,
-        "narHash": "sha256-zVrjXXXY08s7MAgyXBbbpQv5pE/ZEsNcoBya32/JXk0=",
+        "lastModified": 1785259333,
+        "narHash": "sha256-pKnk28WnZZSNuzYKT4iZTV///qv4x8gHxmBgqqN6Gvs=",
         "owner": "caniko",
         "repo": "rs-harbor",
-        "rev": "18c2b94351a428c89be328ae53ef83e2e1cd19e3",
+        "rev": "839c7d80ed76c622195afc3c7ec15b4330ffa621",
         "type": "github"
       },
       "original": {
         "owner": "caniko",
         "repo": "rs-harbor",
-        "rev": "18c2b94351a428c89be328ae53ef83e2e1cd19e3",
+        "rev": "839c7d80ed76c622195afc3c7ec15b4330ffa621",
         "type": "github"
       }
     },

@@ -2,7 +2,7 @@
   description = "Semver-aware git commit helper for Rust projects";
 
   inputs = {
-    rs-harbor.url = "github:caniko/rs-harbor/18c2b94351a428c89be328ae53ef83e2e1cd19e3";
+    rs-harbor.url = "github:caniko/rs-harbor/839c7d80ed76c622195afc3c7ec15b4330ffa621";
 
     nixpkgs.follows = "rs-harbor/nixpkgs";
     rust-overlay.follows = "rs-harbor/rust-overlay";
