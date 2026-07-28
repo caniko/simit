@@ -2911,10 +2911,11 @@ fn push_nix_ci_legacy_steps(
     workflow.push_str("      - name: Clippy\n");
     workflow.push_str("        run: nix develop -c cargo clippy");
     push_package_selector(workflow, package, options);
+    workflow.push_str(" --all-targets");
     if options.workspace_strategy == WorkspaceStrategy::Aggregate {
         workflow.push_str(" --all-features");
     }
-    workflow.push_str(" --all-targets -- --deny warnings\n\n");
+    workflow.push_str(" -- --deny warnings\n\n");
     push_nix_package_crate_step(workflow, package, options);
 }
 
