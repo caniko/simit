@@ -98,7 +98,7 @@
         then
           rs-harbor.lib.mkCrossPackages {
             inherit pkgs cross;
-            inherit (toolchain) craneLib;
+            craneLib = publicCraneLib;
             pname = "simit";
             commonArgs =
               commonArgs

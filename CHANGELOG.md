@@ -25,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Keep rs-harbor's bundled sccache library portable when consumed through a locked GitHub flake input.
 - Validate tagged versions against the release artifact package exposed by the flake.
+- Allow public release runners to build cache misses without Canix's managed sccache transport.
 
 ## [0.17.10] - 2026-07-27
 
