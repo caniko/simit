@@ -1013,17 +1013,22 @@ fn infer_expected_ci_files(
             resolved.runtime,
         );
     }
-    let step_runners: BTreeMap<String, ResolvedRunner> = resolved
-        .step_runners
-        .iter()
-        .map(|(step, label)| {
-            Ok((
-                step.clone(),
-                ResolvedRunner::literal(label)
-                    .map_err(|e| anyhow::anyhow!("invalid step runner label for '{step}': {e}"))?,
-            ))
-        })
-        .collect::<Result<_>>()?;
+    let step_runners: BTreeMap<String, ResolvedRunner> = if platform == Platform::Github {
+        BTreeMap::new()
+    } else {
+        resolved
+            .step_runners
+            .iter()
+            .map(|(step, label)| {
+                Ok((
+                    step.clone(),
+                    ResolvedRunner::literal(label).map_err(|e| {
+                        anyhow::anyhow!("invalid step runner label for '{step}': {e}")
+                    })?,
+                ))
+            })
+            .collect::<Result<_>>()?
+    };
     let packages = cargo::select_packages(&metadata, &resolved.packages, resolved.workspace)?;
     let package_scoped = metadata.workspace_members.len() > 1
         && resolved.workspace_strategy == crate::cli::WorkspaceStrategy::Members;

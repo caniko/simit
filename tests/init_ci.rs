@@ -1237,6 +1237,34 @@ fn generates_github_plain_cargo_workflows() {
 }
 
 #[test]
+fn github_ignores_forgejo_step_runner_labels() {
+    let temp = init_package(true);
+    fs::write(
+        temp.path().join("simit.toml"),
+        r#"[ci]
+provider = "actions"
+platform = "github"
+runtime = "nix"
+runner = "ubuntu-24.04"
+step_runners = { nix-check = "atlas-nix-trusted", cargo-test = "codeberg-medium" }
+"#,
+    )
+    .unwrap();
+
+    let status = simit_with_user_config(temp.path())
+        .current_dir(temp.path())
+        .args(["init", "ci", "--ci-provider", "actions", "--platform", "github"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let ci = read(&temp.path().join(".github/workflows/ci.yaml"));
+    assert!(ci.contains("runs-on: ubuntu-24.04"));
+    assert!(!ci.contains("atlas-nix-trusted"));
+    assert!(!ci.contains("codeberg-medium"));
+}
+
+#[test]
 fn generated_workflows_include_project_ci_setup_and_env() {
     let temp = init_package(true);
     write_ci_customization_config(temp.path());
