@@ -23,6 +23,8 @@ use crate::user_config::{ResolvedCiRunners, ResolvedRunner};
 
 use super::ci;
 
+const DEFAULT_CROW_NIX_IMAGE: &str = "ghcr.io/cachix/devenv:latest";
+
 pub struct FilesRequest<'a> {
     pub format: CrowWorkflowFormat,
     pub crow: &'a CrowCiConfig,
@@ -360,12 +362,12 @@ fn image_for(request: &FilesRequest<'_>) -> Result<String> {
             .image
             .clone()
             .unwrap_or_else(|| rust_container(request.package))),
-        Runtime::Nix => request
+        Runtime::Nix => Ok(request
             .crow
             .nix_image
             .clone()
             .or_else(|| request.crow.image.clone())
-            .ok_or_else(|| anyhow::anyhow!("Crow Nix workflows require [ci.crow].nix_image or [ci.crow].image")),
+            .unwrap_or_else(|| DEFAULT_CROW_NIX_IMAGE.to_owned())),
     }
 }
 
@@ -703,11 +705,11 @@ pub fn maturin_publish_file(
 }
 
 fn nix_image(config: &CrowCiConfig) -> Result<String> {
-    config
+    Ok(config
         .nix_image
         .clone()
         .or_else(|| config.image.clone())
-        .ok_or_else(|| anyhow::anyhow!("Crow Nix workflows require [ci.crow].nix_image or [ci.crow].image"))
+        .unwrap_or_else(|| DEFAULT_CROW_NIX_IMAGE.to_owned()))
 }
 
 fn apply_common_options(steps: &mut [Step], options: &CiOptions) {
@@ -790,6 +792,11 @@ pub fn release_file(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn uses_documented_default_image_for_nix_workflows() {
+        assert_eq!(nix_image(&CrowCiConfig::default()).unwrap(), DEFAULT_CROW_NIX_IMAGE);
+    }
 
     #[test]
     fn renders_native_secret_and_jsonnet_markers() {
