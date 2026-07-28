@@ -234,9 +234,8 @@
         doc = docCheck;
         audit = auditCheck;
         deny = denyCheck;
-        default-package-is-publicly-buildable =
-          assert !(publicPackage.passthru.rsHarborBuildCacheWrapped or false);
-            pkgs.runCommand "check-simit-default-package-cache-policy" {} "touch $out";
+        default-package-is-publicly-buildable = assert !(publicPackage.passthru.rsHarborBuildCacheWrapped or false);
+          pkgs.runCommand "check-simit-default-package-cache-policy" {} "touch $out";
       };
 
       devShells = let
