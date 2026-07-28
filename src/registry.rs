@@ -540,9 +540,7 @@ pub fn audit_ci(workspace_root: &Path) -> Result<CiAudit> {
         .into_iter()
         .filter(|file| !is_release_workflow(file))
         .collect::<Vec<_>>();
-    let (marked, unmarked): (Vec<_>, Vec<_>) = workflows
-        .into_iter()
-        .partition(|file| file.marked);
+    let (marked, unmarked): (Vec<_>, Vec<_>) = workflows.into_iter().partition(|file| file.marked);
     let unmarked = unmarked
         .into_iter()
         .filter(|file| !is_supplementary_workflow(file))
@@ -776,9 +774,7 @@ fn detect_ci_status(workspace_root: &Path) -> FeatureStatus {
         .into_iter()
         .filter(|file| !is_release_workflow(file))
         .collect::<Vec<_>>();
-    let (marked, unmarked): (Vec<_>, Vec<_>) = workflows
-        .into_iter()
-        .partition(|file| file.marked);
+    let (marked, unmarked): (Vec<_>, Vec<_>) = workflows.into_iter().partition(|file| file.marked);
     let unmarked = unmarked
         .into_iter()
         .filter(|file| !is_supplementary_workflow(file))
@@ -918,8 +914,7 @@ fn infer_expected_ci_files(
             content: crate::render::ci::gitlab_nix_flake_workflow(),
         }]);
     }
-    if !workspace_root.join("Cargo.toml").is_file()
-        && python::is_python_uv_project(workspace_root)
+    if !workspace_root.join("Cargo.toml").is_file() && python::is_python_uv_project(workspace_root)
     {
         if platform == Platform::Gitlab {
             return Ok(vec![project::GeneratedFile {
@@ -954,9 +949,7 @@ fn infer_expected_ci_files(
         }
         if let Some(pages) = config_pages_or_inferred(&config, marked)? {
             files.push(crate::render::ci::codeberg_pages_file(
-                platform,
-                &runner,
-                &pages,
+                platform, &runner, &pages,
             )?);
         }
         return Ok(files);
@@ -985,9 +978,7 @@ fn infer_expected_ci_files(
         let mut files = vec![crate::render::ci::nix_flake_ci_file(platform, &runner)?];
         if let Some(pages) = config_pages_or_inferred(&config, marked)? {
             files.push(crate::render::ci::codeberg_pages_file(
-                platform,
-                &runner,
-                &pages,
+                platform, &runner, &pages,
             )?);
         }
         return Ok(files);
@@ -1034,7 +1025,8 @@ fn infer_expected_ci_files(
         })
         .collect::<Result<_>>()?;
     let packages = cargo::select_packages(&metadata, &resolved.packages, resolved.workspace)?;
-    let package_scoped = metadata.workspace_members.len() > 1;
+    let package_scoped = metadata.workspace_members.len() > 1
+        && resolved.workspace_strategy == crate::cli::WorkspaceStrategy::Members;
     let windows_runner = infer_windows_runner(marked);
     let inferred_ci_runner = infer_primary_runner(marked, "ci")?;
     let inferred_release_runner = infer_primary_runner(marked, "publish-crate")
@@ -1058,8 +1050,14 @@ fn infer_expected_ci_files(
         workspace: resolved.workspace,
     };
 
+    let generation_packages =
+        if resolved.workspace_strategy == crate::cli::WorkspaceStrategy::Aggregate {
+            packages.first().into_iter().collect::<Vec<_>>()
+        } else {
+            packages.iter().collect::<Vec<_>>()
+        };
     let mut files = Vec::new();
-    for package in &packages {
+    for package in generation_packages {
         let package_options = ci::CiOptions {
             package_scoped,
             homebrew: infer_homebrew_options(&config, package, marked)?,
@@ -1228,23 +1226,28 @@ fn infer_expected_crow_files(
         .any(|package| package.name == "simit");
     let mut files = Vec::new();
     for package in &packages {
-        files.extend(crate::render::crow::files(crate::render::crow::FilesRequest {
-            format,
-            crow: &crow,
-            runtime: resolved.runtime,
-            package,
-            file_suffix: package_scoped.then_some(package.name.as_str()),
-            self_check: ci::SelfCheckOptions {
-                enabled: self_check,
-                runner_override: None,
-                windows_runner_override: None,
-                packages: &resolved.packages,
-                workspace: resolved.workspace,
-            },
-            runners: &runners,
-            options: ci::CiOptions { package_scoped, ..options.clone() },
+        files.extend(crate::render::crow::files(
+            crate::render::crow::FilesRequest {
+                format,
+                crow: &crow,
+                runtime: resolved.runtime,
+                package,
+                file_suffix: package_scoped.then_some(package.name.as_str()),
+                self_check: ci::SelfCheckOptions {
+                    enabled: self_check,
+                    runner_override: None,
+                    windows_runner_override: None,
+                    packages: &resolved.packages,
+                    workspace: resolved.workspace,
+                },
+                runners: &runners,
+                options: ci::CiOptions {
+                    package_scoped,
+                    ..options.clone()
+                },
                 step_runners: &step_runners,
-        })?);
+            },
+        )?);
     }
     if marked
         .iter()
@@ -1267,9 +1270,10 @@ fn infer_expected_crow_files(
             )?);
         }
     }
-    if marked.iter().any(|workflow| {
-        workflow_name(&workflow.relative_path) == Some("publish-vscode-extension")
-    }) {
+    if marked
+        .iter()
+        .any(|workflow| workflow_name(&workflow.relative_path) == Some("publish-vscode-extension"))
+    {
         if let Some(vscode) = config.resolve_vscode()? {
             files.push(crate::render::crow::vscode_extension_file(
                 format,

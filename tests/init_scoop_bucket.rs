@@ -79,9 +79,7 @@ license = "GPL-3.0-only"
         fs::create_dir_all(package.join("src")).unwrap();
         fs::write(
             package.join("Cargo.toml"),
-            format!(
-                "[package]\nname = \"{name}\"\nversion = \"{version}\"\nedition = \"2024\"\n"
-            ),
+            format!("[package]\nname = \"{name}\"\nversion = \"{version}\"\nedition = \"2024\"\n"),
         )
         .unwrap();
         fs::write(package.join("src/main.rs"), "fn main() {}\n").unwrap();

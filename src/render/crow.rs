@@ -13,12 +13,12 @@ use serde_json::{Value, json};
 use crate::cargo::Package;
 use crate::cli::{CrowWorkflowFormat, Runtime};
 use crate::config::{CrowCiConfig, CrowVariable};
-use crate::render::release_workflow::ReleaseWorkflowInputs;
 use crate::project::GeneratedFile;
 use crate::render::ci::{
-    CiOptions, OmCiMode, SelfCheckOptions, STEP_CARGO_CLIPPY, STEP_CARGO_DOC,
-    STEP_CARGO_FMT, STEP_CARGO_PACKAGE, STEP_CARGO_TEST, STEP_SELF_CHECK,
+    CiOptions, OmCiMode, STEP_CARGO_CLIPPY, STEP_CARGO_DOC, STEP_CARGO_FMT, STEP_CARGO_PACKAGE,
+    STEP_CARGO_TEST, STEP_SELF_CHECK, SelfCheckOptions,
 };
+use crate::render::release_workflow::ReleaseWorkflowInputs;
 use crate::user_config::{ResolvedCiRunners, ResolvedRunner};
 
 use super::ci;
@@ -222,7 +222,10 @@ fn build_workflow(
         steps.push(step(
             "cargo-nextest",
             image,
-            format!("{prefix}cargo nextest run --all-features{}", package_selector(package, options)),
+            format!(
+                "{prefix}cargo nextest run --all-features{}",
+                package_selector(package, options)
+            ),
         ));
     }
     if options.with_audit {
@@ -254,7 +257,10 @@ fn build_workflow(
         steps.push(step(
             STEP_CARGO_PACKAGE,
             image,
-            format!("{prefix}cargo package --allow-dirty --list{}", package_selector(package, options)),
+            format!(
+                "{prefix}cargo package --allow-dirty --list{}",
+                package_selector(package, options)
+            ),
         ));
     }
     if self_check.enabled {
@@ -286,7 +292,10 @@ fn build_workflow(
         name: "build".to_owned(),
         labels: labels(config, &runners.ci),
         platform: config.platform.clone(),
-        when: vec![condition("event", "push"), condition("event", "pull_request")],
+        when: vec![
+            condition("event", "push"),
+            condition("event", "pull_request"),
+        ],
         skip_clone: config.skip_clone.then_some(true),
         variables: config.variables.clone(),
         workspace: config.workspace_base.as_ref().map(|base| Workspace {
@@ -306,14 +315,23 @@ fn publish_workflow(
 ) -> Workflow {
     let prefix = command_prefix(runtime);
     let mut publish = Step::new("publish", image)
-        .command(format!("{prefix}cargo publish --dry-run{}", package_selector(package, options)))
-        .command(format!("{prefix}cargo publish{}", package_selector(package, options)));
+        .command(format!(
+            "{prefix}cargo publish --dry-run{}",
+            package_selector(package, options)
+        ))
+        .command(format!(
+            "{prefix}cargo publish{}",
+            package_selector(package, options)
+        ));
     for secret in &options.required_secrets {
         publish = publish.secret(secret);
     }
     Workflow {
         name: "publish-crate".to_owned(),
-        labels: labels(config, &ResolvedRunner::literal("crow-default").expect("literal label")),
+        labels: labels(
+            config,
+            &ResolvedRunner::literal("crow-default").expect("literal label"),
+        ),
         platform: config.platform.clone(),
         when: vec![condition("event", "manual"), condition("event", "tag")],
         skip_clone: config.skip_clone.then_some(true),
@@ -335,7 +353,10 @@ fn artifacts_workflow(
     let build = if runtime == Runtime::Nix {
         format!("{prefix}nix build")
     } else {
-        format!("{prefix}cargo build --release --locked{}", package_selector(package, options))
+        format!(
+            "{prefix}cargo build --release --locked{}",
+            package_selector(package, options)
+        )
     };
     let mut step = Step::new("build-release-artifacts", image)
         .command("test -n \"$${CI_COMMIT_TAG:-}\"")
@@ -479,7 +500,8 @@ fn render_workflow(workflow: Workflow, format: CrowWorkflowFormat) -> Result<Str
     match format {
         CrowWorkflowFormat::Yaml => Ok(format!("{}\n{}", ci::GENERATED_WORKFLOW_MARKER, yaml)),
         CrowWorkflowFormat::Jsonnet => {
-            let value: Value = serde_yaml::from_str(&yaml).context("converting Crow workflow to Jsonnet")?;
+            let value: Value =
+                serde_yaml::from_str(&yaml).context("converting Crow workflow to Jsonnet")?;
             Ok(format!(
                 "// {}\n{}\n",
                 ci::GENERATED_WORKFLOW_MARKER.trim_start_matches('#').trim(),
@@ -511,7 +533,10 @@ pub fn codeberg_pages_file(
         name: "pages".to_owned(),
         labels: labels(config, runner),
         platform: config.platform.clone(),
-        when: vec![conditions(&[("event", "push"), ("branch", &pages.source_branch)])],
+        when: vec![conditions(&[
+            ("event", "push"),
+            ("branch", &pages.source_branch),
+        ])],
         skip_clone: config.skip_clone.then_some(true),
         variables: config.variables.clone(),
         workspace: None,
@@ -563,7 +588,10 @@ pub fn jetbrains_plugin_file(
     let image = nix_image(config)?;
     let mut publish = Step::new("publish-jetbrains-plugin", &image)
         .commands(jetbrains.prepublish_commands.clone())
-        .command(format!("test -f {}", shell_quote(&jetbrains.package_installable)))
+        .command(format!(
+            "test -f {}",
+            shell_quote(&jetbrains.package_installable)
+        ))
         .secret(&jetbrains.marketplace_token_secret)
         .secret(&jetbrains.certificate_chain_secret)
         .secret(&jetbrains.private_key_secret)
@@ -609,11 +637,19 @@ pub fn python_ci_file(
         ));
     }
     if selected(crate::config::CiComponent::FlakeEvaluation) {
-        steps.push(step("flake-check", &image, "nix flake check --no-build".to_owned()));
+        steps.push(step(
+            "flake-check",
+            &image,
+            "nix flake check --no-build".to_owned(),
+        ));
     }
     if selected(crate::config::CiComponent::Checks) {
         let checks = if check_outputs.is_empty() {
-            vec!["offline-tests".to_owned(), "typecheck".to_owned(), "uv-format".to_owned()]
+            vec![
+                "offline-tests".to_owned(),
+                "typecheck".to_owned(),
+                "uv-format".to_owned(),
+            ]
         } else {
             check_outputs.to_vec()
         };
@@ -631,7 +667,10 @@ pub fn python_ci_file(
         name: "ci".to_owned(),
         labels: labels(config, runner),
         platform: config.platform.clone(),
-        when: vec![condition("event", "push"), condition("event", "pull_request")],
+        when: vec![
+            condition("event", "push"),
+            condition("event", "pull_request"),
+        ],
         skip_clone: config.skip_clone.then_some(true),
         variables: config.variables.clone(),
         workspace: config.workspace_base.as_ref().map(|base| Workspace {
@@ -775,7 +814,13 @@ pub fn release_file(
     add_nix_environment(std::slice::from_mut(&mut build));
     let workflow = Workflow {
         name: "release".to_owned(),
-        labels: labels(config, &ResolvedRunner { name: None, labels: vec![inputs.runner.to_owned()] }),
+        labels: labels(
+            config,
+            &ResolvedRunner {
+                name: None,
+                labels: vec![inputs.runner.to_owned()],
+            },
+        ),
         platform: config.platform.clone(),
         when: vec![condition("event", "tag"), condition("event", "manual")],
         skip_clone: config.skip_clone.then_some(true),
@@ -795,7 +840,10 @@ mod tests {
 
     #[test]
     fn uses_documented_default_image_for_nix_workflows() {
-        assert_eq!(nix_image(&CrowCiConfig::default()).unwrap(), DEFAULT_CROW_NIX_IMAGE);
+        assert_eq!(
+            nix_image(&CrowCiConfig::default()).unwrap(),
+            DEFAULT_CROW_NIX_IMAGE
+        );
     }
 
     #[test]
@@ -808,9 +856,11 @@ mod tests {
             skip_clone: None,
             variables: BTreeMap::new(),
             workspace: None,
-            steps: vec![Step::new("publish", "rust:bookworm")
-                .secret("TOKEN")
-                .command("echo $${TOKEN}".to_owned())],
+            steps: vec![
+                Step::new("publish", "rust:bookworm")
+                    .secret("TOKEN")
+                    .command("echo $${TOKEN}".to_owned()),
+            ],
         };
         let yaml = render_workflow(workflow, CrowWorkflowFormat::Yaml).unwrap();
         assert!(yaml.starts_with(ci::GENERATED_WORKFLOW_MARKER));
