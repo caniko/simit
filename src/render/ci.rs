@@ -2899,6 +2899,9 @@ fn push_nix_ci_legacy_steps(
     workflow.push_str("      - name: Test\n");
     workflow.push_str("        run: nix develop -c cargo test");
     push_package_selector(workflow, package, options);
+    if options.workspace_strategy == WorkspaceStrategy::Aggregate {
+        workflow.push_str(" --all-features");
+    }
     workflow.push_str("\n\n");
     push_quality_tool_install_steps(workflow, Runtime::Nix, options);
     push_optional_ci_steps(workflow, Runtime::Nix, package, options);
@@ -2908,6 +2911,9 @@ fn push_nix_ci_legacy_steps(
     workflow.push_str("      - name: Clippy\n");
     workflow.push_str("        run: nix develop -c cargo clippy");
     push_package_selector(workflow, package, options);
+    if options.workspace_strategy == WorkspaceStrategy::Aggregate {
+        workflow.push_str(" --all-features");
+    }
     workflow.push_str(" --all-targets -- --deny warnings\n\n");
     push_nix_package_crate_step(workflow, package, options);
 }
