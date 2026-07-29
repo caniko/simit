@@ -24,10 +24,13 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
       - name: Install Nix
         uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31
+
       - name: Add cargo bin to PATH
         run: echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
+
       - name: Validate signed release tag
         run: |
           set -euo pipefail
@@ -68,16 +71,22 @@ jobs:
           gpg --batch --import keys/maintainers.gpg
           git fetch --force --tags origin "refs/tags/${tag}:refs/tags/${tag}"
           git verify-tag "$tag"
+
       - name: Check flake
         run: nix flake check
+
       - name: Test
         run: nix develop -c cargo test
+
       - name: Build docs
         run: nix develop .#docs -c cargo doc --no-deps --all-features
+
       - name: Clippy
         run: nix develop -c cargo clippy --all-targets -- --deny warnings
+
       - name: Dry-run publish
         run: nix develop -c cargo publish --dry-run
+
       - name: Publish
         env:
           CRATES_IO_API_TOKEN: ${{ secrets.CRATES_IO_API_TOKEN }}
