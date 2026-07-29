@@ -20,7 +20,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use toml_edit::{Array, DocumentMut, InlineTable, Item, Table, Value, value};
 
-use crate::cli::{CiProvider, CrowWorkflowFormat, Platform, Runtime};
+use crate::cli::{CiProvider, CrowWorkflowFormat, Platform, Runtime, WorkspaceStrategy};
 use crate::user_config::validate_runner_label;
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
@@ -381,6 +381,8 @@ pub struct CiConfig {
     pub windows_runner: Option<String>,
     #[serde(default)]
     pub workspace: bool,
+    #[serde(default)]
+    pub workspace_strategy: WorkspaceStrategy,
     #[serde(default)]
     pub packages: Vec<String>,
     #[serde(default)]
@@ -1743,18 +1745,33 @@ impl ProjectConfig {
             validate_nonempty_string("simit project config: [ci.crow].workspace_base", base)?;
         }
         for (key, value) in &self.ci.crow.labels {
-            if key.trim().is_empty() || value.trim().is_empty() || key.contains('\n') || value.contains('\n') {
-                bail!("simit project config: [ci.crow].labels must contain non-empty single-line keys and values");
+            if key.trim().is_empty()
+                || value.trim().is_empty()
+                || key.contains('\n')
+                || value.contains('\n')
+            {
+                bail!(
+                    "simit project config: [ci.crow].labels must contain non-empty single-line keys and values"
+                );
             }
         }
         for (name, variable) in &self.ci.crow.variables {
             validate_nonempty_string("simit project config: [ci.crow.variables] name", name)?;
             if let Some(description) = &variable.description {
-                validate_nonempty_string("simit project config: [ci.crow.variables].description", description)?;
+                validate_nonempty_string(
+                    "simit project config: [ci.crow.variables].description",
+                    description,
+                )?;
             }
-            validate_nonempty_strings("simit project config: [ci.crow.variables].options", &variable.options)?;
+            validate_nonempty_strings(
+                "simit project config: [ci.crow.variables].options",
+                &variable.options,
+            )?;
             if let Some(default) = &variable.default {
-                validate_nonempty_string("simit project config: [ci.crow.variables].default", default)?;
+                validate_nonempty_string(
+                    "simit project config: [ci.crow.variables].default",
+                    default,
+                )?;
             }
         }
         validate_nonempty_strings(
@@ -2976,6 +2993,16 @@ fn set_ci_table(table: &mut Table, ci: &CiConfig) {
     set_optional_string(table, "runner", ci.runner.as_deref());
     set_optional_string(table, "windows_runner", ci.windows_runner.as_deref());
     set_bool(table, "workspace", ci.workspace);
+    set_optional_string(
+        table,
+        "workspace_strategy",
+        (ci.workspace_strategy != WorkspaceStrategy::Members).then_some(
+            match ci.workspace_strategy {
+                WorkspaceStrategy::Members => "members",
+                WorkspaceStrategy::Aggregate => "aggregate",
+            },
+        ),
+    );
     set_string_array(table, "packages", &ci.packages);
     set_bool(table, "with_nextest", ci.with_nextest);
     set_bool(table, "with_msrv", ci.with_msrv);

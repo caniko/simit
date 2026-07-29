@@ -1237,6 +1237,41 @@ fn generates_github_plain_cargo_workflows() {
 }
 
 #[test]
+fn github_ignores_forgejo_step_runner_labels() {
+    let temp = init_package(true);
+    fs::write(
+        temp.path().join("simit.toml"),
+        r#"[ci]
+provider = "actions"
+platform = "github"
+runtime = "nix"
+runner = "ubuntu-24.04"
+step_runners = { nix-check = "atlas-nix-trusted", cargo-test = "codeberg-medium" }
+"#,
+    )
+    .unwrap();
+
+    let status = simit_with_user_config(temp.path())
+        .current_dir(temp.path())
+        .args([
+            "init",
+            "ci",
+            "--ci-provider",
+            "actions",
+            "--platform",
+            "github",
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let ci = read(&temp.path().join(".github/workflows/ci.yaml"));
+    assert!(ci.contains("runs-on: ubuntu-24.04"));
+    assert!(!ci.contains("atlas-nix-trusted"));
+    assert!(!ci.contains("codeberg-medium"));
+}
+
+#[test]
 fn generated_workflows_include_project_ci_setup_and_env() {
     let temp = init_package(true);
     write_ci_customization_config(temp.path());
@@ -1671,6 +1706,42 @@ fn workspace_flag_generates_per_package_workflows() {
     assert_yaml_parses(&beta_publish);
     assert!(beta_publish.contains("run: cargo publish -p beta --dry-run"));
     assert!(beta_publish.contains("cargo publish -p beta"));
+}
+
+#[test]
+fn aggregate_workspace_strategy_generates_one_workspace_workflow() {
+    let temp = init_workspace_fixture();
+    fs::write(temp.path().join("flake.nix"), "{ outputs = _: {}; }\n").unwrap();
+
+    let status = simit_with_user_config(temp.path())
+        .current_dir(temp.path())
+        .args([
+            "init",
+            "ci",
+            "--platform",
+            "github",
+            "--runtime",
+            "nix",
+            "--workspace",
+            "--workspace-strategy",
+            "aggregate",
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let workflow = temp.path().join(".github/workflows/ci.yaml");
+    assert!(workflow.exists());
+    assert!(!temp.path().join(".github/workflows/ci-alpha.yaml").exists());
+    assert!(!temp.path().join(".github/workflows/ci-beta.yaml").exists());
+
+    let ci = read(&workflow);
+    assert_yaml_parses(&ci);
+    assert!(ci.contains("run: nix develop -c cargo test --workspace --all-features"));
+    assert!(ci.contains(
+        "run: nix develop -c cargo clippy --workspace --all-targets --all-features -- --deny warnings"
+    ));
+    assert!(!ci.contains("cargo package"));
 }
 
 #[test]

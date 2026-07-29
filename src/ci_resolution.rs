@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
-use crate::cli::{Platform, Runtime, RuntimeChoice};
+use crate::cli::{Platform, Runtime, RuntimeChoice, WorkspaceStrategy};
 use crate::config::{CiConfig, ProjectConfig};
 use crate::render::ci::{CiOptions, OMNIX_REF_DEFAULT, OmCiMode};
 
@@ -18,6 +18,7 @@ pub struct CiCliOverrides {
     pub step_runner: Vec<(String, String)>,
     pub granular: bool,
     pub workspace: bool,
+    pub workspace_strategy: Option<WorkspaceStrategy>,
     pub packages: Vec<String>,
     pub with_nextest: Option<bool>,
     pub with_msrv: Option<bool>,
@@ -45,6 +46,7 @@ pub struct CiInference {
     pub runner: Option<String>,
     pub windows_runner: Option<String>,
     pub workspace: Option<bool>,
+    pub workspace_strategy: Option<WorkspaceStrategy>,
     pub packages: Option<Vec<String>>,
     pub with_nextest: Option<bool>,
     pub with_msrv: Option<bool>,
@@ -94,12 +96,17 @@ impl CiInference {
         } else {
             (Some(false), Some(Vec::new()))
         };
+        let workspace_strategy = all_content
+            .contains("--workspace-strategy aggregate")
+            .then_some(WorkspaceStrategy::Aggregate)
+            .or_else(|| workspace.map(|_| WorkspaceStrategy::Members));
 
         Ok(Self {
             runtime: Some(infer_ci_runtime(marked)?),
             runner: infer_primary_runner_label(marked, "ci"),
             windows_runner: infer_windows_runner_label(marked),
             workspace,
+            workspace_strategy,
             packages,
             // Keep these markers in sync with the emitting sites in
             // src/render/ci.rs: optional tool steps, om-ci, and artifact files.
@@ -136,6 +143,7 @@ pub struct ResolvedCiInputs {
     pub step_runners: BTreeMap<String, String>,
     pub granular: bool,
     pub workspace: bool,
+    pub workspace_strategy: WorkspaceStrategy,
     pub packages: Vec<String>,
     pub with_nextest: bool,
     pub with_msrv: bool,
@@ -201,6 +209,19 @@ impl ResolvedCiInputs {
         } else {
             (inference.workspace.unwrap_or(false), Vec::new())
         };
+        let workspace_strategy = cli
+            .workspace_strategy
+            .or_else(|| {
+                (cfg.ci.workspace_strategy != WorkspaceStrategy::Members)
+                    .then_some(cfg.ci.workspace_strategy)
+            })
+            .or(inference.workspace_strategy)
+            .unwrap_or_default();
+        if workspace_strategy == WorkspaceStrategy::Aggregate
+            && (!workspace || !packages.is_empty())
+        {
+            bail!("aggregate workspace CI requires --workspace and no --package selectors");
+        }
 
         Ok(Self {
             runtime,
@@ -219,6 +240,7 @@ impl ResolvedCiInputs {
                 m
             },
             workspace,
+            workspace_strategy,
             packages,
             with_nextest: cli
                 .with_nextest
@@ -302,6 +324,7 @@ impl ResolvedCiInputs {
                 .collect(),
             required_secrets: cfg.ci.required_secrets.clone(),
             required_env: cfg.ci.required_env.clone(),
+            workspace_strategy: self.workspace_strategy,
             package_scoped: false,
             homebrew: None,
             chocolatey: None,
@@ -324,6 +347,7 @@ impl ResolvedCiInputs {
         ci.runner = runner;
         ci.windows_runner = windows_runner;
         ci.workspace = self.workspace;
+        ci.workspace_strategy = self.workspace_strategy;
         ci.packages = self.packages.clone();
         ci.with_nextest = self.with_nextest;
         ci.with_msrv = self.with_msrv;

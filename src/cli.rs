@@ -427,6 +427,12 @@ pub struct InitCiCommand {
     #[arg(long, help = "Generate CI for every package in the workspace")]
     pub workspace: bool,
     #[arg(
+        long = "workspace-strategy",
+        value_enum,
+        help = "Workspace CI layout: one workflow per member or one aggregate workflow"
+    )]
+    pub workspace_strategy: Option<WorkspaceStrategy>,
+    #[arg(
         long,
         value_enum,
         value_name = "PLATFORM",
@@ -1816,6 +1822,14 @@ pub enum CiProvider {
     Actions,
     #[value(name = "crow", help = "Crow CI workflows under .crow")]
     Crow,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq, ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum WorkspaceStrategy {
+    #[default]
+    Members,
+    Aggregate,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq, ValueEnum)]

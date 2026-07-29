@@ -8,8 +8,8 @@ use anyhow::{Context, Result, bail};
 use crate::cargo;
 use crate::ci_resolution::{CiCliOverrides, CiInference, ResolvedCiInputs, WorkflowSnapshot};
 use crate::cli::{
-    CiProvider, ChocolateyOverridesArgs, HomebrewOverridesArgs,
-    InitCiCommand, Platform, Runtime, RuntimeChoice, ScoopOverridesArgs,
+    ChocolateyOverridesArgs, CiProvider, HomebrewOverridesArgs, InitCiCommand, Platform, Runtime,
+    RuntimeChoice, ScoopOverridesArgs,
 };
 use crate::commands::upgrade;
 use crate::config::{
@@ -66,6 +66,14 @@ pub fn run(command: InitCiCommand) -> Result<()> {
     validate_runner(resolved.runner.as_deref())?;
     validate_runner(resolved.windows_runner.as_deref())?;
     let packages = cargo::select_packages(&metadata, &resolved.packages, resolved.workspace)?;
+    if resolved.workspace_strategy == crate::cli::WorkspaceStrategy::Aggregate
+        && (resolved.publish_crates
+            || command.with_homebrew
+            || command.with_chocolatey
+            || command.with_scoop)
+    {
+        bail!("aggregate workspace CI cannot be combined with crate or platform publishing");
+    }
     if command.with_homebrew && resolved.runtime != Runtime::Nix {
         bail!("Homebrew tap publish requires --runtime nix");
     }
@@ -130,25 +138,42 @@ pub fn run(command: InitCiCommand) -> Result<()> {
         resolved.windows_runner.as_deref(),
         windows_packagers,
     )?;
-    let step_runners: BTreeMap<String, ResolvedRunner> = resolved
-        .step_runners
-        .iter()
-        .map(|(step, label)| {
-            Ok((
-                step.clone(),
-                ResolvedRunner::literal(label)
-                    .map_err(|e| anyhow::anyhow!("invalid step runner label for '{step}': {e}"))?,
-            ))
-        })
-        .collect::<Result<_>>()?;
+    // Step-runner labels such as `atlas-nix-trusted` and `codeberg-small`
+    // belong to the Forgejo/Crow runner fleet.  Reusing them for a GitHub
+    // workflow produces a syntactically valid file that cannot be scheduled
+    // on a hosted GitHub runner.  GitHub uses the resolved hosted runner for
+    // every ordinary step unless a future GitHub-specific runner map is added.
+    let step_runners: BTreeMap<String, ResolvedRunner> = if platform == Platform::Github {
+        BTreeMap::new()
+    } else {
+        resolved
+            .step_runners
+            .iter()
+            .map(|(step, label)| {
+                Ok((
+                    step.clone(),
+                    ResolvedRunner::literal(label).map_err(|e| {
+                        anyhow::anyhow!("invalid step runner label for '{step}': {e}")
+                    })?,
+                ))
+            })
+            .collect::<Result<_>>()?
+    };
     let persisted_runner =
         self_check_runner_override(resolved.runner.as_deref(), &runners.ci).map(str::to_owned);
     let persisted_windows_runner = runners.windows.as_ref().and_then(|runner| {
         self_check_runner_override(resolved.windows_runner.as_deref(), runner).map(str::to_owned)
     });
-    let multi_package_workspace = metadata.workspace_members.len() > 1;
+    let multi_package_workspace = metadata.workspace_members.len() > 1
+        && resolved.workspace_strategy == crate::cli::WorkspaceStrategy::Members;
+    let generation_packages =
+        if resolved.workspace_strategy == crate::cli::WorkspaceStrategy::Aggregate {
+            packages.first().into_iter().collect::<Vec<_>>()
+        } else {
+            packages.iter().collect::<Vec<_>>()
+        };
     let mut files = Vec::new();
-    for package in &packages {
+    for package in generation_packages {
         let homebrew = if command.with_homebrew {
             Some(homebrew_options(&cfg, &command.homebrew, package)?)
         } else {
@@ -169,6 +194,7 @@ pub fn run(command: InitCiCommand) -> Result<()> {
             chocolatey,
             scoop,
             package_scoped: multi_package_workspace,
+            workspace_strategy: resolved.workspace_strategy,
             ..options.clone()
         };
         let self_check_runner = self_check_runner_override(resolved.runner.as_deref(), &runners.ci);
@@ -204,11 +230,7 @@ pub fn run(command: InitCiCommand) -> Result<()> {
     }
     let pages = codeberg_pages_options(&cfg, &command, inferred_pages.as_ref())?;
     if let Some(pages) = &pages {
-        files.push(ci::codeberg_pages_file(
-            platform,
-            &runners.ci,
-            pages,
-        )?);
+        files.push(ci::codeberg_pages_file(platform, &runners.ci, pages)?);
     }
     if wants_vscode {
         let vscode = vscode_options(&cfg)?;
@@ -336,10 +358,7 @@ fn run_nix_only(command: InitCiCommand) -> Result<()> {
             relative_path: PathBuf::from(".gitlab-ci.yml"),
             content: ci::gitlab_nix_flake_workflow(),
         },
-        _ => ci::nix_flake_ci_file(
-            platform,
-            &ResolvedRunner::literal(runner)?,
-        )?,
+        _ => ci::nix_flake_ci_file(platform, &ResolvedRunner::literal(runner)?)?,
     };
     let mut files = vec![generated];
     if let Some(pages) = &pages {
@@ -358,13 +377,7 @@ fn run_nix_only(command: InitCiCommand) -> Result<()> {
         if platform == Platform::Gitlab {
             project::check_generated_files(&workspace_root, &files, &message, command.diff)?;
         } else {
-            check_generated_ci_files(
-                &workspace_root,
-                &files,
-                platform,
-                &message,
-                command.diff,
-            )?;
+            check_generated_ci_files(&workspace_root, &files, platform, &message, command.diff)?;
         }
     } else {
         project::write_generated_files(&workspace_root, &files)?;
@@ -476,20 +489,10 @@ fn run_python(command: InitCiCommand) -> Result<()> {
     }
     let pages = codeberg_pages_options(&cfg, &command, inferred_pages.as_ref())?;
     if let Some(pages) = &pages {
-        files.push(ci::codeberg_pages_file(
-            platform,
-            &runners.ci,
-            pages,
-        )?);
+        files.push(ci::codeberg_pages_file(platform, &runners.ci, pages)?);
     }
-    let mut persisted_ci = resolved.persisted_ci(
-        &cfg,
-        platform,
-        false,
-        &omnix_ref,
-        persisted_runner,
-        None,
-    );
+    let mut persisted_ci =
+        resolved.persisted_ci(&cfg, platform, false, &omnix_ref, persisted_runner, None);
     persisted_ci.provider = Some(provider);
     if command.with_codeberg_pages {
         persisted_ci.pages = Some(codeberg_pages_config(&pages)?);
@@ -540,7 +543,11 @@ fn run_crow(
     let snapshots = workflow_snapshots_for_crow(workspace_root)?;
     let inference = CiInference::from_workflows(&snapshots)?;
     let cli_overrides = ci_cli_overrides(&command);
-    let resolved = ResolvedCiInputs::resolve(workspace_root, cfg, &cli_overrides, Some(&inference))?;
+    let resolved =
+        ResolvedCiInputs::resolve(workspace_root, cfg, &cli_overrides, Some(&inference))?;
+    if resolved.workspace_strategy == crate::cli::WorkspaceStrategy::Aggregate {
+        bail!("aggregate workspace CI is only supported for Actions workflows");
+    }
     let packages = cargo::select_packages(metadata, &resolved.packages, resolved.workspace)?;
     let windows_packagers = command.with_chocolatey || command.with_scoop;
     let with_artifacts = resolved.with_artifacts || command.with_homebrew || windows_packagers;
@@ -694,18 +701,16 @@ fn run_crow_python(
     if let Some(format) = command.crow_format {
         crow.format = format;
     }
-    let resolved = ResolvedCiInputs::resolve(
-        workspace_root,
-        cfg,
-        &ci_cli_overrides(&command),
-        None,
-    )?;
+    let resolved =
+        ResolvedCiInputs::resolve(workspace_root, cfg, &ci_cli_overrides(&command), None)?;
     let runner = ResolvedRunner {
         name: None,
-        labels: vec![resolved
-            .runner
-            .clone()
-            .unwrap_or_else(|| "crow-default".to_owned())],
+        labels: vec![
+            resolved
+                .runner
+                .clone()
+                .unwrap_or_else(|| "crow-default".to_owned()),
+        ],
     };
     let options = resolved.ci_options(cfg, false, resolved.omnix_ref.clone());
     let mut files = vec![crate::render::crow::python_ci_file(
@@ -753,23 +758,34 @@ fn run_crow_python(
     Ok(())
 }
 
-fn crow_runners(resolved: &ResolvedCiInputs, needs_windows: bool) -> crate::user_config::ResolvedCiRunners {
+fn crow_runners(
+    resolved: &ResolvedCiInputs,
+    needs_windows: bool,
+) -> crate::user_config::ResolvedCiRunners {
     let ci = ResolvedRunner {
         name: None,
-        labels: vec![resolved
-            .runner
-            .clone()
-            .unwrap_or_else(|| "crow-default".to_owned())],
+        labels: vec![
+            resolved
+                .runner
+                .clone()
+                .unwrap_or_else(|| "crow-default".to_owned()),
+        ],
     };
     let release = ci.clone();
     let windows = needs_windows.then(|| ResolvedRunner {
         name: None,
-        labels: vec![resolved
-            .windows_runner
-            .clone()
-            .unwrap_or_else(|| "platform=windows/amd64".to_owned())],
+        labels: vec![
+            resolved
+                .windows_runner
+                .clone()
+                .unwrap_or_else(|| "platform=windows/amd64".to_owned()),
+        ],
     });
-    crate::user_config::ResolvedCiRunners { ci, release, windows }
+    crate::user_config::ResolvedCiRunners {
+        ci,
+        release,
+        windows,
+    }
 }
 
 fn ci_cli_overrides(command: &InitCiCommand) -> CiCliOverrides {
@@ -788,6 +804,7 @@ fn ci_cli_overrides(command: &InitCiCommand) -> CiCliOverrides {
         step_runner,
         granular: command.granular,
         workspace: command.workspace,
+        workspace_strategy: command.workspace_strategy,
         packages: command.packages.clone(),
         with_nextest: command.with_nextest,
         with_msrv: command.with_msrv,
@@ -850,9 +867,7 @@ pub(crate) fn workflow_snapshots_for_platform(
     Ok(snapshots)
 }
 
-pub(crate) fn workflow_snapshots_for_crow(
-    workspace_root: &Path,
-) -> Result<Vec<WorkflowSnapshot>> {
+pub(crate) fn workflow_snapshots_for_crow(workspace_root: &Path) -> Result<Vec<WorkflowSnapshot>> {
     let workflow_dir = PathBuf::from(".crow");
     let absolute_dir = workspace_root.join(&workflow_dir);
     let entries = match fs::read_dir(&absolute_dir) {
@@ -863,7 +878,8 @@ pub(crate) fn workflow_snapshots_for_crow(
 
     let mut snapshots = Vec::new();
     for entry in entries {
-        let entry = entry.with_context(|| format!("reading entry in {}", absolute_dir.display()))?;
+        let entry =
+            entry.with_context(|| format!("reading entry in {}", absolute_dir.display()))?;
         if !entry
             .file_type()
             .with_context(|| format!("reading file type for {}", entry.path().display()))?
@@ -878,8 +894,8 @@ pub(crate) fn workflow_snapshots_for_crow(
         if !matches!(extension, "yaml" | "yml" | "jsonnet") {
             continue;
         }
-        let content = fs::read_to_string(&path)
-            .with_context(|| format!("reading {}", path.display()))?;
+        let content =
+            fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
         if generated_workflow_marker_present(&content) {
             snapshots.push(WorkflowSnapshot {
                 relative_path: workflow_dir.join(entry.file_name()),
@@ -911,18 +927,14 @@ pub(crate) fn project_regeneration_command(workspace_root: &Path) -> Result<Opti
                 continue;
             }
             let cfg = ProjectConfig::load(workspace_root).unwrap_or_default();
-            let runner = cfg
-                .ci
-                .runner
-                .clone()
-                .or_else(|| {
-                    snapshots.iter().find_map(|snapshot| {
-                        snapshot
-                            .content
-                            .lines()
-                            .find_map(|line| line.trim().strip_prefix("runs-on: ").map(str::to_owned))
-                    })
-                });
+            let runner = cfg.ci.runner.clone().or_else(|| {
+                snapshots.iter().find_map(|snapshot| {
+                    snapshot
+                        .content
+                        .lines()
+                        .find_map(|line| line.trim().strip_prefix("runs-on: ").map(str::to_owned))
+                })
+            });
             let mut command = format!(
                 "simit init ci --platform {} --runtime nix",
                 platform.as_str()
@@ -936,10 +948,12 @@ pub(crate) fn project_regeneration_command(workspace_root: &Path) -> Result<Opti
     }
     let crow = workflow_snapshots_for_crow(workspace_root)?;
     if !crow.is_empty() {
-        let format = if crow
-            .iter()
-            .any(|workflow| workflow.relative_path.extension().is_some_and(|ext| ext == "jsonnet"))
-        {
+        let format = if crow.iter().any(|workflow| {
+            workflow
+                .relative_path
+                .extension()
+                .is_some_and(|ext| ext == "jsonnet")
+        }) {
             " --crow-format jsonnet"
         } else {
             ""
@@ -986,6 +1000,7 @@ pub(crate) fn project_regeneration_command(workspace_root: &Path) -> Result<Opti
     let command = InitCiCommand {
         packages: Vec::new(),
         workspace: false,
+        workspace_strategy: None,
         platform: Some(platform),
         ci_provider: Some(CiProvider::Actions),
         crow_format: None,
@@ -1110,7 +1125,10 @@ pub(crate) fn render_regeneration_command(
     persisted_in_simit_toml: bool,
 ) -> String {
     if persisted_in_simit_toml {
-        return format!("simit init ci --platform {}", command.platform.unwrap_or(Platform::Forgejo).as_str());
+        return format!(
+            "simit init ci --platform {}",
+            command.platform.unwrap_or(Platform::Forgejo).as_str()
+        );
     }
 
     let mut args = vec![
@@ -1118,7 +1136,11 @@ pub(crate) fn render_regeneration_command(
         "init".to_owned(),
         "ci".to_owned(),
         "--platform".to_owned(),
-        command.platform.unwrap_or(Platform::Forgejo).as_str().to_owned(),
+        command
+            .platform
+            .unwrap_or(Platform::Forgejo)
+            .as_str()
+            .to_owned(),
     ];
 
     if resolved.runtime != Runtime::Cargo || command.runtime.is_some() {
@@ -1138,6 +1160,10 @@ pub(crate) fn render_regeneration_command(
     }
     if resolved.workspace {
         args.push("--workspace".to_owned());
+    }
+    if resolved.workspace_strategy == crate::cli::WorkspaceStrategy::Aggregate {
+        args.push("--workspace-strategy".to_owned());
+        args.push("aggregate".to_owned());
     }
     for package in &resolved.packages {
         args.push("--package".to_owned());
@@ -1279,7 +1305,9 @@ fn persisted_ci_matches_simit_toml(
     let explicit_runners_cover_required =
         runner_overrides_cover_required_runners(resolved, windows_packagers);
     let user_config = UserConfig::load().or_else(|err| {
-        if command.platform.unwrap_or(Platform::Forgejo) == Platform::Github || explicit_runners_cover_required {
+        if command.platform.unwrap_or(Platform::Forgejo) == Platform::Github
+            || explicit_runners_cover_required
+        {
             Ok(UserConfig::default())
         } else {
             Err(err)

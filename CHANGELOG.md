@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.12] - 2026-07-28
+
+### Added
+
+- Generate one aggregate GitHub Actions workflow for multi-package Cargo workspaces.
+- Preserve supplementary GitHub workflow fixtures in the published flake source.
+
+### Fixed
+
+- Keep public Simit flake checks independent of Canix-managed cache transport.
+
 ## [0.17.11] - 2026-07-28
 
 ### Added
@@ -356,7 +367,8 @@ ci`, including the `~/.cargo/bin` key, rust-cache settings, and why Nix
 
 - Prepare the first public crates.io release.
 
-[Unreleased]: https://codeberg.org/caniko/simit/compare/0.17.11...HEAD
+[Unreleased]: https://codeberg.org/caniko/simit/compare/0.17.12...HEAD
+[0.17.12]: https://codeberg.org/caniko/simit/compare/0.17.11...0.17.12
 [0.17.11]: https://codeberg.org/caniko/simit/compare/0.17.10...0.17.11
 [0.17.10]: https://codeberg.org/caniko/simit/compare/0.17.9...0.17.10
 [0.17.9]: https://codeberg.org/caniko/simit/compare/0.17.8...0.17.9

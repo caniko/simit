@@ -1,8 +1,8 @@
 pub mod apt_conf;
 pub mod chocolatey_nuspec;
 pub mod ci;
-pub mod crow;
 pub mod copr_makefile;
+pub mod crow;
 pub mod diff;
 pub mod flake;
 pub mod gitignore;

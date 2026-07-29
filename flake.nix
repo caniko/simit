@@ -63,9 +63,14 @@
       # keep this one alongside the normal Cargo source set.
       src = pkgs.lib.cleanSourceWith {
         src = ./.;
-        filter = path: type:
+        filter = path: type: let
+          pathString = toString path;
+        in
           (craneLib.filterCargoSources path type)
-          || pkgs.lib.hasSuffix "ci-actions.json" (toString path);
+          || pkgs.lib.hasSuffix "ci-actions.json" pathString
+          || pkgs.lib.hasSuffix "/.github" pathString
+          || pkgs.lib.hasSuffix "/.github/workflows" pathString
+          || pkgs.lib.hasInfix "/.github/workflows/" pathString;
       };
 
       commonArgs = {
@@ -92,6 +97,8 @@
           nativeBuildInputs = [preCommitBin];
           nativeCheckInputs = [pkgs.git pkgs.gnupg];
         });
+
+      publicCargoArtifacts = publicCraneLib.buildDepsOnly commonArgs;
 
       staticPackages =
         if system == "x86_64-linux"
@@ -139,35 +146,35 @@
         };
       };
 
-      depsCheck = cargoArtifacts;
+      depsCheck = publicCargoArtifacts;
 
-      clippyCheck = craneLib.cargoClippy (commonArgs
+      clippyCheck = publicCraneLib.cargoClippy (commonArgs
         // {
-          inherit cargoArtifacts;
+          cargoArtifacts = publicCargoArtifacts;
           cargoClippyExtraArgs = "--all-targets -- --deny warnings";
         });
 
-      fmtCheck = craneLib.cargoFmt {
+      fmtCheck = publicCraneLib.cargoFmt {
         inherit src;
       };
 
-      nextestCheck = craneLib.cargoNextest (commonArgs
+      nextestCheck = publicCraneLib.cargoNextest (commonArgs
         // {
-          inherit cargoArtifacts;
+          cargoArtifacts = publicCargoArtifacts;
           nativeCheckInputs = [pkgs.git pkgs.gnupg];
         });
 
-      docCheck = craneLib.cargoDoc (commonArgs
+      docCheck = publicCraneLib.cargoDoc (commonArgs
         // {
-          inherit cargoArtifacts;
+          cargoArtifacts = publicCargoArtifacts;
           cargoDocExtraArgs = "--no-deps";
         });
 
-      auditCheck = craneLib.cargoAudit {
+      auditCheck = publicCraneLib.cargoAudit {
         inherit advisory-db src;
       };
 
-      denyCheck = craneLib.cargoDeny {
+      denyCheck = publicCraneLib.cargoDeny {
         inherit src;
       };
 
@@ -215,7 +222,7 @@
       formatter = treefmtEval.config.build.wrapper;
 
       checks = {
-        default = package;
+        default = publicPackage;
         formatting = treefmtEval.config.build.check self;
 
         # Exposes the crane deps closure so atlas's post-build hook and CI
@@ -234,9 +241,8 @@
         doc = docCheck;
         audit = auditCheck;
         deny = denyCheck;
-        default-package-is-publicly-buildable =
-          assert !(publicPackage.passthru.rsHarborBuildCacheWrapped or false);
-            pkgs.runCommand "check-simit-default-package-cache-policy" {} "touch $out";
+        default-package-is-publicly-buildable = assert !(publicPackage.passthru.rsHarborBuildCacheWrapped or false);
+          pkgs.runCommand "check-simit-default-package-cache-policy" {} "touch $out";
       };
 
       devShells = let
@@ -247,7 +253,7 @@
           rust-analyzer
         ];
       in {
-        default = craneLib.devShell {
+        default = publicCraneLib.devShell {
           checks = self.checks.${system};
           packages = with pkgs;
             [
@@ -266,7 +272,7 @@
           shellHook = pre-commit-check.shellHook;
         };
 
-        docs = craneLib.devShell {
+        docs = publicCraneLib.devShell {
           checks = self.checks.${system};
           packages = docsPackages ++ pre-commit-check.enabledPackages;
           shellHook = pre-commit-check.shellHook;

@@ -16,9 +16,14 @@
   programs.prettier = {
     enable = true;
     package = pkgs.prettier;
+    excludes = [
+      ".crow/**"
+    ];
     includes = [
       "*.md"
       "*.markdown"
+      "*.yaml"
+      "*.yml"
     ];
   };
 }

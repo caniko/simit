@@ -447,8 +447,8 @@ pub fn render(inputs: &ReleaseWorkflowInputs<'_>) -> String {
     push_secrets_header(&mut w, inputs);
     w.push_str("name: release\n\n");
 
-    w.push_str("'on':\n");
-    w.push_str("  push:\n    tags:\n      - '[0-9]*'\n");
+    w.push_str("on:\n");
+    w.push_str("  push:\n    tags:\n      - \"[0-9]*\"\n");
     // Codeberg's current Gitea 1.22-derived Actions service rejects nested
     // workflow_dispatch input mappings.  Release publication is tag-driven;
     // an operator can dispatch this workflow against the tag ref directly.

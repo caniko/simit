@@ -65,3 +65,12 @@ Workspace CI is rendered per package as `ci-<crate>.yaml`; single-package
 projects keep the stable `ci.yaml` path. With `--publish-crates`, publishable
 workspace members also get `publish-crate-<crate>.yaml`; single-package release
 projects get `publish-crate.yaml`.
+
+For one aggregate GitHub workflow that runs workspace gates once, use:
+
+```sh
+simit init ci --platform github --runtime nix --workspace --workspace-strategy aggregate
+```
+
+Aggregate mode is for workspace CI only. Crate publishing and package-specific
+release workflows remain member-scoped.
