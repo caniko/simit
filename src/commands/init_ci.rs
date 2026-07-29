@@ -327,8 +327,15 @@ fn run_nix_only(command: InitCiCommand) -> Result<()> {
     if !workspace_root.join("flake.nix").is_file() {
         bail!("Nix CI generation requires flake.nix at the workspace root");
     }
-    let platform = command.platform.unwrap_or(Platform::Forgejo);
-    let provider = command.ci_provider.unwrap_or(CiProvider::Actions);
+    let cfg = ProjectConfig::load(&workspace_root)?;
+    let platform = command
+        .platform
+        .or(cfg.ci.platform)
+        .unwrap_or(Platform::Forgejo);
+    let provider = command
+        .ci_provider
+        .or(cfg.ci.provider)
+        .unwrap_or(CiProvider::Actions);
     if provider != CiProvider::Actions {
         bail!("Nix-only CI currently supports the Actions provider only");
     }
@@ -343,36 +350,73 @@ fn run_nix_only(command: InitCiCommand) -> Result<()> {
         bail!("release and language-specific options are not supported for Nix-only CI");
     }
 
+    let system_runners = cfg.ci.nix_system_runners.clone();
+    if !system_runners.is_empty() {
+        if platform != Platform::Github {
+            bail!("[ci].nix_system_runners requires `--platform github`");
+        }
+        if command.runner.is_some() {
+            bail!(
+                "--runner cannot be combined with [ci].nix_system_runners; edit the per-system runner map instead"
+            );
+        }
+    }
+
     let runner = match platform {
-        Platform::Github => command.runner.as_deref().unwrap_or("ubuntu-latest"),
+        Platform::Github if !system_runners.is_empty() => system_runners
+            .values()
+            .next()
+            .map(String::as_str)
+            .expect("validated non-empty native runner map"),
+        Platform::Github => command
+            .runner
+            .as_deref()
+            .or(cfg.ci.runner.as_deref())
+            .unwrap_or("ubuntu-latest"),
         Platform::Forgejo => command
             .runner
             .as_deref()
+            .or(cfg.ci.runner.as_deref())
             .context("Nix-only Forgejo CI requires --runner")?,
-        Platform::Gitlab => command.runner.as_deref().unwrap_or("shared"),
+        Platform::Gitlab => command
+            .runner
+            .as_deref()
+            .or(cfg.ci.runner.as_deref())
+            .unwrap_or("shared"),
     };
-    let cfg = ProjectConfig::load(&workspace_root)?;
+    let runner = runner.to_owned();
     let pages = codeberg_pages_options(&cfg, &command, None)?;
     let generated = match platform {
         Platform::Gitlab => project::GeneratedFile {
             relative_path: PathBuf::from(".gitlab-ci.yml"),
             content: ci::gitlab_nix_flake_workflow(),
         },
-        _ => ci::nix_flake_ci_file(platform, &ResolvedRunner::literal(runner)?)?,
+        _ => ci::nix_flake_ci_file_with_system_runners(
+            platform,
+            &ResolvedRunner::literal(&runner)?,
+            &system_runners,
+        )?,
     };
     let mut files = vec![generated];
     if let Some(pages) = &pages {
         files.push(ci::codeberg_pages_file(
             platform,
-            &ResolvedRunner::literal(runner)?,
+            &ResolvedRunner::literal(&runner)?,
             pages,
         )?);
     }
-    let message = format!(
-        "Nix-only CI is not up to date; run `simit init ci --platform {} --runtime nix --runner {}`",
-        platform.as_str(),
-        runner
-    );
+    let message = if system_runners.is_empty() {
+        format!(
+            "Nix-only CI is not up to date; run `simit init ci --platform {} --runtime nix --runner {}`",
+            platform.as_str(),
+            runner
+        )
+    } else {
+        format!(
+            "Nix-only CI is not up to date; run `simit init ci --platform {} --runtime nix` (edit [ci.nix_system_runners] for native labels)",
+            platform.as_str()
+        )
+    };
     if command.check {
         if platform == Platform::Gitlab {
             project::check_generated_files(&workspace_root, &files, &message, command.diff)?;
@@ -385,7 +429,7 @@ fn run_nix_only(command: InitCiCommand) -> Result<()> {
         persisted_ci.provider = Some(CiProvider::Actions);
         persisted_ci.platform = Some(platform);
         persisted_ci.runtime = Some(Runtime::Nix);
-        persisted_ci.runner = Some(runner.to_owned());
+        persisted_ci.runner = system_runners.is_empty().then(|| runner.clone());
         if command.with_codeberg_pages {
             persisted_ci.pages = Some(codeberg_pages_config(&pages)?);
         }
@@ -927,14 +971,18 @@ pub(crate) fn project_regeneration_command(workspace_root: &Path) -> Result<Opti
                 continue;
             }
             let cfg = ProjectConfig::load(workspace_root).unwrap_or_default();
-            let runner = cfg.ci.runner.clone().or_else(|| {
-                snapshots.iter().find_map(|snapshot| {
-                    snapshot
-                        .content
-                        .lines()
-                        .find_map(|line| line.trim().strip_prefix("runs-on: ").map(str::to_owned))
+            let runner = if cfg.ci.nix_system_runners.is_empty() {
+                cfg.ci.runner.clone().or_else(|| {
+                    snapshots.iter().find_map(|snapshot| {
+                        snapshot.content.lines().find_map(|line| {
+                            let runner = line.trim().strip_prefix("runs-on: ")?;
+                            (!runner.contains("${{")).then(|| runner.to_owned())
+                        })
+                    })
                 })
-            });
+            } else {
+                None
+            };
             let mut command = format!(
                 "simit init ci --platform {} --runtime nix",
                 platform.as_str()

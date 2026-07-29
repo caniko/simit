@@ -35,6 +35,16 @@ license = "MIT"
     temp
 }
 
+fn init_flake_only() -> TempDir {
+    let temp = TempDir::new().unwrap();
+    fs::write(
+        temp.path().join("flake.nix"),
+        "{ outputs = { self }: {}; }\n",
+    )
+    .unwrap();
+    temp
+}
+
 fn init_python_project() -> TempDir {
     let temp = TempDir::new().unwrap();
     let root = temp.path();
@@ -451,6 +461,117 @@ fn generates_forgejo_nix_workflows() {
     assert!(publish.contains("already published on crates.io; skipping publish"));
     assert!(!publish.contains("cargo login"));
     assert_maintainer_key_written(temp.path());
+}
+
+#[test]
+fn github_nix_only_uses_native_system_runner_matrix() {
+    let temp = init_flake_only();
+    fs::write(
+        temp.path().join("simit.toml"),
+        r#"[ci]
+provider = "actions"
+platform = "github"
+runtime = "nix"
+
+[ci.nix_system_runners]
+"aarch64-darwin" = "macos-15"
+"aarch64-linux" = "ubuntu-24.04-arm"
+"x86_64-linux" = "ubuntu-24.04"
+"#,
+    )
+    .unwrap();
+
+    let status = simit()
+        .current_dir(temp.path())
+        .args(["init", "ci", "--platform", "github", "--runtime", "nix"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let workflow = read(&temp.path().join(".github/workflows/ci.yaml"));
+    assert_yaml_parses(&workflow);
+    assert!(workflow.contains("strategy:\n      fail-fast: false\n      matrix:\n"));
+    assert!(workflow.contains("- system: aarch64-darwin\n            runner: macos-15"));
+    assert!(workflow.contains("- system: aarch64-linux\n            runner: ubuntu-24.04-arm"));
+    assert!(workflow.contains("- system: x86_64-linux\n            runner: ubuntu-24.04"));
+    assert!(workflow.contains("runs-on: ${{ matrix.runner }}"));
+    assert!(workflow.contains(
+        "nix eval --impure --raw --expr builtins.currentSystem)\" = \"${{ matrix.system }}\""
+    ));
+    assert!(
+        workflow
+            .contains("nix flake check --no-update-lock-file --system \"${{ matrix.system }}\"")
+    );
+    assert!(!workflow.contains("--all-systems"));
+
+    let check = simit()
+        .current_dir(temp.path())
+        .args([
+            "init",
+            "ci",
+            "--platform",
+            "github",
+            "--runtime",
+            "nix",
+            "--check",
+            "--diff",
+        ])
+        .status()
+        .unwrap();
+    assert!(check.success());
+}
+
+#[test]
+fn github_nix_only_keeps_single_runner_when_no_system_map_is_configured() {
+    let temp = init_flake_only();
+
+    let status = simit()
+        .current_dir(temp.path())
+        .args([
+            "init",
+            "ci",
+            "--platform",
+            "github",
+            "--runtime",
+            "nix",
+            "--runner",
+            "ubuntu-24.04",
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let workflow = read(&temp.path().join(".github/workflows/ci.yaml"));
+    assert_yaml_parses(&workflow);
+    assert!(workflow.contains("runs-on: ubuntu-24.04"));
+    assert!(workflow.contains("run: nix flake check\n"));
+    assert!(!workflow.contains("matrix:"));
+}
+
+#[test]
+fn github_nix_only_rejects_invalid_native_runner_maps() {
+    let temp = init_flake_only();
+    fs::write(
+        temp.path().join("simit.toml"),
+        r#"[ci]
+platform = "github"
+runtime = "nix"
+runner = "ubuntu-24.04"
+
+[ci.nix_system_runners]
+"aarch64-linux" = ""
+"#,
+    )
+    .unwrap();
+
+    let output = simit()
+        .current_dir(temp.path())
+        .args(["init", "ci", "--platform", "github", "--runtime", "nix"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("[ci].runner cannot be combined with [ci].nix_system_runners"));
 }
 
 #[test]
