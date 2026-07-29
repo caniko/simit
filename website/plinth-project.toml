@@ -1,6 +1,6 @@
 [site]
 title = "simit"
-description = "<!-- simit:badges:start -->"
+description = "A semver-aware commit helper for Rust projects that bumps versions, updates locks, commits changes, and creates release tags."
 base_url = "/"
 footer_note = "Generated from repository metadata by the plinth-project FOSS sweep."
 
@@ -19,13 +19,13 @@ href = "ssh://git@codeberg.org/caniko/simit.git"
 [[pages]]
 slug = "index"
 title = "simit"
-description = "<!-- simit:badges:start -->"
+description = "A semver-aware commit helper for Rust projects that bumps versions, updates locks, commits changes, and creates release tags."
 
 [[pages.sections]]
 type = "hero"
 title = "simit"
-tagline = "<!-- simit:badges:start -->"
-subtitle = "<!-- simit:badges:start -->"
+tagline = "Semver-aware release commits for Rust projects"
+subtitle = "Bump versions, update locks, commit changes, and create release tags from one command."
 
 [[pages.sections.ctas]]
 label = "View source"
