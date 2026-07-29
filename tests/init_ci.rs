@@ -414,7 +414,7 @@ fn generates_forgejo_nix_workflows() {
     assert!(ci.contains("XDG_CACHE_HOME: \"/tmp/.cache\""));
     assert!(ci.contains("CARGO_HOME: \"/tmp/.cargo\""));
     assert!(ci.contains("run: echo \"$CARGO_HOME/bin\" >> \"$GITHUB_PATH\""));
-    assert!(ci.contains("group: ${{ github.workflow }}-${{ github.ref }}"));
+    assert!(ci.contains("group: ${{ codeberg.workflow }}-${{ codeberg.ref }}"));
     assert!(ci.contains("uses: https://code.forgejo.org/actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1"));
     assert!(!ci.contains("pull_request:"));
     assert!(!ci.contains("uses: https://github.com/cachix/install-nix-action@v31"));

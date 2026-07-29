@@ -1313,7 +1313,7 @@ fn python_ci_workflow(
     }
     workflow.push('\n');
     push_github_read_permissions(&mut workflow, platform);
-    push_concurrency(&mut workflow);
+    push_platform_concurrency(&mut workflow, platform);
     workflow.push_str("jobs:\n");
     workflow.push_str("  test:\n");
     workflow.push_str("    runs-on: ");
@@ -1394,7 +1394,7 @@ fn python_publish_workflow(
     workflow.push_str("on:\n");
     workflow.push_str("  push:\n");
     workflow.push_str("    tags: [\"[0-9]*\"]\n\n");
-    push_concurrency(&mut workflow);
+    push_platform_concurrency(&mut workflow, platform);
     workflow.push_str("jobs:\n");
     workflow.push_str("  publish:\n");
     workflow.push_str("    runs-on: ");
@@ -1453,7 +1453,7 @@ fn maturin_publish_workflow(
     workflow.push_str("on:\n");
     workflow.push_str("  push:\n");
     workflow.push_str("    tags: [\"[0-9]*\"]\n\n");
-    push_concurrency(&mut workflow);
+    push_platform_concurrency(&mut workflow, platform);
     workflow.push_str("jobs:\n");
     workflow.push_str("  publish:\n");
     workflow.push_str("    runs-on: ");
@@ -1528,7 +1528,7 @@ fn ci_workflow_single_job(
     }
     workflow.push('\n');
     push_github_read_permissions(&mut workflow, platform);
-    push_concurrency(&mut workflow);
+    push_platform_concurrency(&mut workflow, platform);
     workflow.push_str("jobs:\n");
     workflow.push_str("  test:\n");
     workflow.push_str("    runs-on: ");
@@ -1633,7 +1633,7 @@ fn ci_workflow_multi_job(
     workflow.push_str("    tags-ignore: [\"**\"]\n");
     workflow.push('\n');
     push_github_read_permissions(&mut workflow, platform);
-    push_concurrency(&mut workflow);
+    push_platform_concurrency(&mut workflow, platform);
     workflow.push_str("jobs:\n");
 
     struct StepDef<'a> {
@@ -1871,7 +1871,7 @@ fn publish_workflow(
     // no meaningful input, so keep the trigger scalar and use the selected
     // tag ref for the release version.
     workflow.push_str("  workflow_dispatch:\n\n");
-    push_concurrency(&mut workflow);
+    push_platform_concurrency(&mut workflow, platform);
     workflow.push_str("jobs:\n");
     workflow.push_str("  publish:\n");
     push_release_permissions(&mut workflow, platform);
@@ -1955,7 +1955,7 @@ fn artifacts_workflow(
     workflow.push_str("  push:\n");
     workflow.push_str("    tags:\n");
     workflow.push_str("      - \"*.*.*\"\n\n");
-    push_concurrency(&mut workflow);
+    push_platform_concurrency(&mut workflow, platform);
     workflow.push_str("jobs:\n");
     let has_windows_packagers = options.chocolatey.is_some() || options.scoop.is_some();
     let linux_job_name = if has_windows_packagers {
