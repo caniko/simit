@@ -1048,7 +1048,11 @@ fn push_build_artifacts(w: &mut String, platform: Platform, artifacts: &Artifact
     } else {
         for line in &artifacts.build_commands {
             for sub in line.split('\n') {
-                writeln!(w, "          {sub}").expect("write");
+                if sub.is_empty() {
+                    w.push('\n');
+                } else {
+                    writeln!(w, "          {sub}").expect("write");
+                }
             }
         }
     }
@@ -1885,7 +1889,11 @@ fn push_sbom(w: &mut String, commands: &[String]) {
     w.push_str("      - name: Generate supply-chain reports\n        run: |\n          set -euo pipefail\n          . ./release-env\n          export VERSION IS_PRERELEASE\n          mkdir -p release\n");
     for line in commands {
         for sub in line.split('\n') {
-            writeln!(w, "          {sub}").expect("write");
+            if sub.is_empty() {
+                w.push('\n');
+            } else {
+                writeln!(w, "          {sub}").expect("write");
+            }
         }
     }
 }
@@ -2574,7 +2582,8 @@ mod tests {
             (chocolatey(), windows_signing(), flatpak(), winget());
         let announce = AnnounceConfig::default();
         let mut artifacts = artifacts();
-        artifacts.sbom_commands = vec!["cargo sbom > release/sbom.json".to_owned()];
+        artifacts.build_commands = vec!["echo first\n\necho second".to_owned()];
+        artifacts.sbom_commands = vec!["cargo sbom > release/sbom.json\n\necho report".to_owned()];
         let workflow = render(&ReleaseWorkflowInputs {
             platform: Platform::Forgejo,
             runner: "atlas",
@@ -2599,6 +2608,7 @@ mod tests {
 
         // Scaffolding
         assert!(workflow.contains("name: release\n"));
+        assert!(workflow.lines().all(|line| !line.ends_with(' ')));
         assert!(workflow.contains("runs-on: atlas\n"));
         assert!(workflow.contains("enable-openid-connect: true\n"));
         assert!(
