@@ -2759,7 +2759,9 @@ allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 
 fn push_concurrency(workflow: &mut String) {
     workflow.push_str("concurrency:\n");
-    workflow.push_str("  group: ${{ github.workflow }}-${{ github.ref }}\n");
+    workflow.push_str(
+        "  group: ${{ github.workflow }}-${{ github.event.pull_request.head.ref || github.ref }}\n",
+    );
     workflow.push_str("  cancel-in-progress: true\n\n");
 }
 

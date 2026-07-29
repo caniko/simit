@@ -508,6 +508,9 @@ extra_setup = ["echo prepare-runner"]
     let workflow = read(&temp.path().join(".github/workflows/nix-builds.yaml"));
     assert_yaml_parses(&workflow);
     assert!(workflow.contains("permissions:\n  contents: read"));
+    assert!(workflow.contains(
+        "group: ${{ github.workflow }}-${{ github.event.pull_request.head.ref || github.ref }}"
+    ));
     assert!(workflow.contains("runs-on: ubuntu-latest"));
     assert!(workflow.contains("fail-fast: false"));
     assert!(workflow.contains("max-parallel: 2"));
