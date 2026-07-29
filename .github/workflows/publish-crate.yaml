@@ -40,11 +40,12 @@ jobs:
             tag="${ref#refs/tags/}"
           fi
 
-          if ! printf '%s\n' "$tag" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-            echo "Tag must be an exact semver version like 0.1.1, got '$tag'" >&2
-            exit 1
-          fi
-          # cargo pkgid scopes the version lookup to the crate this workflow publishes.
+            if ! printf '%s\n' "$tag" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+              echo "Tag must be an exact semver version like 0.1.1, got '$tag'" >&2
+              exit 1
+            fi
+
+            # cargo pkgid scopes the version lookup to the crate this workflow publishes.
           version="$(nix develop -c cargo pkgid -p simit | awk -F'[#@]' 'NF > 1 {print $NF}' | tail -n 1)"
           if [ -z "$version" ]; then
             echo "Could not read package version from cargo pkgid" >&2
