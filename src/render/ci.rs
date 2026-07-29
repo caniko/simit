@@ -2701,7 +2701,10 @@ allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 
 fn push_concurrency(workflow: &mut String) {
     workflow.push_str("concurrency:\n");
-    workflow.push_str("  group: ${{ github.workflow }}-${{ github.ref }}\n");
+    // Package-scoped workspaces generate several CI files with the same
+    // display name. `workflow_ref` includes the workflow path, so those jobs
+    // do not cancel one another while retaining per-ref cancellation.
+    workflow.push_str("  group: ${{ github.workflow_ref }}-${{ github.ref }}\n");
     workflow.push_str("  cancel-in-progress: true\n\n");
 }
 
