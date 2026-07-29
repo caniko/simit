@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.13] - 2026-07-28
+
+### Fixed
+
+- Keep generated multiline release commands free of trailing whitespace.
+
 ## [0.17.12] - 2026-07-28
 
 ### Added
@@ -367,7 +373,8 @@ ci`, including the `~/.cargo/bin` key, rust-cache settings, and why Nix
 
 - Prepare the first public crates.io release.
 
-[Unreleased]: https://codeberg.org/caniko/simit/compare/0.17.12...HEAD
+[Unreleased]: https://codeberg.org/caniko/simit/compare/0.17.13...HEAD
+[0.17.13]: https://codeberg.org/caniko/simit/compare/0.17.12...0.17.13
 [0.17.12]: https://codeberg.org/caniko/simit/compare/0.17.11...0.17.12
 [0.17.11]: https://codeberg.org/caniko/simit/compare/0.17.10...0.17.11
 [0.17.10]: https://codeberg.org/caniko/simit/compare/0.17.9...0.17.10
