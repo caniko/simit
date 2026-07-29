@@ -939,6 +939,13 @@ fn infer_expected_ci_files(
             &config.flake.expected_outputs.checks,
             &config.ci.components,
         )?];
+        if provider == CiProvider::Actions && !options.nix_builds.is_empty() {
+            files.push(crate::render::ci::nix_build_matrix_file(
+                platform,
+                &runner,
+                &options.nix_builds,
+            )?);
+        }
         if resolved.with_pypi_publish {
             files.push(crate::render::ci::python_publish_file(
                 platform,
@@ -976,6 +983,13 @@ fn infer_expected_ci_files(
             .unwrap_or("ubuntu-latest");
         let runner = ResolvedRunner::literal(runner)?;
         let mut files = vec![crate::render::ci::nix_flake_ci_file(platform, &runner)?];
+        if provider == CiProvider::Actions && !config.ci.nix_builds.is_empty() {
+            files.push(crate::render::ci::nix_build_matrix_file(
+                platform,
+                &runner,
+                &config.ci.nix_builds,
+            )?);
+        }
         if let Some(pages) = config_pages_or_inferred(&config, marked)? {
             files.push(crate::render::ci::codeberg_pages_file(
                 platform, &runner, &pages,
@@ -1082,6 +1096,13 @@ fn infer_expected_ci_files(
             options: package_options,
             step_runners: &step_runners,
         })?);
+    }
+    if provider == CiProvider::Actions && !options.nix_builds.is_empty() {
+        files.push(crate::render::ci::nix_build_matrix_file(
+            platform,
+            &runners.ci,
+            &options.nix_builds,
+        )?);
     }
     if resolved.with_pypi_publish && cargo::has_pyo3_dep(&metadata.packages) {
         files.push(ci::maturin_publish_file(
