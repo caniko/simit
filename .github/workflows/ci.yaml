@@ -11,9 +11,6 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-permissions:
-  contents: read
-
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -43,7 +40,7 @@ jobs:
       - name: Build docs
         run: nix develop .#docs -c cargo doc --no-deps --all-features
 
-      - name: Check generated GitHub CI
+      - name: Check generated CI
         run: nix develop -c cargo run -- init ci --platform github --runtime nix --runner ubuntu-latest --with-docs --publish-crates --check
 
       - name: Check generated flake and hooks
