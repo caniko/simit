@@ -100,6 +100,7 @@ pub enum OmCiMode {
 
 #[derive(Debug, Clone)]
 pub struct CiOptions {
+    pub nix_builds: Vec<String>,
     pub with_nextest: bool,
     pub with_msrv: bool,
     pub with_audit: bool,
@@ -136,6 +137,7 @@ pub struct CodebergPagesOptions {
 impl Default for CiOptions {
     fn default() -> Self {
         Self {
+            nix_builds: Vec::new(),
             with_nextest: false,
             with_msrv: false,
             with_audit: false,
@@ -416,6 +418,57 @@ pub fn nix_flake_ci_file(platform: Platform, runner: &ResolvedRunner) -> Result<
     workflow.push_str("      - name: Check flake\n        run: nix flake check\n");
     Ok(GeneratedFile {
         relative_path: PathBuf::from(platform.workflow_dir()).join("ci.yaml"),
+        content: workflow,
+    })
+}
+
+/// Generate a hosted-runner matrix for project-declared Nix installables.
+///
+/// The matrix is deliberately build-only: publishing images needs registry
+/// credentials and is a separate release/deploy concern. `--no-link` still
+/// realizes every derivation, so a broken OCI output fails the pull request.
+pub fn nix_build_matrix_file(
+    platform: Platform,
+    runner: &ResolvedRunner,
+    installables: &[String],
+) -> Result<GeneratedFile> {
+    if platform == Platform::Gitlab {
+        bail!("GitLab Nix installable matrices are not supported");
+    }
+    if installables.is_empty() {
+        bail!("Nix installable build matrix requires at least one installable");
+    }
+
+    let mut workflow = String::new();
+    push_generated_workflow_header(&mut workflow);
+    workflow.push_str(
+        "name: Nix installable builds\n\non:\n  push:\n  pull_request:\n  workflow_dispatch:\n\n",
+    );
+    if platform == Platform::Github {
+        workflow.push_str("permissions:\n  contents: read\n\n");
+    }
+    push_platform_concurrency(&mut workflow, platform);
+    workflow.push_str("jobs:\n  build:\n    runs-on: ");
+    workflow.push_str(&runs_on(runner));
+    workflow.push_str(
+        "\n    strategy:\n      fail-fast: false\n      max-parallel: 2\n      matrix:\n        installable:\n",
+    );
+    for installable in installables {
+        workflow.push_str("          - \"");
+        workflow.push_str(&yaml_double_quote(installable));
+        workflow.push_str("\"\n");
+    }
+    workflow.push_str(
+        "    env:\n      NIX_CONFIG: \"experimental-features = nix-command flakes\"\n    steps:\n",
+    );
+    push_checkout_step(&mut workflow, platform);
+    push_install_nix_step(&mut workflow, platform);
+    workflow.push_str("      - name: Build ${{ matrix.installable }}\n");
+    workflow.push_str("        env:\n          INSTALLABLE: ${{ matrix.installable }}\n");
+    workflow.push_str("        run: nix build --no-link \"$INSTALLABLE\"\n");
+
+    Ok(GeneratedFile {
+        relative_path: PathBuf::from(platform.workflow_dir()).join("nix-builds.yaml"),
         content: workflow,
     })
 }
@@ -1257,6 +1310,7 @@ fn python_ci_workflow(
         workflow.push_str("  pull_request:\n");
     }
     workflow.push('\n');
+    push_github_read_permissions(&mut workflow, platform);
     push_concurrency(&mut workflow);
     workflow.push_str("jobs:\n");
     workflow.push_str("  test:\n");
@@ -1471,6 +1525,7 @@ fn ci_workflow_single_job(
         workflow.push_str("  pull_request:\n");
     }
     workflow.push('\n');
+    push_github_read_permissions(&mut workflow, platform);
     push_concurrency(&mut workflow);
     workflow.push_str("jobs:\n");
     workflow.push_str("  test:\n");
@@ -1575,6 +1630,7 @@ fn ci_workflow_multi_job(
     workflow.push_str("    branches: [\"**\"]\n");
     workflow.push_str("    tags-ignore: [\"**\"]\n");
     workflow.push('\n');
+    push_github_read_permissions(&mut workflow, platform);
     push_concurrency(&mut workflow);
     workflow.push_str("jobs:\n");
 
@@ -2703,6 +2759,12 @@ fn push_concurrency(workflow: &mut String) {
     workflow.push_str("concurrency:\n");
     workflow.push_str("  group: ${{ github.workflow }}-${{ github.ref }}\n");
     workflow.push_str("  cancel-in-progress: true\n\n");
+}
+
+fn push_github_read_permissions(workflow: &mut String, platform: Platform) {
+    if platform == Platform::Github {
+        workflow.push_str("permissions:\n  contents: read\n\n");
+    }
 }
 
 fn push_codeberg_concurrency(workflow: &mut String) {

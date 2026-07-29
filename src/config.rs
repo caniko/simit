@@ -385,6 +385,10 @@ pub struct CiConfig {
     pub workspace_strategy: WorkspaceStrategy,
     #[serde(default)]
     pub packages: Vec<String>,
+    /// Nix installables that must be built by the generated hosted-runner
+    /// matrix. Values are passed to `nix build --no-link` unchanged.
+    #[serde(default)]
+    pub nix_builds: Vec<String>,
     #[serde(default)]
     pub with_nextest: bool,
     #[serde(default)]
@@ -1733,6 +1737,15 @@ impl ProjectConfig {
             bail!("simit project config: [ci].workspace cannot be true when [ci].packages is set");
         }
         validate_nonempty_strings("simit project config: [ci].packages", &self.ci.packages)?;
+        validate_nonempty_strings("simit project config: [ci].nix_builds", &self.ci.nix_builds)?;
+        if self
+            .ci
+            .nix_builds
+            .iter()
+            .any(|installable| installable.contains('\n') || installable.contains('\r'))
+        {
+            bail!("simit project config: [ci].nix_builds must contain single-line installables");
+        }
         validate_runner_label_opt("[ci].runner", self.ci.runner.as_deref())?;
         validate_runner_label_opt("[ci].windows_runner", self.ci.windows_runner.as_deref())?;
         if let Some(image) = &self.ci.crow.image {
@@ -3004,6 +3017,7 @@ fn set_ci_table(table: &mut Table, ci: &CiConfig) {
         ),
     );
     set_string_array(table, "packages", &ci.packages);
+    set_string_array(table, "nix_builds", &ci.nix_builds);
     set_bool(table, "with_nextest", ci.with_nextest);
     set_bool(table, "with_msrv", ci.with_msrv);
     set_bool(table, "with_audit", ci.with_audit);

@@ -477,6 +477,46 @@ fn generic_rust_ci_does_not_generate_publish_workflow_by_default() {
 }
 
 #[test]
+fn github_ci_generates_declared_nix_installable_matrix() {
+    let temp = init_package(true);
+    fs::write(
+        temp.path().join("simit.toml"),
+        r#"[ci]
+platform = "github"
+provider = "actions"
+runtime = "nix"
+nix_builds = [".#oci-api", ".#oci-etl"]
+"#,
+    )
+    .unwrap();
+
+    let status = simit()
+        .current_dir(temp.path())
+        .args([
+            "init",
+            "ci",
+            "--platform",
+            "github",
+            "--ci-provider",
+            "actions",
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let workflow = read(&temp.path().join(".github/workflows/nix-builds.yaml"));
+    assert_yaml_parses(&workflow);
+    assert!(workflow.contains("permissions:\n  contents: read"));
+    assert!(workflow.contains("runs-on: ubuntu-latest"));
+    assert!(workflow.contains("fail-fast: false"));
+    assert!(workflow.contains("max-parallel: 2"));
+    assert!(workflow.contains("- \".#oci-api\""));
+    assert!(workflow.contains("- \".#oci-etl\""));
+    assert!(workflow.contains("run: nix build --no-link \"$INSTALLABLE\""));
+    assert!(!workflow.contains("secrets."));
+}
+
+#[test]
 fn generic_flake_integrated_rust_ci_auto_selects_nix_without_publish() {
     let temp = init_package(true);
     fs::write(

@@ -220,6 +220,13 @@ pub fn run(command: InitCiCommand) -> Result<()> {
             step_runners: &step_runners,
         })?);
     }
+    if provider == CiProvider::Actions && !options.nix_builds.is_empty() {
+        files.push(ci::nix_build_matrix_file(
+            platform,
+            &runners.ci,
+            &options.nix_builds,
+        )?);
+    }
     if resolved.with_pypi_publish && cargo::has_pyo3_dep(&metadata.packages) {
         files.push(ci::maturin_publish_file(
             platform,
@@ -361,6 +368,13 @@ fn run_nix_only(command: InitCiCommand) -> Result<()> {
         _ => ci::nix_flake_ci_file(platform, &ResolvedRunner::literal(runner)?)?,
     };
     let mut files = vec![generated];
+    if provider == CiProvider::Actions && !cfg.ci.nix_builds.is_empty() {
+        files.push(ci::nix_build_matrix_file(
+            platform,
+            &ResolvedRunner::literal(runner)?,
+            &cfg.ci.nix_builds,
+        )?);
+    }
     if let Some(pages) = &pages {
         files.push(ci::codeberg_pages_file(
             platform,
@@ -479,6 +493,13 @@ fn run_python(command: InitCiCommand) -> Result<()> {
         &cfg.flake.expected_outputs.checks,
         &cfg.ci.components,
     )?];
+    if provider == CiProvider::Actions && !options.nix_builds.is_empty() {
+        files.push(ci::nix_build_matrix_file(
+            platform,
+            &runners.ci,
+            &options.nix_builds,
+        )?);
+    }
     if with_pypi_publish {
         files.push(ci::python_publish_file(
             platform,
