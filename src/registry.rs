@@ -966,16 +966,28 @@ fn infer_expected_ci_files(
             .runner
             .as_deref()
             .or_else(|| {
+                config
+                    .ci
+                    .nix_system_runners
+                    .values()
+                    .next()
+                    .map(String::as_str)
+            })
+            .or_else(|| {
                 marked.iter().find_map(|workflow| {
-                    workflow
-                        .content
-                        .lines()
-                        .find_map(|line| line.trim().strip_prefix("runs-on: "))
+                    workflow.content.lines().find_map(|line| {
+                        let runner = line.trim().strip_prefix("runs-on: ")?;
+                        (!runner.contains("${{")).then_some(runner)
+                    })
                 })
             })
             .unwrap_or("ubuntu-latest");
         let runner = ResolvedRunner::literal(runner)?;
-        let mut files = vec![crate::render::ci::nix_flake_ci_file(platform, &runner)?];
+        let mut files = vec![crate::render::ci::nix_flake_ci_file_with_system_runners(
+            platform,
+            &runner,
+            &config.ci.nix_system_runners,
+        )?];
         if let Some(pages) = config_pages_or_inferred(&config, marked)? {
             files.push(crate::render::ci::codeberg_pages_file(
                 platform, &runner, &pages,

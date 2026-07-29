@@ -575,7 +575,7 @@ fn single_runs_on_label(content: &str, occurrence: usize) -> Option<String> {
         .filter_map(|line| line.trim_start().strip_prefix("runs-on: "))
         .nth(occurrence)?
         .trim();
-    if line.starts_with('[') {
+    if line.starts_with('[') || line.contains("${{") {
         return None;
     }
     Some(line.trim_matches('"').to_owned())

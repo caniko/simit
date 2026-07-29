@@ -401,6 +401,17 @@ pub fn python_ci_file(
 /// project model. The workflow intentionally has one contract: `nix flake
 /// check` must pass on pushes and pull requests.
 pub fn nix_flake_ci_file(platform: Platform, runner: &ResolvedRunner) -> Result<GeneratedFile> {
+    nix_flake_ci_file_with_system_runners(platform, runner, &BTreeMap::new())
+}
+
+/// Generate flake-only CI with an optional native runner for every Nix system.
+/// A non-empty map is intentionally supported only for GitHub Actions, where
+/// hosted ARM runners are available and can prevent cross-system evaluation.
+pub fn nix_flake_ci_file_with_system_runners(
+    platform: Platform,
+    runner: &ResolvedRunner,
+    system_runners: &BTreeMap<String, String>,
+) -> Result<GeneratedFile> {
     if platform == Platform::Gitlab {
         bail!("GitLab flake CI uses .gitlab-ci.yml");
     }
@@ -408,12 +419,38 @@ pub fn nix_flake_ci_file(platform: Platform, runner: &ResolvedRunner) -> Result<
     push_generated_workflow_header(&mut workflow);
     workflow.push_str("name: Nix flake check\n\non:\n  push:\n  pull_request:\n\n");
     push_platform_concurrency(&mut workflow, platform);
-    workflow.push_str("jobs:\n  flake-check:\n    runs-on: ");
-    workflow.push_str(&runs_on(runner));
-    workflow.push_str("\n    env:\n      NIX_CONFIG: \"experimental-features = nix-command flakes\"\n    steps:\n");
+    workflow.push_str("jobs:\n  flake-check:\n");
+    if system_runners.is_empty() {
+        workflow.push_str("    runs-on: ");
+        workflow.push_str(&runs_on(runner));
+        workflow.push('\n');
+    } else {
+        if platform != Platform::Github {
+            bail!("native per-system Nix runners require GitHub Actions");
+        }
+        workflow
+            .push_str("    strategy:\n      fail-fast: false\n      matrix:\n        include:\n");
+        for (system, runner) in system_runners {
+            workflow.push_str("          - system: ");
+            workflow.push_str(system);
+            workflow.push_str("\n            runner: ");
+            workflow.push_str(runner);
+            workflow.push('\n');
+        }
+        workflow.push_str("    runs-on: ${{ matrix.runner }}\n");
+    }
+    workflow.push_str(
+        "    env:\n      NIX_CONFIG: \"experimental-features = nix-command flakes\"\n    steps:\n",
+    );
     push_checkout_step(&mut workflow, platform);
     push_install_nix_step(&mut workflow, platform);
-    workflow.push_str("      - name: Check flake\n        run: nix flake check\n");
+    if system_runners.is_empty() {
+        workflow.push_str("      - name: Check flake\n        run: nix flake check\n");
+    } else {
+        workflow.push_str(
+            "      - name: Verify runner system\n        run: test \"$(nix eval --impure --raw --expr builtins.currentSystem)\" = \"${{ matrix.system }}\"\n      - name: Check flake\n        run: nix flake check --no-update-lock-file --system \"${{ matrix.system }}\"\n",
+        );
+    }
     Ok(GeneratedFile {
         relative_path: PathBuf::from(platform.workflow_dir()).join("ci.yaml"),
         content: workflow,
