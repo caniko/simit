@@ -225,6 +225,7 @@ pub fn run(command: InitCiCommand) -> Result<()> {
             platform,
             &runners.ci,
             &options.nix_builds,
+            &options.extra_setup,
         )?);
     }
     if resolved.with_pypi_publish && cargo::has_pyo3_dep(&metadata.packages) {
@@ -373,6 +374,7 @@ fn run_nix_only(command: InitCiCommand) -> Result<()> {
             platform,
             &ResolvedRunner::literal(runner)?,
             &cfg.ci.nix_builds,
+            &cfg.ci.extra_setup,
         )?);
     }
     if let Some(pages) = &pages {
@@ -498,6 +500,7 @@ fn run_python(command: InitCiCommand) -> Result<()> {
             platform,
             &runners.ci,
             &options.nix_builds,
+            &options.extra_setup,
         )?);
     }
     if with_pypi_publish {

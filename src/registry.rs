@@ -944,6 +944,7 @@ fn infer_expected_ci_files(
                 platform,
                 &runner,
                 &options.nix_builds,
+                &options.extra_setup,
             )?);
         }
         if resolved.with_pypi_publish {
@@ -988,6 +989,7 @@ fn infer_expected_ci_files(
                 platform,
                 &runner,
                 &config.ci.nix_builds,
+                &config.ci.extra_setup,
             )?);
         }
         if let Some(pages) = config_pages_or_inferred(&config, marked)? {
@@ -1102,6 +1104,7 @@ fn infer_expected_ci_files(
             platform,
             &runners.ci,
             &options.nix_builds,
+            &options.extra_setup,
         )?);
     }
     if resolved.with_pypi_publish && cargo::has_pyo3_dep(&metadata.packages) {

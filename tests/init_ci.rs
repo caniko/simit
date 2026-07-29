@@ -486,6 +486,7 @@ platform = "github"
 provider = "actions"
 runtime = "nix"
 nix_builds = [".#oci-api", ".#oci-etl"]
+extra_setup = ["echo prepare-runner"]
 "#,
     )
     .unwrap();
@@ -513,6 +514,7 @@ nix_builds = [".#oci-api", ".#oci-etl"]
     assert!(workflow.contains("- \".#oci-api\""));
     assert!(workflow.contains("- \".#oci-etl\""));
     assert!(workflow.contains("run: nix build --no-link \"$INSTALLABLE\""));
+    assert!(workflow.contains("run: echo prepare-runner"));
     assert!(!workflow.contains("secrets."));
 }
 

@@ -431,6 +431,7 @@ pub fn nix_build_matrix_file(
     platform: Platform,
     runner: &ResolvedRunner,
     installables: &[String],
+    extra_setup: &[String],
 ) -> Result<GeneratedFile> {
     if platform == Platform::Gitlab {
         bail!("GitLab Nix installable matrices are not supported");
@@ -463,6 +464,7 @@ pub fn nix_build_matrix_file(
     );
     push_checkout_step(&mut workflow, platform);
     push_install_nix_step(&mut workflow, platform);
+    push_extra_setup_steps(&mut workflow, extra_setup);
     workflow.push_str("      - name: Build ${{ matrix.installable }}\n");
     workflow.push_str("        env:\n          INSTALLABLE: ${{ matrix.installable }}\n");
     workflow.push_str("        run: nix build --no-link \"$INSTALLABLE\"\n");
