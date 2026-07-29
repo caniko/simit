@@ -1457,6 +1457,9 @@ fn treefmt_nix(languages: &Languages, rust_edition: &str) -> String {
         content.push_str("\n  programs.prettier = {\n");
         content.push_str("    enable = true;\n");
         content.push_str("    package = pkgs.prettier;\n");
+        content.push_str("    excludes = [\n");
+        content.push_str("      \".crow/**\"\n");
+        content.push_str("    ];\n");
         content.push_str("    includes = [\n");
         if languages.markdown {
             content.push_str("      \"*.md\"\n");
