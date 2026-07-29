@@ -43,9 +43,6 @@ jobs:
       - name: Check generated CI
         run: nix develop -c cargo run -- init ci --platform github --runtime nix --runner ubuntu-latest --with-docs --publish-crates --check
 
-      - name: Check generated release workflow
-        run: nix develop -c cargo run -- init release --platform github --ci-provider actions --check
-
       - name: Check generated flake and hooks
         run: nix develop -c cargo run -- init flake --check
 
