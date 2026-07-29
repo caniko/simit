@@ -19,6 +19,8 @@
     includes = [
       "*.md"
       "*.markdown"
+      "*.yaml"
+      "*.yml"
     ];
   };
 }
