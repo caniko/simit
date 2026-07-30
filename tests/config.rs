@@ -102,6 +102,43 @@ fn loading_without_simit_toml_returns_default_config() {
 }
 
 #[test]
+fn attic_token_secret_rejects_invalid_github_identifiers() {
+    for token in [
+        "\"BAD-NAME\"",
+        "\"9TOKEN\"",
+        "\"GITHUB_TOKEN\"",
+        "\"\"\"BAD\nNAME\"\"\"",
+    ] {
+        let error = load_toml(&format!(
+            r#"[prebuild]
+publish_attic = true
+
+[ci]
+platform = "github"
+runtime = "nix"
+nix_builds = [".#default"]
+
+[ci.nix_system_runners]
+"x86_64-linux" = "ubuntu-24.04"
+
+[release.attic]
+cache = "demo"
+url = "https://attic.example"
+token_name = "demo"
+token_secret = {token}
+"#
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("[release.attic].token_secret")
+                && error.contains("GitHub Actions secret identifier"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
 fn workspace_cargo_metadata_simit_config_loads() {
     let cfg = load_cargo_manifest(
         r#"[workspace]

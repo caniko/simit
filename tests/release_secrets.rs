@@ -359,3 +359,48 @@ fn contract_prints_generic_release_credentials_json() {
             && credential["required"] == false
     }));
 }
+
+#[test]
+fn contract_includes_github_prebuild_attic_secret() {
+    let project = init_project();
+    fs::write(
+        project.path().join("simit.toml"),
+        r#"[prebuild]
+publish_attic = true
+
+[ci]
+platform = "github"
+runtime = "nix"
+nix_builds = [".#default"]
+
+[ci.nix_system_runners]
+"x86_64-linux" = "ubuntu-24.04"
+
+[release.github]
+repo = "example/demo"
+
+[release.attic]
+cache = "demo"
+url = "https://attic.example"
+token_name = "demo"
+token_secret = "ATTIC_TOKEN"
+"#,
+    )
+    .unwrap();
+
+    let output = simit()
+        .current_dir(project.path())
+        .args(["release", "secrets", "contract", "--json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let credentials: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(credentials.as_array().unwrap().iter().any(|credential| {
+        credential["name"] == "ATTIC_TOKEN"
+            && credential["kind"] == "secret"
+            && credential["scope"] == "repo"
+            && credential["context"] == "secrets"
+            && credential["channel"] == "attic"
+            && credential["required"] == true
+    }));
+}

@@ -239,13 +239,12 @@ pull-request events:
 simit init ci --platform forgejo --runtime nix
 ```
 
-Projects that expose a generated `.#site` and `.#deploy-pages` app, such as
-`plinth-project` Codeberg Pages sites, can opt into the repository-local Pages
-deployment hook:
+Projects that expose a generated `.#site` can opt into a repository-local Pages
+workflow:
 
 ```sh
 simit init ci --platform forgejo --runtime nix \
-  --with-codeberg-pages --pages-repo caniko/my-project
+  --with-pages --pages-repo caniko/my-project
 ```
 
 This writes `.forgejo/workflows/pages.yaml`, reads
@@ -256,8 +255,16 @@ in project config:
 
 On GitHub, use the same flag with `--platform github`. Simit writes
 `.github/workflows/pages.yaml`, builds the site, uploads it with the pinned
-`actions/upload-pages-artifact` action, and deploys it with
+`actions/upload-pages-artifact` action, and deploys it through the
+`github-pages` environment with
 `actions/deploy-pages` using `pages: write` and OIDC permissions.
+
+To move or check Pages without changing an existing Crow or Forgejo CI setup:
+
+```sh
+simit init ci --pages-only --platform github
+simit init ci --pages-only --platform github --check --diff
+```
 
 ```toml
 [ci.pages]

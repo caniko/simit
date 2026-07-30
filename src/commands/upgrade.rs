@@ -483,10 +483,16 @@ fn infer_pages_canonical_domain(content: &str) -> Option<String> {
 
 fn infer_pages_site_output(content: &str) -> Option<String> {
     let marker = "nix build ";
-    let suffix = " --no-link --out-link result-pages-site";
-    let line = content
-        .lines()
-        .find(|line| line.contains(marker) && line.contains(suffix))?;
+    let line = content.lines().find(|line| {
+        line.contains(marker)
+            && (line.contains(" --out-link result-pages-site")
+                || line.contains(" --no-link --out-link result-pages-site"))
+    })?;
+    let suffix = if line.contains(" --no-link --out-link result-pages-site") {
+        " --no-link --out-link result-pages-site"
+    } else {
+        " --out-link result-pages-site"
+    };
     let start = line.find(marker)? + marker.len();
     let tail = &line[start..];
     let end = tail.find(suffix)?;

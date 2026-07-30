@@ -16,7 +16,7 @@ use std::fmt::Write as _;
 
 use crate::cli::Platform;
 use crate::config::{
-    AnnounceConfig, ArtifactsConfig, AtticConfig, FlatpakConfig, ReleaseProvider,
+    AnnounceConfig, ArtifactsConfig, AtticConfig, FlatpakConfig, PrebuildConfig, ReleaseProvider,
     ReleasePublishConfig, ReleasePublisherEnforcement, ReleasePublisherPolicy, ResolvedApt,
     ResolvedAur, ResolvedChocolatey, ResolvedCopr, ResolvedHomebrew, ResolvedReleaseTarget,
     ResolvedScoop, WindowsSigningConfig, WingetConfig,
@@ -32,6 +32,7 @@ pub struct ReleaseWorkflowInputs<'a> {
     pub publish_enforcement: ReleasePublisherEnforcement,
     pub publish: &'a ReleasePublishConfig,
     pub artifacts: &'a ArtifactsConfig,
+    pub prebuild: Option<&'a PrebuildConfig>,
     pub smoke_command: Option<&'a str>,
     pub release: Option<&'a ResolvedReleaseTarget>,
     pub attic: Option<&'a AtticConfig>,
@@ -372,12 +373,25 @@ pub fn credential_contract(inputs: &ReleaseWorkflowInputs<'_>) -> Vec<ReleaseCre
         }
     }
     if let Some(attic) = inputs.attic {
-        credentials.push(ReleaseCredential::runner_env(
-            format!("{}/{}", attic.token_dir_env, attic.token_name),
-            "attic",
-            false,
-            "Runner-provided Attic token file.",
-        ));
+        if prebuild_publishes_attic(inputs) {
+            credentials.push(ReleaseCredential::secret(
+                attic
+                    .token_secret
+                    .as_deref()
+                    .expect("validated GitHub Attic token secret"),
+                ReleaseCredentialScope::Repo,
+                "attic",
+                true,
+                "GitHub Actions secret used by native prebuild jobs to publish Nix closures.",
+            ));
+        } else {
+            credentials.push(ReleaseCredential::runner_env(
+                format!("{}/{}", attic.token_dir_env, attic.token_name),
+                "attic",
+                false,
+                "Runner-provided Attic token file.",
+            ));
+        }
     }
     credentials
 }
@@ -387,6 +401,13 @@ fn channel_policy(
     channel: &str,
 ) -> Option<ReleasePublisherPolicy> {
     inputs.publish.policy(channel)
+}
+
+fn prebuild_publishes_attic(inputs: &ReleaseWorkflowInputs<'_>) -> bool {
+    inputs.platform == Platform::Github
+        && inputs
+            .prebuild
+            .is_some_and(|prebuild| prebuild.publish_attic)
 }
 
 fn channel_enabled(inputs: &ReleaseWorkflowInputs<'_>, channel: &str) -> bool {
@@ -458,7 +479,29 @@ pub fn render(inputs: &ReleaseWorkflowInputs<'_>) -> String {
     w.push_str("  group: ${{ github.workflow }}-${{ github.ref }}\n");
     w.push_str("  cancel-in-progress: false\n\n");
 
-    w.push_str("jobs:\n  release:\n");
+    w.push_str("jobs:\n");
+    if inputs.platform == Platform::Github && inputs.prebuild.is_some() {
+        w.push_str("  prebuild:\n    uses: ./.github/workflows/prebuild.yaml\n    with:\n      release: true\n");
+        if let Some(attic) = inputs.attic.filter(|_| {
+            inputs
+                .prebuild
+                .is_some_and(|prebuild| prebuild.publish_attic)
+        }) {
+            let token_secret = attic
+                .token_secret
+                .as_deref()
+                .expect("validated GitHub Attic token secret");
+            writeln!(
+                w,
+                "    secrets:\n      attic_token: ${{{{ secrets.{token_secret} }}}}"
+            )
+            .expect("write");
+        }
+    }
+    w.push_str("  release:\n");
+    if inputs.platform == Platform::Github && inputs.prebuild.is_some() {
+        w.push_str("    needs: prebuild\n");
+    }
     writeln!(w, "    runs-on: {}", inputs.runner).expect("write");
     match inputs.platform {
         Platform::Github => {
@@ -496,7 +539,19 @@ pub fn render(inputs: &ReleaseWorkflowInputs<'_>) -> String {
     if !inputs.artifacts.sbom_commands.is_empty() {
         push_sbom(&mut w, &inputs.artifacts.sbom_commands);
     }
-    push_build_artifacts(&mut w, inputs.platform, inputs.artifacts);
+    let prebuilt_release_archives = inputs
+        .prebuild
+        .is_some_and(|prebuild| prebuild.release_archives)
+        && inputs.platform == Platform::Github;
+    if prebuilt_release_archives {
+        push_download_prebuilt_archives(&mut w);
+    }
+    push_build_artifacts(
+        &mut w,
+        inputs.platform,
+        inputs.artifacts,
+        prebuilt_release_archives,
+    );
     if let Some(apt) = inputs.apt.filter(|_| channel_enabled(inputs, "apt")) {
         push_build_debs(&mut w, apt);
     }
@@ -513,7 +568,7 @@ pub fn render(inputs: &ReleaseWorkflowInputs<'_>) -> String {
     if let Some(release) = inputs.release {
         push_hosted_release(&mut w, release, inputs.artifacts);
     }
-    if let Some(attic) = inputs.attic {
+    if let Some(attic) = inputs.attic.filter(|_| !prebuild_publishes_attic(inputs)) {
         push_attic(&mut w, attic);
     }
     if activated_remote {
@@ -690,12 +745,24 @@ fn push_secrets_header(w: &mut String, inputs: &ReleaseWorkflowInputs<'_>) {
         .expect("write");
     }
     if let Some(attic) = inputs.attic {
-        writeln!(
-            w,
-            "# Runner credential: ${}/{}: Attic token file.",
-            attic.token_dir_env, attic.token_name
-        )
-        .expect("write");
+        if prebuild_publishes_attic(inputs) {
+            writeln!(
+                w,
+                "# - {}: repository secret for native prebuild Attic publication.",
+                attic
+                    .token_secret
+                    .as_deref()
+                    .expect("validated GitHub Attic token secret")
+            )
+            .expect("write");
+        } else {
+            writeln!(
+                w,
+                "# Runner credential: ${}/{}: Attic token file.",
+                attic.token_dir_env, attic.token_name
+            )
+            .expect("write");
+        }
     }
     w.push('\n');
 }
@@ -812,7 +879,8 @@ fn push_release_credentials_preflight(w: &mut String, inputs: &ReleaseWorkflowIn
     let credentials = credential_contract(inputs)
         .into_iter()
         .filter(|credential| {
-            credential.required
+            !(prebuild_publishes_attic(inputs) && credential.channel == "attic")
+                && credential.required
                 && (inputs.publish_enforcement == ReleasePublisherEnforcement::Declared
                     || !downstream_publisher_credential(credential)
                     || inputs.publish.policy(&credential.channel)
@@ -995,8 +1063,24 @@ fn push_build_srpm(w: &mut String, copr: &ResolvedCopr) {
     w.push_str("          SCRIPT\n");
 }
 
-fn push_build_artifacts(w: &mut String, platform: Platform, artifacts: &ArtifactsConfig) {
-    let bundle_attrs = artifacts.effective_nix_bundle_attrs();
+fn push_download_prebuilt_archives(w: &mut String) {
+    w.push_str("      - name: Download native release archives\n        uses: ");
+    w.push_str(&github_action_ref("actions/download-artifact", "v4.3.0"));
+    w.push_str("\n        with:\n          pattern: release-*\n          path: .simit-prebuilt\n");
+    w.push_str("      - name: Collect native release archives\n        run: |\n          set -euo pipefail\n          mkdir -p release\n          count=0\n          while IFS= read -r file; do\n            name=\"$(basename \"$file\")\"\n            test ! -e \"release/$name\" || { echo \"native release asset collision: $name\" >&2; exit 1; }\n            cp \"$file\" \"release/$name\"\n            count=$((count + 1))\n          done < <(find .simit-prebuilt -mindepth 2 -type f -print | LC_ALL=C sort)\n          test \"$count\" -gt 0\n");
+}
+
+fn push_build_artifacts(
+    w: &mut String,
+    platform: Platform,
+    artifacts: &ArtifactsConfig,
+    prebuilt_release_archives: bool,
+) {
+    let bundle_attrs = if prebuilt_release_archives {
+        Vec::new()
+    } else {
+        artifacts.effective_nix_bundle_attrs()
+    };
     w.push_str(
         "      - name: Build release artifacts\n        run: |\n          set -euo pipefail\n",
     );
@@ -1042,7 +1126,7 @@ fn push_build_artifacts(w: &mut String, platform: Platform, artifacts: &Artifact
         w.push_str("          jq -e --arg version \"$VERSION\" '(.schemaVersion == 2) and (.version == $version) and (.artifacts | length > 0)' \"${manifests[0]}\" >/dev/null\n");
     }
     if artifacts.build_commands.is_empty() {
-        if bundle_attrs.is_empty() {
+        if bundle_attrs.is_empty() && !prebuilt_release_archives {
             w.push_str("          echo \"[release.artifacts] has no Nix bundles or build_commands\" >&2\n          exit 1\n");
         }
     } else {
@@ -1202,17 +1286,17 @@ fn push_attic(w: &mut String, attic: &AtticConfig) {
         }
         w.push_str("            > attic-paths.txt\n");
     }
-    w.push_str("          nix profile install nixpkgs#attic-client\n");
+    w.push_str("          attic_config_root=\"$(mktemp -d)\"\n          trap 'rm -rf \"$attic_config_root\"' EXIT\n          install -d -m 0700 \"$attic_config_root/attic\"\n          attic_config=\"$attic_config_root/attic/config.toml\"\n          install -m 0600 /dev/null \"$attic_config\"\n");
     writeln!(
         w,
-        "          if ! attic login {cache} {url} \"$(cat \"$attic_token\")\"; then\n            echo \"::error::Attic login failed for configured Nix closure cache publishing.\" >&2\n            exit 1\n          fi",
+        "          {{ printf '%s\\n' 'default-server = \"{cache}\"'; printf '%s\\n' '[servers.{cache}]'; printf '%s\\n' 'endpoint = \"{url}\"'; printf 'token = \"%s\"\\n' \"$(cat \"$attic_token\")\"; }} > \"$attic_config\"\n          test \"$(stat -c '%a' \"$attic_config\")\" = 600\n          attic=\"$(nix build --inputs-from . --no-link --print-out-paths nixpkgs#attic-client)\"\n          test -x \"$attic/bin/attic\"",
         cache = attic.cache,
         url = attic.url
     )
     .expect("write");
     writeln!(
         w,
-        "          if ! attic push {cache} $(cat attic-paths.txt); then\n            echo \"::error::Attic push failed for configured Nix closure cache publishing.\" >&2\n            exit 1\n          fi",
+        "          if ! XDG_CONFIG_HOME=\"$attic_config_root\" \"$attic/bin/attic\" push --stdin --no-closure --ignore-upstream-cache-filter {cache} < attic-paths.txt; then\n            echo \"::error::Attic push failed for configured Nix closure cache publishing.\" >&2\n            exit 1\n          fi",
         cache = attic.cache
     )
     .expect("write");
@@ -2591,6 +2675,7 @@ mod tests {
             publish_enforcement: ReleasePublisherEnforcement::Declared,
             publish: &ReleasePublishConfig::default(),
             artifacts: &artifacts,
+            prebuild: None,
             smoke_command: Some("nix run .#release-smoke --"),
             release: Some(&codeberg),
             attic: None,
@@ -2791,6 +2876,7 @@ mod tests {
             publish_enforcement: ReleasePublisherEnforcement::ActivatedRemote,
             publish: &ReleasePublishConfig::default(),
             artifacts: &artifacts,
+            prebuild: None,
             smoke_command: None,
             release: Some(&codeberg),
             attic: None,
@@ -2855,6 +2941,7 @@ mod tests {
             publish_enforcement: publish.enforcement,
             publish: &publish,
             artifacts: &artifacts,
+            prebuild: None,
             smoke_command: None,
             release: None,
             attic: None,
@@ -2889,6 +2976,7 @@ mod tests {
             publish_enforcement: ReleasePublisherEnforcement::Declared,
             publish: &ReleasePublishConfig::default(),
             artifacts: &artifacts,
+            prebuild: None,
             smoke_command: None,
             release: None,
             attic: None,
@@ -2935,6 +3023,7 @@ mod tests {
             publish_enforcement: ReleasePublisherEnforcement::Declared,
             publish: &ReleasePublishConfig::default(),
             artifacts: &artifacts,
+            prebuild: None,
             smoke_command: None,
             release: None,
             attic: None,
@@ -2969,6 +3058,7 @@ mod tests {
             publish_enforcement: ReleasePublisherEnforcement::Declared,
             publish: &ReleasePublishConfig::default(),
             artifacts: &artifacts,
+            prebuild: None,
             smoke_command: Some("nix run .#release-smoke --"),
             release: Some(&codeberg),
             attic: None,

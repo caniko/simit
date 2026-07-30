@@ -939,7 +939,10 @@ fn infer_expected_ci_files(
             &config.flake.expected_outputs.checks,
             &config.ci.components,
         )?];
-        if provider == CiProvider::Actions && !options.nix_builds.is_empty() {
+        if provider == CiProvider::Actions
+            && config.prebuild.is_none()
+            && !options.nix_builds.is_empty()
+        {
             files.push(crate::render::ci::nix_build_matrix_file(
                 platform,
                 &runner,
@@ -959,6 +962,7 @@ fn infer_expected_ci_files(
                 platform, &runner, &pages,
             )?);
         }
+        push_prebuild_file(&mut files, &config, platform, provider)?;
         return Ok(files);
     }
     if !workspace_root.join("Cargo.toml").is_file() && workspace_root.join("flake.nix").is_file() {
@@ -973,17 +977,33 @@ fn infer_expected_ci_files(
             .runner
             .as_deref()
             .or_else(|| {
+                config
+                    .ci
+                    .nix_system_runners
+                    .values()
+                    .next()
+                    .map(String::as_str)
+            })
+            .or_else(|| {
                 marked.iter().find_map(|workflow| {
-                    workflow
-                        .content
-                        .lines()
-                        .find_map(|line| line.trim().strip_prefix("runs-on: "))
+                    workflow.content.lines().find_map(|line| {
+                        let runner = line.trim().strip_prefix("runs-on: ")?;
+                        (!runner.contains("${{")).then_some(runner)
+                    })
                 })
             })
             .unwrap_or("ubuntu-latest");
         let runner = ResolvedRunner::literal(runner)?;
-        let mut files = vec![crate::render::ci::nix_flake_ci_file(platform, &runner)?];
-        if provider == CiProvider::Actions && !config.ci.nix_builds.is_empty() {
+        let mut files = vec![crate::render::ci::nix_flake_ci_file_with_system_runners(
+            platform,
+            &runner,
+            &config.ci.nix_system_runners,
+            &config.release.artifacts,
+        )?];
+        if provider == CiProvider::Actions
+            && config.prebuild.is_none()
+            && !config.ci.nix_builds.is_empty()
+        {
             files.push(crate::render::ci::nix_build_matrix_file(
                 platform,
                 &runner,
@@ -995,6 +1015,7 @@ fn infer_expected_ci_files(
                 platform, &runner, &pages,
             )?);
         }
+        push_prebuild_file(&mut files, &config, platform, provider)?;
         return Ok(files);
     }
     let metadata = cargo::cargo_metadata(&cargo::find_manifest(workspace_root)?)?;
@@ -1097,7 +1118,10 @@ fn infer_expected_ci_files(
             step_runners: &step_runners,
         })?);
     }
-    if provider == CiProvider::Actions && !options.nix_builds.is_empty() {
+    if provider == CiProvider::Actions
+        && config.prebuild.is_none()
+        && !options.nix_builds.is_empty()
+    {
         files.push(crate::render::ci::nix_build_matrix_file(
             platform,
             &runners.ci,
@@ -1123,11 +1147,34 @@ fn infer_expected_ci_files(
             .unwrap_or_else(|| ResolvedRunner::literal("ubuntu-latest").expect("literal runner"));
         files.push(ci::codeberg_pages_file(platform, &pages_runner, &pages)?);
     }
+    push_prebuild_file(&mut files, &config, platform, provider)?;
 
     Ok(files
         .into_iter()
         .filter(|file| is_workflow_path(&file.relative_path))
         .collect())
+}
+
+fn push_prebuild_file(
+    files: &mut Vec<project::GeneratedFile>,
+    config: &ProjectConfig,
+    platform: Platform,
+    provider: CiProvider,
+) -> Result<()> {
+    let Some(prebuild) = &config.prebuild else {
+        return Ok(());
+    };
+    if platform != Platform::Github || provider != CiProvider::Actions {
+        bail!("[prebuild] requires GitHub Actions");
+    }
+    files.push(crate::render::ci::github_prebuild_file(
+        &config.ci.nix_system_runners,
+        &config.ci.nix_builds,
+        prebuild,
+        &config.release.artifacts,
+        config.release.attic.as_ref(),
+    )?);
+    Ok(())
 }
 
 fn workflow_snapshots(marked: &[WorkflowFile]) -> Vec<WorkflowSnapshot> {
@@ -1616,10 +1663,16 @@ fn infer_pages_canonical_domain(content: &str) -> Option<String> {
 
 fn infer_pages_site_output(content: &str) -> Option<String> {
     let marker = "nix build ";
-    let suffix = " --no-link --out-link result-pages-site";
-    let line = content
-        .lines()
-        .find(|line| line.contains(marker) && line.contains(suffix))?;
+    let line = content.lines().find(|line| {
+        line.contains(marker)
+            && (line.contains(" --out-link result-pages-site")
+                || line.contains(" --no-link --out-link result-pages-site"))
+    })?;
+    let suffix = if line.contains(" --no-link --out-link result-pages-site") {
+        " --no-link --out-link result-pages-site"
+    } else {
+        " --out-link result-pages-site"
+    };
     let start = line.find(marker)? + marker.len();
     let tail = &line[start..];
     let end = tail.find(suffix)?;
@@ -2007,7 +2060,7 @@ mod tests {
     }
 
     #[test]
-    fn simit_repo_recognizes_supplementary_github_workflows() {
+    fn simit_repo_recognizes_managed_pages_and_supplementary_github_workflows() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let workflows = collect_workflow_files(root)
             .unwrap()
@@ -2023,7 +2076,7 @@ mod tests {
                 .all(|file| file.relative_path.starts_with(".github/workflows"))
         );
         assert!(
-            unmarked
+            marked
                 .iter()
                 .any(|file| file.relative_path == Path::new(".github/workflows/pages.yaml"))
         );

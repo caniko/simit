@@ -128,6 +128,7 @@ pub fn contract(command: ReleaseCommand) -> Result<()> {
         publish_enforcement: cfg.release.publish.enforcement,
         publish: &cfg.release.publish,
         artifacts: &cfg.release.artifacts,
+        prebuild: cfg.prebuild.as_ref(),
         smoke_command: cfg.release.smoke.command.as_deref(),
         release: release.as_ref(),
         attic: cfg.release.attic.as_ref(),

@@ -35,6 +35,16 @@ license = "MIT"
     temp
 }
 
+fn init_flake_only() -> TempDir {
+    let temp = TempDir::new().unwrap();
+    fs::write(
+        temp.path().join("flake.nix"),
+        "{ outputs = { self }: {}; }\n",
+    )
+    .unwrap();
+    temp
+}
+
 fn init_python_project() -> TempDir {
     let temp = TempDir::new().unwrap();
     let root = temp.path();
@@ -489,7 +499,6 @@ nix_builds = [".#oci-api", ".#oci-etl"]
 "#,
     )
     .unwrap();
-
     let status = simit()
         .current_dir(temp.path())
         .args([
@@ -514,6 +523,283 @@ nix_builds = [".#oci-api", ".#oci-etl"]
     assert!(workflow.contains("- \".#oci-etl\""));
     assert!(workflow.contains("run: nix build --no-link \"$INSTALLABLE\""));
     assert!(!workflow.contains("secrets."));
+}
+
+#[test]
+fn github_nix_only_uses_native_system_runner_matrix() {
+    let temp = init_flake_only();
+    fs::write(
+        temp.path().join("simit.toml"),
+        r#"[ci]
+provider = "actions"
+platform = "github"
+runtime = "nix"
+
+[ci.nix_system_runners]
+"aarch64-linux" = "ubuntu-24.04-arm"
+"x86_64-linux" = "ubuntu-24.04"
+"#,
+    )
+    .unwrap();
+
+    let status = simit()
+        .current_dir(temp.path())
+        .args(["init", "ci", "--platform", "github", "--runtime", "nix"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let workflow = read(&temp.path().join(".github/workflows/ci.yaml"));
+    assert_yaml_parses(&workflow);
+    assert!(workflow.contains("runs-on: ${{ matrix.runner }}"));
+    assert!(workflow.contains("- system: aarch64-linux\n            runner: ubuntu-24.04-arm"));
+    assert!(workflow.contains("nix eval --impure --raw --expr builtins.currentSystem"));
+    assert!(workflow.contains("nix flake check --no-update-lock-file --system"));
+}
+
+#[test]
+fn prebuild_only_generates_secure_native_build_and_release_workflow() {
+    let temp = init_flake_only();
+    fs::write(
+        temp.path().join("simit.toml"),
+        r#"[prebuild]
+release_archives = true
+publish_attic = true
+
+[ci]
+provider = "actions"
+platform = "github"
+runtime = "nix"
+nix_builds = [".#server", ".#worker"]
+
+[ci.nix_system_runners]
+"aarch64-linux" = "ubuntu-24.04-arm"
+"x86_64-linux" = "ubuntu-24.04"
+
+[release.artifacts]
+prebuild_binaries = true
+substituters = ["https://cache.example"]
+trusted_public_keys = ["cache.example:abc"]
+
+[release.attic]
+cache = "demo"
+url = "https://attic.example"
+token_name = "demo"
+token_secret = "ATTIC_TOKEN"
+"#,
+    )
+    .unwrap();
+    fs::create_dir_all(temp.path().join(".github/workflows")).unwrap();
+    fs::write(
+        temp.path().join(".github/workflows/nix-builds.yaml"),
+        format!(
+            "{}\nname: obsolete\n",
+            simit::render::ci::GENERATED_WORKFLOW_MARKER
+        ),
+    )
+    .unwrap();
+
+    let status = simit()
+        .current_dir(temp.path())
+        .args(["init", "ci", "--platform", "github", "--runtime", "nix"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert!(temp.path().join(".github/workflows/ci.yaml").is_file());
+    let ci = read(&temp.path().join(".github/workflows/ci.yaml"));
+    assert!(ci.contains("substituters = https://cache.example"));
+    assert!(ci.contains("trusted-public-keys = cache.example:abc"));
+    assert!(
+        !temp
+            .path()
+            .join(".github/workflows/nix-builds.yaml")
+            .exists()
+    );
+
+    let workflow = read(&temp.path().join(".github/workflows/prebuild.yaml"));
+    assert_yaml_parses(&workflow);
+    assert!(workflow.contains("# - ATTIC_TOKEN: Attic token"));
+    assert!(workflow.contains("workflow_call:\n    inputs:\n      release:"));
+    assert!(workflow.contains("secrets:\n      attic_token:\n        required: true"));
+    assert!(workflow.contains(
+        "group: ${{ github.workflow }}-${{ github.ref }}-prebuild\n  cancel-in-progress: ${{ !inputs.release && (github.event_name == 'push' || github.event_name == 'pull_request') }}"
+    ));
+    assert!(workflow.contains("runs-on: ${{ matrix.runner }}"));
+    assert!(workflow.contains("nix eval --impure --raw --expr builtins.currentSystem"));
+    assert!(workflow.contains("nix build '.#server' --out-link '.simit-prebuild/ci-0'"));
+    assert!(
+        workflow.contains("nix build '.#release-bundle' --out-link '.simit-prebuild/release-0'")
+    );
+    assert!(workflow.contains(
+        "github.event_name == 'push' || (inputs.release && github.event_name != 'pull_request')"
+    ));
+    assert!(!workflow.contains("github.event_name == 'pull_request' ||"));
+    assert!(workflow.contains("links=(.simit-prebuild/ci-* .simit-prebuild/release-*)"));
+    assert!(workflow.contains("nix path-info -r \"${links[@]}\""));
+    assert!(workflow.contains("name: release-${{ matrix.system }}"));
+    assert!(workflow.contains(
+        "ATTIC_TOKEN: ${{ inputs.release && secrets.attic_token || secrets.ATTIC_TOKEN }}"
+    ));
+    assert!(workflow.contains(
+        "XDG_CONFIG_HOME: ${{ runner.temp }}/simit-attic-${{ github.run_id }}-${{ github.job }}-${{ matrix.system }}"
+    ));
+    assert!(workflow.contains("install -d -m 0700 \"$XDG_CONFIG_HOME/attic\""));
+    assert!(workflow.contains("test \"$(stat -c '%a' \"$attic_config\")\" = 600"));
+    assert!(workflow.contains("if: ${{ always() }}"));
+    assert!(workflow.contains("run: rm -rf \"$XDG_CONFIG_HOME\""));
+    assert!(!workflow.contains("~/.config/attic"));
+    assert!(
+        workflow
+            .contains("nix build --inputs-from . --no-link --print-out-paths nixpkgs#attic-client")
+    );
+    assert!(workflow.contains(
+        "push --stdin --no-closure --ignore-upstream-cache-filter demo < attic-paths.txt"
+    ));
+    assert!(!workflow.contains("attic login"));
+    assert!(!workflow.contains("MINISIGN"));
+    assert!(!workflow.contains("COSIGN"));
+
+    fs::write(
+        temp.path().join(".github/workflows/nix-builds.yaml"),
+        format!(
+            "{}\nname: obsolete\n",
+            simit::render::ci::GENERATED_WORKFLOW_MARKER
+        ),
+    )
+    .unwrap();
+    let check = simit()
+        .current_dir(temp.path())
+        .args(["init", "ci", "--prebuild-only", "--check", "--diff"])
+        .output()
+        .unwrap();
+    assert!(!check.status.success());
+    assert!(String::from_utf8_lossy(&check.stderr).contains("nix-builds.yaml is superseded"));
+
+    let status = simit()
+        .current_dir(temp.path())
+        .args(["init", "ci", "--prebuild-only"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert!(
+        !temp
+            .path()
+            .join(".github/workflows/nix-builds.yaml")
+            .exists()
+    );
+
+    fs::write(
+        temp.path().join(".github/workflows/nix-builds.yaml"),
+        "name: unmanaged\n",
+    )
+    .unwrap();
+    let status = simit()
+        .current_dir(temp.path())
+        .args(["init", "ci", "--prebuild-only"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(
+        read(&temp.path().join(".github/workflows/nix-builds.yaml")),
+        "name: unmanaged\n"
+    );
+
+    let conflict = simit()
+        .current_dir(temp.path())
+        .args(["init", "ci", "--prebuild-only", "--runner", "ubuntu-latest"])
+        .status()
+        .unwrap();
+    assert!(!conflict.success());
+    let conflict = simit()
+        .current_dir(temp.path())
+        .args(["init", "ci", "--prebuild-only", "--pages-only"])
+        .status()
+        .unwrap();
+    assert!(!conflict.success());
+}
+
+#[test]
+fn prebuild_only_rejects_incompatible_options() {
+    let temp = init_flake_only();
+    fs::write(
+        temp.path().join("simit.toml"),
+        r#"[prebuild]
+
+[ci]
+platform = "github"
+runtime = "nix"
+nix_builds = [".#default"]
+
+[ci.nix_system_runners]
+"x86_64-linux" = "ubuntu-24.04"
+"#,
+    )
+    .unwrap();
+
+    for (args, message) in [
+        (
+            vec!["--platform", "forgejo"],
+            "only supports --platform github",
+        ),
+        (
+            vec!["--ci-provider", "crow"],
+            "only supports the Actions provider",
+        ),
+        (vec!["--runtime", "cargo"], "only supports --runtime nix"),
+        (
+            vec!["--with-artifacts"],
+            "unrelated CI and release options are not supported",
+        ),
+        (
+            vec!["--workspace"],
+            "unrelated CI and release options are not supported",
+        ),
+        (
+            vec!["--windows-runner", "windows-latest"],
+            "unrelated CI and release options are not supported",
+        ),
+        (
+            vec!["--with-nextest"],
+            "unrelated CI and release options are not supported",
+        ),
+        (
+            vec!["--with-audit=false"],
+            "unrelated CI and release options are not supported",
+        ),
+        (
+            vec!["--package", "demo"],
+            "unrelated CI and release options are not supported",
+        ),
+        (
+            vec!["--step-runner", "nix-check=ubuntu-24.04"],
+            "unrelated CI and release options are not supported",
+        ),
+        (
+            vec!["--with-om-ci"],
+            "unrelated CI and release options are not supported",
+        ),
+        (
+            vec!["--homebrew-name", "demo"],
+            "unrelated CI and release options are not supported",
+        ),
+        (
+            vec!["--choco-name", "demo"],
+            "unrelated CI and release options are not supported",
+        ),
+        (
+            vec!["--scoop-name", "demo"],
+            "unrelated CI and release options are not supported",
+        ),
+    ] {
+        let output = simit()
+            .current_dir(temp.path())
+            .args(["init", "ci", "--prebuild-only"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains(message));
+    }
 }
 
 #[test]
@@ -606,7 +892,7 @@ fn forgejo_nix_can_generate_codeberg_pages_workflow() {
     assert!(pages.contains("group: ${{ codeberg.workflow }}-${{ codeberg.ref }}"));
     assert!(pages.contains("runs-on: atlas"));
     assert!(pages.contains("      - name: Validate Pages domain"));
-    assert!(pages.contains("nix build .#site --no-link --out-link result-pages-site"));
+    assert!(pages.contains("nix build .#site --out-link result-pages-site"));
     assert!(pages.contains("grep -qx plinth.tartanoglu.com result-pages-site/.domains"));
     assert!(pages.contains("CODEBERG_TOKEN: ${{ secrets.codeberg_token }}"));
     assert!(pages.contains("test -n \"$CODEBERG_TOKEN\""));
@@ -657,13 +943,156 @@ fn github_nix_can_generate_github_pages_workflow() {
     let pages = read(&temp.path().join(".github/workflows/pages.yaml"));
     assert_yaml_parses(&pages);
     assert!(pages.contains("permissions:\n  contents: read\n  pages: write\n  id-token: write"));
+    assert!(pages.contains("environment:\n      name: github-pages"));
+    assert!(pages.contains("url: ${{ steps.deployment.outputs.page_url }}"));
     assert!(pages.contains("uses: actions/checkout@"));
+    assert!(pages.contains("uses: actions/configure-pages@"));
     assert!(pages.contains("uses: actions/upload-pages-artifact@"));
     assert!(pages.contains("uses: actions/deploy-pages@"));
-    assert!(pages.contains("nix build .#site --no-link --out-link result-pages-site"));
+    assert!(pages.contains("nix build .#site --out-link result-pages-site"));
     assert!(pages.contains("grep -qx plinth.tartanoglu.com result-pages-site/.domains"));
     assert!(!pages.contains("CODEBERG_TOKEN"));
     assert!(!pages.contains("codeberg.workflow"));
+}
+
+#[test]
+fn pages_only_preserves_primary_crow_ci() {
+    let temp = init_package(true);
+    fs::write(
+        temp.path().join("simit.toml"),
+        r#"[ci]
+provider = "crow"
+platform = "forgejo"
+runtime = "nix"
+runner = "atlas-nix-trusted"
+"#,
+    )
+    .unwrap();
+    fs::create_dir_all(temp.path().join(".crow")).unwrap();
+    fs::write(
+        temp.path().join(".crow/ci.yaml"),
+        "existing crow workflow\n",
+    )
+    .unwrap();
+
+    let status = simit_with_user_config(temp.path())
+        .current_dir(temp.path())
+        .args([
+            "init",
+            "ci",
+            "--pages-only",
+            "--platform",
+            "github",
+            "--with-pages",
+            "--pages-repo",
+            "caniko/plinth",
+            "--pages-canonical-domain",
+            "plinth.tartanoglu.com",
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let pages = read(&temp.path().join(".github/workflows/pages.yaml"));
+    assert_yaml_parses(&pages);
+    assert!(pages.contains("uses: actions/deploy-pages@"));
+    assert_eq!(
+        read(&temp.path().join(".crow/ci.yaml")),
+        "existing crow workflow\n"
+    );
+
+    let simit_toml = read(&temp.path().join("simit.toml"));
+    assert!(simit_toml.contains("provider = \"crow\""));
+    assert!(simit_toml.contains("platform = \"forgejo\""));
+    assert!(simit_toml.contains("[ci.pages]"));
+
+    let check = simit_with_user_config(temp.path())
+        .current_dir(temp.path())
+        .args([
+            "init",
+            "ci",
+            "--pages-only",
+            "--platform",
+            "github",
+            "--check",
+        ])
+        .status()
+        .unwrap();
+    assert!(check.success());
+}
+
+#[test]
+fn pages_only_check_infers_managed_workflow_from_cargo_workspace() {
+    let temp = init_package(true);
+    let manifest = read(&temp.path().join("Cargo.toml"));
+    fs::write(
+        temp.path().join("Cargo.toml"),
+        format!(
+            "{manifest}\n[package.metadata.simit.ci]\nplatform = \"forgejo\"\nruntime = \"nix\"\n"
+        ),
+    )
+    .unwrap();
+
+    let status = simit()
+        .current_dir(temp.path().join("src"))
+        .args([
+            "init",
+            "ci",
+            "--pages-only",
+            "--platform",
+            "forgejo",
+            "--runner",
+            "atlas",
+            "--with-pages",
+            "--pages-repo",
+            "caniko/demo",
+            "--pages-canonical-domain",
+            "demo.example.com",
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert!(!temp.path().join("simit.toml").exists());
+
+    let check = simit()
+        .current_dir(temp.path().join("src"))
+        .args([
+            "init",
+            "ci",
+            "--pages-only",
+            "--platform",
+            "forgejo",
+            "--check",
+        ])
+        .status()
+        .unwrap();
+    assert!(check.success());
+}
+
+#[test]
+fn github_generation_drops_persisted_forgejo_runner() {
+    let temp = init_package(true);
+    fs::write(
+        temp.path().join("simit.toml"),
+        r#"[ci]
+provider = "actions"
+platform = "forgejo"
+runtime = "nix"
+runner = "codefloe-global"
+"#,
+    )
+    .unwrap();
+
+    let status = simit_with_user_config(temp.path())
+        .current_dir(temp.path())
+        .args(["init", "ci", "--platform", "github"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let ci = read(&temp.path().join(".github/workflows/ci.yaml"));
+    assert!(ci.contains("runs-on: ubuntu-latest"));
+    assert!(!ci.contains("codefloe-global"));
 }
 
 #[test]
@@ -705,7 +1134,7 @@ fn persisted_codeberg_pages_overrides_survive_regeneration() {
     assert!(check.success());
 
     let pages = read(&temp.path().join(".forgejo/workflows/pages.yaml"));
-    assert!(pages.contains("nix build ./site#site --no-link --out-link result-pages-site"));
+    assert!(pages.contains("nix build ./site#site --out-link result-pages-site"));
     assert!(pages.contains("DEPLOY_REMOTE=pages-origin nix run ./site#deploy-pages"));
 }
 
@@ -1958,7 +2387,7 @@ fn workspace_check_diff_detects_stale_generated_workflow() {
 }
 
 #[test]
-fn workspace_check_rejects_extra_generated_workflow() {
+fn workspace_check_rejects_extra_managed_workflows() {
     let temp = init_workspace_fixture();
 
     let write_status = simit_with_user_config(temp.path())
@@ -1968,14 +2397,16 @@ fn workspace_check_rejects_extra_generated_workflow() {
         .unwrap();
     assert!(write_status.success());
 
-    fs::write(
-        temp.path().join(".forgejo/workflows/ci-old.yaml"),
-        format!(
-            "{}\nname: old\n",
-            simit::render::ci::GENERATED_WORKFLOW_MARKER
-        ),
-    )
-    .unwrap();
+    for name in ["nix-builds.yaml", "prebuild.yaml"] {
+        fs::write(
+            temp.path().join(".forgejo/workflows").join(name),
+            format!(
+                "{}\nname: old\n",
+                simit::render::ci::GENERATED_WORKFLOW_MARKER
+            ),
+        )
+        .unwrap();
+    }
 
     let output = simit_with_user_config(temp.path())
         .current_dir(temp.path())
@@ -1992,7 +2423,8 @@ fn workspace_check_rejects_extra_generated_workflow() {
 
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(stderr.contains(".forgejo/workflows/ci-old.yaml is extra"));
+    assert!(stderr.contains(".forgejo/workflows/nix-builds.yaml is extra"));
+    assert!(stderr.contains(".forgejo/workflows/prebuild.yaml is extra"));
 }
 
 #[test]

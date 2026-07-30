@@ -205,12 +205,140 @@ fn bootstraps_github_release_workflow_with_native_permissions_and_uploads() {
     assert!(workflow.contains("upload_url=$(jq -r '.upload_url' release.json"));
     assert!(workflow.contains("Authorization: Bearer $GITHUB_TOKEN"));
     assert!(!workflow.contains("enable-openid-connect: true"));
+    assert!(!workflow.contains("needs: prebuild"));
     assert!(!workflow.contains("Publish Forgejo release"));
     assert!(workflow.contains("https://github.com/example/github-demo"));
     assert!(!workflow.contains("https://codeberg.org/example/github-demo"));
     assert!(
         String::from_utf8_lossy(&output.stdout).contains("git add .github/workflows/release.yml")
     );
+}
+
+#[test]
+fn github_release_fans_in_unsigned_native_archives_before_signing_once() {
+    let project = init_package("github-native-demo");
+    let config_path = project.path().join("simit.toml");
+    let config = read(&config_path)
+        .replace(
+            "[release.codeberg]\nrepo = \"example/github-native-demo\"",
+            "[release.github]\nrepo = \"example/github-native-demo\"",
+        )
+        .replace(
+            "[release.artifacts]",
+            "[prebuild]\nrelease_archives = true\npublish_attic = false\n\n[ci]\nprovider = \"actions\"\nplatform = \"github\"\nruntime = \"nix\"\nnix_builds = [\".#default\"]\n\n[ci.nix_system_runners]\n\"aarch64-linux\" = \"ubuntu-24.04-arm\"\n\"x86_64-linux\" = \"ubuntu-24.04\"\n\n[release.artifacts]",
+        )
+        .replace(
+            "runner = \"atlas\"\n",
+            "runner = \"ubuntu-24.04\"\nprebuild_binaries = true\n",
+        )
+        .replace(
+            "[aur]",
+            "[release.attic]\ncache = \"demo\"\nurl = \"https://attic.example\"\ntoken_name = \"demo\"\nresult_links = [\"result\"]\n\n[aur]",
+        )
+        .replace("sign = false", "sign = true");
+    fs::write(config_path, config).unwrap();
+
+    let output = simit()
+        .current_dir(project.path())
+        .args(["init", "release", "--platform", "github"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let workflow = read(&project.path().join(".github/workflows/release.yml"));
+    assert!(workflow.contains("prebuild:\n    uses: ./.github/workflows/prebuild.yaml"));
+    assert!(workflow.contains("with:\n      release: true"));
+    assert!(workflow.contains("release:\n    needs: prebuild"));
+    assert!(workflow.contains("uses: actions/download-artifact@"));
+    assert!(workflow.contains("pattern: release-*"));
+    assert!(!workflow.contains("nix build '.#release-bundle'"));
+    assert_eq!(workflow.matches("Generate release checksums").count(), 1);
+    assert_eq!(
+        workflow
+            .matches("Sign checksums and attest release artifacts")
+            .count(),
+        1
+    );
+    assert_eq!(workflow.matches("Publish GitHub release").count(), 1);
+    assert!(workflow.contains("# Runner credential: $ATTIC_TOKENS_DIR/demo"));
+    assert!(workflow.contains("Push Nix closures to Attic"));
+    assert!(workflow.contains("attic_token_dir=\"${ATTIC_TOKENS_DIR:-}\""));
+}
+
+#[test]
+fn github_prebuild_attic_replaces_release_push_and_declares_hosted_secret() {
+    let project = init_package("github-attic-demo");
+    let config_path = project.path().join("simit.toml");
+    let config = read(&config_path)
+        .replace(
+            "[release.codeberg]\nrepo = \"example/github-attic-demo\"",
+            "[release.github]\nrepo = \"example/github-attic-demo\"",
+        )
+        .replace(
+            "[release.artifacts]",
+            "[prebuild]\nrelease_archives = true\npublish_attic = true\n\n[ci]\nprovider = \"actions\"\nplatform = \"github\"\nruntime = \"nix\"\nnix_builds = [\".#default\"]\n\n[ci.nix_system_runners]\n\"x86_64-linux\" = \"ubuntu-24.04\"\n\n[release.artifacts]",
+        )
+        .replace(
+            "runner = \"atlas\"\n",
+            "runner = \"ubuntu-24.04\"\nprebuild_binaries = true\n",
+        )
+        .replace(
+            "[aur]",
+            "[release.attic]\ncache = \"demo\"\nurl = \"https://attic.example\"\ntoken_name = \"demo\"\ntoken_secret = \"ATTIC_TOKEN\"\nresult_links = [\"result\"]\n\n[aur]",
+        );
+    fs::write(config_path, config).unwrap();
+
+    let output = simit()
+        .current_dir(project.path())
+        .args(["init", "release", "--platform", "github"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let workflow = read(&project.path().join(".github/workflows/release.yml"));
+    assert!(workflow.contains("# - ATTIC_TOKEN: repository secret"));
+    assert!(workflow.contains("attic_token: ${{ secrets.ATTIC_TOKEN }}"));
+    assert!(!workflow.contains("          ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN }}"));
+    assert!(!workflow.contains("require_credential 'repo secret' 'ATTIC_TOKEN'"));
+    assert!(!workflow.contains("# Runner credential: $ATTIC_TOKENS_DIR/demo"));
+    assert!(!workflow.contains("Push Nix closures to Attic"));
+
+    fs::write(project.path().join("flake.nix"), "{}\n").unwrap();
+    let status = simit()
+        .current_dir(project.path())
+        .args(["init", "ci", "--prebuild-only"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let prebuild = read(&project.path().join(".github/workflows/prebuild.yaml"));
+    let caller_group = workflow
+        .lines()
+        .find(|line| line.trim_start().starts_with("group:"))
+        .unwrap();
+    let called_group = prebuild
+        .lines()
+        .find(|line| line.trim_start().starts_with("group:"))
+        .unwrap();
+    assert_eq!(
+        caller_group.trim(),
+        "group: ${{ github.workflow }}-${{ github.ref }}"
+    );
+    assert_eq!(
+        called_group.trim(),
+        "group: ${{ github.workflow }}-${{ github.ref }}-prebuild"
+    );
+    assert_ne!(caller_group, called_group);
+    assert!(prebuild.contains(
+        "cancel-in-progress: ${{ !inputs.release && (github.event_name == 'push' || github.event_name == 'pull_request') }}"
+    ));
 }
 
 #[test]
@@ -464,7 +592,7 @@ result_links = ["result"]
     assert!(!workflow.contains("test -r \"${ATTIC_TOKENS_DIR:?}/rs-modde\""));
     assert!(workflow.contains("attic_token_dir=\"${ATTIC_TOKENS_DIR:-}\""));
     assert!(workflow.contains("is required because Nix closure cache publishing is configured."));
-    assert!(workflow.contains("Attic login failed for configured Nix closure cache publishing."));
+    assert!(!workflow.contains("attic login"));
     assert!(workflow.contains("Attic push failed for configured Nix closure cache publishing."));
     assert!(workflow.contains("          nix path-info -r \\\n            ./result \\"));
     assert!(!workflow.contains("\n            result \\\n"));

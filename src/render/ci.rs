@@ -7,7 +7,7 @@ use serde::Deserialize;
 
 use crate::cargo::Package;
 use crate::cli::{CiProvider, Platform, Runtime, WorkspaceStrategy};
-use crate::config::{CiComponent, CrowCiConfig};
+use crate::config::{ArtifactsConfig, AtticConfig, CiComponent, CrowCiConfig, PrebuildConfig};
 use crate::config::{
     JetbrainsCredentialSource, ResolvedJetbrains, ResolvedVscode, VscodePatSource,
 };
@@ -101,6 +101,8 @@ pub enum OmCiMode {
 #[derive(Debug, Clone)]
 pub struct CiOptions {
     pub nix_builds: Vec<String>,
+    pub nix_substituters: Vec<String>,
+    pub nix_trusted_public_keys: Vec<String>,
     pub with_nextest: bool,
     pub with_msrv: bool,
     pub with_audit: bool,
@@ -138,6 +140,8 @@ impl Default for CiOptions {
     fn default() -> Self {
         Self {
             nix_builds: Vec::new(),
+            nix_substituters: Vec::new(),
+            nix_trusted_public_keys: Vec::new(),
             with_nextest: false,
             with_msrv: false,
             with_audit: false,
@@ -344,7 +348,7 @@ pub fn codeberg_pages_file(
         content: match platform {
             Platform::Forgejo => codeberg_pages_workflow(runner, pages),
             Platform::Github => github_pages_workflow(runner, pages),
-            Platform::Gitlab => bail!("Codeberg Pages workflow is not supported on GitLab"),
+            Platform::Gitlab => bail!("Pages workflow is not supported on GitLab"),
         },
     })
 }
@@ -403,6 +407,20 @@ pub fn python_ci_file(
 /// project model. The workflow intentionally has one contract: `nix flake
 /// check` must pass on pushes and pull requests.
 pub fn nix_flake_ci_file(platform: Platform, runner: &ResolvedRunner) -> Result<GeneratedFile> {
+    nix_flake_ci_file_with_system_runners(
+        platform,
+        runner,
+        &BTreeMap::new(),
+        &ArtifactsConfig::default(),
+    )
+}
+
+pub fn nix_flake_ci_file_with_system_runners(
+    platform: Platform,
+    runner: &ResolvedRunner,
+    system_runners: &BTreeMap<String, String>,
+    artifacts: &ArtifactsConfig,
+) -> Result<GeneratedFile> {
     if platform == Platform::Gitlab {
         bail!("GitLab flake CI uses .gitlab-ci.yml");
     }
@@ -410,14 +428,161 @@ pub fn nix_flake_ci_file(platform: Platform, runner: &ResolvedRunner) -> Result<
     push_generated_workflow_header(&mut workflow);
     workflow.push_str("name: Nix flake check\n\non:\n  push:\n  pull_request:\n\n");
     push_platform_concurrency(&mut workflow, platform);
-    workflow.push_str("jobs:\n  flake-check:\n    runs-on: ");
-    workflow.push_str(&runs_on(runner));
-    workflow.push_str("\n    env:\n      NIX_CONFIG: \"experimental-features = nix-command flakes\"\n    steps:\n");
+    workflow.push_str("jobs:\n  flake-check:\n");
+    if system_runners.is_empty() {
+        workflow.push_str("    runs-on: ");
+        workflow.push_str(&runs_on(runner));
+        workflow.push('\n');
+    } else {
+        if platform != Platform::Github {
+            bail!("native per-system Nix runners require GitHub Actions");
+        }
+        workflow
+            .push_str("    strategy:\n      fail-fast: false\n      matrix:\n        include:\n");
+        for (system, runner) in system_runners {
+            workflow.push_str("          - system: ");
+            workflow.push_str(system);
+            workflow.push_str("\n            runner: ");
+            workflow.push_str(runner);
+            workflow.push('\n');
+        }
+        workflow.push_str("    runs-on: ${{ matrix.runner }}\n");
+    }
+    workflow.push_str(
+        "    env:\n      NIX_CONFIG: \"experimental-features = nix-command flakes\"\n    steps:\n",
+    );
     push_checkout_step(&mut workflow, platform);
-    push_install_nix_step(&mut workflow, platform);
-    workflow.push_str("      - name: Check flake\n        run: nix flake check\n");
+    push_install_nix_step_with_cache(
+        &mut workflow,
+        platform,
+        &artifacts.substituters,
+        &artifacts.trusted_public_keys,
+    );
+    if system_runners.is_empty() {
+        workflow.push_str("      - name: Check flake\n        run: nix flake check\n");
+    } else {
+        workflow.push_str(
+            "      - name: Verify runner system\n        run: test \"$(nix eval --impure --raw --expr builtins.currentSystem)\" = \"${{ matrix.system }}\"\n      - name: Check flake\n        run: nix flake check --no-update-lock-file --system \"${{ matrix.system }}\"\n",
+        );
+    }
     Ok(GeneratedFile {
         relative_path: PathBuf::from(platform.workflow_dir()).join("ci.yaml"),
+        content: workflow,
+    })
+}
+
+pub fn github_prebuild_file(
+    system_runners: &BTreeMap<String, String>,
+    nix_builds: &[String],
+    prebuild: &PrebuildConfig,
+    artifacts: &ArtifactsConfig,
+    attic: Option<&AtticConfig>,
+) -> Result<GeneratedFile> {
+    if system_runners.is_empty() {
+        bail!("GitHub prebuild requires at least one native system runner");
+    }
+    let release_attrs = artifacts.effective_nix_bundle_attrs();
+    let attic = prebuild.publish_attic.then_some(attic).flatten();
+    if prebuild.publish_attic && attic.is_none() {
+        bail!("GitHub prebuild Attic publication requires [release.attic]");
+    }
+
+    let mut workflow = String::new();
+    push_generated_workflow_header(&mut workflow);
+    if let Some(attic) = attic {
+        workflow.push_str("# Required repository secret:\n# - ");
+        workflow.push_str(
+            attic
+                .token_secret
+                .as_deref()
+                .expect("validated GitHub Attic token secret"),
+        );
+        workflow.push_str(": Attic token for trusted push and release publication.\n");
+    }
+    workflow.push_str("name: Native Nix prebuild\n\non:\n  push:\n    branches: [\"**\"]\n    tags-ignore: [\"**\"]\n  pull_request:\n  workflow_dispatch:\n  workflow_call:\n    inputs:\n      release:\n        required: false\n        type: boolean\n        default: false\n");
+    if attic.is_some() {
+        workflow.push_str("    secrets:\n      attic_token:\n        required: true\n");
+    }
+    workflow.push_str("\npermissions:\n  contents: read\n\n");
+    workflow.push_str("concurrency:\n  group: ${{ github.workflow }}-${{ github.ref }}-prebuild\n  cancel-in-progress: ${{ !inputs.release && (github.event_name == 'push' || github.event_name == 'pull_request') }}\n\n");
+    workflow.push_str(
+        "jobs:\n  build:\n    strategy:\n      fail-fast: false\n      matrix:\n        include:\n",
+    );
+    for (system, runner) in system_runners {
+        workflow.push_str("          - system: ");
+        workflow.push_str(system);
+        workflow.push_str("\n            runner: ");
+        workflow.push_str(runner);
+        workflow.push('\n');
+    }
+    workflow.push_str("    runs-on: ${{ matrix.runner }}\n    steps:\n");
+    push_checkout_step(&mut workflow, Platform::Github);
+    workflow.push_str("      - name: Install Nix\n        uses: ");
+    workflow.push_str(&github_action_ref("cachix/install-nix-action", "v31"));
+    workflow.push_str("\n        with:\n          extra_nix_config: |\n            experimental-features = nix-command flakes\n");
+    if !artifacts.substituters.is_empty() {
+        workflow.push_str("            substituters = ");
+        workflow.push_str(&artifacts.substituters.join(" "));
+        workflow.push('\n');
+    }
+    if !artifacts.trusted_public_keys.is_empty() {
+        workflow.push_str("            trusted-public-keys = ");
+        workflow.push_str(&artifacts.trusted_public_keys.join(" "));
+        workflow.push('\n');
+    }
+    workflow.push_str("      - name: Verify runner system\n        run: test \"$(nix eval --impure --raw --expr builtins.currentSystem)\" = \"${{ matrix.system }}\"\n");
+    if !nix_builds.is_empty() {
+        workflow.push_str("      - name: Build native Nix outputs\n        run: |\n          set -euo pipefail\n          mkdir -p .simit-prebuild\n");
+        for (index, installable) in nix_builds.iter().enumerate() {
+            workflow.push_str("          nix build ");
+            workflow.push_str(&shell_quote(installable));
+            workflow.push_str(" --out-link ");
+            workflow.push_str(&shell_quote(&format!(".simit-prebuild/ci-{index}")));
+            workflow.push('\n');
+        }
+    }
+    if prebuild.release_archives {
+        workflow.push_str("      - name: Build unsigned release archives\n        if: ${{ inputs.release && github.event_name != 'pull_request' }}\n        run: |\n          set -euo pipefail\n          shopt -s nullglob\n          mkdir -p .simit-prebuild release\n          VERSION=\"${GITHUB_REF_NAME#v}\"\n");
+        for (index, attr) in release_attrs.iter().enumerate() {
+            let link = format!(".simit-prebuild/release-{index}");
+            workflow.push_str("          nix build ");
+            workflow.push_str(&shell_quote(&format!(".#{}", attr)));
+            workflow.push_str(" --out-link ");
+            workflow.push_str(&shell_quote(&link));
+            workflow.push('\n');
+            workflow.push_str("          manifests=(");
+            workflow.push_str(&format!("{link}/*-release-manifest.json"));
+            workflow.push_str(")\n          test \"${#manifests[@]}\" -eq 1\n          jq -e --arg version \"$VERSION\" '(.schemaVersion == 2) and (.version == $version) and (.artifacts | length > 0)' \"${manifests[0]}\" >/dev/null\n");
+            workflow.push_str("          while IFS= read -r file; do\n            name=\"$(basename \"$file\")\"\n            test ! -e \"release/$name\" || { echo \"release bundle asset collision: $name\" >&2; exit 1; }\n            cp -L \"$file\" \"release/$name\"\n          done < <(find -L ");
+            workflow.push_str(&shell_quote(&link));
+            workflow.push_str(" -mindepth 1 -maxdepth 1 -type f ! -name '*-release-manifest.json' -print | LC_ALL=C sort)\n");
+        }
+        workflow.push_str("      - name: Upload unsigned release archives\n        if: ${{ inputs.release && github.event_name != 'pull_request' }}\n        uses: ");
+        workflow.push_str(&github_action_ref("actions/upload-artifact", "v4.6.2"));
+        workflow.push_str("\n        with:\n          name: release-${{ matrix.system }}\n          path: release\n          if-no-files-found: error\n          retention-days: 1\n");
+    }
+    if let Some(attic) = attic {
+        let token_secret = attic
+            .token_secret
+            .as_deref()
+            .expect("validated GitHub Attic token secret");
+        workflow.push_str("      - name: Publish recursive closure to Attic\n        if: ${{ github.event_name == 'push' || (inputs.release && github.event_name != 'pull_request') }}\n        env:\n          ATTIC_TOKEN: ${{ inputs.release && secrets.attic_token || secrets.");
+        workflow.push_str(token_secret);
+        workflow.push_str(" }}\n          XDG_CONFIG_HOME: ${{ runner.temp }}/simit-attic-${{ github.run_id }}-${{ github.job }}-${{ matrix.system }}\n        run: |\n          set -euo pipefail\n          if [[ -z \"${ATTIC_TOKEN//[[:space:]]/}\" || \"$ATTIC_TOKEN\" == *[!A-Za-z0-9._-]* ]]; then\n            echo \"ATTIC_TOKEN must be a nonempty Attic JWT\" >&2\n            exit 1\n          fi\n          umask 077\n          rm -rf \"$XDG_CONFIG_HOME\"\n          install -d -m 0700 \"$XDG_CONFIG_HOME/attic\"\n          attic_config=\"$XDG_CONFIG_HOME/attic/config.toml\"\n          install -m 0600 /dev/null \"$attic_config\"\n          {\n            printf '%s\\n' 'default-server = ");
+        workflow.push_str(&attic.cache);
+        workflow.push_str("\"'\n            printf '%s\\n' '[servers.");
+        workflow.push_str(&attic.cache);
+        workflow.push_str("]'\n            printf '%s\\n' 'endpoint = \"");
+        workflow.push_str(&attic.url);
+        workflow.push_str("\"'\n            printf 'token = \"%s\"\\n' \"$ATTIC_TOKEN\"");
+        workflow.push_str("\n          } > \"$attic_config\"\n          test \"$(stat -c '%a' \"$attic_config\")\" = 600\n          shopt -s nullglob\n          links=(.simit-prebuild/ci-* .simit-prebuild/release-*)\n          if [ \"${#links[@]}\" -eq 0 ]; then echo \"no generated out-links to publish\"; exit 0; fi\n          nix path-info -r \"${links[@]}\" > attic-paths.txt\n          test -s attic-paths.txt\n          attic=\"$(nix build --inputs-from . --no-link --print-out-paths nixpkgs#attic-client)\"\n          test -x \"$attic/bin/attic\"\n          \"$attic/bin/attic\" push --stdin --no-closure --ignore-upstream-cache-filter ");
+        workflow.push_str(&shell_word(&attic.cache));
+        workflow.push_str(" < attic-paths.txt\n");
+        workflow.push_str("      - name: Remove ephemeral Attic credentials\n        if: ${{ always() }}\n        env:\n          XDG_CONFIG_HOME: ${{ runner.temp }}/simit-attic-${{ github.run_id }}-${{ github.job }}-${{ matrix.system }}\n        run: rm -rf \"$XDG_CONFIG_HOME\"\n");
+    }
+
+    Ok(GeneratedFile {
+        relative_path: PathBuf::from(".github/workflows/prebuild.yaml"),
         content: workflow,
     })
 }
@@ -512,7 +677,7 @@ fn codeberg_pages_workflow(runner: &ResolvedRunner, pages: &CodebergPagesOptions
         workflow.push_str("        run: |\n");
         workflow.push_str("          nix build ");
         workflow.push_str(&shell_word(&pages.site_output));
-        workflow.push_str(" --no-link --out-link result-pages-site\n");
+        workflow.push_str(" --out-link result-pages-site\n");
         workflow.push_str("          test -f result-pages-site/.domains\n");
         workflow.push_str("          grep -qx ");
         workflow.push_str(&shell_word(canonical_domain));
@@ -547,14 +712,17 @@ fn github_pages_workflow(runner: &ResolvedRunner, pages: &CodebergPagesOptions) 
     workflow.push_str("\n  workflow_dispatch:\n\n");
     push_concurrency(&mut workflow);
     workflow.push_str("permissions:\n  contents: read\n  pages: write\n  id-token: write\n\n");
-    workflow.push_str("jobs:\n  publish:\n    runs-on: ");
+    workflow.push_str("jobs:\n  publish:\n    environment:\n      name: github-pages\n      url: ${{ steps.deployment.outputs.page_url }}\n    runs-on: ");
     workflow.push_str(&runs_on(runner));
     workflow.push_str("\n    env:\n      NIX_CONFIG: \"experimental-features = nix-command flakes\"\n    steps:\n");
     push_checkout_step(&mut workflow, Platform::Github);
     push_install_nix_step(&mut workflow, Platform::Github);
+    workflow.push_str("      - name: Configure GitHub Pages\n        uses: ");
+    workflow.push_str(&github_action_ref("actions/configure-pages", "v6"));
+    workflow.push('\n');
     workflow.push_str("      - name: Build Pages site\n        run: |\n          nix build ");
     workflow.push_str(&shell_word(&pages.site_output));
-    workflow.push_str(" --no-link --out-link result-pages-site\n");
+    workflow.push_str(" --out-link result-pages-site\n");
     if let Some(canonical_domain) = &pages.canonical_domain {
         workflow.push_str("          test -f result-pages-site/.domains\n          grep -qx ");
         workflow.push_str(&shell_word(canonical_domain));
@@ -1327,7 +1495,12 @@ fn python_ci_workflow(
     workflow.push_str("    steps:\n");
     push_checkout_step(&mut workflow, platform);
     push_required_env_step(&mut workflow, &options.required_env);
-    push_install_nix_step(&mut workflow, platform);
+    push_install_nix_step_with_cache(
+        &mut workflow,
+        platform,
+        &options.nix_substituters,
+        &options.nix_trusted_public_keys,
+    );
     push_extra_setup_steps(&mut workflow, &options.extra_setup);
     if selected(CiComponent::FlakeWiring) {
         workflow.push_str("      - name: Check generated flake wiring\n");
@@ -1408,7 +1581,12 @@ fn python_publish_workflow(
     workflow.push_str("    steps:\n");
     push_checkout_step(&mut workflow, platform);
     push_required_env_step(&mut workflow, &options.required_env);
-    push_install_nix_step(&mut workflow, platform);
+    push_install_nix_step_with_cache(
+        &mut workflow,
+        platform,
+        &options.nix_substituters,
+        &options.nix_trusted_public_keys,
+    );
     push_extra_setup_steps(&mut workflow, &options.extra_setup);
     workflow.push_str("      - name: Build Nix package\n");
     workflow.push_str("        run: nix build .# --no-link\n\n");
@@ -1467,7 +1645,12 @@ fn maturin_publish_workflow(
     workflow.push_str("    steps:\n");
     push_checkout_step(&mut workflow, platform);
     push_required_env_step(&mut workflow, &options.required_env);
-    push_install_nix_step(&mut workflow, platform);
+    push_install_nix_step_with_cache(
+        &mut workflow,
+        platform,
+        &options.nix_substituters,
+        &options.nix_trusted_public_keys,
+    );
     push_extra_setup_steps(&mut workflow, &options.extra_setup);
     workflow.push_str("      - name: Build and publish to PyPI\n");
     workflow.push_str("        env:\n");
@@ -1540,7 +1723,12 @@ fn ci_workflow_single_job(
 
     match runtime {
         Runtime::Nix => {
-            push_install_nix_step(&mut workflow, platform);
+            push_install_nix_step_with_cache(
+                &mut workflow,
+                platform,
+                &options.nix_substituters,
+                &options.nix_trusted_public_keys,
+            );
             push_nix_cargo_bin_path_step(&mut workflow);
             push_extra_setup_steps(&mut workflow, &options.extra_setup);
             workflow.push_str("      - name: Format check\n        run: nix develop -c cargo fmt --all -- --check\n\n");
@@ -1828,7 +2016,12 @@ fn ci_workflow_multi_job(
 
         match runtime {
             Runtime::Nix => {
-                push_install_nix_step(&mut workflow, platform);
+                push_install_nix_step_with_cache(
+                    &mut workflow,
+                    platform,
+                    &options.nix_substituters,
+                    &options.nix_trusted_public_keys,
+                );
                 push_nix_cargo_bin_path_step(&mut workflow);
                 push_extra_setup_steps(&mut workflow, &options.extra_setup);
             }
@@ -1884,7 +2077,12 @@ fn publish_workflow(
 
     match runtime {
         Runtime::Nix => {
-            push_install_nix_step(&mut workflow, platform);
+            push_install_nix_step_with_cache(
+                &mut workflow,
+                platform,
+                &options.nix_substituters,
+                &options.nix_trusted_public_keys,
+            );
             push_nix_cargo_bin_path_step(&mut workflow);
             push_extra_setup_steps(&mut workflow, &options.extra_setup);
             workflow.push_str(&validate_tag_step(command_prefix(runtime), &package.name));
@@ -2925,6 +3123,15 @@ fn push_action_uses(workflow: &mut String, platform: Platform, action: &str, ver
 }
 
 fn push_install_nix_step(workflow: &mut String, platform: Platform) {
+    push_install_nix_step_with_cache(workflow, platform, &[], &[]);
+}
+
+fn push_install_nix_step_with_cache(
+    workflow: &mut String,
+    platform: Platform,
+    substituters: &[String],
+    trusted_public_keys: &[String],
+) {
     if platform == Platform::Forgejo {
         return;
     }
@@ -2932,7 +3139,20 @@ fn push_install_nix_step(workflow: &mut String, platform: Platform) {
     workflow.push_str("      - name: Install Nix\n");
     workflow.push_str("        uses: ");
     workflow.push_str(&github_action_ref("cachix/install-nix-action", "v31"));
-    workflow.push_str("\n\n");
+    if !substituters.is_empty() || !trusted_public_keys.is_empty() {
+        workflow.push_str("\n        with:\n          extra_nix_config: |\n            experimental-features = nix-command flakes\n");
+        if !substituters.is_empty() {
+            workflow.push_str("            substituters = ");
+            workflow.push_str(&substituters.join(" "));
+            workflow.push('\n');
+        }
+        if !trusted_public_keys.is_empty() {
+            workflow.push_str("            trusted-public-keys = ");
+            workflow.push_str(&trusted_public_keys.join(" "));
+            workflow.push('\n');
+        }
+    }
+    workflow.push('\n');
 }
 
 fn push_nix_cargo_bin_path_step(workflow: &mut String) {

@@ -27,6 +27,13 @@ use crate::render::ci::{
 use crate::user_config::{ResolvedRunner, UserConfig, validate_runner_label};
 
 pub fn run(command: InitCiCommand) -> Result<()> {
+    if command.prebuild_only {
+        return run_prebuild_only(command);
+    }
+    if command.pages_only {
+        return run_pages_only(command);
+    }
+
     let current_dir = std::env::current_dir().context("reading current directory")?;
     if command.platform == Some(Platform::Gitlab) {
         return run_nix_only(command);
@@ -99,7 +106,7 @@ pub fn run(command: InitCiCommand) -> Result<()> {
     let wants_codeberg_pages =
         command.with_codeberg_pages || cfg.ci.pages.is_some() || inferred_pages.is_some();
     if wants_codeberg_pages && resolved.runtime != Runtime::Nix {
-        bail!("Codeberg Pages workflow generation requires --runtime nix");
+        bail!("Pages workflow generation requires --runtime nix");
     }
     let wants_vscode = command.with_vscode || cfg.vscode.is_some();
     if wants_vscode && resolved.runtime != Runtime::Nix {
@@ -131,11 +138,23 @@ pub fn run(command: InitCiCommand) -> Result<()> {
         .unwrap_or_else(|| resolved.omnix_ref.clone());
     let mut options = resolved.ci_options(&cfg, with_artifacts, omnix_ref.clone());
     options.publish_crates = publish_crates;
+    let runner_override =
+        if platform != Platform::Github || cfg.ci.platform == Some(Platform::Github) {
+            resolved.runner.as_deref()
+        } else {
+            command.runner.as_deref()
+        };
+    let windows_runner_override =
+        if platform != Platform::Github || cfg.ci.platform == Some(Platform::Github) {
+            resolved.windows_runner.as_deref()
+        } else {
+            command.windows_runner.as_deref()
+        };
     let runners = user_config.resolve_ci_runners(
         platform,
         resolved.runtime,
-        resolved.runner.as_deref(),
-        resolved.windows_runner.as_deref(),
+        runner_override,
+        windows_runner_override,
         windows_packagers,
     )?;
     // Step-runner labels such as `atlas-nix-trusted` and `codeberg-small`
@@ -159,10 +178,13 @@ pub fn run(command: InitCiCommand) -> Result<()> {
             })
             .collect::<Result<_>>()?
     };
-    let persisted_runner =
-        self_check_runner_override(resolved.runner.as_deref(), &runners.ci).map(str::to_owned);
+    let persisted_runner = if cfg.ci.nix_system_runners.is_empty() {
+        self_check_runner_override(runner_override, &runners.ci).map(str::to_owned)
+    } else {
+        None
+    };
     let persisted_windows_runner = runners.windows.as_ref().and_then(|runner| {
-        self_check_runner_override(resolved.windows_runner.as_deref(), runner).map(str::to_owned)
+        self_check_runner_override(windows_runner_override, runner).map(str::to_owned)
     });
     let multi_package_workspace = metadata.workspace_members.len() > 1
         && resolved.workspace_strategy == crate::cli::WorkspaceStrategy::Members;
@@ -220,12 +242,15 @@ pub fn run(command: InitCiCommand) -> Result<()> {
             step_runners: &step_runners,
         })?);
     }
-    if provider == CiProvider::Actions && !options.nix_builds.is_empty() {
+    if provider == CiProvider::Actions && cfg.prebuild.is_none() && !options.nix_builds.is_empty() {
         files.push(ci::nix_build_matrix_file(
             platform,
             &runners.ci,
             &options.nix_builds,
         )?);
+    }
+    if let Some(prebuild) = github_prebuild_file(&cfg, platform, provider)? {
+        files.push(prebuild);
     }
     if resolved.with_pypi_publish && cargo::has_pyo3_dep(&metadata.packages) {
         files.push(ci::maturin_publish_file(
@@ -320,6 +345,7 @@ pub fn run(command: InitCiCommand) -> Result<()> {
         upgrade::update_readme_badges_if_present(workspace_root, true, command.diff)
     } else {
         project::write_generated_files(workspace_root, &files)?;
+        cleanup_obsolete_nix_workflows(workspace_root, platform, &files)?;
         if ProjectConfig::can_persist_ci(workspace_root)? {
             ProjectConfig::write_ci(workspace_root, &persisted_ci)?;
         }
@@ -329,13 +355,258 @@ pub fn run(command: InitCiCommand) -> Result<()> {
     }
 }
 
+fn run_prebuild_only(command: InitCiCommand) -> Result<()> {
+    validate_prebuild_only_options(&command)?;
+    let workspace_root = workflow_workspace_root()?;
+    if !workspace_root.join("flake.nix").is_file() {
+        bail!("Prebuild workflow generation requires flake.nix at the workspace root");
+    }
+    let cfg = ProjectConfig::load(&workspace_root)?;
+    let file = github_prebuild_file(&cfg, Platform::Github, CiProvider::Actions)?
+        .context("--prebuild-only requires a [prebuild] configuration")?;
+    let files = [file];
+    let message = "Prebuild workflow is not up to date; run `simit init ci --prebuild-only`";
+    if command.check {
+        project::check_generated_files(&workspace_root, &files, message, command.diff)?;
+        let expected = files
+            .iter()
+            .map(|file| file.relative_path.clone())
+            .collect::<BTreeSet<_>>();
+        let obsolete = obsolete_nix_workflows(&workspace_root, Platform::Github, &expected)?;
+        if !obsolete.is_empty() {
+            bail!(
+                "{message}:\n{}",
+                obsolete
+                    .into_iter()
+                    .map(|path| format!("{} is superseded", path.display()))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            );
+        }
+    } else {
+        project::write_generated_files(&workspace_root, &files)?;
+        cleanup_obsolete_nix_workflows(&workspace_root, Platform::Github, &files)?;
+        registry::touch_current_project_or_warn([("ci", FeatureStatus::Managed)]);
+    }
+    Ok(())
+}
+
+fn validate_prebuild_only_options(command: &InitCiCommand) -> Result<()> {
+    if command
+        .platform
+        .is_some_and(|platform| platform != Platform::Github)
+    {
+        bail!("--prebuild-only only supports --platform github");
+    }
+    if command
+        .ci_provider
+        .is_some_and(|provider| provider != CiProvider::Actions)
+        || command.crow_format.is_some()
+    {
+        bail!("--prebuild-only only supports the Actions provider");
+    }
+    if command
+        .runtime
+        .is_some_and(|runtime| runtime != RuntimeChoice::Nix)
+    {
+        bail!("--prebuild-only only supports --runtime nix");
+    }
+    let homebrew_overrides = command.homebrew.name.is_some()
+        || command.homebrew.tap.is_some()
+        || !command.homebrew.binary.is_empty()
+        || command.homebrew.description.is_some()
+        || command.homebrew.homepage.is_some()
+        || command.homebrew.license.is_some()
+        || command.homebrew.download_repo.is_some()
+        || command.homebrew.archive_pattern.is_some()
+        || !command.homebrew.no_platform.is_empty();
+    let chocolatey_overrides = command.chocolatey.name.is_some()
+        || command.chocolatey.id.is_some()
+        || command.chocolatey.title.is_some()
+        || command.chocolatey.authors.is_some()
+        || command.chocolatey.description.is_some()
+        || command.chocolatey.summary.is_some()
+        || command.chocolatey.project_url.is_some()
+        || command.chocolatey.license_url.is_some()
+        || command.chocolatey.icon_url.is_some()
+        || command.chocolatey.package_source_url.is_some()
+        || command.chocolatey.docs_url.is_some()
+        || command.chocolatey.bug_tracker_url.is_some()
+        || command.chocolatey.project_source_url.is_some()
+        || command.chocolatey.tags.is_some()
+        || command.chocolatey.release_notes_url.is_some()
+        || command.chocolatey.download_repo.is_some()
+        || command.chocolatey.archive_pattern.is_some()
+        || command.chocolatey.push_source.is_some();
+    let scoop_overrides = command.scoop.name.is_some()
+        || command.scoop.bucket.is_some()
+        || command.scoop.description.is_some()
+        || command.scoop.homepage.is_some()
+        || command.scoop.license.is_some()
+        || command.scoop.download_repo.is_some()
+        || command.scoop.archive_pattern.is_some()
+        || !command.scoop.binary.is_empty()
+        || !command.scoop.no_arch.is_empty();
+    if command.pages_only
+        || !command.packages.is_empty()
+        || command.workspace
+        || command.workspace_strategy.is_some()
+        || command.runner.is_some()
+        || command.windows_runner.is_some()
+        || !command.step_runner.is_empty()
+        || command.granular
+        || command.maintainer_key.is_some()
+        || command.maintainers_gpg.is_some()
+        || command.release_smoke_command.is_some()
+        || command.with_nextest.is_some()
+        || command.with_msrv.is_some()
+        || command.with_audit.is_some()
+        || command.with_deny.is_some()
+        || command.with_docs.is_some()
+        || command.with_om_ci.is_some()
+        || command.om_ci_augment.is_some()
+        || command.omnix_ref.is_some()
+        || command.with_artifacts.is_some()
+        || command.with_pypi_publish.is_some()
+        || command.publish_crates.is_some()
+        || command.with_homebrew
+        || command.with_chocolatey
+        || command.with_scoop
+        || command.with_codeberg_pages
+        || command.with_vscode
+        || command.with_jetbrains
+        || command.pages_repo.is_some()
+        || command.pages_canonical_domain.is_some()
+        || command.pages_site_output.is_some()
+        || command.pages_token_secret.is_some()
+        || command.pages_source_branch.is_some()
+        || command.pages_deploy_app.is_some()
+        || homebrew_overrides
+        || chocolatey_overrides
+        || scoop_overrides
+    {
+        bail!("unrelated CI and release options are not supported with --prebuild-only");
+    }
+    Ok(())
+}
+
+fn workflow_workspace_root() -> Result<PathBuf> {
+    let current_dir = std::env::current_dir().context("reading current directory")?;
+    if cargo::find_manifest(&current_dir).is_ok() {
+        return Ok(cargo::metadata_for_current_dir()?
+            .workspace_root
+            .into_std_path_buf());
+    }
+    Ok(python::find_project_root(&current_dir).unwrap_or(current_dir))
+}
+
+fn github_prebuild_file(
+    cfg: &ProjectConfig,
+    platform: Platform,
+    provider: CiProvider,
+) -> Result<Option<project::GeneratedFile>> {
+    let Some(prebuild) = &cfg.prebuild else {
+        return Ok(None);
+    };
+    if platform != Platform::Github || provider != CiProvider::Actions {
+        bail!("[prebuild] requires GitHub Actions");
+    }
+    Ok(Some(ci::github_prebuild_file(
+        &cfg.ci.nix_system_runners,
+        &cfg.ci.nix_builds,
+        prebuild,
+        &cfg.release.artifacts,
+        cfg.release.attic.as_ref(),
+    )?))
+}
+
+fn run_pages_only(command: InitCiCommand) -> Result<()> {
+    let workspace_root = workflow_workspace_root()?;
+    if !workspace_root.join("flake.nix").is_file() {
+        bail!("Pages workflow generation requires flake.nix at the workspace root");
+    }
+
+    let cfg = ProjectConfig::load(&workspace_root)?;
+    let platform = command
+        .platform
+        .or(cfg.ci.platform)
+        .unwrap_or(Platform::Forgejo);
+    if platform == Platform::Gitlab {
+        bail!("Pages-only generation supports GitHub or Forgejo Actions");
+    }
+    if command
+        .ci_provider
+        .is_some_and(|provider| provider != CiProvider::Actions)
+    {
+        bail!("Pages-only generation requires the Actions provider");
+    }
+    let snapshots = workflow_snapshots_for_platform(&workspace_root, platform)?;
+    let inference = CiInference::from_workflows(&snapshots)?;
+    let inferred_pages = infer_codeberg_pages_from_workflows(&snapshots)?;
+    let inferred_runner = inference.runner.or_else(|| {
+        snapshots.iter().find_map(|snapshot| {
+            snapshot.content.lines().find_map(|line| {
+                let runner = line.trim().strip_prefix("runs-on: ")?;
+                (!runner.contains("${{")).then(|| runner.trim_matches('"').to_owned())
+            })
+        })
+    });
+
+    let runner = match platform {
+        Platform::Github => command
+            .runner
+            .as_deref()
+            .or(inferred_runner.as_deref())
+            .unwrap_or("ubuntu-latest"),
+        Platform::Forgejo => command
+            .runner
+            .as_deref()
+            .or(cfg.ci.runner.as_deref())
+            .or(inferred_runner.as_deref())
+            .context("Forgejo Pages generation requires --runner or [ci].runner")?,
+        Platform::Gitlab => unreachable!(),
+    };
+    let pages = codeberg_pages_options(&cfg, &command, inferred_pages.as_ref())?.context(
+        "--pages-only requires --with-pages, [ci.pages], or an existing managed Pages workflow",
+    )?;
+    let files = [ci::codeberg_pages_file(
+        platform,
+        &ResolvedRunner::literal(runner)?,
+        &pages,
+    )?];
+    let message = format!(
+        "Pages workflow is not up to date; run `simit init ci --pages-only --platform {}`",
+        platform.as_str()
+    );
+
+    if command.check {
+        project::check_generated_files(&workspace_root, &files, &message, command.diff)?;
+    } else {
+        project::write_generated_files(&workspace_root, &files)?;
+        if command.with_codeberg_pages && ProjectConfig::can_persist_ci(&workspace_root)? {
+            let mut persisted_ci = cfg.ci;
+            persisted_ci.pages = Some(codeberg_pages_config(&Some(pages))?);
+            ProjectConfig::write_ci(&workspace_root, &persisted_ci)?;
+        }
+        registry::touch_current_project_or_warn([("ci", FeatureStatus::Managed)]);
+    }
+    Ok(())
+}
+
 fn run_nix_only(command: InitCiCommand) -> Result<()> {
     let workspace_root = std::env::current_dir().context("reading current directory")?;
     if !workspace_root.join("flake.nix").is_file() {
         bail!("Nix CI generation requires flake.nix at the workspace root");
     }
-    let platform = command.platform.unwrap_or(Platform::Forgejo);
-    let provider = command.ci_provider.unwrap_or(CiProvider::Actions);
+    let cfg = ProjectConfig::load(&workspace_root)?;
+    let platform = command
+        .platform
+        .or(cfg.ci.platform)
+        .unwrap_or(Platform::Forgejo);
+    let provider = command
+        .ci_provider
+        .or(cfg.ci.provider)
+        .unwrap_or(CiProvider::Actions);
     if provider != CiProvider::Actions {
         bail!("Nix-only CI currently supports the Actions provider only");
     }
@@ -350,43 +621,78 @@ fn run_nix_only(command: InitCiCommand) -> Result<()> {
         bail!("release and language-specific options are not supported for Nix-only CI");
     }
 
+    let system_runners = cfg.ci.nix_system_runners.clone();
+    if !system_runners.is_empty() && command.runner.is_some() {
+        bail!(
+            "--runner cannot be combined with [ci].nix_system_runners; edit the per-system runner map instead"
+        );
+    }
     let runner = match platform {
-        Platform::Github => command.runner.as_deref().unwrap_or("ubuntu-latest"),
+        Platform::Github if !system_runners.is_empty() => system_runners
+            .values()
+            .next()
+            .map(String::as_str)
+            .expect("validated non-empty native runner map"),
+        Platform::Github => command
+            .runner
+            .as_deref()
+            .or(cfg.ci.runner.as_deref())
+            .unwrap_or("ubuntu-latest"),
         Platform::Forgejo => command
             .runner
             .as_deref()
+            .or(cfg.ci.runner.as_deref())
             .context("Nix-only Forgejo CI requires --runner")?,
-        Platform::Gitlab => command.runner.as_deref().unwrap_or("shared"),
+        Platform::Gitlab => command
+            .runner
+            .as_deref()
+            .or(cfg.ci.runner.as_deref())
+            .unwrap_or("shared"),
     };
-    let cfg = ProjectConfig::load(&workspace_root)?;
+    let runner = runner.to_owned();
     let pages = codeberg_pages_options(&cfg, &command, None)?;
     let generated = match platform {
         Platform::Gitlab => project::GeneratedFile {
             relative_path: PathBuf::from(".gitlab-ci.yml"),
             content: ci::gitlab_nix_flake_workflow(),
         },
-        _ => ci::nix_flake_ci_file(platform, &ResolvedRunner::literal(runner)?)?,
+        _ => ci::nix_flake_ci_file_with_system_runners(
+            platform,
+            &ResolvedRunner::literal(&runner)?,
+            &system_runners,
+            &cfg.release.artifacts,
+        )?,
     };
     let mut files = vec![generated];
-    if provider == CiProvider::Actions && !cfg.ci.nix_builds.is_empty() {
+    if provider == CiProvider::Actions && cfg.prebuild.is_none() && !cfg.ci.nix_builds.is_empty() {
         files.push(ci::nix_build_matrix_file(
             platform,
-            &ResolvedRunner::literal(runner)?,
+            &ResolvedRunner::literal(&runner)?,
             &cfg.ci.nix_builds,
         )?);
+    }
+    if let Some(prebuild) = github_prebuild_file(&cfg, platform, provider)? {
+        files.push(prebuild);
     }
     if let Some(pages) = &pages {
         files.push(ci::codeberg_pages_file(
             platform,
-            &ResolvedRunner::literal(runner)?,
+            &ResolvedRunner::literal(&runner)?,
             pages,
         )?);
     }
-    let message = format!(
-        "Nix-only CI is not up to date; run `simit init ci --platform {} --runtime nix --runner {}`",
-        platform.as_str(),
-        runner
-    );
+    let message = if system_runners.is_empty() {
+        format!(
+            "Nix-only CI is not up to date; run `simit init ci --platform {} --runtime nix --runner {}`",
+            platform.as_str(),
+            runner
+        )
+    } else {
+        format!(
+            "Nix-only CI is not up to date; run `simit init ci --platform {} --runtime nix` (edit [ci.nix_system_runners] for native labels)",
+            platform.as_str()
+        )
+    };
     if command.check {
         if platform == Platform::Gitlab {
             project::check_generated_files(&workspace_root, &files, &message, command.diff)?;
@@ -395,11 +701,12 @@ fn run_nix_only(command: InitCiCommand) -> Result<()> {
         }
     } else {
         project::write_generated_files(&workspace_root, &files)?;
+        cleanup_obsolete_nix_workflows(&workspace_root, platform, &files)?;
         let mut persisted_ci = cfg.ci;
         persisted_ci.provider = Some(CiProvider::Actions);
         persisted_ci.platform = Some(platform);
         persisted_ci.runtime = Some(Runtime::Nix);
-        persisted_ci.runner = Some(runner.to_owned());
+        persisted_ci.runner = system_runners.is_empty().then(|| runner.clone());
         if command.with_codeberg_pages {
             persisted_ci.pages = Some(codeberg_pages_config(&pages)?);
         }
@@ -475,15 +782,21 @@ fn run_python(command: InitCiCommand) -> Result<()> {
         .or_else(|| user_config.ci.tools.omnix.r#ref.clone())
         .unwrap_or_else(|| resolved.omnix_ref.clone());
     let options = resolved.ci_options(&cfg, false, omnix_ref.clone());
+    let runner_override =
+        if platform != Platform::Github || cfg.ci.platform == Some(Platform::Github) {
+            resolved.runner.as_deref()
+        } else {
+            command.runner.as_deref()
+        };
     let runners = user_config.resolve_ci_runners(
         platform,
         resolved.runtime,
-        resolved.runner.as_deref(),
+        runner_override,
         resolved.windows_runner.as_deref(),
         false,
     )?;
     let persisted_runner =
-        self_check_runner_override(resolved.runner.as_deref(), &runners.ci).map(str::to_owned);
+        self_check_runner_override(runner_override, &runners.ci).map(str::to_owned);
     let with_pypi_publish = resolved.with_pypi_publish;
     let mut files = vec![ci::python_ci_file(
         platform,
@@ -493,12 +806,15 @@ fn run_python(command: InitCiCommand) -> Result<()> {
         &cfg.flake.expected_outputs.checks,
         &cfg.ci.components,
     )?];
-    if provider == CiProvider::Actions && !options.nix_builds.is_empty() {
+    if provider == CiProvider::Actions && cfg.prebuild.is_none() && !options.nix_builds.is_empty() {
         files.push(ci::nix_build_matrix_file(
             platform,
             &runners.ci,
             &options.nix_builds,
         )?);
+    }
+    if let Some(prebuild) = github_prebuild_file(&cfg, platform, provider)? {
+        files.push(prebuild);
     }
     if with_pypi_publish {
         files.push(ci::python_publish_file(
@@ -545,6 +861,7 @@ fn run_python(command: InitCiCommand) -> Result<()> {
         upgrade::update_readme_badges_if_present(workspace_root, true, command.diff)
     } else {
         project::write_generated_files(workspace_root, &files)?;
+        cleanup_obsolete_nix_workflows(workspace_root, platform, &files)?;
         if ProjectConfig::can_persist_ci(workspace_root)? {
             ProjectConfig::write_ci(workspace_root, &persisted_ci)?;
         }
@@ -1019,6 +1336,8 @@ pub(crate) fn project_regeneration_command(workspace_root: &Path) -> Result<Opti
         resolved.publish_crates || with_artifacts || with_homebrew || windows_packagers;
     let inferred_pages = infer_codeberg_pages_from_workflows(&snapshots)?;
     let command = InitCiCommand {
+        pages_only: false,
+        prebuild_only: false,
         packages: Vec::new(),
         workspace: false,
         workspace_strategy: None,
@@ -1272,7 +1591,7 @@ pub(crate) fn render_regeneration_command(
         args.push("--with-scoop".to_owned());
     }
     if command.with_codeberg_pages {
-        args.push("--with-codeberg-pages".to_owned());
+        args.push("--with-pages".to_owned());
         push_optional_arg(&mut args, "--pages-repo", command.pages_repo.as_deref());
         push_optional_arg(
             &mut args,
@@ -1491,6 +1810,51 @@ fn extra_generated_workflows(
     Ok(extras)
 }
 
+fn cleanup_obsolete_nix_workflows(
+    workspace_root: &Path,
+    platform: Platform,
+    expected: &[project::GeneratedFile],
+) -> Result<()> {
+    let expected = expected
+        .iter()
+        .map(|file| file.relative_path.clone())
+        .collect::<BTreeSet<_>>();
+    for relative in obsolete_nix_workflows(workspace_root, platform, &expected)? {
+        fs::remove_file(workspace_root.join(&relative))
+            .with_context(|| format!("removing obsolete {}", relative.display()))?;
+    }
+    Ok(())
+}
+
+fn obsolete_nix_workflows(
+    workspace_root: &Path,
+    platform: Platform,
+    expected: &BTreeSet<PathBuf>,
+) -> Result<Vec<PathBuf>> {
+    let workflow_dir = PathBuf::from(platform.workflow_dir());
+    let mut obsolete = Vec::new();
+    for name in [
+        "nix-builds.yaml",
+        "nix-builds.yml",
+        "prebuild.yaml",
+        "prebuild.yml",
+    ] {
+        let relative = workflow_dir.join(name);
+        if expected.contains(&relative) {
+            continue;
+        }
+        let path = workspace_root.join(&relative);
+        let Ok(content) = fs::read_to_string(&path) else {
+            continue;
+        };
+        if generated_workflow_marker_present(&content) {
+            obsolete.push(relative);
+        }
+    }
+    obsolete.sort();
+    Ok(obsolete)
+}
+
 fn check_generated_crow_files(
     workspace_root: &Path,
     files: &[project::GeneratedFile],
@@ -1556,6 +1920,10 @@ fn is_ci_managed_workflow_name(name: &std::ffi::OsStr) -> bool {
             | "publish-crate.yml"
             | "release-artifacts.yaml"
             | "release-artifacts.yml"
+            | "nix-builds.yaml"
+            | "nix-builds.yml"
+            | "prebuild.yaml"
+            | "prebuild.yml"
             | "pages.yaml"
             | "pages.yml"
             | "publish-vscode-extension.yaml"
@@ -1563,6 +1931,8 @@ fn is_ci_managed_workflow_name(name: &std::ffi::OsStr) -> bool {
             | "publish-jetbrains-plugin.yaml"
             | "publish-jetbrains-plugin.yml"
     ) || name.starts_with("ci-")
+        || name.starts_with("nix-builds-")
+        || name.starts_with("prebuild-")
         || name.starts_with("publish-crate-")
         || name.starts_with("release-artifacts-")
 }
@@ -1623,7 +1993,7 @@ fn resolve_codeberg_pages(
         .clone()
         .or_else(|| config.as_ref().map(|pages| pages.repo.clone()))
         .or_else(|| inferred.map(|pages| pages.repo.clone()))
-        .context("--with-codeberg-pages requires --pages-repo or [ci.pages].repo")?;
+        .context("--with-pages requires --pages-repo or [ci.pages].repo")?;
     validate_download_repo_for("--pages-repo", &repo)?;
     let owner = repo
         .split_once('/')
@@ -1753,10 +2123,16 @@ fn infer_pages_canonical_domain(content: &str) -> Option<String> {
 
 fn infer_pages_site_output(content: &str) -> Option<String> {
     let marker = "nix build ";
-    let suffix = " --no-link --out-link result-pages-site";
-    let line = content
-        .lines()
-        .find(|line| line.contains(marker) && line.contains(suffix))?;
+    let line = content.lines().find(|line| {
+        line.contains(marker)
+            && (line.contains(" --out-link result-pages-site")
+                || line.contains(" --no-link --out-link result-pages-site"))
+    })?;
+    let suffix = if line.contains(" --no-link --out-link result-pages-site") {
+        " --no-link --out-link result-pages-site"
+    } else {
+        " --out-link result-pages-site"
+    };
     let start = line.find(marker)? + marker.len();
     let tail = &line[start..];
     let end = tail.find(suffix)?;
@@ -1808,7 +2184,7 @@ fn shell_unquote(value: &str) -> String {
 fn codeberg_pages_config(pages: &Option<CodebergPagesOptions>) -> Result<CodebergPagesConfig> {
     let pages = pages
         .as_ref()
-        .context("--with-codeberg-pages did not resolve a Pages configuration")?;
+        .context("--with-pages did not resolve a Pages configuration")?;
     Ok(CodebergPagesConfig {
         repo: pages.repo.clone(),
         canonical_domain: pages.canonical_domain.clone(),

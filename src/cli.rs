@@ -418,6 +418,17 @@ pub enum BumpKind {
 #[derive(Debug, Args)]
 pub struct InitCiCommand {
     #[arg(
+        long,
+        help = "Generate or verify only the Pages workflow without changing primary CI"
+    )]
+    pub pages_only: bool,
+    #[arg(
+        long,
+        conflicts_with_all = ["pages_only", "runner"],
+        help = "Generate or verify only the native GitHub prebuild workflow"
+    )]
+    pub prebuild_only: bool,
+    #[arg(
         long = "package",
         value_name = "NAME",
         conflicts_with = "workspace",
@@ -607,8 +618,9 @@ pub struct InitCiCommand {
     )]
     pub with_scoop: bool,
     #[arg(
-        long = "with-codeberg-pages",
-        help = "Generate a Pages workflow that publishes .#site with .#deploy-pages"
+        long = "with-pages",
+        visible_alias = "with-codeberg-pages",
+        help = "Generate a Pages workflow for the selected platform"
     )]
     pub with_codeberg_pages: bool,
     #[arg(
@@ -625,7 +637,7 @@ pub struct InitCiCommand {
         long = "pages-repo",
         value_name = "OWNER/REPO",
         requires = "with_codeberg_pages",
-        help = "Codeberg repository receiving the generated pages branch"
+        help = "Repository associated with the Pages site"
     )]
     pub pages_repo: Option<String>,
     #[arg(
@@ -653,7 +665,7 @@ pub struct InitCiCommand {
         long = "pages-source-branch",
         value_name = "BRANCH",
         requires = "with_codeberg_pages",
-        help = "Branch whose pushes publish Codeberg Pages"
+        help = "Branch whose pushes publish Pages"
     )]
     pub pages_source_branch: Option<String>,
     #[arg(

@@ -27,6 +27,8 @@ use crate::user_config::validate_runner_label;
 #[serde(deny_unknown_fields)]
 pub struct ProjectConfig {
     #[serde(default)]
+    pub prebuild: Option<PrebuildConfig>,
+    #[serde(default)]
     pub release: ReleaseConfig,
     #[serde(default)]
     pub flake: FlakeConfig,
@@ -377,6 +379,9 @@ pub struct CiConfig {
     pub runtime: Option<Runtime>,
     #[serde(default)]
     pub runner: Option<String>,
+    /// Native GitHub-hosted runner label for each Nix system.
+    #[serde(default)]
+    pub nix_system_runners: BTreeMap<String, String>,
     #[serde(default)]
     pub windows_runner: Option<String>,
     #[serde(default)]
@@ -429,6 +434,16 @@ pub struct CiConfig {
     pub components: Vec<CiComponent>,
     #[serde(default)]
     pub crow: CrowCiConfig,
+}
+
+/// `[prebuild]` — native GitHub Nix builds shared by CI and releases.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PrebuildConfig {
+    #[serde(default)]
+    pub release_archives: bool,
+    #[serde(default)]
+    pub publish_attic: bool,
 }
 
 /// `[ci.crow]` — project-side Crow workflow rendering options.
@@ -738,6 +753,9 @@ pub struct AtticConfig {
     pub token_dir_env: String,
     /// Token file name within `$<token_dir_env>`.
     pub token_name: String,
+    /// Optional Actions secret used by GitHub-hosted prebuild jobs.
+    #[serde(default)]
+    pub token_secret: Option<String>,
     /// `--out-link` result paths pushed to the cache.
     #[serde(default)]
     pub result_links: Vec<String>,
@@ -1748,6 +1766,47 @@ impl ProjectConfig {
         }
         validate_runner_label_opt("[ci].runner", self.ci.runner.as_deref())?;
         validate_runner_label_opt("[ci].windows_runner", self.ci.windows_runner.as_deref())?;
+        validate_nix_system_runners(&self.ci)?;
+        if let Some(token_secret) = self
+            .release
+            .attic
+            .as_ref()
+            .and_then(|attic| attic.token_secret.as_deref())
+        {
+            validate_github_actions_secret_identifier(
+                "simit project config: [release.attic].token_secret",
+                token_secret,
+            )?;
+        }
+        if let Some(prebuild) = &self.prebuild {
+            if self.ci.nix_system_runners.is_empty() {
+                bail!("simit project config: [prebuild] requires [ci.nix_system_runners]");
+            }
+            if self.ci.nix_builds.is_empty() && !prebuild.release_archives {
+                bail!(
+                    "simit project config: [prebuild] requires [ci].nix_builds or release_archives = true"
+                );
+            }
+            if prebuild.release_archives
+                && self
+                    .release
+                    .artifacts
+                    .effective_nix_bundle_attrs()
+                    .is_empty()
+            {
+                bail!(
+                    "simit project config: [prebuild].release_archives requires release.artifacts Nix bundle outputs"
+                );
+            }
+            if prebuild.publish_attic {
+                let attic = self.release.attic.as_ref().context(
+                    "simit project config: [prebuild].publish_attic requires [release.attic]",
+                )?;
+                attic.token_secret.as_deref().context(
+                    "simit project config: [prebuild].publish_attic requires [release.attic].token_secret",
+                )?;
+            }
+        }
         if let Some(image) = &self.ci.crow.image {
             validate_nonempty_string("simit project config: [ci.crow].image", image)?;
         }
@@ -2992,9 +3051,60 @@ fn validate_nonempty_string(name: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
+fn validate_github_actions_secret_identifier(name: &str, value: &str) -> Result<()> {
+    let mut bytes = value.bytes();
+    let Some(first) = bytes.next() else {
+        bail!("{name} must be a GitHub Actions secret identifier");
+    };
+    if !(first.is_ascii_alphabetic() || first == b'_')
+        || !bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        || value.to_ascii_uppercase().starts_with("GITHUB_")
+    {
+        bail!(
+            "{name} must be a GitHub Actions secret identifier: start with a letter or underscore, contain only ASCII letters, digits, and underscores, and not use the reserved GITHUB_ prefix"
+        );
+    }
+    Ok(())
+}
+
 fn validate_runner_label_opt(name: &str, value: Option<&str>) -> Result<()> {
     if let Some(value) = value {
         validate_runner_label(value).map_err(|err| anyhow!("{name}: {err}"))?;
+    }
+    Ok(())
+}
+
+fn validate_nix_system_runners(ci: &CiConfig) -> Result<()> {
+    if ci.nix_system_runners.is_empty() {
+        return Ok(());
+    }
+    if ci.platform != Some(Platform::Github) || ci.runtime != Some(Runtime::Nix) {
+        bail!(
+            "simit project config: [ci].nix_system_runners requires [ci].platform = \"github\" and [ci].runtime = \"nix\""
+        );
+    }
+    if ci
+        .provider
+        .is_some_and(|provider| provider != CiProvider::Actions)
+    {
+        bail!("simit project config: [ci].nix_system_runners requires the Actions provider");
+    }
+    if ci.runner.is_some() {
+        bail!("simit project config: [ci].runner cannot be combined with [ci].nix_system_runners");
+    }
+    for (system, runner) in &ci.nix_system_runners {
+        if system.trim().is_empty()
+            || !system
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        {
+            bail!(
+                "simit project config: [ci].nix_system_runners has invalid Nix system `{system}`"
+            );
+        }
+        validate_runner_label(runner).map_err(|err| {
+            anyhow!("simit project config: [ci].nix_system_runners.{system}: {err}")
+        })?;
     }
     Ok(())
 }
@@ -3004,6 +3114,7 @@ fn set_ci_table(table: &mut Table, ci: &CiConfig) {
     set_optional_string(table, "platform", ci.platform.map(Platform::as_str));
     set_optional_string(table, "runtime", ci.runtime.map(runtime_name));
     set_optional_string(table, "runner", ci.runner.as_deref());
+    set_string_map(table, "nix_system_runners", &ci.nix_system_runners);
     set_optional_string(table, "windows_runner", ci.windows_runner.as_deref());
     set_bool(table, "workspace", ci.workspace);
     set_optional_string(

@@ -305,6 +305,8 @@ impl ResolvedCiInputs {
     ) -> CiOptions {
         CiOptions {
             nix_builds: cfg.ci.nix_builds.clone(),
+            nix_substituters: cfg.release.artifacts.substituters.clone(),
+            nix_trusted_public_keys: cfg.release.artifacts.trusted_public_keys.clone(),
             with_nextest: self.with_nextest,
             with_msrv: self.with_msrv,
             with_audit: self.with_audit,
@@ -576,7 +578,7 @@ fn single_runs_on_label(content: &str, occurrence: usize) -> Option<String> {
         .filter_map(|line| line.trim_start().strip_prefix("runs-on: "))
         .nth(occurrence)?
         .trim();
-    if line.starts_with('[') {
+    if line.starts_with('[') || line.contains("${{") {
         return None;
     }
     Some(line.trim_matches('"').to_owned())
