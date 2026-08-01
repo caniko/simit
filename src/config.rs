@@ -412,6 +412,8 @@ pub struct CiConfig {
     #[serde(default)]
     pub pypi_token_secret: Option<String>,
     #[serde(default)]
+    pub pypi_trusted_publishing: bool,
+    #[serde(default)]
     pub publish_crates: bool,
     #[serde(default)]
     pub extra_setup: Vec<String>,
@@ -1884,6 +1886,11 @@ impl ProjectConfig {
         if let Some(secret) = &self.ci.pypi_token_secret {
             validate_secret_name("simit project config: [ci].pypi_token_secret", secret)?;
         }
+        if self.ci.pypi_trusted_publishing && self.ci.pypi_token_secret.is_some() {
+            bail!(
+                "simit project config: [ci].pypi_trusted_publishing and [ci].pypi_token_secret are mutually exclusive"
+            );
+        }
         if let Some(pages) = &self.ci.pages {
             validate_owner_repo("simit project config: [ci.pages].repo", &pages.repo)?;
             if let Some(canonical_domain) = &pages.canonical_domain {
@@ -3156,6 +3163,7 @@ fn set_ci_table(table: &mut Table, ci: &CiConfig) {
     set_bool(table, "with_artifacts", ci.with_artifacts);
     set_bool(table, "with_pypi_publish", ci.with_pypi_publish);
     set_optional_string(table, "pypi_token_secret", ci.pypi_token_secret.as_deref());
+    set_bool(table, "pypi_trusted_publishing", ci.pypi_trusted_publishing);
     set_bool(table, "publish_crates", ci.publish_crates);
     set_string_array(table, "extra_setup", &ci.extra_setup);
     set_string_map(table, "extra_env", &ci.extra_env);

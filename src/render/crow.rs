@@ -691,6 +691,9 @@ pub fn python_publish_file(
     runner: &ResolvedRunner,
     options: &CiOptions,
 ) -> Result<GeneratedFile> {
+    if options.pypi_trusted_publishing {
+        bail!("PyPI trusted publishing requires GitHub Actions");
+    }
     let image = nix_image(config)?;
     let mut publish = Step::new("publish-pypi", &image)
         .command("nix develop -c uv build".to_owned())
@@ -720,6 +723,9 @@ pub fn maturin_publish_file(
     runner: &ResolvedRunner,
     options: &CiOptions,
 ) -> Result<GeneratedFile> {
+    if options.pypi_trusted_publishing {
+        bail!("PyPI trusted publishing requires GitHub Actions");
+    }
     let image = nix_image(config)?;
     let mut publish = Step::new("publish-pypi", &image)
         .command("nix develop -c maturin build --release --sdist".to_owned())
