@@ -107,6 +107,7 @@ pub struct CiOptions {
     pub with_docs: bool,
     pub with_artifacts: bool,
     pub with_pypi_publish: bool,
+    pub pypi_token_secret: String,
     pub publish_crates: bool,
     pub om_ci: OmCiMode,
     pub omnix_ref: String,
@@ -143,6 +144,7 @@ impl Default for CiOptions {
             with_docs: false,
             with_artifacts: false,
             with_pypi_publish: false,
+            pypi_token_secret: "PYPI_TOKEN".to_owned(),
             publish_crates: false,
             om_ci: OmCiMode::default(),
             omnix_ref: OMNIX_REF_DEFAULT.to_owned(),
@@ -1397,7 +1399,9 @@ fn python_publish_workflow(
     workflow.push_str("        run: nix build .# --no-link\n\n");
     workflow.push_str("      - name: Publish to PyPI\n");
     workflow.push_str("        env:\n");
-    workflow.push_str("          UV_PUBLISH_TOKEN: ${{ secrets.PYPI_TOKEN }}\n");
+    workflow.push_str("          UV_PUBLISH_TOKEN: ${{ secrets.");
+    workflow.push_str(&options.pypi_token_secret);
+    workflow.push_str(" }}\n");
     workflow.push_str("        run: |\n");
     workflow.push_str("          nix develop -c uv build\n");
     workflow.push_str("          nix develop -c uv publish\n\n");
@@ -1454,7 +1458,9 @@ fn maturin_publish_workflow(
     push_extra_setup_steps(&mut workflow, &options.extra_setup);
     workflow.push_str("      - name: Build and publish to PyPI\n");
     workflow.push_str("        env:\n");
-    workflow.push_str("          MATURIN_PYPI_TOKEN: ${{ secrets.PYPI_TOKEN }}\n");
+    workflow.push_str("          MATURIN_PYPI_TOKEN: ${{ secrets.");
+    workflow.push_str(&options.pypi_token_secret);
+    workflow.push_str(" }}\n");
     workflow.push_str("        run: |\n");
     workflow.push_str("          nix develop -c maturin build --release --sdist\n");
     workflow.push_str("          nix develop -c maturin publish --skip-existing\n\n");

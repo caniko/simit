@@ -695,7 +695,7 @@ pub fn python_publish_file(
     let mut publish = Step::new("publish-pypi", &image)
         .command("nix develop -c uv build".to_owned())
         .command("nix develop -c uv publish".to_owned())
-        .secret("PYPI_TOKEN");
+        .secret(&options.pypi_token_secret);
     apply_common_options(std::slice::from_mut(&mut publish), options);
     add_nix_environment(std::slice::from_mut(&mut publish));
     let workflow = Workflow {
@@ -724,7 +724,7 @@ pub fn maturin_publish_file(
     let mut publish = Step::new("publish-pypi", &image)
         .command("nix develop -c maturin build --release --sdist".to_owned())
         .command("nix develop -c maturin publish --skip-existing".to_owned())
-        .secret("PYPI_TOKEN");
+        .secret(&options.pypi_token_secret);
     apply_common_options(std::slice::from_mut(&mut publish), options);
     add_nix_environment(std::slice::from_mut(&mut publish));
     let workflow = Workflow {
