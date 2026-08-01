@@ -351,6 +351,19 @@ scope = "everything"
 }
 
 #[test]
+fn invalid_pypi_token_secret_is_rejected() {
+    let err = load_toml(
+        r#"[ci]
+pypi_token_secret = "bad-secret"
+"#,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains(
+        "[ci].pypi_token_secret must contain only ASCII letters, digits, and underscores"
+    ));
+}
+
+#[test]
 fn empty_expected_output_is_rejected() {
     let err = load_toml(
         r#"[flake]

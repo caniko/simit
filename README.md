@@ -366,6 +366,7 @@ in project config, simit renders them into every generated CI, publish, and
 artifact workflow. Extra setup runs after checkout/toolchain setup and before
 tests or builds; extra env is job-level environment; required secrets are
 documented as workflow comments but are not read locally.
+Set `[ci].pypi_token_secret` to override the default `PYPI_TOKEN` secret name.
 
 Generic `init ci` runs render test, lint, and optional quality-gate workflows
 without crates.io publishing. Add `--publish-crates` for release projects that

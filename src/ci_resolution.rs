@@ -312,6 +312,11 @@ impl ResolvedCiInputs {
             with_docs: self.with_docs,
             with_artifacts,
             with_pypi_publish: self.with_pypi_publish,
+            pypi_token_secret: cfg
+                .ci
+                .pypi_token_secret
+                .clone()
+                .unwrap_or_else(|| "PYPI_TOKEN".to_owned()),
             publish_crates: self.publish_crates,
             om_ci: self.om_ci,
             omnix_ref,
