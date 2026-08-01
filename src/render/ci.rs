@@ -1394,6 +1394,7 @@ fn python_publish_workflow(
     push_checkout_step(&mut workflow, platform);
     push_required_env_step(&mut workflow, &options.required_env);
     push_install_nix_step(&mut workflow, platform);
+    push_validate_pypi_tag_step(&mut workflow);
     push_extra_setup_steps(&mut workflow, &options.extra_setup);
     workflow.push_str("      - name: Build Nix package\n");
     workflow.push_str("        run: nix build .# --no-link\n\n");
@@ -1455,6 +1456,7 @@ fn maturin_publish_workflow(
     push_checkout_step(&mut workflow, platform);
     push_required_env_step(&mut workflow, &options.required_env);
     push_install_nix_step(&mut workflow, platform);
+    push_validate_pypi_tag_step(&mut workflow);
     push_extra_setup_steps(&mut workflow, &options.extra_setup);
     workflow.push_str("      - name: Build and publish to PyPI\n");
     workflow.push_str("        env:\n");
@@ -3407,6 +3409,26 @@ fn runs_on(runner: &ResolvedRunner) -> String {
         .collect::<Vec<_>>()
         .join(", ");
     format!("[{labels}]")
+}
+
+fn push_validate_pypi_tag_step(workflow: &mut String) {
+    workflow.push_str(
+        r#"      - name: Validate release tag
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME:-${FORGE_REF_NAME:-${CODEBERG_REF_NAME:-}}}"
+          if ! printf '%s\n' "$tag" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "Tag must be an exact semver version like 0.1.1, got '$tag'" >&2
+            exit 1
+          fi
+          version="$(nix develop -c uv version --short)"
+          if [ "$tag" != "$version" ]; then
+            echo "Tag $tag does not match project version $version" >&2
+            exit 1
+          fi
+
+"#,
+    );
 }
 
 fn validate_release_tag_step(
