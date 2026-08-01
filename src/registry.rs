@@ -963,7 +963,7 @@ fn infer_expected_ci_files(
                 platform, &runner, &pages,
             )?);
         }
-        push_prebuild_file(&mut files, &config, platform, provider)?;
+        push_prebuild_file(&mut files, &config)?;
         return Ok(files);
     }
     if !workspace_root.join("Cargo.toml").is_file() && workspace_root.join("flake.nix").is_file() {
@@ -1017,7 +1017,7 @@ fn infer_expected_ci_files(
                 platform, &runner, &pages,
             )?);
         }
-        push_prebuild_file(&mut files, &config, platform, provider)?;
+        push_prebuild_file(&mut files, &config)?;
         return Ok(files);
     }
     let metadata = cargo::cargo_metadata(&cargo::find_manifest(workspace_root)?)?;
@@ -1150,7 +1150,7 @@ fn infer_expected_ci_files(
             .unwrap_or_else(|| ResolvedRunner::literal("ubuntu-latest").expect("literal runner"));
         files.push(ci::codeberg_pages_file(platform, &pages_runner, &pages)?);
     }
-    push_prebuild_file(&mut files, &config, platform, provider)?;
+    push_prebuild_file(&mut files, &config)?;
 
     Ok(files
         .into_iter()
@@ -1161,17 +1161,12 @@ fn infer_expected_ci_files(
 fn push_prebuild_file(
     files: &mut Vec<project::GeneratedFile>,
     config: &ProjectConfig,
-    platform: Platform,
-    provider: CiProvider,
 ) -> Result<()> {
     let Some(prebuild) = &config.prebuild else {
         return Ok(());
     };
-    if platform != Platform::Github || provider != CiProvider::Actions {
-        bail!("[prebuild] requires GitHub Actions");
-    }
     files.push(crate::render::ci::github_prebuild_file(
-        &config.ci.nix_system_runners,
+        prebuild.effective_system_runners(&config.ci),
         &config.ci.nix_builds,
         prebuild,
         &config.release.artifacts,

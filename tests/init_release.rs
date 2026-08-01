@@ -224,7 +224,7 @@ fn github_release_depends_on_prebuild_and_forwards_attic_secret() {
         )
         .replace(
             "[release.artifacts]",
-            "[prebuild]\nrelease_archives = true\npublish_attic = true\n\n[ci]\nprovider = \"actions\"\nplatform = \"github\"\nruntime = \"nix\"\nnix_builds = [\".#default\"]\n\n[ci.nix_system_runners]\n\"x86_64-linux\" = \"ubuntu-24.04\"\n\n[release.artifacts]",
+            "[prebuild]\nrelease_archives = true\npublish_attic = true\nattic_app = \".#push-flake-inputs\"\n\n[ci]\nprovider = \"actions\"\nplatform = \"github\"\nruntime = \"nix\"\nnix_builds = [\".#default\"]\n\n[ci.nix_system_runners]\n\"x86_64-linux\" = \"ubuntu-24.04\"\n\n[release.artifacts]",
         )
         .replace(
             "runner = \"atlas\"\n",

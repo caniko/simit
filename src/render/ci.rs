@@ -562,20 +562,20 @@ pub fn github_prebuild_file(
             .token_secret
             .as_deref()
             .expect("validated GitHub Attic token secret");
-        workflow.push_str("      - name: Publish recursive closure to Attic\n        if: ${{ github.event_name == 'push' || (inputs.release && github.event_name != 'pull_request') }}\n        env:\n          ATTIC_TOKEN: ${{ inputs.release && secrets.attic_token || secrets.");
+        let attic_app = prebuild
+            .attic_app
+            .as_deref()
+            .expect("validated rs-harbor Attic app");
+        workflow.push_str("      - name: Publish flake inputs to Attic\n        if: ${{ (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) || (inputs.release && github.event_name != 'pull_request') }}\n        env:\n          ATTIC_TOKEN: ${{ inputs.release && secrets.attic_token || secrets.");
         workflow.push_str(token_secret);
-        workflow.push_str(" }}\n          XDG_CONFIG_HOME: ${{ runner.temp }}/simit-attic-${{ github.run_id }}-${{ github.job }}-${{ matrix.system }}\n        run: |\n          set -euo pipefail\n          if [[ -z \"${ATTIC_TOKEN//[[:space:]]/}\" || \"$ATTIC_TOKEN\" == *[!A-Za-z0-9._-]* ]]; then\n            echo \"ATTIC_TOKEN must be a nonempty Attic JWT\" >&2\n            exit 1\n          fi\n          umask 077\n          rm -rf \"$XDG_CONFIG_HOME\"\n          install -d -m 0700 \"$XDG_CONFIG_HOME/attic\"\n          attic_config=\"$XDG_CONFIG_HOME/attic/config.toml\"\n          install -m 0600 /dev/null \"$attic_config\"\n          {\n            printf '%s\\n' 'default-server = ");
-        workflow.push('"');
-        workflow.push_str(&attic.cache);
-        workflow.push_str("\"'\n            printf '%s\\n' '[servers.");
-        workflow.push_str(&attic.cache);
-        workflow.push_str("]'\n            printf '%s\\n' 'endpoint = \"");
-        workflow.push_str(&attic.url);
-        workflow.push_str("\"'\n            printf 'token = \"%s\"\\n' \"$ATTIC_TOKEN\"");
-        workflow.push_str("\n          } > \"$attic_config\"\n          test \"$(stat -c '%a' \"$attic_config\")\" = 600\n          shopt -s nullglob\n          links=(.simit-prebuild/ci-* .simit-prebuild/release-*)\n          if [ \"${#links[@]}\" -eq 0 ]; then echo \"no generated out-links to publish\"; exit 0; fi\n          nix path-info -r \"${links[@]}\" > attic-paths.txt\n          test -s attic-paths.txt\n          attic=\"$(nix build --inputs-from . --no-link --print-out-paths nixpkgs#attic-client)\"\n          test -x \"$attic/bin/attic\"\n          \"$attic/bin/attic\" push --stdin --no-closure --ignore-upstream-cache-filter ");
-        workflow.push_str(&shell_word(&attic.cache));
-        workflow.push_str(" < attic-paths.txt\n");
-        workflow.push_str("      - name: Remove ephemeral Attic credentials\n        if: ${{ always() }}\n        env:\n          XDG_CONFIG_HOME: ${{ runner.temp }}/simit-attic-${{ github.run_id }}-${{ github.job }}-${{ matrix.system }}\n        run: rm -rf \"$XDG_CONFIG_HOME\"\n");
+        workflow.push_str(
+            " }}\n          HARBOR_ATTIC_MANIFEST: attic-paths.txt\n        run: nix run ",
+        );
+        workflow.push_str(&shell_quote(attic_app));
+        workflow.push('\n');
+        workflow.push_str("      - name: Upload flake input manifest\n        if: ${{ (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) || (inputs.release && github.event_name != 'pull_request') }}\n        uses: ");
+        workflow.push_str(&github_action_ref("actions/upload-artifact", "v4.6.2"));
+        workflow.push_str("\n        with:\n          name: flake-inputs-${{ matrix.system }}\n          path: attic-paths.txt\n          if-no-files-found: error\n          retention-days: 7\n");
     }
 
     Ok(GeneratedFile {

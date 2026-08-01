@@ -449,6 +449,26 @@ pub struct PrebuildConfig {
     pub release_archives: bool,
     #[serde(default)]
     pub publish_attic: bool,
+    /// rs-harbor app used for Attic publication.
+    #[serde(default)]
+    pub attic_app: Option<String>,
+    /// GitHub-hosted runner label for each native Nix system. This keeps the
+    /// prebuild additive when the project's primary CI is Forgejo or Crow.
+    #[serde(default)]
+    pub system_runners: BTreeMap<String, String>,
+}
+
+impl PrebuildConfig {
+    pub(crate) fn effective_system_runners<'a>(
+        &'a self,
+        ci: &'a CiConfig,
+    ) -> &'a BTreeMap<String, String> {
+        if self.system_runners.is_empty() {
+            &ci.nix_system_runners
+        } else {
+            &self.system_runners
+        }
+    }
 }
 
 /// `[ci.crow]` — project-side Crow workflow rendering options.
@@ -1784,12 +1804,21 @@ impl ProjectConfig {
             )?;
         }
         if let Some(prebuild) = &self.prebuild {
-            if self.ci.nix_system_runners.is_empty() {
-                bail!("simit project config: [prebuild] requires [ci.nix_system_runners]");
-            }
-            if self.ci.nix_builds.is_empty() && !prebuild.release_archives {
+            if prebuild.effective_system_runners(&self.ci).is_empty() {
                 bail!(
-                    "simit project config: [prebuild] requires [ci].nix_builds or release_archives = true"
+                    "simit project config: [prebuild] requires [prebuild.system_runners] or [ci.nix_system_runners]"
+                );
+            }
+            validate_system_runner_map(
+                "simit project config: [prebuild].system_runners",
+                &prebuild.system_runners,
+            )?;
+            if self.ci.nix_builds.is_empty()
+                && !prebuild.release_archives
+                && prebuild.attic_app.is_none()
+            {
+                bail!(
+                    "simit project config: [prebuild] requires [ci].nix_builds, release_archives = true, or attic_app"
                 );
             }
             if prebuild.release_archives
@@ -1804,6 +1833,10 @@ impl ProjectConfig {
                 );
             }
             if prebuild.publish_attic {
+                let attic_app = prebuild.attic_app.as_deref().context(
+                    "simit project config: [prebuild].publish_attic requires [prebuild].attic_app",
+                )?;
+                validate_nonempty_string("simit project config: [prebuild].attic_app", attic_app)?;
                 let attic = self.release.attic.as_ref().context(
                     "simit project config: [prebuild].publish_attic requires [release.attic]",
                 )?;
@@ -3118,19 +3151,22 @@ fn validate_nix_system_runners(ci: &CiConfig) -> Result<()> {
         bail!("simit project config: [ci].runner cannot be combined with [ci].nix_system_runners");
     }
 
-    for (system, runner) in &ci.nix_system_runners {
+    validate_system_runner_map(
+        "simit project config: [ci].nix_system_runners",
+        &ci.nix_system_runners,
+    )
+}
+
+fn validate_system_runner_map(name: &str, runners: &BTreeMap<String, String>) -> Result<()> {
+    for (system, runner) in runners {
         if system.trim().is_empty()
             || !system
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
         {
-            bail!(
-                "simit project config: [ci].nix_system_runners has invalid Nix system `{system}`"
-            );
+            bail!("{name} has invalid Nix system `{system}`");
         }
-        validate_runner_label(runner).map_err(|err| {
-            anyhow!("simit project config: [ci].nix_system_runners.{system}: {err}")
-        })?;
+        validate_runner_label(runner).map_err(|err| anyhow!("{name}.{system}: {err}"))?;
     }
     Ok(())
 }
