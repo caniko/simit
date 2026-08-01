@@ -27,6 +27,8 @@ use crate::user_config::validate_runner_label;
 #[serde(deny_unknown_fields)]
 pub struct ProjectConfig {
     #[serde(default)]
+    pub prebuild: Option<PrebuildConfig>,
+    #[serde(default)]
     pub release: ReleaseConfig,
     #[serde(default)]
     pub flake: FlakeConfig,
@@ -390,6 +392,9 @@ pub struct CiConfig {
     pub workspace_strategy: WorkspaceStrategy,
     #[serde(default)]
     pub packages: Vec<String>,
+    /// Nix installables that must be built by generated hosted-runner jobs.
+    #[serde(default)]
+    pub nix_builds: Vec<String>,
     #[serde(default)]
     pub with_nextest: bool,
     #[serde(default)]
@@ -430,6 +435,16 @@ pub struct CiConfig {
     pub components: Vec<CiComponent>,
     #[serde(default)]
     pub crow: CrowCiConfig,
+}
+
+/// `[prebuild]` - native GitHub Nix builds shared by CI and releases.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PrebuildConfig {
+    #[serde(default)]
+    pub release_archives: bool,
+    #[serde(default)]
+    pub publish_attic: bool,
 }
 
 /// `[ci.crow]` — project-side Crow workflow rendering options.
@@ -739,6 +754,9 @@ pub struct AtticConfig {
     pub token_dir_env: String,
     /// Token file name within `$<token_dir_env>`.
     pub token_name: String,
+    /// Optional Actions secret used by GitHub-hosted prebuild jobs.
+    #[serde(default)]
+    pub token_secret: Option<String>,
     /// `--out-link` result paths pushed to the cache.
     #[serde(default)]
     pub result_links: Vec<String>,
@@ -1738,9 +1756,58 @@ impl ProjectConfig {
             bail!("simit project config: [ci].workspace cannot be true when [ci].packages is set");
         }
         validate_nonempty_strings("simit project config: [ci].packages", &self.ci.packages)?;
+        validate_nonempty_strings("simit project config: [ci].nix_builds", &self.ci.nix_builds)?;
+        if self
+            .ci
+            .nix_builds
+            .iter()
+            .any(|installable| installable.contains('\n') || installable.contains('\r'))
+        {
+            bail!("simit project config: [ci].nix_builds must contain single-line installables");
+        }
         validate_runner_label_opt("[ci].runner", self.ci.runner.as_deref())?;
         validate_runner_label_opt("[ci].windows_runner", self.ci.windows_runner.as_deref())?;
         validate_nix_system_runners(&self.ci)?;
+        if let Some(token_secret) = self
+            .release
+            .attic
+            .as_ref()
+            .and_then(|attic| attic.token_secret.as_deref())
+        {
+            validate_github_actions_secret_identifier(
+                "simit project config: [release.attic].token_secret",
+                token_secret,
+            )?;
+        }
+        if let Some(prebuild) = &self.prebuild {
+            if self.ci.nix_system_runners.is_empty() {
+                bail!("simit project config: [prebuild] requires [ci.nix_system_runners]");
+            }
+            if self.ci.nix_builds.is_empty() && !prebuild.release_archives {
+                bail!(
+                    "simit project config: [prebuild] requires [ci].nix_builds or release_archives = true"
+                );
+            }
+            if prebuild.release_archives
+                && self
+                    .release
+                    .artifacts
+                    .effective_nix_bundle_attrs()
+                    .is_empty()
+            {
+                bail!(
+                    "simit project config: [prebuild].release_archives requires release.artifacts Nix bundle outputs"
+                );
+            }
+            if prebuild.publish_attic {
+                let attic = self.release.attic.as_ref().context(
+                    "simit project config: [prebuild].publish_attic requires [release.attic]",
+                )?;
+                attic.token_secret.as_deref().context(
+                    "simit project config: [prebuild].publish_attic requires [release.attic].token_secret",
+                )?;
+            }
+        }
         if let Some(image) = &self.ci.crow.image {
             validate_nonempty_string("simit project config: [ci.crow].image", image)?;
         }
@@ -2985,6 +3052,22 @@ fn validate_nonempty_string(name: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
+fn validate_github_actions_secret_identifier(name: &str, value: &str) -> Result<()> {
+    let mut bytes = value.bytes();
+    let Some(first) = bytes.next() else {
+        bail!("{name} must be a GitHub Actions secret identifier");
+    };
+    if !(first.is_ascii_alphabetic() || first == b'_')
+        || !bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        || value.to_ascii_uppercase().starts_with("GITHUB_")
+    {
+        bail!(
+            "{name} must be a GitHub Actions secret identifier: start with a letter or underscore, contain only ASCII letters, digits, and underscores, and not use the reserved GITHUB_ prefix"
+        );
+    }
+    Ok(())
+}
+
 fn validate_runner_label_opt(name: &str, value: Option<&str>) -> Result<()> {
     if let Some(value) = value {
         validate_runner_label(value).map_err(|err| anyhow!("{name}: {err}"))?;
@@ -3048,6 +3131,7 @@ fn set_ci_table(table: &mut Table, ci: &CiConfig) {
         ),
     );
     set_string_array(table, "packages", &ci.packages);
+    set_string_array(table, "nix_builds", &ci.nix_builds);
     set_bool(table, "with_nextest", ci.with_nextest);
     set_bool(table, "with_msrv", ci.with_msrv);
     set_bool(table, "with_audit", ci.with_audit);

@@ -304,6 +304,7 @@ impl ResolvedCiInputs {
         omnix_ref: String,
     ) -> CiOptions {
         CiOptions {
+            nix_builds: cfg.ci.nix_builds.clone(),
             with_nextest: self.with_nextest,
             with_msrv: self.with_msrv,
             with_audit: self.with_audit,

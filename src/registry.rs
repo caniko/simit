@@ -939,6 +939,17 @@ fn infer_expected_ci_files(
             &config.flake.expected_outputs.checks,
             &config.ci.components,
         )?];
+        if provider == CiProvider::Actions
+            && config.prebuild.is_none()
+            && !options.nix_builds.is_empty()
+        {
+            files.push(crate::render::ci::nix_build_matrix_file(
+                platform,
+                &runner,
+                &options.nix_builds,
+                &options.extra_setup,
+            )?);
+        }
         if resolved.with_pypi_publish {
             files.push(crate::render::ci::python_publish_file(
                 platform,
@@ -952,6 +963,7 @@ fn infer_expected_ci_files(
                 platform, &runner, &pages,
             )?);
         }
+        push_prebuild_file(&mut files, &config, platform, provider)?;
         return Ok(files);
     }
     if !workspace_root.join("Cargo.toml").is_file() && workspace_root.join("flake.nix").is_file() {
@@ -987,12 +999,25 @@ fn infer_expected_ci_files(
             platform,
             &runner,
             &config.ci.nix_system_runners,
+            &config.release.artifacts,
         )?];
+        if provider == CiProvider::Actions
+            && config.prebuild.is_none()
+            && !config.ci.nix_builds.is_empty()
+        {
+            files.push(crate::render::ci::nix_build_matrix_file(
+                platform,
+                &runner,
+                &config.ci.nix_builds,
+                &config.ci.extra_setup,
+            )?);
+        }
         if let Some(pages) = config_pages_or_inferred(&config, marked)? {
             files.push(crate::render::ci::codeberg_pages_file(
                 platform, &runner, &pages,
             )?);
         }
+        push_prebuild_file(&mut files, &config, platform, provider)?;
         return Ok(files);
     }
     let metadata = cargo::cargo_metadata(&cargo::find_manifest(workspace_root)?)?;
@@ -1095,6 +1120,17 @@ fn infer_expected_ci_files(
             step_runners: &step_runners,
         })?);
     }
+    if provider == CiProvider::Actions
+        && config.prebuild.is_none()
+        && !options.nix_builds.is_empty()
+    {
+        files.push(crate::render::ci::nix_build_matrix_file(
+            platform,
+            &runners.ci,
+            &options.nix_builds,
+            &options.extra_setup,
+        )?);
+    }
     if resolved.with_pypi_publish && cargo::has_pyo3_dep(&metadata.packages) {
         files.push(ci::maturin_publish_file(
             platform,
@@ -1114,11 +1150,34 @@ fn infer_expected_ci_files(
             .unwrap_or_else(|| ResolvedRunner::literal("ubuntu-latest").expect("literal runner"));
         files.push(ci::codeberg_pages_file(platform, &pages_runner, &pages)?);
     }
+    push_prebuild_file(&mut files, &config, platform, provider)?;
 
     Ok(files
         .into_iter()
         .filter(|file| is_workflow_path(&file.relative_path))
         .collect())
+}
+
+fn push_prebuild_file(
+    files: &mut Vec<project::GeneratedFile>,
+    config: &ProjectConfig,
+    platform: Platform,
+    provider: CiProvider,
+) -> Result<()> {
+    let Some(prebuild) = &config.prebuild else {
+        return Ok(());
+    };
+    if platform != Platform::Github || provider != CiProvider::Actions {
+        bail!("[prebuild] requires GitHub Actions");
+    }
+    files.push(crate::render::ci::github_prebuild_file(
+        &config.ci.nix_system_runners,
+        &config.ci.nix_builds,
+        prebuild,
+        &config.release.artifacts,
+        config.release.attic.as_ref(),
+    )?);
+    Ok(())
 }
 
 fn workflow_snapshots(marked: &[WorkflowFile]) -> Vec<WorkflowSnapshot> {
