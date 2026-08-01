@@ -741,12 +741,24 @@ fn push_secrets_header(w: &mut String, inputs: &ReleaseWorkflowInputs<'_>) {
         .expect("write");
     }
     if let Some(attic) = inputs.attic {
-        writeln!(
-            w,
-            "# Runner credential: ${}/{}: Attic token file.",
-            attic.token_dir_env, attic.token_name
-        )
-        .expect("write");
+        if prebuild_publishes_attic(inputs) {
+            writeln!(
+                w,
+                "# - {}: repository secret for native prebuild Attic publication.",
+                attic
+                    .token_secret
+                    .as_deref()
+                    .expect("validated GitHub Attic token secret")
+            )
+            .expect("write");
+        } else {
+            writeln!(
+                w,
+                "# Runner credential: ${}/{}: Attic token file.",
+                attic.token_dir_env, attic.token_name
+            )
+            .expect("write");
+        }
     }
     w.push('\n');
 }
