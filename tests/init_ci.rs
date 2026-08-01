@@ -3217,7 +3217,7 @@ pypi_token_secret = "PYPI_API_TOKEN"
     assert!(workflow.contains("UV_PUBLISH_TOKEN: ${{ secrets.PYPI_API_TOKEN }}"));
     assert!(!workflow.contains("secrets.PYPI_TOKEN"));
     assert!(workflow.contains("Tag must be an exact semver version"));
-    assert!(workflow.contains("version=\"$(nix develop -c uv version --short)\""));
+    assert!(workflow.contains("builtins.fromTOML"));
     assert!(!read(&temp.path().join(".github/workflows/ci.yaml")).contains("Validate release tag"));
 }
 

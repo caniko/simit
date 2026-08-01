@@ -3421,7 +3421,7 @@ fn push_validate_pypi_tag_step(workflow: &mut String) {
             echo "Tag must be an exact semver version like 0.1.1, got '$tag'" >&2
             exit 1
           fi
-          version="$(nix develop -c uv version --short)"
+          version="$(nix eval --raw --impure --expr '(builtins.fromTOML (builtins.readFile ./pyproject.toml)).project.version')"
           if [ "$tag" != "$version" ]; then
             echo "Tag $tag does not match project version $version" >&2
             exit 1
