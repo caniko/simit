@@ -351,7 +351,7 @@ scope = "everything"
 }
 
 #[test]
-fn invalid_pypi_token_secret_is_rejected() {
+fn invalid_pypi_auth_is_rejected() {
     let err = load_toml(
         r#"[ci]
 pypi_token_secret = "bad-secret"
@@ -361,6 +361,15 @@ pypi_token_secret = "bad-secret"
     assert!(err.to_string().contains(
         "[ci].pypi_token_secret must contain only ASCII letters, digits, and underscores"
     ));
+
+    let err = load_toml(
+        r#"[ci]
+pypi_token_secret = "PYPI_TOKEN"
+pypi_trusted_publishing = true
+"#,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("mutually exclusive"));
 }
 
 #[test]

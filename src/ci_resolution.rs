@@ -317,6 +317,7 @@ impl ResolvedCiInputs {
                 .pypi_token_secret
                 .clone()
                 .unwrap_or_else(|| "PYPI_TOKEN".to_owned()),
+            pypi_trusted_publishing: cfg.ci.pypi_trusted_publishing,
             publish_crates: self.publish_crates,
             om_ci: self.om_ci,
             omnix_ref,

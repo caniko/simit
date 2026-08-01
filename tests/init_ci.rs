@@ -3348,6 +3348,28 @@ pypi_token_secret = "PYPI_API_TOKEN"
     assert!(workflow.contains("Tag must be an exact semver version"));
     assert!(workflow.contains("builtins.fromTOML"));
     assert!(!read(&temp.path().join(".github/workflows/ci.yaml")).contains("Validate release tag"));
+
+    let config = read(&temp.path().join("simit.toml")).replace(
+        "pypi_token_secret = \"PYPI_API_TOKEN\"",
+        "pypi_trusted_publishing = true",
+    );
+    fs::write(temp.path().join("simit.toml"), config).unwrap();
+    assert!(
+        simit()
+            .current_dir(temp.path())
+            .args(["init", "ci", "--platform", "github"])
+            .status()
+            .unwrap()
+            .success()
+    );
+
+    let workflow = read(&temp.path().join(".github/workflows/publish-pypi.yaml"));
+    assert_yaml_parses(&workflow);
+    assert!(workflow.contains("environment: pypi"));
+    assert!(workflow.contains("contents: read"));
+    assert!(workflow.contains("id-token: write"));
+    assert!(workflow.contains("uv publish --trusted-publishing always"));
+    assert!(!workflow.contains("UV_PUBLISH_TOKEN"));
 }
 
 #[test]
