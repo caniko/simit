@@ -220,6 +220,17 @@ pub fn run(command: InitCiCommand) -> Result<()> {
             step_runners: &step_runners,
         })?);
     }
+    if provider == CiProvider::Actions && cfg.prebuild.is_none() && !options.nix_builds.is_empty() {
+        files.push(ci::nix_build_matrix_file(
+            platform,
+            &runners.ci,
+            &options.nix_builds,
+            &options.extra_setup,
+        )?);
+    }
+    if let Some(prebuild) = github_prebuild_file(&cfg, platform, provider)? {
+        files.push(prebuild);
+    }
     if resolved.with_pypi_publish && cargo::has_pyo3_dep(&metadata.packages) {
         files.push(ci::maturin_publish_file(
             platform,
@@ -313,6 +324,7 @@ pub fn run(command: InitCiCommand) -> Result<()> {
         upgrade::update_readme_badges_if_present(workspace_root, true, command.diff)
     } else {
         project::write_generated_files(workspace_root, &files)?;
+        cleanup_obsolete_nix_workflows(workspace_root, platform, &files)?;
         if ProjectConfig::can_persist_ci(workspace_root)? {
             ProjectConfig::write_ci(workspace_root, &persisted_ci)?;
         }
@@ -395,9 +407,21 @@ fn run_nix_only(command: InitCiCommand) -> Result<()> {
             platform,
             &ResolvedRunner::literal(&runner)?,
             &system_runners,
+            &cfg.release.artifacts,
         )?,
     };
     let mut files = vec![generated];
+    if provider == CiProvider::Actions && cfg.prebuild.is_none() && !cfg.ci.nix_builds.is_empty() {
+        files.push(ci::nix_build_matrix_file(
+            platform,
+            &ResolvedRunner::literal(&runner)?,
+            &cfg.ci.nix_builds,
+            &cfg.ci.extra_setup,
+        )?);
+    }
+    if let Some(prebuild) = github_prebuild_file(&cfg, platform, provider)? {
+        files.push(prebuild);
+    }
     if let Some(pages) = &pages {
         files.push(ci::codeberg_pages_file(
             platform,
@@ -425,6 +449,7 @@ fn run_nix_only(command: InitCiCommand) -> Result<()> {
         }
     } else {
         project::write_generated_files(&workspace_root, &files)?;
+        cleanup_obsolete_nix_workflows(&workspace_root, platform, &files)?;
         let mut persisted_ci = cfg.ci;
         persisted_ci.provider = Some(CiProvider::Actions);
         persisted_ci.platform = Some(platform);
@@ -439,6 +464,26 @@ fn run_nix_only(command: InitCiCommand) -> Result<()> {
         registry::touch_current_project_or_warn([("ci", FeatureStatus::Managed)]);
     }
     Ok(())
+}
+
+fn github_prebuild_file(
+    cfg: &ProjectConfig,
+    platform: Platform,
+    provider: CiProvider,
+) -> Result<Option<project::GeneratedFile>> {
+    let Some(prebuild) = &cfg.prebuild else {
+        return Ok(None);
+    };
+    if platform != Platform::Github || provider != CiProvider::Actions {
+        bail!("[prebuild] requires GitHub Actions");
+    }
+    Ok(Some(ci::github_prebuild_file(
+        &cfg.ci.nix_system_runners,
+        &cfg.ci.nix_builds,
+        prebuild,
+        &cfg.release.artifacts,
+        cfg.release.attic.as_ref(),
+    )?))
 }
 
 fn run_python(command: InitCiCommand) -> Result<()> {
@@ -523,6 +568,17 @@ fn run_python(command: InitCiCommand) -> Result<()> {
         &cfg.flake.expected_outputs.checks,
         &cfg.ci.components,
     )?];
+    if provider == CiProvider::Actions && cfg.prebuild.is_none() && !options.nix_builds.is_empty() {
+        files.push(ci::nix_build_matrix_file(
+            platform,
+            &runners.ci,
+            &options.nix_builds,
+            &options.extra_setup,
+        )?);
+    }
+    if let Some(prebuild) = github_prebuild_file(&cfg, platform, provider)? {
+        files.push(prebuild);
+    }
     if with_pypi_publish {
         files.push(ci::python_publish_file(
             platform,
@@ -568,6 +624,7 @@ fn run_python(command: InitCiCommand) -> Result<()> {
         upgrade::update_readme_badges_if_present(workspace_root, true, command.diff)
     } else {
         project::write_generated_files(workspace_root, &files)?;
+        cleanup_obsolete_nix_workflows(workspace_root, platform, &files)?;
         if ProjectConfig::can_persist_ci(workspace_root)? {
             ProjectConfig::write_ci(workspace_root, &persisted_ci)?;
         }
@@ -1571,6 +1628,37 @@ fn check_generated_crow_files(
     )
 }
 
+fn cleanup_obsolete_nix_workflows(
+    workspace_root: &Path,
+    platform: Platform,
+    expected: &[project::GeneratedFile],
+) -> Result<()> {
+    let expected = expected
+        .iter()
+        .map(|file| file.relative_path.clone())
+        .collect::<BTreeSet<_>>();
+    for name in [
+        "nix-builds.yaml",
+        "nix-builds.yml",
+        "prebuild.yaml",
+        "prebuild.yml",
+    ] {
+        let relative = PathBuf::from(platform.workflow_dir()).join(name);
+        if expected.contains(&relative) {
+            continue;
+        }
+        let path = workspace_root.join(&relative);
+        let Ok(content) = fs::read_to_string(&path) else {
+            continue;
+        };
+        if generated_workflow_marker_present(&content) {
+            fs::remove_file(&path)
+                .with_context(|| format!("removing obsolete {}", relative.display()))?;
+        }
+    }
+    Ok(())
+}
+
 fn is_ci_managed_workflow_name(name: &std::ffi::OsStr) -> bool {
     let Some(name) = name.to_str() else {
         return false;
@@ -1583,6 +1671,10 @@ fn is_ci_managed_workflow_name(name: &std::ffi::OsStr) -> bool {
             | "publish-crate.yml"
             | "release-artifacts.yaml"
             | "release-artifacts.yml"
+            | "nix-builds.yaml"
+            | "nix-builds.yml"
+            | "prebuild.yaml"
+            | "prebuild.yml"
             | "pages.yaml"
             | "pages.yml"
             | "publish-vscode-extension.yaml"
@@ -1590,6 +1682,8 @@ fn is_ci_managed_workflow_name(name: &std::ffi::OsStr) -> bool {
             | "publish-jetbrains-plugin.yaml"
             | "publish-jetbrains-plugin.yml"
     ) || name.starts_with("ci-")
+        || name.starts_with("nix-builds-")
+        || name.starts_with("prebuild-")
         || name.starts_with("publish-crate-")
         || name.starts_with("release-artifacts-")
 }

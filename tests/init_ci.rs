@@ -522,6 +522,88 @@ runtime = "nix"
 }
 
 #[test]
+fn github_prebuild_is_reusable_publishes_attic_and_tracks_drift() {
+    let temp = init_flake_only();
+    fs::write(
+        temp.path().join("simit.toml"),
+        r#"[prebuild]
+release_archives = true
+publish_attic = true
+
+[ci]
+provider = "actions"
+platform = "github"
+runtime = "nix"
+nix_builds = [".#server", ".#worker"]
+
+[ci.nix_system_runners]
+"aarch64-linux" = "ubuntu-24.04-arm"
+"x86_64-linux" = "ubuntu-24.04"
+
+[release.artifacts]
+prebuild_binaries = true
+substituters = ["https://cache.example"]
+trusted_public_keys = ["cache.example:abc"]
+
+[release.attic]
+cache = "demo"
+url = "https://attic.example"
+token_name = "demo"
+token_secret = "ATTIC_TOKEN"
+"#,
+    )
+    .unwrap();
+    fs::create_dir_all(temp.path().join(".github/workflows")).unwrap();
+    fs::write(
+        temp.path().join(".github/workflows/nix-builds.yaml"),
+        format!(
+            "{}\nname: obsolete\n",
+            simit::render::ci::GENERATED_WORKFLOW_MARKER
+        ),
+    )
+    .unwrap();
+
+    let status = simit()
+        .current_dir(temp.path())
+        .args(["init", "ci", "--platform", "github", "--runtime", "nix"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert!(
+        !temp
+            .path()
+            .join(".github/workflows/nix-builds.yaml")
+            .exists()
+    );
+
+    let workflow = read(&temp.path().join(".github/workflows/prebuild.yaml"));
+    assert_yaml_parses(&workflow);
+    assert!(workflow.contains("workflow_call:\n    inputs:\n      release:"));
+    assert!(workflow.contains("secrets:\n      attic_token:\n        required: true"));
+    assert!(workflow.contains("runs-on: ${{ matrix.runner }}"));
+    assert!(workflow.contains("nix build '.#server' --out-link '.simit-prebuild/ci-0'"));
+    assert!(
+        workflow.contains("nix build '.#release-bundle' --out-link '.simit-prebuild/release-0'")
+    );
+    assert!(workflow.contains("default-server = \"demo\""));
+    assert!(workflow.contains("nix path-info -r \"${links[@]}\""));
+    assert!(workflow.contains("push --stdin --no-closure --ignore-upstream-cache-filter demo"));
+    assert!(!workflow.contains("attic login"));
+
+    let audit = simit::registry::audit_ci(temp.path()).unwrap();
+    assert_eq!(audit.status, simit::registry::FeatureStatus::Managed);
+    fs::write(
+        temp.path().join(".github/workflows/prebuild.yaml"),
+        format!("{workflow}\n# drift\n"),
+    )
+    .unwrap();
+    assert_eq!(
+        simit::registry::audit_ci(temp.path()).unwrap().status,
+        simit::registry::FeatureStatus::Drift
+    );
+}
+
+#[test]
 fn github_nix_only_keeps_single_runner_when_no_system_map_is_configured() {
     let temp = init_flake_only();
 
@@ -595,6 +677,50 @@ fn generic_rust_ci_does_not_generate_publish_workflow_by_default() {
             .exists()
     );
     assert!(!temp.path().join("keys/maintainers.gpg").exists());
+}
+
+#[test]
+fn package_metadata_nix_builds_validate_and_render() {
+    let temp = init_package(true);
+    let manifest = temp.path().join("Cargo.toml");
+    let base = read(&manifest);
+    fs::write(
+        &manifest,
+        format!(
+            "{base}\n[package.metadata.simit.ci]\nplatform = \"github\"\nprovider = \"actions\"\nruntime = \"nix\"\nnix_builds = [\"\"]\n"
+        ),
+    )
+    .unwrap();
+    let invalid = simit()
+        .current_dir(temp.path())
+        .args(["init", "ci", "--platform", "github"])
+        .output()
+        .unwrap();
+    assert!(!invalid.status.success());
+    assert!(String::from_utf8_lossy(&invalid.stderr).contains("[ci].nix_builds"));
+
+    fs::write(
+        &manifest,
+        format!(
+            "{base}\n[package.metadata.simit.ci]\nplatform = \"github\"\nprovider = \"actions\"\nruntime = \"nix\"\nnix_builds = [\".#oci-api\", \".#oci-etl\"]\nextra_setup = [\"echo prepare-runner\"]\n"
+        ),
+    )
+    .unwrap();
+    let status = simit()
+        .current_dir(temp.path())
+        .args(["init", "ci", "--platform", "github"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let workflow = read(&temp.path().join(".github/workflows/nix-builds.yaml"));
+    assert_yaml_parses(&workflow);
+    assert!(workflow.contains("permissions:\n  contents: read"));
+    assert!(workflow.contains("group: ${{ github.workflow_ref }}-${{ github.ref }}"));
+    assert!(workflow.contains("- \".#oci-api\""));
+    assert!(workflow.contains("- \".#oci-etl\""));
+    assert!(workflow.contains("run: echo prepare-runner"));
+    assert!(workflow.contains("run: nix build --no-link \"$INSTALLABLE\""));
 }
 
 #[test]
@@ -1326,6 +1452,9 @@ fn generates_github_plain_cargo_workflows() {
     assert!(ci.contains("run: cargo package --allow-dirty --list"));
 
     let publish = read(&temp.path().join(".github/workflows/publish-crate.yaml"));
+    assert!(
+        publish.contains("on:\n  push:\n    tags:\n      - \"[0-9]*\"\n  workflow_dispatch:\n")
+    );
     assert!(
         publish.contains("uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0")
     );
