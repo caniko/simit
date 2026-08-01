@@ -248,6 +248,11 @@ fn github_release_depends_on_prebuild_and_forwards_attic_secret() {
     );
 
     let workflow = read(&project.path().join(".github/workflows/release.yml"));
+    assert!(
+        workflow
+            .contains("# - ATTIC_TOKEN: repository secret for native prebuild Attic publication.")
+    );
+    assert!(!workflow.contains("# Runner credential: $ATTIC_TOKENS_DIR/demo"));
     assert!(workflow.contains("prebuild:\n    uses: ./.github/workflows/prebuild.yaml"));
     assert!(workflow.contains("with:\n      release: true"));
     assert!(workflow.contains("attic_token: ${{ secrets.ATTIC_TOKEN }}"));
