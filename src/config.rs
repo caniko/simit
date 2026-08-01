@@ -405,6 +405,8 @@ pub struct CiConfig {
     #[serde(default)]
     pub with_pypi_publish: bool,
     #[serde(default)]
+    pub pypi_token_secret: Option<String>,
+    #[serde(default)]
     pub publish_crates: bool,
     #[serde(default)]
     pub extra_setup: Vec<String>,
@@ -1812,6 +1814,9 @@ impl ProjectConfig {
             "simit project config: [ci].extra_setup",
             &self.ci.extra_setup,
         )?;
+        if let Some(secret) = &self.ci.pypi_token_secret {
+            validate_secret_name("simit project config: [ci].pypi_token_secret", secret)?;
+        }
         if let Some(pages) = &self.ci.pages {
             validate_owner_repo("simit project config: [ci.pages].repo", &pages.repo)?;
             if let Some(canonical_domain) = &pages.canonical_domain {
@@ -2985,6 +2990,23 @@ fn validate_nonempty_string(name: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
+fn validate_secret_name(name: &str, value: &str) -> Result<()> {
+    validate_nonempty_string(name, value)?;
+    if value
+        .chars()
+        .next()
+        .is_some_and(|character| character.is_ascii_digit())
+        || !value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '_')
+    {
+        bail!(
+            "{name} must contain only ASCII letters, digits, and underscores and must not start with a digit"
+        );
+    }
+    Ok(())
+}
+
 fn validate_runner_label_opt(name: &str, value: Option<&str>) -> Result<()> {
     if let Some(value) = value {
         validate_runner_label(value).map_err(|err| anyhow!("{name}: {err}"))?;
@@ -3055,6 +3077,7 @@ fn set_ci_table(table: &mut Table, ci: &CiConfig) {
     set_bool(table, "with_docs", ci.with_docs);
     set_bool(table, "with_artifacts", ci.with_artifacts);
     set_bool(table, "with_pypi_publish", ci.with_pypi_publish);
+    set_optional_string(table, "pypi_token_secret", ci.pypi_token_secret.as_deref());
     set_bool(table, "publish_crates", ci.publish_crates);
     set_string_array(table, "extra_setup", &ci.extra_setup);
     set_string_map(table, "extra_env", &ci.extra_env);

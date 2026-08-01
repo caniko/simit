@@ -3186,6 +3186,42 @@ components = ["checks"]
 }
 
 #[test]
+fn python_publish_uses_configured_pypi_token_secret() {
+    let temp = init_python_project();
+    fs::write(
+        temp.path().join("simit.toml"),
+        r#"[flake]
+scope = "full"
+mode = "custom"
+backend = "py-harbor"
+
+[flake.expected_outputs]
+checks = ["offline-tests", "typecheck"]
+
+[ci]
+runtime = "nix"
+with_pypi_publish = true
+pypi_token_secret = "PYPI_API_TOKEN"
+"#,
+    )
+    .unwrap();
+
+    let status = simit()
+        .current_dir(temp.path())
+        .args(["init", "ci", "--platform", "github"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let workflow = read(&temp.path().join(".github/workflows/publish-pypi.yaml"));
+    assert!(workflow.contains("UV_PUBLISH_TOKEN: ${{ secrets.PYPI_API_TOKEN }}"));
+    assert!(!workflow.contains("secrets.PYPI_TOKEN"));
+    assert!(workflow.contains("Tag must be an exact semver version"));
+    assert!(workflow.contains("builtins.fromTOML"));
+    assert!(!read(&temp.path().join(".github/workflows/ci.yaml")).contains("Validate release tag"));
+}
+
+#[test]
 fn generates_crow_yaml_and_jsonnet_without_a_crow_cli() {
     let project = init_package(false);
     let output = simit()
