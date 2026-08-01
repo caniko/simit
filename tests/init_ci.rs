@@ -529,16 +529,17 @@ fn github_prebuild_is_reusable_publishes_attic_and_tracks_drift() {
         r#"[prebuild]
 release_archives = true
 publish_attic = true
+attic_app = ".#push-flake-inputs"
+
+[prebuild.system_runners]
+"aarch64-linux" = "ubuntu-24.04-arm"
+"x86_64-linux" = "ubuntu-24.04"
 
 [ci]
 provider = "actions"
 platform = "github"
 runtime = "nix"
 nix_builds = [".#server", ".#worker"]
-
-[ci.nix_system_runners]
-"aarch64-linux" = "ubuntu-24.04-arm"
-"x86_64-linux" = "ubuntu-24.04"
 
 [release.artifacts]
 prebuild_binaries = true
@@ -585,9 +586,12 @@ token_secret = "ATTIC_TOKEN"
     assert!(
         workflow.contains("nix build '.#release-bundle' --out-link '.simit-prebuild/release-0'")
     );
-    assert!(workflow.contains("default-server = \"demo\""));
-    assert!(workflow.contains("nix path-info -r \"${links[@]}\""));
-    assert!(workflow.contains("push --stdin --no-closure --ignore-upstream-cache-filter demo"));
+    assert!(workflow.contains("nix run '.#push-flake-inputs'"));
+    assert!(workflow.contains("HARBOR_ATTIC_MANIFEST: attic-paths.txt"));
+    assert!(workflow.contains("github.event.repository.default_branch"));
+    assert!(workflow.contains("name: flake-inputs-${{ matrix.system }}"));
+    assert!(!workflow.contains("attic push"));
+    assert!(!workflow.contains("default-server"));
     assert!(!workflow.contains("attic login"));
 
     let audit = simit::registry::audit_ci(temp.path()).unwrap();
@@ -601,6 +605,47 @@ token_secret = "ATTIC_TOKEN"
         simit::registry::audit_ci(temp.path()).unwrap().status,
         simit::registry::FeatureStatus::Drift
     );
+}
+
+#[test]
+fn github_prebuild_is_additive_to_forgejo_crow_ci() {
+    let temp = init_package(true);
+    fs::write(
+        temp.path().join("simit.toml"),
+        r#"[prebuild]
+publish_attic = true
+attic_app = ".#push-flake-inputs"
+
+[prebuild.system_runners]
+"x86_64-linux" = "ubuntu-24.04"
+
+[ci]
+provider = "crow"
+platform = "forgejo"
+runtime = "nix"
+runner = "atlas-nix-trusted"
+
+[release.attic]
+cache = "demo"
+url = "https://attic.example"
+token_name = "demo"
+token_secret = "ATTIC_TOKEN"
+"#,
+    )
+    .unwrap();
+
+    let status = simit()
+        .current_dir(temp.path())
+        .args(["init", "ci"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert!(temp.path().join(".crow/build.yaml").is_file());
+
+    let prebuild = read(&temp.path().join(".github/workflows/prebuild.yaml"));
+    assert_yaml_parses(&prebuild);
+    assert!(prebuild.contains("runs-on: ${{ matrix.runner }}"));
+    assert!(prebuild.contains("nix run '.#push-flake-inputs'"));
 }
 
 #[test]

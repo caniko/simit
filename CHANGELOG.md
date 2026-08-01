@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Delegate GitHub flake-input publication to rs-harbor and allow the generated
+  prebuild workflow alongside Forgejo or Crow CI.
+
 ## [0.17.13] - 2026-07-28
 
 ### Fixed

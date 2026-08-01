@@ -686,6 +686,21 @@ Projects using the conventional rs-harbor output can opt in with the shorter
 `nix_bundle_attrs = ["release-bundle"]` unless an explicit attribute list is
 provided.
 
+GitHub flake-input publication is additive to the primary CI provider. Point
+`attic_app` at an app built with `rs-harbor.lib.mkAtticPush { flake = "."; }`:
+
+```toml
+[prebuild]
+publish_attic = true
+attic_app = ".#push-flake-inputs"
+
+[prebuild.system_runners]
+"x86_64-linux" = "ubuntu-24.04"
+```
+
+Simit invokes the app only on the repository's default branch or a trusted
+release call; pull requests and feature branches never receive the token.
+
 ## Project config
 
 Projects may opt in to stable simit settings with exactly one project config

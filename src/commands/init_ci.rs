@@ -228,7 +228,7 @@ pub fn run(command: InitCiCommand) -> Result<()> {
             &options.extra_setup,
         )?);
     }
-    if let Some(prebuild) = github_prebuild_file(&cfg, platform, provider)? {
+    if let Some(prebuild) = github_prebuild_file(&cfg)? {
         files.push(prebuild);
     }
     if resolved.with_pypi_publish && cargo::has_pyo3_dep(&metadata.packages) {
@@ -419,7 +419,7 @@ fn run_nix_only(command: InitCiCommand) -> Result<()> {
             &cfg.ci.extra_setup,
         )?);
     }
-    if let Some(prebuild) = github_prebuild_file(&cfg, platform, provider)? {
+    if let Some(prebuild) = github_prebuild_file(&cfg)? {
         files.push(prebuild);
     }
     if let Some(pages) = &pages {
@@ -466,19 +466,12 @@ fn run_nix_only(command: InitCiCommand) -> Result<()> {
     Ok(())
 }
 
-fn github_prebuild_file(
-    cfg: &ProjectConfig,
-    platform: Platform,
-    provider: CiProvider,
-) -> Result<Option<project::GeneratedFile>> {
+fn github_prebuild_file(cfg: &ProjectConfig) -> Result<Option<project::GeneratedFile>> {
     let Some(prebuild) = &cfg.prebuild else {
         return Ok(None);
     };
-    if platform != Platform::Github || provider != CiProvider::Actions {
-        bail!("[prebuild] requires GitHub Actions");
-    }
     Ok(Some(ci::github_prebuild_file(
-        &cfg.ci.nix_system_runners,
+        prebuild.effective_system_runners(&cfg.ci),
         &cfg.ci.nix_builds,
         prebuild,
         &cfg.release.artifacts,
@@ -576,7 +569,7 @@ fn run_python(command: InitCiCommand) -> Result<()> {
             &options.extra_setup,
         )?);
     }
-    if let Some(prebuild) = github_prebuild_file(&cfg, platform, provider)? {
+    if let Some(prebuild) = github_prebuild_file(&cfg)? {
         files.push(prebuild);
     }
     if with_pypi_publish {
@@ -730,6 +723,9 @@ fn run_crow(
             &runners.ci,
             &options,
         )?);
+    }
+    if let Some(prebuild) = github_prebuild_file(cfg)? {
+        files.push(prebuild);
     }
 
     let inferred_pages = infer_codeberg_pages_from_workflows(&snapshots)?;
