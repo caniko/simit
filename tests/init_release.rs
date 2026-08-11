@@ -321,6 +321,44 @@ fn sole_github_release_target_uses_actions_without_changing_crow_ci() {
 }
 
 #[test]
+fn crow_release_pushes_attic_only_for_tags() {
+    let project = init_package("crow-attic-demo");
+    let config_path = project.path().join("simit.toml");
+    let config = read(&config_path)
+        .replace(
+            "[release.artifacts]",
+            "[ci]\nprovider = \"crow\"\nplatform = \"forgejo\"\nruntime = \"nix\"\nrunner = \"crow-default\"\n\n[ci.crow]\nlabels = { group = \"codefloe-infra\", platform = \"linux/amd64\" }\n\n[release.artifacts]",
+        )
+        .replace(
+            "build_commands = [\"mkdir -p release\", \"printf artifact > release/crow-attic-demo.txt\"]",
+            "build_commands = [\"nix build .#packages.x86_64-linux.default --out-link result-attic\"]",
+        )
+        + "\n[release.attic]\ncache = \"canix\"\nurl = \"https://attic.example\"\ntoken_name = \"crow-attic-demo\"\ntoken_secret = \"ATTIC_TOKEN\"\nresult_links = [\"result-attic\"]\n";
+    fs::write(config_path, config).unwrap();
+
+    let output = simit()
+        .current_dir(project.path())
+        .args(["init", "release"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let workflow = read(&project.path().join(".crow/release.yaml"));
+    assert!(workflow.contains("group: codefloe-infra"));
+    assert!(workflow.contains("platform: linux/amd64"));
+    assert!(workflow.contains("- event: tag"));
+    assert!(!workflow.contains("- event: manual"));
+    assert!(workflow.contains("from_secret: ATTIC_TOKEN"));
+    assert!(workflow.contains("nix build .#packages.x86_64-linux.default --out-link result-attic"));
+    assert!(workflow.contains("nix path-info -r './result-attic' > attic-paths.txt"));
+    assert!(workflow.contains("push --stdin --no-closure --ignore-upstream-cache-filter canix"));
+}
+
+#[test]
 fn bootstraps_explicit_nix_release_bundle() {
     let project = init_package("bundle-demo");
     let config_path = project.path().join("simit.toml");

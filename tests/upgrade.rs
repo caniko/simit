@@ -240,7 +240,11 @@ fn all_reports_partial_failures_without_skipping_later_projects() {
     let data_home = TempDir::new().unwrap();
     let broken = non_tmp_project("upgrade-broken");
     let good = non_tmp_project("upgrade-good");
-    fs::write(broken.path().join("README.md"), "no heading\n").unwrap();
+    fs::write(
+        broken.path().join("README.md"),
+        "<!-- simit:badges:start -->\n",
+    )
+    .unwrap();
     let broken_path = fs::canonicalize(broken.path()).unwrap();
     let good_path = fs::canonicalize(good.path()).unwrap();
     write_registry(

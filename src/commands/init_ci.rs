@@ -1443,6 +1443,12 @@ fn persisted_ci_matches_simit_toml(
     if cfg.ci.pages.is_some() {
         persisted_ci.pages = cfg.ci.pages.clone();
     }
+    if cfg.ci.all_features.is_none() {
+        persisted_ci.all_features = None;
+    }
+    if !cfg.ci.unit_tests_only {
+        persisted_ci.unit_tests_only = false;
+    }
     Ok(cfg.ci == persisted_ci)
 }
 

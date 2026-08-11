@@ -101,6 +101,10 @@ pub enum OmCiMode {
 #[derive(Debug, Clone)]
 pub struct CiOptions {
     pub nix_builds: Vec<String>,
+    pub all_features: bool,
+    pub unit_tests_only: bool,
+    pub nix_substituters: Vec<String>,
+    pub nix_trusted_public_keys: Vec<String>,
     pub with_nextest: bool,
     pub with_msrv: bool,
     pub with_audit: bool,
@@ -140,6 +144,10 @@ impl Default for CiOptions {
     fn default() -> Self {
         Self {
             nix_builds: Vec::new(),
+            all_features: true,
+            unit_tests_only: false,
+            nix_substituters: Vec::new(),
+            nix_trusted_public_keys: Vec::new(),
             with_nextest: false,
             with_msrv: false,
             with_audit: false,
@@ -710,7 +718,7 @@ fn github_pages_workflow(runner: &ResolvedRunner, pages: &CodebergPagesOptions) 
     workflow.push_str("on:\n  push:\n    branches:\n      - ");
     workflow.push_str(&pages.source_branch);
     workflow.push_str("\n  workflow_dispatch:\n\n");
-    push_concurrency(&mut workflow);
+    push_github_concurrency(&mut workflow);
     workflow.push_str("permissions:\n  contents: read\n  pages: write\n  id-token: write\n\n");
     workflow.push_str("jobs:\n  publish:\n    runs-on: ");
     workflow.push_str(&runs_on(runner));
@@ -1476,7 +1484,7 @@ fn python_ci_workflow(
     }
     workflow.push('\n');
     push_github_read_permissions(&mut workflow, platform);
-    push_concurrency(&mut workflow);
+    push_provider_concurrency(&mut workflow, platform);
     workflow.push_str("jobs:\n");
     workflow.push_str("  test:\n");
     workflow.push_str("    runs-on: ");
@@ -1560,7 +1568,7 @@ fn python_publish_workflow(
     workflow.push_str("on:\n");
     workflow.push_str("  push:\n");
     workflow.push_str("    tags: [\"[0-9]*\"]\n\n");
-    push_concurrency(&mut workflow);
+    push_provider_concurrency(&mut workflow, platform);
     workflow.push_str("jobs:\n");
     workflow.push_str("  publish:\n");
     workflow.push_str("    runs-on: ");
@@ -1637,7 +1645,7 @@ fn maturin_publish_workflow(
     workflow.push_str("on:\n");
     workflow.push_str("  push:\n");
     workflow.push_str("    tags: [\"[0-9]*\"]\n\n");
-    push_concurrency(&mut workflow);
+    push_provider_concurrency(&mut workflow, platform);
     workflow.push_str("jobs:\n");
     workflow.push_str("  publish:\n");
     workflow.push_str("    runs-on: ");
@@ -1715,7 +1723,7 @@ fn ci_workflow_single_job(
     }
     workflow.push('\n');
     push_github_read_permissions(&mut workflow, platform);
-    push_concurrency(&mut workflow);
+    push_provider_concurrency(&mut workflow, platform);
     workflow.push_str("jobs:\n");
     workflow.push_str("  test:\n");
     workflow.push_str("    runs-on: ");
@@ -1820,7 +1828,7 @@ fn ci_workflow_multi_job(
     workflow.push_str("    tags-ignore: [\"**\"]\n");
     workflow.push('\n');
     push_github_read_permissions(&mut workflow, platform);
-    push_concurrency(&mut workflow);
+    push_provider_concurrency(&mut workflow, platform);
     workflow.push_str("jobs:\n");
 
     struct StepDef<'a> {
@@ -1871,7 +1879,13 @@ fn ci_workflow_multi_job(
                 );
             }
             if options.with_docs {
-                opt.push_str("      - name: Build docs\n        run: nix develop -c cargo doc --no-deps --all-features\n\n");
+                opt.push_str(
+                    "      - name: Build docs\n        run: nix develop -c cargo doc --no-deps",
+                );
+                if options.all_features {
+                    opt.push_str(" --all-features");
+                }
+                opt.push_str("\n\n");
             }
             if !opt.is_empty() {
                 capture(STEP_CARGO_DOC, &opt);
@@ -1930,9 +1944,11 @@ fn ci_workflow_multi_job(
                 opt.push_str("      - name: Check MSRV\n        run: cargo check\n\n");
             }
             if options.with_docs {
-                opt.push_str(
-                    "      - name: Build docs\n        run: cargo doc --no-deps --all-features\n\n",
-                );
+                opt.push_str("      - name: Build docs\n        run: cargo doc --no-deps");
+                if options.all_features {
+                    opt.push_str(" --all-features");
+                }
+                opt.push_str("\n\n");
             }
             if !opt.is_empty() {
                 capture(STEP_CARGO_DOC, &opt);
@@ -2058,7 +2074,7 @@ fn publish_workflow(
         workflow.push_str("  push:\n    tags:\n      - \"[0-9]*\"\n");
     }
     workflow.push_str("  workflow_dispatch:\n\n");
-    push_concurrency(&mut workflow);
+    push_provider_concurrency(&mut workflow, platform);
     workflow.push_str("jobs:\n");
     workflow.push_str("  publish:\n");
     push_release_permissions(&mut workflow, platform);
@@ -2142,7 +2158,7 @@ fn artifacts_workflow(
     workflow.push_str("  push:\n");
     workflow.push_str("    tags:\n");
     workflow.push_str("      - \"*.*.*\"\n\n");
-    push_concurrency(&mut workflow);
+    push_provider_concurrency(&mut workflow, platform);
     workflow.push_str("jobs:\n");
     let has_windows_packagers = options.chocolatey.is_some() || options.scoop.is_some();
     let linux_job_name = if has_windows_packagers {
@@ -2953,6 +2969,14 @@ fn push_concurrency(workflow: &mut String) {
     workflow.push_str("  cancel-in-progress: true\n\n");
 }
 
+fn push_github_concurrency(workflow: &mut String) {
+    workflow.push_str("concurrency:\n");
+    workflow.push_str(
+        "  group: ${{ github.workflow }}-${{ github.event.pull_request.head.ref || github.ref }}\n",
+    );
+    workflow.push_str("  cancel-in-progress: true\n\n");
+}
+
 fn push_github_read_permissions(workflow: &mut String, platform: Platform) {
     if platform == Platform::Github {
         workflow.push_str("permissions:\n  contents: read\n\n");
@@ -2968,8 +2992,16 @@ fn push_codeberg_concurrency(workflow: &mut String) {
 fn push_platform_concurrency(workflow: &mut String, platform: Platform) {
     match platform {
         Platform::Forgejo => push_codeberg_concurrency(workflow),
-        Platform::Github => push_concurrency(workflow),
+        Platform::Github => push_github_concurrency(workflow),
         Platform::Gitlab => push_concurrency(workflow),
+    }
+}
+
+fn push_provider_concurrency(workflow: &mut String, platform: Platform) {
+    if platform == Platform::Github {
+        push_github_concurrency(workflow);
+    } else {
+        push_concurrency(workflow);
     }
 }
 
@@ -3177,7 +3209,10 @@ fn push_nix_ci_legacy_steps(
     workflow.push_str("      - name: Test\n");
     workflow.push_str("        run: nix develop -c cargo test");
     push_package_selector(workflow, package, options);
-    if options.workspace_strategy == WorkspaceStrategy::Aggregate {
+    if options.unit_tests_only {
+        workflow.push_str(" --lib");
+    }
+    if options.workspace_strategy == WorkspaceStrategy::Aggregate && options.all_features {
         workflow.push_str(" --all-features");
     }
     workflow.push_str("\n\n");
@@ -3190,7 +3225,7 @@ fn push_nix_ci_legacy_steps(
     workflow.push_str("        run: nix develop -c cargo clippy");
     push_package_selector(workflow, package, options);
     workflow.push_str(" --all-targets");
-    if options.workspace_strategy == WorkspaceStrategy::Aggregate {
+    if options.workspace_strategy == WorkspaceStrategy::Aggregate && options.all_features {
         workflow.push_str(" --all-features");
     }
     workflow.push_str(" -- --deny warnings\n\n");
@@ -3334,15 +3369,35 @@ fn push_test_steps(
             workflow.push_str("command -v cargo-nextest");
         }
         workflow.push_str("\n\n");
-        workflow.push_str("      - name: Test all features\n");
+        workflow.push_str(if options.all_features {
+            "      - name: Test all features\n"
+        } else {
+            "      - name: Test\n"
+        });
         workflow.push_str("        run: cargo nextest run");
         push_package_selector(workflow, package, options);
-        workflow.push_str(" --all-features\n\n");
+        if options.unit_tests_only {
+            workflow.push_str(" --lib");
+        }
+        if options.all_features {
+            workflow.push_str(" --all-features");
+        }
+        workflow.push_str("\n\n");
     } else {
-        workflow.push_str("      - name: Test all features\n");
+        workflow.push_str(if options.all_features {
+            "      - name: Test all features\n"
+        } else {
+            "      - name: Test\n"
+        });
         workflow.push_str("        run: cargo test");
         push_package_selector(workflow, package, options);
-        workflow.push_str(" --all-features\n\n");
+        if options.unit_tests_only {
+            workflow.push_str(" --lib");
+        }
+        if options.all_features {
+            workflow.push_str(" --all-features");
+        }
+        workflow.push_str("\n\n");
     }
     if has_features(package) {
         workflow.push_str("      - name: Test no default features\n");
@@ -3359,10 +3414,18 @@ fn push_test_steps(
 }
 
 fn push_clippy_steps(workflow: &mut String, package: &Package, options: &CiOptions) {
-    workflow.push_str("      - name: Clippy all features\n");
+    workflow.push_str(if options.all_features {
+        "      - name: Clippy all features\n"
+    } else {
+        "      - name: Clippy\n"
+    });
     workflow.push_str("        run: cargo clippy");
     push_package_selector(workflow, package, options);
-    workflow.push_str(" --all-targets --all-features -- --deny warnings\n\n");
+    workflow.push_str(" --all-targets");
+    if options.all_features {
+        workflow.push_str(" --all-features");
+    }
+    workflow.push_str(" -- --deny warnings\n\n");
     if has_features(package) {
         workflow.push_str("      - name: Clippy no default features\n");
         workflow.push_str("        run: cargo clippy");

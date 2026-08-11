@@ -464,6 +464,73 @@ fn generates_forgejo_nix_workflows() {
 }
 
 #[test]
+fn generic_rust_ci_does_not_generate_publish_workflow_by_default() {
+    let temp = init_package(true);
+
+    let status = simit_with_user_config(temp.path())
+        .current_dir(temp.path())
+        .args(["init", "ci", "--platform", "forgejo"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let ci = read(&temp.path().join(".forgejo/workflows/ci.yaml"));
+    assert_yaml_parses(&ci);
+    assert!(temp.path().join(".forgejo/workflows/ci.yaml").exists());
+    assert!(
+        !temp
+            .path()
+            .join(".forgejo/workflows/publish-crate.yaml")
+            .exists()
+    );
+    assert!(!temp.path().join("keys/maintainers.gpg").exists());
+}
+
+#[test]
+fn github_ci_generates_declared_nix_installable_matrix() {
+    let temp = init_package(true);
+    fs::write(
+        temp.path().join("simit.toml"),
+        r#"[ci]
+platform = "github"
+provider = "actions"
+runtime = "nix"
+nix_builds = [".#oci-api", ".#oci-etl"]
+extra_setup = ["echo prepare-runner"]
+"#,
+    )
+    .unwrap();
+    let status = simit()
+        .current_dir(temp.path())
+        .args([
+            "init",
+            "ci",
+            "--platform",
+            "github",
+            "--ci-provider",
+            "actions",
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let workflow = read(&temp.path().join(".github/workflows/nix-builds.yaml"));
+    assert_yaml_parses(&workflow);
+    assert!(workflow.contains("permissions:\n  contents: read"));
+    assert!(workflow.contains(
+        "group: ${{ github.workflow }}-${{ github.event.pull_request.head.ref || github.ref }}"
+    ));
+    assert!(workflow.contains("runs-on: ubuntu-latest"));
+    assert!(workflow.contains("fail-fast: false"));
+    assert!(workflow.contains("max-parallel: 2"));
+    assert!(workflow.contains("- \".#oci-api\""));
+    assert!(workflow.contains("- \".#oci-etl\""));
+    assert!(workflow.contains("run: nix build --no-link \"$INSTALLABLE\""));
+    assert!(workflow.contains("run: echo prepare-runner"));
+    assert!(!workflow.contains("secrets."));
+}
+
+#[test]
 fn github_nix_only_uses_native_system_runner_matrix() {
     let temp = init_flake_only();
     fs::write(
@@ -2044,6 +2111,77 @@ fn aggregate_workspace_strategy_generates_one_workspace_workflow() {
 }
 
 #[test]
+fn aggregate_workspace_strategy_can_skip_all_feature_checks() {
+    let temp = init_workspace_fixture();
+    fs::write(temp.path().join("flake.nix"), "{ outputs = _: {}; }\n").unwrap();
+    fs::write(
+        temp.path().join("simit.toml"),
+        "[ci]\nall_features = false\n",
+    )
+    .unwrap();
+
+    let status = simit_with_user_config(temp.path())
+        .current_dir(temp.path())
+        .args([
+            "init",
+            "ci",
+            "--platform",
+            "github",
+            "--runtime",
+            "nix",
+            "--workspace",
+            "--workspace-strategy",
+            "aggregate",
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let ci = read(&temp.path().join(".github/workflows/ci.yaml"));
+    assert!(ci.contains("run: nix develop -c cargo test --workspace\n"));
+    assert!(
+        ci.contains(
+            "run: nix develop -c cargo clippy --workspace --all-targets -- --deny warnings"
+        )
+    );
+    assert!(!ci.contains("--all-features"));
+}
+
+#[test]
+fn aggregate_workspace_strategy_can_limit_tests_to_library_targets() {
+    let temp = init_workspace_fixture();
+    fs::write(temp.path().join("flake.nix"), "{ outputs = _: {}; }\n").unwrap();
+    fs::write(
+        temp.path().join("simit.toml"),
+        "[ci]\nunit_tests_only = true\n",
+    )
+    .unwrap();
+
+    let status = simit_with_user_config(temp.path())
+        .current_dir(temp.path())
+        .args([
+            "init",
+            "ci",
+            "--platform",
+            "github",
+            "--runtime",
+            "nix",
+            "--workspace",
+            "--workspace-strategy",
+            "aggregate",
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let ci = read(&temp.path().join(".github/workflows/ci.yaml"));
+    assert!(
+        ci.contains("run: nix develop -c cargo test --workspace --lib"),
+        "generated CI:\n{ci}"
+    );
+}
+
+#[test]
 fn workspace_publish_false_package_keeps_ci_but_skips_package_and_publish_workflows() {
     let temp = init_workspace_fixture();
     let beta_manifest = temp.path().join("crates/beta/Cargo.toml");
@@ -2394,7 +2532,10 @@ fn check_fails_when_workflows_differ() {
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("CI workflows are not up to date"));
-    assert!(stderr.contains("run `simit init ci --platform forgejo`"));
+    assert!(
+        stderr.contains("run `simit init ci --platform forgejo`"),
+        "stderr:\n{stderr}"
+    );
     assert!(stderr.contains(".forgejo/workflows/ci.yaml differs"));
 }
 
@@ -2449,7 +2590,10 @@ fn check_failure_hint_includes_effective_generation_flags() {
 
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(stderr.contains("run `simit init ci --platform forgejo`"));
+    assert!(
+        stderr.contains("run `simit init ci --platform forgejo --runtime nix --runner atlas"),
+        "stderr:\n{stderr}"
+    );
     assert!(stderr.contains(".forgejo/workflows/ci-alpha.yaml differs"));
 }
 

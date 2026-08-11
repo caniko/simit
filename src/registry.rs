@@ -891,11 +891,12 @@ fn marked_workflows_drift(workspace_root: &Path, marked: &[WorkflowFile]) -> boo
         .map(|file| (file.relative_path, file.content))
         .collect::<BTreeMap<_, _>>();
 
-    marked.iter().any(|workflow| {
-        expected
-            .get(&workflow.relative_path)
-            .is_none_or(|content| content != &workflow.content)
-    })
+    expected.len() != marked.len()
+        || marked.iter().any(|workflow| {
+            expected
+                .get(&workflow.relative_path)
+                .is_none_or(|content| content != &workflow.content)
+        })
 }
 
 fn infer_expected_ci_files(

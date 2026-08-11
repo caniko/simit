@@ -396,6 +396,12 @@ pub struct CiConfig {
     /// Values are passed to `nix build --no-link` unchanged.
     #[serde(default)]
     pub nix_builds: Vec<String>,
+    /// Whether generated Rust checks should pass `--all-features`.
+    #[serde(default)]
+    pub all_features: Option<bool>,
+    /// Whether generated Rust tests should limit Cargo to library targets.
+    #[serde(default)]
+    pub unit_tests_only: bool,
     #[serde(default)]
     pub with_nextest: bool,
     #[serde(default)]
@@ -3192,6 +3198,13 @@ fn set_ci_table(table: &mut Table, ci: &CiConfig) {
     );
     set_string_array(table, "packages", &ci.packages);
     set_string_array(table, "nix_builds", &ci.nix_builds);
+    match ci.all_features {
+        Some(false) => table["all_features"] = value(false),
+        Some(true) | None => {
+            table.remove("all_features");
+        }
+    }
+    set_bool(table, "unit_tests_only", ci.unit_tests_only);
     set_bool(table, "with_nextest", ci.with_nextest);
     set_bool(table, "with_msrv", ci.with_msrv);
     set_bool(table, "with_audit", ci.with_audit);

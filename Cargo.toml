@@ -30,6 +30,10 @@ rustdoc-args = ["--cfg", "docsrs"]
 [package.metadata.simit.flake]
 scope = "full"
 
+[package.metadata.simit.ci.pages]
+repo = "caniko/simit"
+canonical_domain = "simit.tartanoglu.com"
+
 [package.metadata.simit.release.changelog]
 auto_draft = true
 
