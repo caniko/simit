@@ -585,6 +585,11 @@ pub fn github_prebuild_file(
 }
 
 /// Generate a hosted-runner matrix for project-declared Nix installables.
+///
+/// The matrix is deliberately build-only: publishing images needs registry
+/// credentials and is a separate release/deploy concern. `--no-link` still
+/// realizes every derivation, so a broken OCI output fails the pull request.
+/// Extra setup runs after checkout and Nix installation.
 pub fn nix_build_matrix_file(
     platform: Platform,
     runner: &ResolvedRunner,
@@ -1470,6 +1475,7 @@ fn python_ci_workflow(
         workflow.push_str("  pull_request:\n");
     }
     workflow.push('\n');
+    push_github_read_permissions(&mut workflow, platform);
     push_concurrency(&mut workflow);
     workflow.push_str("jobs:\n");
     workflow.push_str("  test:\n");
@@ -1708,6 +1714,7 @@ fn ci_workflow_single_job(
         workflow.push_str("  pull_request:\n");
     }
     workflow.push('\n');
+    push_github_read_permissions(&mut workflow, platform);
     push_concurrency(&mut workflow);
     workflow.push_str("jobs:\n");
     workflow.push_str("  test:\n");
@@ -1812,6 +1819,7 @@ fn ci_workflow_multi_job(
     workflow.push_str("    branches: [\"**\"]\n");
     workflow.push_str("    tags-ignore: [\"**\"]\n");
     workflow.push('\n');
+    push_github_read_permissions(&mut workflow, platform);
     push_concurrency(&mut workflow);
     workflow.push_str("jobs:\n");
 
@@ -2943,6 +2951,12 @@ fn push_concurrency(workflow: &mut String) {
     // do not cancel one another while retaining per-ref cancellation.
     workflow.push_str("  group: ${{ github.workflow_ref }}-${{ github.ref }}\n");
     workflow.push_str("  cancel-in-progress: true\n\n");
+}
+
+fn push_github_read_permissions(workflow: &mut String, platform: Platform) {
+    if platform == Platform::Github {
+        workflow.push_str("permissions:\n  contents: read\n\n");
+    }
 }
 
 fn push_codeberg_concurrency(workflow: &mut String) {

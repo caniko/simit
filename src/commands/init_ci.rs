@@ -231,6 +231,8 @@ pub fn run(command: InitCiCommand) -> Result<()> {
     if let Some(prebuild) = github_prebuild_file(&cfg)? {
         files.push(prebuild);
     }
+        )?);
+    }
     if resolved.with_pypi_publish && cargo::has_pyo3_dep(&metadata.packages) {
         files.push(ci::maturin_publish_file(
             platform,
@@ -571,6 +573,8 @@ fn run_python(command: InitCiCommand) -> Result<()> {
     }
     if let Some(prebuild) = github_prebuild_file(&cfg)? {
         files.push(prebuild);
+    }
+        )?);
     }
     if with_pypi_publish {
         files.push(ci::python_publish_file(

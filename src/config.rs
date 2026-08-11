@@ -393,6 +393,7 @@ pub struct CiConfig {
     #[serde(default)]
     pub packages: Vec<String>,
     /// Nix installables that must be built by generated hosted-runner jobs.
+    /// Values are passed to `nix build --no-link` unchanged.
     #[serde(default)]
     pub nix_builds: Vec<String>,
     #[serde(default)]

@@ -765,7 +765,11 @@ fn package_metadata_nix_builds_validate_and_render() {
     assert!(workflow.contains("- \".#oci-api\""));
     assert!(workflow.contains("- \".#oci-etl\""));
     assert!(workflow.contains("run: echo prepare-runner"));
+    assert!(workflow.contains("runs-on: ubuntu-latest"));
+    assert!(workflow.contains("fail-fast: false"));
+    assert!(workflow.contains("max-parallel: 2"));
     assert!(workflow.contains("run: nix build --no-link \"$INSTALLABLE\""));
+    assert!(!workflow.contains("secrets."));
 }
 
 #[test]
