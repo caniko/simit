@@ -747,6 +747,8 @@ generated YAML:
 
 ```toml
 [ci]
+all_features = false  # keep optional platform features in dedicated checks
+unit_tests_only = true # leave service-backed integration tests to their workflow
 extra_setup = [
   "apt-get update && apt-get install -y --no-install-recommends postgresql-client",
 ]

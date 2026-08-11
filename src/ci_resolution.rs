@@ -48,6 +48,8 @@ pub struct CiInference {
     pub workspace: Option<bool>,
     pub workspace_strategy: Option<WorkspaceStrategy>,
     pub packages: Option<Vec<String>>,
+    pub all_features: Option<bool>,
+    pub unit_tests_only: Option<bool>,
     pub with_nextest: Option<bool>,
     pub with_msrv: Option<bool>,
     pub with_audit: Option<bool>,
@@ -108,6 +110,12 @@ impl CiInference {
             workspace,
             workspace_strategy,
             packages,
+            all_features: Some(all_content.contains("--all-features")),
+            unit_tests_only: Some(
+                all_content
+                    .lines()
+                    .any(|line| line.contains("cargo test") && line.contains(" --lib")),
+            ),
             // Keep these markers in sync with the emitting sites in
             // src/render/ci.rs: optional tool steps, om-ci, and artifact files.
             with_nextest: Some(all_content.contains("cargo nextest run")),
@@ -145,6 +153,8 @@ pub struct ResolvedCiInputs {
     pub workspace: bool,
     pub workspace_strategy: WorkspaceStrategy,
     pub packages: Vec<String>,
+    pub all_features: bool,
+    pub unit_tests_only: bool,
     pub with_nextest: bool,
     pub with_msrv: bool,
     pub with_audit: bool,
@@ -242,6 +252,14 @@ impl ResolvedCiInputs {
             workspace,
             workspace_strategy,
             packages,
+            all_features: config
+                .all_features
+                .or(inference.all_features)
+                .unwrap_or(true),
+            unit_tests_only: config
+                .unit_tests_only
+                .or(inference.unit_tests_only)
+                .unwrap_or(false),
             with_nextest: cli
                 .with_nextest
                 .or(config.with_nextest)
@@ -305,6 +323,8 @@ impl ResolvedCiInputs {
     ) -> CiOptions {
         CiOptions {
             nix_builds: cfg.ci.nix_builds.clone(),
+            all_features: self.all_features,
+            unit_tests_only: self.unit_tests_only,
             nix_substituters: cfg.release.artifacts.substituters.clone(),
             nix_trusted_public_keys: cfg.release.artifacts.trusted_public_keys.clone(),
             with_nextest: self.with_nextest,
@@ -352,6 +372,8 @@ impl ResolvedCiInputs {
         ci.workspace = self.workspace;
         ci.workspace_strategy = self.workspace_strategy;
         ci.packages = self.packages.clone();
+        ci.all_features = (!self.all_features).then_some(false);
+        ci.unit_tests_only = self.unit_tests_only;
         ci.with_nextest = self.with_nextest;
         ci.with_msrv = self.with_msrv;
         ci.with_audit = self.with_audit;
@@ -377,6 +399,8 @@ struct CiConfigLayer {
     step_runners: Option<BTreeMap<String, String>>,
     workspace: Option<bool>,
     packages: Option<Vec<String>>,
+    all_features: Option<bool>,
+    unit_tests_only: Option<bool>,
     with_nextest: Option<bool>,
     with_msrv: Option<bool>,
     with_audit: Option<bool>,
@@ -420,6 +444,8 @@ impl CiConfigLayer {
             workspace: present(ci_table, "workspace").map(|_| cfg.ci.workspace),
             step_runners,
             packages: present(ci_table, "packages").map(|_| cfg.ci.packages.clone()),
+            all_features: present(ci_table, "all_features").and(cfg.ci.all_features),
+            unit_tests_only: present(ci_table, "unit_tests_only").map(|_| cfg.ci.unit_tests_only),
             with_nextest: present(ci_table, "with_nextest").map(|_| cfg.ci.with_nextest),
             with_msrv: present(ci_table, "with_msrv").map(|_| cfg.ci.with_msrv),
             with_audit: present(ci_table, "with_audit").map(|_| cfg.ci.with_audit),
@@ -448,6 +474,8 @@ impl CiConfigLayer {
             step_runners,
             workspace: cfg.ci.workspace.then_some(true),
             packages: (!cfg.ci.packages.is_empty()).then(|| cfg.ci.packages.clone()),
+            all_features: cfg.ci.all_features,
+            unit_tests_only: cfg.ci.unit_tests_only.then_some(true),
             with_nextest: cfg.ci.with_nextest.then_some(true),
             with_msrv: cfg.ci.with_msrv.then_some(true),
             with_audit: cfg.ci.with_audit.then_some(true),

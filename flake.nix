@@ -2,7 +2,7 @@
   description = "Semver-aware git commit helper for Rust projects";
 
   inputs = {
-    rs-harbor.url = "github:caniko/rs-harbor/839c7d80ed76c622195afc3c7ec15b4330ffa621";
+    rs-harbor.url = "github:caniko/rs-harbor/c26b735eede8078f795651c4a9cbf0be8733b221";
 
     nixpkgs.follows = "rs-harbor/nixpkgs";
     rust-overlay.follows = "rs-harbor/rust-overlay";
@@ -44,7 +44,10 @@
         overlays = [(import rust-overlay)];
       };
 
-      toolchain = rs-harbor.lib.mkToolchain {inherit pkgs;};
+      toolchain = rs-harbor.lib.mkToolchain {
+        inherit pkgs;
+        toolchainProfile = "nightly";
+      };
       inherit (toolchain) craneLib;
       cross = rs-harbor.lib.mkCross {inherit pkgs system;};
       simitVersion = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).package.version;
@@ -55,6 +58,7 @@
       publicCraneLib =
         (rs-harbor.lib.mkToolchain {
           inherit pkgs;
+          toolchainProfile = "nightly";
           cache.enable = false;
         }).craneLib;
 
@@ -92,13 +96,13 @@
           nativeCheckInputs = [pkgs.git pkgs.gnupg];
         });
 
+      publicCargoArtifacts = publicCraneLib.buildDepsOnly commonArgs;
       publicPackage = publicCraneLib.buildPackage (commonArgs
         // {
+          cargoArtifacts = publicCargoArtifacts;
           nativeBuildInputs = [preCommitBin];
           nativeCheckInputs = [pkgs.git pkgs.gnupg];
         });
-
-      publicCargoArtifacts = publicCraneLib.buildDepsOnly commonArgs;
 
       staticPackages =
         if system == "x86_64-linux"
