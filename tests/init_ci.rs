@@ -765,10 +765,9 @@ fn infer_project_ci_target_prefers_config_over_marked_workflows() {
     let target = simit::registry::infer_project_ci_target(temp.path()).unwrap();
     assert_eq!(
         target,
-        Some((
-            simit::cli::CiProvider::Actions,
-            simit::cli::Platform::Github
-        ))
+        Some(simit::ci_resolution::CiBackend::Actions {
+            platform: simit::cli::Platform::Github
+        })
     );
 }
 
@@ -786,10 +785,7 @@ fn infer_project_ci_target_falls_back_to_marked_workflows() {
     .unwrap();
 
     let target = simit::registry::infer_project_ci_target(temp.path()).unwrap();
-    assert_eq!(
-        target,
-        Some((simit::cli::CiProvider::Crow, simit::cli::Platform::Forgejo))
-    );
+    assert_eq!(target, Some(simit::ci_resolution::CiBackend::Crow));
 }
 
 #[test]

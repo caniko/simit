@@ -22,7 +22,7 @@ use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
 use crate::cargo::{self, Package};
-use crate::ci_resolution::{CiCliOverrides, CiInference, WorkflowSnapshot};
+use crate::ci_resolution::{CiBackend, CiCliOverrides, CiInference, WorkflowSnapshot};
 use crate::cli::{CiProvider, CrowWorkflowFormat, Platform};
 use crate::config::{FlakeScope, HomebrewOverrides, ProjectConfig};
 use crate::project;
@@ -560,7 +560,7 @@ pub fn audit_ci(workspace_root: &Path) -> Result<CiAudit> {
         });
     }
 
-    let (provider, platform) = infer_ci_target(&marked)?;
+    let backend = infer_ci_target(&marked)?;
     let expected = infer_expected_ci_files(workspace_root, &marked)?
         .into_iter()
         .map(|file| (file.relative_path, file.content))
@@ -601,8 +601,8 @@ pub fn audit_ci(workspace_root: &Path) -> Result<CiAudit> {
 
     Ok(CiAudit {
         status,
-        platform: Some(match provider {
-            CiProvider::Actions => platform.as_str().to_owned(),
+        platform: Some(match backend.provider() {
+            CiProvider::Actions => backend.platform().as_str().to_owned(),
             CiProvider::Crow => "crow".to_owned(),
         }),
         changed_files,
@@ -911,11 +911,12 @@ fn infer_expected_ci_files(
     marked: &[WorkflowFile],
 ) -> Result<Vec<project::GeneratedFile>> {
     let config = ProjectConfig::load(workspace_root).unwrap_or_default();
-    let (provider, platform) = infer_ci_target(marked)?;
+    let backend = infer_ci_target(marked)?;
     let snapshots = workflow_snapshots(marked);
-    if provider == CiProvider::Crow {
+    if backend.provider() == CiProvider::Crow {
         return infer_expected_crow_files(workspace_root, marked, &snapshots);
     }
+    let platform = backend.platform();
     if platform == Platform::Gitlab && workspace_root.join("flake.nix").is_file() {
         return Ok(vec![project::GeneratedFile {
             relative_path: PathBuf::from(".gitlab-ci.yml"),
@@ -947,7 +948,7 @@ fn infer_expected_ci_files(
             &config.flake.expected_outputs.checks,
             &config.ci.components,
         )?];
-        if provider == CiProvider::Actions
+        if backend.provider() == CiProvider::Actions
             && config.prebuild.is_none()
             && !options.nix_builds.is_empty()
         {
@@ -1012,7 +1013,7 @@ fn infer_expected_ci_files(
             &config.release.artifacts,
             &config.ci.components,
         )?];
-        if provider == CiProvider::Actions
+        if backend.provider() == CiProvider::Actions
             && config.prebuild.is_none()
             && !config.ci.nix_builds.is_empty()
         {
@@ -1122,7 +1123,7 @@ fn infer_expected_ci_files(
             ..options.clone()
         };
         files.extend(ci::files(ci::FilesRequest {
-            provider,
+            provider: backend.provider(),
             platform,
             crow: &config.ci.crow,
             runtime: resolved.runtime,
@@ -1134,7 +1135,7 @@ fn infer_expected_ci_files(
             step_runners: &step_runners,
         })?);
     }
-    if provider == CiProvider::Actions
+    if backend.provider() == CiProvider::Actions
         && config.prebuild.is_none()
         && !options.nix_builds.is_empty()
     {
@@ -1221,11 +1222,11 @@ fn single_runner_label(runner: &ResolvedRunner) -> Option<&str> {
 /// config nor any marked workflow declares a target. This is the single
 /// canonical planning path for `regenerate`; do not reintroduce directory-based
 /// guessing here.
-pub fn infer_project_ci_target(workspace_root: &Path) -> Result<Option<(CiProvider, Platform)>> {
+pub fn infer_project_ci_target(workspace_root: &Path) -> Result<Option<CiBackend>> {
     if let Ok(config) = ProjectConfig::load(workspace_root) {
         if let Some(platform) = config.ci.platform {
             let provider = config.ci.provider.unwrap_or(CiProvider::Actions);
-            return Ok(Some((provider, platform)));
+            return Ok(Some(CiBackend::from_parts(provider, platform)?));
         }
     }
     let workflows = collect_workflow_files(workspace_root)?;
@@ -1239,7 +1240,7 @@ pub fn infer_project_ci_target(workspace_root: &Path) -> Result<Option<(CiProvid
     Ok(Some(infer_ci_target(&marked)?))
 }
 
-fn infer_ci_target(marked: &[WorkflowFile]) -> Result<(CiProvider, Platform)> {
+fn infer_ci_target(marked: &[WorkflowFile]) -> Result<CiBackend> {
     let primary = marked
         .iter()
         .filter(|workflow| !is_supplementary_workflow(workflow))
@@ -1259,7 +1260,7 @@ fn infer_ci_target(marked: &[WorkflowFile]) -> Result<(CiProvider, Platform)> {
         {
             bail!("mixed CI providers in workflow tree");
         }
-        return Ok((CiProvider::Crow, Platform::Forgejo));
+        return CiBackend::from_parts(CiProvider::Crow, Platform::Forgejo);
     }
 
     let mut platform = None;
@@ -1281,10 +1282,10 @@ fn infer_ci_target(marked: &[WorkflowFile]) -> Result<(CiProvider, Platform)> {
             None => platform = Some(current),
         }
     }
-    Ok((
+    CiBackend::from_parts(
         CiProvider::Actions,
         platform.context("no marked CI workflows found")?,
-    ))
+    )
 }
 
 fn infer_expected_crow_files(

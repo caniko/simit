@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 
 use crate::cargo;
+use crate::ci_resolution::CiBackend;
 use crate::cli::InitReleaseCommand;
 use crate::cli::{CiProvider, Platform, Runtime};
 use crate::commands::scaffold::{CheckPrintMode, print_next_steps};
@@ -41,7 +42,9 @@ pub fn run(command: InitReleaseCommand) -> Result<()> {
             cfg.ci.provider.unwrap_or(CiProvider::Actions)
         }
     });
-    crate::ci_resolution::validate_ci_capability(provider, platform)?;
+    // Reject Crow + non-Forgejo pairs; Crow release workflows only render for
+    // Forgejo. Actions works on every platform.
+    CiBackend::from_parts(provider, platform)?;
     let release = cfg.resolve_release_target(platform)?;
     let aur = cfg
         .aur

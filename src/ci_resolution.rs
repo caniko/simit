@@ -10,18 +10,51 @@ use crate::cli::{CiProvider, Platform, Runtime, RuntimeChoice, WorkspaceStrategy
 use crate::config::{CiConfig, ProjectConfig};
 use crate::render::ci::{CiOptions, OMNIX_REF_DEFAULT, OmCiMode};
 
-/// Validate that a requested CI target combination is one simit can actually
-/// render. Rejects unsupported Platform x CiProvider pairs up front instead of
-/// silently generating a workflow the target host cannot run.
-pub fn validate_ci_capability(provider: CiProvider, platform: Platform) -> Result<()> {
-    if provider == CiProvider::Crow && platform != Platform::Forgejo {
-        bail!(
-            "Crow CI workflows can only be generated for the Forgejo platform \
-             (got {}); Crow is a Forgejo-native provider",
-            platform.as_str()
-        );
+/// A validated CI target: the concrete backend simit will render for a chosen
+/// (provider, platform) pair.
+///
+/// This is the capability matrix. Constructing a [`CiBackend`] validates the
+/// pair up front instead of silently generating a workflow the target host
+/// cannot run, and the enum gives every caller one value to branch on rather
+/// than re-establishing provider/platform invariants at each dispatch site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CiBackend {
+    /// Actions workflows rendered under a platform's workflow directory.
+    /// GitLab Actions is nix-only CI; that restriction lives in the renderers.
+    Actions { platform: Platform },
+    /// Crow CI rendered under `.crow/`. Crow is Forgejo-native: the source
+    /// host must be Forgejo, so the backend carries no platform.
+    Crow,
+}
+
+impl CiBackend {
+    /// Validate a `(provider, platform)` request and return the renderable
+    /// backend. Rejects pairs simit cannot render instead of guessing.
+    pub fn from_parts(provider: CiProvider, platform: Platform) -> Result<Self> {
+        match (provider, platform) {
+            (CiProvider::Crow, Platform::Forgejo) => Ok(Self::Crow),
+            (CiProvider::Crow, other) => bail!(
+                "Crow CI workflows can only be generated for the Forgejo platform \
+                 (got {}); Crow is a Forgejo-native provider",
+                other.as_str()
+            ),
+            (CiProvider::Actions, platform) => Ok(Self::Actions { platform }),
+        }
     }
-    Ok(())
+
+    pub fn provider(self) -> CiProvider {
+        match self {
+            Self::Actions { .. } => CiProvider::Actions,
+            Self::Crow => CiProvider::Crow,
+        }
+    }
+
+    pub fn platform(self) -> Platform {
+        match self {
+            Self::Actions { platform } => platform,
+            Self::Crow => Platform::Forgejo,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]

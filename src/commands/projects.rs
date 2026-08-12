@@ -110,9 +110,9 @@ fn regenerate(args: ProjectsRegenerateArgs) -> Result<()> {
             // CI platform to `init release` would override a GitHub release
             // target on a Crow/Forgejo CI project.
             if feature == "ci" {
-                if let Some((provider, platform)) = target {
-                    child.args(["--platform", platform.as_str()]);
-                    if provider == crate::cli::CiProvider::Crow {
+                if let Some(backend) = target {
+                    child.args(["--platform", backend.platform().as_str()]);
+                    if backend.provider() == crate::cli::CiProvider::Crow {
                         child.args(["--ci-provider", "crow"]);
                     }
                 }

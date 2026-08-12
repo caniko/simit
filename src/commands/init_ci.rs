@@ -6,7 +6,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 
 use crate::cargo;
-use crate::ci_resolution::{CiCliOverrides, CiInference, ResolvedCiInputs, WorkflowSnapshot};
+use crate::ci_resolution::{
+    CiBackend, CiCliOverrides, CiInference, ResolvedCiInputs, WorkflowSnapshot,
+};
 use crate::cli::{
     ChocolateyOverridesArgs, CiProvider, HomebrewOverridesArgs, InitCiCommand, Platform, Runtime,
     RuntimeChoice, ScoopOverridesArgs,
@@ -51,8 +53,8 @@ pub fn run(command: InitCiCommand) -> Result<()> {
         .platform
         .or(cfg.ci.platform)
         .unwrap_or(Platform::Forgejo);
-    crate::ci_resolution::validate_ci_capability(provider, platform)?;
-    if provider == CiProvider::Crow {
+    let backend = CiBackend::from_parts(provider, platform)?;
+    if backend.provider() == CiProvider::Crow {
         return run_crow(command, &metadata, workspace_root, &cfg, platform);
     }
     let workflow_snapshots = workflow_snapshots_for_platform(workspace_root, platform)?;
@@ -351,7 +353,7 @@ fn run_nix_only(command: InitCiCommand) -> Result<()> {
         .ci_provider
         .or(cfg.ci.provider)
         .unwrap_or(CiProvider::Actions);
-    crate::ci_resolution::validate_ci_capability(provider, platform)?;
+    let _backend = CiBackend::from_parts(provider, platform)?;
     if provider != CiProvider::Actions {
         bail!("Nix-only CI currently supports the Actions provider only");
     }
@@ -518,8 +520,8 @@ fn run_python(command: InitCiCommand) -> Result<()> {
         .platform
         .or(cfg.ci.platform)
         .unwrap_or(Platform::Forgejo);
-    crate::ci_resolution::validate_ci_capability(provider, platform)?;
-    if provider == CiProvider::Crow {
+    let backend = CiBackend::from_parts(provider, platform)?;
+    if backend.provider() == CiProvider::Crow {
         return run_crow_python(command, workspace_root, &cfg, platform);
     }
     let workflow_snapshots = workflow_snapshots_for_platform(workspace_root, platform)?;
