@@ -41,6 +41,7 @@ pub fn run(command: InitReleaseCommand) -> Result<()> {
             cfg.ci.provider.unwrap_or(CiProvider::Actions)
         }
     });
+    crate::ci_resolution::validate_ci_capability(provider, platform)?;
     let release = cfg.resolve_release_target(platform)?;
     let aur = cfg
         .aur

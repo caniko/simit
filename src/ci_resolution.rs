@@ -6,9 +6,23 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
-use crate::cli::{Platform, Runtime, RuntimeChoice, WorkspaceStrategy};
+use crate::cli::{CiProvider, Platform, Runtime, RuntimeChoice, WorkspaceStrategy};
 use crate::config::{CiConfig, ProjectConfig};
 use crate::render::ci::{CiOptions, OMNIX_REF_DEFAULT, OmCiMode};
+
+/// Validate that a requested CI target combination is one simit can actually
+/// render. Rejects unsupported Platform x CiProvider pairs up front instead of
+/// silently generating a workflow the target host cannot run.
+pub fn validate_ci_capability(provider: CiProvider, platform: Platform) -> Result<()> {
+    if provider == CiProvider::Crow && platform != Platform::Forgejo {
+        bail!(
+            "Crow CI workflows can only be generated for the Forgejo platform \
+             (got {}); Crow is a Forgejo-native provider",
+            platform.as_str()
+        );
+    }
+    Ok(())
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct CiCliOverrides {

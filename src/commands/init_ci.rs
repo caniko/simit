@@ -51,6 +51,7 @@ pub fn run(command: InitCiCommand) -> Result<()> {
         .platform
         .or(cfg.ci.platform)
         .unwrap_or(Platform::Forgejo);
+    crate::ci_resolution::validate_ci_capability(provider, platform)?;
     if provider == CiProvider::Crow {
         return run_crow(command, &metadata, workspace_root, &cfg, platform);
     }
@@ -350,6 +351,7 @@ fn run_nix_only(command: InitCiCommand) -> Result<()> {
         .ci_provider
         .or(cfg.ci.provider)
         .unwrap_or(CiProvider::Actions);
+    crate::ci_resolution::validate_ci_capability(provider, platform)?;
     if provider != CiProvider::Actions {
         bail!("Nix-only CI currently supports the Actions provider only");
     }
@@ -516,6 +518,7 @@ fn run_python(command: InitCiCommand) -> Result<()> {
         .platform
         .or(cfg.ci.platform)
         .unwrap_or(Platform::Forgejo);
+    crate::ci_resolution::validate_ci_capability(provider, platform)?;
     if provider == CiProvider::Crow {
         return run_crow_python(command, workspace_root, &cfg, platform);
     }

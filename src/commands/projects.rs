@@ -95,6 +95,7 @@ fn regenerate(args: ProjectsRegenerateArgs) -> Result<()> {
     let mut failures = 0usize;
     for path in paths {
         println!("==> {path}");
+        let target = registry::infer_project_ci_target(path.as_std_path()).unwrap_or(None);
         for feature in [args.ci.then_some("ci"), args.release.then_some("release")]
             .into_iter()
             .flatten()
@@ -103,8 +104,18 @@ fn regenerate(args: ProjectsRegenerateArgs) -> Result<()> {
             child
                 .current_dir(path.as_std_path())
                 .args(["init", feature]);
-            if let Some(platform) = existing_platform(path.as_std_path()) {
-                child.args(["--platform", platform]);
+            // The release destination resolves independently from
+            // [release].github / [release].codeberg in `init release`, so only
+            // the CI feature inherits the inferred workflow target. Passing the
+            // CI platform to `init release` would override a GitHub release
+            // target on a Crow/Forgejo CI project.
+            if feature == "ci" {
+                if let Some((provider, platform)) = target {
+                    child.args(["--platform", platform.as_str()]);
+                    if provider == crate::cli::CiProvider::Crow {
+                        child.args(["--ci-provider", "crow"]);
+                    }
+                }
             }
             if !args.write {
                 child.arg("--check");
@@ -132,18 +143,6 @@ fn regenerate(args: ProjectsRegenerateArgs) -> Result<()> {
             format!("regeneration failed for {failures} workflow operation(s)"),
         )
         .into())
-    }
-}
-
-fn existing_platform(path: &std::path::Path) -> Option<&'static str> {
-    if path.join(".github/workflows").is_dir() {
-        Some("github")
-    } else if path.join(".forgejo/workflows").is_dir() {
-        Some("forgejo")
-    } else if path.join(".gitlab-ci.yml").is_file() {
-        Some("gitlab")
-    } else {
-        None
     }
 }
 

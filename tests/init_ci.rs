@@ -694,6 +694,117 @@ token_secret = "ATTIC_TOKEN"
 }
 
 #[test]
+fn crow_ci_rejects_non_forgejo_platforms() {
+    let temp = init_package(true);
+
+    let status = simit()
+        .current_dir(temp.path())
+        .args([
+            "init",
+            "ci",
+            "--ci-provider",
+            "crow",
+            "--platform",
+            "github",
+            "--runner",
+            "crow-agent",
+        ])
+        .status()
+        .unwrap();
+    assert!(!status.success());
+    assert!(!temp.path().join(".crow/build.yaml").exists());
+    assert!(!temp.path().join(".github/workflows/ci.yaml").exists());
+
+    let status = simit()
+        .current_dir(temp.path())
+        .args([
+            "init",
+            "ci",
+            "--ci-provider",
+            "crow",
+            "--platform",
+            "gitlab",
+            "--runner",
+            "crow-agent",
+        ])
+        .status()
+        .unwrap();
+    assert!(!status.success());
+}
+
+#[test]
+fn crow_ci_accepts_default_forgejo_platform() {
+    let temp = init_package(true);
+
+    let status = simit()
+        .current_dir(temp.path())
+        .args([
+            "init",
+            "ci",
+            "--ci-provider",
+            "crow",
+            "--runner",
+            "crow-agent",
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert!(temp.path().join(".crow/build.yaml").is_file());
+}
+
+#[test]
+fn infer_project_ci_target_prefers_config_over_marked_workflows() {
+    let temp = init_package(true);
+    fs::write(
+        temp.path().join("simit.toml"),
+        "[ci]\nplatform = \"github\"\n",
+    )
+    .unwrap();
+    fs::create_dir_all(temp.path().join(".crow")).unwrap();
+
+    let target = simit::registry::infer_project_ci_target(temp.path()).unwrap();
+    assert_eq!(
+        target,
+        Some((
+            simit::cli::CiProvider::Actions,
+            simit::cli::Platform::Github
+        ))
+    );
+}
+
+#[test]
+fn infer_project_ci_target_falls_back_to_marked_workflows() {
+    let temp = init_package(true);
+    fs::create_dir_all(temp.path().join(".crow")).unwrap();
+    fs::write(
+        temp.path().join(".crow/build.yaml"),
+        format!(
+            "{}\nname: build\n",
+            simit::render::ci::GENERATED_WORKFLOW_MARKER
+        ),
+    )
+    .unwrap();
+
+    let target = simit::registry::infer_project_ci_target(temp.path()).unwrap();
+    assert_eq!(
+        target,
+        Some((simit::cli::CiProvider::Crow, simit::cli::Platform::Forgejo))
+    );
+}
+
+#[test]
+fn infer_project_ci_target_returns_none_for_unmarked_workspace() {
+    let temp = init_package(true);
+    fs::create_dir_all(temp.path().join(".github/workflows")).unwrap();
+    fs::write(temp.path().join(".github/workflows/ci.yaml"), "name: ci\n").unwrap();
+
+    assert_eq!(
+        simit::registry::infer_project_ci_target(temp.path()).unwrap(),
+        None
+    );
+}
+
+#[test]
 fn github_nix_only_keeps_single_runner_when_no_system_map_is_configured() {
     let temp = init_flake_only();
 

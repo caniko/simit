@@ -28,7 +28,8 @@ pub const SIMIT_RELEASE_ARTIFACTS_BUILD_TYPE: &str = "https://simit.rs/release-a
 /// marker (no `# ` prefix) is recognized only for migration of pre-marker
 /// generation output; it is never written by current renderers.
 pub fn is_generated_workflow_marker(content: &str) -> bool {
-    content.contains(GENERATED_WORKFLOW_MARKER) || content.contains(LEGACY_GENERATED_WORKFLOW_MARKER)
+    content.contains(GENERATED_WORKFLOW_MARKER)
+        || content.contains(LEGACY_GENERATED_WORKFLOW_MARKER)
 }
 const CARGO_NEXTEST_VERSION: &str = "0.9.100";
 const CARGO_DENY_VERSION: &str = "0.18.3";
@@ -2242,10 +2243,7 @@ fn artifacts_workflow(
             workflow.push_str("      - name: Install Nix release tools\n");
             workflow.push_str("        uses: ");
             if platform == Platform::Forgejo {
-                workflow.push_str(&immutable_action_ref(
-                    INSTALL_NIX_ACTION_URL,
-                    "v31",
-                ));
+                workflow.push_str(&immutable_action_ref(INSTALL_NIX_ACTION_URL, "v31"));
             } else {
                 workflow.push_str(&github_action_ref("cachix/install-nix-action", "v31"));
             }

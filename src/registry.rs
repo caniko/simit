@@ -1216,6 +1216,29 @@ fn single_runner_label(runner: &ResolvedRunner) -> Option<&str> {
     }
 }
 
+/// Resolve the CI target a workspace is configured for: persisted `[ci]` config
+/// first, then inference from marked workflow files. `None` when neither the
+/// config nor any marked workflow declares a target. This is the single
+/// canonical planning path for `regenerate`; do not reintroduce directory-based
+/// guessing here.
+pub fn infer_project_ci_target(workspace_root: &Path) -> Result<Option<(CiProvider, Platform)>> {
+    if let Ok(config) = ProjectConfig::load(workspace_root) {
+        if let Some(platform) = config.ci.platform {
+            let provider = config.ci.provider.unwrap_or(CiProvider::Actions);
+            return Ok(Some((provider, platform)));
+        }
+    }
+    let workflows = collect_workflow_files(workspace_root)?;
+    let marked = workflows
+        .into_iter()
+        .filter(|workflow| workflow.marked)
+        .collect::<Vec<_>>();
+    if marked.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(infer_ci_target(&marked)?))
+}
+
 fn infer_ci_target(marked: &[WorkflowFile]) -> Result<(CiProvider, Platform)> {
     let primary = marked
         .iter()
