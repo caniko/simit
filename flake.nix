@@ -101,18 +101,19 @@
         // {
           cargoArtifacts = publicCargoArtifacts;
           nativeBuildInputs = [preCommitBin];
-           nativeCheckInputs = [pkgs.git pkgs.gnupg];
-         });
+          nativeCheckInputs = [pkgs.git pkgs.gnupg];
+        });
 
-      actionlintCheck = pkgs.runCommand "simit-actionlint" {
-        nativeBuildInputs = [pkgs.actionlint];
-      } ''
-        for workflow in ${src}/.github/workflows/*.yml ${src}/.github/workflows/*.yaml; do
-          [ -e "$workflow" ] || continue
-          actionlint "$workflow"
-        done
-        touch "$out"
-      '';
+      actionlintCheck =
+        pkgs.runCommand "simit-actionlint" {
+          nativeBuildInputs = [pkgs.actionlint];
+        } ''
+          for workflow in ${src}/.github/workflows/*.yml ${src}/.github/workflows/*.yaml; do
+            [ -e "$workflow" ] || continue
+            actionlint "$workflow"
+          done
+          touch "$out"
+        '';
 
       staticPackages =
         if system == "x86_64-linux"
