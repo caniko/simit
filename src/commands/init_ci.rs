@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -320,16 +320,10 @@ pub fn run(command: InitCiCommand) -> Result<()> {
     }
 
     if command.check {
-        check_generated_ci_files(
-            workspace_root,
-            &files,
-            platform,
-            &check_message,
-            command.diff,
-        )?;
+        reconcile_ci_files(workspace_root, files, &check_message, true, command.diff)?;
         upgrade::update_readme_badges_if_present(workspace_root, true, command.diff)
     } else {
-        reconcile_ci_files(workspace_root, &files, &check_message, false, false)?;
+        reconcile_ci_files(workspace_root, files, &check_message, false, false)?;
         if ProjectConfig::can_persist_ci(workspace_root)? {
             ProjectConfig::write_ci(workspace_root, &persisted_ci)?;
         }
@@ -454,10 +448,10 @@ fn run_nix_only(command: InitCiCommand) -> Result<()> {
         if platform == Platform::Gitlab {
             project::check_generated_files(&workspace_root, &files, &message, command.diff)?;
         } else {
-            check_generated_ci_files(&workspace_root, &files, platform, &message, command.diff)?;
+            reconcile_ci_files(&workspace_root, files, &message, true, command.diff)?;
         }
     } else {
-        reconcile_ci_files(&workspace_root, &files, &message, false, false)?;
+        reconcile_ci_files(&workspace_root, files, &message, false, false)?;
         let mut persisted_ci = cfg.ci;
         persisted_ci.provider = Some(CiProvider::Actions);
         persisted_ci.platform = Some(platform);
@@ -618,16 +612,10 @@ fn run_python(command: InitCiCommand) -> Result<()> {
     );
 
     if command.check {
-        check_generated_ci_files(
-            workspace_root,
-            &files,
-            platform,
-            &check_message,
-            command.diff,
-        )?;
+        reconcile_ci_files(workspace_root, files, &check_message, true, command.diff)?;
         upgrade::update_readme_badges_if_present(workspace_root, true, command.diff)
     } else {
-        reconcile_ci_files(workspace_root, &files, &check_message, false, false)?;
+        reconcile_ci_files(workspace_root, files, &check_message, false, false)?;
         if ProjectConfig::can_persist_ci(workspace_root)? {
             ProjectConfig::write_ci(workspace_root, &persisted_ci)?;
         }
@@ -783,10 +771,10 @@ fn run_crow(
     let check_message =
         "Crow CI workflows are not up to date; run `simit init ci --ci-provider crow`".to_owned();
     if command.check {
-        check_generated_crow_files(workspace_root, &files, &check_message, command.diff)?;
+        reconcile_ci_files(workspace_root, files, &check_message, true, command.diff)?;
         Ok(())
     } else {
-        reconcile_ci_files(workspace_root, &files, "Crow CI workflows", false, false)?;
+        reconcile_ci_files(workspace_root, files, "Crow CI workflows", false, false)?;
         if ProjectConfig::can_persist_ci(workspace_root)? {
             ProjectConfig::write_ci(workspace_root, &persisted_ci)?;
         }
@@ -849,16 +837,17 @@ fn run_crow_python(
     persisted_ci.crow = crow;
     persisted_ci.with_pypi_publish = resolved.with_pypi_publish;
     if command.check {
-        check_generated_crow_files(
+        reconcile_ci_files(
             workspace_root,
-            &files,
+            files,
             "Crow Python CI workflows are not up to date; run `simit init ci --ci-provider crow`",
+            true,
             command.diff,
         )?;
     } else {
         reconcile_ci_files(
             workspace_root,
-            &files,
+            files,
             "Crow Python CI workflows",
             false,
             false,
@@ -1520,81 +1509,23 @@ fn maybe_push_deny_template(
     });
 }
 
-fn check_generated_ci_files(
-    workspace_root: &Path,
-    files: &[project::GeneratedFile],
-    platform: Platform,
-    message: &str,
-    show_diff: bool,
-) -> Result<()> {
-    let _ = platform;
-    reconcile_ci_files(workspace_root, files, message, true, show_diff)
-}
-
 fn reconcile_ci_files(
     workspace_root: &Path,
-    files: &[project::GeneratedFile],
+    files: Vec<project::GeneratedFile>,
     message: &str,
     check: bool,
     show_diff: bool,
 ) -> Result<()> {
-    let expected = files
-        .iter()
-        .map(|file| file.relative_path.clone())
-        .collect::<BTreeSet<_>>();
-    let obsolete = obsolete_generated_workflows(workspace_root, &expected)?;
-    project::reconcile_generated_files(workspace_root, files, &obsolete, message, check, show_diff)
-}
-
-fn obsolete_generated_workflows(
-    workspace_root: &Path,
-    expected: &BTreeSet<PathBuf>,
-) -> Result<Vec<PathBuf>> {
-    let mut obsolete = Vec::new();
-    for relative_dir in [".forgejo/workflows", ".github/workflows", ".crow"] {
-        let directory = workspace_root.join(relative_dir);
-        let entries = match fs::read_dir(&directory) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == ErrorKind::NotFound => continue,
-            Err(error) => {
-                return Err(error).with_context(|| format!("reading {}", directory.display()));
-            }
-        };
-        for entry in entries {
-            let entry =
-                entry.with_context(|| format!("reading entry in {}", directory.display()))?;
-            if !entry.file_type()?.is_file() {
-                continue;
-            }
-            let path = entry.path();
-            let Some(extension) = path.extension().and_then(|extension| extension.to_str()) else {
-                continue;
-            };
-            if !matches!(extension, "yaml" | "yml" | "jsonnet") {
-                continue;
-            }
-            let relative = PathBuf::from(relative_dir).join(entry.file_name());
-            if expected.contains(&relative) || !is_ci_managed_workflow_name(&entry.file_name()) {
-                continue;
-            }
-            let content =
-                fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-            if generated_workflow_marker_present(&content) {
-                obsolete.push(relative);
-            }
-        }
+    let plan = project::GeneratedPlan {
+        files,
+        message,
+        owns_name: is_ci_managed_workflow_name,
+    };
+    if check {
+        plan.check(workspace_root, show_diff)
+    } else {
+        plan.write(workspace_root)
     }
-    obsolete.sort();
-    Ok(obsolete)
-}
-
-fn check_generated_crow_files(
-    workspace_root: &Path,
-    files: &[project::GeneratedFile],
-    message: &str,
-    show_diff: bool,
-) -> Result<()> {
-    reconcile_ci_files(workspace_root, files, message, true, show_diff)
 }
 
 fn is_ci_managed_workflow_name(name: &std::ffi::OsStr) -> bool {

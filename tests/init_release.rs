@@ -321,6 +321,53 @@ fn sole_github_release_target_uses_actions_without_changing_crow_ci() {
 }
 
 #[test]
+fn switching_release_platform_removes_only_obsolete_generated_workflows() {
+    let project = init_package("release-migration-demo");
+    let config_path = project.path().join("simit.toml");
+    let config = read(&config_path).replace(
+        "[release.codeberg]\nrepo = \"example/release-migration-demo\"",
+        "[release.github]\nrepo = \"example/release-migration-demo\"",
+    );
+    fs::write(config_path, config).unwrap();
+    fs::create_dir_all(project.path().join(".forgejo/workflows")).unwrap();
+    fs::create_dir_all(project.path().join(".crow")).unwrap();
+    fs::write(
+        project.path().join(".forgejo/workflows/release.yml"),
+        format!(
+            "{}\nname: obsolete\n",
+            simit::render::ci::GENERATED_WORKFLOW_MARKER
+        ),
+    )
+    .unwrap();
+    fs::write(
+        project.path().join(".crow/release.yaml"),
+        "name: hand-written\n",
+    )
+    .unwrap();
+
+    let status = simit()
+        .current_dir(project.path())
+        .args(["init", "release"])
+        .status()
+        .unwrap();
+
+    assert!(status.success());
+    assert!(
+        project
+            .path()
+            .join(".github/workflows/release.yml")
+            .is_file()
+    );
+    assert!(
+        !project
+            .path()
+            .join(".forgejo/workflows/release.yml")
+            .exists()
+    );
+    assert!(project.path().join(".crow/release.yaml").is_file());
+}
+
+#[test]
 fn crow_release_pushes_attic_only_for_tags() {
     let project = init_package("crow-attic-demo");
     let config_path = project.path().join("simit.toml");
