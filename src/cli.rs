@@ -2063,6 +2063,8 @@ pub enum ProjectsAction {
     Scan(ProjectsScanArgs),
     #[command(about = "Audit live project CI without reading or writing the registry")]
     Audit(ProjectsAuditArgs),
+    #[command(about = "Regenerate selected generated CI and release workflows")]
+    Regenerate(ProjectsRegenerateArgs),
     #[command(about = "Discover Rust workspaces under a filesystem subtree")]
     Discover(ProjectsDiscoverArgs),
     #[command(about = "Forget one registered project")]
@@ -2146,6 +2148,28 @@ pub struct ProjectsAuditArgs {
     pub paths: Vec<Utf8PathBuf>,
     #[arg(long, help = "Print a stable machine-readable JSON report")]
     pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct ProjectsRegenerateArgs {
+    #[arg(
+        value_name = "PATH",
+        help = "Project path; defaults to the current workspace root; may be repeated"
+    )]
+    pub paths: Vec<Utf8PathBuf>,
+    #[arg(long, help = "Regenerate every registered Simit-managed project")]
+    pub all: bool,
+    #[arg(long, help = "Regenerate CI workflows")]
+    pub ci: bool,
+    #[arg(long, help = "Regenerate release workflows")]
+    pub release: bool,
+    #[arg(
+        long,
+        help = "Write generated files; without this flag only check for drift"
+    )]
+    pub write: bool,
+    #[arg(long, help = "Print diffs when checking generated files")]
+    pub diff: bool,
 }
 
 #[derive(Debug, Args)]

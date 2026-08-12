@@ -101,8 +101,18 @@
         // {
           cargoArtifacts = publicCargoArtifacts;
           nativeBuildInputs = [preCommitBin];
-          nativeCheckInputs = [pkgs.git pkgs.gnupg];
-        });
+           nativeCheckInputs = [pkgs.git pkgs.gnupg];
+         });
+
+      actionlintCheck = pkgs.runCommand "simit-actionlint" {
+        nativeBuildInputs = [pkgs.actionlint];
+      } ''
+        for workflow in ${src}/.github/workflows/*.yml ${src}/.github/workflows/*.yaml; do
+          [ -e "$workflow" ] || continue
+          actionlint "$workflow"
+        done
+        touch "$out"
+      '';
 
       staticPackages =
         if system == "x86_64-linux"
@@ -245,6 +255,7 @@
         doc = docCheck;
         audit = auditCheck;
         deny = denyCheck;
+        actionlint = actionlintCheck;
         default-package-is-publicly-buildable = assert !(publicPackage.passthru.rsHarborBuildCacheWrapped or false);
           pkgs.runCommand "check-simit-default-package-cache-policy" {} "touch $out";
       };
@@ -265,6 +276,7 @@
               cargo-audit
               cargo-deny
               cargo-nextest
+              actionlint
               git
               mdbook
               prettier

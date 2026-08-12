@@ -246,6 +246,7 @@ pub struct ScoopOptions {
 #[derive(Debug, Clone, Copy)]
 pub struct SelfCheckOptions<'a> {
     pub enabled: bool,
+    pub release: bool,
     pub runner_override: Option<&'a str>,
     pub windows_runner_override: Option<&'a str>,
     pub packages: &'a [String],
@@ -420,6 +421,7 @@ pub fn nix_flake_ci_file(platform: Platform, runner: &ResolvedRunner) -> Result<
         runner,
         &BTreeMap::new(),
         &ArtifactsConfig::default(),
+        &[],
     )
 }
 
@@ -431,6 +433,7 @@ pub fn nix_flake_ci_file_with_system_runners(
     runner: &ResolvedRunner,
     system_runners: &BTreeMap<String, String>,
     artifacts: &ArtifactsConfig,
+    components: &[CiComponent],
 ) -> Result<GeneratedFile> {
     if platform == Platform::Gitlab {
         bail!("GitLab flake CI uses .gitlab-ci.yml");
@@ -469,12 +472,35 @@ pub fn nix_flake_ci_file_with_system_runners(
         &artifacts.substituters,
         &artifacts.trusted_public_keys,
     );
-    if system_runners.is_empty() {
-        workflow.push_str("      - name: Check flake\n        run: nix flake check\n");
+    let selected = |component| components.is_empty() || components.contains(&component);
+    if components.is_empty() {
+        if system_runners.is_empty() {
+            workflow.push_str("      - name: Check flake\n        run: nix flake check\n");
+        } else {
+            workflow.push_str(
+                "      - name: Verify runner system\n        run: test \"$(nix eval --impure --raw --expr builtins.currentSystem)\" = \"${{ matrix.system }}\"\n      - name: Check flake\n        run: nix flake check --no-update-lock-file --system \"${{ matrix.system }}\"\n",
+            );
+        }
     } else {
-        workflow.push_str(
-            "      - name: Verify runner system\n        run: test \"$(nix eval --impure --raw --expr builtins.currentSystem)\" = \"${{ matrix.system }}\"\n      - name: Check flake\n        run: nix flake check --no-update-lock-file --system \"${{ matrix.system }}\"\n",
-        );
+        if selected(CiComponent::FlakeWiring) {
+            workflow.push_str("      - name: Check generated flake wiring\n        run: nix run --no-write-lock-file git+https://github.com/caniko/simit.git -- init flake --check --diff\n");
+        }
+        if selected(CiComponent::FlakeEvaluation) {
+            workflow.push_str(
+                "      - name: Check flake evaluation\n        run: nix flake check --no-build",
+            );
+            if !system_runners.is_empty() {
+                workflow.push_str(" --no-update-lock-file --system \"${{ matrix.system }}\"");
+            }
+            workflow.push('\n');
+        }
+        if selected(CiComponent::Checks) {
+            workflow.push_str("      - name: Build flake checks\n        run: nix flake check");
+            if !system_runners.is_empty() {
+                workflow.push_str(" --no-update-lock-file --system \"${{ matrix.system }}\"");
+            }
+            workflow.push('\n');
+        }
     }
     Ok(GeneratedFile {
         relative_path: PathBuf::from(platform.workflow_dir()).join("ci.yaml"),
@@ -515,7 +541,7 @@ pub fn github_prebuild_file(
         workflow.push_str("    secrets:\n      attic_token:\n        required: true\n");
     }
     workflow.push_str("\npermissions:\n  contents: read\n\n");
-    workflow.push_str("concurrency:\n  group: ${{ github.workflow }}-${{ github.ref }}-prebuild\n  cancel-in-progress: ${{ !inputs.release && (github.event_name == 'push' || github.event_name == 'pull_request') }}\n\n");
+    workflow.push_str("concurrency:\n  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}-prebuild\n  cancel-in-progress: ${{ !inputs.release && (github.event_name == 'push' || github.event_name == 'pull_request') }}\n\n");
     workflow.push_str(
         "jobs:\n  build:\n    strategy:\n      fail-fast: false\n      matrix:\n        include:\n",
     );
@@ -603,6 +629,8 @@ pub fn nix_build_matrix_file(
     runner: &ResolvedRunner,
     installables: &[String],
     extra_setup: &[String],
+    substituters: &[String],
+    trusted_public_keys: &[String],
 ) -> Result<GeneratedFile> {
     if platform == Platform::Gitlab {
         bail!("GitLab Nix installable matrices are not supported");
@@ -634,7 +662,7 @@ pub fn nix_build_matrix_file(
         "    env:\n      NIX_CONFIG: \"experimental-features = nix-command flakes\"\n    steps:\n",
     );
     push_checkout_step(&mut workflow, platform);
-    push_install_nix_step(&mut workflow, platform);
+    push_install_nix_step_with_cache(&mut workflow, platform, substituters, trusted_public_keys);
     push_extra_setup_steps(&mut workflow, extra_setup);
     workflow.push_str("      - name: Build ${{ matrix.installable }}\n");
     workflow.push_str("        env:\n          INSTALLABLE: ${{ matrix.installable }}\n");
@@ -725,6 +753,9 @@ fn github_pages_workflow(runner: &ResolvedRunner, pages: &CodebergPagesOptions) 
     workflow.push_str("\n    env:\n      NIX_CONFIG: \"experimental-features = nix-command flakes\"\n    steps:\n");
     push_checkout_step(&mut workflow, Platform::Github);
     push_install_nix_step(&mut workflow, Platform::Github);
+    workflow.push_str("      - name: Configure GitHub Pages\n        uses: ");
+    workflow.push_str(&github_action_ref("actions/configure-pages", "v6"));
+    workflow.push('\n');
     workflow.push_str("      - name: Build Pages site\n        run: |\n          nix build ");
     workflow.push_str(&shell_word(&pages.site_output));
     workflow.push_str(" --no-link --out-link result-pages-site\n");
@@ -1505,7 +1536,7 @@ fn python_ci_workflow(
     if selected(CiComponent::FlakeWiring) {
         workflow.push_str("      - name: Check generated flake wiring\n");
         workflow.push_str(
-            "        run: nix run --no-write-lock-file git+https://codeberg.org/caniko/simit.git -- init flake --check --diff\n\n",
+            "        run: nix run --no-write-lock-file git+https://github.com/caniko/simit.git -- init flake --check --diff\n\n",
         );
     }
     if selected(CiComponent::FlakeEvaluation) {
@@ -2971,9 +3002,8 @@ fn push_concurrency(workflow: &mut String) {
 
 fn push_github_concurrency(workflow: &mut String) {
     workflow.push_str("concurrency:\n");
-    workflow.push_str(
-        "  group: ${{ github.workflow }}-${{ github.event.pull_request.head.ref || github.ref }}\n",
-    );
+    workflow
+        .push_str("  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}\n");
     workflow.push_str("  cancel-in-progress: true\n\n");
 }
 
@@ -3614,7 +3644,15 @@ fn push_self_check_steps(
     workflow.push_str("      - name: Check generated flake and hooks\n");
     workflow.push_str("        run: ");
     workflow.push_str(command_prefix(runtime));
-    workflow.push_str("cargo run -- init flake --check\n\n");
+    workflow.push_str("cargo run -- init flake --check\n");
+    if self_check.release {
+        workflow.push_str("\n      - name: Check generated release\n");
+        workflow.push_str("        run: ");
+        workflow.push_str(command_prefix(runtime));
+        workflow.push_str("cargo run -- init release --check --diff\n\n");
+    } else {
+        workflow.push('\n');
+    }
 }
 
 fn push_self_check_suffix(

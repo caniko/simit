@@ -274,6 +274,13 @@ fn build_workflow(
         }
         command.push_str(" --check");
         steps.push(step(STEP_SELF_CHECK, image, command));
+        if self_check.release {
+            steps.push(step(
+                "release-self-check",
+                image,
+                "cargo run -- init release --ci-provider crow --check --diff".to_owned(),
+            ));
+        }
     }
 
     apply_step_runner_labels(&mut steps, step_runners);
@@ -519,7 +526,10 @@ pub fn codeberg_pages_file(
 ) -> Result<GeneratedFile> {
     let image = nix_image(config)?;
     let mut deploy = Step::new("deploy-pages", &image)
-        .command(format!("nix build .#{} --no-link", pages.site_output))
+        .command(format!(
+            "nix build .#{} --out-link result",
+            pages.site_output
+        ))
         .command("test -d result".to_owned())
         .command(format!("nix run .#{}", pages.deploy_app))
         .secret(&pages.token_secret);
@@ -633,7 +643,7 @@ pub fn python_ci_file(
         steps.push(step(
             "flake-wiring",
             &image,
-            "nix run --no-write-lock-file git+https://codeberg.org/caniko/simit.git -- init flake --check --diff".to_owned(),
+            "nix run --no-write-lock-file git+https://github.com/caniko/simit.git -- init flake --check --diff".to_owned(),
         ));
     }
     if selected(crate::config::CiComponent::FlakeEvaluation) {
@@ -894,6 +904,29 @@ mod tests {
             nix_image(&CrowCiConfig::default()).unwrap(),
             DEFAULT_CROW_NIX_IMAGE
         );
+    }
+
+    #[test]
+    fn pages_build_creates_the_result_link_it_checks() {
+        let runner = crate::user_config::ResolvedRunner::literal("crow").unwrap();
+        let pages = ci::CodebergPagesOptions {
+            repo: "caniko/site".to_owned(),
+            owner: "caniko".to_owned(),
+            canonical_domain: None,
+            site_output: "site".to_owned(),
+            token_secret: "CODEBERG_TOKEN".to_owned(),
+            source_branch: "trunk".to_owned(),
+            deploy_app: "deploy-pages".to_owned(),
+        };
+        let file = codeberg_pages_file(
+            CrowWorkflowFormat::Yaml,
+            &CrowCiConfig::default(),
+            &runner,
+            &pages,
+        )
+        .unwrap();
+        assert!(file.content.contains("nix build .#site --out-link result"));
+        assert!(!file.content.contains("nix build .#site --no-link\n"));
     }
 
     #[test]

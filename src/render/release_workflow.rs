@@ -21,6 +21,7 @@ use crate::config::{
     ResolvedAur, ResolvedChocolatey, ResolvedCopr, ResolvedHomebrew, ResolvedReleaseTarget,
     ResolvedScoop, WindowsSigningConfig, WingetConfig,
 };
+use crate::project::GeneratedFile;
 use crate::render::ci::{forgejo_action_ref, github_action_ref, immutable_action_ref};
 use serde::Serialize;
 
@@ -457,6 +458,13 @@ const PRERELEASE_REGEX: &str = r"-(rc|beta|alpha)\.[0-9]+$";
 /// Resolve `VERSION` from whichever forge ref-name env var is set.
 const VERSION_FROM_REF: &str = r#"VERSION="${GITHUB_REF_NAME:-${FORGE_REF_NAME:-${FORGEJO_REF_NAME:-}}}"
           if [ -z "$VERSION" ]; then ref="${GITHUB_REF:-${FORGE_REF:-${FORGEJO_REF:-}}}"; VERSION="${ref#refs/tags/}"; fi"#;
+
+pub fn file(inputs: &ReleaseWorkflowInputs<'_>) -> GeneratedFile {
+    GeneratedFile {
+        relative_path: std::path::PathBuf::from(inputs.platform.workflow_dir()).join("release.yml"),
+        content: render(inputs),
+    }
+}
 
 pub fn render(inputs: &ReleaseWorkflowInputs<'_>) -> String {
     let mut w = String::new();
@@ -1210,7 +1218,7 @@ fn push_sign(
         .map(|c| {
             let host = match c.provider {
                 ReleaseProvider::Forgejo => forgejo_web_base(&c.api_base),
-                ReleaseProvider::Github => "https://github.com".to_owned(),
+                ReleaseProvider::Github => github_web_base(&c.api_base),
             };
             format!("{host}/{}", c.repo)
         })
@@ -1223,9 +1231,16 @@ fn push_sign(
     w.push_str(platform.workflow_dir());
     w.push_str("/release.yml | awk '{print $1}')\"\n");
     w.push_str("          flake_lock_sha=\"missing\"; if [ -f flake.lock ]; then flake_lock_sha=\"$(sha256sum flake.lock | awk '{print $1}')\"; fi\n");
+    let revision_path = release
+        .map(|target| match target.provider {
+            ReleaseProvider::Forgejo => "/src/tag/",
+            ReleaseProvider::Github => "/blob/",
+        })
+        .unwrap_or("/blob/");
     w.push_str("          builder_id=\"");
     w.push('$');
-    w.push_str("{repo_url}/src/tag/");
+    w.push_str("{repo_url}");
+    w.push_str(revision_path);
     w.push('$');
     w.push_str("{VERSION}/");
     w.push_str(platform.workflow_dir());
@@ -1243,6 +1258,17 @@ fn push_sign(
     w.push_str("            if sign_blob_keyless \"$file\" && attest_blob_keyless \"$file\" \"$predicate\"; then echo \"signed+attested $file (keyless)\"; elif [ -n \"${COSIGN_PRIVATE_KEY:-}\" ]; then echo \"keyless failed for $file; using COSIGN_PRIVATE_KEY\"; sign_blob_with_key \"$file\"; attest_blob_with_key \"$file\" \"$predicate\"; else echo \"::error::keyless Sigstore failed and COSIGN_PRIVATE_KEY is unset for $file\" >&2; exit 1; fi\n");
     w.push_str("            test -s \"${file}.cosign.bundle\"\n            test -s \"${file}.intoto.bundle\"\n");
     w.push_str("            rm -f \"$predicate\"\n          done < <(printf '%s\\n' \"${files[@]}\" | LC_ALL=C sort -u)\n          SCRIPT\n");
+}
+
+fn github_web_base(api_base: &str) -> String {
+    let base = api_base.trim_end_matches('/');
+    if base == "https://api.github.com" {
+        return "https://github.com".to_owned();
+    }
+    base.strip_suffix("/api/v3")
+        .or_else(|| base.strip_suffix("/api"))
+        .unwrap_or(base)
+        .to_owned()
 }
 
 fn push_smoke(w: &mut String, command: &str) {
@@ -2469,7 +2495,7 @@ mod tests {
             api_key_env: "CHOCOLATEY_API_KEY".to_owned(),
             api_key_secret: "chocolatey_api_key".to_owned(),
             api_key_from_runner: false,
-            nix_tool: "github:caniko/nixpkgs/add-chocolatey-scoop#chocolatey git+https://codeberg.org/caniko/simit"
+            nix_tool: "github:caniko/nixpkgs/add-chocolatey-scoop#chocolatey git+https://github.com/caniko/simit.git"
                 .to_owned(),
         }
     }
@@ -2620,6 +2646,44 @@ mod tests {
         assert_eq!(
             forgejo_web_base("https://codeberg.org/api/v1/"),
             "https://codeberg.org"
+        );
+    }
+
+    #[test]
+    fn provenance_builder_url_matches_release_provider() {
+        let artifacts = artifacts();
+        let forgejo = codeberg();
+        let mut forgejo_workflow = String::new();
+        push_sign(
+            &mut forgejo_workflow,
+            &artifacts,
+            Some(&forgejo),
+            Platform::Forgejo,
+        );
+        assert!(forgejo_workflow.contains("repo_url=\"https://codeberg.org/caniko/rs-modde\""));
+        assert!(forgejo_workflow.contains(
+            "builder_id=\"${repo_url}/src/tag/${VERSION}/.forgejo/workflows/release.yml\""
+        ));
+
+        let mut github = forgejo.clone();
+        github.provider = ReleaseProvider::Github;
+        github.api_base = "https://api.github.com".to_owned();
+        let mut github_workflow = String::new();
+        push_sign(
+            &mut github_workflow,
+            &artifacts,
+            Some(&github),
+            Platform::Github,
+        );
+        assert!(github_workflow.contains("repo_url=\"https://github.com/caniko/rs-modde\""));
+        assert!(
+            github_workflow.contains(
+                "builder_id=\"${repo_url}/blob/${VERSION}/.github/workflows/release.yml\""
+            )
+        );
+        assert_eq!(
+            github_web_base("https://github.example/api/v3"),
+            "https://github.example"
         );
     }
 
@@ -2839,7 +2903,7 @@ mod tests {
         assert!(workflow.contains("wine \"$tmpdir/wingetcreate.exe\" update Caniko.Modde"));
         assert!(workflow.contains("/api/v1/statuses"));
         assert!(workflow.contains(
-            "nix shell github:caniko/nixpkgs/add-chocolatey-scoop#chocolatey git+https://codeberg.org/caniko/simit -c simit dist chocolatey bump"
+            "nix shell github:caniko/nixpkgs/add-chocolatey-scoop#chocolatey git+https://github.com/caniko/simit.git -c simit dist chocolatey bump"
         ));
         // Checksum step uses runner-compatible Bash glob enumeration, not find/xargs.
         assert!(workflow.contains("add_matches '*.tar.gz'"));

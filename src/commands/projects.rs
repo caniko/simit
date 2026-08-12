@@ -3,6 +3,7 @@ use std::env;
 use std::error::Error;
 use std::fmt;
 use std::io::{self, IsTerminal};
+use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 use camino::{Utf8Path, Utf8PathBuf};
@@ -13,7 +14,7 @@ use crate::cargo;
 use crate::cli::{
     ProjectsAction, ProjectsAuditArgs, ProjectsClearStateArgs, ProjectsCommand,
     ProjectsDiscoverArgs, ProjectsForgetArgs, ProjectsListArgs, ProjectsPruneArgs,
-    ProjectsScanArgs, ProjectsShowArgs, ProjectsSort,
+    ProjectsRegenerateArgs, ProjectsScanArgs, ProjectsShowArgs, ProjectsSort,
 };
 use crate::commands::init_ci;
 use crate::registry::{
@@ -53,10 +54,108 @@ pub fn run(command: ProjectsCommand) -> Result<()> {
         ProjectsAction::Show(args) => show(args),
         ProjectsAction::Scan(args) => scan(args),
         ProjectsAction::Audit(args) => audit(args),
+        ProjectsAction::Regenerate(args) => regenerate(args),
         ProjectsAction::Discover(args) => discover(args),
         ProjectsAction::Forget(args) => forget(args),
         ProjectsAction::Prune(args) => prune(args),
         ProjectsAction::ClearState(args) => clear_state(args),
+    }
+}
+
+fn regenerate(args: ProjectsRegenerateArgs) -> Result<()> {
+    if !args.ci && !args.release {
+        bail!("select at least one of --ci or --release");
+    }
+    if args.write && args.diff {
+        bail!("--diff is only available without --write");
+    }
+    if args.all && !args.paths.is_empty() {
+        bail!("--all cannot be combined with explicit project paths");
+    }
+
+    let paths = if args.all {
+        registry::load()?
+            .projects
+            .into_iter()
+            .filter(|(path, entry)| {
+                path.as_std_path().is_dir() && registry::uses_simit_features(&entry.features)
+            })
+            .map(|(path, _)| path)
+            .collect::<Vec<_>>()
+    } else if args.paths.is_empty() {
+        vec![current_workspace_root()?]
+    } else {
+        args.paths
+            .iter()
+            .map(normalize_audit_path)
+            .collect::<Result<Vec<_>>>()?
+    };
+
+    let executable = std::env::current_exe().context("locating simit executable")?;
+    let mut failures = 0usize;
+    for path in paths {
+        println!("==> {path}");
+        for feature in [args.ci.then_some("ci"), args.release.then_some("release")]
+            .into_iter()
+            .flatten()
+        {
+            let mut child = Command::new(&executable);
+            child
+                .current_dir(path.as_std_path())
+                .args(["init", feature]);
+            if let Some(platform) = existing_platform(path.as_std_path()) {
+                child.args(["--platform", platform]);
+            }
+            if !args.write {
+                child.arg("--check");
+                if args.diff {
+                    child.arg("--diff");
+                }
+            }
+            let output = child
+                .output()
+                .with_context(|| format!("running simit init {feature} in {path}"))?;
+            print_child_output(&output.stdout);
+            eprint_child_output(&output.stderr);
+            if !output.status.success() {
+                failures += 1;
+                eprintln!("simit: {path}: init {feature} failed");
+            }
+        }
+    }
+
+    if failures == 0 {
+        Ok(())
+    } else {
+        Err(CommandExit::new(
+            if args.write { 2 } else { 1 },
+            format!("regeneration failed for {failures} workflow operation(s)"),
+        )
+        .into())
+    }
+}
+
+fn existing_platform(path: &std::path::Path) -> Option<&'static str> {
+    if path.join(".github/workflows").is_dir() {
+        Some("github")
+    } else if path.join(".forgejo/workflows").is_dir() {
+        Some("forgejo")
+    } else if path.join(".gitlab-ci.yml").is_file() {
+        Some("gitlab")
+    } else {
+        None
+    }
+}
+
+fn print_child_output(bytes: &[u8]) {
+    if !bytes.is_empty() {
+        print!("{}", String::from_utf8_lossy(bytes));
+    }
+}
+
+fn eprint_child_output(bytes: &[u8]) {
+    if !bytes.is_empty() {
+        eprint!("{}", String::from_utf8_lossy(bytes));
     }
 }
 

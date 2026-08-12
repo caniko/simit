@@ -1,6 +1,6 @@
 use std::fs;
 use std::io::ErrorKind;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
@@ -10,6 +10,36 @@ use crate::render::diff::unified_diff;
 pub struct GeneratedFile {
     pub relative_path: PathBuf,
     pub content: String,
+}
+
+/// Apply a complete generated-file plan without leaving a half-applied
+/// migration behind.  `obsolete` must contain only generator-owned paths.
+pub fn reconcile_generated_files(
+    workspace_root: &Path,
+    files: &[GeneratedFile],
+    obsolete: &[PathBuf],
+    message: &str,
+    check: bool,
+    show_diff: bool,
+) -> Result<()> {
+    validate_generated_paths(files, obsolete)?;
+    if check {
+        check_generated_files(workspace_root, files, message, show_diff)?;
+        if !obsolete.is_empty() {
+            bail!(
+                "{message}:\n{}",
+                obsolete
+                    .iter()
+                    .map(|path| format!("{} is extra (obsolete)", path.display()))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            );
+        }
+        return Ok(());
+    }
+
+    write_generated_files(workspace_root, files)?;
+    remove_generated_files(workspace_root, obsolete)
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -34,8 +64,10 @@ pub fn detect_languages(workspace_root: &Path) -> Result<Languages> {
 }
 
 pub fn write_generated_files(workspace_root: &Path, files: &[GeneratedFile]) -> Result<()> {
+    validate_generated_paths(files, &[])?;
     for file in files {
         let path = workspace_root.join(&file.relative_path);
+        refuse_symlink(&path)?;
         let parent = path
             .parent()
             .ok_or_else(|| anyhow::anyhow!("generated path has no parent: {}", path.display()))?;
@@ -43,6 +75,27 @@ pub fn write_generated_files(workspace_root: &Path, files: &[GeneratedFile]) -> 
         fs::write(&path, &file.content).with_context(|| format!("writing {}", path.display()))?;
     }
 
+    Ok(())
+}
+
+pub fn remove_generated_files(workspace_root: &Path, paths: &[PathBuf]) -> Result<()> {
+    for relative_path in paths {
+        let path = workspace_root.join(relative_path);
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(error).with_context(|| format!("reading {}", path.display()));
+            }
+        };
+        if metadata.file_type().is_symlink() {
+            bail!("refusing to remove symlink {}", path.display());
+        }
+        if !metadata.file_type().is_file() {
+            bail!("refusing to remove non-file {}", path.display());
+        }
+        fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
+    }
     Ok(())
 }
 
@@ -86,6 +139,46 @@ pub fn check_generated_files(
             mismatches.join("\n"),
             diffs.join("\n")
         );
+    }
+}
+
+fn validate_generated_paths(files: &[GeneratedFile], obsolete: &[PathBuf]) -> Result<()> {
+    let mut paths = std::collections::BTreeSet::new();
+    for path in files
+        .iter()
+        .map(|file| &file.relative_path)
+        .chain(obsolete.iter())
+    {
+        validate_relative_path(path)?;
+        if !paths.insert(path.clone()) {
+            bail!("duplicate generated path: {}", path.display());
+        }
+    }
+    Ok(())
+}
+
+fn validate_relative_path(path: &Path) -> Result<()> {
+    if path.is_absolute()
+        || path
+            .components()
+            .any(|component| matches!(component, Component::ParentDir))
+    {
+        bail!(
+            "generated path must stay below the workspace root: {}",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+fn refuse_symlink(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            bail!("refusing to overwrite symlink {}", path.display())
+        }
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("reading {}", path.display())),
     }
 }
 

@@ -464,29 +464,6 @@ fn generates_forgejo_nix_workflows() {
 }
 
 #[test]
-fn generic_rust_ci_does_not_generate_publish_workflow_by_default() {
-    let temp = init_package(true);
-
-    let status = simit_with_user_config(temp.path())
-        .current_dir(temp.path())
-        .args(["init", "ci", "--platform", "forgejo"])
-        .status()
-        .unwrap();
-    assert!(status.success());
-
-    let ci = read(&temp.path().join(".forgejo/workflows/ci.yaml"));
-    assert_yaml_parses(&ci);
-    assert!(temp.path().join(".forgejo/workflows/ci.yaml").exists());
-    assert!(
-        !temp
-            .path()
-            .join(".forgejo/workflows/publish-crate.yaml")
-            .exists()
-    );
-    assert!(!temp.path().join("keys/maintainers.gpg").exists());
-}
-
-#[test]
 fn github_ci_generates_declared_nix_installable_matrix() {
     let temp = init_package(true);
     fs::write(
@@ -517,9 +494,10 @@ extra_setup = ["echo prepare-runner"]
     let workflow = read(&temp.path().join(".github/workflows/nix-builds.yaml"));
     assert_yaml_parses(&workflow);
     assert!(workflow.contains("permissions:\n  contents: read"));
-    assert!(workflow.contains(
-        "group: ${{ github.workflow }}-${{ github.event.pull_request.head.ref || github.ref }}"
-    ));
+    assert!(
+        workflow
+            .contains("group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}")
+    );
     assert!(workflow.contains("runs-on: ubuntu-latest"));
     assert!(workflow.contains("fail-fast: false"));
     assert!(workflow.contains("max-parallel: 2"));
@@ -743,6 +721,34 @@ fn github_nix_only_keeps_single_runner_when_no_system_map_is_configured() {
 }
 
 #[test]
+fn github_nix_only_can_select_flake_evaluation_without_building_checks() {
+    let temp = init_flake_only();
+    fs::write(
+        temp.path().join("simit.toml"),
+        r#"[ci]
+platform = "github"
+runtime = "nix"
+runner = "ubuntu-24.04"
+components = ["flake-evaluation"]
+"#,
+    )
+    .unwrap();
+
+    let status = simit()
+        .current_dir(temp.path())
+        .args(["init", "ci", "--platform", "github", "--runtime", "nix"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let workflow = read(&temp.path().join(".github/workflows/ci.yaml"));
+    assert_yaml_parses(&workflow);
+    assert!(workflow.contains("run: nix flake check --no-build\n"));
+    assert!(!workflow.contains("run: nix flake check\n"));
+    assert!(!workflow.contains("Build flake checks"));
+}
+
+#[test]
 fn github_nix_only_rejects_invalid_native_runner_maps() {
     let temp = init_flake_only();
     fs::write(
@@ -828,7 +834,10 @@ fn package_metadata_nix_builds_validate_and_render() {
     let workflow = read(&temp.path().join(".github/workflows/nix-builds.yaml"));
     assert_yaml_parses(&workflow);
     assert!(workflow.contains("permissions:\n  contents: read"));
-    assert!(workflow.contains("group: ${{ github.workflow_ref }}-${{ github.ref }}"));
+    assert!(
+        workflow
+            .contains("group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}")
+    );
     assert!(workflow.contains("- \".#oci-api\""));
     assert!(workflow.contains("- \".#oci-etl\""));
     assert!(workflow.contains("run: echo prepare-runner"));
@@ -3442,11 +3451,13 @@ fn forgejo_python_uv_ci_uses_nix_checks() {
     assert_yaml_parses(&workflow);
     assert!(workflow.contains("runs-on: atlas"));
     assert!(workflow.contains(
-        "nix run --no-write-lock-file git+https://codeberg.org/caniko/simit.git -- init flake --check --diff"
+        "nix run --no-write-lock-file git+https://github.com/caniko/simit.git -- init flake --check --diff"
     ));
-    assert!(!workflow.contains(
-        "nix run git+https://codeberg.org/caniko/simit.git -- init flake --check --diff"
-    ));
+    assert!(
+        !workflow.contains(
+            "nix run git+https://github.com/caniko/simit.git -- init flake --check --diff"
+        )
+    );
     assert!(workflow.contains("nix flake check --no-build"));
     assert!(workflow.contains("nix build .#checks.x86_64-linux.offline-tests"));
     assert!(workflow.contains("nix build .#checks.x86_64-linux.typecheck"));

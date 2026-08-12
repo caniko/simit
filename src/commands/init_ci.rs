@@ -210,6 +210,7 @@ pub fn run(command: InitCiCommand) -> Result<()> {
             file_suffix: multi_package_workspace.then_some(package.name.as_str()),
             self_check: SelfCheckOptions {
                 enabled: self_check,
+                release: cfg.release.github.is_some() || cfg.release.codeberg.is_some(),
                 runner_override: self_check_runner,
                 windows_runner_override: self_check_windows_runner,
                 packages: &resolved.packages,
@@ -226,12 +227,12 @@ pub fn run(command: InitCiCommand) -> Result<()> {
             &runners.ci,
             &options.nix_builds,
             &options.extra_setup,
+            &options.nix_substituters,
+            &options.nix_trusted_public_keys,
         )?);
     }
     if let Some(prebuild) = github_prebuild_file(&cfg)? {
         files.push(prebuild);
-    }
-        )?);
     }
     if resolved.with_pypi_publish && cargo::has_pyo3_dep(&metadata.packages) {
         files.push(ci::maturin_publish_file(
@@ -325,8 +326,7 @@ pub fn run(command: InitCiCommand) -> Result<()> {
         )?;
         upgrade::update_readme_badges_if_present(workspace_root, true, command.diff)
     } else {
-        project::write_generated_files(workspace_root, &files)?;
-        cleanup_obsolete_nix_workflows(workspace_root, platform, &files)?;
+        reconcile_ci_files(workspace_root, &files, &check_message, false, false)?;
         if ProjectConfig::can_persist_ci(workspace_root)? {
             ProjectConfig::write_ci(workspace_root, &persisted_ci)?;
         }
@@ -410,6 +410,7 @@ fn run_nix_only(command: InitCiCommand) -> Result<()> {
             &ResolvedRunner::literal(&runner)?,
             &system_runners,
             &cfg.release.artifacts,
+            &cfg.ci.components,
         )?,
     };
     let mut files = vec![generated];
@@ -419,6 +420,8 @@ fn run_nix_only(command: InitCiCommand) -> Result<()> {
             &ResolvedRunner::literal(&runner)?,
             &cfg.ci.nix_builds,
             &cfg.ci.extra_setup,
+            &cfg.release.artifacts.substituters,
+            &cfg.release.artifacts.trusted_public_keys,
         )?);
     }
     if let Some(prebuild) = github_prebuild_file(&cfg)? {
@@ -450,8 +453,7 @@ fn run_nix_only(command: InitCiCommand) -> Result<()> {
             check_generated_ci_files(&workspace_root, &files, platform, &message, command.diff)?;
         }
     } else {
-        project::write_generated_files(&workspace_root, &files)?;
-        cleanup_obsolete_nix_workflows(&workspace_root, platform, &files)?;
+        reconcile_ci_files(&workspace_root, &files, &message, false, false)?;
         let mut persisted_ci = cfg.ci;
         persisted_ci.provider = Some(CiProvider::Actions);
         persisted_ci.platform = Some(platform);
@@ -569,12 +571,12 @@ fn run_python(command: InitCiCommand) -> Result<()> {
             &runners.ci,
             &options.nix_builds,
             &options.extra_setup,
+            &options.nix_substituters,
+            &options.nix_trusted_public_keys,
         )?);
     }
     if let Some(prebuild) = github_prebuild_file(&cfg)? {
         files.push(prebuild);
-    }
-        )?);
     }
     if with_pypi_publish {
         files.push(ci::python_publish_file(
@@ -620,8 +622,7 @@ fn run_python(command: InitCiCommand) -> Result<()> {
         )?;
         upgrade::update_readme_badges_if_present(workspace_root, true, command.diff)
     } else {
-        project::write_generated_files(workspace_root, &files)?;
-        cleanup_obsolete_nix_workflows(workspace_root, platform, &files)?;
+        reconcile_ci_files(workspace_root, &files, &check_message, false, false)?;
         if ProjectConfig::can_persist_ci(workspace_root)? {
             ProjectConfig::write_ci(workspace_root, &persisted_ci)?;
         }
@@ -709,6 +710,7 @@ fn run_crow(
             file_suffix: multi_package_workspace.then_some(package.name.as_str()),
             self_check: SelfCheckOptions {
                 enabled: self_check,
+                release: cfg.release.github.is_some() || cfg.release.codeberg.is_some(),
                 runner_override: resolved.runner.as_deref(),
                 windows_runner_override: resolved.windows_runner.as_deref(),
                 packages: &resolved.packages,
@@ -779,7 +781,7 @@ fn run_crow(
         check_generated_crow_files(workspace_root, &files, &check_message, command.diff)?;
         Ok(())
     } else {
-        project::write_generated_files(workspace_root, &files)?;
+        reconcile_ci_files(workspace_root, &files, "Crow CI workflows", false, false)?;
         if ProjectConfig::can_persist_ci(workspace_root)? {
             ProjectConfig::write_ci(workspace_root, &persisted_ci)?;
         }
@@ -849,7 +851,13 @@ fn run_crow_python(
             command.diff,
         )?;
     } else {
-        project::write_generated_files(workspace_root, &files)?;
+        reconcile_ci_files(
+            workspace_root,
+            &files,
+            "Crow Python CI workflows",
+            false,
+            false,
+        )?;
         if ProjectConfig::can_persist_ci(workspace_root)? {
             ProjectConfig::write_ci(workspace_root, &persisted_ci)?;
         }
@@ -1515,70 +1523,65 @@ fn check_generated_ci_files(
     message: &str,
     show_diff: bool,
 ) -> Result<()> {
-    project::check_generated_files(workspace_root, files, message, show_diff)?;
+    let _ = platform;
+    reconcile_ci_files(workspace_root, files, message, true, show_diff)
+}
 
+fn reconcile_ci_files(
+    workspace_root: &Path,
+    files: &[project::GeneratedFile],
+    message: &str,
+    check: bool,
+    show_diff: bool,
+) -> Result<()> {
     let expected = files
         .iter()
         .map(|file| file.relative_path.clone())
         .collect::<BTreeSet<_>>();
-    let extras = extra_generated_workflows(workspace_root, platform, &expected)?;
-    if extras.is_empty() {
-        Ok(())
-    } else {
-        let details = extras
-            .into_iter()
-            .map(|path| format!("{} is extra", path.display()))
-            .collect::<Vec<_>>()
-            .join("\n");
-        bail!("{message}:\n{details}");
-    }
+    let obsolete = obsolete_generated_workflows(workspace_root, &expected)?;
+    project::reconcile_generated_files(workspace_root, files, &obsolete, message, check, show_diff)
 }
 
-fn extra_generated_workflows(
+fn obsolete_generated_workflows(
     workspace_root: &Path,
-    platform: Platform,
     expected: &BTreeSet<PathBuf>,
 ) -> Result<Vec<PathBuf>> {
-    let workflow_dir = PathBuf::from(platform.workflow_dir());
-    let absolute_dir = workspace_root.join(&workflow_dir);
-    let entries = match fs::read_dir(&absolute_dir) {
-        Ok(entries) => entries,
-        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(err) => return Err(err).with_context(|| format!("reading {}", absolute_dir.display())),
-    };
-
-    let mut extras = Vec::new();
-    for entry in entries {
-        let entry =
-            entry.with_context(|| format!("reading entry in {}", absolute_dir.display()))?;
-        if !entry
-            .file_type()
-            .with_context(|| format!("reading file type for {}", entry.path().display()))?
-            .is_file()
-        {
-            continue;
-        }
-        let path = entry.path();
-        let Some(extension) = path.extension().and_then(|ext| ext.to_str()) else {
-            continue;
+    let mut obsolete = Vec::new();
+    for relative_dir in [".forgejo/workflows", ".github/workflows", ".crow"] {
+        let directory = workspace_root.join(relative_dir);
+        let entries = match fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(error).with_context(|| format!("reading {}", directory.display()));
+            }
         };
-        if extension != "yaml" && extension != "yml" {
-            continue;
-        }
-        let relative_path = workflow_dir.join(entry.file_name());
-        if expected.contains(&relative_path) {
-            continue;
-        }
-        let content =
-            fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-        if content.contains(ci::GENERATED_WORKFLOW_MARKER)
-            && is_ci_managed_workflow_name(&entry.file_name())
-        {
-            extras.push(relative_path);
+        for entry in entries {
+            let entry =
+                entry.with_context(|| format!("reading entry in {}", directory.display()))?;
+            if !entry.file_type()?.is_file() {
+                continue;
+            }
+            let path = entry.path();
+            let Some(extension) = path.extension().and_then(|extension| extension.to_str()) else {
+                continue;
+            };
+            if !matches!(extension, "yaml" | "yml" | "jsonnet") {
+                continue;
+            }
+            let relative = PathBuf::from(relative_dir).join(entry.file_name());
+            if expected.contains(&relative) || !is_ci_managed_workflow_name(&entry.file_name()) {
+                continue;
+            }
+            let content =
+                fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+            if generated_workflow_marker_present(&content) {
+                obsolete.push(relative);
+            }
         }
     }
-    extras.sort();
-    Ok(extras)
+    obsolete.sort();
+    Ok(obsolete)
 }
 
 fn check_generated_crow_files(
@@ -1587,82 +1590,7 @@ fn check_generated_crow_files(
     message: &str,
     show_diff: bool,
 ) -> Result<()> {
-    project::check_generated_files(workspace_root, files, message, show_diff)?;
-    let expected = files
-        .iter()
-        .map(|file| file.relative_path.clone())
-        .collect::<BTreeSet<_>>();
-    let directory = workspace_root.join(".crow");
-    let entries = match fs::read_dir(&directory) {
-        Ok(entries) => entries,
-        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(()),
-        Err(err) => return Err(err).with_context(|| format!("reading {}", directory.display())),
-    };
-    let mut extras = Vec::new();
-    for entry in entries {
-        let entry = entry.with_context(|| format!("reading entry in {}", directory.display()))?;
-        if !entry.file_type()?.is_file() {
-            continue;
-        }
-        let entry_path = entry.path();
-        let Some(extension) = entry_path.extension().and_then(|ext| ext.to_str()) else {
-            continue;
-        };
-        if !matches!(extension, "yaml" | "yml" | "jsonnet") {
-            continue;
-        }
-        let relative = PathBuf::from(".crow").join(entry.file_name());
-        if expected.contains(&relative) {
-            continue;
-        }
-        let content = fs::read_to_string(entry_path)?;
-        if generated_workflow_marker_present(&content) {
-            extras.push(relative);
-        }
-    }
-    if extras.is_empty() {
-        return Ok(());
-    }
-    extras.sort();
-    bail!(
-        "{message}:\n{}",
-        extras
-            .into_iter()
-            .map(|path| format!("{} is extra", path.display()))
-            .collect::<Vec<_>>()
-            .join("\n")
-    )
-}
-
-fn cleanup_obsolete_nix_workflows(
-    workspace_root: &Path,
-    platform: Platform,
-    expected: &[project::GeneratedFile],
-) -> Result<()> {
-    let expected = expected
-        .iter()
-        .map(|file| file.relative_path.clone())
-        .collect::<BTreeSet<_>>();
-    for name in [
-        "nix-builds.yaml",
-        "nix-builds.yml",
-        "prebuild.yaml",
-        "prebuild.yml",
-    ] {
-        let relative = PathBuf::from(platform.workflow_dir()).join(name);
-        if expected.contains(&relative) {
-            continue;
-        }
-        let path = workspace_root.join(&relative);
-        let Ok(content) = fs::read_to_string(&path) else {
-            continue;
-        };
-        if generated_workflow_marker_present(&content) {
-            fs::remove_file(&path)
-                .with_context(|| format!("removing obsolete {}", relative.display()))?;
-        }
-    }
-    Ok(())
+    reconcile_ci_files(workspace_root, files, message, true, show_diff)
 }
 
 fn is_ci_managed_workflow_name(name: &std::ffi::OsStr) -> bool {
@@ -1683,6 +1611,8 @@ fn is_ci_managed_workflow_name(name: &std::ffi::OsStr) -> bool {
             | "prebuild.yml"
             | "pages.yaml"
             | "pages.yml"
+            | "publish-pypi.yaml"
+            | "publish-pypi.yml"
             | "publish-vscode-extension.yaml"
             | "publish-vscode-extension.yml"
             | "publish-jetbrains-plugin.yaml"
@@ -1691,6 +1621,7 @@ fn is_ci_managed_workflow_name(name: &std::ffi::OsStr) -> bool {
         || name.starts_with("nix-builds-")
         || name.starts_with("prebuild-")
         || name.starts_with("publish-crate-")
+        || name.starts_with("publish-pypi-")
         || name.starts_with("release-artifacts-")
 }
 

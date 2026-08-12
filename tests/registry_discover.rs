@@ -327,7 +327,7 @@ fn generic_ci_registers_as_hand_rolled() {
 }
 
 #[test]
-fn marked_ci_with_unmarked_supplementary_workflow_registers_as_managed_extra() {
+fn marked_ci_with_unmarked_supplementary_workflow_stays_managed() {
     let _env = EnvGuard::new();
     let root = TempDir::new().unwrap();
     init_package(root.path(), "plain");
@@ -343,7 +343,7 @@ fn marked_ci_with_unmarked_supplementary_workflow_registers_as_managed_extra() {
     assert_eq!(report.registered, [canonical(root.path())]);
     let registry = registry::load().unwrap();
     let entry = registry.projects.get(&canonical(root.path())).unwrap();
-    assert_eq!(entry.features["ci"], FeatureStatus::ManagedExtra);
+    assert_eq!(entry.features["ci"], FeatureStatus::Managed);
 }
 
 #[test]
