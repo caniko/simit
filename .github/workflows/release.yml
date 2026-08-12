@@ -8,7 +8,7 @@
 
 name: release
 
-"on":
+on:
   push:
     tags:
       - "[0-9]*"
@@ -172,7 +172,7 @@ jobs:
           git_sha="$(git rev-parse HEAD)"
           workflow_sha="$(sha256sum .github/workflows/release.yml | awk '{print $1}')"
           flake_lock_sha="missing"; if [ -f flake.lock ]; then flake_lock_sha="$(sha256sum flake.lock | awk '{print $1}')"; fi
-          builder_id="${repo_url}/src/tag/${VERSION}/.github/workflows/release.yml"
+          builder_id="${repo_url}/blob/${VERSION}/.github/workflows/release.yml"
           sign_blob_keyless() { file="$1"; if [ -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ] && [ -n "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" ]; then curl -fsSL -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sigstore" | jq -er '.value' > "$oidc_token"; cosign sign-blob --yes --identity-token "$(cat "$oidc_token")" --bundle "${file}.cosign.bundle" "$file"; else return 1; fi; }
           attest_blob_keyless() { file="$1"; predicate="$2"; if [ -s "$oidc_token" ]; then cosign attest-blob --yes --identity-token "$(cat "$oidc_token")" --predicate "$predicate" --type slsaprovenance1 --bundle "${file}.intoto.bundle" "$file"; else return 1; fi; }
           sign_blob_with_key() { file="$1"; test -n "${COSIGN_PRIVATE_KEY:-}"; printf '%s' "$COSIGN_PRIVATE_KEY" > "$cosign_key"; cosign sign-blob --yes --key "$cosign_key" --bundle "${file}.cosign.bundle" "$file"; }

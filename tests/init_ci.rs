@@ -464,6 +464,51 @@ fn generates_forgejo_nix_workflows() {
 }
 
 #[test]
+fn github_ci_generates_declared_nix_installable_matrix() {
+    let temp = init_package(true);
+    fs::write(
+        temp.path().join("simit.toml"),
+        r#"[ci]
+platform = "github"
+provider = "actions"
+runtime = "nix"
+nix_builds = [".#oci-api", ".#oci-etl"]
+extra_setup = ["echo prepare-runner"]
+"#,
+    )
+    .unwrap();
+    let status = simit()
+        .current_dir(temp.path())
+        .args([
+            "init",
+            "ci",
+            "--platform",
+            "github",
+            "--ci-provider",
+            "actions",
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let workflow = read(&temp.path().join(".github/workflows/nix-builds.yaml"));
+    assert_yaml_parses(&workflow);
+    assert!(workflow.contains("permissions:\n  contents: read"));
+    assert!(
+        workflow
+            .contains("group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}")
+    );
+    assert!(workflow.contains("runs-on: ubuntu-latest"));
+    assert!(workflow.contains("fail-fast: false"));
+    assert!(workflow.contains("max-parallel: 2"));
+    assert!(workflow.contains("- \".#oci-api\""));
+    assert!(workflow.contains("- \".#oci-etl\""));
+    assert!(workflow.contains("run: nix build --no-link \"$INSTALLABLE\""));
+    assert!(workflow.contains("run: echo prepare-runner"));
+    assert!(!workflow.contains("secrets."));
+}
+
+#[test]
 fn github_nix_only_uses_native_system_runner_matrix() {
     let temp = init_flake_only();
     fs::write(
@@ -529,16 +574,17 @@ fn github_prebuild_is_reusable_publishes_attic_and_tracks_drift() {
         r#"[prebuild]
 release_archives = true
 publish_attic = true
+attic_app = ".#push-flake-inputs"
+
+[prebuild.system_runners]
+"aarch64-linux" = "ubuntu-24.04-arm"
+"x86_64-linux" = "ubuntu-24.04"
 
 [ci]
 provider = "actions"
 platform = "github"
 runtime = "nix"
 nix_builds = [".#server", ".#worker"]
-
-[ci.nix_system_runners]
-"aarch64-linux" = "ubuntu-24.04-arm"
-"x86_64-linux" = "ubuntu-24.04"
 
 [release.artifacts]
 prebuild_binaries = true
@@ -585,9 +631,12 @@ token_secret = "ATTIC_TOKEN"
     assert!(
         workflow.contains("nix build '.#release-bundle' --out-link '.simit-prebuild/release-0'")
     );
-    assert!(workflow.contains("default-server = \"demo\""));
-    assert!(workflow.contains("nix path-info -r \"${links[@]}\""));
-    assert!(workflow.contains("push --stdin --no-closure --ignore-upstream-cache-filter demo"));
+    assert!(workflow.contains("nix run '.#push-flake-inputs'"));
+    assert!(workflow.contains("HARBOR_ATTIC_MANIFEST: attic-paths.txt"));
+    assert!(workflow.contains("github.event.repository.default_branch"));
+    assert!(workflow.contains("name: flake-inputs-${{ matrix.system }}"));
+    assert!(!workflow.contains("attic push"));
+    assert!(!workflow.contains("default-server"));
     assert!(!workflow.contains("attic login"));
 
     let audit = simit::registry::audit_ci(temp.path()).unwrap();
@@ -600,6 +649,154 @@ token_secret = "ATTIC_TOKEN"
     assert_eq!(
         simit::registry::audit_ci(temp.path()).unwrap().status,
         simit::registry::FeatureStatus::Drift
+    );
+}
+
+#[test]
+fn github_prebuild_is_additive_to_forgejo_crow_ci() {
+    let temp = init_package(true);
+    fs::write(
+        temp.path().join("simit.toml"),
+        r#"[prebuild]
+publish_attic = true
+attic_app = ".#push-flake-inputs"
+
+[prebuild.system_runners]
+"x86_64-linux" = "ubuntu-24.04"
+
+[ci]
+provider = "crow"
+platform = "forgejo"
+runtime = "nix"
+runner = "atlas-nix-trusted"
+
+[release.attic]
+cache = "demo"
+url = "https://attic.example"
+token_name = "demo"
+token_secret = "ATTIC_TOKEN"
+"#,
+    )
+    .unwrap();
+
+    let status = simit()
+        .current_dir(temp.path())
+        .args(["init", "ci"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert!(temp.path().join(".crow/build.yaml").is_file());
+
+    let prebuild = read(&temp.path().join(".github/workflows/prebuild.yaml"));
+    assert_yaml_parses(&prebuild);
+    assert!(prebuild.contains("runs-on: ${{ matrix.runner }}"));
+    assert!(prebuild.contains("nix run '.#push-flake-inputs'"));
+}
+
+#[test]
+fn crow_ci_rejects_non_forgejo_platforms() {
+    let temp = init_package(true);
+
+    let status = simit()
+        .current_dir(temp.path())
+        .args([
+            "init",
+            "ci",
+            "--ci-provider",
+            "crow",
+            "--platform",
+            "github",
+            "--runner",
+            "crow-agent",
+        ])
+        .status()
+        .unwrap();
+    assert!(!status.success());
+    assert!(!temp.path().join(".crow/build.yaml").exists());
+    assert!(!temp.path().join(".github/workflows/ci.yaml").exists());
+
+    let status = simit()
+        .current_dir(temp.path())
+        .args([
+            "init",
+            "ci",
+            "--ci-provider",
+            "crow",
+            "--platform",
+            "gitlab",
+            "--runner",
+            "crow-agent",
+        ])
+        .status()
+        .unwrap();
+    assert!(!status.success());
+}
+
+#[test]
+fn crow_ci_accepts_default_forgejo_platform() {
+    let temp = init_package(true);
+
+    let status = simit()
+        .current_dir(temp.path())
+        .args([
+            "init",
+            "ci",
+            "--ci-provider",
+            "crow",
+            "--runner",
+            "crow-agent",
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert!(temp.path().join(".crow/build.yaml").is_file());
+}
+
+#[test]
+fn infer_project_ci_target_prefers_config_over_marked_workflows() {
+    let temp = init_package(true);
+    fs::write(
+        temp.path().join("simit.toml"),
+        "[ci]\nplatform = \"github\"\n",
+    )
+    .unwrap();
+    fs::create_dir_all(temp.path().join(".crow")).unwrap();
+
+    let target = simit::registry::infer_project_ci_target(temp.path()).unwrap();
+    assert_eq!(
+        target,
+        Some(simit::ci_resolution::CiBackend::Actions {
+            platform: simit::cli::Platform::Github
+        })
+    );
+}
+
+#[test]
+fn infer_project_ci_target_falls_back_to_marked_workflows() {
+    let temp = init_package(true);
+    fs::create_dir_all(temp.path().join(".crow")).unwrap();
+    fs::write(
+        temp.path().join(".crow/build.yaml"),
+        format!(
+            "{}\nname: build\n",
+            simit::render::ci::GENERATED_WORKFLOW_MARKER
+        ),
+    )
+    .unwrap();
+
+    let target = simit::registry::infer_project_ci_target(temp.path()).unwrap();
+    assert_eq!(target, Some(simit::ci_resolution::CiBackend::Crow));
+}
+
+#[test]
+fn infer_project_ci_target_returns_none_for_unmarked_workspace() {
+    let temp = init_package(true);
+    fs::create_dir_all(temp.path().join(".github/workflows")).unwrap();
+    fs::write(temp.path().join(".github/workflows/ci.yaml"), "name: ci\n").unwrap();
+
+    assert_eq!(
+        simit::registry::infer_project_ci_target(temp.path()).unwrap(),
+        None
     );
 }
 
@@ -628,6 +825,34 @@ fn github_nix_only_keeps_single_runner_when_no_system_map_is_configured() {
     assert!(workflow.contains("runs-on: ubuntu-24.04"));
     assert!(workflow.contains("run: nix flake check\n"));
     assert!(!workflow.contains("matrix:"));
+}
+
+#[test]
+fn github_nix_only_can_select_flake_evaluation_without_building_checks() {
+    let temp = init_flake_only();
+    fs::write(
+        temp.path().join("simit.toml"),
+        r#"[ci]
+platform = "github"
+runtime = "nix"
+runner = "ubuntu-24.04"
+components = ["flake-evaluation"]
+"#,
+    )
+    .unwrap();
+
+    let status = simit()
+        .current_dir(temp.path())
+        .args(["init", "ci", "--platform", "github", "--runtime", "nix"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let workflow = read(&temp.path().join(".github/workflows/ci.yaml"));
+    assert_yaml_parses(&workflow);
+    assert!(workflow.contains("run: nix flake check --no-build\n"));
+    assert!(!workflow.contains("run: nix flake check\n"));
+    assert!(!workflow.contains("Build flake checks"));
 }
 
 #[test]
@@ -716,11 +941,18 @@ fn package_metadata_nix_builds_validate_and_render() {
     let workflow = read(&temp.path().join(".github/workflows/nix-builds.yaml"));
     assert_yaml_parses(&workflow);
     assert!(workflow.contains("permissions:\n  contents: read"));
-    assert!(workflow.contains("group: ${{ github.workflow_ref }}-${{ github.ref }}"));
+    assert!(
+        workflow
+            .contains("group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}")
+    );
     assert!(workflow.contains("- \".#oci-api\""));
     assert!(workflow.contains("- \".#oci-etl\""));
     assert!(workflow.contains("run: echo prepare-runner"));
+    assert!(workflow.contains("runs-on: ubuntu-latest"));
+    assert!(workflow.contains("fail-fast: false"));
+    assert!(workflow.contains("max-parallel: 2"));
     assert!(workflow.contains("run: nix build --no-link \"$INSTALLABLE\""));
+    assert!(!workflow.contains("secrets."));
 }
 
 #[test]
@@ -1995,6 +2227,77 @@ fn aggregate_workspace_strategy_generates_one_workspace_workflow() {
 }
 
 #[test]
+fn aggregate_workspace_strategy_can_skip_all_feature_checks() {
+    let temp = init_workspace_fixture();
+    fs::write(temp.path().join("flake.nix"), "{ outputs = _: {}; }\n").unwrap();
+    fs::write(
+        temp.path().join("simit.toml"),
+        "[ci]\nall_features = false\n",
+    )
+    .unwrap();
+
+    let status = simit_with_user_config(temp.path())
+        .current_dir(temp.path())
+        .args([
+            "init",
+            "ci",
+            "--platform",
+            "github",
+            "--runtime",
+            "nix",
+            "--workspace",
+            "--workspace-strategy",
+            "aggregate",
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let ci = read(&temp.path().join(".github/workflows/ci.yaml"));
+    assert!(ci.contains("run: nix develop -c cargo test --workspace\n"));
+    assert!(
+        ci.contains(
+            "run: nix develop -c cargo clippy --workspace --all-targets -- --deny warnings"
+        )
+    );
+    assert!(!ci.contains("--all-features"));
+}
+
+#[test]
+fn aggregate_workspace_strategy_can_limit_tests_to_library_targets() {
+    let temp = init_workspace_fixture();
+    fs::write(temp.path().join("flake.nix"), "{ outputs = _: {}; }\n").unwrap();
+    fs::write(
+        temp.path().join("simit.toml"),
+        "[ci]\nunit_tests_only = true\n",
+    )
+    .unwrap();
+
+    let status = simit_with_user_config(temp.path())
+        .current_dir(temp.path())
+        .args([
+            "init",
+            "ci",
+            "--platform",
+            "github",
+            "--runtime",
+            "nix",
+            "--workspace",
+            "--workspace-strategy",
+            "aggregate",
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let ci = read(&temp.path().join(".github/workflows/ci.yaml"));
+    assert!(
+        ci.contains("run: nix develop -c cargo test --workspace --lib"),
+        "generated CI:\n{ci}"
+    );
+}
+
+#[test]
 fn workspace_publish_false_package_keeps_ci_but_skips_package_and_publish_workflows() {
     let temp = init_workspace_fixture();
     let beta_manifest = temp.path().join("crates/beta/Cargo.toml");
@@ -2345,7 +2648,10 @@ fn check_fails_when_workflows_differ() {
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("CI workflows are not up to date"));
-    assert!(stderr.contains("run `simit init ci --platform forgejo`"));
+    assert!(
+        stderr.contains("run `simit init ci --platform forgejo`"),
+        "stderr:\n{stderr}"
+    );
     assert!(stderr.contains(".forgejo/workflows/ci.yaml differs"));
 }
 
@@ -2400,7 +2706,10 @@ fn check_failure_hint_includes_effective_generation_flags() {
 
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(stderr.contains("run `simit init ci --platform forgejo`"));
+    assert!(
+        stderr.contains("run `simit init ci --platform forgejo --runtime nix --runner atlas"),
+        "stderr:\n{stderr}"
+    );
     assert!(stderr.contains(".forgejo/workflows/ci-alpha.yaml differs"));
 }
 
@@ -3249,11 +3558,13 @@ fn forgejo_python_uv_ci_uses_nix_checks() {
     assert_yaml_parses(&workflow);
     assert!(workflow.contains("runs-on: atlas"));
     assert!(workflow.contains(
-        "nix run --no-write-lock-file git+https://codeberg.org/caniko/simit.git -- init flake --check --diff"
+        "nix run --no-write-lock-file git+https://github.com/caniko/simit.git -- init flake --check --diff"
     ));
-    assert!(!workflow.contains(
-        "nix run git+https://codeberg.org/caniko/simit.git -- init flake --check --diff"
-    ));
+    assert!(
+        !workflow.contains(
+            "nix run git+https://github.com/caniko/simit.git -- init flake --check --diff"
+        )
+    );
     assert!(workflow.contains("nix flake check --no-build"));
     assert!(workflow.contains("nix build .#checks.x86_64-linux.offline-tests"));
     assert!(workflow.contains("nix build .#checks.x86_64-linux.typecheck"));
@@ -3348,6 +3659,28 @@ pypi_token_secret = "PYPI_API_TOKEN"
     assert!(workflow.contains("Tag must be an exact semver version"));
     assert!(workflow.contains("builtins.fromTOML"));
     assert!(!read(&temp.path().join(".github/workflows/ci.yaml")).contains("Validate release tag"));
+
+    let config = read(&temp.path().join("simit.toml")).replace(
+        "pypi_token_secret = \"PYPI_API_TOKEN\"",
+        "pypi_trusted_publishing = true",
+    );
+    fs::write(temp.path().join("simit.toml"), config).unwrap();
+    assert!(
+        simit()
+            .current_dir(temp.path())
+            .args(["init", "ci", "--platform", "github"])
+            .status()
+            .unwrap()
+            .success()
+    );
+
+    let workflow = read(&temp.path().join(".github/workflows/publish-pypi.yaml"));
+    assert_yaml_parses(&workflow);
+    assert!(workflow.contains("environment: pypi"));
+    assert!(workflow.contains("contents: read"));
+    assert!(workflow.contains("id-token: write"));
+    assert!(workflow.contains("uv publish --trusted-publishing always"));
+    assert!(!workflow.contains("UV_PUBLISH_TOKEN"));
 }
 
 #[test]

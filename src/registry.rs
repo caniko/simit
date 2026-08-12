@@ -22,7 +22,7 @@ use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
 use crate::cargo::{self, Package};
-use crate::ci_resolution::{CiCliOverrides, CiInference, WorkflowSnapshot};
+use crate::ci_resolution::{CiBackend, CiCliOverrides, CiInference, WorkflowSnapshot};
 use crate::cli::{CiProvider, CrowWorkflowFormat, Platform};
 use crate::config::{FlakeScope, HomebrewOverrides, ProjectConfig};
 use crate::project;
@@ -560,7 +560,7 @@ pub fn audit_ci(workspace_root: &Path) -> Result<CiAudit> {
         });
     }
 
-    let (provider, platform) = infer_ci_target(&marked)?;
+    let backend = infer_ci_target(&marked)?;
     let expected = infer_expected_ci_files(workspace_root, &marked)?
         .into_iter()
         .map(|file| (file.relative_path, file.content))
@@ -601,8 +601,8 @@ pub fn audit_ci(workspace_root: &Path) -> Result<CiAudit> {
 
     Ok(CiAudit {
         status,
-        platform: Some(match provider {
-            CiProvider::Actions => platform.as_str().to_owned(),
+        platform: Some(match backend.provider() {
+            CiProvider::Actions => backend.platform().as_str().to_owned(),
             CiProvider::Crow => "crow".to_owned(),
         }),
         changed_files,
@@ -812,16 +812,23 @@ fn is_release_workflow(file: &WorkflowFile) -> bool {
 }
 
 fn is_supplementary_workflow(file: &WorkflowFile) -> bool {
-    if file
+    let name = file
         .relative_path
         .file_name()
         .and_then(|name| name.to_str())
-        == Some("credential-visibility.yml")
-    {
-        return true;
-    }
-    file.content.contains("Native GitHub ")
-        && file.content.contains("equivalent of the generated Forgejo")
+        .unwrap_or_default();
+    matches!(
+        name,
+        "credential-visibility.yml"
+            | "credential-visibility.yaml"
+            | "pages.yml"
+            | "pages.yaml"
+            | "prebuild.yml"
+            | "prebuild.yaml"
+            | "nix-builds.yml"
+            | "nix-builds.yaml"
+    ) || (file.content.contains("Native GitHub ")
+        && file.content.contains("equivalent of the generated Forgejo"))
 }
 
 #[derive(Debug, Clone)]
@@ -891,11 +898,12 @@ fn marked_workflows_drift(workspace_root: &Path, marked: &[WorkflowFile]) -> boo
         .map(|file| (file.relative_path, file.content))
         .collect::<BTreeMap<_, _>>();
 
-    marked.iter().any(|workflow| {
-        expected
-            .get(&workflow.relative_path)
-            .is_none_or(|content| content != &workflow.content)
-    })
+    expected.len() != marked.len()
+        || marked.iter().any(|workflow| {
+            expected
+                .get(&workflow.relative_path)
+                .is_none_or(|content| content != &workflow.content)
+        })
 }
 
 fn infer_expected_ci_files(
@@ -903,11 +911,12 @@ fn infer_expected_ci_files(
     marked: &[WorkflowFile],
 ) -> Result<Vec<project::GeneratedFile>> {
     let config = ProjectConfig::load(workspace_root).unwrap_or_default();
-    let (provider, platform) = infer_ci_target(marked)?;
+    let backend = infer_ci_target(marked)?;
     let snapshots = workflow_snapshots(marked);
-    if provider == CiProvider::Crow {
+    if backend.provider() == CiProvider::Crow {
         return infer_expected_crow_files(workspace_root, marked, &snapshots);
     }
+    let platform = backend.platform();
     if platform == Platform::Gitlab && workspace_root.join("flake.nix").is_file() {
         return Ok(vec![project::GeneratedFile {
             relative_path: PathBuf::from(".gitlab-ci.yml"),
@@ -939,7 +948,7 @@ fn infer_expected_ci_files(
             &config.flake.expected_outputs.checks,
             &config.ci.components,
         )?];
-        if provider == CiProvider::Actions
+        if backend.provider() == CiProvider::Actions
             && config.prebuild.is_none()
             && !options.nix_builds.is_empty()
         {
@@ -948,6 +957,8 @@ fn infer_expected_ci_files(
                 &runner,
                 &options.nix_builds,
                 &options.extra_setup,
+                &options.nix_substituters,
+                &options.nix_trusted_public_keys,
             )?);
         }
         if resolved.with_pypi_publish {
@@ -963,7 +974,7 @@ fn infer_expected_ci_files(
                 platform, &runner, &pages,
             )?);
         }
-        push_prebuild_file(&mut files, &config, platform, provider)?;
+        push_prebuild_file(&mut files, &config)?;
         return Ok(files);
     }
     if !workspace_root.join("Cargo.toml").is_file() && workspace_root.join("flake.nix").is_file() {
@@ -1000,8 +1011,9 @@ fn infer_expected_ci_files(
             &runner,
             &config.ci.nix_system_runners,
             &config.release.artifacts,
+            &config.ci.components,
         )?];
-        if provider == CiProvider::Actions
+        if backend.provider() == CiProvider::Actions
             && config.prebuild.is_none()
             && !config.ci.nix_builds.is_empty()
         {
@@ -1010,6 +1022,8 @@ fn infer_expected_ci_files(
                 &runner,
                 &config.ci.nix_builds,
                 &config.ci.extra_setup,
+                &config.release.artifacts.substituters,
+                &config.release.artifacts.trusted_public_keys,
             )?);
         }
         if let Some(pages) = config_pages_or_inferred(&config, marked)? {
@@ -1017,7 +1031,7 @@ fn infer_expected_ci_files(
                 platform, &runner, &pages,
             )?);
         }
-        push_prebuild_file(&mut files, &config, platform, provider)?;
+        push_prebuild_file(&mut files, &config)?;
         return Ok(files);
     }
     let metadata = cargo::cargo_metadata(&cargo::find_manifest(workspace_root)?)?;
@@ -1086,6 +1100,7 @@ fn infer_expected_ci_files(
         enabled: marked
             .iter()
             .any(|workflow| workflow.content.contains("Check generated CI")),
+        release: config.release.github.is_some() || config.release.codeberg.is_some(),
         runner_override: self_check_runner_override,
         windows_runner_override: self_check_windows_runner_override,
         packages: &resolved.packages,
@@ -1108,7 +1123,7 @@ fn infer_expected_ci_files(
             ..options.clone()
         };
         files.extend(ci::files(ci::FilesRequest {
-            provider,
+            provider: backend.provider(),
             platform,
             crow: &config.ci.crow,
             runtime: resolved.runtime,
@@ -1120,7 +1135,7 @@ fn infer_expected_ci_files(
             step_runners: &step_runners,
         })?);
     }
-    if provider == CiProvider::Actions
+    if backend.provider() == CiProvider::Actions
         && config.prebuild.is_none()
         && !options.nix_builds.is_empty()
     {
@@ -1129,6 +1144,8 @@ fn infer_expected_ci_files(
             &runners.ci,
             &options.nix_builds,
             &options.extra_setup,
+            &options.nix_substituters,
+            &options.nix_trusted_public_keys,
         )?);
     }
     if resolved.with_pypi_publish && cargo::has_pyo3_dep(&metadata.packages) {
@@ -1150,7 +1167,7 @@ fn infer_expected_ci_files(
             .unwrap_or_else(|| ResolvedRunner::literal("ubuntu-latest").expect("literal runner"));
         files.push(ci::codeberg_pages_file(platform, &pages_runner, &pages)?);
     }
-    push_prebuild_file(&mut files, &config, platform, provider)?;
+    push_prebuild_file(&mut files, &config)?;
 
     Ok(files
         .into_iter()
@@ -1161,17 +1178,12 @@ fn infer_expected_ci_files(
 fn push_prebuild_file(
     files: &mut Vec<project::GeneratedFile>,
     config: &ProjectConfig,
-    platform: Platform,
-    provider: CiProvider,
 ) -> Result<()> {
     let Some(prebuild) = &config.prebuild else {
         return Ok(());
     };
-    if platform != Platform::Github || provider != CiProvider::Actions {
-        bail!("[prebuild] requires GitHub Actions");
-    }
     files.push(crate::render::ci::github_prebuild_file(
-        &config.ci.nix_system_runners,
+        prebuild.effective_system_runners(&config.ci),
         &config.ci.nix_builds,
         prebuild,
         &config.release.artifacts,
@@ -1205,7 +1217,39 @@ fn single_runner_label(runner: &ResolvedRunner) -> Option<&str> {
     }
 }
 
-fn infer_ci_target(marked: &[WorkflowFile]) -> Result<(CiProvider, Platform)> {
+/// Resolve the CI target a workspace is configured for: persisted `[ci]` config
+/// first, then inference from marked workflow files. `None` when neither the
+/// config nor any marked workflow declares a target. This is the single
+/// canonical planning path for `regenerate`; do not reintroduce directory-based
+/// guessing here.
+pub fn infer_project_ci_target(workspace_root: &Path) -> Result<Option<CiBackend>> {
+    if let Ok(config) = ProjectConfig::load(workspace_root) {
+        if let Some(platform) = config.ci.platform {
+            let provider = config.ci.provider.unwrap_or(CiProvider::Actions);
+            return Ok(Some(CiBackend::from_parts(provider, platform)?));
+        }
+    }
+    let workflows = collect_workflow_files(workspace_root)?;
+    let marked = workflows
+        .into_iter()
+        .filter(|workflow| workflow.marked)
+        .collect::<Vec<_>>();
+    if marked.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(infer_ci_target(&marked)?))
+}
+
+fn infer_ci_target(marked: &[WorkflowFile]) -> Result<CiBackend> {
+    let primary = marked
+        .iter()
+        .filter(|workflow| !is_supplementary_workflow(workflow))
+        .collect::<Vec<_>>();
+    let marked = if primary.is_empty() {
+        marked.iter().collect::<Vec<_>>()
+    } else {
+        primary
+    };
     let has_crow = marked
         .iter()
         .any(|workflow| workflow.relative_path.starts_with(".crow"));
@@ -1216,7 +1260,7 @@ fn infer_ci_target(marked: &[WorkflowFile]) -> Result<(CiProvider, Platform)> {
         {
             bail!("mixed CI providers in workflow tree");
         }
-        return Ok((CiProvider::Crow, Platform::Forgejo));
+        return CiBackend::from_parts(CiProvider::Crow, Platform::Forgejo);
     }
 
     let mut platform = None;
@@ -1238,10 +1282,10 @@ fn infer_ci_target(marked: &[WorkflowFile]) -> Result<(CiProvider, Platform)> {
             None => platform = Some(current),
         }
     }
-    Ok((
+    CiBackend::from_parts(
         CiProvider::Actions,
         platform.context("no marked CI workflows found")?,
-    ))
+    )
 }
 
 fn infer_expected_crow_files(
@@ -1311,6 +1355,7 @@ fn infer_expected_crow_files(
                 file_suffix: package_scoped.then_some(package.name.as_str()),
                 self_check: ci::SelfCheckOptions {
                     enabled: self_check,
+                    release: config.release.github.is_some() || config.release.codeberg.is_some(),
                     runner_override: None,
                     windows_runner_override: None,
                     packages: &resolved.packages,
@@ -1391,8 +1436,7 @@ fn infer_expected_crow_files(
 }
 
 fn generated_workflow_marker_present(content: &str) -> bool {
-    content.contains(ci::GENERATED_WORKFLOW_MARKER)
-        || content.contains("Generated by simit. Manual edits will be reported as ci=drift.")
+    ci::is_generated_workflow_marker(content)
 }
 
 fn infer_homebrew_options(
@@ -2064,6 +2108,10 @@ mod tests {
             .into_iter()
             .filter(|file| !is_release_workflow(file))
             .collect::<Vec<_>>();
+        let pages_is_supplementary = workflows
+            .iter()
+            .find(|file| file.relative_path == Path::new(".github/workflows/pages.yaml"))
+            .is_some_and(is_supplementary_workflow);
         let (marked, unmarked): (Vec<_>, Vec<_>) =
             workflows.into_iter().partition(|file| file.marked);
 
@@ -2072,11 +2120,7 @@ mod tests {
                 .iter()
                 .all(|file| file.relative_path.starts_with(".github/workflows"))
         );
-        assert!(
-            unmarked
-                .iter()
-                .any(|file| file.relative_path == Path::new(".github/workflows/pages.yaml"))
-        );
+        assert!(pages_is_supplementary);
         assert!(unmarked.iter().all(is_supplementary_workflow));
         assert!(!marked.is_empty());
     }

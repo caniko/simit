@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -6,7 +6,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 
 use crate::cargo;
-use crate::ci_resolution::{CiCliOverrides, CiInference, ResolvedCiInputs, WorkflowSnapshot};
+use crate::ci_resolution::{
+    CiBackend, CiCliOverrides, CiInference, ResolvedCiInputs, WorkflowSnapshot,
+};
 use crate::cli::{
     ChocolateyOverridesArgs, CiProvider, HomebrewOverridesArgs, InitCiCommand, Platform, Runtime,
     RuntimeChoice, ScoopOverridesArgs,
@@ -51,7 +53,8 @@ pub fn run(command: InitCiCommand) -> Result<()> {
         .platform
         .or(cfg.ci.platform)
         .unwrap_or(Platform::Forgejo);
-    if provider == CiProvider::Crow {
+    let backend = CiBackend::from_parts(provider, platform)?;
+    if backend.provider() == CiProvider::Crow {
         return run_crow(command, &metadata, workspace_root, &cfg, platform);
     }
     let workflow_snapshots = workflow_snapshots_for_platform(workspace_root, platform)?;
@@ -210,6 +213,7 @@ pub fn run(command: InitCiCommand) -> Result<()> {
             file_suffix: multi_package_workspace.then_some(package.name.as_str()),
             self_check: SelfCheckOptions {
                 enabled: self_check,
+                release: cfg.release.github.is_some() || cfg.release.codeberg.is_some(),
                 runner_override: self_check_runner,
                 windows_runner_override: self_check_windows_runner,
                 packages: &resolved.packages,
@@ -226,9 +230,11 @@ pub fn run(command: InitCiCommand) -> Result<()> {
             &runners.ci,
             &options.nix_builds,
             &options.extra_setup,
+            &options.nix_substituters,
+            &options.nix_trusted_public_keys,
         )?);
     }
-    if let Some(prebuild) = github_prebuild_file(&cfg, platform, provider)? {
+    if let Some(prebuild) = github_prebuild_file(&cfg)? {
         files.push(prebuild);
     }
     if resolved.with_pypi_publish && cargo::has_pyo3_dep(&metadata.packages) {
@@ -314,17 +320,10 @@ pub fn run(command: InitCiCommand) -> Result<()> {
     }
 
     if command.check {
-        check_generated_ci_files(
-            workspace_root,
-            &files,
-            platform,
-            &check_message,
-            command.diff,
-        )?;
+        reconcile_ci_files(workspace_root, files, &check_message, true, command.diff)?;
         upgrade::update_readme_badges_if_present(workspace_root, true, command.diff)
     } else {
-        project::write_generated_files(workspace_root, &files)?;
-        cleanup_obsolete_nix_workflows(workspace_root, platform, &files)?;
+        reconcile_ci_files(workspace_root, files, &check_message, false, false)?;
         if ProjectConfig::can_persist_ci(workspace_root)? {
             ProjectConfig::write_ci(workspace_root, &persisted_ci)?;
         }
@@ -348,6 +347,7 @@ fn run_nix_only(command: InitCiCommand) -> Result<()> {
         .ci_provider
         .or(cfg.ci.provider)
         .unwrap_or(CiProvider::Actions);
+    let _backend = CiBackend::from_parts(provider, platform)?;
     if provider != CiProvider::Actions {
         bail!("Nix-only CI currently supports the Actions provider only");
     }
@@ -408,6 +408,7 @@ fn run_nix_only(command: InitCiCommand) -> Result<()> {
             &ResolvedRunner::literal(&runner)?,
             &system_runners,
             &cfg.release.artifacts,
+            &cfg.ci.components,
         )?,
     };
     let mut files = vec![generated];
@@ -417,9 +418,11 @@ fn run_nix_only(command: InitCiCommand) -> Result<()> {
             &ResolvedRunner::literal(&runner)?,
             &cfg.ci.nix_builds,
             &cfg.ci.extra_setup,
+            &cfg.release.artifacts.substituters,
+            &cfg.release.artifacts.trusted_public_keys,
         )?);
     }
-    if let Some(prebuild) = github_prebuild_file(&cfg, platform, provider)? {
+    if let Some(prebuild) = github_prebuild_file(&cfg)? {
         files.push(prebuild);
     }
     if let Some(pages) = &pages {
@@ -445,11 +448,10 @@ fn run_nix_only(command: InitCiCommand) -> Result<()> {
         if platform == Platform::Gitlab {
             project::check_generated_files(&workspace_root, &files, &message, command.diff)?;
         } else {
-            check_generated_ci_files(&workspace_root, &files, platform, &message, command.diff)?;
+            reconcile_ci_files(&workspace_root, files, &message, true, command.diff)?;
         }
     } else {
-        project::write_generated_files(&workspace_root, &files)?;
-        cleanup_obsolete_nix_workflows(&workspace_root, platform, &files)?;
+        reconcile_ci_files(&workspace_root, files, &message, false, false)?;
         let mut persisted_ci = cfg.ci;
         persisted_ci.provider = Some(CiProvider::Actions);
         persisted_ci.platform = Some(platform);
@@ -466,19 +468,12 @@ fn run_nix_only(command: InitCiCommand) -> Result<()> {
     Ok(())
 }
 
-fn github_prebuild_file(
-    cfg: &ProjectConfig,
-    platform: Platform,
-    provider: CiProvider,
-) -> Result<Option<project::GeneratedFile>> {
+fn github_prebuild_file(cfg: &ProjectConfig) -> Result<Option<project::GeneratedFile>> {
     let Some(prebuild) = &cfg.prebuild else {
         return Ok(None);
     };
-    if platform != Platform::Github || provider != CiProvider::Actions {
-        bail!("[prebuild] requires GitHub Actions");
-    }
     Ok(Some(ci::github_prebuild_file(
-        &cfg.ci.nix_system_runners,
+        prebuild.effective_system_runners(&cfg.ci),
         &cfg.ci.nix_builds,
         prebuild,
         &cfg.release.artifacts,
@@ -519,7 +514,8 @@ fn run_python(command: InitCiCommand) -> Result<()> {
         .platform
         .or(cfg.ci.platform)
         .unwrap_or(Platform::Forgejo);
-    if provider == CiProvider::Crow {
+    let backend = CiBackend::from_parts(provider, platform)?;
+    if backend.provider() == CiProvider::Crow {
         return run_crow_python(command, workspace_root, &cfg, platform);
     }
     let workflow_snapshots = workflow_snapshots_for_platform(workspace_root, platform)?;
@@ -574,9 +570,11 @@ fn run_python(command: InitCiCommand) -> Result<()> {
             &runners.ci,
             &options.nix_builds,
             &options.extra_setup,
+            &options.nix_substituters,
+            &options.nix_trusted_public_keys,
         )?);
     }
-    if let Some(prebuild) = github_prebuild_file(&cfg, platform, provider)? {
+    if let Some(prebuild) = github_prebuild_file(&cfg)? {
         files.push(prebuild);
     }
     if with_pypi_publish {
@@ -614,17 +612,10 @@ fn run_python(command: InitCiCommand) -> Result<()> {
     );
 
     if command.check {
-        check_generated_ci_files(
-            workspace_root,
-            &files,
-            platform,
-            &check_message,
-            command.diff,
-        )?;
+        reconcile_ci_files(workspace_root, files, &check_message, true, command.diff)?;
         upgrade::update_readme_badges_if_present(workspace_root, true, command.diff)
     } else {
-        project::write_generated_files(workspace_root, &files)?;
-        cleanup_obsolete_nix_workflows(workspace_root, platform, &files)?;
+        reconcile_ci_files(workspace_root, files, &check_message, false, false)?;
         if ProjectConfig::can_persist_ci(workspace_root)? {
             ProjectConfig::write_ci(workspace_root, &persisted_ci)?;
         }
@@ -712,6 +703,7 @@ fn run_crow(
             file_suffix: multi_package_workspace.then_some(package.name.as_str()),
             self_check: SelfCheckOptions {
                 enabled: self_check,
+                release: cfg.release.github.is_some() || cfg.release.codeberg.is_some(),
                 runner_override: resolved.runner.as_deref(),
                 windows_runner_override: resolved.windows_runner.as_deref(),
                 packages: &resolved.packages,
@@ -730,6 +722,9 @@ fn run_crow(
             &runners.ci,
             &options,
         )?);
+    }
+    if let Some(prebuild) = github_prebuild_file(cfg)? {
+        files.push(prebuild);
     }
 
     let inferred_pages = infer_codeberg_pages_from_workflows(&snapshots)?;
@@ -776,10 +771,10 @@ fn run_crow(
     let check_message =
         "Crow CI workflows are not up to date; run `simit init ci --ci-provider crow`".to_owned();
     if command.check {
-        check_generated_crow_files(workspace_root, &files, &check_message, command.diff)?;
+        reconcile_ci_files(workspace_root, files, &check_message, true, command.diff)?;
         Ok(())
     } else {
-        project::write_generated_files(workspace_root, &files)?;
+        reconcile_ci_files(workspace_root, files, "Crow CI workflows", false, false)?;
         if ProjectConfig::can_persist_ci(workspace_root)? {
             ProjectConfig::write_ci(workspace_root, &persisted_ci)?;
         }
@@ -842,14 +837,21 @@ fn run_crow_python(
     persisted_ci.crow = crow;
     persisted_ci.with_pypi_publish = resolved.with_pypi_publish;
     if command.check {
-        check_generated_crow_files(
+        reconcile_ci_files(
             workspace_root,
-            &files,
+            files,
             "Crow Python CI workflows are not up to date; run `simit init ci --ci-provider crow`",
+            true,
             command.diff,
         )?;
     } else {
-        project::write_generated_files(workspace_root, &files)?;
+        reconcile_ci_files(
+            workspace_root,
+            files,
+            "Crow Python CI workflows",
+            false,
+            false,
+        )?;
         if ProjectConfig::can_persist_ci(workspace_root)? {
             ProjectConfig::write_ci(workspace_root, &persisted_ci)?;
         }
@@ -1009,8 +1011,7 @@ pub(crate) fn workflow_snapshots_for_crow(workspace_root: &Path) -> Result<Vec<W
 }
 
 fn generated_workflow_marker_present(content: &str) -> bool {
-    content.contains(ci::GENERATED_WORKFLOW_MARKER)
-        || content.contains("Generated by simit. Manual edits will be reported as ci=drift.")
+    ci::is_generated_workflow_marker(content)
 }
 
 pub(crate) fn project_regeneration_command(workspace_root: &Path) -> Result<Option<String>> {
@@ -1443,6 +1444,12 @@ fn persisted_ci_matches_simit_toml(
     if cfg.ci.pages.is_some() {
         persisted_ci.pages = cfg.ci.pages.clone();
     }
+    if cfg.ci.all_features.is_none() {
+        persisted_ci.all_features = None;
+    }
+    if !cfg.ci.unit_tests_only {
+        persisted_ci.unit_tests_only = false;
+    }
     Ok(cfg.ci == persisted_ci)
 }
 
@@ -1502,161 +1509,23 @@ fn maybe_push_deny_template(
     });
 }
 
-fn check_generated_ci_files(
+fn reconcile_ci_files(
     workspace_root: &Path,
-    files: &[project::GeneratedFile],
-    platform: Platform,
+    files: Vec<project::GeneratedFile>,
     message: &str,
+    check: bool,
     show_diff: bool,
 ) -> Result<()> {
-    project::check_generated_files(workspace_root, files, message, show_diff)?;
-
-    let expected = files
-        .iter()
-        .map(|file| file.relative_path.clone())
-        .collect::<BTreeSet<_>>();
-    let extras = extra_generated_workflows(workspace_root, platform, &expected)?;
-    if extras.is_empty() {
-        Ok(())
+    let plan = project::GeneratedPlan {
+        files,
+        message,
+        owns_name: is_ci_managed_workflow_name,
+    };
+    if check {
+        plan.check(workspace_root, show_diff)
     } else {
-        let details = extras
-            .into_iter()
-            .map(|path| format!("{} is extra", path.display()))
-            .collect::<Vec<_>>()
-            .join("\n");
-        bail!("{message}:\n{details}");
+        plan.write(workspace_root)
     }
-}
-
-fn extra_generated_workflows(
-    workspace_root: &Path,
-    platform: Platform,
-    expected: &BTreeSet<PathBuf>,
-) -> Result<Vec<PathBuf>> {
-    let workflow_dir = PathBuf::from(platform.workflow_dir());
-    let absolute_dir = workspace_root.join(&workflow_dir);
-    let entries = match fs::read_dir(&absolute_dir) {
-        Ok(entries) => entries,
-        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(err) => return Err(err).with_context(|| format!("reading {}", absolute_dir.display())),
-    };
-
-    let mut extras = Vec::new();
-    for entry in entries {
-        let entry =
-            entry.with_context(|| format!("reading entry in {}", absolute_dir.display()))?;
-        if !entry
-            .file_type()
-            .with_context(|| format!("reading file type for {}", entry.path().display()))?
-            .is_file()
-        {
-            continue;
-        }
-        let path = entry.path();
-        let Some(extension) = path.extension().and_then(|ext| ext.to_str()) else {
-            continue;
-        };
-        if extension != "yaml" && extension != "yml" {
-            continue;
-        }
-        let relative_path = workflow_dir.join(entry.file_name());
-        if expected.contains(&relative_path) {
-            continue;
-        }
-        let content =
-            fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-        if content.contains(ci::GENERATED_WORKFLOW_MARKER)
-            && is_ci_managed_workflow_name(&entry.file_name())
-        {
-            extras.push(relative_path);
-        }
-    }
-    extras.sort();
-    Ok(extras)
-}
-
-fn check_generated_crow_files(
-    workspace_root: &Path,
-    files: &[project::GeneratedFile],
-    message: &str,
-    show_diff: bool,
-) -> Result<()> {
-    project::check_generated_files(workspace_root, files, message, show_diff)?;
-    let expected = files
-        .iter()
-        .map(|file| file.relative_path.clone())
-        .collect::<BTreeSet<_>>();
-    let directory = workspace_root.join(".crow");
-    let entries = match fs::read_dir(&directory) {
-        Ok(entries) => entries,
-        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(()),
-        Err(err) => return Err(err).with_context(|| format!("reading {}", directory.display())),
-    };
-    let mut extras = Vec::new();
-    for entry in entries {
-        let entry = entry.with_context(|| format!("reading entry in {}", directory.display()))?;
-        if !entry.file_type()?.is_file() {
-            continue;
-        }
-        let entry_path = entry.path();
-        let Some(extension) = entry_path.extension().and_then(|ext| ext.to_str()) else {
-            continue;
-        };
-        if !matches!(extension, "yaml" | "yml" | "jsonnet") {
-            continue;
-        }
-        let relative = PathBuf::from(".crow").join(entry.file_name());
-        if expected.contains(&relative) {
-            continue;
-        }
-        let content = fs::read_to_string(entry_path)?;
-        if generated_workflow_marker_present(&content) {
-            extras.push(relative);
-        }
-    }
-    if extras.is_empty() {
-        return Ok(());
-    }
-    extras.sort();
-    bail!(
-        "{message}:\n{}",
-        extras
-            .into_iter()
-            .map(|path| format!("{} is extra", path.display()))
-            .collect::<Vec<_>>()
-            .join("\n")
-    )
-}
-
-fn cleanup_obsolete_nix_workflows(
-    workspace_root: &Path,
-    platform: Platform,
-    expected: &[project::GeneratedFile],
-) -> Result<()> {
-    let expected = expected
-        .iter()
-        .map(|file| file.relative_path.clone())
-        .collect::<BTreeSet<_>>();
-    for name in [
-        "nix-builds.yaml",
-        "nix-builds.yml",
-        "prebuild.yaml",
-        "prebuild.yml",
-    ] {
-        let relative = PathBuf::from(platform.workflow_dir()).join(name);
-        if expected.contains(&relative) {
-            continue;
-        }
-        let path = workspace_root.join(&relative);
-        let Ok(content) = fs::read_to_string(&path) else {
-            continue;
-        };
-        if generated_workflow_marker_present(&content) {
-            fs::remove_file(&path)
-                .with_context(|| format!("removing obsolete {}", relative.display()))?;
-        }
-    }
-    Ok(())
 }
 
 fn is_ci_managed_workflow_name(name: &std::ffi::OsStr) -> bool {
@@ -1677,6 +1546,8 @@ fn is_ci_managed_workflow_name(name: &std::ffi::OsStr) -> bool {
             | "prebuild.yml"
             | "pages.yaml"
             | "pages.yml"
+            | "publish-pypi.yaml"
+            | "publish-pypi.yml"
             | "publish-vscode-extension.yaml"
             | "publish-vscode-extension.yml"
             | "publish-jetbrains-plugin.yaml"
@@ -1685,6 +1556,7 @@ fn is_ci_managed_workflow_name(name: &std::ffi::OsStr) -> bool {
         || name.starts_with("nix-builds-")
         || name.starts_with("prebuild-")
         || name.starts_with("publish-crate-")
+        || name.starts_with("publish-pypi-")
         || name.starts_with("release-artifacts-")
 }
 

@@ -393,8 +393,15 @@ pub struct CiConfig {
     #[serde(default)]
     pub packages: Vec<String>,
     /// Nix installables that must be built by generated hosted-runner jobs.
+    /// Values are passed to `nix build --no-link` unchanged.
     #[serde(default)]
     pub nix_builds: Vec<String>,
+    /// Whether generated Rust checks should pass `--all-features`.
+    #[serde(default)]
+    pub all_features: Option<bool>,
+    /// Whether generated Rust tests should limit Cargo to library targets.
+    #[serde(default)]
+    pub unit_tests_only: bool,
     #[serde(default)]
     pub with_nextest: bool,
     #[serde(default)]
@@ -411,6 +418,8 @@ pub struct CiConfig {
     pub with_pypi_publish: bool,
     #[serde(default)]
     pub pypi_token_secret: Option<String>,
+    #[serde(default)]
+    pub pypi_trusted_publishing: bool,
     #[serde(default)]
     pub publish_crates: bool,
     #[serde(default)]
@@ -447,6 +456,26 @@ pub struct PrebuildConfig {
     pub release_archives: bool,
     #[serde(default)]
     pub publish_attic: bool,
+    /// rs-harbor app used for Attic publication.
+    #[serde(default)]
+    pub attic_app: Option<String>,
+    /// GitHub-hosted runner label for each native Nix system. This keeps the
+    /// prebuild additive when the project's primary CI is Forgejo or Crow.
+    #[serde(default)]
+    pub system_runners: BTreeMap<String, String>,
+}
+
+impl PrebuildConfig {
+    pub(crate) fn effective_system_runners<'a>(
+        &'a self,
+        ci: &'a CiConfig,
+    ) -> &'a BTreeMap<String, String> {
+        if self.system_runners.is_empty() {
+            &ci.nix_system_runners
+        } else {
+            &self.system_runners
+        }
+    }
 }
 
 /// `[ci.crow]` — project-side Crow workflow rendering options.
@@ -1782,12 +1811,21 @@ impl ProjectConfig {
             )?;
         }
         if let Some(prebuild) = &self.prebuild {
-            if self.ci.nix_system_runners.is_empty() {
-                bail!("simit project config: [prebuild] requires [ci.nix_system_runners]");
-            }
-            if self.ci.nix_builds.is_empty() && !prebuild.release_archives {
+            if prebuild.effective_system_runners(&self.ci).is_empty() {
                 bail!(
-                    "simit project config: [prebuild] requires [ci].nix_builds or release_archives = true"
+                    "simit project config: [prebuild] requires [prebuild.system_runners] or [ci.nix_system_runners]"
+                );
+            }
+            validate_system_runner_map(
+                "simit project config: [prebuild].system_runners",
+                &prebuild.system_runners,
+            )?;
+            if self.ci.nix_builds.is_empty()
+                && !prebuild.release_archives
+                && prebuild.attic_app.is_none()
+            {
+                bail!(
+                    "simit project config: [prebuild] requires [ci].nix_builds, release_archives = true, or attic_app"
                 );
             }
             if prebuild.release_archives
@@ -1802,6 +1840,10 @@ impl ProjectConfig {
                 );
             }
             if prebuild.publish_attic {
+                let attic_app = prebuild.attic_app.as_deref().context(
+                    "simit project config: [prebuild].publish_attic requires [prebuild].attic_app",
+                )?;
+                validate_nonempty_string("simit project config: [prebuild].attic_app", attic_app)?;
                 let attic = self.release.attic.as_ref().context(
                     "simit project config: [prebuild].publish_attic requires [release.attic]",
                 )?;
@@ -1883,6 +1925,11 @@ impl ProjectConfig {
         )?;
         if let Some(secret) = &self.ci.pypi_token_secret {
             validate_secret_name("simit project config: [ci].pypi_token_secret", secret)?;
+        }
+        if self.ci.pypi_trusted_publishing && self.ci.pypi_token_secret.is_some() {
+            bail!(
+                "simit project config: [ci].pypi_trusted_publishing and [ci].pypi_token_secret are mutually exclusive"
+            );
         }
         if let Some(pages) = &self.ci.pages {
             validate_owner_repo("simit project config: [ci.pages].repo", &pages.repo)?;
@@ -3111,19 +3158,22 @@ fn validate_nix_system_runners(ci: &CiConfig) -> Result<()> {
         bail!("simit project config: [ci].runner cannot be combined with [ci].nix_system_runners");
     }
 
-    for (system, runner) in &ci.nix_system_runners {
+    validate_system_runner_map(
+        "simit project config: [ci].nix_system_runners",
+        &ci.nix_system_runners,
+    )
+}
+
+fn validate_system_runner_map(name: &str, runners: &BTreeMap<String, String>) -> Result<()> {
+    for (system, runner) in runners {
         if system.trim().is_empty()
             || !system
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
         {
-            bail!(
-                "simit project config: [ci].nix_system_runners has invalid Nix system `{system}`"
-            );
+            bail!("{name} has invalid Nix system `{system}`");
         }
-        validate_runner_label(runner).map_err(|err| {
-            anyhow!("simit project config: [ci].nix_system_runners.{system}: {err}")
-        })?;
+        validate_runner_label(runner).map_err(|err| anyhow!("{name}.{system}: {err}"))?;
     }
     Ok(())
 }
@@ -3148,6 +3198,13 @@ fn set_ci_table(table: &mut Table, ci: &CiConfig) {
     );
     set_string_array(table, "packages", &ci.packages);
     set_string_array(table, "nix_builds", &ci.nix_builds);
+    match ci.all_features {
+        Some(false) => table["all_features"] = value(false),
+        Some(true) | None => {
+            table.remove("all_features");
+        }
+    }
+    set_bool(table, "unit_tests_only", ci.unit_tests_only);
     set_bool(table, "with_nextest", ci.with_nextest);
     set_bool(table, "with_msrv", ci.with_msrv);
     set_bool(table, "with_audit", ci.with_audit);
@@ -3156,6 +3213,7 @@ fn set_ci_table(table: &mut Table, ci: &CiConfig) {
     set_bool(table, "with_artifacts", ci.with_artifacts);
     set_bool(table, "with_pypi_publish", ci.with_pypi_publish);
     set_optional_string(table, "pypi_token_secret", ci.pypi_token_secret.as_deref());
+    set_bool(table, "pypi_trusted_publishing", ci.pypi_trusted_publishing);
     set_bool(table, "publish_crates", ci.publish_crates);
     set_string_array(table, "extra_setup", &ci.extra_setup);
     set_string_map(table, "extra_env", &ci.extra_env);

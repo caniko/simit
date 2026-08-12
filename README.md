@@ -366,7 +366,8 @@ in project config, simit renders them into every generated CI, publish, and
 artifact workflow. Extra setup runs after checkout/toolchain setup and before
 tests or builds; extra env is job-level environment; required secrets are
 documented as workflow comments but are not read locally.
-Set `[ci].pypi_token_secret` to override the default `PYPI_TOKEN` secret name.
+Set `[ci].pypi_token_secret` to override the default `PYPI_TOKEN` secret name,
+or set `[ci].pypi_trusted_publishing = true` to use GitHub OIDC instead.
 
 Generic `init ci` runs render test, lint, and optional quality-gate workflows
 without crates.io publishing. Add `--publish-crates` for release projects that
@@ -686,6 +687,21 @@ Projects using the conventional rs-harbor output can opt in with the shorter
 `nix_bundle_attrs = ["release-bundle"]` unless an explicit attribute list is
 provided.
 
+GitHub flake-input publication is additive to the primary CI provider. Point
+`attic_app` at an app built with `rs-harbor.lib.mkAtticPush { flake = "."; }`:
+
+```toml
+[prebuild]
+publish_attic = true
+attic_app = ".#push-flake-inputs"
+
+[prebuild.system_runners]
+"x86_64-linux" = "ubuntu-24.04"
+```
+
+Simit invokes the app only on the repository's default branch or a trusted
+release call; pull requests and feature branches never receive the token.
+
 ## Project config
 
 Projects may opt in to stable simit settings with exactly one project config
@@ -741,6 +757,8 @@ generated YAML:
 
 ```toml
 [ci]
+all_features = false  # keep optional platform features in dedicated checks
+unit_tests_only = true # leave service-backed integration tests to their workflow
 extra_setup = [
   "apt-get update && apt-get install -y --no-install-recommends postgresql-client",
 ]

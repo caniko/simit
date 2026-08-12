@@ -327,7 +327,7 @@ fn generic_ci_registers_as_hand_rolled() {
 }
 
 #[test]
-fn marked_ci_with_unmarked_supplementary_workflow_registers_as_managed_extra() {
+fn marked_ci_with_unmarked_supplementary_workflow_stays_managed() {
     let _env = EnvGuard::new();
     let root = TempDir::new().unwrap();
     init_package(root.path(), "plain");
@@ -343,7 +343,7 @@ fn marked_ci_with_unmarked_supplementary_workflow_registers_as_managed_extra() {
     assert_eq!(report.registered, [canonical(root.path())]);
     let registry = registry::load().unwrap();
     let entry = registry.projects.get(&canonical(root.path())).unwrap();
-    assert_eq!(entry.features["ci"], FeatureStatus::ManagedExtra);
+    assert_eq!(entry.features["ci"], FeatureStatus::Managed);
 }
 
 #[test]
@@ -364,6 +364,33 @@ fn edited_marked_ci_with_unmarked_supplementary_workflow_stays_drift() {
         "name: Pages\non: [push]\n",
     )
     .unwrap();
+
+    let report = discover(root.path(), DiscoverOptions::default());
+
+    assert_eq!(report.registered, [canonical(root.path())]);
+    let registry = registry::load().unwrap();
+    let entry = registry.projects.get(&canonical(root.path())).unwrap();
+    assert_eq!(entry.features["ci"], FeatureStatus::Drift);
+}
+
+#[test]
+fn marked_ci_with_missing_generated_workflow_is_drift() {
+    let _env = EnvGuard::new();
+    let root = TempDir::new().unwrap();
+    init_package(root.path(), "plain");
+    fs::write(root.path().join("flake.nix"), "{ outputs = _: {}; }\n").unwrap();
+    fs::write(
+        root.path().join("simit.toml"),
+        r#"[ci]
+platform = "github"
+provider = "actions"
+runtime = "nix"
+nix_builds = [".#demo"]
+"#,
+    )
+    .unwrap();
+    init_managed_github_ci(root.path());
+    fs::remove_file(root.path().join(".github/workflows/nix-builds.yaml")).unwrap();
 
     let report = discover(root.path(), DiscoverOptions::default());
 

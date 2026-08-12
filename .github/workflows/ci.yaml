@@ -7,8 +7,11 @@ on:
     tags-ignore: ["**"]
   pull_request:
 
+permissions:
+  contents: read
+
 concurrency:
-  group: ${{ github.workflow_ref }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
 
 jobs:
@@ -45,6 +48,9 @@ jobs:
 
       - name: Check generated flake and hooks
         run: nix develop -c cargo run -- init flake --check
+
+      - name: Check generated release
+        run: nix develop -c cargo run -- init release --check --diff
 
       - name: Clippy
         run: nix develop -c cargo clippy --all-targets -- --deny warnings

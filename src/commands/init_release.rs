@@ -1,14 +1,16 @@
 use anyhow::Result;
 
 use crate::cargo;
+use crate::ci_resolution::CiBackend;
 use crate::cli::InitReleaseCommand;
 use crate::cli::{CiProvider, Platform, Runtime};
-use crate::commands::scaffold::{ArtifactCheck, CheckPrintMode, print_next_steps};
+use crate::commands::scaffold::{CheckPrintMode, print_next_steps};
 use crate::commands::upgrade;
 use crate::config::{
     AptOverrides, AurOverrides, ChocolateyOverrides, CoprOverrides, HomebrewOverrides,
     ProjectConfig, ScoopOverrides,
 };
+use crate::project;
 use crate::registry::{self, FeatureStatus};
 use crate::render::release_workflow::{self, ReleaseWorkflowInputs};
 use crate::user_config::{ResolvedRunner, UserConfig};
@@ -36,6 +38,9 @@ pub fn run(command: InitReleaseCommand) -> Result<()> {
             cfg.ci.provider.unwrap_or(CiProvider::Actions)
         }
     });
+    // Reject Crow + non-Forgejo pairs; Crow release workflows only render for
+    // Forgejo. Actions works on every platform.
+    CiBackend::from_parts(provider, platform)?;
     let release = cfg.resolve_release_target(platform)?;
     let aur = cfg
         .aur
@@ -104,37 +109,28 @@ pub fn run(command: InitReleaseCommand) -> Result<()> {
         winget: cfg.winget.as_ref(),
         announce: cfg.release.announce.as_ref(),
     };
-    let (content, workflow_path) = if provider == CiProvider::Crow {
-        let file = crate::render::crow::release_file(cfg.ci.crow.format, &cfg.ci.crow, &inputs)?;
-        (
-            file.content,
-            file.relative_path.to_string_lossy().into_owned(),
-        )
+    let workflow = if provider == CiProvider::Crow {
+        crate::render::crow::release_file(cfg.ci.crow.format, &cfg.ci.crow, &inputs)?
     } else {
-        (
-            release_workflow::render(&inputs),
-            format!("{}/release.yml", platform.workflow_dir()),
-        )
+        release_workflow::file(&inputs)
     };
-    let path = workspace_root.join(&workflow_path);
+    let workflow_path = workflow.relative_path.to_string_lossy().into_owned();
+    let plan = project::GeneratedPlan {
+        files: vec![workflow],
+        message: "release workflow is not up to date; run `simit init release`",
+        owns_name: is_release_workflow_name,
+    };
 
     match mode {
         CheckPrintMode::Print => {
-            print!("{content}");
+            print!("{}", plan.files[0].content);
             Ok(())
         }
-        CheckPrintMode::Check { diff } => ArtifactCheck {
-            label: "release workflow",
-            path: &path,
-            expected: &content,
-            remediation: "run `simit init release`",
-        }
-        .verify(diff)
-        .and_then(|_| upgrade::update_readme_badges_if_present(workspace_root, true, diff)),
+        CheckPrintMode::Check { diff } => plan
+            .check(workspace_root, diff)
+            .and_then(|_| upgrade::update_readme_badges_if_present(workspace_root, true, diff)),
         CheckPrintMode::Write => {
-            let parent = path.parent().expect("workflow path has a parent");
-            std::fs::create_dir_all(parent)?;
-            std::fs::write(&path, &content)?;
+            plan.write(workspace_root)?;
             upgrade::update_readme_badges_if_present(workspace_root, false, false)?;
             print_next_steps(
                 workspace_root,
@@ -149,6 +145,13 @@ pub fn run(command: InitReleaseCommand) -> Result<()> {
             Ok(())
         }
     }
+}
+
+fn is_release_workflow_name(name: &std::ffi::OsStr) -> bool {
+    matches!(
+        name.to_str(),
+        Some("release.yml" | "release.yaml" | "release.jsonnet")
+    )
 }
 
 fn resolve_release_runner(cfg: &ProjectConfig, platform: Platform) -> Result<(String, bool)> {

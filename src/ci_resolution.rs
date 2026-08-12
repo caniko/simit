@@ -6,9 +6,56 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
-use crate::cli::{Platform, Runtime, RuntimeChoice, WorkspaceStrategy};
+use crate::cli::{CiProvider, Platform, Runtime, RuntimeChoice, WorkspaceStrategy};
 use crate::config::{CiConfig, ProjectConfig};
 use crate::render::ci::{CiOptions, OMNIX_REF_DEFAULT, OmCiMode};
+
+/// A validated CI target: the concrete backend simit will render for a chosen
+/// (provider, platform) pair.
+///
+/// This is the capability matrix. Constructing a [`CiBackend`] validates the
+/// pair up front instead of silently generating a workflow the target host
+/// cannot run, and the enum gives every caller one value to branch on rather
+/// than re-establishing provider/platform invariants at each dispatch site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CiBackend {
+    /// Actions workflows rendered under a platform's workflow directory.
+    /// GitLab Actions is nix-only CI; that restriction lives in the renderers.
+    Actions { platform: Platform },
+    /// Crow CI rendered under `.crow/`. Crow is Forgejo-native: the source
+    /// host must be Forgejo, so the backend carries no platform.
+    Crow,
+}
+
+impl CiBackend {
+    /// Validate a `(provider, platform)` request and return the renderable
+    /// backend. Rejects pairs simit cannot render instead of guessing.
+    pub fn from_parts(provider: CiProvider, platform: Platform) -> Result<Self> {
+        match (provider, platform) {
+            (CiProvider::Crow, Platform::Forgejo) => Ok(Self::Crow),
+            (CiProvider::Crow, other) => bail!(
+                "Crow CI workflows can only be generated for the Forgejo platform \
+                 (got {}); Crow is a Forgejo-native provider",
+                other.as_str()
+            ),
+            (CiProvider::Actions, platform) => Ok(Self::Actions { platform }),
+        }
+    }
+
+    pub fn provider(self) -> CiProvider {
+        match self {
+            Self::Actions { .. } => CiProvider::Actions,
+            Self::Crow => CiProvider::Crow,
+        }
+    }
+
+    pub fn platform(self) -> Platform {
+        match self {
+            Self::Actions { platform } => platform,
+            Self::Crow => Platform::Forgejo,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct CiCliOverrides {
@@ -48,6 +95,8 @@ pub struct CiInference {
     pub workspace: Option<bool>,
     pub workspace_strategy: Option<WorkspaceStrategy>,
     pub packages: Option<Vec<String>>,
+    pub all_features: Option<bool>,
+    pub unit_tests_only: Option<bool>,
     pub with_nextest: Option<bool>,
     pub with_msrv: Option<bool>,
     pub with_audit: Option<bool>,
@@ -108,6 +157,12 @@ impl CiInference {
             workspace,
             workspace_strategy,
             packages,
+            all_features: Some(all_content.contains("--all-features")),
+            unit_tests_only: Some(
+                all_content
+                    .lines()
+                    .any(|line| line.contains("cargo test") && line.contains(" --lib")),
+            ),
             // Keep these markers in sync with the emitting sites in
             // src/render/ci.rs: optional tool steps, om-ci, and artifact files.
             with_nextest: Some(all_content.contains("cargo nextest run")),
@@ -145,6 +200,8 @@ pub struct ResolvedCiInputs {
     pub workspace: bool,
     pub workspace_strategy: WorkspaceStrategy,
     pub packages: Vec<String>,
+    pub all_features: bool,
+    pub unit_tests_only: bool,
     pub with_nextest: bool,
     pub with_msrv: bool,
     pub with_audit: bool,
@@ -242,6 +299,14 @@ impl ResolvedCiInputs {
             workspace,
             workspace_strategy,
             packages,
+            all_features: config
+                .all_features
+                .or(inference.all_features)
+                .unwrap_or(true),
+            unit_tests_only: config
+                .unit_tests_only
+                .or(inference.unit_tests_only)
+                .unwrap_or(false),
             with_nextest: cli
                 .with_nextest
                 .or(config.with_nextest)
@@ -305,6 +370,10 @@ impl ResolvedCiInputs {
     ) -> CiOptions {
         CiOptions {
             nix_builds: cfg.ci.nix_builds.clone(),
+            all_features: self.all_features,
+            unit_tests_only: self.unit_tests_only,
+            nix_substituters: cfg.release.artifacts.substituters.clone(),
+            nix_trusted_public_keys: cfg.release.artifacts.trusted_public_keys.clone(),
             with_nextest: self.with_nextest,
             with_msrv: self.with_msrv,
             with_audit: self.with_audit,
@@ -317,6 +386,7 @@ impl ResolvedCiInputs {
                 .pypi_token_secret
                 .clone()
                 .unwrap_or_else(|| "PYPI_TOKEN".to_owned()),
+            pypi_trusted_publishing: cfg.ci.pypi_trusted_publishing,
             publish_crates: self.publish_crates,
             om_ci: self.om_ci,
             omnix_ref,
@@ -355,6 +425,8 @@ impl ResolvedCiInputs {
         ci.workspace = self.workspace;
         ci.workspace_strategy = self.workspace_strategy;
         ci.packages = self.packages.clone();
+        ci.all_features = (!self.all_features).then_some(false);
+        ci.unit_tests_only = self.unit_tests_only;
         ci.with_nextest = self.with_nextest;
         ci.with_msrv = self.with_msrv;
         ci.with_audit = self.with_audit;
@@ -380,6 +452,8 @@ struct CiConfigLayer {
     step_runners: Option<BTreeMap<String, String>>,
     workspace: Option<bool>,
     packages: Option<Vec<String>>,
+    all_features: Option<bool>,
+    unit_tests_only: Option<bool>,
     with_nextest: Option<bool>,
     with_msrv: Option<bool>,
     with_audit: Option<bool>,
@@ -423,6 +497,8 @@ impl CiConfigLayer {
             workspace: present(ci_table, "workspace").map(|_| cfg.ci.workspace),
             step_runners,
             packages: present(ci_table, "packages").map(|_| cfg.ci.packages.clone()),
+            all_features: present(ci_table, "all_features").and(cfg.ci.all_features),
+            unit_tests_only: present(ci_table, "unit_tests_only").map(|_| cfg.ci.unit_tests_only),
             with_nextest: present(ci_table, "with_nextest").map(|_| cfg.ci.with_nextest),
             with_msrv: present(ci_table, "with_msrv").map(|_| cfg.ci.with_msrv),
             with_audit: present(ci_table, "with_audit").map(|_| cfg.ci.with_audit),
@@ -451,6 +527,8 @@ impl CiConfigLayer {
             step_runners,
             workspace: cfg.ci.workspace.then_some(true),
             packages: (!cfg.ci.packages.is_empty()).then(|| cfg.ci.packages.clone()),
+            all_features: cfg.ci.all_features,
+            unit_tests_only: cfg.ci.unit_tests_only.then_some(true),
             with_nextest: cfg.ci.with_nextest.then_some(true),
             with_msrv: cfg.ci.with_msrv.then_some(true),
             with_audit: cfg.ci.with_audit.then_some(true),
