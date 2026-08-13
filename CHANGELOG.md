@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.15] - 2026-08-13
+
+### Fixed
+
+- Isolated GitHub Actions concurrency between push and pull request workflows.
+
 ## [0.17.14] - 2026-08-13
 
 - Delegate GitHub flake-input publication to rs-harbor and allow the generated
@@ -396,7 +402,8 @@ ci`, including the `~/.cargo/bin` key, rust-cache settings, and why Nix
 
 - Prepare the first public crates.io release.
 
-[Unreleased]: https://codeberg.org/caniko/simit/compare/0.17.14...HEAD
+[Unreleased]: https://codeberg.org/caniko/simit/compare/0.17.15...HEAD
+[0.17.15]: https://codeberg.org/caniko/simit/compare/0.17.14...0.17.15
 [0.17.14]: https://codeberg.org/caniko/simit/compare/0.17.13...0.17.14
 [0.17.13]: https://codeberg.org/caniko/simit/compare/0.17.12...0.17.13
 [0.17.12]: https://codeberg.org/caniko/simit/compare/0.17.11...0.17.12
