@@ -196,6 +196,7 @@ struct AuditProject {
     path: Utf8PathBuf,
     name: Option<String>,
     applicable: bool,
+    provider: Option<&'static str>,
     ci_status: FeatureStatus,
     platform: Option<String>,
     changed_files: Vec<String>,
@@ -369,6 +370,7 @@ fn audit(args: ProjectsAuditArgs) -> Result<()> {
             path: path.clone(),
             name: None,
             applicable,
+            provider: None,
             ci_status: FeatureStatus::Absent,
             platform: None,
             changed_files: Vec::new(),
@@ -383,6 +385,7 @@ fn audit(args: ProjectsAuditArgs) -> Result<()> {
             match registry::audit_ci(path.as_std_path()) {
                 Ok(ci) => {
                     project.ci_status = ci.status;
+                    project.provider = ci.provider.map(|provider| provider.as_str());
                     project.platform = ci.platform;
                     project.changed_files = ci
                         .changed_files
@@ -433,12 +436,17 @@ fn audit(args: ProjectsAuditArgs) -> Result<()> {
     } else {
         for project in &projects {
             let status = status_label(project.ci_status);
+            let target = match (project.provider, &project.platform) {
+                (Some(provider), Some(platform)) => format!(" [{provider}/{platform}]"),
+                (Some(provider), None) => format!(" [{provider}]"),
+                _ => String::new(),
+            };
             let detail = if project.errors.is_empty() {
                 String::new()
             } else {
                 format!(" ({})", project.errors.join("; "))
             };
-            println!("{status:<12} {}{detail}", project.path);
+            println!("{status:<12} {}{target}{detail}", project.path);
             if !project.changed_files.is_empty() {
                 println!("  changed: {}", project.changed_files.join(", "));
             }

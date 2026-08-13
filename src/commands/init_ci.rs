@@ -54,6 +54,9 @@ pub fn run(command: InitCiCommand) -> Result<()> {
         .or(cfg.ci.platform)
         .unwrap_or(Platform::Forgejo);
     let backend = CiBackend::from_parts(provider, platform)?;
+    if platform == Platform::Gitlab {
+        return run_nix_only(command);
+    }
     if backend.provider() == CiProvider::Crow {
         return run_crow(command, &metadata, workspace_root, &cfg, platform);
     }
@@ -514,6 +517,9 @@ fn run_python(command: InitCiCommand) -> Result<()> {
         .platform
         .or(cfg.ci.platform)
         .unwrap_or(Platform::Forgejo);
+    if platform == Platform::Gitlab {
+        return run_nix_only(command);
+    }
     let backend = CiBackend::from_parts(provider, platform)?;
     if backend.provider() == CiProvider::Crow {
         return run_crow_python(command, workspace_root, &cfg, platform);

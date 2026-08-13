@@ -51,11 +51,14 @@ simit projects audit --json /path/to/project
 ```
 
 The audit never reads or writes the project registry. Its JSON report is stable
-for automation and includes the generator version, platform, CI status,
-changed/missing/extra generated workflow paths, a regeneration command when it
-can be inferred, and per-project errors. Exit status `0` means clean, `1`
-means attention is required, and `2` means the live comparison could not be
-completed for one or more projects.
+for automation and includes the generator version, CI provider and platform,
+CI status, changed/missing/extra generated workflow paths, a regeneration
+command when it can be inferred, and per-project errors. The explicit
+`provider` fact (`actions` or `crow`) reflects the validated CI backend;
+for Crow backends the `platform` value is the provider-conflated legacy
+string, so automation should key off `provider`, not `platform`. Exit status
+`0` means clean, `1` means attention is required, and `2` means the live
+comparison could not be completed for one or more projects.
 
 ## Onboarding existing projects
 

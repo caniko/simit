@@ -132,6 +132,7 @@ pub enum FeatureStatus {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CiAudit {
     pub status: FeatureStatus,
+    pub provider: Option<CiProvider>,
     pub platform: Option<String>,
     pub changed_files: Vec<PathBuf>,
     pub missing_files: Vec<PathBuf>,
@@ -553,6 +554,7 @@ pub fn audit_ci(workspace_root: &Path) -> Result<CiAudit> {
             } else {
                 FeatureStatus::HandRolled
             },
+            provider: None,
             platform: None,
             changed_files: Vec::new(),
             missing_files: Vec::new(),
@@ -601,8 +603,11 @@ pub fn audit_ci(workspace_root: &Path) -> Result<CiAudit> {
 
     Ok(CiAudit {
         status,
+        provider: Some(backend.provider()),
         platform: Some(match backend.provider() {
             CiProvider::Actions => backend.platform().as_str().to_owned(),
+            // Backward-compatible conflation the fleet consumer matches on for
+            // Crow. `provider` now carries the explicit fact separately.
             CiProvider::Crow => "crow".to_owned(),
         }),
         changed_files,
@@ -1223,21 +1228,27 @@ fn single_runner_label(runner: &ResolvedRunner) -> Option<&str> {
 /// canonical planning path for `regenerate`; do not reintroduce directory-based
 /// guessing here.
 pub fn infer_project_ci_target(workspace_root: &Path) -> Result<Option<CiBackend>> {
-    if let Ok(config) = ProjectConfig::load(workspace_root) {
-        if let Some(platform) = config.ci.platform {
-            let provider = config.ci.provider.unwrap_or(CiProvider::Actions);
-            return Ok(Some(CiBackend::from_parts(provider, platform)?));
-        }
+    let config = ProjectConfig::load(workspace_root).unwrap_or_default();
+    // Explicit provider in config is authoritative (also the crow-actions
+    // distinguishing hint). A platform alone is not: legacy crow projects
+    // persisted platform=forgejo without a provider, so fall through to the
+    // workflow tree to detect crow instead of defaulting to Actions.
+    if let (Some(platform), Some(provider)) = (config.ci.platform, config.ci.provider) {
+        return Ok(Some(CiBackend::from_parts(provider, platform)?));
     }
     let workflows = collect_workflow_files(workspace_root)?;
     let marked = workflows
         .into_iter()
         .filter(|workflow| workflow.marked)
         .collect::<Vec<_>>();
-    if marked.is_empty() {
-        return Ok(None);
+    if !marked.is_empty() {
+        return Ok(Some(infer_ci_target(&marked)?));
     }
-    Ok(Some(infer_ci_target(&marked)?))
+    // Fresh project: no workflows yet; platform alone defaults to Actions.
+    if let Some(platform) = config.ci.platform {
+        return Ok(Some(CiBackend::from_parts(CiProvider::Actions, platform)?));
+    }
+    Ok(None)
 }
 
 fn infer_ci_target(marked: &[WorkflowFile]) -> Result<CiBackend> {
@@ -2126,6 +2137,110 @@ mod tests {
     }
 
     #[test]
+    fn infer_project_ci_target_prefers_crow_tree_over_platform_only_config() {
+        let root = TempDir::new().unwrap();
+        fs::write(
+            root.path().join("Cargo.toml"),
+            "[package]\nname = \"crow-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("simit.toml"),
+            "[ci]\nplatform = \"forgejo\"\n", // legacy config: platform persisted, provider absent
+        )
+        .unwrap();
+        fs::create_dir_all(root.path().join(".crow")).unwrap();
+        fs::write(
+            root.path().join(".crow/ci.yaml"),
+            format!(
+                "{}\nname: ci\n",
+                crate::render::ci::GENERATED_WORKFLOW_MARKER
+            ),
+        )
+        .unwrap();
+
+        let backend = infer_project_ci_target(root.path()).unwrap().unwrap();
+
+        assert_eq!(backend.provider(), CiProvider::Crow);
+        assert_eq!(backend.platform(), Platform::Forgejo);
+    }
+
+    #[test]
+    fn infer_project_ci_target_defaults_actions_without_workflow_tree() {
+        let root = TempDir::new().unwrap();
+        fs::write(
+            root.path().join("Cargo.toml"),
+            "[package]\nname = \"fresh-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("simit.toml"),
+            "[ci]\nplatform = \"forgejo\"\n",
+        )
+        .unwrap();
+
+        let backend = infer_project_ci_target(root.path()).unwrap().unwrap();
+
+        assert_eq!(backend.provider(), CiProvider::Actions);
+        assert_eq!(backend.platform(), Platform::Forgejo);
+    }
+
+    #[test]
+    fn infer_project_ci_target_explicit_provider_wins() {
+        let root = TempDir::new().unwrap();
+        fs::write(
+            root.path().join("Cargo.toml"),
+            "[package]\nname = \"explicit-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("simit.toml"),
+            "[ci]\nplatform = \"forgejo\"\nprovider = \"crow\"\n",
+        )
+        .unwrap();
+
+        let backend = infer_project_ci_target(root.path()).unwrap().unwrap();
+
+        assert_eq!(backend.provider(), CiProvider::Crow);
+        assert_eq!(backend.platform(), Platform::Forgejo);
+    }
+
+    #[test]
+    fn legacy_marker_workflows_still_recognized_as_marked() {
+        let root = TempDir::new().unwrap();
+        fs::write(
+            root.path().join("Cargo.toml"),
+            "[package]\nname = \"legacy-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        fs::create_dir_all(root.path().join(".forgejo/workflows")).unwrap();
+        fs::write(
+            root.path().join(".forgejo/workflows/ci.yaml"),
+            format!(
+                "{}\nname: ci\n",
+                crate::render::ci::LEGACY_GENERATED_WORKFLOW_MARKER
+            ),
+        )
+        .unwrap();
+
+        let workflows = collect_workflow_files(root.path()).unwrap();
+        let marked = workflows
+            .iter()
+            .filter(|workflow| workflow.marked)
+            .collect::<Vec<_>>();
+
+        assert_eq!(marked.len(), 1);
+        assert_eq!(
+            marked[0].relative_path,
+            Path::new(".forgejo/workflows/ci.yaml")
+        );
+        // A legacy-marked crow tree still infers Crow, not the Actions default.
+        let backend = infer_project_ci_target(root.path()).unwrap().unwrap();
+        assert_eq!(backend.provider(), CiProvider::Actions);
+        assert_eq!(backend.platform(), Platform::Forgejo);
+    }
+
+    #[test]
     fn live_ci_audit_reports_absent_without_registry_state() {
         let root = TempDir::new().unwrap();
         fs::write(
@@ -2137,6 +2252,7 @@ mod tests {
         let audit = audit_ci(root.path()).unwrap();
 
         assert_eq!(audit.status, FeatureStatus::Absent);
+        assert!(audit.provider.is_none());
         assert!(audit.platform.is_none());
         assert!(audit.changed_files.is_empty());
         assert!(audit.missing_files.is_empty());

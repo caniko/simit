@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Result, bail};
 
 use crate::cargo;
 use crate::ci_resolution::CiBackend;
@@ -41,6 +41,11 @@ pub fn run(command: InitReleaseCommand) -> Result<()> {
     // Reject Crow + non-Forgejo pairs; Crow release workflows only render for
     // Forgejo. Actions works on every platform.
     CiBackend::from_parts(provider, platform)?;
+    if platform == Platform::Gitlab {
+        bail!(
+            "release workflows are not supported for GitLab; GitLab CI is nix-only and has no Actions-style release workflow"
+        );
+    }
     let release = cfg.resolve_release_target(platform)?;
     let aur = cfg
         .aur

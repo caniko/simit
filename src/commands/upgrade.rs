@@ -436,7 +436,7 @@ fn infer_ci_runner(workspace_root: &Path) -> Result<Option<String>> {
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(err) => return Err(err).with_context(|| format!("reading {}", path.display())),
     };
-    if !content.contains(ci::GENERATED_WORKFLOW_MARKER) {
+    if !ci::is_generated_workflow_marker(&content) {
         return Ok(None);
     }
     Ok(infer_pages_runner(&content))

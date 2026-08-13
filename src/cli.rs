@@ -1824,6 +1824,15 @@ pub enum CiProvider {
     Crow,
 }
 
+impl CiProvider {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Actions => "actions",
+            Self::Crow => "crow",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq, ValueEnum)]
 #[serde(rename_all = "lowercase")]
 pub enum WorkspaceStrategy {
