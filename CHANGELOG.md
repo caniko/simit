@@ -7,8 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.14] - 2026-08-13
+
 - Delegate GitHub flake-input publication to rs-harbor and allow the generated
   prebuild workflow alongside Forgejo or Crow CI.
+
+### Added
+
+- GitHub and Crow CI workflow generation.
+- Nix installable build matrices and prebuilds for hosted GitHub runners.
+- Prebuilt release archives and actionlint validation.
+- PyPI trusted publishing support.
+- Publishing of flake inputs through rs-harbor.
+
+### Changed
+
+- CI generation now validates provider capabilities and target configuration across render paths.
+- Legacy generated-workflow markers are migrated automatically.
+
+### Fixed
+
+- PyPI release tag validation and version lookup isolation.
+- Generated workflow concurrency groups now refresh and remain isolated.
 
 ## [0.17.13] - 2026-07-28
 
@@ -376,7 +396,8 @@ ci`, including the `~/.cargo/bin` key, rust-cache settings, and why Nix
 
 - Prepare the first public crates.io release.
 
-[Unreleased]: https://codeberg.org/caniko/simit/compare/0.17.13...HEAD
+[Unreleased]: https://codeberg.org/caniko/simit/compare/0.17.14...HEAD
+[0.17.14]: https://codeberg.org/caniko/simit/compare/0.17.13...0.17.14
 [0.17.13]: https://codeberg.org/caniko/simit/compare/0.17.12...0.17.13
 [0.17.12]: https://codeberg.org/caniko/simit/compare/0.17.11...0.17.12
 [0.17.11]: https://codeberg.org/caniko/simit/compare/0.17.10...0.17.11
