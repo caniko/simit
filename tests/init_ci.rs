@@ -496,7 +496,7 @@ extra_setup = ["echo prepare-runner"]
     assert!(workflow.contains("permissions:\n  contents: read"));
     assert!(
         workflow
-            .contains("group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}")
+            .contains("group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.head_ref || github.ref_name }}")
     );
     assert!(workflow.contains("runs-on: ubuntu-latest"));
     assert!(workflow.contains("fail-fast: false"));
@@ -943,7 +943,7 @@ fn package_metadata_nix_builds_validate_and_render() {
     assert!(workflow.contains("permissions:\n  contents: read"));
     assert!(
         workflow
-            .contains("group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}")
+            .contains("group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.head_ref || github.ref_name }}")
     );
     assert!(workflow.contains("- \".#oci-api\""));
     assert!(workflow.contains("- \".#oci-etl\""));
@@ -3619,6 +3619,9 @@ components = ["checks"]
     assert!(status.success());
 
     let workflow = read(&temp.path().join(".github/workflows/ci.yaml"));
+    assert!(workflow.contains(
+        "group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.head_ref || github.ref_name }}"
+    ));
     assert!(workflow.contains("nix build .#checks.x86_64-linux.offline-tests"));
     assert!(!workflow.contains("Check generated flake wiring"));
     assert!(!workflow.contains("Check flake evaluation"));
