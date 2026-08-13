@@ -3015,8 +3015,9 @@ fn push_concurrency(workflow: &mut String) {
 
 fn push_github_concurrency(workflow: &mut String) {
     workflow.push_str("concurrency:\n");
-    workflow
-        .push_str("  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}\n");
+    workflow.push_str(
+        "  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.head_ref || github.ref_name }}\n",
+    );
     workflow.push_str("  cancel-in-progress: true\n\n");
 }
 
