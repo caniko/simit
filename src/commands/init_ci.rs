@@ -247,6 +247,7 @@ pub fn run(command: InitCiCommand) -> Result<()> {
             platform,
             &runners.ci,
             &options.nix_builds,
+            &options.extra_setup,
         )?);
     }
     if let Some(prebuild) = github_prebuild_file(&cfg, platform, provider)? {
@@ -669,6 +670,7 @@ fn run_nix_only(command: InitCiCommand) -> Result<()> {
             platform,
             &ResolvedRunner::literal(&runner)?,
             &cfg.ci.nix_builds,
+            &cfg.ci.extra_setup,
         )?);
     }
     if let Some(prebuild) = github_prebuild_file(&cfg, platform, provider)? {
@@ -811,6 +813,7 @@ fn run_python(command: InitCiCommand) -> Result<()> {
             platform,
             &runners.ci,
             &options.nix_builds,
+            &options.extra_setup,
         )?);
     }
     if let Some(prebuild) = github_prebuild_file(&cfg, platform, provider)? {
@@ -1677,6 +1680,12 @@ fn persisted_ci_matches_simit_toml(
     persisted_ci.publish_crates = publish_crates;
     if cfg.ci.pages.is_some() {
         persisted_ci.pages = cfg.ci.pages.clone();
+    }
+    if cfg.ci.all_features.is_none() {
+        persisted_ci.all_features = None;
+    }
+    if !cfg.ci.unit_tests_only {
+        persisted_ci.unit_tests_only = false;
     }
     Ok(cfg.ci == persisted_ci)
 }

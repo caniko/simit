@@ -790,6 +790,50 @@ pub fn release_file(
     for attr in inputs.artifacts.effective_nix_bundle_attrs() {
         build = build.command(format!("nix build .#{} --out-link release/{}", attr, attr));
     }
+    if let Some(attic) = inputs.attic {
+        let token_secret = attic
+            .token_secret
+            .as_deref()
+            .context("Crow Attic publication requires [release.attic].token_secret")?;
+        if attic.result_links.is_empty() {
+            bail!("Crow Attic publication requires [release.attic].result_links");
+        }
+        let paths = attic
+            .result_links
+            .iter()
+            .map(|link| {
+                let path =
+                    if link.starts_with('/') || link.starts_with("./") || link.starts_with("../") {
+                        link.clone()
+                    } else {
+                        format!("./{link}")
+                    };
+                shell_quote(&path)
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        build = build
+            .secret(token_secret)
+            .command(format!("test -n \"$${{{token_secret}:-}}\""))
+            .command(format!("nix path-info -r {paths} > attic-paths.txt"))
+            .command("test -s attic-paths.txt".to_owned())
+            .command("attic_config_root=\"$(mktemp -d)\"".to_owned())
+            .command("trap 'rm -rf \"$attic_config_root\"' EXIT".to_owned())
+            .command("install -d -m 0700 \"$attic_config_root/attic\"".to_owned())
+            .command("attic_config=\"$attic_config_root/attic/config.toml\"".to_owned())
+            .command("install -m 0600 /dev/null \"$attic_config\"".to_owned())
+            .command(format!(
+                "{{ printf '%s\\n' 'default-server = \"{}\"'; printf '%s\\n' '[servers.{}]'; printf '%s\\n' 'endpoint = \"{}\"'; printf 'token = \"%s\"\\n' \"$${{{token_secret}}}\"; }} > \"$attic_config\"",
+                attic.cache, attic.cache, attic.url
+            ))
+            .command("test \"$(stat -c '%a' \"$attic_config\")\" = 600".to_owned())
+            .command("attic=\"$(nix build --inputs-from . --no-link --print-out-paths nixpkgs#attic-client)\"".to_owned())
+            .command("test -x \"$attic/bin/attic\"".to_owned())
+            .command(format!(
+                "XDG_CONFIG_HOME=\"$attic_config_root\" \"$attic/bin/attic\" push --stdin --no-closure --ignore-upstream-cache-filter {} < attic-paths.txt",
+                attic.cache
+            ));
+    }
     if !inputs.artifacts.checksum_globs.is_empty() {
         build = build.command(format!(
             "(cd release && sha256sum {}) > release/SHA256SUMS.txt",
@@ -822,7 +866,7 @@ pub fn release_file(
             },
         ),
         platform: config.platform.clone(),
-        when: vec![condition("event", "tag"), condition("event", "manual")],
+        when: vec![condition("event", "tag")],
         skip_clone: config.skip_clone.then_some(true),
         variables: config.variables.clone(),
         workspace: None,

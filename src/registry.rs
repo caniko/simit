@@ -891,11 +891,12 @@ fn marked_workflows_drift(workspace_root: &Path, marked: &[WorkflowFile]) -> boo
         .map(|file| (file.relative_path, file.content))
         .collect::<BTreeMap<_, _>>();
 
-    marked.iter().any(|workflow| {
-        expected
-            .get(&workflow.relative_path)
-            .is_none_or(|content| content != &workflow.content)
-    })
+    expected.len() != marked.len()
+        || marked.iter().any(|workflow| {
+            expected
+                .get(&workflow.relative_path)
+                .is_none_or(|content| content != &workflow.content)
+        })
 }
 
 fn infer_expected_ci_files(
@@ -947,6 +948,7 @@ fn infer_expected_ci_files(
                 platform,
                 &runner,
                 &options.nix_builds,
+                &options.extra_setup,
             )?);
         }
         if resolved.with_pypi_publish {
@@ -1008,6 +1010,7 @@ fn infer_expected_ci_files(
                 platform,
                 &runner,
                 &config.ci.nix_builds,
+                &config.ci.extra_setup,
             )?);
         }
         if let Some(pages) = config_pages_or_inferred(&config, marked)? {
@@ -1126,6 +1129,7 @@ fn infer_expected_ci_files(
             platform,
             &runners.ci,
             &options.nix_builds,
+            &options.extra_setup,
         )?);
     }
     if resolved.with_pypi_publish && cargo::has_pyo3_dep(&metadata.packages) {

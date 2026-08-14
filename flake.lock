@@ -273,11 +273,11 @@
         "rev": "a45718d96cdde0101ef8c20942fada0b188745f0",
         "revCount": 1,
         "type": "git",
-        "url": "https://codeberg.org/caniko/nix-opencode-lsp.git"
+        "url": "ssh://git@github.com/caniko/nix-opencode-lsp.git"
       },
       "original": {
         "type": "git",
-        "url": "https://codeberg.org/caniko/nix-opencode-lsp.git"
+        "url": "ssh://git@github.com/caniko/nix-opencode-lsp.git"
       }
     },
     "nixpkgs": {
@@ -391,17 +391,17 @@
         "rust-overlay": "rust-overlay_2"
       },
       "locked": {
-        "lastModified": 1785259333,
-        "narHash": "sha256-pKnk28WnZZSNuzYKT4iZTV///qv4x8gHxmBgqqN6Gvs=",
+        "lastModified": 1785398296,
+        "narHash": "sha256-/4BATEhiyv8tudat5JvipI8FP3LWu4F7z+bRggZQmzY=",
         "owner": "caniko",
         "repo": "rs-harbor",
-        "rev": "839c7d80ed76c622195afc3c7ec15b4330ffa621",
+        "rev": "c26b735eede8078f795651c4a9cbf0be8733b221",
         "type": "github"
       },
       "original": {
         "owner": "caniko",
         "repo": "rs-harbor",
-        "rev": "839c7d80ed76c622195afc3c7ec15b4330ffa621",
+        "rev": "c26b735eede8078f795651c4a9cbf0be8733b221",
         "type": "github"
       }
     },

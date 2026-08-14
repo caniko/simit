@@ -1204,7 +1204,7 @@ fn cross_print_emits_multi_target_flake_with_contract() {
 
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("--- flake.nix"));
-    assert!(stdout.contains("rs-harbor.url = \"git+https://codeberg.org/caniko/rs-harbor.git?ref=trunk&rev=b40cd4c4fdf6133962f67bd68a48bfd5d554d47f\";"));
+    assert!(stdout.contains("rs-harbor.url = \"git+https://codeberg.org/caniko/rs-harbor.git?ref=trunk&rev=f209ddbca3fdbb0dc31fa3886ccc2ff7369c18ac\";"));
     assert!(stdout.contains("rs-harbor.lib.mkCrossPackages {"));
     assert!(stdout.contains(
         "targets = [\"native\" \"aarch64-linux\" \"windows\" \"darwin-x86_64\" \"darwin-aarch64\"];"
