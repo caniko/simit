@@ -14,7 +14,7 @@ pub const CANIX_CACHE_URL: &str = "https://attic.candee.baby/canix";
 /// Upstream cache.nixos.org public key, advertised alongside the canix cache.
 pub const NIXOS_CACHE_KEY: &str = "cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=";
 /// Pinned rs-harbor revision providing the fleet-wide Rust cache contract.
-pub const RS_HARBOR_REV: &str = "b40cd4c4fdf6133962f67bd68a48bfd5d554d47f";
+pub const RS_HARBOR_REV: &str = "f209ddbca3fdbb0dc31fa3886ccc2ff7369c18ac";
 
 const TREEFMT_INPUT: &str = "    treefmt-nix.url = \"github:numtide/treefmt-nix\";\n";
 const GIT_HOOKS_INPUT: &str = "    git-hooks.url = \"github:cachix/git-hooks.nix\";\n";
