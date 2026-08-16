@@ -16,7 +16,7 @@ use crate::config::{CrowCiConfig, CrowVariable};
 use crate::project::GeneratedFile;
 use crate::render::ci::{
     CiOptions, OmCiMode, STEP_CARGO_CLIPPY, STEP_CARGO_DOC, STEP_CARGO_FMT, STEP_CARGO_PACKAGE,
-    STEP_CARGO_TEST, STEP_SELF_CHECK, SelfCheckOptions,
+    STEP_CARGO_TEST, STEP_PROJECT_CHECK, STEP_SELF_CHECK, SelfCheckOptions,
 };
 use crate::render::release_workflow::ReleaseWorkflowInputs;
 use crate::user_config::{ResolvedCiRunners, ResolvedRunner};
@@ -198,49 +198,61 @@ fn build_workflow(
         );
     }
 
-    if runtime == Runtime::Nix && options.om_ci != OmCiMode::Replace {
+    if runtime == Runtime::Nix && options.om_ci != OmCiMode::Replace && options.nix_flake_check {
         steps.push(step("nix-check", image, format!("{prefix}nix flake check")));
     }
-    steps.push(step(
-        STEP_CARGO_FMT,
-        image,
-        format!("{prefix}cargo fmt --all -- --check"),
-    ));
-    steps.push(step(
-        STEP_CARGO_TEST,
-        image,
-        format!("{prefix}cargo test{}", package_selector(package, options)),
-    ));
-    if options.with_docs {
+    if let Some(command) = options.check_command.as_deref() {
         steps.push(step(
-            STEP_CARGO_DOC,
+            STEP_PROJECT_CHECK,
             image,
-            format!("{prefix}cargo doc --no-deps --all-features"),
+            cargo_components(runtime, "clippy rustfmt", &format!("{prefix}{command}")),
         ));
-    }
-    if options.with_nextest {
+    } else {
         steps.push(step(
-            "cargo-nextest",
+            STEP_CARGO_FMT,
             image,
-            format!(
-                "{prefix}cargo nextest run --all-features{}",
-                package_selector(package, options)
+            cargo_components(
+                runtime,
+                "rustfmt",
+                &format!("{prefix}cargo fmt --all -- --check"),
             ),
         ));
-    }
-    if options.with_audit {
         steps.push(step(
-            "cargo-audit",
+            STEP_CARGO_TEST,
             image,
-            format!("{prefix}cargo audit --no-fetch --stale"),
+            format!("{prefix}cargo test{}", package_selector(package, options)),
         ));
-    }
-    if options.with_deny {
-        steps.push(step(
-            "cargo-deny",
-            image,
-            format!("{prefix}cargo deny check bans licenses sources"),
-        ));
+        if options.with_docs {
+            steps.push(step(
+                STEP_CARGO_DOC,
+                image,
+                format!("{prefix}cargo doc --no-deps --all-features"),
+            ));
+        }
+        if options.with_nextest {
+            steps.push(step(
+                "cargo-nextest",
+                image,
+                format!(
+                    "{prefix}cargo nextest run --all-features{}",
+                    package_selector(package, options)
+                ),
+            ));
+        }
+        if options.with_audit {
+            steps.push(step(
+                "cargo-audit",
+                image,
+                format!("{prefix}cargo audit --no-fetch --stale"),
+            ));
+        }
+        if options.with_deny {
+            steps.push(step(
+                "cargo-deny",
+                image,
+                format!("{prefix}cargo deny check bans licenses sources"),
+            ));
+        }
     }
     if options.om_ci != OmCiMode::Off {
         steps.push(
@@ -248,20 +260,26 @@ fn build_workflow(
                 .command(format!("nix run \"{}\" -- ci run", options.omnix_ref)),
         );
     }
-    steps.push(step(
-        STEP_CARGO_CLIPPY,
-        image,
-        format!("{prefix}cargo clippy --all-targets -- --deny warnings"),
-    ));
-    if package.is_publishable() {
+    if options.check_command.is_none() {
         steps.push(step(
-            STEP_CARGO_PACKAGE,
+            STEP_CARGO_CLIPPY,
             image,
-            format!(
-                "{prefix}cargo package --allow-dirty --list{}",
-                package_selector(package, options)
+            cargo_components(
+                runtime,
+                "clippy",
+                &format!("{prefix}cargo clippy --all-targets -- --deny warnings"),
             ),
         ));
+        if package.is_publishable() {
+            steps.push(step(
+                STEP_CARGO_PACKAGE,
+                image,
+                format!(
+                    "{prefix}cargo package --allow-dirty --list{}",
+                    package_selector(package, options)
+                ),
+            ));
+        }
     }
     if self_check.enabled {
         let mut command = String::from("cargo run -- init ci --ci-provider crow");
@@ -403,6 +421,14 @@ fn command_prefix(runtime: Runtime) -> &'static str {
     match runtime {
         Runtime::Cargo => "",
         Runtime::Nix => "nix develop -c ",
+    }
+}
+
+fn cargo_components(runtime: Runtime, components: &str, command: &str) -> String {
+    if runtime == Runtime::Cargo {
+        format!("rustup component add {components} && {command}")
+    } else {
+        command.to_owned()
     }
 }
 

@@ -1103,6 +1103,8 @@ fn infer_expected_ci_files(
     for package in generation_packages {
         let package_options = ci::CiOptions {
             package_scoped,
+            publish_crates: resolved.workspace_strategy != crate::cli::WorkspaceStrategy::Aggregate
+                && options.publish_crates,
             homebrew: infer_homebrew_options(&config, package, marked)?,
             chocolatey: infer_chocolatey_options(&config, package, marked)?,
             scoop: infer_scoop_options(&config, package, marked)?,
@@ -1120,6 +1122,21 @@ fn infer_expected_ci_files(
             options: package_options,
             step_runners: &step_runners,
         })?);
+    }
+    if resolved.workspace_strategy == crate::cli::WorkspaceStrategy::Aggregate
+        && options.publish_crates
+    {
+        for package in &packages {
+            if package.is_publishable() {
+                files.push(ci::publish_file(
+                    platform,
+                    resolved.runtime,
+                    package,
+                    &runners.release,
+                    options.clone(),
+                ));
+            }
+        }
     }
     if provider == CiProvider::Actions
         && config.prebuild.is_none()

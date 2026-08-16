@@ -21,6 +21,8 @@ pub struct CiCliOverrides {
     pub workspace_strategy: Option<WorkspaceStrategy>,
     pub packages: Vec<String>,
     pub with_nextest: Option<bool>,
+    pub with_nix_cargo_cache: Option<bool>,
+    pub nix_flake_check: Option<bool>,
     pub with_msrv: Option<bool>,
     pub with_audit: Option<bool>,
     pub with_deny: Option<bool>,
@@ -51,6 +53,8 @@ pub struct CiInference {
     pub all_features: Option<bool>,
     pub unit_tests_only: Option<bool>,
     pub with_nextest: Option<bool>,
+    pub with_nix_cargo_cache: Option<bool>,
+    pub nix_flake_check: Option<bool>,
     pub with_msrv: Option<bool>,
     pub with_audit: Option<bool>,
     pub with_deny: Option<bool>,
@@ -119,6 +123,10 @@ impl CiInference {
             // Keep these markers in sync with the emitting sites in
             // src/render/ci.rs: optional tool steps, om-ci, and artifact files.
             with_nextest: Some(all_content.contains("cargo nextest run")),
+            with_nix_cargo_cache: Some(
+                all_content.contains("name: Cache Nix Cargo registry + target"),
+            ),
+            nix_flake_check: Some(all_content.contains("nix flake check")),
             with_msrv: Some(all_content.contains("      - name: Check MSRV\n")),
             with_audit: Some(all_content.contains("cargo audit")),
             with_deny: Some(all_content.contains("cargo deny check")),
@@ -156,6 +164,8 @@ pub struct ResolvedCiInputs {
     pub all_features: bool,
     pub unit_tests_only: bool,
     pub with_nextest: bool,
+    pub with_nix_cargo_cache: bool,
+    pub nix_flake_check: bool,
     pub with_msrv: bool,
     pub with_audit: bool,
     pub with_deny: bool,
@@ -233,6 +243,26 @@ impl ResolvedCiInputs {
             bail!("aggregate workspace CI requires --workspace and no --package selectors");
         }
 
+        let with_nix_cargo_cache = cli
+            .with_nix_cargo_cache
+            .or(config.with_nix_cargo_cache)
+            .or(inference.with_nix_cargo_cache)
+            .unwrap_or(false);
+        if with_nix_cargo_cache && runtime != Runtime::Nix {
+            bail!("simit project config: with_nix_cargo_cache requires runtime = \"nix\"");
+        }
+        if with_nix_cargo_cache
+            && cfg
+                .ci
+                .extra_env
+                .keys()
+                .any(|key| matches!(key.as_str(), "CARGO_HOME" | "CARGO_TARGET_DIR"))
+        {
+            bail!(
+                "simit project config: with_nix_cargo_cache cannot be combined with CARGO_HOME or CARGO_TARGET_DIR overrides"
+            );
+        }
+
         Ok(Self {
             runtime,
             runner: cli.runner.clone().or(config.runner).or(inference.runner),
@@ -265,6 +295,12 @@ impl ResolvedCiInputs {
                 .or(config.with_nextest)
                 .or(inference.with_nextest)
                 .unwrap_or(false),
+            with_nix_cargo_cache,
+            nix_flake_check: cli
+                .nix_flake_check
+                .or(config.nix_flake_check)
+                .or(inference.nix_flake_check)
+                .unwrap_or(true),
             with_msrv: cli
                 .with_msrv
                 .or(config.with_msrv)
@@ -328,6 +364,8 @@ impl ResolvedCiInputs {
             nix_substituters: cfg.release.artifacts.substituters.clone(),
             nix_trusted_public_keys: cfg.release.artifacts.trusted_public_keys.clone(),
             with_nextest: self.with_nextest,
+            with_nix_cargo_cache: self.with_nix_cargo_cache,
+            nix_flake_check: self.nix_flake_check,
             with_msrv: self.with_msrv,
             with_audit: self.with_audit,
             with_deny: self.with_deny,
@@ -349,6 +387,7 @@ impl ResolvedCiInputs {
             required_env: cfg.ci.required_env.clone(),
             workspace_strategy: self.workspace_strategy,
             package_scoped: false,
+            check_command: cfg.ci.check_command.clone(),
             homebrew: None,
             chocolatey: None,
             scoop: None,
@@ -375,6 +414,8 @@ impl ResolvedCiInputs {
         ci.all_features = (!self.all_features).then_some(false);
         ci.unit_tests_only = self.unit_tests_only;
         ci.with_nextest = self.with_nextest;
+        ci.with_nix_cargo_cache = self.with_nix_cargo_cache;
+        ci.nix_flake_check = (!self.nix_flake_check).then_some(false);
         ci.with_msrv = self.with_msrv;
         ci.with_audit = self.with_audit;
         ci.with_deny = self.with_deny;
@@ -402,6 +443,8 @@ struct CiConfigLayer {
     all_features: Option<bool>,
     unit_tests_only: Option<bool>,
     with_nextest: Option<bool>,
+    with_nix_cargo_cache: Option<bool>,
+    nix_flake_check: Option<bool>,
     with_msrv: Option<bool>,
     with_audit: Option<bool>,
     with_deny: Option<bool>,
@@ -447,6 +490,10 @@ impl CiConfigLayer {
             all_features: present(ci_table, "all_features").and(cfg.ci.all_features),
             unit_tests_only: present(ci_table, "unit_tests_only").map(|_| cfg.ci.unit_tests_only),
             with_nextest: present(ci_table, "with_nextest").map(|_| cfg.ci.with_nextest),
+            with_nix_cargo_cache: present(ci_table, "with_nix_cargo_cache")
+                .map(|_| cfg.ci.with_nix_cargo_cache),
+            nix_flake_check: present(ci_table, "nix_flake_check")
+                .and_then(|_| cfg.ci.nix_flake_check),
             with_msrv: present(ci_table, "with_msrv").map(|_| cfg.ci.with_msrv),
             with_audit: present(ci_table, "with_audit").map(|_| cfg.ci.with_audit),
             with_deny: present(ci_table, "with_deny").map(|_| cfg.ci.with_deny),
@@ -477,6 +524,8 @@ impl CiConfigLayer {
             all_features: cfg.ci.all_features,
             unit_tests_only: cfg.ci.unit_tests_only.then_some(true),
             with_nextest: cfg.ci.with_nextest.then_some(true),
+            with_nix_cargo_cache: cfg.ci.with_nix_cargo_cache.then_some(true),
+            nix_flake_check: cfg.ci.nix_flake_check,
             with_msrv: cfg.ci.with_msrv.then_some(true),
             with_audit: cfg.ci.with_audit.then_some(true),
             with_deny: cfg.ci.with_deny.then_some(true),

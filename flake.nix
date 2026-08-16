@@ -2,7 +2,7 @@
   description = "Semver-aware git commit helper for Rust projects";
 
   inputs = {
-    rs-harbor.url = "github:caniko/rs-harbor/c26b735eede8078f795651c4a9cbf0be8733b221";
+    rs-harbor.url = "github:caniko/rs-harbor/1d9b666489bd9e45411f18b71e5eee320e9a1157";
 
     nixpkgs.follows = "rs-harbor/nixpkgs";
     rust-overlay.follows = "rs-harbor/rust-overlay";
@@ -256,8 +256,8 @@
       in {
         default = publicCraneLib.devShell {
           checks = self.checks.${system};
-          packages = with pkgs;
-            [
+           packages = [rs-harbor.packages.${system}.harbor-ci] ++ (with pkgs;
+             [
               alejandra
               cargo-audit
               cargo-deny
@@ -269,7 +269,7 @@
               rust-analyzer
               taplo
             ]
-            ++ pre-commit-check.enabledPackages;
+             ++ pre-commit-check.enabledPackages);
           shellHook = pre-commit-check.shellHook;
         };
 

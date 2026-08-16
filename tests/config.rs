@@ -102,6 +102,55 @@ fn loading_without_simit_toml_returns_default_config() {
 }
 
 #[test]
+fn project_check_command_loads_and_rejects_multiline_values() {
+    let cfg = load_toml(
+        r#"[ci]
+check_command = "cargo xtask ci"
+"#,
+    )
+    .unwrap();
+    assert_eq!(cfg.ci.check_command.as_deref(), Some("cargo xtask ci"));
+
+    let error = load_toml(
+        r#"[ci]
+check_command = "cargo xtask\nci"
+"#,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("check_command"), "{error}");
+
+    let cfg = load_toml(
+        r#"[ci]
+nix_flake_check = false
+"#,
+    )
+    .unwrap();
+    assert_eq!(cfg.ci.nix_flake_check, Some(false));
+}
+
+#[test]
+fn nix_cargo_cache_option_loads() {
+    let cfg = load_toml(
+        r#"[ci]
+with_nix_cargo_cache = true
+"#,
+    )
+    .unwrap();
+    assert!(cfg.ci.with_nix_cargo_cache);
+
+    let error = load_toml(
+        r#"[ci]
+runtime = "cargo"
+with_nix_cargo_cache = true
+"#,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("requires runtime = \"nix\""), "{error}");
+}
+
+#[test]
 fn attic_token_secret_rejects_invalid_github_identifiers() {
     for token in [
         "\"BAD-NAME\"",

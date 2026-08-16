@@ -518,7 +518,7 @@ extra_setup = ["echo prepare-runner"]
     assert_yaml_parses(&workflow);
     assert!(workflow.contains("permissions:\n  contents: read"));
     assert!(workflow.contains(
-        "group: ${{ github.workflow }}-${{ github.event.pull_request.head.ref || github.ref }}"
+        "group: ${{ github.workflow_ref }}-${{ github.event_name }}-${{ github.head_ref || github.ref_name }}"
     ));
     assert!(workflow.contains("runs-on: ubuntu-latest"));
     assert!(workflow.contains("fail-fast: false"));
@@ -2122,6 +2122,260 @@ fn check_succeeds_when_workflows_are_current() {
 }
 
 #[test]
+fn project_check_command_replaces_generic_cargo_lane() {
+    let temp = init_package(true);
+    fs::write(
+        temp.path().join("simit.toml"),
+        r#"[ci]
+platform = "forgejo"
+runtime = "nix"
+runner = "atlas"
+check_command = "cargo xtask ci"
+nix_flake_check = false
+"#,
+    )
+    .unwrap();
+
+    let status = simit_with_user_config(temp.path())
+        .current_dir(temp.path())
+        .args([
+            "init",
+            "ci",
+            "--platform",
+            "forgejo",
+            "--runtime",
+            "nix",
+            "--runner",
+            "atlas",
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let ci = read(&temp.path().join(".forgejo/workflows/ci.yaml"));
+    assert!(ci.contains("name: Project checks"));
+    assert!(ci.contains("nix develop -c cargo xtask ci"));
+    assert!(!ci.contains("cargo fmt --all -- --check"));
+    assert!(!ci.contains("cargo clippy"));
+    assert!(!ci.contains("nix flake check"));
+}
+
+#[test]
+fn project_check_command_keeps_nix_flake_check_by_default() {
+    let temp = init_package(true);
+    fs::write(
+        temp.path().join("simit.toml"),
+        r#"[ci]
+platform = "github"
+runtime = "nix"
+runner = "ubuntu-latest"
+check_command = "cargo xtask ci"
+"#,
+    )
+    .unwrap();
+
+    let status = simit_with_user_config(temp.path())
+        .current_dir(temp.path())
+        .args([
+            "init",
+            "ci",
+            "--platform",
+            "github",
+            "--runtime",
+            "nix",
+            "--runner",
+            "ubuntu-latest",
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let ci = read(&temp.path().join(".github/workflows/ci.yaml"));
+    assert!(ci.contains("name: Check flake"));
+    assert!(ci.contains("name: Project checks"));
+}
+
+#[test]
+fn nix_cargo_cache_is_opt_in_for_nix_runtime() {
+    let temp = init_package(true);
+    fs::write(
+        temp.path().join("simit.toml"),
+        r#"[ci]
+platform = "github"
+runtime = "nix"
+runner = "ubuntu-latest"
+with_nix_cargo_cache = true
+"#,
+    )
+    .unwrap();
+
+    let status = simit_with_user_config(temp.path())
+        .current_dir(temp.path())
+        .args(["init", "ci", "--platform", "github", "--runtime", "nix"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let ci = read(&temp.path().join(".github/workflows/ci.yaml"));
+    assert!(ci.contains("name: Cache Nix Cargo registry + target"));
+    assert!(ci.contains("/tmp/.cargo/registry"));
+    assert!(ci.contains("/tmp/.cargo/git"));
+    assert!(ci.contains("target"));
+    assert!(ci.contains(
+        "hashFiles('Cargo.lock', 'flake.lock', 'flake.nix', 'rust-toolchain.toml', '.cargo/config', '.cargo/config.toml')"
+    ));
+}
+
+#[test]
+fn project_check_commands_render_as_yaml_blocks() {
+    let temp = init_package(true);
+    fs::write(
+        temp.path().join("simit.toml"),
+        r#"[ci]
+platform = "github"
+runtime = "nix"
+runner = "ubuntu-latest"
+check_command = "printf 'url: # safe' && cargo xtask ci"
+"#,
+    )
+    .unwrap();
+
+    let status = simit_with_user_config(temp.path())
+        .current_dir(temp.path())
+        .args(["init", "ci", "--platform", "github", "--runtime", "nix"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let ci = read(&temp.path().join(".github/workflows/ci.yaml"));
+    assert!(ci.contains("run: |\n          nix develop -c printf 'url: # safe' && cargo xtask ci"));
+    assert_yaml_parses(&ci);
+}
+
+#[test]
+fn granular_project_check_commands_render_as_yaml_blocks() {
+    let temp = init_package(true);
+    fs::write(
+        temp.path().join("simit.toml"),
+        r#"[ci]
+platform = "forgejo"
+runtime = "nix"
+runner = "atlas"
+check_command = "printf 'url: # safe' && cargo xtask ci"
+"#,
+    )
+    .unwrap();
+
+    let status = simit_with_user_config(temp.path())
+        .current_dir(temp.path())
+        .args([
+            "init",
+            "ci",
+            "--platform",
+            "forgejo",
+            "--runtime",
+            "nix",
+            "--runner",
+            "atlas",
+            "--granular",
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let ci = read(&temp.path().join(".forgejo/workflows/ci.yaml"));
+    assert!(ci.contains("run: |\n          nix develop -c printf 'url: # safe' && cargo xtask ci"));
+    assert_yaml_parses(&ci);
+}
+
+#[test]
+fn crow_cargo_steps_install_rust_components_before_use() {
+    let temp = init_package(true);
+    fs::write(
+        temp.path().join("simit.toml"),
+        r#"[ci]
+provider = "crow"
+platform = "forgejo"
+runtime = "cargo"
+runner = "atlas"
+check_command = "cargo xtask ci"
+"#,
+    )
+    .unwrap();
+
+    let status = simit_with_user_config(temp.path())
+        .current_dir(temp.path())
+        .args([
+            "init",
+            "ci",
+            "--platform",
+            "forgejo",
+            "--runtime",
+            "cargo",
+            "--runner",
+            "atlas",
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let ci = read(&temp.path().join(".crow/build.yaml"));
+    assert!(ci.contains("rustup component add clippy rustfmt && cargo xtask ci"));
+}
+
+#[test]
+fn crow_ci_check_ignores_release_workflow_owned_by_init_release() {
+    let temp = init_package(true);
+    fs::write(
+        temp.path().join("simit.toml"),
+        r#"[ci]
+provider = "crow"
+platform = "forgejo"
+runtime = "nix"
+runner = "atlas"
+"#,
+    )
+    .unwrap();
+
+    let write_status = simit_with_user_config(temp.path())
+        .current_dir(temp.path())
+        .args([
+            "init",
+            "ci",
+            "--platform",
+            "forgejo",
+            "--runtime",
+            "nix",
+            "--runner",
+            "atlas",
+        ])
+        .status()
+        .unwrap();
+    assert!(write_status.success());
+    fs::write(
+        temp.path().join(".crow/release.yaml"),
+        "# Generated by simit. Manual edits will be reported as ci=drift.\n",
+    )
+    .unwrap();
+
+    let check_status = simit_with_user_config(temp.path())
+        .current_dir(temp.path())
+        .args([
+            "init",
+            "ci",
+            "--platform",
+            "forgejo",
+            "--runtime",
+            "nix",
+            "--runner",
+            "atlas",
+            "--check",
+        ])
+        .status()
+        .unwrap();
+    assert!(check_status.success());
+}
+
+#[test]
 fn workspace_flag_generates_per_package_workflows() {
     let temp = init_workspace_fixture();
 
@@ -2220,6 +2474,42 @@ fn aggregate_workspace_strategy_generates_one_workspace_workflow() {
         "run: nix develop -c cargo clippy --workspace --all-targets --all-features -- --deny warnings"
     ));
     assert!(!ci.contains("cargo package"));
+}
+
+#[test]
+fn aggregate_workspace_strategy_keeps_package_publish_workflows() {
+    let temp = init_workspace_fixture();
+    fs::write(temp.path().join("flake.nix"), "{ outputs = _: {}; }\n").unwrap();
+
+    let status = simit_with_user_config(temp.path())
+        .current_dir(temp.path())
+        .args([
+            "init",
+            "ci",
+            "--platform",
+            "github",
+            "--runtime",
+            "nix",
+            "--workspace",
+            "--workspace-strategy",
+            "aggregate",
+            "--publish-crates",
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let ci = read(&temp.path().join(".github/workflows/ci.yaml"));
+    assert!(ci.contains("cargo test --workspace"));
+    assert!(!ci.contains("cargo publish"));
+    for package in ["alpha", "beta"] {
+        let publish = read(
+            &temp
+                .path()
+                .join(format!(".github/workflows/publish-crate-{package}.yaml")),
+        );
+        assert!(publish.contains(&format!("cargo publish -p {package}")));
+    }
 }
 
 #[test]
@@ -2648,7 +2938,7 @@ fn check_fails_when_workflows_differ() {
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("CI workflows are not up to date"));
     assert!(
-        stderr.contains("run `simit init ci --platform forgejo`"),
+        stderr.contains("run `simit init ci --platform forgejo"),
         "stderr:\n{stderr}"
     );
     assert!(stderr.contains(".forgejo/workflows/ci.yaml differs"));

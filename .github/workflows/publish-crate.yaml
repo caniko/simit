@@ -5,10 +5,13 @@
 name: Publish Crate
 
 on:
+  push:
+    tags:
+      - "[0-9]*"
   workflow_dispatch:
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow_ref }}-${{ github.event_name }}-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
 
 jobs:
@@ -27,6 +30,11 @@ jobs:
 
       - name: Install Nix
         uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+            substituters = https://attic.candee.baby/canix https://cache.nixos.org
+            trusted-public-keys = canix:lPzPzKrmYqW5Rxa5r0uQWvCqD3S5nx0h2eCy7XD5JM8= cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=
 
       - name: Add cargo bin to PATH
         run: echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
@@ -77,14 +85,9 @@ jobs:
       - name: Check flake
         run: nix flake check
 
-      - name: Test
-        run: nix develop -c cargo test
-
-      - name: Build docs
-        run: nix develop .#docs -c cargo doc --no-deps --all-features
-
-      - name: Clippy
-        run: nix develop -c cargo clippy --all-targets -- --deny warnings
+      - name: Project checks
+        run: |
+          nix develop -c harbor-ci full
 
       - name: Dry-run publish
         run: nix develop -c cargo publish --dry-run

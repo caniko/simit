@@ -27,8 +27,27 @@ include = [
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
+[package.metadata.harbor-ci]
+docs = true
+audit = true
+deny = true
+package = true
+
 [package.metadata.simit.flake]
 scope = "full"
+
+[package.metadata.simit.ci]
+provider = "actions"
+platform = "github"
+runtime = "nix"
+runner = "ubuntu-latest"
+with_docs = true
+publish_crates = true
+check_command = "harbor-ci full"
+
+[package.metadata.simit.ci.pages]
+repo = "caniko/simit"
+canonical_domain = "simit.tartanoglu.com"
 
 [package.metadata.simit.release.changelog]
 auto_draft = true

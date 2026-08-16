@@ -525,6 +525,22 @@ pub struct InitCiCommand {
     )]
     pub with_nextest: Option<bool>,
     #[arg(
+        long = "with-nix-cargo-cache",
+        num_args = 0..=1,
+        default_missing_value = "true",
+        action = clap::ArgAction::Set,
+        help = "Cache the Nix-runtime Cargo registry and target directory"
+    )]
+    pub with_nix_cargo_cache: Option<bool>,
+    #[arg(
+        long = "nix-flake-check",
+        num_args = 0..=1,
+        default_missing_value = "true",
+        action = clap::ArgAction::Set,
+        help = "Run nix flake check in Nix-runtime CI; pass --nix-flake-check=false for focused project Nix checks"
+    )]
+    pub nix_flake_check: Option<bool>,
+    #[arg(
         long = "with-msrv",
         num_args = 0..=1,
         default_missing_value = "true",

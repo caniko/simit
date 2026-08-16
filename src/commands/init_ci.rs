@@ -74,12 +74,9 @@ pub fn run(command: InitCiCommand) -> Result<()> {
     validate_runner(resolved.windows_runner.as_deref())?;
     let packages = cargo::select_packages(&metadata, &resolved.packages, resolved.workspace)?;
     if resolved.workspace_strategy == crate::cli::WorkspaceStrategy::Aggregate
-        && (resolved.publish_crates
-            || command.with_homebrew
-            || command.with_chocolatey
-            || command.with_scoop)
+        && (command.with_homebrew || command.with_chocolatey || command.with_scoop)
     {
-        bail!("aggregate workspace CI cannot be combined with crate or platform publishing");
+        bail!("aggregate workspace CI cannot be combined with platform publishing");
     }
     if command.with_homebrew && resolved.runtime != Runtime::Nix {
         bail!("Homebrew tap publish requires --runtime nix");
@@ -217,6 +214,8 @@ pub fn run(command: InitCiCommand) -> Result<()> {
             scoop,
             package_scoped: multi_package_workspace,
             workspace_strategy: resolved.workspace_strategy,
+            publish_crates: resolved.workspace_strategy != crate::cli::WorkspaceStrategy::Aggregate
+                && publish_crates,
             ..options.clone()
         };
         let self_check_runner = self_check_runner_override(resolved.runner.as_deref(), &runners.ci);
@@ -241,6 +240,19 @@ pub fn run(command: InitCiCommand) -> Result<()> {
             options: package_options,
             step_runners: &step_runners,
         })?);
+    }
+    if resolved.workspace_strategy == crate::cli::WorkspaceStrategy::Aggregate && publish_crates {
+        for package in &packages {
+            if package.is_publishable() {
+                files.push(ci::publish_file(
+                    platform,
+                    resolved.runtime,
+                    package,
+                    &runners.release,
+                    options.clone(),
+                ));
+            }
+        }
     }
     if provider == CiProvider::Actions && cfg.prebuild.is_none() && !options.nix_builds.is_empty() {
         files.push(ci::nix_build_matrix_file(
@@ -1148,6 +1160,8 @@ fn ci_cli_overrides(command: &InitCiCommand) -> CiCliOverrides {
         workspace_strategy: command.workspace_strategy,
         packages: command.packages.clone(),
         with_nextest: command.with_nextest,
+        with_nix_cargo_cache: command.with_nix_cargo_cache,
+        nix_flake_check: command.nix_flake_check,
         with_msrv: command.with_msrv,
         with_audit: command.with_audit,
         with_deny: command.with_deny,
@@ -1357,6 +1371,8 @@ pub(crate) fn project_regeneration_command(workspace_root: &Path) -> Result<Opti
         check: false,
         diff: false,
         with_nextest: None,
+        with_nix_cargo_cache: None,
+        nix_flake_check: None,
         with_msrv: None,
         with_audit: None,
         with_deny: None,
@@ -1896,6 +1912,14 @@ fn check_generated_crow_files(
         }
         let relative = PathBuf::from(".crow").join(entry.file_name());
         if expected.contains(&relative) {
+            continue;
+        }
+        if matches!(
+            entry.file_name().to_str(),
+            Some("release.yaml" | "release.yml")
+        ) {
+            // `init release` owns the release workflow; CI must not claim it
+            // as an obsolete Crow build file.
             continue;
         }
         let content = fs::read_to_string(entry_path)?;

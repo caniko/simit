@@ -86,6 +86,7 @@ pub const STEP_CARGO_TEST: &str = "cargo-test";
 pub const STEP_CARGO_DOC: &str = "cargo-doc";
 pub const STEP_CARGO_CLIPPY: &str = "cargo-clippy";
 pub const STEP_CARGO_PACKAGE: &str = "cargo-package";
+pub const STEP_PROJECT_CHECK: &str = "project-check";
 pub const STEP_EXTRA_SETUP: &str = "extra-setup";
 pub const STEP_SELF_CHECK: &str = "self-check";
 pub const STEP_QUALITY_TOOLS: &str = "quality-tools";
@@ -106,6 +107,8 @@ pub struct CiOptions {
     pub nix_substituters: Vec<String>,
     pub nix_trusted_public_keys: Vec<String>,
     pub with_nextest: bool,
+    pub with_nix_cargo_cache: bool,
+    pub nix_flake_check: bool,
     pub with_msrv: bool,
     pub with_audit: bool,
     pub with_deny: bool,
@@ -122,6 +125,7 @@ pub struct CiOptions {
     pub required_env: Vec<String>,
     pub workspace_strategy: WorkspaceStrategy,
     pub package_scoped: bool,
+    pub check_command: Option<String>,
     pub homebrew: Option<HomebrewOptions>,
     pub chocolatey: Option<ChocolateyOptions>,
     pub scoop: Option<ScoopOptions>,
@@ -147,6 +151,8 @@ impl Default for CiOptions {
             nix_substituters: Vec::new(),
             nix_trusted_public_keys: Vec::new(),
             with_nextest: false,
+            with_nix_cargo_cache: false,
+            nix_flake_check: true,
             with_msrv: false,
             with_audit: false,
             with_deny: false,
@@ -163,6 +169,7 @@ impl Default for CiOptions {
             required_env: Vec::new(),
             workspace_strategy: WorkspaceStrategy::Members,
             package_scoped: false,
+            check_command: None,
             homebrew: None,
             chocolatey: None,
             scoop: None,
@@ -340,6 +347,26 @@ pub fn files(request: FilesRequest<'_>) -> Result<Vec<GeneratedFile>> {
         });
     }
     Ok(files)
+}
+
+/// Render only a package-scoped publish workflow.
+///
+/// Aggregate workspace CI uses one project check, while publishing still needs
+/// one workflow per publishable package.
+pub fn publish_file(
+    platform: Platform,
+    runtime: Runtime,
+    package: &Package,
+    runner: &ResolvedRunner,
+    mut options: CiOptions,
+) -> GeneratedFile {
+    options.package_scoped = true;
+    options.workspace_strategy = WorkspaceStrategy::Members;
+    GeneratedFile {
+        relative_path: PathBuf::from(platform.workflow_dir())
+            .join(workflow_file_name("publish-crate", Some(&package.name))),
+        content: publish_workflow(platform, runtime, package, runner, options),
+    }
 }
 
 pub fn codeberg_pages_file(
@@ -1736,9 +1763,14 @@ fn ci_workflow_single_job(
                 &options.nix_substituters,
                 &options.nix_trusted_public_keys,
             );
+            push_nix_cargo_cache_steps(
+                &mut workflow,
+                platform,
+                options.with_nix_cargo_cache,
+                "test",
+            );
             push_nix_cargo_bin_path_step(&mut workflow);
             push_extra_setup_steps(&mut workflow, &options.extra_setup);
-            workflow.push_str("      - name: Format check\n        run: nix develop -c cargo fmt --all -- --check\n\n");
             match options.om_ci {
                 OmCiMode::Off => {
                     push_nix_ci_legacy_steps(
@@ -1751,8 +1783,12 @@ fn ci_workflow_single_job(
                 }
                 OmCiMode::Replace => {
                     push_om_ci_step(&mut workflow, &options);
-                    push_quality_tool_install_steps(&mut workflow, runtime, &options);
-                    push_optional_ci_steps(&mut workflow, runtime, package, &options);
+                    if options.check_command.is_some() {
+                        push_project_check_step(&mut workflow, runtime, &options);
+                    } else {
+                        push_quality_tool_install_steps(&mut workflow, runtime, &options);
+                        push_optional_ci_steps(&mut workflow, runtime, package, &options);
+                    }
                     if self_check.enabled {
                         push_self_check_steps(
                             &mut workflow,
@@ -1779,17 +1815,24 @@ fn ci_workflow_single_job(
             push_rust_setup_step(&mut workflow, platform);
             push_rust_cache_steps(&mut workflow, platform);
             push_extra_setup_steps(&mut workflow, &options.extra_setup);
-            workflow.push_str(
-                "      - name: Format check\n        run: cargo fmt --all -- --check\n\n",
-            );
-            push_test_steps(&mut workflow, runtime, package, &options);
-            push_quality_tool_install_steps(&mut workflow, runtime, &options);
-            push_optional_ci_steps(&mut workflow, runtime, package, &options);
-            if self_check.enabled {
-                push_self_check_steps(&mut workflow, platform, runtime, self_check, &options);
+            if options.check_command.is_some() {
+                push_project_check_step(&mut workflow, runtime, &options);
+                if self_check.enabled {
+                    push_self_check_steps(&mut workflow, platform, runtime, self_check, &options);
+                }
+            } else {
+                workflow.push_str(
+                    "      - name: Format check\n        run: cargo fmt --all -- --check\n\n",
+                );
+                push_test_steps(&mut workflow, runtime, package, &options);
+                push_quality_tool_install_steps(&mut workflow, runtime, &options);
+                push_optional_ci_steps(&mut workflow, runtime, package, &options);
+                if self_check.enabled {
+                    push_self_check_steps(&mut workflow, platform, runtime, self_check, &options);
+                }
+                push_clippy_steps(&mut workflow, package, &options);
+                push_package_crate_step(&mut workflow, package, &options);
             }
-            push_clippy_steps(&mut workflow, package, &options);
-            push_package_crate_step(&mut workflow, package, &options);
         }
     }
 
@@ -1845,132 +1888,164 @@ fn ci_workflow_multi_job(
 
     match runtime {
         Runtime::Nix => {
-            capture(
-                STEP_FLAKE_CHECK,
-                "      - name: Check flake\n        run: nix flake check\n\n",
-            );
-            capture(
-                STEP_CARGO_FMT,
-                "      - name: Format check\n        run: nix develop -c cargo fmt --all -- --check\n\n",
-            );
-
-            let mut test = "      - name: Test\n        run: nix develop -c cargo test".to_string();
-            push_package_selector(&mut test, package, &options);
-            test.push_str("\n\n");
-            capture(STEP_CARGO_TEST, &test);
-
-            let mut q = String::new();
-            if options.with_audit {
-                q.push_str("      - name: Check cargo-audit tool\n        run: nix develop -c cargo-audit --version\n\n");
-            }
-            if options.with_deny {
-                q.push_str("      - name: Check cargo-deny tool\n        run: nix develop -c cargo-deny --version\n\n");
-            }
-            if !q.is_empty() {
-                capture(STEP_QUALITY_TOOLS, &q);
-            }
-
-            let mut opt = String::new();
-            if options.with_msrv {
-                opt.push_str(
-                    "      - name: Check MSRV\n        run: nix develop -c cargo check\n\n",
+            if options.nix_flake_check {
+                capture(
+                    STEP_FLAKE_CHECK,
+                    "      - name: Check flake\n        run: nix flake check\n\n",
                 );
             }
-            if options.with_docs {
-                opt.push_str(
-                    "      - name: Build docs\n        run: nix develop -c cargo doc --no-deps",
+            if options.check_command.is_some() {
+                let check = project_check_step_yaml(
+                    Runtime::Nix,
+                    options.check_command.as_deref().unwrap_or_default(),
                 );
-                if options.all_features {
-                    opt.push_str(" --all-features");
-                }
-                opt.push_str("\n\n");
-            }
-            if !opt.is_empty() {
-                capture(STEP_CARGO_DOC, &opt);
-            }
-
-            if self_check.enabled {
-                let mut sc = String::from(
-                    "      - name: Check generated CI\n        run: nix develop -c cargo run -- init ci",
-                );
-                if runtime == Runtime::Nix {
+                capture(STEP_PROJECT_CHECK, &check);
+                if self_check.enabled {
+                    let mut sc = String::from(
+                        "      - name: Check generated CI\n        run: nix develop -c cargo run -- init ci",
+                    );
                     sc.push_str(" --runtime nix");
+                    sc.push_str("\n      - name: Check generated flake and hooks\n        run: nix develop -c cargo run -- init flake --check\n\n");
+                    capture(STEP_SELF_CHECK, &sc);
                 }
-                sc.push_str("\n      - name: Check generated flake and hooks\n        run: nix develop -c cargo run -- init flake --check\n\n");
-                capture(STEP_SELF_CHECK, &sc);
-            }
+            } else {
+                capture(
+                    STEP_CARGO_FMT,
+                    "      - name: Format check\n        run: nix develop -c cargo fmt --all -- --check\n\n",
+                );
 
-            let mut clippy =
-                "      - name: Clippy\n        run: nix develop -c cargo clippy".to_string();
-            push_package_selector(&mut clippy, package, &options);
-            clippy.push_str(" --all-targets -- --deny warnings\n\n");
-            capture(STEP_CARGO_CLIPPY, &clippy);
+                let mut test =
+                    "      - name: Test\n        run: nix develop -c cargo test".to_string();
+                push_package_selector(&mut test, package, &options);
+                test.push_str("\n\n");
+                capture(STEP_CARGO_TEST, &test);
 
-            if package.is_publishable() {
-                let mut pkg =
-                    "      - name: Package crate\n        run: nix develop -c cargo package"
-                        .to_string();
-                push_package_selector(&mut pkg, package, &options);
-                push_package_flags(&mut pkg, package, &options);
-                capture(STEP_CARGO_PACKAGE, &pkg);
+                let mut q = String::new();
+                if options.with_audit {
+                    q.push_str("      - name: Check cargo-audit tool\n        run: nix develop -c cargo-audit --version\n\n");
+                }
+                if options.with_deny {
+                    q.push_str("      - name: Check cargo-deny tool\n        run: nix develop -c cargo-deny --version\n\n");
+                }
+                if !q.is_empty() {
+                    capture(STEP_QUALITY_TOOLS, &q);
+                }
+
+                let mut opt = String::new();
+                if options.with_msrv {
+                    opt.push_str(
+                        "      - name: Check MSRV\n        run: nix develop -c cargo check\n\n",
+                    );
+                }
+                if options.with_docs {
+                    opt.push_str(
+                        "      - name: Build docs\n        run: nix develop -c cargo doc --no-deps",
+                    );
+                    if options.all_features {
+                        opt.push_str(" --all-features");
+                    }
+                    opt.push_str("\n\n");
+                }
+                if !opt.is_empty() {
+                    capture(STEP_CARGO_DOC, &opt);
+                }
+
+                if self_check.enabled {
+                    let mut sc = String::from(
+                        "      - name: Check generated CI\n        run: nix develop -c cargo run -- init ci",
+                    );
+                    sc.push_str(" --runtime nix");
+                    sc.push_str("\n      - name: Check generated flake and hooks\n        run: nix develop -c cargo run -- init flake --check\n\n");
+                    capture(STEP_SELF_CHECK, &sc);
+                }
+
+                let mut clippy =
+                    "      - name: Clippy\n        run: nix develop -c cargo clippy".to_string();
+                push_package_selector(&mut clippy, package, &options);
+                clippy.push_str(" --all-targets -- --deny warnings\n\n");
+                capture(STEP_CARGO_CLIPPY, &clippy);
+
+                if package.is_publishable() {
+                    let mut pkg =
+                        "      - name: Package crate\n        run: nix develop -c cargo package"
+                            .to_string();
+                    push_package_selector(&mut pkg, package, &options);
+                    push_package_flags(&mut pkg, package, &options);
+                    capture(STEP_CARGO_PACKAGE, &pkg);
+                }
             }
         }
         Runtime::Cargo => {
-            capture(
-                STEP_CARGO_FMT,
-                "      - name: Format check\n        run: cargo fmt --all -- --check\n\n",
-            );
-
-            let mut test = String::from("      - name: Test\n        run: cargo test");
-            push_package_selector(&mut test, package, &options);
-            test.push_str("\n\n");
-            capture(STEP_CARGO_TEST, &test);
-
-            let mut q = String::new();
-            if options.with_audit {
-                q.push_str("      - name: Install cargo-audit\n        run: command -v cargo-audit >/dev/null 2>&1 || cargo install cargo-audit --locked\n\n");
-            }
-            if options.with_deny {
-                q.push_str(&format!("      - name: Install cargo-deny\n        run: command -v cargo-deny >/dev/null 2>&1 || cargo install cargo-deny --locked --version {CARGO_DENY_VERSION}\n\n"));
-            }
-            if !q.is_empty() {
-                capture(STEP_QUALITY_TOOLS, &q);
-            }
-
-            let mut opt = String::new();
-            if options.with_msrv {
-                opt.push_str("      - name: Check MSRV\n        run: cargo check\n\n");
-            }
-            if options.with_docs {
-                opt.push_str("      - name: Build docs\n        run: cargo doc --no-deps");
-                if options.all_features {
-                    opt.push_str(" --all-features");
-                }
-                opt.push_str("\n\n");
-            }
-            if !opt.is_empty() {
-                capture(STEP_CARGO_DOC, &opt);
-            }
-
-            if self_check.enabled {
-                let mut sc = String::from(
-                    "      - name: Check generated CI\n        run: cargo run -- init ci",
+            if options.check_command.is_some() {
+                let check = project_check_step_yaml(
+                    Runtime::Cargo,
+                    options.check_command.as_deref().unwrap_or_default(),
                 );
-                sc.push_str("\n      - name: Check generated flake and hooks\n        run: cargo run -- init flake --check\n\n");
-                capture(STEP_SELF_CHECK, &sc);
-            }
+                capture(STEP_PROJECT_CHECK, &check);
+                if self_check.enabled {
+                    let mut sc = String::from(
+                        "      - name: Check generated CI\n        run: cargo run -- init ci",
+                    );
+                    sc.push_str("\n      - name: Check generated flake and hooks\n        run: cargo run -- init flake --check\n\n");
+                    capture(STEP_SELF_CHECK, &sc);
+                }
+            } else {
+                capture(
+                    STEP_CARGO_FMT,
+                    "      - name: Format check\n        run: cargo fmt --all -- --check\n\n",
+                );
 
-            let mut clippy = String::from("      - name: Clippy\n        run: cargo clippy");
-            push_package_selector(&mut clippy, package, &options);
-            clippy.push_str(" --all-targets -- --deny warnings\n\n");
-            capture(STEP_CARGO_CLIPPY, &clippy);
+                let mut test = String::from("      - name: Test\n        run: cargo test");
+                push_package_selector(&mut test, package, &options);
+                test.push_str("\n\n");
+                capture(STEP_CARGO_TEST, &test);
 
-            if package.is_publishable() {
-                let mut pkg =
-                    String::from("      - name: Package crate\n        run: cargo package");
-                push_package_selector(&mut pkg, package, &options);
-                push_package_flags(&mut pkg, package, &options);
-                capture(STEP_CARGO_PACKAGE, &pkg);
+                let mut q = String::new();
+                if options.with_audit {
+                    q.push_str("      - name: Install cargo-audit\n        run: command -v cargo-audit >/dev/null 2>&1 || cargo install cargo-audit --locked\n\n");
+                }
+                if options.with_deny {
+                    q.push_str(&format!("      - name: Install cargo-deny\n        run: command -v cargo-deny >/dev/null 2>&1 || cargo install cargo-deny --locked --version {CARGO_DENY_VERSION}\n\n"));
+                }
+                if !q.is_empty() {
+                    capture(STEP_QUALITY_TOOLS, &q);
+                }
+
+                let mut opt = String::new();
+                if options.with_msrv {
+                    opt.push_str("      - name: Check MSRV\n        run: cargo check\n\n");
+                }
+                if options.with_docs {
+                    opt.push_str("      - name: Build docs\n        run: cargo doc --no-deps");
+                    if options.all_features {
+                        opt.push_str(" --all-features");
+                    }
+                    opt.push_str("\n\n");
+                }
+                if !opt.is_empty() {
+                    capture(STEP_CARGO_DOC, &opt);
+                }
+
+                if self_check.enabled {
+                    let mut sc = String::from(
+                        "      - name: Check generated CI\n        run: cargo run -- init ci",
+                    );
+                    sc.push_str("\n      - name: Check generated flake and hooks\n        run: cargo run -- init flake --check\n\n");
+                    capture(STEP_SELF_CHECK, &sc);
+                }
+
+                let mut clippy = String::from("      - name: Clippy\n        run: cargo clippy");
+                push_package_selector(&mut clippy, package, &options);
+                clippy.push_str(" --all-targets -- --deny warnings\n\n");
+                capture(STEP_CARGO_CLIPPY, &clippy);
+
+                if package.is_publishable() {
+                    let mut pkg =
+                        String::from("      - name: Package crate\n        run: cargo package");
+                    push_package_selector(&mut pkg, package, &options);
+                    push_package_flags(&mut pkg, package, &options);
+                    capture(STEP_CARGO_PACKAGE, &pkg);
+                }
             }
         }
     }
@@ -2036,6 +2111,12 @@ fn ci_workflow_multi_job(
                     platform,
                     &options.nix_substituters,
                     &options.nix_trusted_public_keys,
+                );
+                push_nix_cargo_cache_steps(
+                    &mut workflow,
+                    platform,
+                    options.with_nix_cargo_cache,
+                    &job.name,
                 );
                 push_nix_cargo_bin_path_step(&mut workflow);
                 push_extra_setup_steps(&mut workflow, &options.extra_setup);
@@ -2109,8 +2190,12 @@ fn publish_workflow(
                 }
                 OmCiMode::Replace => {
                     push_om_ci_step(&mut workflow, &options);
-                    push_quality_tool_install_steps(&mut workflow, runtime, &options);
-                    push_optional_publish_steps(&mut workflow, runtime, &options);
+                    if options.check_command.is_some() {
+                        push_project_check_step(&mut workflow, runtime, &options);
+                    } else {
+                        push_quality_tool_install_steps(&mut workflow, runtime, &options);
+                        push_optional_publish_steps(&mut workflow, runtime, &options);
+                    }
                     workflow.push_str("      - name: Dry-run publish\n");
                     workflow.push_str("        run: nix develop -c cargo publish");
                     push_package_selector(&mut workflow, package, &options);
@@ -2132,10 +2217,14 @@ fn publish_workflow(
             push_rust_cache_steps(&mut workflow, platform);
             push_extra_setup_steps(&mut workflow, &options.extra_setup);
             workflow.push_str(&validate_tag_step(command_prefix(runtime), &package.name));
-            push_test_steps(&mut workflow, runtime, package, &options);
-            push_quality_tool_install_steps(&mut workflow, runtime, &options);
-            push_optional_publish_steps(&mut workflow, runtime, &options);
-            push_clippy_steps(&mut workflow, package, &options);
+            if options.check_command.is_some() {
+                push_project_check_step(&mut workflow, runtime, &options);
+            } else {
+                push_test_steps(&mut workflow, runtime, package, &options);
+                push_quality_tool_install_steps(&mut workflow, runtime, &options);
+                push_optional_publish_steps(&mut workflow, runtime, &options);
+                push_clippy_steps(&mut workflow, package, &options);
+            }
             workflow.push_str("      - name: Dry-run publish\n");
             workflow.push_str("        run: cargo publish");
             push_package_selector(&mut workflow, package, &options);
@@ -2979,7 +3068,7 @@ fn push_concurrency(workflow: &mut String) {
 fn push_github_concurrency(workflow: &mut String) {
     workflow.push_str("concurrency:\n");
     workflow.push_str(
-        "  group: ${{ github.workflow }}-${{ github.event.pull_request.head.ref || github.ref }}\n",
+        "  group: ${{ github.workflow_ref }}-${{ github.event_name }}-${{ github.head_ref || github.ref_name }}\n",
     );
     workflow.push_str("  cancel-in-progress: true\n\n");
 }
@@ -3193,6 +3282,31 @@ fn push_nix_cargo_bin_path_step(workflow: &mut String) {
     workflow.push_str("        run: echo \"$CARGO_HOME/bin\" >> \"$GITHUB_PATH\"\n\n");
 }
 
+fn push_nix_cargo_cache_steps(
+    workflow: &mut String,
+    platform: Platform,
+    enabled: bool,
+    scope: &str,
+) {
+    if !enabled {
+        return;
+    }
+    workflow.push_str("      - name: Cache Nix Cargo registry + target\n");
+    push_action_uses(workflow, platform, "cache", "v4.3.0");
+    workflow.push_str("        with:\n");
+    workflow.push_str("          path: |\n");
+    workflow.push_str("            /tmp/.cargo/registry\n");
+    workflow.push_str("            /tmp/.cargo/git\n");
+    workflow.push_str("            target\n");
+    workflow.push_str(&format!(
+        "          key: cargo-nix-${{{{ runner.os }}}}-${{{{ runner.arch }}}}-{scope}-${{{{ hashFiles('Cargo.lock', 'flake.lock', 'flake.nix', 'rust-toolchain.toml', '.cargo/config', '.cargo/config.toml') }}}}\n"
+    ));
+    workflow.push_str("          restore-keys: |\n");
+    workflow.push_str(&format!(
+        "            cargo-nix-${{{{ runner.os }}}}-${{{{ runner.arch }}}}-{scope}-\n\n"
+    ));
+}
+
 fn push_om_ci_step(workflow: &mut String, options: &CiOptions) {
     workflow.push_str("      - name: Run om ci\n");
     workflow.push_str("        env:\n");
@@ -3202,6 +3316,21 @@ fn push_om_ci_step(workflow: &mut String, options: &CiOptions) {
     workflow.push_str("        run: nix run \"$OMNIX_REF\" -- ci run\n\n");
 }
 
+fn push_project_check_step(workflow: &mut String, runtime: Runtime, options: &CiOptions) {
+    let Some(command) = options.check_command.as_deref() else {
+        return;
+    };
+    workflow.push_str(&project_check_step_yaml(runtime, command));
+}
+
+fn project_check_step_yaml(runtime: Runtime, command: &str) -> String {
+    format!(
+        "      - name: Project checks\n        run: |\n          {}{}\n\n",
+        command_prefix(runtime),
+        command
+    )
+}
+
 fn push_nix_ci_legacy_steps(
     workflow: &mut String,
     platform: Platform,
@@ -3209,8 +3338,17 @@ fn push_nix_ci_legacy_steps(
     self_check: SelfCheckOptions<'_>,
     options: &CiOptions,
 ) {
-    workflow.push_str("      - name: Check flake\n");
-    workflow.push_str("        run: nix flake check\n\n");
+    if options.nix_flake_check {
+        workflow.push_str("      - name: Check flake\n");
+        workflow.push_str("        run: nix flake check\n\n");
+    }
+    if options.check_command.is_some() {
+        push_project_check_step(workflow, Runtime::Nix, options);
+        if self_check.enabled {
+            push_self_check_steps(workflow, platform, Runtime::Nix, self_check, options);
+        }
+        return;
+    }
     workflow.push_str("      - name: Test\n");
     workflow.push_str("        run: nix develop -c cargo test");
     push_package_selector(workflow, package, options);
@@ -3249,8 +3387,23 @@ fn push_nix_package_crate_step(workflow: &mut String, package: &Package, options
 }
 
 fn push_nix_publish_legacy_steps(workflow: &mut String, package: &Package, options: &CiOptions) {
-    workflow.push_str("      - name: Check flake\n");
-    workflow.push_str("        run: nix flake check\n\n");
+    if options.nix_flake_check {
+        workflow.push_str("      - name: Check flake\n");
+        workflow.push_str("        run: nix flake check\n\n");
+    }
+    if options.check_command.is_some() {
+        push_project_check_step(workflow, Runtime::Nix, options);
+        workflow.push_str("      - name: Dry-run publish\n");
+        workflow.push_str("        run: nix develop -c cargo publish");
+        push_package_selector(workflow, package, options);
+        workflow.push_str(" --dry-run\n\n");
+        workflow.push_str(&publish_step(
+            package,
+            "nix develop -c cargo publish",
+            options.package_scoped,
+        ));
+        return;
+    }
     workflow.push_str("      - name: Test\n");
     workflow.push_str("        run: nix develop -c cargo test");
     push_package_selector(workflow, package, options);
