@@ -68,7 +68,7 @@ case the chaperone needs a clean answer to.
 
    ```nix
    inputs.simit = {
-     url = "git+https://codeberg.org/caniko/simit.git?ref=refs/heads/trunk";
+     url = "git+https://github.com/caniko/simit.git?ref=refs/heads/trunk";
      inputs.nixpkgs.follows = "nixpkgs";
    };
    ```

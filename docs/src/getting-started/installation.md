@@ -9,7 +9,7 @@ cargo install simit
 For source builds, clone the canonical repository and use Cargo:
 
 ```sh
-git clone https://codeberg.org/caniko/simit.git
+git clone https://github.com/caniko/simit.git
 cd simit
 cargo install --path .
 ```
