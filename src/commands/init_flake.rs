@@ -1,14 +1,14 @@
 use std::collections::BTreeSet;
 use std::fs;
 use std::io::ErrorKind;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
 use crate::cargo;
 use crate::cli::{FlakeScopeArg, FlakeTargetArg, InitFlakeCommand};
 use crate::commands::upgrade;
-use crate::config::{FlakeMode, FlakeScope, ProjectConfig};
+use crate::config::{FlakeBackend, FlakeMode, FlakeScope, ProjectConfig};
 use crate::project::{self, GeneratedFile, Languages};
 use crate::python;
 use crate::registry::{self, FeatureStatus};
@@ -26,10 +26,11 @@ const HOOK_REMOVAL_NOTES: &[(&str, &str)] = &[
 
 pub fn run(command: InitFlakeCommand) -> Result<()> {
     let current_dir = std::env::current_dir().context("reading current directory")?;
-    if cargo::find_manifest(&current_dir).is_err()
-        && python::find_project_root(&current_dir).is_ok()
-    {
-        return run_python(command);
+    if cargo::find_manifest(&current_dir).is_err() {
+        if python::find_project_root(&current_dir).is_ok() {
+            return run_python(command);
+        }
+        return run_generic(command);
     }
 
     if command.check && command.print {
@@ -253,6 +254,94 @@ pub fn run_python(command: InitFlakeCommand) -> Result<()> {
         ("hooks", FeatureStatus::Installed),
     ]);
     Ok(())
+}
+
+pub fn run_generic(command: InitFlakeCommand) -> Result<()> {
+    if command.check && command.print {
+        bail!("init flake accepts only one of --check or --print");
+    }
+    if command.diff && !command.check {
+        bail!("init flake --diff requires --check");
+    }
+    if command.cross {
+        bail!("--cross is only supported for Rust projects");
+    }
+
+    let current_dir = std::env::current_dir().context("reading current directory")?;
+    let workspace_root = find_generic_root(&current_dir)?;
+    let cfg = ProjectConfig::load(&workspace_root)?;
+    if cfg.flake.backend == FlakeBackend::PyHarbor {
+        bail!(
+            "[flake].backend = \"py-harbor\" requires a uv Python project (pyproject.toml and uv.lock)"
+        );
+    }
+    if cfg.flake.backend != FlakeBackend::Generic {
+        bail!(
+            "could not find a Cargo.toml or uv Python project in {}; set [flake].backend = \"generic\" and [flake].mode = \"custom\" in simit.toml",
+            workspace_root.display()
+        );
+    }
+    if cfg.flake.mode != FlakeMode::Custom {
+        bail!("generic backend requires flake.mode = \"custom\"");
+    }
+
+    let mut languages = project::detect_languages(&workspace_root)?;
+    languages.nix = true;
+    let all_files = flake::generic_files(&languages, &cfg.flake.components);
+    let scope = resolve_python_scope(command.scope, &cfg, &workspace_root);
+    let files = scoped_files(&all_files, scope);
+
+    if command.print {
+        flake::print_files(&hook_files(&files));
+        return Ok(());
+    }
+
+    if command.check {
+        check_files(
+            &workspace_root,
+            &files,
+            &languages,
+            "2024",
+            None,
+            &cfg,
+            scope,
+            command.diff,
+            false,
+            flake::AuditTools::default(),
+        )?;
+        return upgrade::update_readme_badges_if_present(&workspace_root, true, command.diff);
+    }
+
+    if !workspace_root.join("flake.nix").exists() {
+        bail!(
+            "custom flake mode requires an existing flake.nix; simit will manage hook files but will not generate a canonical flake"
+        );
+    }
+    let hook_files = hook_files(&files);
+    if scope == FlakeScope::HooksOnly {
+        println!(
+            "note: hooks-only scope leaves existing flake.nix untouched; review it before taking project ownership"
+        );
+    }
+    project::write_generated_files(&workspace_root, &hook_files)?;
+    upgrade::update_readme_badges_if_present(&workspace_root, false, false)?;
+    registry::touch_current_project_or_warn([
+        ("flake", FeatureStatus::Managed),
+        ("hooks", FeatureStatus::Installed),
+    ]);
+    Ok(())
+}
+
+fn find_generic_root(start: &Path) -> Result<PathBuf> {
+    for dir in start.ancestors() {
+        if dir.join("simit.toml").exists() || dir.join("flake.nix").exists() {
+            return Ok(dir.to_path_buf());
+        }
+    }
+    bail!(
+        "could not find a Cargo.toml or uv Python project in {} or its parents; set [flake].backend = \"generic\" and [flake].mode = \"custom\" in simit.toml",
+        start.display()
+    )
 }
 
 /// Resolve the cross targets for the flake. Returns `None` when `--cross` is
@@ -538,7 +627,13 @@ fn check_files(
             }
             Ok(actual) if file.relative_path == Path::new("nix/pre-commit.nix") => {
                 if actual == file.content
-                    || flake::has_required_pre_commit(&actual, languages, rust_version, audit_tools)
+                    || flake::has_required_pre_commit_with_components(
+                        &actual,
+                        languages,
+                        rust_version,
+                        audit_tools,
+                        &cfg.flake.components,
+                    )
                 {
                     continue;
                 }

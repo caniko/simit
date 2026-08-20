@@ -1047,9 +1047,15 @@ fn check_accepts_semantically_current_custom_hook_files() {
         temp.path().join("nix/pre-commit.nix"),
         r#"{
   pkgs,
+  treefmtWrapper,
   rustToolchain ? null,
   ...
 }: {
+  treefmt = {
+    enable = true;
+    entry = "${treefmtWrapper}/bin/treefmt --fail-on-change";
+    pass_filenames = false;
+  };
   cargo-fmt = {
     enable = true;
     entry = "cargo fmt --all -- --check";
@@ -1307,6 +1313,211 @@ fn check_and_print_are_mutually_exclusive() {
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("init flake accepts only one of --check or --print"));
+}
+
+fn generic_custom_flake() -> &'static str {
+    r#"{
+  description = "generic project";
+  inputs = {
+    harbor.url = "github:example/harbor";
+    nixpkgs.follows = "harbor/nixpkgs";
+    treefmt-nix.follows = "harbor/treefmt-nix";
+    git-hooks.follows = "harbor/git-hooks";
+  };
+  outputs = { self, nixpkgs, treefmt-nix, git-hooks }:
+    let
+      system = "x86_64-linux";
+      pkgs = import nixpkgs { inherit system; };
+      treefmtEval = treefmt-nix.lib.evalModule pkgs (import ./nix/treefmt.nix);
+      pre-commit-check = git-hooks.lib.${system}.run {
+        src = ./.;
+        hooks = import ./nix/pre-commit.nix {
+          inherit pkgs;
+          treefmtWrapper = treefmtEval.config.build.wrapper;
+        };
+      };
+    in {
+      formatter = treefmtEval.config.build.wrapper;
+      checks.formatting = treefmtEval.config.build.check self;
+      devShells.default = pkgs.mkShell {
+        packages = pre-commit-check.enabledPackages;
+        shellHook = pre-commit-check.shellHook;
+      };
+    };
+}
+"#
+}
+
+fn init_generic_js() -> TempDir {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    fs::write(
+        root.join("simit.toml"),
+        "[flake]\nscope = \"full\"\nmode = \"custom\"\nbackend = \"generic\"\n",
+    )
+    .unwrap();
+    fs::write(root.join("package.json"), "{\"name\":\"demo\"}\n").unwrap();
+    fs::write(root.join("index.ts"), "export {}\n").unwrap();
+    fs::write(root.join("flake.nix"), generic_custom_flake()).unwrap();
+    temp
+}
+
+fn init_generic_tex() -> TempDir {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    fs::write(
+        root.join("simit.toml"),
+        "[flake]\nscope = \"full\"\nmode = \"custom\"\nbackend = \"generic\"\n",
+    )
+    .unwrap();
+    fs::write(root.join("main.tex"), "\\documentclass{article}\n").unwrap();
+    fs::write(root.join("flake.nix"), generic_custom_flake()).unwrap();
+    temp
+}
+
+#[test]
+fn generic_backend_writes_hooks_without_touching_flake() {
+    let temp = init_generic_js();
+    let original = read(&temp.path().join("flake.nix"));
+    let nested = temp.path().join("nested/project");
+    fs::create_dir_all(&nested).unwrap();
+
+    let write_status = simit()
+        .current_dir(&nested)
+        .args(["init", "flake"])
+        .status()
+        .unwrap();
+    assert!(write_status.success());
+    assert_eq!(read(&temp.path().join("flake.nix")), original);
+    assert!(temp.path().join("nix/treefmt.nix").exists());
+    assert!(temp.path().join("nix/pre-commit.nix").exists());
+    let treefmt = read(&temp.path().join("nix/treefmt.nix"));
+    let hooks = read(&temp.path().join("nix/pre-commit.nix"));
+    assert!(treefmt.contains("\"*.ts\""));
+    assert!(treefmt.contains("\"*.json\""));
+    assert!(treefmt.contains("programs.alejandra.enable = true;"));
+    assert!(!treefmt.contains("latexindent"));
+    assert!(hooks.contains("nix-flake-check"));
+
+    let second_write_status = simit()
+        .current_dir(temp.path())
+        .args(["init", "flake"])
+        .status()
+        .unwrap();
+    assert!(second_write_status.success());
+    assert_eq!(read(&temp.path().join("flake.nix")), original);
+    assert_eq!(read(&temp.path().join("nix/treefmt.nix")), treefmt);
+    assert_eq!(read(&temp.path().join("nix/pre-commit.nix")), hooks);
+
+    let check_status = simit()
+        .current_dir(temp.path())
+        .args(["init", "flake", "--check", "--diff"])
+        .status()
+        .unwrap();
+    assert!(check_status.success());
+}
+
+#[test]
+fn generic_tex_backend_writes_latex_formatter_and_checks_cleanly() {
+    let temp = init_generic_tex();
+    let original = read(&temp.path().join("flake.nix"));
+
+    let write_status = simit()
+        .current_dir(temp.path())
+        .args(["init", "flake"])
+        .status()
+        .unwrap();
+    assert!(write_status.success());
+    assert_eq!(read(&temp.path().join("flake.nix")), original);
+
+    let treefmt = read(&temp.path().join("nix/treefmt.nix"));
+    assert!(treefmt.contains("latexindent"));
+    assert!(treefmt.contains("\"*.tex\""));
+    assert!(!treefmt.contains("\"*.ts\""));
+
+    let check_status = simit()
+        .current_dir(temp.path())
+        .args(["init", "flake", "--check", "--diff"])
+        .status()
+        .unwrap();
+    assert!(check_status.success());
+}
+
+#[test]
+fn generic_backend_check_reports_stale_generated_files() {
+    let temp = init_generic_js();
+    let write_status = simit()
+        .current_dir(temp.path())
+        .args(["init", "flake"])
+        .status()
+        .unwrap();
+    assert!(write_status.success());
+    fs::write(temp.path().join("nix/treefmt.nix"), "{...}: {}\n").unwrap();
+
+    let output = simit()
+        .current_dir(temp.path())
+        .args(["init", "flake", "--check", "--diff"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("nix/treefmt.nix is missing generated formatter wiring"));
+    assert!(stderr.contains("+++ nix/treefmt.nix"));
+}
+
+#[test]
+fn generic_backend_requires_custom_mode() {
+    let temp = init_generic_js();
+    fs::write(
+        temp.path().join("simit.toml"),
+        "[flake]\nscope = \"full\"\nbackend = \"generic\"\n",
+    )
+    .unwrap();
+
+    let output = simit()
+        .current_dir(temp.path())
+        .args(["init", "flake"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8(output.stderr)
+            .unwrap()
+            .contains("generic backend requires flake.mode = \"custom\"")
+    );
+}
+
+#[test]
+fn generic_backend_requires_existing_flake() {
+    let temp = init_generic_js();
+    fs::remove_file(temp.path().join("flake.nix")).unwrap();
+
+    let output = simit()
+        .current_dir(temp.path())
+        .args(["init", "flake"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8(output.stderr)
+            .unwrap()
+            .contains("custom flake mode requires an existing flake.nix")
+    );
+}
+
+#[test]
+fn generic_backend_required_without_rust_or_python() {
+    let temp = TempDir::new().unwrap();
+    fs::write(temp.path().join("flake.nix"), "{ outputs = _: {}; }\n").unwrap();
+
+    let output = simit()
+        .current_dir(temp.path())
+        .args(["init", "flake"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("backend = \"generic\""));
 }
 
 #[test]
