@@ -147,6 +147,23 @@ pub fn python_files(
     ]
 }
 
+pub fn generic_files(languages: &Languages, components: &[FlakeComponent]) -> Vec<GeneratedFile> {
+    vec![
+        GeneratedFile {
+            relative_path: PathBuf::from("flake.nix"),
+            content: String::new(),
+        },
+        GeneratedFile {
+            relative_path: PathBuf::from("nix/treefmt.nix"),
+            content: treefmt_nix(languages, "2024"),
+        },
+        GeneratedFile {
+            relative_path: PathBuf::from("nix/pre-commit.nix"),
+            content: pre_commit_nix(languages, None, AuditTools::default(), components),
+        },
+    ]
+}
+
 pub fn patch_existing(content: &str, audit_tools: AuditTools) -> Result<String> {
     if has_required_wiring_with_audit_tools(content, audit_tools) {
         return Ok(content.to_owned());
@@ -261,10 +278,16 @@ pub fn custom_wiring_mismatches(
     require_docs_shell: bool,
 ) -> Vec<String> {
     let mut missing = Vec::new();
-    if !(content.contains("treefmt-nix.url") || content.contains("treefmt-nix = {")) {
+    if !(content.contains("treefmt-nix.url")
+        || content.contains("treefmt-nix = {")
+        || content.contains("treefmt-nix.follows"))
+    {
         missing.push("flake.nix custom mode: missing treefmt-nix input".to_owned());
     }
-    if !(content.contains("git-hooks.url") || content.contains("git-hooks = {")) {
+    if !(content.contains("git-hooks.url")
+        || content.contains("git-hooks = {")
+        || content.contains("git-hooks.follows"))
+    {
         missing.push("flake.nix custom mode: missing git-hooks input".to_owned());
     }
     if !content
@@ -319,6 +342,7 @@ pub fn custom_wiring_mismatches(
                 missing.push("flake.nix custom mode: missing py-harbor.lib usage".to_owned());
             }
         }
+        FlakeBackend::Generic => {}
     }
     if config.formatter_output && !has_formatter_output(content) {
         missing.push("flake.nix custom mode: missing formatter output".to_owned());
@@ -455,9 +479,12 @@ pub fn has_required_treefmt(content: &str, languages: &Languages, rust_edition: 
                 && content.contains(&format!("edition = \"{rust_edition}\";"))))
         && (!languages.nix || content.contains("programs.alejandra.enable = true;"))
         && (!languages.toml || content.contains("programs.taplo.enable = true;"))
-        && (!(languages.yaml || languages.markdown) || content.contains("programs.prettier"))
+        && (!(languages.yaml || languages.markdown || languages.javascript)
+            || content.contains("programs.prettier"))
         && (!languages.markdown || content.contains("\"*.md\""))
         && (!languages.yaml || content.contains("\"*.yaml\""))
+        && (!languages.javascript || content.contains("\"*.ts\"") || content.contains("\"*.js\""))
+        && (!languages.tex || content.contains("latexindent"))
 }
 
 pub fn has_required_pre_commit(
@@ -466,38 +493,68 @@ pub fn has_required_pre_commit(
     rust_version: Option<&str>,
     audit_tools: AuditTools,
 ) -> bool {
-    (!languages.rust
-        || (content.contains("cargo-fmt")
-            && content.contains("cargo fmt --all -- --check")
-            && content.contains("cargo-clippy")
-            && content.contains("cargo clippy")
-            && content.contains("--all-targets")
-            && content.contains("--all-features")
-            && content.contains("--deny warnings")
-            && content.contains("cargo-audit")
-            && content.contains("cargo audit")))
-        && (!audit_tools.deny
-            || (content.contains("cargo-deny")
-                && content.contains("cargo deny check bans licenses sources")
-                && content.contains("pkgs.cargo-deny")))
-        && (!languages.nix
+    has_required_pre_commit_with_components(content, languages, rust_version, audit_tools, &[])
+}
+
+pub fn has_required_pre_commit_with_components(
+    content: &str,
+    languages: &Languages,
+    rust_version: Option<&str>,
+    audit_tools: AuditTools,
+    components: &[FlakeComponent],
+) -> bool {
+    let selected = |component: FlakeComponent, detected: bool| {
+        if components.is_empty() {
+            detected
+        } else {
+            components.contains(&component)
+        }
+    };
+    let has_treefmt = content.lines().any(|line| {
+        let line = line.trim_start();
+        line.starts_with("treefmt =") || line.starts_with("treefmt=")
+    });
+
+    (!selected(FlakeComponent::Treefmt, true)
+        || (has_treefmt && content.contains("treefmtWrapper")))
+        && (!selected(FlakeComponent::CargoFmt, languages.rust)
+            || (content.contains("cargo-fmt") && content.contains("cargo fmt --all -- --check")))
+        && (!selected(FlakeComponent::CargoClippy, languages.rust)
+            || (content.contains("cargo-clippy")
+                && content.contains("cargo clippy")
+                && content.contains("--all-targets")
+                && content.contains("--all-features")
+                && content.contains("--deny warnings")))
+        && (!selected(FlakeComponent::CargoAudit, languages.rust)
+            || (content.contains("cargo-audit") && content.contains("cargo audit")))
+        && (!selected(
+            FlakeComponent::CargoDeny,
+            languages.rust && audit_tools.deny,
+        ) || (content.contains("cargo-deny")
+            && content.contains("cargo deny check bans licenses sources")
+            && content.contains("pkgs.cargo-deny")))
+        && (!selected(FlakeComponent::NixFlakeCheck, languages.nix)
             || (content.contains("nix-flake-check") && content.contains("flake check")))
-        && (!languages.uv_python
+        && (!selected(FlakeComponent::UvRuffFormat, languages.uv_python)
             || (content.contains("uv-ruff-format")
-                && content.contains("uv run ruff format --check .")
-                && content.contains("uv-mypy")
-                && content.contains("uv run mypy .")))
-        && rust_version.is_none_or(|version| {
-            let toolchain_version = rust_overlay_version(version);
-            content.contains("cargo-msrv")
-                && content.contains("cargo check MSRV")
-                && content.contains(&format!(
-                    "pkgs.rust-bin.stable.\"{toolchain_version}\".default"
-                ))
-                && content.contains("cargo check --workspace --all-features")
-                && content.contains("\"pre-push\"")
-                && content.contains("\"manual\"")
-        })
+                && content.contains("uv run ruff format --check .")))
+        && (!selected(FlakeComponent::UvMypy, languages.uv_python)
+            || (content.contains("uv-mypy") && content.contains("uv run mypy .")))
+        && (!(selected(
+            FlakeComponent::CargoMsrv,
+            languages.rust && rust_version.is_some(),
+        ) && rust_version.is_some())
+            || rust_version.is_some_and(|version| {
+                let toolchain_version = rust_overlay_version(version);
+                content.contains("cargo-msrv")
+                    && content.contains("cargo check MSRV")
+                    && content.contains(&format!(
+                        "pkgs.rust-bin.stable.\"{toolchain_version}\".default"
+                    ))
+                    && content.contains("cargo check --workspace --all-features")
+                    && content.contains("\"pre-push\"")
+                    && content.contains("\"manual\"")
+            }))
 }
 
 pub fn patch_error(anchor: &str, reason: &str) -> anyhow::Error {
@@ -1453,7 +1510,7 @@ fn treefmt_nix(languages: &Languages, rust_edition: &str) -> String {
     if languages.toml {
         content.push_str("\n  programs.taplo.enable = true;\n");
     }
-    if languages.yaml || languages.markdown {
+    if languages.yaml || languages.markdown || languages.javascript {
         content.push_str("\n  programs.prettier = {\n");
         content.push_str("    enable = true;\n");
         content.push_str("    package = pkgs.prettier;\n");
@@ -1469,6 +1526,28 @@ fn treefmt_nix(languages: &Languages, rust_edition: &str) -> String {
             content.push_str("      \"*.yaml\"\n");
             content.push_str("      \"*.yml\"\n");
         }
+        if languages.javascript {
+            content.push_str("      \"*.js\"\n");
+            content.push_str("      \"*.jsx\"\n");
+            content.push_str("      \"*.mjs\"\n");
+            content.push_str("      \"*.cjs\"\n");
+            content.push_str("      \"*.ts\"\n");
+            content.push_str("      \"*.tsx\"\n");
+            content.push_str("      \"*.json\"\n");
+        }
+        content.push_str("    ];\n");
+        content.push_str("  };\n");
+    }
+
+    if languages.tex {
+        content.push_str("\n  settings.formatter.latexindent = {\n");
+        content.push_str("    command = \"${pkgs.latexindent}/bin/latexindent\";\n");
+        content.push_str("    options = [\"-w\" \"-s\"];\n");
+        content.push_str("    includes = [\n");
+        content.push_str("      \"*.tex\"\n");
+        content.push_str("      \"*.sty\"\n");
+        content.push_str("      \"*.cls\"\n");
+        content.push_str("      \"*.bib\"\n");
         content.push_str("    ];\n");
         content.push_str("  };\n");
     }
@@ -1505,7 +1584,9 @@ fn has_formatting_check(content: &str) -> bool {
 }
 
 fn has_pre_commit_shell_hook(content: &str) -> bool {
-    (content.contains("shellHook =") || content.contains("shellHookSuffix ="))
+    (content.contains("shellHook =")
+        || content.contains("shellHookSuffix =")
+        || content.contains("extraShellHook ="))
         && content.contains("pre-commit-check.shellHook")
 }
 
@@ -1851,5 +1932,51 @@ mod tests {
         assert!(flake.contains("targets = [\"aarch64-linux\" \"windows\"];"));
         // No native target -> default is the first canonical non-native attr.
         assert!(flake.contains("default = crossPackages.\"${pname}-aarch64-linux\";"));
+    }
+
+    #[test]
+    fn generic_treefmt_wires_javascript_and_tex() {
+        let languages = Languages {
+            nix: true,
+            javascript: true,
+            tex: true,
+            ..Languages::default()
+        };
+        let content = treefmt_nix(&languages, "2024");
+        assert!(content.contains("programs.alejandra.enable = true;"));
+        assert!(content.contains("\"*.ts\""));
+        assert!(content.contains("\"*.json\""));
+        assert!(content.contains("latexindent"));
+        assert!(has_required_treefmt(&content, &languages, "2024"));
+    }
+
+    #[test]
+    fn semantic_pre_commit_check_respects_selected_components() {
+        let languages = Languages {
+            nix: true,
+            uv_python: true,
+            ..Languages::default()
+        };
+        let components = [FlakeComponent::Treefmt, FlakeComponent::NixFlakeCheck];
+        let content = pre_commit_nix(&languages, None, AuditTools::default(), &components);
+
+        assert!(has_required_pre_commit_with_components(
+            &content,
+            &languages,
+            None,
+            AuditTools::default(),
+            &components,
+        ));
+        assert!(!content.contains("uv-ruff-format"));
+        assert!(!content.contains("uv-mypy"));
+
+        let missing_treefmt = content.replace("  treefmt = {", "  removed-treefmt = {");
+        assert!(!has_required_pre_commit_with_components(
+            &missing_treefmt,
+            &languages,
+            None,
+            AuditTools::default(),
+            &components,
+        ));
     }
 }

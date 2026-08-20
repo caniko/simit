@@ -137,6 +137,8 @@ pub struct Languages {
     pub rust: bool,
     pub nix: bool,
     pub uv_python: bool,
+    pub javascript: bool,
+    pub tex: bool,
     pub toml: bool,
     pub yaml: bool,
     pub markdown: bool,
@@ -146,6 +148,7 @@ pub fn detect_languages(workspace_root: &Path) -> Result<Languages> {
     let mut languages = Languages {
         rust: workspace_root.join("Cargo.toml").exists(),
         uv_python: is_uv_python_project(workspace_root)?,
+        javascript: workspace_root.join("package.json").exists(),
         ..Languages::default()
     };
 
@@ -312,6 +315,8 @@ fn detect_languages_in_dir(root: &Path, dir: &Path, languages: &mut Languages) -
             Some("toml") => languages.toml = true,
             Some("yaml" | "yml") => languages.yaml = true,
             Some("md" | "markdown") => languages.markdown = true,
+            Some("js" | "jsx" | "mjs" | "cjs" | "ts" | "tsx") => languages.javascript = true,
+            Some("tex" | "sty" | "cls" | "ltx") => languages.tex = true,
             // Rust is a project component only when the repository root owns
             // a Cargo manifest. Source fixtures in Python or documentation
             // projects must not activate Rust tooling.

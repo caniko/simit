@@ -321,6 +321,7 @@ pub enum FlakeBackend {
     #[default]
     RustCrane,
     PyHarbor,
+    Generic,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
