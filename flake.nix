@@ -51,7 +51,7 @@
       inherit (toolchain) craneLib;
       cross = rs-harbor.lib.mkCross {inherit pkgs system;};
       simitVersion = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).package.version;
-      # `nix run git+https://codeberg.org/caniko/simit.git` is the public CLI
+      # `nix run github:caniko/simit` is the public CLI
       # distribution path and must work on runners without canix's managed
       # sccache transport. Keep cached derivations for Simit's own checks,
       # but make the default runnable package self-contained.

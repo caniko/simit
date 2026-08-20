@@ -10,11 +10,11 @@ href = "#overview"
 
 [[nav]]
 label = "Source"
-href = "ssh://git@codeberg.org/caniko/simit.git"
+href = "https://github.com/caniko/simit"
 
 [[footer_links]]
 label = "Source"
-href = "ssh://git@codeberg.org/caniko/simit.git"
+href = "https://github.com/caniko/simit"
 
 [[pages]]
 slug = "index"
@@ -29,7 +29,7 @@ subtitle = "Bump versions, update locks, commit changes, and create release tags
 
 [[pages.sections.ctas]]
 label = "View source"
-href = "ssh://git@codeberg.org/caniko/simit.git"
+href = "https://github.com/caniko/simit"
 primary = true
 
 [[pages.sections]]

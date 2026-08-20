@@ -123,7 +123,7 @@ Promote `[Unreleased]` into a dated release section:
 
 ```sh
 simit changelog release 0.4.0
-simit changelog release 0.4.0 --date 2026-05-20 --repo-url https://codeberg.org/caniko/simit
+simit changelog release 0.4.0 --date 2026-05-20 --repo-url https://github.com/caniko/simit
 ```
 
 Validate or inspect a changelog section:
