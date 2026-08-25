@@ -129,7 +129,7 @@ fn custom_rs_harbor_flake() -> &'static str {
   description = "Memory-aware admission gate for Rust work pipelines";
 
   inputs = {
-    rs-harbor.url = "git+https://github.com/caniko/rs-harbor.git?ref=trunk&rev=a3e5f76326f0f02de230cb2fba66fa3c1c7171cb";
+    rs-harbor.url = "git+https://github.com/caniko/harbor-rs.git?ref=trunk&rev=05cc4f162b55fa904b687db1821e2463fa813e50";
 
     nixpkgs.follows = "rs-harbor/nixpkgs";
     rust-overlay.follows = "rs-harbor/rust-overlay";
@@ -235,7 +235,7 @@ fn custom_skillnet_flake() -> &'static str {
   description = "skillnet AI skill mirror manager";
 
   inputs = {
-    rs-harbor.url = "git+https://github.com/caniko/rs-harbor.git";
+    rs-harbor.url = "git+https://github.com/caniko/harbor-rs.git";
 
     nixpkgs.follows = "rs-harbor/nixpkgs";
     rust-overlay.follows = "rs-harbor/rust-overlay";
@@ -694,7 +694,7 @@ checks = ["offline-tests", "typecheck"]
         temp.path().join("flake.nix"),
         r#"{
   inputs = {
-    py-harbor.url = "git+https://github.com/caniko/py-harbor.git";
+    py-harbor.url = "git+https://github.com/caniko/harbor-py.git";
     treefmt-nix.url = "github:numtide/treefmt-nix";
     git-hooks.url = "github:cachix/git-hooks.nix";
   };
@@ -1210,7 +1210,7 @@ fn cross_print_emits_multi_target_flake_with_contract() {
 
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("--- flake.nix"));
-    assert!(stdout.contains("rs-harbor.url = \"git+https://github.com/caniko/rs-harbor.git?ref=trunk&rev=b40cd4c4fdf6133962f67bd68a48bfd5d554d47f\";"));
+    assert!(stdout.contains("rs-harbor.url = \"git+https://github.com/caniko/harbor-rs.git?ref=trunk&rev=05cc4f162b55fa904b687db1821e2463fa813e50\";"));
     assert!(stdout.contains("rs-harbor.lib.mkCrossPackages {"));
     assert!(stdout.contains(
         "targets = [\"native\" \"aarch64-linux\" \"windows\" \"darwin-x86_64\" \"darwin-aarch64\"];"

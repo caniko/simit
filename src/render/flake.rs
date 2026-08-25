@@ -703,7 +703,7 @@ fn template(audit_tools: AuditTools) -> String {
   description = "Rust project";
 
   inputs = {
-    rs-harbor.url = "git+https://github.com/caniko/rs-harbor.git?ref=trunk&rev=a3e5f76326f0f02de230cb2fba66fa3c1c7171cb";
+    rs-harbor.url = "git+https://github.com/caniko/harbor-rs.git?ref=trunk&rev=05cc4f162b55fa904b687db1821e2463fa813e50";
     nixpkgs.follows = "rs-harbor/nixpkgs";
     rust-overlay.follows = "rs-harbor/rust-overlay";
     crane.follows = "rs-harbor/crane";
@@ -974,7 +974,7 @@ fn python_template(project: &python::Project) -> String {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
     py-harbor = {{
-      url = "git+https://github.com/caniko/py-harbor.git";
+      url = "git+https://github.com/caniko/harbor-py.git";
       inputs.nixpkgs.follows = "nixpkgs";
     }};
 
@@ -1205,7 +1205,7 @@ pub fn cross_template(targets: &[FlakeTargetArg], audit_tools: AuditTools) -> St
   }};
 
   inputs = {{
-    rs-harbor.url = "git+https://github.com/caniko/rs-harbor.git?ref=trunk&rev=a3e5f76326f0f02de230cb2fba66fa3c1c7171cb";
+    rs-harbor.url = "git+https://github.com/caniko/harbor-rs.git?ref=trunk&rev=05cc4f162b55fa904b687db1821e2463fa813e50";
 
     nixpkgs.follows = "rs-harbor/nixpkgs";
     rust-overlay.follows = "rs-harbor/rust-overlay";
@@ -1823,7 +1823,7 @@ mod tests {
 
         // rs-harbor input and follows wiring.
         assert!(flake.contains(&format!(
-            "rs-harbor.url = \"git+https://github.com/caniko/rs-harbor.git?ref=trunk&rev={RS_HARBOR_REV}\";"
+            "rs-harbor.url = \"git+https://github.com/caniko/harbor-rs.git?ref=trunk&rev={RS_HARBOR_REV}\";"
         )));
         assert!(flake.contains("nixpkgs.follows = \"rs-harbor/nixpkgs\";"));
         assert!(flake.contains("rust-overlay.follows = \"rs-harbor/rust-overlay\";"));

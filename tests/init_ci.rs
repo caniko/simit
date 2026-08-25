@@ -69,7 +69,7 @@ dev = ["mypy", "pytest", "ruff"]
     fs::write(
         root.join("flake.nix"),
         r#"{
-  inputs.py-harbor.url = "git+https://github.com/caniko/py-harbor.git";
+  inputs.py-harbor.url = "git+https://github.com/caniko/harbor-py.git";
   outputs = { self, py-harbor, ... }: {
     checks.x86_64-linux.offline-tests = {};
     checks.x86_64-linux.typecheck = {};
