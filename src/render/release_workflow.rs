@@ -2662,7 +2662,7 @@ mod tests {
             Some(&forgejo),
             Platform::Forgejo,
         );
-        assert!(forgejo_workflow.contains("repo_url=\"https://github.com/caniko/rs-modde\""));
+        assert!(forgejo_workflow.contains("repo_url=\"https://codeberg.org/caniko/rs-modde\""));
         assert!(forgejo_workflow.contains(
             "builder_id=\"${repo_url}/src/tag/${VERSION}/.forgejo/workflows/release.yml\""
         ));
