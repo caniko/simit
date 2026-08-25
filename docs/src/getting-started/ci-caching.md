@@ -36,7 +36,7 @@ directories from inside the workflow.
 ## Measured speedup
 
 Reference numbers from
-[`rs-memory-admission`](https://codeberg.org/caniko/rs-memory-admission) on
+[`rs-memory-admission`](https://github.com/caniko/rs-memory-admission) on
 its self-hosted `atlas` runner, after adopting simit-managed CI in commit
 `d40f905`:
 

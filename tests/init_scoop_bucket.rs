@@ -66,7 +66,7 @@ resolver = "2"
         root.join("simit.toml"),
         r#"[scoop]
 name = "modde"
-bucket_url = "https://codeberg.org/caniko/scoop-modde.git"
+bucket_url = "https://github.com/caniko/scoop-modde.git"
 download_repo = "caniko/rs-modde"
 description = "Cross-platform game mod manager"
 homepage = "https://modde.tartanoglu.com"

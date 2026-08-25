@@ -51,7 +51,7 @@ mod tests {
             summary: "x".to_owned(),
             description: "x".to_owned(),
             license: "GPL-3.0-only".to_owned(),
-            url: "https://codeberg.org/caniko/rs-modde".to_owned(),
+            url: "https://github.com/caniko/rs-modde".to_owned(),
             download_repo: "caniko/rs-modde".to_owned(),
             repo: "rs-modde".to_owned(),
             build_requires: vec![],
@@ -75,7 +75,7 @@ mod tests {
         assert!(makefile.contains("\tcurl -Lo rs-modde-v$(VERSION).tar.gz \\\n"));
         assert!(
             makefile.contains(
-                "\t\t\"https://codeberg.org/caniko/rs-modde/archive/v$(VERSION).tar.gz\"\n"
+                "\t\t\"https://github.com/caniko/rs-modde/archive/v$(VERSION).tar.gz\"\n"
             )
         );
         assert!(

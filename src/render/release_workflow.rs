@@ -2560,7 +2560,7 @@ mod tests {
         ResolvedAur {
             name: "modde".to_owned(),
             description: "d".to_owned(),
-            url: "https://codeberg.org/caniko/rs-modde".to_owned(),
+            url: "https://github.com/caniko/rs-modde".to_owned(),
             license: "GPL-3.0-only".to_owned(),
             maintainer: None,
             maintainer_gpg: None,
@@ -2577,7 +2577,7 @@ mod tests {
             repo: "rs-modde".to_owned(),
             source_archive_pattern: "{repo}-{version}.tar.gz".to_owned(),
             binary_archive_pattern: "{name}-{version}-x86_64-linux.tar.gz".to_owned(),
-            git_url: "https://codeberg.org/caniko/rs-modde.git".to_owned(),
+            git_url: "https://github.com/caniko/rs-modde.git".to_owned(),
             flavors: AurFlavors::default(),
             ssh_remote: "ssh://aur@aur.archlinux.org".to_owned(),
             ssh_key_secret: "AUR_SSH_KEY".to_owned(),
@@ -2591,7 +2591,7 @@ mod tests {
             summary: "s".to_owned(),
             description: "d".to_owned(),
             license: "GPL-3.0-only".to_owned(),
-            url: "https://codeberg.org/caniko/rs-modde".to_owned(),
+            url: "https://github.com/caniko/rs-modde".to_owned(),
             download_repo: "caniko/rs-modde".to_owned(),
             repo: "rs-modde".to_owned(),
             build_requires: vec![],
@@ -2609,7 +2609,7 @@ mod tests {
     fn apt() -> ResolvedApt {
         ResolvedApt {
             label: "modde".to_owned(),
-            repo_url: "ssh://git@codeberg.org/caniko/rs-modde-apt.git".to_owned(),
+            repo_url: "ssh://git@github.com/caniko/rs-modde-apt.git".to_owned(),
             public_url: Some("https://apt.modde.example/".to_owned()),
             pages_provider: "codeberg-git-pages".to_owned(),
             pages_runner: Some("atlas".to_owned()),
@@ -2662,7 +2662,7 @@ mod tests {
             Some(&forgejo),
             Platform::Forgejo,
         );
-        assert!(forgejo_workflow.contains("repo_url=\"https://codeberg.org/caniko/rs-modde\""));
+        assert!(forgejo_workflow.contains("repo_url=\"https://github.com/caniko/rs-modde\""));
         assert!(forgejo_workflow.contains(
             "builder_id=\"${repo_url}/src/tag/${VERSION}/.forgejo/workflows/release.yml\""
         ));
@@ -2707,7 +2707,7 @@ mod tests {
     fn scoop() -> ResolvedScoop {
         ResolvedScoop {
             name: "modde".to_owned(),
-            bucket_url: "https://codeberg.org/caniko/scoop-modde.git".to_owned(),
+            bucket_url: "https://github.com/caniko/scoop-modde.git".to_owned(),
             bucket_token_secret: "FORGEJO_SCOOP_TOKEN".to_owned(),
             description: "d".to_owned(),
             homepage: "https://modde.rs".to_owned(),

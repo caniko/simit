@@ -28,7 +28,7 @@ mod tests {
     fn sample() -> ResolvedApt {
         ResolvedApt {
             label: "modde".to_owned(),
-            repo_url: "ssh://git@codeberg.org/caniko/rs-modde-apt.git".to_owned(),
+            repo_url: "ssh://git@github.com/caniko/rs-modde-apt.git".to_owned(),
             public_url: None,
             pages_provider: "codeberg-git-pages".to_owned(),
             pages_runner: None,

@@ -2329,7 +2329,7 @@ mod tests {
             --description 'Cross-platform game mod manager' \
             --homepage https://modde.tartanoglu.com \
             --license GPL-3.0-only \
-            --archive "darwin_arm=https://codeberg.org/caniko/rs-modde/releases/download/${VERSION}/modde-${VERSION}-aarch64-darwin.tar.gz,release/modde-${VERSION}-aarch64-darwin.tar.gz" \
+            --archive "darwin_arm=https://github.com/caniko/rs-modde/releases/download/${VERSION}/modde-${VERSION}-aarch64-darwin.tar.gz,release/modde-${VERSION}-aarch64-darwin.tar.gz" \
             --binary modde \
             --binary modde-ui \
             --tap "$PWD/tap"

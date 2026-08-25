@@ -1051,7 +1051,7 @@ fn forgejo_nix_can_generate_codeberg_pages_workflow() {
     assert!(pages.contains("test -n \"$CODEBERG_TOKEN\""));
     assert!(pages.contains("git config user.name \"forgejo-actions\""));
     assert!(pages.contains(
-        "git remote add pages-origin \"https://caniko:${CODEBERG_TOKEN}@codeberg.org/caniko/plinth.git\""
+        "git remote add pages-origin \"https://caniko:${CODEBERG_TOKEN}@github.com/caniko/plinth.git\""
     ));
     assert!(pages.contains("DEPLOY_REMOTE=pages-origin nix run .#deploy-pages"));
 

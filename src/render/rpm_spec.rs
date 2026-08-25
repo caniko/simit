@@ -89,7 +89,7 @@ mod tests {
             summary: "Cross-platform game mod manager".to_owned(),
             description: "modde is a cross-platform game mod manager.".to_owned(),
             license: "GPL-3.0-only".to_owned(),
-            url: "https://codeberg.org/caniko/rs-modde".to_owned(),
+            url: "https://github.com/caniko/rs-modde".to_owned(),
             download_repo: "caniko/rs-modde".to_owned(),
             repo: "rs-modde".to_owned(),
             build_requires: vec!["rust >= 1.85".to_owned(), "cargo".to_owned()],

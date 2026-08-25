@@ -17,7 +17,7 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
     plinth = {
-      url = "git+https://codeberg.org/caniko/plinth.git";
+      url = "git+https://github.com/caniko/plinth.git";
       inputs.nixpkgs.follows = "nixpkgs";
     };
     advisory-db = {

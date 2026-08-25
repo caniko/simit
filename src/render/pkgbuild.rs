@@ -337,7 +337,7 @@ mod tests {
         ResolvedAur {
             name: "modde".to_owned(),
             description: "Cross-platform game mod manager".to_owned(),
-            url: "https://codeberg.org/caniko/rs-modde".to_owned(),
+            url: "https://github.com/caniko/rs-modde".to_owned(),
             license: "GPL-3.0-only".to_owned(),
             maintainer: Some("Can H. Tartanoglu <caniko@codeberg.org>".to_owned()),
             maintainer_gpg: Some("818D507F1E62139F8A17EAA64623DEA06FDACFE1".to_owned()),
@@ -368,7 +368,7 @@ mod tests {
             repo: "rs-modde".to_owned(),
             source_archive_pattern: "{repo}-{version}.tar.gz".to_owned(),
             binary_archive_pattern: "{name}-{version}-x86_64-linux.tar.gz".to_owned(),
-            git_url: "https://codeberg.org/caniko/rs-modde.git".to_owned(),
+            git_url: "https://github.com/caniko/rs-modde.git".to_owned(),
             flavors: AurFlavors::default(),
             ssh_remote: "ssh://aur@aur.archlinux.org".to_owned(),
             ssh_key_secret: "AUR_SSH_KEY".to_owned(),
@@ -385,7 +385,7 @@ mod tests {
         assert!(body.contains("pkgver=0.2.0\n"));
         assert!(body.contains("makedepends=('cargo' 'cmake' 'pkgconf' 'rust')\n"));
         assert!(body.contains("conflicts=('modde-bin' 'modde-git')\n"));
-        assert!(body.contains("source=(\"rs-modde-${pkgver}.tar.gz::https://codeberg.org/caniko/rs-modde/releases/download/${pkgver}/rs-modde-${pkgver}.tar.gz\")\n"));
+        assert!(body.contains("source=(\"rs-modde-${pkgver}.tar.gz::https://github.com/caniko/rs-modde/releases/download/${pkgver}/rs-modde-${pkgver}.tar.gz\")\n"));
         assert!(body.contains("  cargo build --release --locked --bin modde --bin modde-ui\n"));
         assert!(!body.contains("provides="));
     }
@@ -413,7 +413,7 @@ mod tests {
         let body = rendered.pkgbuild;
         assert!(body.contains("provides=('modde')\n"));
         assert!(body.contains("conflicts=('modde' 'modde-bin')\n"));
-        assert!(body.contains("source=('git+https://codeberg.org/caniko/rs-modde.git')\n"));
+        assert!(body.contains("source=('git+https://github.com/caniko/rs-modde.git')\n"));
         assert!(body.contains("pkgver() {\n"));
         assert!(body.contains("makedepends=('cargo' 'cmake' 'git' 'pkgconf' 'rust')\n"));
     }
