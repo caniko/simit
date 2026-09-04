@@ -23,6 +23,7 @@ Thumbs.db
 .cache/
 .tmp/
 .tmp*/
+graphify-out/
 .pre-commit-config.yaml
 *.log
 logs/
