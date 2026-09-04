@@ -19,7 +19,7 @@ either order.
 ## Goal
 
 Adopting repos with project-specific `flake.nix` content
-(shared-toolchain inputs like `rs-harbor`, custom outputs, custom
+(shared-toolchain inputs like `harbor-rs`, custom outputs, custom
 devShells, project-specific descriptions) can run
 `simit init flake --check --diff` without simit proposing a wholesale
 rewrite of their flake. simit's canonical ownership shrinks to

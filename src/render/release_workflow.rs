@@ -484,7 +484,7 @@ pub fn render(inputs: &ReleaseWorkflowInputs<'_>) -> String {
     w.push_str("  workflow_dispatch:\n\n");
 
     w.push_str("concurrency:\n");
-    w.push_str("  group: ${{ github.workflow }}-${{ github.ref }}\n");
+    w.push_str("  group: ${{ github.workflow_ref }}-${{ github.ref }}\n");
     w.push_str("  cancel-in-progress: false\n\n");
 
     w.push_str("jobs:\n");
@@ -1914,7 +1914,7 @@ fn push_publish_homebrew(
     w.push_str("          rm -rf tap; git -c credential.helper=\"$credential_helper\" clone \"$HOMEBREW_TAP_URL\" tap\n");
     w.push_str("          cd tap; git config credential.helper \"$credential_helper\"; git config user.email 'ci@localhost'; git config user.name 'release bot'\n");
     w.push_str("          git remote set-head origin -a; DEFAULT_BRANCH=\"$(git symbolic-ref --short refs/remotes/origin/HEAD | sed 's|^origin/||')\"; git checkout \"$DEFAULT_BRANCH\"; cd ..\n");
-    w.push_str("          nix run '.#rs-harbor' -- brew bump \\\n");
+    w.push_str("          nix run '.#harbor-rs' -- brew bump \\\n");
     writeln!(w, "            --name {} \\", homebrew.name).expect("write");
     w.push_str("            --version \"$VERSION\" \\\n");
     writeln!(
@@ -2852,10 +2852,10 @@ mod tests {
             workflow
                 .contains("for pkg in modde modde-bin modde-git; do publish_pkg \"$pkg\"; done")
         );
-        // Homebrew via rs-harbor, Scoop via sed template
+        // Homebrew via harbor-rs, Scoop via sed template
         assert!(workflow.contains("HOMEBREW_TAP_TOKEN: ${{ secrets.FORGEJO_HOMEBREW_TOKEN }}"));
         assert!(workflow.contains("SCOOP_BUCKET_TOKEN: ${{ secrets.FORGEJO_SCOOP_TOKEN }}"));
-        assert!(workflow.contains("nix run '.#rs-harbor' -- brew bump"));
+        assert!(workflow.contains("nix run '.#harbor-rs' -- brew bump"));
         assert!(workflow.contains("nix develop -c simit dist scoop bump"));
         assert!(workflow.contains("--archive \"x64=release/modde-${VERSION}-x86_64-windows.zip\""));
         // Prerelease gating present on downstream package repos

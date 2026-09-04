@@ -2699,7 +2699,7 @@ fn push_homebrew_publish_step(workflow: &mut String, platform: Platform, opts: &
     );
     workflow.push_str("          git checkout \"$DEFAULT_BRANCH\"\n");
     workflow.push_str("          cd ..\n\n");
-    workflow.push_str("          nix run '.#rs-harbor' -- brew bump \\\n");
+    workflow.push_str("          nix run '.#harbor-rs' -- brew bump \\\n");
     workflow.push_str("            --name ");
     workflow.push_str(&shell_word(&opts.name));
     workflow.push_str(" \\\n");

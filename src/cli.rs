@@ -1934,7 +1934,7 @@ pub struct InitFlakeCommand {
     pub diff: bool,
     #[arg(
         long,
-        help = "Emit an rs-harbor multi-target flake that builds via rs-harbor.lib.mkCrossPackages"
+        help = "Emit an harbor-rs multi-target flake that builds via harbor-rs.lib.mkCrossPackages"
     )]
     pub cross: bool,
     #[arg(

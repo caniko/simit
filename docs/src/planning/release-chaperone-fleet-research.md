@@ -96,7 +96,7 @@ Snapshots below are point-in-time. Re-run the checks before acting.
   `simit init ci --check --diff` is clean — the "drift" is the
   option-persistence gap, not real divergence.
   `simit init flake --check --diff` wants to wholesale-replace the
-  project-specific flake that consumes the shared `rs-harbor` flake
+  project-specific flake that consumes the shared `harbor-rs` flake
   plus `home-manager` and `advisory-db` inputs.
 
 - [`sorrel`](file:///data/nvme0/can/Projects/sorrel):
@@ -136,7 +136,7 @@ re-verified before acting.
 | simit has no per-project storage for `--with-audit` etc.                                                        | [src/config.rs:106-121](../../src/config.rs#L106) — `CiConfig` has no `runtime`, `runner`, `with_*` fields                                                                                                                                                               |
 | Drift detector tolerates non-marked supplementary workflows                                                     | [src/registry.rs:541-562](../../src/registry.rs#L541) — `managed+extra` requires at least one _marked_ workflow; the rest are tolerated                                                                                                                                  |
 | `simit init flake` silently swaps `cargo-audit` for `cargo-msrv` in pre-commit                                  | Generator change: see [src/render/flake.rs:296-310](../../src/render/flake.rs#L296), [src/render/flake.rs:587-610](../../src/render/flake.rs#L587). Reproducible on any repo whose flake was generated before the swap                                                   |
-| `simit init flake` wholesale-rewrites custom flakes                                                             | Reproducible: run `simit init flake --check --diff` on any repo whose `flake.nix` consumes a shared toolchain flake (e.g. `rs-harbor`) or declares custom outputs                                                                                                        |
+| `simit init flake` wholesale-rewrites custom flakes                                                             | Reproducible: run `simit init flake --check --diff` on any repo whose `flake.nix` consumes a shared toolchain flake (e.g. `harbor-rs`) or declares custom outputs                                                                                                        |
 | Generated publish workflows trigger on `*.*.*` tags only                                                        | Search `"*.*.*"` in [src/render/ci.rs](../../src/render/ci.rs); legacy `v0.1.0`-style tags are ignored                                                                                                                                                                   |
 | (snapshot) rs-modde pins a pre-CLI-restructure simit rev                                                        | `grep -A2 simit rs-modde/flake.nix` showed a pre-restructure rev at snapshot time; `simit --version` from `nix develop` returned the corresponding older version; `simit init ci ...` failed with `unrecognized subcommand 'init'`. Re-check after any flake-input bump. |
 | (snapshot) open-data-license has no in-flake simit pin                                                          | `cat open-data-license/flake.nix` showed no `simit` input                                                                                                                                                                                                                |
@@ -165,7 +165,7 @@ The Phase 11 sub-layers were scoped as "regenerate CI, push, merge."
 They did not anticipate (a) the simit pin in `rs-modde` predating the
 CLI restructure, (b) the option-persistence gap causing
 post-adoption "drift" to recur, or (c) the flake integration cost in
-repos that consume `rs-harbor`/shared toolchain flakes.
+repos that consume `harbor-rs`/shared toolchain flakes.
 
 ## Work That Should Survive
 
@@ -199,7 +199,7 @@ repos that consume `rs-harbor`/shared toolchain flakes.
 
 4. **`simit init flake` needs a "merge" or "managed-section" mode**
    so that projects with custom flake structure (e.g. consuming
-   `rs-harbor`, custom outputs, custom devShells) can still benefit
+   `harbor-rs`, custom outputs, custom devShells) can still benefit
    from generated hook wiring without losing project-owned
    customizations. Today the diff is wholesale-replace, which
    triggers `flake(drift)` permanently on

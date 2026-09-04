@@ -75,7 +75,7 @@ project = "example/foo"
 repo_url = "ssh://git@codeberg.org/example/foo-apt.git"
 ```
 
-For an rs-harbor project whose flake exposes the conventional
+For an harbor-rs project whose flake exposes the conventional
 `packages.<system>.release-bundle`, the release artifact section can instead
 use the simple opt-in:
 

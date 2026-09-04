@@ -674,7 +674,7 @@ push its history-preserving commit. Scoop publication is likewise delegated
 to `simit dist scoop bump`; explicit channel policies allow a repository to
 make APT/Scoop required while keeping another channel staged during rollout.
 
-For rs-harbor-compatible Nix projects, set
+For harbor-rs-compatible Nix projects, set
 `[release.artifacts].nix_bundle_attrs` to an explicit list of flake attributes
 whose outputs are flat release bundles. The configured bundle set must contain
 exactly one versioned `*-release-manifest.json`; Simit validates that manifest
@@ -682,7 +682,7 @@ against the tag before checksums and hosted-release upload. Existing
 `build_commands` remain additive for installers and other project-specific
 formats.
 
-Projects using the conventional rs-harbor output can opt in with the shorter
+Projects using the conventional harbor-rs output can opt in with the shorter
 `[release.artifacts].prebuild_binaries = true`; this is equivalent to
 `nix_bundle_attrs = ["release-bundle"]` unless an explicit attribute list is
 provided.
@@ -852,7 +852,7 @@ In custom flake mode, `simit init flake` writes only `nix/treefmt.nix` and
 check mode requires treefmt/git-hooks inputs, the `treefmtEval` and
 `pre-commit-check` bindings, formatter/check/dev-shell hook wiring, and any
 configured expected outputs. This supports flakes based on helpers such as
-`rs-harbor` without requiring simit to render every project-specific output.
+`harbor-rs` without requiring simit to render every project-specific output.
 
 Preview the generated files without writing them:
 

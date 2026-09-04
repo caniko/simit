@@ -294,8 +294,8 @@ fn bump_push_rejects_unrelated_dirty_file() {
 
 #[test]
 fn contract_sha256_fields_match_rs_harbor_when_available() {
-    if Command::new("rs-harbor").arg("--help").output().is_err() {
-        eprintln!("skipping rs-harbor contract test: rs-harbor is not on PATH");
+    if Command::new("harbor-rs").arg("--help").output().is_err() {
+        eprintln!("skipping harbor-rs contract test: harbor-rs is not on PATH");
         return;
     }
 
@@ -330,7 +330,7 @@ linux_arm = false
     assert!(simit_status.success());
 
     let url = "https://codeberg.org/example/demo-app/releases/download/1.2.3/demo-app-1.2.3-x86_64-linux.tar.gz";
-    let rs_harbor = Command::new("rs-harbor")
+    let rs_harbor = Command::new("harbor-rs")
         .args([
             "brew",
             "bump",

@@ -2323,7 +2323,7 @@ mod tests {
         env:
           HOMEBREW_TAP_URL: https://codeberg.org/caniko/homebrew-modde.git
         run: |
-          nix run '.#rs-harbor' -- brew bump \
+          nix run '.#harbor-rs' -- brew bump \
             --name modde \
             --version "$VERSION" \
             --description 'Cross-platform game mod manager' \

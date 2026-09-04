@@ -66,7 +66,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Draft validated Keep a Changelog entries from Git history with `simit changelog draft` and optional project guidance.
-- Publish the rs-harbor static binary bundle from tagged GitHub releases with runner capacity gates and signed provenance.
+- Publish the harbor-rs static binary bundle from tagged GitHub releases with runner capacity gates and signed provenance.
 - GitHub prebuild releases.
 - Documentation for automatic changelog drafting.
 
@@ -77,7 +77,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Keep rs-harbor's bundled sccache library portable when consumed through a locked GitHub flake input.
+- Keep harbor-rs's bundled sccache library portable when consumed through a locked GitHub flake input.
 - Validate tagged versions against the release artifact package exposed by the flake.
 - Allow public release runners to build cache misses without Canix's managed sccache transport.
 
@@ -104,7 +104,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add provider-aware GitHub Actions and Crow CI templates, including Crow YAML
   and Jsonnet workflows under `.crow`.
 - Add `[release.artifacts].prebuild_binaries` as shorthand for the
-  conventional rs-harbor `release-bundle` output, while preserving explicit
+  conventional harbor-rs `release-bundle` output, while preserving explicit
   `nix_bundle_attrs` overrides.
 - Add repository-backed APT Pages bootstrapping and `dist apt build`,
   `dist apt publish`, and `dist apt verify` commands.
@@ -366,7 +366,7 @@ ci`, including the `~/.cargo/bin` key, rust-cache settings, and why Nix
 
 - `simit init-flake` now renders `rustfmt` with the Rust edition declared by
   workspace packages instead of hard-coding edition 2021.
-- `simit init-flake --check` accepts custom `rs-harbor` flakes that preserve
+- `simit init-flake --check` accepts custom `harbor-rs` flakes that preserve
   the generated pre-commit hook wiring through equivalent local bindings.
 - Document and regression-test that `simit init-ci --check` enforces the
   generated tag-triggered crates.io publish workflow.
@@ -396,7 +396,7 @@ ci`, including the `~/.cargo/bin` key, rust-cache settings, and why Nix
   checked-in `Formula/<name>.rb` skeleton.
 - Add `simit homebrew render` and `simit homebrew bump` for native Homebrew
   formula rendering, sha256 computation, and optional tap commits/pushes
-  without shelling out to `rs-harbor`.
+  without shelling out to `harbor-rs`.
 
 ## [0.3.1] - 2026-05-11
 

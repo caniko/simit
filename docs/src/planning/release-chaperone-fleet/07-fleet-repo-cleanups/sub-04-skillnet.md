@@ -36,13 +36,13 @@ The dossier documents skillnet as the canonical "spurious drift"
 case: the `ci=drift` flag in `simit projects list` clears the
 moment the full flag set is passed to `--check`. The flake-drift
 is more substantive because skillnet consumes the shared
-`rs-harbor` flake plus `home-manager` and `advisory-db` inputs;
+`harbor-rs` flake plus `home-manager` and `advisory-db` inputs;
 the default `simit init flake` wants to remove them.
 
 ## Out of scope
 
 - Publishing `0.5.1`.
-- Changing skillnet's choice to consume the `rs-harbor` flake.
+- Changing skillnet's choice to consume the `harbor-rs` flake.
 - Re-routing skillnet to a different runner.
 
 ## Plan
@@ -133,7 +133,7 @@ the default `simit init flake` wants to remove them.
 ## Pitfalls
 
 - **Do not accept the wholesale `flake.nix` rewrite.** It would
-  delete the `rs-harbor` / `home-manager` / `advisory-db` inputs
+  delete the `harbor-rs` / `home-manager` / `advisory-db` inputs
   and break the project's shared-toolchain story.
 - **Do not silently publish `0.5.0` instead of `0.5.1`** because
   the chaperone happened to encounter that entry first.

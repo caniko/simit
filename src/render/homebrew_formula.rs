@@ -281,6 +281,6 @@ mod tests {
     fn class_name_matches_homebrew_formula_expectation() {
         assert_eq!(class_name("modde"), "Modde");
         assert_eq!(class_name("my-app"), "MyApp");
-        assert_eq!(class_name("rs-harbor"), "RsHarbor");
+        assert_eq!(class_name("harbor-rs"), "HarborRs");
     }
 }

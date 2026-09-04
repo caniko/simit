@@ -243,7 +243,7 @@ pub fn run_python(command: InitFlakeCommand) -> Result<()> {
 
     if flake_path.exists() {
         bail!(
-            "refusing to replace existing Python flake.nix; set [flake].mode = \"custom\" and [flake].backend = \"py-harbor\" in simit.toml, or move the existing flake before rerunning"
+            "refusing to replace existing Python flake.nix; set [flake].mode = \"custom\" and [flake].backend = \"harbor-py\" in simit.toml, or move the existing flake before rerunning"
         );
     }
 
@@ -520,9 +520,11 @@ fn has_existing_full_scope_adoption(workspace_root: &Path, cfg: &ProjectConfig) 
 
     workspace_root.join("nix/treefmt.nix").exists()
         && (content.contains("crane.url = \"github:ipetkov/crane\"")
-            || content.contains("crane.follows = \"rs-harbor/crane\""))
+            || content.contains("crane.follows = \"rs-harbor/crane\"")
+            || content.contains("crane.follows = \"harbor-rs/crane\""))
         && (content.contains("rustToolchain = pkgs.rust-bin.stable.latest.default.override")
-            || content.contains("rs-harbor.lib.mkToolchain"))
+            || content.contains("rs-harbor.lib.mkToolchain")
+            || content.contains("harbor-rs.lib.mkToolchain"))
         && (content.contains("package = craneLib.buildPackage")
             || content.contains("package = buildCache.withRustCache"))
 }
