@@ -399,8 +399,12 @@ fn full_scope_writes_flake_and_formatter_files() {
     let treefmt = read(&temp.path().join("nix/treefmt.nix"));
     assert!(treefmt.contains("programs.rustfmt = {"));
     assert!(treefmt.contains("edition = \"2024\""));
-    assert!(treefmt.contains("pkgs.rust-bin.nightly.latest.default.override"));
-    assert!(treefmt.contains("extensions = [\"rustfmt\"]"));
+    // rustfmt must come from the harbor pinned nightly profile threaded
+    // through by the generated flake — never a floating nightly.latest.
+    assert!(treefmt.contains("package = rustfmtPackage;"));
+    assert!(!treefmt.contains("nightly.latest"));
+    assert!(flake.contains("toolchainProfile = \"nightly\""));
+    assert!(flake.contains("rustfmtPackage = fmtToolchain.rustToolchain;"));
     assert!(treefmt.contains("programs.alejandra.enable = true"));
     assert!(treefmt.contains("programs.taplo.enable = true"));
     assert!(treefmt.contains("programs.prettier"));

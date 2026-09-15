@@ -20,7 +20,8 @@ const TREEFMT_INPUT: &str = "    treefmt-nix.url = \"github:numtide/treefmt-nix\
 const GIT_HOOKS_INPUT: &str = "    git-hooks.url = \"github:cachix/git-hooks.nix\";\n";
 const TREEFMT_OUTPUT: &str = "    treefmt-nix,\n";
 const GIT_HOOKS_OUTPUT: &str = "    git-hooks,\n";
-const HOOK_BINDINGS: &str = r#"      treefmtEval = treefmt-nix.lib.evalModule pkgs (import ./nix/treefmt.nix);
+const HOOK_BINDINGS: &str = r#"      fmtToolchain = harbor-rs.lib.mkToolchain {inherit pkgs; toolchainProfile = "nightly";};
+      treefmtEval = treefmt-nix.lib.evalModule pkgs (import ./nix/treefmt.nix { rustfmtPackage = fmtToolchain.rustToolchain; });
       pre-commit-check = git-hooks.lib.${system}.run {
         src = ./.;
         hooks = import ./nix/pre-commit.nix {
@@ -255,7 +256,9 @@ pub fn has_required_wiring_with_audit_tools(content: &str, audit_tools: AuditToo
         && [
             TREEFMT_OUTPUT,
             GIT_HOOKS_OUTPUT,
-            "treefmtEval = treefmt-nix.lib.evalModule pkgs (import ./nix/treefmt.nix);",
+            // Prefix match: new generations pass rustfmtPackage explicitly,
+            // older ones call the module bare. Both shapes are wired.
+            "treefmtEval = treefmt-nix.lib.evalModule pkgs (import ./nix/treefmt.nix",
             "pre-commit-check = git-hooks.lib.${system}.run",
             "hooks = import ./nix/pre-commit.nix",
             "formatter = treefmtEval.config.build.wrapper;",
@@ -291,7 +294,7 @@ pub fn custom_wiring_mismatches(
         missing.push("flake.nix custom mode: missing git-hooks input".to_owned());
     }
     if !content
-        .contains("treefmtEval = treefmt-nix.lib.evalModule pkgs (import ./nix/treefmt.nix);")
+        .contains("treefmtEval = treefmt-nix.lib.evalModule pkgs (import ./nix/treefmt.nix")
     {
         missing.push(
             "flake.nix custom mode: missing treefmtEval import of ./nix/treefmt.nix".to_owned(),
@@ -731,6 +734,7 @@ fn template(audit_tools: AuditTools) -> String {
 
       toolchain = rs-harbor.lib.mkToolchain {inherit pkgs;};
       inherit (toolchain) craneLib rustToolchain;
+      fmtToolchain = harbor-rs.lib.mkToolchain {inherit pkgs; toolchainProfile = "nightly";};
       src = craneLib.cleanCargoSource ./.;
       commonArgs = {
         inherit src;
@@ -738,7 +742,7 @@ fn template(audit_tools: AuditTools) -> String {
       };
       cargoArtifacts = craneLib.buildDepsOnly commonArgs;
       package = craneLib.buildPackage (commonArgs // {inherit cargoArtifacts;});
-      treefmtEval = treefmt-nix.lib.evalModule pkgs (import ./nix/treefmt.nix);
+      treefmtEval = treefmt-nix.lib.evalModule pkgs (import ./nix/treefmt.nix { rustfmtPackage = fmtToolchain.rustToolchain; });
       pre-commit-check = git-hooks.lib.${system}.run {
         src = ./.;
         hooks = import ./nix/pre-commit.nix {
@@ -1242,6 +1246,7 @@ pub fn cross_template(targets: &[FlakeTargetArg], audit_tools: AuditTools) -> St
       toolchain = rs-harbor.lib.mkToolchain {{inherit pkgs;}};
       inherit (toolchain) craneLib buildCache;
       rustToolchain = toolchain.rustToolchain;
+      fmtToolchain = rs-harbor.lib.mkToolchain {{inherit pkgs; toolchainProfile = "nightly";}};
       cross = rs-harbor.lib.mkCross {{inherit pkgs system;}};
 
       cargoToml = builtins.fromTOML (builtins.readFile ./Cargo.toml);
@@ -1260,7 +1265,7 @@ pub fn cross_template(targets: &[FlakeTargetArg], audit_tools: AuditTools) -> St
         targets = [{target_list}];
       }};
 
-      treefmtEval = treefmt-nix.lib.evalModule pkgs (import ./nix/treefmt.nix);
+      treefmtEval = treefmt-nix.lib.evalModule pkgs (import ./nix/treefmt.nix {{ rustfmtPackage = fmtToolchain.rustToolchain; }});
       pre-commit-check = git-hooks.lib.${{system}}.run {{
         src = ./.;
         hooks = import ./nix/pre-commit.nix {{
@@ -1492,16 +1497,17 @@ fn dev_shell_packages_start(content: &str) -> usize {
 
 fn treefmt_nix(languages: &Languages, rust_edition: &str) -> String {
     let mut content = String::new();
-    content.push_str("{pkgs, ...}: {\n");
+    // rustfmtPackage comes from the harbor pinned nightly profile via the
+    // generated flake (fmtToolchain); never float nightly.latest here, or
+    // fleet formatting diverges per project overlay.
+    content.push_str("{rustfmtPackage}: {pkgs, ...}: {\n");
     content.push_str("  projectRootFile = \"flake.nix\";\n");
 
     if languages.rust {
         content.push_str("\n  programs.rustfmt = {\n");
         content.push_str("    enable = true;\n");
         content.push_str(&format!("    edition = \"{rust_edition}\";\n"));
-        content.push_str("    package = pkgs.rust-bin.nightly.latest.default.override {\n");
-        content.push_str("      extensions = [\"rustfmt\"];\n");
-        content.push_str("    };\n");
+        content.push_str("    package = rustfmtPackage;\n");
         content.push_str("  };\n");
     }
     if languages.nix {
@@ -1880,11 +1886,12 @@ mod tests {
         assert!(!flake.contains("copr-cli build"));
         assert!(!flake.contains("choco push"));
         assert!(!flake.contains("cargo publish -p"));
-        assert!(
-            flake.contains(
-                "treefmtEval = treefmt-nix.lib.evalModule pkgs (import ./nix/treefmt.nix);"
-            )
-        );
+        assert!(flake.contains(
+            "treefmtEval = treefmt-nix.lib.evalModule pkgs (import ./nix/treefmt.nix { rustfmtPackage = fmtToolchain.rustToolchain; });"
+        ));
+        assert!(flake.contains(
+            "fmtToolchain = harbor-rs.lib.mkToolchain {inherit pkgs; toolchainProfile = \"nightly\";};"
+        ));
 
         // Correct, current canix key plus cache.nixos.org key; not the stale key.
         assert!(flake.contains(CANIX_CACHE_KEY));
