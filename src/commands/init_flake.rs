@@ -122,7 +122,24 @@ pub fn run(command: InitFlakeCommand) -> Result<()> {
                 "custom flake mode requires an existing flake.nix; simit will manage hook files but will not generate a canonical flake"
             );
         }
+        // Atomic migration: the generated nix/treefmt.nix and the custom
+        // flake.nix call-site must agree on rustfmtPackage before anything
+        // is written, otherwise evaluation breaks on the next flake command.
         let hook_files = hook_files(&files);
+        if let Some(generated_module) = hook_files
+            .iter()
+            .find(|file| file.relative_path == Path::new("nix/treefmt.nix"))
+        {
+            let flake_content = fs::read_to_string(&flake_path)
+                .with_context(|| format!("reading {}", flake_path.display()))?;
+            if let Some(mismatch) =
+                flake::treefmt_call_module_mismatch(&flake_content, &generated_module.content)
+            {
+                bail!(
+                    "refusing to write nix/treefmt.nix: {mismatch} (custom flake.nix is never rewritten)"
+                );
+            }
+        }
         project::write_generated_files(workspace_root, &hook_files)?;
         upgrade::update_readme_badges_if_present(workspace_root, false, false)?;
         registry::touch_current_project_or_warn([
@@ -232,6 +249,20 @@ pub fn run_python(command: InitFlakeCommand) -> Result<()> {
             );
         }
         let hook_files = hook_files(&files);
+        if let Some(generated_module) = hook_files
+            .iter()
+            .find(|file| file.relative_path == Path::new("nix/treefmt.nix"))
+        {
+            let flake_content = fs::read_to_string(&flake_path)
+                .with_context(|| format!("reading {}", flake_path.display()))?;
+            if let Some(mismatch) =
+                flake::treefmt_call_module_mismatch(&flake_content, &generated_module.content)
+            {
+                bail!(
+                    "refusing to write nix/treefmt.nix: {mismatch} (custom flake.nix is never rewritten)"
+                );
+            }
+        }
         project::write_generated_files(workspace_root, &hook_files)?;
         upgrade::update_readme_badges_if_present(workspace_root, false, false)?;
         registry::touch_current_project_or_warn([
@@ -581,10 +612,29 @@ fn check_files(
                         &cfg.flake,
                         flake_requires_docs_shell(workspace_root, &actual)?,
                     );
-                    if missing.is_empty() {
+                    mismatches.extend(missing);
+                    // The custom flake is never rewritten, so a call-site /
+                    // module signature disagreement would otherwise surface
+                    // only at Nix evaluation time. Fail the check instead.
+                    let manages_treefmt_module = files
+                        .iter()
+                        .any(|file| file.relative_path == Path::new("nix/treefmt.nix"));
+                    if manages_treefmt_module {
+                        let module_path = workspace_root.join("nix/treefmt.nix");
+                        if let Ok(module_actual) = fs::read_to_string(&module_path) {
+                            if let Some(mismatch) = flake::treefmt_call_module_mismatch(
+                                &actual,
+                                &module_actual,
+                            ) {
+                                mismatches.push(format!(
+                                    "nix/treefmt.nix disagrees with custom flake.nix: {mismatch}"
+                                ));
+                            }
+                        }
+                    }
+                    if mismatches.is_empty() {
                         continue;
                     }
-                    mismatches.extend(missing);
                 }
                 Err(e) if e.kind() == ErrorKind::NotFound => {
                     mismatches.push("flake.nix is missing; custom flake mode requires a project-owned flake.nix".to_owned());

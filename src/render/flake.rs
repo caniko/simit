@@ -474,6 +474,39 @@ fn brace_delta(line: &str) -> i32 {
     opens - closes
 }
 
+/// Does a flake call-site pass rustfmtPackage into nix/treefmt.nix?
+pub fn flake_passes_rustfmt_package(flake_content: &str) -> bool {
+    flake_content.contains("rustfmtPackage")
+        && flake_content.contains("import ./nix/treefmt.nix")
+}
+
+/// Does a nix/treefmt.nix module declare the rustfmtPackage parameter?
+pub fn treefmt_module_wants_rustfmt_package(module_content: &str) -> bool {
+    module_content.contains("{rustfmtPackage}")
+}
+
+/// Flake call-site and module signature must agree: writing one side without
+/// the other breaks Nix evaluation. Returns an actionable error message when
+/// they disagree, or None when the pair is consistent.
+pub fn treefmt_call_module_mismatch(
+    flake_content: &str,
+    module_content: &str,
+) -> Option<String> {
+    let call_passes = flake_passes_rustfmt_package(flake_content);
+    let module_wants = treefmt_module_wants_rustfmt_package(module_content);
+    match (call_passes, module_wants) {
+        (true, true) | (false, false) => None,
+        (true, false) => Some(
+            "flake.nix passes rustfmtPackage but nix/treefmt.nix does not declare it; regenerate nix/treefmt.nix with `simit init flake` (full scope) or remove the argument from the treefmtEval call"
+                .to_owned(),
+        ),
+        (false, true) => Some(
+            "nix/treefmt.nix requires rustfmtPackage but flake.nix does not pass it; add `fmtToolchain = harbor-rs.lib.mkToolchain {inherit pkgs; toolchainProfile = \"nightly\";};` and call `(import ./nix/treefmt.nix { rustfmtPackage = fmtToolchain.rustToolchain; })`, or regenerate with `simit init flake`"
+                .to_owned(),
+        ),
+    }
+}
+
 pub fn has_required_treefmt(content: &str, languages: &Languages, rust_edition: &str) -> bool {
     content.contains("projectRootFile = \"flake.nix\";")
         && (!languages.rust
@@ -1499,8 +1532,13 @@ fn treefmt_nix(languages: &Languages, rust_edition: &str) -> String {
     let mut content = String::new();
     // rustfmtPackage comes from the harbor pinned nightly profile via the
     // generated flake (fmtToolchain); never float nightly.latest here, or
-    // fleet formatting diverges per project overlay.
-    content.push_str("{rustfmtPackage}: {pkgs, ...}: {\n");
+    // fleet formatting diverges per project overlay. Python-only modules
+    // stay directly importable: no Rust parameter without Rust formatters.
+    if languages.rust {
+        content.push_str("{rustfmtPackage}: {pkgs, ...}: {\n");
+    } else {
+        content.push_str("{pkgs, ...}: {\n");
+    }
     content.push_str("  projectRootFile = \"flake.nix\";\n");
 
     if languages.rust {
@@ -1751,6 +1789,45 @@ fn rust_overlay_version(version: &str) -> String {
 mod tests {
     use super::*;
     use crate::cli::FlakeTargetArg;
+    use crate::project::Languages;
+
+    #[test]
+    fn treefmt_module_takes_rustfmt_package_only_for_rust() {
+        let rust = treefmt_nix(
+            &Languages {
+                rust: true,
+                nix: true,
+                ..Languages::default()
+            },
+            "2024",
+        );
+        assert!(rust.starts_with("{rustfmtPackage}: {pkgs, ...}: {"));
+        assert!(rust.contains("package = rustfmtPackage;"));
+        assert!(!rust.contains("nightly.latest"));
+
+        let python_only = treefmt_nix(
+            &Languages {
+                nix: true,
+                toml: true,
+                ..Languages::default()
+            },
+            "2024",
+        );
+        assert!(python_only.starts_with("{pkgs, ...}: {"));
+        assert!(!python_only.contains("rustfmtPackage"));
+    }
+
+    #[test]
+    fn treefmt_call_module_mismatch_catches_both_directions() {
+        let new_call = "treefmtEval = treefmt-nix.lib.evalModule pkgs (import ./nix/treefmt.nix { rustfmtPackage = fmtToolchain.rustToolchain; });";
+        let old_call = "treefmtEval = treefmt-nix.lib.evalModule pkgs (import ./nix/treefmt.nix);";
+        let new_module = "{rustfmtPackage}: {pkgs, ...}: {\n";
+        let old_module = "{pkgs, ...}: {\n";
+        assert!(treefmt_call_module_mismatch(new_call, new_module).is_none());
+        assert!(treefmt_call_module_mismatch(old_call, old_module).is_none());
+        assert!(treefmt_call_module_mismatch(new_call, old_module).is_some());
+        assert!(treefmt_call_module_mismatch(old_call, new_module).is_some());
+    }
 
     #[test]
     fn single_target_template_is_unchanged_by_cross_support() {

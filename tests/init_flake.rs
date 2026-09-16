@@ -886,11 +886,50 @@ fn explicit_full_scope_reemits_full_flake_after_hooks_only_adoption() {
     assert!(temp.path().join("nix/treefmt.nix").exists());
 }
 
+/// Apply the documented rustfmtPackage migration to a custom flake: pass
+/// the pinned toolchain into nix/treefmt.nix. Mirrors exactly what the
+/// refusal error message instructs.
+fn with_rustfmt_package_arg(flake: &str) -> String {
+    flake.replace(
+        "treefmtEval = treefmt-nix.lib.evalModule pkgs (import ./nix/treefmt.nix);",
+        "fmtToolchain = harbor-rs.lib.mkToolchain {inherit pkgs; toolchainProfile = \"nightly\";};\n      treefmtEval = treefmt-nix.lib.evalModule pkgs (import ./nix/treefmt.nix { rustfmtPackage = fmtToolchain.rustToolchain; });",
+    )
+}
+
 #[test]
-fn check_accepts_custom_rs_harbor_flake_with_generated_hook_wiring() {
+fn custom_mode_refuses_rustfmt_package_disagreement_before_writing() {
     let temp = init_package();
+    fs::write(
+        temp.path().join("simit.toml"),
+        "[flake]\nmode = \"custom\"\n",
+    )
+    .unwrap();
     fs::write(temp.path().join("flake.nix"), custom_rs_harbor_flake()).unwrap();
 
+    // Old-shape call-site + new-shape generated module: refuse, don't write
+    // a combination that breaks Nix evaluation.
+    let refused = simit()
+        .current_dir(temp.path())
+        .args(["init", "flake", "--scope", "full"])
+        .output()
+        .unwrap();
+    assert!(!refused.status.success());
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        stderr.contains("rustfmtPackage"),
+        "refusal must name the disagreement, got: {stderr}"
+    );
+    assert!(
+        !temp.path().join("nix/treefmt.nix").exists(),
+        "nothing may be written on refusal"
+    );
+
+    // Follow the documented migration, then everything goes green.
+    fs::write(
+        temp.path().join("flake.nix"),
+        with_rustfmt_package_arg(custom_rs_harbor_flake()),
+    )
+    .unwrap();
     let write_status = simit()
         .current_dir(temp.path())
         .args(["init", "flake", "--scope", "full"])
@@ -898,7 +937,6 @@ fn check_accepts_custom_rs_harbor_flake_with_generated_hook_wiring() {
         .unwrap();
     assert!(write_status.success());
 
-    fs::write(temp.path().join("flake.nix"), custom_rs_harbor_flake()).unwrap();
     let check_status = simit()
         .current_dir(temp.path())
         .args(["init", "flake", "--check"])
@@ -915,7 +953,11 @@ fn custom_mode_accepts_skillnet_rs_harbor_flake() {
         custom_skillnet_flake_config(),
     )
     .unwrap();
-    fs::write(temp.path().join("flake.nix"), custom_skillnet_flake()).unwrap();
+    fs::write(
+        temp.path().join("flake.nix"),
+        with_rustfmt_package_arg(custom_skillnet_flake()),
+    )
+    .unwrap();
 
     let write_status = simit()
         .current_dir(temp.path())
@@ -925,7 +967,7 @@ fn custom_mode_accepts_skillnet_rs_harbor_flake() {
     assert!(write_status.success());
 
     let flake = read(&temp.path().join("flake.nix"));
-    assert_eq!(flake, custom_skillnet_flake());
+    assert_eq!(flake, with_rustfmt_package_arg(custom_skillnet_flake()));
     assert!(temp.path().join("nix/treefmt.nix").exists());
     assert!(temp.path().join("nix/pre-commit.nix").exists());
 
@@ -945,7 +987,7 @@ fn custom_mode_reports_missing_owned_wiring_without_template_diff() {
         custom_skillnet_flake_config(),
     )
     .unwrap();
-    let flake = custom_skillnet_flake().replace(
+    let flake = with_rustfmt_package_arg(custom_skillnet_flake()).replace(
         "pre-commit-check = git-hooks.lib.${system}.run",
         "project-hooks = git-hooks.lib.${system}.run",
     );
