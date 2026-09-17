@@ -560,6 +560,8 @@ fn patches_existing_anchorable_flake() {
     assert!(flake.contains("formatting = treefmtEval.config.build.check self"));
     assert!(flake.contains("pre-commit-check.enabledPackages"));
     assert!(flake.contains("shellHook = pre-commit-check.shellHook"));
+    let hooks = read(&temp.path().join("nix/pre-commit.nix"));
+    assert!(hooks.contains("package = treefmtWrapper;"));
 }
 
 #[test]
@@ -892,7 +894,7 @@ fn explicit_full_scope_reemits_full_flake_after_hooks_only_adoption() {
 fn with_rustfmt_package_arg(flake: &str) -> String {
     flake.replace(
         "treefmtEval = treefmt-nix.lib.evalModule pkgs (import ./nix/treefmt.nix);",
-        "fmtToolchain = harbor-rs.lib.mkToolchain {inherit pkgs; toolchainProfile = \"nightly\";};\n      treefmtEval = treefmt-nix.lib.evalModule pkgs (import ./nix/treefmt.nix { rustfmtPackage = fmtToolchain.rustToolchain; });",
+        "fmtToolchain = rs-harbor.lib.mkToolchain {inherit pkgs; toolchainProfile = \"nightly\";};\n      treefmtEval = treefmt-nix.lib.evalModule pkgs (import ./nix/treefmt.nix { rustfmtPackage = fmtToolchain.rustToolchain; });",
     )
 }
 

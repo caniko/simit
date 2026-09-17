@@ -156,7 +156,14 @@ pub fn run(command: InitFlakeCommand) -> Result<()> {
     if cross_targets.is_none() && flake_path.exists() {
         let content = fs::read_to_string(&flake_path)
             .with_context(|| format!("reading {}", flake_path.display()))?;
-        let patched = flake::patch_existing(&content, audit_tools)?;
+        // Derive the contract from the generated module itself so the
+        // patched flake can never disagree with the file written next to it.
+        let generated_module_needs_package = files
+            .iter()
+            .find(|file| file.relative_path == Path::new("nix/treefmt.nix"))
+            .is_some_and(|file| flake::treefmt_module_wants_rustfmt_package(&file.content));
+        let patched =
+            flake::patch_existing(&content, audit_tools, generated_module_needs_package)?;
         let mut patched_files = files.clone();
         let flake_file = patched_files
             .iter_mut()
@@ -710,6 +717,26 @@ fn check_files(
                 mismatches.push(format!("{} is missing", file.relative_path.display()));
             }
             Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+        }
+    }
+
+    // Managed mode rewrites both files together, so verify the on-disk pair
+    // agrees the same way the write path guarantees. (Custom mode checks
+    // this inline above since its flake is never rewritten.)
+    if cfg.flake.mode != FlakeMode::Custom {
+        let flake_disk = workspace_root.join("flake.nix");
+        let module_disk = workspace_root.join("nix/treefmt.nix");
+        if let (Ok(flake_actual), Ok(module_actual)) = (
+            fs::read_to_string(&flake_disk),
+            fs::read_to_string(&module_disk),
+        ) {
+            if let Some(mismatch) =
+                flake::treefmt_call_module_mismatch(&flake_actual, &module_actual)
+            {
+                mismatches.push(format!(
+                    "nix/treefmt.nix disagrees with flake.nix call site: {mismatch}"
+                ));
+            }
         }
     }
 

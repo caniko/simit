@@ -20,7 +20,7 @@ const TREEFMT_INPUT: &str = "    treefmt-nix.url = \"github:numtide/treefmt-nix\
 const GIT_HOOKS_INPUT: &str = "    git-hooks.url = \"github:cachix/git-hooks.nix\";\n";
 const TREEFMT_OUTPUT: &str = "    treefmt-nix,\n";
 const GIT_HOOKS_OUTPUT: &str = "    git-hooks,\n";
-const HOOK_BINDINGS: &str = r#"      fmtToolchain = harbor-rs.lib.mkToolchain {inherit pkgs; toolchainProfile = "nightly";};
+const HOOK_BINDINGS: &str = r#"      fmtToolchain = rs-harbor.lib.mkToolchain {inherit pkgs; toolchainProfile = "nightly";};
       treefmtEval = treefmt-nix.lib.evalModule pkgs (import ./nix/treefmt.nix { rustfmtPackage = fmtToolchain.rustToolchain; });
       pre-commit-check = git-hooks.lib.${system}.run {
         src = ./.;
@@ -165,12 +165,87 @@ pub fn generic_files(languages: &Languages, components: &[FlakeComponent]) -> Ve
     ]
 }
 
+/// Bare treefmtEval call shape predating the pinned rustfmtPackage contract.
+const BARE_TREEFMT_CALL: &str = "(import ./nix/treefmt.nix)";
+/// Pinned call shape threading the harbor nightly rustfmt into the module.
+const PINNED_TREEFMT_CALL: &str =
+    "(import ./nix/treefmt.nix { rustfmtPackage = fmtToolchain.rustToolchain; })";
+/// Binding the pinned call depends on.
+const FMT_TOOLCHAIN_BINDING: &str =
+    "fmtToolchain = rs-harbor.lib.mkToolchain {inherit pkgs; toolchainProfile = \"nightly\";};";
+
 pub fn patch_existing(content: &str, audit_tools: AuditTools) -> Result<String> {
     if has_required_wiring_with_audit_tools(content, audit_tools) {
         return Ok(content.to_owned());
     }
 
+/// Migrate an old-shape treefmtEval call site to the pinned rustfmtPackage
+/// contract, inserting the fmtToolchain binding it depends on. Both edits
+/// happen in memory; callers must only write the result when this returns
+/// Ok, so a failure can never leave a half-migrated flake on disk.
+///
+/// The binding is inserted with the surrounding indentation immediately
+/// before the first treefmtEval line, so canonically generated flakes keep
+/// matching HOOK_BINDINGS verbatim and later ensures stay idempotent.
+fn migrate_treefmt_call(patched: &mut String) -> Result<()> {
+    if !patched.contains(BARE_TREEFMT_CALL) {
+        return Ok(());
+    }
+    if !patched.contains("fmtToolchain =") {
+        let call_pos = patched
+            .find("treefmtEval = treefmt-nix.lib.evalModule pkgs (import ./nix/treefmt.nix)")
+            .ok_or_else(|| {
+                patch_error(
+                    "treefmtEval call",
+                    "expected a treefmtEval call site importing ./nix/treefmt.nix to anchor the fmtToolchain binding",
+                )
+            })?;
+        let line_start = patched[..call_pos].rfind('\n').map(|i| i + 1).unwrap_or(0);
+        let indent: String = patched[line_start..call_pos]
+            .chars()
+            .take_while(|ch| ch.is_whitespace())
+            .collect();
+        let binding = format!("{indent}{FMT_TOOLCHAIN_BINDING}\n");
+        patched.insert_str(line_start, &binding);
+    }
+    *patched = patched.replace(BARE_TREEFMT_CALL, PINNED_TREEFMT_CALL);
+    Ok(())
+}
+
+pub fn patch_existing(
+    content: &str,
+    audit_tools: AuditTools,
+    needs_rustfmt_package: bool,
+) -> Result<String> {
     let mut patched = content.to_owned();
+    // Migrate the call site before checking wiring: the regenerated module
+    // requires rustfmtPackage for Rust projects, so an untouched old flake
+    // paired with a fresh module would break Nix evaluation.
+    if needs_rustfmt_package {
+        migrate_treefmt_call(&mut patched)?;
+    }
+    // Inserting HOOK_BINDINGS wholesale when a treefmtEval binding already
+    // exists would duplicate the binding and break evaluation. A present
+    // treefmtEval without its pre-commit-check companion is a hand-modified
+    // state simit cannot complete safely: refuse with instructions instead.
+    // Both checks are line-anchored so renamed bindings (e.g.
+    // `dropped-pre-commit-check =`) do not count as present. This runs
+    // before the early return so no path can write a lone treefmtEval.
+    let has_treefmt_eval = patched
+        .lines()
+        .any(|line| line.trim_start().starts_with("treefmtEval ="));
+    let has_pre_commit_check = patched
+        .lines()
+        .any(|line| line.trim_start().starts_with("pre-commit-check ="));
+    if has_treefmt_eval && !has_pre_commit_check {
+        bail!(patch_error(
+            "pre-commit-check binding",
+            "flake.nix defines treefmtEval but no pre-commit-check block; add the pre-commit-check binding from `simit init flake --print` next to treefmtEval",
+        ));
+    }
+    if has_required_wiring_with_audit_tools(&patched, audit_tools) {
+        return Ok(patched);
+    }
 
     ensure_after_any_missing(
         &mut patched,
@@ -202,13 +277,21 @@ pub fn patch_existing(content: &str, audit_tools: AuditTools) -> Result<String> 
         "outputs.treefmt-nix",
         "git-hooks must be added to outputs arguments",
     )?;
-    ensure_after_statement(
-        &mut patched,
-        HOOK_BINDINGS,
-        "package = craneLib.buildPackage",
-        "package binding",
-        "hook bindings must be inserted after the package binding in the system let",
-    )?;
+    // Inserting HOOK_BINDINGS wholesale when a treefmtEval binding already
+    // exists would duplicate the binding and break evaluation; the lone
+    // treefmtEval case was already refused above.
+    if !patched
+        .lines()
+        .any(|line| line.trim_start().starts_with("treefmtEval ="))
+    {
+        ensure_after_statement(
+            &mut patched,
+            HOOK_BINDINGS,
+            "package = craneLib.buildPackage",
+            "package binding",
+            "hook bindings must be inserted after the package binding in the system let",
+        )?;
+    }
     ensure_after(
         &mut patched,
         FORMATTER_OUTPUT,
@@ -485,9 +568,14 @@ pub fn treefmt_module_wants_rustfmt_package(module_content: &str) -> bool {
     module_content.contains("{rustfmtPackage}")
 }
 
-/// Flake call-site and module signature must agree: writing one side without
-/// the other breaks Nix evaluation. Returns an actionable error message when
-/// they disagree, or None when the pair is consistent.
+/// Flake call-site and module signature must agree where disagreement breaks
+/// Nix evaluation. Returns an actionable error message for broken pairs, or
+/// None when the pair evaluates. A new-shape call into an old ellipsis
+/// module (`{pkgs, ...}:`) is a working pair — the extra argument is
+/// ignored — so it passes here; unpinned rustfmt is tracked as drift, not
+/// failure. The reverse (old call into a module that requires the
+/// parameter) always breaks evaluation, as does passing the argument to a
+/// module whose header has no `...` to accept it.
 pub fn treefmt_call_module_mismatch(
     flake_content: &str,
     module_content: &str,
@@ -496,12 +584,22 @@ pub fn treefmt_call_module_mismatch(
     let module_wants = treefmt_module_wants_rustfmt_package(module_content);
     match (call_passes, module_wants) {
         (true, true) | (false, false) => None,
-        (true, false) => Some(
-            "flake.nix passes rustfmtPackage but nix/treefmt.nix does not declare it; regenerate nix/treefmt.nix with `simit init flake` (full scope) or remove the argument from the treefmtEval call"
-                .to_owned(),
-        ),
+        (true, false) => {
+            let accepts_extra = module_content
+                .lines()
+                .next()
+                .is_some_and(|header| header.contains("..."));
+            if accepts_extra {
+                None
+            } else {
+                Some(
+                    "flake.nix passes rustfmtPackage but nix/treefmt.nix cannot accept it (no `...` in its parameters); regenerate nix/treefmt.nix with `simit init flake` (full scope) or remove the argument from the treefmtEval call"
+                        .to_owned(),
+                )
+            }
+        }
         (false, true) => Some(
-            "nix/treefmt.nix requires rustfmtPackage but flake.nix does not pass it; add `fmtToolchain = harbor-rs.lib.mkToolchain {inherit pkgs; toolchainProfile = \"nightly\";};` and call `(import ./nix/treefmt.nix { rustfmtPackage = fmtToolchain.rustToolchain; })`, or regenerate with `simit init flake`"
+            "nix/treefmt.nix requires rustfmtPackage but flake.nix does not pass it; add `fmtToolchain = rs-harbor.lib.mkToolchain {inherit pkgs; toolchainProfile = \"nightly\";};` and call `(import ./nix/treefmt.nix { rustfmtPackage = fmtToolchain.rustToolchain; })`, or regenerate with `simit init flake`"
                 .to_owned(),
         ),
     }
@@ -767,7 +865,7 @@ fn template(audit_tools: AuditTools) -> String {
 
       toolchain = rs-harbor.lib.mkToolchain {inherit pkgs;};
       inherit (toolchain) craneLib rustToolchain;
-      fmtToolchain = harbor-rs.lib.mkToolchain {inherit pkgs; toolchainProfile = "nightly";};
+      fmtToolchain = rs-harbor.lib.mkToolchain {inherit pkgs; toolchainProfile = "nightly";};
       src = craneLib.cleanCargoSource ./.;
       commonArgs = {
         inherit src;
@@ -1670,6 +1768,7 @@ fn pre_commit_nix(
         content.push_str("  treefmt = {\n");
         content.push_str("    enable = true;\n");
         content.push_str("    name = \"treefmt\";\n");
+        content.push_str("    package = treefmtWrapper;\n");
         content.push_str("    entry = \"${treefmtWrapper}/bin/treefmt --fail-on-change\";\n");
         content.push_str("    pass_filenames = false;\n");
         content.push_str("  };\n");
@@ -1818,15 +1917,163 @@ mod tests {
     }
 
     #[test]
-    fn treefmt_call_module_mismatch_catches_both_directions() {
+    fn treefmt_call_module_mismatch_catches_breakage_not_drift() {
         let new_call = "treefmtEval = treefmt-nix.lib.evalModule pkgs (import ./nix/treefmt.nix { rustfmtPackage = fmtToolchain.rustToolchain; });";
         let old_call = "treefmtEval = treefmt-nix.lib.evalModule pkgs (import ./nix/treefmt.nix);";
         let new_module = "{rustfmtPackage}: {pkgs, ...}: {\n";
         let old_module = "{pkgs, ...}: {\n";
+        let rigid_module = "{pkgs}: {\n";
         assert!(treefmt_call_module_mismatch(new_call, new_module).is_none());
         assert!(treefmt_call_module_mismatch(old_call, old_module).is_none());
-        assert!(treefmt_call_module_mismatch(new_call, old_module).is_some());
+        // New call into an ellipsis module evaluates (argument ignored).
+        assert!(treefmt_call_module_mismatch(new_call, old_module).is_none());
+        // Old call into a module requiring the parameter always breaks.
         assert!(treefmt_call_module_mismatch(old_call, new_module).is_some());
+        // ...unless the module cannot accept extra arguments at all.
+        assert!(treefmt_call_module_mismatch(new_call, rigid_module).is_some());
+    }
+
+    const OLD_WIRED_FLAKE: &str = r#"{
+  description = "demo";
+
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    flake-utils.url = "github:numtide/flake-utils";
+    treefmt-nix.url = "github:numtide/treefmt-nix";
+    git-hooks.url = "github:cachix/git-hooks.nix";
+  };
+
+  outputs = {
+    self,
+    nixpkgs,
+    flake-utils,
+    rs-harbor,
+    treefmt-nix,
+    git-hooks,
+    ...
+  }:
+    {
+      packages.default = package;
+      formatter = treefmtEval.config.build.wrapper;
+      checks = {
+        default = package;
+        formatting = treefmtEval.config.build.check self;
+      };
+      devShells.default = {
+        packages = [ pre-commit ] ++ pre-commit-check.enabledPackages;
+        shellHook = pre-commit-check.shellHook;
+      };
+      legacyPackages = let
+        pkgs = import nixpkgs { inherit system; };
+        toolchain = rs-harbor.lib.mkToolchain {inherit pkgs;};
+        inherit (toolchain) craneLib rustToolchain;
+        src = craneLib.cleanCargoSource ./.;
+        commonArgs = { inherit src; strictDeps = true; };
+        cargoArtifacts = craneLib.buildDepsOnly commonArgs;
+        package = craneLib.buildPackage (commonArgs // {inherit cargoArtifacts;});
+        treefmtEval = treefmt-nix.lib.evalModule pkgs (import ./nix/treefmt.nix);
+        pre-commit-check = git-hooks.lib.${system}.run {
+          src = ./.;
+          hooks = import ./nix/pre-commit.nix {
+            inherit pkgs;
+            treefmtWrapper = treefmtEval.config.build.wrapper;
+            inherit rustToolchain;
+          };
+        };
+      in {
+        inherit package;
+      };
+    };
+}
+"#;
+
+    const NEW_MODULE: &str = "{rustfmtPackage}: {pkgs, ...}: {\n";
+
+    #[test]
+    fn migrate_treefmt_call_upgrades_bare_call_site() {
+        let mut patched = OLD_WIRED_FLAKE.to_owned();
+        migrate_treefmt_call(&mut patched).unwrap();
+        assert!(patched.contains(
+            "(import ./nix/treefmt.nix { rustfmtPackage = fmtToolchain.rustToolchain; })"
+        ));
+        assert!(!patched.contains("(import ./nix/treefmt.nix)"));
+        assert_eq!(patched.matches("treefmtEval =").count(), 1);
+        assert_eq!(patched.matches("fmtToolchain =").count(), 1);
+        // The binding lands on the line immediately before its use with
+        // matching indentation, so canonically generated flakes keep
+        // matching HOOK_BINDINGS verbatim downstream.
+        let lines: Vec<&str> = patched.lines().collect();
+        let binding_line = lines
+            .iter()
+            .position(|line| line.trim_start().starts_with("fmtToolchain ="))
+            .expect("migrated flake has a fmtToolchain binding");
+        let call_line = lines
+            .iter()
+            .position(|line| line.contains("rustfmtPackage = fmtToolchain.rustToolchain"))
+            .expect("migrated flake has a pinned call site");
+        assert_eq!(binding_line + 1, call_line);
+        fn indent_of(line: &str) -> &str {
+            &line[..line.len() - line.trim_start().len()]
+        }
+        assert_eq!(
+            indent_of(lines[binding_line]),
+            indent_of(lines[call_line])
+        );
+        // Idempotent: a second pass changes nothing.
+        let mut twice = patched.clone();
+        migrate_treefmt_call(&mut twice).unwrap();
+        assert_eq!(patched, twice);
+        // The migrated flake agrees with the fresh module shape.
+        assert!(treefmt_call_module_mismatch(&patched, NEW_MODULE).is_none());
+    }
+
+    #[test]
+    fn migrate_treefmt_call_leaves_new_shape_alone() {
+        let mut patched = OLD_WIRED_FLAKE
+            .replace("(import ./nix/treefmt.nix)", "(import ./nix/treefmt.nix { rustfmtPackage = fmtToolchain.rustToolchain; })")
+            .replace(
+                "inherit (toolchain) craneLib rustToolchain;",
+                "inherit (toolchain) craneLib rustToolchain;\n        fmtToolchain = rs-harbor.lib.mkToolchain {inherit pkgs; toolchainProfile = \"nightly\";};",
+            );
+        let before = patched.clone();
+        migrate_treefmt_call(&mut patched).unwrap();
+        assert_eq!(patched, before);
+    }
+
+    #[test]
+    fn patch_existing_migrates_old_wired_flake_for_rust() {
+        let patched =
+            patch_existing(OLD_WIRED_FLAKE, AuditTools::default(), true).unwrap();
+        assert!(treefmt_call_module_mismatch(&patched, NEW_MODULE).is_none());
+        assert_eq!(patched.matches("treefmtEval =").count(), 1);
+    }
+
+    #[test]
+    fn patch_existing_leaves_bare_call_alone_without_rust() {
+        let patched =
+            patch_existing(OLD_WIRED_FLAKE, AuditTools::default(), false).unwrap();
+        assert!(patched.contains("(import ./nix/treefmt.nix)"));
+        assert!(!patched.contains("fmtToolchain ="));
+    }
+
+    #[test]
+    fn patch_existing_refuses_migration_without_anchor() {
+        // Bare call present but no treefmtEval binding line to anchor the
+        // fmtToolchain insert (e.g. renamed binding): refuse loudly instead
+        // of writing a half-migrated flake.
+        let odd = "{\n  x = (import ./nix/treefmt.nix);\n}\n";
+        let err = patch_existing(odd, AuditTools::default(), true).unwrap_err();
+        assert!(err.to_string().contains("fmtToolchain"));
+    }
+
+    #[test]
+    fn patch_existing_refuses_treefmt_eval_without_pre_commit() {
+        // Inserting a second treefmtEval binding would break evaluation;
+        // a lone treefmtEval without its pre-commit companion is refused.
+        let mut lone = OLD_WIRED_FLAKE.to_owned();
+        lone = lone.replace("        pre-commit-check = git-hooks.lib.${system}.run {", "        other = 1;\n        dropped-pre-commit-check = git-hooks.lib.${system}.run {");
+        let err = patch_existing(&lone, AuditTools::default(), true).unwrap_err();
+        assert!(err.to_string().contains("pre-commit-check"));
     }
 
     #[test]
@@ -1967,7 +2214,7 @@ mod tests {
             "treefmtEval = treefmt-nix.lib.evalModule pkgs (import ./nix/treefmt.nix { rustfmtPackage = fmtToolchain.rustToolchain; });"
         ));
         assert!(flake.contains(
-            "fmtToolchain = harbor-rs.lib.mkToolchain {inherit pkgs; toolchainProfile = \"nightly\";};"
+            "fmtToolchain = rs-harbor.lib.mkToolchain {inherit pkgs; toolchainProfile = \"nightly\";};"
         ));
 
         // Correct, current canix key plus cache.nixos.org key; not the stale key.
