@@ -72,6 +72,30 @@ pub fn run(command: InitCiCommand) -> Result<()> {
     validate_runner(resolved.runner.as_deref())?;
     validate_runner(resolved.windows_runner.as_deref())?;
     let packages = cargo::select_packages(&metadata, &resolved.packages, resolved.workspace)?;
+    let coordinated =
+        resolved.publish_strategy == crate::config::PublishStrategy::Coordinated;
+    if coordinated {
+        if platform != Platform::Github {
+            bail!("coordinated workspace publication requires --platform github in v1");
+        }
+        if provider != CiProvider::Actions {
+            bail!("coordinated workspace publication requires the Actions provider in v1");
+        }
+        if !resolved.workspace {
+            bail!("coordinated workspace publication requires --workspace");
+        }
+        if !resolved.packages.is_empty() {
+            bail!("coordinated workspace publication cannot be combined with --package selectors; it releases the lockstep workspace");
+        }
+        if resolved.workspace_strategy == crate::cli::WorkspaceStrategy::Members
+            && metadata.workspace_members.len() > 1
+        {
+            // Coordinated publish pairs with aggregate CI (one workspace check).
+            // Member CI still works but would duplicate gates; require the
+            // explicit aggregate selection so generation stays deterministic.
+            bail!("coordinated workspace publication requires --workspace-strategy aggregate");
+        }
+    }
     if resolved.workspace_strategy == crate::cli::WorkspaceStrategy::Aggregate
         && (resolved.publish_crates
             || command.with_homebrew
@@ -227,6 +251,47 @@ pub fn run(command: InitCiCommand) -> Result<()> {
             step_runners: &step_runners,
         })?);
     }
+    if coordinated {
+        if !publish_crates {
+            bail!("coordinated workspace publication requires --publish-crates");
+        }
+        let plan = crate::commands::release_plan::build_release_plan(&metadata, &[])?;
+        let ordered: Vec<(String, Vec<String>)> = plan
+            .entries
+            .iter()
+            .map(|entry| (entry.package.name.clone(), entry.depends_on.clone()))
+            .collect();
+        let versions: Vec<(String, String)> = plan
+            .entries
+            .iter()
+            .map(|entry| (entry.package.name.clone(), entry.package.version.clone()))
+            .collect();
+        if ordered.is_empty() {
+            bail!("coordinated workspace publication requires at least one publishable package");
+        }
+        files.push(ci::publish_workspace_file(
+            platform,
+            ci::PublishWorkspaceInputs {
+                runtime: resolved.runtime,
+                runner: &runners.release,
+                options: options.clone(),
+                plan: ordered,
+                versions,
+            },
+        )?);
+    } else if resolved.workspace_strategy == crate::cli::WorkspaceStrategy::Aggregate && publish_crates {
+        for package in &packages {
+            if package.is_publishable() {
+                files.push(ci::publish_file(
+                    platform,
+                    resolved.runtime,
+                    package,
+                    &runners.release,
+                    options.clone(),
+                ));
+            }
+        }
+    }
     if provider == CiProvider::Actions && cfg.prebuild.is_none() && !options.nix_builds.is_empty() {
         files.push(ci::nix_build_matrix_file(
             platform,
@@ -326,7 +391,9 @@ pub fn run(command: InitCiCommand) -> Result<()> {
         reconcile_ci_files(workspace_root, files, &check_message, true, command.diff)?;
         upgrade::update_readme_badges_if_present(workspace_root, true, command.diff)
     } else {
-        reconcile_ci_files(workspace_root, files, &check_message, false, false)?;
+        project::write_generated_files(workspace_root, &files)?;
+        cleanup_obsolete_nix_workflows(workspace_root, platform, &files)?;
+        cleanup_obsolete_publish_workflows(workspace_root, platform, &files, coordinated)?;
         if ProjectConfig::can_persist_ci(workspace_root)? {
             ProjectConfig::write_ci(workspace_root, &persisted_ci)?;
         }
@@ -334,6 +401,245 @@ pub fn run(command: InitCiCommand) -> Result<()> {
         registry::touch_current_project_or_warn([("ci", FeatureStatus::Managed)]);
         Ok(())
     }
+}
+
+fn run_prebuild_only(command: InitCiCommand) -> Result<()> {
+    validate_prebuild_only_options(&command)?;
+    let workspace_root = workflow_workspace_root()?;
+    if !workspace_root.join("flake.nix").is_file() {
+        bail!("Prebuild workflow generation requires flake.nix at the workspace root");
+    }
+    let cfg = ProjectConfig::load(&workspace_root)?;
+    let file = github_prebuild_file(&cfg, Platform::Github, CiProvider::Actions)?
+        .context("--prebuild-only requires a [prebuild] configuration")?;
+    let files = [file];
+    let message = "Prebuild workflow is not up to date; run `simit init ci --prebuild-only`";
+    if command.check {
+        project::check_generated_files(&workspace_root, &files, message, command.diff)?;
+        let expected = files
+            .iter()
+            .map(|file| file.relative_path.clone())
+            .collect::<BTreeSet<_>>();
+        let obsolete = obsolete_nix_workflows(&workspace_root, Platform::Github, &expected)?;
+        if !obsolete.is_empty() {
+            bail!(
+                "{message}:\n{}",
+                obsolete
+                    .into_iter()
+                    .map(|path| format!("{} is superseded", path.display()))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            );
+        }
+    } else {
+        project::write_generated_files(&workspace_root, &files)?;
+        cleanup_obsolete_nix_workflows(&workspace_root, Platform::Github, &files)?;
+        registry::touch_current_project_or_warn([("ci", FeatureStatus::Managed)]);
+    }
+    Ok(())
+}
+
+fn validate_prebuild_only_options(command: &InitCiCommand) -> Result<()> {
+    if command
+        .platform
+        .is_some_and(|platform| platform != Platform::Github)
+    {
+        bail!("--prebuild-only only supports --platform github");
+    }
+    if command
+        .ci_provider
+        .is_some_and(|provider| provider != CiProvider::Actions)
+        || command.crow_format.is_some()
+    {
+        bail!("--prebuild-only only supports the Actions provider");
+    }
+    if command
+        .runtime
+        .is_some_and(|runtime| runtime != RuntimeChoice::Nix)
+    {
+        bail!("--prebuild-only only supports --runtime nix");
+    }
+    let homebrew_overrides = command.homebrew.name.is_some()
+        || command.homebrew.tap.is_some()
+        || !command.homebrew.binary.is_empty()
+        || command.homebrew.description.is_some()
+        || command.homebrew.homepage.is_some()
+        || command.homebrew.license.is_some()
+        || command.homebrew.download_repo.is_some()
+        || command.homebrew.archive_pattern.is_some()
+        || !command.homebrew.no_platform.is_empty();
+    let chocolatey_overrides = command.chocolatey.name.is_some()
+        || command.chocolatey.id.is_some()
+        || command.chocolatey.title.is_some()
+        || command.chocolatey.authors.is_some()
+        || command.chocolatey.description.is_some()
+        || command.chocolatey.summary.is_some()
+        || command.chocolatey.project_url.is_some()
+        || command.chocolatey.license_url.is_some()
+        || command.chocolatey.icon_url.is_some()
+        || command.chocolatey.package_source_url.is_some()
+        || command.chocolatey.docs_url.is_some()
+        || command.chocolatey.bug_tracker_url.is_some()
+        || command.chocolatey.project_source_url.is_some()
+        || command.chocolatey.tags.is_some()
+        || command.chocolatey.release_notes_url.is_some()
+        || command.chocolatey.download_repo.is_some()
+        || command.chocolatey.archive_pattern.is_some()
+        || command.chocolatey.push_source.is_some();
+    let scoop_overrides = command.scoop.name.is_some()
+        || command.scoop.bucket.is_some()
+        || command.scoop.description.is_some()
+        || command.scoop.homepage.is_some()
+        || command.scoop.license.is_some()
+        || command.scoop.download_repo.is_some()
+        || command.scoop.archive_pattern.is_some()
+        || !command.scoop.binary.is_empty()
+        || !command.scoop.no_arch.is_empty();
+    if command.pages_only
+        || !command.packages.is_empty()
+        || command.workspace
+        || command.workspace_strategy.is_some()
+        || command.coordinated_publish.is_some()
+        || command.runner.is_some()
+        || command.windows_runner.is_some()
+        || !command.step_runner.is_empty()
+        || command.granular
+        || command.maintainer_key.is_some()
+        || command.maintainers_gpg.is_some()
+        || command.release_smoke_command.is_some()
+        || command.with_nextest.is_some()
+        || command.with_msrv.is_some()
+        || command.with_audit.is_some()
+        || command.with_deny.is_some()
+        || command.with_docs.is_some()
+        || command.with_om_ci.is_some()
+        || command.om_ci_augment.is_some()
+        || command.omnix_ref.is_some()
+        || command.with_artifacts.is_some()
+        || command.with_pypi_publish.is_some()
+        || command.publish_crates.is_some()
+        || command.with_homebrew
+        || command.with_chocolatey
+        || command.with_scoop
+        || command.with_codeberg_pages
+        || command.with_vscode
+        || command.with_jetbrains
+        || command.pages_repo.is_some()
+        || command.pages_canonical_domain.is_some()
+        || command.pages_site_output.is_some()
+        || command.pages_token_secret.is_some()
+        || command.pages_source_branch.is_some()
+        || command.pages_deploy_app.is_some()
+        || homebrew_overrides
+        || chocolatey_overrides
+        || scoop_overrides
+    {
+        bail!("unrelated CI and release options are not supported with --prebuild-only");
+    }
+    Ok(())
+}
+
+fn workflow_workspace_root() -> Result<PathBuf> {
+    let current_dir = std::env::current_dir().context("reading current directory")?;
+    if cargo::find_manifest(&current_dir).is_ok() {
+        return Ok(cargo::metadata_for_current_dir()?
+            .workspace_root
+            .into_std_path_buf());
+    }
+    Ok(python::find_project_root(&current_dir).unwrap_or(current_dir))
+}
+
+fn github_prebuild_file(
+    cfg: &ProjectConfig,
+    platform: Platform,
+    provider: CiProvider,
+) -> Result<Option<project::GeneratedFile>> {
+    let Some(prebuild) = &cfg.prebuild else {
+        return Ok(None);
+    };
+    if platform != Platform::Github || provider != CiProvider::Actions {
+        bail!("[prebuild] requires GitHub Actions");
+    }
+    Ok(Some(ci::github_prebuild_file(
+        &cfg.ci.nix_system_runners,
+        &cfg.ci.nix_builds,
+        prebuild,
+        &cfg.release.artifacts,
+        cfg.release.attic.as_ref(),
+    )?))
+}
+
+fn run_pages_only(command: InitCiCommand) -> Result<()> {
+    let workspace_root = workflow_workspace_root()?;
+    if !workspace_root.join("flake.nix").is_file() {
+        bail!("Pages workflow generation requires flake.nix at the workspace root");
+    }
+
+    let cfg = ProjectConfig::load(&workspace_root)?;
+    let platform = command
+        .platform
+        .or(cfg.ci.platform)
+        .unwrap_or(Platform::Forgejo);
+    if platform == Platform::Gitlab {
+        bail!("Pages-only generation supports GitHub or Forgejo Actions");
+    }
+    if command
+        .ci_provider
+        .is_some_and(|provider| provider != CiProvider::Actions)
+    {
+        bail!("Pages-only generation requires the Actions provider");
+    }
+    let snapshots = workflow_snapshots_for_platform(&workspace_root, platform)?;
+    let inference = CiInference::from_workflows(&snapshots)?;
+    let inferred_pages = infer_codeberg_pages_from_workflows(&snapshots)?;
+    let inferred_runner = inference.runner.or_else(|| {
+        snapshots.iter().find_map(|snapshot| {
+            snapshot.content.lines().find_map(|line| {
+                let runner = line.trim().strip_prefix("runs-on: ")?;
+                (!runner.contains("${{")).then(|| runner.trim_matches('"').to_owned())
+            })
+        })
+    });
+
+    let runner = match platform {
+        Platform::Github => command
+            .runner
+            .as_deref()
+            .or(inferred_runner.as_deref())
+            .unwrap_or("ubuntu-latest"),
+        Platform::Forgejo => command
+            .runner
+            .as_deref()
+            .or(cfg.ci.runner.as_deref())
+            .or(inferred_runner.as_deref())
+            .context("Forgejo Pages generation requires --runner or [ci].runner")?,
+        Platform::Gitlab => unreachable!(),
+    };
+    let pages = codeberg_pages_options(&cfg, &command, inferred_pages.as_ref())?.context(
+        "--pages-only requires --with-pages, [ci.pages], or an existing managed Pages workflow",
+    )?;
+    let files = [ci::codeberg_pages_file(
+        platform,
+        &ResolvedRunner::literal(runner)?,
+        &pages,
+    )?];
+    let message = format!(
+        "Pages workflow is not up to date; run `simit init ci --pages-only --platform {}`",
+        platform.as_str()
+    );
+
+    if command.check {
+        project::check_generated_files(&workspace_root, &files, &message, command.diff)?;
+    } else {
+        project::write_generated_files(&workspace_root, &files)?;
+        if command.with_codeberg_pages && ProjectConfig::can_persist_ci(&workspace_root)? {
+            let mut persisted_ci = cfg.ci;
+            persisted_ci.pages = Some(codeberg_pages_config(&Some(pages))?);
+            ProjectConfig::write_ci(&workspace_root, &persisted_ci)?;
+        }
+        registry::touch_current_project_or_warn([("ci", FeatureStatus::Managed)]);
+    }
+    Ok(())
 }
 
 fn run_nix_only(command: InitCiCommand) -> Result<()> {
@@ -361,6 +667,8 @@ fn run_nix_only(command: InitCiCommand) -> Result<()> {
         || command.with_jetbrains
         || command.with_pypi_publish == Some(true)
         || command.publish_crates == Some(true)
+        || command.coordinated_publish.is_some()
+        || !cfg.ci.required_gates.is_empty()
     {
         bail!("release and language-specific options are not supported for Nix-only CI");
     }
@@ -498,6 +806,8 @@ fn run_python(command: InitCiCommand) -> Result<()> {
         || command.with_jetbrains
         || command.with_artifacts == Some(true)
         || command.publish_crates == Some(true)
+        || command.coordinated_publish.is_some()
+        || !cfg.ci.required_gates.is_empty()
     {
         bail!("Python uv CI currently supports CI only, not release packaging workflows");
     }
@@ -645,6 +955,12 @@ fn run_crow(
         ResolvedCiInputs::resolve(workspace_root, cfg, &cli_overrides, Some(&inference))?;
     if resolved.workspace_strategy == crate::cli::WorkspaceStrategy::Aggregate {
         bail!("aggregate workspace CI is only supported for Actions workflows");
+    }
+    if resolved.publish_strategy == crate::config::PublishStrategy::Coordinated {
+        bail!("coordinated workspace publication is only supported for Actions workflows on GitHub in v1");
+    }
+    if !resolved.required_gates.is_empty() {
+        bail!("required gates are only supported for Actions workflows in v1");
     }
     let packages = cargo::select_packages(metadata, &resolved.packages, resolved.workspace)?;
     let windows_packagers = command.with_chocolatey || command.with_scoop;
@@ -799,6 +1115,9 @@ fn run_crow_python(
     if command.workspace || !command.packages.is_empty() {
         bail!("Python uv Crow CI does not support --workspace or --package");
     }
+    if command.coordinated_publish.is_some() || !cfg.ci.required_gates.is_empty() {
+        bail!("required gates and coordinated publication are only supported for Actions workflows in v1");
+    }
     let mut crow = cfg.ci.crow.clone();
     if let Some(format) = command.crow_format {
         crow.format = format;
@@ -914,6 +1233,13 @@ fn ci_cli_overrides(command: &InitCiCommand) -> CiCliOverrides {
         granular: command.granular,
         workspace: command.workspace,
         workspace_strategy: command.workspace_strategy,
+        publish_strategy: command.coordinated_publish.map(|enabled| {
+            if enabled {
+                crate::config::PublishStrategy::Coordinated
+            } else {
+                crate::config::PublishStrategy::Members
+            }
+        }),
         packages: command.packages.clone(),
         with_nextest: command.with_nextest,
         with_msrv: command.with_msrv,
@@ -1113,6 +1439,7 @@ pub(crate) fn project_regeneration_command(workspace_root: &Path) -> Result<Opti
         packages: Vec::new(),
         workspace: false,
         workspace_strategy: None,
+        coordinated_publish: None,
         platform: Some(platform),
         ci_provider: Some(CiProvider::Actions),
         crow_format: None,
@@ -1301,6 +1628,9 @@ pub(crate) fn render_regeneration_command(
     }
     if publish_crates {
         args.push("--publish-crates".to_owned());
+    }
+    if resolved.publish_strategy == crate::config::PublishStrategy::Coordinated {
+        args.push("--coordinated-publish".to_owned());
     }
     if resolved.with_pypi_publish {
         args.push("--with-pypi-publish".to_owned());
@@ -1534,6 +1864,225 @@ fn reconcile_ci_files(
     }
 }
 
+fn extra_generated_workflows(
+    workspace_root: &Path,
+    platform: Platform,
+    expected: &BTreeSet<PathBuf>,
+) -> Result<Vec<PathBuf>> {
+    let workflow_dir = PathBuf::from(platform.workflow_dir());
+    let absolute_dir = workspace_root.join(&workflow_dir);
+    let entries = match fs::read_dir(&absolute_dir) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => return Err(err).with_context(|| format!("reading {}", absolute_dir.display())),
+    };
+
+    let mut extras = Vec::new();
+    for entry in entries {
+        let entry =
+            entry.with_context(|| format!("reading entry in {}", absolute_dir.display()))?;
+        if !entry
+            .file_type()
+            .with_context(|| format!("reading file type for {}", entry.path().display()))?
+            .is_file()
+        {
+            continue;
+        }
+        let path = entry.path();
+        let Some(extension) = path.extension().and_then(|ext| ext.to_str()) else {
+            continue;
+        };
+        if extension != "yaml" && extension != "yml" {
+            continue;
+        }
+        let relative_path = workflow_dir.join(entry.file_name());
+        if expected.contains(&relative_path) {
+            continue;
+        }
+        let content =
+            fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+        if content.contains(ci::GENERATED_WORKFLOW_MARKER)
+            && is_ci_managed_workflow_name(&entry.file_name())
+        {
+            extras.push(relative_path);
+        }
+    }
+    extras.sort();
+    Ok(extras)
+}
+
+fn cleanup_obsolete_nix_workflows(
+    workspace_root: &Path,
+    platform: Platform,
+    expected: &[project::GeneratedFile],
+) -> Result<()> {
+    let expected = expected
+        .iter()
+        .map(|file| file.relative_path.clone())
+        .collect::<BTreeSet<_>>();
+    for relative in obsolete_nix_workflows(workspace_root, platform, &expected)? {
+        fs::remove_file(workspace_root.join(&relative))
+            .with_context(|| format!("removing obsolete {}", relative.display()))?;
+    }
+    Ok(())
+}
+
+fn obsolete_nix_workflows(
+    workspace_root: &Path,
+    platform: Platform,
+    expected: &BTreeSet<PathBuf>,
+) -> Result<Vec<PathBuf>> {
+    let workflow_dir = PathBuf::from(platform.workflow_dir());
+    let mut obsolete = Vec::new();
+    for name in [
+        "nix-builds.yaml",
+        "nix-builds.yml",
+        "prebuild.yaml",
+        "prebuild.yml",
+    ] {
+        let relative = workflow_dir.join(name);
+        if expected.contains(&relative) {
+            continue;
+        }
+        let path = workspace_root.join(&relative);
+        let Ok(content) = fs::read_to_string(&path) else {
+            continue;
+        };
+        if generated_workflow_marker_present(&content) {
+            obsolete.push(relative);
+        }
+    }
+    obsolete.sort();
+    Ok(obsolete)
+}
+
+/// Remove only obsolete simit-owned publish outputs when switching between
+/// member-scoped and coordinated strategies. Handwritten or unrelated
+/// workflows are never touched: only files carrying the generated marker and
+/// matching the superseded publish naming are removed.
+fn cleanup_obsolete_publish_workflows(
+    workspace_root: &Path,
+    platform: Platform,
+    expected: &[project::GeneratedFile],
+    coordinated: bool,
+) -> Result<()> {
+    let expected = expected
+        .iter()
+        .map(|file| file.relative_path.clone())
+        .collect::<BTreeSet<_>>();
+    let workflow_dir = PathBuf::from(platform.workflow_dir());
+    let absolute_dir = workspace_root.join(&workflow_dir);
+    let entries = match fs::read_dir(&absolute_dir) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err).with_context(|| format!("reading {}", absolute_dir.display())),
+    };
+    for entry in entries {
+        let entry =
+            entry.with_context(|| format!("reading entry in {}", absolute_dir.display()))?;
+        if !entry
+            .file_type()
+            .with_context(|| format!("reading file type for {}", entry.path().display()))?
+            .is_file()
+        {
+            continue;
+        }
+        let file_name = entry.file_name();
+        let Some(name) = file_name.to_str() else {
+            continue;
+        };
+        let is_publish_output = name == "publish-workspace.yaml"
+            || name == "publish-workspace.yml"
+            || name == "publish-crate.yaml"
+            || name == "publish-crate.yml"
+            || name.starts_with("publish-crate-");
+        if !is_publish_output {
+            continue;
+        }
+        let relative = workflow_dir.join(&file_name);
+        if expected.contains(&relative) {
+            continue;
+        }
+        // Only remove the superseded strategy's outputs.
+        let should_remove = if coordinated {
+            name.starts_with("publish-crate")
+        } else {
+            name.starts_with("publish-workspace")
+        };
+        if !should_remove {
+            continue;
+        }
+        let content =
+            fs::read_to_string(entry.path()).with_context(|| format!("reading {}", entry.path().display()))?;
+        if generated_workflow_marker_present(&content) {
+            fs::remove_file(workspace_root.join(&relative))
+                .with_context(|| format!("removing obsolete {}", relative.display()))?;
+        }
+    }
+    Ok(())
+}
+
+fn check_generated_crow_files(
+    workspace_root: &Path,
+    files: &[project::GeneratedFile],
+    message: &str,
+    show_diff: bool,
+) -> Result<()> {
+    project::check_generated_files(workspace_root, files, message, show_diff)?;
+    let expected = files
+        .iter()
+        .map(|file| file.relative_path.clone())
+        .collect::<BTreeSet<_>>();
+    let directory = workspace_root.join(".crow");
+    let entries = match fs::read_dir(&directory) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err).with_context(|| format!("reading {}", directory.display())),
+    };
+    let mut extras = Vec::new();
+    for entry in entries {
+        let entry = entry.with_context(|| format!("reading entry in {}", directory.display()))?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let entry_path = entry.path();
+        let Some(extension) = entry_path.extension().and_then(|ext| ext.to_str()) else {
+            continue;
+        };
+        if !matches!(extension, "yaml" | "yml" | "jsonnet") {
+            continue;
+        }
+        let relative = PathBuf::from(".crow").join(entry.file_name());
+        if expected.contains(&relative) {
+            continue;
+        }
+        if matches!(
+            entry.file_name().to_str(),
+            Some("release.yaml" | "release.yml")
+        ) {
+            // `init release` owns the release workflow; CI must not claim it
+            // as an obsolete Crow build file.
+            continue;
+        }
+        let content = fs::read_to_string(entry_path)?;
+        if generated_workflow_marker_present(&content) {
+            extras.push(relative);
+        }
+    }
+    if extras.is_empty() {
+        return Ok(());
+    }
+    extras.sort();
+    bail!(
+        "{message}:\n{}",
+        extras
+            .into_iter()
+            .map(|path| format!("{} is extra", path.display()))
+            .collect::<Vec<_>>()
+            .join("\n")
+    )
+}
+
 fn is_ci_managed_workflow_name(name: &std::ffi::OsStr) -> bool {
     let Some(name) = name.to_str() else {
         return false;
@@ -1544,6 +2093,8 @@ fn is_ci_managed_workflow_name(name: &std::ffi::OsStr) -> bool {
             | "ci.yml"
             | "publish-crate.yaml"
             | "publish-crate.yml"
+            | "publish-workspace.yaml"
+            | "publish-workspace.yml"
             | "release-artifacts.yaml"
             | "release-artifacts.yml"
             | "nix-builds.yaml"

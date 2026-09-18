@@ -66,6 +66,7 @@ pub struct CiCliOverrides {
     pub granular: bool,
     pub workspace: bool,
     pub workspace_strategy: Option<WorkspaceStrategy>,
+    pub publish_strategy: Option<crate::config::PublishStrategy>,
     pub packages: Vec<String>,
     pub with_nextest: Option<bool>,
     pub with_msrv: Option<bool>,
@@ -94,6 +95,7 @@ pub struct CiInference {
     pub windows_runner: Option<String>,
     pub workspace: Option<bool>,
     pub workspace_strategy: Option<WorkspaceStrategy>,
+    pub publish_strategy: Option<crate::config::PublishStrategy>,
     pub packages: Option<Vec<String>>,
     pub all_features: Option<bool>,
     pub unit_tests_only: Option<bool>,
@@ -105,6 +107,7 @@ pub struct CiInference {
     pub with_artifacts: Option<bool>,
     pub with_pypi_publish: Option<bool>,
     pub publish_crates: Option<bool>,
+    pub required_gates: Option<Vec<crate::config::RequiredGate>>,
     pub om_ci: Option<OmCiMode>,
     pub omnix_ref: Option<String>,
     pub release_smoke_command: Option<String>,
@@ -183,6 +186,8 @@ impl CiInference {
                     workflow_name(&workflow.relative_path) == Some("publish-crate")
                 }),
             ),
+            publish_strategy: Some(infer_publish_strategy(marked)),
+            required_gates: Some(infer_required_gates(&all_content)),
             om_ci: Some(infer_om_ci_mode(&all_content)),
             omnix_ref: infer_omnix_ref(&all_content),
             release_smoke_command: infer_release_smoke_command(&all_content),
@@ -199,7 +204,9 @@ pub struct ResolvedCiInputs {
     pub granular: bool,
     pub workspace: bool,
     pub workspace_strategy: WorkspaceStrategy,
+    pub publish_strategy: crate::config::PublishStrategy,
     pub packages: Vec<String>,
+    pub required_gates: Vec<crate::config::RequiredGate>,
     pub all_features: bool,
     pub unit_tests_only: bool,
     pub with_nextest: bool,
@@ -280,6 +287,37 @@ impl ResolvedCiInputs {
             bail!("aggregate workspace CI requires --workspace and no --package selectors");
         }
 
+        let with_nix_cargo_cache = cli
+            .with_nix_cargo_cache
+            .or(config.with_nix_cargo_cache)
+            .or(inference.with_nix_cargo_cache)
+            .unwrap_or(false);
+        if with_nix_cargo_cache && runtime != Runtime::Nix {
+            bail!("simit project config: with_nix_cargo_cache requires runtime = \"nix\"");
+        }
+        if with_nix_cargo_cache
+            && cfg
+                .ci
+                .extra_env
+                .keys()
+                .any(|key| matches!(key.as_str(), "CARGO_HOME" | "CARGO_TARGET_DIR"))
+        {
+            bail!(
+                "simit project config: with_nix_cargo_cache cannot be combined with CARGO_HOME or CARGO_TARGET_DIR overrides"
+            );
+        }
+
+        let publish_strategy = cli
+            .publish_strategy
+            .or(config.publish_strategy)
+            .or(inference.publish_strategy)
+            .unwrap_or_default();
+        let required_gates = if cfg.ci.required_gates.is_empty() {
+            inference.required_gates.unwrap_or_default()
+        } else {
+            cfg.ci.required_gates.clone()
+        };
+
         Ok(Self {
             runtime,
             runner: cli.runner.clone().or(config.runner).or(inference.runner),
@@ -298,7 +336,9 @@ impl ResolvedCiInputs {
             },
             workspace,
             workspace_strategy,
+            publish_strategy,
             packages,
+            required_gates,
             all_features: config
                 .all_features
                 .or(inference.all_features)
@@ -388,6 +428,7 @@ impl ResolvedCiInputs {
                 .unwrap_or_else(|| "PYPI_TOKEN".to_owned()),
             pypi_trusted_publishing: cfg.ci.pypi_trusted_publishing,
             publish_crates: self.publish_crates,
+            required_gates: self.required_gates.clone(),
             om_ci: self.om_ci,
             omnix_ref,
             release_smoke_command: self.release_smoke_command.clone(),
@@ -424,6 +465,8 @@ impl ResolvedCiInputs {
         ci.windows_runner = windows_runner;
         ci.workspace = self.workspace;
         ci.workspace_strategy = self.workspace_strategy;
+        ci.publish_strategy = self.publish_strategy;
+        ci.required_gates = self.required_gates.clone();
         ci.packages = self.packages.clone();
         ci.all_features = (!self.all_features).then_some(false);
         ci.unit_tests_only = self.unit_tests_only;
@@ -462,6 +505,7 @@ struct CiConfigLayer {
     with_artifacts: Option<bool>,
     with_pypi_publish: Option<bool>,
     publish_crates: Option<bool>,
+    publish_strategy: Option<crate::config::PublishStrategy>,
     om_ci: Option<bool>,
     om_ci_augment: Option<bool>,
     omnix_ref: Option<String>,
@@ -508,6 +552,8 @@ impl CiConfigLayer {
             with_pypi_publish: present(ci_table, "with_pypi_publish")
                 .map(|_| cfg.ci.with_pypi_publish),
             publish_crates: present(ci_table, "publish_crates").map(|_| cfg.ci.publish_crates),
+            publish_strategy: present(ci_table, "publish_strategy")
+                .map(|_| cfg.ci.publish_strategy),
             om_ci: present(ci_table, "om_ci").map(|_| cfg.ci.om_ci),
             om_ci_augment: present(ci_table, "om_ci_augment").map(|_| cfg.ci.om_ci_augment),
             omnix_ref: present(ci_table, "omnix_ref").and_then(|_| cfg.ci.omnix_ref.clone()),
@@ -537,6 +583,9 @@ impl CiConfigLayer {
             with_artifacts: cfg.ci.with_artifacts.then_some(true),
             with_pypi_publish: cfg.ci.with_pypi_publish.then_some(true),
             publish_crates: cfg.ci.publish_crates.then_some(true),
+            publish_strategy: (cfg.ci.publish_strategy
+                != crate::config::PublishStrategy::Members)
+                .then_some(cfg.ci.publish_strategy),
             om_ci: cfg.ci.om_ci.then_some(true),
             om_ci_augment: cfg.ci.om_ci_augment.then_some(true),
             omnix_ref: cfg.ci.omnix_ref.clone(),
@@ -725,10 +774,90 @@ fn infer_self_check_packages(content: &str) -> Vec<String> {
         .collect()
 }
 
+fn infer_publish_strategy(marked: &[WorkflowSnapshot]) -> crate::config::PublishStrategy {
+    let coordinated = marked.iter().any(|workflow| {
+        workflow
+            .relative_path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .is_some_and(|stem| stem == "publish-workspace")
+            && workflow.content.contains("coordinated workspace publish")
+    });
+    if coordinated {
+        crate::config::PublishStrategy::Coordinated
+    } else {
+        crate::config::PublishStrategy::Members
+    }
+}
+
+/// Infer required gates from the stable `Required gate <id>` job/step marker.
+/// The `run` line following the marker is captured verbatim so `--check`
+/// round-trips deterministically; full fidelity (timeouts, env) comes from
+/// `[ci.required_gates]` config, which remains the source of truth.
+fn infer_required_gates(content: &str) -> Vec<crate::config::RequiredGate> {
+    let mut gates = Vec::new();
+    let mut lines = content.lines().peekable();
+    while let Some(line) = lines.next() {
+        let trimmed = line.trim_start();
+        let Some(id) = trimmed
+            .strip_prefix("- name: Required gate ")
+            .map(str::trim)
+        else {
+            continue;
+        };
+        if id.is_empty() {
+            continue;
+        }
+        // Next `run:` line (possibly `run: <cmd>` or `run: |` block with one line).
+        let mut run = String::new();
+        let mut timeout_minutes = 30u64;
+        for probe in lines.by_ref() {
+            let probe_trim = probe.trim_start();
+            if let Some(value) = probe_trim.strip_prefix("run: ") {
+                run = value.trim().to_owned();
+                // `run: |` block: capture the single indented command line.
+                if run == "|" {
+                    run = String::new();
+                    continue;
+                }
+                break;
+            } else if probe_trim == "run: |" {
+                continue;
+            } else if !run.is_empty() && !probe_trim.is_empty() && !probe_trim.starts_with('-') && !probe_trim.starts_with("env:") && !probe_trim.starts_with("timeout") {
+                // Continuation of a `run: |` block (single-line gates only).
+                if run.is_empty() {
+                    run = probe_trim.to_owned();
+                    break;
+                }
+            }
+            if probe_trim.starts_with("- name:") || probe_trim.starts_with("jobs:") {
+                break;
+            }
+            if let Some(value) = probe_trim.strip_prefix("timeout-minutes: ") {
+                timeout_minutes = value.trim().parse().unwrap_or(30);
+            }
+        }
+        if run.is_empty() || run == "|" {
+            continue;
+        }
+        gates.push(crate::config::RequiredGate {
+            id: id.to_owned(),
+            run,
+            timeout_minutes,
+            env: BTreeMap::new(),
+        });
+    }
+    gates.sort_by(|a, b| a.id.cmp(&b.id));
+    gates.dedup_by(|a, b| a.id == b.id);
+    gates
+}
+
 fn workflow_name(path: &Path) -> Option<&str> {
     let stem = path.file_stem()?.to_str()?;
     if stem == "ci" || stem == "build" || stem.starts_with("ci-") || stem.starts_with("build-") {
         Some("ci")
+    } else if stem == "publish-workspace" {
+        Some("publish-workspace")
     } else if stem == "publish-crate" || stem.starts_with("publish-crate-") {
         Some("publish-crate")
     } else if stem == "release-artifacts" || stem.starts_with("release-artifacts-") {

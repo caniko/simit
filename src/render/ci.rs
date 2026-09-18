@@ -129,6 +129,7 @@ pub struct CiOptions {
     pub pypi_token_secret: String,
     pub pypi_trusted_publishing: bool,
     pub publish_crates: bool,
+    pub required_gates: Vec<crate::config::RequiredGate>,
     pub om_ci: OmCiMode,
     pub omnix_ref: String,
     pub release_smoke_command: Option<String>,
@@ -172,6 +173,7 @@ impl Default for CiOptions {
             pypi_token_secret: "PYPI_TOKEN".to_owned(),
             pypi_trusted_publishing: false,
             publish_crates: false,
+            required_gates: Vec::new(),
             om_ci: OmCiMode::default(),
             omnix_ref: OMNIX_REF_DEFAULT.to_owned(),
             release_smoke_command: None,
@@ -359,6 +361,286 @@ pub fn files(request: FilesRequest<'_>) -> Result<Vec<GeneratedFile>> {
         });
     }
     Ok(files)
+}
+
+/// Render only a package-scoped publish workflow.
+///
+/// Aggregate workspace CI uses one project check, while publishing still needs
+/// one workflow per publishable package.
+pub fn publish_file(
+    platform: Platform,
+    runtime: Runtime,
+    package: &Package,
+    runner: &ResolvedRunner,
+    mut options: CiOptions,
+) -> GeneratedFile {
+    options.package_scoped = true;
+    options.workspace_strategy = WorkspaceStrategy::Members;
+    GeneratedFile {
+        relative_path: PathBuf::from(platform.workflow_dir())
+            .join(workflow_file_name("publish-crate", Some(&package.name))),
+        content: publish_workflow(platform, runtime, package, runner, options),
+    }
+}
+
+/// Coordinated dependency-ordered workspace publish workflow.
+///
+/// Consumes the release-plan order (`plan`: ordered `(name, depends_on)`
+/// pairs) so prerequisites publish before dependents inside one workflow with
+/// explicit `needs` edges. Separate per-member workflows triggered by the same
+/// tag cannot establish ordering; this single `publish-workspace.yaml` does.
+/// GitHub Actions only in v1; other platforms fail explicitly.
+pub struct PublishWorkspaceInputs<'a> {
+    pub runtime: Runtime,
+    pub runner: &'a ResolvedRunner,
+    pub options: CiOptions,
+    /// Release-plan order: `(package name, depends_on)` in publish order.
+    pub plan: Vec<(String, Vec<String>)>,
+    /// Package versions in plan order (for lockstep validation).
+    pub versions: Vec<(String, String)>,
+}
+
+pub fn publish_workspace_file(
+    platform: Platform,
+    inputs: PublishWorkspaceInputs<'_>,
+) -> Result<GeneratedFile> {
+    if platform != Platform::Github {
+        bail!("coordinated workspace publication requires --platform github in v1");
+    }
+    Ok(GeneratedFile {
+        relative_path: PathBuf::from(platform.workflow_dir()).join("publish-workspace.yaml"),
+        content: publish_workspace_workflow(
+            platform,
+            inputs.runtime,
+            inputs.runner,
+            &inputs.options,
+            &inputs.plan,
+            &inputs.versions,
+        ),
+    })
+}
+
+fn publish_workspace_workflow(
+    platform: Platform,
+    runtime: Runtime,
+    runner: &ResolvedRunner,
+    options: &CiOptions,
+    plan: &[(String, Vec<String>)],
+    versions: &[(String, String)],
+) -> String {
+    let mut w = String::new();
+    push_generated_workflow_header(&mut w);
+    push_required_secrets_header(&mut w, &options.required_secrets);
+    w.push_str("# coordinated workspace publish: prerequisites before dependents.\n");
+    w.push_str("# Before creating and pushing a release tag, run `simit changelog release <version>` locally.\n");
+    push_release_security_header(&mut w, false);
+    w.push_str("name: Publish Workspace\n\n");
+    w.push_str("on:\n");
+    w.push_str("  push:\n    tags:\n      - \"[0-9]*\"\n");
+    w.push_str("  workflow_dispatch:\n\n");
+    // Serialize conflicting release attempts; never cancel a publish halfway.
+    w.push_str("concurrency:\n");
+    w.push_str("  group: ${{ github.workflow_ref }}-${{ github.ref }}\n");
+    w.push_str("  cancel-in-progress: false\n\n");
+    w.push_str("jobs:\n");
+    // Validate job: signed tag, trust root, lockstep versions, drift check.
+    w.push_str("  validate:\n");
+    w.push_str("    runs-on: ");
+    w.push_str(&runs_on(runner));
+    w.push('\n');
+    w.push_str("    timeout-minutes: 15\n");
+    push_release_permissions(&mut w, platform);
+    w.push_str("    steps:\n");
+    push_checkout_step(&mut w, platform);
+    if runtime == Runtime::Nix {
+        push_install_nix_step_with_cache(
+            &mut w,
+            platform,
+            &options.nix_substituters,
+            &options.nix_trusted_public_keys,
+        );
+    } else {
+        push_rust_setup_step(&mut w, platform);
+    }
+    w.push_str("      - name: Validate signed release tag and lockstep versions\n");
+    w.push_str("        run: |\n");
+    w.push_str("          set -euo pipefail\n");
+    w.push_str("          tag=\"${GITHUB_REF_NAME:-${GITHUB_REF#refs/tags/}}\"\n");
+    w.push_str("          if ! printf '%s\\n' \"$tag\" | grep -Eq '^[0-9]+\\.[0-9]+\\.[0-9]+$'; then echo \"Tag must be an exact semver version like 0.1.1, got '$tag'\" >&2; exit 1; fi\n");
+    w.push_str("          test -s keys/maintainers.gpg\n");
+    w.push_str("          GNUPGHOME=\"$(mktemp -d)\"; export GNUPGHOME; chmod 700 \"$GNUPGHOME\"\n");
+    w.push_str("          gpg --batch --import keys/maintainers.gpg\n");
+    w.push_str("          git fetch --force --tags origin \"refs/tags/${tag}:refs/tags/${tag}\"\n");
+    w.push_str("          git verify-tag \"$tag\"\n");
+    w.push_str("          validated_sha=\"$(git rev-list -n 1 \"$tag\")\"\n");
+    w.push_str("          git checkout --detach \"$validated_sha\"\n");
+    for (name, version) in versions {
+        w.push_str("          test \"$(cargo pkgid -p ");
+        w.push_str(&shell_word(name));
+        w.push_str(" | awk -F'[#@]' 'NF > 1 {print $NF}' | tail -n 1)\" = \"$tag\" || { echo \"");
+        w.push_str(name);
+        w.push_str(" ");
+        w.push_str(version);
+        w.push_str(" does not match tag $tag\" >&2; exit 1; }\n");
+    }
+    // Required gates as prerequisite jobs (exact revision, failure blocks publish).
+    let mut previous = "validate".to_owned();
+    for gate in &options.required_gates {
+        let job = format!("gate-{}", sanitize_gate_id(&gate.id));
+        w.push_str(&format!("  {job}:\n"));
+        w.push_str(&format!("    needs: [{previous}]\n"));
+        w.push_str("    runs-on: ");
+        w.push_str(&runs_on(runner));
+        w.push('\n');
+        w.push_str(&format!("    timeout-minutes: {}\n", gate.timeout_minutes));
+        push_release_permissions(&mut w, platform);
+        if !gate.env.is_empty() {
+            w.push_str("    env:\n");
+            for (key, value) in &gate.env {
+                w.push_str("      ");
+                w.push_str(key);
+                w.push_str(": \"");
+                w.push_str(&yaml_double_quote(value));
+                w.push_str("\"\n");
+            }
+        }
+        w.push_str("    steps:\n");
+        push_checkout_step(&mut w, platform);
+        if runtime == Runtime::Nix {
+            push_install_nix_step_with_cache(
+                &mut w,
+                platform,
+                &options.nix_substituters,
+                &options.nix_trusted_public_keys,
+            );
+        } else {
+            push_rust_setup_step(&mut w, platform);
+        }
+        w.push_str("      - name: Required gate ");
+        w.push_str(&gate.id);
+        w.push_str("\n        run: ");
+        w.push_str(&gate.run);
+        w.push_str("\n");
+        previous = job;
+    }
+    // Publish jobs in plan order with explicit needs.
+    // Each job: package archive (cargo package) + registry dry-run
+    // (cargo publish --dry-run) + bounded existence check + actual publish +
+    // bounded propagation wait. No publish-on-PR: this workflow only runs on
+    // tags + workflow_dispatch, with least-privilege permissions and pinned
+    // actions. Secrets appear only here, never in ordinary PR jobs.
+    let mut job_names: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    for (name, _) in plan {
+        let job = format!("publish-{}", sanitize_gate_id(name));
+        job_names.insert(name.clone(), job);
+    }
+    for (name, depends_on) in plan {
+        let job = job_names.get(name).unwrap();
+        let mut needs: Vec<String> = vec![previous.clone()];
+        for dep in depends_on {
+            if let Some(dep_job) = job_names.get(dep) {
+                if dep_job != job {
+                    needs.push(dep_job.clone());
+                }
+            }
+        }
+        needs.sort();
+        needs.dedup();
+        w.push_str(&format!("  {job}:\n"));
+        w.push_str(&format!("    needs: [{}]\n", needs.join(", ")));
+        w.push_str("    runs-on: ");
+        w.push_str(&runs_on(runner));
+        w.push('\n');
+        w.push_str("    timeout-minutes: 60\n");
+        push_release_permissions(&mut w, platform);
+        w.push_str("    steps:\n");
+        push_checkout_step(&mut w, platform);
+        if runtime == Runtime::Nix {
+            push_install_nix_step_with_cache(
+                &mut w,
+                platform,
+                &options.nix_substituters,
+                &options.nix_trusted_public_keys,
+            );
+            push_nix_cargo_bin_path_step(&mut w);
+        } else {
+            push_rust_setup_step(&mut w, platform);
+            push_rust_cache_steps(&mut w, platform);
+        }
+        let prefix = command_prefix(runtime);
+        // Stage 1-2: archive construction + verification build from packaged contents.
+        // `cargo package` without `--no-verify` builds from the packaged archive;
+        // for dependents this succeeds only after prerequisites are live (staged verification).
+        w.push_str("      - name: Package archive with verification\n");
+        w.push_str("        run: ");
+        w.push_str(prefix);
+        w.push_str("cargo package -p ");
+        w.push_str(&shell_word(name));
+        w.push_str(" --allow-dirty\n\n");
+        // Stage 3: registry publication dry-run.
+        w.push_str("      - name: Registry dry-run\n");
+        w.push_str("        run: ");
+        w.push_str(prefix);
+        w.push_str("cargo publish -p ");
+        w.push_str(&shell_word(name));
+        w.push_str(" --dry-run\n\n");
+        // Publish with honest conflict handling + bounded propagation wait.
+        w.push_str("      - name: Publish\n");
+        w.push_str("        env:\n");
+        w.push_str("          CRATES_IO_API_TOKEN: ${{ secrets.CRATES_IO_API_TOKEN }}\n");
+        w.push_str("        run: |\n");
+        w.push_str("          set -euo pipefail\n");
+        w.push_str("          crate_name=");
+        w.push_str(&shell_quote(name));
+        w.push_str("\n");
+        w.push_str("          version=\"${GITHUB_REF_NAME:-${GITHUB_REF#refs/tags/}}\"\n");
+        w.push_str("          if [ -z \"$version\" ]; then echo \"Could not determine release version from tag ref\" >&2; exit 1; fi\n");
+        w.push_str("          # Preflight: fail fast on auth/ownership/validation vs propagation delay.\n");
+        w.push_str("          if [ -z \"${CRATES_IO_API_TOKEN:-}\" ] && [ -z \"${CARGO_REGISTRY_TOKEN:-}\" ]; then echo \"CRATES_IO_API_TOKEN is required to publish to crates.io\" >&2; exit 1; fi\n");
+        w.push_str("          export CARGO_REGISTRY_TOKEN=\"${CARGO_REGISTRY_TOKEN:-$CRATES_IO_API_TOKEN}\"\n");
+        w.push_str("          status=\"$(curl --retry 3 -sS -o /tmp/simit-crate.json -w '%{http_code}' -A 'simit publish-workspace preflight' \"https://crates.io/api/v1/crates/${crate_name}/${version}\" || echo 000)\"\n");
+        w.push_str("          case \"$status\" in\n");
+        w.push_str("            200)\n");
+        w.push_str("              echo \"${crate_name} ${version} already exists on crates.io; verifying it is the intended release\" \n");
+        w.push_str("              published_checksum=\"$(jq -er --arg v \"$version\" '.versions[] | select(.num == $v) | .checksum' /tmp/simit-crate.json 2>/dev/null || true)\"\n");
+        w.push_str("              local_crate=\"$(ls target/package/${crate_name}-${version}.crate 2>/dev/null || echo \"\")\"\n");
+        w.push_str("              if [ -n \"$published_checksum\" ] && [ -f \"$local_crate\" ]; then\n");
+        w.push_str("                local_checksum=\"$(sha256sum \"$local_crate\" | awk '{print $1}')\"\n");
+        w.push_str("                if [ \"$local_checksum\" = \"$published_checksum\" ]; then echo \"checksum matches; resuming (already published)\"; exit 0; fi\n");
+        w.push_str("              fi\n");
+        w.push_str("              echo \"conflict: ${crate_name} ${version} exists but checksum does not match the local archive; refusing to treat as success\" >&2; exit 1;;\n");
+        w.push_str("            404) ;;\n");
+        w.push_str("            401|403) echo \"authorization/ownership failure checking ${crate_name} ${version} (HTTP $status)\" >&2; exit 1;;\n");
+        w.push_str("            *) echo \"Could not check crates.io for ${crate_name} ${version} before publishing (HTTP $status)\" >&2; exit 1;;\n");
+        w.push_str("          esac\n");
+        w.push_str("          ");
+        w.push_str(prefix);
+        w.push_str("cargo publish -p ");
+        w.push_str(&shell_word(name));
+        w.push_str("\n");
+        w.push_str("          # Bounded propagation wait: dependents need this version visible.\n");
+        w.push_str("          for attempt in $(seq 1 20); do\n");
+        w.push_str("            code=\"$(curl --retry 2 -sS -o /dev/null -w '%{http_code}' -A 'simit publish-workspace propagation' \"https://crates.io/api/v1/crates/${crate_name}/${version}\" || echo 000)\"\n");
+        w.push_str("            case \"$code\" in 200) echo \"propagated ${crate_name} ${version} (attempt $attempt)\"; break;; 404) echo \"waiting for ${crate_name} ${version} (attempt $attempt/20)\"; sleep 30;; 401|403) echo \"authorization failure while waiting (HTTP $code)\" >&2; exit 1;; *) echo \"unexpected registry status $code while waiting\" >&2; exit 1;; esac\n");
+        w.push_str("            if [ \"$attempt\" = 20 ]; then echo \"propagation timeout for ${crate_name} ${version}\" >&2; exit 1; fi\n");
+        w.push_str("          done\n\n");
+        previous = job.clone();
+    }
+    // Auditable summary (always runs, never publishes).
+    w.push_str(&format!("  publish-report:\n    needs: [{previous}]\n    if: always()\n"));
+    w.push_str("    runs-on: ");
+    w.push_str(&runs_on(runner));
+    w.push('\n');
+    push_release_permissions(&mut w, platform);
+    w.push_str("    steps:\n");
+    push_checkout_step(&mut w, platform);
+    w.push_str("      - name: Release result\n");
+    w.push_str("        run: |\n");
+    w.push_str("          set -euo pipefail\n");
+    w.push_str("          echo \"coordinated workspace publish finished (see per-crate job statuses for the auditable result)\"\n");
+    w.push_str("          echo \"resume: re-dispatch this workflow; already-published crates with matching checksums exit 0, conflicts fail\"\n");
+    trim_trailing_blank_lines(&mut w);
+    w
 }
 
 pub fn codeberg_pages_file(
@@ -1841,6 +2123,7 @@ fn ci_workflow_single_job(
     }
 
     push_sccache_stats_step(&mut workflow, platform, runtime);
+    push_required_gate_jobs(&mut workflow, platform, runtime, runners, &options);
     trim_trailing_blank_lines(&mut workflow);
     workflow
 }
@@ -2093,8 +2376,85 @@ fn ci_workflow_multi_job(
         push_sccache_stats_step(&mut workflow, platform, runtime);
     }
 
+    push_required_gate_jobs(&mut workflow, platform, runtime, runners, &options);
     trim_trailing_blank_lines(&mut workflow);
     workflow
+}
+
+/// Dedicated required integration gate jobs.
+///
+/// Scope: CI scope runs on the same push/PR triggers as the main workflow,
+/// once per workflow run. Release scope re-runs the same gates at the exact
+/// signed tag revision inside the coordinated publish workflow before any
+/// `cargo publish`. Each gate is its own job with `timeout-minutes` and
+/// scoped `env` so test-only services/credentials never leak into unrelated
+/// publishing or artifact jobs. Any gate failure fails the workflow and
+/// blocks publication (failure propagation via job status).
+fn push_required_gate_jobs(
+    workflow: &mut String,
+    platform: Platform,
+    runtime: Runtime,
+    runners: &ResolvedCiRunners,
+    options: &CiOptions,
+) {
+    for gate in &options.required_gates {
+        let job = format!("gate-{}", sanitize_gate_id(&gate.id));
+        workflow.push_str(&format!("\n  {job}:\n"));
+        workflow.push_str("    runs-on: ");
+        workflow.push_str(&runs_on(&runners.ci));
+        workflow.push('\n');
+        workflow.push_str(&format!("    timeout-minutes: {}\n", gate.timeout_minutes));
+        push_github_read_permissions(workflow, platform);
+        // Gate env is scoped to this job only. Values may reference
+        // `${{ secrets.X }}` for project-owned test credentials; release
+        // secrets (CRATES_IO_API_TOKEN, minisign, etc.) must never appear here.
+        if !gate.env.is_empty() {
+            workflow.push_str("    env:\n");
+            for (key, value) in &gate.env {
+                workflow.push_str("      ");
+                workflow.push_str(key);
+                workflow.push_str(": \"");
+                workflow.push_str(&yaml_double_quote(value));
+                workflow.push_str("\"\n");
+            }
+        }
+        workflow.push_str("    steps:\n");
+        push_checkout_step(workflow, platform);
+        if runtime == Runtime::Nix {
+            push_install_nix_step_with_cache(
+                workflow,
+                platform,
+                &options.nix_substituters,
+                &options.nix_trusted_public_keys,
+            );
+        } else {
+            push_rust_setup_step(workflow, platform);
+        }
+        workflow.push_str("      - name: Required gate ");
+        workflow.push_str(&gate.id);
+        workflow.push_str("\n        run: ");
+        workflow.push_str(&gate.run);
+        workflow.push_str("\n");
+    }
+}
+
+fn sanitize_gate_id(id: &str) -> String {
+    let mut out = String::new();
+    for ch in id.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+        } else if ch == '-' || ch == '_' {
+            out.push('-');
+        } else {
+            out.push('-');
+        }
+    }
+    let trimmed = out.trim_matches('-').to_owned();
+    if trimmed.is_empty() {
+        "gate".to_owned()
+    } else {
+        trimmed
+    }
 }
 
 fn publish_workflow(

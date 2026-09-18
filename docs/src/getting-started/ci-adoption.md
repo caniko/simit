@@ -89,6 +89,59 @@ simit init flake --scope hooks-only
 simit init ci --platform forgejo --runtime nix
 ```
 
+## Required Integration Gates
+
+Project-owned custom flakes declare additional required gates without
+hand-editing generated YAML:
+
+```toml
+[[ci.required_gates]]
+id = "gel-integration"
+run = "nix run .#test-gel"
+timeout_minutes = 30
+
+[[ci.required_gates]]
+id = "gel-check"
+run = "nix flake check --no-write-lock-file"
+timeout_minutes = 30
+env = { GEL_FIXTURE = "local" }
+```
+
+Each gate has a stable `id`, one explicit single-line `run` command (a `nix
+run`, `nix build`, or `nix flake check` invocation for flake targets), a
+bounded `timeout_minutes` (1–360, default 30), and scoped `env`. Gates render
+as dedicated `gate-<id>` jobs in CI (same push/PR triggers, once per run) and
+as prerequisite jobs in the coordinated publish workflow at the exact signed
+revision. Any gate failure blocks publication. Gate setup lives in `run`/`env`
+only — never in global `[ci].extra_setup`, so publishing and artifact jobs do
+not inherit test-only services or credentials. Release secrets
+(`CRATES_IO_API_TOKEN`, minisign, etc.) must never appear in gate `env`; they
+belong only to tag-triggered publish jobs.
+
+## Coordinated Workspace Publication
+
+Member-scoped publishing (`publish-crate-<crate>.yaml`) has no cross-crate
+ordering. For lockstep workspaces that need prerequisites before dependents,
+opt in (GitHub Actions only in v1):
+
+```toml
+[ci]
+workspace = true
+workspace_strategy = "aggregate"
+publish_crates = true
+publish_strategy = "coordinated"
+```
+
+```sh
+simit init ci --platform github --runtime nix --workspace --workspace-strategy aggregate --publish-crates --coordinated-publish
+simit init ci --platform github --check --diff
+```
+
+Switching strategies removes only obsolete simit-owned outputs (generated
+`publish-crate-*.yaml` vs generated `publish-workspace.yaml`); handwritten
+workflows are never deleted. Other backends (Forgejo, Crow, GitLab) fail
+explicitly instead of silently degrading.
+
 ## Non-Publishable Crates
 
 Cargo represents `publish = false` in metadata as an empty `publish` list.

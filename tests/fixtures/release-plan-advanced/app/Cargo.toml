@@ -1,0 +1,17 @@
+[package]
+name = "app"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+libb = { path = "../libb", optional = true }
+
+[target.'cfg(unix)'.dependencies]
+liba = { path = "../liba" }
+
+[dev-dependencies]
+helper = { path = "../helper" }
+
+[features]
+default = []
+extra = ["dep:libb"]

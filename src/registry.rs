@@ -1140,7 +1140,54 @@ fn infer_expected_ci_files(
             step_runners: &step_runners,
         })?);
     }
-    if backend.provider() == CiProvider::Actions
+    if resolved.publish_strategy == crate::config::PublishStrategy::Coordinated {
+        if platform == Platform::Github && options.publish_crates {
+            // Registry drift check is best-effort: if the workspace graph is
+            // broken, skip the publish file so the primary `init ci --check`
+            // error remains authoritative.
+            if let Ok(plan) = crate::commands::release_plan::build_release_plan(&metadata, &[]) {
+                let ordered: Vec<(String, Vec<String>)> = plan
+                    .entries
+                    .iter()
+                    .map(|entry| (entry.package.name.clone(), entry.depends_on.clone()))
+                    .collect();
+                let versions: Vec<(String, String)> = plan
+                    .entries
+                    .iter()
+                    .map(|entry| (entry.package.name.clone(), entry.package.version.clone()))
+                    .collect();
+                if !ordered.is_empty() {
+                    if let Ok(file) = ci::publish_workspace_file(
+                        platform,
+                        ci::PublishWorkspaceInputs {
+                            runtime: resolved.runtime,
+                            runner: &runners.release,
+                            options: options.clone(),
+                            plan: ordered,
+                            versions,
+                        },
+                    ) {
+                        files.push(file);
+                    }
+                }
+            }
+        }
+    } else if resolved.workspace_strategy == crate::cli::WorkspaceStrategy::Aggregate
+        && options.publish_crates
+    {
+        for package in &packages {
+            if package.is_publishable() {
+                files.push(ci::publish_file(
+                    platform,
+                    resolved.runtime,
+                    package,
+                    &runners.release,
+                    options.clone(),
+                ));
+            }
+        }
+    }
+    if provider == CiProvider::Actions
         && config.prebuild.is_none()
         && !options.nix_builds.is_empty()
     {
@@ -1739,6 +1786,15 @@ fn infer_primary_runner(marked: &[WorkflowFile], workflow_kind: &str) -> Result<
             (workflow_kind == "publish-crate")
                 .then(|| {
                     marked.iter().find(|workflow| {
+                        workflow_name(&workflow.relative_path) == Some("publish-workspace")
+                    })
+                })
+                .flatten()
+        })
+        .or_else(|| {
+            (workflow_kind == "publish-crate")
+                .then(|| {
+                    marked.iter().find(|workflow| {
                         workflow_name(&workflow.relative_path) == Some("release-artifacts")
                     })
                 })
@@ -1789,6 +1845,8 @@ fn workflow_name(path: &Path) -> Option<&str> {
     let stem = path.file_stem()?.to_str()?;
     if stem == "ci" || stem == "build" || stem.starts_with("ci-") || stem.starts_with("build-") {
         Some("ci")
+    } else if stem == "publish-workspace" {
+        Some("publish-workspace")
     } else if stem == "publish-crate" || stem.starts_with("publish-crate-") {
         Some("publish-crate")
     } else if stem == "release-artifacts" || stem.starts_with("release-artifacts-") {

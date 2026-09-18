@@ -10,10 +10,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Support custom non-Rust and non-Python flakes with a generic backend, including JavaScript and TeX formatter detection.
+- Declarative `[[ci.required_gates]]` for project-owned custom flakes (stable id, single-line run, bounded timeout, scoped env) rendered as dedicated required jobs in CI and as prerequisite jobs in coordinated publishing.
+- Opt-in coordinated workspace publication (`publish_strategy = "coordinated"` / `--coordinated-publish`, GitHub only) generating one `publish-workspace.yaml` in `simit release plan` order with signed-tag, lockstep, gate, checksum-conflict, and bounded-propagation gating.
+- `docs/integrations/chaosbox-v1.md` pinning handoff with exact config, commands, gate/packaging semantics, migration, and tested fixtures.
 
 ### Fixed
 
 - Validate formatted pre-commit hook files against the project-selected component set.
+- Release-plan ordering now ignores dev-dependencies (Cargo parity): publishable crates may dev-depend on `publish = false` helpers without failing the plan; normal/build/optional/target-specific path deps still order and still fail on non-publishable members.
+- `--dry-run-package` output is labeled archive-construction-only (`--no-verify`), never presented as verification, dry-run publication, or publish.
 
 ## [0.17.15] - 2026-08-13
 

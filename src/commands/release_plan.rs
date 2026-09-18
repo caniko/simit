@@ -9,16 +9,22 @@ use serde::Serialize;
 use crate::cargo::{self, Metadata, Package};
 use crate::cli::{ReleaseAction, ReleaseCommand};
 
+/// Ordered workspace publish plan shared by `simit release plan` and the
+/// coordinated workspace publish workflow generator.
+///
+/// The JSON shape emitted by `--json` is versioned as `release-plan/v1` and
+/// must stay compatible: workflow generation consumes this internal API
+/// directly instead of re-resolving the workspace graph.
 #[derive(Debug, Clone)]
-struct ReleasePlan {
-    entries: Vec<ReleasePlanEntry>,
-    skipped_members: Vec<String>,
+pub struct ReleasePlan {
+    pub entries: Vec<ReleasePlanEntry>,
+    pub skipped_members: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
-struct ReleasePlanEntry {
-    package: Package,
-    depends_on: Vec<String>,
+pub struct ReleasePlanEntry {
+    pub package: Package,
+    pub depends_on: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -105,7 +111,10 @@ fn reject_non_plan_flags(command: &ReleaseCommand) -> Result<()> {
     Ok(())
 }
 
-fn build_release_plan(metadata: &Metadata, requested: &[String]) -> Result<ReleasePlan> {
+/// Build the dependency-ordered publish plan. Public so the coordinated
+/// publish workflow generator consumes the exact same graph instead of
+/// reimplementing workspace resolution.
+pub fn build_release_plan(metadata: &Metadata, requested: &[String]) -> Result<ReleasePlan> {
     let workspace_packages = workspace_packages(metadata);
     if workspace_packages.is_empty() {
         bail!("workspace has no packages");
@@ -289,6 +298,26 @@ fn workspace_packages(metadata: &Metadata) -> Vec<Package> {
         .collect()
 }
 
+/// Validate lockstep release versions: every selected publishable package must
+/// carry exactly `expected`. Used by the coordinated workflow's validate job
+/// and available to `simit release verify` callers.
+pub fn validate_lockstep_versions(plan: &ReleasePlan, expected: &str) -> Result<()> {
+    let mut mismatched = Vec::new();
+    for entry in &plan.entries {
+        if entry.package.version != expected {
+            mismatched.push(format!("{} {}", entry.package.name, entry.package.version));
+        }
+    }
+    if mismatched.is_empty() {
+        Ok(())
+    } else {
+        bail!(
+            "lockstep release {expected} mismatched by: {}",
+            mismatched.join(", ")
+        );
+    }
+}
+
 fn local_dependency_names(
     package: &Package,
     packages_by_dir: &BTreeMap<Utf8PathBuf, String>,
@@ -302,6 +331,12 @@ fn local_dependency_names(
 
     let mut names = Vec::new();
     for dependency in &package.dependencies {
+        // Only publish-ordering kinds (normal/build/optional/target-specific)
+        // create edges. Dev-dependencies are ignored by `cargo publish` and
+        // must not order publishes or fail on `publish = false` helpers.
+        if !dependency.is_publish_ordering() {
+            continue;
+        }
         let Some(path) = dependency.path.as_ref() else {
             continue;
         };
@@ -435,10 +470,18 @@ fn print_release_plan(plan: &ReleasePlan) -> Result<()> {
     io::stdout().flush().context("flushing release plan output")
 }
 
+/// Archive-construction check only (`--no-verify`).
+///
+/// This proves the `.crate` file can be built. It does NOT verify that the
+/// packaged contents build (`cargo package` without `--no-verify`), does NOT
+/// run a registry dry-run (`cargo publish --dry-run`), and does NOT publish.
+/// See `docs/integrations/chaosbox-v1.md` for the four-stage semantics and the
+/// staged disposable-registry verification required when internal path
+/// dependencies are not yet on crates.io.
 fn run_dry_run_package(entries: &[ReleasePlanEntry]) -> Result<()> {
     for entry in entries {
         println!(
-            "dry-run package: {} {}",
+            "dry-run package (archive construction only, --no-verify): {} {}",
             entry.package.name, entry.package.version
         );
         let output = Command::new("cargo")
@@ -483,6 +526,14 @@ mod tests {
     use crate::cargo::Dependency;
 
     fn package(name: &str, publishable: bool, dependencies: &[&str]) -> Package {
+        package_with_kinds(name, publishable, &dependencies.iter().map(|d| (*d, None)).collect::<Vec<_>>())
+    }
+
+    fn package_with_kinds(
+        name: &str,
+        publishable: bool,
+        dependencies: &[(&str, Option<&str>)],
+    ) -> Package {
         Package {
             id: format!("{name} 0.1.0 (path+file:///workspace/{name})"),
             name: name.to_owned(),
@@ -497,10 +548,16 @@ mod tests {
             features: BTreeMap::new(),
             dependencies: dependencies
                 .iter()
-                .map(|dependency| Dependency {
+                .map(|(dependency, kind)| Dependency {
                     name: dependency.to_string(),
                     source: None,
                     path: Some(Utf8PathBuf::from(format!("../{dependency}"))),
+                    kind: kind.map(str::to_owned),
+                    optional: false,
+                    uses_default_features: true,
+                    target: None,
+                    rename: None,
+                    req: None,
                 })
                 .collect(),
             manifest_path: Utf8PathBuf::from(format!("/workspace/{name}/Cargo.toml")),
@@ -545,5 +602,69 @@ mod tests {
         let error = build_release_plan(&metadata, &[]).unwrap_err().to_string();
         assert!(error.contains("workspace publish graph has a local dependency cycle"));
         assert!(error.contains("a -> b -> a") || error.contains("b -> a -> b"));
+    }
+
+    #[test]
+    fn dev_dependency_on_non_publishable_member_does_not_block_plan() {
+        // `app` dev-depends on the `publish = false` helper `xtask`. Cargo
+        // ignores dev-deps at publish time, so the plan must too.
+        let metadata = metadata(vec![
+            package_with_kinds("app", true, &[("xtask", Some("dev"))]),
+            package("xtask", false, &[]),
+            package("a", true, &[]),
+        ]);
+
+        let plan = build_release_plan(&metadata, &[]).unwrap();
+        let names = plan
+            .entries
+            .iter()
+            .map(|entry| entry.package.name.as_str())
+            .collect::<Vec<_>>();
+        assert!(names.contains(&"app"));
+        assert!(names.contains(&"a"));
+        let app = plan
+            .entries
+            .iter()
+            .find(|entry| entry.package.name == "app")
+            .unwrap();
+        assert!(app.depends_on.is_empty());
+    }
+
+    #[test]
+    fn normal_dependency_on_non_publishable_member_fails() {
+        let metadata = metadata(vec![
+            package("app", true, &["xtask"]),
+            package("xtask", false, &[]),
+        ]);
+
+        let error = build_release_plan(&metadata, &[]).unwrap_err().to_string();
+        assert!(error.contains("depends on non-publishable workspace member"));
+    }
+
+    #[test]
+    fn build_dependency_orders_publish() {
+        let metadata = metadata(vec![
+            package_with_kinds("app", true, &[("gen", Some("build"))]),
+            package("gen", true, &[]),
+        ]);
+
+        let plan = build_release_plan(&metadata, &[]).unwrap();
+        let names = plan
+            .entries
+            .iter()
+            .map(|entry| entry.package.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["gen", "app"]);
+    }
+
+    #[test]
+    fn lockstep_validation_rejects_mismatch() {
+        let mut a = package("a", true, &[]);
+        a.version = "0.2.0".to_owned();
+        let metadata = metadata(vec![a, package("b", true, &[])]);
+
+        let plan = build_release_plan(&metadata, &[]).unwrap();
+        assert!(validate_lockstep_versions(&plan, "0.1.0").is_err());
+        assert!(validate_lockstep_versions(&plan, "0.2.0").is_err());
     }
 }

@@ -60,6 +60,37 @@ pub struct Dependency {
     pub source: Option<String>,
     #[serde(default)]
     pub path: Option<Utf8PathBuf>,
+    /// Cargo dependency kind: `null` (normal), `"build"`, or `"dev"`.
+    /// `cargo metadata --no-deps` still reports this per-dependency classification.
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub optional: bool,
+    #[serde(default)]
+    pub uses_default_features: bool,
+    #[serde(default)]
+    pub target: Option<String>,
+    /// Renamed dependency alias (`package = "real"` with a different key).
+    /// Directory-based local mapping already resolves the real package, so this
+    /// is retained for diagnostics and future version-requirement checks.
+    #[serde(default)]
+    pub rename: Option<String>,
+    #[serde(default)]
+    pub req: Option<String>,
+}
+
+impl Dependency {
+    /// Whether this dependency imposes crates.io publication ordering.
+    ///
+    /// Cargo only requires normal, build, optional, and target-specific path
+    /// dependencies to be published before their dependents. Dev-dependencies
+    /// are excluded from `cargo package`/`cargo publish` ordering: a
+    /// publishable crate may dev-depend on a `publish = false` helper (e.g.
+    /// `xtask`) and still publish. Treating dev-deps as ordering edges would
+    /// falsely fail the plan and serialize unrelated publishes.
+    pub fn is_publish_ordering(&self) -> bool {
+        self.path.is_some() && self.kind.as_deref() != Some("dev")
+    }
 }
 
 /// Returns true if any workspace member depends on `pyo3`.

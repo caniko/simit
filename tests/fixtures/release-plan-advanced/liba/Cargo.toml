@@ -1,0 +1,4 @@
+[package]
+name = "liba"
+version.workspace = true
+edition.workspace = true

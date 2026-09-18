@@ -72,5 +72,25 @@ For one aggregate GitHub workflow that runs workspace gates once, use:
 simit init ci --platform github --runtime nix --workspace --workspace-strategy aggregate
 ```
 
-Aggregate mode is for workspace CI only. Crate publishing and package-specific
-release workflows remain member-scoped.
+Aggregate mode is for workspace CI only. By default crate publishing remains
+member-scoped (`publish-crate-<crate>.yaml`, no cross-crate ordering).
+
+For dependency-ordered workspace publication (opt-in, GitHub only), use:
+
+```sh
+simit init ci --platform github --runtime nix --workspace --workspace-strategy aggregate --publish-crates --coordinated-publish
+```
+
+This generates one `publish-workspace.yaml` that publishes prerequisites
+before dependents in `simit release plan` order, with signed-tag, lockstep,
+gate, and checksum-conflict gating. See `docs/integrations/chaosbox-v1.md`.
+
+Declare an additional required integration gate (e.g. Gel) without hand-editing
+YAML:
+
+```toml
+[[ci.required_gates]]
+id = "gel-integration"
+run = "nix run .#test-gel"
+timeout_minutes = 30
+```

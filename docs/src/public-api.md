@@ -2,8 +2,13 @@
 
 The Rust library exposes the modules used by the `simit` binary.
 
-- `cargo` parses Cargo metadata, selects workspace packages, plans semantic
+- `cargo` parses Cargo metadata (including dependency `kind`/`optional`/`target`/`rename`
+  for publish-ordering classification), selects workspace packages, plans semantic
   version bumps, and updates manifests and lockfiles.
+- `commands::release_plan` exposes the dependency-ordered publish plan
+  (`build_release_plan`, `validate_lockstep_versions`) as `release-plan/v1`
+  JSON; the coordinated publish generator consumes this API instead of
+  re-resolving the workspace graph.
 - `changelog` initializes, updates, validates, promotes, and displays Keep a
   Changelog files.
 - `cli` defines the command-line parser structures.

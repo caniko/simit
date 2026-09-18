@@ -1,0 +1,8 @@
+[package]
+name = "libb"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+# Renamed dependency: key `liba_alias` points at package `liba`.
+liba_alias = { package = "liba", path = "../liba" }

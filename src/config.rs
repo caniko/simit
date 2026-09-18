@@ -369,6 +369,43 @@ fn default_package_binding() -> String {
     "package".to_owned()
 }
 
+/// Declarative required integration gate for project-owned custom flakes.
+///
+/// A gate has a stable `id`, one explicit shell command `run` (a `nix run`,
+/// `nix build`, or `nix flake check` invocation for flake targets), a bounded
+/// `timeout_minutes`, and scoped `env`. Gates render as dedicated CI jobs and
+/// as prerequisite jobs in the coordinated publish workflow, so a gate failure
+/// blocks publication of the exact signed revision. Gate setup must live in
+/// `run`/`env`, never in global `[ci].extra_setup`, so publishing and artifact
+/// jobs do not inherit test-only services or credentials.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RequiredGate {
+    pub id: String,
+    pub run: String,
+    #[serde(default = "default_gate_timeout_minutes")]
+    pub timeout_minutes: u64,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+}
+
+fn default_gate_timeout_minutes() -> u64 {
+    30
+}
+
+/// Workspace crates.io publishing strategy.
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum PublishStrategy {
+    /// One independent `publish-crate-<name>.yaml` per publishable member
+    /// (historical behavior, no cross-crate ordering).
+    #[default]
+    Members,
+    /// One coordinated `publish-workspace.yaml` that publishes prerequisites
+    /// before dependents in release-plan order (GitHub Actions only in v1).
+    Coordinated,
+}
+
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CiConfig {
@@ -391,12 +428,21 @@ pub struct CiConfig {
     pub workspace: bool,
     #[serde(default)]
     pub workspace_strategy: WorkspaceStrategy,
+    /// Opt-in coordinated dependency-ordered workspace publication.
+    /// Requires `publish_crates = true`. GitHub Actions only in v1; other
+    /// backends fail explicitly instead of silently degrading.
+    #[serde(default)]
+    pub publish_strategy: PublishStrategy,
     #[serde(default)]
     pub packages: Vec<String>,
     /// Nix installables that must be built by generated hosted-runner jobs.
     /// Values are passed to `nix build --no-link` unchanged.
     #[serde(default)]
     pub nix_builds: Vec<String>,
+    /// Additional required integration gates (e.g. `nix run .#test-gel`).
+    /// Rendered as dedicated required jobs; failures block publication.
+    #[serde(default)]
+    pub required_gates: Vec<RequiredGate>,
     /// Whether generated Rust checks should pass `--all-features`.
     #[serde(default)]
     pub all_features: Option<bool>,
@@ -1932,6 +1978,13 @@ impl ProjectConfig {
                 "simit project config: [ci].pypi_trusted_publishing and [ci].pypi_token_secret are mutually exclusive"
             );
         }
+        validate_required_gates(&self.ci)?;
+        if self.ci.publish_strategy == PublishStrategy::Coordinated && !self.ci.publish_crates
+        {
+            bail!(
+                "simit project config: [ci].publish_strategy = \"coordinated\" requires [ci].publish_crates = true"
+            );
+        }
         if let Some(pages) = &self.ci.pages {
             validate_owner_repo("simit project config: [ci.pages].repo", &pages.repo)?;
             if let Some(canonical_domain) = &pages.canonical_domain {
@@ -3139,6 +3192,79 @@ fn validate_runner_label_opt(name: &str, value: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+fn validate_required_gates(ci: &CiConfig) -> Result<()> {
+    use std::collections::BTreeSet;
+    let mut seen = BTreeSet::new();
+    for gate in &ci.required_gates {
+        let id = gate.id.trim();
+        if id.is_empty() {
+            bail!("simit project config: [[ci.required_gates]] id must not be empty");
+        }
+        if !id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        {
+            bail!(
+                "simit project config: [[ci.required_gates]] id `{id}` must match [a-zA-Z0-9_-]+"
+            );
+        }
+        if !seen.insert(id.to_owned()) {
+            bail!("simit project config: [[ci.required_gates]] duplicate id `{id}`");
+        }
+        if gate.run.trim().is_empty() || gate.run.contains(['\n', '\r']) {
+            bail!(
+                "simit project config: [[ci.required_gates.{id}]] run must be a non-empty single-line command"
+            );
+        }
+        if gate.timeout_minutes == 0 || gate.timeout_minutes > 360 {
+            bail!(
+                "simit project config: [[ci.required_gates.{id}]] timeout_minutes must be 1..=360"
+            );
+        }
+        for (key, value) in &gate.env {
+            if key.trim().is_empty() || key.contains(['\n', '\r', ' ', '=']) {
+                bail!(
+                    "simit project config: [[ci.required_gates.{id}]] env keys must be non-empty without whitespace or `=`"
+                );
+            }
+            if value.contains(['\n', '\r']) {
+                bail!(
+                    "simit project config: [[ci.required_gates.{id}]] env value for `{key}` must be single-line"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn set_required_gates_table(table: &mut Table, gates: &[RequiredGate]) {
+    if gates.is_empty() {
+        table.remove("required_gates");
+        return;
+    }
+    let mut array = Array::new();
+    for gate in gates {
+        let mut item = InlineTable::default();
+        item.insert("id", Value::from(gate.id.as_str()));
+        item.insert("run", Value::from(gate.run.as_str()));
+        if gate.timeout_minutes != default_gate_timeout_minutes() {
+            item.insert(
+                "timeout_minutes",
+                Value::from(gate.timeout_minutes as i64),
+            );
+        }
+        if !gate.env.is_empty() {
+            let mut env = InlineTable::default();
+            for (key, value) in &gate.env {
+                env.insert(key.as_str(), Value::from(value.as_str()));
+            }
+            item.insert("env", Value::InlineTable(env));
+        }
+        array.push(Value::InlineTable(item));
+    }
+    table["required_gates"] = Item::Value(Value::Array(array));
+}
+
 fn validate_nix_system_runners(ci: &CiConfig) -> Result<()> {
     if ci.nix_system_runners.is_empty() {
         return Ok(());
@@ -3216,6 +3342,15 @@ fn set_ci_table(table: &mut Table, ci: &CiConfig) {
     set_optional_string(table, "pypi_token_secret", ci.pypi_token_secret.as_deref());
     set_bool(table, "pypi_trusted_publishing", ci.pypi_trusted_publishing);
     set_bool(table, "publish_crates", ci.publish_crates);
+    if ci.publish_strategy != PublishStrategy::Members {
+        table["publish_strategy"] = value(match ci.publish_strategy {
+            PublishStrategy::Members => "members",
+            PublishStrategy::Coordinated => "coordinated",
+        });
+    } else {
+        table.remove("publish_strategy");
+    }
+    set_required_gates_table(table, &ci.required_gates);
     set_string_array(table, "extra_setup", &ci.extra_setup);
     set_string_map(table, "extra_env", &ci.extra_env);
     set_string_map(table, "step_runners", &ci.step_runners);

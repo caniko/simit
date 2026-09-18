@@ -2,7 +2,13 @@
 
 `simit release plan` prints the publish order for the current workspace by
 reading `cargo metadata --no-deps` and sorting local path dependencies before
-their dependents.
+their dependents. Only publish-ordering kinds create edges: normal, build,
+optional, and target-specific path dependencies. Dev-dependencies are ignored
+by `cargo publish` and by the plan, so a publishable crate may dev-depend on a
+`publish = false` helper (e.g. `xtask`) and still publish. Workspace-inherited
+versions, renamed dependencies (`package = "real"`), optional, and
+target-specific dependencies are resolved through directory mapping to real
+package names; ties between independent crates break alphabetically.
 
 ```sh
 simit release plan
@@ -43,10 +49,30 @@ the command fails instead of silently omitting the dependency.
 cargo package -p <crate> --allow-dirty --no-verify
 ```
 
-for each crate in publish order. Current Cargo does not accept
-`cargo package --dry-run`, so simit uses the local packaging command that checks
-the package archive without publishing it. simit stops on the first packaging
-failure and returns exit code `1`.
+for each crate in publish order. This is archive construction only
+(`--no-verify`): it proves the `.crate` file builds, not that packaged
+contents verify, not a registry dry-run, and not publication. Current Cargo
+does not accept `cargo package --dry-run`; simit never introduces it.
+simit stops on the first packaging failure and returns exit code `1`.
+
+Four stages, honestly separated:
+
+1. Archive construction: `cargo package --allow-dirty --no-verify`.
+2. Verification build from packaged contents: `cargo package --allow-dirty`
+   (no `--no-verify`). For dependents this succeeds only after prerequisites
+   are live on the registry (staged verification).
+3. Registry publication dry-run: `cargo publish --dry-run`.
+4. Actual publication: `cargo publish`, prerequisites before dependents with
+   bounded propagation waits.
+
+For a new workspace whose internal versions are not yet on crates.io, stage 2
+initially fails for dependents (sibling source paths do not prove published
+crates will build). Use staged verification: publish prerequisites first in
+plan order (or to a disposable registry for pre-publish checks with a temp
+`source` replacement that is never committed), then re-run stage 2 for
+dependents. Never commit local registry overrides or path patches into
+publishable manifests. See `docs/integrations/chaosbox-v1.md` for the tested
+procedure.
 
 ## JSON Schema
 

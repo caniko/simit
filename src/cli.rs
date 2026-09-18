@@ -592,6 +592,14 @@ pub struct InitCiCommand {
     )]
     pub publish_crates: Option<bool>,
     #[arg(
+        long = "coordinated-publish",
+        num_args = 0..=1,
+        default_missing_value = "true",
+        action = clap::ArgAction::Set,
+        help = "Generate one coordinated publish-workspace.yaml in release-plan order instead of per-member workflows (GitHub only, requires --workspace --publish-crates)"
+    )]
+    pub coordinated_publish: Option<bool>,
+    #[arg(
         long = "with-homebrew",
         help = "Add a Homebrew tap publishing step (Nix runtime)"
     )]
