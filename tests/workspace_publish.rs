@@ -448,6 +448,34 @@ run = "nix run .#other"
         .unwrap();
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("duplicate id"));
+
+    // Distinct raw ids that sanitize to the same job name must also fail.
+    let temp = TempDir::new().unwrap();
+    write_minimal_package(temp.path(), "demo");
+    fs::write(temp.path().join("flake.nix"), "{}\n").unwrap();
+    fs::write(
+        temp.path().join("simit.toml"),
+        r#"[ci]
+platform = "github"
+runtime = "nix"
+
+[[ci.required_gates]]
+id = "a_b"
+run = "nix run .#test-gel"
+
+[[ci.required_gates]]
+id = "a-b"
+run = "nix run .#other"
+"#,
+    )
+    .unwrap();
+    let output = simit()
+        .current_dir(temp.path())
+        .args(["init", "ci", "--platform", "github"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("collides after sanitization"));
 }
 
 #[test]

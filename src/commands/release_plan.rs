@@ -299,8 +299,8 @@ fn workspace_packages(metadata: &Metadata) -> Vec<Package> {
 }
 
 /// Validate lockstep release versions: every selected publishable package must
-/// carry exactly `expected`. Used by the coordinated workflow's validate job
-/// and available to `simit release verify` callers.
+/// carry exactly `expected`. Unit-tested helper available to callers; the
+/// coordinated workflow enforces the same invariant in shell via `cargo pkgid`.
 pub fn validate_lockstep_versions(plan: &ReleasePlan, expected: &str) -> Result<()> {
     let mut mismatched = Vec::new();
     for entry in &plan.entries {

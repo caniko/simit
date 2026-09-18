@@ -58,7 +58,8 @@ Notes:
   lane; `nix flake check` still runs unless explicitly disabled with
   `nix_flake_check = false`. Prefer the flake check or `nix run .#test-gel`
   for Gel; do not put test-only setup in global `[ci].extra_setup`.
-- Gate `id` values must match `[a-zA-Z0-9_-]+`, be unique, and stay stable:
+- Gate `id` values must match `[a-zA-Z0-9_-]+`, be unique (including after
+  sanitization: `a_b` vs `a-b` collide as `gate-a-b`), and stay stable:
   they become `gate-<id>` job names and `needs` references.
 - `publish_strategy = "coordinated"` requires `publish_crates = true`,
   `--workspace`, and `--workspace-strategy aggregate`. Other backends fail
@@ -103,7 +104,9 @@ Scope:
 
 - CI scope: `gate-gel-integration` job in `ci.yaml`, same push/PR triggers,
   once per run, with scoped `env` and `timeout-minutes: 30`. Failure fails the
-  workflow.
+  workflow. CI gate jobs run in parallel with `test`; enforcement is via
+  branch protection requiring both `test` and `gate-gel-integration` green
+  (no `needs` edge by design, for faster PR feedback).
 - Release scope: `gate-gel-integration` job in `publish-workspace.yaml`,
   `needs: [validate]`, re-run at the exact signed tag revision before any
   `cargo publish`. Publish jobs `need` the gate chain, so gate failure blocks

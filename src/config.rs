@@ -3211,6 +3211,15 @@ fn validate_required_gates(ci: &CiConfig) -> Result<()> {
         if !seen.insert(id.to_owned()) {
             bail!("simit project config: [[ci.required_gates]] duplicate id `{id}`");
         }
+        // Job names derive from the sanitized id (`gate-<sanitized>`), so
+        // distinct raw ids that sanitize identically (`a_b` vs `a-b`) would
+        // emit duplicate YAML keys and ambiguous `needs` references.
+        let sanitized = crate::render::ci::sanitize_gate_id(id);
+        if !seen.insert(format!("\0job:{sanitized}")) {
+            bail!(
+                "simit project config: [[ci.required_gates]] id `{id}` collides after sanitization (duplicate `gate-{sanitized}` job name)"
+            );
+        }
         if gate.run.trim().is_empty() || gate.run.contains(['\n', '\r']) {
             bail!(
                 "simit project config: [[ci.required_gates.{id}]] run must be a non-empty single-line command"

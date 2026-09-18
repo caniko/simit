@@ -2438,7 +2438,7 @@ fn push_required_gate_jobs(
     }
 }
 
-fn sanitize_gate_id(id: &str) -> String {
+pub(crate) fn sanitize_gate_id(id: &str) -> String {
     let mut out = String::new();
     for ch in id.chars() {
         if ch.is_ascii_alphanumeric() {
