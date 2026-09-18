@@ -174,11 +174,6 @@ const PINNED_TREEFMT_CALL: &str =
 const FMT_TOOLCHAIN_BINDING: &str =
     "fmtToolchain = rs-harbor.lib.mkToolchain {inherit pkgs; toolchainProfile = \"nightly\";};";
 
-pub fn patch_existing(content: &str, audit_tools: AuditTools) -> Result<String> {
-    if has_required_wiring_with_audit_tools(content, audit_tools) {
-        return Ok(content.to_owned());
-    }
-
 /// Migrate an old-shape treefmtEval call site to the pinned rustfmtPackage
 /// contract, inserting the fmtToolchain binding it depends on. Both edits
 /// happen in memory; callers must only write the result when this returns

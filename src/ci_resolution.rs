@@ -287,26 +287,6 @@ impl ResolvedCiInputs {
             bail!("aggregate workspace CI requires --workspace and no --package selectors");
         }
 
-        let with_nix_cargo_cache = cli
-            .with_nix_cargo_cache
-            .or(config.with_nix_cargo_cache)
-            .or(inference.with_nix_cargo_cache)
-            .unwrap_or(false);
-        if with_nix_cargo_cache && runtime != Runtime::Nix {
-            bail!("simit project config: with_nix_cargo_cache requires runtime = \"nix\"");
-        }
-        if with_nix_cargo_cache
-            && cfg
-                .ci
-                .extra_env
-                .keys()
-                .any(|key| matches!(key.as_str(), "CARGO_HOME" | "CARGO_TARGET_DIR"))
-        {
-            bail!(
-                "simit project config: with_nix_cargo_cache cannot be combined with CARGO_HOME or CARGO_TARGET_DIR overrides"
-            );
-        }
-
         let publish_strategy = cli
             .publish_strategy
             .or(config.publish_strategy)

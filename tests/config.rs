@@ -206,7 +206,7 @@ fn flake_and_ci_config_load() {
         r#"[flake]
 scope = "full"
 mode = "custom"
-backend = "harbor-py"
+backend = "py-harbor"
 toolchain_binding = "toolchain.rustToolchain"
 crane_lib_binding = "craneLib"
 package_binding = "package"
@@ -247,7 +247,7 @@ prepublish_commands = ["nix flake check --no-build"]
 
     assert_eq!(cfg.flake.scope, Some(FlakeScope::Full));
     assert_eq!(cfg.flake.mode, FlakeMode::Custom);
-    assert_eq!(cfg.flake.backend, simit::config::FlakeBackend::HarborPy);
+    assert_eq!(cfg.flake.backend, simit::config::FlakeBackend::PyHarbor);
     assert_eq!(cfg.flake.toolchain_binding, "toolchain.rustToolchain");
     assert_eq!(
         cfg.flake.expected_outputs.packages,
@@ -261,18 +261,11 @@ prepublish_commands = ["nix flake check --no-build"]
     assert_eq!(cfg.flake.expected_outputs.dev_shells, ["default", "docs"]);
     assert_eq!(cfg.flake.expected_outputs.top_level, ["hmModules"]);
     assert_eq!(
-        load_toml("[flake]\nbackend = \"harbor-py\"\n")
-            .unwrap()
-            .flake
-            .backend,
-        simit::config::FlakeBackend::HarborPy
-    );
-    assert_eq!(
         load_toml("[flake]\nbackend = \"py-harbor\"\n")
             .unwrap()
             .flake
             .backend,
-        simit::config::FlakeBackend::HarborPy
+        simit::config::FlakeBackend::PyHarbor
     );
     assert_eq!(cfg.ci.extra_setup.len(), 1);
     assert_eq!(
@@ -318,7 +311,7 @@ prepublish_commands = ["nix flake check --no-build"]
 #[test]
 fn flake_and_ci_config_load_from_flake_output() {
     with_fake_nix(
-        r#"{"flake":{"scope":"hooks-only","mode":"custom","backend":"harbor-py","toolchain_binding":"toolchain.rustToolchain","expected_outputs":{"apps":["default"],"dev_shells":["default"],"checks":["hm-module"],"top_level":["hmModules"]}},"ci":{"extra_setup":["echo setup"],"extra_env":{"PG_URL":"${{ secrets.PG_URL }}"}}}"#,
+        r#"{"flake":{"scope":"hooks-only","mode":"custom","backend":"py-harbor","toolchain_binding":"toolchain.rustToolchain","expected_outputs":{"apps":["default"],"dev_shells":["default"],"checks":["hm-module"],"top_level":["hmModules"]}},"ci":{"extra_setup":["echo setup"],"extra_env":{"PG_URL":"${{ secrets.PG_URL }}"}}}"#,
         |temp| {
             fs::write(
                 temp.path().join("flake.nix"),
@@ -329,7 +322,7 @@ fn flake_and_ci_config_load_from_flake_output() {
             let cfg = ProjectConfig::load(temp.path()).unwrap();
             assert_eq!(cfg.flake.scope, Some(FlakeScope::HooksOnly));
             assert_eq!(cfg.flake.mode, FlakeMode::Custom);
-            assert_eq!(cfg.flake.backend, simit::config::FlakeBackend::HarborPy);
+            assert_eq!(cfg.flake.backend, simit::config::FlakeBackend::PyHarbor);
             assert_eq!(cfg.flake.toolchain_binding, "toolchain.rustToolchain");
             assert_eq!(cfg.flake.expected_outputs.apps, ["default"]);
             assert_eq!(cfg.flake.expected_outputs.dev_shells, ["default"]);

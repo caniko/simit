@@ -1187,7 +1187,7 @@ fn infer_expected_ci_files(
             }
         }
     }
-    if provider == CiProvider::Actions
+    if backend.provider() == CiProvider::Actions
         && config.prebuild.is_none()
         && !options.nix_builds.is_empty()
     {

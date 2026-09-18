@@ -418,6 +418,17 @@ pub enum BumpKind {
 #[derive(Debug, Args)]
 pub struct InitCiCommand {
     #[arg(
+        long,
+        help = "Generate or verify only the Pages workflow without changing primary CI"
+    )]
+    pub pages_only: bool,
+    #[arg(
+        long,
+        conflicts_with_all = ["pages_only", "runner"],
+        help = "Generate or verify only the native GitHub prebuild workflow"
+    )]
+    pub prebuild_only: bool,
+    #[arg(
         long = "package",
         value_name = "NAME",
         conflicts_with = "workspace",

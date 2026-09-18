@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -410,7 +410,7 @@ fn run_prebuild_only(command: InitCiCommand) -> Result<()> {
         bail!("Prebuild workflow generation requires flake.nix at the workspace root");
     }
     let cfg = ProjectConfig::load(&workspace_root)?;
-    let file = github_prebuild_file(&cfg, Platform::Github, CiProvider::Actions)?
+    let file = github_prebuild_file(&cfg)?
         .context("--prebuild-only requires a [prebuild] configuration")?;
     let files = [file];
     let message = "Prebuild workflow is not up to date; run `simit init ci --prebuild-only`";
@@ -547,26 +547,6 @@ fn workflow_workspace_root() -> Result<PathBuf> {
             .into_std_path_buf());
     }
     Ok(python::find_project_root(&current_dir).unwrap_or(current_dir))
-}
-
-fn github_prebuild_file(
-    cfg: &ProjectConfig,
-    platform: Platform,
-    provider: CiProvider,
-) -> Result<Option<project::GeneratedFile>> {
-    let Some(prebuild) = &cfg.prebuild else {
-        return Ok(None);
-    };
-    if platform != Platform::Github || provider != CiProvider::Actions {
-        bail!("[prebuild] requires GitHub Actions");
-    }
-    Ok(Some(ci::github_prebuild_file(
-        &cfg.ci.nix_system_runners,
-        &cfg.ci.nix_builds,
-        prebuild,
-        &cfg.release.artifacts,
-        cfg.release.attic.as_ref(),
-    )?))
 }
 
 fn run_pages_only(command: InitCiCommand) -> Result<()> {
@@ -1436,6 +1416,8 @@ pub(crate) fn project_regeneration_command(workspace_root: &Path) -> Result<Opti
         resolved.publish_crates || with_artifacts || with_homebrew || windows_packagers;
     let inferred_pages = infer_codeberg_pages_from_workflows(&snapshots)?;
     let command = InitCiCommand {
+        pages_only: false,
+        prebuild_only: false,
         packages: Vec::new(),
         workspace: false,
         workspace_strategy: None,
