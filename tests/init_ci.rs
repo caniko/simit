@@ -1099,6 +1099,7 @@ fn github_nix_can_generate_github_pages_workflow() {
     assert!(pages.contains("uses: actions/checkout@"));
     assert!(pages.contains("uses: actions/upload-pages-artifact@"));
     assert!(pages.contains("uses: actions/deploy-pages@"));
+    assert!(pages.contains("environment:\n      name: github-pages\n      url: ${{ steps.deployment.outputs.page_url }}"));
     assert!(pages.contains("nix build .#site --no-link --out-link result-pages-site"));
     assert!(pages.contains("grep -qx plinth.tartanoglu.com result-pages-site/.domains"));
     assert!(!pages.contains("CODEBERG_TOKEN"));

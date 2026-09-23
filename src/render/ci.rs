@@ -1046,6 +1046,7 @@ fn github_pages_workflow(runner: &ResolvedRunner, pages: &CodebergPagesOptions) 
     workflow.push_str("permissions:\n  contents: read\n  pages: write\n  id-token: write\n\n");
     workflow.push_str("jobs:\n  publish:\n    runs-on: ");
     workflow.push_str(&runs_on(runner));
+    workflow.push_str("\n    environment:\n      name: github-pages\n      url: ${{ steps.deployment.outputs.page_url }}");
     workflow.push_str("\n    env:\n      NIX_CONFIG: \"experimental-features = nix-command flakes\"\n    steps:\n");
     push_checkout_step(&mut workflow, Platform::Github);
     push_install_nix_step(&mut workflow, Platform::Github);
