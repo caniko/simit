@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-09-25
+
 ### Added
 
 - Support custom non-Rust and non-Python flakes with a generic backend, including JavaScript and TeX formatter detection.
@@ -420,7 +422,8 @@ ci`, including the `~/.cargo/bin` key, rust-cache settings, and why Nix
 
 - Prepare the first public crates.io release.
 
-[Unreleased]: https://github.com/caniko/simit/compare/0.17.15...HEAD
+[Unreleased]: https://github.com/caniko/simit/compare/0.18.0...HEAD
+[0.18.0]: https://github.com/caniko/simit/compare/0.17.15...0.18.0
 [0.17.15]: https://github.com/caniko/simit/compare/0.17.14...0.17.15
 [0.17.14]: https://github.com/caniko/simit/compare/0.17.13...0.17.14
 [0.17.13]: https://github.com/caniko/simit/compare/0.17.12...0.17.13
