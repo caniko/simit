@@ -479,7 +479,7 @@ fn publish_workspace_workflow(
         w.push_str(&shell_word(name));
         w.push_str(" | awk -F'[#@]' 'NF > 1 {print $NF}' | tail -n 1)\" = \"$tag\" || { echo \"");
         w.push_str(name);
-        w.push_str(" ");
+        w.push(' ');
         w.push_str(version);
         w.push_str(" does not match tag $tag\" >&2; exit 1; }\n");
     }
@@ -520,7 +520,7 @@ fn publish_workspace_workflow(
         w.push_str(&gate.id);
         w.push_str("\n        run: ");
         w.push_str(&gate.run);
-        w.push_str("\n");
+        w.push('\n');
         previous = job;
     }
     // Publish jobs in plan order with explicit needs.
@@ -592,7 +592,7 @@ fn publish_workspace_workflow(
         w.push_str("          set -euo pipefail\n");
         w.push_str("          crate_name=");
         w.push_str(&shell_quote(name));
-        w.push_str("\n");
+        w.push('\n');
         w.push_str("          version=\"${GITHUB_REF_NAME:-${GITHUB_REF#refs/tags/}}\"\n");
         w.push_str("          if [ -z \"$version\" ]; then echo \"Could not determine release version from tag ref\" >&2; exit 1; fi\n");
         w.push_str("          # Preflight: fail fast on auth/ownership/validation vs propagation delay.\n");
@@ -617,7 +617,7 @@ fn publish_workspace_workflow(
         w.push_str(prefix);
         w.push_str("cargo publish -p ");
         w.push_str(&shell_word(name));
-        w.push_str("\n");
+        w.push('\n');
         w.push_str("          # Bounded propagation wait: dependents need this version visible.\n");
         w.push_str("          for attempt in $(seq 1 20); do\n");
         w.push_str("            code=\"$(curl --retry 2 -sS -o /dev/null -w '%{http_code}' -A 'simit publish-workspace propagation' \"https://crates.io/api/v1/crates/${crate_name}/${version}\" || echo 000)\"\n");
@@ -2434,7 +2434,7 @@ fn push_required_gate_jobs(
         workflow.push_str(&gate.id);
         workflow.push_str("\n        run: ");
         workflow.push_str(&gate.run);
-        workflow.push_str("\n");
+        workflow.push('\n');
     }
 }
 
@@ -2443,8 +2443,6 @@ pub(crate) fn sanitize_gate_id(id: &str) -> String {
     for ch in id.chars() {
         if ch.is_ascii_alphanumeric() {
             out.push(ch.to_ascii_lowercase());
-        } else if ch == '-' || ch == '_' {
-            out.push('-');
         } else {
             out.push('-');
         }
