@@ -136,5 +136,19 @@ fn release_plan_dry_run_package_fails_fast_in_publish_order() {
     assert!(stdout.contains("  ok"));
     assert!(stdout.contains("b 0.1.0"));
     assert!(stdout.contains("  fail"));
-    assert!(!stdout.contains("c 0.1.0"));
+    // Fail-fast in publish order: `b` fails, so `c` must never reach
+    // packaging, even though it still appears in the publish-order listing.
+    let packaged: Vec<&str> = stdout
+        .lines()
+        .filter(|line| line.contains("dry-run package (archive construction only"))
+        .collect();
+    assert_eq!(
+        packaged.len(),
+        2,
+        "expected only `a` and `b` to be packaged: {stdout}"
+    );
+    assert!(
+        !packaged.iter().any(|line| line.contains("c 0.1.0")),
+        "`c` was packaged after `b` failed: {stdout}"
+    );
 }

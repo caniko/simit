@@ -3044,7 +3044,7 @@ fn forgejo_nix_homebrew_step_matches_hardened_shape() {
         "git -c credential.helper=\"$credential_helper\" clone \"$HOMEBREW_TAP_URL\" tap"
     ));
     assert!(!workflow.contains("https://$HOMEBREW_TAP_TOKEN"));
-    assert!(workflow.contains("nix run '.#rs-harbor' -- brew bump \\"));
+    assert!(workflow.contains("nix run '.#harbor-rs' -- brew bump \\"));
     assert!(workflow.contains("--name demo \\"));
     assert!(workflow.contains("--description 'demo binary' \\"));
     assert!(workflow.contains("--homepage 'https://example.com' \\"));

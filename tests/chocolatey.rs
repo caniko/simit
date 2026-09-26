@@ -259,6 +259,9 @@ fn bump_push_requires_default_api_key_env() {
 
     let output = simit()
         .current_dir(temp.path())
+        // The ambient environment may export a real key; this test is about
+        // the missing-variable path, so model it explicitly.
+        .env_remove("CHOCOLATEY_API_KEY")
         .args([
             "dist",
             "chocolatey",
