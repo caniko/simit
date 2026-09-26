@@ -198,70 +198,74 @@ fn build_workflow(
         );
     }
 
-    if runtime == Runtime::Nix && options.om_ci != OmCiMode::Replace {
-        steps.push(step("nix-check", image, format!("{prefix}nix flake check")));
-    }
-    steps.push(step(
-        STEP_CARGO_FMT,
-        image,
-        format!("{prefix}cargo fmt --all -- --check"),
-    ));
-    steps.push(step(
-        STEP_CARGO_TEST,
-        image,
-        format!("{prefix}cargo test{}", package_selector(package, options)),
-    ));
-    if options.with_docs {
+    if let Some(command) = &config.check_command {
+        steps.push(step("project-check", image, command.clone()));
+    } else {
+        if runtime == Runtime::Nix && options.om_ci != OmCiMode::Replace {
+            steps.push(step("nix-check", image, format!("{prefix}nix flake check")));
+        }
         steps.push(step(
-            STEP_CARGO_DOC,
+            STEP_CARGO_FMT,
             image,
-            format!("{prefix}cargo doc --no-deps --all-features"),
+            format!("{prefix}cargo fmt --all -- --check"),
         ));
-    }
-    if options.with_nextest {
         steps.push(step(
-            "cargo-nextest",
+            STEP_CARGO_TEST,
             image,
-            format!(
-                "{prefix}cargo nextest run --all-features{}",
-                package_selector(package, options)
-            ),
+            format!("{prefix}cargo test{}", package_selector(package, options)),
         ));
-    }
-    if options.with_audit {
+        if options.with_docs {
+            steps.push(step(
+                STEP_CARGO_DOC,
+                image,
+                format!("{prefix}cargo doc --no-deps --all-features"),
+            ));
+        }
+        if options.with_nextest {
+            steps.push(step(
+                "cargo-nextest",
+                image,
+                format!(
+                    "{prefix}cargo nextest run --all-features{}",
+                    package_selector(package, options)
+                ),
+            ));
+        }
+        if options.with_audit {
+            steps.push(step(
+                "cargo-audit",
+                image,
+                format!("{prefix}cargo audit --no-fetch --stale"),
+            ));
+        }
+        if options.with_deny {
+            steps.push(step(
+                "cargo-deny",
+                image,
+                format!("{prefix}cargo deny check bans licenses sources"),
+            ));
+        }
+        if options.om_ci != OmCiMode::Off {
+            steps.push(
+                Step::new("om-ci", image)
+                    .command(format!("nix run \"{}\" -- ci run", options.omnix_ref)),
+            );
+        }
         steps.push(step(
-            "cargo-audit",
+            STEP_CARGO_CLIPPY,
             image,
-            format!("{prefix}cargo audit --no-fetch --stale"),
+            format!("{prefix}cargo clippy --all-targets -- --deny warnings"),
         ));
-    }
-    if options.with_deny {
-        steps.push(step(
-            "cargo-deny",
-            image,
-            format!("{prefix}cargo deny check bans licenses sources"),
-        ));
-    }
-    if options.om_ci != OmCiMode::Off {
-        steps.push(
-            Step::new("om-ci", image)
-                .command(format!("nix run \"{}\" -- ci run", options.omnix_ref)),
-        );
-    }
-    steps.push(step(
-        STEP_CARGO_CLIPPY,
-        image,
-        format!("{prefix}cargo clippy --all-targets -- --deny warnings"),
-    ));
-    if package.is_publishable() {
-        steps.push(step(
-            STEP_CARGO_PACKAGE,
-            image,
-            format!(
-                "{prefix}cargo package --allow-dirty --list{}",
-                package_selector(package, options)
-            ),
-        ));
+        if package.is_publishable() {
+            steps.push(step(
+                STEP_CARGO_PACKAGE,
+                image,
+                format!(
+                    "{prefix}cargo package --allow-dirty --list{}",
+                    package_selector(package, options)
+                ),
+            ));
+        }
     }
     if self_check.enabled {
         let mut command = String::from("cargo run -- init ci --ci-provider crow");

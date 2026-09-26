@@ -532,6 +532,8 @@ pub struct CrowCiConfig {
     pub format: CrowWorkflowFormat,
     pub image: Option<String>,
     pub nix_image: Option<String>,
+    /// Project-owned orchestrator that replaces the generic Rust check steps.
+    pub check_command: Option<String>,
     pub platform: Option<String>,
     pub labels: BTreeMap<String, String>,
     pub workspace_base: Option<String>,
@@ -554,6 +556,7 @@ impl Default for CrowCiConfig {
             format: CrowWorkflowFormat::Yaml,
             image: None,
             nix_image: None,
+            check_command: None,
             platform: None,
             labels: BTreeMap::new(),
             workspace_base: None,
@@ -1979,6 +1982,13 @@ impl ProjectConfig {
             );
         }
         validate_required_gates(&self.ci)?;
+        if let Some(command) = &self.ci.crow.check_command
+            && (command.trim().is_empty() || command.contains(['\n', '\r']))
+        {
+            bail!(
+                "simit project config: [ci.crow].check_command must be a non-empty single-line command"
+            );
+        }
         if self.ci.publish_strategy == PublishStrategy::Coordinated && !self.ci.publish_crates {
             bail!(
                 "simit project config: [ci].publish_strategy = \"coordinated\" requires [ci].publish_crates = true"
@@ -3387,6 +3397,11 @@ fn set_crow_table(table: &mut Table, crow: &CrowCiConfig) {
     if let Some(nix_image) = &crow.nix_image {
         crow_table["nix_image"] = value(nix_image.as_str());
     }
+    set_optional_string(
+        &mut crow_table,
+        "check_command",
+        crow.check_command.as_deref(),
+    );
     if let Some(platform) = &crow.platform {
         crow_table["platform"] = value(platform.as_str());
     }
