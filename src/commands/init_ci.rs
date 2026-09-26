@@ -29,6 +29,12 @@ use crate::render::ci::{
 use crate::user_config::{ResolvedRunner, UserConfig, validate_runner_label};
 
 pub fn run(command: InitCiCommand) -> Result<()> {
+    if command.prebuild_only {
+        return run_prebuild_only(command);
+    }
+    if command.pages_only {
+        return run_pages_only(command);
+    }
     let current_dir = std::env::current_dir().context("reading current directory")?;
     if command.platform == Some(Platform::Gitlab) {
         return run_nix_only(command);
@@ -1846,53 +1852,6 @@ fn reconcile_ci_files(
     }
 }
 
-fn extra_generated_workflows(
-    workspace_root: &Path,
-    platform: Platform,
-    expected: &BTreeSet<PathBuf>,
-) -> Result<Vec<PathBuf>> {
-    let workflow_dir = PathBuf::from(platform.workflow_dir());
-    let absolute_dir = workspace_root.join(&workflow_dir);
-    let entries = match fs::read_dir(&absolute_dir) {
-        Ok(entries) => entries,
-        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(err) => return Err(err).with_context(|| format!("reading {}", absolute_dir.display())),
-    };
-
-    let mut extras = Vec::new();
-    for entry in entries {
-        let entry =
-            entry.with_context(|| format!("reading entry in {}", absolute_dir.display()))?;
-        if !entry
-            .file_type()
-            .with_context(|| format!("reading file type for {}", entry.path().display()))?
-            .is_file()
-        {
-            continue;
-        }
-        let path = entry.path();
-        let Some(extension) = path.extension().and_then(|ext| ext.to_str()) else {
-            continue;
-        };
-        if extension != "yaml" && extension != "yml" {
-            continue;
-        }
-        let relative_path = workflow_dir.join(entry.file_name());
-        if expected.contains(&relative_path) {
-            continue;
-        }
-        let content =
-            fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-        if content.contains(ci::GENERATED_WORKFLOW_MARKER)
-            && is_ci_managed_workflow_name(&entry.file_name())
-        {
-            extras.push(relative_path);
-        }
-    }
-    extras.sort();
-    Ok(extras)
-}
-
 fn cleanup_obsolete_nix_workflows(
     workspace_root: &Path,
     platform: Platform,
@@ -2002,67 +1961,6 @@ fn cleanup_obsolete_publish_workflows(
         }
     }
     Ok(())
-}
-
-fn check_generated_crow_files(
-    workspace_root: &Path,
-    files: &[project::GeneratedFile],
-    message: &str,
-    show_diff: bool,
-) -> Result<()> {
-    project::check_generated_files(workspace_root, files, message, show_diff)?;
-    let expected = files
-        .iter()
-        .map(|file| file.relative_path.clone())
-        .collect::<BTreeSet<_>>();
-    let directory = workspace_root.join(".crow");
-    let entries = match fs::read_dir(&directory) {
-        Ok(entries) => entries,
-        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(()),
-        Err(err) => return Err(err).with_context(|| format!("reading {}", directory.display())),
-    };
-    let mut extras = Vec::new();
-    for entry in entries {
-        let entry = entry.with_context(|| format!("reading entry in {}", directory.display()))?;
-        if !entry.file_type()?.is_file() {
-            continue;
-        }
-        let entry_path = entry.path();
-        let Some(extension) = entry_path.extension().and_then(|ext| ext.to_str()) else {
-            continue;
-        };
-        if !matches!(extension, "yaml" | "yml" | "jsonnet") {
-            continue;
-        }
-        let relative = PathBuf::from(".crow").join(entry.file_name());
-        if expected.contains(&relative) {
-            continue;
-        }
-        if matches!(
-            entry.file_name().to_str(),
-            Some("release.yaml" | "release.yml")
-        ) {
-            // `init release` owns the release workflow; CI must not claim it
-            // as an obsolete Crow build file.
-            continue;
-        }
-        let content = fs::read_to_string(entry_path)?;
-        if generated_workflow_marker_present(&content) {
-            extras.push(relative);
-        }
-    }
-    if extras.is_empty() {
-        return Ok(());
-    }
-    extras.sort();
-    bail!(
-        "{message}:\n{}",
-        extras
-            .into_iter()
-            .map(|path| format!("{} is extra", path.display()))
-            .collect::<Vec<_>>()
-            .join("\n")
-    )
 }
 
 fn is_ci_managed_workflow_name(name: &std::ffi::OsStr) -> bool {
