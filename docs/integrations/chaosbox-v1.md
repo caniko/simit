@@ -131,13 +131,13 @@ Runtime contract (lockstep v1):
 
 - One lockstep workspace release: every publishable member version must equal
   the tag (`cargo pkgid -p <crate>` compared to `$tag` after `git verify-tag`
-  + checkout of the validated SHA). Development-only `publish = false`
-  members are excluded from the plan and publish jobs.
+  - checkout of the validated SHA). Development-only `publish = false`
+    members are excluded from the plan and publish jobs.
 - Triggers only on tags (`[0-9]*`) + `workflow_dispatch`. No publish-on-PR.
 - Least-privilege permissions (`contents: read`, `id-token: write`), pinned
   actions, serialized concurrency (`cancel-in-progress: false`).
 - Maintainer trust root preserved: `test -s keys/maintainers.gpg` + `git
-  verify-tag`; missing configuration fails instead of disabling signing.
+verify-tag`; missing configuration fails instead of disabling signing.
 
 Per-crate publish steps in plan order, each with:
 
@@ -152,7 +152,7 @@ Conflict handling is honest, not blind:
 - `404` → not yet published; proceed.
 - `200` → verify checksum (`crates.io/.../checksum` vs local
   `target/package/<crate>-<version>.crate` sha256). Match → resume (`exit
-  0`); mismatch → `conflict: ... refusing to treat as success` (`exit 1`).
+0`); mismatch → `conflict: ... refusing to treat as success` (`exit 1`).
 - `401`/`403` → authorization/ownership, fail fast.
 - Other → fail fast (validation vs network distinguished in logs).
 
@@ -172,11 +172,11 @@ Dependency semantics (tested against `cargo metadata`):
 ## Signed-tag and credential prerequisites
 
 - Signed semver tags (`0.1.0`, no `v` prefix in this workflow; `git
-  verify-tag` against `keys/maintainers.gpg`), `CHANGELOG.md` section for the
+verify-tag` against `keys/maintainers.gpg`), `CHANGELOG.md` section for the
   version when using `init release` flows, and `keys/minisign.pub` when
   artifact signing is enabled.
 - `keys/maintainers.gpg` committed; `[release.signing].key` set or `git config
-  user.signingkey` / `--maintainer-key` available at generation time.
+user.signingkey` / `--maintainer-key` available at generation time.
   Generation fails closed when signing is required but unconfigured.
 - `CRATES_IO_API_TOKEN` repo secret for publish jobs only. No secrets on
   untrusted PRs; no untrusted PR code on privileged release runners.
