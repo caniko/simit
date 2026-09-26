@@ -104,11 +104,15 @@ pub fn run(command: InitCiCommand) -> Result<()> {
         }
     }
     if resolved.workspace_strategy == crate::cli::WorkspaceStrategy::Aggregate
-        && (resolved.publish_crates
+        && ((resolved.publish_crates && !coordinated)
             || command.with_homebrew
             || command.with_chocolatey
             || command.with_scoop)
     {
+        // Coordinated publish is workspace-level (one publish-workspace.yaml
+        // in release-plan order), so it pairs with aggregate CI instead of
+        // tripping the per-member publishing rule; the check above already
+        // requires aggregate when coordinated publish is selected.
         bail!("aggregate workspace CI cannot be combined with crate or platform publishing");
     }
     if command.with_homebrew && resolved.runtime != Runtime::Nix {
