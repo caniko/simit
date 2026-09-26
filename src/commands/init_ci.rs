@@ -78,8 +78,7 @@ pub fn run(command: InitCiCommand) -> Result<()> {
     validate_runner(resolved.runner.as_deref())?;
     validate_runner(resolved.windows_runner.as_deref())?;
     let packages = cargo::select_packages(&metadata, &resolved.packages, resolved.workspace)?;
-    let coordinated =
-        resolved.publish_strategy == crate::config::PublishStrategy::Coordinated;
+    let coordinated = resolved.publish_strategy == crate::config::PublishStrategy::Coordinated;
     if coordinated {
         if platform != Platform::Github {
             bail!("coordinated workspace publication requires --platform github in v1");
@@ -91,7 +90,9 @@ pub fn run(command: InitCiCommand) -> Result<()> {
             bail!("coordinated workspace publication requires --workspace");
         }
         if !resolved.packages.is_empty() {
-            bail!("coordinated workspace publication cannot be combined with --package selectors; it releases the lockstep workspace");
+            bail!(
+                "coordinated workspace publication cannot be combined with --package selectors; it releases the lockstep workspace"
+            );
         }
         if resolved.workspace_strategy == crate::cli::WorkspaceStrategy::Members
             && metadata.workspace_members.len() > 1
@@ -285,7 +286,9 @@ pub fn run(command: InitCiCommand) -> Result<()> {
                 versions,
             },
         )?);
-    } else if resolved.workspace_strategy == crate::cli::WorkspaceStrategy::Aggregate && publish_crates {
+    } else if resolved.workspace_strategy == crate::cli::WorkspaceStrategy::Aggregate
+        && publish_crates
+    {
         for package in &packages {
             if package.is_publishable() {
                 files.push(ci::publish_file(
@@ -943,7 +946,9 @@ fn run_crow(
         bail!("aggregate workspace CI is only supported for Actions workflows");
     }
     if resolved.publish_strategy == crate::config::PublishStrategy::Coordinated {
-        bail!("coordinated workspace publication is only supported for Actions workflows on GitHub in v1");
+        bail!(
+            "coordinated workspace publication is only supported for Actions workflows on GitHub in v1"
+        );
     }
     if !resolved.required_gates.is_empty() {
         bail!("required gates are only supported for Actions workflows in v1");
@@ -1102,7 +1107,9 @@ fn run_crow_python(
         bail!("Python uv Crow CI does not support --workspace or --package");
     }
     if command.coordinated_publish.is_some() || !cfg.ci.required_gates.is_empty() {
-        bail!("required gates and coordinated publication are only supported for Actions workflows in v1");
+        bail!(
+            "required gates and coordinated publication are only supported for Actions workflows in v1"
+        );
     }
     let mut crow = cfg.ci.crow.clone();
     if let Some(format) = command.crow_format {
@@ -1953,8 +1960,8 @@ fn cleanup_obsolete_publish_workflows(
         if !should_remove {
             continue;
         }
-        let content =
-            fs::read_to_string(entry.path()).with_context(|| format!("reading {}", entry.path().display()))?;
+        let content = fs::read_to_string(entry.path())
+            .with_context(|| format!("reading {}", entry.path().display()))?;
         if generated_workflow_marker_present(&content) {
             fs::remove_file(workspace_root.join(&relative))
                 .with_context(|| format!("removing obsolete {}", relative.display()))?;

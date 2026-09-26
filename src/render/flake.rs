@@ -371,8 +371,7 @@ pub fn custom_wiring_mismatches(
     {
         missing.push("flake.nix custom mode: missing git-hooks input".to_owned());
     }
-    if !content
-        .contains("treefmtEval = treefmt-nix.lib.evalModule pkgs (import ./nix/treefmt.nix")
+    if !content.contains("treefmtEval = treefmt-nix.lib.evalModule pkgs (import ./nix/treefmt.nix")
     {
         missing.push(
             "flake.nix custom mode: missing treefmtEval import of ./nix/treefmt.nix".to_owned(),
@@ -554,8 +553,7 @@ fn brace_delta(line: &str) -> i32 {
 
 /// Does a flake call-site pass rustfmtPackage into nix/treefmt.nix?
 pub fn flake_passes_rustfmt_package(flake_content: &str) -> bool {
-    flake_content.contains("rustfmtPackage")
-        && flake_content.contains("import ./nix/treefmt.nix")
+    flake_content.contains("rustfmtPackage") && flake_content.contains("import ./nix/treefmt.nix")
 }
 
 /// Does a nix/treefmt.nix module declare the rustfmtPackage parameter?
@@ -571,10 +569,7 @@ pub fn treefmt_module_wants_rustfmt_package(module_content: &str) -> bool {
 /// failure. The reverse (old call into a module that requires the
 /// parameter) always breaks evaluation, as does passing the argument to a
 /// module whose header has no `...` to accept it.
-pub fn treefmt_call_module_mismatch(
-    flake_content: &str,
-    module_content: &str,
-) -> Option<String> {
+pub fn treefmt_call_module_mismatch(flake_content: &str, module_content: &str) -> Option<String> {
     let call_passes = flake_passes_rustfmt_package(flake_content);
     let module_wants = treefmt_module_wants_rustfmt_package(module_content);
     match (call_passes, module_wants) {
@@ -2010,10 +2005,7 @@ mod tests {
         fn indent_of(line: &str) -> &str {
             &line[..line.len() - line.trim_start().len()]
         }
-        assert_eq!(
-            indent_of(lines[binding_line]),
-            indent_of(lines[call_line])
-        );
+        assert_eq!(indent_of(lines[binding_line]), indent_of(lines[call_line]));
         // Idempotent: a second pass changes nothing.
         let mut twice = patched.clone();
         migrate_treefmt_call(&mut twice).unwrap();
@@ -2037,16 +2029,14 @@ mod tests {
 
     #[test]
     fn patch_existing_migrates_old_wired_flake_for_rust() {
-        let patched =
-            patch_existing(OLD_WIRED_FLAKE, AuditTools::default(), true).unwrap();
+        let patched = patch_existing(OLD_WIRED_FLAKE, AuditTools::default(), true).unwrap();
         assert!(treefmt_call_module_mismatch(&patched, NEW_MODULE).is_none());
         assert_eq!(patched.matches("treefmtEval =").count(), 1);
     }
 
     #[test]
     fn patch_existing_leaves_bare_call_alone_without_rust() {
-        let patched =
-            patch_existing(OLD_WIRED_FLAKE, AuditTools::default(), false).unwrap();
+        let patched = patch_existing(OLD_WIRED_FLAKE, AuditTools::default(), false).unwrap();
         assert!(patched.contains("(import ./nix/treefmt.nix)"));
         assert!(!patched.contains("fmtToolchain ="));
     }
@@ -2066,7 +2056,10 @@ mod tests {
         // Inserting a second treefmtEval binding would break evaluation;
         // a lone treefmtEval without its pre-commit companion is refused.
         let mut lone = OLD_WIRED_FLAKE.to_owned();
-        lone = lone.replace("        pre-commit-check = git-hooks.lib.${system}.run {", "        other = 1;\n        dropped-pre-commit-check = git-hooks.lib.${system}.run {");
+        lone = lone.replace(
+            "        pre-commit-check = git-hooks.lib.${system}.run {",
+            "        other = 1;\n        dropped-pre-commit-check = git-hooks.lib.${system}.run {",
+        );
         let err = patch_existing(&lone, AuditTools::default(), true).unwrap_err();
         assert!(err.to_string().contains("pre-commit-check"));
     }

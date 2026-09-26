@@ -162,8 +162,7 @@ pub fn run(command: InitFlakeCommand) -> Result<()> {
             .iter()
             .find(|file| file.relative_path == Path::new("nix/treefmt.nix"))
             .is_some_and(|file| flake::treefmt_module_wants_rustfmt_package(&file.content));
-        let patched =
-            flake::patch_existing(&content, audit_tools, generated_module_needs_package)?;
+        let patched = flake::patch_existing(&content, audit_tools, generated_module_needs_package)?;
         let mut patched_files = files.clone();
         let flake_file = patched_files
             .iter_mut()
@@ -629,10 +628,9 @@ fn check_files(
                     if manages_treefmt_module {
                         let module_path = workspace_root.join("nix/treefmt.nix");
                         if let Ok(module_actual) = fs::read_to_string(&module_path) {
-                            if let Some(mismatch) = flake::treefmt_call_module_mismatch(
-                                &actual,
-                                &module_actual,
-                            ) {
+                            if let Some(mismatch) =
+                                flake::treefmt_call_module_mismatch(&actual, &module_actual)
+                            {
                                 mismatches.push(format!(
                                     "nix/treefmt.nix disagrees with custom flake.nix: {mismatch}"
                                 ));

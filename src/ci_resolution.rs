@@ -563,8 +563,7 @@ impl CiConfigLayer {
             with_artifacts: cfg.ci.with_artifacts.then_some(true),
             with_pypi_publish: cfg.ci.with_pypi_publish.then_some(true),
             publish_crates: cfg.ci.publish_crates.then_some(true),
-            publish_strategy: (cfg.ci.publish_strategy
-                != crate::config::PublishStrategy::Members)
+            publish_strategy: (cfg.ci.publish_strategy != crate::config::PublishStrategy::Members)
                 .then_some(cfg.ci.publish_strategy),
             om_ci: cfg.ci.om_ci.then_some(true),
             om_ci_augment: cfg.ci.om_ci_augment.then_some(true),
@@ -803,7 +802,12 @@ fn infer_required_gates(content: &str) -> Vec<crate::config::RequiredGate> {
                 break;
             } else if probe_trim == "run: |" {
                 continue;
-            } else if !run.is_empty() && !probe_trim.is_empty() && !probe_trim.starts_with('-') && !probe_trim.starts_with("env:") && !probe_trim.starts_with("timeout") {
+            } else if !run.is_empty()
+                && !probe_trim.is_empty()
+                && !probe_trim.starts_with('-')
+                && !probe_trim.starts_with("env:")
+                && !probe_trim.starts_with("timeout")
+            {
                 // Continuation of a `run: |` block (single-line gates only).
                 if run.is_empty() {
                     run = probe_trim.to_owned();

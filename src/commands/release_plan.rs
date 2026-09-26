@@ -526,7 +526,11 @@ mod tests {
     use crate::cargo::Dependency;
 
     fn package(name: &str, publishable: bool, dependencies: &[&str]) -> Package {
-        package_with_kinds(name, publishable, &dependencies.iter().map(|d| (*d, None)).collect::<Vec<_>>())
+        package_with_kinds(
+            name,
+            publishable,
+            &dependencies.iter().map(|d| (*d, None)).collect::<Vec<_>>(),
+        )
     }
 
     fn package_with_kinds(

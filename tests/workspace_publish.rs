@@ -13,7 +13,10 @@ fn simit() -> Command {
 
 fn fixture_dir(name: &str) -> TempDir {
     let temp = TempDir::new().unwrap();
-    copy_dir(Path::new("tests/fixtures").join(name).as_path(), temp.path());
+    copy_dir(
+        Path::new("tests/fixtures").join(name).as_path(),
+        temp.path(),
+    );
     temp
 }
 
@@ -305,14 +308,17 @@ fn coordinated_publish_replaces_per_member_outputs_only() {
         .status()
         .unwrap();
     assert!(status.success());
-    assert!(temp
-        .path()
-        .join(".github/workflows/publish-workspace.yaml")
-        .exists());
-    assert!(!temp
-        .path()
-        .join(".github/workflows/publish-crate-a.yaml")
-        .exists());
+    assert!(
+        temp.path()
+            .join(".github/workflows/publish-workspace.yaml")
+            .exists()
+    );
+    assert!(
+        !temp
+            .path()
+            .join(".github/workflows/publish-crate-a.yaml")
+            .exists()
+    );
     assert_eq!(
         read(&temp.path().join(".github/workflows/handwritten.yaml")),
         "name: handwritten\n"
@@ -379,9 +385,11 @@ fn coordinated_publish_check_detects_drift_and_is_stable() {
         .output()
         .unwrap();
     assert!(!check.status.success());
-    assert!(String::from_utf8_lossy(&check.stderr).contains("differs")
-        || String::from_utf8_lossy(&check.stdout).contains("differs")
-        || !check.status.success());
+    assert!(
+        String::from_utf8_lossy(&check.stderr).contains("differs")
+            || String::from_utf8_lossy(&check.stdout).contains("differs")
+            || !check.status.success()
+    );
 
     // Missing file detected.
     fs::remove_file(temp.path().join(".github/workflows/publish-workspace.yaml")).unwrap();

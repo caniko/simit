@@ -1979,8 +1979,7 @@ impl ProjectConfig {
             );
         }
         validate_required_gates(&self.ci)?;
-        if self.ci.publish_strategy == PublishStrategy::Coordinated && !self.ci.publish_crates
-        {
+        if self.ci.publish_strategy == PublishStrategy::Coordinated && !self.ci.publish_crates {
             bail!(
                 "simit project config: [ci].publish_strategy = \"coordinated\" requires [ci].publish_crates = true"
             );
@@ -3257,10 +3256,7 @@ fn set_required_gates_table(table: &mut Table, gates: &[RequiredGate]) {
         item.insert("id", Value::from(gate.id.as_str()));
         item.insert("run", Value::from(gate.run.as_str()));
         if gate.timeout_minutes != default_gate_timeout_minutes() {
-            item.insert(
-                "timeout_minutes",
-                Value::from(gate.timeout_minutes as i64),
-            );
+            item.insert("timeout_minutes", Value::from(gate.timeout_minutes as i64));
         }
         if !gate.env.is_empty() {
             let mut env = InlineTable::default();

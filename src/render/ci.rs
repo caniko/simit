@@ -468,7 +468,9 @@ fn publish_workspace_workflow(
     w.push_str("          tag=\"${GITHUB_REF_NAME:-${GITHUB_REF#refs/tags/}}\"\n");
     w.push_str("          if ! printf '%s\\n' \"$tag\" | grep -Eq '^[0-9]+\\.[0-9]+\\.[0-9]+$'; then echo \"Tag must be an exact semver version like 0.1.1, got '$tag'\" >&2; exit 1; fi\n");
     w.push_str("          test -s keys/maintainers.gpg\n");
-    w.push_str("          GNUPGHOME=\"$(mktemp -d)\"; export GNUPGHOME; chmod 700 \"$GNUPGHOME\"\n");
+    w.push_str(
+        "          GNUPGHOME=\"$(mktemp -d)\"; export GNUPGHOME; chmod 700 \"$GNUPGHOME\"\n",
+    );
     w.push_str("          gpg --batch --import keys/maintainers.gpg\n");
     w.push_str("          git fetch --force --tags origin \"refs/tags/${tag}:refs/tags/${tag}\"\n");
     w.push_str("          git verify-tag \"$tag\"\n");
@@ -529,7 +531,8 @@ fn publish_workspace_workflow(
     // bounded propagation wait. No publish-on-PR: this workflow only runs on
     // tags + workflow_dispatch, with least-privilege permissions and pinned
     // actions. Secrets appear only here, never in ordinary PR jobs.
-    let mut job_names: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    let mut job_names: std::collections::BTreeMap<String, String> =
+        std::collections::BTreeMap::new();
     for (name, _) in plan {
         let job = format!("publish-{}", sanitize_gate_id(name));
         job_names.insert(name.clone(), job);
@@ -595,7 +598,9 @@ fn publish_workspace_workflow(
         w.push('\n');
         w.push_str("          version=\"${GITHUB_REF_NAME:-${GITHUB_REF#refs/tags/}}\"\n");
         w.push_str("          if [ -z \"$version\" ]; then echo \"Could not determine release version from tag ref\" >&2; exit 1; fi\n");
-        w.push_str("          # Preflight: fail fast on auth/ownership/validation vs propagation delay.\n");
+        w.push_str(
+            "          # Preflight: fail fast on auth/ownership/validation vs propagation delay.\n",
+        );
         w.push_str("          if [ -z \"${CRATES_IO_API_TOKEN:-}\" ] && [ -z \"${CARGO_REGISTRY_TOKEN:-}\" ]; then echo \"CRATES_IO_API_TOKEN is required to publish to crates.io\" >&2; exit 1; fi\n");
         w.push_str("          export CARGO_REGISTRY_TOKEN=\"${CARGO_REGISTRY_TOKEN:-$CRATES_IO_API_TOKEN}\"\n");
         w.push_str("          status=\"$(curl --retry 3 -sS -o /tmp/simit-crate.json -w '%{http_code}' -A 'simit publish-workspace preflight' \"https://crates.io/api/v1/crates/${crate_name}/${version}\" || echo 000)\"\n");
@@ -604,8 +609,12 @@ fn publish_workspace_workflow(
         w.push_str("              echo \"${crate_name} ${version} already exists on crates.io; verifying it is the intended release\" \n");
         w.push_str("              published_checksum=\"$(jq -er --arg v \"$version\" '.versions[] | select(.num == $v) | .checksum' /tmp/simit-crate.json 2>/dev/null || true)\"\n");
         w.push_str("              local_crate=\"$(ls target/package/${crate_name}-${version}.crate 2>/dev/null || echo \"\")\"\n");
-        w.push_str("              if [ -n \"$published_checksum\" ] && [ -f \"$local_crate\" ]; then\n");
-        w.push_str("                local_checksum=\"$(sha256sum \"$local_crate\" | awk '{print $1}')\"\n");
+        w.push_str(
+            "              if [ -n \"$published_checksum\" ] && [ -f \"$local_crate\" ]; then\n",
+        );
+        w.push_str(
+            "                local_checksum=\"$(sha256sum \"$local_crate\" | awk '{print $1}')\"\n",
+        );
         w.push_str("                if [ \"$local_checksum\" = \"$published_checksum\" ]; then echo \"checksum matches; resuming (already published)\"; exit 0; fi\n");
         w.push_str("              fi\n");
         w.push_str("              echo \"conflict: ${crate_name} ${version} exists but checksum does not match the local archive; refusing to treat as success\" >&2; exit 1;;\n");
@@ -627,7 +636,9 @@ fn publish_workspace_workflow(
         previous = job.clone();
     }
     // Auditable summary (always runs, never publishes).
-    w.push_str(&format!("  publish-report:\n    needs: [{previous}]\n    if: always()\n"));
+    w.push_str(&format!(
+        "  publish-report:\n    needs: [{previous}]\n    if: always()\n"
+    ));
     w.push_str("    runs-on: ");
     w.push_str(&runs_on(runner));
     w.push('\n');
