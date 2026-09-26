@@ -2415,7 +2415,7 @@ fn push_required_gate_jobs(
         workflow.push_str(&runs_on(&runners.ci));
         workflow.push('\n');
         workflow.push_str(&format!("    timeout-minutes: {}\n", gate.timeout_minutes));
-        push_github_read_permissions(workflow, platform);
+        push_job_github_read_permissions(workflow, platform);
         // Gate env is scoped to this job only. Values may reference
         // `${{ secrets.X }}` for project-owned test credentials; release
         // secrets (CRATES_IO_API_TOKEN, minisign, etc.) must never appear here.
@@ -3393,6 +3393,15 @@ fn push_github_concurrency(workflow: &mut String) {
 fn push_github_read_permissions(workflow: &mut String, platform: Platform) {
     if platform == Platform::Github {
         workflow.push_str("permissions:\n  contents: read\n\n");
+    }
+}
+
+/// Job-scoped counterpart of `push_github_read_permissions`. Reusing the
+/// workflow-level variant inside a job emits a second top-level `permissions`
+/// key with no indentation, which makes the generated workflow invalid YAML.
+fn push_job_github_read_permissions(workflow: &mut String, platform: Platform) {
+    if platform == Platform::Github {
+        workflow.push_str("    permissions:\n      contents: read\n");
     }
 }
 
