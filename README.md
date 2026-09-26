@@ -188,6 +188,8 @@ provider = "crow"
 format = "yaml" # or "jsonnet"
 image = "rust:bookworm"
 nix_image = "ghcr.io/cachix/devenv:latest"
+# Optional: replace the generated check steps with a project-owned gate.
+check_command = "nix develop -c cargo run --locked -p my-ci -- ci"
 platform = "linux/amd64"
 labels = { location = "europe" }
 workspace_base = "/crow"
@@ -203,6 +205,10 @@ required = true
 Generated Crow workflows use Crow's native `labels`, `platform`, `when`,
 `workspace`, `variables`, `skip_clone`, step `commands`, and `from_secret`
 bindings. Shell variables are escaped as `$${NAME}` for Crow interpolation.
+`check_command` keeps setup and self-check steps but replaces the default
+flake/Cargo checks with a single `project-check` step. For Nix runtimes,
+choose a `nix_image` whose Crow container can write to `/nix`; the default
+image may require runner-specific permissions.
 
 Forgejo workflows use direct Rust container jobs by default, even when the
 repository has a `flake.nix`. The default container is derived from
