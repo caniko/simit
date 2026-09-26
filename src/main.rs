@@ -6,6 +6,9 @@ use simit::commands;
 
 fn main() {
     if let Err(err) = run() {
+        if let Some(test_exit) = err.downcast_ref::<simit::commands::test::TestExit>() {
+            std::process::exit(test_exit.code());
+        }
         if let Some(command_exit) = err.downcast_ref::<simit::commands::projects::CommandExit>() {
             eprintln!("simit: {command_exit}");
             std::process::exit(command_exit.code());
@@ -57,6 +60,7 @@ fn run() -> Result<()> {
             HooksAction::Install(command) => commands::hooks::install(command),
         },
         Commands::Config(command) => commands::config::run(command),
+        Commands::Test(command) => commands::test::run(command),
         Commands::Projects(command) => commands::projects::run(command),
         Commands::Upgrade(command) => commands::upgrade::run(command),
         Commands::Completions(command) => commands::completions::run(command),

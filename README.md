@@ -67,6 +67,35 @@ simit release sync-up --push
 
 Without `--push`, sync-up only moves the local tag.
 
+## Running tests with Git fixtures
+
+Run any project's test command directly, with its exit status and arguments
+preserved:
+
+```sh
+simit test -- cargo test
+simit test --git-fixtures -- pnpm test:run
+```
+
+On Unix, `--git-fixtures` creates a disposable temp directory and sets `TMPDIR`, `TMP`,
+and `TEMP` for the test subprocess. A temporary Git configuration includes the
+operator's original global configuration, then uses `includeIf gitdir:` to
+disable inherited hooks and automatic commit/tag signing **only for repositories
+whose Git directories are beneath that temp root**. It does not change identity,
+system configuration, checkout configuration, or hook files. Git operations in
+the original checkout retain their normal policy; linked worktrees with Git
+metadata outside the fixture root retain it too. Explicit local and
+command-scope Git settings still take precedence.
+
+Tests must honor the supplied temp directory. Hard-coded `/tmp` fixtures and
+tests that replace `GIT_CONFIG_GLOBAL` are outside this isolation. Set `TMPDIR`
+before invoking Simit to select a parent directory; use a short parent when
+testing Unix sockets. The runner needs Git with `git var GIT_CONFIG_GLOBAL`
+support. It executes the command without a shell, streams its standard I/O, and
+removes the temporary directory after the command exits, including failed tests.
+It does not install dependencies or provide an OS sandbox. Without
+`--git-fixtures`, the command's environment is unchanged.
+
 ## Project registry
 
 Simit records projects it has acted on in a per-user registry. Inspect that

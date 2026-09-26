@@ -27,6 +27,7 @@ pub mod release_secrets;
 pub mod release_verify;
 pub mod scaffold;
 pub mod scoop;
+pub mod test;
 pub mod upgrade;
 pub mod windows;
 pub mod winget;

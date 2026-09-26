@@ -34,6 +34,8 @@ pub enum Commands {
     Changelog(ChangelogCommand),
     #[command(about = "Install and verify project Git hooks")]
     Hooks(HooksCommand),
+    #[command(about = "Run tests with optional scoped Git fixture isolation")]
+    Test(TestCommand),
     #[command(about = "Manage user-scoped simit configuration")]
     Config(ConfigCommand),
     #[command(about = "Inspect and maintain the per-user project registry")]
@@ -44,6 +46,23 @@ pub enum Commands {
     Completions(CompletionsCommand),
     #[command(about = "Print a roff manpage for simit")]
     Man(ManCommand),
+}
+
+#[derive(Debug, Args)]
+pub struct TestCommand {
+    #[arg(
+        long,
+        help = "Isolate inherited hooks and signing only for repositories under a disposable test temp root (Unix)"
+    )]
+    pub git_fixtures: bool,
+    #[arg(
+        required = true,
+        last = true,
+        num_args = 1..,
+        value_name = "COMMAND",
+        help = "Test executable and arguments, after -- (no shell expansion)"
+    )]
+    pub command: Vec<OsString>,
 }
 
 #[derive(Debug, Args)]
