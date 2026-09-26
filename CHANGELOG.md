@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Pages inference is provider-aware: a GitHub-hosted `pages` workflow is now
+  identified positively from its own markers and workflow directory, and
+  resolves as applicable configuration instead of failing with a Codeberg
+  inference error that described healthy GitHub setup as malformed. Mixed
+  provider claims (both marker sets, or markers contradicting the workflow
+  directory) stay errors, and a Codeberg workflow with a bad repository still
+  reports its original inference error.
+- An `infer_expected_ci_files` configuration that will not load is now
+  reported, including the offending keys, instead of silently falling back to
+  defaults and surfacing only the resulting file drift.
+
 ## [0.18.0] - 2026-09-25
 
 ### Added

@@ -915,7 +915,12 @@ fn infer_expected_ci_files(
     workspace_root: &Path,
     marked: &[WorkflowFile],
 ) -> Result<Vec<project::GeneratedFile>> {
-    let config = ProjectConfig::load(workspace_root).unwrap_or_default();
+    // A configuration that will not load is a reportable condition, not a
+    // default: swallowing it here hid unsupported/legacy schema behind whatever
+    // the defaults produce, and the consumer could only ever see the resulting
+    // file drift. `{:#}` keeps the offending keys in the message.
+    let config =
+        ProjectConfig::load(workspace_root).context("loading simit project configuration")?;
     let backend = infer_ci_target(marked)?;
     let snapshots = workflow_snapshots(marked);
     if backend.provider() == CiProvider::Crow {
@@ -974,7 +979,7 @@ fn infer_expected_ci_files(
                 &options,
             )?);
         }
-        if let Some(pages) = config_pages_or_inferred(&config, marked)? {
+        if let Some(pages) = config_pages_or_inferred(workspace_root, &config, marked)? {
             files.push(crate::render::ci::codeberg_pages_file(
                 platform, &runner, &pages,
             )?);
@@ -1031,7 +1036,7 @@ fn infer_expected_ci_files(
                 &config.release.artifacts.trusted_public_keys,
             )?);
         }
-        if let Some(pages) = config_pages_or_inferred(&config, marked)? {
+        if let Some(pages) = config_pages_or_inferred(workspace_root, &config, marked)? {
             files.push(crate::render::ci::codeberg_pages_file(
                 platform, &runner, &pages,
             )?);
@@ -1208,7 +1213,7 @@ fn infer_expected_ci_files(
             &options,
         )?);
     }
-    if let Some(pages) = config_pages_or_inferred(&config, marked)? {
+    if let Some(pages) = config_pages_or_inferred(workspace_root, &config, marked)? {
         let pages_runner = config
             .ci
             .runner
@@ -1670,6 +1675,7 @@ fn infer_scoop_options(
 }
 
 fn config_pages_or_inferred(
+    workspace_root: &Path,
     config: &ProjectConfig,
     marked: &[WorkflowFile],
 ) -> Result<Option<ci::CodebergPagesOptions>> {
@@ -1684,10 +1690,84 @@ fn config_pages_or_inferred(
             deploy_app: pages.deploy_app,
         }));
     }
-    infer_codeberg_pages_options(marked)
+    infer_pages_options(workspace_root, marked)
 }
 
-fn infer_codeberg_pages_options(
+/// Which Pages provider a marked `pages` workflow belongs to.
+///
+/// Pages providers are not interchangeable, and only positive evidence routes
+/// one. The Codeberg inference reads `@codeberg.org/` out of the workflow
+/// body, so before this distinction existed a GitHub Pages workflow failed
+/// with an error that described healthy GitHub configuration as malformed
+/// Codeberg configuration — an inference error the consumer surfaced verbatim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PagesProvider {
+    Codeberg,
+    Github,
+    /// Both providers are claimed at once: the workflow carries both marker
+    /// sets, or its markers contradict the workflow directory it lives in.
+    Conflicting,
+    /// Neither the workflow directory nor its content names a provider.
+    Unidentified,
+}
+
+/// Markers only a Codeberg Pages workflow carries. Each is one the
+/// `infer_pages_*` helpers themselves read, so a workflow classified as
+/// Codeberg keeps today's inference — including today's error when it is
+/// malformed.
+const CODEBERG_PAGES_MARKERS: &[&str] = &[
+    "@codeberg.org/",
+    "CODEBERG_TOKEN: ${{ secrets.",
+    "DEPLOY_REMOTE=pages-origin",
+];
+
+/// Markers only a GitHub Pages workflow carries.
+const GITHUB_PAGES_MARKERS: &[&str] = &[
+    "actions/configure-pages",
+    "actions/upload-pages-artifact",
+    "actions/deploy-pages",
+    "peaceiris/actions-gh-pages",
+];
+
+/// The host a workflow directory names. `infer_ci_target` has already
+/// rejected a workflow tree that mixes these, so one directory means one host.
+fn pages_workflow_host(relative_path: &Path) -> Option<Platform> {
+    if relative_path.starts_with(".forgejo/workflows") {
+        Some(Platform::Forgejo)
+    } else if relative_path.starts_with(".github/workflows") {
+        Some(Platform::Github)
+    } else {
+        None
+    }
+}
+
+fn pages_provider(workflow: &WorkflowFile) -> PagesProvider {
+    let codeberg = CODEBERG_PAGES_MARKERS
+        .iter()
+        .any(|marker| workflow.content.contains(marker));
+    let github = GITHUB_PAGES_MARKERS
+        .iter()
+        .any(|marker| workflow.content.contains(marker));
+    let host = pages_workflow_host(&workflow.relative_path);
+    match (codeberg, github) {
+        (true, true) => PagesProvider::Conflicting,
+        (true, false) if host != Some(Platform::Forgejo) => PagesProvider::Conflicting,
+        (true, false) => PagesProvider::Codeberg,
+        (false, true) if host != Some(Platform::Github) => PagesProvider::Conflicting,
+        (false, true) => PagesProvider::Github,
+        // No markers: the directory is the only positive evidence left, and
+        // a bare Codeberg workflow with no markers stays what it was before —
+        // an error out of the Codeberg repo inference.
+        (false, false) => match host {
+            Some(Platform::Github) => PagesProvider::Github,
+            Some(Platform::Forgejo) => PagesProvider::Codeberg,
+            _ => PagesProvider::Unidentified,
+        },
+    }
+}
+
+fn infer_pages_options(
+    workspace_root: &Path,
     marked: &[WorkflowFile],
 ) -> Result<Option<ci::CodebergPagesOptions>> {
     let Some(workflow) = marked
@@ -1696,6 +1776,27 @@ fn infer_codeberg_pages_options(
     else {
         return Ok(None);
     };
+    match pages_provider(workflow) {
+        PagesProvider::Github => infer_github_pages_options(workspace_root, workflow).map(Some),
+        PagesProvider::Codeberg => infer_codeberg_pages_options(workflow).map(Some),
+        PagesProvider::Conflicting => bail!(
+            "{} claims two Pages providers at once: it carries both Codeberg Pages \
+             and GitHub Pages markers, or its markers contradict the workflow \
+             directory; keep one Pages provider per workflow tree",
+            workflow.relative_path.display()
+        ),
+        PagesProvider::Unidentified => bail!(
+            "cannot identify the Pages provider in {}: it carries no Codeberg Pages \
+             markers ({}) and does not live under .github/workflows or \
+             .forgejo/workflows; declare [ci.pages].repo in simit.toml or remove \
+             the workflow",
+            workflow.relative_path.display(),
+            CODEBERG_PAGES_MARKERS.join(", ")
+        ),
+    }
+}
+
+fn infer_codeberg_pages_options(workflow: &WorkflowFile) -> Result<ci::CodebergPagesOptions> {
     let repo = infer_pages_repo(&workflow.content).with_context(|| {
         format!(
             "inferring Codeberg Pages repo from {}",
@@ -1706,7 +1807,7 @@ fn infer_codeberg_pages_options(
         .split_once('/')
         .map(|(owner, _)| owner.to_owned())
         .context("inferring Codeberg Pages repo owner")?;
-    Ok(Some(ci::CodebergPagesOptions {
+    Ok(ci::CodebergPagesOptions {
         repo,
         owner,
         canonical_domain: infer_pages_canonical_domain(&workflow.content),
@@ -1718,7 +1819,69 @@ fn infer_codeberg_pages_options(
             .unwrap_or_else(|| "trunk".to_owned()),
         deploy_app: infer_pages_deploy_app(&workflow.content)
             .unwrap_or_else(|| ".#deploy-pages".to_owned()),
-    }))
+    })
+}
+
+/// GitHub Pages inference. `github_pages_workflow` renders exactly the
+/// branch, site output, and canonical domain, and all three round-trip
+/// through the `infer_pages_*` helpers, so a marked GitHub Pages workflow
+/// now lands in the expected set as ordinary recoverable drift.
+///
+/// The carrier still wants an `OWNER/REPO` that no GitHub Pages workflow
+/// states and no `[ci.pages]` declared here; the checkout's own origin is
+/// the only place that fact lives, and it fails closed rather than inventing
+/// one.
+fn infer_github_pages_options(
+    workspace_root: &Path,
+    workflow: &WorkflowFile,
+) -> Result<ci::CodebergPagesOptions> {
+    let repo = origin_owner_repo(workspace_root).with_context(|| {
+        format!(
+            "identifying the GitHub Pages repository for {}",
+            workflow.relative_path.display()
+        )
+    })?;
+    let owner = repo
+        .split_once('/')
+        .map(|(owner, _)| owner.to_owned())
+        .context("GitHub Pages origin is not an OWNER/REPO remote")?;
+    Ok(ci::CodebergPagesOptions {
+        repo,
+        owner,
+        canonical_domain: infer_pages_canonical_domain(&workflow.content),
+        site_output: infer_pages_site_output(&workflow.content)
+            .unwrap_or_else(|| ".#site".to_owned()),
+        // `github_pages_workflow` authenticates through `id-token: write`,
+        // so the secret name is carried, never rendered.
+        token_secret: infer_pages_token_secret(&workflow.content)
+            .unwrap_or_else(|| "GITHUB_TOKEN".to_owned()),
+        source_branch: infer_pages_source_branch(&workflow.content)
+            .unwrap_or_else(|| "trunk".to_owned()),
+        deploy_app: infer_pages_deploy_app(&workflow.content)
+            .unwrap_or_else(|| ".#deploy-pages".to_owned()),
+    })
+}
+
+/// `OWNER/REPO` as spelled by the checkout's `origin` remote, accepting the
+/// `https://host/owner/repo`, `git@host:owner/repo`, and `ssh://` shapes.
+fn origin_owner_repo(workspace_root: &Path) -> Result<String> {
+    let origin = crate::git::output(workspace_root, &["remote", "get-url", "origin"])
+        .context("reading the origin remote")?;
+    let origin = origin.trim();
+    let mut segments = origin.rsplit(['/', ':']);
+    let repo = segments
+        .next()
+        .unwrap_or_default()
+        .strip_suffix(".git")
+        .unwrap_or_default();
+    let owner = segments.next().unwrap_or_default();
+    if owner.is_empty() || repo.is_empty() || owner.contains('@') || owner.contains(':') {
+        bail!(
+            "origin remote {origin:?} does not look like an OWNER/REPO URL; declare \
+             [ci.pages].repo in simit.toml"
+        );
+    }
+    Ok(format!("{owner}/{repo}"))
 }
 
 fn infer_pages_repo(content: &str) -> Option<String> {
@@ -2192,6 +2355,185 @@ mod tests {
         assert!(pages_is_supplementary);
         assert!(unmarked.iter().all(is_supplementary_workflow));
         assert!(!marked.is_empty());
+    }
+
+    /// The shape `github_pages_workflow` renders: every marker the GitHub
+    /// inference keys on, plus the three fields it round-trips.
+    const GITHUB_PAGES_WORKFLOW: &str = r#"# codeberg:managed
+name: pages
+
+on:
+  push:
+    branches:
+      - trunk
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@0000000000000000000000000000000000000000
+      - uses: actions/configure-pages@0000000000000000000000000000000000000000
+      - run: nix build ./site#site --no-link --out-link result-pages-site
+      - run: |
+          test -f result-pages-site/.domains
+          grep -qx demo.example.com result-pages-site/.domains
+      - uses: actions/upload-pages-artifact@0000000000000000000000000000000000000000
+      - uses: actions/deploy-pages@0000000000000000000000000000000000000000
+"#;
+
+    /// The shape `codeberg_pages_workflow` renders.
+    const CODEBERG_PAGES_WORKFLOW: &str = r#"# codeberg:managed
+name: pages
+
+on:
+  push:
+    branches:
+      - trunk
+
+jobs:
+  publish:
+    runs-on: forgejo-deploy
+    steps:
+      - uses: https://codeberg.org/forgejo/actions/checkout@0000000000000000000000000000000000000000
+      - run: |
+          DEPLOY_REMOTE=pages-origin nix run github:codeberg-pages/deploy-action
+        env:
+          CODEBERG_TOKEN: ${{ secrets.codeberg_token }}
+      - run: git push ssh://git@codeberg.org/caniko/demo.git
+"#;
+
+    fn repo_with_origin(url: &str) -> (GitConfigGuard, TempDir) {
+        let (guard, repo) = git_repo();
+        let status = Command::new("git")
+            .args(["remote", "add", "origin", url])
+            .current_dir(repo.path())
+            .status()
+            .unwrap();
+        assert!(status.success());
+        (guard, repo)
+    }
+
+    fn marked_workflow(relative_path: &str, content: &str) -> Vec<WorkflowFile> {
+        vec![WorkflowFile {
+            relative_path: PathBuf::from(relative_path),
+            content: content.to_owned(),
+            marked: true,
+        }]
+    }
+
+    /// GitHub-only Pages must resolve as applicable configuration instead of
+    /// failing with an error that calls healthy GitHub setup malformed
+    /// Codeberg configuration.
+    #[test]
+    fn github_only_pages_infers_instead_of_failing_codeberg_inference() {
+        let (_guard, root) = repo_with_origin("https://github.com/caniko/demo.git");
+        let marked = marked_workflow(".github/workflows/pages.yaml", GITHUB_PAGES_WORKFLOW);
+
+        let pages = infer_pages_options(root.path(), &marked)
+            .unwrap()
+            .expect("a marked GitHub Pages workflow is part of the expected file set");
+
+        assert_eq!(pages.repo, "caniko/demo");
+        assert_eq!(pages.owner, "caniko");
+        assert_eq!(pages.source_branch, "trunk");
+        assert_eq!(pages.site_output, "./site#site");
+        assert_eq!(pages.canonical_domain.as_deref(), Some("demo.example.com"));
+        assert_eq!(pages.token_secret, "GITHUB_TOKEN");
+    }
+
+    /// A GitHub workflow with no Pages markers still resolves: the workflow
+    /// directory is the only positive evidence left.
+    #[test]
+    fn markerless_github_pages_workflow_resolves_from_its_directory() {
+        let (_guard, root) = repo_with_origin("git@github.com:caniko/demo.git");
+        let marked = marked_workflow(
+            ".github/workflows/pages.yaml",
+            "name: pages\non:\n  push:\n    branches:\n      - trunk\n",
+        );
+
+        let pages = infer_pages_options(root.path(), &marked)
+            .unwrap()
+            .expect("a GitHub-hosted pages workflow resolves without markers");
+
+        assert_eq!(pages.repo, "caniko/demo");
+        assert_eq!(pages.source_branch, "trunk");
+        assert_eq!(pages.site_output, ".#site");
+    }
+
+    /// The Codeberg path is untouched by provider detection.
+    #[test]
+    fn valid_codeberg_pages_still_infers_repo_and_owner() {
+        let root = TempDir::new().unwrap();
+        let marked = marked_workflow(".forgejo/workflows/pages.yaml", CODEBERG_PAGES_WORKFLOW);
+
+        let pages = infer_pages_options(root.path(), &marked)
+            .unwrap()
+            .expect("a Codeberg Pages workflow is part of the expected file set");
+
+        assert_eq!(pages.repo, "caniko/demo");
+        assert_eq!(pages.owner, "caniko");
+        assert_eq!(pages.source_branch, "trunk");
+        assert_eq!(pages.token_secret, "codeberg_token");
+    }
+
+    /// Malformed Codeberg configuration stays loud: a Codeberg-hosted
+    /// workflow that names no repository cannot be inferred.
+    #[test]
+    fn malformed_codeberg_pages_stays_an_error() {
+        let root = TempDir::new().unwrap();
+        let marked = marked_workflow(
+            ".forgejo/workflows/pages.yaml",
+            "name: pages\n  CODEBERG_TOKEN: ${{ secrets.codeberg_token }}\n",
+        );
+
+        let error = infer_pages_options(root.path(), &marked)
+            .expect_err("a Codeberg workflow with no repository is malformed");
+
+        assert!(
+            format!("{error:#}")
+                .contains("inferring Codeberg Pages repo from .forgejo/workflows/pages.yaml"),
+            "unhelpful error: {error:#}"
+        );
+    }
+
+    /// A workflow claiming both providers is ambiguous, and ambiguity is not
+    /// silently resolved to "not applicable".
+    #[test]
+    fn mixed_provider_pages_workflow_stays_an_error() {
+        let root = TempDir::new().unwrap();
+        let mut mixed = GITHUB_PAGES_WORKFLOW.to_owned();
+        mixed.push_str("      - run: git push ssh://git@codeberg.org/caniko/demo.git\n");
+        let marked = marked_workflow(".github/workflows/pages.yaml", &mixed);
+
+        let error = infer_pages_options(root.path(), &marked)
+            .expect_err("two Pages providers in one workflow is ambiguous");
+
+        assert!(
+            format!("{error:#}").contains("claims two Pages providers"),
+            "unhelpful error: {error:#}"
+        );
+    }
+
+    /// The origin remote must actually be an OWNER/REPO before it is used to
+    /// describe a GitHub Pages repository.
+    #[test]
+    fn origin_without_a_repo_path_is_reported_not_mangled_into_owner_repo() {
+        // scp-style without a path: the segment before the last one is a host,
+        // not an owner.
+        let (_guard, root) = repo_with_origin("git@github.com:demo.git");
+
+        let error = origin_owner_repo(root.path()).expect_err("no OWNER/REPO to read");
+
+        assert!(
+            format!("{error:#}").contains("[ci.pages].repo"),
+            "unhelpful error: {error:#}"
+        );
     }
 
     #[test]
