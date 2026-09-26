@@ -102,6 +102,29 @@ fn loading_without_simit_toml_returns_default_config() {
 }
 
 #[test]
+fn crow_check_command_survives_ci_config_updates() {
+    let temp = TempDir::new().unwrap();
+    fs::write(
+        temp.path().join("simit.toml"),
+        "[ci]\nprovider = \"crow\"\n[ci.crow]\ncheck_command = \"nix develop -c cargo run -- ci\"\n",
+    )
+    .unwrap();
+    let mut ci = ProjectConfig::load(temp.path()).unwrap().ci;
+    ci.with_docs = true;
+
+    assert!(ProjectConfig::write_ci(temp.path(), &ci).unwrap());
+    assert_eq!(
+        ProjectConfig::load(temp.path())
+            .unwrap()
+            .ci
+            .crow
+            .check_command
+            .as_deref(),
+        Some("nix develop -c cargo run -- ci")
+    );
+}
+
+#[test]
 fn workspace_cargo_metadata_simit_config_loads() {
     let cfg = load_cargo_manifest(
         r#"[workspace]
