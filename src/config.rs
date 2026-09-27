@@ -534,6 +534,9 @@ pub struct CrowCiConfig {
     pub nix_image: Option<String>,
     /// Project-owned orchestrator that replaces the generic Rust check steps.
     pub check_command: Option<String>,
+    /// Crow secret available only to the push-event copy of `check_command`.
+    /// Pull requests run the same gate without receiving this secret.
+    pub check_push_secret: Option<String>,
     pub platform: Option<String>,
     pub labels: BTreeMap<String, String>,
     pub workspace_base: Option<String>,
@@ -557,6 +560,7 @@ impl Default for CrowCiConfig {
             image: None,
             nix_image: None,
             check_command: None,
+            check_push_secret: None,
             platform: None,
             labels: BTreeMap::new(),
             workspace_base: None,
@@ -1989,6 +1993,17 @@ impl ProjectConfig {
                 "simit project config: [ci.crow].check_command must be a non-empty single-line command"
             );
         }
+        if let Some(secret) = &self.ci.crow.check_push_secret {
+            validate_secret_name("simit project config: [ci.crow].check_push_secret", secret)?;
+            if self.ci.crow.check_command.is_none() {
+                bail!("simit project config: [ci.crow].check_push_secret requires check_command");
+            }
+            if self.ci.required_secrets.contains(secret) {
+                bail!(
+                    "simit project config: [ci.crow].check_push_secret must not also be a global required_secret"
+                );
+            }
+        }
         if self.ci.publish_strategy == PublishStrategy::Coordinated && !self.ci.publish_crates {
             bail!(
                 "simit project config: [ci].publish_strategy = \"coordinated\" requires [ci].publish_crates = true"
@@ -3401,6 +3416,11 @@ fn set_crow_table(table: &mut Table, crow: &CrowCiConfig) {
         &mut crow_table,
         "check_command",
         crow.check_command.as_deref(),
+    );
+    set_optional_string(
+        &mut crow_table,
+        "check_push_secret",
+        crow.check_push_secret.as_deref(),
     );
     if let Some(platform) = &crow.platform {
         crow_table["platform"] = value(platform.as_str());

@@ -77,6 +77,8 @@ struct Step {
     failure: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     temp_volumes: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    when: Vec<BTreeMap<String, Value>>,
 }
 
 impl Step {
@@ -91,6 +93,7 @@ impl Step {
             entrypoint: None,
             failure: None,
             temp_volumes: Vec::new(),
+            when: Vec::new(),
         }
     }
 
@@ -199,7 +202,16 @@ fn build_workflow(
     }
 
     if let Some(command) = &config.check_command {
-        steps.push(step("project-check", image, command.clone()));
+        if let Some(secret) = &config.check_push_secret {
+            let mut push = step("project-check-push", image, command.clone()).secret(secret);
+            push.when.push(condition("event", "push"));
+            steps.push(push);
+            let mut pr = step("project-check-pr", image, command.clone());
+            pr.when.push(condition("event", "pull_request"));
+            steps.push(pr);
+        } else {
+            steps.push(step("project-check", image, command.clone()));
+        }
     } else {
         if runtime == Runtime::Nix && options.om_ci != OmCiMode::Replace {
             steps.push(step("nix-check", image, format!("{prefix}nix flake check")));
