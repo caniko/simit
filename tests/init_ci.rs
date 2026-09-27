@@ -918,6 +918,98 @@ check_command = "nix develop -c cargo run --locked -p demo-ci -- ci"
 }
 
 #[test]
+fn crow_check_push_secret_never_reaches_pull_requests() {
+    let temp = init_package(true);
+    fs::write(
+        temp.path().join("simit.toml"),
+        r#"[ci]
+provider = "crow"
+platform = "forgejo"
+runtime = "nix"
+
+[ci.crow]
+check_command = "nix develop -c cargo run -p demo-ci -- ci"
+check_push_secret = "ATTIC_TOKEN"
+"#,
+    )
+    .unwrap();
+    assert!(
+        simit()
+            .current_dir(temp.path())
+            .args(["init", "ci"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let workflow = fs::read_to_string(temp.path().join(".crow/build.yaml")).unwrap();
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
+    let steps = yaml["steps"].as_sequence().unwrap();
+    assert_eq!(
+        steps.len(),
+        3,
+        "Nix setup and both event-specific full gates"
+    );
+    let push = steps
+        .iter()
+        .find(|step| step["name"] == "project-check-push")
+        .unwrap();
+    let pr = steps
+        .iter()
+        .find(|step| step["name"] == "project-check-pr")
+        .unwrap();
+    assert_eq!(
+        push["commands"], pr["commands"],
+        "no quality gate may be dropped on PRs"
+    );
+    assert_eq!(
+        push["environment"]["ATTIC_TOKEN"]["from_secret"],
+        "ATTIC_TOKEN"
+    );
+    assert_eq!(push["when"][0]["event"], "push");
+    assert_eq!(pr["when"][0]["event"], "pull_request");
+    assert!(pr["environment"].get("ATTIC_TOKEN").is_none());
+    assert!(steps[0]["environment"].get("ATTIC_TOKEN").is_none());
+    assert!(
+        simit()
+            .current_dir(temp.path())
+            .args(["init", "ci", "--check"])
+            .status()
+            .unwrap()
+            .success()
+    );
+}
+
+#[test]
+fn crow_check_push_secret_requires_a_gate_and_cannot_also_be_global() {
+    let temp = init_package(true);
+    let config = temp.path().join("simit.toml");
+    fs::write(
+        &config,
+        "[ci]\nprovider = \"crow\"\n[ci.crow]\ncheck_push_secret = \"ATTIC_TOKEN\"\n",
+    )
+    .unwrap();
+    let output = simit()
+        .current_dir(temp.path())
+        .args(["init", "ci", "--check"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("requires check_command"));
+
+    fs::write(&config, "[ci]\nprovider = \"crow\"\nrequired_secrets = [\"ATTIC_TOKEN\"]\n[ci.crow]\ncheck_command = \"cargo test\"\ncheck_push_secret = \"ATTIC_TOKEN\"\n").unwrap();
+    let output = simit()
+        .current_dir(temp.path())
+        .args(["init", "ci", "--check"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("must not also be a global required_secret")
+    );
+}
+
+#[test]
 fn infer_project_ci_target_prefers_config_over_marked_workflows() {
     let temp = init_package(true);
     fs::write(

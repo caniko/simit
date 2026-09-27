@@ -217,6 +217,10 @@ provider = "crow"
 format = "yaml" # or "jsonnet"
 image = "rust:bookworm"
 nix_image = "ghcr.io/cachix/devenv:latest"
+# Optional: replace the generated check steps with a project-owned gate.
+check_command = "nix develop -c cargo run --locked -p my-ci -- ci"
+# Optional: the push copy alone receives this Crow repo secret.
+check_push_secret = "ATTIC_TOKEN"
 platform = "linux/amd64"
 labels = { location = "europe" }
 workspace_base = "/crow"
@@ -229,13 +233,16 @@ default = "staging"
 required = true
 ```
 
-Set `[ci.crow].check_command` to run a project-owned CI orchestrator as the
-`project-check` step instead of Simit's generic Cargo and Nix checks. The Crow
-setup step, environment, and optional self-check still apply.
-
 Generated Crow workflows use Crow's native `labels`, `platform`, `when`,
 `workspace`, `variables`, `skip_clone`, step `commands`, and `from_secret`
 bindings. Shell variables are escaped as `$${NAME}` for Crow interpolation.
+`check_command` keeps setup and self-check steps but replaces the default
+flake/Cargo checks with a single `project-check` step. With
+`check_push_secret`, the same command runs in event-gated push and pull-request
+steps: only the push step has a `from_secret` binding. The secret must not also
+be listed in `[ci].required_secrets`, which binds to every step. For Nix runtimes,
+choose a `nix_image` whose Crow container can write to `/nix`; the default
+image may require runner-specific permissions.
 
 Forgejo workflows use direct Rust container jobs by default, even when the
 repository has a `flake.nix`. The default container is derived from
