@@ -84,6 +84,8 @@ pub fn run(command: InitFlakeCommand) -> Result<()> {
         return Ok(());
     }
 
+    validate_hooks_only_policy(workspace_root, &files, scope, &languages, &rust_edition)?;
+
     if command.check {
         check_files(
             workspace_root,
@@ -216,6 +218,8 @@ pub fn run_python(command: InitFlakeCommand) -> Result<()> {
         return Ok(());
     }
 
+    validate_hooks_only_policy(workspace_root, &files, scope, &languages, "2024")?;
+
     if command.check {
         check_files(
             workspace_root,
@@ -332,6 +336,8 @@ pub fn run_generic(command: InitFlakeCommand) -> Result<()> {
         flake::print_files(&hook_files(&files));
         return Ok(());
     }
+
+    validate_hooks_only_policy(&workspace_root, &files, scope, &languages, "2024")?;
 
     if command.check {
         check_files(
@@ -759,6 +765,37 @@ fn hook_files(files: &[GeneratedFile]) -> Vec<GeneratedFile> {
         .filter(|file| file.relative_path != Path::new("flake.nix"))
         .cloned()
         .collect()
+}
+
+// Hooks-only is also useful for scaffolding a new project. Once a flake
+// exists, however, removing standalone formatters requires policy coverage.
+fn validate_hooks_only_policy(
+    root: &Path,
+    files: &[GeneratedFile],
+    scope: FlakeScope,
+    languages: &Languages,
+    edition: &str,
+) -> Result<()> {
+    if scope != FlakeScope::HooksOnly || !root.join("flake.nix").exists() {
+        return Ok(());
+    }
+    let uses_treefmt = files.iter().any(|file| {
+        file.relative_path == Path::new("nix/pre-commit.nix")
+            && file.content.contains("treefmtWrapper")
+    });
+    if uses_treefmt {
+        let policy = fs::read_to_string(root.join("nix/treefmt.nix")).unwrap_or_default();
+        if !flake::is_generated_treefmt(&policy, languages, edition) {
+            bail!(
+                "hooks-only update requires a recognized generated treefmt policy before removing standalone formatter hooks; custom or imported policies need evaluated coverage evidence. Review `simit init flake --scope full --print` for the generated policy contract"
+            );
+        }
+        let flake_content = fs::read_to_string(root.join("flake.nix"))?;
+        if let Some(mismatch) = flake::treefmt_call_module_mismatch(&flake_content, &policy) {
+            bail!("hooks-only update requires matching treefmt wiring: {mismatch}");
+        }
+    }
+    Ok(())
 }
 
 fn pre_commit_removal_notes(actual: &str, generated: &str) -> Vec<String> {

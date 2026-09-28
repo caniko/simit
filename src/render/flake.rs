@@ -789,9 +789,15 @@ pub fn has_required_pre_commit_with_components(
         line.starts_with("treefmt =") || line.starts_with("treefmt=")
     });
 
-    (!selected(FlakeComponent::Treefmt, true)
-        || (has_treefmt && content.contains("treefmtWrapper")))
+    let treefmt_selected = selected(FlakeComponent::Treefmt, true);
+
+    (!treefmt_selected
+        || (has_treefmt
+            && content.contains("treefmtWrapper")
+            && !content.contains("cargo-fmt")
+            && !content.contains("uv-ruff-format")))
         && (!selected(FlakeComponent::CargoFmt, languages.rust)
+            || treefmt_selected
             || (content.contains("cargo-fmt") && content.contains("cargo fmt --all -- --check")))
         && (!selected(FlakeComponent::CargoClippy, languages.rust)
             || (content.contains("cargo-clippy")
@@ -810,6 +816,7 @@ pub fn has_required_pre_commit_with_components(
         && (!selected(FlakeComponent::NixFlakeCheck, languages.nix)
             || (content.contains("nix-flake-check") && content.contains("flake check")))
         && (!selected(FlakeComponent::UvRuffFormat, languages.uv_python)
+            || treefmt_selected
             || (content.contains("uv-ruff-format")
                 && content.contains("uv run ruff format --check .")))
         && (!selected(FlakeComponent::UvMypy, languages.uv_python)
@@ -1358,15 +1365,6 @@ fn python_template(project: &python::Project) -> String {
             ${{checkEnv}}/bin/python -m mypy .
             echo ok > $out/result
           '';
-          uv-format = pkgs.runCommand "{name}-uv-format" {{ }} ''
-            export HOME=$TMPDIR/home
-            export XDG_CACHE_HOME=$TMPDIR/cache
-            export UV_NO_SYNC=1
-            mkdir -p "$HOME" "$XDG_CACHE_HOME" "$out"
-            cd ${{./.}}
-            ${{checkEnv}}/bin/uv run --no-sync ruff format --check .
-            echo ok > $out/result
-          '';
         }};
 
     in
@@ -1888,8 +1886,8 @@ fn pre_commit_nix(
             components.contains(&component)
         }
     };
+    let treefmt_selected = selected(FlakeComponent::Treefmt, true);
     let has_rust_component = [
-        FlakeComponent::CargoFmt,
         FlakeComponent::CargoClippy,
         FlakeComponent::CargoMsrv,
         FlakeComponent::CargoAudit,
@@ -1897,17 +1895,26 @@ fn pre_commit_nix(
     ]
     .into_iter()
     .any(|component| selected(component, languages.rust));
+    // treefmt is the sole formatter: CargoFmt and UvRuffFormat are covered by
+    // the configured wrapper, so they must not emit a second hook when
+    // treefmt is selected. They remain only as a fallback when treefmt is
+    // explicitly disabled.
+    let cargo_fmt_fallback =
+        selected(FlakeComponent::CargoFmt, languages.rust) && !treefmt_selected;
+    let ruff_fmt_fallback =
+        selected(FlakeComponent::UvRuffFormat, languages.uv_python) && !treefmt_selected;
+    let has_rust_component = has_rust_component || cargo_fmt_fallback;
     let mut content = String::new();
     content.push_str("{\n");
     content.push_str("  pkgs,\n");
-    if selected(FlakeComponent::Treefmt, true) {
+    if treefmt_selected {
         content.push_str("  treefmtWrapper,\n");
     }
     if has_rust_component {
         content.push_str("  rustToolchain ? null,\n");
     }
     content.push_str("}: {\n");
-    if selected(FlakeComponent::Treefmt, true) {
+    if treefmt_selected {
         content.push_str("  treefmt = {\n");
         content.push_str("    enable = true;\n");
         content.push_str("    name = \"treefmt\";\n");
@@ -1917,7 +1924,7 @@ fn pre_commit_nix(
         content.push_str("  };\n");
     }
 
-    if selected(FlakeComponent::CargoFmt, languages.rust) {
+    if cargo_fmt_fallback {
         content.push_str("\n  cargo-fmt = {\n");
         content.push_str("    enable = true;\n");
         content.push_str("    name = \"cargo fmt\";\n");
@@ -1996,7 +2003,7 @@ fn pre_commit_nix(
         content.push_str("  };\n");
     }
 
-    if selected(FlakeComponent::UvRuffFormat, languages.uv_python) {
+    if ruff_fmt_fallback {
         content.push_str("\n  uv-ruff-format = {\n");
         content.push_str("    enable = true;\n");
         content.push_str("    name = \"uv ruff format\";\n");

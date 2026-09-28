@@ -662,7 +662,7 @@ pub fn python_ci_file(
             vec![
                 "offline-tests".to_owned(),
                 "typecheck".to_owned(),
-                "uv-format".to_owned(),
+                "formatting".to_owned(),
             ]
         } else {
             check_outputs.to_vec()

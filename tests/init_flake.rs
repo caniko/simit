@@ -347,6 +347,28 @@ fn custom_skillnet_flake() -> &'static str {
 }
 
 #[test]
+fn hooks_only_refuses_to_drop_python_formatter_without_policy_coverage() {
+    let temp = init_python_project();
+    fs::write(temp.path().join("flake.nix"), "{}\n").unwrap();
+    fs::create_dir_all(temp.path().join("nix")).unwrap();
+    fs::write(
+        temp.path().join("nix/treefmt.nix"),
+        "{...}: { programs.alejandra.enable = true; }\n",
+    )
+    .unwrap();
+    let hooks = "{...}: { uv-ruff-format.entry = \"uv run ruff format --check .\"; }\n";
+    fs::write(temp.path().join("nix/pre-commit.nix"), hooks).unwrap();
+    let output = simit()
+        .current_dir(temp.path())
+        .args(["init", "flake"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("hooks-only"));
+    assert_eq!(read(&temp.path().join("nix/pre-commit.nix")), hooks);
+}
+
+#[test]
 fn check_rejects_disabled_formatter_hidden_by_a_comment() {
     let temp = init_package();
     assert!(
@@ -406,7 +428,10 @@ fn default_scope_writes_only_detected_hook_file() {
     assert!(!temp.path().join("nix/treefmt.nix").exists());
 
     let hooks = read(&temp.path().join("nix/pre-commit.nix"));
-    assert!(hooks.contains("cargo fmt --all -- --check"));
+    // treefmt is the sole formatter: Rust formatting is covered by the
+    // configured wrapper, so no separate cargo-fmt hook is emitted.
+    assert!(hooks.contains("treefmt --ci"));
+    assert!(!hooks.contains("cargo-fmt"));
     assert!(hooks.contains("cargo clippy --all-targets --all-features -- --deny warnings"));
     assert!(hooks.contains("cargo-msrv"));
     assert!(hooks.contains("cargo check MSRV"));
@@ -650,7 +675,11 @@ version = "0.1.0"
     assert!(status.success());
 
     let hooks = read(&temp.path().join("nix/pre-commit.nix"));
-    assert!(hooks.contains("uv run ruff format --check ."));
+    // treefmt covers Ruff formatting; only the mypy typecheck keeps a
+    // separate hook.
+    assert!(hooks.contains("treefmt --ci"));
+    assert!(!hooks.contains("uv-ruff-format"));
+    assert!(!hooks.contains("uv run ruff format --check ."));
     assert!(hooks.contains("uv run mypy ."));
 }
 
@@ -676,8 +705,12 @@ fn pure_uv_python_project_generates_py_harbor_flake() {
     assert!(flake.contains("\"pyd\""));
 
     let hooks = read(&temp.path().join("nix/pre-commit.nix"));
-    assert!(hooks.contains("uv-ruff-format"));
+    assert!(hooks.contains("treefmt --ci"));
+    assert!(!hooks.contains("uv-ruff-format"));
     assert!(hooks.contains("uv-mypy"));
+
+    let treefmt = read(&temp.path().join("nix/treefmt.nix"));
+    assert!(treefmt.contains("programs.ruff-format.enable = true;"));
 
     let check_status = simit()
         .current_dir(temp.path())
@@ -717,7 +750,9 @@ fn python_component_selection_excludes_rust_and_unselected_hooks() {
     let hooks = read(&temp.path().join("nix/pre-commit.nix"));
     assert!(hooks.contains("treefmt"));
     assert!(hooks.contains("nix-flake-check"));
-    assert!(hooks.contains("uv-ruff-format"));
+    // treefmt covers Ruff formatting, so an explicit uv-ruff-format
+    // component does not emit a second hook.
+    assert!(!hooks.contains("uv-ruff-format"));
     assert!(!hooks.contains("uv-mypy"));
     assert!(!hooks.contains("cargo-"));
     assert!(!hooks.contains("rustToolchain"));
@@ -865,24 +900,42 @@ fn check_succeeds_when_flake_and_hooks_are_current() {
 #[test]
 fn hooks_only_check_ignores_project_owned_flake() {
     let temp = init_package();
-    fs::write(temp.path().join("flake.nix"), custom_rs_harbor_flake()).unwrap();
+    assert!(
+        simit()
+            .current_dir(temp.path())
+            .args(["init", "flake", "--scope", "full"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let policy = read(&temp.path().join("nix/treefmt.nix"));
+    let custom = with_rustfmt_package_arg(custom_rs_harbor_flake());
+    fs::write(temp.path().join("flake.nix"), &custom).unwrap();
 
     let write_status = simit()
         .current_dir(temp.path())
-        .args(["init", "flake"])
+        .args(["init", "flake", "--scope", "hooks-only"])
         .status()
         .unwrap();
     assert!(write_status.success());
-    assert_eq!(
-        read(&temp.path().join("flake.nix")),
-        custom_rs_harbor_flake()
-    );
-    assert!(!temp.path().join("nix/treefmt.nix").exists());
+    assert_eq!(read(&temp.path().join("flake.nix")), custom);
+    assert_eq!(read(&temp.path().join("nix/treefmt.nix")), policy);
 
-    fs::write(temp.path().join("flake.nix"), "{ custom = \"owned\"; }\n").unwrap();
+    fs::write(
+        temp.path().join("flake.nix"),
+        format!("{custom}\n# owned customization\n"),
+    )
+    .unwrap();
     let check_status = simit()
         .current_dir(temp.path())
-        .args(["init", "flake", "--check", "--diff"])
+        .args([
+            "init",
+            "flake",
+            "--scope",
+            "hooks-only",
+            "--check",
+            "--diff",
+        ])
         .status()
         .unwrap();
     assert!(check_status.success());
@@ -1149,11 +1202,6 @@ fn check_accepts_semantically_current_custom_hook_files() {
   treefmt = {
     enable = true;
     entry = "${treefmtWrapper}/bin/treefmt --fail-on-change";
-    pass_filenames = false;
-  };
-  cargo-fmt = {
-    enable = true;
-    entry = "cargo fmt --all -- --check";
     pass_filenames = false;
   };
   cargo-clippy = {

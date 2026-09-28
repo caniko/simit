@@ -399,6 +399,58 @@ fn assert_maintainer_key_written(root: &Path) {
 }
 
 #[test]
+fn python_default_ci_builds_treefmt_check() {
+    let temp = init_python_project();
+    fs::remove_file(temp.path().join("simit.toml")).unwrap();
+    fs::remove_file(temp.path().join("flake.nix")).unwrap();
+    assert!(
+        simit()
+            .current_dir(temp.path())
+            .args(["init", "flake"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let output = simit()
+        .current_dir(temp.path())
+        .args(["init", "ci", "--platform", "github", "--runtime", "nix"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let workflow = fs::read_to_string(temp.path().join(".github/workflows/ci.yaml")).unwrap();
+    assert!(workflow.contains("checks.x86_64-linux.formatting"));
+    assert!(!workflow.contains("checks.x86_64-linux.uv-format"));
+    let output = simit()
+        .current_dir(temp.path())
+        .args([
+            "init",
+            "ci",
+            "--platform",
+            "forgejo",
+            "--ci-provider",
+            "crow",
+            "--runtime",
+            "nix",
+            "--runner",
+            "atlas-nix-trusted",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let workflow = fs::read_to_string(temp.path().join(".crow/ci.yaml")).unwrap();
+    assert!(workflow.contains("checks.x86_64-linux.formatting"));
+    assert!(!workflow.contains("checks.x86_64-linux.uv-format"));
+}
+
+#[test]
 fn nix_format_jobs_are_uncached_across_providers_and_job_layouts() {
     for (platform, provider, path, step_runners) in [
         ("github", "actions", ".github/workflows/ci.yaml", ""),
