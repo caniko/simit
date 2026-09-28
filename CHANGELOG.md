@@ -38,6 +38,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Recognize generated treefmt policies structurally in checks and registry status, and use the actual Cargo workspace edition instead of assuming 2024.
 - Generate uncached treefmt checks for local hooks and Nix-backed GitHub Actions, Forgejo Actions, and Crow jobs.
 - Validate treefmt import arguments against required module parameters; reject missing arguments, unsupported dynamic calls, and misleading unrelated bindings.
 - Declare GitHub Actions as this repository's CI provider and retire the generated Crow workflow.

@@ -56,7 +56,7 @@ pub fn run(command: InitFlakeCommand) -> Result<()> {
     }
     let mut languages = project::detect_languages(workspace_root)?;
     languages.nix = true;
-    let rust_edition = rustfmt_edition(&metadata);
+    let rust_edition = cargo::rustfmt_edition(&metadata)?;
     let rust_version = workspace_rust_version(&metadata);
     let audit_tools = resolve_audit_tools(workspace_root, &cfg, &languages, &metadata)?;
     let all_files = flake::files_with_components(
@@ -465,17 +465,6 @@ fn flake_requires_docs_shell(workspace_root: &Path, flake_content: &str) -> Resu
     )
 }
 
-fn rustfmt_edition(metadata: &cargo::Metadata) -> String {
-    metadata
-        .packages
-        .iter()
-        .filter(|package| metadata.workspace_members.contains(&package.id))
-        .filter_map(|package| package.edition.as_deref())
-        .max()
-        .unwrap_or("2021")
-        .to_owned()
-}
-
 fn workspace_rust_version(metadata: &cargo::Metadata) -> Option<String> {
     metadata
         .packages
@@ -673,11 +662,11 @@ fn check_files(
             }
             Ok(actual) if file.relative_path == Path::new("nix/treefmt.nix") => {
                 if actual == file.content
-                    || flake::has_required_treefmt(&actual, languages, rust_edition)
+                    || flake::is_generated_treefmt(&actual, languages, rust_edition)
                 {
                     continue;
                 }
-                mismatches.push("nix/treefmt.nix is missing generated formatter wiring".to_owned());
+                mismatches.push("nix/treefmt.nix does not match the generated policy contract; custom or imported policies require evaluated evidence".to_owned());
                 if show_diff {
                     diffs.push(unified_diff("nix/treefmt.nix", &actual, &file.content));
                 }

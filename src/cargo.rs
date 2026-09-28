@@ -137,6 +137,19 @@ pub fn metadata_for_current_dir() -> Result<Metadata> {
     cargo_metadata(&manifest)
 }
 
+/// Use the newest edition among workspace members for the shared formatter.
+/// Missing metadata is an error, rather than permission to guess an edition.
+pub fn rustfmt_edition(metadata: &Metadata) -> Result<String> {
+    metadata
+        .packages
+        .iter()
+        .filter(|package| metadata.workspace_members.contains(&package.id))
+        .filter_map(|package| package.edition.as_deref())
+        .max()
+        .map(str::to_owned)
+        .context("workspace metadata has no Rust edition")
+}
+
 pub fn find_manifest(start: &Path) -> Result<PathBuf> {
     for dir in start.ancestors() {
         let candidate = dir.join("Cargo.toml");

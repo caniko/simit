@@ -645,26 +645,35 @@ fn detect_flake_status(workspace_root: &Path) -> FeatureStatus {
     }
 
     let Ok(languages) = project::detect_languages(workspace_root) else {
-        return FeatureStatus::Managed;
+        return FeatureStatus::Drift;
+    };
+    let edition = if languages.rust {
+        match cargo::cargo_metadata(&workspace_root.join("Cargo.toml"))
+            .and_then(|metadata| cargo::rustfmt_edition(&metadata))
+        {
+            Ok(edition) => edition,
+            Err(_) => return FeatureStatus::Drift,
+        }
+    } else {
+        String::new() // Non-Rust policies do not consume an edition.
     };
     let treefmt = fs::read_to_string(workspace_root.join("nix/treefmt.nix")).ok();
     let pre_commit = fs::read_to_string(workspace_root.join("nix/pre-commit.nix")).ok();
-    if treefmt
-        .as_deref()
-        .is_some_and(|content| flake::has_required_treefmt(content, &languages, "2024"))
-        && pre_commit.as_deref().is_some_and(|content| {
-            flake::has_required_pre_commit(
-                content,
-                &languages,
-                None,
-                flake::AuditTools {
-                    audit: languages.rust,
-                    deny: false,
-                    pyo3: false,
-                },
-            )
-        })
-    {
+    if treefmt.as_deref().is_some_and(|policy| {
+        flake::is_generated_treefmt(policy, &languages, &edition)
+            && flake::treefmt_call_module_mismatch(&content, policy).is_none()
+    }) && pre_commit.as_deref().is_some_and(|content| {
+        flake::has_required_pre_commit(
+            content,
+            &languages,
+            None,
+            flake::AuditTools {
+                audit: languages.rust,
+                deny: false,
+                pyo3: false,
+            },
+        )
+    }) {
         FeatureStatus::Managed
     } else {
         FeatureStatus::Drift
@@ -2329,6 +2338,61 @@ mod tests {
         fs::write(path.join("dispatched-by-canix"), "").unwrap();
         for hook in HOOK_TYPES {
             write_executable(&path.join(hook));
+        }
+    }
+
+    #[test]
+    fn flake_status_uses_workspace_edition_and_rejects_commented_coverage() {
+        let _guard = GIT_CONFIG_LOCK.lock().unwrap();
+        for edition in ["2018", "2021", "2024"] {
+            let temp = TempDir::new().unwrap();
+            let root = temp.path();
+            fs::create_dir(root.join("src")).unwrap();
+            fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
+            fs::write(
+                root.join("Cargo.toml"),
+                format!(
+                    "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nedition = \"{edition}\"\n"
+                ),
+            )
+            .unwrap();
+            fs::write(root.join("simit.toml"), "[flake]\nscope = \"full\"\n").unwrap();
+            let mut languages = project::detect_languages(root).unwrap();
+            languages.nix = true;
+            for file in flake::files(
+                &languages,
+                edition,
+                None,
+                None,
+                flake::AuditTools {
+                    audit: true,
+                    ..Default::default()
+                },
+            ) {
+                let path = root.join(file.relative_path);
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                fs::write(path, file.content).unwrap();
+            }
+            assert_eq!(
+                detect_flake_status(root),
+                FeatureStatus::Managed,
+                "edition {edition}"
+            );
+            assert!(
+                !root.join("Cargo.lock").exists(),
+                "status must not generate a lockfile"
+            );
+            let path = root.join("nix/treefmt.nix");
+            let policy = fs::read_to_string(&path).unwrap();
+            fs::write(
+                &path,
+                policy.replace(
+                    "programs.alejandra.enable = true;",
+                    "programs.alejandra.enable = false; # programs.alejandra.enable = true;",
+                ),
+            )
+            .unwrap();
+            assert_eq!(detect_flake_status(root), FeatureStatus::Drift);
         }
     }
 

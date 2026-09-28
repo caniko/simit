@@ -727,20 +727,38 @@ pub fn treefmt_call_module_mismatch(flake_content: &str, module_content: &str) -
     None
 }
 
-pub fn has_required_treefmt(content: &str, languages: &Languages, rust_edition: &str) -> bool {
-    content.contains("projectRootFile = \"flake.nix\";")
-        && (!languages.rust
-            || (content.contains("programs.rustfmt")
-                && content.contains("enable = true;")
-                && content.contains(&format!("edition = \"{rust_edition}\";"))))
-        && (!languages.nix || content.contains("programs.alejandra.enable = true;"))
-        && (!languages.toml || content.contains("programs.taplo.enable = true;"))
-        && (!(languages.yaml || languages.markdown || languages.javascript)
-            || content.contains("programs.prettier"))
-        && (!languages.markdown || content.contains("\"*.md\""))
-        && (!languages.yaml || content.contains("\"*.yaml\""))
-        && (!languages.javascript || content.contains("\"*.ts\"") || content.contains("\"*.js\""))
-        && (!languages.tex || content.contains("latexindent"))
+/// Recognize the producer's exact policy contract, allowing formatting and
+/// comments but no extra definitions that could disable required formatters.
+/// Custom/imported policies require evaluated evidence; substring discovery
+/// is never sufficient authority to remove their standalone hooks.
+pub fn is_generated_treefmt(content: &str, languages: &Languages, rust_edition: &str) -> bool {
+    fn tokens(source: &str) -> Option<Vec<(rnix::SyntaxKind, String)>> {
+        let parsed = rnix::Root::parse(source);
+        if !parsed.errors().is_empty() {
+            return None;
+        }
+        Some(
+            parsed
+                .syntax()
+                .descendants_with_tokens()
+                .filter_map(|node| {
+                    let token = node.into_token()?;
+                    (!matches!(
+                        token.kind(),
+                        rnix::SyntaxKind::TOKEN_WHITESPACE | rnix::SyntaxKind::TOKEN_COMMENT
+                    ))
+                    .then(|| (token.kind(), token.text().to_owned()))
+                })
+                .collect(),
+        )
+    }
+    match (
+        tokens(content),
+        tokens(&treefmt_nix(languages, rust_edition)),
+    ) {
+        (Some(actual), Some(expected)) => actual == expected,
+        _ => false,
+    }
 }
 
 pub fn has_required_pre_commit(
@@ -1774,6 +1792,9 @@ fn treefmt_nix(languages: &Languages, rust_edition: &str) -> String {
     if languages.toml {
         content.push_str("\n  programs.taplo.enable = true;\n");
     }
+    if languages.uv_python {
+        content.push_str("\n  programs.ruff-format.enable = true;\n");
+    }
     if languages.yaml || languages.markdown || languages.javascript {
         content.push_str("\n  programs.prettier = {\n");
         content.push_str("    enable = true;\n");
@@ -2011,6 +2032,42 @@ mod tests {
     use super::*;
     use crate::cli::FlakeTargetArg;
     use crate::project::Languages;
+
+    #[test]
+    fn generated_policy_recognition_rejects_disabled_or_commented_coverage() {
+        let languages = Languages {
+            nix: true,
+            uv_python: true,
+            ..Languages::default()
+        };
+        let policy = treefmt_nix(&languages, "2024");
+        assert!(is_generated_treefmt(
+            &format!("# owned policy\n{policy}"),
+            &languages,
+            "2024"
+        ));
+        let disabled = policy.replace(
+            "programs.ruff-format.enable = true;",
+            "programs.ruff-format.enable = false; # programs.ruff-format.enable = true;",
+        );
+        assert!(!is_generated_treefmt(&disabled, &languages, "2024"));
+        let commented = format!("/* {policy} */ {{...}}: {{}}");
+        assert!(!is_generated_treefmt(&commented, &languages, "2024"));
+        assert!(!is_generated_treefmt(
+            "{...}: { imports = [ ./shared.nix ]; }",
+            &languages,
+            "2024"
+        ));
+        let rust = Languages {
+            rust: true,
+            ..Languages::default()
+        };
+        assert!(!is_generated_treefmt(
+            &treefmt_nix(&rust, "2021"),
+            &rust,
+            "2024"
+        ));
+    }
 
     #[test]
     fn treefmt_module_takes_rustfmt_package_only_for_rust() {
@@ -2433,7 +2490,7 @@ mod tests {
         assert!(content.contains("\"*.ts\""));
         assert!(content.contains("\"*.json\""));
         assert!(content.contains("latexindent"));
-        assert!(has_required_treefmt(&content, &languages, "2024"));
+        assert!(is_generated_treefmt(&content, &languages, "2024"));
     }
 
     #[test]

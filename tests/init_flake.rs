@@ -347,6 +347,33 @@ fn custom_skillnet_flake() -> &'static str {
 }
 
 #[test]
+fn check_rejects_disabled_formatter_hidden_by_a_comment() {
+    let temp = init_package();
+    assert!(
+        simit()
+            .current_dir(temp.path())
+            .args(["init", "flake", "--scope", "full"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let path = temp.path().join("nix/treefmt.nix");
+    let policy = read(&path).replace(
+        "programs.alejandra.enable = true;",
+        "programs.alejandra.enable = false; # programs.alejandra.enable = true;",
+    );
+    fs::write(&path, &policy).unwrap();
+    let output = simit()
+        .current_dir(temp.path())
+        .args(["init", "flake", "--check"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("nix/treefmt.nix"));
+    assert_eq!(read(&path), policy);
+}
+
+#[test]
 fn generated_treefmt_hook_is_uncached() {
     let temp = init_package();
     let output = simit()
@@ -881,7 +908,7 @@ fn existing_generated_flake_defaults_to_full_scope() {
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("flake and hook files are not up to date"));
-    assert!(stderr.contains("nix/treefmt.nix is missing generated formatter wiring"));
+    assert!(stderr.contains("nix/treefmt.nix does not match the generated policy contract"));
 }
 
 #[test]
@@ -1099,6 +1126,7 @@ fn check_accepts_semantically_current_custom_hook_files() {
   programs.prettier = {
     enable = true;
     package = pkgs.prettier;
+    excludes = [".crow/**"];
     includes = [
       "*.md"
       "*.markdown"
@@ -1182,7 +1210,7 @@ fn check_fails_when_hook_files_differ() {
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("flake and hook files are not up to date"));
-    assert!(stderr.contains("nix/treefmt.nix is missing generated formatter wiring"));
+    assert!(stderr.contains("nix/treefmt.nix does not match the generated policy contract"));
 }
 
 #[test]
@@ -1528,7 +1556,7 @@ fn generic_backend_check_reports_stale_generated_files() {
         .unwrap();
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(stderr.contains("nix/treefmt.nix is missing generated formatter wiring"));
+    assert!(stderr.contains("nix/treefmt.nix does not match the generated policy contract"));
     assert!(stderr.contains("+++ nix/treefmt.nix"));
 }
 
