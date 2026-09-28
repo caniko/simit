@@ -165,20 +165,7 @@ fn release_plan_reports_cycle() {
 
 fn init_coordinated_workspace(extra_gates: &str) -> TempDir {
     let temp = fixture_dir("release-plan-diamond");
-    // Diamond fixture has no src/ or flake; add minimal package sources and a
-    // project-owned custom flake (hooks-only composition, not generated).
-    for member in ["a", "b", "c", "d"] {
-        let dir = temp.path().join(member);
-        fs::create_dir_all(dir.join("src")).unwrap();
-        fs::write(dir.join("src/lib.rs"), "pub fn f() {}\n").unwrap();
-        // Minimal lib target so `cargo metadata` stays offline-clean.
-        let manifest = read(&dir.join("Cargo.toml"));
-        fs::write(
-            dir.join("Cargo.toml"),
-            format!("{manifest}\n[lib]\npath = \"src/lib.rs\"\n"),
-        )
-        .unwrap();
-    }
+    // Add a project-owned custom flake (hooks-only composition, not generated).
     fs::write(
         temp.path().join("flake.nix"),
         "{ outputs = { self }: {}; }\n",
@@ -219,6 +206,10 @@ timeout_minutes = 30
 
     let ci = read(&temp.path().join(".github/workflows/ci.yaml"));
     assert_yaml_parses(&ci);
+    assert!(
+        !ci.contains("\n\n\n"),
+        "generated CI must remain treefmt-stable"
+    );
     // Required gate is a dedicated CI job with scoped identity + timeout.
     assert!(ci.contains("- name: Required gate gel-integration"));
     assert!(ci.contains("run: nix run .#test-gel"));
@@ -243,6 +234,15 @@ timeout_minutes = 30
     // Lockstep validation for every publishable member.
     assert!(publish.contains("cargo pkgid -p a"));
     assert!(publish.contains("cargo pkgid -p d"));
+    assert!(publish.contains("$(nix develop -c cargo pkgid -p a"));
+    assert!(publish.contains(".version | select(.num == $v) | .checksum"));
+    let parsed: serde_yaml::Value = serde_yaml::from_str(&publish).unwrap();
+    for job in ["validate", "gate-gel-integration", "publish-a"] {
+        assert_eq!(
+            parsed["jobs"][job]["env"]["CARGO_HOME"].as_str(),
+            Some("/tmp/.cargo")
+        );
+    }
     // Gate failure blocks publication via needs chain.
     assert!(publish.contains("gate-gel-integration"));
     assert!(publish.contains("needs: [validate]"));
@@ -283,6 +283,14 @@ fn coordinated_publish_replaces_per_member_outputs_only() {
         ),
     )
     .unwrap();
+    fs::write(
+        temp.path().join(".github/workflows/ci-a.yaml"),
+        format!(
+            "{}\nname: stale\n",
+            simit::render::ci::GENERATED_WORKFLOW_MARKER
+        ),
+    )
+    .unwrap();
     // Handwritten outputs are never deleted.
     fs::write(
         temp.path().join(".github/workflows/handwritten.yaml"),
@@ -308,6 +316,17 @@ fn coordinated_publish_replaces_per_member_outputs_only() {
         .status()
         .unwrap();
     assert!(status.success());
+    assert!(
+        !temp
+            .path()
+            .join(".github/workflows/publish-crate.yaml")
+            .exists(),
+        "coordinated publication must have exactly one publisher workflow"
+    );
+    assert!(
+        !temp.path().join(".github/workflows/ci-a.yaml").exists(),
+        "aggregate CI supersedes generated member CI"
+    );
     assert!(
         temp.path()
             .join(".github/workflows/publish-workspace.yaml")

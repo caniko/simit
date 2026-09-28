@@ -450,6 +450,7 @@ fn publish_workspace_workflow(
     w.push('\n');
     w.push_str("    timeout-minutes: 15\n");
     push_release_permissions(&mut w, platform);
+    push_job_env(&mut w, platform, runtime, &[], true);
     w.push_str("    steps:\n");
     push_checkout_step(&mut w, platform);
     if runtime == Runtime::Nix {
@@ -477,7 +478,9 @@ fn publish_workspace_workflow(
     w.push_str("          validated_sha=\"$(git rev-list -n 1 \"$tag\")\"\n");
     w.push_str("          git checkout --detach \"$validated_sha\"\n");
     for (name, version) in versions {
-        w.push_str("          test \"$(cargo pkgid -p ");
+        w.push_str("          test \"$(");
+        w.push_str(command_prefix(runtime));
+        w.push_str("cargo pkgid -p ");
         w.push_str(&shell_word(name));
         w.push_str(" | awk -F'[#@]' 'NF > 1 {print $NF}' | tail -n 1)\" = \"$tag\" || { echo \"");
         w.push_str(name);
@@ -496,16 +499,12 @@ fn publish_workspace_workflow(
         w.push('\n');
         w.push_str(&format!("    timeout-minutes: {}\n", gate.timeout_minutes));
         push_release_permissions(&mut w, platform);
-        if !gate.env.is_empty() {
-            w.push_str("    env:\n");
-            for (key, value) in &gate.env {
-                w.push_str("      ");
-                w.push_str(key);
-                w.push_str(": \"");
-                w.push_str(&yaml_double_quote(value));
-                w.push_str("\"\n");
-            }
-        }
+        let gate_env: Vec<_> = gate
+            .env
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        push_job_env(&mut w, platform, runtime, &gate_env, true);
         w.push_str("    steps:\n");
         push_checkout_step(&mut w, platform);
         if runtime == Runtime::Nix {
@@ -556,6 +555,7 @@ fn publish_workspace_workflow(
         w.push('\n');
         w.push_str("    timeout-minutes: 60\n");
         push_release_permissions(&mut w, platform);
+        push_job_env(&mut w, platform, runtime, &[], true);
         w.push_str("    steps:\n");
         push_checkout_step(&mut w, platform);
         if runtime == Runtime::Nix {
@@ -606,8 +606,8 @@ fn publish_workspace_workflow(
         w.push_str("          status=\"$(curl --retry 3 -sS -o /tmp/simit-crate.json -w '%{http_code}' -A 'simit publish-workspace preflight' \"https://crates.io/api/v1/crates/${crate_name}/${version}\" || echo 000)\"\n");
         w.push_str("          case \"$status\" in\n");
         w.push_str("            200)\n");
-        w.push_str("              echo \"${crate_name} ${version} already exists on crates.io; verifying it is the intended release\" \n");
-        w.push_str("              published_checksum=\"$(jq -er --arg v \"$version\" '.versions[] | select(.num == $v) | .checksum' /tmp/simit-crate.json 2>/dev/null || true)\"\n");
+        w.push_str("              echo \"${crate_name} ${version} already exists on crates.io; verifying it is the intended release\"\n");
+        w.push_str("              published_checksum=\"$(jq -er --arg v \"$version\" '.version | select(.num == $v) | .checksum' /tmp/simit-crate.json 2>/dev/null || true)\"\n");
         w.push_str("              local_crate=\"$(ls target/package/${crate_name}-${version}.crate 2>/dev/null || echo \"\")\"\n");
         w.push_str(
             "              if [ -n \"$published_checksum\" ] && [ -f \"$local_crate\" ]; then\n",
@@ -2411,6 +2411,7 @@ fn push_required_gate_jobs(
 ) {
     for gate in &options.required_gates {
         let job = format!("gate-{}", sanitize_gate_id(&gate.id));
+        trim_trailing_blank_lines(workflow);
         workflow.push_str(&format!("\n  {job}:\n"));
         workflow.push_str("    runs-on: ");
         workflow.push_str(&runs_on(&runners.ci));
@@ -2489,7 +2490,14 @@ fn publish_workflow(
         workflow.push_str("  push:\n    tags:\n      - \"[0-9]*\"\n");
     }
     workflow.push_str("  workflow_dispatch:\n\n");
-    push_provider_concurrency(&mut workflow, platform);
+    if platform == Platform::Github {
+        // Per-crate workflows all display as "Publish Crate". Include the
+        // workflow path in the key so a tag starts every crate publisher;
+        // serialize retries instead of cancelling a publication mid-upload.
+        workflow.push_str("concurrency:\n  group: ${{ github.workflow_ref }}-${{ github.ref }}\n  cancel-in-progress: false\n\n");
+    } else {
+        push_provider_concurrency(&mut workflow, platform);
+    }
     workflow.push_str("jobs:\n");
     workflow.push_str("  publish:\n");
     push_release_permissions(&mut workflow, platform);

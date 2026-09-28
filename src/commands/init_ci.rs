@@ -234,6 +234,7 @@ pub fn run(command: InitCiCommand) -> Result<()> {
             homebrew,
             chocolatey,
             scoop,
+            publish_crates: publish_crates && !coordinated,
             package_scoped: multi_package_workspace,
             workspace_strategy: resolved.workspace_strategy,
             ..options.clone()
@@ -1908,8 +1909,8 @@ fn obsolete_nix_workflows(
     Ok(obsolete)
 }
 
-/// Remove only obsolete simit-owned publish outputs when switching between
-/// member-scoped and coordinated strategies. Handwritten or unrelated
+/// Remove only obsolete simit-owned publish and member CI outputs when switching
+/// between member-scoped and coordinated strategies. Handwritten or unrelated
 /// workflows are never touched: only files carrying the generated marker and
 /// matching the superseded publish naming are removed.
 fn cleanup_obsolete_publish_workflows(
@@ -1948,7 +1949,11 @@ fn cleanup_obsolete_publish_workflows(
             || name == "publish-crate.yaml"
             || name == "publish-crate.yml"
             || name.starts_with("publish-crate-");
-        if !is_publish_output {
+        let is_member_ci = coordinated
+            && expected.contains(&workflow_dir.join("ci.yaml"))
+            && name.starts_with("ci-")
+            && (name.ends_with(".yaml") || name.ends_with(".yml"));
+        if !is_publish_output && !is_member_ci {
             continue;
         }
         let relative = workflow_dir.join(&file_name);
@@ -1957,7 +1962,7 @@ fn cleanup_obsolete_publish_workflows(
         }
         // Only remove the superseded strategy's outputs.
         let should_remove = if coordinated {
-            name.starts_with("publish-crate")
+            name.starts_with("publish-crate") || is_member_ci
         } else {
             name.starts_with("publish-workspace")
         };
