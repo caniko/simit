@@ -38,6 +38,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Declare GitHub Actions as this repository's CI provider and retire the generated Crow workflow.
 - Validate formatted pre-commit hook files against the project-selected component set.
 - Release-plan ordering now ignores dev-dependencies (Cargo parity): publishable crates may dev-depend on `publish = false` helpers without failing the plan; normal/build/optional/target-specific path deps still order and still fail on non-publishable members.
 - `--dry-run-package` output is labeled archive-construction-only (`--no-verify`), never presented as verification, dry-run publication, or publish.
