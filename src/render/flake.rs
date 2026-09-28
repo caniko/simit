@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use anyhow::{Result, bail};
@@ -551,48 +552,179 @@ fn brace_delta(line: &str) -> i32 {
     opens - closes
 }
 
-/// Does a flake call-site pass rustfmtPackage into nix/treefmt.nix?
+/// Does every recognized policy import explicitly receive rustfmtPackage?
 pub fn flake_passes_rustfmt_package(flake_content: &str) -> bool {
-    flake_content.contains("rustfmtPackage") && flake_content.contains("import ./nix/treefmt.nix")
+    treefmt_call_arguments(flake_content).is_ok_and(|calls| {
+        calls.iter().all(|call| {
+            call.as_ref()
+                .is_some_and(|arguments| arguments.contains("rustfmtPackage"))
+        })
+    })
 }
 
-/// Does a nix/treefmt.nix module declare the rustfmtPackage parameter?
-pub fn treefmt_module_wants_rustfmt_package(module_content: &str) -> bool {
-    module_content.contains("{rustfmtPackage}")
+fn cast_nix_node<T: rnix::ast::AstNode>(node: rnix::SyntaxNode) -> Option<T> {
+    T::cast(node)
 }
 
-/// Flake call-site and module signature must agree where disagreement breaks
-/// Nix evaluation. Returns an actionable error message for broken pairs, or
-/// None when the pair evaluates. A new-shape call into an old ellipsis
-/// module (`{pkgs, ...}:`) is a working pair — the extra argument is
-/// ignored — so it passes here; unpinned rustfmt is tracked as drift, not
-/// failure. The reverse (old call into a module that requires the
-/// parameter) always breaks evaluation, as does passing the argument to a
-/// module whose header has no `...` to accept it.
-pub fn treefmt_call_module_mismatch(flake_content: &str, module_content: &str) -> Option<String> {
-    let call_passes = flake_passes_rustfmt_package(flake_content);
-    let module_wants = treefmt_module_wants_rustfmt_package(module_content);
-    match (call_passes, module_wants) {
-        (true, true) | (false, false) => None,
-        (true, false) => {
-            let accepts_extra = module_content
-                .lines()
-                .next()
-                .is_some_and(|header| header.contains("..."));
-            if accepts_extra {
-                None
-            } else {
-                Some(
-                    "flake.nix passes rustfmtPackage but nix/treefmt.nix cannot accept it (no `...` in its parameters); regenerate nix/treefmt.nix with `simit init flake` (full scope) or remove the argument from the treefmtEval call"
-                        .to_owned(),
-                )
+fn unparen(mut expr: rnix::ast::Expr) -> Option<rnix::ast::Expr> {
+    while let rnix::ast::Expr::Paren(paren) = expr {
+        expr = paren.expr()?;
+    }
+    Some(expr)
+}
+
+/// None denotes an unapplied module (arguments supplied by evalModule).
+/// Dynamic call arguments need evaluated evidence, never guessed attributes.
+fn treefmt_call_arguments(content: &str) -> Result<Vec<Option<BTreeSet<String>>>, String> {
+    use rnix::ast::{Attr, Entry, Expr, HasEntry};
+
+    let parsed = rnix::Root::parse(content);
+    // Also accept a binding fragment, as used by the wiring migration tests.
+    let parsed = if parsed.errors().is_empty() {
+        parsed
+    } else {
+        rnix::Root::parse(&format!("{{ {content} }}"))
+    };
+    if !parsed.errors().is_empty() {
+        return Err("cannot parse treefmt call-site".to_owned());
+    }
+    let mut calls = Vec::new();
+    for node in parsed.syntax().descendants() {
+        let Some(import) = cast_nix_node::<rnix::ast::Apply>(node.clone()) else {
+            continue;
+        };
+        if !matches!(import.lambda().and_then(unparen), Some(Expr::Ident(id)) if id.to_string() == "import")
+            || !matches!(import.argument().and_then(unparen), Some(Expr::Path(path)) if path.to_string() == "./nix/treefmt.nix")
+        {
+            continue;
+        }
+        let mut call_node = node;
+        while let Some(parent) = call_node.parent() {
+            if parent.kind() != rnix::SyntaxKind::NODE_PAREN {
+                break;
+            }
+            call_node = parent;
+        }
+        let application = call_node.parent().filter(|parent| {
+            parent.kind() == rnix::SyntaxKind::NODE_APPLY
+                && parent.first_child().as_ref() == Some(&call_node)
+        });
+        let Some(application) = application.and_then(cast_nix_node::<rnix::ast::Apply>) else {
+            calls.push(None);
+            continue;
+        };
+        let Some(Expr::AttrSet(arguments)) = application.argument().and_then(unparen) else {
+            return Err(
+                "treefmt import uses dynamic arguments; evaluated evidence is required".to_owned(),
+            );
+        };
+        let mut names = BTreeSet::new();
+        for entry in arguments.entries() {
+            let attrs = match entry {
+                Entry::Inherit(inherit) => inherit.attrs().collect::<Vec<_>>(),
+                Entry::AttrpathValue(value) => value
+                    .attrpath()
+                    .and_then(|path| path.attrs().next())
+                    .into_iter()
+                    .collect(),
+            };
+            for attr in attrs {
+                let Attr::Ident(ident) = attr else {
+                    return Err("treefmt import uses non-identifier argument names; evaluated evidence is required".to_owned());
+                };
+                names.insert(ident.to_string());
             }
         }
-        (false, true) => Some(
-            "nix/treefmt.nix requires rustfmtPackage but flake.nix does not pass it; add `fmtToolchain = rs-harbor.lib.mkToolchain {inherit pkgs; toolchainProfile = \"nightly\";};` and call `(import ./nix/treefmt.nix { rustfmtPackage = fmtToolchain.rustToolchain; })`, or regenerate with `simit init flake`"
-                .to_owned(),
-        ),
+        calls.push(Some(names));
     }
+    if calls.is_empty() {
+        return Err(
+            "no supported import of ./nix/treefmt.nix found; evaluated evidence is required"
+                .to_owned(),
+        );
+    }
+    Ok(calls)
+}
+
+fn treefmt_module_pattern(module_content: &str) -> Option<rnix::ast::Pattern> {
+    let parsed = rnix::Root::parse(module_content);
+    if !parsed.errors().is_empty() {
+        return None;
+    }
+    let mut expr = parsed.tree().expr()?;
+    while let rnix::ast::Expr::Paren(paren) = expr {
+        expr = paren.expr()?;
+    }
+    let rnix::ast::Expr::Lambda(lambda) = expr else {
+        return None;
+    };
+    match lambda.param()? {
+        rnix::ast::Param::Pattern(pattern) => Some(pattern),
+        _ => None,
+    }
+}
+
+/// Does a nix/treefmt.nix module require the rustfmtPackage parameter?
+pub fn treefmt_module_wants_rustfmt_package(module_content: &str) -> bool {
+    treefmt_module_pattern(module_content).is_some_and(|pattern| {
+        pattern.pat_entries().any(|entry| {
+            entry
+                .ident()
+                .is_some_and(|ident| ident.to_string() == "rustfmtPackage")
+                && entry.question_token().is_none()
+        })
+    })
+}
+
+/// Check the statically recognized import's argument contract. This is not
+/// proof that the module body evaluates. Ellipsis permits extra arguments,
+/// but never supplies missing required arguments.
+pub fn treefmt_call_module_mismatch(flake_content: &str, module_content: &str) -> Option<String> {
+    let calls = match treefmt_call_arguments(flake_content) {
+        Ok(calls) => calls,
+        Err(message) => return Some(message),
+    };
+    let Some(pattern) = treefmt_module_pattern(module_content) else {
+        return Some(
+            "unsupported treefmt module signature; evaluated evidence is required".to_owned(),
+        );
+    };
+    let declared: BTreeSet<String> = pattern
+        .pat_entries()
+        .filter_map(|entry| entry.ident().map(|ident| ident.to_string()))
+        .collect();
+    for arguments in calls {
+        if let Some(arguments) = arguments {
+            for entry in pattern.pat_entries() {
+                let name = entry.ident()?.to_string();
+                if entry.question_token().is_none() && !arguments.contains(&name) {
+                    return Some(format!(
+                        "nix/treefmt.nix requires {name} but flake.nix does not pass it to the import; regenerate the call/module pair with `simit init flake`"
+                    ));
+                }
+            }
+            if pattern.ellipsis_token().is_none()
+                && let Some(extra) = arguments.difference(&declared).next()
+            {
+                return Some(format!(
+                    "flake.nix passes {extra} but nix/treefmt.nix cannot accept it (no `...` in its parameters)"
+                ));
+            }
+        } else {
+            // These are supplied by evalModule. Additional required arguments
+            // may come from custom _module.args, which needs evaluated evidence.
+            let module_args = ["pkgs", "lib", "config", "options", "specialArgs"];
+            for entry in pattern.pat_entries() {
+                let name = entry.ident()?.to_string();
+                if entry.question_token().is_none() && !module_args.contains(&name.as_str()) {
+                    return Some(format!(
+                        "nix/treefmt.nix requires {name} but flake.nix does not pass it; regenerate the call/module pair with `simit init flake` or provide evaluated custom module-argument evidence"
+                    ));
+                }
+            }
+        }
+    }
+    None
 }
 
 pub fn has_required_treefmt(content: &str, languages: &Languages, rust_edition: &str) -> bool {
@@ -1910,17 +2042,52 @@ mod tests {
     fn treefmt_call_module_mismatch_catches_breakage_not_drift() {
         let new_call = "treefmtEval = treefmt-nix.lib.evalModule pkgs (import ./nix/treefmt.nix { rustfmtPackage = fmtToolchain.rustToolchain; });";
         let old_call = "treefmtEval = treefmt-nix.lib.evalModule pkgs (import ./nix/treefmt.nix);";
-        let new_module = "{rustfmtPackage}: {pkgs, ...}: {\n";
-        let old_module = "{pkgs, ...}: {\n";
-        let rigid_module = "{pkgs}: {\n";
+        let new_module = "{rustfmtPackage}: {pkgs, ...}: {}";
+        let old_module = "{pkgs, ...}: {}";
+        let rigid_module = "{pkgs}: {}";
         assert!(treefmt_call_module_mismatch(new_call, new_module).is_none());
         assert!(treefmt_call_module_mismatch(old_call, old_module).is_none());
-        // New call into an ellipsis module evaluates (argument ignored).
-        assert!(treefmt_call_module_mismatch(new_call, old_module).is_none());
+        // Ellipsis accepts extras; it does not supply the required pkgs.
+        assert!(treefmt_call_module_mismatch(new_call, old_module).is_some());
         // Old call into a module requiring the parameter always breaks.
         assert!(treefmt_call_module_mismatch(old_call, new_module).is_some());
         // ...unless the module cannot accept extra arguments at all.
         assert!(treefmt_call_module_mismatch(new_call, rigid_module).is_some());
+        let multiline = "# shared imports\n{\n harbor-rs,\n rustfmtPackage,\n}: {...}: {}";
+        assert!(treefmt_call_module_mismatch(new_call, multiline).is_some());
+        assert!(treefmt_call_module_mismatch(old_call, multiline).is_some());
+        let optional = "{rustfmtPackage ? null}: {...}: {}";
+        assert!(treefmt_call_module_mismatch(new_call, optional).is_none());
+        assert!(treefmt_call_module_mismatch(old_call, optional).is_none());
+        let misleading = "# {rustfmtPackage} ...\n{pkgs}: { comment = \"...\"; }";
+        assert!(!treefmt_module_wants_rustfmt_package(misleading));
+        assert!(treefmt_call_module_mismatch(new_call, misleading).is_some());
+    }
+
+    #[test]
+    fn treefmt_call_arguments_are_bound_to_the_actual_import() {
+        let module = "{harbor-rs, rustfmtPackage}: {pkgs, ...}: {}";
+        let complete = "{ treefmtEval = evalModule pkgs ((import ./nix/treefmt.nix) { inherit harbor-rs; rustfmtPackage = toolchain; }); }";
+        assert!(treefmt_call_module_mismatch(complete, module).is_none());
+        let missing = "{ harbor-rs = input; treefmtEval = evalModule pkgs (import ./nix/treefmt.nix { rustfmtPackage = toolchain; }); }";
+        assert!(treefmt_call_module_mismatch(missing, module).is_some());
+        let decoy = "{ rustfmtPackage = toolchain; treefmtEval = evalModule pkgs (import ./nix/treefmt.nix); }";
+        assert!(!flake_passes_rustfmt_package(decoy));
+        assert!(treefmt_call_module_mismatch(decoy, "{rustfmtPackage}: {...}: {}").is_some());
+        let unknown = "{ treefmtEval = evalModule pkgs (import ./nix/treefmt.nix arguments); }";
+        assert!(treefmt_call_module_mismatch(unknown, module).is_some());
+        let extra = "{ treefmtEval = evalModule pkgs (import ./nix/treefmt.nix { inherit rustfmtPackage typo; }); }";
+        assert!(treefmt_call_module_mismatch(extra, "{rustfmtPackage}: {...}: {}").is_some());
+        let defaulted = "{harbor-rs ? null, rustfmtPackage}: {...}: {}";
+        assert!(treefmt_call_module_mismatch(missing, defaulted).is_none());
+        assert!(treefmt_call_module_mismatch(decoy, "{harbor-rs}: {...}: {}").is_some());
+        let multiple = "{ a = import ./nix/treefmt.nix { inherit rustfmtPackage; }; b = import ./nix/treefmt.nix {}; }";
+        assert!(!flake_passes_rustfmt_package(multiple));
+        assert!(treefmt_call_module_mismatch(multiple, "{rustfmtPackage}: {...}: {}").is_some());
+        assert!(
+            treefmt_call_module_mismatch("{ note = \"import ./nix/treefmt.nix\"; }", module)
+                .is_some()
+        );
     }
 
     const OLD_WIRED_FLAKE: &str = r#"{
@@ -1977,7 +2144,7 @@ mod tests {
 }
 "#;
 
-    const NEW_MODULE: &str = "{rustfmtPackage}: {pkgs, ...}: {\n";
+    const NEW_MODULE: &str = "{rustfmtPackage}: {pkgs, ...}: {}";
 
     #[test]
     fn migrate_treefmt_call_upgrades_bare_call_site() {

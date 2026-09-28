@@ -1069,11 +1069,12 @@ fn check_accepts_semantically_current_custom_hook_files() {
     fs::write(temp.path().join("flake.nix"), flake).unwrap();
     fs::write(
         temp.path().join("nix/treefmt.nix"),
-        r#"{pkgs, ...}: {
+        r#"{rustfmtPackage}: {pkgs, ...}: {
   projectRootFile = "flake.nix";
   programs.rustfmt = {
     enable = true;
     edition = "2024";
+    package = rustfmtPackage;
   };
   programs.alejandra.enable = true;
   programs.taplo.enable = true;
