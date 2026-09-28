@@ -347,6 +347,24 @@ fn custom_skillnet_flake() -> &'static str {
 }
 
 #[test]
+fn generated_treefmt_hook_is_uncached() {
+    let temp = init_package();
+    let output = simit()
+        .current_dir(temp.path())
+        .args(["init", "flake", "--scope", "full"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let hooks = read(&temp.path().join("nix/pre-commit.nix"));
+    assert!(hooks.contains("${treefmtWrapper}/bin/treefmt --ci"));
+    assert!(!hooks.contains("treefmt --fail-on-change"));
+}
+
+#[test]
 fn default_scope_writes_only_detected_hook_file() {
     let temp = init_package();
 

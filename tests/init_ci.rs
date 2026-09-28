@@ -399,6 +399,44 @@ fn assert_maintainer_key_written(root: &Path) {
 }
 
 #[test]
+fn nix_format_jobs_are_uncached_across_providers_and_job_layouts() {
+    for (platform, provider, path, step_runners) in [
+        ("github", "actions", ".github/workflows/ci.yaml", ""),
+        (
+            "forgejo",
+            "actions",
+            ".forgejo/workflows/ci.yaml",
+            "step_runners = { cargo-fmt = \"atlas-nix-trusted\" }",
+        ),
+        ("forgejo", "crow", ".crow/build.yaml", ""),
+    ] {
+        let temp = init_package(true);
+        fs::write(
+            temp.path().join("simit.toml"),
+            format!("[ci]\nplatform = \"{platform}\"\nprovider = \"{provider}\"\nruntime = \"nix\"\n{step_runners}\n"),
+        )
+        .unwrap();
+        let output = simit()
+            .current_dir(temp.path())
+            .args(["init", "ci"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let workflow = read(&temp.path().join(path));
+        assert_yaml_parses(&workflow);
+        assert!(
+            workflow.contains("treefmt --ci"),
+            "{platform}/{provider}: {workflow}"
+        );
+        assert!(!workflow.contains("treefmt --fail-on-change"));
+    }
+}
+
+#[test]
 fn generates_forgejo_nix_workflows() {
     let temp = init_package(true);
 

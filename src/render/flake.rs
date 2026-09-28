@@ -1891,7 +1891,7 @@ fn pre_commit_nix(
         content.push_str("    enable = true;\n");
         content.push_str("    name = \"treefmt\";\n");
         content.push_str("    package = treefmtWrapper;\n");
-        content.push_str("    entry = \"${treefmtWrapper}/bin/treefmt --fail-on-change\";\n");
+        content.push_str("    entry = \"${treefmtWrapper}/bin/treefmt --ci\";\n");
         content.push_str("    pass_filenames = false;\n");
         content.push_str("  };\n");
     }

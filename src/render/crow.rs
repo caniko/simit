@@ -204,7 +204,11 @@ fn build_workflow(
     steps.push(step(
         STEP_CARGO_FMT,
         image,
-        format!("{prefix}cargo fmt --all -- --check"),
+        if runtime == Runtime::Nix {
+            format!("{prefix}treefmt --ci")
+        } else {
+            format!("{prefix}cargo fmt --all -- --check")
+        },
     ));
     steps.push(step(
         STEP_CARGO_TEST,

@@ -2079,7 +2079,7 @@ fn ci_workflow_single_job(
             push_install_nix_step(&mut workflow, platform);
             push_nix_cargo_bin_path_step(&mut workflow);
             push_extra_setup_steps(&mut workflow, &options.extra_setup);
-            workflow.push_str("      - name: Format check\n        run: nix develop -c cargo fmt --all -- --check\n\n");
+            workflow.push_str("      - name: Format check\n        run: nix develop -c treefmt --ci\n\n");
             match options.om_ci {
                 OmCiMode::Off => {
                     push_nix_ci_legacy_steps(
@@ -2193,7 +2193,7 @@ fn ci_workflow_multi_job(
             );
             capture(
                 STEP_CARGO_FMT,
-                "      - name: Format check\n        run: nix develop -c cargo fmt --all -- --check\n\n",
+                "      - name: Format check\n        run: nix develop -c treefmt --ci\n\n",
             );
 
             let mut test = "      - name: Test\n        run: nix develop -c cargo test".to_string();
