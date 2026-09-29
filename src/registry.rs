@@ -1940,14 +1940,18 @@ fn infer_pages_canonical_domain(content: &str) -> Option<String> {
 
 fn infer_pages_site_output(content: &str) -> Option<String> {
     let marker = "nix build ";
-    let suffix = " --no-link --out-link result-pages-site";
+    let suffix = " --out-link result-pages-site";
     let line = content
         .lines()
         .find(|line| line.contains(marker) && line.contains(suffix))?;
     let start = line.find(marker)? + marker.len();
     let tail = &line[start..];
     let end = tail.find(suffix)?;
-    Some(shell_unquote(tail[..end].trim()))
+    let output = tail[..end].trim();
+    // Accept workflows generated before the output-link fix during upgrades.
+    Some(shell_unquote(
+        output.strip_suffix(" --no-link").unwrap_or(output),
+    ))
 }
 
 fn infer_primary_runner(marked: &[WorkflowFile], workflow_kind: &str) -> Result<ResolvedRunner> {

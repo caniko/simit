@@ -586,7 +586,7 @@ extra_setup = ["echo prepare-runner"]
     assert!(workflow.contains("permissions:\n  contents: read"));
     assert!(
         workflow
-            .contains("group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.head_ref || github.ref_name }}")
+            .contains("group: ${{ github.workflow_ref }}-${{ github.event_name }}-${{ github.head_ref || github.ref_name }}")
     );
     assert!(workflow.contains("runs-on: ubuntu-latest"));
     assert!(workflow.contains("fail-fast: false"));
@@ -1033,7 +1033,7 @@ fn package_metadata_nix_builds_validate_and_render() {
     assert!(workflow.contains("permissions:\n  contents: read"));
     assert!(
         workflow
-            .contains("group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.head_ref || github.ref_name }}")
+            .contains("group: ${{ github.workflow_ref }}-${{ github.event_name }}-${{ github.head_ref || github.ref_name }}")
     );
     assert!(workflow.contains("- \".#oci-api\""));
     assert!(workflow.contains("- \".#oci-etl\""));
@@ -1135,7 +1135,8 @@ fn forgejo_nix_can_generate_codeberg_pages_workflow() {
     assert!(pages.contains("group: ${{ codeberg.workflow }}-${{ codeberg.ref }}"));
     assert!(pages.contains("runs-on: atlas"));
     assert!(pages.contains("      - name: Validate Pages domain"));
-    assert!(pages.contains("nix build .#site --no-link --out-link result-pages-site"));
+    assert!(pages.contains("nix build .#site --out-link result-pages-site"));
+    assert!(!pages.contains("--no-link"));
     assert!(pages.contains("grep -qx plinth.tartanoglu.com result-pages-site/.domains"));
     assert!(pages.contains("CODEBERG_TOKEN: ${{ secrets.codeberg_token }}"));
     assert!(pages.contains("test -n \"$CODEBERG_TOKEN\""));
@@ -1190,7 +1191,8 @@ fn github_nix_can_generate_github_pages_workflow() {
     assert!(pages.contains("uses: actions/upload-pages-artifact@"));
     assert!(pages.contains("uses: actions/deploy-pages@"));
     assert!(pages.contains("environment:\n      name: github-pages\n      url: ${{ steps.deployment.outputs.page_url }}"));
-    assert!(pages.contains("nix build .#site --no-link --out-link result-pages-site"));
+    assert!(pages.contains("nix build .#site --out-link result-pages-site"));
+    assert!(!pages.contains("--no-link"));
     assert!(pages.contains("grep -qx plinth.tartanoglu.com result-pages-site/.domains"));
     assert!(!pages.contains("CODEBERG_TOKEN"));
     assert!(!pages.contains("codeberg.workflow"));
@@ -1235,7 +1237,7 @@ fn persisted_codeberg_pages_overrides_survive_regeneration() {
     assert!(check.success());
 
     let pages = read(&temp.path().join(".forgejo/workflows/pages.yaml"));
-    assert!(pages.contains("nix build ./site#site --no-link --out-link result-pages-site"));
+    assert!(pages.contains("nix build ./site#site --out-link result-pages-site"));
     assert!(pages.contains("DEPLOY_REMOTE=pages-origin nix run ./site#deploy-pages"));
 }
 
@@ -2279,6 +2281,39 @@ fn workspace_flag_generates_per_package_workflows() {
     assert_yaml_parses(&beta_publish);
     assert!(beta_publish.contains("run: cargo publish -p beta --dry-run"));
     assert!(beta_publish.contains("cargo publish -p beta"));
+}
+
+#[test]
+fn github_workspace_workflows_have_path_scoped_concurrency() {
+    let temp = init_workspace_fixture();
+    let status = simit_with_user_config(temp.path())
+        .current_dir(temp.path())
+        .args(["init", "ci", "--platform", "github", "--workspace"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    for member in ["alpha", "beta"] {
+        let workflow = read(
+            &temp
+                .path()
+                .join(format!(".github/workflows/ci-{member}.yaml")),
+        );
+        let yaml: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
+        assert_eq!(yaml["name"].as_str(), Some("CI"));
+        let group = yaml["concurrency"]["group"].as_str().unwrap();
+        // Display names collide across member workflows; the path must key cancellation.
+        assert!(group.contains("${{ github.workflow_ref }}"), "{group}");
+        assert!(group.contains("${{ github.event_name }}"), "{group}");
+        assert!(
+            group.contains("github.head_ref || github.ref_name"),
+            "{group}"
+        );
+        assert_eq!(
+            yaml["concurrency"]["cancel-in-progress"].as_bool(),
+            Some(true)
+        );
+    }
 }
 
 #[test]
@@ -3711,7 +3746,7 @@ components = ["checks"]
 
     let workflow = read(&temp.path().join(".github/workflows/ci.yaml"));
     assert!(workflow.contains(
-        "group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.head_ref || github.ref_name }}"
+        "group: ${{ github.workflow_ref }}-${{ github.event_name }}-${{ github.head_ref || github.ref_name }}"
     ));
     assert!(workflow.contains("nix build .#checks.x86_64-linux.offline-tests"));
     assert!(!workflow.contains("Check generated flake wiring"));

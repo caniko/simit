@@ -1020,7 +1020,7 @@ fn codeberg_pages_workflow(runner: &ResolvedRunner, pages: &CodebergPagesOptions
         workflow.push_str("        run: |\n");
         workflow.push_str("          nix build ");
         workflow.push_str(&shell_word(&pages.site_output));
-        workflow.push_str(" --no-link --out-link result-pages-site\n");
+        workflow.push_str(" --out-link result-pages-site\n");
         workflow.push_str("          test -f result-pages-site/.domains\n");
         workflow.push_str("          grep -qx ");
         workflow.push_str(&shell_word(canonical_domain));
@@ -1066,7 +1066,7 @@ fn github_pages_workflow(runner: &ResolvedRunner, pages: &CodebergPagesOptions) 
     workflow.push('\n');
     workflow.push_str("      - name: Build Pages site\n        run: |\n          nix build ");
     workflow.push_str(&shell_word(&pages.site_output));
-    workflow.push_str(" --no-link --out-link result-pages-site\n");
+    workflow.push_str(" --out-link result-pages-site\n");
     if let Some(canonical_domain) = &pages.canonical_domain {
         workflow.push_str("          test -f result-pages-site/.domains\n          grep -qx ");
         workflow.push_str(&shell_word(canonical_domain));
@@ -3393,8 +3393,10 @@ fn push_concurrency(workflow: &mut String) {
 
 fn push_github_concurrency(workflow: &mut String) {
     workflow.push_str("concurrency:\n");
+    // Member workflows share the display name "CI"; include the workflow path
+    // so one member cannot cancel another on the same event and branch.
     workflow.push_str(
-        "  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.head_ref || github.ref_name }}\n",
+        "  group: ${{ github.workflow_ref }}-${{ github.event_name }}-${{ github.head_ref || github.ref_name }}\n",
     );
     workflow.push_str("  cancel-in-progress: true\n\n");
 }
