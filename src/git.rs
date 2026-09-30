@@ -96,32 +96,19 @@ pub fn commit(workspace_root: &Path, git_args: &[OsString]) -> Result<()> {
 }
 
 pub fn tag(workspace_root: &Path, version: &Version, sign_tag: bool) -> Result<()> {
-    let mut command = Command::new("git");
-    command.current_dir(workspace_root).arg("tag");
-
-    if sign_tag {
-        command
-            .arg("-s")
-            .arg("-m")
-            .arg(format!("Release {version}"));
-    } else {
-        command.arg("--no-sign");
-    }
-
-    let status = command
-        .arg(version.to_string())
-        .status()
-        .context("creating git tag")?;
-
-    if !status.success() {
-        bail!("git tag failed for {version}");
-    }
-    Ok(())
+    tag_impl(workspace_root, version, sign_tag, false)
 }
 
 pub fn move_tag(workspace_root: &Path, version: &Version, sign_tag: bool) -> Result<()> {
+    tag_impl(workspace_root, version, sign_tag, true)
+}
+
+fn tag_impl(workspace_root: &Path, version: &Version, sign_tag: bool, force: bool) -> Result<()> {
     let mut command = Command::new("git");
-    command.current_dir(workspace_root).args(["tag", "-f"]);
+    command.current_dir(workspace_root).arg("tag");
+    if force {
+        command.arg("-f");
+    }
 
     if sign_tag {
         command
@@ -132,13 +119,21 @@ pub fn move_tag(workspace_root: &Path, version: &Version, sign_tag: bool) -> Res
         command.arg("--no-sign");
     }
 
+    let context = if force {
+        "moving git tag"
+    } else {
+        "creating git tag"
+    };
     let status = command
         .arg(version.to_string())
         .status()
-        .context("moving git tag")?;
+        .with_context(|| context)?;
 
     if !status.success() {
-        bail!("git tag -f failed for {version}");
+        if force {
+            bail!("git tag -f failed for {version}");
+        }
+        bail!("git tag failed for {version}");
     }
     Ok(())
 }
