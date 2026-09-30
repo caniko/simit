@@ -67,6 +67,24 @@
           cache.enable = false;
         }).craneLib;
 
+      # Hosted CI needs the site generator without Plinth's fleet-only cache
+      # transport or the full web workspace's native dependencies.
+      plinthProjectArgs = {
+        pname = "simit-plinth-project";
+        src = plinth;
+        strictDeps = true;
+        cargoExtraArgs = "--locked --package plinth-project --bin plinth-project";
+        doCheck = false;
+      };
+      plinthProject = publicCraneLib.buildPackage (plinthProjectArgs
+        // {
+          cargoArtifacts = publicCraneLib.buildDepsOnly plinthProjectArgs;
+        });
+      projectSite = import "${plinth}/nix/project-site.nix" {
+        inherit pkgs plinthProject;
+        inherit (pkgs) lib;
+      };
+
       # The generator embeds the immutable action registry at compile time.
       # crane's default Cargo filter intentionally drops root JSON files, so
       # keep this one alongside the normal Cargo source set.
@@ -208,7 +226,7 @@
           cp -r docs/book $out
         '';
       };
-      website = plinth.lib.${system}.mkProjectSite {
+      website = projectSite.mkProjectSite {
         pname = "simit-website";
         domain = "simit.tartanoglu.com";
         configPath = ./website/plinth-project.toml;
@@ -231,7 +249,7 @@
           else {}
         );
 
-      apps.deploy-pages = plinth.lib.${system}.mkDeployPagesApp {
+      apps.deploy-pages = projectSite.mkDeployPagesApp {
         domain = "simit.tartanoglu.com";
       };
 
@@ -263,7 +281,7 @@
       devShells = let
         docsPackages = with pkgs; [
           mdbook
-          plinth.packages.${system}.plinth-project
+          plinthProject
           pre-commit
           rust-analyzer
         ];
