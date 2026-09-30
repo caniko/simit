@@ -791,6 +791,20 @@ checks = ["offline-tests", "typecheck"]
         .status()
         .unwrap();
     assert!(check_status.success());
+
+    let flake_path = temp.path().join("flake.nix");
+    let modern = read(&flake_path).replace("py-harbor", "harbor-py");
+    fs::write(&flake_path, modern).unwrap();
+    let check = simit()
+        .current_dir(temp.path())
+        .args(["init", "flake", "--check"])
+        .output()
+        .unwrap();
+    assert!(
+        check.status.success(),
+        "{}",
+        String::from_utf8_lossy(&check.stderr)
+    );
 }
 
 #[test]

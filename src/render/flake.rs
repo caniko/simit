@@ -415,11 +415,11 @@ pub fn custom_wiring_mismatches(
             }
         }
         FlakeBackend::PyHarbor => {
-            if !content.contains("py-harbor") {
+            if !content.contains("py-harbor") && !content.contains("harbor-py") {
                 missing
                     .push("flake.nix custom mode: missing py-harbor input or binding".to_owned());
             }
-            if !content.contains("py-harbor.lib") {
+            if !content.contains("py-harbor.lib") && !content.contains("harbor-py.lib") {
                 missing.push("flake.nix custom mode: missing py-harbor.lib usage".to_owned());
             }
         }

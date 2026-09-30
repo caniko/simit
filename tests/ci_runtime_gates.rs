@@ -172,10 +172,15 @@ fn nix_format_gate_supports_legacy_shells_and_propagates_formatter_failures() {
         let bin = root.join("bin");
         fs::create_dir(&bin).unwrap();
         symlink("/bin/sh", bin.join("sh")).unwrap();
+        let wrapper = root.join("formatter");
+        fs::create_dir_all(wrapper.join("bin")).unwrap();
+        let wrapper_bin = wrapper.join("bin/treefmt");
+        fs::write(&wrapper_bin, "#!/bin/sh\nprintf 'project-treefmt %s\\n' \"$*\" > \"$FORMAT_LOG\"\nexit \"$FORMAT_STATUS\"\n").unwrap();
+        fs::set_permissions(&wrapper_bin, fs::Permissions::from_mode(0o755)).unwrap();
         for (name, script) in [
             (
                 "nix",
-                "#!/bin/sh\nshift 2\nPATH=\"$FORMAT_BIN\" exec \"$@\"\n",
+                "#!/bin/sh\ncase \"$1\" in\n eval) printf '%s' \"$FORMAT_WRAPPER\"; exit \"$EVAL_STATUS\" ;;\n build) printf '%s' \"$FORMAT_WRAPPER\"; exit 0 ;;\n esac\nshift 2\nPATH=\"$FORMAT_BIN\" exec \"$@\"\n",
             ),
             (
                 "cargo",
@@ -190,11 +195,13 @@ fn nix_format_gate_supports_legacy_shells_and_propagates_formatter_failures() {
             fs::write(&file, script).unwrap();
             fs::set_permissions(&file, fs::Permissions::from_mode(0o755)).unwrap();
         }
-        for (treefmt, status, expected) in [
-            (true, 0, "treefmt --ci\n"),
-            (true, 17, "treefmt --ci\n"),
-            (false, 0, "cargo fmt --all -- --check\n"),
-            (false, 17, "cargo fmt --all -- --check\n"),
+        for (project_wrapper, treefmt, status, expected) in [
+            (true, true, 0, "project-treefmt --ci\n"),
+            (true, true, 17, "project-treefmt --ci\n"),
+            (false, true, 0, "treefmt --ci\n"),
+            (false, true, 17, "treefmt --ci\n"),
+            (false, false, 0, "cargo fmt --all -- --check\n"),
+            (false, false, 17, "cargo fmt --all -- --check\n"),
         ] {
             if !treefmt && bin.join("treefmt").exists() {
                 fs::remove_file(bin.join("treefmt")).unwrap();
@@ -206,6 +213,15 @@ fn nix_format_gate_supports_legacy_shells_and_propagates_formatter_failures() {
                 .env("FORMAT_BIN", &bin)
                 .env("FORMAT_LOG", &log)
                 .env("FORMAT_STATUS", status.to_string())
+                .env("EVAL_STATUS", "0")
+                .env(
+                    "FORMAT_WRAPPER",
+                    if project_wrapper {
+                        wrapper.as_os_str()
+                    } else {
+                        std::ffi::OsStr::new("")
+                    },
+                )
                 .output()
                 .unwrap();
             assert_eq!(
@@ -216,6 +232,22 @@ fn nix_format_gate_supports_legacy_shells_and_propagates_formatter_failures() {
             );
             assert_eq!(fs::read_to_string(&log).unwrap(), expected);
         }
+        let log = root.join("eval-failure.log");
+        let output = Command::new("sh")
+            .args(["-c", &gate])
+            .env("PATH", &bin)
+            .env("FORMAT_BIN", &bin)
+            .env("FORMAT_WRAPPER", "")
+            .env("FORMAT_LOG", &log)
+            .env("FORMAT_STATUS", "0")
+            .env("EVAL_STATUS", "23")
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(23));
+        assert!(
+            !log.exists(),
+            "evaluation errors must not silently select Cargo formatting"
+        );
     }
 }
 
