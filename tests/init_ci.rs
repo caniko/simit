@@ -2863,7 +2863,7 @@ fn check_fails_when_workflows_differ() {
 }
 
 #[test]
-fn check_failure_hint_includes_effective_generation_flags() {
+fn check_failure_hint_includes_transient_generation_flags() {
     let temp = init_workspace_fixture();
     fs::write(temp.path().join("flake.nix"), "{}\n").unwrap();
 
@@ -2902,7 +2902,7 @@ fn check_failure_hint_includes_effective_generation_flags() {
             "--runtime",
             "nix",
             "--runner",
-            "atlas",
+            "atlas-nix-trusted",
             "--workspace",
             "--with-deny",
             "--with-artifacts",
@@ -2914,10 +2914,28 @@ fn check_failure_hint_includes_effective_generation_flags() {
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(
-        stderr.contains("run `simit init ci --platform forgejo --runtime nix --runner atlas"),
+        stderr.contains("run `simit init ci --platform forgejo --runtime nix --runner atlas-nix-trusted"),
         "stderr:\n{stderr}"
     );
+    assert!(stderr.contains("--workspace --with-deny --with-artifacts"));
     assert!(stderr.contains(".forgejo/workflows/ci-alpha.yaml differs"));
+    let hint = stderr.split('`').nth(1).unwrap();
+    assert!(
+        simit_with_user_config(temp.path())
+            .current_dir(temp.path())
+            .args(hint.split_whitespace().skip(1))
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        simit_with_user_config(temp.path())
+            .current_dir(temp.path())
+            .args(["init", "ci", "--check"])
+            .status()
+            .unwrap()
+            .success()
+    );
 }
 
 #[test]
