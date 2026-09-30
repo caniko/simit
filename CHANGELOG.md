@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Keep generated plugin publisher scripts lint-clean by emitting only the configured credential variables and identifying jq's literal filter variables.
 - Resolve GitHub SSH flake inputs over HTTPS in hosted Nix jobs so public pinned dependencies remain usable without runner SSH keys.
 - Apply the same GitHub input transport setup to comprehensive artifact release workflows.
+- Keep activated multi-channel release scripts lint-clean, report concrete missing archive versions, propagate Chocolatey filter failures, and exclude the Windows ZIP output from its own inputs.
 - Keep Nix CI formatting usable for legacy shells without treefmt while preserving full uncached treefmt checks and propagating formatter failures whenever it is available.
 - Reconcile obsolete generated Rust workflows across providers during CI writes, matching check-mode ownership while preserving handwritten CI and release workflows.
 - Match coordinated publication in registry audits instead of reporting a missing per-crate publisher after successful generation.
