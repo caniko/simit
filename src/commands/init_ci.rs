@@ -18,6 +18,11 @@ use crate::config::{
     CodebergPagesConfig, ProjectConfig, ResolvedChocolatey, ResolvedCodebergPages,
     ResolvedHomebrew, ResolvedJetbrains, ResolvedScoop, ResolvedVscode,
 };
+use crate::packaging_common::validate_download_repo;
+use crate::pages_infer::{
+    infer_pages_canonical_domain, infer_pages_deploy_app, infer_pages_repo,
+    infer_pages_site_output, infer_pages_source_branch, infer_pages_token_secret,
+};
 use crate::project;
 use crate::python;
 use crate::registry::{self, FeatureStatus};
@@ -2070,7 +2075,7 @@ fn resolve_codeberg_pages(
         .or_else(|| config.as_ref().map(|pages| pages.repo.clone()))
         .or_else(|| inferred.map(|pages| pages.repo.clone()))
         .context("--with-codeberg-pages requires --pages-repo or [ci.pages].repo")?;
-    validate_download_repo_for("--pages-repo", &repo)?;
+    validate_download_repo("--pages-repo", &repo)?;
     let owner = repo
         .split_once('/')
         .expect("validated owner/repo")
@@ -2152,7 +2157,7 @@ fn infer_codeberg_pages_from_workflows(
     let Some(repo) = infer_pages_repo(&workflow.content) else {
         return Ok(None);
     };
-    validate_download_repo_for("--pages-repo", &repo)?;
+    validate_download_repo("--pages-repo", &repo)?;
     Ok(Some(CodebergPagesConfig {
         repo,
         canonical_domain: infer_pages_canonical_domain(&workflow.content),
@@ -2165,94 +2170,6 @@ fn infer_codeberg_pages_from_workflows(
         deploy_app: infer_pages_deploy_app(&workflow.content)
             .unwrap_or_else(|| ".#deploy-pages".to_owned()),
     }))
-}
-
-fn infer_pages_repo(content: &str) -> Option<String> {
-    let marker = "@codeberg.org/";
-    let line = content.lines().find(|line| line.contains(marker))?;
-    let repo_start = line.find(marker)? + marker.len();
-    let repo_tail = &line[repo_start..];
-    let repo_end = repo_tail.find(".git").unwrap_or(repo_tail.len());
-    Some(repo_tail[..repo_end].trim_matches('"').to_owned())
-}
-
-fn infer_pages_token_secret(content: &str) -> Option<String> {
-    let marker = "CODEBERG_TOKEN: ${{ secrets.";
-    let line = content.lines().find(|line| line.contains(marker))?;
-    let start = line.find(marker)? + marker.len();
-    let tail = &line[start..];
-    let end = tail.find(" }}")?;
-    Some(tail[..end].to_owned())
-}
-
-fn infer_pages_canonical_domain(content: &str) -> Option<String> {
-    let marker = "grep -qx ";
-    let suffix = " result-pages-site/.domains";
-    let line = content
-        .lines()
-        .find(|line| line.contains(marker) && line.contains(suffix))?;
-    let start = line.find(marker)? + marker.len();
-    let tail = &line[start..];
-    let end = tail.find(suffix)?;
-    Some(shell_unquote(tail[..end].trim()))
-}
-
-fn infer_pages_site_output(content: &str) -> Option<String> {
-    let marker = "nix build ";
-    let suffix = " --out-link result-pages-site";
-    let line = content
-        .lines()
-        .find(|line| line.contains(marker) && line.contains(suffix))?;
-    let start = line.find(marker)? + marker.len();
-    let tail = &line[start..];
-    let end = tail.find(suffix)?;
-    let output = tail[..end].trim();
-    // Accept workflows generated before the output-link fix during upgrades.
-    Some(shell_unquote(
-        output.strip_suffix(" --no-link").unwrap_or(output),
-    ))
-}
-
-fn infer_pages_source_branch(content: &str) -> Option<String> {
-    let mut lines = content.lines().peekable();
-    while let Some(line) = lines.next() {
-        if !line.trim_start().starts_with("branches:") {
-            continue;
-        }
-        let trimmed = line.trim();
-        if let Some(inline) = trimmed
-            .strip_prefix("branches: [")
-            .and_then(|value| value.strip_suffix(']'))
-        {
-            return Some(inline.trim_matches('"').to_owned());
-        }
-        while let Some(next) = lines.peek() {
-            let trimmed = next.trim();
-            if let Some(branch) = trimmed.strip_prefix("- ") {
-                return Some(branch.trim_matches('"').to_owned());
-            }
-            if !next.starts_with(' ') {
-                break;
-            }
-            lines.next();
-        }
-    }
-    None
-}
-
-fn infer_pages_deploy_app(content: &str) -> Option<String> {
-    let marker = "DEPLOY_REMOTE=pages-origin nix run ";
-    let line = content.lines().find(|line| line.contains(marker))?;
-    let start = line.find(marker)? + marker.len();
-    Some(line[start..].trim().to_owned())
-}
-
-fn shell_unquote(value: &str) -> String {
-    let value = value.trim();
-    if value.len() >= 2 && value.starts_with('\'') && value.ends_with('\'') {
-        return value[1..value.len() - 1].replace("'\"'\"'", "'");
-    }
-    value.to_owned()
 }
 
 fn codeberg_pages_config(pages: &Option<CodebergPagesOptions>) -> Result<CodebergPagesConfig> {
@@ -2304,7 +2221,7 @@ fn chocolatey_options(
     package: &cargo::Package,
 ) -> Result<ChocolateyOptions> {
     let resolved = cfg.resolve_chocolatey(args.as_overrides(), package)?;
-    validate_download_repo_for("--choco-download-repo", &resolved.download_repo)?;
+    validate_download_repo("--choco-download-repo", &resolved.download_repo)?;
     Ok(chocolatey_options_from_resolved(resolved))
 }
 
@@ -2337,7 +2254,7 @@ fn scoop_options(
     package: &cargo::Package,
 ) -> Result<ScoopOptions> {
     let resolved = cfg.resolve_scoop(args.as_overrides(), package)?;
-    validate_download_repo_for("--scoop-download-repo", &resolved.download_repo)?;
+    validate_download_repo("--scoop-download-repo", &resolved.download_repo)?;
     Ok(scoop_options_from_resolved(resolved))
 }
 
@@ -2364,7 +2281,7 @@ fn homebrew_options(
 ) -> Result<HomebrewOptions> {
     let resolved = cfg.resolve_homebrew(args.as_overrides(), package)?;
     let tap_url = normalize_tap_url(&resolved.tap_url)?;
-    validate_download_repo(&resolved.download_repo)?;
+    validate_download_repo("--homebrew-download-repo", &resolved.download_repo)?;
     let platforms = homebrew_platforms(&resolved);
     Ok(HomebrewOptions {
         name: resolved.name,
@@ -2402,17 +2319,6 @@ fn normalize_tap_url(value: &str) -> Result<String> {
     } else {
         Ok(format!("{with_scheme}.git"))
     }
-}
-
-fn validate_download_repo(value: &str) -> Result<()> {
-    validate_download_repo_for("--homebrew-download-repo", value)
-}
-
-fn validate_download_repo_for(flag: &str, value: &str) -> Result<()> {
-    if value.split('/').count() != 2 || value.split('/').any(str::is_empty) {
-        bail!("{flag} must be OWNER/REPO");
-    }
-    Ok(())
 }
 
 fn homebrew_platforms(resolved: &ResolvedHomebrew) -> HomebrewPlatformSet {

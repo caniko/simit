@@ -8,6 +8,7 @@ use anyhow::{Context, Result, bail};
 use crate::cargo;
 use crate::cli::{ChocolateyAction, ChocolateyBumpArgs, ChocolateyCommand, ChocolateyRenderArgs};
 use crate::config::{ProjectConfig, ResolvedChocolatey};
+use crate::packaging_common::{validate_download_repo, validate_version};
 use crate::registry::{self, FeatureStatus};
 use crate::render::chocolatey_nuspec::{
     self, Architecture, ChocolateyRenderOptions, RenderedPackage, Sha256Set,
@@ -26,7 +27,7 @@ fn render(args: ChocolateyRenderArgs) -> Result<()> {
     let version = args.version.as_deref().unwrap_or(&package_version);
     validate_version(version)?;
     validate_resolved(&resolved)?;
-    validate_download_repo(&resolved.download_repo)?;
+    validate_download_repo("chocolatey.download_repo", &resolved.download_repo)?;
 
     let package = render_package(&resolved, version, false, &Sha256Set::all_no_check());
     if let Some(output_dir) = args.output_dir {
@@ -45,7 +46,7 @@ pub(crate) fn bump(args: ChocolateyBumpArgs) -> Result<()> {
     }
     let (resolved, _) = resolve(overrides)?;
     validate_resolved(&resolved)?;
-    validate_download_repo(&resolved.download_repo)?;
+    validate_download_repo("chocolatey.download_repo", &resolved.download_repo)?;
 
     let archives = parse_archives(&args.archive)?;
     let include_x86 = archives.contains_key(&Architecture::X86);
@@ -313,25 +314,6 @@ pub(crate) fn validate_resolved(resolved: &ResolvedChocolatey) -> Result<()> {
         bail!(
             "chocolatey.authors not set: provide it via --choco-authors, simit project config [chocolatey].authors, or Cargo.toml package.authors"
         );
-    }
-    Ok(())
-}
-
-fn validate_version(version: &str) -> Result<()> {
-    if version.starts_with('v')
-        || version.is_empty()
-        || !version
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '+' | '~' | '_' | '-'))
-    {
-        bail!("version must match [0-9A-Za-z.+~_-]+ without a leading v, got: {version}");
-    }
-    Ok(())
-}
-
-fn validate_download_repo(value: &str) -> Result<()> {
-    if value.split('/').count() != 2 || value.split('/').any(str::is_empty) {
-        bail!("chocolatey.download_repo must be OWNER/REPO");
     }
     Ok(())
 }

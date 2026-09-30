@@ -6,6 +6,7 @@ use crate::cli::{
     WingetSubmitArgs,
 };
 use crate::config::ProjectConfig;
+use crate::packaging_common::validate_version;
 use anyhow::{Context, Result, bail};
 
 pub fn run(command: WindowsCommand) -> Result<()> {
@@ -120,16 +121,4 @@ fn parse_archives(values: &[String]) -> Result<BTreeMap<String, String>> {
 
 fn looks_like_url(value: &str) -> bool {
     value.starts_with("https://") || value.starts_with("http://")
-}
-
-fn validate_version(version: &str) -> Result<()> {
-    if version.starts_with('v')
-        || version.is_empty()
-        || !version
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '+' | '~' | '_' | '-'))
-    {
-        bail!("version must match [0-9A-Za-z.+~_-]+ without a leading v, got: {version}");
-    }
-    Ok(())
 }

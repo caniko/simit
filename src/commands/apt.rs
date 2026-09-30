@@ -13,6 +13,7 @@ use crate::cli::{
 use crate::commands::scaffold::run_git;
 use crate::config::{AptOverrides, ProjectConfig, ResolvedApt};
 use crate::git;
+use crate::packaging_common::validate_version;
 use crate::render::apt_conf;
 
 pub const DISTRIBUTIONS_PATH: &str = "dist/apt/conf/distributions";
@@ -321,18 +322,6 @@ fn host_architecture(apt: &ResolvedApt) -> Result<&'static str> {
         );
     }
     Ok(architecture)
-}
-
-fn validate_version(version: &str) -> Result<()> {
-    if version.is_empty()
-        || version.starts_with('v')
-        || !version
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '+' | '~' | '_' | '-'))
-    {
-        bail!("version must match [0-9A-Za-z.+~_-]+ without a leading v, got: {version}");
-    }
-    Ok(())
 }
 
 fn validate_deb(path: &Path, deb_name: &str, version: &str, architecture: &str) -> Result<()> {

@@ -1,13 +1,13 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
 use std::path::PathBuf;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 
 use crate::cargo;
 use crate::cli::{HomebrewAction, HomebrewBumpArgs, HomebrewCommand, HomebrewRenderArgs};
 use crate::commands::scaffold::{BumpFlow, WriteArtifact};
 use crate::config::{HomebrewOverrides, ProjectConfig, ResolvedHomebrew};
+use crate::packaging_common::{validate_download_repo, validate_version, write_or_print};
 use crate::registry::{self, FeatureStatus};
 use crate::render::homebrew_formula::{self, Platform, Sha256Set};
 use crate::sha256;
@@ -25,23 +25,13 @@ fn render(args: HomebrewRenderArgs) -> Result<()> {
     validate_version(version)?;
     let formula = homebrew_formula::render(&resolved, version, &Sha256Set::all_no_check());
 
-    if let Some(output) = args.output {
-        let path = output.as_std_path();
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
-        }
-        fs::write(path, formula).with_context(|| format!("writing {}", path.display()))?;
-    } else {
-        print!("{formula}");
-    }
-
-    Ok(())
+    write_or_print(args.output.as_ref(), &formula)
 }
 
 fn bump(args: HomebrewBumpArgs) -> Result<()> {
     validate_version(&args.version)?;
     let (resolved, _) = resolve(args.homebrew.as_overrides())?;
-    validate_download_repo(&resolved.download_repo)?;
+    validate_download_repo("homebrew.download_repo", &resolved.download_repo)?;
     let archives = parse_archives(&args.archive)?;
     let sha256s = sha256_set(&resolved, &archives)?;
     let formula = homebrew_formula::render(&resolved, &args.version, &sha256s);
@@ -127,23 +117,4 @@ fn sha256_set(
         sha256s.set(platform, sha256::sha256_of_file(path)?);
     }
     Ok(sha256s)
-}
-
-fn validate_version(version: &str) -> Result<()> {
-    if version.starts_with('v')
-        || version.is_empty()
-        || !version
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '+' | '~' | '_' | '-'))
-    {
-        bail!("version must match [0-9A-Za-z.+~_-]+ without a leading v, got: {version}");
-    }
-    Ok(())
-}
-
-fn validate_download_repo(value: &str) -> Result<()> {
-    if value.split('/').count() != 2 || value.split('/').any(str::is_empty) {
-        bail!("homebrew.download_repo must be OWNER/REPO");
-    }
-    Ok(())
 }

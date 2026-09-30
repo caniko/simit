@@ -1,6 +1,6 @@
 use std::ffi::OsString;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Result, anyhow, bail};
 use semver::Version;
 
 use crate::cargo::{self, BumpSpec, Package};
@@ -357,23 +357,11 @@ fn reject_secrets_flags(command: &ReleaseCommand) -> Result<()> {
 }
 
 fn common_current_version(packages: &[Package]) -> Result<Version> {
-    let Some(first) = packages.first() else {
-        bail!("no packages selected");
-    };
-    let first_version = Version::parse(&first.version)
-        .with_context(|| format!("parsing version {}", first.version))?;
-
-    let mut divergent = Vec::new();
-    for package in packages.iter().skip(1) {
-        let version = Version::parse(&package.version)
-            .with_context(|| format!("parsing version {}", package.version))?;
-        if version != first_version {
-            divergent.push(format!("{} -> {}", package.name, package.version));
-        }
-    }
+    let (first_version, first_label, divergent) =
+        crate::packaging_common::divergent_versions(packages)?;
 
     if !divergent.is_empty() {
-        let mut details = vec![format!("{} -> {}", first.name, first.version)];
+        let mut details = vec![first_label];
         details.extend(divergent);
         bail!(
             "selected packages do not have one current release version:\n{}",

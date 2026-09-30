@@ -10,6 +10,7 @@ use crate::cargo;
 use crate::cli::{ScoopAction, ScoopBumpArgs, ScoopCommand, ScoopRenderArgs};
 use crate::commands::scaffold::{BumpFlow, WriteArtifact, redact_url, run_git};
 use crate::config::{ProjectConfig, ResolvedScoop, ScoopOverrides};
+use crate::packaging_common::{validate_download_repo, validate_version, write_or_print};
 use crate::registry::{self, FeatureStatus};
 use crate::render::scoop_manifest::{self, Architecture, ScoopChecksums};
 use crate::sha256;
@@ -27,23 +28,13 @@ fn render(args: ScoopRenderArgs) -> Result<()> {
     validate_version(version)?;
     let manifest = scoop_manifest::render(&resolved, version, &ScoopChecksums::all_placeholder());
 
-    if let Some(output) = args.output {
-        let path = output.as_std_path();
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
-        }
-        fs::write(path, manifest).with_context(|| format!("writing {}", path.display()))?;
-    } else {
-        print!("{manifest}");
-    }
-
-    Ok(())
+    write_or_print(args.output.as_ref(), &manifest)
 }
 
 pub(crate) fn bump(args: ScoopBumpArgs) -> Result<()> {
     validate_version(&args.version)?;
     let (resolved, _) = resolve(args.scoop.as_overrides())?;
-    validate_download_repo(&resolved.download_repo)?;
+    validate_download_repo("scoop.download_repo", &resolved.download_repo)?;
     let archives = parse_archives(&args.archive)?;
     let checksums = checksum_set(&resolved, &archives)?;
     let manifest = scoop_manifest::render(&resolved, &args.version, &checksums);
@@ -229,23 +220,4 @@ fn checksum_set(
         checksums.set(architecture, sha256::sha256_of_file(path)?);
     }
     Ok(checksums)
-}
-
-fn validate_version(version: &str) -> Result<()> {
-    if version.starts_with('v')
-        || version.is_empty()
-        || !version
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '+' | '~' | '_' | '-'))
-    {
-        bail!("version must match [0-9A-Za-z.+~_-]+ without a leading v, got: {version}");
-    }
-    Ok(())
-}
-
-fn validate_download_repo(value: &str) -> Result<()> {
-    if value.split('/').count() != 2 || value.split('/').any(str::is_empty) {
-        bail!("scoop.download_repo must be OWNER/REPO");
-    }
-    Ok(())
 }

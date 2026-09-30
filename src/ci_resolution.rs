@@ -8,6 +8,7 @@ use anyhow::{Context, Result, bail};
 
 use crate::cli::{CiProvider, Platform, Runtime, RuntimeChoice, WorkspaceStrategy};
 use crate::config::{CiConfig, ProjectConfig};
+use crate::pages_infer::shell_unquote;
 use crate::render::ci::{CiOptions, OMNIX_REF_DEFAULT, OmCiMode};
 
 /// A validated CI target: the concrete backend simit will render for a chosen
@@ -860,13 +861,4 @@ fn workflow_suffix(path: &Path) -> Option<String> {
         .or_else(|| stem.strip_prefix("release-artifacts-"))
         .or_else(|| stem.strip_prefix("publish-pypi-"))
         .map(str::to_owned)
-}
-
-fn shell_unquote(value: &str) -> String {
-    let value = value.trim();
-    if value.starts_with('\'') && value.ends_with('\'') && value.len() >= 2 {
-        value[1..value.len() - 1].replace("'\\''", "'")
-    } else {
-        value.to_owned()
-    }
 }

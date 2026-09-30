@@ -6,10 +6,7 @@ use crate::cli::InitReleaseCommand;
 use crate::cli::{CiProvider, Platform, Runtime};
 use crate::commands::scaffold::{CheckPrintMode, print_next_steps};
 use crate::commands::upgrade;
-use crate::config::{
-    AptOverrides, AurOverrides, ChocolateyOverrides, CoprOverrides, HomebrewOverrides,
-    ProjectConfig, ScoopOverrides,
-};
+use crate::config::ProjectConfig;
 use crate::project;
 use crate::registry::{self, FeatureStatus};
 use crate::render::release_workflow::{self, ReleaseWorkflowInputs};
@@ -47,36 +44,8 @@ pub fn run(command: InitReleaseCommand) -> Result<()> {
         );
     }
     let release = cfg.resolve_release_target(platform)?;
-    let aur = cfg
-        .aur
-        .as_ref()
-        .map(|_| cfg.resolve_aur_for_platform(AurOverrides::default(), &package, platform))
-        .transpose()?;
-    let copr = cfg
-        .copr
-        .as_ref()
-        .map(|_| cfg.resolve_copr_for_platform(CoprOverrides::default(), &package, platform))
-        .transpose()?;
-    let apt = cfg
-        .apt
-        .as_ref()
-        .map(|_| cfg.resolve_apt(AptOverrides::default(), &package))
-        .transpose()?;
-    let homebrew = cfg
-        .homebrew
-        .as_ref()
-        .map(|_| cfg.resolve_homebrew(HomebrewOverrides::default(), &package))
-        .transpose()?;
-    let scoop = cfg
-        .scoop
-        .as_ref()
-        .map(|_| cfg.resolve_scoop(ScoopOverrides::default(), &package))
-        .transpose()?;
-    let chocolatey = cfg
-        .chocolatey
-        .as_ref()
-        .map(|_| cfg.resolve_chocolatey(ChocolateyOverrides::default(), &package))
-        .transpose()?;
+    let targets =
+        crate::packaging_common::resolve_release_platform_targets(&cfg, &package, platform)?;
 
     let (runner, preinstalled_nix) = if provider == CiProvider::Crow {
         (
@@ -103,12 +72,12 @@ pub fn run(command: InitReleaseCommand) -> Result<()> {
         smoke_command: cfg.release.smoke.command.as_deref(),
         release: release.as_ref(),
         attic: cfg.release.attic.as_ref(),
-        aur: aur.as_ref(),
-        copr: copr.as_ref(),
-        apt: apt.as_ref(),
-        homebrew: homebrew.as_ref(),
-        scoop: scoop.as_ref(),
-        chocolatey: chocolatey.as_ref(),
+        aur: targets.aur.as_ref(),
+        copr: targets.copr.as_ref(),
+        apt: targets.apt.as_ref(),
+        homebrew: targets.homebrew.as_ref(),
+        scoop: targets.scoop.as_ref(),
+        chocolatey: targets.chocolatey.as_ref(),
         windows_signing: cfg.release.windows_signing.as_ref(),
         flatpak: cfg.flatpak.as_ref(),
         winget: cfg.winget.as_ref(),

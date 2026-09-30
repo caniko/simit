@@ -20,6 +20,10 @@ pub mod commands;
 pub mod config;
 /// Git preflight, staging, commit, and tag helpers.
 pub mod git;
+/// Shared packaging validation + release-version helpers.
+pub mod packaging_common;
+/// Shared Codeberg Pages workflow inference.
+pub mod pages_infer;
 /// Project language detection and generated-file management.
 pub mod project;
 /// Python uv project metadata discovery.

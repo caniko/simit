@@ -25,6 +25,10 @@ use crate::cargo::{self, Package};
 use crate::ci_resolution::{CiBackend, CiCliOverrides, CiInference, WorkflowSnapshot};
 use crate::cli::{CiProvider, CrowWorkflowFormat, Platform};
 use crate::config::{FlakeScope, HomebrewOverrides, ProjectConfig};
+use crate::pages_infer::{
+    infer_pages_canonical_domain, infer_pages_deploy_app, infer_pages_repo,
+    infer_pages_site_output, infer_pages_source_branch, infer_pages_token_secret,
+};
 use crate::project;
 use crate::python;
 use crate::render::ci;
@@ -231,31 +235,32 @@ pub fn refresh_current_project_or_warn() {
 fn touch_current_project(
     feature_updates: impl IntoIterator<Item = (&'static str, FeatureStatus)>,
 ) -> Result<()> {
-    if disabled() {
-        return Ok(());
+    if let Some((workspace_root, package_name)) = current_project_target()? {
+        touch(&workspace_root, &package_name, feature_updates)?;
     }
-
-    let Some(metadata) = metadata_for_registry()? else {
-        return Ok(());
-    };
-    let package_name = registry_package_name(&metadata)?;
-    touch(
-        metadata.workspace_root.as_std_path(),
-        &package_name,
-        feature_updates,
-    )
+    Ok(())
 }
 
 fn refresh_current_project() -> Result<()> {
+    if let Some((workspace_root, package_name)) = current_project_target()? {
+        refresh(&workspace_root, &package_name)?;
+    }
+    Ok(())
+}
+
+fn current_project_target() -> Result<Option<(std::path::PathBuf, String)>> {
     if disabled() {
-        return Ok(());
+        return Ok(None);
     }
 
     let Some(metadata) = metadata_for_registry()? else {
-        return Ok(());
+        return Ok(None);
     };
     let package_name = registry_package_name(&metadata)?;
-    refresh(metadata.workspace_root.as_std_path(), &package_name)
+    Ok(Some((
+        metadata.workspace_root.as_std_path().to_path_buf(),
+        package_name,
+    )))
 }
 
 fn metadata_for_registry() -> Result<Option<cargo::Metadata>> {
@@ -1606,7 +1611,7 @@ fn infer_homebrew_flags(content: &str, flag: &str) -> Vec<String> {
         .filter_map(|line| {
             let value = line.trim_start().strip_prefix(&prefix)?;
             let value = value.trim_end_matches('\\').trim();
-            (!value.is_empty()).then(|| shell_unquote(value))
+            (!value.is_empty()).then(|| crate::pages_infer::shell_unquote(value))
         })
         .collect()
 }
@@ -1893,67 +1898,6 @@ fn origin_owner_repo(workspace_root: &Path) -> Result<String> {
     Ok(format!("{owner}/{repo}"))
 }
 
-fn infer_pages_repo(content: &str) -> Option<String> {
-    let marker = "@codeberg.org/";
-    let line = content.lines().find(|line| line.contains(marker))?;
-    let repo_start = line.find(marker)? + marker.len();
-    let repo_tail = &line[repo_start..];
-    let repo_end = repo_tail.find(".git").unwrap_or(repo_tail.len());
-    Some(repo_tail[..repo_end].trim_matches('"').to_owned())
-}
-
-fn infer_pages_token_secret(content: &str) -> Option<String> {
-    let marker = "CODEBERG_TOKEN: ${{ secrets.";
-    let line = content.lines().find(|line| line.contains(marker))?;
-    let start = line.find(marker)? + marker.len();
-    let tail = &line[start..];
-    let end = tail.find(" }}")?;
-    Some(tail[..end].to_owned())
-}
-
-fn infer_pages_source_branch(content: &str) -> Option<String> {
-    let mut lines = content.lines();
-    while !lines.next()?.trim_start().starts_with("branches:") {}
-    lines
-        .find_map(|line| line.trim_start().strip_prefix("- "))
-        .map(str::to_owned)
-}
-
-fn infer_pages_deploy_app(content: &str) -> Option<String> {
-    let marker = "DEPLOY_REMOTE=pages-origin nix run ";
-    let line = content.lines().find(|line| line.contains(marker))?;
-    let start = line.find(marker)? + marker.len();
-    Some(line[start..].trim().to_owned())
-}
-
-fn infer_pages_canonical_domain(content: &str) -> Option<String> {
-    let marker = "grep -qx ";
-    let suffix = " result-pages-site/.domains";
-    let line = content
-        .lines()
-        .find(|line| line.contains(marker) && line.contains(suffix))?;
-    let start = line.find(marker)? + marker.len();
-    let tail = &line[start..];
-    let end = tail.find(suffix)?;
-    Some(shell_unquote(tail[..end].trim()))
-}
-
-fn infer_pages_site_output(content: &str) -> Option<String> {
-    let marker = "nix build ";
-    let suffix = " --out-link result-pages-site";
-    let line = content
-        .lines()
-        .find(|line| line.contains(marker) && line.contains(suffix))?;
-    let start = line.find(marker)? + marker.len();
-    let tail = &line[start..];
-    let end = tail.find(suffix)?;
-    let output = tail[..end].trim();
-    // Accept workflows generated before the output-link fix during upgrades.
-    Some(shell_unquote(
-        output.strip_suffix(" --no-link").unwrap_or(output),
-    ))
-}
-
 fn infer_primary_runner(marked: &[WorkflowFile], workflow_kind: &str) -> Result<ResolvedRunner> {
     let workflow = marked
         .iter()
@@ -2054,15 +1998,6 @@ fn is_workflow_path(path: &Path) -> bool {
         || path.starts_with(".github/workflows")
         || path.starts_with(".crow")
         || path == Path::new(".gitlab-ci.yml")
-}
-
-fn shell_unquote(value: &str) -> String {
-    let value = value.trim();
-    if value.starts_with('\'') && value.ends_with('\'') && value.len() >= 2 {
-        value[1..value.len() - 1].replace("'\\''", "'")
-    } else {
-        value.to_owned()
-    }
 }
 
 fn detect_hooks_status(workspace_root: &Path) -> FeatureStatus {
@@ -2240,6 +2175,61 @@ mod tests {
 
     static GIT_CONFIG_LOCK: Mutex<()> = Mutex::new(());
 
+    #[test]
+    fn flake_status_uses_workspace_edition_and_rejects_commented_coverage() {
+        let _guard = GIT_CONFIG_LOCK.lock().unwrap();
+        for edition in ["2018", "2021", "2024"] {
+            let temp = TempDir::new().unwrap();
+            let root = temp.path();
+            fs::create_dir(root.join("src")).unwrap();
+            fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
+            fs::write(
+                root.join("Cargo.toml"),
+                format!(
+                    "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nedition = \"{edition}\"\n"
+                ),
+            )
+            .unwrap();
+            fs::write(root.join("simit.toml"), "[flake]\nscope = \"full\"\n").unwrap();
+            let mut languages = project::detect_languages(root).unwrap();
+            languages.nix = true;
+            for file in flake::files(
+                &languages,
+                edition,
+                None,
+                None,
+                flake::AuditTools {
+                    audit: true,
+                    ..Default::default()
+                },
+            ) {
+                let path = root.join(file.relative_path);
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                fs::write(path, file.content).unwrap();
+            }
+            assert_eq!(
+                detect_flake_status(root),
+                FeatureStatus::Managed,
+                "edition {edition}"
+            );
+            assert!(
+                !root.join("Cargo.lock").exists(),
+                "status must not generate a lockfile"
+            );
+            let path = root.join("nix/treefmt.nix");
+            let policy = fs::read_to_string(&path).unwrap();
+            fs::write(
+                &path,
+                policy.replace(
+                    "programs.alejandra.enable = true;",
+                    "programs.alejandra.enable = false; # programs.alejandra.enable = true;",
+                ),
+            )
+            .unwrap();
+            assert_eq!(detect_flake_status(root), FeatureStatus::Drift);
+        }
+    }
+
     struct GitConfigGuard {
         _guard: std::sync::MutexGuard<'static, ()>,
         _global_config: TempDir,
@@ -2342,61 +2332,6 @@ mod tests {
         fs::write(path.join("dispatched-by-canix"), "").unwrap();
         for hook in HOOK_TYPES {
             write_executable(&path.join(hook));
-        }
-    }
-
-    #[test]
-    fn flake_status_uses_workspace_edition_and_rejects_commented_coverage() {
-        let _guard = GIT_CONFIG_LOCK.lock().unwrap();
-        for edition in ["2018", "2021", "2024"] {
-            let temp = TempDir::new().unwrap();
-            let root = temp.path();
-            fs::create_dir(root.join("src")).unwrap();
-            fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
-            fs::write(
-                root.join("Cargo.toml"),
-                format!(
-                    "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nedition = \"{edition}\"\n"
-                ),
-            )
-            .unwrap();
-            fs::write(root.join("simit.toml"), "[flake]\nscope = \"full\"\n").unwrap();
-            let mut languages = project::detect_languages(root).unwrap();
-            languages.nix = true;
-            for file in flake::files(
-                &languages,
-                edition,
-                None,
-                None,
-                flake::AuditTools {
-                    audit: true,
-                    ..Default::default()
-                },
-            ) {
-                let path = root.join(file.relative_path);
-                fs::create_dir_all(path.parent().unwrap()).unwrap();
-                fs::write(path, file.content).unwrap();
-            }
-            assert_eq!(
-                detect_flake_status(root),
-                FeatureStatus::Managed,
-                "edition {edition}"
-            );
-            assert!(
-                !root.join("Cargo.lock").exists(),
-                "status must not generate a lockfile"
-            );
-            let path = root.join("nix/treefmt.nix");
-            let policy = fs::read_to_string(&path).unwrap();
-            fs::write(
-                &path,
-                policy.replace(
-                    "programs.alejandra.enable = true;",
-                    "programs.alejandra.enable = false; # programs.alejandra.enable = true;",
-                ),
-            )
-            .unwrap();
-            assert_eq!(detect_flake_status(root), FeatureStatus::Drift);
         }
     }
 

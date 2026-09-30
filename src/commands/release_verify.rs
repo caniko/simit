@@ -5,7 +5,7 @@ use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use semver::Version;
 use serde::{Deserialize, Serialize};
 
@@ -510,20 +510,12 @@ fn parse_crates_io_versions(body: &str) -> std::result::Result<Vec<String>, Crat
 }
 
 fn common_current_version(packages: &[Package]) -> Result<Version> {
-    let Some(first) = packages.first() else {
-        bail!("no packages selected");
-    };
-    let first_version = Version::parse(&first.version)
-        .with_context(|| format!("parsing version {}", first.version))?;
+    let (first_version, _, divergent) = crate::packaging_common::divergent_versions(packages)?;
 
-    for package in packages.iter().skip(1) {
-        let version = Version::parse(&package.version)
-            .with_context(|| format!("parsing version {}", package.version))?;
-        if version != first_version {
-            bail!(
-                "selected packages do not have one current release version; pass --version to verify a specific version"
-            );
-        }
+    if !divergent.is_empty() {
+        bail!(
+            "selected packages do not have one current release version; pass --version to verify a specific version"
+        );
     }
 
     Ok(first_version)

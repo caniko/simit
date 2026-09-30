@@ -9,6 +9,9 @@ use camino::Utf8PathBuf;
 
 use crate::cargo;
 use crate::cli::UpgradeCommand;
+use crate::pages_infer::{
+    infer_pages_canonical_domain, infer_pages_site_output, infer_pages_source_branch,
+};
 use crate::readme_badges;
 use crate::registry::{self, FeatureStatus, Registry};
 use crate::render::ci::{self, CodebergPagesOptions};
@@ -440,69 +443,6 @@ fn infer_ci_runner(workspace_root: &Path) -> Result<Option<String>> {
         return Ok(None);
     }
     Ok(infer_pages_runner(&content))
-}
-
-fn infer_pages_source_branch(content: &str) -> Option<String> {
-    let mut lines = content.lines().peekable();
-    while let Some(line) = lines.next() {
-        if !line.trim_start().starts_with("branches:") {
-            continue;
-        }
-        let trimmed = line.trim();
-        if let Some(inline) = trimmed
-            .strip_prefix("branches: [")
-            .and_then(|value| value.strip_suffix(']'))
-        {
-            return Some(inline.trim_matches('"').to_owned());
-        }
-        while let Some(next) = lines.peek() {
-            let trimmed = next.trim();
-            if let Some(branch) = trimmed.strip_prefix("- ") {
-                return Some(branch.trim_matches('"').to_owned());
-            }
-            if !next.starts_with(' ') {
-                break;
-            }
-            lines.next();
-        }
-    }
-    None
-}
-
-fn infer_pages_canonical_domain(content: &str) -> Option<String> {
-    let marker = "grep -qx ";
-    let suffix = " result-pages-site/.domains";
-    let line = content
-        .lines()
-        .find(|line| line.contains(marker) && line.contains(suffix))?;
-    let start = line.find(marker)? + marker.len();
-    let tail = &line[start..];
-    let end = tail.find(suffix)?;
-    Some(shell_unquote(tail[..end].trim()))
-}
-
-fn infer_pages_site_output(content: &str) -> Option<String> {
-    let marker = "nix build ";
-    let suffix = " --out-link result-pages-site";
-    let line = content
-        .lines()
-        .find(|line| line.contains(marker) && line.contains(suffix))?;
-    let start = line.find(marker)? + marker.len();
-    let tail = &line[start..];
-    let end = tail.find(suffix)?;
-    let output = tail[..end].trim();
-    // Accept workflows generated before the output-link fix during upgrades.
-    Some(shell_unquote(
-        output.strip_suffix(" --no-link").unwrap_or(output),
-    ))
-}
-
-fn shell_unquote(value: &str) -> String {
-    let value = value.trim();
-    if value.len() >= 2 && value.starts_with('\'') && value.ends_with('\'') {
-        return value[1..value.len() - 1].replace("'\"'\"'", "'");
-    }
-    value.to_owned()
 }
 
 fn print_single_outcome(outcome: &ProjectOutcome, mode: Mode) {

@@ -7,6 +7,7 @@ use anyhow::{Context, Result, bail};
 use crate::cargo;
 use crate::cli::{Platform, WingetAction, WingetCommand, WingetSubmitArgs};
 use crate::config::{ProjectConfig, WingetConfig};
+use crate::packaging_common::{validate_download_repo, validate_version};
 use crate::registry::{self, FeatureStatus};
 
 pub fn run(command: WingetCommand) -> Result<()> {
@@ -18,7 +19,7 @@ pub fn run(command: WingetCommand) -> Result<()> {
 pub(crate) fn submit(args: WingetSubmitArgs) -> Result<()> {
     validate_version(&args.version)?;
     let (resolved, platform) = resolve(&args)?;
-    validate_download_repo(&resolved.download_repo)?;
+    validate_download_repo("winget.download_repo", &resolved.download_repo)?;
     let url = args
         .url
         .clone()
@@ -185,23 +186,4 @@ fn resolve(args: &WingetSubmitArgs) -> Result<(WingetConfig, Platform)> {
 fn release_url(resolved: &WingetConfig, version: &str, platform: Platform) -> String {
     let zip = resolved.zip_archive.replace("{version}", version);
     platform.release_download_url(&resolved.download_repo, version, &zip)
-}
-
-fn validate_version(version: &str) -> Result<()> {
-    if version.starts_with('v')
-        || version.is_empty()
-        || !version
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '+' | '~' | '_' | '-'))
-    {
-        bail!("version must match [0-9A-Za-z.+~_-]+ without a leading v, got: {version}");
-    }
-    Ok(())
-}
-
-fn validate_download_repo(value: &str) -> Result<()> {
-    if value.split('/').count() != 2 || value.split('/').any(str::is_empty) {
-        bail!("winget.download_repo must be OWNER/REPO");
-    }
-    Ok(())
 }
