@@ -115,6 +115,91 @@ fn init_flake_only() -> TempDir {
 }
 
 #[test]
+fn rust_provider_migrations_reconcile_all_generated_ci_outputs() {
+    let temp = init_package(true);
+    fs::write(
+        temp.path().join("simit.toml"),
+        "[ci]\nprovider = \"crow\"\nplatform = \"forgejo\"\nruntime = \"nix\"\nrunner = \"atlas-nix-trusted\"\n",
+    )
+    .unwrap();
+    assert!(
+        simit_with_user_config(temp.path())
+            .current_dir(temp.path())
+            .args(["init", "ci"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    for name in ["pages.yaml", "publish-crate.yaml", "release.yml"] {
+        fs::write(
+            temp.path().join(".crow").join(name),
+            format!(
+                "{}\nname: retained\n",
+                simit::render::ci::GENERATED_WORKFLOW_MARKER
+            ),
+        )
+        .unwrap();
+    }
+    fs::write(
+        temp.path().join(".crow/build-operator.yaml"),
+        "name: handwritten\n",
+    )
+    .unwrap();
+
+    for args in [
+        vec![
+            "init",
+            "ci",
+            "--platform",
+            "github",
+            "--ci-provider",
+            "actions",
+            "--runner",
+            "ubuntu-24.04",
+        ],
+        vec![
+            "init",
+            "ci",
+            "--platform",
+            "forgejo",
+            "--ci-provider",
+            "crow",
+            "--runner",
+            "atlas-nix-trusted",
+        ],
+    ] {
+        let output = simit_with_user_config(temp.path())
+            .current_dir(temp.path())
+            .args(&args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let checked = simit_with_user_config(temp.path())
+            .current_dir(temp.path())
+            .args(&args)
+            .arg("--check")
+            .output()
+            .unwrap();
+        assert!(
+            checked.status.success(),
+            "{}",
+            String::from_utf8_lossy(&checked.stderr)
+        );
+        assert_eq!(
+            simit::registry::audit_ci(temp.path()).unwrap().status,
+            simit::registry::FeatureStatus::ManagedExtra
+        );
+    }
+    assert!(temp.path().join(".crow/release.yml").exists());
+    assert!(temp.path().join(".crow/build-operator.yaml").exists());
+    assert!(!temp.path().join(".github/workflows/ci.yaml").exists());
+}
+
+#[test]
 fn python_default_ci_builds_treefmt_check() {
     let temp = init_python_project();
     fs::remove_file(temp.path().join("simit.toml")).unwrap();

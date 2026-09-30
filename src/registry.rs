@@ -1141,6 +1141,8 @@ fn infer_expected_ci_files(
     for package in generation_packages {
         let package_options = ci::CiOptions {
             package_scoped,
+            publish_crates: options.publish_crates
+                && resolved.publish_strategy != crate::config::PublishStrategy::Coordinated,
             homebrew: infer_homebrew_options(&config, package, marked)?,
             chocolatey: infer_chocolatey_options(&config, package, marked)?,
             scoop: infer_scoop_options(&config, package, marked)?,

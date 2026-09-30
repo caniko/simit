@@ -609,7 +609,7 @@ fn publish_workspace_workflow(
         w.push_str("            200)\n");
         w.push_str("              echo \"${crate_name} ${version} already exists on crates.io; verifying it is the intended release\"\n");
         w.push_str("              published_checksum=\"$(jq -er --arg v \"$version\" '.version | select(.num == $v) | .checksum' /tmp/simit-crate.json 2>/dev/null || true)\"\n");
-        w.push_str("              local_crate=\"$(ls target/package/${crate_name}-${version}.crate 2>/dev/null || echo \"\")\"\n");
+        w.push_str("              local_crate=\"target/package/${crate_name}-${version}.crate\"\n");
         w.push_str(
             "              if [ -n \"$published_checksum\" ] && [ -f \"$local_crate\" ]; then\n",
         );
