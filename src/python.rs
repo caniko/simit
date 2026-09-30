@@ -36,7 +36,10 @@ struct ToolTable {
 #[derive(Debug, Deserialize)]
 struct ProjectTable {
     name: String,
-    version: String,
+    #[serde(default)]
+    version: Option<String>,
+    #[serde(default)]
+    dynamic: Vec<String>,
     #[serde(default, rename = "requires-python")]
     requires_python: Option<String>,
     #[serde(default)]
@@ -84,26 +87,58 @@ pub fn load_project(root: &Path) -> Result<Project> {
         .with_context(|| format!("reading {}", pyproject_path.display()))?;
     let pyproject = toml_edit::de::from_str::<Pyproject>(&content)
         .with_context(|| format!("parsing {}", pyproject_path.display()))?;
+    let poetry = pyproject.tool.and_then(|tool| tool.poetry);
 
     let (name, version, requires_python, mut scripts, mut optional_extras, mut dependency_groups) =
         if let Some(project) = pyproject.project {
-            (
-                project.name,
-                project.version,
-                project.requires_python,
-                project.scripts.keys().cloned().collect::<Vec<_>>(),
+            let is_dynamic = |field: &str| project.dynamic.iter().any(|value| value == field);
+            let version = match project.version {
+                Some(version) => version,
+                None if is_dynamic("version") => poetry
+                    .as_ref()
+                    .map(|poetry| poetry.version.clone())
+                    .context("project declares a dynamic version without a supported [tool.poetry].version provider")?,
+                None => bail!("[project] requires version or dynamic = [\"version\"]"),
+            };
+            let scripts = if is_dynamic("scripts") {
+                poetry
+                    .as_ref()
+                    .context("dynamic scripts require [tool.poetry.scripts]")?
+                    .scripts
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>()
+            } else {
+                project.scripts.keys().cloned().collect::<Vec<_>>()
+            };
+            let optional_extras = if is_dynamic("optional-dependencies") {
+                poetry
+                    .as_ref()
+                    .context("dynamic optional-dependencies require [tool.poetry.extras]")?
+                    .extras
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>()
+            } else {
                 project
                     .optional_dependencies
                     .keys()
                     .cloned()
-                    .collect::<Vec<_>>(),
+                    .collect::<Vec<_>>()
+            };
+            (
+                project.name,
+                version,
+                project.requires_python,
+                scripts,
+                optional_extras,
                 pyproject
                     .dependency_groups
                     .keys()
                     .cloned()
                     .collect::<Vec<_>>(),
             )
-        } else if let Some(poetry) = pyproject.tool.and_then(|tool| tool.poetry) {
+        } else if let Some(poetry) = poetry {
             (
                 poetry.name,
                 poetry.version,

@@ -4100,6 +4100,41 @@ pypi_token_secret = "PYPI_API_TOKEN"
 }
 
 #[test]
+fn python_poetry_dynamic_version_generates_convergent_publish_workflow() {
+    let temp = init_python_project();
+    fs::write(
+        temp.path().join("pyproject.toml"),
+        "[project]\nname = 'hybrid'\ndynamic = ['version']\n[tool.poetry]\nname = 'hybrid'\nversion = '1.2.3'\n",
+    )
+    .unwrap();
+    fs::write(
+        temp.path().join("simit.toml"),
+        "[flake]\nmode = 'custom'\nbackend = 'py-harbor'\n[ci]\nruntime = 'nix'\nwith_pypi_publish = true\npypi_token_secret = 'PYPI_API_TOKEN'\n",
+    )
+    .unwrap();
+    assert!(
+        simit()
+            .current_dir(temp.path())
+            .args(["init", "ci", "--platform", "github"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let workflow = read(&temp.path().join(".github/workflows/publish-pypi.yaml"));
+    assert_yaml_parses(&workflow);
+    assert!(workflow.contains("metadata.tool.poetry.version"));
+    assert!(workflow.contains("builtins.elem \"version\""));
+    assert!(
+        simit()
+            .current_dir(temp.path())
+            .args(["init", "ci", "--platform", "github", "--check"])
+            .status()
+            .unwrap()
+            .success()
+    );
+}
+
+#[test]
 fn generates_crow_yaml_and_jsonnet_without_a_crow_cli() {
     let project = init_package(false);
     let output = simit()

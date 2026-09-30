@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Read explicitly dynamic Python versions, scripts, and optional extras from Poetry metadata when a project also declares PEP 621 metadata. Preserve static PEP 621 fields and uv dependency groups, use the same version provider for PyPI release-tag validation, and report unsupported dynamic version providers clearly.
+
 ## [0.19.0] - 2026-09-30
 
 ### Added
