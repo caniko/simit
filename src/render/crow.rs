@@ -224,7 +224,7 @@ fn build_workflow(
             },
             image,
             if runtime == Runtime::Nix {
-                format!("{prefix}treefmt --ci")
+                format!("{prefix}{}", crate::render::ci::NIX_FORMAT_COMMAND)
             } else {
                 format!("{prefix}cargo fmt --all -- --check")
             },

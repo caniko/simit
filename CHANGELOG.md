@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Keep Nix CI formatting usable for legacy shells without treefmt while preserving full uncached treefmt checks and propagating formatter failures whenever it is available.
 - Reconcile obsolete generated Rust workflows across providers during CI writes, matching check-mode ownership while preserving handwritten CI and release workflows.
 - Match coordinated publication in registry audits instead of reporting a missing per-crate publisher after successful generation.
 - Quote coordinated-publication archive paths without shell glob expansion so generated workflows pass ShellCheck.

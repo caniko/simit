@@ -157,6 +157,69 @@ fn explicit_default_feature_policy_is_respected_by_nix_jobs() {
 }
 
 #[test]
+#[cfg(unix)]
+fn nix_format_gate_supports_legacy_shells_and_propagates_formatter_failures() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    use std::process::Command;
+
+    for split in [false, true] {
+        let directory = fixture("nix", split, false);
+        let root = directory.path();
+        let gate = commands(root, "ci")
+            .into_iter()
+            .find(|run| run.contains("treefmt --ci"))
+            .unwrap();
+        let bin = root.join("bin");
+        fs::create_dir(&bin).unwrap();
+        symlink("/bin/sh", bin.join("sh")).unwrap();
+        for (name, script) in [
+            (
+                "nix",
+                "#!/bin/sh\nshift 2\nPATH=\"$FORMAT_BIN\" exec \"$@\"\n",
+            ),
+            (
+                "cargo",
+                "#!/bin/sh\nprintf 'cargo %s\\n' \"$*\" > \"$FORMAT_LOG\"\nexit \"$FORMAT_STATUS\"\n",
+            ),
+            (
+                "treefmt",
+                "#!/bin/sh\nprintf 'treefmt %s\\n' \"$*\" > \"$FORMAT_LOG\"\nexit \"$FORMAT_STATUS\"\n",
+            ),
+        ] {
+            let file = bin.join(name);
+            fs::write(&file, script).unwrap();
+            fs::set_permissions(&file, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        for (treefmt, status, expected) in [
+            (true, 0, "treefmt --ci\n"),
+            (true, 17, "treefmt --ci\n"),
+            (false, 0, "cargo fmt --all -- --check\n"),
+            (false, 17, "cargo fmt --all -- --check\n"),
+        ] {
+            if !treefmt && bin.join("treefmt").exists() {
+                fs::remove_file(bin.join("treefmt")).unwrap();
+            }
+            let log = root.join("format.log");
+            let output = Command::new("sh")
+                .args(["-c", &gate])
+                .env("PATH", &bin)
+                .env("FORMAT_BIN", &bin)
+                .env("FORMAT_LOG", &log)
+                .env("FORMAT_STATUS", status.to_string())
+                .output()
+                .unwrap();
+            assert_eq!(
+                output.status.code(),
+                Some(status),
+                "split={split}, treefmt={treefmt}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(fs::read_to_string(&log).unwrap(), expected);
+        }
+    }
+}
+
+#[test]
 fn generated_flakes_supply_a_native_msrv_shell_for_both_build_modes() {
     for cross in [false, true] {
         let directory = fixture("nix", false, true);
