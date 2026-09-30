@@ -703,9 +703,10 @@ pub fn treefmt_call_module_mismatch(flake_content: &str, module_content: &str) -
                     ));
                 }
             }
-            if pattern.ellipsis_token().is_none()
-                && let Some(extra) = arguments.difference(&declared).next()
-            {
+            if let (None, Some(extra)) = (
+                pattern.ellipsis_token(),
+                arguments.difference(&declared).next(),
+            ) {
                 return Some(format!(
                     "flake.nix passes {extra} but nix/treefmt.nix cannot accept it (no `...` in its parameters)"
                 ));

@@ -1986,8 +1986,12 @@ impl ProjectConfig {
             );
         }
         validate_required_gates(&self.ci)?;
-        if let Some(command) = &self.ci.crow.check_command
-            && (command.trim().is_empty() || command.contains(['\n', '\r']))
+        if self
+            .ci
+            .crow
+            .check_command
+            .as_ref()
+            .is_some_and(|command| command.trim().is_empty() || command.contains(['\n', '\r']))
         {
             bail!(
                 "simit project config: [ci.crow].check_command must be a non-empty single-line command"
