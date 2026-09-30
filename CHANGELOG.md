@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-09-30
+
 ### Added
 
 - `simit test --git-fixtures -- <command>` provides disposable, directory-scoped Git fixture isolation while preserving checkout hook/signing policy and child exit status.
@@ -18,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Recognize the current `harbor-py` input name alongside `py-harbor` when validating custom Python flakes.
 - Keep generated plugin publisher scripts lint-clean by emitting only the configured credential variables and identifying jq's literal filter variables.
 - Resolve GitHub SSH flake inputs over HTTPS in hosted Nix jobs so public pinned dependencies remain usable without runner SSH keys.
+- Apply the same GitHub input transport setup to comprehensive artifact release workflows.
 - Keep Nix CI formatting usable for legacy shells without treefmt while preserving full uncached treefmt checks and propagating formatter failures whenever it is available.
 - Reconcile obsolete generated Rust workflows across providers during CI writes, matching check-mode ownership while preserving handwritten CI and release workflows.
 - Match coordinated publication in registry audits instead of reporting a missing per-crate publisher after successful generation.
@@ -468,7 +471,8 @@ ci`, including the `~/.cargo/bin` key, rust-cache settings, and why Nix
 
 - Prepare the first public crates.io release.
 
-[Unreleased]: https://github.com/caniko/simit/compare/0.18.1...HEAD
+[Unreleased]: https://github.com/caniko/simit/compare/0.19.0...HEAD
+[0.19.0]: https://github.com/caniko/simit/compare/0.18.1...0.19.0
 [0.18.1]: https://github.com/caniko/simit/compare/0.18.0...0.18.1
 [0.18.0]: https://github.com/caniko/simit/compare/0.17.15...0.18.0
 [0.17.15]: https://github.com/caniko/simit/compare/0.17.14...0.17.15

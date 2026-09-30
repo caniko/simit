@@ -816,6 +816,9 @@ fn push_install_nix(w: &mut String, platform: Platform, artifacts: &ArtifactsCon
         .expect("write");
     }
     w.push('\n');
+    if platform == Platform::Github {
+        crate::render::ci::push_github_input_transport(w);
+    }
 }
 
 fn push_preinstalled_nix_env(w: &mut String, artifacts: &ArtifactsConfig) {
