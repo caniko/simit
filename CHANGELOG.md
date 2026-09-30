@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Select the flake's configured treefmt wrapper before bare shell tools in Nix formatting gates, preserving project policy and formatter failure status.
 - Keep generated plugin publisher scripts lint-clean by emitting only the configured credential variables and identifying jq's literal filter variables.
 - Resolve GitHub SSH flake inputs over HTTPS in hosted Nix jobs so public pinned dependencies remain usable without runner SSH keys.
 - Keep Nix CI formatting usable for legacy shells without treefmt while preserving full uncached treefmt checks and propagating formatter failures whenever it is available.

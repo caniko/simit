@@ -36,7 +36,7 @@ const CARGO_DENY_VERSION: &str = "0.18.3";
 const CARGO_DENY_POLICY_CHECKS: &str = "bans licenses sources";
 // Custom/legacy Nix shells may expose rustfmt without a treefmt wrapper.
 // Prefer the complete project formatter, and never mask its failure.
-pub(crate) const NIX_FORMAT_COMMAND: &str = "sh -c 'if command -v treefmt >/dev/null 2>&1; then exec treefmt --ci; else exec cargo fmt --all -- --check; fi'";
+pub(crate) const NIX_FORMAT_COMMAND: &str = r#"sh -c 'formatter=$(nix eval --impure --raw --expr "let root = toString ./.; flake = builtins.getFlake (if builtins.pathExists ./.git then \"git+file://\" + root else root); in if flake ? formatter.\${builtins.currentSystem} then flake.formatter.\${builtins.currentSystem}.drvPath else \"\"") || exit; if [ -n "$formatter" ]; then formatter_path=$(nix build --no-link --print-out-paths "$formatter^out") || exit; if [ -x "$formatter_path/bin/treefmt" ]; then exec "$formatter_path/bin/treefmt" --ci; fi; fi; if command -v treefmt >/dev/null 2>&1; then exec treefmt --ci; else exec cargo fmt --all -- --check; fi'"#;
 
 #[derive(Debug, Deserialize)]
 struct ActionPin {
@@ -2099,7 +2099,7 @@ fn ci_workflow_single_job(
             push_nix_cargo_bin_path_step(&mut workflow);
             push_extra_setup_steps(&mut workflow, &options.extra_setup);
             workflow.push_str(&format!(
-                "      - name: Format check\n        run: nix develop -c {NIX_FORMAT_COMMAND}\n\n",
+                "      - name: Format check\n        run: |\n          # Expand formatter variables inside the Nix shell.\n          # shellcheck disable=SC2016\n          nix develop -c {NIX_FORMAT_COMMAND}\n\n",
             ));
             match options.om_ci {
                 OmCiMode::Off => {
@@ -2229,7 +2229,7 @@ fn ci_workflow_multi_job(
             capture(
                 STEP_FORMAT,
                 &format!(
-                    "      - name: Format check\n        run: nix develop -c {NIX_FORMAT_COMMAND}\n\n"
+                    "      - name: Format check\n        run: |\n          # Expand formatter variables inside the Nix shell.\n          # shellcheck disable=SC2016\n          nix develop -c {NIX_FORMAT_COMMAND}\n\n"
                 ),
             );
 
