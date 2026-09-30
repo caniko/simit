@@ -11,14 +11,6 @@
     pass_filenames = false;
   };
 
-  cargo-fmt = {
-    enable = true;
-    name = "cargo fmt";
-    entry = "cargo fmt --all -- --check";
-    extraPackages = pkgs.lib.optional (rustToolchain != null) rustToolchain;
-    pass_filenames = false;
-  };
-
   cargo-clippy = {
     enable = true;
     name = "cargo clippy";

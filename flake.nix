@@ -156,7 +156,7 @@
           }
         else null;
 
-      treefmtEval = treefmt-nix.lib.evalModule pkgs (import ./nix/treefmt.nix);
+      treefmtEval = treefmt-nix.lib.evalModule pkgs (import ./nix/treefmt.nix {rustfmtPackage = toolchain.rustToolchain;});
       pre-commit-check = git-hooks.lib.${system}.run {
         src = ./.;
         hooks = import ./nix/pre-commit.nix {
@@ -173,10 +173,6 @@
           cargoArtifacts = publicCargoArtifacts;
           cargoClippyExtraArgs = "--all-targets -- --deny warnings";
         });
-
-      fmtCheck = publicCraneLib.cargoFmt {
-        inherit src;
-      };
 
       nextestCheck = publicCraneLib.cargoNextest (commonArgs
         // {
@@ -249,14 +245,12 @@
         # Attic push can cache the project dependency graph independently.
         simit-deps = depsCheck;
         simit-clippy = clippyCheck;
-        simit-fmt = fmtCheck;
         simit-nextest = nextestCheck;
         simit-doc = docCheck;
         simit-audit = auditCheck;
         simit-deny = denyCheck;
 
         clippy = clippyCheck;
-        fmt = fmtCheck;
         nextest = nextestCheck;
         doc = docCheck;
         audit = auditCheck;
