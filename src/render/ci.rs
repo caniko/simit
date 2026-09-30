@@ -3625,6 +3625,10 @@ fn push_install_nix_step_with_cache(
     } else {
         workflow.push_str("\n\n");
     }
+    // Public GitHub flake inputs often retain operator SSH URLs in their locks.
+    // Hosted runners have no SSH key; resolve those inputs over HTTPS without
+    // changing pinned revisions or borrowing deployment credentials.
+    workflow.push_str("      - name: Configure GitHub input transport\n        run: |\n          git config --global --add url.https://github.com/.insteadOf ssh://git@github.com/\n          git config --global --add url.https://github.com/.insteadOf git@github.com:\n\n");
 }
 
 fn push_nix_cargo_bin_path_step(workflow: &mut String) {

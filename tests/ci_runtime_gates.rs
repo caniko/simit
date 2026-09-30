@@ -220,6 +220,51 @@ fn nix_format_gate_supports_legacy_shells_and_propagates_formatter_failures() {
 }
 
 #[test]
+#[cfg(unix)]
+fn github_nix_input_transport_works_without_a_runner_ssh_key() {
+    use std::process::Command;
+
+    let directory = fixture("nix", false, false);
+    let setup = commands(directory.path(), "ci")
+        .into_iter()
+        .find(|run| run.contains("insteadOf"))
+        .expect("GitHub Nix jobs must normalize GitHub SSH input transport");
+    let config = directory.path().join("git-fixture-config");
+    assert!(
+        Command::new("sh")
+            .args(["-c", &setup])
+            .env("GIT_CONFIG_GLOBAL", &config)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .status()
+            .unwrap()
+            .success()
+    );
+    for (url, expected) in [
+        (
+            "ssh://git@github.com/caniko/harbor-rs.git",
+            "https://github.com/caniko/harbor-rs.git",
+        ),
+        (
+            "git@github.com:caniko/harbor-rs.git",
+            "https://github.com/caniko/harbor-rs.git",
+        ),
+        (
+            "ssh://git@codefloe.com/caniko/cotton.git",
+            "ssh://git@codefloe.com/caniko/cotton.git",
+        ),
+    ] {
+        let result = Command::new("git")
+            .args(["ls-remote", "--get-url", url])
+            .env("GIT_CONFIG_GLOBAL", &config)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .unwrap();
+        assert!(result.status.success());
+        assert_eq!(String::from_utf8(result.stdout).unwrap().trim(), expected);
+    }
+}
+
+#[test]
 fn generated_flakes_supply_a_native_msrv_shell_for_both_build_modes() {
     for cross in [false, true] {
         let directory = fixture("nix", false, true);
