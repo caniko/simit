@@ -35,6 +35,75 @@ license = "MIT"
     temp
 }
 
+#[test]
+fn nix_format_jobs_are_uncached_across_providers_and_job_layouts() {
+    for (platform, provider, path, step_runners) in [
+        ("github", "actions", ".github/workflows/ci.yaml", ""),
+        (
+            "forgejo",
+            "actions",
+            ".forgejo/workflows/ci.yaml",
+            "step_runners = { cargo-fmt = \"atlas-nix-trusted\" }",
+        ),
+        ("forgejo", "crow", ".crow/build.yaml", ""),
+    ] {
+        let temp = init_package(true);
+        fs::write(
+            temp.path().join("simit.toml"),
+            format!("[ci]\nplatform = \"{platform}\"\nprovider = \"{provider}\"\nruntime = \"nix\"\n{step_runners}\n"),
+        )
+        .unwrap();
+        let output = simit()
+            .current_dir(temp.path())
+            .args(["init", "ci"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let workflow = read(&temp.path().join(path));
+        assert_yaml_parses(&workflow);
+        assert!(
+            workflow.contains("treefmt --ci"),
+            "{platform}/{provider}: {workflow}"
+        );
+        assert!(!workflow.contains("treefmt --fail-on-change"));
+    }
+}
+
+#[test]
+fn github_required_gates_have_job_scoped_permissions() {
+    let temp = init_package(true);
+    fs::write(
+        temp.path().join("simit.toml"),
+        r#"[ci]
+platform = "github"
+provider = "actions"
+runtime = "nix"
+required_gates = [
+    { id = "integration", run = "nix run .#integration" },
+    { id = "module-smoke", run = "nix build .#module-smoke" },
+]
+"#,
+    )
+    .unwrap();
+    let status = simit()
+        .current_dir(temp.path())
+        .args(["init", "ci"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let workflow = fs::read_to_string(temp.path().join(".github/workflows/ci.yaml")).unwrap();
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
+    for id in ["gate-integration", "gate-module-smoke"] {
+        let job = &yaml["jobs"][id];
+        assert_eq!(job["permissions"]["contents"].as_str(), Some("read"));
+        assert!(job["steps"].as_sequence().is_some());
+    }
+}
+
 fn init_flake_only() -> TempDir {
     let temp = TempDir::new().unwrap();
     fs::write(
@@ -43,6 +112,58 @@ fn init_flake_only() -> TempDir {
     )
     .unwrap();
     temp
+}
+
+#[test]
+fn python_default_ci_builds_treefmt_check() {
+    let temp = init_python_project();
+    fs::remove_file(temp.path().join("simit.toml")).unwrap();
+    fs::remove_file(temp.path().join("flake.nix")).unwrap();
+    assert!(
+        simit()
+            .current_dir(temp.path())
+            .args(["init", "flake"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let output = simit()
+        .current_dir(temp.path())
+        .args(["init", "ci", "--platform", "github", "--runtime", "nix"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let workflow = fs::read_to_string(temp.path().join(".github/workflows/ci.yaml")).unwrap();
+    assert!(workflow.contains("checks.x86_64-linux.formatting"));
+    assert!(!workflow.contains("checks.x86_64-linux.uv-format"));
+    let output = simit()
+        .current_dir(temp.path())
+        .args([
+            "init",
+            "ci",
+            "--platform",
+            "forgejo",
+            "--ci-provider",
+            "crow",
+            "--runtime",
+            "nix",
+            "--runner",
+            "atlas-nix-trusted",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let workflow = fs::read_to_string(temp.path().join(".crow/ci.yaml")).unwrap();
+    assert!(workflow.contains("checks.x86_64-linux.formatting"));
+    assert!(!workflow.contains("checks.x86_64-linux.uv-format"));
 }
 
 fn init_python_project() -> TempDir {
@@ -399,96 +520,6 @@ fn assert_maintainer_key_written(root: &Path) {
 }
 
 #[test]
-fn python_default_ci_builds_treefmt_check() {
-    let temp = init_python_project();
-    fs::remove_file(temp.path().join("simit.toml")).unwrap();
-    fs::remove_file(temp.path().join("flake.nix")).unwrap();
-    assert!(
-        simit()
-            .current_dir(temp.path())
-            .args(["init", "flake"])
-            .status()
-            .unwrap()
-            .success()
-    );
-    let output = simit()
-        .current_dir(temp.path())
-        .args(["init", "ci", "--platform", "github", "--runtime", "nix"])
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let workflow = fs::read_to_string(temp.path().join(".github/workflows/ci.yaml")).unwrap();
-    assert!(workflow.contains("checks.x86_64-linux.formatting"));
-    assert!(!workflow.contains("checks.x86_64-linux.uv-format"));
-    let output = simit()
-        .current_dir(temp.path())
-        .args([
-            "init",
-            "ci",
-            "--platform",
-            "forgejo",
-            "--ci-provider",
-            "crow",
-            "--runtime",
-            "nix",
-            "--runner",
-            "atlas-nix-trusted",
-        ])
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let workflow = fs::read_to_string(temp.path().join(".crow/ci.yaml")).unwrap();
-    assert!(workflow.contains("checks.x86_64-linux.formatting"));
-    assert!(!workflow.contains("checks.x86_64-linux.uv-format"));
-}
-
-#[test]
-fn nix_format_jobs_are_uncached_across_providers_and_job_layouts() {
-    for (platform, provider, path, step_runners) in [
-        ("github", "actions", ".github/workflows/ci.yaml", ""),
-        (
-            "forgejo",
-            "actions",
-            ".forgejo/workflows/ci.yaml",
-            "step_runners = { cargo-fmt = \"atlas-nix-trusted\" }",
-        ),
-        ("forgejo", "crow", ".crow/build.yaml", ""),
-    ] {
-        let temp = init_package(true);
-        fs::write(
-            temp.path().join("simit.toml"),
-            format!("[ci]\nplatform = \"{platform}\"\nprovider = \"{provider}\"\nruntime = \"nix\"\n{step_runners}\n"),
-        )
-        .unwrap();
-        let output = simit()
-            .current_dir(temp.path())
-            .args(["init", "ci"])
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let workflow = read(&temp.path().join(path));
-        assert_yaml_parses(&workflow);
-        assert!(
-            workflow.contains("treefmt --ci"),
-            "{platform}/{provider}: {workflow}"
-        );
-        assert!(!workflow.contains("treefmt --fail-on-change"));
-    }
-}
-
-#[test]
 fn generates_forgejo_nix_workflows() {
     let temp = init_package(true);
 
@@ -522,7 +553,9 @@ fn generates_forgejo_nix_workflows() {
     assert!(!ci.contains("path: ~/.cargo/bin"));
     assert!(!ci.contains("command -v cargo-nextest"));
     assert!(ci.contains("run: nix flake check"));
-    assert!(ci.contains("run: nix develop -c cargo clippy --all-targets -- --deny warnings"));
+    assert!(ci.contains(
+        "run: nix develop -c cargo clippy --all-targets --all-features -- --deny warnings"
+    ));
 
     let publish = read(&temp.path().join(".forgejo/workflows/publish-crate.yaml"));
     assert!(publish.contains("runs-on: atlas"));
@@ -1535,11 +1568,13 @@ fn forgejo_nix_with_om_ci_augment_keeps_legacy_steps() {
     assert!(ci.contains("nix run \"$OMNIX_REF\" -- ci run"));
     assert!(ci.contains("run: nix flake check"));
     assert!(ci.contains("nix develop -c cargo test"));
-    assert!(ci.contains("nix develop -c cargo clippy --all-targets -- --deny warnings"));
+    assert!(
+        ci.contains("nix develop -c cargo clippy --all-targets --all-features -- --deny warnings")
+    );
 }
 
 #[test]
-fn forgejo_nix_msrv_uses_devshell_toolchain() {
+fn forgejo_nix_msrv_uses_and_verifies_the_msrv_devshell_toolchain() {
     let temp = init_package(true);
 
     let status = simit_with_user_config(temp.path())
@@ -1558,7 +1593,9 @@ fn forgejo_nix_msrv_uses_devshell_toolchain() {
     assert!(status.success());
 
     let ci = read(&temp.path().join(".forgejo/workflows/ci.yaml"));
-    assert!(ci.contains("run: nix develop -c cargo check --all-targets"));
+    assert!(ci.contains("nix develop .#msrv -c rustc --version"));
+    assert!(ci.contains("= '1.85.0'"));
+    assert!(ci.contains("nix develop .#msrv -c cargo check --all-targets --all-features"));
     assert!(!ci.contains("cargo +1.85 check"));
 }
 
@@ -1777,6 +1814,8 @@ fn generates_github_plain_cargo_workflows() {
     assert!(ci.contains("run: cargo package --allow-dirty --list"));
 
     let publish = read(&temp.path().join(".github/workflows/publish-crate.yaml"));
+    assert!(publish.contains("group: ${{ github.workflow_ref }}-${{ github.ref }}"));
+    assert!(publish.contains("cancel-in-progress: false"));
     assert!(
         publish.contains("on:\n  push:\n    tags:\n      - \"[0-9]*\"\n  workflow_dispatch:\n")
     );
@@ -3092,7 +3131,8 @@ fn optional_strict_flags_render_expected_steps() {
         "run: command -v cargo-deny >/dev/null 2>&1 || cargo install cargo-deny --locked --version 0.18.3"
     ));
     assert!(ci.contains("run: cargo deny check bans licenses sources"));
-    assert!(ci.contains("run: cargo +1.85 check --all-targets"));
+    assert!(ci.contains("rustup toolchain install 1.85 --profile minimal"));
+    assert!(ci.contains("cargo +1.85 check --all-targets --all-features"));
     assert!(ci.contains("run: cargo doc --no-deps --all-features"));
     assert!(!ci.contains("&>/dev/null"));
 

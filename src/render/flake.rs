@@ -95,8 +95,8 @@ pub fn files_with_components(
     components: &[FlakeComponent],
 ) -> Vec<GeneratedFile> {
     let flake_content = match cross_targets {
-        Some(targets) => cross_template(targets, audit_tools),
-        None => template(audit_tools),
+        Some(targets) => cross_template_with_msrv(targets, audit_tools, rust_version),
+        None => template(audit_tools, rust_version),
     };
     vec![
         GeneratedFile {
@@ -979,7 +979,40 @@ fn unique_anchor(content: &str, anchor: &str, anchor_name: &str, reason: &str) -
     Ok(index)
 }
 
-fn template(audit_tools: AuditTools) -> String {
+/// Dev-shell package list shared by [`template`] and [`cross_template`].
+/// Inserted via marker replacement after rendering so both outputs stay
+/// byte-identical to the previous inline lists.
+const DEVSHELL_PACKAGES_MARKER: &str = "@@DEVSHELL_PACKAGES@@";
+const DEVSHELL_PACKAGES: &str = "        packages = with pkgs; [\n          cargo-about\n          cargo-audit\n          cargo-cyclonedx\n          cargo-deny\n          cargo-llvm-cov\n          cargo-sbom\n          cargo-nextest\n          cosign\n          file\n          gnutar\n          gzip\n          jq\n          minisign\n          nodejs\n          pre-commit\n          rpm\n          util-linux\n          unzip\n          zip\n          reprepro\n          rust-analyzer\n          taplo\n        ] ++ pre-commit-check.enabledPackages;";
+
+fn msrv_shell(rust_version: Option<&str>, attribute: &str) -> String {
+    let Some(version) = rust_version else {
+        return String::new();
+    };
+    let version = rust_overlay_version(version);
+    format!(
+        r#"{attribute} = let
+        msrvToolchain = rs-harbor.lib.mkToolchain {{
+          inherit pkgs;
+          toolchainFile = builtins.toFile "rust-toolchain-msrv.toml" ''
+            [toolchain]
+            channel = "{version}"
+            profile = "minimal"
+          '';
+          withRustAnalyzer = false;
+          crossTargets = [];
+        }};
+      in (rs-harbor.lib.mkDevShells {{
+        inherit pkgs;
+        inherit (msrvToolchain) craneLib;
+        cross = rs-harbor.lib.mkCross {{inherit pkgs system; enableOsxcross = false;}};
+        opencodeLsp.enable = false;
+        extraEnv = {{RUSTFLAGS = ""; CARGO_ENCODED_RUSTFLAGS = "";}};
+      }}).default;"#
+    )
+}
+
+fn template(audit_tools: AuditTools, rust_version: Option<&str>) -> String {
     let mut content = r#"{
   description = "Rust project";
 
@@ -1044,32 +1077,10 @@ fn template(audit_tools: AuditTools) -> String {
       };
       devShells.default = craneLib.devShell {
         checks = self.checks.${system};
-        packages = with pkgs; [
-          cargo-about
-          cargo-audit
-          cargo-cyclonedx
-          cargo-deny
-          cargo-llvm-cov
-          cargo-sbom
-          cargo-nextest
-          cosign
-          file
-          gnutar
-          gzip
-          jq
-          minisign
-          nodejs
-          pre-commit
-          rpm
-          util-linux
-          unzip
-          zip
-          reprepro
-          rust-analyzer
-          taplo
-        ] ++ pre-commit-check.enabledPackages;
+        @@DEVSHELL_PACKAGES@@
         shellHook = pre-commit-check.shellHook;
       };
+      @@MSRV_SHELL@@
       apps.local-check-fast = {
         type = "app";
         program = let
@@ -1211,6 +1222,11 @@ fn template(audit_tools: AuditTools) -> String {
 "#
     .to_owned();
     content = content.replace("a3e5f76326f0f02de230cb2fba66fa3c1c7171cb", RS_HARBOR_REV);
+    content = content.replace(DEVSHELL_PACKAGES_MARKER, DEVSHELL_PACKAGES);
+    content = content.replace(
+        "@@MSRV_SHELL@@",
+        &msrv_shell(rust_version, "devShells.msrv"),
+    );
     insert_template_audit_packages(&mut content, audit_tools);
     content
 }
@@ -1461,6 +1477,14 @@ fn cross_default_attr(targets: &[FlakeTargetArg]) -> String {
 /// Render an rs-harbor-based multi-target flake that builds the requested cross
 /// targets through `rs-harbor.lib.mkCrossPackages`.
 pub fn cross_template(targets: &[FlakeTargetArg], audit_tools: AuditTools) -> String {
+    cross_template_with_msrv(targets, audit_tools, None)
+}
+
+fn cross_template_with_msrv(
+    targets: &[FlakeTargetArg],
+    audit_tools: AuditTools,
+    rust_version: Option<&str>,
+) -> String {
     let target_list = cross_target_list(targets);
     let default_attr = cross_default_attr(targets);
     let mut content = format!(
@@ -1560,34 +1584,13 @@ pub fn cross_template(targets: &[FlakeTargetArg], audit_tools: AuditTools) -> St
           }});
         fmt = craneLib.cargoFmt {{inherit src;}};
       }};
-      devShells = rs-harbor.lib.mkDevShells {{
+      devShells = (rs-harbor.lib.mkDevShells {{
         inherit pkgs cross;
         inherit (toolchain) craneLib;
-        packages = with pkgs; [
-          cargo-about
-          cargo-audit
-          cargo-cyclonedx
-          cargo-deny
-          cargo-llvm-cov
-          cargo-sbom
-          cargo-nextest
-          cosign
-          file
-          gnutar
-          gzip
-          jq
-          minisign
-          nodejs
-          pre-commit
-          rpm
-          util-linux
-          unzip
-          zip
-          reprepro
-          rust-analyzer
-          taplo
-        ] ++ pre-commit-check.enabledPackages;
+        @@DEVSHELL_PACKAGES@@
         extraShellHook = pre-commit-check.shellHook;
+      }}) // {{
+        @@MSRV_SHELL@@
       }};
       apps.local-check-fast = {{
         type = "app";
@@ -1734,6 +1737,8 @@ pub fn cross_template(targets: &[FlakeTargetArg], audit_tools: AuditTools) -> St
         default_attr = default_attr,
     );
     content = content.replace("a3e5f76326f0f02de230cb2fba66fa3c1c7171cb", RS_HARBOR_REV);
+    content = content.replace(DEVSHELL_PACKAGES_MARKER, DEVSHELL_PACKAGES);
+    content = content.replace("@@MSRV_SHELL@@", &msrv_shell(rust_version, "msrv"));
     insert_template_audit_packages(&mut content, audit_tools);
     content
 }
@@ -2026,7 +2031,7 @@ fn pre_commit_nix(
     content
 }
 
-fn rust_overlay_version(version: &str) -> String {
+pub(super) fn rust_overlay_version(version: &str) -> String {
     match version.matches('.').count() {
         0 => format!("{version}.0.0"),
         1 => format!("{version}.0"),
@@ -2297,11 +2302,14 @@ mod tests {
 
     #[test]
     fn single_target_template_is_unchanged_by_cross_support() {
-        let flake = template(AuditTools {
-            audit: true,
-            deny: false,
-            pyo3: false,
-        });
+        let flake = template(
+            AuditTools {
+                audit: true,
+                deny: false,
+                pyo3: false,
+            },
+            None,
+        );
         // Every generated Rust flake consumes the canonical rs-harbor cache
         // contract, while the single-target path remains non-cross.
         assert!(flake.contains("package = craneLib.buildPackage"));

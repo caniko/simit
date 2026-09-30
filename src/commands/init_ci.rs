@@ -2345,7 +2345,15 @@ pub(crate) fn apply_granular_step_runners(
             .or_insert_with(|| "atlas-nix-trusted".to_string());
     }
     step_runners
-        .entry(crate::render::ci::STEP_CARGO_FMT.to_string())
+        .entry(
+            if runtime == Runtime::Nix
+                && !step_runners.contains_key(crate::render::ci::STEP_CARGO_FMT)
+            {
+                crate::render::ci::STEP_FORMAT.to_string()
+            } else {
+                crate::render::ci::STEP_CARGO_FMT.to_string()
+            },
+        )
         .or_insert_with(|| "codeberg-tiny".to_string());
     step_runners
         .entry(crate::render::ci::STEP_CARGO_CLIPPY.to_string())
