@@ -198,74 +198,82 @@ fn build_workflow(
         );
     }
 
-    if runtime == Runtime::Nix && options.om_ci != OmCiMode::Replace {
-        steps.push(step("nix-check", image, format!("{prefix}nix flake check")));
-    }
-    steps.push(step(
-        STEP_CARGO_FMT,
-        image,
-        if runtime == Runtime::Nix {
-            format!("{prefix}treefmt --ci")
-        } else {
-            format!("{prefix}cargo fmt --all -- --check")
-        },
-    ));
-    steps.push(step(
-        STEP_CARGO_TEST,
-        image,
-        format!("{prefix}cargo test{}", package_selector(package, options)),
-    ));
-    if options.with_docs {
+    if let Some(command) = &config.check_command {
+        steps.push(step("project-check", image, command.clone()));
+    } else {
+        if runtime == Runtime::Nix && options.om_ci != OmCiMode::Replace {
+            steps.push(step("nix-check", image, format!("{prefix}nix flake check")));
+        }
         steps.push(step(
-            STEP_CARGO_DOC,
+            if runtime == Runtime::Nix {
+                crate::render::ci::STEP_FORMAT
+            } else {
+                STEP_CARGO_FMT
+            },
             image,
-            format!("{prefix}cargo doc --no-deps --all-features"),
+            if runtime == Runtime::Nix {
+                format!("{prefix}treefmt --ci")
+            } else {
+                format!("{prefix}cargo fmt --all -- --check")
+            },
         ));
-    }
-    if options.with_nextest {
         steps.push(step(
-            "cargo-nextest",
+            STEP_CARGO_TEST,
             image,
-            format!(
-                "{prefix}cargo nextest run --all-features{}",
-                package_selector(package, options)
-            ),
+            format!("{prefix}cargo test{}", package_selector(package, options)),
         ));
-    }
-    if options.with_audit {
+        if options.with_docs {
+            steps.push(step(
+                STEP_CARGO_DOC,
+                image,
+                format!("{prefix}cargo doc --no-deps --all-features"),
+            ));
+        }
+        if options.with_nextest {
+            steps.push(step(
+                "cargo-nextest",
+                image,
+                format!(
+                    "{prefix}cargo nextest run --all-features{}",
+                    package_selector(package, options)
+                ),
+            ));
+        }
+        if options.with_audit {
+            steps.push(step(
+                "cargo-audit",
+                image,
+                format!("{prefix}cargo audit --no-fetch --stale"),
+            ));
+        }
+        if options.with_deny {
+            steps.push(step(
+                "cargo-deny",
+                image,
+                format!("{prefix}cargo deny check bans licenses sources"),
+            ));
+        }
+        if options.om_ci != OmCiMode::Off {
+            steps.push(
+                Step::new("om-ci", image)
+                    .command(format!("nix run \"{}\" -- ci run", options.omnix_ref)),
+            );
+        }
         steps.push(step(
-            "cargo-audit",
+            STEP_CARGO_CLIPPY,
             image,
-            format!("{prefix}cargo audit --no-fetch --stale"),
+            format!("{prefix}cargo clippy --all-targets -- --deny warnings"),
         ));
-    }
-    if options.with_deny {
-        steps.push(step(
-            "cargo-deny",
-            image,
-            format!("{prefix}cargo deny check bans licenses sources"),
-        ));
-    }
-    if options.om_ci != OmCiMode::Off {
-        steps.push(
-            Step::new("om-ci", image)
-                .command(format!("nix run \"{}\" -- ci run", options.omnix_ref)),
-        );
-    }
-    steps.push(step(
-        STEP_CARGO_CLIPPY,
-        image,
-        format!("{prefix}cargo clippy --all-targets -- --deny warnings"),
-    ));
-    if package.is_publishable() {
-        steps.push(step(
-            STEP_CARGO_PACKAGE,
-            image,
-            format!(
-                "{prefix}cargo package --allow-dirty --list{}",
-                package_selector(package, options)
-            ),
-        ));
+        if package.is_publishable() {
+            steps.push(step(
+                STEP_CARGO_PACKAGE,
+                image,
+                format!(
+                    "{prefix}cargo package --allow-dirty --list{}",
+                    package_selector(package, options)
+                ),
+            ));
+        }
     }
     if self_check.enabled {
         let mut command = String::from("cargo run -- init ci --ci-provider crow");
@@ -480,7 +488,7 @@ fn add_nix_environment(steps: &mut [Step]) {
 
 fn apply_step_runner_labels(steps: &mut [Step], runners: &BTreeMap<String, ResolvedRunner>) {
     for step in steps {
-        let Some(runner) = runners.get(&step.name) else {
+        let Some(runner) = crate::render::ci::step_runner_override(runners, &step.name) else {
             continue;
         };
         for label in &runner.labels {
@@ -705,30 +713,16 @@ pub fn python_publish_file(
     runner: &ResolvedRunner,
     options: &CiOptions,
 ) -> Result<GeneratedFile> {
-    if options.pypi_trusted_publishing {
-        bail!("PyPI trusted publishing requires GitHub Actions");
-    }
-    let image = nix_image(config)?;
-    let mut publish = Step::new("publish-pypi", &image)
-        .command("nix develop -c uv build".to_owned())
-        .command("nix develop -c uv publish".to_owned())
-        .secret(&options.pypi_token_secret);
-    apply_common_options(std::slice::from_mut(&mut publish), options);
-    add_nix_environment(std::slice::from_mut(&mut publish));
-    let workflow = Workflow {
-        name: "publish-pypi".to_owned(),
-        labels: labels(config, runner),
-        platform: config.platform.clone(),
-        when: vec![condition("event", "tag")],
-        skip_clone: config.skip_clone.then_some(true),
-        variables: config.variables.clone(),
-        workspace: None,
-        steps: vec![publish],
-    };
-    Ok(GeneratedFile {
-        relative_path: crow_path("publish-pypi", None, format),
-        content: render_workflow(workflow, format)?,
-    })
+    pypi_publish_file(
+        format,
+        config,
+        runner,
+        options,
+        &[
+            "nix develop -c uv build".to_owned(),
+            "nix develop -c uv publish".to_owned(),
+        ],
+    )
 }
 
 pub fn maturin_publish_file(
@@ -737,14 +731,34 @@ pub fn maturin_publish_file(
     runner: &ResolvedRunner,
     options: &CiOptions,
 ) -> Result<GeneratedFile> {
+    pypi_publish_file(
+        format,
+        config,
+        runner,
+        options,
+        &[
+            "nix develop -c maturin build --release --sdist".to_owned(),
+            "nix develop -c maturin publish --skip-existing".to_owned(),
+        ],
+    )
+}
+
+fn pypi_publish_file(
+    format: CrowWorkflowFormat,
+    config: &CrowCiConfig,
+    runner: &ResolvedRunner,
+    options: &CiOptions,
+    build_commands: &[String],
+) -> Result<GeneratedFile> {
     if options.pypi_trusted_publishing {
         bail!("PyPI trusted publishing requires GitHub Actions");
     }
     let image = nix_image(config)?;
-    let mut publish = Step::new("publish-pypi", &image)
-        .command("nix develop -c maturin build --release --sdist".to_owned())
-        .command("nix develop -c maturin publish --skip-existing".to_owned())
-        .secret(&options.pypi_token_secret);
+    let mut publish = Step::new("publish-pypi", &image);
+    for command in build_commands {
+        publish = publish.command(command.clone());
+    }
+    let mut publish = publish.secret(&options.pypi_token_secret);
     apply_common_options(std::slice::from_mut(&mut publish), options);
     add_nix_environment(std::slice::from_mut(&mut publish));
     let workflow = Workflow {
@@ -900,6 +914,36 @@ pub fn release_file(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn format_runner_preserves_legacy_override_and_prefers_new_key() {
+        use super::*;
+        let legacy = ResolvedRunner {
+            name: Some("legacy".into()),
+            labels: vec!["agent=legacy".into()],
+        };
+        let current = ResolvedRunner {
+            name: Some("current".into()),
+            labels: vec!["agent=current".into()],
+        };
+        let mut runners = BTreeMap::from([(STEP_CARGO_FMT.to_owned(), legacy.clone())]);
+        assert_eq!(
+            crate::render::ci::step_runner_override(&runners, "format"),
+            Some(&legacy)
+        );
+        let mut steps = vec![Step::new("format", "nix")];
+        apply_step_runner_labels(&mut steps, &runners);
+        assert_eq!(steps[0].environment["SIMIT_RUNNER_AGENT"], "legacy");
+        runners.insert("format".into(), current.clone());
+        assert_eq!(
+            crate::render::ci::step_runner_override(&runners, "format"),
+            Some(&current)
+        );
+        assert_eq!(
+            crate::render::ci::step_runner_override(&runners, STEP_CARGO_FMT),
+            Some(&legacy)
+        );
+    }
+
     use super::*;
 
     #[test]

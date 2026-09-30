@@ -876,6 +876,48 @@ fn crow_ci_accepts_default_forgejo_platform() {
 }
 
 #[test]
+fn crow_ci_can_delegate_project_checks_to_a_single_command() {
+    let temp = init_package(true);
+    fs::write(
+        temp.path().join("simit.toml"),
+        r#"[ci]
+provider = "crow"
+platform = "forgejo"
+runner = "codefloe-global"
+runtime = "nix"
+
+[ci.crow]
+check_command = "nix develop -c cargo run --locked -p demo-ci -- ci"
+"#,
+    )
+    .unwrap();
+
+    let status = simit()
+        .current_dir(temp.path())
+        .args(["init", "ci"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let workflow = fs::read_to_string(temp.path().join(".crow/build.yaml")).unwrap();
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
+    let steps = yaml["steps"].as_sequence().unwrap();
+    assert!(steps.iter().any(|step| {
+        step["name"] == "project-check"
+            && step["commands"][0] == "nix develop -c cargo run --locked -p demo-ci -- ci"
+    }));
+    assert!(!workflow.contains("cargo test"));
+    assert!(!workflow.contains("cargo package"));
+    assert!(
+        simit()
+            .current_dir(temp.path())
+            .args(["init", "ci", "--check"])
+            .status()
+            .unwrap()
+            .success()
+    );
+}
+
+#[test]
 fn infer_project_ci_target_prefers_config_over_marked_workflows() {
     let temp = init_package(true);
     fs::write(

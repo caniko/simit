@@ -229,6 +229,10 @@ default = "staging"
 required = true
 ```
 
+Set `[ci.crow].check_command` to run a project-owned CI orchestrator as the
+`project-check` step instead of Simit's generic Cargo and Nix checks. The Crow
+setup step, environment, and optional self-check still apply.
+
 Generated Crow workflows use Crow's native `labels`, `platform`, `when`,
 `workspace`, `variables`, `skip_clone`, step `commands`, and `from_secret`
 bindings. Shell variables are escaped as `$${NAME}` for Crow interpolation.
