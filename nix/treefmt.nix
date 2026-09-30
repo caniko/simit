@@ -22,13 +22,6 @@
       "*.markdown"
       "*.yaml"
       "*.yml"
-      "*.js"
-      "*.jsx"
-      "*.mjs"
-      "*.cjs"
-      "*.ts"
-      "*.tsx"
-      "*.json"
     ];
   };
 }
