@@ -761,6 +761,8 @@ pub fn is_generated_treefmt(content: &str, languages: &Languages, rust_edition: 
     }
 }
 
+mod treefmt_hook;
+
 pub fn has_required_pre_commit(
     content: &str,
     languages: &Languages,
@@ -784,18 +786,9 @@ pub fn has_required_pre_commit_with_components(
             components.contains(&component)
         }
     };
-    let has_treefmt = content.lines().any(|line| {
-        let line = line.trim_start();
-        line.starts_with("treefmt =") || line.starts_with("treefmt=")
-    });
-
     let treefmt_selected = selected(FlakeComponent::Treefmt, true);
 
-    (!treefmt_selected
-        || (has_treefmt
-            && content.contains("treefmtWrapper")
-            && !content.contains("cargo-fmt")
-            && !content.contains("uv-ruff-format")))
+    (!treefmt_selected || treefmt_hook::matches(content))
         && (!selected(FlakeComponent::CargoFmt, languages.rust)
             || treefmt_selected
             || (content.contains("cargo-fmt") && content.contains("cargo fmt --all -- --check")))

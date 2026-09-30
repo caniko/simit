@@ -42,6 +42,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Run MSRV checks with the declared compiler in both CI and publishing: install it for Cargo jobs, verify the dedicated Nix shell's compiler, and generate matching MSRV shells for new Rust flakes.
 - Scope GitHub Actions concurrency by workflow path so workspace members with the same display name cannot cancel one another.
 - Keep the Pages build output link for artifact upload and domain validation, while preserving custom installables inferred from older workflows.
+- Validate the treefmt hook's enabled state, uncached wrapper command, and full-file scope structurally; reject disabled, redirected, filtered, or shadowed hooks instead of accepting textual decoys.
 - Use treefmt as the sole generated formatter when selected, and require recognized policy coverage before hooks-only updates remove standalone formatters.
 - Recognize generated treefmt policies structurally in checks and registry status, and use the actual Cargo workspace edition instead of assuming 2024.
 - Generate uncached treefmt checks for local hooks and Nix-backed GitHub Actions, Forgejo Actions, and Crow jobs.

@@ -347,73 +347,6 @@ fn custom_skillnet_flake() -> &'static str {
 }
 
 #[test]
-fn hooks_only_refuses_to_drop_python_formatter_without_policy_coverage() {
-    let temp = init_python_project();
-    fs::write(temp.path().join("flake.nix"), "{}\n").unwrap();
-    fs::create_dir_all(temp.path().join("nix")).unwrap();
-    fs::write(
-        temp.path().join("nix/treefmt.nix"),
-        "{...}: { programs.alejandra.enable = true; }\n",
-    )
-    .unwrap();
-    let hooks = "{...}: { uv-ruff-format.entry = \"uv run ruff format --check .\"; }\n";
-    fs::write(temp.path().join("nix/pre-commit.nix"), hooks).unwrap();
-    let output = simit()
-        .current_dir(temp.path())
-        .args(["init", "flake"])
-        .output()
-        .unwrap();
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("hooks-only"));
-    assert_eq!(read(&temp.path().join("nix/pre-commit.nix")), hooks);
-}
-
-#[test]
-fn check_rejects_disabled_formatter_hidden_by_a_comment() {
-    let temp = init_package();
-    assert!(
-        simit()
-            .current_dir(temp.path())
-            .args(["init", "flake", "--scope", "full"])
-            .status()
-            .unwrap()
-            .success()
-    );
-    let path = temp.path().join("nix/treefmt.nix");
-    let policy = read(&path).replace(
-        "programs.alejandra.enable = true;",
-        "programs.alejandra.enable = false; # programs.alejandra.enable = true;",
-    );
-    fs::write(&path, &policy).unwrap();
-    let output = simit()
-        .current_dir(temp.path())
-        .args(["init", "flake", "--check"])
-        .output()
-        .unwrap();
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("nix/treefmt.nix"));
-    assert_eq!(read(&path), policy);
-}
-
-#[test]
-fn generated_treefmt_hook_is_uncached() {
-    let temp = init_package();
-    let output = simit()
-        .current_dir(temp.path())
-        .args(["init", "flake", "--scope", "full"])
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let hooks = read(&temp.path().join("nix/pre-commit.nix"));
-    assert!(hooks.contains("${treefmtWrapper}/bin/treefmt --ci"));
-    assert!(!hooks.contains("treefmt --fail-on-change"));
-}
-
-#[test]
 fn default_scope_writes_only_detected_hook_file() {
     let temp = init_package();
 
@@ -718,6 +651,28 @@ fn pure_uv_python_project_generates_py_harbor_flake() {
         .status()
         .unwrap();
     assert!(check_status.success());
+}
+
+#[test]
+fn hooks_only_refuses_to_drop_python_formatter_without_policy_coverage() {
+    let temp = init_python_project();
+    fs::write(temp.path().join("flake.nix"), "{}\n").unwrap();
+    fs::create_dir_all(temp.path().join("nix")).unwrap();
+    fs::write(
+        temp.path().join("nix/treefmt.nix"),
+        "{...}: { programs.alejandra.enable = true; }\n",
+    )
+    .unwrap();
+    let hooks = "{...}: { uv-ruff-format.entry = \"uv run ruff format --check .\"; }\n";
+    fs::write(temp.path().join("nix/pre-commit.nix"), hooks).unwrap();
+    let output = simit()
+        .current_dir(temp.path())
+        .args(["init", "flake"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("hooks-only"));
+    assert_eq!(read(&temp.path().join("nix/pre-commit.nix")), hooks);
 }
 
 #[test]
@@ -1201,7 +1156,7 @@ fn check_accepts_semantically_current_custom_hook_files() {
 }: {
   treefmt = {
     enable = true;
-    entry = "${treefmtWrapper}/bin/treefmt --fail-on-change";
+    entry = "${treefmtWrapper}/bin/treefmt --ci";
     pass_filenames = false;
   };
   cargo-clippy = {
@@ -1234,6 +1189,124 @@ fn check_accepts_semantically_current_custom_hook_files() {
         .status()
         .unwrap();
     assert!(check_status.success());
+}
+
+#[test]
+fn check_rejects_disabled_cached_or_redirected_treefmt_hooks() {
+    let temp = init_package();
+    assert!(
+        simit()
+            .current_dir(temp.path())
+            .args(["init", "flake", "--scope", "full"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let path = temp.path().join("nix/pre-commit.nix");
+    let original = read(&path);
+    let mut accepted = Vec::new();
+    for (name, from, to) in [
+        (
+            "disabled",
+            "treefmt = {\n    enable = true;",
+            "treefmt = {\n    enable = false;",
+        ),
+        ("cached", "treefmt --ci", "treefmt --fail-on-change"),
+        (
+            "wrong executable",
+            "${treefmtWrapper}/bin/treefmt --ci",
+            "/wrong/treefmt --ci",
+        ),
+        (
+            "comment decoy",
+            "entry = \"${treefmtWrapper}/bin/treefmt --ci\";",
+            "entry = \"true\"; # ${treefmtWrapper}/bin/treefmt --ci",
+        ),
+        (
+            "filename filter",
+            "name = \"treefmt\";",
+            "name = \"treefmt\"; files = \"^README\";",
+        ),
+        (
+            "staged files only",
+            "pass_filenames = false;",
+            "pass_filenames = true;",
+        ),
+        (
+            "manual only",
+            "name = \"treefmt\";",
+            "name = \"treefmt\"; stages = [\"manual\"];",
+        ),
+        (
+            "shadowed wrapper",
+            "}: {",
+            "}: rec { treefmtWrapper = \"/wrong\";",
+        ),
+    ] {
+        assert!(original.contains(from), "missing mutation anchor: {name}");
+        let changed = original.replacen(from, to, 1);
+        fs::write(&path, &changed).unwrap();
+        let output = simit()
+            .current_dir(temp.path())
+            .args(["init", "flake", "--check"])
+            .output()
+            .unwrap();
+        if output.status.success() {
+            accepted.push(name);
+        } else {
+            assert!(String::from_utf8_lossy(&output.stderr).contains("nix/pre-commit.nix"));
+        }
+        assert_eq!(read(&path), changed, "check mutated {name}");
+    }
+    assert!(
+        accepted.is_empty(),
+        "invalid hook contracts accepted: {accepted:?}"
+    );
+}
+
+#[test]
+fn generated_treefmt_hook_is_uncached() {
+    let temp = init_package();
+    let output = simit()
+        .current_dir(temp.path())
+        .args(["init", "flake", "--scope", "full"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let hooks = read(&temp.path().join("nix/pre-commit.nix"));
+    assert!(hooks.contains("${treefmtWrapper}/bin/treefmt --ci"));
+    assert!(!hooks.contains("treefmt --fail-on-change"));
+}
+
+#[test]
+fn check_rejects_disabled_formatter_hidden_by_a_comment() {
+    let temp = init_package();
+    assert!(
+        simit()
+            .current_dir(temp.path())
+            .args(["init", "flake", "--scope", "full"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let path = temp.path().join("nix/treefmt.nix");
+    let policy = read(&path).replace(
+        "programs.alejandra.enable = true;",
+        "programs.alejandra.enable = false; # programs.alejandra.enable = true;",
+    );
+    fs::write(&path, &policy).unwrap();
+    let output = simit()
+        .current_dir(temp.path())
+        .args(["init", "flake", "--check"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("nix/treefmt.nix"));
+    assert_eq!(read(&path), policy);
 }
 
 #[test]
