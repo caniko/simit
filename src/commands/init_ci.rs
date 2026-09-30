@@ -410,9 +410,7 @@ pub fn run(command: InitCiCommand) -> Result<()> {
         reconcile_ci_files(workspace_root, files, &check_message, true, command.diff)?;
         upgrade::update_readme_badges_if_present(workspace_root, true, command.diff)
     } else {
-        project::write_generated_files(workspace_root, &files)?;
-        cleanup_obsolete_nix_workflows(workspace_root, platform, &files)?;
-        cleanup_obsolete_publish_workflows(workspace_root, platform, &files, coordinated)?;
+        reconcile_ci_files(workspace_root, files, &check_message, false, false)?;
         if ProjectConfig::can_persist_ci(workspace_root)? {
             ProjectConfig::write_ci(workspace_root, &persisted_ci)?;
         }
@@ -1914,83 +1912,16 @@ fn obsolete_nix_workflows(
     Ok(obsolete)
 }
 
-/// Remove only obsolete simit-owned publish and member CI outputs when switching
-/// between member-scoped and coordinated strategies. Handwritten or unrelated
-/// workflows are never touched: only files carrying the generated marker and
-/// matching the superseded publish naming are removed.
-fn cleanup_obsolete_publish_workflows(
-    workspace_root: &Path,
-    platform: Platform,
-    expected: &[project::GeneratedFile],
-    coordinated: bool,
-) -> Result<()> {
-    let expected = expected
-        .iter()
-        .map(|file| file.relative_path.clone())
-        .collect::<BTreeSet<_>>();
-    let workflow_dir = PathBuf::from(platform.workflow_dir());
-    let absolute_dir = workspace_root.join(&workflow_dir);
-    let entries = match fs::read_dir(&absolute_dir) {
-        Ok(entries) => entries,
-        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(()),
-        Err(err) => return Err(err).with_context(|| format!("reading {}", absolute_dir.display())),
-    };
-    for entry in entries {
-        let entry =
-            entry.with_context(|| format!("reading entry in {}", absolute_dir.display()))?;
-        if !entry
-            .file_type()
-            .with_context(|| format!("reading file type for {}", entry.path().display()))?
-            .is_file()
-        {
-            continue;
-        }
-        let file_name = entry.file_name();
-        let Some(name) = file_name.to_str() else {
-            continue;
-        };
-        let is_publish_output = name == "publish-workspace.yaml"
-            || name == "publish-workspace.yml"
-            || name == "publish-crate.yaml"
-            || name == "publish-crate.yml"
-            || name.starts_with("publish-crate-");
-        let is_member_ci = coordinated
-            && expected.contains(&workflow_dir.join("ci.yaml"))
-            && name.starts_with("ci-")
-            && (name.ends_with(".yaml") || name.ends_with(".yml"));
-        if !is_publish_output && !is_member_ci {
-            continue;
-        }
-        let relative = workflow_dir.join(&file_name);
-        if expected.contains(&relative) {
-            continue;
-        }
-        // Only remove the superseded strategy's outputs.
-        let should_remove = if coordinated {
-            name.starts_with("publish-crate") || is_member_ci
-        } else {
-            name.starts_with("publish-workspace")
-        };
-        if !should_remove {
-            continue;
-        }
-        let content = fs::read_to_string(entry.path())
-            .with_context(|| format!("reading {}", entry.path().display()))?;
-        if generated_workflow_marker_present(&content) {
-            fs::remove_file(workspace_root.join(&relative))
-                .with_context(|| format!("removing obsolete {}", relative.display()))?;
-        }
-    }
-    Ok(())
-}
-
 fn is_ci_managed_workflow_name(name: &std::ffi::OsStr) -> bool {
     let Some(name) = name.to_str() else {
         return false;
     };
     matches!(
         name,
-        "ci.yaml"
+        "build.yaml"
+            | "build.yml"
+            | "build.jsonnet"
+            | "ci.yaml"
             | "ci.yml"
             | "publish-crate.yaml"
             | "publish-crate.yml"
@@ -2010,7 +1941,8 @@ fn is_ci_managed_workflow_name(name: &std::ffi::OsStr) -> bool {
             | "publish-vscode-extension.yml"
             | "publish-jetbrains-plugin.yaml"
             | "publish-jetbrains-plugin.yml"
-    ) || name.starts_with("ci-")
+    ) || name.starts_with("build-")
+        || name.starts_with("ci-")
         || name.starts_with("nix-builds-")
         || name.starts_with("prebuild-")
         || name.starts_with("publish-crate-")

@@ -203,6 +203,12 @@ timeout_minutes = 30
         .status()
         .unwrap();
     assert!(status.success());
+    let audit = simit::registry::audit_ci(temp.path()).unwrap();
+    assert_eq!(
+        audit.status,
+        simit::registry::FeatureStatus::Managed,
+        "{audit:?}"
+    );
 
     let ci = read(&temp.path().join(".github/workflows/ci.yaml"));
     assert_yaml_parses(&ci);
@@ -231,6 +237,7 @@ timeout_minutes = 30
     // Signed-tag + trust-root gating preserved (never disabled when missing).
     assert!(publish.contains("git verify-tag \"$tag\""));
     assert!(publish.contains("test -s keys/maintainers.gpg"));
+    assert!(publish.contains("local_crate=\"target/package/${crate_name}-${version}.crate\""));
     // Lockstep validation for every publishable member.
     assert!(publish.contains("cargo pkgid -p a"));
     assert!(publish.contains("cargo pkgid -p d"));
