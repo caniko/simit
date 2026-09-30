@@ -26,6 +26,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Declare GitHub Actions as this repository's CI provider and retire the generated Crow workflow.
 - Keep coordinated workspace publication executable and resumable with isolated publishers, Nix job environments, and version-specific checksum verification.
 - Build documentation and the project site without requiring fleet-managed compiler-cache transport on hosted runners.
+- Keep Crow and treefmt argument validation compatible with the declared Rust 1.85 compiler.
+- Omit Intel-macOS flake outputs unsupported by the pinned nixpkgs, and keep formatter tests independent of the operator's runner configuration.
 
 ## [0.18.1] - 2026-09-26
 

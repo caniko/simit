@@ -43,7 +43,8 @@
     git-hooks,
     ...
   }:
-    flake-utils.lib.eachDefaultSystem (system: let
+  # The pinned nixpkgs has retired Intel macOS.
+    flake-utils.lib.eachSystem (builtins.filter (system: system != "x86_64-darwin") flake-utils.lib.defaultSystems) (system: let
       pkgs = import nixpkgs {
         inherit system;
         overlays = [(import rust-overlay)];

@@ -53,7 +53,7 @@ fn nix_format_jobs_are_uncached_across_providers_and_job_layouts() {
             format!("[ci]\nplatform = \"{platform}\"\nprovider = \"{provider}\"\nruntime = \"nix\"\n{step_runners}\n"),
         )
         .unwrap();
-        let output = simit()
+        let output = simit_with_user_config(temp.path())
             .current_dir(temp.path())
             .args(["init", "ci"])
             .output()
