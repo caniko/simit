@@ -33,12 +33,7 @@ pub fn run(command: InitFlakeCommand) -> Result<()> {
         return run_generic(command);
     }
 
-    if command.check && command.print {
-        bail!("init flake accepts only one of --check or --print");
-    }
-    if command.diff && !command.check {
-        bail!("init flake --diff requires --check");
-    }
+    validate_init_flags(&command)?;
 
     let cross_targets = resolve_cross_targets(&command);
 
@@ -77,10 +72,7 @@ pub fn run(command: InitFlakeCommand) -> Result<()> {
     let files = scoped_files(&all_files, scope);
 
     if command.print {
-        flake::print_files(&files);
-        if scope == FlakeScope::Full {
-            flake::print_existing_flake_note();
-        }
+        print_tail(&files, scope);
         return Ok(());
     }
 
@@ -103,52 +95,12 @@ pub fn run(command: InitFlakeCommand) -> Result<()> {
     }
 
     if scope == FlakeScope::HooksOnly {
-        if workspace_root.join("flake.nix").exists() {
-            println!(
-                "note: hooks-only scope leaves existing flake.nix untouched; review it before taking project ownership"
-            );
-        }
-        project::write_generated_files(workspace_root, &files)?;
-        upgrade::update_readme_badges_if_present(workspace_root, false, false)?;
-        registry::touch_current_project_or_warn([
-            ("flake", FeatureStatus::Managed),
-            ("hooks", FeatureStatus::Installed),
-        ]);
-        return Ok(());
+        return hooks_only_tail(workspace_root, &files);
     }
 
     let flake_path = workspace_root.join("flake.nix");
     if cfg.flake.mode == FlakeMode::Custom {
-        if !flake_path.exists() {
-            bail!(
-                "custom flake mode requires an existing flake.nix; simit will manage hook files but will not generate a canonical flake"
-            );
-        }
-        // Atomic migration: the generated nix/treefmt.nix and the custom
-        // flake.nix call-site must agree on rustfmtPackage before anything
-        // is written, otherwise evaluation breaks on the next flake command.
-        let hook_files = hook_files(&files);
-        if let Some(generated_module) = hook_files
-            .iter()
-            .find(|file| file.relative_path == Path::new("nix/treefmt.nix"))
-        {
-            let flake_content = fs::read_to_string(&flake_path)
-                .with_context(|| format!("reading {}", flake_path.display()))?;
-            if let Some(mismatch) =
-                flake::treefmt_call_module_mismatch(&flake_content, &generated_module.content)
-            {
-                bail!(
-                    "refusing to write nix/treefmt.nix: {mismatch} (custom flake.nix is never rewritten)"
-                );
-            }
-        }
-        project::write_generated_files(workspace_root, &hook_files)?;
-        upgrade::update_readme_badges_if_present(workspace_root, false, false)?;
-        registry::touch_current_project_or_warn([
-            ("flake", FeatureStatus::Managed),
-            ("hooks", FeatureStatus::Installed),
-        ]);
-        return Ok(());
+        return custom_mode_tail(workspace_root, &files);
     }
 
     // In cross mode the generated flake.nix is canonical and authoritative, so
@@ -171,31 +123,14 @@ pub fn run(command: InitFlakeCommand) -> Result<()> {
             .find(|file| file.relative_path == Path::new("flake.nix"))
             .expect("flake.nix is generated");
         flake_file.content = patched;
-        project::write_generated_files(workspace_root, &patched_files)?;
-        upgrade::update_readme_badges_if_present(workspace_root, false, false)?;
-        registry::touch_current_project_or_warn([
-            ("flake", FeatureStatus::Managed),
-            ("hooks", FeatureStatus::Installed),
-        ]);
-        return Ok(());
+        return write_tail(workspace_root, &patched_files);
     }
 
-    project::write_generated_files(workspace_root, &files)?;
-    upgrade::update_readme_badges_if_present(workspace_root, false, false)?;
-    registry::touch_current_project_or_warn([
-        ("flake", FeatureStatus::Managed),
-        ("hooks", FeatureStatus::Installed),
-    ]);
-    Ok(())
+    write_tail(workspace_root, &files)
 }
 
 pub fn run_python(command: InitFlakeCommand) -> Result<()> {
-    if command.check && command.print {
-        bail!("init flake accepts only one of --check or --print");
-    }
-    if command.diff && !command.check {
-        bail!("init flake --diff requires --check");
-    }
+    validate_init_flags(&command)?;
     if command.cross {
         bail!("--cross is only supported for Rust projects");
     }
@@ -211,10 +146,7 @@ pub fn run_python(command: InitFlakeCommand) -> Result<()> {
     let files = scoped_files(&all_files, scope);
 
     if command.print {
-        flake::print_files(&files);
-        if scope == FlakeScope::Full {
-            flake::print_existing_flake_note();
-        }
+        print_tail(&files, scope);
         return Ok(());
     }
 
@@ -237,49 +169,12 @@ pub fn run_python(command: InitFlakeCommand) -> Result<()> {
     }
 
     if scope == FlakeScope::HooksOnly {
-        if workspace_root.join("flake.nix").exists() {
-            println!(
-                "note: hooks-only scope leaves existing flake.nix untouched; review it before taking project ownership"
-            );
-        }
-        project::write_generated_files(workspace_root, &files)?;
-        upgrade::update_readme_badges_if_present(workspace_root, false, false)?;
-        registry::touch_current_project_or_warn([
-            ("flake", FeatureStatus::Managed),
-            ("hooks", FeatureStatus::Installed),
-        ]);
-        return Ok(());
+        return hooks_only_tail(workspace_root, &files);
     }
 
     let flake_path = workspace_root.join("flake.nix");
     if cfg.flake.mode == FlakeMode::Custom {
-        if !flake_path.exists() {
-            bail!(
-                "custom flake mode requires an existing flake.nix; simit will manage hook files but will not generate a canonical flake"
-            );
-        }
-        let hook_files = hook_files(&files);
-        if let Some(generated_module) = hook_files
-            .iter()
-            .find(|file| file.relative_path == Path::new("nix/treefmt.nix"))
-        {
-            let flake_content = fs::read_to_string(&flake_path)
-                .with_context(|| format!("reading {}", flake_path.display()))?;
-            if let Some(mismatch) =
-                flake::treefmt_call_module_mismatch(&flake_content, &generated_module.content)
-            {
-                bail!(
-                    "refusing to write nix/treefmt.nix: {mismatch} (custom flake.nix is never rewritten)"
-                );
-            }
-        }
-        project::write_generated_files(workspace_root, &hook_files)?;
-        upgrade::update_readme_badges_if_present(workspace_root, false, false)?;
-        registry::touch_current_project_or_warn([
-            ("flake", FeatureStatus::Managed),
-            ("hooks", FeatureStatus::Installed),
-        ]);
-        return Ok(());
+        return custom_mode_tail(workspace_root, &files);
     }
 
     if flake_path.exists() {
@@ -288,22 +183,11 @@ pub fn run_python(command: InitFlakeCommand) -> Result<()> {
         );
     }
 
-    project::write_generated_files(workspace_root, &files)?;
-    upgrade::update_readme_badges_if_present(workspace_root, false, false)?;
-    registry::touch_current_project_or_warn([
-        ("flake", FeatureStatus::Managed),
-        ("hooks", FeatureStatus::Installed),
-    ]);
-    Ok(())
+    write_tail(workspace_root, &files)
 }
 
 pub fn run_generic(command: InitFlakeCommand) -> Result<()> {
-    if command.check && command.print {
-        bail!("init flake accepts only one of --check or --print");
-    }
-    if command.diff && !command.check {
-        bail!("init flake --diff requires --check");
-    }
+    validate_init_flags(&command)?;
     if command.cross {
         bail!("--cross is only supported for Rust projects");
     }
@@ -767,6 +651,33 @@ fn hook_files(files: &[GeneratedFile]) -> Vec<GeneratedFile> {
         .collect()
 }
 
+fn validate_init_flags(command: &InitFlakeCommand) -> Result<()> {
+    if command.check && command.print {
+        bail!("init flake accepts only one of --check or --print");
+    }
+    if command.diff && !command.check {
+        bail!("init flake --diff requires --check");
+    }
+    Ok(())
+}
+
+fn print_tail(files: &[GeneratedFile], scope: FlakeScope) {
+    flake::print_files(files);
+    if scope == FlakeScope::Full {
+        flake::print_existing_flake_note();
+    }
+}
+
+fn write_tail(workspace_root: &Path, files: &[GeneratedFile]) -> Result<()> {
+    project::write_generated_files(workspace_root, files)?;
+    upgrade::update_readme_badges_if_present(workspace_root, false, false)?;
+    registry::touch_current_project_or_warn([
+        ("flake", FeatureStatus::Managed),
+        ("hooks", FeatureStatus::Installed),
+    ]);
+    Ok(())
+}
+
 // Hooks-only is also useful for scaffolding a new project. Once a flake
 // exists, however, removing standalone formatters requires policy coverage.
 fn validate_hooks_only_policy(
@@ -796,6 +707,43 @@ fn validate_hooks_only_policy(
         }
     }
     Ok(())
+}
+
+fn hooks_only_tail(workspace_root: &Path, files: &[GeneratedFile]) -> Result<()> {
+    if workspace_root.join("flake.nix").exists() {
+        println!(
+            "note: hooks-only scope leaves existing flake.nix untouched; review it before taking project ownership"
+        );
+    }
+    write_tail(workspace_root, files)
+}
+
+fn custom_mode_tail(workspace_root: &Path, files: &[GeneratedFile]) -> Result<()> {
+    let flake_path = workspace_root.join("flake.nix");
+    if !flake_path.exists() {
+        bail!(
+            "custom flake mode requires an existing flake.nix; simit will manage hook files but will not generate a canonical flake"
+        );
+    }
+    // Atomic migration: the generated nix/treefmt.nix and the custom
+    // flake.nix call-site must agree on rustfmtPackage before anything
+    // is written, otherwise evaluation breaks on the next flake command.
+    let hook_files = hook_files(files);
+    if let Some(generated_module) = hook_files
+        .iter()
+        .find(|file| file.relative_path == Path::new("nix/treefmt.nix"))
+    {
+        let flake_content = fs::read_to_string(&flake_path)
+            .with_context(|| format!("reading {}", flake_path.display()))?;
+        if let Some(mismatch) =
+            flake::treefmt_call_module_mismatch(&flake_content, &generated_module.content)
+        {
+            bail!(
+                "refusing to write nix/treefmt.nix: {mismatch} (custom flake.nix is never rewritten)"
+            );
+        }
+    }
+    write_tail(workspace_root, &hook_files)
 }
 
 fn pre_commit_removal_notes(actual: &str, generated: &str) -> Vec<String> {
