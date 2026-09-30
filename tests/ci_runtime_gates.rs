@@ -257,6 +257,29 @@ fn github_nix_input_transport_works_without_a_runner_ssh_key() {
     use std::process::Command;
 
     let directory = fixture("nix", false, false);
+    let config_path = directory.path().join("simit.toml");
+    let mut project_config = fs::read_to_string(&config_path).unwrap();
+    project_config.push_str("\n[release.github]\nrepo = \"example/runtime-gates-fixture\"\n");
+    fs::write(&config_path, project_config).unwrap();
+    let release = common::simit()
+        .current_dir(directory.path())
+        .args(["init", "release", "--platform", "github"])
+        .output()
+        .unwrap();
+    assert!(
+        release.status.success(),
+        "{}",
+        String::from_utf8_lossy(&release.stderr)
+    );
+    let release_yaml =
+        fs::read_to_string(directory.path().join(".github/workflows/release.yml")).unwrap();
+    let release_doc: serde_yaml::Value = serde_yaml::from_str(&release_yaml).unwrap();
+    let release_transport = release_doc["jobs"]["release"]["steps"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .find_map(|step| step["run"].as_str().filter(|run| run.contains("insteadOf")))
+        .expect("Comprehensive release jobs must also normalize GitHub SSH input transport");
     let setup = commands(directory.path(), "ci")
         .into_iter()
         .find(|run| run.contains("insteadOf"))
@@ -265,6 +288,15 @@ fn github_nix_input_transport_works_without_a_runner_ssh_key() {
     assert!(
         Command::new("sh")
             .args(["-c", &setup])
+            .env("GIT_CONFIG_GLOBAL", &config)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        Command::new("sh")
+            .args(["-c", release_transport])
             .env("GIT_CONFIG_GLOBAL", &config)
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .status()

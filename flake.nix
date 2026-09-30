@@ -287,6 +287,33 @@
           rust-analyzer
         ];
       in {
+        msrv = let
+          msrvToolchain = rs-harbor.lib.mkToolchain {
+            inherit pkgs;
+            toolchainFile = builtins.toFile "rust-toolchain-msrv.toml" ''
+              [toolchain]
+              channel = "1.85.0"
+              profile = "minimal"
+            '';
+            withRustAnalyzer = false;
+            crossTargets = [];
+            cache.enable = false;
+          };
+        in
+          (rs-harbor.lib.mkDevShells {
+            inherit pkgs;
+            inherit (msrvToolchain) craneLib;
+            cross = rs-harbor.lib.mkCross {
+              inherit pkgs system;
+              enableOsxcross = false;
+            };
+            opencodeLsp.enable = false;
+            extraEnv = {
+              RUSTFLAGS = "";
+              CARGO_ENCODED_RUSTFLAGS = "";
+            };
+          }).default;
+
         default = publicCraneLib.devShell {
           checks = self.checks.${system};
           packages = with pkgs;

@@ -816,6 +816,9 @@ fn push_install_nix(w: &mut String, platform: Platform, artifacts: &ArtifactsCon
         .expect("write");
     }
     w.push('\n');
+    if platform == Platform::Github {
+        crate::render::ci::push_github_input_transport(w);
+    }
 }
 
 fn push_preinstalled_nix_env(w: &mut String, artifacts: &ArtifactsConfig) {
@@ -1636,13 +1639,13 @@ fn push_publisher_state_probe(w: &mut String, inputs: &ReleaseWorkflowInputs<'_>
         );
         writeln!(
             w,
-            "          export CHOCO_FILTER=\"$(printf {} | jq -sRr @uri)\"",
+            "          CHOCO_FILTER=\"$(printf '%s' {} | jq -sRr @uri)\"\n          export CHOCO_FILTER",
             shell_quote(&filter)
         )
         .expect("write");
         writeln!(
             w,
-            "          stable_or_state chocolatey {} bash -c 'curl -fsSL \"https://community.chocolatey.org/api/v2/Packages()?%24filter=${{CHOCO_FILTER}}\" | grep -q \"<entry>\"'",
+            "          # Expand the filter in the child shell.\n          # shellcheck disable=SC2016\n          stable_or_state chocolatey {} bash -c 'curl -fsSL \"https://community.chocolatey.org/api/v2/Packages()?%24filter=${{CHOCO_FILTER}}\" | grep -q \"<entry>\"'",
             shell_quote(&chocolatey.id)
         )
         .expect("write");
@@ -1904,13 +1907,13 @@ fn push_publish_homebrew(
         for (_, arch, os, enabled) in homebrew_platform_keys(homebrew) {
             if enabled {
                 let file = homebrew_archive(homebrew, arch, os);
-                writeln!(w, "          test -s release/{file} || publisher_missing homebrew 'missing release/{file}'").expect("write");
+                writeln!(w, "          test -s \"release/{file}\" || publisher_missing homebrew \"missing release/{file}\"").expect("write");
             }
         }
     } else {
         w.push_str("          if [ -z \"${HOMEBREW_TAP_TOKEN:-}\" ]; then echo 'HOMEBREW_TAP_TOKEN is required because Homebrew tap publishing is configured.' >&2; exit 1; fi\n");
     }
-    w.push_str("          credential_helper='!f() { echo username=x-access-token; echo \"password=$HOMEBREW_TAP_TOKEN\"; }; f'\n");
+    w.push_str("          # Git expands the token when invoking this credential helper.\n          # shellcheck disable=SC2016\n          credential_helper='!f() { echo username=x-access-token; echo \"password=$HOMEBREW_TAP_TOKEN\"; }; f'\n");
     w.push_str("          rm -rf tap; git -c credential.helper=\"$credential_helper\" clone \"$HOMEBREW_TAP_URL\" tap\n");
     w.push_str("          cd tap; git config credential.helper \"$credential_helper\"; git config user.email 'ci@localhost'; git config user.name 'release bot'\n");
     w.push_str("          git remote set-head origin -a; DEFAULT_BRANCH=\"$(git symbolic-ref --short refs/remotes/origin/HEAD | sed 's|^origin/||')\"; git checkout \"$DEFAULT_BRANCH\"; cd ..\n");
@@ -2074,7 +2077,7 @@ fn push_windows_signing(w: &mut String, windows: &WindowsSigningConfig) {
     writeln!(w, "          zip_out=\"$PWD/release/{zip}\"").expect("write");
     writeln!(
         w,
-        "          nix shell nixpkgs#zip -c bash -c 'cd \"$1\" && shift && zip -q \"$1\" \"$@\"' _ {dir} \"$zip_out\" {basenames}"
+        "          # Expand positional arguments inside the child shell.\n          # shellcheck disable=SC2016\n          nix shell nixpkgs#zip -c bash -c 'cd \"$1\" && zip_out=\"$2\" && shift 2 && zip -q \"$zip_out\" \"$@\"' _ {dir} \"$zip_out\" {basenames}"
     )
     .expect("write");
     // Individual signed .exe assets, e.g. modde-${VERSION}-x86_64-windows.exe.
@@ -2177,9 +2180,9 @@ fn push_publish_flathub(w: &mut String, flatpak: &FlatpakConfig, activated_remot
     }
     for file in &flatpak.manifest_files {
         if activated_remote {
-            writeln!(w, "          test -s release/{file} || publisher_missing flathub 'missing release/{file}'").expect("write");
+            writeln!(w, "          test -s \"release/{file}\" || publisher_missing flathub \"missing release/{file}\"").expect("write");
         } else {
-            writeln!(w, "          test -s release/{file}").expect("write");
+            writeln!(w, "          test -s \"release/{file}\"").expect("write");
         }
     }
     w.push_str("          nix shell nixpkgs#curl nixpkgs#git nixpkgs#jq -c bash <<'SCRIPT'\n");
@@ -2717,6 +2720,159 @@ mod tests {
             binaries: vec!["modde".to_owned()],
             architectures: ScoopArchSet::default(),
         }
+    }
+
+    #[test]
+    fn activated_multichannel_shell_scripts_pass_shellcheck() {
+        use std::process::Command;
+
+        if Command::new("shellcheck")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let (aur, copr, apt, mut release, homebrew, scoop) =
+            (aur(), copr(), apt(), codeberg(), homebrew(), scoop());
+        release.provider = ReleaseProvider::Github;
+        release.api_base = "https://api.github.com".to_owned();
+        let (chocolatey, windows, flatpak, winget) =
+            (chocolatey(), windows_signing(), flatpak(), winget());
+        let workflow = render(&ReleaseWorkflowInputs {
+            platform: Platform::Github,
+            runner: "ubuntu-24.04",
+            preinstalled_nix: false,
+            publish_enforcement: ReleasePublisherEnforcement::ActivatedRemote,
+            publish: &ReleasePublishConfig::default(),
+            artifacts: &artifacts(),
+            prebuild: None,
+            smoke_command: None,
+            release: Some(&release),
+            attic: None,
+            aur: Some(&aur),
+            copr: Some(&copr),
+            apt: Some(&apt),
+            homebrew: Some(&homebrew),
+            scoop: Some(&scoop),
+            chocolatey: Some(&chocolatey),
+            windows_signing: Some(&windows),
+            flatpak: Some(&flatpak),
+            winget: Some(&winget),
+            announce: None,
+        });
+        let doc: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let mut checked = 0;
+        for step in doc["jobs"]["release"]["steps"].as_sequence().unwrap() {
+            if !matches!(
+                step["name"].as_str(),
+                Some(
+                    "Sign Windows Authenticode artifacts"
+                        | "Probe downstream publisher state"
+                        | "Publish Homebrew tap"
+                        | "Publish Flathub update PR"
+                )
+            ) {
+                continue;
+            }
+            let script = directory.path().join(format!("step-{checked}.sh"));
+            std::fs::write(&script, step["run"].as_str().unwrap()).unwrap();
+            let output = Command::new("shellcheck")
+                .args(["--shell=bash", "--severity=info", "--exclude=SC1091"])
+                .arg(&script)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}: {}",
+                step["name"].as_str().unwrap(),
+                String::from_utf8_lossy(&output.stdout)
+            );
+            checked += 1;
+        }
+        assert_eq!(checked, 4);
+    }
+
+    #[test]
+    fn windows_packaging_does_not_include_the_output_archive_as_an_input() {
+        let mut workflow = String::new();
+        push_windows_signing(&mut workflow, &windows_signing());
+        let doc: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
+        let script = doc[0]["run"].as_str().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        std::fs::create_dir_all(root.join("release/windows-x86_64")).unwrap();
+        for binary in ["modde", "modde-ui"] {
+            std::fs::write(
+                root.join(format!("release/windows-x86_64/{binary}.exe")),
+                "exe",
+            )
+            .unwrap();
+        }
+        std::fs::write(root.join("release-env"), "VERSION=0.9.0\n").unwrap();
+        let output = std::process::Command::new("bash")
+            .args(["-c", &format!(
+                "nix() {{ while [ \"$1\" != -c ]; do shift; done; shift; \"$@\"; }}\nzip() {{ printf '%s\\n' \"$@\" > \"$ZIP_ARGUMENTS\"; }}\nexport -f nix zip\n{script}"
+            )])
+            .current_dir(root)
+            .env("ZIP_ARGUMENTS", root.join("zip-arguments"))
+            .env_remove("WINDOWS_SIGNING_PFX")
+            .env_remove("WINDOWS_SIGNING_PASS")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let arguments = std::fs::read_to_string(root.join("zip-arguments")).unwrap();
+        assert_eq!(
+            arguments.lines().collect::<Vec<_>>(),
+            [
+                "-q",
+                root.join("release/modde-0.9.0-x86_64-windows.zip")
+                    .to_str()
+                    .unwrap(),
+                "modde.exe",
+                "modde-ui.exe"
+            ]
+        );
+        assert!(
+            root.join("release/modde-0.9.0-x86_64-windows.tar.gz")
+                .is_file()
+        );
+        assert!(
+            root.join("release/modde-0.9.0-x86_64-windows.exe")
+                .is_file()
+        );
+    }
+
+    #[test]
+    fn activated_homebrew_reports_the_concrete_missing_archive() {
+        let mut workflow = String::new();
+        push_publish_homebrew(&mut workflow, &homebrew(), true, Platform::Github);
+        let doc: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(
+            directory.path().join("release-env"),
+            "VERSION=0.9.0\nIS_PRERELEASE=false\n",
+        )
+        .unwrap();
+        let output = std::process::Command::new("bash")
+            .args(["-c", doc[0]["run"].as_str().unwrap()])
+            .current_dir(directory.path())
+            .env("HOMEBREW_TAP_TOKEN", "fixture")
+            .env("PUBLISH_HOMEBREW_STATE", "active-required")
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            error.contains("missing release/modde-0.9.0-aarch64-darwin.tar.gz"),
+            "{error}"
+        );
+        assert!(!error.contains("${VERSION}"), "{error}");
     }
 
     #[test]
