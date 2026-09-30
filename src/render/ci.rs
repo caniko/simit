@@ -1338,6 +1338,7 @@ fn push_jetbrains_version_validation(workflow: &mut String, jetbrains: &Resolved
     workflow.push_str("          [[ \"$VERSION\" =~ ^[0-9]+\\.[0-9]+\\.[0-9]+$ ]]\n");
     if let Some(cargo_package) = &jetbrains.cargo_package {
         workflow.push_str("          cargo_metadata=$(nix shell nixpkgs#cargo -c cargo metadata --format-version 1 --no-deps)\n");
+        workflow.push_str("          # jq variables are expanded by jq, not the shell.\n          # shellcheck disable=SC2016\n");
         workflow.push_str("          cargo_version=$(printf '%s' \"$cargo_metadata\" | nix shell nixpkgs#jq -c jq -r --arg package ");
         workflow.push_str(&shell_word(cargo_package));
         workflow.push_str(" '.packages[] | select(.name == $package) | .version' | head -n1)\n");
@@ -1449,6 +1450,7 @@ fn push_vscode_version_validation(workflow: &mut String, vscode: &ResolvedVscode
     workflow.push_str("          printf '%s\\n' \"$VERSION\" | grep -Eq '^[0-9]+\\.[0-9]+\\.[0-9]+$' || { echo \"release tag must be an exact semver version\"; exit 1; }\n");
     if let Some(cargo_package) = &vscode.cargo_package {
         workflow.push_str("          cargo_metadata=$(nix shell nixpkgs#cargo -c cargo metadata --no-deps --format-version 1)\n");
+        workflow.push_str("          # jq variables are expanded by jq, not the shell.\n          # shellcheck disable=SC2016\n");
         workflow.push_str("          cargo_version=$(printf '%s' \"$cargo_metadata\" | nix shell nixpkgs#jq -c jq -r --arg name ");
         workflow.push_str(&shell_word(cargo_package));
         workflow.push_str(" '.packages[] | select(.name == $name) | .version')\n");
@@ -1487,7 +1489,6 @@ fn push_vscode_codeberg_upload(workflow: &mut String, vscode: &ResolvedVscode) {
         .push_str("          test -n \"${CODEBERG_TOKEN:-}\" || { echo \"missing Actions secret ");
     workflow.push_str(&vscode.codeberg_token_secret);
     workflow.push_str("\"; exit 1; }\n");
-    workflow.push_str("          VERSION=\"${GITHUB_REF_NAME#v}\"\n");
     workflow.push_str("          tag=\"${GITHUB_REF_NAME}\"\n");
     workflow.push_str("          api=");
     workflow.push_str(&shell_word(&vscode.codeberg_api_base));
@@ -1505,6 +1506,7 @@ fn push_vscode_codeberg_upload(workflow: &mut String, vscode: &ResolvedVscode) {
     workflow.push_str("          for asset in release/*; do\n");
     workflow.push_str("            test -f \"$asset\" || continue\n");
     workflow.push_str("            name=$(basename \"$asset\")\n");
+    workflow.push_str("            # jq variables are expanded by jq, not the shell.\n            # shellcheck disable=SC2016\n");
     workflow.push_str("            existing_ids=$(printf '%s' \"$release_json\" | nix shell nixpkgs#jq -c jq -r --arg name \"$name\" '.assets[]? | select(.name == $name) | .id')\n");
     workflow.push_str("            for asset_id in $existing_ids; do\n");
     workflow.push_str("              curl --fail --silent --show-error --request DELETE --header \"$auth_header\" \"$api/repos/$repo/releases/$release_id/assets/$asset_id\" >/dev/null\n");
@@ -1681,8 +1683,10 @@ fn push_vscode_marketplace_visibility_gate(workflow: &mut String, vscode: &Resol
     workflow.push_str("          });\n");
     workflow.push_str("          NODE\n");
     workflow.push_str("          for attempt in $(seq 1 60); do\n");
+    workflow.push_str("            # jq variables are expanded by jq, not the shell.\n            # shellcheck disable=SC2016\n");
     workflow.push_str("            query=$(nix shell nixpkgs#jq -c jq -cn --arg id \"$EXTENSION_ID\" '{filters:[{criteria:[{filterType:7,value:$id}]}],flags:2151}')\n");
     workflow.push_str("            result=$(curl --fail --silent --show-error --header 'Content-Type: application/json' --header 'Accept: application/json;api-version=7.2-preview.1' --data \"$query\" https://marketplace.visualstudio.com/_apis/public/gallery/extensionquery)\n");
+    workflow.push_str("            # jq variables are expanded by jq, not the shell.\n            # shellcheck disable=SC2016\n");
     workflow.push_str("            visible=$(printf '%s' \"$result\" | nix shell nixpkgs#jq -c jq -r --arg id \"$EXTENSION_ID\" '.results[0].extensions[]? | select((.publisher.publisherName + \".\" + .extensionName | ascii_downcase) == ($id | ascii_downcase)) | .flags')\n");
     workflow.push_str("            if printf '%s\\n' \"$visible\" | grep -Eq '(^|, )public(,|$)' && printf '%s\\n' \"$visible\" | grep -Eq '(^|, )validated(,|$)'; then\n");
     workflow.push_str("              echo \"$EXTENSION_ID is visible in the public VS Code Marketplace Gallery API\"\n");
@@ -1715,9 +1719,11 @@ fn push_vscode_marketplace_signature_gate(workflow: &mut String, vscode: &Resolv
     workflow.push_str("          EXTENSION_ID=\"$EXTENSION_PUBLISHER.$EXTENSION_NAME\"\n");
     workflow.push_str("          tmp_dir=$(mktemp -d)\n");
     workflow.push_str("          trap 'rm -rf \"$tmp_dir\"' EXIT\n");
+    workflow.push_str("          # jq variables are expanded by jq, not the shell.\n          # shellcheck disable=SC2016\n");
     workflow.push_str("          query=$(nix shell nixpkgs#jq -c jq -cn --arg id \"$EXTENSION_ID\" '{filters:[{criteria:[{filterType:7,value:$id}]}],flags:2151}')\n");
     workflow.push_str("          result=$(curl --fail --silent --show-error --header 'Content-Type: application/json' --header 'Accept: application/json;api-version=7.2-preview.1' --data \"$query\" https://marketplace.visualstudio.com/_apis/public/gallery/extensionquery)\n");
     workflow.push_str("          versions_tsv=\"$tmp_dir/versions.tsv\"\n");
+    workflow.push_str("          # jq variables are expanded by jq, not the shell.\n          # shellcheck disable=SC2016\n");
     workflow.push_str("          printf '%s' \"$result\" | nix shell nixpkgs#jq -c jq -r --arg id \"$EXTENSION_ID\" '\n");
     workflow.push_str("            .results[0].extensions[]?\n");
     workflow.push_str("            | select((.publisher.publisherName + \".\" + .extensionName | ascii_downcase) == ($id | ascii_downcase))\n");
@@ -1760,12 +1766,21 @@ fn push_vscode_marketplace_signature_gate(workflow: &mut String, vscode: &Resolv
 fn push_vscode_pat_resolution_function(workflow: &mut String, vscode: &ResolvedVscode) {
     workflow.push_str("          resolve_pat() {\n");
     workflow.push_str("            case \"$1\" in\n");
-    workflow.push_str("              vsce) file_env=");
-    workflow.push_str(&shell_word(&vscode.vsce_pat_file_env));
-    workflow.push_str("; secret=\"${VSCE_PAT_FROM_SECRET:-}\" ;;\n");
-    workflow.push_str("              ovsx) file_env=");
-    workflow.push_str(&shell_word(&vscode.ovsx_pat_file_env));
-    workflow.push_str("; secret=\"${OVSX_PAT_FROM_SECRET:-}\" ;;\n");
+    for (publisher, file_env, secret_env) in [
+        ("vsce", &vscode.vsce_pat_file_env, "VSCE_PAT_FROM_SECRET"),
+        ("ovsx", &vscode.ovsx_pat_file_env, "OVSX_PAT_FROM_SECRET"),
+    ] {
+        workflow.push_str(&format!("              {publisher}) "));
+        if !matches!(vscode.pat_source, VscodePatSource::ActionsSecret) {
+            workflow.push_str("file_env=");
+            workflow.push_str(&shell_word(file_env));
+            workflow.push_str("; ");
+        }
+        if !matches!(vscode.pat_source, VscodePatSource::FileEnv) {
+            workflow.push_str(&format!("secret=\"${{{secret_env}:-}}\"; "));
+        }
+        workflow.push_str(";;\n");
+    }
     workflow.push_str("              *) echo \"unknown publisher $1\" >&2; exit 1 ;;\n");
     workflow.push_str("            esac\n");
     match vscode.pat_source {
