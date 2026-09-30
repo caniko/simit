@@ -3006,7 +3006,9 @@ fn check_failure_hint_includes_transient_generation_flags() {
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(
-        stderr.contains("run `simit init ci --platform forgejo --runtime nix --runner atlas-nix-trusted"),
+        stderr.contains(
+            "run `simit init ci --platform forgejo --runtime nix --runner atlas-nix-trusted"
+        ),
         "stderr:\n{stderr}"
     );
     assert!(stderr.contains("--workspace --with-deny --with-artifacts"));
