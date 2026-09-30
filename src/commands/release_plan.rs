@@ -331,9 +331,8 @@ fn local_dependency_names(
 
     let mut names = Vec::new();
     for dependency in &package.dependencies {
-        // Only publish-ordering kinds (normal/build/optional/target-specific)
-        // create edges. Dev-dependencies are ignored by `cargo publish` and
-        // must not order publishes or fail on `publish = false` helpers.
+        // Versioned dev-dependencies also need registry resolution during
+        // packaging. Path-only test helpers are removed from the archive.
         if !dependency.is_publish_ordering() {
             continue;
         }
@@ -610,8 +609,7 @@ mod tests {
 
     #[test]
     fn dev_dependency_on_non_publishable_member_does_not_block_plan() {
-        // `app` dev-depends on the `publish = false` helper `xtask`. Cargo
-        // ignores dev-deps at publish time, so the plan must too.
+        // Cargo removes path-only dev-dependencies on unpublished helpers.
         let metadata = metadata(vec![
             package_with_kinds("app", true, &[("xtask", Some("dev"))]),
             package("xtask", false, &[]),
@@ -632,6 +630,35 @@ mod tests {
             .find(|entry| entry.package.name == "app")
             .unwrap();
         assert!(app.depends_on.is_empty());
+    }
+
+    #[test]
+    fn versioned_dev_dependency_orders_package_verification() {
+        let mut client = package_with_kinds("client", true, &[("server", Some("dev"))]);
+        client.dependencies[0].req = Some("^0.2.0".to_owned());
+        let metadata = metadata(vec![client, package("server", true, &[])]);
+
+        let plan = build_release_plan(&metadata, &[]).unwrap();
+        let names = plan
+            .entries
+            .iter()
+            .map(|entry| entry.package.name.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(names, vec!["server", "client"]);
+        assert_eq!(plan.entries[1].depends_on, vec!["server"]);
+    }
+
+    #[test]
+    fn unversioned_dev_dependency_on_non_publishable_member_does_not_block_plan() {
+        let mut app = package_with_kinds("app", true, &[("xtask", Some("dev"))]);
+        app.dependencies[0].req = Some("*".to_owned());
+        let metadata = metadata(vec![app, package("xtask", false, &[])]);
+
+        let plan = build_release_plan(&metadata, &[]).unwrap();
+
+        assert_eq!(plan.entries.len(), 1);
+        assert!(plan.entries[0].depends_on.is_empty());
     }
 
     #[test]

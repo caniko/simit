@@ -82,14 +82,16 @@ pub struct Dependency {
 impl Dependency {
     /// Whether this dependency imposes crates.io publication ordering.
     ///
-    /// Cargo only requires normal, build, optional, and target-specific path
-    /// dependencies to be published before their dependents. Dev-dependencies
-    /// are excluded from `cargo package`/`cargo publish` ordering: a
-    /// publishable crate may dev-depend on a `publish = false` helper (e.g.
-    /// `xtask`) and still publish. Treating dev-deps as ordering edges would
-    /// falsely fail the plan and serialize unrelated publishes.
+    /// Cargo resolves versioned dev-dependencies while preparing a package's
+    /// lockfile, even when archive compilation does not build its tests.
+    /// Path-only dev-dependencies have the wildcard requirement in metadata
+    /// and are removed during packaging, so unpublished test helpers do not
+    /// impose ordering. Normal, build, optional, and target-specific path
+    /// dependencies always impose ordering.
     pub fn is_publish_ordering(&self) -> bool {
-        self.path.is_some() && self.kind.as_deref() != Some("dev")
+        self.path.is_some()
+            && (self.kind.as_deref() != Some("dev")
+                || self.req.as_deref().is_some_and(|req| req != "*"))
     }
 }
 

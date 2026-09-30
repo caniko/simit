@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Order versioned workspace dev-dependencies before their dependents during
+  coordinated publication, because Cargo resolves them while packaging the
+  lockfile. Path-only unpublished test helpers remain excluded from the plan.
+
 ## [0.19.0] - 2026-09-30
 
 ### Added
