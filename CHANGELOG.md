@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `simit test --git-fixtures -- <command>` provides disposable, directory-scoped Git fixture isolation while preserving checkout hook/signing policy and child exit status.
+- Project-owned Crow check commands, with an optional push-only secret that is excluded from pull-request steps and preserved during CI configuration updates.
+
+### Fixed
+
+- Honor test and Clippy feature policy in Nix and split-runner Actions workflows, including library-only passes and crates.io publishers.
+- Run MSRV checks with the declared compiler in both CI and publishing: install it for Cargo jobs, verify the dedicated Nix shell's compiler, and generate matching MSRV shells for new Rust flakes.
+- Scope GitHub Actions concurrency by workflow path so workspace members with the same display name cannot cancel one another.
+- Keep the Pages build output link for artifact upload and domain validation, while preserving custom installables inferred from older workflows.
+- Validate the treefmt hook's enabled state, uncached wrapper command, and full-file scope structurally; reject disabled, redirected, filtered, or shadowed hooks instead of accepting textual decoys.
+- Use treefmt as the sole generated formatter when selected, and require recognized policy coverage before hooks-only updates remove standalone formatters.
+- Recognize generated treefmt policies structurally in checks and registry status, and use the actual Cargo workspace edition instead of assuming 2024.
+- Generate uncached treefmt checks for local hooks and Nix-backed GitHub Actions, Forgejo Actions, and Crow jobs.
+- Validate treefmt import arguments against required module parameters; reject missing arguments, unsupported dynamic calls, and misleading unrelated bindings.
+- Declare GitHub Actions as this repository's CI provider and retire the generated Crow workflow.
+- Keep coordinated workspace publication executable and resumable with isolated publishers, Nix job environments, and version-specific checksum verification.
+- Build documentation and the project site without requiring fleet-managed compiler-cache transport on hosted runners.
+
 ## [0.18.1] - 2026-09-26
 
 ### Fixed
@@ -26,7 +46,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `simit test --git-fixtures -- <command>` provides disposable, directory-scoped Git fixture isolation while preserving checkout hook/signing policy and child exit status.
 - Support custom non-Rust and non-Python flakes with a generic backend, including JavaScript and TeX formatter detection.
 - Declarative `[[ci.required_gates]]` for project-owned custom flakes (stable id, single-line run, bounded timeout, scoped env) rendered as dedicated required jobs in CI and as prerequisite jobs in coordinated publishing.
 - Opt-in coordinated workspace publication (`publish_strategy = "coordinated"` / `--coordinated-publish`, GitHub only) generating one `publish-workspace.yaml` in `simit release plan` order with signed-tag, lockstep, gate, checksum-conflict, and bounded-propagation gating.
@@ -38,16 +57,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Honor test and Clippy feature policy in Nix and split-runner Actions workflows, including library-only passes and crates.io publishers.
-- Run MSRV checks with the declared compiler in both CI and publishing: install it for Cargo jobs, verify the dedicated Nix shell's compiler, and generate matching MSRV shells for new Rust flakes.
-- Scope GitHub Actions concurrency by workflow path so workspace members with the same display name cannot cancel one another.
-- Keep the Pages build output link for artifact upload and domain validation, while preserving custom installables inferred from older workflows.
-- Validate the treefmt hook's enabled state, uncached wrapper command, and full-file scope structurally; reject disabled, redirected, filtered, or shadowed hooks instead of accepting textual decoys.
-- Use treefmt as the sole generated formatter when selected, and require recognized policy coverage before hooks-only updates remove standalone formatters.
-- Recognize generated treefmt policies structurally in checks and registry status, and use the actual Cargo workspace edition instead of assuming 2024.
-- Generate uncached treefmt checks for local hooks and Nix-backed GitHub Actions, Forgejo Actions, and Crow jobs.
-- Validate treefmt import arguments against required module parameters; reject missing arguments, unsupported dynamic calls, and misleading unrelated bindings.
-- Declare GitHub Actions as this repository's CI provider and retire the generated Crow workflow.
 - Validate formatted pre-commit hook files against the project-selected component set.
 - Release-plan ordering now ignores dev-dependencies (Cargo parity): publishable crates may dev-depend on `publish = false` helpers without failing the plan; normal/build/optional/target-specific path deps still order and still fail on non-publishable members.
 - `--dry-run-package` output is labeled archive-construction-only (`--no-verify`), never presented as verification, dry-run publication, or publish.
