@@ -1683,6 +1683,14 @@ prepublish_commands = ["nix flake check --no-build"]
             .contains("-F \"file=@$RUNNER_TEMP/jetbrains-plugin-signed.zip;type=application/zip\"")
     );
     assert!(workflow.contains("name: example-jetbrains-${{ github.ref_name }}"));
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
+    let upload = yaml["jobs"]["publish"]["steps"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .find(|step| step["name"] == "Publish to JetBrains Marketplace")
+        .unwrap();
+    assert_eq!(upload["env"]["CHANNEL"].as_str(), Some(""));
     assert!(workflow.contains("jetbrains-plugin-archive-name"));
     assert!(!workflow.contains("pluginId="));
     assert!(!workflow.contains("pkl-lsp-jetbrains"));

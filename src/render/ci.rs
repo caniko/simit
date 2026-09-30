@@ -3353,9 +3353,11 @@ fn shell_quote(value: &str) -> String {
 }
 
 fn shell_word(value: &str) -> String {
-    if value.bytes().all(|byte| {
-        byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b'/' | b'#')
-    }) {
+    if !value.is_empty()
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b'/' | b'#')
+        })
+    {
         value.to_owned()
     } else {
         shell_quote(value)
