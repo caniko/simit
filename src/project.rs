@@ -3,6 +3,7 @@ use std::ffi::OsStr;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
+use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
@@ -152,7 +153,14 @@ pub fn detect_languages(workspace_root: &Path) -> Result<Languages> {
         ..Languages::default()
     };
 
-    detect_languages_in_dir(workspace_root, workspace_root, &mut languages)?;
+    if workspace_root.join(".git").exists() {
+        // Include tracked and new source files, but not ignored build outputs.
+        // Otherwise building documentation can change formatter policy and
+        // make a fresh checkout disagree with the developer's checkout.
+        detect_languages_in_git(workspace_root, &mut languages)?;
+    } else {
+        detect_languages_in_dir(workspace_root, workspace_root, &mut languages)?;
+    }
     Ok(languages)
 }
 
@@ -290,6 +298,46 @@ fn is_uv_python_project(workspace_root: &Path) -> Result<bool> {
     Ok(content.contains("[tool.uv") || content.contains("[dependency-groups]"))
 }
 
+fn detect_languages_in_git(root: &Path, languages: &mut Languages) -> Result<()> {
+    let output = Command::new("git")
+        .current_dir(root)
+        .args([
+            "ls-files",
+            "-z",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+        ])
+        .output()
+        .context("listing project source files")?;
+    if !output.status.success() {
+        bail!(
+            "git ls-files failed while detecting project languages: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let paths = String::from_utf8(output.stdout).context("project source paths are not UTF-8")?;
+    for relative in paths.split('\0').filter(|path| !path.is_empty()) {
+        let path = root.join(relative);
+        if Path::new(relative)
+            .ancestors()
+            .skip(1)
+            .any(|directory| should_skip_dir(root, &root.join(directory)))
+        {
+            continue;
+        }
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.is_file() => detect_language(&path, languages),
+            Ok(_) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| format!("reading {}", path.display()));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn detect_languages_in_dir(root: &Path, dir: &Path, languages: &mut Languages) -> Result<()> {
     for entry in fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
         let entry = entry.with_context(|| format!("reading entry in {}", dir.display()))?;
@@ -310,22 +358,25 @@ fn detect_languages_in_dir(root: &Path, dir: &Path, languages: &mut Languages) -
             continue;
         }
 
-        match path.extension().and_then(|extension| extension.to_str()) {
-            Some("nix") => languages.nix = true,
-            Some("toml") => languages.toml = true,
-            Some("yaml" | "yml") => languages.yaml = true,
-            Some("md" | "markdown") => languages.markdown = true,
-            Some("js" | "jsx" | "mjs" | "cjs" | "ts" | "tsx") => languages.javascript = true,
-            Some("tex" | "sty" | "cls" | "ltx") => languages.tex = true,
-            // Rust is a project component only when the repository root owns
-            // a Cargo manifest. Source fixtures in Python or documentation
-            // projects must not activate Rust tooling.
-            Some("rs") => {}
-            _ => {}
-        }
+        detect_language(&path, languages);
     }
 
     Ok(())
+}
+
+fn detect_language(path: &Path, languages: &mut Languages) {
+    match path.extension().and_then(|extension| extension.to_str()) {
+        Some("nix") => languages.nix = true,
+        Some("toml") => languages.toml = true,
+        Some("yaml" | "yml") => languages.yaml = true,
+        Some("md" | "markdown") => languages.markdown = true,
+        Some("js" | "jsx" | "mjs" | "cjs" | "ts" | "tsx") => languages.javascript = true,
+        Some("tex" | "sty" | "cls" | "ltx") => languages.tex = true,
+        // Rust is a project component only when the repository root owns
+        // a Cargo manifest. Source fixtures in Python or documentation
+        // projects must not activate Rust tooling.
+        _ => {}
+    }
 }
 
 fn should_skip_dir(root: &Path, path: &Path) -> bool {

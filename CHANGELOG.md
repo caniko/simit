@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Ignore untracked build outputs during Git-backed language detection so documentation builds cannot change formatter policy or README badge checks between local and hosted CI.
 - Honor test and Clippy feature policy in Nix and split-runner Actions workflows, including library-only passes and crates.io publishers.
 - Run MSRV checks with the declared compiler in both CI and publishing: install it for Cargo jobs, verify the dedicated Nix shell's compiler, and generate matching MSRV shells for new Rust flakes.
 - Scope GitHub Actions concurrency by workflow path so workspace members with the same display name cannot cancel one another.
