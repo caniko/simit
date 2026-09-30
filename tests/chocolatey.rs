@@ -258,6 +258,7 @@ fn bump_push_requires_default_api_key_env() {
     let x64 = archive(temp.path(), "x64.zip", b"x64 archive\n");
 
     let output = simit()
+        .env_remove("CHOCOLATEY_API_KEY")
         .current_dir(temp.path())
         // The ambient environment may export a real key; this test is about
         // the missing-variable path, so model it explicitly.
@@ -279,7 +280,10 @@ fn bump_push_requires_default_api_key_env() {
 
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(stderr.contains("reading Chocolatey API key from $CHOCOLATEY_API_KEY"));
+    assert!(
+        stderr.contains("reading Chocolatey API key from $CHOCOLATEY_API_KEY"),
+        "{stderr}"
+    );
 }
 
 #[test]
