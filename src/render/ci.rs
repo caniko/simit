@@ -34,6 +34,9 @@ pub fn is_generated_workflow_marker(content: &str) -> bool {
 const CARGO_NEXTEST_VERSION: &str = "0.9.100";
 const CARGO_DENY_VERSION: &str = "0.18.3";
 const CARGO_DENY_POLICY_CHECKS: &str = "bans licenses sources";
+// Custom/legacy Nix shells may expose rustfmt without a treefmt wrapper.
+// Prefer the complete project formatter, and never mask its failure.
+pub(crate) const NIX_FORMAT_COMMAND: &str = "sh -c 'if command -v treefmt >/dev/null 2>&1; then exec treefmt --ci; else exec cargo fmt --all -- --check; fi'";
 
 #[derive(Debug, Deserialize)]
 struct ActionPin {
@@ -2080,9 +2083,9 @@ fn ci_workflow_single_job(
             push_install_nix_step(&mut workflow, platform);
             push_nix_cargo_bin_path_step(&mut workflow);
             push_extra_setup_steps(&mut workflow, &options.extra_setup);
-            workflow.push_str(
-                "      - name: Format check\n        run: nix develop -c treefmt --ci\n\n",
-            );
+            workflow.push_str(&format!(
+                "      - name: Format check\n        run: nix develop -c {NIX_FORMAT_COMMAND}\n\n",
+            ));
             match options.om_ci {
                 OmCiMode::Off => {
                     push_nix_ci_legacy_steps(
@@ -2210,7 +2213,9 @@ fn ci_workflow_multi_job(
             );
             capture(
                 STEP_FORMAT,
-                "      - name: Format check\n        run: nix develop -c treefmt --ci\n\n",
+                &format!(
+                    "      - name: Format check\n        run: nix develop -c {NIX_FORMAT_COMMAND}\n\n"
+                ),
             );
 
             let mut test = String::new();
