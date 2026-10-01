@@ -277,6 +277,80 @@ timeout_minutes = 30
     assert!(publish.contains("if: always()"));
 }
 
+#[cfg(unix)]
+#[test]
+fn coordinated_tag_validation_rejects_a_moved_tag_before_checkout() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = init_coordinated_workspace("");
+    let output = simit()
+        .current_dir(temp.path())
+        .args(["init", "ci", "--runtime", "cargo"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let workflow: serde_yaml::Value = serde_yaml::from_str(&read(
+        &temp.path().join(".github/workflows/publish-workspace.yaml"),
+    ))
+    .unwrap();
+    let script = workflow["jobs"]["validate"]["steps"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .find(|step| {
+            step["name"].as_str() == Some("Validate signed release tag and lockstep versions")
+        })
+        .unwrap()["run"]
+        .as_str()
+        .unwrap();
+
+    // Exercise the rendered shell boundary without contacting GitHub or requiring
+    // an operator signing key. Signature verification succeeds in this fixture;
+    // only the binding between the tag commit and the immutable event SHA varies.
+    let bin = temp.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    fs::create_dir_all(temp.path().join("keys")).unwrap();
+    fs::write(
+        temp.path().join("keys/maintainers.gpg"),
+        "fixture trust root",
+    )
+    .unwrap();
+    for (name, body) in [
+        ("gpg", "exit 0"),
+        (
+            "git",
+            "case \"$1\" in\nfetch|verify-tag) exit 0;;\nrev-list) printf '%s\\n' \"$TEST_TAG_SHA\";;\ncheckout) touch checkout-ran;;\n*) exit 99;;\nesac",
+        ),
+        ("cargo", "printf 'fixture@0.1.0\\n'"),
+    ] {
+        let path = bin.join(name);
+        fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let path = std::env::join_paths(
+        std::iter::once(bin).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+    )
+    .unwrap();
+    let event_sha = "1111111111111111111111111111111111111111";
+    for tag_sha in ["2222222222222222222222222222222222222222", event_sha] {
+        let output = Command::new("bash")
+            .current_dir(temp.path())
+            .args(["-c", script])
+            .env("PATH", &path)
+            .env("TMPDIR", temp.path())
+            .env("GITHUB_REF_NAME", "0.1.0")
+            .env("GITHUB_SHA", event_sha)
+            .env("TEST_TAG_SHA", tag_sha)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.success(), tag_sha == event_sha, "{output:?}");
+        assert_eq!(
+            temp.path().join("checkout-ran").exists(),
+            tag_sha == event_sha
+        );
+    }
+}
+
 #[test]
 fn coordinated_publish_replaces_per_member_outputs_only() {
     let temp = init_coordinated_workspace("");

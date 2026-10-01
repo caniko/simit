@@ -480,6 +480,9 @@ fn publish_workspace_workflow(
     w.push_str("          git fetch --force --tags origin \"refs/tags/${tag}:refs/tags/${tag}\"\n");
     w.push_str("          git verify-tag \"$tag\"\n");
     w.push_str("          validated_sha=\"$(git rev-list -n 1 \"$tag\")\"\n");
+    // Every subsequent job checks out the immutable workflow event commit.
+    // A refetch must never let a moved tag authorize a different source tree.
+    w.push_str("          test \"$validated_sha\" = \"${GITHUB_SHA:?missing workflow event SHA}\" || { echo \"Signed tag commit does not match the workflow event SHA; refusing a moved tag\" >&2; exit 1; }\n");
     w.push_str("          git checkout --detach \"$validated_sha\"\n");
     for (name, version) in versions {
         w.push_str("          test \"$(");
