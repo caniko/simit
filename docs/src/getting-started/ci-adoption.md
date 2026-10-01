@@ -112,6 +112,76 @@ simit init flake --scope hooks-only
 simit init ci --platform forgejo --runtime nix
 ```
 
+## Focused Hosted Nix Builds
+
+Declare the exact installables that qualify a feature in `[ci].nix_builds`.
+GitHub Actions projects can configure their matrix independently of ordinary
+checks and release jobs:
+
+```toml
+[ci]
+platform = "github"
+provider = "actions"
+runtime = "nix"
+runner = "ubuntu-24.04"
+nix_builds = [
+  ".#checks.x86_64-linux.client-runtime",
+  ".#checks.x86_64-linux.managed-postgres-recovery",
+]
+
+[ci.nix_build]
+only = true
+timeout_minutes = 90
+max_parallel = 1
+max_jobs = 1
+cores = 2
+kvm = true
+capture_results = true
+artifact_retention_days = 14
+extra_setup = ["python3 ci/prepare-input-access.py"]
+post_build = ["python3 ci/retain-receipts.py"]
+artifact_paths = ["${{ runner.temp }}/receipts/**"]
+required_secrets = ["FLAKE_SSH_KEY"]
+
+[ci.nix_build.extra_env]
+FLAKE_SSH_KEY = "${{ secrets.FLAKE_SSH_KEY }}"
+```
+
+Generate and check with `simit init ci --platform github --runtime nix`, then
+`simit init ci --check --diff`. `only = true` is for flake-only projects: it
+emits `nix-builds.yaml` without a broad flake-check workflow. Switching to it
+removes obsolete Simit-managed primary CI while preserving project-owned
+workflows. It cannot be combined with `components`, `nix_system_runners`, or
+`prebuild`. Rust and Python projects can use the other matrix options alongside
+their ordinary CI.
+
+The nested environment and setup apply only to the build matrix. Bind every
+required secret to the same-named variable using `${{ secrets.NAME }}` under
+`extra_env`; the generated preflight fails on a missing secret without printing
+its value. GitHub supplies no repository secrets to fork pull requests, so these
+credential-dependent jobs fail preflight rather than claiming qualification.
+`required_env` checks run after setup, allowing setup to create credential files.
+Keep private-input credentials out of global `[ci].extra_env` and release jobs.
+
+KVM setup requires a GitHub-hosted Linux runner with `/dev/kvm`. Configured
+matrix builds use `--no-update-lock-file`; `max_jobs` and `cores` bound Nix
+realization, and `max_parallel` bounds the number of matrix jobs. Limits are
+validated: timeout 1–360 minutes, parallelism 1–256, jobs 1–1024, cores 0–1024
+(0 means all available cores), and artifact retention 1–90 days.
+
+With `capture_results = true`, `$SIMIT_NIX_BUILD_RESULTS` points to a job-specific
+runner-temporary directory containing the checked-out `revision`, selected
+`installable`, `build.log`, and Nix's `result.json` (derivation and output paths).
+The build preserves Nix's failure status while streaming and retaining its
+diagnostics. `post_build` commands run after successful realization; they can
+read `result.json` and copy package receipts or VM reports into the evidence
+directory. They must fail if an expected receipt is missing. The pinned upload
+action runs even after failure and includes any explicit `artifact_paths`.
+Artifacts retain evidence, not Nix store closures; an empty or partial result
+file after failure is not a passing receipt.
+
+Omitting `[ci.nix_build]` preserves the existing generated matrix defaults.
+
 ## Required Integration Gates
 
 Project-owned custom flakes declare additional required gates without

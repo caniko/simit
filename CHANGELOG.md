@@ -7,8 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Scoped GitHub Nix build-matrix options under `[ci.nix_build]`: exact-only
+  flake qualification, private-input environment/preflight and setup, KVM,
+  bounded realization, and retained source/output metadata, build diagnostics
+  and project-exported receipts.
+
 ### Fixed
 
+- Reject a coordinated publication when the refetched signed tag resolves to a
+  different commit than the immutable workflow event SHA, keeping validation
+  and all later release jobs bound to the same source tree.
 - Order versioned workspace dev-dependencies before their dependents during
   coordinated publication, because Cargo resolves them while packaging the
   lockfile. Path-only unpublished test helpers remain excluded from the plan.
