@@ -148,12 +148,15 @@ FLAKE_SSH_KEY = "${{ secrets.FLAKE_SSH_KEY }}"
 ```
 
 Generate and check with `simit init ci --platform github --runtime nix`, then
-`simit init ci --check --diff`. `only = true` is for flake-only projects: it
+`simit init ci --check --diff`. `only = true` supports flake-only and Rust flake projects: it
 emits `nix-builds.yaml` without a broad flake-check workflow. Switching to it
 removes obsolete Simit-managed primary CI while preserving project-owned
 workflows. It cannot be combined with `components`, `nix_system_runners`, or
-`prebuild`. Rust and Python projects can use the other matrix options alongside
-their ordinary CI.
+`prebuild` or language-specific release flags. Rust workspaces resolve this
+policy from the workspace root, including invocations from member directories.
+Select all required Rust checks explicitly as Nix installables in this mode.
+Rust and Python projects can also use the other matrix options alongside their
+ordinary CI.
 
 The nested environment and setup apply only to the build matrix. Bind every
 required secret to the same-named variable using `${{ secrets.NAME }}` under

@@ -57,7 +57,7 @@ pub fn run(command: InitCiCommand) -> Result<()> {
     let workspace_root = metadata.workspace_root.as_std_path();
     let cfg = ProjectConfig::load(workspace_root)?;
     if cfg.ci.nix_build.only {
-        bail!("[ci.nix_build].only is supported for flake-only projects");
+        return run_nix_only_at(command, workspace_root);
     }
     let provider = command
         .ci_provider
@@ -645,10 +645,14 @@ fn run_pages_only(command: InitCiCommand) -> Result<()> {
 
 fn run_nix_only(command: InitCiCommand) -> Result<()> {
     let workspace_root = std::env::current_dir().context("reading current directory")?;
+    run_nix_only_at(command, &workspace_root)
+}
+
+fn run_nix_only_at(command: InitCiCommand, workspace_root: &Path) -> Result<()> {
     if !workspace_root.join("flake.nix").is_file() {
         bail!("Nix CI generation requires flake.nix at the workspace root");
     }
-    let cfg = ProjectConfig::load(&workspace_root)?;
+    let cfg = ProjectConfig::load(workspace_root)?;
     if cfg.ci.nix_build.only && command.runtime == Some(RuntimeChoice::Cargo) {
         bail!("[ci.nix_build].only requires --runtime nix");
     }
@@ -766,12 +770,12 @@ fn run_nix_only(command: InitCiCommand) -> Result<()> {
     };
     if command.check {
         if platform == Platform::Gitlab {
-            project::check_generated_files(&workspace_root, &files, &message, command.diff)?;
+            project::check_generated_files(workspace_root, &files, &message, command.diff)?;
         } else {
-            reconcile_ci_files(&workspace_root, files, &message, true, command.diff)?;
+            reconcile_ci_files(workspace_root, files, &message, true, command.diff)?;
         }
     } else {
-        reconcile_ci_files(&workspace_root, files, &message, false, false)?;
+        reconcile_ci_files(workspace_root, files, &message, false, false)?;
         let mut persisted_ci = cfg.ci;
         persisted_ci.provider = Some(CiProvider::Actions);
         persisted_ci.platform = Some(platform);
@@ -780,8 +784,8 @@ fn run_nix_only(command: InitCiCommand) -> Result<()> {
         if command.with_codeberg_pages {
             persisted_ci.pages = Some(codeberg_pages_config(&pages)?);
         }
-        if ProjectConfig::can_persist_ci(&workspace_root)? {
-            ProjectConfig::write_ci(&workspace_root, &persisted_ci)?;
+        if ProjectConfig::can_persist_ci(workspace_root)? {
+            ProjectConfig::write_ci(workspace_root, &persisted_ci)?;
         }
         registry::touch_current_project_or_warn([("ci", FeatureStatus::Managed)]);
     }
