@@ -16,6 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Coalesce configured hosted Nix qualification runs for branch pushes and pull
+  requests so the same source does not consume two hosted build matrices.
 - Reject a coordinated publication when the refetched signed tag resolves to a
   different commit than the immutable workflow event SHA, keeping validation
   and all later release jobs bound to the same source tree.
