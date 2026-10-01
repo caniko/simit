@@ -64,6 +64,10 @@ extra_env = { FLAKE_SSH_KEY = "${{ secrets.FLAKE_SSH_KEY }}" }
     let original = fs::read(temp.path().join(".github/workflows/nix-builds.yaml")).unwrap();
     let value = workflow(&temp);
     assert_eq!(value["permissions"]["contents"], "read");
+    assert_eq!(
+        value["concurrency"]["group"],
+        "${{ github.workflow }}-${{ github.event.pull_request.head.ref || github.ref_name }}"
+    );
     let job = &value["jobs"]["build"];
     assert_eq!(job["timeout-minutes"], 90);
     assert_eq!(job["strategy"]["max-parallel"], 1);

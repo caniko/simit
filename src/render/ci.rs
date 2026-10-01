@@ -986,7 +986,12 @@ pub fn nix_build_matrix_file_with_options(
     if platform == Platform::Github {
         workflow.push_str("permissions:\n  contents: read\n\n");
     }
-    push_platform_concurrency(&mut workflow, platform);
+    if platform == Platform::Github && *options != crate::config::NixBuildConfig::default() {
+        // Push and PR runs for the same source branch share one qualification.
+        workflow.push_str("concurrency:\n  group: ${{ github.workflow }}-${{ github.event.pull_request.head.ref || github.ref_name }}\n  cancel-in-progress: true\n\n");
+    } else {
+        push_platform_concurrency(&mut workflow, platform);
+    }
     workflow.push_str("jobs:\n  build:\n    runs-on: ");
     workflow.push_str(&runs_on(runner));
     workflow.push('\n');
