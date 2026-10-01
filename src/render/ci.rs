@@ -4285,7 +4285,7 @@ fn push_validate_pypi_tag_step(workflow: &mut String) {
             echo "Tag must be an exact semver version like 0.1.1, got '$tag'" >&2
             exit 1
           fi
-          version="$(nix eval --raw --impure --expr '(builtins.fromTOML (builtins.readFile ./pyproject.toml)).project.version')"
+          version="$(nix eval --raw --impure --expr 'let metadata = builtins.fromTOML (builtins.readFile ./pyproject.toml); in if metadata ? project.version then metadata.project.version else if metadata ? project && builtins.elem "version" (metadata.project.dynamic or []) && metadata ? tool.poetry.version then metadata.tool.poetry.version else if !(metadata ? project) && metadata ? tool.poetry.version then metadata.tool.poetry.version else throw "No supported Python project version provider"')"
           if [ "$tag" != "$version" ]; then
             echo "Tag $tag does not match project version $version" >&2
             exit 1
