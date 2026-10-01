@@ -946,15 +946,40 @@ pub fn nix_build_matrix_file(
     substituters: &[String],
     trusted_public_keys: &[String],
 ) -> Result<GeneratedFile> {
+    nix_build_matrix_file_with_options(
+        platform,
+        runner,
+        installables,
+        extra_setup,
+        substituters,
+        trusted_public_keys,
+        &crate::config::NixBuildConfig::default(),
+    )
+}
+
+/// Render an installable matrix with explicitly scoped qualification options.
+pub fn nix_build_matrix_file_with_options(
+    platform: Platform,
+    runner: &ResolvedRunner,
+    installables: &[String],
+    extra_setup: &[String],
+    substituters: &[String],
+    trusted_public_keys: &[String],
+    options: &crate::config::NixBuildConfig,
+) -> Result<GeneratedFile> {
     if platform == Platform::Gitlab {
         bail!("GitLab Nix installable matrices are not supported");
     }
     if installables.is_empty() {
         bail!("Nix installable build matrix requires at least one installable");
     }
+    if platform != Platform::Github && *options != crate::config::NixBuildConfig::default() {
+        bail!("[ci.nix_build] options require GitHub Actions");
+    }
 
     let mut workflow = String::new();
     push_generated_workflow_header(&mut workflow);
+    push_required_secrets_header(&mut workflow, &options.required_secrets);
     workflow.push_str(
         "name: Nix installable builds\n\non:\n  push:\n  pull_request:\n  workflow_dispatch:\n\n",
     );
@@ -964,23 +989,72 @@ pub fn nix_build_matrix_file(
     push_platform_concurrency(&mut workflow, platform);
     workflow.push_str("jobs:\n  build:\n    runs-on: ");
     workflow.push_str(&runs_on(runner));
-    workflow.push_str(
-        "\n    strategy:\n      fail-fast: false\n      max-parallel: 2\n      matrix:\n        installable:\n",
-    );
+    workflow.push('\n');
+    if let Some(timeout) = options.timeout_minutes {
+        workflow.push_str(&format!("    timeout-minutes: {timeout}\n"));
+    }
+    workflow.push_str(&format!(
+        "    strategy:\n      fail-fast: false\n      max-parallel: {}\n      matrix:\n        installable:\n",
+        options.max_parallel.unwrap_or(2)
+    ));
     for installable in installables {
         workflow.push_str("          - \"");
         workflow.push_str(&yaml_double_quote(installable));
         workflow.push_str("\"\n");
     }
-    workflow.push_str(
-        "    env:\n      NIX_CONFIG: \"experimental-features = nix-command flakes\"\n    steps:\n",
-    );
+    workflow.push_str("    env:\n");
+    if !options.extra_env.contains_key("NIX_CONFIG") {
+        workflow.push_str("      NIX_CONFIG: \"experimental-features = nix-command flakes\"\n");
+    }
+    for (key, value) in &options.extra_env {
+        workflow.push_str(&format!("      {key}: \"{}\"\n", yaml_double_quote(value)));
+    }
+    workflow.push_str("    steps:\n");
     push_checkout_step(&mut workflow, platform);
+    if options.capture_results {
+        workflow.push_str("      - name: Prepare Nix build evidence\n        env:\n          INSTALLABLE: ${{ matrix.installable }}\n        run: |\n          SIMIT_NIX_BUILD_RESULTS=\"$RUNNER_TEMP/simit-nix-build-${{ strategy.job-index }}\"\n          printf '%s\\n' \"SIMIT_NIX_BUILD_RESULTS=$SIMIT_NIX_BUILD_RESULTS\" >> \"$GITHUB_ENV\"\n          mkdir -p \"$SIMIT_NIX_BUILD_RESULTS\"\n          git rev-parse HEAD > \"$SIMIT_NIX_BUILD_RESULTS/revision\"\n          printf '%s\\n' \"$INSTALLABLE\" > \"$SIMIT_NIX_BUILD_RESULTS/installable\"\n");
+    }
     push_install_nix_step_with_cache(&mut workflow, platform, substituters, trusted_public_keys);
+    push_required_env_step(&mut workflow, &options.required_secrets);
+    if options.kvm {
+        workflow.push_str("      - name: Enable hosted KVM\n        run: |\n          test \"${RUNNER_ENVIRONMENT:-}\" = github-hosted\n          test -c /dev/kvm\n          sudo chmod a+rw /dev/kvm\n          test -r /dev/kvm && test -w /dev/kvm\n");
+    }
     push_extra_setup_steps(&mut workflow, extra_setup);
+    push_extra_setup_steps(&mut workflow, &options.extra_setup);
+    push_required_env_step(&mut workflow, &options.required_env);
     workflow.push_str("      - name: Build ${{ matrix.installable }}\n");
     workflow.push_str("        env:\n          INSTALLABLE: ${{ matrix.installable }}\n");
-    workflow.push_str("        run: nix build --no-link \"$INSTALLABLE\"\n");
+    let mut command = "nix build --no-link".to_owned();
+    if *options != crate::config::NixBuildConfig::default() {
+        command.push_str(" --no-update-lock-file");
+    }
+    if let Some(jobs) = options.max_jobs {
+        command.push_str(&format!(" --max-jobs {jobs}"));
+    }
+    if let Some(cores) = options.cores {
+        command.push_str(&format!(" --cores {cores}"));
+    }
+    if options.capture_results {
+        command.push_str(" --json");
+        workflow.push_str(&format!("        run: |\n          set -euo pipefail\n          exec 3> >(tee \"$SIMIT_NIX_BUILD_RESULTS/build.log\" >&2)\n          log_pid=$!\n          status=0\n          {command} \"$INSTALLABLE\" 2>&3 | tee \"$SIMIT_NIX_BUILD_RESULTS/result.json\" || status=$?\n          exec 3>&-\n          wait \"$log_pid\"\n          exit \"$status\"\n"));
+        for (index, script) in options.post_build.iter().enumerate() {
+            workflow.push_str(&format!(
+                "      - name: Retain Nix results {}\n        run: |\n",
+                index + 1
+            ));
+            for line in script.lines() {
+                workflow.push_str(&format!("          {line}\n"));
+            }
+        }
+        workflow.push_str("      - name: Upload Nix build evidence\n        if: always()\n");
+        push_action_uses(&mut workflow, platform, "upload-artifact", "v4.6.2");
+        workflow.push_str(&format!("\n        with:\n          name: nix-build-${{{{ strategy.job-index }}}}\n          retention-days: {}\n          if-no-files-found: warn\n          path: |\n            ${{{{ runner.temp }}}}/simit-nix-build-${{{{ strategy.job-index }}}}\n", options.artifact_retention_days.unwrap_or(14)));
+        for path in &options.artifact_paths {
+            workflow.push_str(&format!("            {path}\n"));
+        }
+    } else {
+        workflow.push_str(&format!("        run: {command} \"$INSTALLABLE\"\n"));
+    }
 
     Ok(GeneratedFile {
         relative_path: PathBuf::from(platform.workflow_dir()).join("nix-builds.yaml"),

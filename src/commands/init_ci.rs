@@ -56,6 +56,9 @@ pub fn run(command: InitCiCommand) -> Result<()> {
     let metadata = cargo::metadata_for_current_dir()?;
     let workspace_root = metadata.workspace_root.as_std_path();
     let cfg = ProjectConfig::load(workspace_root)?;
+    if cfg.ci.nix_build.only {
+        bail!("[ci.nix_build].only is supported for flake-only projects");
+    }
     let provider = command
         .ci_provider
         .or(cfg.ci.provider)
@@ -312,13 +315,14 @@ pub fn run(command: InitCiCommand) -> Result<()> {
         }
     }
     if provider == CiProvider::Actions && cfg.prebuild.is_none() && !options.nix_builds.is_empty() {
-        files.push(ci::nix_build_matrix_file(
+        files.push(ci::nix_build_matrix_file_with_options(
             platform,
             &runners.ci,
             &options.nix_builds,
             &options.extra_setup,
             &options.nix_substituters,
             &options.nix_trusted_public_keys,
+            &cfg.ci.nix_build,
         )?);
     }
     if let Some(prebuild) = github_prebuild_file(&cfg)? {
@@ -645,6 +649,9 @@ fn run_nix_only(command: InitCiCommand) -> Result<()> {
         bail!("Nix CI generation requires flake.nix at the workspace root");
     }
     let cfg = ProjectConfig::load(&workspace_root)?;
+    if cfg.ci.nix_build.only && command.runtime == Some(RuntimeChoice::Cargo) {
+        bail!("[ci.nix_build].only requires --runtime nix");
+    }
     let platform = command
         .platform
         .or(cfg.ci.platform)
@@ -719,15 +726,20 @@ fn run_nix_only(command: InitCiCommand) -> Result<()> {
             &cfg.ci.components,
         )?,
     };
-    let mut files = vec![generated];
+    let mut files = if cfg.ci.nix_build.only {
+        Vec::new()
+    } else {
+        vec![generated]
+    };
     if provider == CiProvider::Actions && cfg.prebuild.is_none() && !cfg.ci.nix_builds.is_empty() {
-        files.push(ci::nix_build_matrix_file(
+        files.push(ci::nix_build_matrix_file_with_options(
             platform,
             &ResolvedRunner::literal(&runner)?,
             &cfg.ci.nix_builds,
             &cfg.ci.extra_setup,
             &cfg.release.artifacts.substituters,
             &cfg.release.artifacts.trusted_public_keys,
+            &cfg.ci.nix_build,
         )?);
     }
     if let Some(prebuild) = github_prebuild_file(&cfg)? {
@@ -793,6 +805,9 @@ fn run_python(command: InitCiCommand) -> Result<()> {
     let project = python::project_for_current_dir()?;
     let workspace_root = project.workspace_root.as_std_path();
     let cfg = ProjectConfig::load(workspace_root)?;
+    if cfg.ci.nix_build.only {
+        bail!("[ci.nix_build].only is supported for flake-only projects");
+    }
 
     if command.workspace || !command.packages.is_empty() {
         bail!("Python uv CI does not support --workspace or --package");
@@ -878,13 +893,14 @@ fn run_python(command: InitCiCommand) -> Result<()> {
         &cfg.ci.components,
     )?];
     if provider == CiProvider::Actions && cfg.prebuild.is_none() && !options.nix_builds.is_empty() {
-        files.push(ci::nix_build_matrix_file(
+        files.push(ci::nix_build_matrix_file_with_options(
             platform,
             &runners.ci,
             &options.nix_builds,
             &options.extra_setup,
             &options.nix_substituters,
             &options.nix_trusted_public_keys,
+            &cfg.ci.nix_build,
         )?);
     }
     if let Some(prebuild) = github_prebuild_file(&cfg)? {

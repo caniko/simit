@@ -976,13 +976,14 @@ fn infer_expected_ci_files(
             && config.prebuild.is_none()
             && !options.nix_builds.is_empty()
         {
-            files.push(crate::render::ci::nix_build_matrix_file(
+            files.push(crate::render::ci::nix_build_matrix_file_with_options(
                 platform,
                 &runner,
                 &options.nix_builds,
                 &options.extra_setup,
                 &options.nix_substituters,
                 &options.nix_trusted_public_keys,
+                &config.ci.nix_build,
             )?);
         }
         if resolved.with_pypi_publish {
@@ -1030,24 +1031,30 @@ fn infer_expected_ci_files(
             })
             .unwrap_or("ubuntu-latest");
         let runner = ResolvedRunner::literal(runner)?;
-        let mut files = vec![crate::render::ci::nix_flake_ci_file_with_system_runners(
+        let generated = crate::render::ci::nix_flake_ci_file_with_system_runners(
             platform,
             &runner,
             &config.ci.nix_system_runners,
             &config.release.artifacts,
             &config.ci.components,
-        )?];
+        )?;
+        let mut files = if config.ci.nix_build.only {
+            Vec::new()
+        } else {
+            vec![generated]
+        };
         if backend.provider() == CiProvider::Actions
             && config.prebuild.is_none()
             && !config.ci.nix_builds.is_empty()
         {
-            files.push(crate::render::ci::nix_build_matrix_file(
+            files.push(crate::render::ci::nix_build_matrix_file_with_options(
                 platform,
                 &runner,
                 &config.ci.nix_builds,
                 &config.ci.extra_setup,
                 &config.release.artifacts.substituters,
                 &config.release.artifacts.trusted_public_keys,
+                &config.ci.nix_build,
             )?);
         }
         if let Some(pages) = config_pages_or_inferred(workspace_root, &config, marked)? {
@@ -1212,13 +1219,14 @@ fn infer_expected_ci_files(
         && config.prebuild.is_none()
         && !options.nix_builds.is_empty()
     {
-        files.push(crate::render::ci::nix_build_matrix_file(
+        files.push(crate::render::ci::nix_build_matrix_file_with_options(
             platform,
             &runners.ci,
             &options.nix_builds,
             &options.extra_setup,
             &options.nix_substituters,
             &options.nix_trusted_public_keys,
+            &config.ci.nix_build,
         )?);
     }
     if resolved.with_pypi_publish && cargo::has_pyo3_dep(&metadata.packages) {

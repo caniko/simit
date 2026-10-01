@@ -439,6 +439,9 @@ pub struct CiConfig {
     /// Values are passed to `nix build --no-link` unchanged.
     #[serde(default)]
     pub nix_builds: Vec<String>,
+    /// Options scoped to the hosted Nix installable matrix, never release jobs.
+    #[serde(default)]
+    pub nix_build: NixBuildConfig,
     /// Additional required integration gates (e.g. `nix run .#test-gel`).
     /// Rendered as dedicated required jobs; failures block publication.
     #[serde(default)]
@@ -493,6 +496,30 @@ pub struct CiConfig {
     pub components: Vec<CiComponent>,
     #[serde(default)]
     pub crow: CrowCiConfig,
+}
+
+/// `[ci.nix_build]` — opt-in GitHub-hosted qualification and evidence capture.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct NixBuildConfig {
+    /// For flake-only projects, emit just the declared installable matrix.
+    pub only: bool,
+    pub timeout_minutes: Option<u64>,
+    pub max_parallel: Option<u64>,
+    pub max_jobs: Option<u64>,
+    pub cores: Option<u64>,
+    pub kvm: bool,
+    /// Retain exact source/installable metadata and Nix's JSON output map.
+    pub capture_results: bool,
+    pub artifact_retention_days: Option<u64>,
+    /// Additional upload paths, e.g. receipts copied by `post_build`.
+    pub artifact_paths: Vec<String>,
+    pub extra_setup: Vec<String>,
+    pub post_build: Vec<String>,
+    pub extra_env: BTreeMap<String, String>,
+    /// Required secrets must be explicitly bound under `extra_env`.
+    pub required_secrets: Vec<String>,
+    pub required_env: Vec<String>,
 }
 
 /// `[prebuild]` - native GitHub Nix builds shared by CI and releases.
@@ -1842,6 +1869,7 @@ impl ProjectConfig {
         }
         validate_nonempty_strings("simit project config: [ci].packages", &self.ci.packages)?;
         validate_nonempty_strings("simit project config: [ci].nix_builds", &self.ci.nix_builds)?;
+        validate_nix_build_config(self)?;
         if self
             .ci
             .nix_builds
@@ -3339,6 +3367,143 @@ fn validate_system_runner_map(name: &str, runners: &BTreeMap<String, String>) ->
     Ok(())
 }
 
+fn validate_nix_build_config(config: &ProjectConfig) -> Result<()> {
+    let ci = &config.ci;
+    let options = &ci.nix_build;
+    if *options == NixBuildConfig::default() {
+        return Ok(());
+    }
+    if ci.nix_builds.is_empty() {
+        bail!("simit project config: [ci.nix_build] requires [ci].nix_builds");
+    }
+    if config.prebuild.is_some() {
+        bail!("simit project config: [ci.nix_build] cannot be combined with [prebuild]");
+    }
+    if ci
+        .platform
+        .is_some_and(|platform| platform != Platform::Github)
+        || ci
+            .provider
+            .is_some_and(|provider| provider != CiProvider::Actions)
+    {
+        bail!("simit project config: [ci.nix_build] requires GitHub Actions");
+    }
+    if options.only && (!ci.components.is_empty() || !ci.nix_system_runners.is_empty()) {
+        bail!(
+            "simit project config: [ci.nix_build].only cannot be combined with components or nix_system_runners"
+        );
+    }
+    if options.only && ci.runtime == Some(Runtime::Cargo) {
+        bail!("simit project config: [ci.nix_build].only requires the Nix runtime");
+    }
+    for (name, number, min, max) in [
+        ("timeout_minutes", options.timeout_minutes, 1, 360),
+        ("max_parallel", options.max_parallel, 1, 256),
+        ("max_jobs", options.max_jobs, 1, 1024),
+        ("cores", options.cores, 0, 1024),
+        (
+            "artifact_retention_days",
+            options.artifact_retention_days,
+            1,
+            90,
+        ),
+    ] {
+        if number.is_some_and(|number| !(min..=max).contains(&number)) {
+            bail!("simit project config: [ci.nix_build].{name} must be {min}..={max}");
+        }
+    }
+    if !options.capture_results
+        && (!options.post_build.is_empty() || options.artifact_retention_days.is_some())
+    {
+        bail!(
+            "simit project config: [ci.nix_build].post_build and artifact_retention_days require capture_results"
+        );
+    }
+    for (name, values) in [
+        ("artifact_paths", &options.artifact_paths),
+        ("extra_setup", &options.extra_setup),
+        ("post_build", &options.post_build),
+    ] {
+        validate_nonempty_strings(
+            &format!("simit project config: [ci.nix_build].{name}"),
+            values,
+        )?;
+    }
+    if !options.capture_results && !options.artifact_paths.is_empty() {
+        bail!("simit project config: [ci.nix_build].artifact_paths requires capture_results");
+    }
+    if options
+        .artifact_paths
+        .iter()
+        .any(|path| path.contains(['\n', '\r']))
+    {
+        bail!("simit project config: [ci.nix_build].artifact_paths must be single-line paths");
+    }
+    for (name, value) in &options.extra_env {
+        validate_github_actions_secret_identifier(
+            "simit project config: [ci.nix_build].extra_env key",
+            name,
+        )?;
+        if value.contains(['\n', '\r']) {
+            bail!("simit project config: [ci.nix_build].extra_env values must be single-line");
+        }
+        if name == "SIMIT_NIX_BUILD_RESULTS" {
+            bail!(
+                "simit project config: [ci.nix_build].extra_env cannot override SIMIT_NIX_BUILD_RESULTS"
+            );
+        }
+    }
+    for name in &options.required_env {
+        validate_github_actions_secret_identifier(
+            "simit project config: [ci.nix_build].required_env",
+            name,
+        )?;
+    }
+    for name in &options.required_secrets {
+        validate_github_actions_secret_identifier(
+            "simit project config: [ci.nix_build].required_secrets",
+            name,
+        )?;
+        let binding = format!("${{{{ secrets.{name} }}}}");
+        if options.extra_env.get(name) != Some(&binding) {
+            bail!(
+                "simit project config: [ci.nix_build].required_secrets entry {name} requires extra_env.{name} = {binding:?}"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn set_nix_build_table(table: &mut Table, options: &NixBuildConfig) {
+    if *options == NixBuildConfig::default() {
+        table.remove("nix_build");
+        return;
+    }
+    let mut build = Table::new();
+    build.set_implicit(false);
+    set_bool(&mut build, "only", options.only);
+    set_bool(&mut build, "kvm", options.kvm);
+    set_bool(&mut build, "capture_results", options.capture_results);
+    for (name, number) in [
+        ("timeout_minutes", options.timeout_minutes),
+        ("max_parallel", options.max_parallel),
+        ("max_jobs", options.max_jobs),
+        ("cores", options.cores),
+        ("artifact_retention_days", options.artifact_retention_days),
+    ] {
+        if let Some(number) = number {
+            build[name] = value(number as i64);
+        }
+    }
+    set_string_array(&mut build, "artifact_paths", &options.artifact_paths);
+    set_string_array(&mut build, "extra_setup", &options.extra_setup);
+    set_string_array(&mut build, "post_build", &options.post_build);
+    set_string_map(&mut build, "extra_env", &options.extra_env);
+    set_string_array(&mut build, "required_secrets", &options.required_secrets);
+    set_string_array(&mut build, "required_env", &options.required_env);
+    table["nix_build"] = Item::Table(build);
+}
+
 fn set_ci_table(table: &mut Table, ci: &CiConfig) {
     set_optional_string(table, "provider", ci.provider.map(ci_provider_name));
     set_optional_string(table, "platform", ci.platform.map(Platform::as_str));
@@ -3359,6 +3524,7 @@ fn set_ci_table(table: &mut Table, ci: &CiConfig) {
     );
     set_string_array(table, "packages", &ci.packages);
     set_string_array(table, "nix_builds", &ci.nix_builds);
+    set_nix_build_table(table, &ci.nix_build);
     match ci.all_features {
         Some(false) => table["all_features"] = value(false),
         Some(true) | None => {
