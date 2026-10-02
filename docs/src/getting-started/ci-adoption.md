@@ -148,7 +148,7 @@ FLAKE_SSH_KEY = "${{ secrets.FLAKE_SSH_KEY }}"
 ```
 
 Generate and check with `simit init ci --platform github --runtime nix`, then
-`simit init ci --check --diff`. `only = true` supports flake-only and Rust flake projects: it
+`simit init ci --check --diff`. `only = true` supports flake-only, Rust and Python flake projects: it
 emits `nix-builds.yaml` without a broad flake-check workflow. Switching to it
 removes obsolete Simit-managed primary CI while preserving project-owned
 workflows. It cannot be combined with `components`, `nix_system_runners`, or

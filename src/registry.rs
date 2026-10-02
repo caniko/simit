@@ -947,7 +947,9 @@ fn infer_expected_ci_files(
             content: crate::render::ci::gitlab_nix_flake_workflow(),
         }]);
     }
-    if !workspace_root.join("Cargo.toml").is_file() && python::is_python_uv_project(workspace_root)
+    if !config.ci.nix_build.only
+        && !workspace_root.join("Cargo.toml").is_file()
+        && python::is_python_uv_project(workspace_root)
     {
         if platform == Platform::Gitlab {
             return Ok(vec![project::GeneratedFile {
