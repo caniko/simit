@@ -123,6 +123,44 @@ extra_env = { FLAKE_SSH_KEY = "${{ secrets.FLAKE_SSH_KEY }}" }
 }
 
 #[test]
+fn rust_flake_can_select_exact_nix_gates_from_its_workspace_root() {
+    let temp = project("[ci.nix_build]\nonly = true");
+    fs::write(
+        temp.path().join("Cargo.toml"),
+        "[package]\nname = \"native-contract\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )
+    .unwrap();
+    fs::create_dir(temp.path().join("src")).unwrap();
+    fs::write(temp.path().join("src/main.rs"), "fn main() {}\n").unwrap();
+    let output = generate(&temp, &[]);
+    assert!(output.status.success(), "{output:?}");
+    assert!(!temp.path().join(".github/workflows/ci.yaml").exists());
+    let original = fs::read(temp.path().join(".github/workflows/nix-builds.yaml")).unwrap();
+    let output = common::simit()
+        .current_dir(temp.path().join("src"))
+        .args(["init", "ci", "--check", "--diff"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        original,
+        fs::read(temp.path().join(".github/workflows/nix-builds.yaml")).unwrap()
+    );
+    assert_eq!(
+        simit::registry::audit_ci(temp.path()).unwrap().status,
+        simit::registry::FeatureStatus::Managed
+    );
+    for extra in [vec!["--runtime", "cargo"], vec!["--publish-crates=true"]] {
+        let output = generate(&temp, &extra);
+        assert!(!output.status.success(), "{output:?}");
+        assert_eq!(
+            original,
+            fs::read(temp.path().join(".github/workflows/nix-builds.yaml")).unwrap()
+        );
+    }
+}
+
+#[test]
 fn scoped_matrix_credentials_do_not_reach_primary_ci() {
     let temp = project(
         r#"[ci.nix_build]

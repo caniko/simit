@@ -1002,7 +1002,9 @@ fn infer_expected_ci_files(
         push_prebuild_file(&mut files, &config)?;
         return Ok(files);
     }
-    if !workspace_root.join("Cargo.toml").is_file() && workspace_root.join("flake.nix").is_file() {
+    if (config.ci.nix_build.only || !workspace_root.join("Cargo.toml").is_file())
+        && workspace_root.join("flake.nix").is_file()
+    {
         if platform == Platform::Gitlab {
             return Ok(vec![project::GeneratedFile {
                 relative_path: PathBuf::from(".gitlab-ci.yml"),
