@@ -1474,6 +1474,7 @@ fn infer_expected_crow_files(
                     token_secret: pages.token_secret,
                     source_branch: pages.source_branch,
                     deploy_app: pages.deploy_app,
+                    extra_setup: config.ci.extra_setup.clone(),
                 },
             )?);
         }
@@ -1712,9 +1713,14 @@ fn config_pages_or_inferred(
             token_secret: pages.token_secret,
             source_branch: pages.source_branch,
             deploy_app: pages.deploy_app,
+            extra_setup: config.ci.extra_setup.clone(),
         }));
     }
-    infer_pages_options(workspace_root, marked)
+    let mut inferred = infer_pages_options(workspace_root, marked)?;
+    if let Some(pages) = &mut inferred {
+        pages.extra_setup.clone_from(&config.ci.extra_setup);
+    }
+    Ok(inferred)
 }
 
 /// Which Pages provider a marked `pages` workflow belongs to.
@@ -1843,6 +1849,7 @@ fn infer_codeberg_pages_options(workflow: &WorkflowFile) -> Result<ci::CodebergP
             .unwrap_or_else(|| "trunk".to_owned()),
         deploy_app: infer_pages_deploy_app(&workflow.content)
             .unwrap_or_else(|| ".#deploy-pages".to_owned()),
+        extra_setup: Vec::new(),
     })
 }
 
@@ -1883,6 +1890,7 @@ fn infer_github_pages_options(
             .unwrap_or_else(|| "trunk".to_owned()),
         deploy_app: infer_pages_deploy_app(&workflow.content)
             .unwrap_or_else(|| ".#deploy-pages".to_owned()),
+        extra_setup: Vec::new(),
     })
 }
 
