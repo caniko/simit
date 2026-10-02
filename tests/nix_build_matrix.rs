@@ -161,6 +161,40 @@ fn rust_flake_can_select_exact_nix_gates_from_its_workspace_root() {
 }
 
 #[test]
+fn python_flake_can_select_exact_nix_gates_without_language_ci() {
+    let temp = project("[ci.nix_build]\nonly = true");
+    fs::write(
+        temp.path().join("pyproject.toml"),
+        "[project]\nname = \"native-contract\"\ndynamic = [\"version\"]\n",
+    )
+    .unwrap();
+    fs::write(temp.path().join("uv.lock"), "version = 1\n").unwrap();
+    fs::create_dir(temp.path().join("src")).unwrap();
+    let output = generate(&temp, &[]);
+    assert!(output.status.success(), "{output:?}");
+    assert!(!temp.path().join(".github/workflows/ci.yaml").exists());
+    let original = fs::read(temp.path().join(".github/workflows/nix-builds.yaml")).unwrap();
+    let output = common::simit()
+        .current_dir(temp.path().join("src"))
+        .args(["init", "ci", "--check", "--diff"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        simit::registry::audit_ci(temp.path()).unwrap().status,
+        simit::registry::FeatureStatus::Managed
+    );
+    for extra in [vec!["--runtime", "cargo"], vec!["--with-pypi-publish=true"]] {
+        let output = generate(&temp, &extra);
+        assert!(!output.status.success(), "{output:?}");
+        assert_eq!(
+            original,
+            fs::read(temp.path().join(".github/workflows/nix-builds.yaml")).unwrap()
+        );
+    }
+}
+
+#[test]
 fn scoped_matrix_credentials_do_not_reach_primary_ci() {
     let temp = project(
         r#"[ci.nix_build]

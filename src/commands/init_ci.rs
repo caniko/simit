@@ -806,12 +806,14 @@ fn github_prebuild_file(cfg: &ProjectConfig) -> Result<Option<project::Generated
 }
 
 fn run_python(command: InitCiCommand) -> Result<()> {
-    let project = python::project_for_current_dir()?;
-    let workspace_root = project.workspace_root.as_std_path();
+    let current_dir = std::env::current_dir().context("reading current directory")?;
+    let root = python::find_project_root(&current_dir)?;
+    let workspace_root = root.as_path();
     let cfg = ProjectConfig::load(workspace_root)?;
     if cfg.ci.nix_build.only {
-        bail!("[ci.nix_build].only is supported for flake-only projects");
+        return run_nix_only_at(command, workspace_root);
     }
+    python::load_project(workspace_root)?;
 
     if command.workspace || !command.packages.is_empty() {
         bail!("Python uv CI does not support --workspace or --package");

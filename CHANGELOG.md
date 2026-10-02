@@ -16,6 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Allow Python flake projects to select exact-only Nix qualification without
+  generating language CI or requiring language-specific version metadata; keep
+  generated-workflow checks and registry audits aligned.
 - Coalesce configured hosted Nix qualification runs for branch pushes and pull
   requests so the same source does not consume two hosted build matrices.
 - Reject a coordinated publication when the refetched signed tag resolves to a

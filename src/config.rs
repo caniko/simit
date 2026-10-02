@@ -502,7 +502,7 @@ pub struct CiConfig {
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct NixBuildConfig {
-    /// For flake-only projects, emit just the declared installable matrix.
+    /// Emit just the declared installable matrix, including for language projects.
     pub only: bool,
     pub timeout_minutes: Option<u64>,
     pub max_parallel: Option<u64>,
