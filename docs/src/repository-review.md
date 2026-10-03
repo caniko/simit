@@ -29,6 +29,12 @@ controller tool lock, binding engine and tool identities without changing v1
 schemas. Unpackaged developer binaries support schema/validation, but execution
 needs the pinned package manifest.
 
+A lean deployment can set `inputs.simit.flake = false` and import
+`(simit + "/nix/review-tools.nix") { source = simit; inherit system nixpkgs; }`
+directly. This uses the same tool constructor without importing Simit's
+development and website dependency graph; the controller still locks the exact
+engine source revision and its content hash.
+
 Keep `policy.json` under controller review: approved recipes require repository,
 full commit, directory, and source input; there is no implicit fixture exemption.
 Cache profiles contain public endpoints and approved keys only. Profile names
