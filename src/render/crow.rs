@@ -549,7 +549,11 @@ pub fn codeberg_pages_file(
     pages: &ci::CodebergPagesOptions,
 ) -> Result<GeneratedFile> {
     let image = nix_image(config)?;
-    let mut deploy = Step::new("deploy-pages", &image)
+    let mut deploy = Step::new("deploy-pages", &image);
+    for setup in &pages.extra_setup {
+        deploy = deploy.command(setup.clone());
+    }
+    deploy = deploy
         .command(format!(
             "nix build .#{} --out-link result",
             pages.site_output
@@ -977,6 +981,7 @@ mod tests {
             token_secret: "CODEBERG_TOKEN".to_owned(),
             source_branch: "trunk".to_owned(),
             deploy_app: "deploy-pages".to_owned(),
+            extra_setup: Vec::new(),
         };
         let file = codeberg_pages_file(
             CrowWorkflowFormat::Yaml,

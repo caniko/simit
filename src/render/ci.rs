@@ -157,6 +157,7 @@ pub struct CodebergPagesOptions {
     pub token_secret: String,
     pub source_branch: String,
     pub deploy_app: String,
+    pub extra_setup: Vec<String>,
 }
 
 impl Default for CiOptions {
@@ -1101,6 +1102,7 @@ fn codeberg_pages_workflow(runner: &ResolvedRunner, pages: &CodebergPagesOptions
     workflow.push_str("      NIX_CONFIG: \"experimental-features = nix-command flakes\"\n");
     workflow.push_str("    steps:\n");
     push_checkout_step(&mut workflow, Platform::Forgejo);
+    push_extra_setup_steps(&mut workflow, &pages.extra_setup);
     if let Some(canonical_domain) = &pages.canonical_domain {
         workflow.push_str("      - name: Validate Pages domain\n");
         workflow.push_str("        run: |\n");
@@ -1147,6 +1149,7 @@ fn github_pages_workflow(runner: &ResolvedRunner, pages: &CodebergPagesOptions) 
     workflow.push_str("\n    env:\n      NIX_CONFIG: \"experimental-features = nix-command flakes\"\n    steps:\n");
     push_checkout_step(&mut workflow, Platform::Github);
     push_install_nix_step(&mut workflow, Platform::Github);
+    push_extra_setup_steps(&mut workflow, &pages.extra_setup);
     workflow.push_str("      - name: Configure GitHub Pages\n        uses: ");
     workflow.push_str(&github_action_ref("actions/configure-pages", "v6"));
     workflow.push('\n');

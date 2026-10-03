@@ -1414,6 +1414,11 @@ fn forgejo_nix_can_generate_codeberg_pages_workflow() {
 #[test]
 fn github_nix_can_generate_github_pages_workflow() {
     let temp = init_package(true);
+    fs::write(
+        temp.path().join("simit.toml"),
+        "[ci]\nextra_setup = [\"echo prepare-pages-cache\"]\n",
+    )
+    .unwrap();
 
     let status = simit_with_user_config(temp.path())
         .current_dir(temp.path())
@@ -1448,6 +1453,27 @@ fn github_nix_can_generate_github_pages_workflow() {
     assert!(pages.contains("grep -qx plinth.tartanoglu.com result-pages-site/.domains"));
     assert!(!pages.contains("CODEBERG_TOKEN"));
     assert!(!pages.contains("codeberg.workflow"));
+    let setup = pages.find("run: echo prepare-pages-cache").unwrap();
+    assert!(pages.find("- name: Install Nix").unwrap() < setup);
+    assert!(setup < pages.find("- name: Build Pages site").unwrap());
+    let check = simit_with_user_config(temp.path())
+        .current_dir(temp.path())
+        .args([
+            "init",
+            "ci",
+            "--pages-only",
+            "--platform",
+            "github",
+            "--check",
+            "--diff",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        check.status.success(),
+        "{}",
+        String::from_utf8_lossy(&check.stderr)
+    );
 }
 
 #[test]

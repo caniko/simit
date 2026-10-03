@@ -328,6 +328,7 @@ fn plan_codeberg_pages_upgrade(workspace_root: &Path) -> Result<Option<FileUpgra
             token_secret: "codeberg_token".to_owned(),
             source_branch,
             deploy_app: ".#deploy-pages".to_owned(),
+            extra_setup: Vec::new(),
         },
     )?;
 

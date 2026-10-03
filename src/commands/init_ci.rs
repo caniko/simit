@@ -2028,6 +2028,7 @@ fn codeberg_pages_options(
         token_secret: resolved.token_secret,
         source_branch: resolved.source_branch,
         deploy_app: resolved.deploy_app,
+        extra_setup: cfg.ci.extra_setup.clone(),
     }))
 }
 
