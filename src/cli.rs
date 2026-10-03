@@ -19,6 +19,11 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Commands {
+    #[command(
+        subcommand,
+        about = "Review exact repository revisions through Nix and GitHub Actions"
+    )]
+    Review(crate::review::cli::Cmd),
     #[command(about = "Bump package versions, commit the change, and optionally tag it")]
     Commit(CommitCommand),
     #[command(about = "Run local release checks, update the changelog, commit, and tag")]
