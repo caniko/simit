@@ -11,7 +11,12 @@ fn fork_heads_resolve_and_checkout_from_the_fork_while_merge_and_revision_use_ba
     let base = "b".repeat(40);
     let merge = "d".repeat(40);
     let tree = "e".repeat(40);
-    for mode in ["head", "merge", "revision"] {
+    for (mode, nixpkgs) in [
+        ("head", false),
+        ("merge", false),
+        ("revision", false),
+        ("head", true),
+    ] {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
         let tools = root.join("tools");
@@ -21,12 +26,23 @@ fn fork_heads_resolve_and_checkout_from_the_fork_while_merge_and_revision_use_ba
             "merge" => &merge,
             _ => &base,
         };
-        let source = if mode == "head" {
-            "contributor/project"
+        let base_repository = if nixpkgs {
+            "NixOS/nixpkgs"
         } else {
             "OWNER/REPOSITORY"
         };
+        let source = if mode == "head" {
+            "contributor/project"
+        } else {
+            base_repository
+        };
         let mut request = example();
+        if nixpkgs {
+            request.repository = base_repository.into();
+            request.backend = Backend::Nixpkgs;
+            request.packages.clear();
+            request.checks.clear();
+        }
         request.mode = if mode == "merge" {
             Mode::Merge
         } else {
@@ -57,10 +73,10 @@ fn fork_heads_resolve_and_checkout_from_the_fork_while_merge_and_revision_use_ba
 case "$4" in
 repos/caniko/controller) printf '%s' '{{"id":3,"full_name":"caniko/controller"}}';;
 repos/caniko/controller/commits/{controller}) printf '%s' '{controller_metadata}';;
-repos/OWNER/REPOSITORY) printf '%s' '{{"id":1,"full_name":"OWNER/REPOSITORY"}}';;
-repos/OWNER/REPOSITORY/commits/HEAD|repos/OWNER/REPOSITORY/commits/{base}) printf '%s' '{base_metadata}';;
-repos/OWNER/REPOSITORY/pulls/1) printf '%s' '{pr}';;
-repos/OWNER/REPOSITORY/commits/{merge}) printf '%s' '{merge_metadata}';;
+repos/{base_repository}) printf '%s' '{{"id":1,"full_name":"{base_repository}"}}';;
+repos/{base_repository}/commits/HEAD|repos/{base_repository}/commits/{base}) printf '%s' '{base_metadata}';;
+repos/{base_repository}/pulls/1) printf '%s' '{pr}';;
+repos/{base_repository}/commits/{merge}) printf '%s' '{merge_metadata}';;
 repos/contributor/project) printf '%s' '{{"id":2,"full_name":"contributor/project"}}';;
 repos/contributor/project/commits/{head}) printf '%s' '{head_metadata}';;
 *) printf 'unexpected API endpoint: %s' "$4" >&2; exit 1;;
@@ -78,11 +94,25 @@ rev-parse)
     printf '%s %s\n' "$6" "$7" >> "$FETCH_LOG"
     [ "$6" = 'https://github.com/{source}.git' ] && [ "$7" = '{commit}' ] || exit 1
   fi;;
+fetch)
+  printf '%s %s\n' "$3" "$4" >> "$FETCH_LOG"
+  [ "$3" = 'https://github.com/{base_repository}.git' ] && [ "$4" = '{base}' ] || exit 1;;
 *) exit 1;;
 esac
 "#, root=root.display())),
             ("uname", "#!/bin/sh\nprintf x86_64".into()),
-            ("nix", "#!/bin/sh\ncase \"$1 $2 $3\" in\n'config show system') printf x86_64-linux;;\n'config show sandbox') printf true;;\n--version*) printf 'Nix fixture';;\n'flake metadata --json') printf 'checkout verified' > \"$EVAL_LOG\"; exit 1;;\n*) exit 1;;\nesac\n".into()),
+            ("nix", format!(r#"#!/bin/sh
+case "$1 $2 $3" in
+'config show system') printf x86_64-linux;;
+'config show sandbox') printf true;;
+--version*) printf 'Nix fixture';;
+'flake metadata --json')
+  [ "$5" = 'github:{source}/{commit}?dir=.' ] || exit 1
+  printf '%s' "$5" > "$EVAL_LOG"; exit 1;;
+*) exit 1;;
+esac
+"#)),
+            ("repo-review-nixpkgs-select", "#!/bin/sh\n[ -f \"$1\" ] && [ \"$2\" = x86_64-linux ] || exit 1\nprintf 'nixpkgs selector' > \"$EVAL_LOG\"\nexit 1\n".into()),
         ] {
             let path = tools.join(name);
             fs::write(&path, script).unwrap();
@@ -119,11 +149,12 @@ esac
         );
         let plan: Plan = read_json(&root.join("plan.json")).unwrap();
         plan.validate().unwrap();
-        assert_eq!(plan.request.repository, "OWNER/REPOSITORY");
-        assert_eq!(plan.target.repository, "OWNER/REPOSITORY");
+        assert_eq!(plan.request.repository, base_repository);
+        assert_eq!(plan.target.repository, base_repository);
         assert_eq!(plan.target.id, 1);
         assert_eq!(&plan.target.commit, commit);
         assert_eq!(plan.target.tree, tree);
+        let bundle = root.join("bundle");
         let result = run(&[
             "build",
             "--plan",
@@ -131,7 +162,7 @@ esac
             "--system",
             "x86_64-linux",
             "--output",
-            "bundle",
+            bundle.to_str().unwrap(),
         ]);
         assert!(!result.status.success());
         let report: PlatformResult = read_json(&root.join("bundle/review-result.json")).unwrap();
@@ -140,17 +171,29 @@ esac
                 .error
                 .as_deref()
                 .unwrap_or("")
-                .starts_with("nix failed"),
+                .starts_with(if nixpkgs {
+                    "repo-review-nixpkgs-select failed"
+                } else {
+                    "nix failed"
+                }),
             "{mode}: {:?}",
             report.error
         );
+        let evaluation = if nixpkgs {
+            "nixpkgs selector".into()
+        } else {
+            format!("github:{source}/{commit}?dir=.")
+        };
         assert_eq!(
             fs::read_to_string(root.join("evaluation.log")).unwrap(),
-            "checkout verified"
+            evaluation
         );
-        assert_eq!(
-            fs::read_to_string(root.join("fetch.log")).unwrap(),
-            format!("https://github.com/{source}.git {commit}\n")
-        );
+        let mut fetches = format!("https://github.com/{source}.git {commit}\n");
+        if nixpkgs {
+            fetches.push_str(&format!(
+                "https://github.com/{base_repository}.git {base}\n"
+            ));
+        }
+        assert_eq!(fs::read_to_string(root.join("fetch.log")).unwrap(), fetches);
     }
 }
