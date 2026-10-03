@@ -214,6 +214,100 @@ extra_env = { FLAKE_SSH_KEY = "${{ secrets.FLAKE_SSH_KEY }}" }
     );
 }
 
+#[test]
+fn nix_only_rejects_effective_language_options_before_changing_workflows() {
+    for option in [
+        "with_nextest",
+        "with_msrv",
+        "with_audit",
+        "with_deny",
+        "with_docs",
+        "with_artifacts",
+        "with_pypi_publish",
+        "publish_crates",
+    ] {
+        for from_config in [false, true] {
+            let temp = project("[ci.nix_build]\nonly = true");
+            assert!(generate(&temp, &[]).status.success());
+            let path = temp.path().join(".github/workflows/nix-builds.yaml");
+            let original = fs::read(&path).unwrap();
+            let config = temp.path().join("simit.toml");
+            let mut arguments = Vec::new();
+            if from_config {
+                let content = fs::read_to_string(&config)
+                    .unwrap()
+                    .replace("[ci]\n", &format!("[ci]\n{option} = true\n"));
+                fs::write(&config, content).unwrap();
+            } else {
+                arguments.push(format!("--{}=true", option.replace('_', "-")));
+            }
+            let original_config = fs::read(&config).unwrap();
+            if from_config {
+                let error = simit::registry::audit_ci(temp.path()).unwrap_err();
+                assert!(format!("{error:#}").contains(option), "{error:#}");
+            }
+            for mode in [vec![], vec!["--check", "--diff"]] {
+                let mut args = arguments.iter().map(String::as_str).collect::<Vec<_>>();
+                args.extend(mode);
+                let output = generate(&temp, &args);
+                assert!(
+                    !output.status.success(),
+                    "silently accepted {option} (config={from_config})"
+                );
+                assert!(
+                    String::from_utf8_lossy(&output.stderr).contains(option),
+                    "{output:?}"
+                );
+                assert_eq!(fs::read(&path).unwrap(), original);
+                assert_eq!(fs::read(&config).unwrap(), original_config);
+                assert!(
+                    !temp
+                        .path()
+                        .join(".github/workflows/release-artifacts.yaml")
+                        .exists()
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn nix_only_persists_explicit_false_overrides_for_language_options() {
+    let options = [
+        "with_nextest",
+        "with_msrv",
+        "with_audit",
+        "with_deny",
+        "with_docs",
+        "with_artifacts",
+        "with_pypi_publish",
+        "publish_crates",
+    ];
+    let temp = project(&format!(
+        "{}\n[ci.nix_build]\nonly = true",
+        options
+            .iter()
+            .map(|option| format!("{option} = true"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    ));
+    let arguments = options
+        .iter()
+        .map(|option| format!("--{}=false", option.replace('_', "-")))
+        .collect::<Vec<_>>();
+    let args = arguments.iter().map(String::as_str).collect::<Vec<_>>();
+    let output = generate(&temp, &args);
+    assert!(output.status.success(), "{output:?}");
+    let config = fs::read_to_string(temp.path().join("simit.toml")).unwrap();
+    for option in options {
+        assert!(
+            !config.contains(&format!("{option} = true")),
+            "did not persist {option} override"
+        );
+    }
+    assert!(generate(&temp, &["--check", "--diff"]).status.success());
+}
+
 #[cfg(unix)]
 #[test]
 fn matrix_secret_preflight_fails_without_exposing_secret_values() {
