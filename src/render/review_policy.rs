@@ -99,7 +99,7 @@ permissions:
   pull-requests: read
 concurrency:
   group: review-policy-${{ github.event_name }}-${{ github.event.pull_request.number || github.event.issue.number || inputs.pr_number || 'sweep' }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name != 'schedule' }}
 jobs:
   resolve:
     # Dispatch on a source branch must not access the policy App credential.
@@ -121,12 +121,24 @@ jobs:
             if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) throw new Error('invalid repository');
             let prs;
             if (process.env.GITHUB_EVENT_NAME === 'schedule') {
-              const response = await fetch(`https://api.github.com/repos/${repo}/pulls?state=open&per_page=100`, {
+              const base = `https://api.github.com/repos/${repo}/pulls?state=open&sort=created&direction=asc&per_page=100`;
+              let response = await fetch(base, {
                 headers: {Authorization: `Bearer ${process.env.GH_TOKEN}`, Accept: 'application/vnd.github+json'}
               });
               if (!response.ok) throw new Error(`PR enumeration failed: ${response.status}`);
+              const last = response.headers.get('link')?.match(/<([^>]+)>; rel="last"/);
+              const pages = last ? Number(new URL(last[1]).searchParams.get('page')) : 1;
+              if (!Number.isSafeInteger(pages) || pages < 1) throw new Error('invalid PR pagination');
+              // Rotate a bounded page rather than repeatedly abandoning a full
+              // collection. Active scheduled batches finish before the next.
+              const page = 1 + Math.floor(Date.now() / 600000) % pages;
+              if (page !== 1) {
+                response = await fetch(`${base}&page=${page}`, {
+                  headers: {Authorization: `Bearer ${process.env.GH_TOKEN}`, Accept: 'application/vnd.github+json'}
+                });
+                if (!response.ok) throw new Error(`PR page lookup failed: ${response.status}`);
+              }
               const items = await response.json();
-              if (items.length >= 100) throw new Error('PR sweep exceeds bound; dispatch individual PRs');
               prs = items.map(pr => pr.number);
             } else {
               prs = [Number(event.pull_request?.number || event.issue?.number || event.inputs?.pr_number)];
@@ -145,7 +157,7 @@ jobs:
         pr: ${{ fromJSON(needs.resolve.outputs.prs) }}
     concurrency:
       group: review-policy-pr-${{ matrix.pr }}
-      cancel-in-progress: true
+      cancel-in-progress: ${{ github.event_name != 'schedule' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -196,5 +208,7 @@ jobs:
           EXPECTED_HEAD: ${{ steps.candidate.outputs.head }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          "$RUNNER_TEMP/toolbelt/bin/canix-toolbelt" review gate --pr "$PR_URL" --expected-head "$EXPECTED_HEAD" --timeout-seconds 600 --publish-check --details-url "$RUN_URL"%POLICY%
+          seconds=600
+          if [ "$GITHUB_EVENT_NAME" = schedule ]; then seconds=0; fi
+          "$RUNNER_TEMP/toolbelt/bin/canix-toolbelt" review gate --pr "$PR_URL" --expected-head "$EXPECTED_HEAD" --timeout-seconds "$seconds" --publish-check --details-url "$RUN_URL"%POLICY%
 "#;

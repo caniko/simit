@@ -75,7 +75,9 @@ trusted event SHA with credentials disabled, and installs the exact locked
 registry engine. It never executes PR source. PR/comment events reconcile
 individual candidates; a bounded, ten-minute scheduled sweep covers completed
 bot reviews, dismissals, and delayed feedback. Collection waits up to ten
-minutes without requesting another provider review. All findings remain
+minutes for event-triggered runs without requesting another provider review.
+Scheduled sweeps rotate one bounded page of open PRs, collect without waiting,
+and allow an active batch to finish before the next sweep. All findings remain
 blocking until source fixes receive a fresh review or repository writers record
 exact-finding evidence-backed dispositions.
 
