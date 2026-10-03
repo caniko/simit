@@ -6,21 +6,22 @@
       flake = false;
     };
   };
-  outputs =
-    { nixpkgs, source, ... }:
-    let
-      system = "x86_64-linux";
-      pkgs = nixpkgs.legacyPackages.${system};
-      package = pkgs.runCommand "external-source-fixture" { } ''
-        mkdir -p $out/share
-        cp ${source}/fixtures/source/message.txt $out/share/message.txt
-      '';
-    in
-    {
-      packages.${system}.default = package;
-      checks.${system}.smoke = pkgs.runCommand "external-source-check" { } ''
-        grep -Fx 'external source fixture' ${package}/share/message.txt
-        touch $out
-      '';
-    };
+  outputs = {
+    nixpkgs,
+    source,
+    ...
+  }: let
+    system = "x86_64-linux";
+    pkgs = nixpkgs.legacyPackages.${system};
+    package = pkgs.runCommand "external-source-fixture" {} ''
+      mkdir -p $out/share
+      cp ${source}/fixtures/source/message.txt $out/share/message.txt
+    '';
+  in {
+    packages.${system}.default = package;
+    checks.${system}.smoke = pkgs.runCommand "external-source-check" {} ''
+      grep -Fx 'external source fixture' ${package}/share/message.txt
+      touch $out
+    '';
+  };
 }
