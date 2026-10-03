@@ -31,10 +31,10 @@ jobs:
             };
           }
           EOF
-          nix flake lock ./controller-lock
-          nix build ./controller-lock#repo-review --out-link tools --no-update-lock-file -L
+          nix flake lock path:./controller-lock
+          nix build path:./controller-lock#repo-review --out-link tools --no-update-lock-file -L
           tools/bin/repo-review verify-engine --root controller-lock
-          nix build ./controller-lock#checks.x86_64-linux.selector --no-link --no-update-lock-file -L
+          nix build path:./controller-lock#checks.x86_64-linux.selector --no-link --no-update-lock-file -L
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: ${{ always() }}
         with:
@@ -58,8 +58,11 @@ jobs:
       - name: Verify packaged runtime assets
         shell: bash
         run: |
-          cargo +1.85.0 package --list --allow-dirty > package-files.txt
-          grep -Fx src/review/assets/nixpkgs.py package-files.txt
-          grep -Fx src/review/assets/review-repository.yml package-files.txt
-          grep -Fx src/review/assets/publish-review.yml package-files.txt
-          grep -Fx src/review/assets/LICENSE package-files.txt
+          python - <<'PY'
+          import subprocess
+          files = subprocess.check_output(["cargo", "+1.85.0", "package", "--list", "--allow-dirty"], text=True).replace("\\", "/").splitlines()
+          for asset in ("nixpkgs.py", "review-repository.yml", "publish-review.yml", "LICENSE"):
+              path = "src/review/assets/" + asset
+              assert path in files, (path, files)
+              print(path)
+          PY
