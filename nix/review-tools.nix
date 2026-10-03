@@ -27,7 +27,9 @@
       src = pkgs.lib.cleanSource source;
       cargoLock.lockFile = "${source}/Cargo.lock";
       nativeBuildInputs = [pkgs.makeWrapper];
-      nativeCheckInputs = [pkgs.git pkgs.gnupg];
+      # The full Simit suite invokes release preflight in temporary Cargo
+      # projects, so its nested quality commands need the matching toolchain.
+      nativeCheckInputs = [pkgs.git pkgs.gnupg pkgs.clippy pkgs.rustfmt];
       postInstall = ''
         for binary in simit repo-review; do
           wrapProgram "$out/bin/$binary" \
