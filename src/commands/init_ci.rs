@@ -652,7 +652,7 @@ fn run_nix_only_at(command: InitCiCommand, workspace_root: &Path) -> Result<()> 
     if !workspace_root.join("flake.nix").is_file() {
         bail!("Nix CI generation requires flake.nix at the workspace root");
     }
-    let cfg = ProjectConfig::load(workspace_root)?;
+    let mut cfg = ProjectConfig::load(workspace_root)?;
     if cfg.ci.nix_build.only && command.runtime == Some(RuntimeChoice::Cargo) {
         bail!("[ci.nix_build].only requires --runtime nix");
     }
@@ -668,13 +668,27 @@ fn run_nix_only_at(command: InitCiCommand, workspace_root: &Path) -> Result<()> 
     if provider != CiProvider::Actions {
         bail!("Nix-only CI currently supports the Actions provider only");
     }
+    // Resolve CLI overrides before validation and persistence. These options
+    // belong to language/release workflows; Nix-only renderers cannot honour
+    // them, and accepting them would silently remove the requested gate.
+    for (cli, configured) in [
+        (command.with_nextest, &mut cfg.ci.with_nextest),
+        (command.with_msrv, &mut cfg.ci.with_msrv),
+        (command.with_audit, &mut cfg.ci.with_audit),
+        (command.with_deny, &mut cfg.ci.with_deny),
+        (command.with_docs, &mut cfg.ci.with_docs),
+        (command.with_artifacts, &mut cfg.ci.with_artifacts),
+        (command.with_pypi_publish, &mut cfg.ci.with_pypi_publish),
+        (command.publish_crates, &mut cfg.ci.publish_crates),
+    ] {
+        *configured = cli.unwrap_or(*configured);
+    }
+    cfg.ci.validate_nix_only_language_options()?;
     if command.with_homebrew
         || command.with_chocolatey
         || command.with_scoop
         || command.with_vscode
         || command.with_jetbrains
-        || command.with_pypi_publish == Some(true)
-        || command.publish_crates == Some(true)
         || command.coordinated_publish.is_some()
         || !cfg.ci.required_gates.is_empty()
     {

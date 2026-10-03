@@ -498,6 +498,31 @@ pub struct CiConfig {
     pub crow: CrowCiConfig,
 }
 
+impl CiConfig {
+    /// Shared by Nix-only generation and drift auditing. Call after CLI overrides
+    /// so an explicit false can disable a configured unsupported option.
+    pub(crate) fn validate_nix_only_language_options(&self) -> Result<()> {
+        for (name, enabled) in [
+            ("with_nextest", self.with_nextest),
+            ("with_msrv", self.with_msrv),
+            ("with_audit", self.with_audit),
+            ("with_deny", self.with_deny),
+            ("with_docs", self.with_docs),
+            ("with_artifacts", self.with_artifacts),
+            ("with_pypi_publish", self.with_pypi_publish),
+            ("publish_crates", self.publish_crates),
+        ] {
+            if enabled {
+                bail!(
+                    "[ci].{name} / --{} is not supported for Nix-only CI; disable it explicitly or use language CI",
+                    name.replace('_', "-")
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
 /// `[ci.nix_build]` — opt-in GitHub-hosted qualification and evidence capture.
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]

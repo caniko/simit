@@ -16,6 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Reject unsupported language checks and release requests in Nix-only CI instead
+  of silently omitting them; honor and persist explicit `false` overrides.
 - Allow Python flake projects to select exact-only Nix qualification without
   generating language CI or requiring language-specific version metadata; keep
   generated-workflow checks and registry audits aligned.

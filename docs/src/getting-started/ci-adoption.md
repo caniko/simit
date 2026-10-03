@@ -86,6 +86,14 @@ CI-only even when stale generated publish workflows are present. Release
 artifact and package-manager publishing flags such as `--with-artifacts`,
 `--with-homebrew`, `--with-chocolatey`, and `--with-scoop` imply release mode.
 
+Nix-only generation, including `[ci.nix_build].only = true`, rejects enabled
+language/release options from either the command line or `[ci]`. This includes
+`with_nextest`, `with_msrv`, `with_audit`, `with_deny`, `with_docs`,
+`with_artifacts`, `with_pypi_publish`, and `publish_crates`. Put required checks
+inside the declared Nix installables or use language CI. Explicit `--flag=false`
+overrides disable the matching project option and persist that choice when
+generating. Rejected requests leave configuration and workflow files intact.
+
 For a Forgejo Nix workspace with release artifacts and cargo-deny:
 
 ```sh
