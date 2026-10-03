@@ -105,7 +105,7 @@ pub fn plan(
         &request.repository,
         request.revision.as_deref().unwrap_or("HEAD"),
     )?;
-    request.repository = canonical.repository;
+    request.repository = canonical.repository.clone();
     let (target, pr) = if let Some(number) = request.pr {
         let deadline = Instant::now() + Duration::from_secs(30);
         let endpoint = format!("repos/{}/pulls/{number}", request.repository);
@@ -129,7 +129,22 @@ pub fn plan(
             None
         };
         let (commit, pr) = resolve_pr(&request, &p, merge.as_ref())?;
-        (identity(&request.repository, &commit)?, Some(pr))
+        let source_repository = if request.mode == Mode::Head {
+            &pr.head_repository
+        } else {
+            &request.repository
+        };
+        let source = identity(source_repository, &commit)?;
+        // The v1 target identity names the base repository for PR reporting;
+        // its exact head commit and tree can belong exclusively to a fork.
+        (
+            Identity {
+                commit: source.commit,
+                tree: source.tree,
+                ..canonical
+            },
+            Some(pr),
+        )
     } else {
         (
             identity(

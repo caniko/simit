@@ -10,16 +10,27 @@ use anyhow::{Result, bail, ensure};
 use serde_json::Value;
 use std::{collections::BTreeMap, fs, path::Path};
 
-pub fn source_ref(plan: &Plan) -> String {
-    let repo = if plan.request.mode == Mode::Head {
+fn source_repository(plan: &Plan) -> &str {
+    if plan.request.mode == Mode::Head {
         plan.pr
             .as_ref()
             .map(|p| p.head_repository.as_str())
             .unwrap_or(&plan.target.repository)
     } else {
         &plan.target.repository
-    };
-    format!("github:{repo}/{}", plan.target.commit)
+    }
+}
+pub fn source_ref(plan: &Plan) -> String {
+    format!("github:{}/{}", source_repository(plan), plan.target.commit)
+}
+fn checkout_target(plan: &Plan, destination: &Path) -> Result<()> {
+    github::checkout(
+        &Identity {
+            repository: source_repository(plan).into(),
+            ..plan.target.clone()
+        },
+        destination,
+    )
 }
 pub fn flake_ref(plan: &Plan) -> String {
     if let Some(r) = &plan.request.recipe {
@@ -91,7 +102,7 @@ pub fn validate_lock(plan: &Plan, lock: &Value) -> Result<Option<String>> {
 }
 pub fn prepare(plan: &Plan, system: &str, out: &Path) -> Result<EffectivePlan> {
     let verified = tempfile::tempdir()?;
-    github::checkout(&plan.target, &verified.path().join("target"))?;
+    checkout_target(plan, &verified.path().join("target"))?;
     let recipe_tree = if let Some(i) = &plan.recipe {
         let path = verified.path().join("recipe");
         github::checkout(i, &path)?;
@@ -383,7 +394,7 @@ fn nixpkgs_prepare(plan: &Plan, system: &str, out: &Path) -> Result<EffectivePla
         .ok_or_else(|| anyhow::anyhow!("missing PR"))?;
     let checkout = tempfile::tempdir()?;
     let target = checkout.path().join("nixpkgs");
-    github::checkout(&plan.target, &target)?;
+    checkout_target(plan, &target)?;
     run(
         "git",
         &args(&[
