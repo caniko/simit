@@ -308,6 +308,79 @@ fn nix_only_persists_explicit_false_overrides_for_language_options() {
     assert!(generate(&temp, &["--check", "--diff"]).status.success());
 }
 
+#[test]
+fn rust_workspace_nix_only_rejects_requested_gates_from_member_directories() {
+    for option in [
+        "with_artifacts",
+        "with_audit",
+        "with_msrv",
+        "publish_crates",
+    ] {
+        for from_config in [false, true] {
+            let temp = project("[ci.nix_build]\nonly = true");
+            fs::write(
+                temp.path().join("Cargo.toml"),
+                "[workspace]\nmembers = [\"member\"]\nresolver = \"2\"\n",
+            )
+            .unwrap();
+            let member = temp.path().join("member");
+            fs::create_dir_all(member.join("src")).unwrap();
+            fs::write(
+                member.join("Cargo.toml"),
+                "[package]\nname = \"native-contract\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+            )
+            .unwrap();
+            fs::write(member.join("src/main.rs"), "fn main() {}\n").unwrap();
+            let output = generate(&temp, &[]);
+            assert!(output.status.success(), "{output:?}");
+            let workflow_path = temp.path().join(".github/workflows/nix-builds.yaml");
+            let original_workflow = fs::read(&workflow_path).unwrap();
+            let release_path = temp.path().join(".github/workflows/release-artifacts.yaml");
+            fs::write(&release_path, &original_workflow).unwrap();
+            let config_path = temp.path().join("simit.toml");
+            if from_config {
+                let content = fs::read_to_string(&config_path)
+                    .unwrap()
+                    .replace("[ci]\n", &format!("[ci]\n{option} = true\n"));
+                fs::write(&config_path, content).unwrap();
+            }
+            let original_config = fs::read(&config_path).unwrap();
+            let flag = format!("--{}=true", option.replace('_', "-"));
+            for check in [false, true] {
+                let mut command = common::simit();
+                command.current_dir(&member).args(["init", "ci"]);
+                if !from_config {
+                    command.arg(&flag);
+                }
+                if check {
+                    command.args(["--check", "--diff"]);
+                }
+                let output = command.output().unwrap();
+                assert!(!output.status.success(), "silently accepted {option}");
+                assert!(
+                    String::from_utf8_lossy(&output.stderr).contains(option),
+                    "{output:?}"
+                );
+                assert_eq!(fs::read(&config_path).unwrap(), original_config);
+                assert_eq!(fs::read(&workflow_path).unwrap(), original_workflow);
+                assert_eq!(fs::read(&release_path).unwrap(), original_workflow);
+            }
+            let output = common::simit()
+                .current_dir(&member)
+                .args(["init", "ci"])
+                .arg(format!("--{}=false", option.replace('_', "-")))
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            assert!(generate(&temp, &["--check", "--diff"]).status.success());
+            assert_eq!(
+                simit::registry::audit_ci(temp.path()).unwrap().status,
+                simit::registry::FeatureStatus::Managed
+            );
+        }
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn matrix_secret_preflight_fails_without_exposing_secret_values() {
