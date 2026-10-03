@@ -1939,6 +1939,9 @@ fn reconcile_ci_files(
     if let Some(review) = ProjectConfig::load(workspace_root)?.review.as_ref() {
         files.extend(crate::review::generation::files(review)?);
     }
+    if let Some(policy) = ProjectConfig::load(workspace_root)?.review_policy.as_ref() {
+        files.push(crate::render::review_policy::file(policy)?);
+    }
     let plan = project::GeneratedPlan {
         files,
         message,
@@ -2003,6 +2006,7 @@ fn is_ci_managed_workflow_name(name: &std::ffi::OsStr) -> bool {
     matches!(
         name,
         "build.yaml"
+            | "review-policy.yaml"
             | "build.yml"
             | "build.jsonnet"
             | "ci.yaml"

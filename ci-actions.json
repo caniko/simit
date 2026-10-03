@@ -2,6 +2,11 @@
   "$schema": "https://json.schemastore.org/renovate.json",
   "actions": [
     {
+      "name": "https://github.com/actions/create-github-app-token",
+      "version": "v2",
+      "sha": "fee1f7d63c2ff003460e3d139729b119787bc349"
+    },
+    {
       "name": "https://code.forgejo.org/actions/checkout",
       "version": "v4.3.1",
       "sha": "34e114876b0b11c390a56381ad16ebd13914f8d5"
