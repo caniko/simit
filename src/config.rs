@@ -27,6 +27,8 @@ use crate::user_config::validate_runner_label;
 #[serde(deny_unknown_fields)]
 pub struct ProjectConfig {
     #[serde(default)]
+    pub review: Option<crate::review::generation::Config>,
+    #[serde(default)]
     pub prebuild: Option<PrebuildConfig>,
     #[serde(default)]
     pub release: ReleaseConfig,
@@ -1905,6 +1907,9 @@ impl ProjectConfig {
     }
 
     fn validate_common(&self) -> Result<()> {
+        if let Some(review) = &self.review {
+            review.validate()?;
+        }
         if self.ci.workspace && !self.ci.packages.is_empty() {
             bail!("simit project config: [ci].workspace cannot be true when [ci].packages is set");
         }

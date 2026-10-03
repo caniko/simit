@@ -8,6 +8,8 @@
 - [Release Plan](getting-started/release-plan.md)
 - [Release Verify](getting-started/release-verify.md)
 - [CI Caching](getting-started/ci-caching.md)
+- [Repository Review](repository-review.md)
+- [Review Migration Verification](review-migration-verification.md)
 - [CI Adoption Notes](getting-started/ci-adoption.md)
 - [Distribution Channels](getting-started/distribution-channels.md)
 - [Windows Packaging](getting-started/windows-packaging.md)

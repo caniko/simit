@@ -572,16 +572,21 @@ pub fn audit_ci(workspace_root: &Path) -> Result<CiAudit> {
         .into_iter()
         .map(|file| (file.relative_path, file.content))
         .collect::<BTreeMap<_, _>>();
-    let actual = marked
+    let mut actual = marked
         .iter()
-        .map(|file| (file.relative_path.clone(), file.content.as_str()))
+        .map(|file| (file.relative_path.clone(), file.content.clone()))
         .collect::<BTreeMap<_, _>>();
+    for path in expected.keys().filter(|p| p.starts_with(".github/actions")) {
+        if let Ok(content) = fs::read_to_string(workspace_root.join(path)) {
+            actual.insert(path.clone(), content);
+        }
+    }
 
     let mut changed_files = Vec::new();
     let mut missing_files = Vec::new();
     for (path, content) in &expected {
         match actual.get(path) {
-            Some(actual) if *actual == content.as_str() => {}
+            Some(actual) if actual == content => {}
             Some(_) => changed_files.push(path.clone()),
             None => missing_files.push(path.clone()),
         }
@@ -839,6 +844,7 @@ fn is_supplementary_workflow(file: &WorkflowFile) -> bool {
     matches!(
         name,
         "credential-visibility.yml"
+            | "review-compatibility.yml"
             | "credential-visibility.yaml"
             | "pages.yml"
             | "pages.yaml"
@@ -912,12 +918,18 @@ fn marked_workflows_drift(workspace_root: &Path, marked: &[WorkflowFile]) -> boo
         Ok(expected) => expected,
         Err(_) => return true,
     };
-    let expected = expected
+    let mut expected = expected
         .into_iter()
         .map(|file| (file.relative_path, file.content))
         .collect::<BTreeMap<_, _>>();
 
-    expected.len() != marked.len()
+    let actions_drift = expected
+        .iter()
+        .filter(|(p, _)| p.starts_with(".github/actions"))
+        .any(|(p, c)| fs::read_to_string(workspace_root.join(p)).as_ref().ok() != Some(c));
+    expected.retain(|p, _| !p.starts_with(".github/actions"));
+    actions_drift
+        || expected.len() != marked.len()
         || marked.iter().any(|workflow| {
             expected
                 .get(&workflow.relative_path)
@@ -926,6 +938,27 @@ fn marked_workflows_drift(workspace_root: &Path, marked: &[WorkflowFile]) -> boo
 }
 
 fn infer_expected_ci_files(
+    workspace_root: &Path,
+    marked: &[WorkflowFile],
+) -> Result<Vec<project::GeneratedFile>> {
+    let config = ProjectConfig::load(workspace_root)?;
+    let primary: Vec<_> = marked
+        .iter()
+        .filter(|file| !crate::review::generation::is_review_path(&file.relative_path))
+        .cloned()
+        .collect();
+    let mut files = if primary.is_empty() && config.review.is_some() {
+        Vec::new()
+    } else {
+        infer_expected_primary_ci_files(workspace_root, &primary)?
+    };
+    if let Some(review) = config.review.as_ref() {
+        files.extend(crate::review::generation::files(review)?);
+    }
+    Ok(files)
+}
+
+fn infer_expected_primary_ci_files(
     workspace_root: &Path,
     marked: &[WorkflowFile],
 ) -> Result<Vec<project::GeneratedFile>> {

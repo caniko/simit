@@ -19,6 +19,11 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Commands {
+    #[command(
+        subcommand,
+        about = "Review exact repository revisions through Nix and GitHub Actions"
+    )]
+    Review(crate::review::cli::Cmd),
     #[command(about = "Bump package versions, commit the change, and optionally tag it")]
     Commit(CommitCommand),
     #[command(about = "Run local release checks, update the changelog, commit, and tag")]
@@ -436,6 +441,8 @@ pub enum BumpKind {
 
 #[derive(Debug, Args)]
 pub struct InitCiCommand {
+    #[arg(long, conflicts_with_all = ["pages_only", "prebuild_only", "runner"], help = "Generate or verify only the opt-in repository review controller/client workflows")]
+    pub review_only: bool,
     #[arg(
         long,
         help = "Generate or verify only the Pages workflow without changing primary CI"
