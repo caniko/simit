@@ -21,7 +21,7 @@ jobs:
           mkdir controller-lock
           cat > controller-lock/flake.nix <<EOF
           {
-            inputs.nixpkgs.url = "github:NixOS/nixpkgs/13043924aaa7375ce482ebe2494338e058282925";
+            inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
             inputs.simit = { url = "github:caniko/simit/$ENGINE_REVISION"; flake = false; };
             outputs = { self, simit, nixpkgs }: let
               tools = import (simit + "/nix/review-tools.nix") { source = simit; system = "x86_64-linux"; inherit nixpkgs; };
@@ -31,6 +31,7 @@ jobs:
             };
           }
           EOF
+          curl --fail --location https://raw.githubusercontent.com/caniko/nixpkgs-review-gha/f7bad6b95787f752cedbf50e09c5bf4ae0f39a07/flake.lock > controller-lock/flake.lock
           nix flake lock path:./controller-lock
           nix build path:./controller-lock#repo-review --out-link tools --no-update-lock-file -L
           tools/bin/repo-review verify-engine --root controller-lock
