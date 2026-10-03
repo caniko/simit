@@ -42,6 +42,11 @@
       "sha": "d3f86a106a0bac45b974a628896c90dbdf5c8093"
     },
     {
+      "name": "https://github.com/actions/configure-pages",
+      "version": "v6",
+      "sha": "45bfe0192ca1faeb007ade9deae92b16b8254a0d"
+    },
+    {
       "name": "https://github.com/actions/upload-pages-artifact",
       "version": "v3",
       "sha": "56afc609e74202658d3ffba0e8f6dda462b719fa"

@@ -1445,6 +1445,7 @@ fn github_nix_can_generate_github_pages_workflow() {
     assert_yaml_parses(&pages);
     assert!(pages.contains("permissions:\n  contents: read\n  pages: write\n  id-token: write"));
     assert!(pages.contains("uses: actions/checkout@"));
+    assert!(pages.contains("uses: actions/configure-pages@"));
     assert!(pages.contains("uses: actions/upload-pages-artifact@"));
     assert!(pages.contains("uses: actions/deploy-pages@"));
     assert!(pages.contains("environment:\n      name: github-pages\n      url: ${{ steps.deployment.outputs.page_url }}"));
@@ -1474,6 +1475,146 @@ fn github_nix_can_generate_github_pages_workflow() {
         "{}",
         String::from_utf8_lossy(&check.stderr)
     );
+}
+
+#[test]
+fn pages_only_preserves_primary_crow_ci() {
+    let temp = init_package(true);
+    fs::write(
+        temp.path().join("simit.toml"),
+        r#"[ci]
+provider = "crow"
+platform = "forgejo"
+runtime = "nix"
+runner = "atlas-nix-trusted"
+"#,
+    )
+    .unwrap();
+    fs::create_dir_all(temp.path().join(".crow")).unwrap();
+    fs::write(
+        temp.path().join(".crow/ci.yaml"),
+        "existing crow workflow\n",
+    )
+    .unwrap();
+
+    let status = simit_with_user_config(temp.path())
+        .current_dir(temp.path())
+        .args([
+            "init",
+            "ci",
+            "--pages-only",
+            "--platform",
+            "github",
+            "--with-pages",
+            "--pages-repo",
+            "caniko/plinth",
+            "--pages-canonical-domain",
+            "plinth.tartanoglu.com",
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let pages = read(&temp.path().join(".github/workflows/pages.yaml"));
+    assert_yaml_parses(&pages);
+    assert!(pages.contains("uses: actions/deploy-pages@"));
+    assert_eq!(
+        read(&temp.path().join(".crow/ci.yaml")),
+        "existing crow workflow\n"
+    );
+
+    let simit_toml = read(&temp.path().join("simit.toml"));
+    assert!(simit_toml.contains("provider = \"crow\""));
+    assert!(simit_toml.contains("platform = \"forgejo\""));
+    assert!(simit_toml.contains("[ci.pages]"));
+
+    let check = simit_with_user_config(temp.path())
+        .current_dir(temp.path())
+        .args([
+            "init",
+            "ci",
+            "--pages-only",
+            "--platform",
+            "github",
+            "--check",
+        ])
+        .status()
+        .unwrap();
+    assert!(check.success());
+}
+
+#[test]
+fn pages_only_check_infers_managed_workflow_from_cargo_workspace() {
+    let temp = init_package(true);
+    let manifest = read(&temp.path().join("Cargo.toml"));
+    fs::write(
+        temp.path().join("Cargo.toml"),
+        format!(
+            "{manifest}\n[package.metadata.simit.ci]\nplatform = \"forgejo\"\nruntime = \"nix\"\n"
+        ),
+    )
+    .unwrap();
+
+    let status = simit()
+        .current_dir(temp.path().join("src"))
+        .args([
+            "init",
+            "ci",
+            "--pages-only",
+            "--platform",
+            "forgejo",
+            "--runner",
+            "atlas",
+            "--with-pages",
+            "--pages-repo",
+            "caniko/demo",
+            "--pages-canonical-domain",
+            "demo.example.com",
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert!(!temp.path().join("simit.toml").exists());
+
+    let check = simit()
+        .current_dir(temp.path().join("src"))
+        .args([
+            "init",
+            "ci",
+            "--pages-only",
+            "--platform",
+            "forgejo",
+            "--check",
+        ])
+        .status()
+        .unwrap();
+    assert!(check.success());
+}
+
+#[test]
+fn github_generation_drops_persisted_forgejo_runner() {
+    let temp = init_package(true);
+    fs::write(
+        temp.path().join("simit.toml"),
+        r#"[ci]
+provider = "actions"
+platform = "forgejo"
+runtime = "nix"
+runner = "codefloe-global"
+"#,
+    )
+    .unwrap();
+
+    let status = simit_with_user_config(temp.path())
+        .current_dir(temp.path())
+        .args(["init", "ci", "--platform", "github"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let ci = read(&temp.path().join(".github/workflows/ci.yaml"));
+    assert!(ci.contains("runs-on: ubuntu-latest"));
+    assert!(!ci.contains("codefloe-global"));
 }
 
 #[test]
@@ -2511,6 +2652,345 @@ fn check_succeeds_when_workflows_are_current() {
 }
 
 #[test]
+fn project_check_command_replaces_generic_cargo_lane() {
+    let temp = init_package(true);
+    fs::write(
+        temp.path().join("simit.toml"),
+        r#"[ci]
+platform = "forgejo"
+runtime = "nix"
+runner = "atlas"
+check_command = "cargo xtask ci"
+nix_flake_check = false
+"#,
+    )
+    .unwrap();
+
+    let status = simit_with_user_config(temp.path())
+        .current_dir(temp.path())
+        .args([
+            "init",
+            "ci",
+            "--platform",
+            "forgejo",
+            "--runtime",
+            "nix",
+            "--runner",
+            "atlas",
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let ci = read(&temp.path().join(".forgejo/workflows/ci.yaml"));
+    assert!(ci.contains("name: Project checks"));
+    assert!(ci.contains("nix develop -c sh -c 'cargo xtask ci'"));
+    assert!(!ci.contains("cargo fmt --all -- --check"));
+    assert!(!ci.contains("cargo clippy"));
+    assert!(!ci.contains("nix flake check"));
+}
+
+#[test]
+fn project_check_command_keeps_nix_flake_check_by_default() {
+    let temp = init_package(true);
+    fs::write(
+        temp.path().join("simit.toml"),
+        r#"[ci]
+platform = "github"
+runtime = "nix"
+runner = "ubuntu-latest"
+check_command = "cargo xtask ci"
+"#,
+    )
+    .unwrap();
+
+    let status = simit_with_user_config(temp.path())
+        .current_dir(temp.path())
+        .args([
+            "init",
+            "ci",
+            "--platform",
+            "github",
+            "--runtime",
+            "nix",
+            "--runner",
+            "ubuntu-latest",
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let ci = read(&temp.path().join(".github/workflows/ci.yaml"));
+    assert!(ci.contains("name: Check flake"));
+    assert!(ci.contains("name: Project checks"));
+}
+
+#[test]
+fn nix_cargo_cache_is_opt_in_for_nix_runtime() {
+    let temp = init_package(true);
+    fs::write(
+        temp.path().join("simit.toml"),
+        r#"[ci]
+platform = "github"
+runtime = "nix"
+runner = "ubuntu-latest"
+with_nix_cargo_cache = true
+"#,
+    )
+    .unwrap();
+
+    let status = simit_with_user_config(temp.path())
+        .current_dir(temp.path())
+        .args(["init", "ci", "--platform", "github", "--runtime", "nix"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let ci = read(&temp.path().join(".github/workflows/ci.yaml"));
+    assert!(ci.contains("name: Cache Nix Cargo registry + target"));
+    assert!(ci.contains("/tmp/.cargo/registry"));
+    assert!(ci.contains("/tmp/.cargo/git"));
+    assert!(ci.contains("target"));
+    assert!(ci.contains(
+        "hashFiles('Cargo.lock', 'flake.lock', 'flake.nix', 'rust-toolchain.toml', '.cargo/config', '.cargo/config.toml')"
+    ));
+    let disabled = simit_with_user_config(temp.path())
+        .current_dir(temp.path())
+        .args(["init", "ci", "--with-nix-cargo-cache=false"])
+        .output()
+        .unwrap();
+    assert!(
+        disabled.status.success(),
+        "{}",
+        String::from_utf8_lossy(&disabled.stderr)
+    );
+    assert!(!read(&temp.path().join(".github/workflows/ci.yaml")).contains("Cache Nix Cargo"));
+    let check = simit_with_user_config(temp.path())
+        .current_dir(temp.path())
+        .args(["init", "ci", "--check"])
+        .output()
+        .unwrap();
+    assert!(
+        check.status.success(),
+        "{}",
+        String::from_utf8_lossy(&check.stderr)
+    );
+}
+
+#[test]
+fn invalid_nix_cargo_cache_requests_preserve_project_files() {
+    for policy in [
+        "runtime = \"cargo\"\n",
+        "runtime = \"nix\"\nprovider = \"crow\"\nplatform = \"forgejo\"\n",
+        "runtime = \"nix\"\n[ci.extra_env]\nCARGO_HOME = \"/custom\"\n",
+        "runtime = \"nix\"\n[ci.extra_env]\nCARGO_TARGET_DIR = \"/custom\"\n",
+    ] {
+        let temp = init_package(true);
+        let config = format!("[ci]\nwith_nix_cargo_cache = true\n{policy}");
+        fs::write(temp.path().join("simit.toml"), &config).unwrap();
+        let output = simit_with_user_config(temp.path())
+            .current_dir(temp.path())
+            .args(["init", "ci"])
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{policy}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("with_nix_cargo_cache"),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(read(&temp.path().join("simit.toml")), config);
+        assert!(!temp.path().join(".github/workflows/ci.yaml").exists());
+        assert!(!temp.path().join(".crow/build.yaml").exists());
+    }
+}
+
+#[test]
+fn project_check_and_flake_check_override_round_trip() {
+    let temp = init_package(true);
+    fs::write(temp.path().join("simit.toml"), "[ci]\nplatform = \"github\"\nruntime = \"nix\"\ncheck_command = \"cargo xtask ci\"\nnix_flake_check = false\n").unwrap();
+    for (flag, enabled) in [
+        ("--nix-flake-check=true", true),
+        ("--nix-flake-check=false", false),
+    ] {
+        let output = simit_with_user_config(temp.path())
+            .current_dir(temp.path())
+            .args(["init", "ci", flag])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let ci = read(&temp.path().join(".github/workflows/ci.yaml"));
+        assert_eq!(ci.contains("run: nix flake check"), enabled);
+        assert!(ci.contains("Project checks"));
+        let check = simit_with_user_config(temp.path())
+            .current_dir(temp.path())
+            .args(["init", "ci", "--check"])
+            .output()
+            .unwrap();
+        assert!(
+            check.status.success(),
+            "{}",
+            String::from_utf8_lossy(&check.stderr)
+        );
+    }
+}
+
+#[test]
+fn project_check_commands_render_as_yaml_blocks() {
+    let temp = init_package(true);
+    fs::write(
+        temp.path().join("simit.toml"),
+        r#"[ci]
+platform = "github"
+runtime = "nix"
+runner = "ubuntu-latest"
+check_command = "printf 'url: # safe' && cargo xtask ci"
+"#,
+    )
+    .unwrap();
+
+    let status = simit_with_user_config(temp.path())
+        .current_dir(temp.path())
+        .args(["init", "ci", "--platform", "github", "--runtime", "nix"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let ci = read(&temp.path().join(".github/workflows/ci.yaml"));
+    assert!(ci.contains("run: |\n          nix develop -c sh -c 'printf"));
+    assert!(ci.contains(" && cargo xtask ci'"));
+    assert_yaml_parses(&ci);
+}
+
+#[test]
+fn granular_project_check_commands_render_as_yaml_blocks() {
+    let temp = init_package(true);
+    fs::write(
+        temp.path().join("simit.toml"),
+        r#"[ci]
+platform = "forgejo"
+runtime = "nix"
+runner = "atlas"
+check_command = "printf 'url: # safe' && cargo xtask ci"
+"#,
+    )
+    .unwrap();
+
+    let status = simit_with_user_config(temp.path())
+        .current_dir(temp.path())
+        .args([
+            "init",
+            "ci",
+            "--platform",
+            "forgejo",
+            "--runtime",
+            "nix",
+            "--runner",
+            "atlas",
+            "--granular",
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let ci = read(&temp.path().join(".forgejo/workflows/ci.yaml"));
+    assert!(ci.contains("run: |\n          nix develop -c sh -c 'printf"));
+    assert!(ci.contains(" && cargo xtask ci'"));
+    assert_yaml_parses(&ci);
+}
+
+#[test]
+fn crow_cargo_steps_install_rust_components_before_use() {
+    let temp = init_package(true);
+    fs::write(
+        temp.path().join("simit.toml"),
+        r#"[ci]
+provider = "crow"
+platform = "forgejo"
+runtime = "cargo"
+runner = "atlas"
+check_command = "cargo xtask ci"
+"#,
+    )
+    .unwrap();
+
+    let status = simit_with_user_config(temp.path())
+        .current_dir(temp.path())
+        .args([
+            "init",
+            "ci",
+            "--platform",
+            "forgejo",
+            "--runtime",
+            "cargo",
+            "--runner",
+            "atlas",
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let ci = read(&temp.path().join(".crow/build.yaml"));
+    assert!(ci.contains("rustup component add clippy rustfmt && cargo xtask ci"));
+}
+
+#[test]
+fn crow_ci_check_ignores_release_workflow_owned_by_init_release() {
+    let temp = init_package(true);
+    fs::write(
+        temp.path().join("simit.toml"),
+        r#"[ci]
+provider = "crow"
+platform = "forgejo"
+runtime = "nix"
+runner = "atlas"
+"#,
+    )
+    .unwrap();
+
+    let write_status = simit_with_user_config(temp.path())
+        .current_dir(temp.path())
+        .args([
+            "init",
+            "ci",
+            "--platform",
+            "forgejo",
+            "--runtime",
+            "nix",
+            "--runner",
+            "atlas",
+        ])
+        .status()
+        .unwrap();
+    assert!(write_status.success());
+    fs::write(
+        temp.path().join(".crow/release.yaml"),
+        "# Generated by simit. Manual edits will be reported as ci=drift.\n",
+    )
+    .unwrap();
+
+    let check_status = simit_with_user_config(temp.path())
+        .current_dir(temp.path())
+        .args([
+            "init",
+            "ci",
+            "--platform",
+            "forgejo",
+            "--runtime",
+            "nix",
+            "--runner",
+            "atlas",
+            "--check",
+        ])
+        .status()
+        .unwrap();
+    assert!(check_status.success());
+}
+
+#[test]
 fn workspace_flag_generates_per_package_workflows() {
     let temp = init_workspace_fixture();
 
@@ -2889,7 +3369,7 @@ fn workspace_check_diff_detects_stale_generated_workflow() {
 }
 
 #[test]
-fn workspace_check_rejects_extra_generated_workflow() {
+fn workspace_check_rejects_extra_managed_workflows() {
     let temp = init_workspace_fixture();
 
     let write_status = simit_with_user_config(temp.path())
@@ -2899,14 +3379,16 @@ fn workspace_check_rejects_extra_generated_workflow() {
         .unwrap();
     assert!(write_status.success());
 
-    fs::write(
-        temp.path().join(".forgejo/workflows/ci-old.yaml"),
-        format!(
-            "{}\nname: old\n",
-            simit::render::ci::GENERATED_WORKFLOW_MARKER
-        ),
-    )
-    .unwrap();
+    for name in ["ci-old.yaml", "nix-builds.yaml", "prebuild.yaml"] {
+        fs::write(
+            temp.path().join(".forgejo/workflows").join(name),
+            format!(
+                "{}\nname: old\n",
+                simit::render::ci::GENERATED_WORKFLOW_MARKER
+            ),
+        )
+        .unwrap();
+    }
 
     let output = simit_with_user_config(temp.path())
         .current_dir(temp.path())
@@ -2923,7 +3405,9 @@ fn workspace_check_rejects_extra_generated_workflow() {
 
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains(".forgejo/workflows/nix-builds.yaml is extra"));
     assert!(stderr.contains(".forgejo/workflows/ci-old.yaml is extra"));
+    assert!(stderr.contains(".forgejo/workflows/prebuild.yaml is extra"));
 }
 
 #[test]
@@ -4065,6 +4549,16 @@ components = ["checks"]
     assert!(!workflow.contains("Check generated flake wiring"));
     assert!(!workflow.contains("Check flake evaluation"));
     assert!(!workflow.contains("CARGO_HOME"));
+    let check = simit()
+        .current_dir(temp.path())
+        .args(["init", "ci", "--check"])
+        .output()
+        .unwrap();
+    assert!(
+        check.status.success(),
+        "{}",
+        String::from_utf8_lossy(&check.stderr)
+    );
 }
 
 #[test]

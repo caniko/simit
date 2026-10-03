@@ -115,6 +115,9 @@ impl Step {
 }
 
 pub fn files(request: FilesRequest<'_>) -> Result<Vec<GeneratedFile>> {
+    if request.options.with_nix_cargo_cache {
+        bail!("with_nix_cargo_cache requires the Actions provider");
+    }
     if request.options.with_msrv && request.package.rust_version.is_none() {
         bail!("--with-msrv requires package.rust-version in Cargo.toml");
     }
@@ -212,8 +215,19 @@ fn build_workflow(
         } else {
             steps.push(step("project-check", image, command.clone()));
         }
+    } else if let Some(command) = options.check_command.as_deref() {
+        if runtime == Runtime::Nix && options.nix_flake_check {
+            steps.push(step("nix-check", image, format!("{prefix}nix flake check")));
+        }
+        let command = if runtime == Runtime::Cargo {
+            format!("rustup component add clippy rustfmt && {command}")
+        } else {
+            crate::render::ci::project_check_command(runtime, command)
+        };
+        steps.push(step(crate::render::ci::STEP_PROJECT_CHECK, image, command));
     } else {
-        if runtime == Runtime::Nix && options.om_ci != OmCiMode::Replace {
+        if runtime == Runtime::Nix && options.nix_flake_check && options.om_ci != OmCiMode::Replace
+        {
             steps.push(step("nix-check", image, format!("{prefix}nix flake check")));
         }
         steps.push(step(
@@ -661,6 +675,11 @@ pub fn python_ci_file(
     check_outputs: &[String],
     components: &[crate::config::CiComponent],
 ) -> Result<GeneratedFile> {
+    if options.check_command.is_some() || options.with_nix_cargo_cache || !options.nix_flake_check {
+        bail!(
+            "check_command, with_nix_cargo_cache and nix_flake_check=false require Rust language CI"
+        );
+    }
     let image = nix_image(config)?;
     let selected = |component| components.is_empty() || components.contains(&component);
     let mut steps = Vec::new();

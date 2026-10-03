@@ -217,6 +217,7 @@ extra_env = { FLAKE_SSH_KEY = "${{ secrets.FLAKE_SSH_KEY }}" }
 #[test]
 fn nix_only_rejects_effective_language_options_before_changing_workflows() {
     for option in [
+        "with_nix_cargo_cache",
         "with_nextest",
         "with_msrv",
         "with_audit",
@@ -274,6 +275,7 @@ fn nix_only_rejects_effective_language_options_before_changing_workflows() {
 #[test]
 fn nix_only_persists_explicit_false_overrides_for_language_options() {
     let options = [
+        "with_nix_cargo_cache",
         "with_nextest",
         "with_msrv",
         "with_audit",

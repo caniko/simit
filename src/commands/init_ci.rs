@@ -197,11 +197,23 @@ pub fn run(command: InitCiCommand) -> Result<()> {
         .unwrap_or_else(|| resolved.omnix_ref.clone());
     let mut options = resolved.ci_options(&cfg, with_artifacts, omnix_ref.clone());
     options.publish_crates = publish_crates;
+    let runner_override =
+        if platform == Platform::Github && cfg.ci.platform != Some(Platform::Github) {
+            command.runner.as_deref()
+        } else {
+            resolved.runner.as_deref()
+        };
+    let windows_runner_override =
+        if platform == Platform::Github && cfg.ci.platform != Some(Platform::Github) {
+            command.windows_runner.as_deref()
+        } else {
+            resolved.windows_runner.as_deref()
+        };
     let runners = user_config.resolve_ci_runners(
         platform,
         resolved.runtime,
-        resolved.runner.as_deref(),
-        resolved.windows_runner.as_deref(),
+        runner_override,
+        windows_runner_override,
         windows_packagers,
     )?;
     // Step-runner labels such as `atlas-nix-trusted` and `codeberg-small`
@@ -226,9 +238,9 @@ pub fn run(command: InitCiCommand) -> Result<()> {
             .collect::<Result<_>>()?
     };
     let persisted_runner =
-        self_check_runner_override(resolved.runner.as_deref(), &runners.ci).map(str::to_owned);
+        self_check_runner_override(runner_override, &runners.ci).map(str::to_owned);
     let persisted_windows_runner = runners.windows.as_ref().and_then(|runner| {
-        self_check_runner_override(resolved.windows_runner.as_deref(), runner).map(str::to_owned)
+        self_check_runner_override(windows_runner_override, runner).map(str::to_owned)
     });
     let multi_package_workspace = metadata.workspace_members.len() > 1
         && resolved.workspace_strategy == crate::cli::WorkspaceStrategy::Members;
@@ -690,6 +702,10 @@ fn run_nix_only_at(command: InitCiCommand, workspace_root: &Path) -> Result<()> 
     // them, and accepting them would silently remove the requested gate.
     for (cli, configured) in [
         (command.with_nextest, &mut cfg.ci.with_nextest),
+        (
+            command.with_nix_cargo_cache,
+            &mut cfg.ci.with_nix_cargo_cache,
+        ),
         (command.with_msrv, &mut cfg.ci.with_msrv),
         (command.with_audit, &mut cfg.ci.with_audit),
         (command.with_deny, &mut cfg.ci.with_deny),
@@ -700,6 +716,7 @@ fn run_nix_only_at(command: InitCiCommand, workspace_root: &Path) -> Result<()> 
     ] {
         *configured = cli.unwrap_or(*configured);
     }
+    cfg.ci.nix_flake_check = command.nix_flake_check.or(cfg.ci.nix_flake_check);
     cfg.ci.validate_nix_only_language_options()?;
     if command.with_homebrew
         || command.with_chocolatey
@@ -1296,6 +1313,8 @@ fn ci_cli_overrides(command: &InitCiCommand) -> CiCliOverrides {
         }),
         packages: command.packages.clone(),
         with_nextest: command.with_nextest,
+        with_nix_cargo_cache: command.with_nix_cargo_cache,
+        nix_flake_check: command.nix_flake_check,
         with_msrv: command.with_msrv,
         with_audit: command.with_audit,
         with_deny: command.with_deny,
@@ -1510,6 +1529,8 @@ pub(crate) fn project_regeneration_command(workspace_root: &Path) -> Result<Opti
         check: false,
         diff: false,
         with_nextest: None,
+        with_nix_cargo_cache: None,
+        nix_flake_check: None,
         with_msrv: None,
         with_audit: None,
         with_deny: None,
@@ -1667,6 +1688,12 @@ pub(crate) fn render_regeneration_command(
     }
     if resolved.with_nextest {
         args.push("--with-nextest".to_owned());
+    }
+    if resolved.with_nix_cargo_cache {
+        args.push("--with-nix-cargo-cache".to_owned());
+    }
+    if !resolved.nix_flake_check {
+        args.push("--nix-flake-check=false".to_owned());
     }
     if resolved.with_msrv {
         args.push("--with-msrv".to_owned());

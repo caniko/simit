@@ -343,7 +343,12 @@ fn upsert_block(readme: &str, block: &str) -> Result<String> {
     }
 
     let Some((heading_end, _)) = top_level_heading_end(readme) else {
-        bail!("README.md must contain a top-level `#` heading before simit can insert badges");
+        // READMEs with an HTML banner instead of a Markdown H1 still get the
+        // badge block — prepended ahead of the banner.
+        let mut out = String::from(block);
+        out.push('\n');
+        out.push_str(readme.trim_start_matches(['\r', '\n']));
+        return Ok(out);
     };
 
     let mut out = String::new();
@@ -392,9 +397,9 @@ mod tests {
     }
 
     #[test]
-    fn rejects_missing_h1() {
-        let err = upsert_block("body\n", "BLOCK\n").unwrap_err();
-        assert!(err.to_string().contains("top-level"));
+    fn prepends_block_when_h1_is_absent() {
+        let out = upsert_block("<p align=\"center\">banner</p>\n", "BLOCK\n").unwrap();
+        assert_eq!(out, "BLOCK\n\n<p align=\"center\">banner</p>\n");
     }
 
     #[test]

@@ -102,6 +102,30 @@ fn loading_without_simit_toml_returns_default_config() {
 }
 
 #[test]
+fn project_check_command_loads_and_rejects_multiline_values() {
+    let cfg =
+        load_toml("[ci]\ncheck_command = \"cargo xtask ci\"\nnix_flake_check = false\n").unwrap();
+    assert_eq!(cfg.ci.check_command.as_deref(), Some("cargo xtask ci"));
+    assert_eq!(cfg.ci.nix_flake_check, Some(false));
+    for command in ["", "   ", "cargo xtask\\nci", "cargo xtask\\rci"] {
+        let error = load_toml(&format!("[ci]\ncheck_command = \"{command}\"\n"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("check_command"), "{error}");
+    }
+}
+
+#[test]
+fn nix_cargo_cache_option_loads() {
+    let cfg = load_toml("[ci]\nwith_nix_cargo_cache = true\n").unwrap();
+    assert!(cfg.ci.with_nix_cargo_cache);
+    let error = load_toml("[ci]\nruntime = \"cargo\"\nwith_nix_cargo_cache = true\n")
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("requires runtime = \"nix\""), "{error}");
+}
+
+#[test]
 fn crow_check_command_survives_ci_config_updates() {
     let temp = TempDir::new().unwrap();
     fs::write(
