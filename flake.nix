@@ -95,6 +95,7 @@
           pathString = toString path;
         in
           (craneLib.filterCargoSources path type)
+          || pkgs.lib.hasInfix "/src/review/assets/" pathString
           || pkgs.lib.hasSuffix "ci-actions.json" pathString
           || pkgs.lib.hasSuffix "/.github" pathString
           || pkgs.lib.hasSuffix "/.github/workflows" pathString

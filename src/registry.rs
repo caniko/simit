@@ -844,6 +844,7 @@ fn is_supplementary_workflow(file: &WorkflowFile) -> bool {
     matches!(
         name,
         "credential-visibility.yml"
+            | "review-compatibility.yml"
             | "credential-visibility.yaml"
             | "pages.yml"
             | "pages.yaml"
