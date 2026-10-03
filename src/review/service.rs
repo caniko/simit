@@ -105,6 +105,7 @@ pub fn aggregate(plan: &Plan, reports: Vec<PlatformResult>) -> Result<ReviewResu
         provenance: "GitHub metadata is frozen by resolver; effective locks, derivations, and test evidence are untrusted runner observations, not independent attestations.".into() })
 }
 pub fn collect(plan: &Plan, inputs: &Path, out: &Path) -> Result<ReviewResult> {
+    super::engine::verify_plan(plan)?;
     fs::create_dir_all(out)?;
     let mut reports = vec![];
     let mut bundles = BTreeMap::new();
@@ -198,6 +199,7 @@ pub fn consume(r: &ReviewResult) -> String {
     text
 }
 pub fn post(r: &ReviewResult, out: &Path) -> Result<Value> {
+    super::engine::verify_plan(&r.plan)?;
     r.plan.validate()?;
     ensure!(r.plan.request.post_result, "posting not requested");
     let pr = r.plan.pr.as_ref().ok_or_else(|| anyhow::anyhow!("no PR"))?;
@@ -243,10 +245,7 @@ pub struct CacheProfile {
     pub server: Option<String>,
 }
 pub fn cache_profile(policy: &Path, profile: &str) -> Result<CacheProfile> {
-    ensure!(
-        ["attic-existing", "cachix-existing"].contains(&profile),
-        "unknown profile"
-    );
+    ensure!(name(profile), "unknown profile");
     let p: Value = read_json(policy)?;
     let c: CacheProfile = serde_json::from_value(p["caches"][profile].clone())?;
     artifact::public_url(&c.url)?;
@@ -269,8 +268,7 @@ pub fn cache_profile(policy: &Path, profile: &str) -> Result<CacheProfile> {
         artifact::public_url(s)?;
     }
     ensure!(
-        (profile == "attic-existing" && c.kind == "attic" && c.server.is_some())
-            || (profile == "cachix-existing" && c.kind == "cachix"),
+        (c.kind == "attic" && c.server.is_some()) || c.kind == "cachix",
         "cache kind mismatch"
     );
     Ok(c)
@@ -309,6 +307,7 @@ pub fn publish(
     approved_plan: &str,
     approved_bundle: &str,
 ) -> Result<Value> {
+    super::engine::verify_plan(plan)?;
     validate_review(review)?;
     ensure!(
         review.plan == *plan && review.successful(),

@@ -1,0 +1,30 @@
+name: Review engine compatibility
+on:
+  push:
+    branches: [feat/repository-review, trunk]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  compatibility:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2022]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Install declared MSRV
+        run: rustup toolchain install 1.85.0 --profile minimal
+      - name: Compile both frontends and verify review contracts on MSRV
+        run: cargo +1.85.0 test --locked --test review_cli --test review_engine --test review_generation --test review_contracts
+      - name: Verify packaged runtime assets
+        shell: bash
+        run: |
+          cargo +1.85.0 package --list --allow-dirty > package-files.txt
+          grep -Fx src/review/assets/nixpkgs.py package-files.txt
+          grep -Fx src/review/assets/review-repository.yml package-files.txt
+          grep -Fx src/review/assets/publish-review.yml package-files.txt
+          grep -Fx src/review/assets/LICENSE package-files.txt

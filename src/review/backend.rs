@@ -231,6 +231,7 @@ pub fn prepare(plan: &Plan, system: &str, out: &Path) -> Result<EffectivePlan> {
 }
 
 pub fn build(plan: &Plan, system: &str, out: &Path) -> Result<PlatformResult> {
+    super::engine::verify_plan(plan)?;
     plan.validate()?;
     ensure!(
         plan.request.systems.iter().any(|s| s == system),

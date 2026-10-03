@@ -34,6 +34,23 @@ use crate::render::ci::{
 use crate::user_config::{ResolvedRunner, UserConfig, validate_runner_label};
 
 pub fn run(command: InitCiCommand) -> Result<()> {
+    if command.review_only {
+        if command.platform.is_some_and(|p| p != Platform::Github)
+            || command
+                .ci_provider
+                .is_some_and(|p| p != CiProvider::Actions)
+        {
+            bail!("repository review workflows require GitHub Actions");
+        }
+        let root = std::env::current_dir()?;
+        let config = ProjectConfig::load(&root)?;
+        let review = config
+            .review
+            .as_ref()
+            .context("--review-only requires [review] configuration")?;
+        crate::review::generation::run(&root, review, command.check, command.diff)?;
+        return Ok(());
+    }
     if command.prebuild_only {
         return run_prebuild_only(command);
     }
@@ -1475,6 +1492,7 @@ pub(crate) fn project_regeneration_command(workspace_root: &Path) -> Result<Opti
     let command = InitCiCommand {
         pages_only: false,
         prebuild_only: false,
+        review_only: false,
         packages: Vec::new(),
         workspace: false,
         workspace_strategy: None,
@@ -1886,11 +1904,14 @@ fn maybe_push_deny_template(
 
 fn reconcile_ci_files(
     workspace_root: &Path,
-    files: Vec<project::GeneratedFile>,
+    mut files: Vec<project::GeneratedFile>,
     message: &str,
     check: bool,
     show_diff: bool,
 ) -> Result<()> {
+    if let Some(review) = ProjectConfig::load(workspace_root)?.review.as_ref() {
+        files.extend(crate::review::generation::files(review)?);
+    }
     let plan = project::GeneratedPlan {
         files,
         message,

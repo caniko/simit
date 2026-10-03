@@ -49,7 +49,9 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
       - uses: ./.github/actions/setup-nix
-      - run: nix build .#repo-review --out-link tools --no-update-lock-file
+      - run: |
+          nix build .#repo-review --out-link tools --no-update-lock-file
+          tools/bin/repo-review verify-engine --root .
       - name: Validate reviewed revision, exact workflow/run/attempt and both actors
         env:
           GH_TOKEN: ${{ github.token }}
@@ -75,7 +77,9 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
       - uses: ./.github/actions/setup-nix
-      - run: nix build .#repo-review --out-link tools --no-update-lock-file
+      - run: |
+          nix build .#repo-review --out-link tools --no-update-lock-file
+          tools/bin/repo-review verify-engine --root .
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           github-token: ${{ github.token }}
@@ -134,7 +138,9 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
       - uses: ./.github/actions/setup-nix
-      - run: nix build .#repo-review --out-link tools --no-update-lock-file
+      - run: |
+          nix build .#repo-review --out-link tools --no-update-lock-file
+          tools/bin/repo-review verify-engine --root .
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           github-token: ${{ github.token }}

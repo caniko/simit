@@ -12,6 +12,12 @@ pub struct Cli {
 }
 #[derive(Debug, Subcommand)]
 pub enum Cmd {
+    /// Report the immutable engine identity supplied by the pinned Nix package.
+    EngineInfo,
+    VerifyEngine {
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+    },
     Schema {
         #[arg(default_value = "request")]
         kind: String,
@@ -165,6 +171,12 @@ fn request(path: &str) -> Result<Request> {
 }
 pub fn execute(command: Cmd) -> Result<(Value, i32)> {
     let value = match command {
+        Cmd::EngineInfo => serde_json::to_value(super::engine::manifest()?)?,
+        Cmd::VerifyEngine { root } => {
+            let manifest = super::engine::manifest()?;
+            super::engine::verify_lock(&read_json(&root.join("flake.lock"))?, &manifest)?;
+            serde_json::to_value(manifest)?
+        }
         Cmd::Schema { kind } => match kind.as_str() {
             "request" => serde_json::to_value(schemars::schema_for!(Request))?,
             "plan" => serde_json::to_value(schemars::schema_for!(Plan))?,

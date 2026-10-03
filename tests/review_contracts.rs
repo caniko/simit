@@ -321,7 +321,12 @@ fn export_failure_exits_unsuccessfully_and_retains_build_facts() {
     use std::os::unix::fs::PermissionsExt;
     use std::process::Command;
     let temp = tempfile::tempdir().unwrap();
-    let p = plan();
+    let mut p = plan();
+    p.tool_lock = json!({"version":7,"root":"root","nodes":{"root":{"inputs":{"simit":"simit","nixpkgs":"nixpkgs"}},"simit":{"locked":{"type":"github","owner":"caniko","repo":"simit","rev":HEAD}},"nixpkgs":{"locked":{"type":"github","owner":"NixOS","repo":"nixpkgs","rev":HEAD}}}});
+    p.tool_lock_digest = canonical_digest(&p.tool_lock).unwrap();
+    p.seal().unwrap();
+    let manifest = temp.path().join("engine.json");
+    repo_review::write_json(&manifest, &json!({"schema_version":1,"repository":"caniko/simit","revision":HEAD,"nixpkgs_revision":HEAD})).unwrap();
     let plan_path = temp.path().join("plan.json");
     repo_review::write_json(&plan_path, &p).unwrap();
     let tools = temp.path().join("tools");
@@ -357,6 +362,7 @@ fn export_failure_exits_unsuccessfully_and_retains_build_facts() {
         .args(["--system", "x86_64-linux", "--output"])
         .arg(&out)
         .env("PATH", &tools)
+        .env("SIMIT_REVIEW_ENGINE_MANIFEST", &manifest)
         .output()
         .unwrap();
     let r: PlatformResult = repo_review::read_json(&out.join("review-result.json")).unwrap();

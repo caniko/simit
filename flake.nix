@@ -343,6 +343,7 @@
     })
     // {
       lib = {
+        mkReviewTools = args: import ./nix/review-tools.nix ({source = self;} // args);
         simitModule = import ./nix/simit-module.nix {lib = nixpkgs.lib;};
         mkSimitConfig = import ./nix/simit-config.nix {lib = nixpkgs.lib;};
       };

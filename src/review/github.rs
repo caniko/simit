@@ -147,9 +147,6 @@ pub fn plan(
     }
     let recipe = if let Some(r) = &request.recipe {
         let policy: Value = read_json(&root.join("policy.json"))?;
-        let own_fixture = r.repository == controller.repository
-            && r.commit == controller.commit
-            && r.directory == "fixtures/external";
         let trusted = policy["recipes"].as_array().is_some_and(|entries| {
             entries.iter().any(|e| {
                 e["repository"] == r.repository
@@ -158,15 +155,13 @@ pub fn plan(
                     && e["source_input"] == r.source_input
             })
         });
-        ensure!(
-            own_fixture || trusted,
-            "recipe pin is not in controller policy.json"
-        );
+        ensure!(trusted, "recipe pin is not in controller policy.json");
         Some(identity(&r.repository, &r.commit)?)
     } else {
         None
     };
     let tool_lock: Value = read_json(&root.join("flake.lock"))?;
+    super::engine::verify_lock(&tool_lock, &super::engine::manifest()?)?;
     let mut p = Plan {
         schema_version: VERSION,
         request_id: canonical_digest(&request)?,

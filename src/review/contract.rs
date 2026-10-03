@@ -233,10 +233,7 @@ impl Request {
             );
         }
         if let Some(c) = &self.cache_profile {
-            ensure!(
-                ["attic-existing", "cachix-existing"].contains(&c.as_str()),
-                "unknown cache profile"
-            );
+            ensure!(name(c), "unknown cache profile");
         }
         ensure!(
             self.publication == Publication::None || self.cache_profile.is_some(),

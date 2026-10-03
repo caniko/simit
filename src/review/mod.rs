@@ -5,6 +5,8 @@ pub mod artifact;
 pub mod backend;
 pub mod cli;
 pub mod contract;
+pub mod engine;
+pub mod generation;
 pub mod github;
 pub mod process;
 pub mod service;
