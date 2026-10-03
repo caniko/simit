@@ -541,6 +541,8 @@ pub struct NixBuildConfig {
     pub artifact_paths: Vec<String>,
     pub extra_setup: Vec<String>,
     pub post_build: Vec<String>,
+    /// Collect diagnostics before upload even when setup or realization failed.
+    pub post_build_always: Vec<String>,
     pub extra_env: BTreeMap<String, String>,
     /// Required secrets must be explicitly bound under `extra_env`.
     pub required_secrets: Vec<String>,
@@ -3438,16 +3440,19 @@ fn validate_nix_build_config(config: &ProjectConfig) -> Result<()> {
         }
     }
     if !options.capture_results
-        && (!options.post_build.is_empty() || options.artifact_retention_days.is_some())
+        && (!options.post_build.is_empty()
+            || !options.post_build_always.is_empty()
+            || options.artifact_retention_days.is_some())
     {
         bail!(
-            "simit project config: [ci.nix_build].post_build and artifact_retention_days require capture_results"
+            "simit project config: [ci.nix_build].post_build, post_build_always and artifact_retention_days require capture_results"
         );
     }
     for (name, values) in [
         ("artifact_paths", &options.artifact_paths),
         ("extra_setup", &options.extra_setup),
         ("post_build", &options.post_build),
+        ("post_build_always", &options.post_build_always),
     ] {
         validate_nonempty_strings(
             &format!("simit project config: [ci.nix_build].{name}"),
@@ -3523,6 +3528,7 @@ fn set_nix_build_table(table: &mut Table, options: &NixBuildConfig) {
     set_string_array(&mut build, "artifact_paths", &options.artifact_paths);
     set_string_array(&mut build, "extra_setup", &options.extra_setup);
     set_string_array(&mut build, "post_build", &options.post_build);
+    set_string_array(&mut build, "post_build_always", &options.post_build_always);
     set_string_map(&mut build, "extra_env", &options.extra_env);
     set_string_array(&mut build, "required_secrets", &options.required_secrets);
     set_string_array(&mut build, "required_env", &options.required_env);
