@@ -85,6 +85,7 @@ pub fn run(command: InitCiCommand) -> Result<()> {
         .or(cfg.ci.platform)
         .unwrap_or(Platform::Forgejo);
     let backend = CiBackend::from_parts(provider, platform)?;
+    validate_review_policy_backend(&cfg, platform, provider)?;
     if platform == Platform::Gitlab {
         return run_nix_only(command);
     }
@@ -694,6 +695,7 @@ fn run_nix_only_at(command: InitCiCommand, workspace_root: &Path) -> Result<()> 
         .or(cfg.ci.provider)
         .unwrap_or(CiProvider::Actions);
     let _backend = CiBackend::from_parts(provider, platform)?;
+    validate_review_policy_backend(&cfg, platform, provider)?;
     if provider != CiProvider::Actions {
         bail!("Nix-only CI currently supports the Actions provider only");
     }
@@ -897,6 +899,7 @@ fn run_python(command: InitCiCommand) -> Result<()> {
         return run_nix_only(command);
     }
     let backend = CiBackend::from_parts(provider, platform)?;
+    validate_review_policy_backend(&cfg, platform, provider)?;
     if backend.provider() == CiProvider::Crow {
         return run_crow_python(command, workspace_root, &cfg, platform);
     }
@@ -1939,6 +1942,9 @@ fn reconcile_ci_files(
     if let Some(review) = ProjectConfig::load(workspace_root)?.review.as_ref() {
         files.extend(crate::review::generation::files(review)?);
     }
+    if let Some(policy) = ProjectConfig::load(workspace_root)?.review_policy.as_ref() {
+        files.push(crate::render::review_policy::file(policy)?);
+    }
     let plan = project::GeneratedPlan {
         files,
         message,
@@ -1949,6 +1955,19 @@ fn reconcile_ci_files(
     } else {
         plan.write(workspace_root)
     }
+}
+
+fn validate_review_policy_backend(
+    config: &ProjectConfig,
+    platform: Platform,
+    provider: CiProvider,
+) -> Result<()> {
+    if config.review_policy.is_some()
+        && (platform != Platform::Github || provider != CiProvider::Actions)
+    {
+        bail!("[review_policy] requires the effective CI backend to be GitHub Actions");
+    }
+    Ok(())
 }
 
 fn cleanup_obsolete_nix_workflows(
@@ -2003,6 +2022,7 @@ fn is_ci_managed_workflow_name(name: &std::ffi::OsStr) -> bool {
     matches!(
         name,
         "build.yaml"
+            | "review-policy.yaml"
             | "build.yml"
             | "build.jsonnet"
             | "ci.yaml"

@@ -39,6 +39,63 @@ with_msrv = true
 
 ## Generic CI vs Release Publishing
 
+### Provider-review merge gate
+
+`canix-toolbelt` owns provider review, durable request accounting, and guarded
+merging. Simit can generate its trusted `review-policy` coordinator separately
+from ordinary CI and from the build-oriented `[review]` controller:
+
+```toml
+[ci]
+platform = "github"
+provider = "actions"
+
+[review_policy]
+toolbelt_version = "0.2.0" # select a qualified, published stable release
+app_id_secret = "REVIEW_POLICY_APP_ID"
+app_private_key_secret = "REVIEW_POLICY_APP_PRIVATE_KEY"
+# Optional policy from the trusted default-branch checkout, JSON or Pkl:
+# policy_path = "policy/review.json"
+```
+
+Generate and verify with `simit init ci --platform github` and
+`simit init ci --platform github --check --diff`. Do not enable a version before
+its crates.io publication has been independently verified.
+
+Provision a **dedicated policy GitHub App**, install it on each enrolled
+repository, and store its ID/private key under the configured secret names.
+This is separate from Greptile's installed App: Greptile supplies review records;
+the policy App authenticates the normalized acceptance check. The policy App
+needs repository `Checks: write`, `Contents: read`, `Pull requests: read`,
+`Issues: read`, and GitHub's mandatory `Metadata: read`. Do not grant contents
+write, administration write, or a merge credential to the coordinator.
+
+The workflow executes only on the default-branch ref, checks out its exact
+trusted event SHA with credentials disabled, and installs the exact locked
+registry engine. It never executes PR source. PR/comment events reconcile
+individual candidates; a bounded, ten-minute scheduled sweep covers completed
+bot reviews, dismissals, and delayed feedback. Collection waits up to ten
+minutes for event-triggered runs without requesting another provider review.
+Scheduled sweeps rotate one bounded page of open PRs, collect without waiting,
+and allow an active batch to finish before the next sweep. All findings remain
+blocking until source fixes receive a fresh review or repository writers record
+exact-finding evidence-backed dispositions.
+
+After the first check is published, configure classic branch protection with
+strict up-to-date checks and administrator enforcement. Require `review-policy`
+with its **dedicated App ID**, plus the repository's actual required CI contexts
+and human-approval policy. Do not bind the review context to the shared GitHub
+Actions App: PR-controlled workflows can otherwise impersonate that context.
+Unconfigured protection, absent credentials, unsupported rulesets/merge queues,
+and missing or failed CI remain merge blockers.
+
+The normal operator flow is `canix-toolbelt review ensure --pr URL`, investigate
+and fix every confirmed finding, repeat ensure after each head change, then
+`canix-toolbelt merge --pr URL --apply` for an authorized merge. Canix's direct
+library consumer exposes the equivalent `canix repo review` / `canix repo merge`
+surface once its qualified release is installed. A `ready` receipt cannot
+replace the merge command's live revalidation.
+
 ### Rust feature coverage and MSRV environments
 
 Rust Actions workflows honor `ci.all_features` for tests and Clippy in both
