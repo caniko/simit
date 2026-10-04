@@ -832,6 +832,20 @@ token_secret = "ATTIC_TOKEN"
 
     let workflow = read(&temp.path().join(".github/workflows/prebuild.yaml"));
     assert_yaml_parses(&workflow);
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
+    // A push and its PR must each retain their required prebuild check.
+    assert_eq!(
+        yaml["concurrency"]["group"].as_str(),
+        Some(
+            "${{ github.workflow_ref }}-${{ github.event_name }}-${{ github.head_ref || github.ref_name }}-prebuild"
+        )
+    );
+    assert_eq!(
+        yaml["concurrency"]["cancel-in-progress"].as_str(),
+        Some(
+            "${{ !inputs.release && (github.event_name == 'push' || github.event_name == 'pull_request') }}"
+        )
+    );
     assert!(workflow.contains("workflow_call:\n    inputs:\n      release:"));
     assert!(workflow.contains("secrets:\n      attic_token:\n        required: true"));
     assert!(workflow.contains("runs-on: ${{ matrix.runner }}"));
