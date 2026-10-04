@@ -374,8 +374,7 @@ pub fn custom_wiring_mismatches(
     {
         missing.push("flake.nix custom mode: missing git-hooks input".to_owned());
     }
-    if !content.contains("treefmtEval = treefmt-nix.lib.evalModule pkgs (import ./nix/treefmt.nix")
-    {
+    if !has_treefmt_eval_import(content) {
         missing.push(
             "flake.nix custom mode: missing treefmtEval import of ./nix/treefmt.nix".to_owned(),
         );
@@ -566,6 +565,48 @@ pub fn flake_passes_rustfmt_package(flake_content: &str) -> bool {
             call.as_ref()
                 .is_some_and(|arguments| arguments.contains("rustfmtPackage"))
         })
+    })
+}
+
+fn has_treefmt_eval_import(content: &str) -> bool {
+    use rnix::ast::Expr;
+
+    fn imports_policy<T: rnix::ast::AstNode>(argument: T) -> bool {
+        argument.syntax().descendants().any(|node| {
+            let Some(import) = cast_nix_node::<rnix::ast::Apply>(node) else {
+                return false;
+            };
+            matches!(import.lambda().and_then(unparen), Some(Expr::Ident(id)) if id.to_string() == "import")
+                && matches!(import.argument().and_then(unparen), Some(Expr::Path(path)) if path.to_string() == "./nix/treefmt.nix")
+        })
+    }
+
+    let parsed = rnix::Root::parse(content);
+    if !parsed.errors().is_empty() {
+        return false;
+    }
+    parsed.syntax().descendants().any(|node| {
+        let Some(binding) = cast_nix_node::<rnix::ast::AttrpathValue>(node) else {
+            return false;
+        };
+        if binding.attrpath().is_none_or(|path| path.to_string() != "treefmtEval") {
+            return false;
+        }
+        let Some(Expr::Apply(module)) = binding.value().and_then(unparen) else {
+            return false;
+        };
+        let Some(Expr::Apply(pkgs_call)) = module.lambda().and_then(unparen) else {
+            return false;
+        };
+        let Some(Expr::Select(function)) = pkgs_call.lambda().and_then(unparen) else {
+            return false;
+        };
+        if function.to_string().split_whitespace().collect::<String>() != "treefmt-nix.lib.evalModule"
+            || !matches!(pkgs_call.argument().and_then(unparen), Some(Expr::Ident(id)) if id.to_string() == "pkgs")
+        {
+            return false;
+        }
+        module.argument().is_some_and(imports_policy)
     })
 }
 
@@ -2101,6 +2142,25 @@ mod tests {
     use super::*;
     use crate::cli::FlakeTargetArg;
     use crate::project::Languages;
+
+    #[test]
+    fn custom_treefmt_import_survives_formatter_line_breaks() {
+        let binding = "treefmtEval =\n treefmt-nix.lib.evalModule pkgs\n (import ./nix/treefmt.nix { rustfmtPackage = rustToolchain; } { inherit pkgs; }\n // { settings.global.excludes = [\"third_party/**\"]; });";
+        assert!(has_treefmt_eval_import(&format!("{{ {binding} }}")));
+        assert!(!has_treefmt_eval_import(&format!("{{ # {binding}\n }}")));
+        assert!(!has_treefmt_eval_import(&format!("{{ /* {binding} */ }}")));
+        assert!(!has_treefmt_eval_import(&format!(
+            "{{ {} }}",
+            binding.replace("treefmtEval", "unused")
+        )));
+        assert!(!has_treefmt_eval_import(&format!(
+            "{{ {} }}",
+            binding.replace("./nix/treefmt.nix", "./other.nix")
+        )));
+        assert!(!has_treefmt_eval_import(
+            "{ treefmtEval = null; unused = import ./nix/treefmt.nix; }"
+        ));
+    }
 
     #[test]
     fn generated_policy_recognition_rejects_disabled_or_commented_coverage() {
