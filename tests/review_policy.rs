@@ -134,7 +134,7 @@ fn policy_generation_rejects_an_effective_non_github_platform() {
 }
 
 #[test]
-fn a_full_sweep_page_rotates_to_later_prs_without_abandoning_evaluation() {
+fn a_delivered_sweep_covers_every_page_even_when_schedule_slots_are_skipped() {
     let config = review_policy::Config {
         toolbelt_version: "0.2.0".into(),
         app_id_secret: "APP_ID".into(),
@@ -155,13 +155,13 @@ fn a_full_sweep_page_rotates_to_later_prs_without_abandoning_evaluation() {
     let output = root.path().join("outputs");
     std::fs::write(&event, "{}").unwrap();
     let fixture = r#"
-Date.now = () => 600000;
+Date.now = () => 1800000;
 let calls = 0;
 global.fetch = async url => {
   calls++;
-  if (calls === 2 && !url.endsWith('&page=2')) throw new Error('did not rotate to the later page');
-  return {ok:true, headers:{get:()=>'<https://api.github.com/repos/example/project/pulls?page=3>; rel="last"'},
-    json:async()=>Array.from({length:100},(_,i)=>({number:(calls===1?1:101)+i}))};
+  if (!url.endsWith(`&page=${calls}`)) throw new Error('did not fetch the next page');
+  return {ok:true, headers:{get:()=>calls<3?`<https://api.github.com/repos/example/project/pulls?page=${calls+1}>; rel="next"`:null},
+    json:async()=>Array.from({length:calls<3?100:1},(_,i)=>({number:(calls-1)*100+i+1}))};
 };
 "#;
     let result = std::process::Command::new("node")
@@ -181,5 +181,5 @@ global.fetch = async url => {
     );
     let outputs = std::fs::read_to_string(output).unwrap();
     let prs: Vec<u64> = serde_json::from_str(outputs.trim().strip_prefix("prs=").unwrap()).unwrap();
-    assert_eq!(prs, (101..=200).collect::<Vec<_>>());
+    assert_eq!(prs, (1..=201).collect::<Vec<_>>());
 }

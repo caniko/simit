@@ -122,24 +122,22 @@ jobs:
             let prs;
             if (process.env.GITHUB_EVENT_NAME === 'schedule') {
               const base = `https://api.github.com/repos/${repo}/pulls?state=open&sort=created&direction=asc&per_page=100`;
-              let response = await fetch(base, {
-                headers: {Authorization: `Bearer ${process.env.GH_TOKEN}`, Accept: 'application/vnd.github+json'}
-              });
-              if (!response.ok) throw new Error(`PR enumeration failed: ${response.status}`);
-              const last = response.headers.get('link')?.match(/<([^>]+)>; rel="last"/);
-              const pages = last ? Number(new URL(last[1]).searchParams.get('page')) : 1;
-              if (!Number.isSafeInteger(pages) || pages < 1) throw new Error('invalid PR pagination');
-              // Rotate a bounded page rather than repeatedly abandoning a full
-              // collection. Active scheduled batches finish before the next.
-              const page = 1 + Math.floor(Date.now() / 600000) % pages;
-              if (page !== 1) {
-                response = await fetch(`${base}&page=${page}`, {
+              prs = [];
+              // Each delivered schedule covers every page. GitHub may skip
+              // schedule slots, so wall-clock rotation cannot guarantee progress.
+              for (let page = 1; ; page++) {
+                const response = await fetch(`${base}&page=${page}`, {
                   headers: {Authorization: `Bearer ${process.env.GH_TOKEN}`, Accept: 'application/vnd.github+json'}
                 });
                 if (!response.ok) throw new Error(`PR page lookup failed: ${response.status}`);
+                const items = await response.json();
+                if (!Array.isArray(items)) throw new Error('invalid PR page');
+                prs.push(...items.map(pr => pr.number));
+                // Fail explicitly at the matrix limit instead of silently
+                // declaring an incomplete sweep successful.
+                if (prs.length > 256) throw new Error('review sweep exceeds the 256-job matrix limit');
+                if (!response.headers.get('link')?.match(/<([^>]+)>; rel="next"/)) break;
               }
-              const items = await response.json();
-              prs = items.map(pr => pr.number);
             } else {
               prs = [Number(event.pull_request?.number || event.issue?.number || event.inputs?.pr_number)];
             }
