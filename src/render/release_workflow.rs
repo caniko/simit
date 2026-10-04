@@ -859,7 +859,20 @@ fn push_validate_tag(w: &mut String, artifacts: &ArtifactsConfig) {
     w.push_str("            if [ -n \"${GNUPGHOME:-}\" ]; then rm -rf \"$GNUPGHOME\"; fi\n");
     w.push_str("          }\n");
     w.push_str("          trap cleanup_validation EXIT\n");
-    w.push_str("          git worktree add --detach \"$tag_worktree\" \"$VERSION\"\n");
+    w.push_str(
+        "          GNUPGHOME=\"$(mktemp -d)\"; export GNUPGHOME; chmod 700 \"$GNUPGHOME\"\n",
+    );
+    w.push_str("          git fetch --no-tags origin HEAD\n");
+    w.push_str(
+        "          git show \"FETCH_HEAD:keys/maintainers.gpg\" > \"$GNUPGHOME/maintainers.gpg\"\n",
+    );
+    w.push_str("          test -s \"$GNUPGHOME/maintainers.gpg\"\n");
+    w.push_str("          gpg --batch --import \"$GNUPGHOME/maintainers.gpg\"\n");
+    w.push_str("          git verify-tag \"$VERSION\"\n");
+    w.push_str(
+        "          validated_sha=\"$(git rev-parse --verify \"refs/tags/${VERSION}^{commit}\")\"\n",
+    );
+    w.push_str("          git worktree add --detach \"$tag_worktree\" \"$validated_sha\"\n");
     if let Some(attr) = &artifacts.version_attr {
         writeln!(
             w,
@@ -867,17 +880,11 @@ fn push_validate_tag(w: &mut String, artifacts: &ArtifactsConfig) {
         )
         .expect("write");
     }
-    w.push_str("          test -s \"$tag_worktree/keys/maintainers.gpg\"\n");
     w.push_str("          if ! grep -q \"^## \\[$VERSION\\] - [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]\" \"$tag_worktree/CHANGELOG.md\"; then\n");
     w.push_str("            echo \"CHANGELOG.md missing section for $VERSION\" >&2\n            exit 1\n          fi\n\n");
     w.push_str("          IS_PRERELEASE=false\n");
     writeln!(w, "          if printf '%s\\n' \"$VERSION\" | grep -Eq -- '{PRERELEASE_REGEX}'; then IS_PRERELEASE=true; fi").expect("write");
-    w.push_str(
-        "\n          GNUPGHOME=\"$(mktemp -d)\"; export GNUPGHOME; chmod 700 \"$GNUPGHOME\"\n",
-    );
-    w.push_str("          gpg --batch --import \"$tag_worktree/keys/maintainers.gpg\"\n");
-    w.push_str("          git verify-tag \"$VERSION\"\n");
-    w.push_str("          validated_sha=\"$(git -C \"$tag_worktree\" rev-parse HEAD)\"\n");
+    w.push_str("\n");
     w.push_str("          git checkout --detach \"$validated_sha\"\n");
     w.push_str("          { printf 'VERSION=%s\\n' \"$VERSION\"; printf 'IS_PRERELEASE=%s\\n' \"$IS_PRERELEASE\"; } > release-env\n");
 }
@@ -2875,6 +2882,77 @@ mod tests {
         assert!(!error.contains("${VERSION}"), "{error}");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn artifact_release_verifies_independent_keys_before_evaluating_tag_source() {
+        use std::{fs, os::unix::fs::PermissionsExt, process::Command};
+
+        let temp = tempfile::tempdir().unwrap();
+        let bin = temp.path().join("bin");
+        fs::create_dir(&bin).unwrap();
+        for (name, body) in [
+            (
+                "git",
+                r#"case "$1" in
+fetch) exit 0;;
+show) [ "$2" = 'FETCH_HEAD:keys/maintainers.gpg' ] && [ "$TEST_KEY_AVAILABLE" = 1 ] || exit 90; printf default-branch-key;;
+verify-tag) [ "$TEST_TAG_ACCEPTED" = 1 ] || exit 91; touch verified;;
+rev-parse) [ "$3" = 'refs/tags/0.1.0^{commit}' ] || exit 92; printf verified-tag-commit;;
+worktree) case "$2" in
+  add) [ -f verified ] && [ "$5" = verified-tag-commit ] || exit 93; mkdir -p "$4"; printf '## [0.1.0] - 2026-10-04\n' > "$4/CHANGELOG.md";;
+  remove) rm -rf "$4";;
+  *) exit 94;;
+esac;;
+checkout) [ "$3" = verified-tag-commit ] || exit 95; touch checked-out;;
+*) exit 99;;
+esac"#,
+            ),
+            (
+                "gpg",
+                r#"[ "$1" = --batch ] && [ "$2" = --import ] && [ "$(cat "$3")" = default-branch-key"#,
+            ),
+            (
+                "nix",
+                "test -f verified || exit 96; touch evaluated; printf '0.1.0'",
+            ),
+        ] {
+            let path = bin.join(name);
+            fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let path = std::env::join_paths(
+            std::iter::once(bin).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+        )
+        .unwrap();
+        let mut config = artifacts();
+        config.version_attr = Some("demo".to_owned());
+        let mut step = String::new();
+        push_validate_tag(&mut step, &config);
+        let script = step
+            .lines()
+            .skip(2)
+            .map(|line| line.strip_prefix("          ").unwrap_or(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for (key_available, tag_accepted, accepted) in
+            [("0", "1", false), ("1", "0", false), ("1", "1", true)]
+        {
+            let output = Command::new("bash")
+                .current_dir(temp.path())
+                .args(["-c", &script])
+                .env("PATH", &path)
+                .env("TMPDIR", temp.path())
+                .env("GITHUB_REF_NAME", "0.1.0")
+                .env("TEST_KEY_AVAILABLE", key_available)
+                .env("TEST_TAG_ACCEPTED", tag_accepted)
+                .output()
+                .unwrap();
+            assert_eq!(output.status.success(), accepted, "{output:?}");
+            assert_eq!(temp.path().join("evaluated").exists(), accepted);
+            assert_eq!(temp.path().join("checked-out").exists(), accepted);
+        }
+    }
+
     #[test]
     fn full_pipeline_has_every_channel_mechanic() {
         let (aur, copr, apt, codeberg, homebrew, scoop) =
@@ -2924,7 +3002,9 @@ mod tests {
                 "test \"$(nix eval --raw \"$tag_worktree#modde.version\")\" = \"$VERSION\""
             )
         );
-        assert!(workflow.contains("git worktree add --detach \"$tag_worktree\" \"$VERSION\""));
+        assert!(
+            workflow.contains("git worktree add --detach \"$tag_worktree\" \"$validated_sha\"")
+        );
         assert!(workflow.contains("git verify-tag \"$VERSION\""));
         assert!(workflow.contains("git checkout --detach \"$validated_sha\""));
         assert!(workflow.contains("export VERSION IS_PRERELEASE"));
