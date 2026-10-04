@@ -138,8 +138,44 @@ fn upgrade_current_workspace_writes_managed_badge_block() {
 
     let readme = read(&project.path().join("README.md"));
     assert!(readme.contains("<!-- simit:badges:start -->"));
-    assert!(readme.contains("https://img.shields.io/badge/crates.io-ready-f46623"));
+    assert!(readme.contains("https://img.shields.io/badge/crates.io-publishable-f46623"));
     assert!(readme.contains("# upgrade-current\n\n<!-- simit:badges:start -->"));
+}
+
+#[test]
+fn hosted_release_badges_follow_crate_publication_policy() {
+    for host in ["codeberg", "github"] {
+        for publish_crates in [false, true] {
+            let project = non_tmp_project("upgrade-hosted");
+            fs::write(
+                project.path().join("simit.toml"),
+                format!(
+                    "[ci]\npublish_crates = {publish_crates}\n\n[release.{host}]\nrepo = \"example/player\"\n"
+                ),
+            )
+            .unwrap();
+            let output = simit()
+                .current_dir(project.path())
+                .args(["upgrade"])
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let readme = read(&project.path().join("README.md"));
+            assert_eq!(
+                readme.contains("https://img.shields.io/badge/crates.io-publishable-f46623"),
+                publish_crates,
+                "{host}, publish_crates={publish_crates}: {readme}"
+            );
+            assert!(!readme.contains("crates.io-ready"));
+            if !publish_crates {
+                assert!(!readme.contains("https://crates.io/crates/"));
+            }
+        }
+    }
 }
 
 #[test]
