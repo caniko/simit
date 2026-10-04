@@ -101,10 +101,11 @@ fn badges(
             docs_link(workspace_root, &package),
         ));
     }
-    if package.is_publishable() {
+    let hosted_release = config.release.codeberg.is_some() || config.release.github.is_some();
+    if package.is_publishable() && (config.ci.publish_crates || !hosted_release) {
         badges.push(static_badge(
             "crates.io",
-            "ready",
+            "publishable",
             "f46623",
             Some(format!("https://crates.io/crates/{}", package.name)),
         ));
