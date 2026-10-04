@@ -55,10 +55,8 @@ impl Config {
 
 pub fn file(config: &Config) -> Result<GeneratedFile> {
     config.validate()?;
-    // The relative path is validated before inclusion in shell syntax.
-    let policy = config.policy_path.as_ref().map_or(String::new(), |path| {
-        format!(" --policy \"$GITHUB_WORKSPACE/{path}\"")
-    });
+    // Validated paths are quoted as YAML values, never executable shell text.
+    let policy = format!("\"{}\"", config.policy_path.as_deref().unwrap_or(""));
     let content = TEMPLATE
         .replace("%MARKER%", ci::GENERATED_WORKFLOW_MARKER)
         .replace(
@@ -107,7 +105,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
-      prs: ${{ steps.prs.outputs.prs }}
+      batches: ${{ steps.prs.outputs.batches }}
     steps:
       - id: prs
         env:
@@ -122,67 +120,41 @@ jobs:
             let prs;
             if (process.env.GITHUB_EVENT_NAME === 'schedule') {
               const base = `https://api.github.com/repos/${repo}/pulls?state=open&sort=created&direction=asc&per_page=100`;
-              let response = await fetch(base, {
-                headers: {Authorization: `Bearer ${process.env.GH_TOKEN}`, Accept: 'application/vnd.github+json'}
-              });
-              if (!response.ok) throw new Error(`PR enumeration failed: ${response.status}`);
-              const last = response.headers.get('link')?.match(/<([^>]+)>; rel="last"/);
-              const pages = last ? Number(new URL(last[1]).searchParams.get('page')) : 1;
-              if (!Number.isSafeInteger(pages) || pages < 1) throw new Error('invalid PR pagination');
-              // Rotate a bounded page rather than repeatedly abandoning a full
-              // collection. Active scheduled batches finish before the next.
-              const page = 1 + Math.floor(Date.now() / 600000) % pages;
-              if (page !== 1) {
-                response = await fetch(`${base}&page=${page}`, {
+              prs = [];
+              // Every run restarts a complete bounded enumeration. Delayed or
+              // skipped schedules cannot strand a page behind a clock cursor.
+              for (let page = 1; page <= 50; page++) {
+                const response = await fetch(`${base}&page=${page}`, {
                   headers: {Authorization: `Bearer ${process.env.GH_TOKEN}`, Accept: 'application/vnd.github+json'}
                 });
-                if (!response.ok) throw new Error(`PR page lookup failed: ${response.status}`);
+                if (!response.ok) throw new Error(`PR enumeration failed: ${response.status}`);
+                const items = await response.json();
+                if (!Array.isArray(items)) throw new Error('invalid PR collection');
+                prs.push(...items.map(pr => pr.number));
+                if (!response.headers.get('link')?.includes('rel="next"')) break;
+                if (page === 50) throw new Error('sweep exceeds supported 5000-PR bound; no partial qualification');
               }
-              const items = await response.json();
-              prs = items.map(pr => pr.number);
             } else {
               prs = [Number(event.pull_request?.number || event.issue?.number || event.inputs?.pr_number)];
             }
             if (!prs.every(n => Number.isSafeInteger(n) && n > 0)) throw new Error('invalid PR identity');
-            fs.appendFileSync(process.env.GITHUB_OUTPUT, `prs=${JSON.stringify(prs)}\n`);
+            prs = [...new Set(prs)];
+            const batches = [];
+            for (let start = 0; start < prs.length; start += 20) batches.push(prs.slice(start, start + 20));
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, `batches=${JSON.stringify(batches)}\n`);
           })().catch(error => { console.error(error.message); process.exit(1); });
           NODE
   evaluate:
     needs: resolve
-    if: ${{ needs.resolve.outputs.prs != '[]' }}
+    if: ${{ needs.resolve.outputs.batches != '[]' }}
     strategy:
       fail-fast: false
       max-parallel: 2
       matrix:
-        pr: ${{ fromJSON(needs.resolve.outputs.prs) }}
-    concurrency:
-      group: review-policy-pr-${{ matrix.pr }}
-      cancel-in-progress: ${{ github.event_name != 'schedule' }}
+        batch: ${{ fromJSON(needs.resolve.outputs.batches) }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 45
     steps:
-      - name: Resolve authoritative PR identity
-        id: candidate
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ matrix.pr }}
-        run: |
-          node <<'NODE'
-          const fs = require('node:fs');
-          (async () => {
-            const event = JSON.parse(fs.readFileSync(process.env.GITHUB_EVENT_PATH, 'utf8'));
-            const number = Number(process.env.PR_NUMBER);
-            const repo = process.env.GITHUB_REPOSITORY;
-            if (!Number.isSafeInteger(number) || number <= 0 || !/^[\w.-]+\/[\w.-]+$/.test(repo)) throw new Error('invalid PR identity');
-            const response = await fetch(`https://api.github.com/repos/${repo}/pulls/${number}`, {
-              headers: {Authorization: `Bearer ${process.env.GH_TOKEN}`, Accept: 'application/vnd.github+json'}
-            });
-            if (!response.ok) throw new Error(`PR lookup failed: ${response.status}`);
-            const pr = await response.json();
-            if (!/^[a-f0-9]{40}$/.test(pr.head.sha)) throw new Error('invalid candidate SHA');
-            fs.appendFileSync(process.env.GITHUB_OUTPUT, `url=https://github.com/${repo}/pull/${number}\nhead=${pr.head.sha}\n`);
-          })().catch(error => { console.error(error.message); process.exit(1); });
-          NODE
       - name: Checkout trusted policy only
         uses: %CHECKOUT%
         with:
@@ -204,11 +176,33 @@ jobs:
       - name: Reconcile and publish revision-bound review evidence
         env:
           GH_TOKEN: ${{ steps.policy-token.outputs.token }}
-          PR_URL: ${{ steps.candidate.outputs.url }}
-          EXPECTED_HEAD: ${{ steps.candidate.outputs.head }}
+          PR_BATCH: ${{ toJSON(matrix.batch) }}
+          POLICY_PATH: %POLICY%
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          seconds=600
-          if [ "$GITHUB_EVENT_NAME" = schedule ]; then seconds=0; fi
-          "$RUNNER_TEMP/toolbelt/bin/canix-toolbelt" review gate --pr "$PR_URL" --expected-head "$EXPECTED_HEAD" --timeout-seconds "$seconds" --publish-check --details-url "$RUN_URL"%POLICY%
+          node <<'NODE'
+          const {spawnSync} = require('node:child_process');
+          (async () => {
+            const repo = process.env.GITHUB_REPOSITORY;
+            const batch = JSON.parse(process.env.PR_BATCH);
+            if (!/^[\w.-]+\/[\w.-]+$/.test(repo) || !Array.isArray(batch) || batch.length > 20 || !batch.every(n => Number.isSafeInteger(n) && n > 0)) throw new Error('invalid PR batch');
+            let failed = false;
+            for (const number of batch) {
+              try {
+                const response = await fetch(`https://api.github.com/repos/${repo}/pulls/${number}`, {
+                  headers: {Authorization: `Bearer ${process.env.GH_TOKEN}`, Accept: 'application/vnd.github+json'}
+                });
+                if (!response.ok) throw new Error(`PR lookup failed: ${response.status}`);
+                const pr = await response.json();
+                if (!/^[a-f0-9]{40}$/.test(pr.head.sha)) throw new Error('invalid candidate SHA');
+                const args = ['review', 'gate', '--pr', `https://github.com/${repo}/pull/${number}`, '--expected-head', pr.head.sha,
+                  '--timeout-seconds', process.env.GITHUB_EVENT_NAME === 'schedule' ? '0' : '600', '--publish-check', '--details-url', process.env.RUN_URL];
+                if (process.env.POLICY_PATH) args.push('--policy', `${process.env.GITHUB_WORKSPACE}/${process.env.POLICY_PATH}`);
+                const result = spawnSync(`${process.env.RUNNER_TEMP}/toolbelt/bin/canix-toolbelt`, args, {stdio:'inherit', timeout:660000});
+                if (result.error || result.status !== 0) failed = true;
+              } catch (error) { console.error(`PR ${number}: ${error.message}`); failed = true; }
+            }
+            if (failed) process.exitCode = 1;
+          })().catch(error => { console.error(error.message); process.exit(1); });
+          NODE
 "#;

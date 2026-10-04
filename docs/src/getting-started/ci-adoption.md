@@ -76,8 +76,10 @@ registry engine. It never executes PR source. PR/comment events reconcile
 individual candidates; a bounded, ten-minute scheduled sweep covers completed
 bot reviews, dismissals, and delayed feedback. Collection waits up to ten
 minutes for event-triggered runs without requesting another provider review.
-Scheduled sweeps rotate one bounded page of open PRs, collect without waiting,
-and allow an active batch to finish before the next sweep. All findings remain
+Scheduled sweeps enumerate every open-PR page, up to the supported 5000-PR
+bound, collect without waiting in batches of twenty, and allow an active sweep
+to finish before the next. Exceeding the bound fails explicitly without claiming
+partial qualification. All findings remain
 blocking until source fixes receive a fresh review or repository writers record
 exact-finding evidence-backed dispositions.
 
