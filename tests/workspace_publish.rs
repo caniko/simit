@@ -236,7 +236,7 @@ timeout_minutes = 30
     assert!(publish.contains("cancel-in-progress: false"));
     // Signed-tag + trust-root gating preserved (never disabled when missing).
     assert!(publish.contains("git verify-tag \"$tag\""));
-    assert!(publish.contains("test -s keys/maintainers.gpg"));
+    assert!(publish.contains("test -s \"$GNUPGHOME/maintainers.gpg\""));
     assert!(publish.contains("local_crate=\"target/package/${crate_name}-${version}.crate\""));
     // Lockstep validation for every publishable member.
     assert!(publish.contains("cargo pkgid -p a"));
@@ -319,7 +319,7 @@ fn coordinated_tag_validation_rejects_a_moved_tag_before_checkout() {
         ("gpg", "exit 0"),
         (
             "git",
-            "case \"$1\" in\nfetch|verify-tag) exit 0;;\nrev-list) printf '%s\\n' \"$TEST_TAG_SHA\";;\ncheckout) touch checkout-ran;;\n*) exit 99;;\nesac",
+            "case \"$1\" in\nfetch|verify-tag) exit 0;;\nshow) printf 'fixture trust root';;\nrev-list) printf '%s\\n' \"$TEST_TAG_SHA\";;\ncheckout) touch checkout-ran;;\n*) exit 99;;\nesac",
         ),
         ("cargo", "printf 'fixture@0.1.0\\n'"),
     ] {
@@ -611,8 +611,8 @@ fn coordinated_publish_preserves_signing_trust_when_config_missing() {
         .unwrap();
     assert!(status.success());
     let publish = read(&temp.path().join(".github/workflows/publish-workspace.yaml"));
-    assert!(publish.contains("test -s keys/maintainers.gpg"));
-    assert!(publish.contains("gpg --batch --import keys/maintainers.gpg"));
+    assert!(publish.contains("git show \"FETCH_HEAD:keys/maintainers.gpg\""));
+    assert!(publish.contains("gpg --batch --import \"$GNUPGHOME/maintainers.gpg\""));
     assert!(publish.contains("git verify-tag \"$tag\""));
 }
 

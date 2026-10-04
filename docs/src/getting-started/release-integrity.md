@@ -26,6 +26,18 @@ The key is discovered from `[release.signing].key`, `git config
 user.signingkey`, or `--key`/`--maintainer-key`. If no exportable key is
 available, simit blocks instead of generating an unsigned publish path.
 
+Land `keys/maintainers.gpg` on the repository's default branch before releasing.
+Generated publish workflows fetch that branch's keyring into an isolated GnuPG
+home rather than trusting keys supplied by the release checkout. A missing
+default-branch keyring fails publication. Key rotation must therefore land on
+the default branch before a tag signed by the replacement key is released.
+
+After verifying the signed tag, generated publish workflows require its peeled
+commit to equal the checkout being published. A manual run from a different
+same-version branch fails before package metadata is executed or publication
+begins. Coordinated workspace publication also binds the signed commit to the
+immutable workflow event SHA used by its dependent jobs.
+
 `keys/minisign.pub` is the public half of the offline minisign key used to
 sign `SHA256SUMS.txt`. Generate the keypair on the maintainer-controlled
 machine and store the secret key outside the repository:

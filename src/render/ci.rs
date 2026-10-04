@@ -480,11 +480,7 @@ fn publish_workspace_workflow(
     w.push_str("          set -euo pipefail\n");
     w.push_str("          tag=\"${GITHUB_REF_NAME:-${GITHUB_REF#refs/tags/}}\"\n");
     w.push_str("          if ! printf '%s\\n' \"$tag\" | grep -Eq '^[0-9]+\\.[0-9]+\\.[0-9]+$'; then echo \"Tag must be an exact semver version like 0.1.1, got '$tag'\" >&2; exit 1; fi\n");
-    w.push_str("          test -s keys/maintainers.gpg\n");
-    w.push_str(
-        "          GNUPGHOME=\"$(mktemp -d)\"; export GNUPGHOME; chmod 700 \"$GNUPGHOME\"\n",
-    );
-    w.push_str("          gpg --batch --import keys/maintainers.gpg\n");
+    w.push_str(release_trust_root_steps());
     w.push_str("          git fetch --force --tags origin \"refs/tags/${tag}:refs/tags/${tag}\"\n");
     w.push_str("          git verify-tag \"$tag\"\n");
     w.push_str("          validated_sha=\"$(git rev-list -n 1 \"$tag\")\"\n");
@@ -1545,6 +1541,11 @@ fn push_vscode_version_validation(workflow: &mut String, vscode: &ResolvedVscode
     workflow.push_str("          set -euo pipefail\n");
     workflow.push_str("          VERSION=\"${GITHUB_REF_NAME#v}\"\n");
     workflow.push_str("          printf '%s\\n' \"$VERSION\" | grep -Eq '^[0-9]+\\.[0-9]+\\.[0-9]+$' || { echo \"release tag must be an exact semver version\"; exit 1; }\n");
+    workflow.push_str(release_trust_root_steps());
+    workflow.push_str("          git fetch --force --tags origin \"refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}\"\n");
+    workflow.push_str("          git verify-tag \"$GITHUB_REF_NAME\"\n");
+    workflow.push_str("          validated_sha=\"$(git rev-parse --verify \"refs/tags/${GITHUB_REF_NAME}^{commit}\")\"\n");
+    workflow.push_str("          test \"$validated_sha\" = \"$(git rev-parse --verify HEAD)\" || { echo \"Signed tag commit does not match the checkout being published\" >&2; exit 1; }\n");
     if let Some(cargo_package) = &vscode.cargo_package {
         workflow.push_str("          cargo_metadata=$(nix shell nixpkgs#cargo -c cargo metadata --no-deps --format-version 1)\n");
         workflow.push_str("          # jq variables are expanded by jq, not the shell.\n          # shellcheck disable=SC2016\n");
@@ -1564,14 +1565,6 @@ fn push_vscode_version_validation(workflow: &mut String, vscode: &ResolvedVscode
     )));
     workflow.push_str(")\n");
     workflow.push_str("          test \"$extension_version\" = \"$VERSION\" || { echo \"extension version $extension_version does not match tag $VERSION\"; exit 1; }\n\n");
-    workflow.push_str("          test -s keys/maintainers.gpg\n");
-    workflow.push_str("          GNUPGHOME=\"$(mktemp -d)\"\n");
-    workflow.push_str("          export GNUPGHOME\n");
-    workflow.push_str("          trap 'rm -rf \"$GNUPGHOME\"' EXIT\n");
-    workflow.push_str("          chmod 700 \"$GNUPGHOME\"\n");
-    workflow.push_str("          gpg --batch --import keys/maintainers.gpg\n");
-    workflow.push_str("          git fetch --force --tags origin \"refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}\"\n");
-    workflow.push_str("          git verify-tag \"$GITHUB_REF_NAME\"\n\n");
 }
 
 fn push_vscode_codeberg_upload(workflow: &mut String, vscode: &ResolvedVscode) {
@@ -4384,6 +4377,20 @@ fn push_validate_pypi_tag_step(workflow: &mut String) {
     );
 }
 
+fn release_trust_root_steps() -> &'static str {
+    r#"          GNUPGHOME="$(mktemp -d)"
+          export GNUPGHOME
+          trap 'rm -rf "$GNUPGHOME"' EXIT
+          chmod 700 "$GNUPGHOME"
+          # The release checkout cannot supply its own verification key.
+          # Fetch the repository's independently maintained default-branch key.
+          git fetch --no-tags origin HEAD
+          git show "FETCH_HEAD:keys/maintainers.gpg" > "$GNUPGHOME/maintainers.gpg"
+          test -s "$GNUPGHOME/maintainers.gpg"
+          gpg --batch --import "$GNUPGHOME/maintainers.gpg"
+"#
+}
+
 fn validate_release_tag_step(
     cargo_command_prefix: Option<&str>,
     package_name: Option<&str>,
@@ -4409,6 +4416,7 @@ fn validate_release_tag_step(
     } else {
         String::new()
     };
+    let trust_root = release_trust_root_steps();
 
     format!(
         r#"      - name: Validate signed release tag
@@ -4424,8 +4432,6 @@ fn validate_release_tag_step(
             echo "Tag must be an exact semver version like 0.1.1, got '$tag'" >&2
             exit 1
           fi
-{version_check}
-          test -s keys/maintainers.gpg
           if ! command -v gpg >/dev/null 2>&1; then
             if command -v apt-get >/dev/null 2>&1; then
               apt-get update
@@ -4435,14 +4441,16 @@ fn validate_release_tag_step(
               exit 1
             fi
           fi
-          GNUPGHOME="$(mktemp -d)"
-          export GNUPGHOME
-          trap 'rm -rf "$GNUPGHOME"' EXIT
-          chmod 700 "$GNUPGHOME"
-          gpg --batch --import keys/maintainers.gpg
+{trust_root}
           git fetch --force --tags origin "refs/tags/${{tag}}:refs/tags/${{tag}}"
           git verify-tag "$tag"
-
+          validated_sha="$(git rev-parse --verify "refs/tags/${{tag}}^{{commit}}")"
+          checkout_sha="$(git rev-parse --verify HEAD)"
+          if [ "$validated_sha" != "$checkout_sha" ]; then
+            echo "Signed tag commit does not match the checkout being published" >&2
+            exit 1
+          fi
+{version_check}
 "#
     )
 }
