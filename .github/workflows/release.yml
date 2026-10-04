@@ -47,8 +47,9 @@ jobs:
           set -euo pipefail
           VERSION="${GITHUB_REF_NAME:-${FORGE_REF_NAME:-${FORGEJO_REF_NAME:-}}}"
           if [ -z "$VERSION" ]; then ref="${GITHUB_REF:-${FORGE_REF:-${FORGEJO_REF:-}}}"; VERSION="${ref#refs/tags/}"; fi
+          TAG="$VERSION"
           echo "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-(rc|beta|alpha)\.[0-9]+)?$'
-          git fetch --force --tags origin "refs/tags/${VERSION}:refs/tags/${VERSION}"
+          git fetch --force --tags origin "refs/tags/${TAG}:refs/tags/${TAG}"
           tag_worktree="$(mktemp -d)"
           rmdir "$tag_worktree"
           cleanup_validation() {
@@ -56,7 +57,7 @@ jobs:
             if [ -n "${GNUPGHOME:-}" ]; then rm -rf "$GNUPGHOME"; fi
           }
           trap cleanup_validation EXIT
-          git worktree add --detach "$tag_worktree" "$VERSION"
+          git worktree add --detach "$tag_worktree" "$TAG"
           test "$(nix eval --raw "$tag_worktree#simit-x86_64-linux-musl.version")" = "$VERSION"
           test -s "$tag_worktree/keys/maintainers.gpg"
           if ! grep -q "^## \[$VERSION\] - [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]" "$tag_worktree/CHANGELOG.md"; then
@@ -69,10 +70,21 @@ jobs:
 
           GNUPGHOME="$(mktemp -d)"; export GNUPGHOME; chmod 700 "$GNUPGHOME"
           gpg --batch --import "$tag_worktree/keys/maintainers.gpg"
-          git verify-tag "$VERSION"
+          git verify-tag "$TAG"
           validated_sha="$(git -C "$tag_worktree" rev-parse HEAD)"
           git checkout --detach "$validated_sha"
-          { printf 'VERSION=%s\n' "$VERSION"; printf 'IS_PRERELEASE=%s\n' "$IS_PRERELEASE"; } > release-env
+          { printf 'TAG=%s\n' "$TAG"; printf 'VERSION=%s\n' "$VERSION"; printf 'IS_PRERELEASE=%s\n' "$IS_PRERELEASE"; } > release-env
+      - name: Generate release notes
+        run: |
+          set -euo pipefail
+          . ./release-env
+          awk -v version="$VERSION" '
+            $0 ~ "^## \\[" version "\\] - [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]$" { found = 1; print; next }
+            found && /^## \[/ { exit }
+            found && /^\[[^]]+\]: / { exit }
+            found { print }
+            END { if (!found) exit 1 }
+          ' CHANGELOG.md > release-notes.md
       - name: Check release credentials
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -106,7 +118,7 @@ jobs:
         run: |
           set -euo pipefail
           . ./release-env
-          export VERSION IS_PRERELEASE
+          export TAG VERSION IS_PRERELEASE
           mkdir -p release
           df -h /
           free_kib="$(df -Pk / | awk 'NR == 2 { print $4 }')"
@@ -177,7 +189,7 @@ jobs:
           git_sha="$(git rev-parse HEAD)"
           workflow_sha="$(sha256sum .github/workflows/release.yml | awk '{print $1}')"
           flake_lock_sha="missing"; if [ -f flake.lock ]; then flake_lock_sha="$(sha256sum flake.lock | awk '{print $1}')"; fi
-          builder_id="${repo_url}/blob/${VERSION}/.github/workflows/release.yml"
+          builder_id="${repo_url}/blob/${TAG}/.github/workflows/release.yml"
           sign_blob_keyless() { file="$1"; if [ -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ] && [ -n "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" ]; then curl -fsSL -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sigstore" | jq -er '.value' > "$oidc_token"; cosign sign-blob --yes --identity-token "$(cat "$oidc_token")" --bundle "${file}.cosign.bundle" "$file"; else return 1; fi; }
           attest_blob_keyless() { file="$1"; predicate="$2"; if [ -s "$oidc_token" ]; then cosign attest-blob --yes --identity-token "$(cat "$oidc_token")" --predicate "$predicate" --type slsaprovenance1 --bundle "${file}.intoto.bundle" "$file"; else return 1; fi; }
           sign_blob_with_key() { file="$1"; test -n "${COSIGN_PRIVATE_KEY:-}"; printf '%s' "$COSIGN_PRIVATE_KEY" > "$cosign_key"; cosign sign-blob --yes --key "$cosign_key" --bundle "${file}.cosign.bundle" "$file"; }
@@ -187,7 +199,7 @@ jobs:
           while IFS= read -r file; do
             [ -f "$file" ] || continue
             artifact_sha="$(sha256sum "$file" | awk '{print $1}')"; predicate="$(mktemp)"
-            jq -n --arg builder_id "$builder_id" --arg git_sha "$git_sha" --arg workflow_sha "$workflow_sha" --arg flake_lock_sha "$flake_lock_sha" --arg repo_url "$repo_url" --arg ref "refs/tags/${VERSION}" --arg artifact "$(basename "$file")" --arg artifact_sha "$artifact_sha" '{buildDefinition:{buildType:"https://simit.rs/release",externalParameters:{repository:$repo_url,ref:$ref,artifact:$artifact,artifactDigest:{sha256:$artifact_sha}},internalParameters:{},resolvedDependencies:[{uri:($repo_url+".git"),digest:{gitCommit:$git_sha}},{uri:"flake.lock",digest:{sha256:$flake_lock_sha}},{uri:"release workflow",digest:{sha256:$workflow_sha}}]},runDetails:{builder:{id:$builder_id}}}' > "$predicate"
+            jq -n --arg builder_id "$builder_id" --arg git_sha "$git_sha" --arg workflow_sha "$workflow_sha" --arg flake_lock_sha "$flake_lock_sha" --arg repo_url "$repo_url" --arg ref "refs/tags/${TAG}" --arg artifact "$(basename "$file")" --arg artifact_sha "$artifact_sha" '{buildDefinition:{buildType:"https://simit.rs/release",externalParameters:{repository:$repo_url,ref:$ref,artifact:$artifact,artifactDigest:{sha256:$artifact_sha}},internalParameters:{},resolvedDependencies:[{uri:($repo_url+".git"),digest:{gitCommit:$git_sha}},{uri:"flake.lock",digest:{sha256:$flake_lock_sha}},{uri:"release workflow",digest:{sha256:$workflow_sha}}]},runDetails:{builder:{id:$builder_id}}}' > "$predicate"
             if sign_blob_keyless "$file" && attest_blob_keyless "$file" "$predicate"; then echo "signed+attested $file (keyless)"; elif [ -n "${COSIGN_PRIVATE_KEY:-}" ]; then echo "keyless failed for $file; using COSIGN_PRIVATE_KEY"; sign_blob_with_key "$file"; attest_blob_with_key "$file" "$predicate"; else echo "::error::keyless Sigstore failed and COSIGN_PRIVATE_KEY is unset for $file" >&2; exit 1; fi
             test -s "${file}.cosign.bundle"
             test -s "${file}.intoto.bundle"
@@ -206,17 +218,10 @@ jobs:
           nix shell nixpkgs#curl nixpkgs#jq -c bash <<'SCRIPT'
           set -euo pipefail
           . ./release-env
-          awk -v version="$VERSION" '
-            $0 ~ "^## \\[" version "\\] - [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]$" { found = 1; print; next }
-            found && /^## \[/ { exit }
-            found && /^\[[^]]+\]: / { exit }
-            found { print }
-            END { if (!found) exit 1 }
-          ' CHANGELOG.md > release-notes.md || { echo "CHANGELOG.md missing section for $VERSION" >&2; exit 1; }
-          release_payload=$(jq -n --arg tag "$VERSION" --arg name "$VERSION" --arg branch "trunk" --argjson prerelease "$IS_PRERELEASE" --rawfile body release-notes.md '{tag_name: $tag, target_commitish: $branch, name: $name, body: $body, draft: false, prerelease: $prerelease}')
+          release_payload=$(jq -n --arg tag "$TAG" --arg name "$TAG" --arg branch "trunk" --argjson prerelease "$IS_PRERELEASE" --rawfile body release-notes.md '{tag_name: $tag, target_commitish: $branch, name: $name, body: $body, draft: false, prerelease: $prerelease}')
           status=$(curl -sS -o release.json -w '%{http_code}' -H "Authorization: Bearer $GITHUB_TOKEN" -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28' -d "$release_payload" "$GITHUB_API/repos/$GITHUB_REPO/releases")
           if [ "$status" = "409" ] || [ "$status" = "422" ]; then
-            curl -sS --fail -H "Authorization: Bearer $GITHUB_TOKEN" -H 'Accept: application/vnd.github+json' "$GITHUB_API/repos/$GITHUB_REPO/releases/tags/$VERSION" > release.json
+            curl -sS --fail -H "Authorization: Bearer $GITHUB_TOKEN" -H 'Accept: application/vnd.github+json' "$GITHUB_API/repos/$GITHUB_REPO/releases/tags/$TAG" > release.json
           elif [ "$status" -lt 200 ] || [ "$status" -ge 300 ]; then cat release.json; exit 1; fi
           release_id=$(jq -r '.id' release.json); test "$release_id" != "null"
           upload_url=$(jq -r '.upload_url' release.json | cut -d '{' -f 1); test -n "$upload_url"

@@ -63,6 +63,9 @@ pub fn run(command: InitReleaseCommand) -> Result<()> {
 
     let inputs = ReleaseWorkflowInputs {
         platform,
+        tag_prefix: cfg.release.tag_prefix,
+        notes_source: cfg.release.notes.source,
+        required_gates: &cfg.ci.required_gates,
         runner: &runner,
         preinstalled_nix,
         publish_enforcement: cfg.release.publish.enforcement,

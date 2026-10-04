@@ -295,8 +295,9 @@ fn push_package_function(out: &mut String, aur: &ResolvedAur, flavor: Flavor) {
 /// Release-asset download base, e.g. `https://codeberg.org/owner/repo/releases/download/${pkgver}`.
 pub fn release_download_base(aur: &ResolvedAur) -> String {
     format!(
-        "https://codeberg.org/{}/releases/download/${{pkgver}}",
-        aur.download_repo
+        "https://codeberg.org/{}/releases/download/{}${{pkgver}}",
+        aur.download_repo,
+        aur.tag_prefix.as_str()
     )
 }
 
@@ -335,6 +336,7 @@ mod tests {
 
     fn sample() -> ResolvedAur {
         ResolvedAur {
+            tag_prefix: crate::release_identity::TagPrefix::None,
             name: "modde".to_owned(),
             description: "Cross-platform game mod manager".to_owned(),
             url: "https://codeberg.org/caniko/rs-modde".to_owned(),

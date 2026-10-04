@@ -128,23 +128,77 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
         None => common_current_version(&packages)?,
     };
     let config = ProjectConfig::load(workspace_root)?;
+    let platform = config.ci.platform.unwrap_or_else(|| {
+        if config.release.github.is_some() {
+            crate::cli::Platform::Github
+        } else {
+            crate::cli::Platform::Forgejo
+        }
+    });
+    let hosted = config.release.codeberg.is_some() || config.release.github.is_some();
+    let tag = config.release.tag_prefix.tag(version.clone());
     let mut results = vec![
         check_worktree_clean(workspace_root),
         check_ci_managed(workspace_root),
         check_flake_managed(workspace_root),
         check_release_trust(workspace_root, &config, &command),
-        check_changelog(workspace_root, &version),
+        check_notes(workspace_root, &config, platform, &version),
     ];
-    results.extend(check_crates_io(&packages, &version));
+    if hosted {
+        results.push(check_hosted_workflow(workspace_root));
+        let package = cargo::representative_package(&metadata, None)?;
+        match super::release_secrets::project_credentials(&config, &package, platform) {
+            Ok(credentials) => results.push(CheckResult::blocked(
+                "remote secrets",
+                format!(
+                    "remote credentials: {} presence not verifiable locally",
+                    credentials
+                        .iter()
+                        .filter(|credential| credential.required)
+                        .map(|credential| credential.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                "check `simit release secrets contract --json` and the repository Actions settings",
+            )),
+            Err(error) => results.push(CheckResult::fail(
+                "hosted release target",
+                error.to_string(),
+                "repair the hosted release configuration",
+            )),
+        }
+        if config
+            .release
+            .artifacts
+            .effective_nix_bundle_attrs()
+            .is_empty()
+            && config.release.artifacts.build_commands.is_empty()
+        {
+            results.push(CheckResult::fail(
+                "release artifacts",
+                "no artifact producer configured",
+                "configure release.artifacts.prebuild_binaries, nix_bundle_attrs or build_commands",
+            ));
+        } else {
+            results.push(CheckResult::pass(
+                "release artifacts",
+                "release artifact producer configured",
+            ));
+        }
+    }
+    // Preserve registry verification for legacy crate projects without a hosted target.
+    if config.ci.publish_crates || !hosted {
+        results.extend(check_crates_io(&packages, &version));
+        results.push(CheckResult::blocked(
+            "remote secrets",
+            "remote secrets: CRATES_IO_API_TOKEN presence not verifiable locally",
+            "run `simit release secrets` once available; until then verify the remote secret in Forgejo/GitHub settings",
+        ));
+    }
     results.push(check_tag(
         workspace_root,
-        &version,
+        &tag,
         command.push_target.as_deref(),
-    ));
-    results.push(CheckResult::blocked(
-        "remote secrets",
-        "remote secrets: CRATES_IO_API_TOKEN presence not verifiable locally",
-        "run `simit release secrets` once available; until then verify the remote secret in Forgejo/GitHub settings",
     ));
 
     let report = report(results);
@@ -375,7 +429,11 @@ fn check_crate_version(package: &Package, version: &Version) -> CheckResult {
     }
 }
 
-fn check_tag(workspace_root: &Path, version: &Version, push_target: Option<&str>) -> CheckResult {
+fn check_tag(
+    workspace_root: &Path,
+    version: &impl fmt::Display,
+    push_target: Option<&str>,
+) -> CheckResult {
     let tag = version.to_string();
     let local = Command::new("git")
         .args(["tag", "--list", &tag])
@@ -428,6 +486,73 @@ fn check_tag(workspace_root: &Path, version: &Version, push_target: Option<&str>
             "tag presence",
             format!("tag presence: {tag} present locally"),
         )
+    }
+}
+
+fn check_hosted_workflow(root: &Path) -> CheckResult {
+    let output = std::env::current_exe().and_then(|exe| {
+        Command::new(exe)
+            .current_dir(root)
+            .args(["init", "release", "--check", "--diff"])
+            .output()
+    });
+    match output {
+        Ok(output) if output.status.success() => CheckResult::pass(
+            "release workflow managed",
+            "release workflow matches its configuration",
+        ),
+        Ok(output) => CheckResult::fail(
+            "release workflow managed",
+            format!(
+                "release workflow missing or has drift: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+            "run `simit init release --check --diff` and regenerate the workflow",
+        ),
+        Err(error) => CheckResult::blocked(
+            "release workflow managed",
+            error.to_string(),
+            "rerun `simit init release --check --diff`",
+        ),
+    }
+}
+
+fn check_notes(
+    root: &Path,
+    config: &ProjectConfig,
+    platform: crate::cli::Platform,
+    version: &Version,
+) -> CheckResult {
+    match config.release.notes_source(platform) {
+        crate::config::ReleaseNotesSource::Changelog => check_changelog(root, version),
+        crate::config::ReleaseNotesSource::None => {
+            CheckResult::pass("release notes", "release notes explicitly disabled")
+        }
+        crate::config::ReleaseNotesSource::Git => {
+            let tag = config.release.tag_prefix.tag(version.clone());
+            let output = Command::new("bash")
+                .current_dir(root)
+                .env("TAG", tag.to_string())
+                .args([
+                    "-c",
+                    &crate::release_notes::git_notes_script(config.release.tag_prefix),
+                ])
+                .output();
+            match output {
+                Ok(output) if output.status.success() => CheckResult::pass(
+                    "release notes",
+                    format!("Git release notes resolve at {tag}"),
+                ),
+                Ok(output) => CheckResult::fail(
+                    "release notes",
+                    String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+                    "fetch the release tag and its reachable history",
+                ),
+                Err(error) => {
+                    CheckResult::blocked("release notes", error.to_string(), "install bash and git")
+                }
+            }
+        }
     }
 }
 

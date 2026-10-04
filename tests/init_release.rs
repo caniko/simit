@@ -151,7 +151,7 @@ fn bootstraps_release_workflow_for_enabled_channels() {
     assert!(workflow.contains("  workflow_dispatch:\n\n"));
     assert!(!workflow.contains("      version:\n"));
     assert!(!workflow.contains("inputs.version"));
-    assert!(workflow.contains("git worktree add --detach \"$tag_worktree\" \"$VERSION\""));
+    assert!(workflow.contains("git worktree add --detach \"$tag_worktree\" \"$TAG\""));
     assert!(workflow.contains("git checkout --detach \"$validated_sha\""));
     assert!(workflow.contains(
         "uses: https://github.com/cachix/install-nix-action@ba0dd844c9180cbf77aa72a116d6fbc515d0e87b # v27"

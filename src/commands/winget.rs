@@ -18,12 +18,12 @@ pub fn run(command: WingetCommand) -> Result<()> {
 
 pub(crate) fn submit(args: WingetSubmitArgs) -> Result<()> {
     validate_version(&args.version)?;
-    let (resolved, platform) = resolve(&args)?;
+    let (resolved, platform, tag_prefix) = resolve(&args)?;
     validate_download_repo("winget.download_repo", &resolved.download_repo)?;
     let url = args
         .url
         .clone()
-        .unwrap_or_else(|| release_url(&resolved, &args.version, platform));
+        .unwrap_or_else(|| release_url(&resolved, &args.version, platform, tag_prefix));
     let token_env = args
         .token_env
         .as_deref()
@@ -145,7 +145,9 @@ fn latest_wingetcreate_url() -> Result<String> {
         .context("latest winget-create release did not contain wingetcreate.exe")
 }
 
-fn resolve(args: &WingetSubmitArgs) -> Result<(WingetConfig, Platform)> {
+fn resolve(
+    args: &WingetSubmitArgs,
+) -> Result<(WingetConfig, Platform, crate::release_identity::TagPrefix)> {
     let metadata = cargo::metadata_for_current_dir()?;
     let workspace_root = metadata.workspace_root.as_std_path();
     let cfg = ProjectConfig::load(workspace_root)?;
@@ -180,10 +182,20 @@ fn resolve(args: &WingetSubmitArgs) -> Result<(WingetConfig, Platform)> {
             token_secret,
         },
         cfg.ci.platform.unwrap_or(Platform::Forgejo),
+        cfg.release.tag_prefix,
     ))
 }
 
-fn release_url(resolved: &WingetConfig, version: &str, platform: Platform) -> String {
+fn release_url(
+    resolved: &WingetConfig,
+    version: &str,
+    platform: Platform,
+    prefix: crate::release_identity::TagPrefix,
+) -> String {
     let zip = resolved.zip_archive.replace("{version}", version);
-    platform.release_download_url(&resolved.download_repo, version, &zip)
+    platform.release_download_url(
+        &resolved.download_repo,
+        &format!("{}{version}", prefix.as_str()),
+        &zip,
+    )
 }

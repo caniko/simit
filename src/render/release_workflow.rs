@@ -16,10 +16,11 @@ use std::fmt::Write as _;
 
 use crate::cli::Platform;
 use crate::config::{
-    AnnounceConfig, ArtifactsConfig, AtticConfig, FlatpakConfig, PrebuildConfig, ReleaseProvider,
-    ReleasePublishConfig, ReleasePublisherEnforcement, ReleasePublisherPolicy, ResolvedApt,
-    ResolvedAur, ResolvedChocolatey, ResolvedCopr, ResolvedHomebrew, ResolvedReleaseTarget,
-    ResolvedScoop, WindowsSigningConfig, WingetConfig,
+    AnnounceConfig, ArtifactsConfig, AtticConfig, FlatpakConfig, PrebuildConfig,
+    ReleaseNotesSource, ReleaseProvider, ReleasePublishConfig, ReleasePublisherEnforcement,
+    ReleasePublisherPolicy, RequiredGate, ResolvedApt, ResolvedAur, ResolvedChocolatey,
+    ResolvedCopr, ResolvedHomebrew, ResolvedReleaseTarget, ResolvedScoop, WindowsSigningConfig,
+    WingetConfig,
 };
 use crate::project::GeneratedFile;
 use crate::render::ci::{forgejo_action_ref, github_action_ref, immutable_action_ref};
@@ -28,6 +29,9 @@ use serde::Serialize;
 /// Everything the release workflow generator needs, resolved up front.
 pub struct ReleaseWorkflowInputs<'a> {
     pub platform: Platform,
+    pub tag_prefix: crate::release_identity::TagPrefix,
+    pub notes_source: Option<ReleaseNotesSource>,
+    pub required_gates: &'a [RequiredGate],
     pub runner: &'a str,
     pub preinstalled_nix: bool,
     pub publish_enforcement: ReleasePublisherEnforcement,
@@ -477,7 +481,12 @@ pub fn render(inputs: &ReleaseWorkflowInputs<'_>) -> String {
     w.push_str("name: release\n\n");
 
     w.push_str("on:\n");
-    w.push_str("  push:\n    tags:\n      - \"[0-9]*\"\n");
+    writeln!(
+        w,
+        "  push:\n    tags:\n      - \"{}[0-9]*\"",
+        inputs.tag_prefix.as_str()
+    )
+    .expect("write");
     // Codeberg's current Gitea 1.22-derived Actions service rejects nested
     // workflow_dispatch input mappings.  Release publication is tag-driven;
     // an operator can dispatch this workflow against the tag ref directly.
@@ -529,7 +538,16 @@ pub fn render(inputs: &ReleaseWorkflowInputs<'_>) -> String {
     if !inputs.preinstalled_nix {
         push_install_nix(&mut w, inputs.platform, inputs.artifacts);
     }
-    push_validate_tag(&mut w, inputs.artifacts);
+    let notes_source = inputs.notes_source.unwrap_or_else(|| {
+        if inputs.release.is_some_and(|r| !r.body_from_changelog) {
+            ReleaseNotesSource::None
+        } else {
+            ReleaseNotesSource::Changelog
+        }
+    });
+    push_validate_tag(&mut w, inputs.artifacts, inputs.tag_prefix, notes_source);
+    push_release_notes(&mut w, inputs.tag_prefix, notes_source);
+    push_required_gates(&mut w, inputs.required_gates);
     push_release_credentials_preflight(&mut w, inputs);
     if let Some(copr) = inputs.copr {
         push_rewrite_spec(&mut w, copr);
@@ -845,13 +863,20 @@ fn push_preinstalled_nix_env(w: &mut String, artifacts: &ArtifactsConfig) {
     w.push_str("      XDG_CACHE_HOME: \"/tmp/.cache\"\n");
 }
 
-fn push_validate_tag(w: &mut String, artifacts: &ArtifactsConfig) {
+fn push_validate_tag(
+    w: &mut String,
+    artifacts: &ArtifactsConfig,
+    prefix: crate::release_identity::TagPrefix,
+    notes: ReleaseNotesSource,
+) {
     w.push_str("      - name: Validate tag\n        run: |\n          set -euo pipefail\n");
     writeln!(w, "          {VERSION_FROM_REF}").expect("write");
+    w.push_str("          TAG=\"$VERSION\"\n");
+    if prefix == crate::release_identity::TagPrefix::V {
+        w.push_str("          case \"$TAG\" in v*) ;; *) echo 'release tag must start with v' >&2; exit 1;; esac\n          VERSION=\"${TAG#v}\"\n");
+    }
     writeln!(w, "          echo \"$VERSION\" | grep -Eq '{TAG_REGEX}'").expect("write");
-    w.push_str(
-        "          git fetch --force --tags origin \"refs/tags/${VERSION}:refs/tags/${VERSION}\"\n",
-    );
+    w.push_str("          git fetch --force --tags origin \"refs/tags/${TAG}:refs/tags/${TAG}\"\n");
     w.push_str("          tag_worktree=\"$(mktemp -d)\"\n");
     w.push_str("          rmdir \"$tag_worktree\"\n");
     w.push_str("          cleanup_validation() {\n");
@@ -859,7 +884,7 @@ fn push_validate_tag(w: &mut String, artifacts: &ArtifactsConfig) {
     w.push_str("            if [ -n \"${GNUPGHOME:-}\" ]; then rm -rf \"$GNUPGHOME\"; fi\n");
     w.push_str("          }\n");
     w.push_str("          trap cleanup_validation EXIT\n");
-    w.push_str("          git worktree add --detach \"$tag_worktree\" \"$VERSION\"\n");
+    w.push_str("          git worktree add --detach \"$tag_worktree\" \"$TAG\"\n");
     if let Some(attr) = &artifacts.version_attr {
         writeln!(
             w,
@@ -868,18 +893,70 @@ fn push_validate_tag(w: &mut String, artifacts: &ArtifactsConfig) {
         .expect("write");
     }
     w.push_str("          test -s \"$tag_worktree/keys/maintainers.gpg\"\n");
-    w.push_str("          if ! grep -q \"^## \\[$VERSION\\] - [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]\" \"$tag_worktree/CHANGELOG.md\"; then\n");
-    w.push_str("            echo \"CHANGELOG.md missing section for $VERSION\" >&2\n            exit 1\n          fi\n\n");
+    if notes == ReleaseNotesSource::Changelog {
+        w.push_str("          if ! grep -q \"^## \\[$VERSION\\] - [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]\" \"$tag_worktree/CHANGELOG.md\"; then\n");
+        w.push_str("            echo \"CHANGELOG.md missing section for $VERSION\" >&2\n            exit 1\n          fi\n\n");
+    }
     w.push_str("          IS_PRERELEASE=false\n");
     writeln!(w, "          if printf '%s\\n' \"$VERSION\" | grep -Eq -- '{PRERELEASE_REGEX}'; then IS_PRERELEASE=true; fi").expect("write");
     w.push_str(
         "\n          GNUPGHOME=\"$(mktemp -d)\"; export GNUPGHOME; chmod 700 \"$GNUPGHOME\"\n",
     );
     w.push_str("          gpg --batch --import \"$tag_worktree/keys/maintainers.gpg\"\n");
-    w.push_str("          git verify-tag \"$VERSION\"\n");
+    w.push_str("          git verify-tag \"$TAG\"\n");
     w.push_str("          validated_sha=\"$(git -C \"$tag_worktree\" rev-parse HEAD)\"\n");
     w.push_str("          git checkout --detach \"$validated_sha\"\n");
-    w.push_str("          { printf 'VERSION=%s\\n' \"$VERSION\"; printf 'IS_PRERELEASE=%s\\n' \"$IS_PRERELEASE\"; } > release-env\n");
+    w.push_str("          { printf 'TAG=%s\\n' \"$TAG\"; printf 'VERSION=%s\\n' \"$VERSION\"; printf 'IS_PRERELEASE=%s\\n' \"$IS_PRERELEASE\"; } > release-env\n");
+}
+
+fn push_release_notes(
+    w: &mut String,
+    prefix: crate::release_identity::TagPrefix,
+    source: ReleaseNotesSource,
+) {
+    w.push_str("      - name: Generate release notes\n        run: |\n          set -euo pipefail\n          . ./release-env\n");
+    match source {
+        ReleaseNotesSource::None => w.push_str("          : > release-notes.md\n"),
+        ReleaseNotesSource::Git => {
+            w.push_str("          {\n");
+            for line in crate::release_notes::git_notes_script(prefix).lines() {
+                writeln!(w, "            {line}").expect("write");
+            }
+            w.push_str("          } > release-notes.md\n");
+        }
+        ReleaseNotesSource::Changelog => {
+            w.push_str("          awk -v version=\"$VERSION\" '\n");
+            w.push_str("            $0 ~ \"^## \\\\[\" version \"\\\\] - [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]$\" { found = 1; print; next }\n");
+            w.push_str("            found && /^## \\[/ { exit }\n            found && /^\\[[^]]+\\]: / { exit }\n            found { print }\n            END { if (!found) exit 1 }\n");
+            w.push_str("          ' CHANGELOG.md > release-notes.md\n");
+        }
+    }
+}
+
+fn push_required_gates(w: &mut String, gates: &[RequiredGate]) {
+    for gate in gates {
+        writeln!(
+            w,
+            "      - name: Required gate {}\n        timeout-minutes: {}",
+            gate.id, gate.timeout_minutes
+        )
+        .expect("write");
+        if !gate.env.is_empty() {
+            w.push_str("        env:\n");
+            for (key, value) in &gate.env {
+                writeln!(
+                    w,
+                    "          {key}: {}",
+                    serde_json::to_string(value).expect("string")
+                )
+                .expect("write");
+            }
+        }
+        w.push_str("        run: |\n          set -euo pipefail\n");
+        for line in gate.run.lines() {
+            writeln!(w, "          {line}").expect("write");
+        }
+    }
 }
 
 fn push_release_credentials_preflight(w: &mut String, inputs: &ReleaseWorkflowInputs<'_>) {
@@ -1090,7 +1167,7 @@ fn push_build_artifacts(
     w.push_str(
         "      - name: Build release artifacts\n        run: |\n          set -euo pipefail\n",
     );
-    w.push_str("          . ./release-env\n          export VERSION IS_PRERELEASE\n          mkdir -p release\n");
+    w.push_str("          . ./release-env\n          export TAG VERSION IS_PRERELEASE\n          mkdir -p release\n");
     if !bundle_attrs.is_empty() {
         if platform == Platform::Github {
             w.push_str("          df -h /\n");
@@ -1245,7 +1322,7 @@ fn push_sign(
     w.push_str("{repo_url}");
     w.push_str(revision_path);
     w.push('$');
-    w.push_str("{VERSION}/");
+    w.push_str("{TAG}/");
     w.push_str(platform.workflow_dir());
     w.push_str("/release.yml\"\n");
     w.push_str("          sign_blob_keyless() { file=\"$1\"; if [ -n \"${ACTIONS_ID_TOKEN_REQUEST_URL:-}\" ] && [ -n \"${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}\" ]; then curl -fsSL -H \"Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}\" \"${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sigstore\" | jq -er '.value' > \"$oidc_token\"; cosign sign-blob --yes --identity-token \"$(cat \"$oidc_token\")\" --bundle \"${file}.cosign.bundle\" \"$file\"; else return 1; fi; }\n");
@@ -1257,7 +1334,7 @@ fn push_sign(
     w.push_str("          while IFS= read -r file; do\n");
     w.push_str("            [ -f \"$file\" ] || continue\n");
     w.push_str("            artifact_sha=\"$(sha256sum \"$file\" | awk '{print $1}')\"; predicate=\"$(mktemp)\"\n");
-    w.push_str("            jq -n --arg builder_id \"$builder_id\" --arg git_sha \"$git_sha\" --arg workflow_sha \"$workflow_sha\" --arg flake_lock_sha \"$flake_lock_sha\" --arg repo_url \"$repo_url\" --arg ref \"refs/tags/${VERSION}\" --arg artifact \"$(basename \"$file\")\" --arg artifact_sha \"$artifact_sha\" '{buildDefinition:{buildType:\"");
+    w.push_str("            jq -n --arg builder_id \"$builder_id\" --arg git_sha \"$git_sha\" --arg workflow_sha \"$workflow_sha\" --arg flake_lock_sha \"$flake_lock_sha\" --arg repo_url \"$repo_url\" --arg ref \"refs/tags/${TAG}\" --arg artifact \"$(basename \"$file\")\" --arg artifact_sha \"$artifact_sha\" '{buildDefinition:{buildType:\"");
     w.push_str(super::ci::SIMIT_RELEASE_BUILD_TYPE);
     w.push_str("\",externalParameters:{repository:$repo_url,ref:$ref,artifact:$artifact,artifactDigest:{sha256:$artifact_sha}},internalParameters:{},resolvedDependencies:[{uri:($repo_url+\".git\"),digest:{gitCommit:$git_sha}},{uri:\"flake.lock\",digest:{sha256:$flake_lock_sha}},{uri:\"release workflow\",digest:{sha256:$workflow_sha}}]},runDetails:{builder:{id:$builder_id}}}' > \"$predicate\"\n");
     w.push_str("            if sign_blob_keyless \"$file\" && attest_blob_keyless \"$file\" \"$predicate\"; then echo \"signed+attested $file (keyless)\"; elif [ -n \"${COSIGN_PRIVATE_KEY:-}\" ]; then echo \"keyless failed for $file; using COSIGN_PRIVATE_KEY\"; sign_blob_with_key \"$file\"; attest_blob_with_key \"$file\" \"$predicate\"; else echo \"::error::keyless Sigstore failed and COSIGN_PRIVATE_KEY is unset for $file\" >&2; exit 1; fi\n");
@@ -1363,23 +1440,14 @@ fn push_github_release(
     w.push_str("        run: |\n          set -euo pipefail\n          test -n \"$GITHUB_TOKEN\"\n          . ./release-env\n");
     w.push_str("          nix shell nixpkgs#curl nixpkgs#jq -c bash <<'SCRIPT'\n");
     w.push_str("          set -euo pipefail\n          . ./release-env\n");
-    if github.body_from_changelog {
-        w.push_str("          awk -v version=\"$VERSION\" '\n");
-        w.push_str("            $0 ~ \"^## \\\\[\" version \"\\\\] - [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]$\" { found = 1; print; next }\n");
-        w.push_str("            found && /^## \\[/ { exit }\n");
-        w.push_str("            found && /^\\[[^]]+\\]: / { exit }\n");
-        w.push_str("            found { print }\n");
-        w.push_str("            END { if (!found) exit 1 }\n");
-        w.push_str("          ' CHANGELOG.md > release-notes.md || { echo \"CHANGELOG.md missing section for $VERSION\" >&2; exit 1; }\n");
-    } else {
-        w.push_str("          : > release-notes.md\n");
-    }
-    w.push_str("          release_payload=$(jq -n --arg tag \"$VERSION\" --arg name \"$VERSION\" --arg branch \"");
+    w.push_str(
+        "          release_payload=$(jq -n --arg tag \"$TAG\" --arg name \"$TAG\" --arg branch \"",
+    );
     w.push_str(&github.target_branch);
     w.push_str("\" --argjson prerelease \"$IS_PRERELEASE\" --rawfile body release-notes.md '{tag_name: $tag, target_commitish: $branch, name: $name, body: $body, draft: false, prerelease: $prerelease}')\n");
     w.push_str("          status=$(curl -sS -o release.json -w '%{http_code}' -H \"Authorization: Bearer $GITHUB_TOKEN\" -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28' -d \"$release_payload\" \"$GITHUB_API/repos/$GITHUB_REPO/releases\")\n");
     w.push_str("          if [ \"$status\" = \"409\" ] || [ \"$status\" = \"422\" ]; then\n");
-    w.push_str("            curl -sS --fail -H \"Authorization: Bearer $GITHUB_TOKEN\" -H 'Accept: application/vnd.github+json' \"$GITHUB_API/repos/$GITHUB_REPO/releases/tags/$VERSION\" > release.json\n");
+    w.push_str("            curl -sS --fail -H \"Authorization: Bearer $GITHUB_TOKEN\" -H 'Accept: application/vnd.github+json' \"$GITHUB_API/repos/$GITHUB_REPO/releases/tags/$TAG\" > release.json\n");
     w.push_str("          elif [ \"$status\" -lt 200 ] || [ \"$status\" -ge 300 ]; then cat release.json; exit 1; fi\n");
     w.push_str(
         "          release_id=$(jq -r '.id' release.json); test \"$release_id\" != \"null\"\n",
@@ -1444,26 +1512,15 @@ fn push_forgejo_release(
     w.push_str("        run: |\n          set -euo pipefail\n          test -n \"$FORGEJO_TOKEN\"\n          . ./release-env\n");
     w.push_str("          nix shell nixpkgs#curl nixpkgs#jq -c bash <<'SCRIPT'\n");
     w.push_str("          set -euo pipefail\n          . ./release-env\n");
-    if forgejo.body_from_changelog {
-        w.push_str("          awk -v version=\"$VERSION\" '\n");
-        w.push_str("            $0 ~ \"^## \\\\[\" version \"\\\\] - [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]$\" { found = 1; print; next }\n");
-        w.push_str("            found && /^## \\[/ { exit }\n");
-        w.push_str("            found && /^\\[[^]]+\\]: / { exit }\n");
-        w.push_str("            found { print }\n");
-        w.push_str("            END { if (!found) exit 1 }\n");
-        w.push_str("          ' CHANGELOG.md > release-notes.md || { echo \"CHANGELOG.md missing section for $VERSION\" >&2; exit 1; }\n");
-    } else {
-        w.push_str("          : > release-notes.md\n");
-    }
     writeln!(
         w,
-        "          release_payload=$(jq -n --arg tag \"$VERSION\" --arg name \"$VERSION\" --arg branch \"{branch}\" --argjson prerelease \"$IS_PRERELEASE\" --rawfile body release-notes.md '{{tag_name: $tag, target_commitish: $branch, name: $name, body: $body, draft: false, prerelease: $prerelease}}')",
+        "          release_payload=$(jq -n --arg tag \"$TAG\" --arg name \"$TAG\" --arg branch \"{branch}\" --argjson prerelease \"$IS_PRERELEASE\" --rawfile body release-notes.md '{{tag_name: $tag, target_commitish: $branch, name: $name, body: $body, draft: false, prerelease: $prerelease}}')",
         branch = forgejo.target_branch
     )
     .expect("write");
     w.push_str("          status=$(curl -sS -o release.json -w '%{http_code}' -H \"Authorization: token ${FORGEJO_TOKEN}\" -H 'Content-Type: application/json' -d \"$release_payload\" \"${FORGEJO_API}/repos/${FORGEJO_REPO}/releases\")\n");
     w.push_str("          if [ \"$status\" = \"409\" ]; then\n");
-    w.push_str("            curl -sS --fail -H \"Authorization: token ${FORGEJO_TOKEN}\" \"${FORGEJO_API}/repos/${FORGEJO_REPO}/releases/tags/${VERSION}\" > release.json\n");
+    w.push_str("            curl -sS --fail -H \"Authorization: token ${FORGEJO_TOKEN}\" \"${FORGEJO_API}/repos/${FORGEJO_REPO}/releases/tags/${TAG}\" > release.json\n");
     w.push_str("          elif [ \"$status\" -lt 200 ] || [ \"$status\" -ge 300 ]; then cat release.json; exit 1; fi\n");
     w.push_str(
         "          release_id=\"$(jq -r '.id' release.json)\"; test \"$release_id\" != \"null\"\n",
@@ -1940,7 +1997,7 @@ fn push_publish_homebrew(
         let file = homebrew_archive(homebrew, arch, os);
         writeln!(
             w,
-            "            --archive \"{key}={host}/{repo}/releases/download/${{VERSION}}/{file},release/{file}\" \\",
+            "            --archive \"{key}={host}/{repo}/releases/download/${{TAG}}/{file},release/{file}\" \\",
             host = platform.web_base_url(),
             repo = homebrew.download_repo
         )
@@ -2102,7 +2159,7 @@ fn push_announce(
     platform: Platform,
 ) {
     let fallback = release
-        .map(|c| platform.release_tag_url(&c.repo, "${VERSION}"))
+        .map(|c| platform.release_tag_url(&c.repo, "${TAG}"))
         .unwrap_or_else(|| "${VERSION}".to_owned());
     w.push_str("      - name: Announce stable release\n        env:\n");
     writeln!(
@@ -2240,7 +2297,7 @@ fn push_publish_winget(
     w.push_str(platform.web_base_url());
     w.push('/');
     w.push_str(&winget.download_repo);
-    w.push_str("/releases/download/${VERSION}/${ZIP_NAME}\"\n");
+    w.push_str("/releases/download/${TAG}/${ZIP_NAME}\"\n");
     if activated_remote {
         w.push_str("          test -s \"release/${ZIP_NAME}\" || publisher_missing winget \"missing release/${ZIP_NAME}\"\n");
     } else {
@@ -2479,6 +2536,7 @@ mod tests {
 
     fn chocolatey() -> ResolvedChocolatey {
         ResolvedChocolatey {
+            tag_prefix: crate::release_identity::TagPrefix::None,
             name: "modde".to_owned(),
             id: "modde".to_owned(),
             title: "modde".to_owned(),
@@ -2561,6 +2619,7 @@ mod tests {
 
     fn aur() -> ResolvedAur {
         ResolvedAur {
+            tag_prefix: crate::release_identity::TagPrefix::None,
             name: "modde".to_owned(),
             description: "d".to_owned(),
             url: "https://github.com/caniko/rs-modde".to_owned(),
@@ -2666,9 +2725,11 @@ mod tests {
             Platform::Forgejo,
         );
         assert!(forgejo_workflow.contains("repo_url=\"https://codeberg.org/caniko/rs-modde\""));
-        assert!(forgejo_workflow.contains(
-            "builder_id=\"${repo_url}/src/tag/${VERSION}/.forgejo/workflows/release.yml\""
-        ));
+        assert!(
+            forgejo_workflow.contains(
+                "builder_id=\"${repo_url}/src/tag/${TAG}/.forgejo/workflows/release.yml\""
+            )
+        );
 
         let mut github = forgejo.clone();
         github.provider = ReleaseProvider::Github;
@@ -2682,9 +2743,8 @@ mod tests {
         );
         assert!(github_workflow.contains("repo_url=\"https://github.com/caniko/rs-modde\""));
         assert!(
-            github_workflow.contains(
-                "builder_id=\"${repo_url}/blob/${VERSION}/.github/workflows/release.yml\""
-            )
+            github_workflow
+                .contains("builder_id=\"${repo_url}/blob/${TAG}/.github/workflows/release.yml\"")
         );
         assert_eq!(
             github_web_base("https://github.example/api/v3"),
@@ -2694,6 +2754,7 @@ mod tests {
 
     fn homebrew() -> ResolvedHomebrew {
         ResolvedHomebrew {
+            tag_prefix: crate::release_identity::TagPrefix::None,
             name: "modde".to_owned(),
             binaries: vec!["modde".to_owned(), "modde-ui".to_owned()],
             tap_url: "https://codeberg.org/caniko/homebrew-modde.git".to_owned(),
@@ -2709,6 +2770,7 @@ mod tests {
 
     fn scoop() -> ResolvedScoop {
         ResolvedScoop {
+            tag_prefix: crate::release_identity::TagPrefix::None,
             name: "modde".to_owned(),
             bucket_url: "https://github.com/caniko/scoop-modde.git".to_owned(),
             bucket_token_secret: "FORGEJO_SCOOP_TOKEN".to_owned(),
@@ -2748,6 +2810,9 @@ mod tests {
             artifacts: &artifacts(),
             prebuild: None,
             smoke_command: None,
+            tag_prefix: crate::release_identity::TagPrefix::None,
+            notes_source: None,
+            required_gates: &[],
             release: Some(&release),
             attic: None,
             aur: Some(&aur),
@@ -2894,6 +2959,9 @@ mod tests {
             artifacts: &artifacts,
             prebuild: None,
             smoke_command: Some("nix run .#release-smoke --"),
+            tag_prefix: crate::release_identity::TagPrefix::None,
+            notes_source: None,
+            required_gates: &[],
             release: Some(&codeberg),
             attic: None,
             aur: Some(&aur),
@@ -2924,8 +2992,8 @@ mod tests {
                 "test \"$(nix eval --raw \"$tag_worktree#modde.version\")\" = \"$VERSION\""
             )
         );
-        assert!(workflow.contains("git worktree add --detach \"$tag_worktree\" \"$VERSION\""));
-        assert!(workflow.contains("git verify-tag \"$VERSION\""));
+        assert!(workflow.contains("git worktree add --detach \"$tag_worktree\" \"$TAG\""));
+        assert!(workflow.contains("git verify-tag \"$TAG\""));
         assert!(workflow.contains("git checkout --detach \"$validated_sha\""));
         assert!(workflow.contains("export VERSION IS_PRERELEASE"));
         assert!(workflow.contains("nix run .#release-smoke -- \"$VERSION\" release"));
@@ -3095,6 +3163,9 @@ mod tests {
             artifacts: &artifacts,
             prebuild: None,
             smoke_command: None,
+            tag_prefix: crate::release_identity::TagPrefix::None,
+            notes_source: None,
+            required_gates: &[],
             release: Some(&codeberg),
             attic: None,
             aur: Some(&aur),
@@ -3161,6 +3232,9 @@ mod tests {
             prebuild: None,
             smoke_command: None,
             release: None,
+            tag_prefix: crate::release_identity::TagPrefix::None,
+            notes_source: None,
+            required_gates: &[],
             attic: None,
             aur: None,
             copr: None,
@@ -3196,6 +3270,9 @@ mod tests {
             prebuild: None,
             smoke_command: None,
             release: None,
+            tag_prefix: crate::release_identity::TagPrefix::None,
+            notes_source: None,
+            required_gates: &[],
             attic: None,
             aur: None,
             copr: None,
@@ -3243,6 +3320,9 @@ mod tests {
             prebuild: None,
             smoke_command: None,
             release: None,
+            tag_prefix: crate::release_identity::TagPrefix::None,
+            notes_source: None,
+            required_gates: &[],
             attic: None,
             aur: None,
             copr: None,
@@ -3278,6 +3358,9 @@ mod tests {
             prebuild: None,
             smoke_command: Some("nix run .#release-smoke --"),
             release: Some(&codeberg),
+            tag_prefix: crate::release_identity::TagPrefix::None,
+            notes_source: None,
+            required_gates: &[],
             attic: None,
             aur: Some(&aur),
             copr: Some(&copr),

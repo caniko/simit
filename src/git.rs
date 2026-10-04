@@ -30,7 +30,7 @@ pub fn release_preflight(
     workspace_root: &Path,
     create_tag: bool,
     sign_tag: bool,
-    version: &Version,
+    version: &impl std::fmt::Display,
 ) -> Result<()> {
     ensure_git_identity(workspace_root)?;
     ensure_attached_head(workspace_root)?;
@@ -95,15 +95,24 @@ pub fn commit(workspace_root: &Path, git_args: &[OsString]) -> Result<()> {
     Ok(())
 }
 
-pub fn tag(workspace_root: &Path, version: &Version, sign_tag: bool) -> Result<()> {
+pub fn tag(workspace_root: &Path, version: &impl std::fmt::Display, sign_tag: bool) -> Result<()> {
     tag_impl(workspace_root, version, sign_tag, false)
 }
 
-pub fn move_tag(workspace_root: &Path, version: &Version, sign_tag: bool) -> Result<()> {
+pub fn move_tag(
+    workspace_root: &Path,
+    version: &impl std::fmt::Display,
+    sign_tag: bool,
+) -> Result<()> {
     tag_impl(workspace_root, version, sign_tag, true)
 }
 
-fn tag_impl(workspace_root: &Path, version: &Version, sign_tag: bool, force: bool) -> Result<()> {
+fn tag_impl(
+    workspace_root: &Path,
+    version: &impl std::fmt::Display,
+    sign_tag: bool,
+    force: bool,
+) -> Result<()> {
     let mut command = Command::new("git");
     command.current_dir(workspace_root).arg("tag");
     if force {
@@ -142,7 +151,7 @@ pub fn head_commit(workspace_root: &Path) -> Result<String> {
     rev_parse(workspace_root, "HEAD")
 }
 
-pub fn tag_ref_object(workspace_root: &Path, version: &Version) -> Result<String> {
+pub fn tag_ref_object(workspace_root: &Path, version: &impl std::fmt::Display) -> Result<String> {
     let output = Command::new("git")
         .current_dir(workspace_root)
         .args(["rev-parse", "--verify"])
@@ -159,7 +168,10 @@ pub fn tag_ref_object(workspace_root: &Path, version: &Version) -> Result<String
         .map(|value| value.trim().to_owned())
 }
 
-pub fn tag_target_commit(workspace_root: &Path, version: &Version) -> Result<String> {
+pub fn tag_target_commit(
+    workspace_root: &Path,
+    version: &impl std::fmt::Display,
+) -> Result<String> {
     let output = Command::new("git")
         .current_dir(workspace_root)
         .args(["rev-parse", "--verify"])
@@ -179,7 +191,7 @@ pub fn tag_target_commit(workspace_root: &Path, version: &Version) -> Result<Str
 pub fn remote_tag_ref_object(
     workspace_root: &Path,
     remote: &str,
-    version: &Version,
+    version: &impl std::fmt::Display,
 ) -> Result<String> {
     let output = Command::new("git")
         .current_dir(workspace_root)
@@ -209,7 +221,7 @@ pub fn remote_tag_ref_object(
 pub fn push_moved_tag(
     workspace_root: &Path,
     remote: &str,
-    version: &Version,
+    version: &impl std::fmt::Display,
     expected_remote_object: &str,
 ) -> Result<()> {
     let refname = format!("refs/tags/{version}");
@@ -245,7 +257,7 @@ pub fn output(workspace_root: &Path, args: &[&str]) -> Result<String> {
     String::from_utf8(output.stdout).context("git output was not valid UTF-8")
 }
 
-pub fn ensure_tag_absent(workspace_root: &Path, version: &Version) -> Result<()> {
+pub fn ensure_tag_absent(workspace_root: &Path, version: &impl std::fmt::Display) -> Result<()> {
     let output = Command::new("git")
         .current_dir(workspace_root)
         .args(["rev-parse", "--verify", "--quiet"])

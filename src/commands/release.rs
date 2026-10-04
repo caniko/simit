@@ -50,6 +50,12 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
     )?;
     let plans = cargo::plan_versions(packages, &bump)?;
     let new_version = cargo::common_new_version(&plans)?;
+    let tag = config.release.tag_prefix.tag(new_version.clone());
+    let changelog_enabled = !command.no_changelog
+        && config
+            .release
+            .notes_source(config.ci.platform.unwrap_or(crate::cli::Platform::Forgejo))
+            == crate::config::ReleaseNotesSource::Changelog;
     let create_tag = !command.no_tag;
     let sign_tag = !command.no_sign;
     let message = command
@@ -68,7 +74,7 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
             );
         }
         println!("would run cargo test and cargo clippy");
-        if !command.no_changelog && changelog_path.exists() {
+        if changelog_enabled && changelog_path.exists() {
             if config.release.changelog.auto_draft {
                 println!("would draft CHANGELOG.md [Unreleased] from git history");
             }
@@ -76,13 +82,13 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
         }
         println!("would run git commit with {:?}", git_args);
         if create_tag {
-            println!("would create tag {new_version}");
+            println!("would create tag {tag}");
         }
         return Ok(());
     }
 
-    git::release_preflight(workspace_root, create_tag, sign_tag, &new_version)?;
-    let changelog_update = if !command.no_changelog && changelog_path.exists() {
+    git::release_preflight(workspace_root, create_tag, sign_tag, &tag)?;
+    let changelog_update = if changelog_enabled && changelog_path.exists() {
         let content = std::fs::read_to_string(&changelog_path)?;
         let content = if config.release.changelog.auto_draft {
             changelog::draft_content(&content, workspace_root, None)?
@@ -123,7 +129,7 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
     if workspace_version_bumped {
         paths.push(workspace_root.join("Cargo.toml"));
     }
-    if changelog_path.exists() && !command.no_changelog {
+    if changelog_path.exists() && changelog_enabled {
         paths.push(changelog_path);
     }
     paths.sort();
@@ -131,7 +137,7 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
     git::stage_paths(workspace_root, &paths)?;
     git::commit(workspace_root, &git_args)?;
     if create_tag {
-        git::tag(workspace_root, &new_version, sign_tag)?;
+        git::tag(workspace_root, &tag, sign_tag)?;
     }
 
     registry::refresh_current_project_or_warn();
@@ -279,23 +285,25 @@ fn sync_up(command: ReleaseCommand) -> Result<()> {
     let workspace_root = metadata.workspace_root.as_std_path();
     let packages = cargo::select_packages(&metadata, &command.packages, command.workspace)?;
     let version = common_current_version(&packages)?;
+    let config = ProjectConfig::load(workspace_root)?;
+    let tag = config.release.tag_prefix.tag(version.clone());
     let sign_tag = !command.no_sign;
-    git::tag_ref_object(workspace_root, &version)?;
-    let old_tag_target = git::tag_target_commit(workspace_root, &version)?;
+    git::tag_ref_object(workspace_root, &tag)?;
+    let old_tag_target = git::tag_target_commit(workspace_root, &tag)?;
     let head = git::head_commit(workspace_root)?;
 
     if command.dry_run {
         println!("simit release sync-up dry-run");
         println!("version: {version}");
-        println!("tag {version} currently points to {old_tag_target}");
+        println!("tag {tag} currently points to {old_tag_target}");
         println!("would run cargo test and cargo clippy");
         if old_tag_target == head {
-            println!("tag {version} already points to HEAD");
+            println!("tag {tag} already points to HEAD");
         } else {
-            println!("would move tag {version} to HEAD {head}");
+            println!("would move tag {tag} to HEAD {head}");
         }
         if command.push {
-            println!("would push tag {version} to {}", command.remote);
+            println!("would push tag {tag} to {}", command.remote);
         } else {
             println!("would not push tag {version}");
         }
@@ -306,19 +314,19 @@ fn sync_up(command: ReleaseCommand) -> Result<()> {
     git::run_project_checks(workspace_root)?;
 
     if old_tag_target == head {
-        println!("tag {version} already points to HEAD");
+        println!("tag {tag} already points to HEAD");
     } else {
-        git::move_tag(workspace_root, &version, sign_tag)?;
-        println!("moved tag {version} to HEAD {head}");
+        git::move_tag(workspace_root, &tag, sign_tag)?;
+        println!("moved tag {tag} to HEAD {head}");
     }
 
     if command.push {
         let expected_remote_object =
-            git::remote_tag_ref_object(workspace_root, &command.remote, &version)?;
+            git::remote_tag_ref_object(workspace_root, &command.remote, &tag)?;
         git::push_moved_tag(
             workspace_root,
             &command.remote,
-            &version,
+            &tag,
             &expected_remote_object,
         )?;
     }

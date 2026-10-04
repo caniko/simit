@@ -32,6 +32,10 @@ pub mod python;
 pub mod readme_badges;
 /// Per-user registry of projects simit has acted on.
 pub mod registry;
+/// Canonical release tags and their semantic package versions.
+pub mod release_identity;
+/// Deterministic release notes from the exact tagged Git history.
+pub mod release_notes;
 /// Release maintainer trust-root discovery and validation.
 pub mod release_trust;
 /// Renderers for generated support files.
