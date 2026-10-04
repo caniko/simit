@@ -18,6 +18,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Give native GitHub Nix flake matrices read-only permissions, coalesced push/PR
+  concurrency, bounded parallelism and timeouts, and explicit build-resource limits.
 - Resolve and check out fork PR heads from their source repository while keeping
   review plans and PR reporting anchored to the base repository.
 - Keep GitHub review workflows out of ordinary CI provider inference so Forgejo

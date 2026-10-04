@@ -768,7 +768,13 @@ pub fn nix_flake_ci_file_with_system_runners(
     let mut workflow = String::new();
     push_generated_workflow_header(&mut workflow);
     workflow.push_str("name: Nix flake check\n\non:\n  push:\n  pull_request:\n\n");
-    push_platform_concurrency(&mut workflow, platform);
+    push_github_read_permissions(&mut workflow, platform);
+    if platform == Platform::Github && !system_runners.is_empty() {
+        // Coalesce push and PR qualification for the same source branch.
+        workflow.push_str("concurrency:\n  group: ${{ github.workflow }}-${{ github.event.pull_request.head.ref || github.ref_name }}\n  cancel-in-progress: true\n\n");
+    } else {
+        push_platform_concurrency(&mut workflow, platform);
+    }
     workflow.push_str("jobs:\n  flake-check:\n");
     if system_runners.is_empty() {
         workflow.push_str("    runs-on: ");
@@ -778,8 +784,7 @@ pub fn nix_flake_ci_file_with_system_runners(
         if platform != Platform::Github {
             bail!("native per-system Nix runners require GitHub Actions");
         }
-        workflow
-            .push_str("    strategy:\n      fail-fast: false\n      matrix:\n        include:\n");
+        workflow.push_str("    timeout-minutes: 60\n    strategy:\n      fail-fast: false\n      max-parallel: 2\n      matrix:\n        include:\n");
         for (system, runner) in system_runners {
             workflow.push_str("          - system: ");
             workflow.push_str(system);
@@ -805,7 +810,7 @@ pub fn nix_flake_ci_file_with_system_runners(
             workflow.push_str("      - name: Check flake\n        run: nix flake check\n");
         } else {
             workflow.push_str(
-                "      - name: Verify runner system\n        run: test \"$(nix eval --impure --raw --expr builtins.currentSystem)\" = \"${{ matrix.system }}\"\n      - name: Check flake\n        run: nix flake check --no-update-lock-file --system \"${{ matrix.system }}\"\n",
+                "      - name: Verify runner system\n        run: test \"$(nix eval --impure --raw --expr builtins.currentSystem)\" = \"${{ matrix.system }}\"\n      - name: Check flake\n        run: nix flake check --no-update-lock-file --max-jobs 1 --cores 2 --system \"${{ matrix.system }}\"\n",
             );
         }
     } else {
@@ -824,7 +829,7 @@ pub fn nix_flake_ci_file_with_system_runners(
         if selected(CiComponent::Checks) {
             workflow.push_str("      - name: Build flake checks\n        run: nix flake check");
             if !system_runners.is_empty() {
-                workflow.push_str(" --no-update-lock-file --system \"${{ matrix.system }}\"");
+                workflow.push_str(" --no-update-lock-file --max-jobs 1 --cores 2 --system \"${{ matrix.system }}\"");
             }
             workflow.push('\n');
         }
