@@ -35,6 +35,7 @@ const HOOK_BINDINGS: &str = r#"      fmtToolchain = rs-harbor.lib.mkToolchain {i
 const FORMATTER_OUTPUT: &str = "      formatter = treefmtEval.config.build.wrapper;\n";
 const FORMATTING_CHECK: &str = "        formatting = treefmtEval.config.build.check self;\n";
 const PRE_COMMIT_PACKAGE: &str = "          pre-commit\n";
+const TREEFMT_SHELL_PACKAGE: &str = "          treefmtEval.config.build.wrapper\n";
 const CARGO_AUDIT_PACKAGE: &str = "          cargo-audit\n";
 const CARGO_DENY_PACKAGE: &str = "          cargo-deny\n";
 const RELEASE_DEV_SHELL_PACKAGES: &str = r#"          cargo-about
@@ -349,6 +350,7 @@ pub fn has_required_wiring_with_audit_tools(content: &str, audit_tools: AuditToo
         .all(|snippet| content.contains(snippet))
         && has_rust_toolchain_hook_package(content)
         && has_treefmt_wrapper_argument(content)
+        && has_treefmt_shell_package(content)
         && has_pre_commit_shell_hook(content)
         && (!audit_tools.audit || content.contains("cargo-audit"))
         && (!audit_tools.deny || content.contains("cargo-deny"))
@@ -432,6 +434,11 @@ pub fn custom_wiring_mismatches(
         missing.push("flake.nix custom mode: missing formatting check".to_owned());
     }
     if config.pre_commit_shell_hook {
+        if !has_treefmt_shell_package(content) {
+            missing.push(
+                "flake.nix custom mode: dev shell packages must include treefmtEval.config.build.wrapper".to_owned(),
+            );
+        }
         if !content.contains("pre-commit-check.enabledPackages") {
             missing.push(
                 "flake.nix custom mode: dev shell missing pre-commit-check.enabledPackages"
@@ -891,6 +898,18 @@ fn ensure_after_statement(
 }
 
 fn ensure_dev_shell_packages(content: &mut String, audit_tools: AuditTools) -> Result<()> {
+    if !has_treefmt_shell_package(content) {
+        let index = unique_anchor(
+            content,
+            "        packages = with pkgs; [\n",
+            "devShell packages",
+            "add treefmtEval.config.build.wrapper to the dev shell packages",
+        )?;
+        content.insert_str(
+            index + "        packages = with pkgs; [\n".len(),
+            TREEFMT_SHELL_PACKAGE,
+        );
+    }
     if audit_tools.audit {
         ensure_explicit_dev_shell_package(
             content,
@@ -977,7 +996,7 @@ fn unique_anchor(content: &str, anchor: &str, anchor_name: &str, reason: &str) -
 /// Inserted via marker replacement after rendering so both outputs stay
 /// byte-identical to the previous inline lists.
 const DEVSHELL_PACKAGES_MARKER: &str = "@@DEVSHELL_PACKAGES@@";
-const DEVSHELL_PACKAGES: &str = "        packages = with pkgs; [\n          cargo-about\n          cargo-audit\n          cargo-cyclonedx\n          cargo-deny\n          cargo-llvm-cov\n          cargo-sbom\n          cargo-nextest\n          cosign\n          file\n          gnutar\n          gzip\n          jq\n          minisign\n          nodejs\n          pre-commit\n          rpm\n          util-linux\n          unzip\n          zip\n          reprepro\n          rust-analyzer\n          taplo\n        ] ++ pre-commit-check.enabledPackages;";
+const DEVSHELL_PACKAGES: &str = "        packages = with pkgs; [\n          treefmtEval.config.build.wrapper\n          cargo-about\n          cargo-audit\n          cargo-cyclonedx\n          cargo-deny\n          cargo-llvm-cov\n          cargo-sbom\n          cargo-nextest\n          cosign\n          file\n          gnutar\n          gzip\n          jq\n          minisign\n          nodejs\n          pre-commit\n          rpm\n          util-linux\n          unzip\n          zip\n          reprepro\n          rust-analyzer\n          taplo\n        ] ++ pre-commit-check.enabledPackages;";
 
 fn msrv_shell(rust_version: Option<&str>, attribute: &str) -> String {
     let Some(version) = rust_version else {
@@ -1303,7 +1322,7 @@ fn python_template(project: &python::Project) -> String {
             inherit pkgs;
             uvExtra = "{cpu_extra}";
             devGroup = "{dev_group}";
-            extraPackages = pre-commit-check.enabledPackages;
+            extraPackages = [treefmtEval.config.build.wrapper] ++ pre-commit-check.enabledPackages;
             shellHookSuffix = pre-commit-check.shellHook;
           }};
         }};
@@ -1848,6 +1867,50 @@ fn has_treefmt_wrapper_argument(content: &str) -> bool {
     content.contains("treefmtWrapper = treefmtEval.config.build.wrapper;")
 }
 
+fn has_treefmt_shell_package(content: &str) -> bool {
+    use rnix::ast::{Attr, AttrpathValue};
+
+    fn includes_wrapper<T: rnix::ast::AstNode>(value: T) -> bool {
+        value
+            .syntax()
+            .descendants()
+            .filter(|node| node.kind() == rnix::SyntaxKind::NODE_SELECT)
+            .any(|select| {
+                let tokens: String = select
+                    .descendants_with_tokens()
+                    .filter_map(|node| node.into_token())
+                    .filter(|token| {
+                        !matches!(
+                            token.kind(),
+                            rnix::SyntaxKind::TOKEN_WHITESPACE | rnix::SyntaxKind::TOKEN_COMMENT
+                        )
+                    })
+                    .map(|token| token.text().to_owned())
+                    .collect();
+                tokens == "treefmtEval.config.build.wrapper"
+            })
+    }
+
+    let parsed = rnix::Root::parse(content);
+    if !parsed.errors().is_empty() {
+        return false;
+    }
+    parsed
+        .syntax()
+        .descendants()
+        .filter_map(cast_nix_node::<AttrpathValue>)
+        .any(|binding| {
+            let Some(Attr::Ident(name)) = binding.attrpath().and_then(|path| path.attrs().last())
+            else {
+                return false;
+            };
+            if !matches!(name.to_string().as_str(), "packages" | "extraPackages") {
+                return false;
+            }
+            binding.value().is_some_and(includes_wrapper)
+        })
+}
+
 fn has_pre_commit_check_binding(content: &str) -> bool {
     content.contains("pre-commit-check = git-hooks.lib.${system}.run")
         || ((content.contains("pre-commit-check =") || content.contains("pre-commit-check="))
@@ -2180,7 +2243,7 @@ mod tests {
         formatting = treefmtEval.config.build.check self;
       };
       devShells.default = {
-        packages = [ pre-commit ] ++ pre-commit-check.enabledPackages;
+        packages = [ pre-commit treefmtEval.config.build.wrapper ] ++ pre-commit-check.enabledPackages;
         shellHook = pre-commit-check.shellHook;
       };
       legacyPackages = let

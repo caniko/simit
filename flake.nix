@@ -319,6 +319,7 @@
           checks = self.checks.${system};
           packages = with pkgs;
             [
+              treefmtEval.config.build.wrapper
               alejandra
               cargo-audit
               cargo-deny
@@ -337,7 +338,7 @@
 
         docs = publicCraneLib.devShell {
           checks = self.checks.${system};
-          packages = docsPackages ++ pre-commit-check.enabledPackages;
+          packages = [treefmtEval.config.build.wrapper] ++ docsPackages ++ pre-commit-check.enabledPackages;
           shellHook = pre-commit-check.shellHook;
         };
       };

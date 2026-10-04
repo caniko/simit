@@ -122,6 +122,31 @@ simit init ci --platform forgejo --runtime nix
 
 ## Focused Hosted Nix Builds
 
+### Project-owned formatting
+
+`simit init flake --scope full` wires the project treefmt policy into:
+
+- `formatter.<system>` for `nix fmt`;
+- `checks.<system>.formatting` for the uncached formatting gate;
+- the development shell's packages for direct `treefmt` use;
+- the pre-commit hook, using the same wrapper with `--ci`.
+
+Rust and cross-platform shells use the pinned Rust formatter supplied to
+`nix/treefmt.nix`; Python shells use the same treefmt wrapper for their own
+language policy. Run `treefmt` inside `nix develop`, or use `nix fmt`.
+
+Custom flakes retain ownership of their shell definitions. Include
+`treefmtEval.config.build.wrapper` in `packages` (or Python `extraPackages`)
+beside `pre-commit-check.enabledPackages`. `simit init flake --check --diff`
+reports missing shell wiring; a comment or the formatter output alone does
+not satisfy that check.
+
+Generated Nix CI executes the project formatter with `--ci` and propagates
+evaluation, build and formatting failures. A project with `nix/treefmt.nix`,
+`treefmt.toml` or `.treefmt.toml` must provide the flake formatter output;
+an ambient treefmt or a Rust-only check cannot substitute for its policy.
+Legacy Nix projects without a treefmt policy retain their Cargo fmt gate.
+
 Declare the exact installables that qualify a feature in `[ci].nix_builds`.
 GitHub Actions projects can configure their matrix independently of ordinary
 checks and release jobs:

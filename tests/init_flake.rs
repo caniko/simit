@@ -70,6 +70,76 @@ fn read(path: &Path) -> String {
     fs::read_to_string(path).unwrap_or_else(|err| panic!("reading {}: {err}", path.display()))
 }
 
+#[test]
+fn project_treefmt_is_available_in_generated_shells_and_missing_wiring_is_drift() {
+    let temp = init_package();
+    fs::write(
+        temp.path().join("simit.toml"),
+        "[flake]\nscope = \"full\"\n",
+    )
+    .unwrap();
+    let output = simit()
+        .current_dir(temp.path())
+        .args(["init", "flake"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let path = temp.path().join("flake.nix");
+    let flake = read(&path);
+    assert!(flake.contains("          treefmtEval.config.build.wrapper\n"));
+    let broken = flake.replace(
+        "          treefmtEval.config.build.wrapper\n",
+        "          # treefmtEval.config.build.wrapper\n",
+    );
+    fs::write(&path, broken).unwrap();
+    let output = simit()
+        .current_dir(temp.path())
+        .args(["init", "flake", "--check", "--diff"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let output = simit()
+        .current_dir(temp.path())
+        .args(["init", "flake"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(read(&path).contains("          treefmtEval.config.build.wrapper\n"));
+}
+
+#[test]
+fn python_and_cross_shells_use_the_project_treefmt_wrapper() {
+    let temp = init_python_project();
+    let output = simit()
+        .current_dir(temp.path())
+        .args(["init", "flake", "--scope", "full", "--print"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains(
+        "extraPackages = [treefmtEval.config.build.wrapper] ++ pre-commit-check.enabledPackages"
+    ));
+    let temp = init_package();
+    let output = simit()
+        .current_dir(temp.path())
+        .args(["init", "flake", "--cross", "--print"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stdout)
+            .contains("          treefmtEval.config.build.wrapper\n")
+    );
+}
+
 fn patchable_flake() -> &'static str {
     r#"{
   description = "Rust project";
@@ -200,6 +270,7 @@ fn custom_rs_harbor_flake() -> &'static str {
       devShells.default = craneLib.devShell {
         checks = self.checks.${system};
         packages = with pkgs; [
+          treefmtEval.config.build.wrapper
           cargo-audit
           cargo-nextest
           pre-commit
@@ -321,6 +392,7 @@ fn custom_skillnet_flake() -> &'static str {
       devShells.default = craneLib.devShell {
         checks = self.checks.${system};
         packages = with pkgs; [
+          treefmtEval.config.build.wrapper
           cargo-nextest
           pre-commit
           rust-analyzer
@@ -332,6 +404,7 @@ fn custom_skillnet_flake() -> &'static str {
         inherit (toolchain) craneLib;
         cross = rs-harbor.lib.mkCross {inherit pkgs system;};
         packages = with pkgs; [
+          treefmtEval.config.build.wrapper
           mdbook
           pre-commit
           rust-analyzer
@@ -768,8 +841,10 @@ checks = ["offline-tests", "typecheck"]
           pkgs = py.mkPkgs { system = "x86_64-linux"; };
           treefmtEval = treefmt-nix.lib.evalModule pkgs (import ./nix/treefmt.nix);
         in treefmtEval.config.build.check self;
-      devShells.x86_64-linux.hooks = {
-        packages = [] ++ pre-commit-check.enabledPackages;
+      devShells.x86_64-linux.hooks = let
+        treefmtEval = treefmt-nix.lib.evalModule pkgs (import ./nix/treefmt.nix);
+      in {
+        packages = [treefmtEval.config.build.wrapper] ++ pre-commit-check.enabledPackages;
         shellHook = pre-commit-check.shellHook;
       };
     };
@@ -1095,6 +1170,7 @@ fn custom_mode_requires_docs_shell_when_docs_outputs_are_advertised() {
         inherit (toolchain) craneLib;
         cross = rs-harbor.lib.mkCross {inherit pkgs system;};
         packages = with pkgs; [
+          treefmtEval.config.build.wrapper
           mdbook
           pre-commit
           rust-analyzer
@@ -1570,7 +1646,7 @@ fn generic_custom_flake() -> &'static str {
       formatter = treefmtEval.config.build.wrapper;
       checks.formatting = treefmtEval.config.build.check self;
       devShells.default = pkgs.mkShell {
-        packages = pre-commit-check.enabledPackages;
+        packages = [treefmtEval.config.build.wrapper] ++ pre-commit-check.enabledPackages;
         shellHook = pre-commit-check.shellHook;
       };
     };

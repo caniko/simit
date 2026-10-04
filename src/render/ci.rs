@@ -34,9 +34,12 @@ pub fn is_generated_workflow_marker(content: &str) -> bool {
 const CARGO_NEXTEST_VERSION: &str = "0.9.100";
 const CARGO_DENY_VERSION: &str = "0.18.3";
 const CARGO_DENY_POLICY_CHECKS: &str = "bans licenses sources";
-// Custom/legacy Nix shells may expose rustfmt without a treefmt wrapper.
-// Prefer the complete project formatter, and never mask its failure.
-pub(crate) const NIX_FORMAT_COMMAND: &str = r#"sh -c 'formatter=$(nix eval --impure --raw --expr "let root = toString ./.; flake = builtins.getFlake (if builtins.pathExists ./.git then \"git+file://\" + root else root); in if flake ? formatter.\${builtins.currentSystem} then flake.formatter.\${builtins.currentSystem}.drvPath else \"\"") || exit; if [ -n "$formatter" ]; then formatter_path=$(nix build --no-link --print-out-paths "$formatter^out") || exit; if [ -x "$formatter_path/bin/treefmt" ]; then exec "$formatter_path/bin/treefmt" --ci; fi; fi; if command -v treefmt >/dev/null 2>&1; then exec treefmt --ci; else exec cargo fmt --all -- --check; fi'"#;
+// A managed formatting policy must run its own wrapper, never an ambient
+// treefmt or a Rust-only fallback. Legacy shells without a policy retain fmt.
+pub(crate) const NIX_FORMAT_COMMAND: &str = r#"sh -c 'formatter=$(nix eval --impure --raw --expr "let root = toString ./.; flake = builtins.getFlake (if builtins.pathExists ./.git then \"git+file://\" + root else root); in if flake ? formatter.\${builtins.currentSystem} then flake.formatter.\${builtins.currentSystem}.drvPath else \"\"") || exit; if [ -n "$formatter" ]; then formatter_path=$(nix build --no-link --print-out-paths "$formatter^out") || exit; test -x "$formatter_path/bin/treefmt" || { echo "project formatter does not provide bin/treefmt" >&2; exit 1; }; exec "$formatter_path/bin/treefmt" --ci; fi; if [ -f nix/treefmt.nix ] || [ -f treefmt.toml ] || [ -f .treefmt.toml ]; then echo "treefmt policy requires a flake formatter output; run simit init flake" >&2; exit 1; fi; exec cargo fmt --all -- --check'"#;
+
+#[cfg(all(test, unix))]
+mod formatter_tests;
 
 #[derive(Debug, Deserialize)]
 struct ActionPin {

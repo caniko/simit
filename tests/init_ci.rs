@@ -66,7 +66,7 @@ fn nix_format_jobs_are_uncached_across_providers_and_job_layouts() {
         let workflow = read(&temp.path().join(path));
         assert_yaml_parses(&workflow);
         assert!(
-            workflow.contains("treefmt --ci"),
+            workflow.contains("bin/treefmt\" --ci"),
             "{platform}/{provider}: {workflow}"
         );
         assert!(!workflow.contains("treefmt --fail-on-change"));
