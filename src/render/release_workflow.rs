@@ -2909,7 +2909,7 @@ esac"#,
             ),
             (
                 "gpg",
-                r#"[ "$1" = --batch ] && [ "$2" = --import ] && [ "$(cat "$3")" = default-branch-key"#,
+                r#"[ "$1" = --batch ] && [ "$2" = --import ] && [ "$(cat "$3")" = default-branch-key ]"#,
             ),
             (
                 "nix",
