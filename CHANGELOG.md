@@ -18,6 +18,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Include Nix builder-phase output in captured build artifacts so hosted
+  cancellations retain build diagnostics alongside client messages and results.
 - Give native GitHub Nix flake matrices read-only permissions, coalesced push/PR
   concurrency, bounded parallelism and timeouts, and explicit build-resource limits.
 - Resolve and check out fork PR heads from their source repository while keeping
