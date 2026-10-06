@@ -1886,21 +1886,22 @@ fn maybe_push_deny_template(
 
 fn reconcile_ci_files(
     workspace_root: &Path,
-    files: Vec<project::GeneratedFile>,
+    mut files: Vec<project::GeneratedFile>,
     message: &str,
     check: bool,
     show_diff: bool,
 ) -> Result<()> {
-    let plan = project::GeneratedPlan {
-        files,
-        message,
-        owns_name: is_ci_managed_workflow_name,
-    };
-    if check {
-        plan.check(workspace_root, show_diff)
-    } else {
-        plan.write(workspace_root)
-    }
+    let config = ProjectConfig::load(workspace_root)?;
+    crate::render::workflow_templates::append(workspace_root, &config.ci, &mut files)?;
+    let mut obsolete =
+        project::obsolete_generated_workflows(workspace_root, &files, is_ci_managed_workflow_name)?;
+    obsolete.extend(crate::render::workflow_templates::obsolete(
+        workspace_root,
+        &files,
+    )?);
+    obsolete.sort();
+    obsolete.dedup();
+    project::reconcile_generated_files(workspace_root, &files, &obsolete, message, check, show_diff)
 }
 
 fn cleanup_obsolete_nix_workflows(

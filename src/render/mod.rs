@@ -11,3 +11,4 @@ pub mod pkgbuild;
 pub mod release_workflow;
 pub mod rpm_spec;
 pub mod scoop_manifest;
+pub mod workflow_templates;

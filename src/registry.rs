@@ -929,6 +929,16 @@ fn infer_expected_ci_files(
     workspace_root: &Path,
     marked: &[WorkflowFile],
 ) -> Result<Vec<project::GeneratedFile>> {
+    let mut files = infer_builtin_ci_files(workspace_root, marked)?;
+    let config = ProjectConfig::load(workspace_root)?;
+    crate::render::workflow_templates::append(workspace_root, &config.ci, &mut files)?;
+    Ok(files)
+}
+
+fn infer_builtin_ci_files(
+    workspace_root: &Path,
+    marked: &[WorkflowFile],
+) -> Result<Vec<project::GeneratedFile>> {
     // A configuration that will not load is a reportable condition, not a
     // default: swallowing it here hid unsupported/legacy schema behind whatever
     // the defaults produce, and the consumer could only ever see the resulting

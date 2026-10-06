@@ -39,6 +39,39 @@ with_msrv = true
 
 ## Generic CI vs Release Publishing
 
+### Project-owned workflow templates
+
+Projects with specialized Actions jobs can render their existing workflow
+templates through Simit alongside its built-in jobs:
+
+```toml
+[ci.workflow_templates]
+".github/workflows/tests.yml" = ".simit/templates/tests.yml"
+
+[ci.workflow_variables]
+runner = "${{ github.event.repository.fork && 'ubuntu-24.04' || 'ubuntu-latest-32-core' }}"
+```
+
+The template uses `@simit(runner)@` where this literal value belongs. Simit
+substitutes named values once, preserving GitHub `${{ ... }}` expressions and
+shell syntax. There are no recursive substitutions or implicit environment
+reads. Undefined variables and malformed rendered YAML fail before any output
+is written. Keep credentials as runtime Actions secret references, never literal
+values in committed templates or configuration.
+
+`simit init ci` renders the declared templates, marks their outputs as generated,
+and persists both mappings and variables. `--check --diff` and registry auditing
+use the same renderer, so edits to outputs, templates, or variables are detected.
+Removing a mapping retires only its template-marked output; unrelated workflows
+remain project-owned. Built-in workflow collisions, paths outside the repository,
+and mismatched Actions platforms are rejected. This feature supports GitHub and
+Forgejo Actions, including exact-only Nix qualification; it does not replace the
+project's test selections or permission policy.
+
+When importing upstream CI, retain its presets in template sources and declare
+fork-specific policy through variables. Apply future upstream changes to those
+sources, then regenerate rather than modifying generated workflow files.
+
 ### Rust feature coverage and MSRV environments
 
 Rust Actions workflows honor `ci.all_features` for tests and Clippy in both

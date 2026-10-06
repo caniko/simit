@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Project-owned Actions workflow templates and literal variables, sharing CI
+  generation, configuration persistence, drift checks, and registry ownership.
 - Scoped GitHub Nix build-matrix options under `[ci.nix_build]`: exact-only
   flake qualification, private-input environment/preflight and setup, KVM,
   bounded realization, and retained source/output metadata, build diagnostics

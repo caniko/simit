@@ -56,7 +56,7 @@ impl GeneratedPlan<'_> {
 /// Scan the shared workflow directories ([`.forgejo/workflows`],
 /// [`.github/workflows`], [`.crow`]) for generator-owned workflow files that
 /// are not part of `files` and would be left behind by a write.
-fn obsolete_generated_workflows(
+pub(crate) fn obsolete_generated_workflows(
     workspace_root: &Path,
     files: &[GeneratedFile],
     owns_name: fn(&OsStr) -> bool,

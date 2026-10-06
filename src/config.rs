@@ -476,6 +476,12 @@ pub struct CiConfig {
     pub extra_setup: Vec<String>,
     #[serde(default)]
     pub extra_env: BTreeMap<String, String>,
+    /// Project-owned workflow templates, keyed by generated workflow path.
+    #[serde(default)]
+    pub workflow_templates: BTreeMap<String, String>,
+    /// Literal values substituted for `@simit(name)@` in workflow templates.
+    #[serde(default)]
+    pub workflow_variables: BTreeMap<String, String>,
     #[serde(default)]
     pub required_secrets: Vec<String>,
     #[serde(default)]
@@ -1891,6 +1897,7 @@ impl ProjectConfig {
     }
 
     fn validate_common(&self) -> Result<()> {
+        crate::render::workflow_templates::validate_config(&self.ci)?;
         if self.ci.workspace && !self.ci.packages.is_empty() {
             bail!("simit project config: [ci].workspace cannot be true when [ci].packages is set");
         }
@@ -3584,6 +3591,8 @@ fn set_ci_table(table: &mut Table, ci: &CiConfig) {
     set_required_gates_table(table, &ci.required_gates);
     set_string_array(table, "extra_setup", &ci.extra_setup);
     set_string_map(table, "extra_env", &ci.extra_env);
+    set_string_map(table, "workflow_templates", &ci.workflow_templates);
+    set_string_map(table, "workflow_variables", &ci.workflow_variables);
     set_string_map(table, "step_runners", &ci.step_runners);
     set_string_array(table, "required_secrets", &ci.required_secrets);
     set_string_array(table, "required_env", &ci.required_env);
