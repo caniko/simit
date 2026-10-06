@@ -884,7 +884,7 @@ fn push_validate_tag(w: &mut String, artifacts: &ArtifactsConfig) {
     w.push_str("            echo \"CHANGELOG.md missing section for $VERSION\" >&2\n            exit 1\n          fi\n\n");
     w.push_str("          IS_PRERELEASE=false\n");
     writeln!(w, "          if printf '%s\\n' \"$VERSION\" | grep -Eq -- '{PRERELEASE_REGEX}'; then IS_PRERELEASE=true; fi").expect("write");
-    w.push_str("\n");
+    w.push('\n');
     w.push_str("          git checkout --detach \"$validated_sha\"\n");
     w.push_str("          { printf 'VERSION=%s\\n' \"$VERSION\"; printf 'IS_PRERELEASE=%s\\n' \"$IS_PRERELEASE\"; } > release-env\n");
 }
