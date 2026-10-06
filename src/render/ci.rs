@@ -1061,7 +1061,9 @@ pub fn nix_build_matrix_file_with_options(
         command.push_str(&format!(" --cores {cores}"));
     }
     if options.capture_results {
-        command.push_str(" --json");
+        // Builder phases go to stderr only when explicitly requested. Retaining
+        // the client diagnostics alone cannot explain a cancelled build.
+        command.push_str(" --print-build-logs --json");
         workflow.push_str(&format!("        run: |\n          set -euo pipefail\n          exec 3> >(tee \"$SIMIT_NIX_BUILD_RESULTS/build.log\" >&2)\n          log_pid=$!\n          status=0\n          {command} \"$INSTALLABLE\" 2>&3 | tee \"$SIMIT_NIX_BUILD_RESULTS/result.json\" || status=$?\n          exec 3>&-\n          wait \"$log_pid\"\n          exit \"$status\"\n"));
         for (index, script) in options.post_build.iter().enumerate() {
             workflow.push_str(&format!(
