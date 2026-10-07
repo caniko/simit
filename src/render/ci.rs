@@ -656,14 +656,20 @@ fn publish_workspace_workflow(
           mkdir "$probe/src"
           touch "$probe/src/lib.rs"
           printf '[package]\nname = "simit-registry-probe"\nversion = "0.0.0"\nedition = "2021"\n[workspace]\n[dependencies]\n%s = { version = "=%s", registry = "crates-io", default-features = false }\n' "$crate_name" "$version" > "$probe/Cargo.toml"
-          # The web API may be ready before the index. Resolve an exact registry
+          # The web API may be ready before the index. Fetch an exact registry
           # dependency from a workspace-isolated manifest, without a cached lock.
+          # Cargo.lock retains binary-only packages too; metadata omits them.
           for attempt in $(seq 1 20); do
             rm -f "$probe/Cargo.lock"
             if timeout --kill-after=5s 60s "#);
         w.push_str(prefix);
-        w.push_str(r#"cargo metadata --manifest-path "$probe/Cargo.toml" --format-version 1 > "$probe/metadata.json" 2> "$probe/error.log" && jq -e --arg n "$crate_name" --arg v "$version" 'any(.packages[]; .name == $n and .version == $v and .source == "registry+https://github.com/rust-lang/crates.io-index")' "$probe/metadata.json" > /dev/null; then
-              echo "resolved ${crate_name} ${version} from crates.io (attempt $attempt)"
+        w.push_str(r#"cargo fetch --manifest-path "$probe/Cargo.toml" > "$probe/fetch.log" 2> "$probe/error.log" && awk -v wanted_name="$crate_name" -v wanted_version="$version" '
+              function matches() { return name == wanted_name && version == wanted_version && source == "registry+https://github.com/rust-lang/crates.io-index" }
+              /^\[\[package\]\]/ { if (matches()) found = 1; name = version = source = "" }
+              /^(name|version|source) = "/ { value = $3; gsub(/"/, "", value); if ($1 == "name") name = value; else if ($1 == "version") version = value; else source = value }
+              END { exit !(found || matches()) }
+            ' "$probe/Cargo.lock"; then
+              echo "resolved and fetched ${crate_name} ${version} from crates.io (attempt $attempt)"
               break
             fi
             cat "$probe/error.log" >&2

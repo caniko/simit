@@ -646,7 +646,7 @@ fn coordinated_publish_bounds_propagation_and_distinguishes_failures() {
     assert!(publish.contains("sleep 30"));
     assert!(publish.contains("registry resolution timeout for"));
     assert!(publish.contains("timeout --kill-after=5s 60s"));
-    assert!(publish.contains("cargo metadata --manifest-path"));
+    assert!(publish.contains("cargo fetch --manifest-path"));
     // Upload auth/ownership still fails fast; API readiness never replaces
     // dependency resolution, including when resuming an existing upload.
     assert!(publish.contains("401|403) echo \"authorization/ownership failure"));
@@ -719,17 +719,16 @@ fn coordinated_publication_waits_for_exact_cargo_resolution_even_when_api_is_rea
             "cargo",
             r##"#!/usr/bin/env bash
 set -euo pipefail
-[[ "$*" == "metadata --manifest-path "*" --format-version 1" ]] || exit 92
+[[ "$*" == "fetch --manifest-path "* ]] || exit 92
 grep -F 'a = { version = "=0.1.0", registry = "crates-io", default-features = false }' "$3" >/dev/null || exit 93
 [[ ! -e "${3%/*}/Cargo.lock" ]] || exit 94
-touch "${3%/*}/Cargo.lock"
 count=0; [[ ! -f "$TEST_STATE/count" ]] || count=$(cat "$TEST_STATE/count")
 count=$((count + 1)); printf '%s' "$count" > "$TEST_STATE/count"
-if [[ "$TEST_MODE" == missing || ( "$TEST_MODE" == delayed && "$count" == 1 ) ]]; then echo 'no matching version in registry index' >&2; exit 1; fi
+if [[ "$TEST_MODE" == missing || ( "$TEST_MODE" == delayed && "$count" == 1 ) ]]; then touch "${3%/*}/Cargo.lock"; echo 'no matching version in registry index' >&2; exit 1; fi
 source='registry+https://github.com/rust-lang/crates.io-index'
 [[ "$TEST_MODE" != foreign ]] || source='path+file:///checkout/a'
 version=0.1.0; [[ "$TEST_MODE" != wrong-version ]] || version=0.1.1
-printf '{"packages":[{"name":"a","version":"%s","source":"%s"}]}' "$version" "$source"
+printf 'version = 4\n\n[[package]]\nname = "a"\nversion = "%s"\nsource = "%s"\n\n[[package]]\nname = "probe"\nversion = "0.0.0"\n' "$version" "$source" > "${3%/*}/Cargo.lock"
 "##,
         ),
     ] {
@@ -744,6 +743,7 @@ printf '{"packages":[{"name":"a","version":"%s","source":"%s"}]}' "$version" "$s
     let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
     for (mode, success, attempts) in [
         ("delayed", true, 2),
+        ("binary-only", true, 1),
         ("missing", false, 20),
         ("foreign", false, 20),
         ("wrong-version", false, 20),
