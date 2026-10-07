@@ -46,6 +46,19 @@ fn controller_generation_round_trips_and_audits_bootstrap_drift() {
     let workflow =
         std::fs::read_to_string(root.join(".github/workflows/review-repository.yml")).unwrap();
     assert!(workflow.contains("verify-engine --root controller"));
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
+    let secret = &yaml["on"]["workflow_call"]["secrets"]["GH_TOKEN"];
+    assert!(
+        secret.is_mapping(),
+        "callers must be able to forward the report-only token"
+    );
+    assert_eq!(secret["required"].as_bool(), Some(false));
+    for trigger in ["workflow_dispatch", "workflow_call"] {
+        assert_eq!(
+            yaml["on"][trigger]["inputs"]["controller_revision"]["required"].as_bool(),
+            Some(false)
+        );
+    }
     assert_eq!(
         std::fs::read_to_string(root.join("policy.json")).unwrap(),
         "{\"publication_enabled\":false}"
