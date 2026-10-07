@@ -602,7 +602,8 @@ fn publish_workspace_workflow(
         w.push_str("cargo publish -p ");
         w.push_str(&shell_word(name));
         w.push_str(" --dry-run\n\n");
-        // Publish with honest conflict handling + bounded propagation wait.
+        // Publish with honest conflict handling. Readiness is a separate step
+        // so checksum-based resumes also wait for actual Cargo resolution.
         w.push_str("      - name: Publish\n");
         w.push_str("        env:\n");
         w.push_str("          CRATES_IO_API_TOKEN: ${{ secrets.CRATES_IO_API_TOKEN }}\n");
@@ -642,12 +643,36 @@ fn publish_workspace_workflow(
         w.push_str("cargo publish -p ");
         w.push_str(&shell_word(name));
         w.push('\n');
-        w.push_str("          # Bounded propagation wait: dependents need this version visible.\n");
-        w.push_str("          for attempt in $(seq 1 20); do\n");
-        w.push_str("            code=\"$(curl --retry 2 -sS -o /dev/null -w '%{http_code}' -A 'simit publish-workspace propagation' \"https://crates.io/api/v1/crates/${crate_name}/${version}\" || echo 000)\"\n");
-        w.push_str("            case \"$code\" in 200) echo \"propagated ${crate_name} ${version} (attempt $attempt)\"; break;; 404) echo \"waiting for ${crate_name} ${version} (attempt $attempt/20)\"; sleep 30;; 401|403) echo \"authorization failure while waiting (HTTP $code)\" >&2; exit 1;; *) echo \"unexpected registry status $code while waiting\" >&2; exit 1;; esac\n");
-        w.push_str("            if [ \"$attempt\" = 20 ]; then echo \"propagation timeout for ${crate_name} ${version}\" >&2; exit 1; fi\n");
-        w.push_str("          done\n\n");
+        w.push('\n');
+        w.push_str("      - name: Wait for exact registry resolution\n");
+        w.push_str("        run: |\n");
+        w.push_str("          set -euo pipefail\n");
+        w.push_str("          crate_name=");
+        w.push_str(&shell_quote(name));
+        w.push('\n');
+        w.push_str(r#"          version="${GITHUB_REF_NAME:-${GITHUB_REF#refs/tags/}}"
+          probe="$(mktemp -d)"
+          trap 'rm -rf "$probe"' EXIT
+          mkdir "$probe/src"
+          touch "$probe/src/lib.rs"
+          printf '[package]\nname = "simit-registry-probe"\nversion = "0.0.0"\nedition = "2021"\n[workspace]\n[dependencies]\n%s = { version = "=%s", registry = "crates-io", default-features = false }\n' "$crate_name" "$version" > "$probe/Cargo.toml"
+          # The web API may be ready before the index. Resolve an exact registry
+          # dependency from a workspace-isolated manifest, without a cached lock.
+          for attempt in $(seq 1 20); do
+            rm -f "$probe/Cargo.lock"
+            if timeout --kill-after=5s 60s "#);
+        w.push_str(prefix);
+        w.push_str(r#"cargo metadata --manifest-path "$probe/Cargo.toml" --format-version 1 > "$probe/metadata.json" 2> "$probe/error.log" && jq -e --arg n "$crate_name" --arg v "$version" 'any(.packages[]; .name == $n and .version == $v and .source == "registry+https://github.com/rust-lang/crates.io-index")' "$probe/metadata.json" > /dev/null; then
+              echo "resolved ${crate_name} ${version} from crates.io (attempt $attempt)"
+              break
+            fi
+            cat "$probe/error.log" >&2
+            if [ "$attempt" = 20 ]; then echo "registry resolution timeout for ${crate_name} ${version}" >&2; exit 1; fi
+            echo "waiting for exact registry resolution of ${crate_name} ${version} (attempt $attempt/20)"
+            sleep 30
+          done
+
+"#);
         previous = job.clone();
     }
     // Auditable summary (always runs, never publishes).
