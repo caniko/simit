@@ -692,6 +692,15 @@ fn coordinated_publication_waits_for_exact_cargo_resolution_even_when_api_is_rea
     let script = steps[wait]["run"].as_str().unwrap();
     let bin = temp.path().join("bin");
     fs::create_dir(&bin).unwrap();
+    // Runtime-created fixtures are not processed by Nix's patchShebangs.
+    // Resolve Bash through the build environment rather than assuming /usr.
+    let bash = Command::new("bash")
+        .args(["-c", "printf '%s' \"$BASH\""])
+        .output()
+        .unwrap();
+    assert!(bash.status.success());
+    let interpreter = String::from_utf8(bash.stdout).unwrap();
+    assert!(std::path::Path::new(&interpreter).is_absolute());
     for (name, contents) in [
         (
             "curl",
@@ -725,7 +734,11 @@ printf '{"packages":[{"name":"a","version":"%s","source":"%s"}]}' "$version" "$s
         ),
     ] {
         let path = bin.join(name);
-        fs::write(&path, contents).unwrap();
+        fs::write(
+            &path,
+            contents.replacen("#!/usr/bin/env bash", &format!("#!{interpreter}"), 1),
+        )
+        .unwrap();
         fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
     }
     let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
