@@ -18,6 +18,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Wait for exact crates.io dependency resolution through Cargo after each
+  coordinated workspace publication, including checksum-based resumes, before
+  starting dependent jobs. Fetch and verify lockfile evidence for library and
+  binary-only crates, with bounded retries and individual calls; crates.io web
+  API readiness alone no longer advances the publication plan.
 - Give native GitHub Nix flake matrices read-only permissions, coalesced push/PR
   concurrency, bounded parallelism and timeouts, and explicit build-resource limits.
 - Resolve and check out fork PR heads from their source repository while keeping

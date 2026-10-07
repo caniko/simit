@@ -264,10 +264,13 @@ timeout_minutes = 30
     // Honest conflict handling: checksum resume vs conflict failure.
     assert!(publish.contains("already exists on crates.io; verifying it is the intended release"));
     assert!(publish.contains("refusing to treat as success"));
-    // Bounded propagation wait distinguishes delay (404 retry) from
-    // auth/ownership (401/403 fast fail) and unexpected statuses.
-    assert!(publish.contains("waiting for ${crate_name} ${version} (attempt"));
-    assert!(publish.contains("authorization failure while waiting"));
+    // Upload preflight still fails on auth/ownership; dependencies await
+    // exact Cargo registry resolution in a separate step.
+    assert!(
+        publish
+            .contains("waiting for exact registry resolution of ${crate_name} ${version} (attempt")
+    );
+    assert!(publish.contains("authorization/ownership failure checking"));
     // Packaging stages distinguished: archive+verify, dry-run, publish.
     assert!(publish.contains("cargo package -p"));
     assert!(publish.contains("cargo publish -p"));
@@ -638,15 +641,136 @@ fn coordinated_publish_bounds_propagation_and_distinguishes_failures() {
         .unwrap();
     assert!(status.success());
     let publish = read(&temp.path().join(".github/workflows/publish-workspace.yaml"));
-    // Bounded retries: 20 attempts, 30s sleep, explicit timeout failure.
+    // Bounded retries: 20 attempts, 60s calls, 30s sleep, explicit failure.
     assert!(publish.contains("for attempt in $(seq 1 20)"));
     assert!(publish.contains("sleep 30"));
-    assert!(publish.contains("propagation timeout for"));
-    // Propagation delay (404) retries; auth/ownership (401/403) fails fast;
-    // unexpected statuses fail fast (not misclassified as delay).
-    assert!(publish.contains("404) echo \"waiting for"));
-    assert!(publish.contains("401|403) echo \"authorization failure while waiting"));
-    assert!(publish.contains("unexpected registry status"));
+    assert!(publish.contains("registry resolution timeout for"));
+    assert!(publish.contains("timeout --kill-after=5s 60s"));
+    assert!(publish.contains("cargo fetch --manifest-path"));
+    // Upload auth/ownership still fails fast; API readiness never replaces
+    // dependency resolution, including when resuming an existing upload.
+    assert!(publish.contains("401|403) echo \"authorization/ownership failure"));
+    assert!(!publish.contains("simit publish-workspace propagation"));
+}
+
+#[cfg(unix)]
+#[test]
+fn coordinated_publication_waits_for_exact_cargo_resolution_even_when_api_is_ready() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = init_coordinated_workspace("");
+    assert!(
+        simit()
+            .current_dir(temp.path())
+            .args([
+                "init",
+                "ci",
+                "--platform",
+                "github",
+                "--runtime",
+                "nix",
+                "--workspace",
+                "--workspace-strategy",
+                "aggregate",
+                "--publish-crates",
+                "--coordinated-publish",
+            ])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&read(
+        &temp.path().join(".github/workflows/publish-workspace.yaml"),
+    ))
+    .unwrap();
+    let steps = yaml["jobs"]["publish-a"]["steps"].as_sequence().unwrap();
+    let publish = steps
+        .iter()
+        .position(|step| step["name"].as_str() == Some("Publish"))
+        .unwrap();
+    let wait = steps.iter().position(|step| step["name"].as_str() == Some("Wait for exact registry resolution")).expect("publication must await Cargo index resolution in a separate step, including checksum resumes");
+    assert!(wait > publish);
+    let script = steps[wait]["run"].as_str().unwrap();
+    let bin = temp.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    // Runtime-created fixtures are not processed by Nix's patchShebangs.
+    // Resolve Bash through the build environment rather than assuming /usr.
+    let bash = Command::new("bash")
+        .args(["-c", "printf '%s' \"$BASH\""])
+        .output()
+        .unwrap();
+    assert!(bash.status.success());
+    let interpreter = String::from_utf8(bash.stdout).unwrap();
+    assert!(std::path::Path::new(&interpreter).is_absolute());
+    for (name, contents) in [
+        (
+            "curl",
+            "#!/usr/bin/env bash\ntouch \"$TEST_STATE/api-probed\"\nprintf '200'\n",
+        ),
+        ("sleep", "#!/usr/bin/env bash\nexit 0\n"),
+        (
+            "timeout",
+            "#!/usr/bin/env bash\n[[ \"$1\" == --kill-after=5s && \"$2\" == 60s ]] || exit 90\nshift 2\nexec \"$@\"\n",
+        ),
+        (
+            "nix",
+            "#!/usr/bin/env bash\n[[ \"$1\" == develop && \"$2\" == -c ]] || exit 91\nshift 2\nexec \"$@\"\n",
+        ),
+        (
+            "cargo",
+            r##"#!/usr/bin/env bash
+set -euo pipefail
+[[ "$*" == "fetch --manifest-path "* ]] || exit 92
+grep -F 'a = { version = "=0.1.0", registry = "crates-io", default-features = false }' "$3" >/dev/null || exit 93
+[[ ! -e "${3%/*}/Cargo.lock" ]] || exit 94
+count=0; [[ ! -f "$TEST_STATE/count" ]] || count=$(cat "$TEST_STATE/count")
+count=$((count + 1)); printf '%s' "$count" > "$TEST_STATE/count"
+if [[ "$TEST_MODE" == missing || ( "$TEST_MODE" == delayed && "$count" == 1 ) ]]; then touch "${3%/*}/Cargo.lock"; echo 'no matching version in registry index' >&2; exit 1; fi
+source='registry+https://github.com/rust-lang/crates.io-index'
+[[ "$TEST_MODE" != foreign ]] || source='path+file:///checkout/a'
+version=0.1.0; [[ "$TEST_MODE" != wrong-version ]] || version=0.1.1
+printf 'version = 4\n\n[[package]]\nname = "a"\nversion = "%s"\nsource = "%s"\n\n[[package]]\nname = "probe"\nversion = "0.0.0"\n' "$version" "$source" > "${3%/*}/Cargo.lock"
+"##,
+        ),
+    ] {
+        let path = bin.join(name);
+        fs::write(
+            &path,
+            contents.replacen("#!/usr/bin/env bash", &format!("#!{interpreter}"), 1),
+        )
+        .unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+    for (mode, success, attempts) in [
+        ("delayed", true, 2),
+        ("binary-only", true, 1),
+        ("missing", false, 20),
+        ("foreign", false, 20),
+        ("wrong-version", false, 20),
+    ] {
+        let state = temp.path().join(mode);
+        fs::create_dir(&state).unwrap();
+        let output = Command::new("bash")
+            .args(["-c", script])
+            .current_dir(temp.path())
+            .env("PATH", &path)
+            .env("GITHUB_REF_NAME", "0.1.0")
+            .env("TEST_MODE", mode)
+            .env("TEST_STATE", &state)
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.success(),
+            success,
+            "{mode}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(read(&state.join("count")), attempts.to_string());
+        assert!(
+            !state.join("api-probed").exists(),
+            "API readiness cannot establish registry resolution"
+        );
+    }
 }
 
 #[test]
