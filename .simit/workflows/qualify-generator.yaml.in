@@ -23,6 +23,7 @@ jobs:
         max-jobs = 1
         cores = 2
       CARGO_BUILD_JOBS: "2"
+      SIMIT_MAINTAINERS_GPG: ${{ github.workspace }}/keys/maintainers.gpg
     steps:
       - name: Checkout exact execution source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -46,6 +47,8 @@ jobs:
         run: |
           set -euo pipefail
           generator=$(python3 -c 'import json,os; print(os.path.join(json.load(open(os.path.join(os.environ["RUNNER_TEMP"], "generator-qualification/result.json")))[0]["outputs"]["out"], "bin/simit"))')
+          cp "$generator" "$RUNNER_TEMP/generator-qualification/simit"
+          sha256sum "$RUNNER_TEMP/generator-qualification/simit" > "$RUNNER_TEMP/generator-qualification/simit.sha256"
           "$generator" init ci --platform github --runtime nix --runner ubuntu-latest --with-docs --publish-crates
           "$generator" init ci --platform github --runtime nix --runner ubuntu-latest --with-docs --publish-crates --check --diff
           git diff --check
