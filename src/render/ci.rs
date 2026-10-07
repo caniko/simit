@@ -2188,7 +2188,7 @@ fn ci_workflow_single_job(
     }
     workflow.push('\n');
     push_github_read_permissions(&mut workflow, platform);
-    push_provider_concurrency(&mut workflow, platform);
+    push_rust_ci_concurrency(&mut workflow, platform, &options);
     workflow.push_str("jobs:\n");
     workflow.push_str("  test:\n");
     workflow.push_str("    runs-on: ");
@@ -2324,7 +2324,7 @@ fn ci_workflow_multi_job(
     workflow.push_str("    tags-ignore: [\"**\"]\n");
     workflow.push('\n');
     push_github_read_permissions(&mut workflow, platform);
-    push_provider_concurrency(&mut workflow, platform);
+    push_rust_ci_concurrency(&mut workflow, platform, &options);
     workflow.push_str("jobs:\n");
 
     struct StepDef<'a> {
@@ -3563,6 +3563,17 @@ fn push_github_concurrency(workflow: &mut String) {
         "  group: ${{ github.workflow_ref }}-${{ github.event_name }}-${{ github.head_ref || github.ref_name }}\n",
     );
     workflow.push_str("  cancel-in-progress: true\n\n");
+}
+
+fn push_rust_ci_concurrency(workflow: &mut String, platform: Platform, options: &CiOptions) {
+    if platform == Platform::Github && options.workspace_strategy == WorkspaceStrategy::Aggregate {
+        // workflow_ref contains the event ref, so it cannot coalesce a branch
+        // push with its PR merge ref. Aggregate CI has one stable workflow path.
+        // Include the source repository so a fork's same-named branch is distinct.
+        workflow.push_str("concurrency:\n  group: .github/workflows/ci.yaml-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event.pull_request.head.ref || github.ref_name }}\n  cancel-in-progress: true\n\n");
+    } else {
+        push_provider_concurrency(workflow, platform);
+    }
 }
 
 fn push_github_read_permissions(workflow: &mut String, platform: Platform) {
