@@ -6,30 +6,42 @@ mod common;
 
 #[test]
 fn publish_uses_default_branch_keys_and_rejects_a_different_checkout() {
+    for member_scoped in [false, true] {
+        verify_publish_binding(member_scoped);
+    }
+}
+
+fn verify_publish_binding(member_scoped: bool) {
     let temp = tempfile::tempdir().unwrap();
     fs::write(
         temp.path().join("Cargo.toml"),
-        "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nedition = \"2024\"\nlicense = \"MIT\"\n",
+        "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nedition = \"2024\"\nlicense = \"MIT\"\n\n[workspace]\nmembers = []\n",
     )
     .unwrap();
     fs::create_dir(temp.path().join("src")).unwrap();
     fs::write(temp.path().join("src/main.rs"), "fn main() {}\n").unwrap();
-    let output = common::simit()
-        .current_dir(temp.path())
-        .args([
-            "init",
-            "ci",
-            "--platform",
-            "github",
-            "--runtime",
-            "cargo",
-            "--publish-crates",
-        ])
-        .output()
-        .unwrap();
+    let mut command = common::simit();
+    command.current_dir(temp.path()).args([
+        "init",
+        "ci",
+        "--platform",
+        "github",
+        "--runtime",
+        "cargo",
+        "--publish-crates",
+    ]);
+    if member_scoped {
+        command.arg("--workspace");
+    }
+    let output = command.output().unwrap();
     assert!(output.status.success(), "{output:?}");
+    let name = if member_scoped {
+        "publish-crate-demo.yaml"
+    } else {
+        "publish-crate.yaml"
+    };
     let workflow: serde_yaml::Value = serde_yaml::from_str(
-        &fs::read_to_string(temp.path().join(".github/workflows/publish-crate.yaml")).unwrap(),
+        &fs::read_to_string(temp.path().join(".github/workflows").join(name)).unwrap(),
     )
     .unwrap();
     let script = workflow["jobs"]["publish"]["steps"]

@@ -464,7 +464,7 @@ fn publish_workspace_workflow(
     push_release_permissions(&mut w, platform);
     push_job_env(&mut w, platform, runtime, &[], true);
     w.push_str("    steps:\n");
-    push_checkout_step(&mut w, platform);
+    push_event_checkout_step(&mut w, platform);
     if runtime == Runtime::Nix {
         push_install_nix_step_with_cache(
             &mut w,
@@ -517,7 +517,7 @@ fn publish_workspace_workflow(
             .collect();
         push_job_env(&mut w, platform, runtime, &gate_env, true);
         w.push_str("    steps:\n");
-        push_checkout_step(&mut w, platform);
+        push_event_checkout_step(&mut w, platform);
         if runtime == Runtime::Nix {
             push_install_nix_step_with_cache(
                 &mut w,
@@ -568,7 +568,7 @@ fn publish_workspace_workflow(
         push_release_permissions(&mut w, platform);
         push_job_env(&mut w, platform, runtime, &[], true);
         w.push_str("    steps:\n");
-        push_checkout_step(&mut w, platform);
+        push_event_checkout_step(&mut w, platform);
         if runtime == Runtime::Nix {
             push_install_nix_step_with_cache(
                 &mut w,
@@ -655,7 +655,7 @@ fn publish_workspace_workflow(
     w.push('\n');
     push_release_permissions(&mut w, platform);
     w.push_str("    steps:\n");
-    push_checkout_step(&mut w, platform);
+    push_event_checkout_step(&mut w, platform);
     w.push_str("      - name: Release result\n");
     w.push_str("        run: |\n");
     w.push_str("          set -euo pipefail\n");
@@ -3654,6 +3654,15 @@ fn push_checkout_step(workflow: &mut String, platform: Platform) {
     workflow.push_str("      - name: Checkout\n");
     push_action_uses(workflow, platform, "checkout", "v4.3.1");
     workflow.push('\n');
+}
+
+fn push_event_checkout_step(workflow: &mut String, platform: Platform) {
+    workflow.push_str("      - name: Checkout\n");
+    push_action_uses(workflow, platform, "checkout", "v4.3.1");
+    // Tag validation binds its peeled commit to this immutable event identity.
+    // Gates and every dependent publisher must use that same commit even if the
+    // tag moves after validation; no downstream job resolves the tag again.
+    workflow.push_str("        with:\n          ref: ${{ github.sha }}\n\n");
 }
 
 fn push_extra_setup_steps(workflow: &mut String, extra_setup: &[String]) {

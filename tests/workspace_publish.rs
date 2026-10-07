@@ -244,6 +244,22 @@ timeout_minutes = 30
     assert!(publish.contains("$(nix develop -c cargo pkgid -p a"));
     assert!(publish.contains(".version | select(.num == $v) | .checksum"));
     let parsed: serde_yaml::Value = serde_yaml::from_str(&publish).unwrap();
+    // The tag may move after validation. Every job that reads source, including
+    // required gates and transitive dependent publishers, retains the event SHA
+    // that validation requires the signed tag to match.
+    for (name, job) in parsed["jobs"].as_mapping().unwrap() {
+        let checkout = job["steps"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .find(|step| step["name"].as_str() == Some("Checkout"))
+            .unwrap();
+        assert_eq!(
+            checkout["with"]["ref"].as_str(),
+            Some("${{ github.sha }}"),
+            "job {name:?} must not resolve a mutable release ref"
+        );
+    }
     for job in ["validate", "gate-gel-integration", "publish-a"] {
         assert_eq!(
             parsed["jobs"][job]["env"]["CARGO_HOME"].as_str(),

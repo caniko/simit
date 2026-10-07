@@ -52,19 +52,6 @@ jobs:
             echo "Tag must be an exact semver version like 0.1.1, got '$tag'" >&2
             exit 1
           fi
-
-          # cargo pkgid scopes the version lookup to the crate this workflow publishes.
-          version="$(nix develop -c cargo pkgid -p simit | awk -F'[#@]' 'NF > 1 {print $NF}' | tail -n 1)"
-          if [ -z "$version" ]; then
-            echo "Could not read package version from cargo pkgid" >&2
-            exit 1
-          fi
-          if [ "$tag" != "$version" ]; then
-            echo "Tag $tag does not match Cargo.toml package version $version" >&2
-            exit 1
-          fi
-
-          test -s keys/maintainers.gpg
           if ! command -v gpg >/dev/null 2>&1; then
             if command -v apt-get >/dev/null 2>&1; then
               apt-get update
@@ -78,9 +65,32 @@ jobs:
           export GNUPGHOME
           trap 'rm -rf "$GNUPGHOME"' EXIT
           chmod 700 "$GNUPGHOME"
-          gpg --batch --import keys/maintainers.gpg
+          # The release checkout cannot supply its own verification key.
+          # Fetch the repository's independently maintained default-branch key.
+          git fetch --no-tags origin HEAD
+          git show "FETCH_HEAD:keys/maintainers.gpg" > "$GNUPGHOME/maintainers.gpg"
+          test -s "$GNUPGHOME/maintainers.gpg"
+          gpg --batch --import "$GNUPGHOME/maintainers.gpg"
+
           git fetch --force --tags origin "refs/tags/${tag}:refs/tags/${tag}"
           git verify-tag "$tag"
+          validated_sha="$(git rev-parse --verify "refs/tags/${tag}^{commit}")"
+          checkout_sha="$(git rev-parse --verify HEAD)"
+          if [ "$validated_sha" != "$checkout_sha" ]; then
+            echo "Signed tag commit does not match the checkout being published" >&2
+            exit 1
+          fi
+
+          # cargo pkgid scopes the version lookup to the crate this workflow publishes.
+          version="$(nix develop -c cargo pkgid -p simit | awk -F'[#@]' 'NF > 1 {print $NF}' | tail -n 1)"
+          if [ -z "$version" ]; then
+            echo "Could not read package version from cargo pkgid" >&2
+            exit 1
+          fi
+          if [ "$tag" != "$version" ]; then
+            echo "Tag $tag does not match Cargo.toml package version $version" >&2
+            exit 1
+          fi
 
       - name: Check flake
         run: nix flake check
