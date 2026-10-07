@@ -51,7 +51,7 @@ fn nix_matrix_qualifies_branch_pushes_and_pull_requests_without_tag_releases() {
         assert!(events.contains_key("pull_request"));
         assert!(events.contains_key("workflow_dispatch"));
         assert_eq!(value["on"]["push"]["branches"][0], "**");
-        assert_eq!(value["on"]["push"]["tags-ignore"][0], "**");
+        assert!(value["on"]["push"]["tags-ignore"].is_null());
         assert!(value["on"]["push"]["tags"].is_null());
         assert!(generate(&temp, &["--check", "--diff"]).status.success());
         assert!(generate(&temp, &[]).status.success());

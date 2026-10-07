@@ -981,7 +981,7 @@ pub fn nix_build_matrix_file_with_options(
     push_generated_workflow_header(&mut workflow);
     push_required_secrets_header(&mut workflow, &options.required_secrets);
     workflow.push_str(
-        "name: Nix installable builds\n\non:\n  push:\n    branches: [\"**\"]\n    tags-ignore: [\"**\"]\n  pull_request:\n  workflow_dispatch:\n\n",
+        "name: Nix installable builds\n\non:\n  push:\n    branches: [\"**\"]\n  pull_request:\n  workflow_dispatch:\n\n",
     );
     if platform == Platform::Github {
         workflow.push_str("permissions:\n  contents: read\n\n");

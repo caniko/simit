@@ -201,8 +201,9 @@ Rust and Python projects can also use the other matrix options alongside their
 ordinary CI.
 
 The installable matrix qualifies branch pushes, pull requests, and explicit
-dispatches. Tag pushes are excluded; channel-specific release workflows retain
-their own triggers and publication policy.
+dispatches. Its push trigger defines only `branches`, which excludes tag pushes
+without a tag filter under GitHub's workflow rules. Channel-specific release
+workflows retain their own triggers and publication policy.
 
 The nested environment and setup apply only to the build matrix. Bind every
 required secret to the same-named variable using `${{ secrets.NAME }}` under

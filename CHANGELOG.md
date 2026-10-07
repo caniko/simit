@@ -21,6 +21,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Exclude tag pushes from installable qualification matrices, retain release
   workflow triggers, and use current pinned GitHub checkout and evidence-upload
   actions in focused qualification.
+- Use the branch filter alone for installable qualification so consumers enforcing
+  branch-only CI can validate it without accepting redundant tag filters.
 - Keep the default development environment usable when a worktree lacks the
   optional sibling language-server checkout.
 - Reject unsupported language checks and release requests in Nix-only CI instead
