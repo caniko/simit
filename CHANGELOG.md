@@ -18,10 +18,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Bind signed-tag publication to independently fetched default-branch keys and
-  the exact checkout before evaluating package metadata, including per-member
-  publishers; explicitly pin every coordinated release job to the immutable
-  event SHA and regenerate this repository's publisher from that renderer.
 - Resolve and check out fork PR heads from their source repository while keeping
   review plans and PR reporting anchored to the base repository.
 - Keep GitHub review workflows out of ordinary CI provider inference so Forgejo
@@ -40,6 +36,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   coordinated publication, because Cargo resolves them while packaging the
   lockfile. Path-only unpublished test helpers remain excluded from the plan.
 - Read explicitly dynamic Python versions, scripts, and optional extras from Poetry metadata when a project also declares PEP 621 metadata. Preserve static PEP 621 fields and uv dependency groups, use the same version provider for PyPI release-tag validation, and report unsupported dynamic version providers clearly.
+- Bind signed-tag publication to independently fetched default-branch keys and
+  the exact checkout before evaluating package metadata, including per-member
+  publishers; explicitly pin every coordinated release job to the immutable
+  event SHA and regenerate this repository's publisher from that renderer.
 
 ## [0.19.0] - 2026-09-30
 
