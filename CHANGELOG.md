@@ -18,6 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Bind signed-tag publication to independently fetched default-branch keys and
+  the exact checkout before evaluating package metadata, including per-member
+  publishers; explicitly pin every coordinated release job to the immutable
+  event SHA and regenerate this repository's publisher from that renderer.
 - Resolve and check out fork PR heads from their source repository while keeping
   review plans and PR reporting anchored to the base repository.
 - Keep GitHub review workflows out of ordinary CI provider inference so Forgejo
