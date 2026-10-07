@@ -24,6 +24,7 @@ jobs:
       NIX_CONFIG: "experimental-features = nix-command flakes"
       XDG_CACHE_HOME: "/tmp/.cache"
       CARGO_HOME: "/tmp/.cargo"
+      CARGO_BUILD_JOBS: "2"
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -38,6 +39,9 @@ jobs:
 
       - name: Add cargo bin to PATH
         run: echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
+
+      - name: Project setup
+        run: printf '%s\n' 'NIX_CONFIG<<SIMIT_NIX_LIMITS' 'experimental-features = nix-command flakes' 'max-jobs = 1' 'cores = 2' 'SIMIT_NIX_LIMITS' >> "$GITHUB_ENV"
 
       - name: Validate signed release tag
         run: |

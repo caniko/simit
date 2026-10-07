@@ -18,6 +18,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Exclude tag pushes from installable qualification matrices, retain release
+  workflow triggers, and use current pinned GitHub checkout and evidence-upload
+  actions in focused qualification.
+- Keep the default development environment usable when a worktree lacks the
+  optional sibling language-server checkout.
 - Reject unsupported language checks and release requests in Nix-only CI instead
   of silently omitting them; honor and persist explicit `false` overrides.
 - Allow Python flake projects to select exact-only Nix qualification without

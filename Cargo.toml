@@ -34,6 +34,15 @@ scope = "full"
 [package.metadata.simit.ci]
 platform = "github"
 provider = "actions"
+extra_setup = [
+  "printf '%s\\n' 'NIX_CONFIG<<SIMIT_NIX_LIMITS' 'experimental-features = nix-command flakes' 'max-jobs = 1' 'cores = 2' 'SIMIT_NIX_LIMITS' >> \"$GITHUB_ENV\"",
+]
+
+[package.metadata.simit.ci.extra_env]
+CARGO_BUILD_JOBS = "2"
+
+[package.metadata.simit.ci.workflow_templates]
+".github/workflows/qualify-generator.yaml" = ".simit/workflows/qualify-generator.yaml.in"
 
 [package.metadata.simit.ci.pages]
 repo = "caniko/simit"

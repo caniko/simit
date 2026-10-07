@@ -200,6 +200,10 @@ Select all required Rust checks explicitly as Nix installables in this mode.
 Rust and Python projects can also use the other matrix options alongside their
 ordinary CI.
 
+The installable matrix qualifies branch pushes, pull requests, and explicit
+dispatches. Tag pushes are excluded; channel-specific release workflows retain
+their own triggers and publication policy.
+
 The nested environment and setup apply only to the build matrix. Bind every
 required secret to the same-named variable using `${{ secrets.NAME }}` under
 `extra_env`; the generated preflight fails on a missing secret without printing

@@ -981,7 +981,7 @@ pub fn nix_build_matrix_file_with_options(
     push_generated_workflow_header(&mut workflow);
     push_required_secrets_header(&mut workflow, &options.required_secrets);
     workflow.push_str(
-        "name: Nix installable builds\n\non:\n  push:\n  pull_request:\n  workflow_dispatch:\n\n",
+        "name: Nix installable builds\n\non:\n  push:\n    branches: [\"**\"]\n    tags-ignore: [\"**\"]\n  pull_request:\n  workflow_dispatch:\n\n",
     );
     if platform == Platform::Github {
         workflow.push_str("permissions:\n  contents: read\n\n");
@@ -1062,7 +1062,7 @@ pub fn nix_build_matrix_file_with_options(
             }
         }
         workflow.push_str("      - name: Upload Nix build evidence\n        if: always()\n");
-        push_action_uses(&mut workflow, platform, "upload-artifact", "v4.6.2");
+        push_action_uses(&mut workflow, platform, "upload-artifact", "v7.0.1");
         workflow.push_str(&format!("\n        with:\n          name: nix-build-${{{{ strategy.job-index }}}}\n          retention-days: {}\n          if-no-files-found: warn\n          path: |\n            ${{{{ runner.temp }}}}/simit-nix-build-${{{{ strategy.job-index }}}}\n", options.artifact_retention_days.unwrap_or(14)));
         for path in &options.artifact_paths {
             workflow.push_str(&format!("            {path}\n"));
@@ -3625,7 +3625,12 @@ fn yaml_double_quote(value: &str) -> String {
 
 fn push_checkout_step(workflow: &mut String, platform: Platform) {
     workflow.push_str("      - name: Checkout\n");
-    push_action_uses(workflow, platform, "checkout", "v4.3.1");
+    let version = if platform == Platform::Github {
+        "v7.0.1"
+    } else {
+        "v4.3.1"
+    };
+    push_action_uses(workflow, platform, "checkout", version);
     workflow.push('\n');
 }
 
@@ -3717,7 +3722,7 @@ fn push_install_nix_step_with_cache(
 
     workflow.push_str("      - name: Install Nix\n");
     workflow.push_str("        uses: ");
-    workflow.push_str(&github_action_ref("cachix/install-nix-action", "v31"));
+    workflow.push_str(&github_action_ref("cachix/install-nix-action", "v31.11.1"));
     if !substituters.is_empty() || !trusted_public_keys.is_empty() {
         workflow.push_str("\n        with:\n          extra_nix_config: |\n            experimental-features = nix-command flakes\n");
         if !substituters.is_empty() {
