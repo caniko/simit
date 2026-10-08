@@ -52,6 +52,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Dispatch reviews through an explicit branch or tag resolving to the reviewed
   controller SHA, reject ref movement before checkout, and declare the optional
   reusable-workflow report credential.
+- Honor cancellation when collecting Nix diagnostics while retaining collectors
+  after build or setup failures.
 
 ## [0.19.0] - 2026-09-30
 
