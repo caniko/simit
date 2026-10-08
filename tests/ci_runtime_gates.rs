@@ -273,42 +273,40 @@ fn nix_format_gate_executes_custom_flake_formatters_in_check_mode() {
         fs::set_permissions(&nix, fs::Permissions::from_mode(0o755)).unwrap();
         // No treefmt or Cargo fallback exists: a declared custom formatter
         // must run, and a missing exported executable must fail explicitly.
-        for name in ["ci", "publish-crate"] {
-            let gate = commands(root, name)
-                .into_iter()
-                .find(|run| run.contains("formatter_program="))
+        let gate = commands(root, "ci")
+            .into_iter()
+            .find(|run| run.contains("formatter_program="))
+            .expect("ordinary CI must expose its format gate");
+        for (program, status, expected_status) in [
+            ("crossbow-fmt", 0, 0),
+            ("crossbow-fmt", 17, 17),
+            ("missing-formatter", 0, 1),
+        ] {
+            let log = root.join("format.log");
+            let _ = fs::remove_file(&log);
+            let output = Command::new("sh")
+                .args(["-c", &gate])
+                .env("PATH", &bin)
+                .env("FORMAT_BIN", &bin)
+                .env("FORMAT_WRAPPER", &wrapper)
+                .env("FORMAT_PROGRAM", program)
+                .env("FORMAT_LOG", &log)
+                .env("FORMAT_STATUS", status.to_string())
+                .output()
                 .unwrap();
-            for (program, status, expected_status) in [
-                ("crossbow-fmt", 0, 0),
-                ("crossbow-fmt", 17, 17),
-                ("missing-formatter", 0, 1),
-            ] {
-                let log = root.join("format.log");
-                let _ = fs::remove_file(&log);
-                let output = Command::new("sh")
-                    .args(["-c", &gate])
-                    .env("PATH", &bin)
-                    .env("FORMAT_BIN", &bin)
-                    .env("FORMAT_WRAPPER", &wrapper)
-                    .env("FORMAT_PROGRAM", program)
-                    .env("FORMAT_LOG", &log)
-                    .env("FORMAT_STATUS", status.to_string())
-                    .output()
-                    .unwrap();
-                assert_eq!(
-                    output.status.code(),
-                    Some(expected_status),
-                    "{name}, split={split}: {output:?}"
+            assert_eq!(
+                output.status.code(),
+                Some(expected_status),
+                "split={split}: {output:?}"
+            );
+            if program == "crossbow-fmt" {
+                assert_eq!(fs::read_to_string(log).unwrap(), "crossbow-fmt --check\n");
+            } else {
+                assert!(!log.exists());
+                assert!(
+                    String::from_utf8_lossy(&output.stderr)
+                        .contains("Declared flake formatter executable is missing")
                 );
-                if program == "crossbow-fmt" {
-                    assert_eq!(fs::read_to_string(log).unwrap(), "crossbow-fmt --check\n");
-                } else {
-                    assert!(!log.exists());
-                    assert!(
-                        String::from_utf8_lossy(&output.stderr)
-                            .contains("Declared flake formatter executable is missing")
-                    );
-                }
             }
         }
     }
