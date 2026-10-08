@@ -159,7 +159,7 @@ Conflict handling is honest, not blind:
 
 A halfway failure is not atomic rollback. The `publish-report` job (`if:
 always()`) plus per-crate job statuses form the auditable result. Resume by
-re-dispatching the workflow: matching checksums skip, conflicts fail, missing
+rerunning the original tag-push run: matching checksums skip, conflicts fail, missing
 versions publish in order. Preflight never blindly republishes or skips.
 
 Dependency semantics (tested against `cargo metadata`):

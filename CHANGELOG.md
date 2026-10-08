@@ -50,6 +50,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Give per-member GitHub/Forgejo jobs distinct package-qualified check names,
   including split checks and integration gates; restrict GitHub crates.io
   publishers to signed semver tag pushes, with retries on the original run.
+- Validate signed event-bound tags before VS Code credentials, reusable release
+  prebuilds and Windows builds/publication; keep all dependent jobs on the same
+  immutable event checkout and document retrying the original tag-push run.
 - Honor cancellation when collecting Nix diagnostics while retaining collectors
   after build or setup failures.
 

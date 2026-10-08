@@ -262,10 +262,51 @@ fn github_release_depends_on_prebuild_and_forwards_attic_secret() {
             .contains("# - ATTIC_TOKEN: repository secret for native prebuild Attic publication.")
     );
     assert!(!workflow.contains("# Runner credential: $ATTIC_TOKENS_DIR/demo"));
-    assert!(workflow.contains("prebuild:\n    uses: ./.github/workflows/prebuild.yaml"));
+    assert!(
+        workflow.contains(
+            "prebuild:\n    needs: validate\n    uses: ./.github/workflows/prebuild.yaml"
+        )
+    );
     assert!(workflow.contains("with:\n      release: true"));
     assert!(workflow.contains("attic_token: ${{ secrets.ATTIC_TOKEN }}"));
-    assert!(workflow.contains("release:\n    needs: prebuild"));
+    assert!(workflow.contains("release:\n    needs: [validate, prebuild]"));
+    let parsed: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
+    assert_eq!(
+        parsed["jobs"]["validate"]["permissions"]["contents"].as_str(),
+        Some("read")
+    );
+    for job in ["validate", "release"] {
+        let steps = parsed["jobs"][job]["steps"].as_sequence().unwrap();
+        assert_eq!(steps[0]["with"]["ref"].as_str(), Some("${{ github.sha }}"));
+        assert_eq!(
+            steps[0]["with"]["persist-credentials"].as_bool(),
+            Some(false)
+        );
+        let guard = steps
+            .iter()
+            .find(|step| step["name"].as_str() == Some("Validate tag"))
+            .unwrap()["run"]
+            .as_str()
+            .unwrap();
+        assert!(guard.contains("Signed tag commit does not match the immutable event checkout"));
+        assert!(guard.find("git verify-tag").unwrap() < guard.find("nix eval").unwrap());
+    }
+    let prebuild = read(&project.path().join(".github/workflows/prebuild.yaml"));
+    let parsed: serde_yaml::Value = serde_yaml::from_str(&prebuild).unwrap();
+    let steps = parsed["jobs"]["native"]["steps"].as_sequence().unwrap();
+    let validation = steps
+        .iter()
+        .position(|step| step["name"].as_str() == Some("Validate tag"))
+        .unwrap();
+    assert_eq!(
+        steps[validation]["if"].as_str(),
+        Some("${{ inputs.release }}")
+    );
+    assert!(steps[..=validation].iter().all(|step| {
+        !serde_yaml::to_string(&step["env"])
+            .unwrap()
+            .contains("secrets.")
+    }));
     assert!(workflow.contains("uses: actions/download-artifact@"));
     assert!(workflow.contains("pattern: release-*"));
     assert!(!workflow.contains("nix build '.#release-bundle'"));

@@ -489,7 +489,22 @@ pub fn render(inputs: &ReleaseWorkflowInputs<'_>) -> String {
 
     w.push_str("jobs:\n");
     if inputs.platform == Platform::Github && inputs.prebuild.is_some() {
-        w.push_str("  prebuild:\n    uses: ./.github/workflows/prebuild.yaml\n    with:\n      release: true\n");
+        // No reusable build or Attic credential is admitted before event-bound
+        // signed-tag validation. Every job checks out the same immutable SHA.
+        w.push_str(
+            "  validate:\n    permissions:\n      contents: read\n    timeout-minutes: 30\n",
+        );
+        writeln!(w, "    runs-on: {}", inputs.runner).expect("write");
+        if inputs.preinstalled_nix {
+            push_preinstalled_nix_env(&mut w, inputs.artifacts);
+        }
+        w.push_str("    steps:\n");
+        push_checkout(&mut w, inputs.platform);
+        if !inputs.preinstalled_nix {
+            push_install_nix(&mut w, inputs.platform, inputs.artifacts);
+        }
+        push_validate_tag(&mut w, inputs.artifacts);
+        w.push_str("  prebuild:\n    needs: validate\n    uses: ./.github/workflows/prebuild.yaml\n    with:\n      release: true\n");
         if let Some(attic) = inputs.attic.filter(|_| prebuild_publishes_attic(inputs)) {
             let token_secret = attic
                 .token_secret
@@ -504,7 +519,7 @@ pub fn render(inputs: &ReleaseWorkflowInputs<'_>) -> String {
     }
     w.push_str("  release:\n");
     if inputs.platform == Platform::Github && inputs.prebuild.is_some() {
-        w.push_str("    needs: prebuild\n");
+        w.push_str("    needs: [validate, prebuild]\n");
     }
     writeln!(w, "    runs-on: {}", inputs.runner).expect("write");
     match inputs.platform {
@@ -779,7 +794,7 @@ fn push_checkout(w: &mut String, platform: Platform) {
         w.push_str(&github_action_ref("actions/checkout", "v4.3.1"));
     }
     w.push('\n');
-    w.push_str("        with:\n          fetch-depth: 0\n");
+    w.push_str("        with:\n          fetch-depth: 0\n          ref: ${{ github.sha }}\n          persist-credentials: false\n");
 }
 
 fn push_install_nix(w: &mut String, platform: Platform, artifacts: &ArtifactsConfig) {
@@ -845,6 +860,12 @@ fn push_preinstalled_nix_env(w: &mut String, artifacts: &ArtifactsConfig) {
     w.push_str("      XDG_CACHE_HOME: \"/tmp/.cache\"\n");
 }
 
+pub(crate) fn tag_validation_step(artifacts: &ArtifactsConfig) -> String {
+    let mut step = String::new();
+    push_validate_tag(&mut step, artifacts);
+    step
+}
+
 fn push_validate_tag(w: &mut String, artifacts: &ArtifactsConfig) {
     w.push_str("      - name: Validate tag\n        run: |\n          set -euo pipefail\n");
     writeln!(w, "          {VERSION_FROM_REF}").expect("write");
@@ -872,6 +893,9 @@ fn push_validate_tag(w: &mut String, artifacts: &ArtifactsConfig) {
     w.push_str(
         "          validated_sha=\"$(git rev-parse --verify \"refs/tags/${VERSION}^{commit}\")\"\n",
     );
+    w.push_str("          checkout_sha=\"$(git rev-parse --verify HEAD)\"\n");
+    w.push_str("          event_sha=\"${GITHUB_SHA:-${FORGE_SHA:-${FORGEJO_SHA:-}}}\"\n");
+    w.push_str("          test -n \"$event_sha\" && test \"$validated_sha\" = \"$event_sha\" && test \"$checkout_sha\" = \"$event_sha\" || { echo \"Signed tag commit does not match the immutable event checkout\" >&2; exit 1; }\n");
     w.push_str("          git worktree add --detach \"$tag_worktree\" \"$validated_sha\"\n");
     if let Some(attr) = &artifacts.version_attr {
         writeln!(
@@ -2897,7 +2921,11 @@ mod tests {
 fetch) exit 0;;
 show) [ "$2" = 'FETCH_HEAD:keys/maintainers.gpg' ] && [ "$TEST_KEY_AVAILABLE" = 1 ] || exit 90; printf default-branch-key;;
 verify-tag) [ "$TEST_TAG_ACCEPTED" = 1 ] || exit 91; touch verified;;
-rev-parse) [ "$3" = 'refs/tags/0.1.0^{commit}' ] || exit 92; printf verified-tag-commit;;
+rev-parse) case "$3" in
+  'refs/tags/0.1.0^{commit}') printf verified-tag-commit;;
+  HEAD) printf '%s' "$TEST_CHECKOUT_SHA";;
+  *) exit 92;;
+esac;;
 worktree) case "$2" in
   add) [ -f verified ] && [ "$5" = verified-tag-commit ] || exit 93; mkdir -p "$4"; printf '## [0.1.0] - 2026-10-04\n' > "$4/CHANGELOG.md";;
   remove) rm -rf "$4";;
@@ -2934,15 +2962,33 @@ esac"#,
             .map(|line| line.strip_prefix("          ").unwrap_or(line))
             .collect::<Vec<_>>()
             .join("\n");
-        for (key_available, tag_accepted, accepted) in
-            [("0", "1", false), ("1", "0", false), ("1", "1", true)]
-        {
+        for (key_available, tag_accepted, checkout, event, accepted) in [
+            (
+                "0",
+                "1",
+                "verified-tag-commit",
+                "verified-tag-commit",
+                false,
+            ),
+            (
+                "1",
+                "0",
+                "verified-tag-commit",
+                "verified-tag-commit",
+                false,
+            ),
+            ("1", "1", "different-checkout", "verified-tag-commit", false),
+            ("1", "1", "verified-tag-commit", "different-event", false),
+            ("1", "1", "verified-tag-commit", "verified-tag-commit", true),
+        ] {
             let output = Command::new("bash")
                 .current_dir(temp.path())
                 .args(["-c", &script])
                 .env("PATH", &path)
                 .env("TMPDIR", temp.path())
                 .env("GITHUB_REF_NAME", "0.1.0")
+                .env("GITHUB_SHA", event)
+                .env("TEST_CHECKOUT_SHA", checkout)
                 .env("TEST_KEY_AVAILABLE", key_available)
                 .env("TEST_TAG_ACCEPTED", tag_accepted)
                 .output()

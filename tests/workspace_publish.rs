@@ -231,6 +231,8 @@ timeout_minutes = 30
     assert!(publish.contains("tags:\n      - \"[0-9]*\""));
     assert!(!publish.contains("pull_request"));
     assert!(!publish.contains("workflow_dispatch"));
+    assert!(publish.contains("resume: rerun the original tag-push run"));
+    assert!(!publish.contains("re-dispatch"));
     // Least-privilege permissions.
     assert!(publish.contains("permissions:\n      contents: read\n      id-token: write"));
     // Serialize conflicting attempts.
@@ -302,14 +304,14 @@ fn member_workflows_have_unique_check_names_for_single_split_and_gate_jobs() {
     for (platform, split) in [("github", false), ("forgejo", false), ("forgejo", true)] {
         let temp = fixture_dir("release-plan-diamond");
         let runner_map = if split {
-            "[ci.step_runners]\nclippy = 'lint-runner'\ntest = 'test-runner'\n"
+            "[ci.step_runners]\ncargo-clippy = 'lint-runner'\ncargo-test = 'test-runner'\n"
         } else {
             ""
         };
         fs::write(
             temp.path().join("simit.toml"),
             format!(
-                "[ci]\nplatform = '{platform}'\nruntime = 'cargo'\nworkspace = true\nworkspace_strategy = 'members'\npackages = ['a', 'b']\nall_features = false\n{runner_map}\n[[ci.required_gates]]\nid = 'integration'\nrun = 'cargo test --no-default-features'\nscope = 'ci'\n"
+                "[ci]\nplatform = '{platform}'\nruntime = 'cargo'\nworkspace = false\nworkspace_strategy = 'members'\npackages = ['a', 'b']\nall_features = false\n{runner_map}\n[[ci.required_gates]]\nid = 'integration'\nrun = 'cargo test --no-default-features'\nscope = 'ci'\n"
             ),
         )
         .unwrap();

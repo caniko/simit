@@ -693,7 +693,7 @@ fn publish_workspace_workflow(
     w.push_str("        run: |\n");
     w.push_str("          set -euo pipefail\n");
     w.push_str("          echo \"coordinated workspace publish finished (see per-crate job statuses for the auditable result)\"\n");
-    w.push_str("          echo \"resume: re-dispatch this workflow; already-published crates with matching checksums exit 0, conflicts fail\"\n");
+    w.push_str("          echo \"resume: rerun the original tag-push run; already-published crates with matching checksums exit 0, conflicts fail\"\n");
     trim_trailing_blank_lines(&mut w);
     w
 }
@@ -914,13 +914,21 @@ pub fn github_prebuild_file(
         workflow.push('\n');
     }
     workflow.push_str("    runs-on: ${{ matrix.runner }}\n    steps:\n");
-    push_checkout_step(&mut workflow, Platform::Github);
+    push_event_checkout_step(&mut workflow, Platform::Github);
     push_install_nix_step_with_cache(
         &mut workflow,
         Platform::Github,
         &artifacts.substituters,
         &artifacts.trusted_public_keys,
     );
+    // Reusable release prebuilds also validate their own event checkout before
+    // any project-controlled evaluation/build or Attic credential use.
+    let validation = super::release_workflow::tag_validation_step(artifacts);
+    workflow.push_str(&validation.replacen(
+        "        run: |",
+        "        if: ${{ inputs.release }}\n        run: |",
+        1,
+    ));
     workflow.push_str("      - name: Verify runner system\n        run: test \"$(nix eval --impure --raw --expr builtins.currentSystem)\" = \"${{ matrix.system }}\"\n");
     if !nix_builds.is_empty() {
         workflow.push_str("      - name: Build native Nix outputs\n        run: |\n          set -euo pipefail\n          mkdir -p .simit-prebuild\n");
@@ -1247,10 +1255,10 @@ fn vscode_extension_workflow(
     workflow.push_str("    env:\n");
     workflow.push_str("      NIX_CONFIG: \"experimental-features = nix-command flakes\"\n");
     workflow.push_str("    steps:\n");
-    push_checkout_step(&mut workflow, platform);
+    push_event_checkout_step(&mut workflow, platform);
     push_install_nix_step(&mut workflow, platform);
-    push_vscode_credential_preflight(&mut workflow, vscode);
     push_vscode_version_validation(&mut workflow, vscode);
+    push_vscode_credential_preflight(&mut workflow, vscode);
     for (index, command) in vscode.prepublish_commands.iter().enumerate() {
         workflow.push_str("      - name: Prepublish command ");
         workflow.push_str(&(index + 1).to_string());
@@ -2806,9 +2814,19 @@ fn artifacts_workflow(
     } else {
         "build"
     };
+    if has_windows_packagers {
+        workflow.push_str("  validate:\n    permissions:\n      contents: read\n    timeout-minutes: 30\n    runs-on: ");
+        workflow.push_str(&runs_on(&runners.release));
+        workflow.push_str("\n    steps:\n");
+        push_event_checkout_step(&mut workflow, platform);
+        workflow.push_str(&validate_release_tag_step(None, None));
+    }
     workflow.push_str("  ");
     workflow.push_str(linux_job_name);
     workflow.push_str(":\n");
+    if has_windows_packagers {
+        workflow.push_str("    needs: validate\n");
+    }
     push_release_permissions(&mut workflow, platform);
     workflow.push_str("    runs-on: ");
     workflow.push_str(&runs_on(&runners.release));
@@ -2816,7 +2834,7 @@ fn artifacts_workflow(
     push_container(&mut workflow, platform, runtime, package);
     push_job_env(&mut workflow, platform, runtime, &options.extra_env, true);
     workflow.push_str("    steps:\n");
-    push_checkout_step(&mut workflow, platform);
+    push_event_checkout_step(&mut workflow, platform);
     push_required_env_step(&mut workflow, &options.required_env);
     workflow.push_str(&validate_release_tag_step(None, None));
     match runtime {
@@ -2873,6 +2891,7 @@ fn push_windows_build_job(
 ) {
     let matrix = windows_matrix(options);
     workflow.push_str("\n  build-windows:\n");
+    workflow.push_str("    needs: validate\n");
     workflow.push_str("    runs-on: ");
     workflow.push_str(&runs_on(windows_runner));
     workflow.push('\n');
@@ -2889,7 +2908,7 @@ fn push_windows_build_job(
         workflow.push('\n');
     }
     workflow.push_str("    steps:\n");
-    push_checkout_step(workflow, platform);
+    push_event_checkout_step(workflow, platform);
     push_windows_rust_setup_step(workflow, platform);
     workflow.push_str("      - name: Install Windows target\n");
     workflow.push_str("        run: rustup target add ${{ matrix.target }}\n\n");
@@ -2912,12 +2931,12 @@ fn push_windows_publish_job(
     options: &CiOptions,
 ) {
     workflow.push_str("\n  publish-windows-packages:\n");
-    workflow.push_str("    needs: build-windows\n");
+    workflow.push_str("    needs: [validate, build-windows]\n");
     workflow.push_str("    runs-on: ");
     workflow.push_str(&runs_on(windows_runner));
     workflow.push('\n');
     workflow.push_str("    steps:\n");
-    push_checkout_step(workflow, platform);
+    push_event_checkout_step(workflow, platform);
     workflow.push_str("      - name: Download Windows archives\n");
     push_action_uses(workflow, platform, "download-artifact", "v4.3.0");
     workflow.push_str("        with:\n");
@@ -3745,7 +3764,9 @@ fn push_event_checkout_step(workflow: &mut String, platform: Platform) {
     // Tag validation binds its peeled commit to this immutable event identity.
     // Gates and every dependent publisher must use that same commit even if the
     // tag moves after validation; no downstream job resolves the tag again.
-    workflow.push_str("        with:\n          ref: ${{ github.sha }}\n\n");
+    workflow.push_str(
+        "        with:\n          ref: ${{ github.sha }}\n          persist-credentials: false\n\n",
+    );
 }
 
 fn push_extra_setup_steps(workflow: &mut String, extra_setup: &[String]) {
