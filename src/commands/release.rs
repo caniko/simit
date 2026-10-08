@@ -47,6 +47,17 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
         return sync_up(command);
     }
 
+    if command.push {
+        bail!("--push is only valid with `simit release sync-up`");
+    }
+    if command.remote != "origin" {
+        bail!("--remote is only valid with `simit release sync-up`");
+    }
+    reject_verify_flags(&command)?;
+    if let Some(selection) = crate::monorepo::releases::select(&command)? {
+        return crate::monorepo::releases::bump(&selection, &command);
+    }
+
     let monorepo = command
         .component
         .as_ref()
@@ -73,13 +84,6 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
     } else {
         cargo::select_packages(&metadata, &command.packages, command.workspace)?
     };
-    if command.push {
-        bail!("--push is only valid with `simit release sync-up`");
-    }
-    if command.remote != "origin" {
-        bail!("--remote is only valid with `simit release sync-up`");
-    }
-    reject_verify_flags(&command)?;
     let bump = BumpSpec::new(
         command.action.bump_kind().expect("release bump action"),
         command.pre,
@@ -363,7 +367,25 @@ fn sync_up(command: ReleaseCommand) -> Result<()> {
     }
     reject_verify_flags(&command)?;
 
-    let metadata = cargo::metadata_for_current_dir()?;
+    if let Some(selection) = crate::monorepo::releases::select(&command)? {
+        let tag = crate::release_identity::ReleaseTag::for_package(
+            &selection.package.config.namespace,
+            selection.package.version.clone(),
+        )?;
+        return sync_tag(
+            &command,
+            &selection.root,
+            &selection.package.version,
+            &tag,
+            || crate::monorepo::releases::qualify(&selection),
+        );
+    }
+    let metadata = if command.component.is_some() {
+        let (root, _) = crate::monorepo::load(&std::env::current_dir()?)?;
+        cargo::cargo_metadata(&root.join("Cargo.toml"))?
+    } else {
+        cargo::metadata_for_current_dir()?
+    };
     let workspace_root = metadata.workspace_root.as_std_path();
     let config = ProjectConfig::load(workspace_root)?;
     if config.monorepo.is_some() && command.component.is_none() {
@@ -386,16 +408,28 @@ fn sync_up(command: ReleaseCommand) -> Result<()> {
     } else {
         config.release.tag_prefix.tag(version.clone())
     };
+    sync_tag(&command, workspace_root, &version, &tag, || {
+        git::run_project_checks(workspace_root)
+    })
+}
+
+fn sync_tag(
+    command: &ReleaseCommand,
+    workspace_root: &std::path::Path,
+    version: &Version,
+    tag: &crate::release_identity::ReleaseTag,
+    qualify: impl FnOnce() -> Result<()>,
+) -> Result<()> {
     let sign_tag = !command.no_sign;
-    git::tag_ref_object(workspace_root, &tag)?;
-    let old_tag_target = git::tag_target_commit(workspace_root, &tag)?;
+    git::tag_ref_object(workspace_root, tag)?;
+    let old_tag_target = git::tag_target_commit(workspace_root, tag)?;
     let head = git::head_commit(workspace_root)?;
 
     if command.dry_run {
         println!("simit release sync-up dry-run");
         println!("version: {version}");
         println!("tag {tag} currently points to {old_tag_target}");
-        println!("would run cargo test and cargo clippy");
+        println!("would run release qualification");
         if old_tag_target == head {
             println!("tag {tag} already points to HEAD");
         } else {
@@ -410,22 +444,31 @@ fn sync_up(command: ReleaseCommand) -> Result<()> {
     }
 
     git::sync_up_preflight(workspace_root, sign_tag)?;
-    git::run_project_checks(workspace_root)?;
+    qualify()?;
+    git::ensure_worktree_clean(workspace_root)?;
+    anyhow::ensure!(
+        git::head_commit(workspace_root)? == head,
+        "release HEAD changed during qualification"
+    );
+    anyhow::ensure!(
+        git::tag_target_commit(workspace_root, tag)? == old_tag_target,
+        "release tag changed during qualification"
+    );
 
     if old_tag_target == head {
         println!("tag {tag} already points to HEAD");
     } else {
-        git::move_tag(workspace_root, &tag, sign_tag)?;
+        git::move_tag(workspace_root, tag, sign_tag)?;
         println!("moved tag {tag} to HEAD {head}");
     }
 
     if command.push {
         let expected_remote_object =
-            git::remote_tag_ref_object(workspace_root, &command.remote, &tag)?;
+            git::remote_tag_ref_object(workspace_root, &command.remote, tag)?;
         git::push_moved_tag(
             workspace_root,
             &command.remote,
-            &tag,
+            tag,
             &expected_remote_object,
         )?;
     }

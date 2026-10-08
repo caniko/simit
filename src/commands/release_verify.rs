@@ -119,6 +119,9 @@ struct VerifySummary {
 
 pub fn run(command: ReleaseCommand) -> Result<()> {
     reject_non_verify_flags(&command)?;
+    if let Some(selection) = crate::monorepo::releases::select(&command)? {
+        return verify_manifest(&selection, &command);
+    }
 
     let metadata = if command.component.is_some() {
         let (root, _) = crate::monorepo::load(&std::env::current_dir()?)?;
@@ -253,8 +256,12 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
         command.push_target.as_deref(),
     ));
 
+    finish_report(results, command.json)
+}
+
+fn finish_report(results: Vec<CheckResult>, json: bool) -> Result<()> {
     let report = report(results);
-    if command.json {
+    if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
         print_text_report(&report);
@@ -268,6 +275,86 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
         }
         .into())
     }
+}
+
+fn verify_manifest(
+    selection: &crate::monorepo::releases::Selection,
+    command: &ReleaseCommand,
+) -> Result<()> {
+    let package = &selection.package;
+    let version = command.verify_version.as_ref().unwrap_or(&package.version);
+    let tag = crate::release_identity::ReleaseTag::for_package(
+        &package.config.namespace,
+        version.clone(),
+    )?;
+    let platform = selection
+        .project
+        .ci
+        .platform
+        .unwrap_or(crate::cli::Platform::Forgejo);
+    let script = crate::release_notes::component_git_notes_script(
+        &package.config.namespace,
+        &selection.graph.components[&selection.component].paths,
+    )?;
+    let manifest = selection.root.join(&package.config.manifest);
+    let mut results = vec![
+        check_worktree_clean(&selection.root),
+        check_ci_managed(&selection.root),
+        check_flake_managed(&selection.root),
+        check_release_trust(&selection.root, &selection.project, command),
+        check_notes(
+            manifest.parent().context("manifest has no parent")?,
+            &selection.project,
+            platform,
+            version,
+            &tag,
+            Some(&script),
+        ),
+        check_tag(&selection.root, &tag, command.push_target.as_deref()),
+    ];
+    let tagged = Command::new("git")
+        .current_dir(&selection.root)
+        .args([
+            "show",
+            &format!("refs/tags/{tag}:{}", package.config.manifest),
+        ])
+        .output();
+    let identity = match tagged {
+        Ok(output) if output.status.success() => String::from_utf8(output.stdout)
+            .map_err(anyhow::Error::from)
+            .and_then(|content| package.config.parse(&content)),
+        Ok(output) => Err(anyhow::anyhow!(
+            "could not read tagged manifest: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )),
+        Err(error) => Err(error.into()),
+    };
+    results.push(match identity {
+        Ok(tagged) if tagged.name == package.name && &tagged.version == version => {
+            CheckResult::pass(
+                "tagged package identity",
+                format!("{} {version} resolves at {tag}", package.name),
+            )
+        }
+        Ok(_) => CheckResult::fail(
+            "tagged package identity",
+            "tagged manifest name/version disagrees with the selected release",
+            "restore the correct manifest and immutable release tag",
+        ),
+        Err(error) => CheckResult::fail(
+            "tagged package identity",
+            error.to_string(),
+            "create or fetch the selected release tag",
+        ),
+    });
+    if package.publish {
+        results.push(CheckResult::blocked(
+            "registry publication",
+            "non-Cargo registry propagation is not configured",
+            "qualify publication through the package's native registry workflow",
+        ));
+    }
+    finish_report(results, command.json)
 }
 
 fn reject_non_verify_flags(command: &ReleaseCommand) -> Result<()> {

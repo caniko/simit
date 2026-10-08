@@ -115,5 +115,41 @@ contracts. Shared tag verification and sync-up require explicit component
 selection in monorepositories. With `[release.notes].source = "git"`, verification
 uses commits touching component-owned paths between the previous package tag and
 the exact release tag; unrelated components and later commits are excluded. Trust
-and secrets stay repository-scoped. Non-Cargo version mutation still requires
-additional generator support.
+and secrets stay repository-scoped.
+
+## Independent Python and npm versions
+
+Declare each static version owner explicitly; template and test-fixture manifests
+are never inferred as release packages:
+
+```toml
+[[monorepo.components]]
+id = "python"
+paths = ["components/python"]
+releases = [
+  { manifest = "components/python/pyproject.toml", namespace = "py-engine", publish = false },
+]
+checks = [{ id = "test", run = "uv run --project components/python pytest" }]
+```
+
+The same `release plan`, `patch`, `minor`, `major`, `verify`, and `sync-up`
+commands accept these owners. Select `--package` explicitly for components with
+multiple release packages, including mixed Cargo/Python components. An explicit
+namespace supports npm package names such as `@example/engine` while retaining
+safe package-qualified tags. Versions must be static SemVer; dynamic Python
+version providers are rejected.
+
+Python bumps preserve TOML comments and update the local package record in the
+nearest `uv.lock`. npm bumps preserve package metadata, dependencies and `private`,
+and update adjacent `package-lock.json`/`npm-shrinkwrap.json` root records. Stale
+lock identities fail before source mutation. Release checks run the affected
+component graph in dependency order with their configured timeouts; the execution
+environment must supply Bash and GNU `timeout`. Changelogs remain adjacent to
+their manifests. A dirty checkout or a failing prerequisite check prevents the
+version commit and tag.
+
+`publish` records registry eligibility (npm `private = true` always disables it).
+This declaration does not create Python/npm registry publication workflows;
+verification reports registry propagation as blocked for eligible packages until
+their native registry workflow is configured. Cargo publication remains managed
+by `[ci].publish_crates`.

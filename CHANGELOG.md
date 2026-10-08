@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tag sync, and publication through signed `<package>/v<version>` tags.
 - Component-scoped Git release notes and automatic changelog drafting, with
   package-qualified compare links and history bounded by owned paths.
+- Independent static Python/npm version owners, package-qualified tags, scoped
+  lock updates, verification and prerequisite-gated tag synchronization.
 
 - Project-owned Rust CI commands through `[ci].check_command`, optional
   `nix_flake_check`, and opt-in Nix-runtime Cargo caching for Actions workflows.

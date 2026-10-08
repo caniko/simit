@@ -38,6 +38,9 @@ struct JsonPlanEntry {
 
 pub fn run(command: ReleaseCommand) -> Result<()> {
     reject_non_plan_flags(&command)?;
+    if let Some(selection) = crate::monorepo::releases::select(&command)? {
+        return crate::monorepo::releases::print_plan(&selection, &command);
+    }
 
     let monorepo = command
         .component

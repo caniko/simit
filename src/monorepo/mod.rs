@@ -2,6 +2,7 @@
 
 pub(crate) mod ci;
 mod plan;
+pub(crate) mod releases;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component as PathComponent, Path, PathBuf};
@@ -49,6 +50,9 @@ pub struct Component {
     pub paths: Vec<String>,
     #[serde(default)]
     pub cargo_packages: Vec<String>,
+    /// Static Python/npm version owners; registry publication is separate.
+    #[serde(default)]
+    pub releases: Vec<releases::ManifestRelease>,
     #[serde(default)]
     pub depends_on: Vec<String>,
     #[serde(default)]
@@ -83,6 +87,9 @@ impl Config {
             }
             for path in &component.paths {
                 validate_relative_path(path)?;
+            }
+            for release in &component.releases {
+                release.validate(component)?;
             }
             let mut gates = BTreeSet::new();
             for gate in &component.checks {
@@ -140,6 +147,7 @@ impl Config {
         };
         let graph = self.graph(metadata.as_ref())?;
         graph.validate_ownership()?;
+        releases::validate(root, &graph)?;
         for path in graph
             .components
             .values()
