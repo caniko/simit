@@ -7,6 +7,8 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
+use caseless::Caseless;
+use unicode_normalization::UnicodeNormalization;
 
 use crate::{
     cli::{CiProvider, Platform},
@@ -18,7 +20,14 @@ pub(crate) const TEMPLATE_MARKER: &str = "# Simit workflow template: ";
 
 fn portable_path(path: &Path) -> String {
     path.components()
-        .map(|part| part.as_os_str().to_string_lossy().to_ascii_lowercase())
+        .map(|part| {
+            part.as_os_str()
+                .to_string_lossy()
+                .nfd()
+                .default_case_fold()
+                .nfd()
+                .collect::<String>()
+        })
         .collect::<Vec<_>>()
         .join("/")
 }
@@ -27,11 +36,8 @@ pub(crate) fn same_output(root: &Path, left: &Path, right: &Path) -> bool {
     if left == right {
         return true;
     }
-    if portable_path(left) != portable_path(right) {
-        return false;
-    }
-    // A case-only rename aliases an existing file on insensitive filesystems,
-    // but identifies two distinct outputs on sensitive filesystems.
+    // The actual filesystem is authoritative for existing aliases, including
+    // filesystem-specific Unicode case and normalization rules.
     match (
         root.join(left).canonicalize(),
         root.join(right).canonicalize(),

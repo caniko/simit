@@ -73,8 +73,12 @@ Keep template sources outside Actions workflow directories, or give them a
 non-workflow extension such as `.yaml.in`, so the source is not itself executed.
 Destinations must be files with directory parents; validation rejects existing
 directories, symlinks, portable case-insensitive path collisions, and hard-linked
-aliases of template sources or planned outputs before any writes. Each generated
-destination must have its own file identity.
+aliases of template sources or planned outputs before any writes. Portable keys
+use Unicode canonical normalization and full case folding, so non-ASCII and
+composed/decomposed spellings cannot claim the same output. Existing aliases are
+also checked against the actual filesystem. Generated files replace their own
+directory entries atomically; an unrelated file hard-linked to a destination
+retains its original bytes and file identity. Existing permissions are preserved.
 This feature supports GitHub and Forgejo Actions, including exact-only Nix
 qualification; it does not replace the
 project's test selections or permission policy.

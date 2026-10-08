@@ -221,6 +221,63 @@ fn hard_linked_destinations_fail_without_mutating_sources_or_other_outputs() {
 }
 
 #[test]
+fn hard_links_to_unrelated_files_are_replaced_without_corrupting_the_other_link() {
+    for destination in [
+        ".github/workflows/tests.yml",
+        ".github/workflows/nix-builds.yaml",
+    ] {
+        let temp = project();
+        assert!(generate(&temp, &[]).status.success());
+        let unrelated = temp.path().join("README.md");
+        let original = b"Unrelated project documentation\n";
+        fs::write(&unrelated, original).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&unrelated, fs::Permissions::from_mode(0o640)).unwrap();
+        }
+        let output = temp.path().join(destination);
+        fs::remove_file(&output).unwrap();
+        fs::hard_link(&unrelated, &output).unwrap();
+        let config_path = temp.path().join("simit.toml");
+        let config = fs::read_to_string(&config_path)
+            .unwrap()
+            .replace("ubuntu-24.04", "windows-2022");
+        fs::write(&config_path, &config).unwrap();
+
+        assert!(!generate(&temp, &["--check", "--diff"]).status.success());
+        assert_eq!(fs::read(&unrelated).unwrap(), original);
+        assert_eq!(fs::read(&output).unwrap(), original);
+        assert_eq!(fs::read_to_string(&config_path).unwrap(), config);
+        let result = generate(&temp, &[]);
+        assert!(result.status.success(), "{destination}: {result:?}");
+        assert_eq!(fs::read(&unrelated).unwrap(), original);
+        assert!(!same_file::is_same_file(&output, &unrelated).unwrap());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&output).unwrap().permissions().mode() & 0o777,
+                0o640
+            );
+            assert_eq!(
+                fs::metadata(&unrelated).unwrap().permissions().mode() & 0o777,
+                0o640
+            );
+        }
+        let yaml: serde_yaml::Value =
+            serde_yaml::from_str(&fs::read_to_string(&output).unwrap()).unwrap();
+        assert!(yaml["jobs"].is_mapping());
+        assert!(generate(&temp, &["--check", "--diff"]).status.success());
+        assert_eq!(
+            audit_ci(temp.path()).unwrap().status,
+            FeatureStatus::Managed
+        );
+        assert_eq!(fs::read(&unrelated).unwrap(), original);
+    }
+}
+
+#[test]
 fn non_file_destinations_fail_before_rewriting_builtins() {
     let temp = project();
     assert!(generate(&temp, &[]).status.success());
@@ -292,6 +349,9 @@ fn case_only_template_renames_preserve_the_generated_output_and_audit() {
             ("Tests.yml", "tests.yml"),
             ("ci-custom.yaml", "CI-custom.yaml"),
             ("CI-custom.yaml", "ci-custom.yaml"),
+            ("Ä.yml", "ä.yml"),
+            ("ci-Ä.yaml", "ci-ä.yaml"),
+            ("É.yml", "e\u{301}.yml"),
         ] {
             let temp = project();
             let cfg_path = temp.path().join("simit.toml");
@@ -341,13 +401,15 @@ fn case_only_template_renames_preserve_the_generated_output_and_audit() {
 
 #[test]
 #[cfg(unix)]
-fn qualifier_source_hashes_include_option_like_tracked_filenames() {
+fn qualifier_source_hashes_include_dash_and_option_like_tracked_filenames() {
     use sha2::Digest;
     use std::process::Command;
 
     let temp = TempDir::new().unwrap();
     let fixture = b"source fixture\n";
     fs::write(temp.path().join("--help"), fixture).unwrap();
+    let dash_fixture = b"a tracked dash is not standard input\n";
+    fs::write(temp.path().join("-"), dash_fixture).unwrap();
     fs::write(temp.path().join("source.rs"), b"fn main() {}\n").unwrap();
     for args in [vec!["init", "--quiet"], vec!["add", "--", "."]] {
         assert!(
@@ -381,12 +443,17 @@ fn qualifier_source_hashes_include_option_like_tracked_filenames() {
             .unwrap();
         assert!(output.status.success(), "{path}: {output:?}");
         let manifest = String::from_utf8(output.stdout).unwrap();
-        assert_eq!(manifest.lines().count(), 2, "{path}: {manifest}");
-        let expected = format!("{}  --help", hex::encode(sha2::Sha256::digest(fixture)));
-        assert!(
-            manifest.lines().any(|line| line == expected),
-            "{path}: {manifest}"
-        );
+        assert_eq!(manifest.lines().count(), 3, "{path}: {manifest}");
+        for (name, content) in [
+            ("--help", fixture.as_slice()),
+            ("-", dash_fixture.as_slice()),
+        ] {
+            let expected = format!("{}  ./{name}", hex::encode(sha2::Sha256::digest(content)));
+            assert!(
+                manifest.lines().any(|line| line == expected),
+                "{path}: {manifest}"
+            );
+        }
     }
 }
 
@@ -551,6 +618,34 @@ fn template_outputs_reject_portable_case_collisions_without_writes() {
     let result = generate(&temp, &[]);
     assert!(!result.status.success(), "{result:?}");
     assert!(String::from_utf8_lossy(&result.stderr).contains("case-insensitive"));
+}
+
+#[test]
+fn unicode_case_and_normalization_collisions_are_rejected_before_any_writes() {
+    for (first, second) in [
+        ("Ä.yml", "ä.yml"),
+        ("Straße.yml", "STRASSE.yml"),
+        ("Σ.yml", "ς.yml"),
+        ("É.yml", "e\u{301}.yml"),
+    ] {
+        let temp = project();
+        let config_path = temp.path().join("simit.toml");
+        let config = fs::read_to_string(&config_path)
+            .unwrap()
+            .replace("workflows/tests.yml", &format!("workflows/{first}"))
+            .replace(
+                "[ci.workflow_variables]",
+                &format!("'.github/workflows/{second}'='.simit/templates/tests.yml'\n[ci.workflow_variables]"),
+            );
+        fs::write(&config_path, &config).unwrap();
+        for args in [vec![], vec!["--check", "--diff"]] {
+            let result = generate(&temp, &args);
+            assert!(!result.status.success(), "{first}/{second}: {result:?}");
+            assert!(String::from_utf8_lossy(&result.stderr).contains("case-insensitive"));
+            assert_eq!(fs::read_to_string(&config_path).unwrap(), config);
+            assert!(!temp.path().join(".github/workflows").exists());
+        }
+    }
 }
 
 #[test]
