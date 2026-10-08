@@ -118,7 +118,7 @@
         // {
           inherit cargoArtifacts;
           nativeBuildInputs = [preCommitBin];
-          nativeCheckInputs = [pkgs.git pkgs.gnupg];
+          nativeCheckInputs = [pkgs.git pkgs.gnupg pkgs.nodejs];
         });
 
       publicCargoArtifacts = publicCraneLib.buildDepsOnly commonArgs;
@@ -126,7 +126,7 @@
         // {
           cargoArtifacts = publicCargoArtifacts;
           nativeBuildInputs = [preCommitBin];
-          nativeCheckInputs = [pkgs.git pkgs.gnupg];
+          nativeCheckInputs = [pkgs.git pkgs.gnupg pkgs.nodejs];
         });
 
       actionlintCheck =
@@ -197,7 +197,7 @@
       nextestCheck = publicCraneLib.cargoNextest (commonArgs
         // {
           cargoArtifacts = publicCargoArtifacts;
-          nativeCheckInputs = [pkgs.git pkgs.gnupg];
+          nativeCheckInputs = [pkgs.git pkgs.gnupg pkgs.nodejs];
         });
 
       docCheck = publicCraneLib.cargoDoc (commonArgs
