@@ -23,6 +23,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   actions in focused qualification.
 - Use the branch filter alone for installable qualification so consumers enforcing
   branch-only CI can validate it without accepting redundant tag filters.
+- Reserve release-owned paths from project templates and keep template contents
+  out of built-in CI inference; qualify durable-branch updates and reject
+  committed generation drift after retaining its evidence.
 - Keep the default development environment usable when a worktree lacks the
   optional sibling language-server checkout.
 - Reject unsupported language checks and release requests in Nix-only CI instead

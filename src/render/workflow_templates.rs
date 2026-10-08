@@ -14,7 +14,7 @@ use crate::{
     project::GeneratedFile,
 };
 
-const TEMPLATE_MARKER: &str = "# Simit workflow template: ";
+pub(crate) const TEMPLATE_MARKER: &str = "# Simit workflow template: ";
 
 fn relative_path(value: &str) -> bool {
     !value.is_empty()
@@ -58,6 +58,12 @@ pub(crate) fn validate_config(ci: &CiConfig) -> Result<()> {
             bail!(
                 "invalid [ci.workflow_templates] mapping {output:?} = {source:?}; use distinct repository-relative template and Actions workflow paths"
             );
+        }
+        if matches!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some("release.yml" | "release.yaml")
+        ) {
+            bail!("workflow template {output} collides with a release-owned workflow");
         }
     }
     for name in ci.workflow_variables.keys() {

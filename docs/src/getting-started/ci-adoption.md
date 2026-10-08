@@ -63,9 +63,11 @@ values in committed templates or configuration.
 and persists both mappings and variables. `--check --diff` and registry auditing
 use the same renderer, so edits to outputs, templates, or variables are detected.
 Removing a mapping retires only its template-marked output; unrelated workflows
-remain project-owned. Built-in workflow collisions, paths outside the repository,
-and mismatched Actions platforms are rejected. This feature supports GitHub and
-Forgejo Actions, including exact-only Nix qualification; it does not replace the
+remain project-owned. Built-in and release-owned workflow collisions, paths
+outside the repository, and mismatched Actions platforms are rejected. Template
+contents do not participate in built-in check, package, or runner inference.
+This feature supports GitHub and Forgejo Actions, including exact-only Nix
+qualification; it does not replace the
 project's test selections or permission policy.
 
 When importing upstream CI, retain its presets in template sources and declare

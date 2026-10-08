@@ -4,7 +4,7 @@ name: Qualify generator and retain regeneration
 
 on:
   push:
-    branches: ["fix/hermes-workflow-templates"]
+    branches: ["fix/hermes-workflow-templates", "trunk"]
   pull_request:
   workflow_dispatch:
 
@@ -57,6 +57,7 @@ jobs:
           git diff > "$RUNNER_TEMP/generator-qualification/regenerated.diff"
           tar -czf "$RUNNER_TEMP/generator-qualification/regenerated.tar.gz" Cargo.toml .github/workflows .simit/workflows
           sha256sum "$RUNNER_TEMP/generator-qualification/regenerated.tar.gz" > "$RUNNER_TEMP/generator-qualification/regenerated.sha256"
+          git diff --exit-code
       - name: Retain per-attempt qualification evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

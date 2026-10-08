@@ -929,7 +929,16 @@ fn infer_expected_ci_files(
     workspace_root: &Path,
     marked: &[WorkflowFile],
 ) -> Result<Vec<project::GeneratedFile>> {
-    let mut files = infer_builtin_ci_files(workspace_root, marked)?;
+    let builtin = marked
+        .iter()
+        .filter(|workflow| {
+            !workflow
+                .content
+                .starts_with(crate::render::workflow_templates::TEMPLATE_MARKER)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut files = infer_builtin_ci_files(workspace_root, &builtin)?;
     let config = ProjectConfig::load(workspace_root)?;
     crate::render::workflow_templates::append(workspace_root, &config.ci, &mut files)?;
     Ok(files)
