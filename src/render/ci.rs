@@ -4581,7 +4581,9 @@ fn publish_crate_steps(name: &str, runtime: Runtime, package_scoped: bool) -> St
               exit 1
             fi
           fi
-          target_dir="$({prefix}cargo metadata --no-deps --format-version 1 | jq -er '.target_directory')"
+          # Only discover the target directory; the package-scoped signed-tag
+          # version extractor remains separate. Never update the verified lock.
+          target_dir="$({prefix}cargo metadata --locked --no-deps --format-version 1 | jq -er '.target_directory')"
           local_crate="${{target_dir}}/package/${{crate_name}}-${{version}}.crate"
           test -f "$local_crate" || {{ echo "missing verified package archive: $local_crate" >&2; exit 1; }}
           local_checksum="$(sha256sum "$local_crate" | awk '{{print $1}}')"
@@ -4625,7 +4627,7 @@ fn publish_crate_steps(name: &str, runtime: Runtime, package_scoped: bool) -> St
             ref="${{GITHUB_REF:-${{FORGE_REF:-${{CODEBERG_REF:-}}}}}}"
             version="${{ref#refs/tags/}}"
           fi
-          target_dir="$({prefix}cargo metadata --no-deps --format-version 1 | jq -er '.target_directory')"
+          target_dir="$({prefix}cargo metadata --locked --no-deps --format-version 1 | jq -er '.target_directory')"
           local_checksum="$(sha256sum "$target_dir/package/${{crate_name}}-${{version}}.crate" | awk '{{print $1}}')"
           probe="$(mktemp -d)"
           trap 'rm -rf "$probe"' EXIT

@@ -243,7 +243,7 @@ timeout_minutes = 30
     assert!(
         publish.contains("local_crate=\"${target_dir}/package/${crate_name}-${version}.crate\"")
     );
-    assert!(publish.contains("cargo metadata --no-deps --format-version 1"));
+    assert!(publish.contains("cargo metadata --locked --no-deps --format-version 1"));
     // Lockstep validation for every publishable member.
     assert!(publish.contains("cargo pkgid -p a"));
     assert!(publish.contains("cargo pkgid -p d"));
@@ -923,7 +923,7 @@ fn coordinated_publication_waits_for_exact_cargo_resolution_even_when_api_is_rea
             "cargo",
             r##"#!/usr/bin/env bash
 set -euo pipefail
-if [[ "$*" == "metadata --no-deps --format-version 1" ]]; then printf '{"target_directory":"%s"}\n' "$TEST_TARGET"; exit 0; fi
+if [[ "$*" == "metadata --locked --no-deps --format-version 1" ]]; then printf '{"target_directory":"%s"}\n' "$TEST_TARGET"; exit 0; fi
 [[ "$*" == "fetch --manifest-path "* ]] || exit 92
 grep -F 'a = { version = "=0.1.0", registry = "crates-io", default-features = false }' "$3" >/dev/null || exit 93
 [[ ! -e "${3%/*}/Cargo.lock" ]] || exit 94
@@ -1048,7 +1048,7 @@ fn single_and_coordinated_publication_require_usable_checksum_bound_registry_arc
                 ),
                 (
                     "cargo",
-                    "#!/bin/sh\nset -eu\nif [ \"$*\" = 'metadata --no-deps --format-version 1' ]; then printf '{\"target_directory\":\"%s\"}\\n' \"$TEST_TARGET\"; exit 0; fi\ntest \"$1\" = publish || exit 92\nprintf '%s\\n' \"$*\" > \"$TEST_STATE/published\"\n",
+                    "#!/bin/sh\nset -eu\nif [ \"$*\" = 'metadata --locked --no-deps --format-version 1' ]; then printf '{\"target_directory\":\"%s\"}\\n' \"$TEST_TARGET\"; exit 0; fi\ntest \"$1\" = publish || exit 92\nprintf '%s\\n' \"$*\" > \"$TEST_STATE/published\"\n",
                 ),
                 (
                     "curl",
