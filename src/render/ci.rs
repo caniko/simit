@@ -432,6 +432,10 @@ pub fn publish_workspace_file(
     })
 }
 
+fn github_crate_publish_triggers() -> &'static str {
+    "# GitHub crates.io publishers run only on signed semver tag pushes. Retry the original run rather than dispatching a branch.\non:\n  push:\n    tags:\n      - \"[0-9]*\"\n\n"
+}
+
 fn publish_workspace_workflow(
     platform: Platform,
     runtime: Runtime,
@@ -447,9 +451,7 @@ fn publish_workspace_workflow(
     w.push_str("# Before creating and pushing a release tag, run `simit changelog release <version>` locally.\n");
     push_release_security_header(&mut w, false);
     w.push_str("name: Publish Workspace\n\n");
-    w.push_str("on:\n");
-    w.push_str("  push:\n    tags:\n      - \"[0-9]*\"\n");
-    w.push_str("  workflow_dispatch:\n\n");
+    w.push_str(github_crate_publish_triggers());
     // Serialize conflicting release attempts; never cancel a publish halfway.
     w.push_str("concurrency:\n");
     w.push_str("  group: ${{ github.workflow_ref }}-${{ github.ref }}\n");
@@ -539,7 +541,7 @@ fn publish_workspace_workflow(
     // Each job: package archive (cargo package) + registry dry-run
     // (cargo publish --dry-run) + bounded existence check + actual publish +
     // bounded propagation wait. No publish-on-PR: this workflow only runs on
-    // tags + workflow_dispatch, with least-privilege permissions and pinned
+    // Signed tag pushes, with least-privilege permissions and pinned
     // actions. Secrets appear only here, never in ordinary PR jobs.
     let mut job_names: std::collections::BTreeMap<String, String> =
         std::collections::BTreeMap::new();
@@ -2161,7 +2163,7 @@ fn ci_workflow_single_job(
     let mut workflow = String::new();
     push_generated_workflow_header(&mut workflow);
     push_required_secrets_header(&mut workflow, &options.required_secrets);
-    workflow.push_str("name: CI\n\n");
+    push_ci_workflow_name(&mut workflow, package, &options);
     workflow.push_str("on:\n");
     workflow.push_str("  push:\n");
     workflow.push_str("    branches: [\"**\"]\n");
@@ -2174,6 +2176,7 @@ fn ci_workflow_single_job(
     push_provider_concurrency(&mut workflow, platform);
     workflow.push_str("jobs:\n");
     workflow.push_str("  test:\n");
+    push_member_job_name(&mut workflow, package, &options, "test");
     workflow.push_str("    runs-on: ");
     workflow.push_str(&runs_on(&runners.ci));
     workflow.push('\n');
@@ -2260,7 +2263,7 @@ fn ci_workflow_single_job(
     }
 
     push_sccache_stats_step(&mut workflow, platform, runtime);
-    push_required_gate_jobs(&mut workflow, platform, runtime, runners, &options);
+    push_required_gate_jobs(&mut workflow, platform, runtime, package, runners, &options);
     trim_trailing_blank_lines(&mut workflow);
     workflow
 }
@@ -2300,7 +2303,7 @@ fn ci_workflow_multi_job(
     let mut workflow = String::new();
     push_generated_workflow_header(&mut workflow);
     push_required_secrets_header(&mut workflow, &options.required_secrets);
-    workflow.push_str("name: CI\n\n");
+    push_ci_workflow_name(&mut workflow, package, &options);
     workflow.push_str("on:\n");
     workflow.push_str("  push:\n");
     workflow.push_str("    branches: [\"**\"]\n");
@@ -2503,6 +2506,7 @@ fn ci_workflow_multi_job(
     let first_job_name = jobs.first().map(|j| j.name.clone()).unwrap_or_default();
     for (idx, job) in jobs.iter().enumerate() {
         workflow.push_str(&format!("  {}:\n", job.name));
+        push_member_job_name(&mut workflow, package, &options, &job.name);
         if idx > 0 {
             workflow.push_str(&format!("    needs: [{first_job_name}]\n"));
         }
@@ -2533,9 +2537,30 @@ fn ci_workflow_multi_job(
         push_sccache_stats_step(&mut workflow, platform, runtime);
     }
 
-    push_required_gate_jobs(&mut workflow, platform, runtime, runners, &options);
+    push_required_gate_jobs(&mut workflow, platform, runtime, package, runners, &options);
     trim_trailing_blank_lines(&mut workflow);
     workflow
+}
+
+fn push_ci_workflow_name(workflow: &mut String, package: &Package, options: &CiOptions) {
+    if options.package_scoped {
+        workflow.push_str(&format!(
+            "name: \"CI ({})\"\n\n",
+            yaml_double_quote(&package.name)
+        ));
+    } else {
+        workflow.push_str("name: CI\n\n");
+    }
+}
+
+fn push_member_job_name(workflow: &mut String, package: &Package, options: &CiOptions, job: &str) {
+    if options.package_scoped {
+        workflow.push_str(&format!(
+            "    name: \"{} / {}\"\n",
+            yaml_double_quote(&package.name),
+            yaml_double_quote(job)
+        ));
+    }
 }
 
 /// Dedicated required integration gate jobs.
@@ -2551,6 +2576,7 @@ fn push_required_gate_jobs(
     workflow: &mut String,
     platform: Platform,
     runtime: Runtime,
+    package: &Package,
     runners: &ResolvedCiRunners,
     options: &CiOptions,
 ) {
@@ -2558,6 +2584,7 @@ fn push_required_gate_jobs(
         let job = format!("gate-{}", sanitize_gate_id(&gate.id));
         trim_trailing_blank_lines(workflow);
         workflow.push_str(&format!("\n  {job}:\n"));
+        push_member_job_name(workflow, package, options, &job);
         workflow.push_str("    runs-on: ");
         workflow.push_str(&runs_on(&runners.ci));
         workflow.push('\n');
@@ -2628,13 +2655,12 @@ fn publish_workflow(
     );
     push_release_security_header(&mut workflow, false);
     workflow.push_str("name: Publish Crate\n\n");
-    workflow.push_str("on:\n");
-    // Codeberg rejects nested dispatch inputs. GitHub also publishes stable
-    // release tags automatically.
     if platform == Platform::Github {
-        workflow.push_str("  push:\n    tags:\n      - \"[0-9]*\"\n");
+        workflow.push_str(github_crate_publish_triggers());
+    } else {
+        // Codeberg rejects nested dispatch inputs.
+        workflow.push_str("on:\n  workflow_dispatch:\n\n");
     }
-    workflow.push_str("  workflow_dispatch:\n\n");
     if platform == Platform::Github {
         // Per-crate workflows all display as "Publish Crate". Include the
         // workflow path in the key so a tag starts every crate publisher;

@@ -40,6 +40,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the exact checkout before evaluating package metadata, including per-member
   publishers; explicitly pin every coordinated release job to the immutable
   event SHA and regenerate this repository's publisher from that renderer.
+- Give per-member GitHub/Forgejo jobs distinct package-qualified check names,
+  including split checks and integration gates; restrict GitHub crates.io
+  publishers to signed semver tag pushes, with retries on the original run.
 
 ## [0.19.0] - 2026-09-30
 

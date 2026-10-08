@@ -2224,9 +2224,8 @@ fn generates_github_plain_cargo_workflows() {
     let publish = read(&temp.path().join(".github/workflows/publish-crate.yaml"));
     assert!(publish.contains("group: ${{ github.workflow_ref }}-${{ github.ref }}"));
     assert!(publish.contains("cancel-in-progress: false"));
-    assert!(
-        publish.contains("on:\n  push:\n    tags:\n      - \"[0-9]*\"\n  workflow_dispatch:\n")
-    );
+    assert!(publish.contains("on:\n  push:\n    tags:\n      - \"[0-9]*\"\n"));
+    assert!(!publish.contains("workflow_dispatch"));
     assert!(
         publish.contains("uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0")
     );

@@ -4,11 +4,11 @@
 # - keys/maintainers.gpg: pinned maintainer OpenPGP public keys for git verify-tag.
 name: Publish Crate
 
+# GitHub crates.io publishers run only on signed semver tag pushes. Retry the original run rather than dispatching a branch.
 on:
   push:
     tags:
       - "[0-9]*"
-  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow_ref }}-${{ github.ref }}

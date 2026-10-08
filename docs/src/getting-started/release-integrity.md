@@ -33,9 +33,13 @@ default-branch keyring fails publication. Key rotation must therefore land on
 the default branch before a tag signed by the replacement key is released.
 
 After verifying the signed tag, generated publish workflows require its peeled
-commit to equal the checkout being published. A manual run from a different
-same-version branch fails before package metadata is executed or publication
-begins. Coordinated workspace publication also binds the signed commit to the
+commit to equal the checkout being published, before package metadata is executed
+or publication begins. GitHub crates.io publishers run only on signed semver tag
+pushes; they do not expose a branch-based manual dispatch. To retry publication,
+rerun the original tag-triggered run. Forgejo retains its existing dispatch
+surface and applies the same signed-tag/checkout validation.
+
+Coordinated workspace publication also binds the signed commit to the
 immutable workflow event SHA. Its validation job, required gates, all dependent
 publishers, and release report explicitly check out `${{ github.sha }}` rather
 than resolving the release tag again. A tag moved after validation cannot change

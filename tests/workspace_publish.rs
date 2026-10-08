@@ -230,6 +230,7 @@ timeout_minutes = 30
     // Tag-only triggers: no publish-on-PR.
     assert!(publish.contains("tags:\n      - \"[0-9]*\""));
     assert!(!publish.contains("pull_request"));
+    assert!(!publish.contains("workflow_dispatch"));
     // Least-privilege permissions.
     assert!(publish.contains("permissions:\n      contents: read\n      id-token: write"));
     // Serialize conflicting attempts.
@@ -291,6 +292,67 @@ timeout_minutes = 30
     // Auditable non-publishing summary.
     assert!(publish.contains("publish-report"));
     assert!(publish.contains("if: always()"));
+}
+
+#[test]
+fn member_workflows_have_unique_check_names_for_single_split_and_gate_jobs() {
+    for (platform, split) in [("github", false), ("forgejo", false), ("forgejo", true)] {
+        let temp = fixture_dir("release-plan-diamond");
+        let runner_map = if split {
+            "[ci.step_runners]\nclippy = 'lint-runner'\ntest = 'test-runner'\n"
+        } else {
+            ""
+        };
+        fs::write(
+            temp.path().join("simit.toml"),
+            format!(
+                "[ci]\nplatform = '{platform}'\nruntime = 'cargo'\nworkspace = true\nworkspace_strategy = 'members'\npackages = ['a', 'b']\nall_features = false\n{runner_map}\n[[ci.required_gates]]\nid = 'integration'\nrun = 'cargo test --no-default-features'\nscope = 'ci'\n"
+            ),
+        )
+        .unwrap();
+        let output = simit()
+            .current_dir(temp.path())
+            .args(["init", "ci"])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let mut names = std::collections::BTreeSet::new();
+        for member in ["a", "b"] {
+            let path = temp
+                .path()
+                .join(format!(".{platform}/workflows/ci-{member}.yaml"));
+            let text = read(&path);
+            let workflow: serde_yaml::Value = serde_yaml::from_str(&text).unwrap();
+            assert_eq!(
+                workflow["name"].as_str(),
+                Some(format!("CI ({member})").as_str())
+            );
+            let jobs = workflow["jobs"].as_mapping().unwrap();
+            assert_eq!(jobs.len(), if split { 4 } else { 2 });
+            for (id, job) in jobs {
+                let name = job["name"]
+                    .as_str()
+                    .expect("every member job needs a distinct check name");
+                assert_eq!(name, format!("{member} / {}", id.as_str().unwrap()));
+                assert!(
+                    names.insert(name.to_owned()),
+                    "ambiguous member check: {name}"
+                );
+            }
+            assert!(!text.contains("--all-features"));
+            assert!(text.contains("cargo test --no-default-features"));
+        }
+        let check = simit()
+            .current_dir(temp.path())
+            .args(["init", "ci", "--check", "--diff"])
+            .output()
+            .unwrap();
+        assert!(check.status.success(), "{check:?}");
+        assert_eq!(
+            simit::registry::audit_ci(temp.path()).unwrap().status,
+            simit::registry::FeatureStatus::Managed
+        );
+    }
 }
 
 #[cfg(unix)]

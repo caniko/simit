@@ -101,6 +101,12 @@ simit init ci --platform forgejo --runtime nix --runner atlas-nix-trusted \
   --workspace --with-artifacts --with-deny --check --diff
 ```
 
+Per-member GitHub and Forgejo workflows use package-qualified job names, such as
+`my-crate / test` and `my-crate / gate-integration`. These are distinct required
+check names even when several members use the same job IDs. Regenerate existing
+workflows and select the qualified names in branch protection when adopting this
+generator; single-package and aggregate workflow check names retain their shape.
+
 If the project also publishes a Homebrew tap, keep the tap metadata in project
 config when possible. Command-line overrides work, but config makes future
 checks shorter and reproducible.

@@ -133,7 +133,8 @@ Runtime contract (lockstep v1):
   the tag (`cargo pkgid -p <crate>` compared to `$tag` after `git verify-tag`
   - checkout of the validated SHA). Development-only `publish = false`
     members are excluded from the plan and publish jobs.
-- Triggers only on tags (`[0-9]*`) + `workflow_dispatch`. No publish-on-PR.
+- Triggers only on signed semver tag pushes (`[0-9]*`); retry the original run.
+  No branch-based manual dispatch or publish-on-PR.
 - Least-privilege permissions (`contents: read`, `id-token: write`), pinned
   actions, serialized concurrency (`cancel-in-progress: false`).
 - Maintainer trust root preserved: `test -s keys/maintainers.gpg` + `git
