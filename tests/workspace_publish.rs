@@ -311,7 +311,7 @@ fn member_workflows_have_unique_check_names_for_single_split_and_gate_jobs() {
         fs::write(
             temp.path().join("simit.toml"),
             format!(
-                "[ci]\nplatform = '{platform}'\nruntime = 'cargo'\nworkspace = false\nworkspace_strategy = 'members'\npackages = ['a', 'b']\nall_features = false\n{runner_map}\n[[ci.required_gates]]\nid = 'integration'\nrun = 'cargo test --no-default-features'\n"
+                "[ci]\nplatform = '{platform}'\nruntime = 'cargo'\nrunner = 'fixture-linux'\nworkspace = false\nworkspace_strategy = 'members'\npackages = ['a', 'b']\nall_features = false\n{runner_map}\n[[ci.required_gates]]\nid = 'integration'\nrun = 'cargo test --no-default-features'\n"
             ),
         )
         .unwrap();
