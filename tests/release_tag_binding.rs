@@ -5,6 +5,60 @@ use std::{fs, os::unix::fs::PermissionsExt, process::Command};
 mod common;
 
 #[test]
+fn source_manifests_hash_dash_and_option_like_names_as_files() {
+    use sha2::Digest;
+
+    let temp = tempfile::tempdir().unwrap();
+    for name in ["-", "--help", "source.rs"] {
+        fs::write(temp.path().join(name), format!("fixture {name}\n")).unwrap();
+    }
+    for args in [vec!["init", "--quiet"], vec!["add", "--", "."]] {
+        assert!(
+            Command::new("git")
+                .args(args)
+                .current_dir(temp.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    for path in [
+        ".github/workflows/qualify-release-generator.yaml",
+        ".github/workflows/review-compatibility.yml",
+    ] {
+        let workflow =
+            fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(path))
+                .unwrap();
+        let command = workflow
+            .lines()
+            .find(|line| line.contains("git ls-files -z"))
+            .unwrap()
+            .split(" > ")
+            .next()
+            .unwrap()
+            .trim();
+        let output = Command::new("sh")
+            .args(["-c", command])
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{path}: {output:?}");
+        let manifest = String::from_utf8(output.stdout).unwrap();
+        assert_eq!(manifest.lines().count(), 3, "{path}: {manifest}");
+        for name in ["-", "--help", "source.rs"] {
+            let expected = format!(
+                "{}  ./{name}",
+                hex::encode(sha2::Sha256::digest(format!("fixture {name}\n")))
+            );
+            assert!(
+                manifest.lines().any(|line| line == expected),
+                "{path}: {manifest}"
+            );
+        }
+    }
+}
+
+#[test]
 fn publishers_validate_before_project_setup_without_persisting_credentials() {
     for platform in ["github", "forgejo"] {
         for runtime in ["cargo", "nix"] {

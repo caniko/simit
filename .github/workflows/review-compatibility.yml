@@ -43,7 +43,7 @@ jobs:
           mkdir -p "$evidence"
           git rev-parse HEAD > "$evidence/revision"
           git rev-parse 'HEAD^{tree}' > "$evidence/tree"
-          git ls-files -z | sort -z | xargs -0 sha256sum > "$evidence/source.sha256"
+          git ls-files -z | sort -z | sed -z 's|^|./|' | xargs -0 sha256sum -- > "$evidence/source.sha256"
           cp controller-lock/flake.lock "$evidence/flake.lock"
           sha256sum "$evidence/flake.lock" > "$evidence/lock.sha256"
           nix build path:./controller-lock#repo-review --out-link tools --no-update-lock-file --max-jobs 1 --cores 2 --json -L > "$evidence/result.json"
