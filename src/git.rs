@@ -316,7 +316,7 @@ fn ensure_attached_head(workspace_root: &Path) -> Result<()> {
     Ok(())
 }
 
-fn ensure_worktree_clean(workspace_root: &Path) -> Result<()> {
+pub(crate) fn ensure_worktree_clean(workspace_root: &Path) -> Result<()> {
     let output = Command::new("git")
         .current_dir(workspace_root)
         .args(["status", "--porcelain"])

@@ -6,6 +6,7 @@
 - [Project Registry](getting-started/project-registry.md)
 - [Release Integrity](getting-started/release-integrity.md)
 - [Release Plan](getting-started/release-plan.md)
+- [Mixed-language Monorepositories](monorepos.md)
 - [Release Verify](getting-started/release-verify.md)
 - [CI Caching](getting-started/ci-caching.md)
 - [Repository Review](repository-review.md)

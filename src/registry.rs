@@ -968,6 +968,9 @@ fn infer_expected_primary_ci_files(
     // file drift. `{:#}` keeps the offending keys in the message.
     let config =
         ProjectConfig::load(workspace_root).context("loading simit project configuration")?;
+    if config.monorepo.is_some() {
+        return crate::monorepo::ci::files(workspace_root, &config);
+    }
     let backend = infer_ci_target(marked)?;
     let snapshots = workflow_snapshots(marked);
     if backend.provider() == CiProvider::Crow {

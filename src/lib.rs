@@ -20,6 +20,8 @@ pub mod commands;
 pub mod config;
 /// Git preflight, staging, commit, and tag helpers.
 pub mod git;
+/// Declarative mixed-language repository components and qualification plans.
+pub mod monorepo;
 /// Shared packaging validation + release-version helpers.
 pub mod packaging_common;
 /// Shared Codeberg Pages workflow inference.

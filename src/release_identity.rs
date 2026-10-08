@@ -27,6 +27,7 @@ impl TagPrefix {
         ReleaseTag {
             version,
             prefix: self,
+            namespace: None,
         }
     }
 
@@ -51,11 +52,44 @@ impl TagPrefix {
 pub struct ReleaseTag {
     pub version: Version,
     prefix: TagPrefix,
+    namespace: Option<String>,
 }
 
 impl fmt::Display for ReleaseTag {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(namespace) = &self.namespace {
+            write!(f, "{namespace}/")?;
+        }
         write!(f, "{}{}", self.prefix.as_str(), self.version)
+    }
+}
+
+impl ReleaseTag {
+    /// Package names form independent release namespaces within one repository.
+    pub fn for_package(package: &str, version: Version) -> Result<Self> {
+        if package.is_empty()
+            || !package
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        {
+            bail!("invalid release package namespace {package:?}");
+        }
+        Ok(Self {
+            version,
+            prefix: TagPrefix::V,
+            namespace: Some(package.to_owned()),
+        })
+    }
+
+    pub fn parse_for_package(package: &str, tag: &str) -> Result<Self> {
+        let raw = tag
+            .strip_prefix(&format!("{package}/v"))
+            .ok_or_else(|| anyhow::anyhow!("release tag {tag:?} does not belong to {package}"))?;
+        let identity = Self::for_package(package, Version::parse(raw)?)?;
+        if identity.to_string() != tag {
+            bail!("release tag {tag:?} is not canonical");
+        }
+        Ok(identity)
     }
 }
 
@@ -73,5 +107,14 @@ mod tests {
         assert!(TagPrefix::None.parse("v0.2.0").is_err());
         assert!(TagPrefix::V.parse("0.2.0").is_err());
         assert!(TagPrefix::V.parse("vv0.2.0").is_err());
+    }
+
+    #[test]
+    fn package_tags_have_disjoint_release_namespaces() {
+        let tag = ReleaseTag::parse_for_package("harbor-cache", "harbor-cache/v0.1.1").unwrap();
+        assert_eq!(tag.version.to_string(), "0.1.1");
+        assert_eq!(tag.to_string(), "harbor-cache/v0.1.1");
+        assert!(ReleaseTag::parse_for_package("harbor-sdk", &tag.to_string()).is_err());
+        assert!(ReleaseTag::for_package("../outside", Version::new(1, 0, 0)).is_err());
     }
 }

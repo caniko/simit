@@ -39,8 +39,59 @@ struct JsonPlanEntry {
 pub fn run(command: ReleaseCommand) -> Result<()> {
     reject_non_plan_flags(&command)?;
 
-    let metadata = cargo::metadata_for_current_dir()?;
-    let plan = build_release_plan(&metadata, &command.packages)?;
+    let monorepo = command
+        .component
+        .as_ref()
+        .map(|_| crate::monorepo::load(&std::env::current_dir()?))
+        .transpose()?;
+    let metadata = if let Some((root, _)) = &monorepo {
+        cargo::cargo_metadata(&root.join("Cargo.toml"))?
+    } else {
+        cargo::metadata_for_current_dir()?
+    };
+    let mut requested = command.packages.clone();
+    let graph = monorepo
+        .as_ref()
+        .map(|(root, config)| {
+            config
+                .monorepo
+                .as_ref()
+                .context("missing monorepo config")?
+                .resolve(root)
+        })
+        .transpose()?;
+    if let (Some(id), Some(graph)) = (&command.component, &graph) {
+        let component = graph
+            .components
+            .get(id)
+            .with_context(|| format!("unknown monorepo component {id}"))?;
+        if component.cargo_packages.is_empty() {
+            bail!("component {id} has no Cargo release packages");
+        }
+        if requested.is_empty() {
+            requested = component
+                .cargo_packages
+                .iter()
+                .filter(|name| {
+                    metadata
+                        .packages
+                        .iter()
+                        .any(|package| &package.name == *name && package.is_publishable())
+                })
+                .cloned()
+                .collect();
+            if requested.is_empty() {
+                bail!("component {id} has no publishable Cargo packages");
+            }
+        }
+        if requested
+            .iter()
+            .any(|name| !component.cargo_packages.contains(name))
+        {
+            bail!("--package must belong to component {id}");
+        }
+    }
+    let plan = build_release_plan(&metadata, &requested)?;
 
     if command.json {
         let json = plan
@@ -54,7 +105,16 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
                 depends_on: entry.depends_on.clone(),
             })
             .collect::<Vec<_>>();
-        serde_json::to_writer_pretty(io::stdout(), &json).context("writing release plan JSON")?;
+        if let (Some(id), Some(graph)) = (&command.component, &graph) {
+            let entries = json.iter().map(|entry| {
+                let owner = graph.components.values().find(|component| component.cargo_packages.contains(&entry.name)).context("release package has no component owner")?;
+                Ok(serde_json::json!({"name": entry.name, "version": entry.version, "manifest_path": entry.manifest_path, "publish": entry.publish, "depends_on": entry.depends_on, "component": owner.id, "tag": format!("{}/v{}", entry.name, entry.version)}))
+            }).collect::<Result<Vec<_>>>()?;
+            serde_json::to_writer_pretty(io::stdout(), &serde_json::json!({"schemaVersion": 1, "component": id, "entries": entries, "skippedMembers": plan.skipped_members})).context("writing component release plan JSON")?;
+        } else {
+            serde_json::to_writer_pretty(io::stdout(), &json)
+                .context("writing release plan JSON")?;
+        }
         println!();
     } else {
         print_release_plan(&plan)?;

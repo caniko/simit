@@ -1,0 +1,101 @@
+# Mixed-language monorepositories
+
+A monorepository has one root Simit configuration and a project-owned Nix
+`ci` development shell. Components describe source ownership, dependencies,
+and required qualification commands. Package versions remain independent.
+
+```toml
+[ci]
+platform = "github"
+provider = "actions"
+runtime = "nix"
+
+[monorepo]
+schema_version = 1
+formatter_modules = ["nix/formatters/python.nix"]
+
+[[monorepo.components]]
+id = "core"
+paths = ["nix/core"]
+checks = [{ id = "evaluate", run = "nix eval .#lib.core.contractVersion" }]
+
+[[monorepo.components]]
+id = "rust"
+paths = ["nix/rust"]
+cargo_packages = ["engine"]
+depends_on = ["core"]
+checks = [{ id = "test", run = "cargo test --locked -p engine" }]
+
+[[monorepo.components]]
+id = "python"
+paths = ["python"]
+depends_on = ["core"]
+checks = [{ id = "test", run = "python3 -m unittest discover -s python/tests" }]
+```
+
+`simit.toml` and Cargo `[workspace.metadata.simit]` or
+`[package.metadata.simit]` configuration are supported. Use one configuration
+source. Commands stop root discovery at Git checkout boundaries.
+
+## Qualification planning
+
+```console
+simit monorepo plan --json
+simit monorepo plan --base origin/trunk --json
+simit monorepo plan --changed-path nix/core/default.nix --json
+```
+
+The JSON contract has `schemaVersion`, `changedPaths`, `full`, `selected`, and
+`reasons`. Selection includes changed owners, their transitive dependents,
+then every selected component's prerequisites, in deterministic dependency
+order. Cargo metadata supplies member source directories and local dependency
+edges, including optional, build, development, and target-specific dependencies.
+All Cargo members must have exactly one component owner.
+
+An unknown source path selects all components. The default shared paths are
+`simit.toml`, `flake.nix`, `flake.lock`, `Cargo.toml`, `Cargo.lock`,
+`rust-toolchain.toml`, `deny.toml`, and `.github`; `shared_paths` can replace
+that list. Git selection includes committed, staged, unstaged, and untracked
+changes relative to the base. Renames retain both old and new paths; deletions
+retain their old owners. Missing or invalid base revisions fail locally.
+
+Paths must be normalized and root-relative. Overlapping component ownership,
+unknown dependencies, cycles, duplicate package ownership, and symlink traversal
+are rejected. A component may contain multiple paths and Cargo packages.
+
+## Generated qualification CI
+
+`simit init ci` and `simit init ci --check` operate on the complete root workflow
+set from both root and member directories. GitHub Actions runs the planner at the
+checked-out revision and qualifies the selected components. Missing push-base
+objects trigger full qualification. Every component requires explicit checks;
+failed or cancelled selected jobs fail the aggregate `qualified` gate.
+
+The root `devShells.<system>.ci` must supply Simit with this component support,
+Cargo, and the tools used by checks. Each command runs in that shell with its
+declared environment and timeout. `systems` can select native runners using
+`[ci.nix_system_runners]`. Handwritten supplementary workflows are retained.
+
+`simit init flake` also resolves member invocations to the root. Optional
+`formatter_modules` are composed into the generated root treefmt module; custom
+flakes retain their existing ownership contract. Language and publication
+overrides must not be used to replace component qualification commands.
+
+## Independent Cargo releases
+
+```console
+simit release plan --component rust --json
+simit release patch --component rust --package engine -m 'release engine'
+```
+
+Component release plans contain dependency-ordered publishable packages and
+their owning components, versions, and package-qualified tags. `publish = false`
+members remain non-publishable. A bump selects exactly one owned package and
+creates a signed tag such as `engine/v0.2.1`; package versions stay plain SemVer.
+The package's adjacent `CHANGELOG.md` is used. Workspace-inherited versions and
+repository-wide automatic changelog drafting are rejected for independent bumps.
+Component release mutation requires a clean checkout.
+
+Repository-scoped release verification, trust, and sync-up keep their existing
+contracts. Hosted component publication and non-Cargo version mutation require
+additional generator support before these commands can be used for those lanes.
