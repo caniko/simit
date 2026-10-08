@@ -17,7 +17,7 @@ fn publishers_validate_before_project_setup_without_persisting_credentials() {
             fs::create_dir(temp.path().join("src")).unwrap();
             fs::write(temp.path().join("src/lib.rs"), "").unwrap();
             fs::write(temp.path().join("flake.nix"), "{ outputs = _: {}; }\n").unwrap();
-            fs::write(temp.path().join("simit.toml"), format!("[ci]\nplatform='{platform}'\nruntime='{runtime}'\npublish_crates=true\nextra_setup=['echo checkout-controlled-setup']\n")).unwrap();
+            fs::write(temp.path().join("simit.toml"), format!("[ci]\nplatform='{platform}'\nruntime='{runtime}'\nrunner='fixture-linux'\npublish_crates=true\nextra_setup=['echo checkout-controlled-setup']\n")).unwrap();
             let output = common::simit()
                 .current_dir(temp.path())
                 .args(["init", "ci"])
