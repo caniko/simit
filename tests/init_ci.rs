@@ -666,7 +666,8 @@ fn generates_forgejo_nix_workflows() {
     assert!(publish.contains("CRATES_IO_API_TOKEN is required"));
     assert!(publish.contains("export CARGO_REGISTRY_TOKEN="));
     assert!(publish.contains("https://crates.io/api/v1/crates/${crate_name}/${version}"));
-    assert!(publish.contains("already published on crates.io; skipping publish"));
+    assert!(publish.contains("checksum matches; resuming (already published)"));
+    assert!(publish.contains("invalid, mismatched or yanked registry version"));
     assert!(!publish.contains("cargo login"));
     assert_maintainer_key_written(temp.path());
 }
@@ -1464,6 +1465,15 @@ fn github_nix_can_generate_github_pages_workflow() {
 
     let pages = read(&temp.path().join(".github/workflows/pages.yaml"));
     assert_yaml_parses(&pages);
+    let value: serde_yaml::Value = serde_yaml::from_str(&pages).unwrap();
+    assert_eq!(value["concurrency"]["group"], "github-pages");
+    assert_eq!(value["concurrency"]["cancel-in-progress"], false);
+    assert!(value["on"]["workflow_dispatch"].is_null());
+    assert_eq!(value["on"]["push"]["branches"][0], "trunk");
+    let ci: serde_yaml::Value =
+        serde_yaml::from_str(&read(&temp.path().join(".github/workflows/ci.yaml"))).unwrap();
+    assert_ne!(ci["concurrency"]["group"], value["concurrency"]["group"]);
+    assert_eq!(ci["concurrency"]["cancel-in-progress"], true);
     assert!(pages.contains("permissions:\n  contents: read\n  pages: write\n  id-token: write"));
     assert!(pages.contains("uses: actions/checkout@"));
     assert!(pages.contains("uses: actions/configure-pages@"));
@@ -2423,7 +2433,8 @@ fn generates_github_plain_cargo_workflows() {
         publish.contains(r#"cargo pkgid -p demo | awk -F'[#@]' 'NF > 1 {print $NF}' | tail -n 1"#)
     );
     assert!(publish.contains("export CARGO_REGISTRY_TOKEN="));
-    assert!(publish.contains("already published on crates.io; skipping publish"));
+    assert!(publish.contains("checksum matches; resuming (already published)"));
+    assert!(publish.contains("invalid, mismatched or yanked registry version"));
     assert!(!publish.contains("cargo login"));
     // Regression: the publish workflow must not infer the release version from
     // the first package in workspace-wide cargo metadata.

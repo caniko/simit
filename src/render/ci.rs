@@ -601,83 +601,9 @@ fn publish_workspace_workflow(
         w.push_str("cargo publish -p ");
         w.push_str(&shell_word(name));
         w.push_str(" --dry-run\n\n");
-        // Publish with honest conflict handling. Readiness is a separate step
-        // so checksum-based resumes also wait for actual Cargo resolution.
-        w.push_str("      - name: Publish\n");
-        w.push_str("        env:\n");
-        w.push_str("          CRATES_IO_API_TOKEN: ${{ secrets.CRATES_IO_API_TOKEN }}\n");
-        w.push_str("        run: |\n");
-        w.push_str("          set -euo pipefail\n");
-        w.push_str("          crate_name=");
-        w.push_str(&shell_quote(name));
-        w.push('\n');
-        w.push_str("          version=\"${GITHUB_REF_NAME:-${GITHUB_REF#refs/tags/}}\"\n");
-        w.push_str("          if [ -z \"$version\" ]; then echo \"Could not determine release version from tag ref\" >&2; exit 1; fi\n");
-        w.push_str(
-            "          # Preflight: fail fast on auth/ownership/validation vs propagation delay.\n",
-        );
-        w.push_str("          if [ -z \"${CRATES_IO_API_TOKEN:-}\" ] && [ -z \"${CARGO_REGISTRY_TOKEN:-}\" ]; then echo \"CRATES_IO_API_TOKEN is required to publish to crates.io\" >&2; exit 1; fi\n");
-        w.push_str("          export CARGO_REGISTRY_TOKEN=\"${CARGO_REGISTRY_TOKEN:-$CRATES_IO_API_TOKEN}\"\n");
-        w.push_str("          status=\"$(curl --retry 3 -sS -o /tmp/simit-crate.json -w '%{http_code}' -A 'simit publish-workspace preflight' \"https://crates.io/api/v1/crates/${crate_name}/${version}\" || echo 000)\"\n");
-        w.push_str("          case \"$status\" in\n");
-        w.push_str("            200)\n");
-        w.push_str("              echo \"${crate_name} ${version} already exists on crates.io; verifying it is the intended release\"\n");
-        w.push_str("              published_checksum=\"$(jq -er --arg v \"$version\" '.version | select(.num == $v) | .checksum' /tmp/simit-crate.json 2>/dev/null || true)\"\n");
-        w.push_str("              local_crate=\"target/package/${crate_name}-${version}.crate\"\n");
-        w.push_str(
-            "              if [ -n \"$published_checksum\" ] && [ -f \"$local_crate\" ]; then\n",
-        );
-        w.push_str(
-            "                local_checksum=\"$(sha256sum \"$local_crate\" | awk '{print $1}')\"\n",
-        );
-        w.push_str("                if [ \"$local_checksum\" = \"$published_checksum\" ]; then echo \"checksum matches; resuming (already published)\"; exit 0; fi\n");
-        w.push_str("              fi\n");
-        w.push_str("              echo \"conflict: ${crate_name} ${version} exists but checksum does not match the local archive; refusing to treat as success\" >&2; exit 1;;\n");
-        w.push_str("            404) ;;\n");
-        w.push_str("            401|403) echo \"authorization/ownership failure checking ${crate_name} ${version} (HTTP $status)\" >&2; exit 1;;\n");
-        w.push_str("            *) echo \"Could not check crates.io for ${crate_name} ${version} before publishing (HTTP $status)\" >&2; exit 1;;\n");
-        w.push_str("          esac\n");
-        w.push_str("          ");
-        w.push_str(prefix);
-        w.push_str("cargo publish -p ");
-        w.push_str(&shell_word(name));
-        w.push('\n');
-        w.push('\n');
-        w.push_str("      - name: Wait for exact registry resolution\n");
-        w.push_str("        run: |\n");
-        w.push_str("          set -euo pipefail\n");
-        w.push_str("          crate_name=");
-        w.push_str(&shell_quote(name));
-        w.push('\n');
-        w.push_str(r#"          version="${GITHUB_REF_NAME:-${GITHUB_REF#refs/tags/}}"
-          probe="$(mktemp -d)"
-          trap 'rm -rf "$probe"' EXIT
-          mkdir "$probe/src"
-          touch "$probe/src/lib.rs"
-          printf '[package]\nname = "simit-registry-probe"\nversion = "0.0.0"\nedition = "2021"\n[workspace]\n[dependencies]\n%s = { version = "=%s", registry = "crates-io", default-features = false }\n' "$crate_name" "$version" > "$probe/Cargo.toml"
-          # The web API may be ready before the index. Fetch an exact registry
-          # dependency from a workspace-isolated manifest, without a cached lock.
-          # Cargo.lock retains binary-only packages too; metadata omits them.
-          for attempt in $(seq 1 20); do
-            rm -f "$probe/Cargo.lock"
-            if timeout --kill-after=5s 60s "#);
-        w.push_str(prefix);
-        w.push_str(r#"cargo fetch --manifest-path "$probe/Cargo.toml" > "$probe/fetch.log" 2> "$probe/error.log" && awk -v wanted_name="$crate_name" -v wanted_version="$version" '
-              function matches() { return name == wanted_name && version == wanted_version && source == "registry+https://github.com/rust-lang/crates.io-index" }
-              /^\[\[package\]\]/ { if (matches()) found = 1; name = version = source = "" }
-              /^(name|version|source) = "/ { value = $3; gsub(/"/, "", value); if ($1 == "name") name = value; else if ($1 == "version") version = value; else source = value }
-              END { exit !(found || matches()) }
-            ' "$probe/Cargo.lock"; then
-              echo "resolved and fetched ${crate_name} ${version} from crates.io (attempt $attempt)"
-              break
-            fi
-            cat "$probe/error.log" >&2
-            if [ "$attempt" = 20 ]; then echo "registry resolution timeout for ${crate_name} ${version}" >&2; exit 1; fi
-            echo "waiting for exact registry resolution of ${crate_name} ${version} (attempt $attempt/20)"
-            sleep 30
-          done
-
-"#);
+        // Single-crate and dependency-ordered publication share conflict and
+        // exact-registry readiness checks, including checksum-based resumes.
+        w.push_str(&publish_crate_steps(name, runtime, true));
         previous = job.clone();
     }
     // Auditable summary (always runs, never publishes).
@@ -1206,7 +1132,9 @@ fn github_pages_workflow(runner: &ResolvedRunner, pages: &CodebergPagesOptions) 
     workflow.push_str("on:\n  push:\n    branches:\n      - ");
     workflow.push_str(&pages.source_branch);
     workflow.push_str("\n  workflow_dispatch:\n\n");
-    push_github_concurrency(&mut workflow);
+    // All refs and event types deploy to the same repository Pages target.
+    // Serialize deployments instead of cancelling one already in progress.
+    workflow.push_str("concurrency:\n  group: github-pages\n  cancel-in-progress: false\n\n");
     workflow.push_str("permissions:\n  contents: read\n  pages: write\n  id-token: write\n\n");
     workflow.push_str("jobs:\n  publish:\n    runs-on: ");
     workflow.push_str(&runs_on(runner));
@@ -2790,11 +2718,7 @@ fn publish_workflow(
                     workflow.push_str("        run: nix develop -c cargo publish");
                     push_package_selector(&mut workflow, package, &options);
                     workflow.push_str(" --dry-run\n\n");
-                    workflow.push_str(&publish_step(
-                        package,
-                        "nix develop -c cargo publish",
-                        options.package_scoped,
-                    ));
+                    workflow.push_str(&publish_step(package, runtime, options.package_scoped));
                 }
                 OmCiMode::Augment => {
                     push_om_ci_step(&mut workflow, &options);
@@ -2815,11 +2739,7 @@ fn publish_workflow(
             workflow.push_str("        run: cargo publish");
             push_package_selector(&mut workflow, package, &options);
             workflow.push_str(" --dry-run\n\n");
-            workflow.push_str(&publish_step(
-                package,
-                "cargo publish",
-                options.package_scoped,
-            ));
+            workflow.push_str(&publish_step(package, runtime, options.package_scoped));
             push_sccache_stats_step(&mut workflow, platform, runtime);
         }
     }
@@ -4016,11 +3936,7 @@ fn push_nix_publish_legacy_steps(workflow: &mut String, package: &Package, optio
     workflow.push_str("        run: nix develop -c cargo publish");
     push_package_selector(workflow, package, options);
     workflow.push_str(" --dry-run\n\n");
-    workflow.push_str(&publish_step(
-        package,
-        "nix develop -c cargo publish",
-        options.package_scoped,
-    ));
+    workflow.push_str(&publish_step(package, Runtime::Nix, options.package_scoped));
 }
 
 fn rust_container(package: &Package) -> String {
@@ -4627,14 +4543,18 @@ fn validate_tag_step(cargo_command_prefix: &str, package_name: &str) -> String {
     validate_release_tag_step(Some(cargo_command_prefix), Some(package_name))
 }
 
-fn publish_step(package: &Package, command: &str, package_scoped: bool) -> String {
-    let package_name = shell_quote(&package.name);
+fn publish_step(package: &Package, runtime: Runtime, package_scoped: bool) -> String {
+    publish_crate_steps(&package.name, runtime, package_scoped)
+}
+
+fn publish_crate_steps(name: &str, runtime: Runtime, package_scoped: bool) -> String {
+    let package_name = shell_quote(name);
+    let prefix = command_prefix(runtime);
     let package_arg = if package_scoped {
-        format!(" -p {}", shell_word(&package.name))
+        format!(" -p {}", shell_word(name))
     } else {
         String::new()
     };
-    let command = format!("{command}{package_arg}");
     format!(
         r#"      - name: Publish
         env:
@@ -4651,24 +4571,38 @@ fn publish_step(package: &Package, command: &str, package_scoped: bool) -> Strin
             echo "Could not determine release version from tag ref" >&2
             exit 1
           fi
-          if ! command -v curl >/dev/null 2>&1; then
+          if ! command -v curl >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1; then
             if command -v apt-get >/dev/null 2>&1; then
-              apt-get update
-              apt-get install -y --no-install-recommends curl ca-certificates
+              if [ "$(id -u)" = 0 ]; then apt=(apt-get); else apt=(sudo apt-get); fi
+              "${{apt[@]}}" update
+              "${{apt[@]}}" install -y --no-install-recommends curl ca-certificates jq
             else
-              echo "curl is required to check crates.io for existing versions" >&2
+              echo "curl and jq are required to check crates.io for existing versions" >&2
               exit 1
             fi
           fi
-          if ! status="$(curl --retry 3 -sS -o /dev/null -w '%{{http_code}}' -A 'simit init ci publish check' "https://crates.io/api/v1/crates/${{crate_name}}/${{version}}")"; then
+          target_dir="$({prefix}cargo metadata --no-deps --format-version 1 | jq -er '.target_directory')"
+          local_crate="${{target_dir}}/package/${{crate_name}}-${{version}}.crate"
+          test -f "$local_crate" || {{ echo "missing verified package archive: $local_crate" >&2; exit 1; }}
+          local_checksum="$(sha256sum "$local_crate" | awk '{{print $1}}')"
+          response="$(mktemp)"
+          trap 'rm -f "$response"' EXIT
+          if ! status="$(curl --connect-timeout 10 --max-time 60 --retry 3 -sS -o "$response" -w '%{{http_code}}' -A 'simit publish preflight' "https://crates.io/api/v1/crates/${{crate_name}}/${{version}}")"; then
             status=000
           fi
           case "$status" in
             200)
-              echo "${{crate_name}} ${{version}} is already published on crates.io; skipping publish"
-              exit 0
+              echo "${{crate_name}} ${{version}} already exists on crates.io; verifying it is the intended release"
+              published_checksum="$(jq -er --arg name "$crate_name" --arg v "$version" '.version | select(.crate == $name and .num == $v and .yanked == false) | .checksum | select(type == "string" and test("^[0-9a-f]{{64}}$"))' "$response")" || {{ echo "invalid, mismatched or yanked registry version; refusing to treat as success" >&2; exit 1; }}
+              if [ "$local_checksum" = "$published_checksum" ]; then echo "checksum matches; resuming (already published)"; exit 0; fi
+              echo "conflict: ${{crate_name}} ${{version}} exists but checksum does not match the local archive; refusing to treat as success" >&2
+              exit 1
               ;;
             404)
+              ;;
+            401|403)
+              echo "authorization/ownership failure checking ${{crate_name}} ${{version}} (HTTP $status)" >&2
+              exit 1
               ;;
             *)
               echo "Could not check crates.io for ${{crate_name}} ${{version}} before publishing (HTTP $status)" >&2
@@ -4680,7 +4614,43 @@ fn publish_step(package: &Package, command: &str, package_scoped: bool) -> Strin
             exit 1
           fi
           export CARGO_REGISTRY_TOKEN="${{CARGO_REGISTRY_TOKEN:-$CRATES_IO_API_TOKEN}}"
-          {command}
+          {prefix}cargo publish{package_arg}
+
+      - name: Wait for exact registry resolution
+        run: |
+          set -euo pipefail
+          crate_name={package_name}
+          version="${{GITHUB_REF_NAME:-${{FORGE_REF_NAME:-${{CODEBERG_REF_NAME:-}}}}}}"
+          if [ -z "$version" ]; then
+            ref="${{GITHUB_REF:-${{FORGE_REF:-${{CODEBERG_REF:-}}}}}}"
+            version="${{ref#refs/tags/}}"
+          fi
+          target_dir="$({prefix}cargo metadata --no-deps --format-version 1 | jq -er '.target_directory')"
+          local_checksum="$(sha256sum "$target_dir/package/${{crate_name}}-${{version}}.crate" | awk '{{print $1}}')"
+          probe="$(mktemp -d)"
+          trap 'rm -rf "$probe"' EXIT
+          mkdir "$probe/src"
+          touch "$probe/src/lib.rs"
+          printf '[package]\nname = "simit-registry-probe"\nversion = "0.0.0"\nedition = "2021"\n[workspace]\n[dependencies]\n%s = {{ version = "=%s", registry = "crates-io", default-features = false }}\n' "$crate_name" "$version" > "$probe/Cargo.toml"
+          # A web response is not index readiness. Resolve and fetch an exact
+          # registry dependency in an isolated workspace, retaining binary-only
+          # crates and checking the lock source/version/checksum against our archive.
+          for attempt in $(seq 1 20); do
+            rm -f "$probe/Cargo.lock"
+            if timeout --kill-after=5s 60s {prefix}cargo fetch --manifest-path "$probe/Cargo.toml" > "$probe/fetch.log" 2> "$probe/error.log" && awk -v wanted_name="$crate_name" -v wanted_version="$version" -v wanted_checksum="$local_checksum" '
+              function matches() {{ return name == wanted_name && version == wanted_version && source == "registry+https://github.com/rust-lang/crates.io-index" && checksum == wanted_checksum }}
+              /^\[\[package\]\]/ {{ if (matches()) found = 1; name = version = source = checksum = "" }}
+              /^(name|version|source|checksum) = "/ {{ value = $3; gsub(/"/, "", value); if ($1 == "name") name = value; else if ($1 == "version") version = value; else if ($1 == "source") source = value; else checksum = value }}
+              END {{ exit !(found || matches()) }}
+            ' "$probe/Cargo.lock"; then
+              echo "resolved and fetched ${{crate_name}} ${{version}} from crates.io (attempt $attempt)"
+              break
+            fi
+            cat "$probe/error.log" >&2
+            if [ "$attempt" = 20 ]; then echo "registry resolution timeout for ${{crate_name}} ${{version}}" >&2; exit 1; fi
+            echo "waiting for exact registry resolution of ${{crate_name}} ${{version}} (attempt $attempt/20)"
+            sleep 30
+          done
 "#
     )
 }

@@ -336,6 +336,24 @@ Switching strategies removes only obsolete simit-owned outputs (generated
 workflows are never deleted. Other backends (Forgejo, Crow, GitLab) fail
 explicitly instead of silently degrading.
 
+Publication strategy does not require changing ordinary CI strategy. Keep
+`workspace_strategy = "members"` for existing per-member test, lint, feature,
+docs and required-gate policies, and select `publish_strategy = "coordinated"`
+for the dependency-ordered release carrier. With an already configured workspace,
+`simit init ci --coordinated-publish` retains that CI selection. Do not migrate a
+consumer to aggregate CI merely to enable ordered publication.
+
+Both single-crate and coordinated publishers compare the intended verified local
+archive with the registry response before resuming an existing version. The
+response must identify the exact crate/version, be unyanked, and contain the same
+SHA-256 checksum. Missing, malformed and conflicting records fail. Publication
+and checksum-matched recovery both require bounded independent Cargo fetches of
+the exact registry version, source and checksum before the workflow succeeds.
+
+Generated GitHub Pages deploys share the repository-wide `github-pages`
+concurrency group across manual/push events and refs, without canceling an active
+deployment. Ordinary CI keeps its separate event/ref-scoped concurrency.
+
 ## Non-Publishable Crates
 
 Cargo represents `publish = false` in metadata as an empty `publish` list.

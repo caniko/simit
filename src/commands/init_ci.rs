@@ -120,14 +120,6 @@ pub fn run(command: InitCiCommand) -> Result<()> {
                 "coordinated workspace publication cannot be combined with --package selectors; it releases the lockstep workspace"
             );
         }
-        if resolved.workspace_strategy == crate::cli::WorkspaceStrategy::Members
-            && metadata.workspace_members.len() > 1
-        {
-            // Coordinated publish pairs with aggregate CI (one workspace check).
-            // Member CI still works but would duplicate gates; require the
-            // explicit aggregate selection so generation stays deterministic.
-            bail!("coordinated workspace publication requires --workspace-strategy aggregate");
-        }
     }
     if resolved.workspace_strategy == crate::cli::WorkspaceStrategy::Aggregate
         && ((resolved.publish_crates && !coordinated)
@@ -135,10 +127,9 @@ pub fn run(command: InitCiCommand) -> Result<()> {
             || command.with_chocolatey
             || command.with_scoop)
     {
-        // Coordinated publish is workspace-level (one publish-workspace.yaml
-        // in release-plan order), so it pairs with aggregate CI instead of
-        // tripping the per-member publishing rule; the check above already
-        // requires aggregate when coordinated publish is selected.
+        // Publication strategy is independent of ordinary member/aggregate CI.
+        // A coordinated carrier supports either; separate package publishers
+        // still cannot be combined with aggregate CI.
         bail!("aggregate workspace CI cannot be combined with crate or platform publishing");
     }
     if command.with_homebrew && resolved.runtime != Runtime::Nix {

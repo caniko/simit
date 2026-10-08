@@ -49,6 +49,12 @@ the source used by later jobs. This applies to both package-scoped publishers
 and coordinated workspace publication; regenerate existing consumer workflows
 after selecting the qualified generator revision.
 
+An HTTP 200 for an existing crate version is not release acceptance. Publishers
+require an unyanked exact crate/version record and a checksum matching the local
+verified package archive, then independently resolve and fetch that exact
+registry source/version/checksum. A matching upload can be resumed by rerunning
+the original signed-tag run; a conflicting or unusable version fails closed.
+
 `keys/minisign.pub` is the public half of the offline minisign key used to
 sign `SHA256SUMS.txt`. Generate the keypair on the maintainer-controlled
 machine and store the secret key outside the repository:

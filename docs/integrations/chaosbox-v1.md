@@ -61,8 +61,9 @@ Notes:
 - Gate `id` values must match `[a-zA-Z0-9_-]+`, be unique (including after
   sanitization: `a_b` vs `a-b` collide as `gate-a-b`), and stay stable:
   they become `gate-<id>` job names and `needs` references.
-- `publish_strategy = "coordinated"` requires `publish_crates = true`,
-  `--workspace`, and `--workspace-strategy aggregate`. Other backends fail
+- `publish_strategy = "coordinated"` requires `publish_crates = true` and
+  `--workspace`. Ordinary CI can retain either the member or aggregate strategy;
+  dependency-order publication does not remove member CI policies. Other backends fail
   explicitly (Forgejo/Crow/GitLab are not silently degraded in v1).
 
 ## Generation and drift-check commands
