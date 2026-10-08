@@ -305,9 +305,10 @@ fn edited_template_headers_do_not_infer_or_persist_builtin_gates() {
             .contains("cargo deny check")
     );
     assert!(
-        fs::read_to_string(cfg_path)
+        !simit::config::ProjectConfig::load(temp.path())
             .unwrap()
-            .contains("with_deny = false")
+            .ci
+            .with_deny
     );
     assert_eq!(fs::read_to_string(output).unwrap(), original);
     let result = generate(&temp, &["--check", "--diff"]);
