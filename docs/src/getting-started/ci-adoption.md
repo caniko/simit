@@ -193,9 +193,10 @@ Artifacts retain evidence, not Nix store closures; an empty or partial result
 file after failure is not a passing receipt.
 
 Use `post_build_always` for diagnostic collection that must run after a failed
-build or setup step. These commands run with `if: always()` before artifact
-upload. They must handle an absent or partial build log and result map. A
-collector failure still fails the job, and a successful collector never clears
+build or setup step. These commands run with `if: ${{ !cancelled() }}` before
+artifact upload, honoring workflow cancellation. They must handle an absent or
+partial build log and result map. A collector failure still fails the job, and a
+successful collector never clears
 the earlier build failure. Both post-build command lists require
 `capture_results = true`. Keep qualification receipt validation in `post_build`.
 
