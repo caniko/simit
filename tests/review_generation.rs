@@ -110,7 +110,9 @@ fn controller_identity_rejects_ref_movement_before_publishing_checkout_outputs()
         "[review]\nrole='controller'\n",
     )
     .unwrap();
-    assert!(generate(root.path(), false).status.success());
+    std::fs::write(root.path().join("flake.nix"), "{}\n").unwrap();
+    let generated = generate(root.path(), false);
+    assert!(generated.status.success(), "{generated:?}");
     let yaml: serde_yaml::Value = serde_yaml::from_str(
         &std::fs::read_to_string(root.path().join(".github/workflows/review-repository.yml"))
             .unwrap(),

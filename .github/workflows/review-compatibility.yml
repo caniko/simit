@@ -1,7 +1,7 @@
 name: Review engine compatibility
 on:
   push:
-    branches: [feat/repository-review, trunk]
+    branches: [feat/repository-review, feat/provider-review-policy, trunk]
   pull_request:
 permissions:
   contents: read
