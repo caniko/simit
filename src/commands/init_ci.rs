@@ -1326,6 +1326,7 @@ pub(crate) fn workflow_snapshots_for_platform(
         let content =
             fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
         if generated_workflow_marker_present(&content)
+            && !content.starts_with(crate::render::workflow_templates::TEMPLATE_MARKER)
             && is_ci_managed_workflow_name(&entry.file_name())
         {
             snapshots.push(WorkflowSnapshot {
