@@ -288,42 +288,105 @@ fn retired_templates_with_moved_headers_are_removed_but_foreign_markers_survive(
 #[test]
 fn case_only_template_renames_preserve_the_generated_output_and_audit() {
     for platform in ["github", "forgejo"] {
-        let temp = project();
-        let cfg_path = temp.path().join("simit.toml");
-        let cfg = fs::read_to_string(&cfg_path)
-            .unwrap()
-            .replace("github", platform)
-            .replace("workflows/tests.yml", "workflows/Tests.yml");
-        fs::write(&cfg_path, &cfg).unwrap();
-        let result = generate(&temp, &[]);
-        assert!(result.status.success(), "{result:?}");
-        let new_name = format!(".{platform}/workflows/tests.yml");
-        let cfg = fs::read_to_string(&cfg_path)
-            .unwrap()
-            .replace("workflows/Tests.yml", "workflows/tests.yml")
-            .replace("ubuntu-24.04", "windows-2022");
-        fs::write(&cfg_path, cfg).unwrap();
-        for _ in 0..2 {
+        for (old, new) in [
+            ("Tests.yml", "tests.yml"),
+            ("ci-custom.yaml", "CI-custom.yaml"),
+            ("CI-custom.yaml", "ci-custom.yaml"),
+        ] {
+            let temp = project();
+            let cfg_path = temp.path().join("simit.toml");
+            let cfg = fs::read_to_string(&cfg_path)
+                .unwrap()
+                .replace("github", platform)
+                .replace("workflows/tests.yml", &format!("workflows/{old}"));
+            let cfg = if platform == "forgejo" {
+                cfg.replace("[ci.nix_build]\nonly=true\n", "")
+            } else {
+                cfg
+            };
+            fs::write(&cfg_path, &cfg).unwrap();
             let result = generate(&temp, &[]);
             assert!(result.status.success(), "{result:?}");
-            let output = fs::read_to_string(temp.path().join(&new_name)).unwrap();
-            let parsed: serde_yaml::Value = serde_yaml::from_str(&output).unwrap();
-            assert_eq!(parsed["jobs"]["test"]["runs-on"], "windows-2022");
-            assert!(generate(&temp, &["--check", "--diff"]).status.success());
-            assert_eq!(
-                audit_ci(temp.path()).unwrap().status,
-                FeatureStatus::Managed
-            );
-            let template_count = fs::read_dir(temp.path().join(format!(".{platform}/workflows")))
+            let new_name = format!(".{platform}/workflows/{new}");
+            let cfg = fs::read_to_string(&cfg_path)
                 .unwrap()
-                .map(|entry| fs::read_to_string(entry.unwrap().path()).unwrap())
-                .filter(|content| content.contains("# Simit workflow template: "))
-                .count();
-            assert_eq!(
-                template_count, 1,
-                "{platform}: no stale case-only output remains"
-            );
+                .replace(&format!("workflows/{old}"), &format!("workflows/{new}"))
+                .replace("ubuntu-24.04", "windows-2022");
+            fs::write(&cfg_path, cfg).unwrap();
+            for _ in 0..2 {
+                let result = generate(&temp, &[]);
+                assert!(result.status.success(), "{result:?}");
+                let output = fs::read_to_string(temp.path().join(&new_name)).unwrap();
+                let parsed: serde_yaml::Value = serde_yaml::from_str(&output).unwrap();
+                assert_eq!(parsed["jobs"]["test"]["runs-on"], "windows-2022");
+                assert!(generate(&temp, &["--check", "--diff"]).status.success());
+                assert_eq!(
+                    audit_ci(temp.path()).unwrap().status,
+                    FeatureStatus::Managed
+                );
+                let template_count =
+                    fs::read_dir(temp.path().join(format!(".{platform}/workflows")))
+                        .unwrap()
+                        .map(|entry| fs::read_to_string(entry.unwrap().path()).unwrap())
+                        .filter(|content| content.contains("# Simit workflow template: "))
+                        .count();
+                assert_eq!(
+                    template_count, 1,
+                    "{platform}: no stale case-only output remains"
+                );
+            }
         }
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn qualifier_source_hashes_include_option_like_tracked_filenames() {
+    use sha2::Digest;
+    use std::process::Command;
+
+    let temp = TempDir::new().unwrap();
+    let fixture = b"source fixture\n";
+    fs::write(temp.path().join("--help"), fixture).unwrap();
+    fs::write(temp.path().join("source.rs"), b"fn main() {}\n").unwrap();
+    for args in [vec!["init", "--quiet"], vec!["add", "--", "."]] {
+        assert!(
+            Command::new("git")
+                .args(args)
+                .current_dir(temp.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    for path in [
+        ".github/workflows/qualify-generator.yaml",
+        ".github/workflows/review-compatibility.yml",
+    ] {
+        let template =
+            fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(path))
+                .unwrap();
+        let command = template
+            .lines()
+            .find(|line| line.contains("git ls-files -z"))
+            .unwrap()
+            .split(" > ")
+            .next()
+            .unwrap()
+            .trim();
+        let output = Command::new("sh")
+            .args(["-c", command])
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{path}: {output:?}");
+        let manifest = String::from_utf8(output.stdout).unwrap();
+        assert_eq!(manifest.lines().count(), 2, "{path}: {manifest}");
+        let expected = format!("{}  --help", hex::encode(sha2::Sha256::digest(fixture)));
+        assert!(
+            manifest.lines().any(|line| line == expected),
+            "{path}: {manifest}"
+        );
     }
 }
 

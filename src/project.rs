@@ -89,7 +89,10 @@ pub(crate) fn obsolete_generated_workflows(
                 continue;
             }
             let relative = PathBuf::from(relative_dir).join(entry.file_name());
-            if expected.contains(&relative) || !owns_name(entry.file_name().as_os_str()) {
+            if expected.iter().any(|expected| {
+                crate::render::workflow_templates::same_output(workspace_root, expected, &relative)
+            }) || !owns_name(entry.file_name().as_os_str())
+            {
                 continue;
             }
             let content =

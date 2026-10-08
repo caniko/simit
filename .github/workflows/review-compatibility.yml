@@ -43,7 +43,7 @@ jobs:
           mkdir -p "$evidence"
           git rev-parse HEAD > "$evidence/revision"
           git rev-parse 'HEAD^{tree}' > "$evidence/tree"
-          git ls-files -z | sort -z | xargs -0 sha256sum > "$evidence/source.sha256"
+          git ls-files -z | sort -z | xargs -0 sha256sum -- > "$evidence/source.sha256"
           cp controller-lock/flake.lock "$evidence/flake.lock"
           sha256sum "$evidence/flake.lock" > "$evidence/lock.sha256"
           nix build path:./controller-lock#repo-review --out-link tools --no-update-lock-file --max-jobs 1 --cores 2 --json -L > "$evidence/result.json"
@@ -95,6 +95,8 @@ jobs:
         run: rustup toolchain install 1.85.0 --profile minimal
       - name: Compile both frontends and verify review contracts on MSRV
         run: cargo +1.85.0 test --locked --test review_cli --test review_engine --test review_generation --test review_contracts
+      - name: Verify portable workflow templates on MSRV
+        run: cargo +1.85.0 test --locked --test workflow_templates
       - name: Verify packaged runtime assets
         shell: bash
         run: |

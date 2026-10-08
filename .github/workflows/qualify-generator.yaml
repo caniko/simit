@@ -40,7 +40,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/generator-qualification"
           git rev-parse HEAD > "$RUNNER_TEMP/generator-qualification/revision"
           git rev-parse 'HEAD^{tree}' > "$RUNNER_TEMP/generator-qualification/tree"
-          git ls-files -z | sort -z | xargs -0 sha256sum > "$RUNNER_TEMP/generator-qualification/source.sha256"
+          git ls-files -z | sort -z | xargs -0 sha256sum -- > "$RUNNER_TEMP/generator-qualification/source.sha256"
       - name: Build exact production generator
         run: |
           set -euo pipefail
