@@ -867,11 +867,12 @@ pub(crate) fn tag_validation_step(artifacts: &ArtifactsConfig) -> String {
 }
 
 fn push_validate_tag(w: &mut String, artifacts: &ArtifactsConfig) {
-    w.push_str("      - name: Validate tag\n        run: |\n          set -euo pipefail\n");
+    w.push_str("      - name: Validate tag\n        env:\n          GITHUB_TOKEN: ${{ github.token }}\n        run: |\n          set -euo pipefail\n");
     writeln!(w, "          {VERSION_FROM_REF}").expect("write");
     writeln!(w, "          echo \"$VERSION\" | grep -Eq '{TAG_REGEX}'").expect("write");
+    w.push_str(super::ci::authenticated_git_fetch_steps());
     w.push_str(
-        "          git fetch --force --tags origin \"refs/tags/${VERSION}:refs/tags/${VERSION}\"\n",
+        "          git_fetch --force --tags origin \"refs/tags/${VERSION}:refs/tags/${VERSION}\"\n",
     );
     w.push_str("          tag_worktree=\"$(mktemp -d)\"\n");
     w.push_str("          rmdir \"$tag_worktree\"\n");
@@ -883,7 +884,7 @@ fn push_validate_tag(w: &mut String, artifacts: &ArtifactsConfig) {
     w.push_str(
         "          GNUPGHOME=\"$(mktemp -d)\"; export GNUPGHOME; chmod 700 \"$GNUPGHOME\"\n",
     );
-    w.push_str("          git fetch --no-tags origin HEAD\n");
+    w.push_str("          git_fetch --no-tags origin HEAD\n");
     w.push_str(
         "          git show \"FETCH_HEAD:keys/maintainers.gpg\" > \"$GNUPGHOME/maintainers.gpg\"\n",
     );
@@ -2917,10 +2918,15 @@ mod tests {
         for (name, body) in [
             (
                 "git",
-                r#"case "$1" in
-fetch) exit 0;;
+                r#"authenticated=0
+if [ "$1" = -c ]; then
+  [ "$2" = 'http.extraHeader=AUTHORIZATION: basic eC1hY2Nlc3MtdG9rZW46Zml4dHVyZS1yZWFkLXRva2Vu' ] || exit 94
+  authenticated=1; shift 2
+fi
+case "$1" in
+fetch) [ "$authenticated" = 1 ] || exit 95; case "$*" in *refs/tags/0.1.0:refs/tags/0.1.0*) touch tag-fetched;; esac;;
 show) [ "$2" = 'FETCH_HEAD:keys/maintainers.gpg' ] && [ "$TEST_KEY_AVAILABLE" = 1 ] || exit 90; printf default-branch-key;;
-verify-tag) [ "$TEST_TAG_ACCEPTED" = 1 ] || exit 91; touch verified;;
+verify-tag) [ -f tag-fetched ] && [ "$TEST_TAG_ACCEPTED" = 1 ] || exit 91; touch verified;;
 rev-parse) case "$3" in
   'refs/tags/0.1.0^{commit}') printf verified-tag-commit;;
   HEAD) printf '%s' "$TEST_CHECKOUT_SHA";;
@@ -2957,8 +2963,10 @@ esac"#,
         let mut step = String::new();
         push_validate_tag(&mut step, &config);
         let script = step
+            .split_once("        run: |\n")
+            .unwrap()
+            .1
             .lines()
-            .skip(2)
             .map(|line| line.strip_prefix("          ").unwrap_or(line))
             .collect::<Vec<_>>()
             .join("\n");
@@ -2981,12 +2989,14 @@ esac"#,
             ("1", "1", "verified-tag-commit", "different-event", false),
             ("1", "1", "verified-tag-commit", "verified-tag-commit", true),
         ] {
+            let _ = fs::remove_file(temp.path().join("tag-fetched"));
             let output = Command::new("bash")
                 .current_dir(temp.path())
                 .args(["-c", &script])
                 .env("PATH", &path)
                 .env("TMPDIR", temp.path())
                 .env("GITHUB_REF_NAME", "0.1.0")
+                .env("GITHUB_TOKEN", "fixture-read-token")
                 .env("GITHUB_SHA", event)
                 .env("TEST_CHECKOUT_SHA", checkout)
                 .env("TEST_KEY_AVAILABLE", key_available)

@@ -36,7 +36,7 @@ const CARGO_DENY_VERSION: &str = "0.18.3";
 const CARGO_DENY_POLICY_CHECKS: &str = "bans licenses sources";
 // Custom/legacy Nix shells may expose rustfmt without a treefmt wrapper.
 // Prefer the complete project formatter, and never mask its failure.
-pub(crate) const NIX_FORMAT_COMMAND: &str = r#"sh -c 'formatter=$(nix eval --impure --raw --expr "let root = toString ./.; flake = builtins.getFlake (if builtins.pathExists ./.git then \"git+file://\" + root else root); in if flake ? formatter.\${builtins.currentSystem} then flake.formatter.\${builtins.currentSystem}.drvPath else \"\"") || exit; if [ -n "$formatter" ]; then formatter_path=$(nix build --no-link --print-out-paths "$formatter^out") || exit; if [ -x "$formatter_path/bin/treefmt" ]; then exec "$formatter_path/bin/treefmt" --ci; fi; fi; if command -v treefmt >/dev/null 2>&1; then exec treefmt --ci; else exec cargo fmt --all -- --check; fi'"#;
+pub(crate) const NIX_FORMAT_COMMAND: &str = r#"sh -c 'formatter_expr="let root = toString ./.; flake = builtins.getFlake (if builtins.pathExists ./.git then \"git+file://\" + root else root); in if flake ? formatter.\${builtins.currentSystem} then flake.formatter.\${builtins.currentSystem} else null"; formatter=$(nix eval --impure --raw --expr "let f = ($formatter_expr); in if f == null then \"\" else f.drvPath") || exit; if [ -n "$formatter" ]; then formatter_program=$(nix eval --impure --raw --expr "let f = ($formatter_expr); in f.meta.mainProgram or (f.pname or (builtins.parseDrvName f.name).name)") || exit; formatter_path=$(nix build --no-link --print-out-paths "$formatter^out") || exit; formatter_exe="$formatter_path/bin/$formatter_program"; if [ ! -x "$formatter_exe" ]; then echo "Declared flake formatter executable is missing: $formatter_exe" >&2; exit 1; fi; if [ "$formatter_program" = treefmt ]; then exec "$formatter_exe" --ci; else exec "$formatter_exe" --check; fi; fi; if command -v treefmt >/dev/null 2>&1; then exec treefmt --ci; else exec cargo fmt --all -- --check; fi'"#;
 
 #[derive(Debug, Deserialize)]
 struct ActionPin {
@@ -478,12 +478,13 @@ fn publish_workspace_workflow(
         push_rust_setup_step(&mut w, platform);
     }
     w.push_str("      - name: Validate signed release tag and lockstep versions\n");
+    w.push_str("        env:\n          GITHUB_TOKEN: ${{ github.token }}\n");
     w.push_str("        run: |\n");
     w.push_str("          set -euo pipefail\n");
     w.push_str("          tag=\"${GITHUB_REF_NAME:-${GITHUB_REF#refs/tags/}}\"\n");
     w.push_str("          if ! printf '%s\\n' \"$tag\" | grep -Eq '^[0-9]+\\.[0-9]+\\.[0-9]+$'; then echo \"Tag must be an exact semver version like 0.1.1, got '$tag'\" >&2; exit 1; fi\n");
-    w.push_str(release_trust_root_steps());
-    w.push_str("          git fetch --force --tags origin \"refs/tags/${tag}:refs/tags/${tag}\"\n");
+    w.push_str(&release_trust_root_steps());
+    w.push_str("          git_fetch --force --tags origin \"refs/tags/${tag}:refs/tags/${tag}\"\n");
     w.push_str("          git verify-tag \"$tag\"\n");
     w.push_str("          validated_sha=\"$(git rev-list -n 1 \"$tag\")\"\n");
     // Every subsequent job checks out the immutable workflow event commit.
@@ -1593,12 +1594,13 @@ fn push_vscode_credential_preflight(workflow: &mut String, vscode: &ResolvedVsco
 
 fn push_vscode_version_validation(workflow: &mut String, vscode: &ResolvedVscode) {
     workflow.push_str("      - name: Validate release tag and extension version\n");
+    workflow.push_str("        env:\n          GITHUB_TOKEN: ${{ github.token }}\n");
     workflow.push_str("        run: |\n");
     workflow.push_str("          set -euo pipefail\n");
     workflow.push_str("          VERSION=\"${GITHUB_REF_NAME#v}\"\n");
     workflow.push_str("          printf '%s\\n' \"$VERSION\" | grep -Eq '^[0-9]+\\.[0-9]+\\.[0-9]+$' || { echo \"release tag must be an exact semver version\"; exit 1; }\n");
-    workflow.push_str(release_trust_root_steps());
-    workflow.push_str("          git fetch --force --tags origin \"refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}\"\n");
+    workflow.push_str(&release_trust_root_steps());
+    workflow.push_str("          git_fetch --force --tags origin \"refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}\"\n");
     workflow.push_str("          git verify-tag \"$GITHUB_REF_NAME\"\n");
     workflow.push_str("          validated_sha=\"$(git rev-parse --verify \"refs/tags/${GITHUB_REF_NAME}^{commit}\")\"\n");
     workflow.push_str("          test \"$validated_sha\" = \"$(git rev-parse --verify HEAD)\" || { echo \"Signed tag commit does not match the checkout being published\" >&2; exit 1; }\n");
@@ -4490,18 +4492,34 @@ fn push_validate_pypi_tag_step(workflow: &mut String) {
     );
 }
 
-fn release_trust_root_steps() -> &'static str {
-    r#"          GNUPGHOME="$(mktemp -d)"
+pub(crate) fn authenticated_git_fetch_steps() -> &'static str {
+    r#"          git_fetch() {
+            if [ -n "${GITHUB_TOKEN:-}" ]; then
+              auth_header="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 | tr -d '\n')"
+              git -c "http.extraHeader=$auth_header" fetch "$@"
+            else
+              git fetch "$@"
+            fi
+          }
+"#
+}
+
+fn release_trust_root_steps() -> String {
+    let fetch = authenticated_git_fetch_steps();
+    format!(
+        "{fetch}{}",
+        r#"          GNUPGHOME="$(mktemp -d)"
           export GNUPGHOME
           trap 'rm -rf "$GNUPGHOME"' EXIT
           chmod 700 "$GNUPGHOME"
           # The release checkout cannot supply its own verification key.
           # Fetch the repository's independently maintained default-branch key.
-          git fetch --no-tags origin HEAD
+          git_fetch --no-tags origin HEAD
           git show "FETCH_HEAD:keys/maintainers.gpg" > "$GNUPGHOME/maintainers.gpg"
           test -s "$GNUPGHOME/maintainers.gpg"
           gpg --batch --import "$GNUPGHOME/maintainers.gpg"
 "#
+    )
 }
 
 fn validate_release_tag_step(
@@ -4533,6 +4551,8 @@ fn validate_release_tag_step(
 
     format!(
         r#"      - name: Validate signed release tag
+        env:
+          GITHUB_TOKEN: ${{{{ github.token }}}}
         run: |
           set -euo pipefail
           tag="${{GITHUB_REF_NAME:-${{FORGE_REF_NAME:-${{CODEBERG_REF_NAME:-}}}}}}"
@@ -4555,7 +4575,7 @@ fn validate_release_tag_step(
             fi
           fi
 {trust_root}
-          git fetch --force --tags origin "refs/tags/${{tag}}:refs/tags/${{tag}}"
+          git_fetch --force --tags origin "refs/tags/${{tag}}:refs/tags/${{tag}}"
           git verify-tag "$tag"
           validated_sha="$(git rev-parse --verify "refs/tags/${{tag}}^{{commit}}")"
           checkout_sha="$(git rev-parse --verify HEAD)"

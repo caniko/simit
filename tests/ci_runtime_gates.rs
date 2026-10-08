@@ -180,7 +180,7 @@ fn nix_format_gate_supports_legacy_shells_and_propagates_formatter_failures() {
         for (name, script) in [
             (
                 "nix",
-                "#!/bin/sh\ncase \"$1\" in\n eval) printf '%s' \"$FORMAT_WRAPPER\"; exit \"$EVAL_STATUS\" ;;\n build) printf '%s' \"$FORMAT_WRAPPER\"; exit 0 ;;\n esac\nshift 2\nPATH=\"$FORMAT_BIN\" exec \"$@\"\n",
+                "#!/bin/sh\ncase \"$1\" in\n eval) case \"$*\" in *mainProgram*) printf treefmt;; *) printf '%s' \"$FORMAT_WRAPPER\";; esac; exit \"$EVAL_STATUS\" ;;\n build) printf '%s' \"$FORMAT_WRAPPER\"; exit 0 ;;\n esac\nshift 2\nPATH=\"$FORMAT_BIN\" exec \"$@\"\n",
             ),
             (
                 "cargo",
@@ -248,6 +248,69 @@ fn nix_format_gate_supports_legacy_shells_and_propagates_formatter_failures() {
             !log.exists(),
             "evaluation errors must not silently select Cargo formatting"
         );
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn nix_format_gate_executes_custom_flake_formatters_in_check_mode() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    use std::process::Command;
+
+    for split in [false, true] {
+        let directory = fixture("nix", split, false);
+        let root = directory.path();
+        let bin = root.join("bin");
+        fs::create_dir(&bin).unwrap();
+        symlink("/bin/sh", bin.join("sh")).unwrap();
+        let wrapper = root.join("formatter");
+        fs::create_dir_all(wrapper.join("bin")).unwrap();
+        let custom = wrapper.join("bin/crossbow-fmt");
+        fs::write(&custom, "#!/bin/sh\nprintf 'crossbow-fmt %s\\n' \"$*\" > \"$FORMAT_LOG\"\n[ \"$*\" = --check ] || exit 97\nexit \"$FORMAT_STATUS\"\n").unwrap();
+        fs::set_permissions(&custom, fs::Permissions::from_mode(0o755)).unwrap();
+        let nix = bin.join("nix");
+        fs::write(&nix, "#!/bin/sh\ncase \"$1\" in\n eval) case \"$*\" in *mainProgram*) printf '%s' \"$FORMAT_PROGRAM\";; *) printf '%s' \"$FORMAT_WRAPPER\";; esac;;\n build) printf '%s' \"$FORMAT_WRAPPER\";;\n develop) shift 2; PATH=\"$FORMAT_BIN\" exec \"$@\";;\n *) exit 98;;\nesac\n").unwrap();
+        fs::set_permissions(&nix, fs::Permissions::from_mode(0o755)).unwrap();
+        // No treefmt or Cargo fallback exists: a declared custom formatter
+        // must run, and a missing exported executable must fail explicitly.
+        for name in ["ci", "publish-crate"] {
+            let gate = commands(root, name)
+                .into_iter()
+                .find(|run| run.contains("formatter_program="))
+                .unwrap();
+            for (program, status, expected_status) in [
+                ("crossbow-fmt", 0, 0),
+                ("crossbow-fmt", 17, 17),
+                ("missing-formatter", 0, 1),
+            ] {
+                let log = root.join("format.log");
+                let _ = fs::remove_file(&log);
+                let output = Command::new("sh")
+                    .args(["-c", &gate])
+                    .env("PATH", &bin)
+                    .env("FORMAT_BIN", &bin)
+                    .env("FORMAT_WRAPPER", &wrapper)
+                    .env("FORMAT_PROGRAM", program)
+                    .env("FORMAT_LOG", &log)
+                    .env("FORMAT_STATUS", status.to_string())
+                    .output()
+                    .unwrap();
+                assert_eq!(
+                    output.status.code(),
+                    Some(expected_status),
+                    "{name}, split={split}: {output:?}"
+                );
+                if program == "crossbow-fmt" {
+                    assert_eq!(fs::read_to_string(log).unwrap(), "crossbow-fmt --check\n");
+                } else {
+                    assert!(!log.exists());
+                    assert!(
+                        String::from_utf8_lossy(&output.stderr)
+                            .contains("Declared flake formatter executable is missing")
+                    );
+                }
+            }
+        }
     }
 }
 

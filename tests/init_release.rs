@@ -291,7 +291,16 @@ fn github_release_depends_on_prebuild_and_forwards_attic_secret() {
         assert!(guard.contains("Signed tag commit does not match the immutable event checkout"));
         assert!(guard.find("git verify-tag").unwrap() < guard.find("nix eval").unwrap());
     }
-    let prebuild = read(&project.path().join(".github/workflows/prebuild.yaml"));
+    let config = simit::config::ProjectConfig::load(project.path()).unwrap();
+    let prebuild = simit::render::ci::github_prebuild_file(
+        &config.ci.nix_system_runners,
+        &config.ci.nix_builds,
+        config.prebuild.as_ref().unwrap(),
+        &config.release.artifacts,
+        config.release.attic.as_ref(),
+    )
+    .unwrap()
+    .content;
     let parsed: serde_yaml::Value = serde_yaml::from_str(&prebuild).unwrap();
     let steps = parsed["jobs"]["native"]["steps"].as_sequence().unwrap();
     let validation = steps

@@ -79,8 +79,13 @@ fn verify_publish_binding(member_scoped: bool) {
     for (name, body) in [
         (
             "git",
-            r#"case "$1" in
-fetch) exit 0;;
+            r#"authenticated=0
+if [ "$1" = -c ]; then
+  [ "$2" = 'http.extraHeader=AUTHORIZATION: basic eC1hY2Nlc3MtdG9rZW46Zml4dHVyZS1yZWFkLXRva2Vu' ] || exit 94
+  authenticated=1; shift 2
+fi
+case "$1" in
+fetch) [ "$authenticated" = 1 ] || exit 95;;
 show) [ "$2" = 'FETCH_HEAD:keys/maintainers.gpg' ] || exit 90; [ "$TEST_KEY_AVAILABLE" = 1 ] || exit 91; printf default-branch-key;;
 verify-tag) exit 0;;
 rev-parse) case "$3" in HEAD) printf '%s\n' "$TEST_CHECKOUT_SHA";; refs/tags/*) printf '%s\n' "$TEST_TAG_SHA";; *) exit 92;; esac;;
@@ -113,6 +118,7 @@ esac"#,
             .env("PATH", &path)
             .env("TMPDIR", temp.path())
             .env("GITHUB_REF_NAME", "0.1.0")
+            .env("GITHUB_TOKEN", "fixture-read-token")
             .env("TEST_CHECKOUT_SHA", checkout)
             .env("TEST_TAG_SHA", tag)
             .env("TEST_KEY_AVAILABLE", key_available)

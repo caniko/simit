@@ -45,12 +45,22 @@ jobs:
           git config --global --add url.https://github.com/.insteadOf git@github.com:
 
       - name: Validate tag
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           VERSION="${GITHUB_REF_NAME:-${FORGE_REF_NAME:-${FORGEJO_REF_NAME:-}}}"
           if [ -z "$VERSION" ]; then ref="${GITHUB_REF:-${FORGE_REF:-${FORGEJO_REF:-}}}"; VERSION="${ref#refs/tags/}"; fi
           echo "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-(rc|beta|alpha)\.[0-9]+)?$'
-          git fetch --force --tags origin "refs/tags/${VERSION}:refs/tags/${VERSION}"
+          git_fetch() {
+            if [ -n "${GITHUB_TOKEN:-}" ]; then
+              auth_header="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 | tr -d '\n')"
+              git -c "http.extraHeader=$auth_header" fetch "$@"
+            else
+              git fetch "$@"
+            fi
+          }
+          git_fetch --force --tags origin "refs/tags/${VERSION}:refs/tags/${VERSION}"
           tag_worktree="$(mktemp -d)"
           rmdir "$tag_worktree"
           cleanup_validation() {
@@ -59,7 +69,7 @@ jobs:
           }
           trap cleanup_validation EXIT
           GNUPGHOME="$(mktemp -d)"; export GNUPGHOME; chmod 700 "$GNUPGHOME"
-          git fetch --no-tags origin HEAD
+          git_fetch --no-tags origin HEAD
           git show "FETCH_HEAD:keys/maintainers.gpg" > "$GNUPGHOME/maintainers.gpg"
           test -s "$GNUPGHOME/maintainers.gpg"
           gpg --batch --import "$GNUPGHOME/maintainers.gpg"

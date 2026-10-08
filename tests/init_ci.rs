@@ -3110,9 +3110,10 @@ fn github_workspace_workflows_have_path_scoped_concurrency() {
                 .join(format!(".github/workflows/ci-{member}.yaml")),
         );
         let yaml: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
-        assert_eq!(yaml["name"].as_str(), Some("CI"));
+        let expected_name = format!("CI ({member})");
+        assert_eq!(yaml["name"].as_str(), Some(expected_name.as_str()));
         let group = yaml["concurrency"]["group"].as_str().unwrap();
-        // Display names collide across member workflows; the path must key cancellation.
+        // Workflow identity must still isolate source paths and event types.
         assert!(group.contains("${{ github.workflow_ref }}"), "{group}");
         assert!(group.contains("${{ github.event_name }}"), "{group}");
         assert!(
