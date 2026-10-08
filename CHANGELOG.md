@@ -26,6 +26,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Reserve release-owned paths from project templates and keep template contents
   out of built-in CI inference; qualify durable-branch updates and reject
   committed generation drift after retaining its evidence.
+- Reserve every release-registry filename, reject generated template sources,
+  include untracked outputs in production parity, and isolate fork qualification
+  concurrency by source repository as well as branch.
 - Keep the default development environment usable when a worktree lacks the
   optional sibling language-server checkout.
 - Reject unsupported language checks and release requests in Nix-only CI instead

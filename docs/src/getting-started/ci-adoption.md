@@ -66,6 +66,8 @@ Removing a mapping retires only its template-marked output; unrelated workflows
 remain project-owned. Built-in and release-owned workflow collisions, paths
 outside the repository, and mismatched Actions platforms are rejected. Template
 contents do not participate in built-in check, package, or runner inference.
+Built-in generated workflows cannot be template sources: templates must remain
+project-owned inputs, rather than snapshots of outputs from an earlier run.
 This feature supports GitHub and Forgejo Actions, including exact-only Nix
 qualification; it does not replace the
 project's test selections or permission policy.

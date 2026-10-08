@@ -12,7 +12,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.head.ref || github.ref_name }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event.pull_request.head.ref || github.ref_name }}
   cancel-in-progress: true
 
 jobs:
@@ -55,9 +55,11 @@ jobs:
           "$generator" init ci --platform github --runtime nix --runner ubuntu-latest --with-docs --publish-crates --check --diff
           git diff --check
           git diff > "$RUNNER_TEMP/generator-qualification/regenerated.diff"
+          git status --porcelain --untracked-files=all > "$RUNNER_TEMP/generator-qualification/regenerated.status"
           tar -czf "$RUNNER_TEMP/generator-qualification/regenerated.tar.gz" Cargo.toml .github/workflows .simit/workflows
           sha256sum "$RUNNER_TEMP/generator-qualification/regenerated.tar.gz" > "$RUNNER_TEMP/generator-qualification/regenerated.sha256"
           git diff --exit-code
+          test ! -s "$RUNNER_TEMP/generator-qualification/regenerated.status"
       - name: Retain per-attempt qualification evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

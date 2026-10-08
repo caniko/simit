@@ -816,10 +816,12 @@ fn detect_ci_status(workspace_root: &Path) -> FeatureStatus {
 }
 
 fn is_release_workflow(file: &WorkflowFile) -> bool {
+    is_release_workflow_path(&file.relative_path)
+}
+
+pub(crate) fn is_release_workflow_path(path: &Path) -> bool {
     matches!(
-        file.relative_path
-            .file_name()
-            .and_then(|name| name.to_str()),
+        path.file_name().and_then(|name| name.to_str()),
         Some(
             "release.yml"
                 | "release.yaml"

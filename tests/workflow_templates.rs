@@ -139,7 +139,12 @@ fn invalid_templates_fail_before_any_outputs_are_written() {
 #[test]
 fn release_owned_workflows_cannot_be_claimed_by_project_templates() {
     for platform in ["github", "forgejo"] {
-        for name in ["release.yaml", "release.yml"] {
+        for name in [
+            "release.yaml",
+            "release.yml",
+            "publish-vscode-extension.yaml",
+            "publish-jetbrains-plugin.yaml",
+        ] {
             let temp = project();
             let output = format!(".{platform}/workflows/{name}");
             config(&temp, &output, ".simit/templates/tests.yml", "ubuntu-24.04");
@@ -195,4 +200,26 @@ fn project_templates_do_not_infer_builtin_checks_packages_or_runners() {
         let audit = audit_ci(temp.path()).unwrap();
         assert_eq!(audit.status, FeatureStatus::Managed, "{output}: {audit:?}");
     }
+}
+
+#[test]
+fn builtin_workflows_cannot_be_sources_even_when_the_previous_output_exists() {
+    let temp = project();
+    assert!(generate(&temp, &[]).status.success());
+    let source = ".github/workflows/nix-builds.yaml";
+    let previous = fs::read_to_string(temp.path().join(source)).unwrap();
+    config(&temp, ".github/workflows/tests.yml", source, "ubuntu-24.04");
+    let cfg = fs::read_to_string(temp.path().join("simit.toml")).unwrap();
+    fs::write(
+        temp.path().join("simit.toml"),
+        cfg.replace("nix_builds=['.#default']", "nix_builds=['.#changed']"),
+    )
+    .unwrap();
+    let output = generate(&temp, &[]);
+    assert!(!output.status.success(), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("built-in generated output"));
+    assert_eq!(
+        fs::read_to_string(temp.path().join(source)).unwrap(),
+        previous
+    );
 }

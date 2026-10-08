@@ -59,10 +59,7 @@ pub(crate) fn validate_config(ci: &CiConfig) -> Result<()> {
                 "invalid [ci.workflow_templates] mapping {output:?} = {source:?}; use distinct repository-relative template and Actions workflow paths"
             );
         }
-        if matches!(
-            path.file_name().and_then(|name| name.to_str()),
-            Some("release.yml" | "release.yaml")
-        ) {
+        if crate::registry::is_release_workflow_path(path) {
             bail!("workflow template {output} collides with a release-owned workflow");
         }
     }
@@ -124,6 +121,11 @@ pub(crate) fn append(root: &Path, ci: &CiConfig, files: &mut Vec<GeneratedFile>)
         if builtin_paths.contains(&relative) {
             bail!("workflow template {output} collides with a built-in generated workflow");
         }
+        if builtin_paths.contains(Path::new(source)) {
+            bail!(
+                "workflow template source {source} is a built-in generated output; use a project-owned template"
+            );
+        }
         if !builtin_paths
             .iter()
             .any(|path| path.parent() == relative.parent())
@@ -136,6 +138,14 @@ pub(crate) fn append(root: &Path, ci: &CiConfig, files: &mut Vec<GeneratedFile>)
             .with_context(|| format!("resolving workflow template {source}"))?;
         if !path.starts_with(&canonical_root) {
             bail!("workflow template {source} escapes the repository");
+        }
+        if builtin_paths
+            .iter()
+            .any(|builtin| path == canonical_root.join(builtin))
+        {
+            bail!(
+                "workflow template source {source} resolves to a built-in generated output; use a project-owned template"
+            );
         }
         let source_text = fs::read_to_string(path)
             .with_context(|| format!("reading workflow template {source}"))?;
