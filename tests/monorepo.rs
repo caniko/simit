@@ -198,8 +198,10 @@ fn git_diff_includes_both_sides_of_renames_and_deleted_paths() {
         assert!(output.status.success(), "{output:?}");
     };
     git(&["init", "-q"]);
+    git(&["config", "user.name", "Simit disposable fixture"]);
+    git(&["config", "user.email", "fixture@example.invalid"]);
     git(&["add", "."]);
-    // A disposable fixture uses the operator's configured identity and isolates hooks/signing.
+    // Identity and hook isolation are confined to this disposable repository.
     git(&[
         "-c",
         "core.hooksPath=/dev/null",
@@ -467,6 +469,8 @@ fn component_release_mutates_only_its_package_and_adjacent_changelog() {
         String::from_utf8(output.stdout).unwrap()
     };
     git(&["init", "-q"]);
+    git(&["config", "user.name", "Simit disposable fixture"]);
+    git(&["config", "user.email", "fixture@example.invalid"]);
     let lock = Command::new("cargo")
         .current_dir(temp.path())
         .args(["generate-lockfile", "--offline"])
@@ -523,13 +527,7 @@ fn component_release_mutates_only_its_package_and_adjacent_changelog() {
 #[test]
 fn unsupported_ci_options_fail_before_writing_and_shared_bumps_are_rejected() {
     let temp = fixture();
-    for flag in [
-        "--with-audit",
-        "--with-nextest",
-        "--with-pages",
-        "--publish-crates",
-        "--diff",
-    ] {
+    for flag in ["--with-audit", "--with-nextest", "--with-pages", "--diff"] {
         let output = common::simit()
             .current_dir(temp.path())
             .args(["init", "ci", flag])
@@ -553,4 +551,81 @@ fn unsupported_ci_options_fail_before_writing_and_shared_bumps_are_rejected() {
         .unwrap();
     assert!(!output.status.success(), "{output:?}");
     assert!(String::from_utf8_lossy(&output.stderr).contains("require --component"));
+}
+
+#[test]
+fn independent_publication_qualifies_native_components_and_keeps_version_drift_stable() {
+    let temp = fixture();
+    let mut config = fs::read_to_string(temp.path().join("simit.toml")).unwrap();
+    config = config.replace("runtime = \"nix\"", "runtime = \"nix\"\npublish_crates = true\n[ci.nix_system_runners]\naarch64-darwin = \"macos-14\"");
+    for id in ["core", "rust", "python", "worker"] {
+        config = config.replace(
+            &format!("id = \"{id}\""),
+            &format!("id = \"{id}\"\nchecks = [{{ id = \"qualify\", run = \"true\" }}]"),
+        );
+    }
+    config = config.replace(
+        "id = \"python\"",
+        "id = \"python\"\nsystems = [\"aarch64-darwin\"]",
+    );
+    write(temp.path(), "simit.toml", &config);
+    let output = common::simit()
+        .current_dir(temp.path())
+        .args(["init", "ci"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let path = temp
+        .path()
+        .join(".github/workflows/publish-crate-worker.yaml");
+    let text = fs::read_to_string(&path).unwrap();
+    let workflow: serde_yaml::Value = serde_yaml::from_str(&text).unwrap();
+    assert_eq!(workflow["on"]["push"]["tags"][0], "worker/v[0-9]*");
+    assert_eq!(workflow["permissions"]["contents"], "read");
+    assert_eq!(workflow["jobs"]["validate"]["needs"][0], "qualified");
+    assert_eq!(
+        workflow["jobs"]["plan"]["steps"][2]["env"]["BASE_REVISION"],
+        ""
+    );
+    assert_eq!(
+        workflow["jobs"]["component-python"]["strategy"]["matrix"]["include"][0]["runner"],
+        "macos-14"
+    );
+    let publishes: Vec<_> = workflow["jobs"]
+        .as_mapping()
+        .unwrap()
+        .keys()
+        .filter_map(|k| k.as_str())
+        .filter(|k| k.starts_with("publish-") && *k != "publish-report")
+        .collect();
+    assert_eq!(publishes, ["publish-worker"]);
+    assert!(text.contains("git verify-tag"));
+    assert!(text.contains("git rev-list -n 1 \"$tag\""));
+    assert!(text.contains("${GITHUB_SHA:?missing workflow event SHA}"));
+    assert!(text.contains("version=\"${version#*/v}\""));
+    assert!(text.contains("cargo package -p worker"));
+    let manifest = fs::read_to_string(temp.path().join("crates/worker/Cargo.toml")).unwrap();
+    write(
+        temp.path(),
+        "crates/worker/Cargo.toml",
+        &manifest.replacen("version = \"0.1.0\"", "version = \"0.2.0\"", 1),
+    );
+    let output = common::simit()
+        .current_dir(temp.path())
+        .args(["init", "ci", "--check"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(fs::read_to_string(path).unwrap(), text);
+    fs::remove_file(
+        temp.path()
+            .join(".github/workflows/publish-crate-engine.yaml"),
+    )
+    .unwrap();
+    let output = common::simit()
+        .current_dir(temp.path())
+        .args(["init", "ci", "--check"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "{output:?}");
 }

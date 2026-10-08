@@ -96,6 +96,14 @@ The package's adjacent `CHANGELOG.md` is used. Workspace-inherited versions and
 repository-wide automatic changelog drafting are rejected for independent bumps.
 Component release mutation requires a clean checkout.
 
+Set `[ci].publish_crates = true` to generate one independently tagged publication
+workflow per publishable Cargo member. Each `<package>/v<version>` release first
+qualifies the entire component graph on its declared native runners, verifies the
+signed tag against `keys/maintainers.gpg`, and checks its exact checkout and package
+version. It publishes only the tagged package, retains the package/archive checksum
+and registry propagation checks, and requires local dependencies to be published
+already. Qualification jobs have no registry credentials. Publication uses the
+repository's existing `CRATES_IO_API_TOKEN` secret.
+
 Repository-scoped release verification, trust, and sync-up keep their existing
-contracts. Hosted component publication and non-Cargo version mutation require
-additional generator support before these commands can be used for those lanes.
+contracts. Non-Cargo version mutation still requires additional generator support.

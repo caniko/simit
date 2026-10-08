@@ -24,8 +24,7 @@ pub(crate) fn files(root: &Path, config: &ProjectConfig) -> Result<Vec<Generated
     {
         bail!("monorepo qualification requires GitHub Actions and runtime nix");
     }
-    if config.ci.publish_crates
-        || config.ci.with_artifacts
+    if config.ci.with_artifacts
         || config.ci.with_pypi_publish
         || config.ci.pages.is_some()
         || config.prebuild.is_some()
@@ -110,14 +109,69 @@ pub(crate) fn files(root: &Path, config: &ProjectConfig) -> Result<Vec<Generated
         "needs": needs, "if": "${{ always() }}", "runs-on": runner, "timeout-minutes": 5,
         "steps": [{"name": "Require every selected component", "env": {"RESULTS": "${{ toJSON(needs) }}", "SELECTED": "${{ needs.plan.outputs.selected }}"}, "run": "printf '%s' \"$RESULTS\" | jq -e --argjson selected \"$SELECTED\" '. as $jobs | $jobs.plan.result == \"success\" and all($selected[]; $jobs[\"component-\" + .].result == \"success\")'"}]
     }));
-    let workflow = json!({"name": "Monorepo qualification", "on": {"push": {}, "pull_request": {}, "workflow_dispatch": {}}, "permissions": {"contents": "read"}, "concurrency": {"group": "monorepo-${{ github.event.pull_request.number || github.ref }}", "cancel-in-progress": true}, "jobs": jobs});
-    Ok(vec![GeneratedFile {
+    let workflow = json!({"name": "Monorepo qualification", "on": {"push": {"branches": ["**"]}, "pull_request": {}, "workflow_dispatch": {}}, "permissions": {"contents": "read"}, "concurrency": {"group": "monorepo-${{ github.event.pull_request.head.ref || github.ref_name }}", "cancel-in-progress": true}, "jobs": jobs});
+    let mut files = vec![GeneratedFile {
         relative_path: PathBuf::from(".github/workflows/ci.yaml"),
         content: format!(
             "{GENERATED_WORKFLOW_MARKER}\n{}",
             serde_yaml::to_string(&workflow)?
         ),
-    }])
+    }];
+    if config.ci.publish_crates {
+        let metadata = crate::cargo::cargo_metadata(&root.join("Cargo.toml"))?;
+        if config.release.signing.trust_root.as_str() != "keys/maintainers.gpg" {
+            bail!(
+                "independent Cargo publication currently requires the keys/maintainers.gpg trust root"
+            );
+        }
+        let runner = crate::user_config::ResolvedRunner {
+            name: None,
+            labels: vec![runner.to_owned()],
+        };
+        for package in metadata
+            .packages
+            .iter()
+            .filter(|p| metadata.workspace_members.contains(&p.id) && p.is_publishable())
+        {
+            crate::commands::release_plan::build_release_plan(
+                &metadata,
+                std::slice::from_ref(&package.name),
+            )?;
+            let options = crate::render::ci::CiOptions {
+                publish_crates: true,
+                ..Default::default()
+            };
+            let mut file = crate::render::ci::publish_independent_file(package, &runner, &options)?;
+            let mut release: Value = serde_yaml::from_str(&file.content)?;
+            release["permissions"] = json!({"contents": "read"});
+            let mut qualification = workflow["jobs"].clone();
+            // A release always qualifies the entire graph on its native runners,
+            // including non-Cargo checks, before the credentialed publish job.
+            qualification["plan"]["steps"][2]["env"]["BASE_REVISION"] = json!("");
+            release["jobs"]
+                .as_object_mut()
+                .context("release jobs must be a mapping")?
+                .extend(
+                    qualification
+                        .as_object()
+                        .context("qualification jobs must be a mapping")?
+                        .clone(),
+                );
+            release["jobs"]["validate"]["needs"] = json!(["qualified"]);
+            file.content = format!(
+                "{GENERATED_WORKFLOW_MARKER}\n{}",
+                serde_yaml::to_string(&release)?
+            );
+            files.push(file);
+        }
+        files.push(crate::release_trust::generated_file(
+            root,
+            config,
+            &Default::default(),
+            true,
+        )?);
+    }
+    Ok(files)
 }
 
 pub(crate) fn resolve_config(root: &Path, command: &InitCiCommand) -> Result<ProjectConfig> {
@@ -147,7 +201,6 @@ pub(crate) fn resolve_config(root: &Path, command: &InitCiCommand) -> Result<Pro
         || command.omnix_ref.is_some()
         || command.with_artifacts.is_some()
         || command.with_pypi_publish.is_some()
-        || command.publish_crates.is_some()
         || command.coordinated_publish.is_some()
         || command.with_homebrew
         || command.with_chocolatey
@@ -172,6 +225,9 @@ pub(crate) fn resolve_config(root: &Path, command: &InitCiCommand) -> Result<Pro
     }
     if command.runtime == Some(RuntimeChoice::Nix) {
         config.ci.runtime = Some(Runtime::Nix);
+    }
+    if let Some(publish) = command.publish_crates {
+        config.ci.publish_crates = publish;
     }
     Ok(config)
 }

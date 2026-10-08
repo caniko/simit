@@ -431,6 +431,7 @@ pub fn publish_workspace_file(
             &inputs.options,
             &inputs.plan,
             &inputs.versions,
+            None,
         ),
     })
 }
@@ -442,6 +443,7 @@ fn publish_workspace_workflow(
     options: &CiOptions,
     plan: &[(String, Vec<String>)],
     versions: &[(String, String)],
+    independent_package: Option<&str>,
 ) -> String {
     let mut w = String::new();
     push_generated_workflow_header(&mut w);
@@ -449,9 +451,18 @@ fn publish_workspace_workflow(
     w.push_str("# coordinated workspace publish: prerequisites before dependents.\n");
     w.push_str("# Before creating and pushing a release tag, run `simit changelog release <version>` locally.\n");
     push_release_security_header(&mut w, false);
-    w.push_str("name: Publish Workspace\n\n");
+    w.push_str(&format!(
+        "name: Publish {}\n\n",
+        independent_package.unwrap_or("Workspace")
+    ));
     w.push_str("on:\n");
-    w.push_str("  push:\n    tags:\n      - \"[0-9]*\"\n");
+    if let Some(package) = independent_package {
+        w.push_str(&format!(
+            "  push:\n    tags:\n      - \"{package}/v[0-9]*\"\n"
+        ));
+    } else {
+        w.push_str("  push:\n    tags:\n      - \"[0-9]*\"\n");
+    }
     w.push_str("  workflow_dispatch:\n\n");
     // Serialize conflicting release attempts; never cancel a publish halfway.
     w.push_str("concurrency:\n");
@@ -482,7 +493,12 @@ fn publish_workspace_workflow(
     w.push_str("        run: |\n");
     w.push_str("          set -euo pipefail\n");
     w.push_str("          tag=\"${GITHUB_REF_NAME:-${GITHUB_REF#refs/tags/}}\"\n");
-    w.push_str("          if ! printf '%s\\n' \"$tag\" | grep -Eq '^[0-9]+\\.[0-9]+\\.[0-9]+$'; then echo \"Tag must be an exact semver version like 0.1.1, got '$tag'\" >&2; exit 1; fi\n");
+    if let Some(package) = independent_package {
+        w.push_str(&format!("          case \"$tag\" in {package}/v*) version=\"${{tag#{package}/v}}\" ;; *) echo 'Tag does not belong to this package' >&2; exit 1 ;; esac\n"));
+        w.push_str("          if ! printf '%s\\n' \"$version\" | grep -Eq '^[0-9]+\\.[0-9]+\\.[0-9]+([+-][0-9A-Za-z.+-]+)?$'; then echo 'Invalid package release version' >&2; exit 1; fi\n");
+    } else {
+        w.push_str("          if ! printf '%s\\n' \"$tag\" | grep -Eq '^[0-9]+\\.[0-9]+\\.[0-9]+$'; then echo \"Tag must be an exact semver version like 0.1.1, got '$tag'\" >&2; exit 1; fi\n");
+    }
     w.push_str("          test -s keys/maintainers.gpg\n");
     w.push_str(
         "          GNUPGHOME=\"$(mktemp -d)\"; export GNUPGHOME; chmod 700 \"$GNUPGHOME\"\n",
@@ -500,10 +516,20 @@ fn publish_workspace_workflow(
         w.push_str(command_prefix(runtime));
         w.push_str("cargo pkgid -p ");
         w.push_str(&shell_word(name));
-        w.push_str(" | awk -F'[#@]' 'NF > 1 {print $NF}' | tail -n 1)\" = \"$tag\" || { echo \"");
+        w.push_str(" | awk -F'[#@]' 'NF > 1 {print $NF}' | tail -n 1)\" = \"");
+        w.push_str(if independent_package.is_some() {
+            "$version"
+        } else {
+            "$tag"
+        });
+        w.push_str("\" || { echo \"");
         w.push_str(name);
         w.push(' ');
-        w.push_str(version);
+        w.push_str(if independent_package.is_some() {
+            "version"
+        } else {
+            version
+        });
         w.push_str(" does not match tag $tag\" >&2; exit 1; }\n");
     }
     // Required gates as prerequisite jobs (exact revision, failure blocks publish).
@@ -615,6 +641,9 @@ fn publish_workspace_workflow(
         w.push_str(&shell_quote(name));
         w.push('\n');
         w.push_str("          version=\"${GITHUB_REF_NAME:-${GITHUB_REF#refs/tags/}}\"\n");
+        if independent_package.is_some() {
+            w.push_str("          version=\"${version#*/v}\"\n");
+        }
         w.push_str("          if [ -z \"$version\" ]; then echo \"Could not determine release version from tag ref\" >&2; exit 1; fi\n");
         w.push_str(
             "          # Preflight: fail fast on auth/ownership/validation vs propagation delay.\n",
@@ -670,6 +699,37 @@ fn publish_workspace_workflow(
     w.push_str("          echo \"resume: re-dispatch this workflow; already-published crates with matching checksums exit 0, conflicts fail\"\n");
     trim_trailing_blank_lines(&mut w);
     w
+}
+
+/// Independently tagged publication retains the signed exact-source, packaged
+/// archive, checksum conflict, and bounded propagation gates of workspace publishing.
+/// Dependencies must already exist in the registry; only the tagged package is
+/// published. Component integration gates run before any credentialed job.
+pub fn publish_independent_file(
+    package: &Package,
+    runner: &ResolvedRunner,
+    options: &CiOptions,
+) -> Result<GeneratedFile> {
+    crate::release_identity::ReleaseTag::for_package(
+        &package.name,
+        semver::Version::parse(&package.version)?,
+    )?;
+    if !package.is_publishable() {
+        bail!("{} is not publishable", package.name);
+    }
+    Ok(GeneratedFile {
+        relative_path: PathBuf::from(".github/workflows")
+            .join(format!("publish-crate-{}.yaml", package.name)),
+        content: publish_workspace_workflow(
+            Platform::Github,
+            Runtime::Nix,
+            runner,
+            options,
+            &[(package.name.clone(), Vec::new())],
+            &[(package.name.clone(), package.version.clone())],
+            Some(&package.name),
+        ),
+    })
 }
 
 pub fn codeberg_pages_file(
