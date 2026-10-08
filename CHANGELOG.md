@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- A mixed-language monorepo component graph for changed-path qualification,
+  member discovery, shared formatter composition, and native GitHub CI.
+- Independent Cargo release planning, package-scoped version bumps, verification,
+  tag sync, and publication through signed `<package>/v<version>` tags.
+
 - Project-owned Rust CI commands through `[ci].check_command`, optional
   `nix_flake_check`, and opt-in Nix-runtime Cargo caching for Actions workflows.
 - Scoped GitHub Nix build-matrix options under `[ci.nix_build]`: exact-only
@@ -17,6 +22,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and project-exported receipts.
 
 ### Fixed
+
+- Resolve public GitHub and Codeberg SSH inputs over HTTPS before monorepo
+  qualification, including the full native graph used for package publication.
 
 - Include Nix builder-phase output in captured build artifacts so hosted
   cancellations retain build diagnostics alongside client messages and results.
