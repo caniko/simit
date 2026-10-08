@@ -195,7 +195,8 @@ pub(crate) fn append(root: &Path, ci: &CiConfig, files: &mut Vec<GeneratedFile>)
             }
         }
     }
-    let mut templates = Vec::new();
+    // Preflight every destination before inspecting sources. Source aliases of
+    // later planned outputs must retain the destination-identity rejection.
     for (output, source) in &ci.workflow_templates {
         let relative = PathBuf::from(output);
         for ancestor in relative
@@ -263,6 +264,10 @@ pub(crate) fn append(root: &Path, ci: &CiConfig, files: &mut Vec<GeneratedFile>)
         }) {
             bail!("workflow template {output} does not match the selected Actions platform");
         }
+    }
+    let mut templates = Vec::new();
+    for (output, source) in &ci.workflow_templates {
+        let relative = PathBuf::from(output);
         let path = root
             .join(source)
             .canonicalize()
