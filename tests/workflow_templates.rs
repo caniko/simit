@@ -137,6 +137,44 @@ fn invalid_templates_fail_before_any_outputs_are_written() {
 }
 
 #[test]
+fn template_retirement_preserves_the_opt_in_review_policy_and_builtin_outputs() {
+    let temp = project();
+    let policy = "\n[review_policy]\ntoolbelt_version='0.2.0'\napp_id_secret='APP_ID'\napp_private_key_secret='APP_KEY'\ncredential_environment='review-policy'\n";
+    let cfg_path = temp.path().join("simit.toml");
+    fs::write(&cfg_path, fs::read_to_string(&cfg_path).unwrap() + policy).unwrap();
+    let result = generate(&temp, &[]);
+    assert!(result.status.success(), "{result:?}");
+    let policy_path = temp.path().join(".github/workflows/review-policy.yaml");
+    let builtin_path = temp.path().join(".github/workflows/nix-builds.yaml");
+    let policy_output = fs::read_to_string(&policy_path).unwrap();
+    let builtin_output = fs::read_to_string(&builtin_path).unwrap();
+    assert!(generate(&temp, &["--check", "--diff"]).status.success());
+    assert_eq!(
+        audit_ci(temp.path()).unwrap().status,
+        FeatureStatus::Managed
+    );
+
+    let config = fs::read_to_string(&cfg_path).unwrap();
+    let without_template = config
+        .split("[ci.workflow_templates]")
+        .next()
+        .unwrap()
+        .to_owned()
+        + policy;
+    fs::write(cfg_path, without_template).unwrap();
+    let result = generate(&temp, &[]);
+    assert!(result.status.success(), "{result:?}");
+    assert!(!temp.path().join(".github/workflows/tests.yml").exists());
+    assert_eq!(fs::read_to_string(policy_path).unwrap(), policy_output);
+    assert_eq!(fs::read_to_string(builtin_path).unwrap(), builtin_output);
+    assert!(generate(&temp, &["--check", "--diff"]).status.success());
+    assert_eq!(
+        audit_ci(temp.path()).unwrap().status,
+        FeatureStatus::Managed
+    );
+}
+
+#[test]
 fn release_owned_workflows_cannot_be_claimed_by_project_templates() {
     for platform in ["github", "forgejo"] {
         for name in [

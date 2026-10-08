@@ -49,6 +49,9 @@ pub enum Cmd {
         controller: String,
         #[arg(long)]
         revision: String,
+        /// Branch or tag name resolving to the reviewed controller revision.
+        #[arg(long)]
+        dispatch_ref: String,
     },
     Status {
         #[arg(long)]
@@ -215,7 +218,8 @@ pub fn execute(command: Cmd) -> Result<(Value, i32)> {
             request: p,
             controller,
             revision,
-        } => service::dispatch(&request(&p)?, &controller, &revision)?,
+            dispatch_ref,
+        } => service::dispatch(&request(&p)?, &controller, &revision, &dispatch_ref)?,
         Cmd::Status {
             controller,
             run,

@@ -86,6 +86,7 @@ pub fn run(command: InitCiCommand) -> Result<()> {
         .unwrap_or(Platform::Forgejo);
     let backend = CiBackend::from_parts(provider, platform)?;
     crate::render::workflow_templates::validate_backend(&cfg.ci, provider, platform)?;
+    validate_review_policy_backend(&cfg, platform, provider)?;
     if platform == Platform::Gitlab {
         return run_nix_only(command);
     }
@@ -696,6 +697,7 @@ fn run_nix_only_at(command: InitCiCommand, workspace_root: &Path) -> Result<()> 
         .unwrap_or(CiProvider::Actions);
     let _backend = CiBackend::from_parts(provider, platform)?;
     crate::render::workflow_templates::validate_backend(&cfg.ci, provider, platform)?;
+    validate_review_policy_backend(&cfg, platform, provider)?;
     if provider != CiProvider::Actions {
         bail!("Nix-only CI currently supports the Actions provider only");
     }
@@ -900,6 +902,7 @@ fn run_python(command: InitCiCommand) -> Result<()> {
     }
     let backend = CiBackend::from_parts(provider, platform)?;
     crate::render::workflow_templates::validate_backend(&cfg.ci, provider, platform)?;
+    validate_review_policy_backend(&cfg, platform, provider)?;
     if backend.provider() == CiProvider::Crow {
         return run_crow_python(command, workspace_root, &cfg, platform);
     }
@@ -1949,6 +1952,9 @@ fn reconcile_ci_files(
     if let Some(review) = config.review.as_ref() {
         files.extend(crate::review::generation::files(review)?);
     }
+    if let Some(policy) = config.review_policy.as_ref() {
+        files.push(crate::render::review_policy::file(policy)?);
+    }
     crate::render::workflow_templates::append(workspace_root, &config.ci, &mut files)?;
     let mut obsolete =
         project::obsolete_generated_workflows(workspace_root, &files, is_ci_managed_workflow_name)?;
@@ -1959,6 +1965,19 @@ fn reconcile_ci_files(
     obsolete.sort();
     obsolete.dedup();
     project::reconcile_generated_files(workspace_root, &files, &obsolete, message, check, show_diff)
+}
+
+fn validate_review_policy_backend(
+    config: &ProjectConfig,
+    platform: Platform,
+    provider: CiProvider,
+) -> Result<()> {
+    if config.review_policy.is_some()
+        && (platform != Platform::Github || provider != CiProvider::Actions)
+    {
+        bail!("[review_policy] requires the effective CI backend to be GitHub Actions");
+    }
+    Ok(())
 }
 
 fn cleanup_obsolete_nix_workflows(
@@ -2013,6 +2032,7 @@ fn is_ci_managed_workflow_name(name: &std::ffi::OsStr) -> bool {
     matches!(
         name,
         "build.yaml"
+            | "review-policy.yaml"
             | "build.yml"
             | "build.jsonnet"
             | "ci.yaml"

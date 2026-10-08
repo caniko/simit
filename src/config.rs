@@ -27,6 +27,8 @@ use crate::user_config::validate_runner_label;
 #[serde(deny_unknown_fields)]
 pub struct ProjectConfig {
     #[serde(default)]
+    pub review_policy: Option<crate::render::review_policy::Config>,
+    #[serde(default)]
     pub review: Option<crate::review::generation::Config>,
     #[serde(default)]
     pub prebuild: Option<PrebuildConfig>,
@@ -1916,6 +1918,14 @@ impl ProjectConfig {
 
     fn validate_common(&self) -> Result<()> {
         crate::render::workflow_templates::validate_config(&self.ci)?;
+        if let Some(policy) = &self.review_policy {
+            policy.validate()?;
+            if self.ci.platform.is_some_and(|p| p != Platform::Github)
+                || self.ci.provider.is_some_and(|p| p != CiProvider::Actions)
+            {
+                bail!("[review_policy] requires GitHub Actions");
+            }
+        }
         if let Some(review) = &self.review {
             review.validate()?;
         }

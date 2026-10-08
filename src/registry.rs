@@ -846,6 +846,7 @@ fn is_supplementary_workflow(file: &WorkflowFile) -> bool {
     matches!(
         name,
         "credential-visibility.yml"
+            | "review-policy.yaml"
             | "review-compatibility.yml"
             | "credential-visibility.yaml"
             | "pages.yml"
@@ -948,6 +949,7 @@ fn infer_expected_ci_files(
         .iter()
         .filter(|file| {
             !crate::review::generation::is_review_path(&file.relative_path)
+                && file.relative_path != Path::new(crate::render::review_policy::PATH)
                 && !crate::render::workflow_templates::is_template_output(
                     &config.ci,
                     &file.relative_path,
@@ -956,17 +958,21 @@ fn infer_expected_ci_files(
         })
         .cloned()
         .collect();
-    let mut files =
-        if primary.is_empty() && config.review.is_some() && config.ci.workflow_templates.is_empty()
-        {
-            Vec::new()
-        } else {
-            // Template paths identify the backend, but their bodies must not infer
-            // built-in packages, checks or runners, even when every built-in is missing.
-            infer_expected_primary_ci_files(workspace_root, &primary, infer_ci_target(marked)?)?
-        };
+    let mut files = if primary.is_empty()
+        && (config.review.is_some() || config.review_policy.is_some())
+        && config.ci.workflow_templates.is_empty()
+    {
+        Vec::new()
+    } else {
+        // Template paths identify the backend, but their bodies must not infer
+        // built-in packages, checks or runners, even when every built-in is missing.
+        infer_expected_primary_ci_files(workspace_root, &primary, infer_ci_target(marked)?)?
+    };
     if let Some(review) = config.review.as_ref() {
         files.extend(crate::review::generation::files(review)?);
+    }
+    if let Some(policy) = config.review_policy.as_ref() {
+        files.push(crate::render::review_policy::file(policy)?);
     }
     crate::render::workflow_templates::append(workspace_root, &config.ci, &mut files)?;
     Ok(files)
