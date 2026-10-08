@@ -36,6 +36,16 @@ scope = "full"
 [package.metadata.simit.ci]
 platform = "github"
 provider = "actions"
+runtime = "nix"
+runner = "ubuntu-latest"
+with_docs = true
+publish_crates = true
+nix_builds = [".#default"]
+
+# The production package runs the complete native test suite. macOS must
+# qualify registry isolation before downstream flakes consume this producer.
+[package.metadata.simit.prebuild.system_runners]
+aarch64-darwin = "macos-15"
 
 [package.metadata.simit.ci.pages]
 repo = "caniko/simit"

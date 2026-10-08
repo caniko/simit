@@ -19,7 +19,12 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  prebuild:
+    uses: ./.github/workflows/prebuild.yaml
+    with:
+      release: true
   release:
+    needs: prebuild
     runs-on: ubuntu-24.04
     permissions:
       contents: write

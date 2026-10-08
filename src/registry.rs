@@ -153,9 +153,20 @@ impl Default for Registry {
 }
 
 pub fn registry_path() -> Result<Utf8PathBuf> {
-    let dirs =
-        ProjectDirs::from("", "", "simit").context("resolving per-user simit data directory")?;
-    Utf8PathBuf::from_path_buf(dirs.data_dir().join("projects.toml")).map_err(|path| {
+    // ProjectDirs applies XDG overrides on Linux only. Honor the documented
+    // override before asking for a native default, including in macOS sandboxes.
+    let path = if let Some(data_home) = env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+    {
+        data_home.join("simit/projects.toml")
+    } else {
+        ProjectDirs::from("", "", "simit")
+            .context("resolving per-user simit data directory")?
+            .data_dir()
+            .join("projects.toml")
+    };
+    Utf8PathBuf::from_path_buf(path).map_err(|path| {
         anyhow::anyhow!("simit registry path is not valid UTF-8: {}", path.display())
     })
 }

@@ -27,6 +27,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Honor an absolute `XDG_DATA_HOME` registry override on macOS and other native
+  platforms, keeping project fixtures isolated from the platform default home.
+- Bound native Nix prebuilds to one build job, two cores, and three hours while
+  streaming builder logs for package-test diagnostics.
 - Stream Nix builder logs while bootstrapping monorepo qualification and
   publication shells so native package-test failures retain their diagnostics.
 - Resolve public GitHub and Codeberg SSH inputs over HTTPS before monorepo

@@ -842,6 +842,8 @@ token_secret = "ATTIC_TOKEN"
     assert!(workflow.contains("workflow_call:\n    inputs:\n      release:"));
     assert!(workflow.contains("secrets:\n      attic_token:\n        required: true"));
     assert!(workflow.contains("runs-on: ${{ matrix.runner }}"));
+    assert!(workflow.contains("timeout-minutes: 180"));
+    assert!(workflow.contains("--print-build-logs --max-jobs 1 --cores 2"));
     assert!(workflow.contains("nix build '.#server' --out-link '.simit-prebuild/ci-0'"));
     assert!(
         workflow.contains("nix build '.#release-bundle' --out-link '.simit-prebuild/release-0'")

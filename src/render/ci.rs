@@ -947,7 +947,7 @@ pub fn github_prebuild_file(
         workflow.push_str(runner);
         workflow.push('\n');
     }
-    workflow.push_str("    runs-on: ${{ matrix.runner }}\n    steps:\n");
+    workflow.push_str("    runs-on: ${{ matrix.runner }}\n    timeout-minutes: 180\n    steps:\n");
     push_checkout_step(&mut workflow, Platform::Github);
     push_install_nix_step_with_cache(
         &mut workflow,
@@ -963,7 +963,7 @@ pub fn github_prebuild_file(
             workflow.push_str(&shell_quote(installable));
             workflow.push_str(" --out-link ");
             workflow.push_str(&shell_quote(&format!(".simit-prebuild/ci-{index}")));
-            workflow.push('\n');
+            workflow.push_str(" --print-build-logs --max-jobs 1 --cores 2\n");
         }
     }
     if prebuild.release_archives {
@@ -974,7 +974,7 @@ pub fn github_prebuild_file(
             workflow.push_str(&shell_quote(&format!(".#{}", attr)));
             workflow.push_str(" --out-link ");
             workflow.push_str(&shell_quote(&link));
-            workflow.push('\n');
+            workflow.push_str(" --print-build-logs --max-jobs 1 --cores 2\n");
             workflow.push_str("          manifests=(");
             workflow.push_str(&format!("{link}/*-release-manifest.json"));
             workflow.push_str(")\n          test \"${#manifests[@]}\" -eq 1\n          jq -e --arg version \"$VERSION\" '(.schemaVersion == 2) and (.version == $version) and (.artifacts | length > 0)' \"${manifests[0]}\" >/dev/null\n");
