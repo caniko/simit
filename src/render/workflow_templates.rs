@@ -23,6 +23,24 @@ fn portable_path(path: &Path) -> String {
         .join("/")
 }
 
+pub(crate) fn same_output(root: &Path, left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+    if portable_path(left) != portable_path(right) {
+        return false;
+    }
+    // A case-only rename aliases an existing file on insensitive filesystems,
+    // but identifies two distinct outputs on sensitive filesystems.
+    match (
+        root.join(left).canonicalize(),
+        root.join(right).canonicalize(),
+    ) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
+}
+
 fn is_actions_workflow(path: &Path) -> bool {
     let normalized = portable_path(path);
     let path = Path::new(&normalized);
@@ -276,7 +294,10 @@ pub(crate) fn obsolete(root: &Path, files: &[GeneratedFile]) -> Result<Vec<PathB
             ) {
                 continue;
             }
-            if expected.contains(&relative) {
+            if expected
+                .iter()
+                .any(|expected| same_output(root, expected, &relative))
+            {
                 continue;
             }
             let content = fs::read_to_string(entry.path())?;

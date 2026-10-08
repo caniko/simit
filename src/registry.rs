@@ -574,7 +574,19 @@ pub fn audit_ci(workspace_root: &Path) -> Result<CiAudit> {
         .collect::<BTreeMap<_, _>>();
     let mut actual = marked
         .iter()
-        .map(|file| (file.relative_path.clone(), file.content.clone()))
+        .map(|file| {
+            let path = expected
+                .keys()
+                .find(|path| {
+                    crate::render::workflow_templates::same_output(
+                        workspace_root,
+                        path,
+                        &file.relative_path,
+                    )
+                })
+                .unwrap_or(&file.relative_path);
+            (path.clone(), file.content.clone())
+        })
         .collect::<BTreeMap<_, _>>();
     for path in expected.keys().filter(|p| p.starts_with(".github/actions")) {
         if let Ok(content) = fs::read_to_string(workspace_root.join(path)) {
@@ -935,7 +947,15 @@ fn marked_workflows_drift(workspace_root: &Path, marked: &[WorkflowFile]) -> boo
         || expected.len() != marked.len()
         || marked.iter().any(|workflow| {
             expected
-                .get(&workflow.relative_path)
+                .iter()
+                .find(|(path, _)| {
+                    crate::render::workflow_templates::same_output(
+                        workspace_root,
+                        path,
+                        &workflow.relative_path,
+                    )
+                })
+                .map(|(_, content)| content)
                 .is_none_or(|content| content != &workflow.content)
         })
 }

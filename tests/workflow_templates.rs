@@ -233,10 +233,53 @@ fn retired_templates_with_moved_headers_are_removed_but_foreign_markers_survive(
     assert!(!output.exists());
     assert_eq!(fs::read_to_string(&foreign).unwrap(), foreign_content);
     assert!(generate(&temp, &["--check", "--diff"]).status.success());
+    // The preserved project workflow is reported as an unmanaged extra.
     assert_eq!(
         audit_ci(temp.path()).unwrap().status,
-        FeatureStatus::Managed
+        FeatureStatus::ManagedExtra
     );
+}
+
+#[test]
+fn case_only_template_renames_preserve_the_generated_output_and_audit() {
+    for platform in ["github", "forgejo"] {
+        let temp = project();
+        let cfg_path = temp.path().join("simit.toml");
+        let cfg = fs::read_to_string(&cfg_path)
+            .unwrap()
+            .replace("github", platform)
+            .replace("workflows/tests.yml", "workflows/Tests.yml");
+        fs::write(&cfg_path, &cfg).unwrap();
+        let result = generate(&temp, &[]);
+        assert!(result.status.success(), "{result:?}");
+        let new_name = format!(".{platform}/workflows/tests.yml");
+        let cfg = fs::read_to_string(&cfg_path)
+            .unwrap()
+            .replace("workflows/Tests.yml", "workflows/tests.yml")
+            .replace("ubuntu-24.04", "windows-2022");
+        fs::write(&cfg_path, cfg).unwrap();
+        for _ in 0..2 {
+            let result = generate(&temp, &[]);
+            assert!(result.status.success(), "{result:?}");
+            let output = fs::read_to_string(temp.path().join(&new_name)).unwrap();
+            let parsed: serde_yaml::Value = serde_yaml::from_str(&output).unwrap();
+            assert_eq!(parsed["jobs"]["test"]["runs-on"], "windows-2022");
+            assert!(generate(&temp, &["--check", "--diff"]).status.success());
+            assert_eq!(
+                audit_ci(temp.path()).unwrap().status,
+                FeatureStatus::Managed
+            );
+            let template_count = fs::read_dir(temp.path().join(format!(".{platform}/workflows")))
+                .unwrap()
+                .map(|entry| fs::read_to_string(entry.unwrap().path()).unwrap())
+                .filter(|content| content.contains("# Simit workflow template: "))
+                .count();
+            assert_eq!(
+                template_count, 1,
+                "{platform}: no stale case-only output remains"
+            );
+        }
+    }
 }
 
 #[test]
