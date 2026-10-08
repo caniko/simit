@@ -71,7 +71,7 @@ pub(crate) fn files(root: &Path, config: &ProjectConfig) -> Result<Vec<Generated
         "steps": [checkout(), install_nix(), input_transport(), {
             "id": "plan", "name": "Select affected components", "shell": "bash",
             "env": {"BASE_REVISION": "${{ github.event.pull_request.base.sha || github.event.before }}"},
-            "run": "set -euo pipefail\nif [ -n \"$BASE_REVISION\" ] && git cat-file -e \"$BASE_REVISION^{commit}\" 2>/dev/null; then\n  nix develop .#ci --command simit monorepo plan --base \"$BASE_REVISION\" --json > plan.json\nelse\n  nix develop .#ci --command simit monorepo plan --json > plan.json\nfi\nselected=$(jq -c '.selected' plan.json)\nprintf 'selected=%s\\n' \"$selected\" >> \"$GITHUB_OUTPUT\"\ncat plan.json\n"
+            "run": "set -euo pipefail\nif [ -n \"$BASE_REVISION\" ] && git cat-file -e \"$BASE_REVISION^{commit}\" 2>/dev/null; then\n  nix develop --print-build-logs .#ci --command simit monorepo plan --base \"$BASE_REVISION\" --json > plan.json\nelse\n  nix develop --print-build-logs .#ci --command simit monorepo plan --json > plan.json\nfi\nselected=$(jq -c '.selected' plan.json)\nprintf 'selected=%s\\n' \"$selected\" >> \"$GITHUB_OUTPUT\"\ncat plan.json\n"
         }]
     }));
     let mut needs = vec!["plan".to_owned()];
@@ -105,12 +105,12 @@ pub(crate) fn files(root: &Path, config: &ProjectConfig) -> Result<Vec<Generated
             job["runs-on"] = json!("${{ matrix.runner }}");
         }
         let mut steps = vec![checkout(), install_nix(), input_transport()];
-        steps.push(json!({"name": "Verify generated workflows", "run": "nix develop .#ci --command simit init ci --check"}));
+        steps.push(json!({"name": "Verify generated workflows", "run": "nix develop --print-build-logs .#ci --command simit init ci --check"}));
         for gate in &component.checks {
             // The project-owned command is one argument to sh, not an interpolated
             // expression; GitHub event data never enters a shell command.
             let quoted = format!("'{}'", gate.run.replace('\'', "'\\''"));
-            steps.push(json!({"name": gate.id, "timeout-minutes": gate.timeout_minutes, "env": gate.env, "run": format!("nix develop .#ci --command sh -ec {quoted}")}));
+            steps.push(json!({"name": gate.id, "timeout-minutes": gate.timeout_minutes, "env": gate.env, "run": format!("nix develop --print-build-logs .#ci --command sh -ec {quoted}")}));
         }
         job["steps"] = json!(steps);
         jobs.insert(id, job);

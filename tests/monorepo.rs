@@ -427,7 +427,7 @@ fn qualification_generation_is_complete_and_member_stable() {
     assert!(text.contains("--base \"$BASE_REVISION\""));
     assert!(text.contains("fetch-depth: 0"));
     assert!(text.contains("persist-credentials: false"));
-    assert!(text.contains("nix develop .#ci --command simit monorepo plan"));
+    assert!(text.contains("nix develop --print-build-logs .#ci --command simit monorepo plan"));
     assert!(!temp.path().join("python/.github").exists());
     assert_eq!(
         fs::read_to_string(temp.path().join(".github/workflows/handwritten.yaml")).unwrap(),

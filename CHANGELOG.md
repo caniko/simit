@@ -27,6 +27,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Stream Nix builder logs while bootstrapping monorepo qualification and
+  publication shells so native package-test failures retain their diagnostics.
 - Resolve public GitHub and Codeberg SSH inputs over HTTPS before monorepo
   qualification, including the full native graph used for package publication.
 
