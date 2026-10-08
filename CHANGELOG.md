@@ -60,7 +60,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   prebuilds and Windows builds/publication; keep all dependent jobs on the same
   immutable event checkout and document retrying the original tag-push run.
 - Execute a declared flake formatter's exported executable, using `--ci` for
-  treefmt and `--check` for custom formatters; fail on broken formatter exports.
+  treefmt and no arguments for custom formatters; reject repository mutations
+  and fail on broken formatter exports.
 - Authenticate release verification fetches explicitly without persisting checkout
   credentials; cover private fetches and shallow reusable prebuild tag retrieval.
 - Dispatch reviews through an explicit branch or tag resolving to the reviewed
