@@ -1,7 +1,7 @@
 name: Review engine compatibility
 on:
   push:
-    branches: [feat/repository-review, trunk]
+    branches: [feat/repository-review, feat/provider-review-policy, trunk]
   pull_request:
 permissions:
   contents: read
@@ -9,6 +9,12 @@ jobs:
   pinned-tools:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    env:
+      NIX_CONFIG: |
+        experimental-features = nix-command flakes
+        max-jobs = 1
+        cores = 2
+      CARGO_BUILD_JOBS: "2"
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -33,14 +39,47 @@ jobs:
           EOF
           curl --fail --location https://raw.githubusercontent.com/caniko/nixpkgs-review-gha/f7bad6b95787f752cedbf50e09c5bf4ae0f39a07/flake.lock > controller-lock/flake.lock
           nix flake lock path:./controller-lock
-          nix build path:./controller-lock#repo-review --out-link tools --no-update-lock-file -L
+          evidence="$RUNNER_TEMP/review-generator"
+          mkdir -p "$evidence"
+          git rev-parse HEAD > "$evidence/revision"
+          git rev-parse 'HEAD^{tree}' > "$evidence/tree"
+          git ls-files -z | sort -z | xargs -0 sha256sum > "$evidence/source.sha256"
+          cp controller-lock/flake.lock "$evidence/flake.lock"
+          sha256sum "$evidence/flake.lock" > "$evidence/lock.sha256"
+          nix build path:./controller-lock#repo-review --out-link tools --no-update-lock-file --max-jobs 1 --cores 2 --json -L > "$evidence/result.json"
           tools/bin/repo-review verify-engine --root controller-lock
+          tools/bin/repo-review engine-info > "$evidence/engine.json"
           nix build path:./controller-lock#checks.x86_64-linux.selector --no-link --no-update-lock-file -L
+      - name: Regenerate controller templates with the exact packaged producer
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/review-generator"
+          cp -L tools/bin/simit "$evidence/simit"
+          cp -L tools/bin/.simit-wrapped "$evidence/simit-unwrapped"
+          sha256sum "$evidence/simit" "$evidence/simit-unwrapped" > "$evidence/binary.sha256"
+          mkdir -p "$evidence/generated"
+          printf '%s\n' '[review]' 'role = "controller"' > "$evidence/generated/simit.toml"
+          printf '%s\n' '{ outputs = _: {}; }' > "$evidence/generated/flake.nix"
+          (
+            cd "$evidence/generated"
+            "$GITHUB_WORKSPACE/tools/bin/simit" init ci --review-only
+            "$GITHUB_WORKSPACE/tools/bin/simit" init ci --review-only --check --diff
+          )
+          tar -czf "$evidence/generated.tar.gz" -C "$evidence/generated" .
+          sha256sum "$evidence/generated.tar.gz" > "$evidence/generated.sha256"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: ${{ always() }}
         with:
           name: controller-lock
           path: controller-lock/flake.lock
+          if-no-files-found: error
+      - name: Retain exact producer, lock, and generated-template evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: review-generator-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/review-generator/**
+          retention-days: 31
           if-no-files-found: error
   compatibility:
     strategy:

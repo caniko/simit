@@ -844,6 +844,7 @@ fn is_supplementary_workflow(file: &WorkflowFile) -> bool {
     matches!(
         name,
         "credential-visibility.yml"
+            | "review-policy.yaml"
             | "review-compatibility.yml"
             | "qualify-release-generator.yaml"
             | "credential-visibility.yaml"
@@ -945,16 +946,23 @@ fn infer_expected_ci_files(
     let config = ProjectConfig::load(workspace_root)?;
     let primary: Vec<_> = marked
         .iter()
-        .filter(|file| !crate::review::generation::is_review_path(&file.relative_path))
+        .filter(|file| {
+            !crate::review::generation::is_review_path(&file.relative_path)
+                && file.relative_path != Path::new(crate::render::review_policy::PATH)
+        })
         .cloned()
         .collect();
-    let mut files = if primary.is_empty() && config.review.is_some() {
-        Vec::new()
-    } else {
-        infer_expected_primary_ci_files(workspace_root, &primary)?
-    };
+    let mut files =
+        if primary.is_empty() && (config.review.is_some() || config.review_policy.is_some()) {
+            Vec::new()
+        } else {
+            infer_expected_primary_ci_files(workspace_root, &primary)?
+        };
     if let Some(review) = config.review.as_ref() {
         files.extend(crate::review::generation::files(review)?);
+    }
+    if let Some(policy) = config.review_policy.as_ref() {
+        files.push(crate::render::review_policy::file(policy)?);
     }
     Ok(files)
 }

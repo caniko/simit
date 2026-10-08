@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- Require default-branch-restricted environment-only policy App credentials,
+  reject unprovisionable GitHub secret names, and allow explicitly credentialed
+  external reusable-controller runs to publish their exact-head report.
+
 ### Added
 
 - Project-owned Rust CI commands through `[ci].check_command`, optional
@@ -57,6 +63,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   treefmt and `--check` for custom formatters; fail on broken formatter exports.
 - Authenticate release verification fetches explicitly without persisting checkout
   credentials; cover private fetches and shallow reusable prebuild tag retrieval.
+- Dispatch reviews through an explicit branch or tag resolving to the reviewed
+  controller SHA, reject ref movement before checkout, and declare the optional
+  reusable-workflow report credential.
 - Honor cancellation when collecting Nix diagnostics while retaining collectors
   after build or setup failures.
 
