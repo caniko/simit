@@ -470,10 +470,42 @@ pub fn manifest(root: &Path, repo: &str, rev: &str) -> Result<Value> {
         "ready":false,"activation_gates":["Implementation PR must be reviewed and merged, not auto-merged","Workflow must be registered on default branch","Run bounded generic live acceptance and inspect evidence","Approve exact cache URL/public keys in policy.json before enabling publication","Approve each external recipe pin in policy.json","Run separate digest-bound promotion and fresh-cache retrieval acceptance"]}),
     )
 }
-pub fn dispatch(request: &Request, controller: &str, revision: &str) -> Result<Value> {
+pub fn dispatch(
+    request: &Request,
+    controller: &str,
+    revision: &str,
+    dispatch_ref: &str,
+) -> Result<Value> {
     request.validate()?;
     repository(controller)?;
     sha(revision)?;
+    reference(dispatch_ref)?;
+    ensure!(
+        !(dispatch_ref.len() == 40 && dispatch_ref.bytes().all(|b| b.is_ascii_hexdigit())),
+        "dispatch ref must be a branch or tag name, not a commit SHA"
+    );
+    let identity = github::identity(controller, dispatch_ref)?;
+    ensure!(
+        identity.commit == revision,
+        "dispatch ref does not resolve to the reviewed controller revision"
+    );
+    let mut matches = 0;
+    for namespace in ["heads", "tags"] {
+        let refs = github::api(&format!(
+            "repos/{}/git/matching-refs/{namespace}/{dispatch_ref}",
+            identity.repository
+        ))?;
+        matches += refs
+            .as_array()
+            .ok_or_else(|| anyhow::anyhow!("missing GitHub refs"))?
+            .iter()
+            .filter(|r| r["ref"] == format!("refs/{namespace}/{dispatch_ref}"))
+            .count();
+    }
+    ensure!(
+        matches == 1,
+        "dispatch ref must name one unambiguous branch or tag"
+    );
     run(
         "gh",
         &args(&[
@@ -481,17 +513,19 @@ pub fn dispatch(request: &Request, controller: &str, revision: &str) -> Result<V
             "run",
             "review-repository.yml",
             "--repo",
-            controller,
+            &identity.repository,
             "--ref",
-            revision,
+            dispatch_ref,
             "-f",
             &format!("request={}", serde_json::to_string(request)?),
+            "-f",
+            &format!("controller_revision={revision}"),
         ]),
         None,
         None,
     )?;
     Ok(
-        json!({"dispatched":true,"request_id":canonical_digest(request)?,"controller":controller,"revision":revision,"status_argv":["gh","run","list","--repo",controller,"--workflow","review-repository.yml","--commit",revision,"--json","databaseId,headSha,status,conclusion"]}),
+        json!({"dispatched":true,"request_id":canonical_digest(request)?,"controller":identity.repository,"revision":revision,"dispatch_ref":dispatch_ref,"status_argv":["gh","run","list","--repo",identity.repository,"--workflow","review-repository.yml","--commit",revision,"--json","databaseId,headSha,status,conclusion"]}),
     )
 }
 pub fn status(repo: &str, run_id: u64, wait: u64) -> Result<Value> {

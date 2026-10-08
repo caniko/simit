@@ -67,6 +67,10 @@ if [ "$1" = api ]; then
   case "$4" in
     repos/caniko/controller) printf '{"id":1,"full_name":"caniko/controller"}';;
     repos/caniko/controller/commits/reviewed-release) printf '{"sha":"%s","commit":{"tree":{"sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}}' "$TEST_RESOLVED_SHA";;
+    repos/caniko/controller/git/matching-refs/heads/reviewed-release)
+      if [ "$TEST_REF_KIND" = branch ] || [ "$TEST_REF_KIND" = ambiguous ]; then printf '[{"ref":"refs/heads/reviewed-release"}]'; else printf '[]'; fi;;
+    repos/caniko/controller/git/matching-refs/tags/reviewed-release)
+      if [ "$TEST_REF_KIND" = tag ] || [ "$TEST_REF_KIND" = ambiguous ]; then printf '[{"ref":"refs/tags/reviewed-release"}]'; else printf '[]'; fi;;
     *) exit 90;;
   esac
 elif [ "$1" = workflow ] && [ "$2" = run ]; then
@@ -84,12 +88,15 @@ fi
     .unwrap();
     let expected = "a".repeat(40);
     let argv = root.path().join("dispatch.argv");
-    for (selector, resolved, accepted) in [
-        ("reviewed-release", "c".repeat(40), false),
-        (expected.as_str(), expected.clone(), false),
-        ("--unsafe", expected.clone(), false),
-        ("release?ref=main", expected.clone(), false),
-        ("reviewed-release", expected.clone(), true),
+    for (selector, resolved, kind, accepted) in [
+        ("reviewed-release", "c".repeat(40), "branch", false),
+        (expected.as_str(), expected.clone(), "none", false),
+        ("--unsafe", expected.clone(), "none", false),
+        ("release?ref=main", expected.clone(), "none", false),
+        ("reviewed-release", expected.clone(), "none", false),
+        ("reviewed-release", expected.clone(), "ambiguous", false),
+        ("reviewed-release", expected.clone(), "branch", true),
+        ("reviewed-release", expected.clone(), "tag", true),
     ] {
         let output = Command::new(env!("CARGO_BIN_EXE_simit"))
             .args(["review", "dispatch"])
@@ -98,6 +105,7 @@ fi
             .arg(format!("--dispatch-ref={selector}"))
             .env("PATH", &path)
             .env("TEST_RESOLVED_SHA", resolved)
+            .env("TEST_REF_KIND", kind)
             .env("TEST_DISPATCH_ARGV", &argv)
             .output()
             .unwrap();
@@ -118,6 +126,7 @@ fi
             let receipt: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
             assert_eq!(receipt["revision"], expected);
             assert_eq!(receipt["dispatch_ref"], selector);
+            fs::remove_file(&argv).unwrap();
         }
     }
 }

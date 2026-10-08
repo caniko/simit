@@ -101,3 +101,64 @@ fn client_generation_requires_exact_controller_pin_without_cargo_or_flake() {
     .unwrap();
     assert!(!generate(root, false).status.success());
 }
+
+#[test]
+fn controller_identity_rejects_ref_movement_before_publishing_checkout_outputs() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(
+        root.path().join("simit.toml"),
+        "[review]\nrole='controller'\n",
+    )
+    .unwrap();
+    assert!(generate(root.path(), false).status.success());
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        &std::fs::read_to_string(root.path().join(".github/workflows/review-repository.yml"))
+            .unwrap(),
+    )
+    .unwrap();
+    let step = &yaml["jobs"]["controller"]["steps"][0];
+    assert_eq!(
+        step["env"]["EXPECTED_CONTROLLER_REVISION"].as_str(),
+        Some("${{ inputs.controller_revision }}")
+    );
+    let script = step["run"]
+        .as_str()
+        .unwrap()
+        .strip_prefix("node <<'NODE'\n")
+        .unwrap()
+        .strip_suffix("NODE\n")
+        .unwrap();
+    let actual = "a".repeat(40);
+    for (expected, accepted) in [
+        (actual.clone(), true),
+        ("b".repeat(40), false),
+        ("unsafe\nrevision".into(), false),
+        (String::new(), true),
+    ] {
+        let output_path = root.path().join("identity.out");
+        let claims = serde_json::json!({
+            "iss":"https://token.actions.githubusercontent.com",
+            "aud":"repo-review-controller",
+            "workflow_ref":"caniko/controller/.github/workflows/review-repository.yml@refs/heads/reviewed-release",
+            "workflow_sha":actual
+        });
+        let harness = format!(
+            "global.fetch = async () => ({{ok:true,json:async () => ({{value:'header.'+Buffer.from(JSON.stringify({claims})).toString('base64url')+'.signature'}})}});\n{script}"
+        );
+        let output = Command::new("node")
+            .args(["-e", &harness])
+            .env("EXPECTED_CONTROLLER_REVISION", expected)
+            .env("GITHUB_OUTPUT", &output_path)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.success(), accepted, "{output:?}");
+        assert_eq!(output_path.exists(), accepted);
+        if accepted {
+            assert_eq!(
+                std::fs::read_to_string(&output_path).unwrap(),
+                format!("repository=caniko/controller\nrevision={actual}\n")
+            );
+            std::fs::remove_file(output_path).unwrap();
+        }
+    }
+}

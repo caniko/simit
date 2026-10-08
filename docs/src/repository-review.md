@@ -61,6 +61,28 @@ above is explanatory and must be replaced. The generated reusable-workflow call
 pins a full SHA and forwards no secrets. Controller identity is resolved through
 GitHub OIDC, independently of the calling repository.
 
+## Dispatch an exact reviewed controller
+
+GitHub workflow dispatch accepts a branch or tag name rather than a raw commit.
+Supply both the reviewed full SHA and a named ref that resolves to it:
+
+```sh
+simit review dispatch request.json --controller your-owner/your-controller \
+  --revision 0123456789abcdef0123456789abcdef0123456789 \
+  --dispatch-ref reviewed-release
+```
+
+The CLI rejects missing, ambiguous, unsafe, and mismatched refs before submission.
+It sends the reviewed SHA as `controller_revision`; the workflow compares that
+precondition with its GitHub OIDC identity before any checkout. A ref moving after
+the preflight therefore fails instead of selecting a different controller. Keep
+the workflow registered on the controller's default branch and publish the named
+branch or tag through the controller's existing review process.
+
+Reusable callers may explicitly forward the optional report-only `GH_TOKEN`
+secret. Omission retains manual reporting; generated clients forward no secrets.
+The report credential is used only by the reporting job.
+
 ## Interfaces and trust boundaries
 
 `simit review` exposes `schema`, `example`, `validate`, `plan`, `dispatch`,
