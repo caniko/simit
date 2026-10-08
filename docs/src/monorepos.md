@@ -33,9 +33,10 @@ depends_on = ["core"]
 checks = [{ id = "test", run = "python3 -m unittest discover -s python/tests" }]
 ```
 
-`simit.toml` and Cargo `[workspace.metadata.simit]` or
-`[package.metadata.simit]` configuration are supported. Use one configuration
-source. Commands stop root discovery at Git checkout boundaries.
+Configuration can come from `simit.toml`, Cargo `[workspace.metadata.simit]` or
+`[package.metadata.simit]`, or flake `outputs.simitConfig`. Use one configuration
+source. Member invocations discover the root for each source, stopping at Git
+checkout boundaries.
 
 ## Qualification planning
 
@@ -105,5 +106,10 @@ and registry propagation checks, and requires local dependencies to be published
 already. Qualification jobs have no registry credentials. Publication uses the
 repository's existing `CRATES_IO_API_TOKEN` secret.
 
-Repository-scoped release verification, trust, and sync-up keep their existing
-contracts. Non-Cargo version mutation still requires additional generator support.
+`simit release verify --component <id> --package <name>` checks the package's
+adjacent changelog and namespaced tag. `simit release sync-up` accepts the same
+selection and preserves its existing clean-checkout and lease-protected tag push
+contracts. Shared tag verification and sync-up require explicit component
+selection in monorepositories. Trust and secrets stay repository-scoped.
+Component Git-derived release notes and non-Cargo version mutation still require
+additional generator support.

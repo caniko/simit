@@ -5,7 +5,7 @@ use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use semver::Version;
 use serde::{Deserialize, Serialize};
 
@@ -122,12 +122,25 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
 
     let metadata = cargo::metadata_for_current_dir()?;
     let workspace_root = metadata.workspace_root.as_std_path();
-    let packages = cargo::select_packages(&metadata, &command.packages, command.workspace)?;
+    let config = ProjectConfig::load(workspace_root)?;
+    if config.monorepo.is_some() && command.component.is_none() {
+        bail!("monorepo release verification requires --component and one independent package");
+    }
+    let packages = if let Some(id) = &command.component {
+        vec![crate::monorepo::release_package(
+            workspace_root,
+            &config,
+            &metadata,
+            id,
+            &command.packages,
+        )?]
+    } else {
+        cargo::select_packages(&metadata, &command.packages, command.workspace)?
+    };
     let version = match command.verify_version.clone() {
         Some(version) => version,
         None => common_current_version(&packages)?,
     };
-    let config = ProjectConfig::load(workspace_root)?;
     let platform = config.ci.platform.unwrap_or_else(|| {
         if config.release.github.is_some() {
             crate::cli::Platform::Github
@@ -135,14 +148,35 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
             crate::cli::Platform::Forgejo
         }
     });
-    let hosted = config.release.codeberg.is_some() || config.release.github.is_some();
-    let tag = config.release.tag_prefix.tag(version.clone());
+    let hosted = command.component.is_none()
+        && (config.release.codeberg.is_some() || config.release.github.is_some());
+    if command.component.is_some()
+        && config.release.notes_source(platform) == crate::config::ReleaseNotesSource::Git
+    {
+        bail!(
+            "component release verification requires adjacent changelog entries or disabled notes; repository Git notes do not have package scope"
+        );
+    }
+    let tag = if command.component.is_some() {
+        crate::release_identity::ReleaseTag::for_package(&packages[0].name, version.clone())?
+    } else {
+        config.release.tag_prefix.tag(version.clone())
+    };
+    let notes_root = if command.component.is_some() {
+        packages[0]
+            .manifest_path
+            .parent()
+            .context("package manifest has no parent")?
+            .as_std_path()
+    } else {
+        workspace_root
+    };
     let mut results = vec![
         check_worktree_clean(workspace_root),
         check_ci_managed(workspace_root),
         check_flake_managed(workspace_root),
         check_release_trust(workspace_root, &config, &command),
-        check_notes(workspace_root, &config, platform, &version),
+        check_notes(notes_root, &config, platform, &version),
     ];
     if hosted {
         results.push(check_hosted_workflow(workspace_root));

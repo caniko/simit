@@ -293,6 +293,73 @@ fn metadata_configuration_resolves_from_members() {
     assert!(output.status.success(), "{output:?}");
 }
 
+#[cfg(unix)]
+#[test]
+fn flake_configuration_resolves_from_non_cargo_members_and_stops_at_git_boundaries() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = fixture();
+    let json = serde_json::json!({
+        "ci": {"platform": "github", "provider": "actions", "runtime": "nix"},
+        "monorepo": {"schema_version": 1, "components": [
+            {"id": "rust", "cargo_packages": ["engine", "worker"], "checks": [{"id": "test", "run": "true"}]},
+            {"id": "python", "paths": ["python"], "checks": [{"id": "test", "run": "true"}]}
+        ]}
+    });
+    fs::remove_file(temp.path().join("simit.toml")).unwrap();
+    write(
+        temp.path(),
+        "flake.nix",
+        "{ outputs = { self }: { simitConfig = {}; }; }\n",
+    );
+    write(
+        temp.path(),
+        "bin/nix",
+        &format!("#!/bin/sh\nprintf '%s\\n' '{}'\n", json),
+    );
+    fs::set_permissions(
+        temp.path().join("bin/nix"),
+        fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    let mut paths = vec![temp.path().join("bin")];
+    paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
+    let path = std::env::join_paths(paths).unwrap();
+    let output = common::simit()
+        .current_dir(temp.path().join("python"))
+        .env("PATH", &path)
+        .args([
+            "monorepo",
+            "plan",
+            "--changed-path",
+            "python/test.py",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let plan: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(plan["selected"], serde_json::json!(["python"]));
+    let output = common::simit()
+        .current_dir(temp.path().join("python"))
+        .env("PATH", &path)
+        .args(["init", "ci"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert!(temp.path().join(".github/workflows/ci.yaml").is_file());
+    assert!(!temp.path().join("python/.github").exists());
+    fs::create_dir(temp.path().join("python/.git")).unwrap();
+    let output = common::simit()
+        .current_dir(temp.path().join("python"))
+        .env("PATH", &path)
+        .args(["monorepo", "plan", "--json"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("no [monorepo]"));
+}
+
 #[test]
 fn qualification_generation_is_complete_and_member_stable() {
     let temp = fixture();
@@ -447,6 +514,149 @@ fn component_release_dry_run_uses_package_tag_without_changing_other_versions() 
             .unwrap()
             .contains("version = \"0.1.0\"")
     );
+}
+
+#[test]
+fn independent_sync_up_uses_owned_package_tag_with_divergent_versions() {
+    let temp = fixture();
+    let root = temp.path();
+    let worker = fs::read_to_string(root.join("crates/worker/Cargo.toml")).unwrap();
+    write(
+        root,
+        "crates/worker/Cargo.toml",
+        &worker.replacen("version = \"0.1.0\"", "version = \"0.2.0\"", 1),
+    );
+    let git = |args: &[&str]| {
+        let output = Command::new("git")
+            .current_dir(root)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.name", "Simit disposable fixture"]);
+    git(&["config", "user.email", "fixture@example.invalid"]);
+    git(&["add", "."]);
+    git(&[
+        "-c",
+        "commit.gpgsign=false",
+        "-c",
+        "core.hooksPath=/dev/null",
+        "commit",
+        "-qm",
+        "fixture",
+    ]);
+    git(&["-c", "tag.gpgsign=false", "tag", "worker/v0.2.0"]);
+    let output = common::simit()
+        .current_dir(root)
+        .args([
+            "release",
+            "sync-up",
+            "--component",
+            "worker",
+            "--dry-run",
+            "--no-sign",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(text.contains("worker/v0.2.0 already points to HEAD"));
+    assert!(!text.contains("engine/v"));
+    let output = common::simit()
+        .current_dir(root)
+        .args([
+            "release",
+            "sync-up",
+            "--component",
+            "rust",
+            "--package",
+            "worker",
+            "--dry-run",
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let output = common::simit()
+        .current_dir(root)
+        .args(["release", "sync-up", "--dry-run"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("requires --component"));
+}
+
+#[test]
+fn independent_verification_uses_adjacent_notes_and_owned_tag() {
+    let temp = fixture();
+    let root = temp.path();
+    let engine = fs::read_to_string(root.join("crates/engine/Cargo.toml")).unwrap();
+    write(
+        root,
+        "crates/engine/Cargo.toml",
+        &engine.replace("edition = \"2024\"", "edition = \"2024\"\npublish = false"),
+    );
+    write(
+        root,
+        "CHANGELOG.md",
+        "# Changelog\n\n## [0.9.0]\n\nWrong root notes.\n",
+    );
+    write(
+        root,
+        "crates/engine/CHANGELOG.md",
+        "# Changelog\n\n## [0.1.0]\n\nPackage release.\n",
+    );
+    let git = |args: &[&str]| {
+        let output = Command::new("git")
+            .current_dir(root)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.name", "Simit disposable fixture"]);
+    git(&["config", "user.email", "fixture@example.invalid"]);
+    git(&["add", "."]);
+    git(&[
+        "-c",
+        "commit.gpgsign=false",
+        "-c",
+        "core.hooksPath=/dev/null",
+        "commit",
+        "-qm",
+        "fixture",
+    ]);
+    git(&["-c", "tag.gpgsign=false", "tag", "0.1.0"]);
+    for tagged in [false, true] {
+        if tagged {
+            git(&["-c", "tag.gpgsign=false", "tag", "engine/v0.1.0"]);
+        }
+        let output = common::simit()
+            .current_dir(root)
+            .args(["release", "verify", "--component", "rust", "--json"])
+            .output()
+            .unwrap();
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        let results = report["results"].as_array().unwrap();
+        let notes = results
+            .iter()
+            .find(|r| r["check"] == "CHANGELOG entry exists")
+            .unwrap();
+        assert_eq!(notes["status"], "pass");
+        let tag = results
+            .iter()
+            .find(|r| r["check"] == "tag presence")
+            .unwrap();
+        assert_eq!(tag["status"], if tagged { "pass" } else { "fail" });
+        assert!(tag["message"].as_str().unwrap().contains("engine/v0.1.0"));
+        assert!(
+            !results
+                .iter()
+                .any(|r| r["check"].as_str().unwrap().starts_with("crates.io"))
+        );
+    }
 }
 
 #[test]

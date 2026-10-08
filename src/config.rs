@@ -3937,7 +3937,7 @@ fn load_flake_config(workspace_root: &Path) -> Result<Option<ProjectConfigSource
     }))
 }
 
-fn flake_declares_simit_config(path: &Path) -> Result<bool> {
+pub(crate) fn flake_declares_simit_config(path: &Path) -> Result<bool> {
     let text =
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     Ok(text

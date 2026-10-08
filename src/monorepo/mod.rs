@@ -337,6 +337,13 @@ pub fn find_root(start: &Path) -> Result<Option<PathBuf>> {
                 return Ok(Some(directory.to_path_buf()));
             }
         }
+        let flake = directory.join("flake.nix");
+        if flake.is_file()
+            && crate::config::flake_declares_simit_config(&flake)?
+            && ProjectConfig::load(directory)?.monorepo.is_some()
+        {
+            return Ok(Some(directory.to_path_buf()));
+        }
         if directory.join(".git").exists() {
             break;
         }
@@ -348,6 +355,48 @@ pub fn load(start: &Path) -> Result<(PathBuf, ProjectConfig)> {
     let root = find_root(start)?.context("no [monorepo] configuration found in this repository")?;
     let config = ProjectConfig::load(&root)?;
     Ok((root, config))
+}
+
+pub(crate) fn release_package(
+    root: &Path,
+    project: &ProjectConfig,
+    metadata: &crate::cargo::Metadata,
+    id: &str,
+    requested: &[String],
+) -> Result<crate::cargo::Package> {
+    let graph = project
+        .monorepo
+        .as_ref()
+        .context("missing monorepo config")?
+        .resolve(root)?;
+    let component = graph
+        .components
+        .get(id)
+        .with_context(|| format!("unknown monorepo component {id}"))?;
+    let requested = if requested.is_empty() {
+        &component.cargo_packages
+    } else {
+        requested
+    };
+    if requested.len() != 1
+        || requested
+            .iter()
+            .any(|name| !component.cargo_packages.contains(name))
+    {
+        bail!(
+            "independent component releases require exactly one owned Cargo package; pass --package <name>"
+        );
+    }
+    let mut packages = crate::cargo::select_packages(metadata, requested, false)?;
+    let package = packages.remove(0);
+    let manifest = std::fs::read_to_string(package.manifest_path.as_std_path())?
+        .parse::<toml_edit::DocumentMut>()?;
+    if manifest["package"]["version"].as_str().is_none() {
+        bail!(
+            "independent release package.version must be literal; shared workspace versions would change other components"
+        );
+    }
+    Ok(package)
 }
 
 pub(crate) fn compose_formatter_modules(

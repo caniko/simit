@@ -13,12 +13,18 @@ use crate::release_trust::{self, TrustOverrides};
 
 pub fn run(command: ReleaseCommand) -> Result<()> {
     if command.component.is_some()
-        && command.action != ReleaseAction::Plan
+        && !matches!(
+            command.action,
+            ReleaseAction::Plan | ReleaseAction::Verify | ReleaseAction::SyncUp
+        )
         && command.action.bump_kind().is_none()
     {
         bail!(
-            "--component currently supports release plan and version bumps; verification, trust and sync-up remain repository-scoped"
+            "--component supports release plan, version bumps, verification and sync-up; trust and secrets remain repository-scoped"
         );
+    }
+    if command.component.is_some() && command.workspace {
+        bail!("--workspace cannot be combined with independent --component releases");
     }
     if command.action == ReleaseAction::Verify {
         return crate::commands::release_verify::run(command);
@@ -57,38 +63,13 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
         bail!("monorepo version bumps require --component and one independent package");
     }
     let packages = if let (Some(id), Some((root, project))) = (&command.component, &monorepo) {
-        let graph = project
-            .monorepo
-            .as_ref()
-            .ok_or_else(|| anyhow!("missing monorepo config"))?
-            .resolve(root)?;
-        let component = graph
-            .components
-            .get(id)
-            .ok_or_else(|| anyhow!("unknown monorepo component {id}"))?;
-        let requested = if command.packages.is_empty() {
-            &component.cargo_packages
-        } else {
-            &command.packages
-        };
-        if requested.len() != 1
-            || requested
-                .iter()
-                .any(|name| !component.cargo_packages.contains(name))
-        {
-            bail!(
-                "independent component releases require exactly one owned Cargo package; pass --package <name>"
-            );
-        }
-        let packages = cargo::select_packages(&metadata, requested, false)?;
-        let manifest = std::fs::read_to_string(packages[0].manifest_path.as_std_path())?
-            .parse::<toml_edit::DocumentMut>()?;
-        if manifest["package"]["version"].as_str().is_none() {
-            bail!(
-                "independent release package.version must be literal; shared workspace versions would change other components"
-            );
-        }
-        packages
+        vec![crate::monorepo::release_package(
+            root,
+            project,
+            &metadata,
+            id,
+            &command.packages,
+        )?]
     } else {
         cargo::select_packages(&metadata, &command.packages, command.workspace)?
     };
@@ -364,10 +345,27 @@ fn sync_up(command: ReleaseCommand) -> Result<()> {
 
     let metadata = cargo::metadata_for_current_dir()?;
     let workspace_root = metadata.workspace_root.as_std_path();
-    let packages = cargo::select_packages(&metadata, &command.packages, command.workspace)?;
-    let version = common_current_version(&packages)?;
     let config = ProjectConfig::load(workspace_root)?;
-    let tag = config.release.tag_prefix.tag(version.clone());
+    if config.monorepo.is_some() && command.component.is_none() {
+        bail!("monorepo tag sync-up requires --component and one independent package");
+    }
+    let packages = if let Some(id) = &command.component {
+        vec![crate::monorepo::release_package(
+            workspace_root,
+            &config,
+            &metadata,
+            id,
+            &command.packages,
+        )?]
+    } else {
+        cargo::select_packages(&metadata, &command.packages, command.workspace)?
+    };
+    let version = common_current_version(&packages)?;
+    let tag = if command.component.is_some() {
+        crate::release_identity::ReleaseTag::for_package(&packages[0].name, version.clone())?
+    } else {
+        config.release.tag_prefix.tag(version.clone())
+    };
     let sign_tag = !command.no_sign;
     git::tag_ref_object(workspace_root, &tag)?;
     let old_tag_target = git::tag_target_commit(workspace_root, &tag)?;
