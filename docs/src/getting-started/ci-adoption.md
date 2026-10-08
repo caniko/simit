@@ -121,8 +121,9 @@ does not satisfy the MSRV gate.
 
 Nix-runtime format checks use the declared `formatter.<system>` executable,
 selected from `meta.mainProgram`, `pname`, or the derivation name. A treefmt
-formatter runs with `--ci`; custom formatters must support the non-mutating
-`--check` contract. A present formatter with a missing executable fails the
+formatter runs with `--ci`; custom formatters run without assumed arguments,
+then the gate rejects tracked, index, or untracked-file changes. A custom
+formatter's nonzero exit status is preserved. A missing executable fails the
 gate. Only projects without a flake formatter fall back to shell-provided
 treefmt, then Cargo formatting when treefmt is absent.
 

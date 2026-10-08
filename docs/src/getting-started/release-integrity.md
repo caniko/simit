@@ -33,8 +33,10 @@ default-branch keyring fails publication. Key rotation must therefore land on
 the default branch before a tag signed by the replacement key is released.
 
 After verifying the signed tag, generated publish workflows require its peeled
-commit to equal the checkout being published, before package metadata is executed
-or publication begins. GitHub crates.io publishers run only on signed semver tag
+commit to equal the checkout being published, before package metadata, project
+`ci.extra_setup` commands, or publication execute. Checkout credentials are not
+persisted; private verification fetches use command-scoped authentication.
+GitHub crates.io publishers run only on signed semver tag
 pushes; they do not expose a branch-based manual dispatch. To retry publication,
 rerun the original tag-triggered run. Forgejo retains its existing dispatch
 surface and applies the same signed-tag/checkout validation.

@@ -36,7 +36,7 @@ const CARGO_DENY_VERSION: &str = "0.18.3";
 const CARGO_DENY_POLICY_CHECKS: &str = "bans licenses sources";
 // Custom/legacy Nix shells may expose rustfmt without a treefmt wrapper.
 // Prefer the complete project formatter, and never mask its failure.
-pub(crate) const NIX_FORMAT_COMMAND: &str = r#"sh -c 'formatter_expr="let root = toString ./.; flake = builtins.getFlake (if builtins.pathExists ./.git then \"git+file://\" + root else root); in if flake ? formatter.\${builtins.currentSystem} then flake.formatter.\${builtins.currentSystem} else null"; formatter=$(nix eval --impure --raw --expr "let f = ($formatter_expr); in if f == null then \"\" else f.drvPath") || exit; if [ -n "$formatter" ]; then formatter_program=$(nix eval --impure --raw --expr "let f = ($formatter_expr); in f.meta.mainProgram or (f.pname or (builtins.parseDrvName f.name).name)") || exit; formatter_path=$(nix build --no-link --print-out-paths "$formatter^out") || exit; formatter_exe="$formatter_path/bin/$formatter_program"; if [ ! -x "$formatter_exe" ]; then echo "Declared flake formatter executable is missing: $formatter_exe" >&2; exit 1; fi; if [ "$formatter_program" = treefmt ]; then exec "$formatter_exe" --ci; else exec "$formatter_exe" --check; fi; fi; if command -v treefmt >/dev/null 2>&1; then exec treefmt --ci; else exec cargo fmt --all -- --check; fi'"#;
+pub(crate) const NIX_FORMAT_COMMAND: &str = r#"sh -c 'formatter_expr="let root = toString ./.; flake = builtins.getFlake (if builtins.pathExists ./.git then \"git+file://\" + root else root); in if flake ? formatter.\${builtins.currentSystem} then flake.formatter.\${builtins.currentSystem} else null"; formatter=$(nix eval --impure --raw --expr "let f = ($formatter_expr); in if f == null then \"\" else f.drvPath") || exit; if [ -n "$formatter" ]; then formatter_program=$(nix eval --impure --raw --expr "let f = ($formatter_expr); in f.meta.mainProgram or (f.pname or (builtins.parseDrvName f.name).name)") || exit; formatter_path=$(nix build --no-link --print-out-paths "$formatter^out") || exit; formatter_exe="$formatter_path/bin/$formatter_program"; if [ ! -x "$formatter_exe" ]; then echo "Declared flake formatter executable is missing: $formatter_exe" >&2; exit 1; fi; if [ "$formatter_program" = treefmt ]; then exec "$formatter_exe" --ci; fi; index_tree=$(git write-tree) || exit; "$formatter_exe" || exit; git diff --exit-code || exit; git diff --cached --exit-code "$index_tree" || exit; untracked=$(git ls-files --others --exclude-standard) || exit; if [ -n "$untracked" ]; then echo "Formatter created untracked files: $untracked" >&2; exit 1; fi; exit 0; fi; if command -v treefmt >/dev/null 2>&1; then exec treefmt --ci; else exec cargo fmt --all -- --check; fi'"#;
 
 #[derive(Debug, Deserialize)]
 struct ActionPin {
@@ -2734,15 +2734,15 @@ fn publish_workflow(
     push_container(&mut workflow, platform, runtime, package);
     push_job_env(&mut workflow, platform, runtime, &options.extra_env, true);
     workflow.push_str("    steps:\n");
-    push_checkout_step(&mut workflow, platform);
+    push_event_checkout_step(&mut workflow, platform);
     push_required_env_step(&mut workflow, &options.required_env);
 
     match runtime {
         Runtime::Nix => {
             push_install_nix_step(&mut workflow, platform);
             push_nix_cargo_bin_path_step(&mut workflow);
-            push_extra_setup_steps(&mut workflow, &options.extra_setup);
             workflow.push_str(&validate_tag_step(command_prefix(runtime), &package.name));
+            push_extra_setup_steps(&mut workflow, &options.extra_setup);
             match options.om_ci {
                 OmCiMode::Off => {
                     push_nix_publish_legacy_steps(&mut workflow, package, &options);
@@ -2770,8 +2770,8 @@ fn publish_workflow(
         Runtime::Cargo => {
             push_rust_setup_step(&mut workflow, platform);
             push_rust_cache_steps(&mut workflow, platform);
-            push_extra_setup_steps(&mut workflow, &options.extra_setup);
             workflow.push_str(&validate_tag_step(command_prefix(runtime), &package.name));
+            push_extra_setup_steps(&mut workflow, &options.extra_setup);
             push_test_steps(&mut workflow, runtime, package, &options);
             push_quality_tool_install_steps(&mut workflow, runtime, &options);
             push_optional_publish_steps(&mut workflow, runtime, package, &options);

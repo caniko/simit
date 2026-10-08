@@ -253,7 +253,7 @@ fn nix_format_gate_supports_legacy_shells_and_propagates_formatter_failures() {
 
 #[test]
 #[cfg(unix)]
-fn nix_format_gate_executes_custom_flake_formatters_in_check_mode() {
+fn nix_format_gate_runs_custom_flake_formatters_and_rejects_worktree_mutation() {
     use std::os::unix::fs::{PermissionsExt, symlink};
     use std::process::Command;
 
@@ -263,10 +263,20 @@ fn nix_format_gate_executes_custom_flake_formatters_in_check_mode() {
         let bin = root.join("bin");
         fs::create_dir(&bin).unwrap();
         symlink("/bin/sh", bin.join("sh")).unwrap();
+        let git = Command::new("sh")
+            .args(["-c", "command -v git"])
+            .output()
+            .unwrap();
+        assert!(git.status.success(), "{git:?}");
+        symlink(
+            String::from_utf8(git.stdout).unwrap().trim(),
+            bin.join("git"),
+        )
+        .unwrap();
         let wrapper = root.join("formatter");
         fs::create_dir_all(wrapper.join("bin")).unwrap();
         let custom = wrapper.join("bin/crossbow-fmt");
-        fs::write(&custom, "#!/bin/sh\nprintf 'crossbow-fmt %s\\n' \"$*\" > \"$FORMAT_LOG\"\n[ \"$*\" = --check ] || exit 97\nexit \"$FORMAT_STATUS\"\n").unwrap();
+        fs::write(&custom, "#!/bin/sh\nprintf 'crossbow-fmt %s\\n' \"$*\" > \"$FORMAT_LOG\"\n[ \"$#\" -eq 0 ] || exit 97\ncase \"$FORMAT_MUTATION\" in tracked) printf 'changed\\n' >> src/lib.rs;; staged) printf 'changed\\n' >> src/lib.rs; git add src/lib.rs;; untracked) printf 'new\\n' > new-output.txt;; esac\nexit \"$FORMAT_STATUS\"\n").unwrap();
         fs::set_permissions(&custom, fs::Permissions::from_mode(0o755)).unwrap();
         let nix = bin.join("nix");
         fs::write(&nix, "#!/bin/sh\ncase \"$1\" in\n eval) case \"$*\" in *mainProgram*) printf '%s' \"$FORMAT_PROGRAM\";; *) printf '%s' \"$FORMAT_WRAPPER\";; esac;;\n build) printf '%s' \"$FORMAT_WRAPPER\";;\n develop) shift 2; PATH=\"$FORMAT_BIN\" exec \"$@\";;\n *) exit 98;;\nesac\n").unwrap();
@@ -277,21 +287,47 @@ fn nix_format_gate_executes_custom_flake_formatters_in_check_mode() {
             .into_iter()
             .find(|run| run.contains("formatter_program="))
             .expect("ordinary CI must expose its format gate");
-        for (program, status, expected_status) in [
-            ("crossbow-fmt", 0, 0),
-            ("crossbow-fmt", 17, 17),
-            ("missing-formatter", 0, 1),
+        assert!(
+            Command::new("git")
+                .args(["init", "--quiet"])
+                .current_dir(root)
+                .status()
+                .unwrap()
+                .success()
+        );
+        fs::write(
+            root.join(".git/info/exclude"),
+            "/bin/\n/formatter/\n/format.log\n",
+        )
+        .unwrap();
+        assert!(
+            Command::new("git")
+                .args(["add", "."])
+                .current_dir(root)
+                .status()
+                .unwrap()
+                .success()
+        );
+        for (program, status, mutation, expected_status) in [
+            ("crossbow-fmt", 0, "", 0),
+            ("crossbow-fmt", 17, "", 17),
+            ("missing-formatter", 0, "", 1),
+            ("crossbow-fmt", 0, "tracked", 1),
+            ("crossbow-fmt", 0, "staged", 1),
+            ("crossbow-fmt", 0, "untracked", 1),
         ] {
             let log = root.join("format.log");
             let _ = fs::remove_file(&log);
             let output = Command::new("sh")
                 .args(["-c", &gate])
+                .current_dir(root)
                 .env("PATH", &bin)
                 .env("FORMAT_BIN", &bin)
                 .env("FORMAT_WRAPPER", &wrapper)
                 .env("FORMAT_PROGRAM", program)
                 .env("FORMAT_LOG", &log)
                 .env("FORMAT_STATUS", status.to_string())
+                .env("FORMAT_MUTATION", mutation)
                 .output()
                 .unwrap();
             assert_eq!(
@@ -300,7 +336,7 @@ fn nix_format_gate_executes_custom_flake_formatters_in_check_mode() {
                 "split={split}: {output:?}"
             );
             if program == "crossbow-fmt" {
-                assert_eq!(fs::read_to_string(log).unwrap(), "crossbow-fmt --check\n");
+                assert_eq!(fs::read_to_string(log).unwrap(), "crossbow-fmt \n");
             } else {
                 assert!(!log.exists());
                 assert!(
@@ -308,6 +344,16 @@ fn nix_format_gate_executes_custom_flake_formatters_in_check_mode() {
                         .contains("Declared flake formatter executable is missing")
                 );
             }
+            fs::write(root.join("src/lib.rs"), "pub fn example() {}\n").unwrap();
+            assert!(
+                Command::new("git")
+                    .args(["add", "src/lib.rs"])
+                    .current_dir(root)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            let _ = fs::remove_file(root.join("new-output.txt"));
         }
     }
 }

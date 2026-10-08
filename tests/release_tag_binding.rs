@@ -5,6 +5,57 @@ use std::{fs, os::unix::fs::PermissionsExt, process::Command};
 mod common;
 
 #[test]
+fn publishers_validate_before_project_setup_without_persisting_credentials() {
+    for platform in ["github", "forgejo"] {
+        for runtime in ["cargo", "nix"] {
+            let temp = tempfile::tempdir().unwrap();
+            fs::write(
+                temp.path().join("Cargo.toml"),
+                "[package]\nname='demo'\nversion='0.1.0'\nedition='2024'\nlicense='MIT'\n",
+            )
+            .unwrap();
+            fs::create_dir(temp.path().join("src")).unwrap();
+            fs::write(temp.path().join("src/lib.rs"), "").unwrap();
+            fs::write(temp.path().join("flake.nix"), "{ outputs = _: {}; }\n").unwrap();
+            fs::write(temp.path().join("simit.toml"), format!("[ci]\nplatform='{platform}'\nruntime='{runtime}'\npublish_crates=true\nextra_setup=['echo checkout-controlled-setup']\n")).unwrap();
+            let output = common::simit()
+                .current_dir(temp.path())
+                .args(["init", "ci"])
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{platform}/{runtime}: {output:?}");
+            let workflow = fs::read_to_string(
+                temp.path()
+                    .join(format!(".{platform}/workflows/publish-crate.yaml")),
+            )
+            .unwrap();
+            let parsed: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
+            let steps = parsed["jobs"]["publish"]["steps"].as_sequence().unwrap();
+            let validation = steps
+                .iter()
+                .position(|step| step["name"] == "Validate signed release tag")
+                .unwrap();
+            let setup = steps
+                .iter()
+                .position(|step| step["run"] == "echo checkout-controlled-setup")
+                .unwrap();
+            assert!(validation < setup, "{platform}/{runtime}: {workflow}");
+            let checkout = steps
+                .iter()
+                .find(|step| step["name"] == "Checkout")
+                .unwrap();
+            assert_eq!(checkout["with"]["persist-credentials"], false);
+            assert_eq!(checkout["with"]["ref"], "${{ github.sha }}");
+            let run = steps[validation]["run"].as_str().unwrap();
+            let binding = run
+                .find("if [ \"$validated_sha\" != \"$checkout_sha\" ]")
+                .unwrap();
+            assert!(binding < run.find("cargo pkgid").unwrap());
+        }
+    }
+}
+
+#[test]
 fn publish_uses_default_branch_keys_and_rejects_a_different_checkout() {
     for member_scoped in [false, true] {
         verify_publish_binding(member_scoped);
