@@ -137,6 +137,109 @@ fn invalid_templates_fail_before_any_outputs_are_written() {
 }
 
 #[test]
+fn active_workflow_sources_are_rejected_without_rewriting_builtins() {
+    for platform in ["github", "forgejo"] {
+        for extension in ["yml", "yaml"] {
+            let temp = project();
+            assert!(generate(&temp, &[]).status.success());
+            let builtin = temp.path().join(".github/workflows/nix-builds.yaml");
+            let before = fs::read_to_string(&builtin).unwrap();
+            let source = format!(".{platform}/workflows/tests-template.{extension}");
+            let path = temp.path().join(&source);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let template =
+                fs::read_to_string(temp.path().join(".simit/templates/tests.yml")).unwrap();
+            fs::write(&path, &template).unwrap();
+            config(
+                &temp,
+                ".github/workflows/tests.yml",
+                &source,
+                "windows-2022",
+            );
+            let cfg_path = temp.path().join("simit.toml");
+            let cfg = fs::read_to_string(&cfg_path)
+                .unwrap()
+                .replace("nix_builds=['.#default']", "nix_builds=['.#changed']");
+            fs::write(&cfg_path, &cfg).unwrap();
+            for args in [vec![], vec!["--check", "--diff"]] {
+                let result = generate(&temp, &args);
+                assert!(!result.status.success(), "{source}: {result:?}");
+                assert!(
+                    String::from_utf8_lossy(&result.stderr).contains("active Actions workflow")
+                );
+                assert_eq!(fs::read_to_string(&builtin).unwrap(), before);
+                assert_eq!(fs::read_to_string(&path).unwrap(), template);
+                assert_eq!(fs::read_to_string(&cfg_path).unwrap(), cfg);
+            }
+        }
+    }
+}
+
+#[test]
+fn non_file_destinations_fail_before_rewriting_builtins() {
+    let temp = project();
+    assert!(generate(&temp, &[]).status.success());
+    let builtin = temp.path().join(".github/workflows/nix-builds.yaml");
+    let before = fs::read_to_string(&builtin).unwrap();
+    let output = temp.path().join(".github/workflows/tests.yml");
+    fs::remove_file(&output).unwrap();
+    fs::create_dir(&output).unwrap();
+    fs::write(output.join("foreign"), "foreign file\n").unwrap();
+    config(
+        &temp,
+        ".github/workflows/tests.yml",
+        ".simit/templates/tests.yml",
+        "windows-2022",
+    );
+    let cfg_path = temp.path().join("simit.toml");
+    let cfg = fs::read_to_string(&cfg_path)
+        .unwrap()
+        .replace("nix_builds=['.#default']", "nix_builds=['.#changed']");
+    fs::write(&cfg_path, &cfg).unwrap();
+    for args in [vec![], vec!["--check", "--diff"]] {
+        let result = generate(&temp, &args);
+        assert!(!result.status.success(), "{result:?}");
+        assert!(String::from_utf8_lossy(&result.stderr).contains("non-file destination"));
+        assert_eq!(fs::read_to_string(&builtin).unwrap(), before);
+        assert_eq!(fs::read_to_string(&cfg_path).unwrap(), cfg);
+    }
+    assert_eq!(
+        fs::read_to_string(output.join("foreign")).unwrap(),
+        "foreign file\n"
+    );
+}
+
+#[test]
+fn retired_templates_with_moved_headers_are_removed_but_foreign_markers_survive() {
+    let temp = project();
+    assert!(generate(&temp, &[]).status.success());
+    let output = temp.path().join(".github/workflows/tests.yml");
+    let original = fs::read_to_string(&output).unwrap();
+    fs::write(&output, "\n# Project note\n".to_owned() + &original).unwrap();
+    let foreign = temp.path().join(".github/workflows/foreign.yml");
+    let foreign_content = "# Simit workflow template: project-note\nname: Foreign\n";
+    fs::write(&foreign, foreign_content).unwrap();
+    let cfg_path = temp.path().join("simit.toml");
+    let cfg = fs::read_to_string(&cfg_path).unwrap();
+    fs::write(
+        &cfg_path,
+        cfg.split("[ci.workflow_templates]").next().unwrap(),
+    )
+    .unwrap();
+    assert!(!generate(&temp, &["--check", "--diff"]).status.success());
+    assert!(output.is_file());
+    let result = generate(&temp, &[]);
+    assert!(result.status.success(), "{result:?}");
+    assert!(!output.exists());
+    assert_eq!(fs::read_to_string(&foreign).unwrap(), foreign_content);
+    assert!(generate(&temp, &["--check", "--diff"]).status.success());
+    assert_eq!(
+        audit_ci(temp.path()).unwrap().status,
+        FeatureStatus::Managed
+    );
+}
+
+#[test]
 fn template_retirement_preserves_the_opt_in_review_policy_and_builtin_outputs() {
     let temp = project();
     let policy = "\n[review_policy]\ntoolbelt_version='0.2.0'\napp_id_secret='APP_ID'\napp_private_key_secret='APP_KEY'\ncredential_environment='review-policy'\n";

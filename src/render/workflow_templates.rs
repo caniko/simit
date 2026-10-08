@@ -17,7 +17,22 @@ use crate::{
 pub(crate) const TEMPLATE_MARKER: &str = "# Simit workflow template: ";
 
 fn portable_path(path: &Path) -> String {
-    path.to_string_lossy().to_ascii_lowercase()
+    path.components()
+        .map(|part| part.as_os_str().to_string_lossy().to_ascii_lowercase())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn is_actions_workflow(path: &Path) -> bool {
+    let normalized = portable_path(path);
+    let path = Path::new(&normalized);
+    matches!(
+        path.parent().and_then(Path::to_str),
+        Some(".github/workflows" | ".forgejo/workflows")
+    ) && matches!(
+        path.extension().and_then(|part| part.to_str()),
+        Some("yaml" | "yml")
+    )
 }
 
 pub(crate) fn is_template_output(ci: &CiConfig, path: &Path, content: &str) -> bool {
@@ -156,6 +171,25 @@ pub(crate) fn append(root: &Path, ci: &CiConfig, files: &mut Vec<GeneratedFile>)
                     path.display()
                 );
             }
+            match fs::symlink_metadata(&path) {
+                Ok(metadata) => {
+                    let valid = if ancestor == relative {
+                        metadata.is_file()
+                    } else {
+                        metadata.is_dir()
+                    };
+                    if !valid {
+                        bail!(
+                            "workflow template output {output} crosses a non-file destination or non-directory parent at {}",
+                            path.display()
+                        );
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(error).context("inspecting workflow template destination");
+                }
+            }
         }
         if builtin_paths.contains(&portable_path(&relative)) {
             bail!("workflow template {output} collides with a built-in generated workflow");
@@ -165,10 +199,9 @@ pub(crate) fn append(root: &Path, ci: &CiConfig, files: &mut Vec<GeneratedFile>)
                 "workflow template source {source} is a built-in generated output; use a project-owned template"
             );
         }
-        if !builtin_paths
-            .iter()
-            .any(|path| Path::new(path).parent() == relative.parent())
-        {
+        if !builtin_paths.iter().any(|path| {
+            Path::new(path).parent().map(portable_path) == relative.parent().map(portable_path)
+        }) {
             bail!("workflow template {output} does not match the selected Actions platform");
         }
         let path = root
@@ -186,11 +219,18 @@ pub(crate) fn append(root: &Path, ci: &CiConfig, files: &mut Vec<GeneratedFile>)
                 "workflow template source {source} resolves to a built-in generated output; use a project-owned template"
             );
         }
-        let source_text = fs::read_to_string(path)
+        let source_text = fs::read_to_string(&path)
             .with_context(|| format!("reading workflow template {source}"))?;
         if super::ci::is_generated_workflow_marker(&source_text) {
             bail!(
                 "workflow template source {source} is a built-in generated output; use a project-owned template"
+            );
+        }
+        if is_actions_workflow(Path::new(source))
+            || is_actions_workflow(path.strip_prefix(&canonical_root)?)
+        {
+            bail!(
+                "workflow template source {source} is an active Actions workflow; use a project-owned template with a non-workflow extension or directory"
             );
         }
         let rendered = substitute(&source_text, ci)
@@ -239,7 +279,10 @@ pub(crate) fn obsolete(root: &Path, files: &[GeneratedFile]) -> Result<Vec<PathB
             if expected.contains(&relative) {
                 continue;
             }
-            if fs::read_to_string(entry.path())?.starts_with(TEMPLATE_MARKER) {
+            let content = fs::read_to_string(entry.path())?;
+            if content.contains(TEMPLATE_MARKER)
+                && super::ci::is_generated_workflow_marker(&content)
+            {
                 obsolete.push(relative);
             }
         }

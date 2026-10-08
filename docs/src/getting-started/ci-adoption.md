@@ -62,12 +62,17 @@ values in committed templates or configuration.
 `simit init ci` renders the declared templates, marks their outputs as generated,
 and persists both mappings and variables. `--check --diff` and registry auditing
 use the same renderer, so edits to outputs, templates, or variables are detected.
-Removing a mapping retires only its template-marked output; unrelated workflows
+Removing a mapping retires outputs carrying both Simit generation and template
+markers, even when project comments precede those markers; unrelated workflows
 remain project-owned. Built-in and release-owned workflow collisions, paths
 outside the repository, and mismatched Actions platforms are rejected. Template
 contents do not participate in built-in check, package, or runner inference.
 Built-in generated workflows cannot be template sources: templates must remain
 project-owned inputs, rather than snapshots of outputs from an earlier run.
+Keep template sources outside Actions workflow directories, or give them a
+non-workflow extension such as `.yaml.in`, so the source is not itself executed.
+Destinations must be files with directory parents; validation rejects existing
+directories and portable case-insensitive path collisions before any writes.
 This feature supports GitHub and Forgejo Actions, including exact-only Nix
 qualification; it does not replace the
 project's test selections or permission policy.
