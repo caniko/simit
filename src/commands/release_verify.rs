@@ -120,7 +120,12 @@ struct VerifySummary {
 pub fn run(command: ReleaseCommand) -> Result<()> {
     reject_non_verify_flags(&command)?;
 
-    let metadata = cargo::metadata_for_current_dir()?;
+    let metadata = if command.component.is_some() {
+        let (root, _) = crate::monorepo::load(&std::env::current_dir()?)?;
+        cargo::cargo_metadata(&root.join("Cargo.toml"))?
+    } else {
+        cargo::metadata_for_current_dir()?
+    };
     let workspace_root = metadata.workspace_root.as_std_path();
     let config = ProjectConfig::load(workspace_root)?;
     if config.monorepo.is_some() && command.component.is_none() {
@@ -150,13 +155,6 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
     });
     let hosted = command.component.is_none()
         && (config.release.codeberg.is_some() || config.release.github.is_some());
-    if command.component.is_some()
-        && config.release.notes_source(platform) == crate::config::ReleaseNotesSource::Git
-    {
-        bail!(
-            "component release verification requires adjacent changelog entries or disabled notes; repository Git notes do not have package scope"
-        );
-    }
     let tag = if command.component.is_some() {
         crate::release_identity::ReleaseTag::for_package(&packages[0].name, version.clone())?
     } else {
@@ -171,12 +169,32 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
     } else {
         workspace_root
     };
+    let component_script = if let Some(id) = &command.component {
+        let graph = config
+            .monorepo
+            .as_ref()
+            .context("missing monorepo config")?
+            .resolve(workspace_root)?;
+        Some(crate::release_notes::component_git_notes_script(
+            &packages[0].name,
+            &graph.components[id].paths,
+        )?)
+    } else {
+        None
+    };
     let mut results = vec![
         check_worktree_clean(workspace_root),
         check_ci_managed(workspace_root),
         check_flake_managed(workspace_root),
         check_release_trust(workspace_root, &config, &command),
-        check_notes(notes_root, &config, platform, &version),
+        check_notes(
+            notes_root,
+            &config,
+            platform,
+            &version,
+            &tag,
+            component_script.as_deref(),
+        ),
     ];
     if hosted {
         results.push(check_hosted_workflow(workspace_root));
@@ -556,6 +574,8 @@ fn check_notes(
     config: &ProjectConfig,
     platform: crate::cli::Platform,
     version: &Version,
+    tag: &crate::release_identity::ReleaseTag,
+    component_script: Option<&str>,
 ) -> CheckResult {
     match config.release.notes_source(platform) {
         crate::config::ReleaseNotesSource::Changelog => check_changelog(root, version),
@@ -563,14 +583,13 @@ fn check_notes(
             CheckResult::pass("release notes", "release notes explicitly disabled")
         }
         crate::config::ReleaseNotesSource::Git => {
-            let tag = config.release.tag_prefix.tag(version.clone());
+            let script = component_script.map(str::to_owned).unwrap_or_else(|| {
+                crate::release_notes::git_notes_script(config.release.tag_prefix)
+            });
             let output = Command::new("bash")
                 .current_dir(root)
                 .env("TAG", tag.to_string())
-                .args([
-                    "-c",
-                    &crate::release_notes::git_notes_script(config.release.tag_prefix),
-                ])
+                .args(["-c", &script])
                 .output();
             match output {
                 Ok(output) if output.status.success() => CheckResult::pass(

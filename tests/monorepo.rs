@@ -885,3 +885,160 @@ fn assert_public_input_transport(job: &serde_yaml::Value) {
     }
     assert!(!run.contains("secrets."));
 }
+
+fn fixture_git(root: &Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .current_dir(root)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    String::from_utf8(output.stdout).unwrap()
+}
+
+fn history_fixture() -> TempDir {
+    let temp = fixture();
+    let root = temp.path();
+    write(root, ".gitignore", "target/\n");
+    fixture_git(root, &["init", "-q"]);
+    fixture_git(root, &["config", "user.name", "Simit disposable fixture"]);
+    fixture_git(root, &["config", "user.email", "fixture@example.invalid"]);
+    fixture_git(root, &["config", "commit.gpgsign", "false"]);
+    fixture_git(root, &["config", "tag.gpgsign", "false"]);
+    fixture_git(root, &["config", "core.hooksPath", "/dev/null"]);
+    fixture_git(root, &["add", "."]);
+    fixture_git(root, &["commit", "-qm", "Initial components"]);
+    fixture_git(root, &["tag", "engine/v0.1.0"]);
+    write(
+        root,
+        "crates/engine/src/lib.rs",
+        "pub fn ready() {}\npub fn improved() {}\n",
+    );
+    fixture_git(root, &["add", "."]);
+    fixture_git(root, &["commit", "-qm", "Improve engine behavior"]);
+    write(root, "python/server.py", "# Unrelated Python behavior\n");
+    fixture_git(root, &["add", "."]);
+    fixture_git(root, &["commit", "-qm", "Unrelated Python change"]);
+    fixture_git(root, &["tag", "worker/v9.0.0"]);
+    temp
+}
+
+#[test]
+fn component_git_notes_verify_the_owned_tag_from_non_cargo_members() {
+    let temp = history_fixture();
+    let root = temp.path();
+    let config = fs::read_to_string(root.join("simit.toml")).unwrap();
+    write(
+        root,
+        "simit.toml",
+        &format!("{config}\n[release.notes]\nsource = \"git\"\n"),
+    );
+    fixture_git(root, &["add", "."]);
+    fixture_git(root, &["commit", "-qm", "Select Git release notes"]);
+    fixture_git(root, &["tag", "engine/v0.1.1"]);
+    let output = common::simit()
+        .current_dir(root.join("python"))
+        .args([
+            "release",
+            "verify",
+            "--component",
+            "rust",
+            "--version",
+            "0.1.1",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let notes = report["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["check"] == "release notes")
+        .unwrap();
+    assert_eq!(notes["status"], "pass", "{report}");
+    assert!(notes["message"].as_str().unwrap().contains("engine/v0.1.1"));
+    write(root, "crates/engine/src/lib.rs", "pub fn unreleased() {}\n");
+    fixture_git(root, &["add", "."]);
+    fixture_git(root, &["commit", "-qm", "Unreleased engine change"]);
+    let script =
+        simit::release_notes::component_git_notes_script("engine", &["crates/engine".to_owned()])
+            .unwrap();
+    let notes = Command::new("bash")
+        .current_dir(root.join("python"))
+        .env("TAG", "engine/v0.1.1")
+        .args(["-c", &script])
+        .output()
+        .unwrap();
+    assert!(notes.status.success(), "{notes:?}");
+    let notes = String::from_utf8(notes.stdout).unwrap();
+    assert!(notes.contains("Improve engine behavior"), "{notes}");
+    assert!(!notes.contains("Initial components"), "{notes}");
+    assert!(!notes.contains("Unrelated Python change"), "{notes}");
+    assert!(!notes.contains("Unreleased engine change"), "{notes}");
+}
+
+#[cfg(unix)]
+#[test]
+fn component_automatic_changelog_drafting_uses_only_owned_history() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let temp = history_fixture();
+    let root = temp.path();
+    let support = TempDir::new().unwrap();
+    let prompt = support.path().join("prompt");
+    let script = support.path().join("codex");
+    fs::write(&script, format!("#!/bin/sh\nwhile [ \"$1\" != '-o' ]; do shift; done\nshift; out=$1\ncat > '{}'\nprintf '%s\\n' '### Fixed' '' '- Improve engine behavior.' > \"$out\"\n", prompt.display())).unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    write(
+        root,
+        "crates/engine/CHANGELOG.md",
+        &format!(
+            "{}\n## [Unreleased]\n\n## [0.1.0] - 2026-01-01\n\n### Added\n\n- Initial engine.\n",
+            simit::changelog::HEADER
+        ),
+    );
+    let config = fs::read_to_string(root.join("simit.toml")).unwrap();
+    write(
+        root,
+        "simit.toml",
+        &format!("{config}\n[release.changelog]\nauto_draft = true\n"),
+    );
+    fixture_git(
+        root,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/example/monorepo.git",
+        ],
+    );
+    fixture_git(root, &["add", "."]);
+    fixture_git(root, &["commit", "-qm", "Configure engine release notes"]);
+    let output = common::simit()
+        .current_dir(root)
+        .env("SIMIT_CODEX", &script)
+        .args([
+            "release",
+            "patch",
+            "--component",
+            "rust",
+            "--no-sign",
+            "-m",
+            "release engine",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let prompt = fs::read_to_string(prompt).unwrap();
+    assert!(prompt.contains("Base: engine/v0.1.0"), "{prompt}");
+    assert!(prompt.contains("Improve engine behavior"), "{prompt}");
+    assert!(!prompt.contains("Unrelated Python change"), "{prompt}");
+    assert!(!prompt.contains("python/server.py"), "{prompt}");
+    let notes = fs::read_to_string(root.join("crates/engine/CHANGELOG.md")).unwrap();
+    assert!(notes.contains("## [0.1.1]"), "{notes}");
+    assert!(
+        notes.contains("/compare/engine/v0.1.0...engine/v0.1.1"),
+        "{notes}"
+    );
+    assert_eq!(fixture_git(root, &["status", "--porcelain"]), "");
+}

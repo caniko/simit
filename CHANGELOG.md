@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   member discovery, shared formatter composition, and native GitHub CI.
 - Independent Cargo release planning, package-scoped version bumps, verification,
   tag sync, and publication through signed `<package>/v<version>` tags.
+- Component-scoped Git release notes and automatic changelog drafting, with
+  package-qualified compare links and history bounded by owned paths.
 
 - Project-owned Rust CI commands through `[ci].check_command`, optional
   `nix_flake_check`, and opt-in Nix-runtime Cargo caching for Actions workflows.

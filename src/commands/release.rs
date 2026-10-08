@@ -1,6 +1,6 @@
 use std::ffi::OsString;
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use semver::Version;
 
 use crate::cargo::{self, BumpSpec, Package};
@@ -117,11 +117,18 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
     } else {
         workspace_root.join(changelog::DEFAULT_PATH)
     };
-    if command.component.is_some() && changelog_enabled && config.release.changelog.auto_draft {
-        bail!(
-            "component changelogs require package-scoped entries; repository-wide automatic drafting is not supported"
-        );
-    }
+    let component_paths = command
+        .component
+        .as_ref()
+        .map(|id| {
+            let graph = config
+                .monorepo
+                .as_ref()
+                .context("missing monorepo config")?
+                .resolve(workspace_root)?;
+            Ok::<_, anyhow::Error>(graph.components[id].paths.clone())
+        })
+        .transpose()?;
 
     if command.dry_run {
         println!("simit release dry-run");
@@ -152,17 +159,30 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
     let changelog_update = if changelog_enabled && changelog_path.exists() {
         let content = std::fs::read_to_string(&changelog_path)?;
         let content = if config.release.changelog.auto_draft {
-            changelog::draft_content(&content, workspace_root, None)?
+            if let Some(paths) = &component_paths {
+                changelog::draft_component_content(
+                    &content,
+                    workspace_root,
+                    &plans[0].package.name,
+                    paths,
+                )?
+            } else {
+                changelog::draft_content(&content, workspace_root, None)?
+            }
         } else {
             content
         };
-        Some(changelog::release_content(
+        Some(changelog::release_content_with_namespace(
             &content,
             &new_version,
             changelog::today_utc()?,
             None,
             &changelog_path,
             Some(workspace_root),
+            command
+                .component
+                .as_ref()
+                .map(|_| plans[0].package.name.as_str()),
         )?)
     } else {
         None

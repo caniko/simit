@@ -93,9 +93,11 @@ Component release plans contain dependency-ordered publishable packages and
 their owning components, versions, and package-qualified tags. `publish = false`
 members remain non-publishable. A bump selects exactly one owned package and
 creates a signed tag such as `engine/v0.2.1`; package versions stay plain SemVer.
-The package's adjacent `CHANGELOG.md` is used. Workspace-inherited versions and
-repository-wide automatic changelog drafting are rejected for independent bumps.
-Component release mutation requires a clean checkout.
+The package's adjacent `CHANGELOG.md` is used. Workspace-inherited versions are
+rejected for independent bumps. With `[release.changelog].auto_draft = true`,
+drafting uses only component-owned paths since the latest reachable package tag.
+Changelog compare links use the same package namespace. Component release mutation
+requires a clean checkout.
 
 Set `[ci].publish_crates = true` to generate one independently tagged publication
 workflow per publishable Cargo member. Each `<package>/v<version>` release first
@@ -110,6 +112,8 @@ repository's existing `CRATES_IO_API_TOKEN` secret.
 adjacent changelog and namespaced tag. `simit release sync-up` accepts the same
 selection and preserves its existing clean-checkout and lease-protected tag push
 contracts. Shared tag verification and sync-up require explicit component
-selection in monorepositories. Trust and secrets stay repository-scoped.
-Component Git-derived release notes and non-Cargo version mutation still require
+selection in monorepositories. With `[release.notes].source = "git"`, verification
+uses commits touching component-owned paths between the previous package tag and
+the exact release tag; unrelated components and later commits are excluded. Trust
+and secrets stay repository-scoped. Non-Cargo version mutation still requires
 additional generator support.
