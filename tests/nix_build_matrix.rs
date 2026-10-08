@@ -218,7 +218,7 @@ fn diagnostics_run_after_failed_builds_before_upload_without_relaxing_the_gate()
         .unwrap();
     assert!(build < success && success < diagnostics && diagnostics < upload);
     assert!(steps[success]["if"].is_null());
-    assert_eq!(steps[diagnostics]["if"], "always()");
+    assert_eq!(steps[diagnostics]["if"], "${{ !cancelled() }}");
     assert_eq!(steps[upload]["if"], "always()");
     assert!(
         steps[build]["run"]

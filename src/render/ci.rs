@@ -1051,10 +1051,10 @@ pub fn nix_build_matrix_file_with_options(
                 workflow.push_str(&format!("          {line}\n"));
             }
         }
-        // Diagnostic collection cannot turn a failed build into a passing job.
+        // Collect failed-build diagnostics without keeping canceled runs alive.
         for (index, script) in options.post_build_always.iter().enumerate() {
             workflow.push_str(&format!(
-                "      - name: Retain Nix diagnostics {}\n        if: always()\n        run: |\n",
+                "      - name: Retain Nix diagnostics {}\n        if: ${{{{ !cancelled() }}}}\n        run: |\n",
                 index + 1
             ));
             for line in script.lines() {

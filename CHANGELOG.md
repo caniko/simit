@@ -42,6 +42,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   coordinated publication, because Cargo resolves them while packaging the
   lockfile. Path-only unpublished test helpers remain excluded from the plan.
 - Read explicitly dynamic Python versions, scripts, and optional extras from Poetry metadata when a project also declares PEP 621 metadata. Preserve static PEP 621 fields and uv dependency groups, use the same version provider for PyPI release-tag validation, and report unsupported dynamic version providers clearly.
+- Honor cancellation when collecting Nix diagnostics while retaining collectors
+  after build or setup failures.
 
 ## [0.19.0] - 2026-09-30
 
