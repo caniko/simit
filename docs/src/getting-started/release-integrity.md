@@ -85,6 +85,19 @@ top-level `release/` directory. It then writes and publishes:
 The SLSA predicate records the source commit, release workflow digest, optional
 `flake.lock` digest, artifact name, and artifact SHA-256.
 
+### Editor Marketplace Packages
+
+JetBrains publication reads the signing task's `signedArchiveFile` property and
+binds `verifyPluginSignature.inputArchiveFile` to that same archive. The verified
+output is used even when the project overrides its name or directory; missing,
+ambiguous, or unsigned selections fail before upload. See the
+[JetBrains signing task contract](https://plugins.jetbrains.com/docs/intellij/tools-intellij-platform-gradle-plugin-tasks.html#signPlugin-signedArchiveFile).
+
+VS Code Marketplace and Open VSX publishers pass every `release/*.vsix` package
+through the plural `--packagePath` option, preserving universal and target-specific
+packages. Qualification exercises publisher arguments and archive selection with
+offline fixtures; it does not perform a live marketplace upload.
+
 ## Consumer Verification
 
 Verify the signed checksum manifest first:

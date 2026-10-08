@@ -1516,6 +1516,15 @@ fn push_jetbrains_sign_and_publish(workflow: &mut String, jetbrains: &ResolvedJe
         .push_str("          archive_name=$(cat \"$RUNNER_TEMP/jetbrains-plugin-archive-name\")\n");
     workflow.push_str("          test -n \"$archive_name\"\n");
     workflow.push_str("          cp \"$RUNNER_TEMP/jetbrains-plugin-unsigned.zip\" \"build/distributions/$archive_name\"\n");
+    workflow.push_str("          rm -f -- \"$RUNNER_TEMP/jetbrains-plugin-signed-path\"\n");
+    workflow
+        .push_str("          cat > \"$RUNNER_TEMP/jetbrains-signed-archive.gradle\" <<'GRADLE'\n");
+    for line in JETBRAINS_SIGNED_ARCHIVE_INIT_SCRIPT.lines() {
+        workflow.push_str("          ");
+        workflow.push_str(line);
+        workflow.push('\n');
+    }
+    workflow.push_str("          GRADLE\n");
     workflow
         .push_str("          CERTIFICATE_CHAIN_FILE=\"$RUNNER_TEMP/certificate-chain.pem\" \\\n");
     workflow.push_str("          PRIVATE_KEY_FILE=\"$RUNNER_TEMP/private-key.pem\" \\\n");
@@ -1523,10 +1532,14 @@ fn push_jetbrains_sign_and_publish(workflow: &mut String, jetbrains: &ResolvedJe
         "          PRIVATE_KEY_PASSWORD=\"$(cat \"$RUNNER_TEMP/private-key-password\")\" \\\n",
     );
     workflow.push_str(
-        "          nix shell nixpkgs#gradle_9 nixpkgs#jdk21 -c gradle --no-daemon -x buildPlugin signPlugin verifyPluginSignature\n",
+        "          nix shell nixpkgs#gradle_9 nixpkgs#jdk21 -c gradle --no-daemon -x buildPlugin signPlugin verifyPluginSignature --init-script \"$RUNNER_TEMP/jetbrains-signed-archive.gradle\"\n",
     );
-    workflow.push_str("          signed=$(find build/distributions -maxdepth 1 -type f -name '*.zip' ! -name '*unsigned*' | sort | tail -n1)\n");
-    workflow.push_str("          test -n \"$signed\"\n");
+    workflow.push_str(
+        "          mapfile -t signed_paths < \"$RUNNER_TEMP/jetbrains-plugin-signed-path\"\n",
+    );
+    workflow.push_str("          test \"${#signed_paths[@]}\" -eq 1 || { echo 'expected exactly one verified signed plugin archive' >&2; exit 1; }\n");
+    workflow.push_str("          signed=\"${signed_paths[0]}\"\n");
+    workflow.push_str("          test -f \"$signed\" && test ! \"$signed\" -ef \"build/distributions/$archive_name\" || { echo 'missing signed archive or unsigned archive selected' >&2; exit 1; }\n");
     workflow.push_str("          cp \"$signed\" \"$RUNNER_TEMP/jetbrains-plugin-signed.zip\"\n\n");
     workflow.push_str("      - name: Publish to JetBrains Marketplace\n");
     workflow.push_str("        env:\n");
@@ -1548,6 +1561,28 @@ fn push_jetbrains_sign_and_publish(workflow: &mut String, jetbrains: &ResolvedJe
     workflow.push_str("          fi\n");
     workflow.push_str("          curl --fail-with-body --retry 3 -X POST -H \"Authorization: Bearer $JETBRAINS_MARKETPLACE_TOKEN\" \"${upload_args[@]}\" \"$upload_url\"\n");
 }
+
+// Read the task's RegularFileProperty rather than guessing a filename. Bind
+// signature verification to that same output, including project overrides.
+const JETBRAINS_SIGNED_ARCHIVE_INIT_SCRIPT: &str = r#"gradle.projectsEvaluated {
+    def currentDir = gradle.startParameter.currentDir.canonicalFile
+    def projects = gradle.rootProject.allprojects.findAll { it.projectDir.canonicalFile == currentDir }
+    if (projects.size() != 1) {
+        throw new GradleException('expected exactly one JetBrains plugin project')
+    }
+    def sign = projects[0].tasks.named('signPlugin').get()
+    def verify = projects[0].tasks.named('verifyPluginSignature').get()
+    verify.inputArchiveFile.set(sign.signedArchiveFile)
+    verify.outputs.upToDateWhen { false }
+    verify.doLast {
+        def signed = sign.signedArchiveFile.get().asFile.canonicalFile
+        def unsigned = sign.archiveFile.get().asFile.canonicalFile
+        if (!signed.isFile() || !unsigned.isFile() || java.nio.file.Files.isSameFile(signed.toPath(), unsigned.toPath())) {
+            throw new GradleException('missing signed archive or unsigned archive selected')
+        }
+        new File(System.getenv('RUNNER_TEMP'), 'jetbrains-plugin-signed-path').text = signed.path + '\n'
+    }
+}"#;
 
 fn push_vscode_credential_preflight(workflow: &mut String, vscode: &ResolvedVscode) {
     workflow.push_str("      - name: Validate publish credentials\n");
@@ -1682,7 +1717,7 @@ fn push_vscode_publish_step(
         ),
         VscodePublisher::Ovsx => (
             "Publish to Open VSX",
-            "nix develop -c npx --yes ovsx publish release/*.vsix --pat \"$PUBLISH_PAT\" --skip-duplicate",
+            "nix develop -c npx --yes ovsx publish --packagePath release/*.vsix --pat \"$PUBLISH_PAT\" --skip-duplicate",
             "ovsx",
         ),
     };

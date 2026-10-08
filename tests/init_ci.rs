@@ -1810,8 +1810,10 @@ prepublish_commands = ["nix flake check --no-build"]
         "nix develop -c npx --yes ovsx create-namespace \"$OVSX_NAMESPACE\" --pat \"$PUBLISH_PAT\" || true"
     ));
     assert!(workflow.contains(
-        "nix develop -c npx --yes ovsx publish release/*.vsix --pat \"$PUBLISH_PAT\" --skip-duplicate"
+        "nix develop -c npx --yes ovsx publish --packagePath release/*.vsix --pat \"$PUBLISH_PAT\" --skip-duplicate"
     ));
+    #[cfg(unix)]
+    verify_editor_publish_package_arguments(temp.path(), &parsed);
 
     let check = simit_with_user_config(temp.path())
         .current_dir(temp.path())
@@ -1902,6 +1904,152 @@ prepublish_commands = ["nix flake check --no-build"]
     assert!(!workflow.contains("pkl-lsp-jetbrains"));
     assert!(workflow.contains("upload-artifact"));
     assert!(!workflow.contains("secrets.JETBRAINS_MARKETPLACE_TOKEN"));
+    #[cfg(unix)]
+    verify_jetbrains_signed_archive_selection(temp.path(), &yaml);
+}
+
+#[cfg(unix)]
+fn verify_editor_publish_package_arguments(root: &Path, yaml: &serde_yaml::Value) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let bin = root.join("publisher-bin");
+    fs::create_dir_all(&bin).unwrap();
+    let nix = bin.join("nix");
+    fs::write(
+        &nix,
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$PUBLISH_ARGUMENTS\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&nix, fs::Permissions::from_mode(0o755)).unwrap();
+    let release = root.join("release");
+    fs::create_dir(&release).unwrap();
+    let names = [
+        "universal",
+        "linux-x64",
+        "linux-arm64",
+        "darwin-x64",
+        "darwin-arm64",
+        "win32-x64",
+    ];
+    for name in names {
+        fs::write(release.join(format!("plugin-{name}.vsix")), "fixture").unwrap();
+    }
+    let path = std::env::join_paths(
+        std::iter::once(bin).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+    )
+    .unwrap();
+    for publisher in ["@vscode/vsce", "ovsx"] {
+        let script = yaml["jobs"]["publish"]["steps"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .filter_map(|step| step["run"].as_str())
+            .flat_map(str::lines)
+            .find(|line| line.contains(&format!("{publisher} publish ")))
+            .unwrap();
+        let arguments = root.join("publisher-arguments");
+        let result = Command::new("bash")
+            .args(["-c", script])
+            .current_dir(root)
+            .env("PATH", &path)
+            .env("PUBLISH_PAT", "fixture-not-a-token")
+            .env("PUBLISH_ARGUMENTS", &arguments)
+            .output()
+            .unwrap();
+        assert!(result.status.success(), "{publisher}: {result:?}");
+        let arguments = fs::read_to_string(arguments).unwrap();
+        let args = arguments.lines().collect::<Vec<_>>();
+        let start = args.iter().position(|arg| *arg == "--packagePath").unwrap() + 1;
+        let end = args.iter().position(|arg| *arg == "--pat").unwrap();
+        assert_eq!(end - start, 6, "{publisher}: {args:?}");
+        for name in names {
+            assert!(args[start..end].contains(&format!("release/plugin-{name}.vsix").as_str()));
+        }
+    }
+}
+
+#[cfg(unix)]
+fn verify_jetbrains_signed_archive_selection(root: &Path, yaml: &serde_yaml::Value) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let script = yaml["jobs"]["publish"]["steps"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .find(|step| step["name"] == "Sign plugin")
+        .unwrap()["run"]
+        .as_str()
+        .unwrap()
+        .replace(
+            "${{ github.event.inputs.version || github.ref_name }}",
+            "1.0.0",
+        );
+    assert!(script.contains("verify.inputArchiveFile.set(sign.signedArchiveFile)"));
+    assert!(script.contains("sign.signedArchiveFile.get().asFile"));
+    let bin = root.join("signer-bin");
+    fs::create_dir_all(&bin).unwrap();
+    let nix = bin.join("nix");
+    fs::write(&nix, r#"#!/bin/bash
+set -euo pipefail
+[[ "$*" == *'--init-script '* ]]
+case "$SIGNED_ARCHIVE_CASE" in
+  default) signed="$PWD/build/distributions/pkl-lsp-1.0.0-signed.zip";;
+  override) signed="$PWD/custom outputs/verified.zip";;
+  missing) signed="$PWD/missing.zip";;
+  ambiguous) printf 'first.zip\nsecond.zip\n' > "$RUNNER_TEMP/jetbrains-plugin-signed-path"; exit 0;;
+  unsigned) signed="$PWD/build/distributions/pkl-lsp-1.0.0.zip";;
+esac
+if [ "$SIGNED_ARCHIVE_CASE" != missing ] && [ "$SIGNED_ARCHIVE_CASE" != unsigned ]; then
+  mkdir -p "$(dirname "$signed")"
+  printf 'verified signed fixture' > "$signed"
+fi
+printf '%s\n' "$signed" > "$RUNNER_TEMP/jetbrains-plugin-signed-path"
+"#).unwrap();
+    fs::set_permissions(&nix, fs::Permissions::from_mode(0o755)).unwrap();
+    let path = std::env::join_paths(
+        std::iter::once(bin).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+    )
+    .unwrap();
+    for (case, accepted) in [
+        ("default", true),
+        ("override", true),
+        ("missing", false),
+        ("ambiguous", false),
+        ("unsigned", false),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("jetbrains-plugin-unsigned.zip"),
+            "unsigned fixture",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("jetbrains-plugin-archive-name"),
+            "pkl-lsp-1.0.0.zip\n",
+        )
+        .unwrap();
+        fs::write(temp.path().join("private-key-password"), "fixture-password").unwrap();
+        let plugin = root.join(format!("signing-{case}"));
+        fs::create_dir_all(&plugin).unwrap();
+        let result = Command::new("bash")
+            .args(["-c", &script])
+            .current_dir(root)
+            .env("PATH", &path)
+            .env("PLUGIN_DIR", plugin)
+            .env("RUNNER_TEMP", temp.path())
+            .env("SIGNED_ARCHIVE_CASE", case)
+            .output()
+            .unwrap();
+        assert_eq!(result.status.success(), accepted, "{case}: {result:?}");
+        let output = temp.path().join("jetbrains-plugin-signed.zip");
+        assert_eq!(output.exists(), accepted);
+        if accepted {
+            assert_eq!(
+                fs::read_to_string(output).unwrap(),
+                "verified signed fixture"
+            );
+        }
+    }
 }
 
 #[test]
