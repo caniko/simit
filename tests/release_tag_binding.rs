@@ -20,6 +20,23 @@ fn verify_publish_binding(member_scoped: bool) {
     .unwrap();
     fs::create_dir(temp.path().join("src")).unwrap();
     fs::write(temp.path().join("src/main.rs"), "fn main() {}\n").unwrap();
+    if member_scoped {
+        // Package-scoped workflows require more than one real workspace member.
+        let helper = temp.path().join("helper");
+        fs::create_dir_all(helper.join("src")).unwrap();
+        fs::write(
+            helper.join("Cargo.toml"),
+            "[package]\nname = \"helper\"\nversion = \"0.1.0\"\nedition = \"2024\"\npublish = false\n",
+        )
+        .unwrap();
+        fs::write(helper.join("src/lib.rs"), "").unwrap();
+        let manifest = fs::read_to_string(temp.path().join("Cargo.toml")).unwrap();
+        fs::write(
+            temp.path().join("Cargo.toml"),
+            manifest.replace("members = []", "members = [\"helper\"]"),
+        )
+        .unwrap();
+    }
     let mut command = common::simit();
     command.current_dir(temp.path()).args([
         "init",
