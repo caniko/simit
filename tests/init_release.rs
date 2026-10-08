@@ -237,7 +237,7 @@ fn github_release_depends_on_prebuild_and_forwards_attic_secret() {
         )
         .replace(
             "runner = \"atlas\"\n",
-            "runner = \"ubuntu-24.04\"\nprebuild_binaries = true\n",
+            "runner = \"ubuntu-24.04\"\nprebuild_binaries = true\nversion_attr = \"demo\"\n",
         )
         .replace(
             "[aur]",
