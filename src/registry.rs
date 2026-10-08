@@ -845,6 +845,7 @@ fn is_supplementary_workflow(file: &WorkflowFile) -> bool {
         name,
         "credential-visibility.yml"
             | "review-compatibility.yml"
+            | "qualify-release-generator.yaml"
             | "credential-visibility.yaml"
             | "pages.yml"
             | "pages.yaml"

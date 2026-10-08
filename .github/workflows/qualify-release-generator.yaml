@@ -3,7 +3,7 @@ name: Qualify signed-release generator
 
 on:
   push:
-    branches: [maintenance/release-tag-binding]
+    branches: [maintenance/release-tag-binding, trunk]
   pull_request:
 
 permissions:
