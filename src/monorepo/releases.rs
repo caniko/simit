@@ -127,7 +127,12 @@ pub(super) fn validate(root: &Path, graph: &Graph) -> Result<()> {
         .values()
         .flat_map(|c| c.cargo_packages.iter().cloned())
         .collect();
-    let mut names = namespaces.clone();
+    // Native package names belong to separate registries. Git release tags use
+    // the globally unique namespace above, even when npm and PyPI names match.
+    let mut names: BTreeSet<_> = namespaces
+        .iter()
+        .map(|name| ("cargo", name.clone()))
+        .collect();
     let mut manifests = BTreeSet::new();
     for release in graph.components.values().flat_map(|c| &c.releases) {
         ensure!(
@@ -141,9 +146,14 @@ pub(super) fn validate(root: &Path, graph: &Graph) -> Result<()> {
             release.manifest
         );
         let package = release.load(root)?;
+        let registry = if release.manifest.ends_with("/pyproject.toml") {
+            "python"
+        } else {
+            "npm"
+        };
         ensure!(
-            names.insert(package.name.clone()),
-            "duplicate release package name {}",
+            names.insert((registry, package.name.clone())),
+            "duplicate {registry} release package name {}",
             package.name
         );
     }
@@ -197,15 +207,36 @@ pub(crate) fn select(command: &ReleaseCommand) -> Result<Option<Selection>> {
         .iter()
         .map(|release| release.load(&root))
         .collect::<Result<Vec<_>>>()?;
+    // An explicit release namespace is authoritative. Native names remain a
+    // convenient selector only when they identify one owner in this component.
+    let index = if let Some(requested) = command.packages.first() {
+        if let Some(index) = packages
+            .iter()
+            .position(|package| &package.config.namespace == requested)
+        {
+            index
+        } else {
+            let matches: Vec<_> = packages
+                .iter()
+                .enumerate()
+                .filter(|(_, package)| &package.name == requested)
+                .collect();
+            ensure!(
+                matches.len() <= 1,
+                "ambiguous package {requested}; select --package <release namespace>"
+            );
+            matches
+                .first()
+                .with_context(|| format!("--package must belong to component {id}"))?
+                .0
+        }
+    } else {
+        0
+    };
     let package = packages
         .into_iter()
-        .find(|package| {
-            command
-                .packages
-                .first()
-                .is_none_or(|name| &package.name == name)
-        })
-        .with_context(|| format!("--package must belong to component {id}"))?;
+        .nth(index)
+        .context("missing release owner")?;
     let graph = project
         .monorepo
         .as_ref()

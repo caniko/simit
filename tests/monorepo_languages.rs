@@ -212,6 +212,178 @@ fn scoped_private_npm_bump_updates_only_root_lock_records() {
 }
 
 #[test]
+fn registry_names_can_overlap_but_release_namespaces_select_one_owner() {
+    let temp = fixture();
+    let root = temp.path();
+    write(
+        root,
+        "simit.toml",
+        r#"[monorepo]
+schema_version = 1
+[[monorepo.components]]
+id = "shared"
+paths = ["python", "node"]
+releases = [
+  { manifest = "python/pyproject.toml", namespace = "shared-python", publish = false },
+  { manifest = "node/package.json", namespace = "shared-node", publish = false },
+]
+checks = [{ id = "test", run = "true" }]
+"#,
+    );
+    write(
+        root,
+        "python/pyproject.toml",
+        "[project]\nname = 'shared'\nversion = '0.2.0'\n",
+    );
+    write(
+        root,
+        "python/uv.lock",
+        "version = 1\n[[package]]\nname = 'shared'\nversion = '0.2.0'\nsource = { editable = '.' }\n",
+    );
+    write(
+        root,
+        "node/package.json",
+        "{\"name\":\"shared\",\"version\":\"1.3.0\",\"private\":true}\n",
+    );
+    write(
+        root,
+        "node/package-lock.json",
+        "{\"name\":\"shared\",\"version\":\"1.3.0\",\"lockfileVersion\":3,\"packages\":{\"\":{\"name\":\"shared\",\"version\":\"1.3.0\"}}}\n",
+    );
+    git(root, &["add", "."]);
+    git(
+        root,
+        &["commit", "-qm", "Retain separate registry identities"],
+    );
+    let before = git(root, &["status", "--porcelain"]);
+    let ambiguous = run(
+        root,
+        &[
+            "release",
+            "plan",
+            "--component",
+            "shared",
+            "--package",
+            "shared",
+            "--json",
+        ],
+    );
+    assert!(!ambiguous.status.success(), "{ambiguous:?}");
+    assert!(
+        String::from_utf8_lossy(&ambiguous.stderr).contains("release namespace"),
+        "{ambiguous:?}"
+    );
+    assert_eq!(git(root, &["status", "--porcelain"]), before);
+    for (selector, version) in [("shared-python", "0.2.0"), ("shared-node", "1.3.0")] {
+        let plan = run(
+            root,
+            &[
+                "release",
+                "plan",
+                "--component",
+                "shared",
+                "--package",
+                selector,
+                "--json",
+            ],
+        );
+        assert!(plan.status.success(), "{plan:?}");
+        let plan: Value = serde_json::from_slice(&plan.stdout).unwrap();
+        assert_eq!(plan["entries"][0]["name"], "shared");
+        assert_eq!(plan["entries"][0]["version"], version);
+        assert_eq!(plan["entries"][0]["tag"], format!("{selector}/v{version}"));
+    }
+    let npm = fs::read(root.join("node/package.json")).unwrap();
+    let bumped = run(
+        root,
+        &[
+            "release",
+            "patch",
+            "--component",
+            "shared",
+            "--package",
+            "shared-python",
+            "--no-sign",
+            "-m",
+            "Release Python identity",
+        ],
+    );
+    assert!(bumped.status.success(), "{bumped:?}");
+    assert!(
+        fs::read_to_string(root.join("python/pyproject.toml"))
+            .unwrap()
+            .contains("0.2.1")
+    );
+    assert_eq!(fs::read(root.join("node/package.json")).unwrap(), npm);
+    assert_eq!(git(root, &["tag", "--list"]), "shared-python/v0.2.1\n");
+    let verify = run(
+        root,
+        &[
+            "release",
+            "verify",
+            "--component",
+            "shared",
+            "--package",
+            "shared-python",
+            "--json",
+        ],
+    );
+    let report: Value = serde_json::from_slice(&verify.stdout).unwrap();
+    for name in [
+        "tag presence",
+        "tagged package identity",
+        "CHANGELOG entry exists",
+    ] {
+        assert!(
+            report["results"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|check| check["check"] == name && check["status"] == "pass"),
+            "{report}"
+        );
+    }
+    let config = fs::read_to_string(root.join("simit.toml")).unwrap();
+    write(
+        root,
+        "simit.toml",
+        &config.replace("namespace = \"shared-node\"", "namespace = \"shared\""),
+    );
+    let namespaced = run(
+        root,
+        &[
+            "release",
+            "plan",
+            "--component",
+            "shared",
+            "--package",
+            "shared",
+            "--json",
+        ],
+    );
+    assert!(namespaced.status.success(), "{namespaced:?}");
+    let plan: Value = serde_json::from_slice(&namespaced.stdout).unwrap();
+    assert_eq!(plan["entries"][0]["tag"], "shared/v1.3.0");
+    write(
+        root,
+        "node/pyproject.toml",
+        "[project]\nname = 'shared'\nversion = '1.3.0'\n",
+    );
+    write(
+        root,
+        "simit.toml",
+        &config.replace("node/package.json", "node/pyproject.toml"),
+    );
+    let duplicate = run(root, &["monorepo", "plan", "--json"]);
+    assert!(!duplicate.status.success(), "{duplicate:?}");
+    assert!(
+        String::from_utf8_lossy(&duplicate.stderr)
+            .contains("duplicate python release package name"),
+        "{duplicate:?}"
+    );
+}
+
+#[test]
 fn non_cargo_failures_leave_versions_tags_and_index_untouched() {
     for (replacement, diagnostic) in [("run = \"exit 9\"", "test"), ("run = \"true\"", "worktree")]
     {

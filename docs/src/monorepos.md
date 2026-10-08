@@ -139,6 +139,13 @@ namespace supports npm package names such as `@example/engine` while retaining
 safe package-qualified tags. Versions must be static SemVer; dynamic Python
 version providers are rejected.
 
+Package names are unique within their native registry, so Python and npm may
+both retain a package named `shared`. Release namespaces remain globally unique.
+`--package` first selects an exact release namespace; a native package name is
+accepted only when it identifies one owner in the selected component. Use
+distinct namespaces such as `shared-python` and `shared-node` to choose between
+matching registry names. Ambiguous name-only selections fail before mutation.
+
 Python bumps preserve TOML comments and update the local package record in the
 nearest `uv.lock`. npm bumps preserve package metadata, dependencies and `private`,
 and update adjacent `package-lock.json`/`npm-shrinkwrap.json` root records. Stale
