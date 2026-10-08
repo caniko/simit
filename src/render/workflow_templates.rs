@@ -16,6 +16,18 @@ use crate::{
 
 pub(crate) const TEMPLATE_MARKER: &str = "# Simit workflow template: ";
 
+fn portable_path(path: &Path) -> String {
+    path.to_string_lossy().to_ascii_lowercase()
+}
+
+pub(crate) fn is_template_output(ci: &CiConfig, path: &Path, content: &str) -> bool {
+    content.contains(TEMPLATE_MARKER)
+        || ci
+            .workflow_templates
+            .keys()
+            .any(|output| portable_path(Path::new(output)) == portable_path(path))
+}
+
 fn relative_path(value: &str) -> bool {
     !value.is_empty()
         && !value.contains(['\n', '\r', '\0'])
@@ -41,6 +53,14 @@ pub(crate) fn validate_config(ci: &CiConfig) -> Result<()> {
     if ci.provider == Some(CiProvider::Crow) || ci.platform == Some(Platform::Gitlab) {
         bail!("[ci.workflow_templates] requires GitHub or Forgejo Actions");
     }
+    let outputs = ci
+        .workflow_templates
+        .keys()
+        .map(|output| portable_path(Path::new(output)))
+        .collect::<BTreeSet<_>>();
+    if outputs.len() != ci.workflow_templates.len() {
+        bail!("workflow templates collide on case-insensitive filesystems");
+    }
     for (output, source) in &ci.workflow_templates {
         let path = Path::new(output);
         if !relative_path(output)
@@ -53,13 +73,13 @@ pub(crate) fn validate_config(ci: &CiConfig) -> Result<()> {
                 path.extension().and_then(|part| part.to_str()),
                 Some("yaml" | "yml")
             )
-            || ci.workflow_templates.contains_key(source)
+            || outputs.contains(&portable_path(Path::new(source)))
         {
             bail!(
                 "invalid [ci.workflow_templates] mapping {output:?} = {source:?}; use distinct repository-relative template and Actions workflow paths"
             );
         }
-        if crate::registry::is_release_workflow_path(path) {
+        if crate::registry::is_release_workflow_path(Path::new(&portable_path(path))) {
             bail!("workflow template {output} collides with a release-owned workflow");
         }
     }
@@ -120,7 +140,7 @@ pub(crate) fn append(root: &Path, ci: &CiConfig, files: &mut Vec<GeneratedFile>)
         .context("resolving workflow template root")?;
     let builtin_paths = files
         .iter()
-        .map(|file| file.relative_path.clone())
+        .map(|file| portable_path(&file.relative_path))
         .collect::<BTreeSet<_>>();
     let mut templates = Vec::new();
     for (output, source) in &ci.workflow_templates {
@@ -137,17 +157,17 @@ pub(crate) fn append(root: &Path, ci: &CiConfig, files: &mut Vec<GeneratedFile>)
                 );
             }
         }
-        if builtin_paths.contains(&relative) {
+        if builtin_paths.contains(&portable_path(&relative)) {
             bail!("workflow template {output} collides with a built-in generated workflow");
         }
-        if builtin_paths.contains(Path::new(source)) {
+        if builtin_paths.contains(&portable_path(Path::new(source))) {
             bail!(
                 "workflow template source {source} is a built-in generated output; use a project-owned template"
             );
         }
         if !builtin_paths
             .iter()
-            .any(|path| path.parent() == relative.parent())
+            .any(|path| Path::new(path).parent() == relative.parent())
         {
             bail!("workflow template {output} does not match the selected Actions platform");
         }
@@ -160,7 +180,7 @@ pub(crate) fn append(root: &Path, ci: &CiConfig, files: &mut Vec<GeneratedFile>)
         }
         if builtin_paths
             .iter()
-            .any(|builtin| path == canonical_root.join(builtin))
+            .any(|builtin| portable_path(&path) == portable_path(&canonical_root.join(builtin)))
         {
             bail!(
                 "workflow template source {source} resolves to a built-in generated output; use a project-owned template"

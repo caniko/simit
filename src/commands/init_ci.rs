@@ -1336,6 +1336,7 @@ pub(crate) fn workflow_snapshots_for_platform(
     workspace_root: &Path,
     platform: Platform,
 ) -> Result<Vec<WorkflowSnapshot>> {
+    let config = ProjectConfig::load(workspace_root)?;
     let workflow_dir = PathBuf::from(platform.workflow_dir());
     let absolute_dir = workspace_root.join(&workflow_dir);
     let entries = match fs::read_dir(&absolute_dir) {
@@ -1365,7 +1366,11 @@ pub(crate) fn workflow_snapshots_for_platform(
         let content =
             fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
         if generated_workflow_marker_present(&content)
-            && !content.starts_with(crate::render::workflow_templates::TEMPLATE_MARKER)
+            && !crate::render::workflow_templates::is_template_output(
+                &config.ci,
+                &workflow_dir.join(entry.file_name()),
+                &content,
+            )
             && is_ci_managed_workflow_name(&entry.file_name())
         {
             snapshots.push(WorkflowSnapshot {

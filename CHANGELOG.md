@@ -34,6 +34,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Reject opposite-platform generated template sources, enforce effective CLI
   backend constraints in check and write modes, and report missing built-ins as
   ordinary drift even when only project template outputs remain.
+- Identify template outputs by configured path even after ownership-header edits,
+  and reject case-insensitive collisions with built-ins, releases, or other templates.
 - Keep the default development environment usable when a worktree lacks the
   optional sibling language-server checkout.
 - Wait for exact crates.io dependency resolution through Cargo after each

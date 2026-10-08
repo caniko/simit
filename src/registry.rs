@@ -948,9 +948,11 @@ fn infer_expected_ci_files(
         .iter()
         .filter(|file| {
             !crate::review::generation::is_review_path(&file.relative_path)
-                && !file
-                    .content
-                    .starts_with(crate::render::workflow_templates::TEMPLATE_MARKER)
+                && !crate::render::workflow_templates::is_template_output(
+                    &config.ci,
+                    &file.relative_path,
+                    &file.content,
+                )
         })
         .cloned()
         .collect();

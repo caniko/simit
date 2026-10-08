@@ -225,6 +225,100 @@ fn builtin_workflows_cannot_be_sources_even_when_the_previous_output_exists() {
 }
 
 #[test]
+fn template_outputs_reject_portable_case_collisions_without_writes() {
+    for output in [
+        ".github/workflows/NIX-BUILDS.yaml",
+        ".github/workflows/RELEASE.yml",
+    ] {
+        let temp = project();
+        config(&temp, output, ".simit/templates/tests.yml", "ubuntu-24.04");
+        let before = fs::read_to_string(temp.path().join("simit.toml")).unwrap();
+        for args in [vec![], vec!["--check", "--diff"]] {
+            let result = generate(&temp, &args);
+            assert!(!result.status.success(), "{output}: {result:?}");
+            assert!(String::from_utf8_lossy(&result.stderr).contains("collides"));
+            assert_eq!(
+                fs::read_to_string(temp.path().join("simit.toml")).unwrap(),
+                before
+            );
+            assert!(
+                !temp
+                    .path()
+                    .join(".github/workflows/nix-builds.yaml")
+                    .exists()
+            );
+        }
+    }
+    let temp = project();
+    let mut cfg = fs::read_to_string(temp.path().join("simit.toml")).unwrap();
+    cfg = cfg.replace(
+        "[ci.workflow_variables]",
+        "'.github/workflows/Tests.yml'='.simit/templates/tests.yml'\n[ci.workflow_variables]",
+    );
+    fs::write(temp.path().join("simit.toml"), cfg).unwrap();
+    let result = generate(&temp, &[]);
+    assert!(!result.status.success(), "{result:?}");
+    assert!(String::from_utf8_lossy(&result.stderr).contains("case-insensitive"));
+}
+
+#[test]
+fn edited_template_headers_do_not_infer_or_persist_builtin_gates() {
+    let temp = project();
+    fs::write(
+        temp.path().join("Cargo.toml"),
+        "[package]\nname='edited-template'\nversion='0.1.0'\nedition='2024'\n",
+    )
+    .unwrap();
+    fs::create_dir(temp.path().join("src")).unwrap();
+    fs::write(temp.path().join("src/main.rs"), "fn main() {}\n").unwrap();
+    fs::write(temp.path().join("simit.toml"), "[ci]\nplatform='github'\nprovider='actions'\nruntime='cargo'\n[ci.workflow_templates]\n'.github/workflows/ci-other.yaml'='.simit/templates/tests.yml'\n").unwrap();
+    fs::write(temp.path().join(".simit/templates/tests.yml"), "name: Custom\non: [push]\njobs:\n  project:\n    runs-on: windows-2022\n    steps:\n      - run: cargo deny check\n").unwrap();
+    let result = generate(&temp, &[]);
+    assert!(result.status.success(), "{result:?}");
+    let cfg_path = temp.path().join("simit.toml");
+    let baseline = fs::read_to_string(&cfg_path).unwrap();
+    // Leave the option omitted so a contaminated inference would persist true.
+    fs::write(
+        &cfg_path,
+        baseline
+            .lines()
+            .filter(|line| !line.starts_with("with_deny = "))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n",
+    )
+    .unwrap();
+    let output = temp.path().join(".github/workflows/ci-other.yaml");
+    let original = fs::read_to_string(&output).unwrap();
+    fs::write(
+        &output,
+        "\n# Project note before the generated header\n".to_owned()
+            + &original.replace("# Simit workflow template:", "# Edited template header:"),
+    )
+    .unwrap();
+    assert_eq!(audit_ci(temp.path()).unwrap().status, FeatureStatus::Drift);
+    let result = generate(&temp, &[]);
+    assert!(result.status.success(), "{result:?}");
+    assert!(
+        !fs::read_to_string(temp.path().join(".github/workflows/ci.yaml"))
+            .unwrap()
+            .contains("cargo deny check")
+    );
+    assert!(
+        fs::read_to_string(cfg_path)
+            .unwrap()
+            .contains("with_deny = false")
+    );
+    assert_eq!(fs::read_to_string(output).unwrap(), original);
+    let result = generate(&temp, &["--check", "--diff"]);
+    assert!(result.status.success(), "{result:?}");
+    assert_eq!(
+        audit_ci(temp.path()).unwrap().status,
+        FeatureStatus::Managed
+    );
+}
+
+#[test]
 fn inactive_platform_generated_sources_are_rejected_before_reconciliation() {
     let temp = project();
     let source = ".forgejo/workflows/ci.yaml";
