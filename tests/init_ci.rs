@@ -743,7 +743,14 @@ runtime = "nix"
 
     let workflow = read(&temp.path().join(".github/workflows/ci.yaml"));
     assert_yaml_parses(&workflow);
-    assert!(workflow.contains("strategy:\n      fail-fast: false\n      matrix:\n"));
+    let parsed: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
+    assert_eq!(parsed["permissions"]["contents"], "read");
+    assert_eq!(
+        parsed["concurrency"]["group"],
+        "${{ github.workflow }}-${{ github.event.pull_request.head.ref || github.ref_name }}"
+    );
+    assert_eq!(parsed["jobs"]["flake-check"]["strategy"]["max-parallel"], 2);
+    assert_eq!(parsed["jobs"]["flake-check"]["timeout-minutes"], 60);
     assert!(workflow.contains("- system: aarch64-darwin\n            runner: macos-15"));
     assert!(workflow.contains("- system: aarch64-linux\n            runner: ubuntu-24.04-arm"));
     assert!(workflow.contains("- system: x86_64-linux\n            runner: ubuntu-24.04"));
@@ -753,7 +760,7 @@ runtime = "nix"
     ));
     assert!(
         workflow
-            .contains("nix flake check --no-update-lock-file --system \"${{ matrix.system }}\"")
+            .contains("nix flake check --no-update-lock-file --max-jobs 1 --cores 2 --system \"${{ matrix.system }}\"")
     );
     assert!(!workflow.contains("--all-systems"));
 

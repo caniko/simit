@@ -600,7 +600,8 @@ fn publish_workspace_workflow(
         w.push_str("cargo publish -p ");
         w.push_str(&shell_word(name));
         w.push_str(" --dry-run\n\n");
-        // Publish with honest conflict handling + bounded propagation wait.
+        // Publish with honest conflict handling. Readiness is a separate step
+        // so checksum-based resumes also wait for actual Cargo resolution.
         w.push_str("      - name: Publish\n");
         w.push_str("        env:\n");
         w.push_str("          CRATES_IO_API_TOKEN: ${{ secrets.CRATES_IO_API_TOKEN }}\n");
@@ -640,12 +641,42 @@ fn publish_workspace_workflow(
         w.push_str("cargo publish -p ");
         w.push_str(&shell_word(name));
         w.push('\n');
-        w.push_str("          # Bounded propagation wait: dependents need this version visible.\n");
-        w.push_str("          for attempt in $(seq 1 20); do\n");
-        w.push_str("            code=\"$(curl --retry 2 -sS -o /dev/null -w '%{http_code}' -A 'simit publish-workspace propagation' \"https://crates.io/api/v1/crates/${crate_name}/${version}\" || echo 000)\"\n");
-        w.push_str("            case \"$code\" in 200) echo \"propagated ${crate_name} ${version} (attempt $attempt)\"; break;; 404) echo \"waiting for ${crate_name} ${version} (attempt $attempt/20)\"; sleep 30;; 401|403) echo \"authorization failure while waiting (HTTP $code)\" >&2; exit 1;; *) echo \"unexpected registry status $code while waiting\" >&2; exit 1;; esac\n");
-        w.push_str("            if [ \"$attempt\" = 20 ]; then echo \"propagation timeout for ${crate_name} ${version}\" >&2; exit 1; fi\n");
-        w.push_str("          done\n\n");
+        w.push('\n');
+        w.push_str("      - name: Wait for exact registry resolution\n");
+        w.push_str("        run: |\n");
+        w.push_str("          set -euo pipefail\n");
+        w.push_str("          crate_name=");
+        w.push_str(&shell_quote(name));
+        w.push('\n');
+        w.push_str(r#"          version="${GITHUB_REF_NAME:-${GITHUB_REF#refs/tags/}}"
+          probe="$(mktemp -d)"
+          trap 'rm -rf "$probe"' EXIT
+          mkdir "$probe/src"
+          touch "$probe/src/lib.rs"
+          printf '[package]\nname = "simit-registry-probe"\nversion = "0.0.0"\nedition = "2021"\n[workspace]\n[dependencies]\n%s = { version = "=%s", registry = "crates-io", default-features = false }\n' "$crate_name" "$version" > "$probe/Cargo.toml"
+          # The web API may be ready before the index. Fetch an exact registry
+          # dependency from a workspace-isolated manifest, without a cached lock.
+          # Cargo.lock retains binary-only packages too; metadata omits them.
+          for attempt in $(seq 1 20); do
+            rm -f "$probe/Cargo.lock"
+            if timeout --kill-after=5s 60s "#);
+        w.push_str(prefix);
+        w.push_str(r#"cargo fetch --manifest-path "$probe/Cargo.toml" > "$probe/fetch.log" 2> "$probe/error.log" && awk -v wanted_name="$crate_name" -v wanted_version="$version" '
+              function matches() { return name == wanted_name && version == wanted_version && source == "registry+https://github.com/rust-lang/crates.io-index" }
+              /^\[\[package\]\]/ { if (matches()) found = 1; name = version = source = "" }
+              /^(name|version|source) = "/ { value = $3; gsub(/"/, "", value); if ($1 == "name") name = value; else if ($1 == "version") version = value; else source = value }
+              END { exit !(found || matches()) }
+            ' "$probe/Cargo.lock"; then
+              echo "resolved and fetched ${crate_name} ${version} from crates.io (attempt $attempt)"
+              break
+            fi
+            cat "$probe/error.log" >&2
+            if [ "$attempt" = 20 ]; then echo "registry resolution timeout for ${crate_name} ${version}" >&2; exit 1; fi
+            echo "waiting for exact registry resolution of ${crate_name} ${version} (attempt $attempt/20)"
+            sleep 30
+          done
+
+"#);
         previous = job.clone();
     }
     // Auditable summary (always runs, never publishes).
@@ -766,7 +797,13 @@ pub fn nix_flake_ci_file_with_system_runners(
     let mut workflow = String::new();
     push_generated_workflow_header(&mut workflow);
     workflow.push_str("name: Nix flake check\n\non:\n  push:\n  pull_request:\n\n");
-    push_platform_concurrency(&mut workflow, platform);
+    push_github_read_permissions(&mut workflow, platform);
+    if platform == Platform::Github && !system_runners.is_empty() {
+        // Coalesce push and PR qualification for the same source branch.
+        workflow.push_str("concurrency:\n  group: ${{ github.workflow }}-${{ github.event.pull_request.head.ref || github.ref_name }}\n  cancel-in-progress: true\n\n");
+    } else {
+        push_platform_concurrency(&mut workflow, platform);
+    }
     workflow.push_str("jobs:\n  flake-check:\n");
     if system_runners.is_empty() {
         workflow.push_str("    runs-on: ");
@@ -776,8 +813,7 @@ pub fn nix_flake_ci_file_with_system_runners(
         if platform != Platform::Github {
             bail!("native per-system Nix runners require GitHub Actions");
         }
-        workflow
-            .push_str("    strategy:\n      fail-fast: false\n      matrix:\n        include:\n");
+        workflow.push_str("    timeout-minutes: 60\n    strategy:\n      fail-fast: false\n      max-parallel: 2\n      matrix:\n        include:\n");
         for (system, runner) in system_runners {
             workflow.push_str("          - system: ");
             workflow.push_str(system);
@@ -803,7 +839,7 @@ pub fn nix_flake_ci_file_with_system_runners(
             workflow.push_str("      - name: Check flake\n        run: nix flake check\n");
         } else {
             workflow.push_str(
-                "      - name: Verify runner system\n        run: test \"$(nix eval --impure --raw --expr builtins.currentSystem)\" = \"${{ matrix.system }}\"\n      - name: Check flake\n        run: nix flake check --no-update-lock-file --system \"${{ matrix.system }}\"\n",
+                "      - name: Verify runner system\n        run: test \"$(nix eval --impure --raw --expr builtins.currentSystem)\" = \"${{ matrix.system }}\"\n      - name: Check flake\n        run: nix flake check --no-update-lock-file --max-jobs 1 --cores 2 --system \"${{ matrix.system }}\"\n",
             );
         }
     } else {
@@ -822,7 +858,7 @@ pub fn nix_flake_ci_file_with_system_runners(
         if selected(CiComponent::Checks) {
             workflow.push_str("      - name: Build flake checks\n        run: nix flake check");
             if !system_runners.is_empty() {
-                workflow.push_str(" --no-update-lock-file --system \"${{ matrix.system }}\"");
+                workflow.push_str(" --no-update-lock-file --max-jobs 1 --cores 2 --system \"${{ matrix.system }}\"");
             }
             workflow.push('\n');
         }
@@ -1056,6 +1092,16 @@ pub fn nix_build_matrix_file_with_options(
         for (index, script) in options.post_build.iter().enumerate() {
             workflow.push_str(&format!(
                 "      - name: Retain Nix results {}\n        run: |\n",
+                index + 1
+            ));
+            for line in script.lines() {
+                workflow.push_str(&format!("          {line}\n"));
+            }
+        }
+        // Collect failed-build diagnostics without keeping canceled runs alive.
+        for (index, script) in options.post_build_always.iter().enumerate() {
+            workflow.push_str(&format!(
+                "      - name: Retain Nix diagnostics {}\n        if: ${{{{ !cancelled() }}}}\n        run: |\n",
                 index + 1
             ));
             for line in script.lines() {
@@ -2173,7 +2219,7 @@ fn ci_workflow_single_job(
     }
     workflow.push('\n');
     push_github_read_permissions(&mut workflow, platform);
-    push_provider_concurrency(&mut workflow, platform);
+    push_rust_ci_concurrency(&mut workflow, platform, &options);
     workflow.push_str("jobs:\n");
     workflow.push_str("  test:\n");
     push_member_job_name(&mut workflow, package, &options, "test");
@@ -2310,7 +2356,7 @@ fn ci_workflow_multi_job(
     workflow.push_str("    tags-ignore: [\"**\"]\n");
     workflow.push('\n');
     push_github_read_permissions(&mut workflow, platform);
-    push_provider_concurrency(&mut workflow, platform);
+    push_rust_ci_concurrency(&mut workflow, platform, &options);
     workflow.push_str("jobs:\n");
 
     struct StepDef<'a> {
@@ -3572,6 +3618,17 @@ fn push_github_concurrency(workflow: &mut String) {
         "  group: ${{ github.workflow_ref }}-${{ github.event_name }}-${{ github.head_ref || github.ref_name }}\n",
     );
     workflow.push_str("  cancel-in-progress: true\n\n");
+}
+
+fn push_rust_ci_concurrency(workflow: &mut String, platform: Platform, options: &CiOptions) {
+    if platform == Platform::Github && options.workspace_strategy == WorkspaceStrategy::Aggregate {
+        // workflow_ref contains the event ref, so it cannot coalesce a branch
+        // push with its PR merge ref. Aggregate CI has one stable workflow path.
+        // Include the source repository so a fork's same-named branch is distinct.
+        workflow.push_str("concurrency:\n  group: .github/workflows/ci.yaml-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event.pull_request.head.ref || github.ref_name }}\n  cancel-in-progress: true\n\n");
+    } else {
+        push_provider_concurrency(workflow, platform);
+    }
 }
 
 fn push_github_read_permissions(workflow: &mut String, platform: Platform) {

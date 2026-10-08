@@ -161,6 +161,61 @@ fn rust_flake_can_select_exact_nix_gates_from_its_workspace_root() {
 }
 
 #[test]
+fn diagnostics_run_after_failed_builds_before_upload_without_relaxing_the_gate() {
+    let temp = project(
+        "[ci.nix_build]\nonly = true\ncapture_results = true\npost_build = [\"echo qualified\"]\npost_build_always = [\"python3 ci/retain-diagnostics.py\"]",
+    );
+    let output = generate(&temp, &[]);
+    assert!(output.status.success(), "{output:?}");
+    let value = workflow(&temp);
+    let steps = value["jobs"]["build"]["steps"].as_sequence().unwrap();
+    let build = steps
+        .iter()
+        .position(|s| s["name"] == "Build ${{ matrix.installable }}")
+        .unwrap();
+    let success = steps
+        .iter()
+        .position(|s| s["name"] == "Retain Nix results 1")
+        .unwrap();
+    let diagnostics = steps
+        .iter()
+        .position(|s| s["name"] == "Retain Nix diagnostics 1")
+        .unwrap();
+    let upload = steps
+        .iter()
+        .position(|s| s["name"] == "Upload Nix build evidence")
+        .unwrap();
+    assert!(build < success && success < diagnostics && diagnostics < upload);
+    assert!(steps[success]["if"].is_null());
+    assert_eq!(steps[diagnostics]["if"], "${{ !cancelled() }}");
+    assert_eq!(steps[upload]["if"], "always()");
+    assert!(
+        steps[build]["run"]
+            .as_str()
+            .unwrap()
+            .contains("exit \"$status\"")
+    );
+    assert!(steps.iter().all(|s| s["continue-on-error"].is_null()));
+    assert!(generate(&temp, &["--check", "--diff"]).status.success());
+    assert!(
+        fs::read_to_string(temp.path().join("simit.toml"))
+            .unwrap()
+            .contains("post_build_always")
+    );
+
+    let invalid = project("[ci.nix_build]\npost_build_always = [\"echo diagnostics\"]");
+    let output = generate(&invalid, &[]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("capture_results"));
+    assert!(
+        !invalid
+            .path()
+            .join(".github/workflows/nix-builds.yaml")
+            .exists()
+    );
+}
+
+#[test]
 fn python_flake_can_select_exact_nix_gates_without_language_ci() {
     let temp = project("[ci.nix_build]\nonly = true");
     fs::write(

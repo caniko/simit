@@ -154,6 +154,7 @@ capture_results = true
 artifact_retention_days = 14
 extra_setup = ["python3 ci/prepare-input-access.py"]
 post_build = ["python3 ci/retain-receipts.py"]
+post_build_always = ["python3 ci/retain-diagnostics.py"]
 artifact_paths = ["${{ runner.temp }}/receipts/**"]
 required_secrets = ["FLAKE_SSH_KEY"]
 
@@ -196,6 +197,14 @@ directory. They must fail if an expected receipt is missing. The pinned upload
 action runs even after failure and includes any explicit `artifact_paths`.
 Artifacts retain evidence, not Nix store closures; an empty or partial result
 file after failure is not a passing receipt.
+
+Use `post_build_always` for diagnostic collection that must run after a failed
+build or setup step. These commands run with `if: ${{ !cancelled() }}` before
+artifact upload, honoring workflow cancellation. They must handle an absent or
+partial build log and result map. A collector failure still fails the job, and a
+successful collector never clears
+the earlier build failure. Both post-build command lists require
+`capture_results = true`. Keep qualification receipt validation in `post_build`.
 
 Omitting `[ci.nix_build]` preserves the existing generated matrix defaults.
 
