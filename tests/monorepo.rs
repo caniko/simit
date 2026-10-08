@@ -420,6 +420,9 @@ fn qualification_generation_is_complete_and_member_stable() {
         "qualified",
     ] {
         assert!(yaml["jobs"][id].is_mapping(), "missing {id}");
+        if id != "qualified" {
+            assert_public_input_transport(&yaml["jobs"][id]);
+        }
     }
     assert!(text.contains("--base \"$BASE_REVISION\""));
     assert!(text.contains("fetch-depth: 0"));
@@ -794,9 +797,23 @@ fn independent_publication_qualifies_native_components_and_keeps_version_drift_s
     assert_eq!(workflow["permissions"]["contents"], "read");
     assert_eq!(workflow["jobs"]["validate"]["needs"][0], "qualified");
     assert_eq!(
-        workflow["jobs"]["plan"]["steps"][2]["env"]["BASE_REVISION"],
+        workflow["jobs"]["plan"]["steps"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .find(|step| step["id"] == "plan")
+            .unwrap()["env"]["BASE_REVISION"],
         ""
     );
+    for id in [
+        "plan",
+        "component-core",
+        "component-rust",
+        "component-python",
+        "component-worker",
+    ] {
+        assert_public_input_transport(&workflow["jobs"][id]);
+    }
     assert_eq!(
         workflow["jobs"]["component-python"]["strategy"]["matrix"]["include"][0]["runner"],
         "macos-14"
@@ -838,4 +855,33 @@ fn independent_publication_qualifies_native_components_and_keeps_version_drift_s
         .output()
         .unwrap();
     assert!(!output.status.success(), "{output:?}");
+}
+
+fn assert_public_input_transport(job: &serde_yaml::Value) {
+    let steps = job["steps"].as_sequence().unwrap();
+    let first_eval = steps
+        .iter()
+        .position(|step| {
+            step["run"]
+                .as_str()
+                .is_some_and(|run| run.contains("nix develop"))
+        })
+        .unwrap();
+    let transport = steps
+        .iter()
+        .position(|step| {
+            step["run"]
+                .as_str()
+                .is_some_and(|run| run.contains("insteadOf"))
+        })
+        .unwrap();
+    assert!(transport < first_eval);
+    let run = steps[transport]["run"].as_str().unwrap();
+    for forge in ["github.com", "codeberg.org"] {
+        assert!(run.contains(&format!(
+            "url.https://{forge}/.insteadOf ssh://git@{forge}/"
+        )));
+        assert!(run.contains(&format!("url.https://{forge}/.insteadOf git@{forge}:")));
+    }
+    assert!(!run.contains("secrets."));
 }

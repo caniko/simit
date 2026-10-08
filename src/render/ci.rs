@@ -3852,11 +3852,19 @@ fn push_install_nix_step_with_cache(
     push_github_input_transport(workflow);
 }
 
+pub(crate) const GITHUB_INPUT_TRANSPORT: &str = "git config --global --add url.https://github.com/.insteadOf ssh://git@github.com/\ngit config --global --add url.https://github.com/.insteadOf git@github.com:\n";
+
 pub(crate) fn push_github_input_transport(workflow: &mut String) {
     // Public GitHub flake inputs often retain operator SSH URLs in their locks.
     // Hosted runners have no SSH key; resolve those inputs over HTTPS without
     // changing pinned revisions or borrowing deployment credentials.
-    workflow.push_str("      - name: Configure GitHub input transport\n        run: |\n          git config --global --add url.https://github.com/.insteadOf ssh://git@github.com/\n          git config --global --add url.https://github.com/.insteadOf git@github.com:\n\n");
+    workflow.push_str("      - name: Configure GitHub input transport\n        run: |\n");
+    for line in GITHUB_INPUT_TRANSPORT.lines() {
+        workflow.push_str("          ");
+        workflow.push_str(line);
+        workflow.push('\n');
+    }
+    workflow.push('\n');
 }
 
 fn push_nix_cargo_bin_path_step(workflow: &mut String) {

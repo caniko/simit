@@ -17,6 +17,16 @@ fn install_nix() -> Value {
     json!({"uses": immutable_action_ref("https://github.com/cachix/install-nix-action", "v31").trim_start_matches("https://github.com/").split(" #").next().unwrap()})
 }
 
+fn input_transport() -> Value {
+    // Imported public component locks may retain their original operator SSH
+    // transport. Reuse exact revisions over HTTPS without deployment keys.
+    let run = format!(
+        "{}git config --global --add url.https://codeberg.org/.insteadOf ssh://git@codeberg.org/\ngit config --global --add url.https://codeberg.org/.insteadOf git@codeberg.org:\n",
+        crate::render::ci::GITHUB_INPUT_TRANSPORT
+    );
+    json!({"name": "Configure public input transport", "run": run})
+}
+
 pub(crate) fn files(root: &Path, config: &ProjectConfig) -> Result<Vec<GeneratedFile>> {
     if config.ci.platform != Some(Platform::Github)
         || config.ci.provider.is_some_and(|p| p != CiProvider::Actions)
@@ -58,7 +68,7 @@ pub(crate) fn files(root: &Path, config: &ProjectConfig) -> Result<Vec<Generated
         "timeout-minutes": 20,
         "env": {"NIX_CONFIG": "experimental-features = nix-command flakes"},
         "outputs": {"selected": "${{ steps.plan.outputs.selected }}"},
-        "steps": [checkout(), install_nix(), {
+        "steps": [checkout(), install_nix(), input_transport(), {
             "id": "plan", "name": "Select affected components", "shell": "bash",
             "env": {"BASE_REVISION": "${{ github.event.pull_request.base.sha || github.event.before }}"},
             "run": "set -euo pipefail\nif [ -n \"$BASE_REVISION\" ] && git cat-file -e \"$BASE_REVISION^{commit}\" 2>/dev/null; then\n  nix develop .#ci --command simit monorepo plan --base \"$BASE_REVISION\" --json > plan.json\nelse\n  nix develop .#ci --command simit monorepo plan --json > plan.json\nfi\nselected=$(jq -c '.selected' plan.json)\nprintf 'selected=%s\\n' \"$selected\" >> \"$GITHUB_OUTPUT\"\ncat plan.json\n"
@@ -94,7 +104,7 @@ pub(crate) fn files(root: &Path, config: &ProjectConfig) -> Result<Vec<Generated
                 json!({"fail-fast": false, "max-parallel": 2, "matrix": {"include": rows}});
             job["runs-on"] = json!("${{ matrix.runner }}");
         }
-        let mut steps = vec![checkout(), install_nix()];
+        let mut steps = vec![checkout(), install_nix(), input_transport()];
         steps.push(json!({"name": "Verify generated workflows", "run": "nix develop .#ci --command simit init ci --check"}));
         for gate in &component.checks {
             // The project-owned command is one argument to sh, not an interpolated
@@ -147,7 +157,13 @@ pub(crate) fn files(root: &Path, config: &ProjectConfig) -> Result<Vec<Generated
             let mut qualification = workflow["jobs"].clone();
             // A release always qualifies the entire graph on its native runners,
             // including non-Cargo checks, before the credentialed publish job.
-            qualification["plan"]["steps"][2]["env"]["BASE_REVISION"] = json!("");
+            let plan = qualification["plan"]["steps"]
+                .as_array_mut()
+                .context("qualification plan requires steps")?
+                .iter_mut()
+                .find(|step| step["id"] == "plan")
+                .context("qualification plan step is missing")?;
+            plan["env"]["BASE_REVISION"] = json!("");
             release["jobs"]
                 .as_object_mut()
                 .context("release jobs must be a mapping")?
