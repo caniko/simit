@@ -72,7 +72,9 @@ project-owned inputs, rather than snapshots of outputs from an earlier run.
 Keep template sources outside Actions workflow directories, or give them a
 non-workflow extension such as `.yaml.in`, so the source is not itself executed.
 Destinations must be files with directory parents; validation rejects existing
-directories and portable case-insensitive path collisions before any writes.
+directories, symlinks, portable case-insensitive path collisions, and hard-linked
+aliases of template sources or planned outputs before any writes. Each generated
+destination must have its own file identity.
 This feature supports GitHub and Forgejo Actions, including exact-only Nix
 qualification; it does not replace the
 project's test selections or permission policy.

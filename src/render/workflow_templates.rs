@@ -209,6 +209,27 @@ pub(crate) fn append(root: &Path, ci: &CiConfig, files: &mut Vec<GeneratedFile>)
                 }
             }
         }
+        let destination = root.join(&relative);
+        if destination.try_exists()? {
+            let sources = ci.workflow_templates.values().map(Path::new);
+            let outputs = ci.workflow_templates.keys().map(Path::new);
+            let builtins = files.iter().map(|file| file.relative_path.as_path());
+            for candidate in sources.chain(outputs).chain(builtins) {
+                if candidate == relative {
+                    continue;
+                }
+                let candidate = root.join(candidate);
+                if candidate.try_exists()?
+                    && same_file::is_same_file(&destination, &candidate)
+                        .context("comparing workflow template file identities")?
+                {
+                    bail!(
+                        "workflow template output {output} aliases another source or generated output at {}; use distinct files",
+                        candidate.display()
+                    );
+                }
+            }
+        }
         if builtin_paths.contains(&portable_path(&relative)) {
             bail!("workflow template {output} collides with a built-in generated workflow");
         }

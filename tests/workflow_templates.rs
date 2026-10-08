@@ -176,6 +176,51 @@ fn active_workflow_sources_are_rejected_without_rewriting_builtins() {
 }
 
 #[test]
+fn hard_linked_destinations_fail_without_mutating_sources_or_other_outputs() {
+    for alias in [
+        ".simit/templates/tests.yml",
+        ".github/workflows/nix-builds.yaml",
+        ".github/workflows/other.yml",
+    ] {
+        let temp = project();
+        let cfg_path = temp.path().join("simit.toml");
+        let cfg = fs::read_to_string(&cfg_path).unwrap().replace(
+            "[ci.workflow_variables]",
+            "'.github/workflows/other.yml'='.simit/templates/tests.yml'\n[ci.workflow_variables]",
+        );
+        fs::write(&cfg_path, &cfg).unwrap();
+        assert!(generate(&temp, &[]).status.success());
+        let output = temp.path().join(".github/workflows/tests.yml");
+        let alias_path = temp.path().join(alias);
+        fs::remove_file(&output).unwrap();
+        fs::hard_link(&alias_path, &output).unwrap();
+        let retained = [
+            ".simit/templates/tests.yml",
+            ".github/workflows/nix-builds.yaml",
+            ".github/workflows/other.yml",
+            ".github/workflows/tests.yml",
+        ]
+        .map(|path| (path, fs::read(temp.path().join(path)).unwrap()));
+        let cfg = cfg
+            .replace("ubuntu-24.04", "windows-2022")
+            .replace("nix_builds=['.#default']", "nix_builds=['.#changed']");
+        fs::write(&cfg_path, &cfg).unwrap();
+        for args in [vec![], vec!["--check", "--diff"]] {
+            let result = generate(&temp, &args);
+            assert!(!result.status.success(), "{alias}: {result:?}");
+            assert!(
+                String::from_utf8_lossy(&result.stderr)
+                    .contains("aliases another source or generated output")
+            );
+            for (path, content) in &retained {
+                assert_eq!(fs::read(temp.path().join(path)).unwrap(), *content);
+            }
+            assert_eq!(fs::read_to_string(&cfg_path).unwrap(), cfg);
+        }
+    }
+}
+
+#[test]
 fn non_file_destinations_fail_before_rewriting_builtins() {
     let temp = project();
     assert!(generate(&temp, &[]).status.success());
