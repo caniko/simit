@@ -91,6 +91,13 @@ commands. `repo-review` remains the compatible argument-array frontend;
 `publish` is the digest-approved promotion command. `engine-info` and
 `verify-engine` expose/check the engine manifest. JSON contracts remain v1.
 
+For PR head mode, commit/tree resolution and source checkout use the PR's head
+repository, including forks. Merge mode uses the base repository's verified
+merge commit. The v1 plan's `target.repository` and `target.id` continue to name
+the base repository, where the PR and its report belong. Review workflows are
+audited for drift alongside ordinary CI, but do not change its inferred provider
+or platform.
+
 Resolution, secretless target builds/tests, collection, approved publication,
 fresh-store retrieval, and reporting remain separate jobs. Missing platforms,
 failed checks, incomplete closure export, and failed retrieval cannot pass.

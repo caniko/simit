@@ -24,6 +24,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Wait for exact crates.io dependency resolution through Cargo after each
+  coordinated workspace publication, including checksum-based resumes, before
+  starting dependent jobs. Fetch and verify lockfile evidence for library and
+  binary-only crates, with bounded retries and individual calls; crates.io web
+  API readiness alone no longer advances the publication plan.
+- Give native GitHub Nix flake matrices read-only permissions, coalesced push/PR
+  concurrency, bounded parallelism and timeouts, and explicit build-resource limits.
+- Resolve and check out fork PR heads from their source repository while keeping
+  review plans and PR reporting anchored to the base repository.
+- Keep GitHub review workflows out of ordinary CI provider inference so Forgejo
+  and Crow projects remain auditable, including review-workflow drift checks.
 - Reject unsupported language checks and release requests in Nix-only CI instead
   of silently omitting them; honor and persist explicit `false` overrides.
 - Allow Python flake projects to select exact-only Nix qualification without

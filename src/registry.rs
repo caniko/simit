@@ -1374,12 +1374,25 @@ pub fn infer_project_ci_target(workspace_root: &Path) -> Result<Option<CiBackend
 }
 
 fn infer_ci_target(marked: &[WorkflowFile]) -> Result<CiBackend> {
-    let primary = marked
+    // Review workflows always use GitHub Actions, independently of ordinary CI.
+    // Keep them in file auditing, but infer the ordinary provider without them.
+    // A review-only project still reports its GitHub backend.
+    let ordinary = marked
+        .iter()
+        .filter(|workflow| !crate::review::generation::is_review_path(&workflow.relative_path))
+        .collect::<Vec<_>>();
+    let candidates = if ordinary.is_empty() {
+        marked.iter().collect::<Vec<_>>()
+    } else {
+        ordinary
+    };
+    let primary = candidates
         .iter()
         .filter(|workflow| !is_supplementary_workflow(workflow))
+        .copied()
         .collect::<Vec<_>>();
     let marked = if primary.is_empty() {
-        marked.iter().collect::<Vec<_>>()
+        candidates
     } else {
         primary
     };
