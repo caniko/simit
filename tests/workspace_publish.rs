@@ -881,7 +881,8 @@ fn coordinated_publish_conflict_is_not_success_and_resume_is_auditable() {
     assert!(publish.contains("conflict:"));
     assert!(publish.contains("refusing to treat as success"));
     // Resume guidance + always-run auditable report (not atomic rollback).
-    assert!(publish.contains("re-dispatch this workflow"));
+    assert!(publish.contains("resume: rerun the original tag-push run"));
+    assert!(!publish.contains("re-dispatch"));
     assert!(publish.contains("already-published crates with matching checksums exit 0"));
     assert!(publish.contains("see per-crate job statuses for the auditable result"));
 }
