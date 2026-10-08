@@ -1,4 +1,4 @@
-use std::{fs, process::Output};
+use std::{fs, path::Path, process::Output};
 
 use simit::registry::{FeatureStatus, audit_ci};
 use tempfile::TempDir;
@@ -172,6 +172,35 @@ fn active_workflow_sources_are_rejected_without_rewriting_builtins() {
                 assert_eq!(fs::read_to_string(&cfg_path).unwrap(), cfg);
             }
         }
+    }
+}
+
+#[test]
+fn configured_template_sources_are_in_the_actual_cargo_package_file_set() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let manifest = fs::read_to_string(root.join("Cargo.toml")).unwrap();
+    let manifest: toml_edit::DocumentMut = manifest.parse().unwrap();
+    let templates = manifest["package"]["metadata"]["simit"]["ci"]["workflow_templates"]
+        .as_table()
+        .unwrap();
+    assert!(!templates.is_empty());
+    let output = std::process::Command::new("cargo")
+        .current_dir(root)
+        .args(["package", "--list", "--allow-dirty", "--offline"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let list = String::from_utf8(output.stdout).unwrap();
+    for (_, source) in templates {
+        let source = source.as_str().unwrap();
+        assert!(
+            list.lines().any(|file| file == source),
+            "package omits {source}: {list}"
+        );
+        assert!(
+            root.join(source).is_file(),
+            "Nix-filtered source omits {source}"
+        );
     }
 }
 

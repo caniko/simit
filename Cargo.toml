@@ -17,6 +17,7 @@ include = [
   "/ci-actions.json",
   "/.github/workflows/*.yaml",
   "/.github/workflows/*.yml",
+  "/.simit/workflows/**",
   "/CHANGELOG.md",
   "/LICENSE",
   "/README.md",
