@@ -53,6 +53,15 @@ fn controller_generation_round_trips_and_audits_bootstrap_drift() {
         "callers must be able to forward the report-only token"
     );
     assert_eq!(secret["required"].as_bool(), Some(false));
+    let report = &yaml["jobs"]["report"];
+    assert!(!report["if"].as_str().unwrap().contains("github.repository"));
+    assert!(
+        report["steps"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .any(|step| step["env"]["GH_TOKEN"].as_str() == Some("${{ secrets.GH_TOKEN }}"))
+    );
     for trigger in ["workflow_dispatch", "workflow_call"] {
         assert_eq!(
             yaml["on"][trigger]["inputs"]["controller_revision"]["required"].as_bool(),
@@ -162,5 +171,68 @@ fn controller_identity_rejects_ref_movement_before_publishing_checkout_outputs()
             );
             std::fs::remove_file(output_path).unwrap();
         }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn reusable_report_consumes_the_explicit_token_only_when_posting_is_requested() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(
+        root.path().join("simit.toml"),
+        "[review]\nrole='controller'\n",
+    )
+    .unwrap();
+    std::fs::write(root.path().join("flake.nix"), "{}\n").unwrap();
+    let output = generate(root.path(), false);
+    assert!(output.status.success(), "{output:?}");
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        &std::fs::read_to_string(root.path().join(".github/workflows/review-repository.yml"))
+            .unwrap(),
+    )
+    .unwrap();
+    let steps = yaml["jobs"]["report"]["steps"].as_sequence().unwrap();
+    let script = steps
+        .iter()
+        .find(|step| {
+            step["name"].as_str() == Some("Optional exact-head comment (report-only credential)")
+        })
+        .unwrap()["run"]
+        .as_str()
+        .unwrap();
+    let bin = root.path().join("bin");
+    let tools = root.path().join("tools/bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::create_dir_all(&tools).unwrap();
+    for (path, body) in [
+        (bin.join("jq"), "[ \"$POST_REQUESTED\" = true ]"),
+        (
+            tools.join("repo-review"),
+            "[ \"$GH_TOKEN\" = fixture-report-token ] && [ \"$PLAN_DIGEST\" = fixture-plan-digest ] || exit 1; touch report-posted; printf '%s\\n' '{\"posted\":true}'",
+        ),
+    ] {
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let path = std::env::join_paths(
+        std::iter::once(bin).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+    )
+    .unwrap();
+    for requested in ["false", "true"] {
+        let output = Command::new("bash")
+            .current_dir(root.path())
+            .args(["-c", script])
+            .env("PATH", &path)
+            .env("POST_REQUESTED", requested)
+            .env("GH_TOKEN", "fixture-report-token")
+            .env("PLAN_DIGEST", "fixture-plan-digest")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(
+            root.path().join("report-posted").exists(),
+            requested == "true"
+        );
     }
 }

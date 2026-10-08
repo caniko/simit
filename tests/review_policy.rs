@@ -11,7 +11,7 @@ fn generated_policy_is_owned_and_drift_checked_with_ordinary_ci() {
         "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
     )
     .unwrap();
-    std::fs::write(root.path().join("simit.toml"), "[ci]\nplatform = \"github\"\nprovider = \"actions\"\nruntime = \"cargo\"\n[review_policy]\ntoolbelt_version = \"0.2.0\"\napp_id_secret = \"APP_ID\"\napp_private_key_secret = \"APP_KEY\"\n").unwrap();
+    std::fs::write(root.path().join("simit.toml"), "[ci]\nplatform = \"github\"\nprovider = \"actions\"\nruntime = \"cargo\"\n[review_policy]\ntoolbelt_version = \"0.2.0\"\napp_id_secret = \"APP_ID\"\napp_private_key_secret = \"APP_KEY\"\ncredential_environment = \"review-policy\"\n").unwrap();
     for args in [vec!["init", "ci"], vec!["init", "ci", "--check", "--diff"]] {
         let output = common::simit()
             .current_dir(root.path())
@@ -56,6 +56,7 @@ provider = "actions"
 toolbelt_version = "0.2.0"
 app_id_secret = "REVIEW_POLICY_APP_ID"
 app_private_key_secret = "REVIEW_POLICY_APP_PRIVATE_KEY"
+credential_environment = "review-policy"
 "#,
     )
     .unwrap();
@@ -68,6 +69,10 @@ app_private_key_secret = "REVIEW_POLICY_APP_PRIVATE_KEY"
     let yaml: serde_yaml::Value = serde_yaml::from_str(&file.content).unwrap();
     assert!(yaml["on"]["pull_request_target"].is_mapping());
     assert!(yaml["on"]["schedule"].is_sequence());
+    assert_eq!(
+        yaml["jobs"]["evaluate"]["environment"].as_str(),
+        Some("review-policy")
+    );
     assert!(file.content.contains(
         "github.ref == format('refs/heads/{0}', github.event.repository.default_branch)"
     ));
@@ -91,9 +96,34 @@ app_private_key_secret = "REVIEW_POLICY_APP_PRIVATE_KEY"
 #[test]
 fn review_policy_rejects_unpinned_or_injected_configuration() {
     let root = tempfile::tempdir().unwrap();
-    for (version, secret) in [("latest", "APP_ID"), ("0.2.0", "APP_ID }}"), ("0.2.0", "")] {
-        std::fs::write(root.path().join("simit.toml"), format!("[review_policy]\ntoolbelt_version = {version:?}\napp_id_secret = {secret:?}\napp_private_key_secret = \"APP_PRIVATE_KEY\"\n")).unwrap();
+    for (version, secret) in [
+        ("latest", "APP_ID"),
+        ("0.2.0", "APP_ID }}"),
+        ("0.2.0", ""),
+        ("0.2.0", "1APP_KEY"),
+        ("0.2.0", "GITHUB_APP_KEY"),
+    ] {
+        std::fs::write(root.path().join("simit.toml"), format!("[ci]\nplatform='github'\n[review_policy]\ntoolbelt_version = {version:?}\napp_id_secret = {secret:?}\napp_private_key_secret = \"APP_PRIVATE_KEY\"\ncredential_environment = \"review-policy\"\n")).unwrap();
         assert!(ProjectConfig::load(root.path()).is_err());
+    }
+}
+
+#[test]
+fn policy_credentials_require_a_safe_environment_before_generation() {
+    let root = tempfile::tempdir().unwrap();
+    for environment in [None, Some(""), Some("unsafe: environment")] {
+        let setting = environment
+            .map(|value| format!("credential_environment = {value:?}\n"))
+            .unwrap_or_default();
+        std::fs::write(root.path().join("simit.toml"), format!("[ci]\nplatform='github'\n[review_policy]\ntoolbelt_version='0.2.0'\napp_id_secret='APP_ID'\napp_private_key_secret='APP_KEY'\n{setting}")).unwrap();
+        assert!(ProjectConfig::load(root.path()).is_err());
+        let output = common::simit()
+            .current_dir(root.path())
+            .args(["init", "ci"])
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{output:?}");
+        assert!(!root.path().join(review_policy::PATH).exists());
     }
 }
 
@@ -107,7 +137,7 @@ fn policy_generation_rejects_an_effective_non_github_platform() {
         "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
     )
     .unwrap();
-    std::fs::write(root.path().join("simit.toml"), "[review_policy]\ntoolbelt_version = \"0.2.0\"\napp_id_secret = \"APP_ID\"\napp_private_key_secret = \"APP_KEY\"\n").unwrap();
+    std::fs::write(root.path().join("simit.toml"), "[review_policy]\ntoolbelt_version = \"0.2.0\"\napp_id_secret = \"APP_ID\"\napp_private_key_secret = \"APP_KEY\"\ncredential_environment = \"review-policy\"\n").unwrap();
     for args in [
         vec!["init", "ci"],
         vec!["init", "ci", "--platform", "forgejo"],
@@ -139,6 +169,7 @@ fn a_delayed_sweep_collects_every_page_and_batches_all_candidates() {
         toolbelt_version: "0.2.0".into(),
         app_id_secret: "APP_ID".into(),
         app_private_key_secret: "APP_KEY".into(),
+        credential_environment: "review-policy".into(),
         policy_path: None,
     };
     let yaml: serde_yaml::Value =

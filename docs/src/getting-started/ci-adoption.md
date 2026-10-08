@@ -54,6 +54,7 @@ provider = "actions"
 toolbelt_version = "0.2.0" # select a qualified, published stable release
 app_id_secret = "REVIEW_POLICY_APP_ID"
 app_private_key_secret = "REVIEW_POLICY_APP_PRIVATE_KEY"
+credential_environment = "review-policy"
 # Optional policy from the trusted default-branch checkout, JSON or Pkl:
 # policy_path = "policy/review.json"
 ```
@@ -63,7 +64,14 @@ Generate and verify with `simit init ci --platform github` and
 its crates.io publication has been independently verified.
 
 Provision a **dedicated policy GitHub App**, install it on each enrolled
-repository, and store its ID/private key under the configured secret names.
+repository. Store its ID/private key **only as secrets of the configured
+credential environment**, and restrict that environment's deployment branch
+policy to the repository's exact default branch. Do not also create
+repository-level copies: a branch-controlled workflow could use those without
+the environment boundary. The workflow's ref condition is an additional guard;
+the platform-enforced environment restriction protects the credential when a
+manual dispatch selects an edited non-default-branch workflow. Configure and
+verify that boundary before enabling the coordinator.
 This is separate from Greptile's installed App: Greptile supplies review records;
 the policy App authenticates the normalized acceptance check. The policy App
 needs repository `Checks: write`, `Contents: read`, `Pull requests: read`,

@@ -11,6 +11,7 @@ pub struct Config {
     pub toolbelt_version: String,
     pub app_id_secret: String,
     pub app_private_key_secret: String,
+    pub credential_environment: String,
     pub policy_path: Option<String>,
 }
 
@@ -27,6 +28,11 @@ impl Config {
             ensure!(
                 !secret.is_empty()
                     && secret.len() <= 100
+                    && !secret.starts_with("GITHUB_")
+                    && secret
+                        .as_bytes()
+                        .first()
+                        .is_some_and(|byte| byte.is_ascii_uppercase() || *byte == b'_')
                     && secret
                         .bytes()
                         .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_'),
@@ -36,6 +42,15 @@ impl Config {
         ensure!(
             self.app_id_secret != self.app_private_key_secret,
             "review_policy secrets must be distinct"
+        );
+        ensure!(
+            !self.credential_environment.is_empty()
+                && self.credential_environment.len() <= 100
+                && self
+                    .credential_environment
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"_-".contains(&byte)),
+            "review_policy requires a safe credential_environment with default-branch-only deployment rules and environment-only App secrets"
         );
         if let Some(path) = &self.policy_path {
             ensure!(
@@ -69,6 +84,7 @@ pub fn file(config: &Config) -> Result<GeneratedFile> {
         )
         .replace("%APP_ID%", &config.app_id_secret)
         .replace("%APP_KEY%", &config.app_private_key_secret)
+        .replace("%CREDENTIAL_ENVIRONMENT%", &config.credential_environment)
         .replace("%VERSION%", &config.toolbelt_version)
         .replace("%POLICY%", &policy);
     Ok(GeneratedFile {
@@ -153,6 +169,9 @@ jobs:
       matrix:
         batch: ${{ fromJSON(needs.resolve.outputs.batches) }}
     runs-on: ubuntu-24.04
+    # App secrets exist only in this environment, whose platform deployment rules
+    # must restrict access to the default branch. Repository-level copies are unsafe.
+    environment: "%CREDENTIAL_ENVIRONMENT%"
     timeout-minutes: 45
     steps:
       - name: Checkout trusted policy only

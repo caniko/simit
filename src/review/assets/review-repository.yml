@@ -180,7 +180,7 @@ jobs:
           retention-days: 14
   report:
     needs: [controller, resolve, collect]
-    if: ${{ always() && needs.collect.result != 'skipped' && needs.controller.outputs.repository == github.repository }}
+    if: ${{ always() && needs.collect.result != 'skipped' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:

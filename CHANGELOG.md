@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- Require default-branch-restricted environment-only policy App credentials,
+  reject unprovisionable GitHub secret names, and allow explicitly credentialed
+  external reusable-controller runs to publish their exact-head report.
+
 ### Added
 
 - Project-owned Rust CI commands through `[ci].check_command`, optional
