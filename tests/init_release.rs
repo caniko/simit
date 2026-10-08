@@ -302,7 +302,9 @@ fn github_release_depends_on_prebuild_and_forwards_attic_secret() {
     .unwrap()
     .content;
     let parsed: serde_yaml::Value = serde_yaml::from_str(&prebuild).unwrap();
-    let steps = parsed["jobs"]["native"]["steps"].as_sequence().unwrap();
+    let steps = parsed["jobs"]["build"]["steps"]
+        .as_sequence()
+        .expect("reusable prebuild must expose the build matrix job");
     let validation = steps
         .iter()
         .position(|step| step["name"].as_str() == Some("Validate tag"))
