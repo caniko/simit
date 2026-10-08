@@ -181,6 +181,20 @@ pub(crate) fn append(root: &Path, ci: &CiConfig, files: &mut Vec<GeneratedFile>)
         .iter()
         .map(|file| portable_path(&file.relative_path))
         .collect::<BTreeSet<_>>();
+    let mut active_workflows = Vec::new();
+    for directory in [".github/workflows", ".forgejo/workflows"] {
+        let entries = match fs::read_dir(root.join(directory)) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error).context("inspecting active Actions workflows"),
+        };
+        for entry in entries {
+            let path = entry?.path();
+            if path.is_file() && is_actions_workflow(path.strip_prefix(root)?) {
+                active_workflows.push(path);
+            }
+        }
+    }
     let mut templates = Vec::new();
     for (output, source) in &ci.workflow_templates {
         let relative = PathBuf::from(output);
@@ -277,6 +291,16 @@ pub(crate) fn append(root: &Path, ci: &CiConfig, files: &mut Vec<GeneratedFile>)
             bail!(
                 "workflow template source {source} is an active Actions workflow; use a project-owned template with a non-workflow extension or directory"
             );
+        }
+        for active in &active_workflows {
+            if same_file::is_same_file(&path, active)
+                .context("comparing active workflow source identities")?
+            {
+                bail!(
+                    "workflow template source {source} aliases an active Actions workflow at {}; use a distinct project-owned template",
+                    active.display()
+                );
+            }
         }
         let rendered = substitute(&source_text, ci)
             .with_context(|| format!("rendering workflow template {source}"))?;

@@ -176,6 +176,35 @@ fn active_workflow_sources_are_rejected_without_rewriting_builtins() {
 }
 
 #[test]
+fn hard_linked_active_workflow_sources_fail_before_any_writes() {
+    for directory in [".github/workflows", ".forgejo/workflows"] {
+        let temp = project();
+        let source = temp.path().join(".simit/templates/tests.yml");
+        let original = fs::read(&source).unwrap();
+        let active = temp.path().join(directory).join("live.yml");
+        fs::create_dir_all(active.parent().unwrap()).unwrap();
+        fs::hard_link(&source, &active).unwrap();
+        let config_path = temp.path().join("simit.toml");
+        let config = fs::read(&config_path).unwrap();
+        for args in [vec![], vec!["--check", "--diff"]] {
+            let result = generate(&temp, &args);
+            assert!(!result.status.success(), "{directory}: {result:?}");
+            assert!(String::from_utf8_lossy(&result.stderr).contains("active Actions workflow"));
+            assert_eq!(fs::read(&config_path).unwrap(), config);
+            assert_eq!(fs::read(&source).unwrap(), original);
+            assert_eq!(fs::read(&active).unwrap(), original);
+            assert!(!temp.path().join(".github/workflows/tests.yml").exists());
+            assert!(
+                !temp
+                    .path()
+                    .join(".github/workflows/nix-builds.yaml")
+                    .exists()
+            );
+        }
+    }
+}
+
+#[test]
 fn hard_linked_destinations_fail_without_mutating_sources_or_other_outputs() {
     for alias in [
         ".simit/templates/tests.yml",

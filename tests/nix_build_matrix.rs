@@ -154,6 +154,29 @@ extra_env = { FLAKE_SSH_KEY = "${{ secrets.FLAKE_SSH_KEY }}" }
 }
 
 #[test]
+fn evidence_capture_rejects_effective_forgejo_before_action_pin_lookup_or_writes() {
+    for args in [vec![], vec!["--platform", "forgejo"]] {
+        let temp = project("[ci.nix_build]\nonly = true\ncapture_results = true");
+        let config_path = temp.path().join("simit.toml");
+        let config = fs::read_to_string(&config_path)
+            .unwrap()
+            .replace("platform = \"github\"\n", "");
+        fs::write(&config_path, &config).unwrap();
+        let output = generate(&temp, &args);
+        assert!(!output.status.success(), "{output:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("[ci.nix_build] options require GitHub Actions"),
+            "{stderr}"
+        );
+        assert!(!stderr.contains("panicked"));
+        assert_eq!(fs::read_to_string(&config_path).unwrap(), config);
+        assert!(!temp.path().join(".forgejo/workflows").exists());
+        assert!(!temp.path().join(".github/workflows").exists());
+    }
+}
+
+#[test]
 fn rust_flake_can_select_exact_nix_gates_from_its_workspace_root() {
     let temp = project("[ci.nix_build]\nonly = true");
     fs::write(

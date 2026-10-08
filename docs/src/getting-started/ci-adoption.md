@@ -71,6 +71,8 @@ Built-in generated workflows cannot be template sources: templates must remain
 project-owned inputs, rather than snapshots of outputs from an earlier run.
 Keep template sources outside Actions workflow directories, or give them a
 non-workflow extension such as `.yaml.in`, so the source is not itself executed.
+File identity is checked against both Actions workflow directories, so a hard
+link with a project-template spelling cannot duplicate an existing active job.
 Destinations must be files with directory parents; validation rejects existing
 directories, symlinks, portable case-insensitive path collisions, and hard-linked
 aliases of template sources or planned outputs before any writes. Portable keys
