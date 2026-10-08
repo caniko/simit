@@ -1989,9 +1989,12 @@ fn verify_jetbrains_signed_archive_selection(root: &Path, yaml: &serde_yaml::Val
     let bin = root.join("signer-bin");
     fs::create_dir_all(&bin).unwrap();
     let nix = bin.join("nix");
-    fs::write(&nix, r#"#!/bin/bash
-set -euo pipefail
-[[ "$*" == *'--init-script '* ]]
+    fs::write(&nix, r#"#!/bin/sh
+set -eu
+case "$*" in
+  *'--init-script '*) ;;
+  *) exit 1;;
+esac
 case "$SIGNED_ARCHIVE_CASE" in
   default) signed="$PWD/build/distributions/pkl-lsp-1.0.0-signed.zip";;
   override) signed="$PWD/custom outputs/verified.zip";;
