@@ -1100,6 +1100,16 @@ pub fn nix_build_matrix_file_with_options(
                 workflow.push_str(&format!("          {line}\n"));
             }
         }
+        // Collect failed-build diagnostics without keeping canceled runs alive.
+        for (index, script) in options.post_build_always.iter().enumerate() {
+            workflow.push_str(&format!(
+                "      - name: Retain Nix diagnostics {}\n        if: ${{{{ !cancelled() }}}}\n        run: |\n",
+                index + 1
+            ));
+            for line in script.lines() {
+                workflow.push_str(&format!("          {line}\n"));
+            }
+        }
         workflow.push_str("      - name: Upload Nix build evidence\n        if: always()\n");
         push_action_uses(&mut workflow, platform, "upload-artifact", "v4.6.2");
         workflow.push_str(&format!("\n        with:\n          name: nix-build-${{{{ strategy.job-index }}}}\n          retention-days: {}\n          if-no-files-found: warn\n          path: |\n            ${{{{ runner.temp }}}}/simit-nix-build-${{{{ strategy.job-index }}}}\n", options.artifact_retention_days.unwrap_or(14)));
