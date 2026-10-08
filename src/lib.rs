@@ -36,6 +36,8 @@ pub mod registry;
 pub mod release_trust;
 /// Renderers for generated support files.
 pub mod render;
+/// Exact-revision repository review, closure promotion, and retrieval.
+pub mod review;
 /// SHA-256 helpers for release artifacts.
 pub mod sha256;
 /// User-scoped configuration for local infrastructure defaults.

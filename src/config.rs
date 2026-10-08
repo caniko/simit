@@ -27,6 +27,8 @@ use crate::user_config::validate_runner_label;
 #[serde(deny_unknown_fields)]
 pub struct ProjectConfig {
     #[serde(default)]
+    pub review: Option<crate::review::generation::Config>,
+    #[serde(default)]
     pub prebuild: Option<PrebuildConfig>,
     #[serde(default)]
     pub release: ReleaseConfig,
@@ -426,6 +428,13 @@ pub struct CiConfig {
     pub windows_runner: Option<String>,
     #[serde(default)]
     pub workspace: bool,
+    /// Project-owned command that replaces Simit's generic Cargo lane.
+    /// Nix validation remains enabled separately by default.
+    #[serde(default)]
+    pub check_command: Option<String>,
+    /// Run `nix flake check` alongside a project Cargo command in Nix CI.
+    #[serde(default)]
+    pub nix_flake_check: Option<bool>,
     #[serde(default)]
     pub workspace_strategy: WorkspaceStrategy,
     /// Opt-in coordinated dependency-ordered workspace publication.
@@ -454,6 +463,9 @@ pub struct CiConfig {
     pub unit_tests_only: bool,
     #[serde(default)]
     pub with_nextest: bool,
+    /// Cache the Nix-runtime Cargo registry and workspace target directory.
+    #[serde(default)]
+    pub with_nix_cargo_cache: bool,
     #[serde(default)]
     pub with_msrv: bool,
     #[serde(default)]
@@ -510,6 +522,7 @@ impl CiConfig {
     pub(crate) fn validate_nix_only_language_options(&self) -> Result<()> {
         for (name, enabled) in [
             ("with_nextest", self.with_nextest),
+            ("with_nix_cargo_cache", self.with_nix_cargo_cache),
             ("with_msrv", self.with_msrv),
             ("with_audit", self.with_audit),
             ("with_deny", self.with_deny),
@@ -524,6 +537,11 @@ impl CiConfig {
                     name.replace('_', "-")
                 );
             }
+        }
+        if self.check_command.is_some() || self.nix_flake_check == Some(false) {
+            bail!(
+                "[ci].check_command and nix_flake_check=false require Rust language CI; use [ci].components for Nix-only checks"
+            );
         }
         Ok(())
     }
@@ -1898,8 +1916,21 @@ impl ProjectConfig {
 
     fn validate_common(&self) -> Result<()> {
         crate::render::workflow_templates::validate_config(&self.ci)?;
+        if let Some(review) = &self.review {
+            review.validate()?;
+        }
         if self.ci.workspace && !self.ci.packages.is_empty() {
             bail!("simit project config: [ci].workspace cannot be true when [ci].packages is set");
+        }
+        if let Some(command) = &self.ci.check_command {
+            if command.trim().is_empty() || command.contains(['\n', '\r']) {
+                bail!(
+                    "simit project config: [ci].check_command must be a non-empty single-line command"
+                );
+            }
+        }
+        if self.ci.with_nix_cargo_cache && self.ci.runtime == Some(Runtime::Cargo) {
+            bail!("simit project config: [ci].with_nix_cargo_cache requires runtime = \"nix\"");
         }
         validate_nonempty_strings("simit project config: [ci].packages", &self.ci.packages)?;
         validate_nonempty_strings("simit project config: [ci].nix_builds", &self.ci.nix_builds)?;
@@ -3550,6 +3581,8 @@ fn set_ci_table(table: &mut Table, ci: &CiConfig) {
     set_string_map(table, "nix_system_runners", &ci.nix_system_runners);
     set_optional_string(table, "windows_runner", ci.windows_runner.as_deref());
     set_bool(table, "workspace", ci.workspace);
+    set_optional_string(table, "check_command", ci.check_command.as_deref());
+    set_optional_bool_default_true(table, "nix_flake_check", ci.nix_flake_check);
     set_optional_string(
         table,
         "workspace_strategy",
@@ -3571,6 +3604,7 @@ fn set_ci_table(table: &mut Table, ci: &CiConfig) {
     }
     set_bool(table, "unit_tests_only", ci.unit_tests_only);
     set_bool(table, "with_nextest", ci.with_nextest);
+    set_bool(table, "with_nix_cargo_cache", ci.with_nix_cargo_cache);
     set_bool(table, "with_msrv", ci.with_msrv);
     set_bool(table, "with_audit", ci.with_audit);
     set_bool(table, "with_deny", ci.with_deny);
@@ -3707,6 +3741,15 @@ fn set_bool(table: &mut Table, key: &str, enabled: bool) {
         table[key] = value(enabled);
     } else {
         table.remove(key);
+    }
+}
+
+fn set_optional_bool_default_true(table: &mut Table, key: &str, enabled: Option<bool>) {
+    match enabled {
+        Some(false) => table[key] = value(false),
+        Some(true) | None => {
+            table.remove(key);
+        }
     }
 }
 

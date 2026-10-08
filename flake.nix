@@ -95,6 +95,7 @@
           pathString = toString path;
         in
           (craneLib.filterCargoSources path type)
+          || pkgs.lib.hasInfix "/src/review/assets/" pathString
           || pkgs.lib.hasSuffix "ci-actions.json" pathString
           || pkgs.lib.hasSuffix "/.github" pathString
           || pkgs.lib.hasSuffix "/.github/workflows" pathString
@@ -343,6 +344,7 @@
     })
     // {
       lib = {
+        mkReviewTools = args: import ./nix/review-tools.nix ({source = self;} // args);
         simitModule = import ./nix/simit-module.nix {lib = nixpkgs.lib;};
         mkSimitConfig = import ./nix/simit-config.nix {lib = nixpkgs.lib;};
       };

@@ -368,6 +368,48 @@ nix develop -c cargo check --all-targets
 They do not use `cargo +<msrv>` because Nix dev shells do not imply rustup
 toolchains.
 
+### Nix-runtime Cargo cache
+
+Projects whose Nix-runtime workflow runs a substantial host-side Cargo gate can
+provide a project-owned Cargo command while retaining the Nix flake gate:
+
+```toml
+[ci]
+check_command = "cargo xtask ci"
+```
+
+`check_command` replaces only Simit's generic Cargo lane. Nix-runtime workflows
+still run `nix flake check` by default. Projects with a deliberately focused
+Nix validation workflow may opt out explicitly:
+
+```toml
+[ci]
+check_command = "cargo run --locked -p syndb-ci -- ci"
+nix_flake_check = false
+```
+
+Projects whose Nix-runtime workflow runs a substantial host-side Cargo gate can
+also opt into a registry and target cache:
+
+```toml
+[ci]
+runtime = "nix"
+with_nix_cargo_cache = true
+```
+
+The generated workflow caches `/tmp/.cargo/registry`, `/tmp/.cargo/git`, and
+the workspace `target/` directory. The key includes the lockfiles, flake,
+Rust toolchain, Cargo configuration, runner architecture, and generated job
+scope. The option is deliberately opt-in because projects that install mutable
+Cargo tools into the generated Cargo home may prefer the existing tool-cache
+behavior. It cannot be combined with custom `CARGO_HOME` or
+`CARGO_TARGET_DIR` workflow environment overrides.
+
+These options apply to Rust language CI. The Cargo cache requires the Actions
+provider; Crow supports the generic project command but retains its dedicated
+`[ci.crow].check_command` and push-only secret policy. Exact-only Nix and Python
+workflows use `[ci].components` to select their checks instead.
+
 ## Cargo-Audit Reliability
 
 Generated cargo-audit steps fetch the RustSec advisory database explicitly and

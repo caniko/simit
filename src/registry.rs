@@ -572,16 +572,21 @@ pub fn audit_ci(workspace_root: &Path) -> Result<CiAudit> {
         .into_iter()
         .map(|file| (file.relative_path, file.content))
         .collect::<BTreeMap<_, _>>();
-    let actual = marked
+    let mut actual = marked
         .iter()
-        .map(|file| (file.relative_path.clone(), file.content.as_str()))
+        .map(|file| (file.relative_path.clone(), file.content.clone()))
         .collect::<BTreeMap<_, _>>();
+    for path in expected.keys().filter(|p| p.starts_with(".github/actions")) {
+        if let Ok(content) = fs::read_to_string(workspace_root.join(path)) {
+            actual.insert(path.clone(), content);
+        }
+    }
 
     let mut changed_files = Vec::new();
     let mut missing_files = Vec::new();
     for (path, content) in &expected {
         match actual.get(path) {
-            Some(actual) if *actual == content.as_str() => {}
+            Some(actual) if actual == content => {}
             Some(_) => changed_files.push(path.clone()),
             None => missing_files.push(path.clone()),
         }
@@ -841,6 +846,7 @@ fn is_supplementary_workflow(file: &WorkflowFile) -> bool {
     matches!(
         name,
         "credential-visibility.yml"
+            | "review-compatibility.yml"
             | "credential-visibility.yaml"
             | "pages.yml"
             | "pages.yaml"
@@ -914,12 +920,18 @@ fn marked_workflows_drift(workspace_root: &Path, marked: &[WorkflowFile]) -> boo
         Ok(expected) => expected,
         Err(_) => return true,
     };
-    let expected = expected
+    let mut expected = expected
         .into_iter()
         .map(|file| (file.relative_path, file.content))
         .collect::<BTreeMap<_, _>>();
 
-    expected.len() != marked.len()
+    let actions_drift = expected
+        .iter()
+        .filter(|(p, _)| p.starts_with(".github/actions"))
+        .any(|(p, c)| fs::read_to_string(workspace_root.join(p)).as_ref().ok() != Some(c));
+    expected.retain(|p, _| !p.starts_with(".github/actions"));
+    actions_drift
+        || expected.len() != marked.len()
         || marked.iter().any(|workflow| {
             expected
                 .get(&workflow.relative_path)
@@ -931,22 +943,30 @@ fn infer_expected_ci_files(
     workspace_root: &Path,
     marked: &[WorkflowFile],
 ) -> Result<Vec<project::GeneratedFile>> {
-    let builtin = marked
+    let config = ProjectConfig::load(workspace_root)?;
+    let primary: Vec<_> = marked
         .iter()
-        .filter(|workflow| {
-            !workflow
-                .content
-                .starts_with(crate::render::workflow_templates::TEMPLATE_MARKER)
+        .filter(|file| {
+            !crate::review::generation::is_review_path(&file.relative_path)
+                && !file
+                    .content
+                    .starts_with(crate::render::workflow_templates::TEMPLATE_MARKER)
         })
         .cloned()
-        .collect::<Vec<_>>();
-    let mut files = infer_builtin_ci_files(workspace_root, &builtin)?;
-    let config = ProjectConfig::load(workspace_root)?;
+        .collect();
+    let mut files = if primary.is_empty() && config.review.is_some() {
+        Vec::new()
+    } else {
+        infer_expected_primary_ci_files(workspace_root, &primary)?
+    };
+    if let Some(review) = config.review.as_ref() {
+        files.extend(crate::review::generation::files(review)?);
+    }
     crate::render::workflow_templates::append(workspace_root, &config.ci, &mut files)?;
     Ok(files)
 }
 
-fn infer_builtin_ci_files(
+fn infer_expected_primary_ci_files(
     workspace_root: &Path,
     marked: &[WorkflowFile],
 ) -> Result<Vec<project::GeneratedFile>> {
@@ -1354,12 +1374,25 @@ pub fn infer_project_ci_target(workspace_root: &Path) -> Result<Option<CiBackend
 }
 
 fn infer_ci_target(marked: &[WorkflowFile]) -> Result<CiBackend> {
-    let primary = marked
+    // Review workflows always use GitHub Actions, independently of ordinary CI.
+    // Keep them in file auditing, but infer the ordinary provider without them.
+    // A review-only project still reports its GitHub backend.
+    let ordinary = marked
+        .iter()
+        .filter(|workflow| !crate::review::generation::is_review_path(&workflow.relative_path))
+        .collect::<Vec<_>>();
+    let candidates = if ordinary.is_empty() {
+        marked.iter().collect::<Vec<_>>()
+    } else {
+        ordinary
+    };
+    let primary = candidates
         .iter()
         .filter(|workflow| !is_supplementary_workflow(workflow))
+        .copied()
         .collect::<Vec<_>>();
     let marked = if primary.is_empty() {
-        marked.iter().collect::<Vec<_>>()
+        candidates
     } else {
         primary
     };
@@ -1500,6 +1533,7 @@ fn infer_expected_crow_files(
                     token_secret: pages.token_secret,
                     source_branch: pages.source_branch,
                     deploy_app: pages.deploy_app,
+                    extra_setup: config.ci.extra_setup.clone(),
                 },
             )?);
         }
@@ -1738,9 +1772,14 @@ fn config_pages_or_inferred(
             token_secret: pages.token_secret,
             source_branch: pages.source_branch,
             deploy_app: pages.deploy_app,
+            extra_setup: config.ci.extra_setup.clone(),
         }));
     }
-    infer_pages_options(workspace_root, marked)
+    let mut inferred = infer_pages_options(workspace_root, marked)?;
+    if let Some(pages) = &mut inferred {
+        pages.extra_setup.clone_from(&config.ci.extra_setup);
+    }
+    Ok(inferred)
 }
 
 /// Which Pages provider a marked `pages` workflow belongs to.
@@ -1869,6 +1908,7 @@ fn infer_codeberg_pages_options(workflow: &WorkflowFile) -> Result<ci::CodebergP
             .unwrap_or_else(|| "trunk".to_owned()),
         deploy_app: infer_pages_deploy_app(&workflow.content)
             .unwrap_or_else(|| ".#deploy-pages".to_owned()),
+        extra_setup: Vec::new(),
     })
 }
 
@@ -1909,6 +1949,7 @@ fn infer_github_pages_options(
             .unwrap_or_else(|| "trunk".to_owned()),
         deploy_app: infer_pages_deploy_app(&workflow.content)
             .unwrap_or_else(|| ".#deploy-pages".to_owned()),
+        extra_setup: Vec::new(),
     })
 }
 

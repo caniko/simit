@@ -19,6 +19,11 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Commands {
+    #[command(
+        subcommand,
+        about = "Review exact repository revisions through Nix and GitHub Actions"
+    )]
+    Review(crate::review::cli::Cmd),
     #[command(about = "Bump package versions, commit the change, and optionally tag it")]
     Commit(CommitCommand),
     #[command(about = "Run local release checks, update the changelog, commit, and tag")]
@@ -436,6 +441,8 @@ pub enum BumpKind {
 
 #[derive(Debug, Args)]
 pub struct InitCiCommand {
+    #[arg(long, conflicts_with_all = ["pages_only", "prebuild_only", "runner"], help = "Generate or verify only the opt-in repository review controller/client workflows")]
+    pub review_only: bool,
     #[arg(
         long,
         help = "Generate or verify only the Pages workflow without changing primary CI"
@@ -544,6 +551,22 @@ pub struct InitCiCommand {
     )]
     pub with_nextest: Option<bool>,
     #[arg(
+        long = "with-nix-cargo-cache",
+        num_args = 0..=1,
+        default_missing_value = "true",
+        action = clap::ArgAction::Set,
+        help = "Cache the Nix-runtime Cargo registry and target directory"
+    )]
+    pub with_nix_cargo_cache: Option<bool>,
+    #[arg(
+        long = "nix-flake-check",
+        num_args = 0..=1,
+        default_missing_value = "true",
+        action = clap::ArgAction::Set,
+        help = "Run nix flake check in Nix-runtime CI; pass --nix-flake-check=false for focused project Nix checks"
+    )]
+    pub nix_flake_check: Option<bool>,
+    #[arg(
         long = "with-msrv",
         num_args = 0..=1,
         default_missing_value = "true",
@@ -645,8 +668,9 @@ pub struct InitCiCommand {
     )]
     pub with_scoop: bool,
     #[arg(
-        long = "with-codeberg-pages",
-        help = "Generate a Pages workflow that publishes .#site with .#deploy-pages"
+        long = "with-pages",
+        visible_alias = "with-codeberg-pages",
+        help = "Generate a Pages workflow for the selected platform"
     )]
     pub with_codeberg_pages: bool,
     #[arg(
@@ -663,7 +687,7 @@ pub struct InitCiCommand {
         long = "pages-repo",
         value_name = "OWNER/REPO",
         requires = "with_codeberg_pages",
-        help = "Codeberg repository receiving the generated pages branch"
+        help = "Repository associated with the Pages site"
     )]
     pub pages_repo: Option<String>,
     #[arg(
@@ -691,7 +715,7 @@ pub struct InitCiCommand {
         long = "pages-source-branch",
         value_name = "BRANCH",
         requires = "with_codeberg_pages",
-        help = "Branch whose pushes publish Codeberg Pages"
+        help = "Branch whose pushes publish Pages"
     )]
     pub pages_source_branch: Option<String>,
     #[arg(
