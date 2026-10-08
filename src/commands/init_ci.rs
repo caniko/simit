@@ -85,6 +85,7 @@ pub fn run(command: InitCiCommand) -> Result<()> {
         .or(cfg.ci.platform)
         .unwrap_or(Platform::Forgejo);
     let backend = CiBackend::from_parts(provider, platform)?;
+    crate::render::workflow_templates::validate_backend(&cfg.ci, provider, platform)?;
     if platform == Platform::Gitlab {
         return run_nix_only(command);
     }
@@ -694,6 +695,7 @@ fn run_nix_only_at(command: InitCiCommand, workspace_root: &Path) -> Result<()> 
         .or(cfg.ci.provider)
         .unwrap_or(CiProvider::Actions);
     let _backend = CiBackend::from_parts(provider, platform)?;
+    crate::render::workflow_templates::validate_backend(&cfg.ci, provider, platform)?;
     if provider != CiProvider::Actions {
         bail!("Nix-only CI currently supports the Actions provider only");
     }
@@ -897,6 +899,7 @@ fn run_python(command: InitCiCommand) -> Result<()> {
         return run_nix_only(command);
     }
     let backend = CiBackend::from_parts(provider, platform)?;
+    crate::render::workflow_templates::validate_backend(&cfg.ci, provider, platform)?;
     if backend.provider() == CiProvider::Crow {
         return run_crow_python(command, workspace_root, &cfg, platform);
     }

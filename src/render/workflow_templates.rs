@@ -91,6 +91,25 @@ fn substitute(template: &str, ci: &CiConfig) -> Result<String> {
     Ok(output)
 }
 
+pub(crate) fn validate_backend(
+    ci: &CiConfig,
+    provider: CiProvider,
+    platform: Platform,
+) -> Result<()> {
+    validate_config(ci)?;
+    if !ci.workflow_templates.is_empty() {
+        if provider != CiProvider::Actions || platform == Platform::Gitlab {
+            bail!("[ci.workflow_templates] requires GitHub or Forgejo Actions");
+        }
+        for output in ci.workflow_templates.keys() {
+            if Path::new(output).parent() != Some(Path::new(platform.workflow_dir())) {
+                bail!("workflow template {output} does not match the selected Actions platform");
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn append(root: &Path, ci: &CiConfig, files: &mut Vec<GeneratedFile>) -> Result<()> {
     validate_config(ci)?;
     if ci.workflow_templates.is_empty() {
@@ -149,6 +168,11 @@ pub(crate) fn append(root: &Path, ci: &CiConfig, files: &mut Vec<GeneratedFile>)
         }
         let source_text = fs::read_to_string(path)
             .with_context(|| format!("reading workflow template {source}"))?;
+        if super::ci::is_generated_workflow_marker(&source_text) {
+            bail!(
+                "workflow template source {source} is a built-in generated output; use a project-owned template"
+            );
+        }
         let rendered = substitute(&source_text, ci)
             .with_context(|| format!("rendering workflow template {source}"))?;
         let _: serde_yaml::Value = serde_yaml::from_str(&rendered)

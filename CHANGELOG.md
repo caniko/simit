@@ -31,6 +31,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Reserve every release-registry filename, reject generated template sources,
   include untracked outputs in production parity, and isolate fork qualification
   concurrency by source repository as well as branch.
+- Reject opposite-platform generated template sources, enforce effective CLI
+  backend constraints in check and write modes, and report missing built-ins as
+  ordinary drift even when only project template outputs remain.
 - Keep the default development environment usable when a worktree lacks the
   optional sibling language-server checkout.
 - Wait for exact crates.io dependency resolution through Cargo after each

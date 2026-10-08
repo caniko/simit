@@ -954,11 +954,15 @@ fn infer_expected_ci_files(
         })
         .cloned()
         .collect();
-    let mut files = if primary.is_empty() && config.review.is_some() {
-        Vec::new()
-    } else {
-        infer_expected_primary_ci_files(workspace_root, &primary)?
-    };
+    let mut files =
+        if primary.is_empty() && config.review.is_some() && config.ci.workflow_templates.is_empty()
+        {
+            Vec::new()
+        } else {
+            // Template paths identify the backend, but their bodies must not infer
+            // built-in packages, checks or runners, even when every built-in is missing.
+            infer_expected_primary_ci_files(workspace_root, &primary, infer_ci_target(marked)?)?
+        };
     if let Some(review) = config.review.as_ref() {
         files.extend(crate::review::generation::files(review)?);
     }
@@ -969,6 +973,7 @@ fn infer_expected_ci_files(
 fn infer_expected_primary_ci_files(
     workspace_root: &Path,
     marked: &[WorkflowFile],
+    backend: CiBackend,
 ) -> Result<Vec<project::GeneratedFile>> {
     // A configuration that will not load is a reportable condition, not a
     // default: swallowing it here hid unsupported/legacy schema behind whatever
@@ -976,7 +981,6 @@ fn infer_expected_primary_ci_files(
     // file drift. `{:#}` keeps the offending keys in the message.
     let config =
         ProjectConfig::load(workspace_root).context("loading simit project configuration")?;
-    let backend = infer_ci_target(marked)?;
     let snapshots = workflow_snapshots(marked);
     if backend.provider() == CiProvider::Crow {
         return infer_expected_crow_files(workspace_root, marked, &snapshots);
@@ -1005,7 +1009,19 @@ fn infer_expected_primary_ci_files(
             &CiCliOverrides::default(),
             Some(&inference),
         )?;
-        let runner = infer_primary_runner(marked, "ci")?;
+        let runner = if marked.is_empty() {
+            crate::user_config::UserConfig::default()
+                .resolve_ci_runners(
+                    platform,
+                    resolved.runtime,
+                    resolved.runner.as_deref(),
+                    resolved.windows_runner.as_deref(),
+                    false,
+                )?
+                .ci
+        } else {
+            infer_primary_runner(marked, "ci")?
+        };
         let options = resolved.ci_options(&config, false, resolved.omnix_ref.clone());
         let mut files = vec![crate::render::ci::python_ci_file(
             platform,
@@ -1161,7 +1177,19 @@ fn infer_expected_primary_ci_files(
     let package_scoped = metadata.workspace_members.len() > 1
         && resolved.workspace_strategy == crate::cli::WorkspaceStrategy::Members;
     let windows_runner = infer_windows_runner(marked);
-    let inferred_ci_runner = infer_primary_runner(marked, "ci")?;
+    let inferred_ci_runner = if marked.is_empty() {
+        crate::user_config::UserConfig::default()
+            .resolve_ci_runners(
+                platform,
+                resolved.runtime,
+                resolved.runner.as_deref(),
+                resolved.windows_runner.as_deref(),
+                false,
+            )?
+            .ci
+    } else {
+        infer_primary_runner(marked, "ci")?
+    };
     let inferred_release_runner = infer_primary_runner(marked, "publish-crate")
         .unwrap_or_else(|_| inferred_ci_runner.clone());
     let runners = ResolvedCiRunners {
