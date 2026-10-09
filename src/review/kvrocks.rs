@@ -35,6 +35,107 @@ pub struct BootstrapReceipt {
     pub binary_sha256: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerIdentity {
+    pub user: String,
+    pub uid: u32,
+    pub group: String,
+    pub gid: u32,
+}
+
+fn identity_record(value: &str, fields: usize) -> Result<Vec<&str>> {
+    let record = value.strip_suffix('\n').unwrap_or(value);
+    ensure!(
+        !record.is_empty() && record.len() <= 16 * 1024 && !record.chars().any(char::is_control),
+        "expected one bounded account database record"
+    );
+    let record = record.split(':').collect::<Vec<_>>();
+    ensure!(record.len() == fields, "malformed account database record");
+    Ok(record)
+}
+
+/// Parse exact `getent passwd USER` and `getent group GROUP` observations. The
+/// lifecycle must obtain these from the actual worker, not a consumer request.
+pub fn parse_worker_identity(
+    user: &str,
+    group: &str,
+    passwd_record: &str,
+    group_record: &str,
+) -> Result<WorkerIdentity> {
+    for name in [user, group] {
+        ensure!(
+            !name.is_empty()
+                && name.len() <= 64
+                && name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"_-".contains(&byte))
+                && !name.starts_with('-'),
+            "invalid worker account name"
+        );
+    }
+    let passwd = identity_record(passwd_record, 7)?;
+    let build_group = identity_record(group_record, 4)?;
+    ensure!(
+        passwd[0] == user && build_group[0] == group,
+        "worker account lookup returned a different identity"
+    );
+    let uid: u32 = passwd[2].parse().context("invalid runner UID")?;
+    let _: u32 = passwd[3].parse().context("invalid runner primary GID")?;
+    let gid: u32 = build_group[2].parse().context("invalid Nix build GID")?;
+    ensure!(
+        uid != 0 && uid != u32::MAX && gid != 0 && gid != u32::MAX,
+        "Kvrocks requires a non-root runner and Nix build group"
+    );
+    Ok(WorkerIdentity {
+        user: user.into(),
+        uid,
+        group: group.into(),
+        gid,
+    })
+}
+
+/// Refuse any pre-existing runtime state, including dangling symlinks. This is
+/// an observation only; creation must still be exclusive in the owned lifecycle.
+pub fn refuse_existing_runtime(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).context("inspecting Kvrocks runtime state"),
+        Ok(_) => anyhow::bail!(
+            "Kvrocks runtime state already exists at {}; preserve its owner",
+            path.display()
+        ),
+    }
+}
+
+/// Verify the socket and immediate runtime directory without following their
+/// symlinks. These metadata checks do not establish process ownership or sandbox
+/// admission; those require the lifecycle's independent receipts.
+#[cfg(unix)]
+pub fn verify_socket(socket: &Path, identity: &WorkerIdentity) -> Result<()> {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+
+    ensure!(socket.is_absolute(), "socket path must be absolute");
+    let parent = socket.parent().context("socket has no runtime directory")?;
+    let directory = fs::symlink_metadata(parent).context("inspecting runtime directory")?;
+    ensure!(
+        directory.is_dir()
+            && directory.uid() == identity.uid
+            && directory.gid() == identity.gid
+            && directory.mode() & 0o7777 == 0o750,
+        "Kvrocks runtime directory identity/mode differs from the worker"
+    );
+    let metadata = fs::symlink_metadata(socket).context("inspecting Kvrocks socket")?;
+    ensure!(
+        metadata.file_type().is_socket()
+            && metadata.uid() == identity.uid
+            && metadata.gid() == identity.gid
+            && metadata.mode() & 0o7777 == 0o660,
+        "Kvrocks socket type/identity/mode differs from the worker"
+    );
+    Ok(())
+}
+
 /// The direct controller tool pin owns this package, never the target's lock.
 pub fn tool_reference(manifest: &EngineManifest, system: &str) -> Result<String> {
     ensure!(manifest.schema_version == 1, "unsupported engine manifest");

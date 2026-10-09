@@ -64,6 +64,14 @@ and binary hashes. The requested platform must match both the worker architectur
 and native Nix system. The consumer flake, recipe and their cache-dependent Rust
 closures do not supply this transport tool.
 
+Worker preflight parses the actual runner and Nix build-group account records,
+rejects root/ambiguous identities, and refuses existing runtime state, including
+dangling symlinks. Socket metadata verification requires a non-symlink runtime
+directory owned by that runner/group with mode `0750`, and a Unix socket with
+the same ownership and mode `0660`. These observations preserve foreign state;
+they do not reserve the runtime path or prove service ownership, Unix-only
+listeners, sandbox admission, or compiler-cache operation.
+
 Execution currently rejects this opt-in before creating an output receipt.
 The owned bounded Kvrocks lifecycle, canonical sandbox socket mount, effective
 resource/source receipts and each exact wrapper's sandbox write/hit/cleanup
