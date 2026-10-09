@@ -257,7 +257,12 @@ fn nix_format_gate_runs_custom_flake_formatters_and_rejects_worktree_mutation() 
     use std::os::unix::fs::{PermissionsExt, symlink};
     use std::process::Command;
 
-    for split in [false, true] {
+    for (split, crow_format) in [
+        (false, None),
+        (true, None),
+        (false, Some("yaml")),
+        (false, Some("jsonnet")),
+    ] {
         let directory = fixture("nix", split, false);
         let root = directory.path();
         let bin = root.join("bin");
@@ -283,10 +288,60 @@ fn nix_format_gate_runs_custom_flake_formatters_and_rejects_worktree_mutation() 
         fs::set_permissions(&nix, fs::Permissions::from_mode(0o755)).unwrap();
         // No treefmt or Cargo fallback exists: a declared custom formatter
         // must run, and a missing exported executable must fail explicitly.
-        let gate = commands(root, "ci")
-            .into_iter()
-            .find(|run| run.contains("formatter_program="))
-            .expect("ordinary CI must expose its format gate");
+        let gate = if let Some(format) = crow_format {
+            let generated = common::simit()
+                .current_dir(root)
+                .args([
+                    "init",
+                    "ci",
+                    "--platform",
+                    "forgejo",
+                    "--ci-provider",
+                    "crow",
+                    "--crow-format",
+                    format,
+                    "--runner",
+                    "crow-agent",
+                ])
+                .output()
+                .unwrap();
+            assert!(generated.status.success(), "{generated:?}");
+            let file = fs::read_to_string(root.join(format!(".crow/build.{format}"))).unwrap();
+            let document: serde_yaml::Value = if format == "jsonnet" {
+                serde_yaml::from_str(file.split_once('\n').unwrap().1).unwrap()
+            } else {
+                serde_yaml::from_str(&file).unwrap()
+            };
+            let command = document["steps"]
+                .as_sequence()
+                .unwrap()
+                .iter()
+                .flat_map(|step| step["commands"].as_sequence().unwrap())
+                .filter_map(serde_yaml::Value::as_str)
+                .find(|command| command.contains("formatter_program="))
+                .expect("Crow CI must expose its format gate");
+            // The pipeline preprocessor consumes $$ as one literal dollar.
+            // No shell/Nix dollar may reach its variable-expression parser.
+            let mut expanded = String::new();
+            let mut characters = command.chars();
+            while let Some(character) = characters.next() {
+                if character == '$' {
+                    assert_eq!(
+                        characters.next(),
+                        Some('$'),
+                        "unescaped Crow interpolation: {command}"
+                    );
+                }
+                expanded.push(character);
+            }
+            assert!(expanded.contains(r"\${builtins.currentSystem}"));
+            expanded
+        } else {
+            commands(root, "ci")
+                .into_iter()
+                .find(|run| run.contains("formatter_program="))
+                .expect("ordinary CI must expose its format gate")
+        };
         assert!(
             Command::new("git")
                 .args(["init", "--quiet"])
@@ -333,7 +388,7 @@ fn nix_format_gate_runs_custom_flake_formatters_and_rejects_worktree_mutation() 
             assert_eq!(
                 output.status.code(),
                 Some(expected_status),
-                "split={split}: {output:?}"
+                "split={split}, crow_format={crow_format:?}: {output:?}"
             );
             if program == "crossbow-fmt" {
                 assert_eq!(fs::read_to_string(log).unwrap(), "crossbow-fmt \n");

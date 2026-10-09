@@ -62,6 +62,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Execute a declared flake formatter's exported executable, using `--ci` for
   treefmt and no arguments for custom formatters; reject repository mutations
   and fail on broken formatter exports.
+- Preserve formatter shell variables and Nix interpolation through Crow's
+  literal-dollar preprocessing in YAML and Jsonnet workflows.
 - Authenticate release verification fetches explicitly without persisting checkout
   credentials; cover private fetches and shallow reusable prebuild tag retrieval.
 - Dispatch reviews through an explicit branch or tag resolving to the reviewed
