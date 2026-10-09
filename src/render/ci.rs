@@ -28,8 +28,27 @@ pub const SIMIT_RELEASE_ARTIFACTS_BUILD_TYPE: &str = "https://simit.rs/release-a
 /// marker (no `# ` prefix) is recognized only for migration of pre-marker
 /// generation output; it is never written by current renderers.
 pub fn is_generated_workflow_marker(content: &str) -> bool {
-    content.contains(GENERATED_WORKFLOW_MARKER)
-        || content.contains(LEGACY_GENERATED_WORKFLOW_MARKER)
+    workflow_preamble_lines(content).any(|line| {
+        line == GENERATED_WORKFLOW_MARKER
+            || line == LEGACY_GENERATED_WORKFLOW_MARKER
+            || line.strip_prefix("// ") == Some(LEGACY_GENERATED_WORKFLOW_MARKER)
+    })
+}
+
+/// Ownership headers can follow document separators, blanks and project notes,
+/// but quoted marker strings or script comments in a workflow body are data.
+pub(crate) fn workflow_preamble_lines(content: &str) -> impl Iterator<Item = &str> {
+    content
+        .trim_start_matches('\u{feff}')
+        .lines()
+        .map(str::trim)
+        .take_while(|line| {
+            line.is_empty()
+                || *line == "---"
+                || line.starts_with('#')
+                || line.starts_with("//")
+                || *line == LEGACY_GENERATED_WORKFLOW_MARKER
+        })
 }
 const CARGO_NEXTEST_VERSION: &str = "0.9.100";
 const CARGO_DENY_VERSION: &str = "0.18.3";

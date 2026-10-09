@@ -60,11 +60,18 @@ fn is_actions_workflow(path: &Path) -> bool {
 }
 
 pub(crate) fn is_template_output(ci: &CiConfig, path: &Path, content: &str) -> bool {
-    content.contains(TEMPLATE_MARKER)
+    (has_template_header(content) && super::ci::is_generated_workflow_marker(content))
         || ci
             .workflow_templates
             .keys()
             .any(|output| portable_path(Path::new(output)) == portable_path(path))
+}
+
+fn has_template_header(content: &str) -> bool {
+    super::ci::workflow_preamble_lines(content).any(|line| {
+        line.strip_prefix(TEMPLATE_MARKER)
+            .is_some_and(relative_path)
+    })
 }
 
 fn relative_path(value: &str) -> bool {
@@ -357,9 +364,7 @@ pub(crate) fn obsolete(root: &Path, files: &[GeneratedFile]) -> Result<Vec<PathB
                 continue;
             }
             let content = fs::read_to_string(entry.path())?;
-            if content.contains(TEMPLATE_MARKER)
-                && super::ci::is_generated_workflow_marker(&content)
-            {
+            if has_template_header(&content) && super::ci::is_generated_workflow_marker(&content) {
                 obsolete.push(relative);
             }
         }
