@@ -87,6 +87,37 @@ fn project_templates_round_trip_and_share_generation_drift_and_registry_ownershi
 }
 
 #[test]
+fn template_encoding_bom_stays_outside_the_header_prefixed_yaml_payload() {
+    let temp = project();
+    let source = temp.path().join(".simit/templates/tests.yml");
+    let payload = fs::read_to_string(&source).unwrap();
+    let with_bom = format!("\u{feff}{payload}");
+    fs::write(&source, &with_bom).unwrap();
+    let original: serde_yaml::Value = serde_yaml::from_str(&with_bom).unwrap();
+    assert_eq!(original["name"], "Project tests");
+    let result = generate(&temp, &[]);
+    assert!(result.status.success(), "{result:?}");
+    let path = temp.path().join(".github/workflows/tests.yml");
+    let generated = fs::read_to_string(&path).unwrap();
+    assert!(
+        !generated.contains('\u{feff}'),
+        "the encoding prefix must not become a payload character: {generated:?}"
+    );
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&generated).unwrap();
+    assert_eq!(yaml["name"], original["name"]);
+    assert_eq!(yaml["jobs"]["test"]["runs-on"], "ubuntu-24.04");
+    assert_eq!(fs::read_to_string(&source).unwrap(), with_bom);
+    assert!(generate(&temp, &["--check", "--diff"]).status.success());
+    assert_eq!(
+        audit_ci(temp.path()).unwrap().status,
+        FeatureStatus::Managed
+    );
+    assert!(generate(&temp, &[]).status.success());
+    assert_eq!(fs::read_to_string(&path).unwrap(), generated);
+    assert_eq!(fs::read_to_string(&source).unwrap(), with_bom);
+}
+
+#[test]
 fn invalid_templates_fail_before_any_outputs_are_written() {
     for (output, source, template) in [
         ("../escape.yml", ".simit/templates/tests.yml", "name: bad\n"),
