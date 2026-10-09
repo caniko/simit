@@ -118,6 +118,115 @@ fn template_encoding_bom_stays_outside_the_header_prefixed_yaml_payload() {
 }
 
 #[test]
+fn specialized_generation_preserves_templates_that_collide_with_its_outputs() {
+    for (output, mode, extra, options) in [
+        (
+            ".github/workflows/pages.yaml",
+            "--pages-only",
+            "",
+            vec!["--with-pages", "--pages-repo", "caniko/example"],
+        ),
+        (
+            ".github/workflows/prebuild.yaml",
+            "--prebuild-only",
+            "\n[prebuild]\n[prebuild.system_runners]\n'x86_64-linux'='ubuntu-24.04'\n",
+            vec![],
+        ),
+        (
+            ".github/workflows/review-repository.yml",
+            "--review-only",
+            "\n[review]\nrole='controller'\n",
+            vec![],
+        ),
+    ] {
+        let temp = project();
+        let cfg_path = temp.path().join("simit.toml");
+        let cfg = fs::read_to_string(&cfg_path).unwrap();
+        fs::write(&cfg_path, format!("{cfg}{extra}")).unwrap();
+        let mut args = vec![mode];
+        args.extend(options);
+        // A supported non-colliding project proves the specialized route itself
+        // is usable; the negative control must fail on destination ownership.
+        let control = generate(&temp, &args);
+        assert!(control.status.success(), "{mode}: {control:?}");
+        let source = temp.path().join(".simit/templates/tests.yml");
+        let source_bytes = fs::read(&source).unwrap();
+        let destination = temp.path().join(output);
+        let template = format!(
+            "# Simit workflow template: .simit/templates/tests.yml\n{}\nname: preserved template\n",
+            simit::render::ci::GENERATED_WORKFLOW_MARKER
+        );
+        fs::write(&destination, &template).unwrap();
+        let mut cfg: toml_edit::DocumentMut =
+            fs::read_to_string(&cfg_path).unwrap().parse().unwrap();
+        let mappings = cfg["ci"]["workflow_templates"].as_table_mut().unwrap();
+        mappings.clear();
+        mappings.insert(output, toml_edit::value(".simit/templates/tests.yml"));
+        fs::write(&cfg_path, cfg.to_string()).unwrap();
+        let candidate_cfg = fs::read(&cfg_path).unwrap();
+        for check in [true, false] {
+            let mut invocation = args.clone();
+            if check {
+                invocation.extend(["--check", "--diff"]);
+            }
+            let result = generate(&temp, &invocation);
+            assert!(!result.status.success(), "{mode}: {result:?}");
+            assert!(
+                String::from_utf8_lossy(&result.stderr).contains("collides"),
+                "{mode}: {result:?}"
+            );
+            assert_eq!(fs::read_to_string(&destination).unwrap(), template);
+            assert_eq!(fs::read(&source).unwrap(), source_bytes);
+            assert_eq!(fs::read(&cfg_path).unwrap(), candidate_cfg);
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn retirement_refuses_symlinked_workflow_directories_and_preserves_their_targets() {
+    use std::os::unix::fs::symlink;
+    for link_parent in [false, true] {
+        let temp = project();
+        assert!(generate(&temp, &[]).status.success());
+        let workflow = temp.path().join(".github/workflows/tests.yml");
+        let bytes = fs::read(&workflow).unwrap();
+        let cfg_path = temp.path().join("simit.toml");
+        let cfg = fs::read_to_string(&cfg_path).unwrap();
+        fs::write(
+            &cfg_path,
+            cfg.split("[ci.workflow_templates]").next().unwrap(),
+        )
+        .unwrap();
+        let relative = if link_parent {
+            ".github"
+        } else {
+            ".github/workflows"
+        };
+        let original = temp.path().join(relative);
+        let target = temp.path().join("retained-target");
+        fs::rename(&original, &target).unwrap();
+        symlink(&target, &original).unwrap();
+        let target_file = target.join(if link_parent {
+            "workflows/tests.yml"
+        } else {
+            "tests.yml"
+        });
+        for args in [vec!["--check", "--diff"], vec![]] {
+            let result = generate(&temp, &args);
+            assert!(!result.status.success(), "{relative}: {result:?}");
+            assert!(
+                String::from_utf8_lossy(&result.stderr).contains("symlink"),
+                "{relative}: {result:?}"
+            );
+            assert_eq!(fs::read(&target_file).unwrap(), bytes);
+            assert_eq!(fs::read(&workflow).unwrap(), bytes);
+            assert!(original.is_symlink());
+        }
+    }
+}
+
+#[test]
 fn invalid_templates_fail_before_any_outputs_are_written() {
     for (output, source, template) in [
         ("../escape.yml", ".simit/templates/tests.yml", "name: bad\n"),
