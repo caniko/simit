@@ -161,9 +161,11 @@ fn specialized_generation_preserves_templates_that_collide_with_its_outputs() {
         fs::write(&destination, &template).unwrap();
         let mut cfg: toml_edit::DocumentMut =
             fs::read_to_string(&cfg_path).unwrap().parse().unwrap();
-        let mappings = cfg["ci"]["workflow_templates"].as_table_mut().unwrap();
-        mappings.clear();
+        // Pages-only persistence may serialize this map as an inline table.
+        // Replace the fixture mapping independently of that TOML representation.
+        let mut mappings = toml_edit::Table::new();
         mappings.insert(output, toml_edit::value(".simit/templates/tests.yml"));
+        cfg["ci"]["workflow_templates"] = toml_edit::Item::Table(mappings);
         fs::write(&cfg_path, cfg.to_string()).unwrap();
         let candidate_cfg = fs::read(&cfg_path).unwrap();
         for check in [true, false] {
