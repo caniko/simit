@@ -78,6 +78,14 @@ pub(super) fn files(
                     .unwrap()
                     .clone(),
             );
+            if matches!(registry, Registry::Npm) {
+                let manifest: Value =
+                    serde_json::from_str(&std::fs::read_to_string(root.join(&owner.manifest))?)?;
+                if manifest["publishConfig"]["provenance"] == true {
+                    workflow["jobs"]["publish"]["permissions"] =
+                        json!({"contents": "read", "id-token": "write"});
+                }
+            }
             files.push(GeneratedFile {
                 relative_path: PathBuf::from(format!(
                     ".github/workflows/publish-{}-{}.yaml",

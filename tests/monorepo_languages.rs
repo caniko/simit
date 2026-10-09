@@ -769,12 +769,23 @@ fn eligible_native_publication_qualifies_the_full_graph_and_preserves_private_ow
         serde_json::from_slice(&fs::read(root.join("node/package.json")).unwrap()).unwrap();
     let mut npm = npm;
     npm["private"] = false.into();
+    npm["publishConfig"] = serde_json::json!({"access": "public", "provenance": true});
     write(root, "node/package.json", &npm.to_string());
     let generated = run(root, &["init", "ci"]);
     assert!(generated.status.success(), "{generated:?}");
     let npm =
         fs::read_to_string(root.join(".github/workflows/publish-npm-node-engine.yaml")).unwrap();
     assert!(npm.contains("NPM_TOKEN"));
+    let npm_workflow: serde_yaml::Value = serde_yaml::from_str(&npm).unwrap();
+    assert_eq!(
+        npm_workflow["jobs"]["publish"]["permissions"]["id-token"],
+        "write"
+    );
+    assert!(
+        npm_workflow["jobs"]["validate"]
+            .get("permissions")
+            .is_none()
+    );
     for entry in fs::read_dir(root.join(".github/workflows")).unwrap() {
         let output = Command::new("actionlint")
             .arg(entry.unwrap().path())

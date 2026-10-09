@@ -172,7 +172,9 @@ the project's root `ci` shell, which must provide Python 3.11+, GnuPG and `uv`
 or npm. Prepared npm files must already be present after component qualification;
 `publishConfig` access and distribution-tag settings are retained, while custom
 registries require a separate backend. npm prereleases require an explicit
-`publishConfig.tag`. Python owners retain SemVer in source/tags; public releases
+`publishConfig.tag`. npm `publishConfig.provenance = true` grants OIDC permission
+only to the publication job so npm can retain its provenance setting. Python
+owners retain SemVer in source/tags; public Python releases
 support stable versions and `alpha`, `beta`, `rc`, or `dev` numeric prereleases,
 mapped to PyPI's normalized metadata version. SemVer build metadata is unsupported
 for public native releases. All native publication requires `keys/maintainers.gpg`.
