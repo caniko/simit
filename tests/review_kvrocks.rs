@@ -360,7 +360,7 @@ fn kvrocks_transient_service_plan_binds_native_tool_run_identity_and_bounded_res
     assert_eq!(plan.memory_max_bytes, 2 * 1024 * 1024 * 1024);
     assert_eq!(plan.cpu_quota_percent, 200);
     assert_eq!(plan.max_db_gib, 4);
-    assert_eq!(plan.sandbox_paths, [plan.socket.clone()]);
+    assert_eq!(plan.sandbox_paths, std::slice::from_ref(&plan.socket));
     assert_eq!(
         plan.state_directory,
         format!("/home/runner/work/_temp/simit-kvrocks-{run_identity}")
