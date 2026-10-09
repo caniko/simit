@@ -203,6 +203,122 @@ fn yaml_nonprintable_characters_in_template_paths_fail_before_any_writes() {
 }
 
 #[test]
+fn windows_invalid_template_components_fail_before_any_writes_on_every_host() {
+    let mut components = vec![
+        "CON".to_owned(),
+        "prn".to_owned(),
+        "AuX".to_owned(),
+        "NUL".to_owned(),
+        "bad<name".to_owned(),
+        "bad>name".to_owned(),
+        "bad:name".to_owned(),
+        "bad\"name".to_owned(),
+        "bad\\name".to_owned(),
+        "bad|name".to_owned(),
+        "bad?name".to_owned(),
+        "bad*name".to_owned(),
+    ];
+    for prefix in ["COM", "lpt"] {
+        for suffix in ["1", "2", "3", "4", "5", "6", "7", "8", "9", "¹", "²", "³"] {
+            components.push(format!("{prefix}{suffix}"));
+        }
+    }
+    for component in components {
+        for source_path in [false, true] {
+            let temp = project();
+            assert!(generate(&temp, &[]).status.success());
+            let cfg_path = temp.path().join("simit.toml");
+            let original_cfg = fs::read_to_string(&cfg_path).unwrap();
+            let paths = [
+                ".github/workflows/nix-builds.yaml",
+                ".github/workflows/tests.yml",
+                ".simit/templates/tests.yml",
+            ];
+            let before = paths.map(|path| fs::read(temp.path().join(path)).unwrap());
+            let bad_path = if source_path {
+                format!(".simit/templates/{component}/tests.yml")
+            } else {
+                format!(".github/workflows/{component}.yml")
+            };
+            let (output, source) = if source_path {
+                (".github/workflows/tests.yml", bad_path.as_str())
+            } else {
+                (bad_path.as_str(), ".simit/templates/tests.yml")
+            };
+            let mut cfg: toml_edit::DocumentMut = original_cfg.parse().unwrap();
+            let mappings = cfg["ci"]["workflow_templates"].as_table_mut().unwrap();
+            mappings.clear();
+            mappings.insert(output, toml_edit::value(source));
+            fs::write(&cfg_path, cfg.to_string()).unwrap();
+            let candidate_cfg = fs::read_to_string(&cfg_path).unwrap();
+            // Do not create these paths even on Unix: rejection must happen in
+            // portable configuration validation, before filesystem resolution.
+            for args in [vec![], vec!["--check", "--diff"]] {
+                let result = generate(&temp, &args);
+                assert!(!result.status.success(), "{bad_path:?}: {result:?}");
+                assert!(
+                    String::from_utf8_lossy(&result.stderr)
+                        .contains("invalid [ci.workflow_templates] mapping"),
+                    "{bad_path:?}: {result:?}"
+                );
+                for (path, bytes) in paths.iter().zip(&before) {
+                    assert_eq!(fs::read(temp.path().join(path)).unwrap(), *bytes);
+                }
+                assert_eq!(fs::read_to_string(&cfg_path).unwrap(), candidate_cfg);
+            }
+            fs::write(&cfg_path, &original_cfg).unwrap();
+            assert!(generate(&temp, &["--check", "--diff"]).status.success());
+        }
+    }
+    for component in ["parent.", "parent ", "NUL.txt", "AUX.tar.gz"] {
+        let temp = project();
+        let mut cfg: toml_edit::DocumentMut = fs::read_to_string(temp.path().join("simit.toml"))
+            .unwrap()
+            .parse()
+            .unwrap();
+        cfg["ci"]["workflow_templates"][".github/workflows/tests.yml"] =
+            toml_edit::value(format!(".simit/{component}/tests.yml"));
+        fs::write(temp.path().join("simit.toml"), cfg.to_string()).unwrap();
+        let result = generate(&temp, &[]);
+        assert!(!result.status.success(), "{component:?}: {result:?}");
+        assert!(
+            String::from_utf8_lossy(&result.stderr)
+                .contains("invalid [ci.workflow_templates] mapping"),
+            "{component:?}: {result:?}"
+        );
+        assert!(!temp.path().join(".github/workflows").exists());
+    }
+}
+
+#[test]
+fn portable_template_names_near_windows_devices_remain_usable() {
+    for component in [
+        "CONifer",
+        "auxiliary",
+        "COM0",
+        "com10",
+        "LPT0",
+        "lpt10",
+        "naïve",
+        ".hidden",
+    ] {
+        let temp = project();
+        let source = format!(".simit/templates/{component}.yml");
+        let output = format!(".github/workflows/{component}.yml");
+        fs::copy(
+            temp.path().join(".simit/templates/tests.yml"),
+            temp.path().join(&source),
+        )
+        .unwrap();
+        config(&temp, &output, &source, "ubuntu-24.04");
+        let result = generate(&temp, &[]);
+        assert!(result.status.success(), "{component:?}: {result:?}");
+        assert!(temp.path().join(&output).is_file());
+        assert!(generate(&temp, &["--check", "--diff"]).status.success());
+    }
+}
+
+#[test]
 fn active_workflow_sources_are_rejected_without_rewriting_builtins() {
     for platform in ["github", "forgejo"] {
         for extension in ["yml", "yaml"] {
