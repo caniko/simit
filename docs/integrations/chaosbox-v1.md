@@ -61,8 +61,9 @@ Notes:
 - Gate `id` values must match `[a-zA-Z0-9_-]+`, be unique (including after
   sanitization: `a_b` vs `a-b` collide as `gate-a-b`), and stay stable:
   they become `gate-<id>` job names and `needs` references.
-- `publish_strategy = "coordinated"` requires `publish_crates = true`,
-  `--workspace`, and `--workspace-strategy aggregate`. Other backends fail
+- `publish_strategy = "coordinated"` requires `publish_crates = true` and
+  `--workspace`. Ordinary CI can retain either the member or aggregate strategy;
+  dependency-order publication does not remove member CI policies. Other backends fail
   explicitly (Forgejo/Crow/GitLab are not silently degraded in v1).
 
 ## Generation and drift-check commands
@@ -133,7 +134,8 @@ Runtime contract (lockstep v1):
   the tag (`cargo pkgid -p <crate>` compared to `$tag` after `git verify-tag`
   - checkout of the validated SHA). Development-only `publish = false`
     members are excluded from the plan and publish jobs.
-- Triggers only on tags (`[0-9]*`) + `workflow_dispatch`. No publish-on-PR.
+- Triggers only on signed semver tag pushes (`[0-9]*`); retry the original run.
+  No branch-based manual dispatch or publish-on-PR.
 - Least-privilege permissions (`contents: read`, `id-token: write`), pinned
   actions, serialized concurrency (`cancel-in-progress: false`).
 - Maintainer trust root preserved: `test -s keys/maintainers.gpg` + `git
@@ -158,7 +160,7 @@ Conflict handling is honest, not blind:
 
 A halfway failure is not atomic rollback. The `publish-report` job (`if:
 always()`) plus per-crate job statuses form the auditable result. Resume by
-re-dispatching the workflow: matching checksums skip, conflicts fail, missing
+rerunning the original tag-push run: matching checksums skip, conflicts fail, missing
 versions publish in order. Preflight never blindly republishes or skips.
 
 Dependency semantics (tested against `cargo metadata`):
