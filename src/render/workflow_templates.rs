@@ -386,16 +386,21 @@ pub(crate) fn append(root: &Path, ci: &CiConfig, files: &mut Vec<GeneratedFile>)
                 );
             }
         }
-        let rendered = substitute(&source_text, ci)
+        // An encoding BOM belongs at the start of its source stream. Ownership
+        // headers move that boundary, so remove only the leading prefix before
+        // substitution and validate exactly the complete generated document.
+        let source_payload = source_text.strip_prefix('\u{feff}').unwrap_or(&source_text);
+        let rendered = substitute(source_payload, ci)
             .with_context(|| format!("rendering workflow template {source}"))?;
-        let _: serde_yaml::Value = serde_yaml::from_str(&rendered)
+        let content = format!(
+            "{TEMPLATE_MARKER}{source}\n{}\n{rendered}",
+            super::ci::GENERATED_WORKFLOW_MARKER
+        );
+        let _: serde_yaml::Value = serde_yaml::from_str(&content)
             .with_context(|| format!("parsing rendered workflow {output}"))?;
         templates.push(GeneratedFile {
             relative_path: relative,
-            content: format!(
-                "{TEMPLATE_MARKER}{source}\n{}\n{rendered}",
-                super::ci::GENERATED_WORKFLOW_MARKER
-            ),
+            content,
         });
     }
     // Complete all template validation before mutating the generation plan.
