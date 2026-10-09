@@ -108,6 +108,103 @@ pub fn refuse_existing_runtime(path: &Path) -> Result<()> {
     }
 }
 
+/// An exclusively created directory retained by its open inode. The privileged
+/// lifecycle must place this below a trusted parent (the canonical `/run` route)
+/// and stop its owned service before cleanup. This guard never recursively
+/// removes state and does not establish service or sandbox readiness.
+#[cfg(unix)]
+pub struct OwnedRuntime {
+    path: std::path::PathBuf,
+    directory: fs::File,
+    identity: WorkerIdentity,
+    cleaned: bool,
+}
+
+#[cfg(unix)]
+impl OwnedRuntime {
+    pub fn create(path: &Path, identity: &WorkerIdentity) -> Result<Self> {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+
+        ensure!(
+            path.is_absolute() && path.file_name().is_some(),
+            "invalid runtime directory"
+        );
+        ensure!(
+            path.components().all(|part| matches!(
+                part,
+                std::path::Component::RootDir | std::path::Component::Normal(_)
+            )),
+            "runtime directory must not contain traversal"
+        );
+        for ancestor in path.ancestors().skip(1) {
+            let metadata = fs::symlink_metadata(ancestor).context("inspecting runtime parent")?;
+            ensure!(
+                metadata.is_dir(),
+                "runtime parent is a symlink or non-directory"
+            );
+        }
+        // create_dir, not create_dir_all: concurrent creators and dangling
+        // symlinks both fail without adopting or altering existing state.
+        fs::DirBuilder::new()
+            .mode(0o750)
+            .create(path)
+            .context("exclusively allocating Kvrocks runtime directory")?;
+        let directory = fs::File::open(path).context("retaining owned runtime inode")?;
+        let owned = Self {
+            path: path.to_owned(),
+            directory,
+            identity: identity.clone(),
+            cleaned: false,
+        };
+        std::os::unix::fs::chown(path, Some(identity.uid), Some(identity.gid))
+            .context("assigning owned runtime identity")?;
+        owned
+            .directory
+            .set_permissions(fs::Permissions::from_mode(0o750))?;
+        owned.verify_owned_path()?;
+        Ok(owned)
+    }
+
+    fn verify_owned_path(&self) -> Result<()> {
+        use std::os::unix::fs::MetadataExt;
+
+        let pinned = self.directory.metadata()?;
+        let current = fs::symlink_metadata(&self.path).context("inspecting owned runtime path")?;
+        ensure!(
+            current.is_dir()
+                && current.dev() == pinned.dev()
+                && current.ino() == pinned.ino()
+                && current.uid() == self.identity.uid
+                && current.gid() == self.identity.gid
+                && current.mode() & 0o7777 == 0o750,
+            "runtime path or identity was replaced; preserve foreign state"
+        );
+        Ok(())
+    }
+
+    fn remove_empty(&mut self) -> Result<()> {
+        self.verify_owned_path()?;
+        // An unexpected socket, database file or foreign sentinel prevents
+        // removal. The service owner must separately account for its artifacts.
+        fs::remove_dir(&self.path).context("removing only the owned empty runtime directory")?;
+        self.cleaned = true;
+        Ok(())
+    }
+
+    pub fn cleanup(mut self) -> Result<()> {
+        self.remove_empty()
+    }
+}
+
+#[cfg(unix)]
+impl Drop for OwnedRuntime {
+    fn drop(&mut self) {
+        if !self.cleaned {
+            let _ = self.remove_empty();
+        }
+    }
+}
+
 /// Verify the socket and immediate runtime directory without following their
 /// symlinks. These metadata checks do not establish process ownership or sandbox
 /// admission; those require the lifecycle's independent receipts.
