@@ -56,6 +56,14 @@ revision requests use a full lowercase commit SHA equal to `expected_head`.
 Plans also bind the resolved target to that immutable revision. Darwin, Nixpkgs,
 merge-mode and mutable-revision requests cannot select this profile.
 
+The lifecycle's native-tool bootstrap derives `legacyPackages.<system>.kvrocks`
+only from the packaged engine manifest's direct controller Nixpkgs revision.
+It independently freezes the package version, native derivation and output,
+realizes that exact output with no remote builders or IFD, and retains its NAR
+and binary hashes. The requested platform must match both the worker architecture
+and native Nix system. The consumer flake, recipe and their cache-dependent Rust
+closures do not supply this transport tool.
+
 Execution currently rejects this opt-in before creating an output receipt.
 The owned bounded Kvrocks lifecycle, canonical sandbox socket mount, effective
 resource/source receipts and each exact wrapper's sandbox write/hit/cleanup

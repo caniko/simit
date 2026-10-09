@@ -8,6 +8,7 @@ pub mod contract;
 pub mod engine;
 pub mod generation;
 pub mod github;
+pub mod kvrocks;
 pub mod process;
 pub mod service;
 

@@ -2,6 +2,7 @@
 //! Actual service/socket and each pinned wrapper's sandbox receipts are separate.
 use serde_json::{Value, json};
 use simit::review::{canonical_digest, contract::Request};
+use simit::review::{engine::EngineManifest, kvrocks};
 
 const HEAD: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const BASE: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -93,4 +94,66 @@ fn kvrocks_rejects_mutable_identity_unsupported_platforms_and_free_form_profiles
         accepts(enabled),
         "native Linux systems remain independently selected"
     );
+}
+
+#[test]
+fn kvrocks_bootstrap_uses_only_the_direct_worker_native_pin() {
+    let mut manifest = EngineManifest {
+        schema_version: 1,
+        repository: "caniko/simit".into(),
+        revision: "c".repeat(40),
+        nixpkgs_revision: "d".repeat(40),
+    };
+    for system in ["x86_64-linux", "aarch64-linux"] {
+        let reference = kvrocks::tool_reference(&manifest, system).unwrap();
+        assert_eq!(
+            reference,
+            format!(
+                "github:NixOS/nixpkgs/{}#legacyPackages.{system}.kvrocks",
+                "d".repeat(40)
+            )
+        );
+        assert!(!reference.contains(HEAD));
+        assert!(!reference.contains(BASE));
+        let package = json!({"pname":"kvrocks", "version":"2.14.0", "system":system,
+            "outputs":["out"], "drvPath":format!("/nix/store/{}-kvrocks-2.14.0.drv", "0".repeat(32)),
+            "outPath":format!("/nix/store/{}-kvrocks-2.14.0", "1".repeat(32))});
+        let source = kvrocks::freeze_source(&manifest, system, &package).unwrap();
+        assert_eq!(source.system, system);
+        assert_eq!(source.installable, reference);
+        assert_eq!(source.engine_revision, "c".repeat(40));
+        assert_eq!(source.nixpkgs_revision, "d".repeat(40));
+        assert_eq!(source.version, "2.14.0");
+        for (field, value) in [
+            ("pname", json!("redis")),
+            ("system", json!("x86_64-darwin")),
+            ("outputs", json!(["out", "dev"])),
+            ("version", json!("2.14.0\nother-setting")),
+            ("version", json!("")),
+            ("drvPath", json!("/tmp/foreign.drv")),
+            ("drvPath", package["outPath"].clone()),
+            ("outPath", package["drvPath"].clone()),
+            ("outPath", json!("/nix/store/../foreign")),
+        ] {
+            let mut invalid = package.clone();
+            invalid[field] = value;
+            assert!(
+                kvrocks::freeze_source(&manifest, system, &invalid).is_err(),
+                "must reject {field}"
+            );
+        }
+    }
+    for system in [
+        "x86_64-darwin",
+        "aarch64-darwin",
+        "x86_64-windows",
+        "x86_64-linux;echo foreign",
+    ] {
+        assert!(kvrocks::tool_reference(&manifest, system).is_err());
+    }
+    manifest.nixpkgs_revision = "trunk".into();
+    assert!(kvrocks::tool_reference(&manifest, "x86_64-linux").is_err());
+    manifest.nixpkgs_revision = "d".repeat(40);
+    manifest.revision = "latest".into();
+    assert!(kvrocks::tool_reference(&manifest, "x86_64-linux").is_err());
 }
