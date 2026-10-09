@@ -157,3 +157,104 @@ fn kvrocks_bootstrap_uses_only_the_direct_worker_native_pin() {
     manifest.revision = "latest".into();
     assert!(kvrocks::tool_reference(&manifest, "x86_64-linux").is_err());
 }
+
+#[test]
+fn kvrocks_worker_identity_requires_the_actual_runner_and_nix_build_group() {
+    let identity = kvrocks::parse_worker_identity(
+        "runner",
+        "nixbld",
+        "runner:x:1001:1001:Runner:/home/runner:/bin/bash\n",
+        "nixbld:x:30000:nixbld1,nixbld2\n",
+    )
+    .unwrap();
+    assert_eq!(identity.user, "runner");
+    assert_eq!(identity.uid, 1001);
+    assert_eq!(identity.group, "nixbld");
+    assert_eq!(identity.gid, 30000);
+    for (passwd, group) in [
+        (
+            "other:x:1001:1001:Runner:/home/runner:/bin/bash",
+            "nixbld:x:30000:nixbld1",
+        ),
+        (
+            "runner:x:0:0:root:/root:/bin/bash",
+            "nixbld:x:30000:nixbld1",
+        ),
+        (
+            "runner:x:invalid:1001:Runner:/home/runner:/bin/bash",
+            "nixbld:x:30000:nixbld1",
+        ),
+        (
+            "runner:x:1001:1001:Runner:/home/runner:/bin/bash",
+            "other:x:30000:nixbld1",
+        ),
+        (
+            "runner:x:1001:1001:Runner:/home/runner:/bin/bash",
+            "nixbld:x:0:nixbld1",
+        ),
+        (
+            "runner:x:1001:1001:Runner:/home/runner:/bin/bash\nother:x:1002:1002::/:/bin/sh",
+            "nixbld:x:30000:nixbld1",
+        ),
+    ] {
+        assert!(kvrocks::parse_worker_identity("runner", "nixbld", passwd, group).is_err());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn kvrocks_runtime_preflight_preserves_foreign_state_and_checks_socket_identity() {
+    use std::os::unix::{
+        fs::{MetadataExt, PermissionsExt, symlink},
+        net::UnixListener,
+    };
+    let root = tempfile::tempdir().unwrap();
+    let runtime = root.path().join("redis-sccache");
+    kvrocks::refuse_existing_runtime(&runtime).unwrap();
+    std::fs::create_dir(&runtime).unwrap();
+    let sentinel = runtime.join("foreign-state");
+    std::fs::write(&sentinel, "preserve foreign service bytes").unwrap();
+    assert!(kvrocks::refuse_existing_runtime(&runtime).is_err());
+    assert_eq!(
+        std::fs::read_to_string(&sentinel).unwrap(),
+        "preserve foreign service bytes"
+    );
+    std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o750)).unwrap();
+    let socket = runtime.join("redis.sock");
+    let _listener = UnixListener::bind(&socket).unwrap();
+    std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o660)).unwrap();
+    let metadata = std::fs::metadata(&runtime).unwrap();
+    let identity = kvrocks::WorkerIdentity {
+        user: "fixture".into(),
+        uid: metadata.uid(),
+        group: "fixture".into(),
+        gid: metadata.gid(),
+    };
+    kvrocks::verify_socket(&socket, &identity).unwrap();
+    for mode in [0o600, 0o666, 0o777] {
+        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(mode)).unwrap();
+        assert!(kvrocks::verify_socket(&socket, &identity).is_err());
+    }
+    std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o660)).unwrap();
+    let mut foreign = identity.clone();
+    foreign.uid = foreign.uid.checked_add(1).unwrap();
+    assert!(kvrocks::verify_socket(&socket, &foreign).is_err());
+    foreign = identity.clone();
+    foreign.gid = foreign.gid.checked_add(1).unwrap();
+    assert!(kvrocks::verify_socket(&socket, &foreign).is_err());
+    std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(kvrocks::verify_socket(&socket, &identity).is_err());
+    std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o750)).unwrap();
+    let alias = runtime.join("alias.sock");
+    symlink(&socket, &alias).unwrap();
+    assert!(kvrocks::verify_socket(&alias, &identity).is_err());
+    let dangling = root.path().join("dangling-runtime");
+    symlink(root.path().join("missing"), &dangling).unwrap();
+    assert!(kvrocks::refuse_existing_runtime(&dangling).is_err());
+    assert!(dangling.is_symlink());
+    assert!(kvrocks::verify_socket(&sentinel, &identity).is_err());
+    assert_eq!(
+        std::fs::read_to_string(&sentinel).unwrap(),
+        "preserve foreign service bytes"
+    );
+}
