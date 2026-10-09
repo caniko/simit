@@ -139,6 +139,34 @@ pub struct OwnedRuntime {
     cleaned: bool,
 }
 
+/// Arm conservative rollback before opening the allocated directory can fail.
+/// The lifecycle's trusted parent prevents untrusted creators; the snapshot
+/// additionally preserves a replacement path or unexpected nonempty state.
+#[cfg(unix)]
+struct PendingRuntime<'a> {
+    path: &'a Path,
+    allocated: fs::Metadata,
+    armed: bool,
+}
+
+#[cfg(unix)]
+impl Drop for PendingRuntime<'_> {
+    fn drop(&mut self) {
+        use std::os::unix::fs::MetadataExt;
+
+        if self.armed
+            && fs::symlink_metadata(self.path).is_ok_and(|current| {
+                current.is_dir()
+                    && current.dev() == self.allocated.dev()
+                    && current.ino() == self.allocated.ino()
+            })
+        {
+            // remove_dir refuses nonempty state; never recursively delete it.
+            let _ = fs::remove_dir(self.path);
+        }
+    }
+}
+
 #[cfg(unix)]
 impl OwnedRuntime {
     pub fn create(path: &Path, identity: &WorkerIdentity) -> Result<Self> {
@@ -159,7 +187,16 @@ impl OwnedRuntime {
         identity: &WorkerIdentity,
         setup: impl FnOnce(&Self) -> Result<()>,
     ) -> Result<Self> {
-        use std::os::unix::fs::DirBuilderExt;
+        Self::create_with_setup_and_open(path, identity, |path| fs::File::open(path), setup)
+    }
+
+    fn create_with_setup_and_open(
+        path: &Path,
+        identity: &WorkerIdentity,
+        open: impl FnOnce(&Path) -> std::io::Result<fs::File>,
+        setup: impl FnOnce(&Self) -> Result<()>,
+    ) -> Result<Self> {
+        use std::os::unix::fs::{DirBuilderExt, MetadataExt};
 
         ensure!(
             path.is_absolute() && path.file_name().is_some(),
@@ -185,7 +222,19 @@ impl OwnedRuntime {
             .mode(0o750)
             .create(path)
             .context("exclusively allocating Kvrocks runtime directory")?;
-        let directory = fs::File::open(path).context("retaining owned runtime inode")?;
+        let mut pending = PendingRuntime {
+            path,
+            allocated: fs::symlink_metadata(path).context("observing allocated runtime inode")?,
+            armed: true,
+        };
+        let directory = open(path).context("retaining owned runtime inode")?;
+        let pinned = directory.metadata()?;
+        ensure!(
+            pinned.is_dir()
+                && pinned.dev() == pending.allocated.dev()
+                && pinned.ino() == pending.allocated.ino(),
+            "runtime allocation was replaced while retaining its inode"
+        );
         let mut owned = Self {
             path: path.to_owned(),
             directory,
@@ -193,6 +242,8 @@ impl OwnedRuntime {
             initialized: false,
             cleaned: false,
         };
+        // Ownership transfers to the file-pinned guard before setup can fail.
+        pending.armed = false;
         setup(&owned)?;
         owned.verify_owned_path()?;
         owned.initialized = true;
@@ -652,6 +703,60 @@ mod tests {
             fs::read(runtime.join("foreign")).unwrap(),
             b"preserve foreign"
         );
+    }
+
+    #[test]
+    fn inode_open_rollback_preserves_nonempty_and_replaced_runtime_paths() {
+        let root = tempfile::tempdir().unwrap();
+        let metadata = root.path().metadata().unwrap();
+        let identity = WorkerIdentity {
+            user: "fixture".into(),
+            uid: metadata.uid(),
+            group: "fixture".into(),
+            gid: metadata.gid(),
+        };
+        let runtime = root.path().join("runtime");
+        let result = OwnedRuntime::create_with_setup_and_open(
+            &runtime,
+            &identity,
+            |path| {
+                fs::write(path.join("unclaimed"), b"preserve unexpected state")?;
+                Err(std::io::Error::from_raw_os_error(24))
+            },
+            |_| panic!("setup must not run after an inode-open failure"),
+        );
+        assert!(result.is_err());
+        assert_eq!(
+            fs::read(runtime.join("unclaimed")).unwrap(),
+            b"preserve unexpected state"
+        );
+        fs::remove_file(runtime.join("unclaimed")).unwrap();
+        fs::remove_dir(&runtime).unwrap();
+
+        for open_replacement in [false, true] {
+            let retained = root.path().join(format!("retained-{open_replacement}"));
+            let result = OwnedRuntime::create_with_setup_and_open(
+                &runtime,
+                &identity,
+                |path| {
+                    fs::rename(path, &retained)?;
+                    fs::create_dir(path)?;
+                    if open_replacement {
+                        fs::File::open(path)
+                    } else {
+                        Err(std::io::Error::from_raw_os_error(24))
+                    }
+                },
+                |_| panic!("setup must not adopt a replacement inode"),
+            );
+            assert!(result.is_err());
+            assert!(runtime.is_dir(), "preserve the empty replacement inode");
+            assert!(retained.is_dir(), "preserve the displaced allocated inode");
+            fs::remove_dir(&runtime).unwrap();
+        }
+        let owned = OwnedRuntime::create(&runtime, &identity).unwrap();
+        owned.cleanup().unwrap();
+        assert!(fs::symlink_metadata(&runtime).is_err());
     }
 
     #[test]
