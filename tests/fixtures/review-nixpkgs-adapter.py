@@ -62,11 +62,15 @@ with tempfile.TemporaryDirectory() as temp:
     config = adapter.scoped_nixpkgs_config(plan)
     assert config == '{ problems.handlers."vortex".broken = "warn"; }'
     assert adapter.scoped_nixpkgs_config({"request": {}}) == "{  }"
-    review = adapter.SelectOnly(plan, system, output,
-        builddir=SimpleNamespace(nix_path="recorded", worktree_dir=Path(temp)),
-        build_args="", no_shell=True, run="", remote="", systems=[system],
-        allow=AllowedFeatures([]), build_graph="nix", nixpkgs_config=Path(temp),
-        extra_nixpkgs_config=config, eval_type="local", checkout=upstream.CheckoutOption.COMMIT)
+    # As in the discovery cases above, this fixture records Nix I/O. Review's
+    # constructor probes the native system before the selection boundary; do
+    # not accidentally require a daemon inside this ordinary check sandbox.
+    with patch.object(upstream, "current_system", return_value=system):
+        review = adapter.SelectOnly(plan, system, output,
+            builddir=SimpleNamespace(nix_path="recorded", worktree_dir=Path(temp)),
+            build_args="", no_shell=True, run="", remote="", systems=[system],
+            allow=AllowedFeatures([]), build_graph="nix", nixpkgs_config=Path(temp),
+            extra_nixpkgs_config=config, eval_type="local", checkout=upstream.CheckoutOption.COMMIT)
     for discovery in ({}, {system: set()}, {system: {"hello"}}):
         additions = {"vortex", "vortex.tests.packaging"}
         expected = additions | discovery.get(system, set())
