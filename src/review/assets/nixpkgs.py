@@ -18,6 +18,14 @@ from nixpkgs_review.nix import nix_eval
 from nixpkgs_review.review import CheckoutOption, Review
 
 
+def scoped_nixpkgs_config(plan):
+    warnings = plan.get("request", {}).get("nixpkgs_broken_warnings", [])
+    return "{ " + " ".join(
+        f'problems.handlers.{json.dumps(package)}.broken = "warn";'
+        for package in sorted(warnings)
+    ) + " }"
+
+
 class SelectOnly(Review):
     def __init__(self, plan, selected_system, output, **kwargs):
         super().__init__(**kwargs)
@@ -26,12 +34,24 @@ class SelectOnly(Review):
         self.output = output
 
     def build(self, packages_per_system, args):
-        if set(packages_per_system) != {self.selected_system}:
+        if set(packages_per_system) - {self.selected_system}:
             raise RuntimeError("changed-package detector returned unexpected systems")
-        selected = sorted(packages_per_system[self.selected_system])
+        # Retain upstream discovery even when it produced no system entry. Never
+        # substitute only_packages, which bypasses changed-package discovery.
+        changed = set(packages_per_system.get(self.selected_system, set()))
+        request = self.plan.get("request", {})
+        packages = set(request.get("packages", []))
+        checks = set(request.get("checks", []))
+        additions = packages | checks
+        selected = sorted(changed | additions)
         attrs = nix_eval(set(selected), self.selected_system, self.allow, self.builddir.nix_path)
         if any(a.broken or a.blacklisted or not a.exists or not a.drv_path for a in attrs):
             raise RuntimeError("selected package unavailable, broken, or blacklisted")
+        represented = {name for a in attrs for name in [a.name, *a.aliases]}
+        def covers(attribute, name):
+            return name == attribute or name.startswith(attribute + ".")
+        if any(not any(covers(attribute, name) for name in represented) for attribute in additions):
+            raise RuntimeError("explicit Nixpkgs attribute selected no derivations")
         actual = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=self.worktree_dir(), text=True).strip()
         if actual != self.plan["target"]["commit"]:
             raise RuntimeError("nixpkgs-review checkout differs from frozen tested commit")
@@ -41,8 +61,11 @@ class SelectOnly(Review):
             "tested_commit": actual,
             "base_commit": self.plan["pr"]["base"],
             "system": self.selected_system,
-            "changed_attributes": selected,
-            "derivations": [{"attribute": a.name, "aliases": a.aliases, "derivation": a.drv_path, "check": a.is_test()} for a in attrs],
+            "changed_attributes": sorted(changed),
+            "additional_attributes": sorted(additions),
+            "nixpkgs_broken_warnings": sorted(request.get("nixpkgs_broken_warnings", [])),
+            "derivations": [{"attribute": a.name, "aliases": a.aliases, "derivation": a.drv_path,
+                             "check": a.is_test() or any(covers(check, name) for check in checks for name in [a.name, *a.aliases])} for a in attrs],
         }, sort_keys=True, indent=2) + "\n")
         return {self.selected_system: attrs}
 
@@ -59,10 +82,11 @@ def main():
     # Fixed administrator-owned limits for upstream subprocesses, not request config.
     os.environ["NIX_CONFIG"] = "accept-flake-config = false\nallow-import-from-derivation = false\nbuilders =\nmax-jobs = 2\ncores = 2\ntimeout = 1800\nmax-silent-time = 600\n"
     allow = AllowedFeatures([])
-    with Buildenv(False, "{ }") as config, Builddir("exact-" + plan["digest"]) as builddir:
+    extra_config = scoped_nixpkgs_config(plan)
+    with Buildenv(False, extra_config) as config, Builddir("exact-" + plan["digest"]) as builddir:
         review = SelectOnly(plan, selected_system, output, builddir=builddir, build_args="", no_shell=True, run="", remote="",
                             systems=[selected_system], allow=allow, build_graph="nix",
-                            nixpkgs_config=config, extra_nixpkgs_config="{ }", eval_type="local",
+                            nixpkgs_config=config, extra_nixpkgs_config=extra_config, eval_type="local",
                             checkout=CheckoutOption.COMMIT, num_parallel_evals=1)
         # Passing the tested SHA in merge_commit bypasses git_merge in upstream.
         # Use that same SHA as head_commit so COMMIT cannot switch to another tree.

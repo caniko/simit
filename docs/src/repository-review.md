@@ -83,6 +83,37 @@ Reusable callers may explicitly forward the optional report-only `GH_TOKEN`
 secret. Omission retains manual reporting; generated clients forward no secrets.
 The report credential is used only by the reporting job.
 
+## Explicit Nixpkgs additions and scoped broken warnings
+
+For the `nixpkgs` backend, `packages` and `checks` are optional dot-separated
+attribute paths. They are unioned with upstream changed-package discovery for
+each requested system, including when discovery returns no system entry. An
+explicit attribute that does not evaluate to a usable derivation fails selection;
+it cannot silently turn into a successful no-change result. Attributes in `checks`
+retain test identity through frozen selection, realization, and collection.
+
+The optional `nixpkgs_broken_warnings` array contains only explicitly requested
+top-level package names. For example, these request fields add a package and its
+packaging test while applying the warning only to that package:
+
+```json
+{
+  "backend": "nixpkgs",
+  "packages": ["vortex"],
+  "checks": ["vortex.tests.packaging"],
+  "nixpkgs_broken_warnings": ["vortex"]
+}
+```
+
+These are fields to insert into a complete v1 request. The adapter sets exactly
+`problems.handlers."vortex".broken = "warn"` in its Nixpkgs configuration;
+global broken-package permission remains disabled. Arbitrary Nix configuration
+or evaluation arguments are not accepted. The frozen report binds additions,
+scoped warnings, test identities, system, and exact head/base to the request.
+Omitting the new array preserves existing request serialization and digests.
+Deployment still requires a qualified immutable engine/controller pin and actual
+package/test/cache receipts on the consumer's exact candidate.
+
 ## Interfaces and trust boundaries
 
 `simit review` exposes `schema`, `example`, `validate`, `plan`, `dispatch`,
