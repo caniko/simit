@@ -976,6 +976,49 @@ fn unicode_case_and_normalization_collisions_are_rejected_before_any_writes() {
 }
 
 #[test]
+#[cfg(unix)]
+fn symlink_targets_are_not_treated_as_generated_output_case_aliases() {
+    use std::os::unix::fs::symlink;
+
+    let temp = project();
+    assert!(generate(&temp, &[]).status.success());
+    let expected = temp.path().join(".github/workflows/nix-builds.yaml");
+    let obsolete = temp.path().join(".github/workflows/nix-builds.yml");
+    let config_path = temp.path().join("simit.toml");
+    let config_before = fs::read(&config_path).unwrap();
+    let template = temp.path().join(".github/workflows/tests.yml");
+    let template_before = fs::read(&template).unwrap();
+    let generated_before = fs::read(&expected).unwrap();
+    fs::rename(&expected, &obsolete).unwrap();
+    symlink("nix-builds.yml", &expected).unwrap();
+
+    let checked = generate(&temp, &["--check", "--diff"]);
+    assert!(
+        !checked.status.success(),
+        "a symlink cannot hide an obsolete generated target: {checked:?}"
+    );
+    assert_eq!(audit_ci(temp.path()).unwrap().status, FeatureStatus::Drift);
+    let written = generate(&temp, &[]);
+    assert!(!written.status.success(), "{written:?}");
+    assert!(String::from_utf8_lossy(&written.stderr).contains("symlink"));
+    assert_eq!(fs::read(&obsolete).unwrap(), generated_before);
+    assert_eq!(fs::read(&template).unwrap(), template_before);
+    assert_eq!(fs::read(&config_path).unwrap(), config_before);
+    assert_eq!(
+        fs::read_link(&expected).unwrap(),
+        Path::new("nix-builds.yml")
+    );
+
+    fs::remove_file(&expected).unwrap();
+    fs::rename(&obsolete, &expected).unwrap();
+    assert!(generate(&temp, &["--check", "--diff"]).status.success());
+    assert_eq!(
+        audit_ci(temp.path()).unwrap().status,
+        FeatureStatus::Managed
+    );
+}
+
+#[test]
 fn edited_template_headers_do_not_infer_or_persist_builtin_gates() {
     let temp = project();
     fs::write(
