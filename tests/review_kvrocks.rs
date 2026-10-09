@@ -258,3 +258,62 @@ fn kvrocks_runtime_preflight_preserves_foreign_state_and_checks_socket_identity(
         "preserve foreign service bytes"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn kvrocks_runtime_allocation_is_exclusive_and_only_cleans_its_own_empty_directory() {
+    use std::os::unix::fs::{MetadataExt, symlink};
+    let root = tempfile::tempdir().unwrap();
+    let metadata = std::fs::metadata(root.path()).unwrap();
+    let identity = kvrocks::WorkerIdentity {
+        user: "fixture".into(),
+        uid: metadata.uid(),
+        group: "fixture".into(),
+        gid: metadata.gid(),
+    };
+    let runtime = root.path().join("redis-sccache");
+    let owned = kvrocks::OwnedRuntime::create(&runtime, &identity).unwrap();
+    let metadata = std::fs::symlink_metadata(&runtime).unwrap();
+    assert!(metadata.is_dir());
+    assert_eq!(metadata.mode() & 0o7777, 0o750);
+    assert_eq!(metadata.uid(), identity.uid);
+    assert_eq!(metadata.gid(), identity.gid);
+    assert!(kvrocks::OwnedRuntime::create(&runtime, &identity).is_err());
+    owned.cleanup().unwrap();
+    assert!(!runtime.exists());
+
+    let owned = kvrocks::OwnedRuntime::create(&runtime, &identity).unwrap();
+    let retained = root.path().join("retained-owned-directory");
+    std::fs::rename(&runtime, &retained).unwrap();
+    std::fs::create_dir(&runtime).unwrap();
+    let sentinel = runtime.join("foreign");
+    std::fs::write(&sentinel, "preserve replacement").unwrap();
+    assert!(owned.cleanup().is_err());
+    assert_eq!(
+        std::fs::read_to_string(&sentinel).unwrap(),
+        "preserve replacement"
+    );
+    assert!(retained.is_dir());
+    std::fs::remove_file(&sentinel).unwrap();
+    std::fs::remove_dir(&runtime).unwrap();
+
+    let owned = kvrocks::OwnedRuntime::create(&runtime, &identity).unwrap();
+    let sentinel = runtime.join("unexpected-state");
+    std::fs::write(&sentinel, "preserve unclaimed state").unwrap();
+    assert!(owned.cleanup().is_err());
+    assert_eq!(
+        std::fs::read_to_string(&sentinel).unwrap(),
+        "preserve unclaimed state"
+    );
+    std::fs::remove_file(&sentinel).unwrap();
+    std::fs::remove_dir(&runtime).unwrap();
+
+    symlink(root.path().join("missing"), &runtime).unwrap();
+    assert!(kvrocks::OwnedRuntime::create(&runtime, &identity).is_err());
+    assert!(runtime.is_symlink());
+    let alias = root.path().join("runtime-parent-alias");
+    symlink(&retained, &alias).unwrap();
+    assert!(kvrocks::OwnedRuntime::create(&alias.join("new-runtime"), &identity).is_err());
+    assert!(!retained.join("new-runtime").exists());
+    assert!(alias.is_symlink());
+}
