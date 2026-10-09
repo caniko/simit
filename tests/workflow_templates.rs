@@ -137,6 +137,57 @@ fn invalid_templates_fail_before_any_outputs_are_written() {
 }
 
 #[test]
+fn yaml_line_separators_in_template_paths_fail_before_any_writes() {
+    for separator in ['\u{85}', '\u{2028}', '\u{2029}'] {
+        for source_path in [false, true] {
+            let temp = project();
+            assert!(generate(&temp, &[]).status.success());
+            let cfg_path = temp.path().join("simit.toml");
+            let original_cfg = fs::read_to_string(&cfg_path).unwrap();
+            let builtin = temp.path().join(".github/workflows/nix-builds.yaml");
+            let builtin_bytes = fs::read(&builtin).unwrap();
+            let template_output = temp.path().join(".github/workflows/tests.yml");
+            let output_bytes = fs::read(&template_output).unwrap();
+            let original_source = temp.path().join(".simit/templates/tests.yml");
+            let source_bytes = fs::read(&original_source).unwrap();
+            let bad_path = if source_path {
+                format!(".simit/templates/break{separator}in-source.yml")
+            } else {
+                format!(".github/workflows/break{separator}in-output.yml")
+            };
+            let (output, source) = if source_path {
+                fs::write(temp.path().join(&bad_path), &source_bytes).unwrap();
+                (".github/workflows/tests.yml", bad_path.as_str())
+            } else {
+                (bad_path.as_str(), ".simit/templates/tests.yml")
+            };
+            config(&temp, output, source, "ubuntu-24.04");
+            let candidate_cfg = fs::read_to_string(&cfg_path).unwrap();
+            for args in [vec![], vec!["--check", "--diff"]] {
+                let result = generate(&temp, &args);
+                assert!(!result.status.success(), "{bad_path:?}: {result:?}");
+                assert!(
+                    String::from_utf8_lossy(&result.stderr)
+                        .contains("invalid [ci.workflow_templates] mapping"),
+                    "{result:?}"
+                );
+                assert_eq!(fs::read(&builtin).unwrap(), builtin_bytes);
+                assert_eq!(fs::read(&template_output).unwrap(), output_bytes);
+                assert_eq!(fs::read(&original_source).unwrap(), source_bytes);
+                assert_eq!(fs::read_to_string(&cfg_path).unwrap(), candidate_cfg);
+                if source_path {
+                    assert_eq!(fs::read(temp.path().join(&bad_path)).unwrap(), source_bytes);
+                } else {
+                    assert!(!temp.path().join(&bad_path).exists());
+                }
+            }
+            fs::write(&cfg_path, original_cfg).unwrap();
+            assert!(generate(&temp, &["--check", "--diff"]).status.success());
+        }
+    }
+}
+
+#[test]
 fn active_workflow_sources_are_rejected_without_rewriting_builtins() {
     for platform in ["github", "forgejo"] {
         for extension in ["yml", "yaml"] {

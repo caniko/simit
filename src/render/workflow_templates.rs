@@ -76,7 +76,9 @@ fn has_template_header(content: &str) -> bool {
 
 fn relative_path(value: &str) -> bool {
     !value.is_empty()
-        && !value.contains(['\n', '\r', '\0'])
+        // YAML also treats NEL and Unicode line/paragraph separators as breaks.
+        // Paths appear verbatim in ownership comments, so reject every break.
+        && !value.contains(['\n', '\r', '\u{85}', '\u{2028}', '\u{2029}', '\0'])
         && Path::new(value)
             .components()
             .all(|part| matches!(part, Component::Normal(_)))
