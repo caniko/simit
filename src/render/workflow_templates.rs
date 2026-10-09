@@ -36,12 +36,19 @@ pub(crate) fn same_output(root: &Path, left: &Path, right: &Path) -> bool {
     if left == right {
         return true;
     }
-    // The actual filesystem is authoritative for existing aliases, including
-    // filesystem-specific Unicode case and normalization rules.
-    match (
-        root.join(left).canonicalize(),
-        root.join(right).canonicalize(),
-    ) {
+    let left = root.join(left);
+    let right = root.join(right);
+    // A symlink targets a different directory entry; it is not a filesystem
+    // case/normalization alias. Check/audit must retain the obsolete target so
+    // it cannot accept a checkout that regeneration refuses to write.
+    if [&left, &right].into_iter().any(|path| {
+        fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink())
+    }) {
+        return false;
+    }
+    // The actual filesystem is authoritative for real existing aliases,
+    // including filesystem-specific Unicode case and normalization rules.
+    match (left.canonicalize(), right.canonicalize()) {
         (Ok(left), Ok(right)) => left == right,
         _ => false,
     }

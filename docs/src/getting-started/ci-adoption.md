@@ -81,7 +81,8 @@ collisions, and hard-linked aliases of template sources or planned outputs befor
 any writes. Portable keys
 use Unicode canonical normalization and full case folding, so non-ASCII and
 composed/decomposed spellings cannot claim the same output. Existing aliases are
-also checked against the actual filesystem. Generated files replace their own
+also checked against the actual filesystem, excluding symlink endpoints from
+case/normalization alias matching. Generated files replace their own
 directory entries atomically; an unrelated file hard-linked to a destination
 retains its original bytes and file identity. Existing permissions are preserved.
 This feature supports GitHub and Forgejo Actions, including exact-only Nix
