@@ -44,6 +44,32 @@ pub struct WorkerIdentity {
     pub gid: u32,
 }
 
+fn account_name(name: &str) -> Result<()> {
+    ensure!(
+        !name.is_empty()
+            && name.len() <= 64
+            && name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"_-".contains(&byte))
+            && !name.starts_with('-'),
+        "invalid worker account name"
+    );
+    Ok(())
+}
+
+fn validate_identity(identity: &WorkerIdentity) -> Result<()> {
+    account_name(&identity.user)?;
+    account_name(&identity.group)?;
+    ensure!(
+        identity.uid != 0
+            && identity.uid != u32::MAX
+            && identity.gid != 0
+            && identity.gid != u32::MAX,
+        "Kvrocks requires a non-root runner and Nix build group"
+    );
+    Ok(())
+}
+
 fn identity_record(value: &str, fields: usize) -> Result<Vec<&str>> {
     let record = value.strip_suffix('\n').unwrap_or(value);
     ensure!(
@@ -64,15 +90,7 @@ pub fn parse_worker_identity(
     group_record: &str,
 ) -> Result<WorkerIdentity> {
     for name in [user, group] {
-        ensure!(
-            !name.is_empty()
-                && name.len() <= 64
-                && name
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || b"_-".contains(&byte))
-                && !name.starts_with('-'),
-            "invalid worker account name"
-        );
+        account_name(name)?;
     }
     let passwd = identity_record(passwd_record, 7)?;
     let build_group = identity_record(group_record, 4)?;
@@ -117,13 +135,31 @@ pub struct OwnedRuntime {
     path: std::path::PathBuf,
     directory: fs::File,
     identity: WorkerIdentity,
+    initialized: bool,
     cleaned: bool,
 }
 
 #[cfg(unix)]
 impl OwnedRuntime {
     pub fn create(path: &Path, identity: &WorkerIdentity) -> Result<Self> {
-        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        use std::os::unix::fs::PermissionsExt;
+
+        Self::create_with_setup(path, identity, |owned| {
+            std::os::unix::fs::chown(path, Some(identity.uid), Some(identity.gid))
+                .context("assigning owned runtime identity")?;
+            owned
+                .directory
+                .set_permissions(fs::Permissions::from_mode(0o750))?;
+            Ok(())
+        })
+    }
+
+    fn create_with_setup(
+        path: &Path,
+        identity: &WorkerIdentity,
+        setup: impl FnOnce(&Self) -> Result<()>,
+    ) -> Result<Self> {
+        use std::os::unix::fs::DirBuilderExt;
 
         ensure!(
             path.is_absolute() && path.file_name().is_some(),
@@ -150,31 +186,36 @@ impl OwnedRuntime {
             .create(path)
             .context("exclusively allocating Kvrocks runtime directory")?;
         let directory = fs::File::open(path).context("retaining owned runtime inode")?;
-        let owned = Self {
+        let mut owned = Self {
             path: path.to_owned(),
             directory,
             identity: identity.clone(),
+            initialized: false,
             cleaned: false,
         };
-        std::os::unix::fs::chown(path, Some(identity.uid), Some(identity.gid))
-            .context("assigning owned runtime identity")?;
-        owned
-            .directory
-            .set_permissions(fs::Permissions::from_mode(0o750))?;
+        setup(&owned)?;
         owned.verify_owned_path()?;
+        owned.initialized = true;
         Ok(owned)
     }
 
-    fn verify_owned_path(&self) -> Result<()> {
+    fn verify_pinned_path(&self) -> Result<fs::Metadata> {
         use std::os::unix::fs::MetadataExt;
 
         let pinned = self.directory.metadata()?;
         let current = fs::symlink_metadata(&self.path).context("inspecting owned runtime path")?;
         ensure!(
-            current.is_dir()
-                && current.dev() == pinned.dev()
-                && current.ino() == pinned.ino()
-                && current.uid() == self.identity.uid
+            current.is_dir() && current.dev() == pinned.dev() && current.ino() == pinned.ino(),
+            "runtime path was replaced; preserve foreign state"
+        );
+        Ok(current)
+    }
+
+    fn verify_owned_path(&self) -> Result<()> {
+        use std::os::unix::fs::MetadataExt;
+        let current = self.verify_pinned_path()?;
+        ensure!(
+            current.uid() == self.identity.uid
                 && current.gid() == self.identity.gid
                 && current.mode() & 0o7777 == 0o750,
             "runtime path or identity was replaced; preserve foreign state"
@@ -183,7 +224,13 @@ impl OwnedRuntime {
     }
 
     fn remove_empty(&mut self) -> Result<()> {
-        self.verify_owned_path()?;
+        if self.initialized {
+            self.verify_owned_path()?;
+        } else {
+            // Failed chown/chmod cannot establish the intended final identity.
+            // Roll back only the allocated inode and only if it is still empty.
+            self.verify_pinned_path()?;
+        }
         // An unexpected socket, database file or foreign sentinel prevents
         // removal. The service owner must separately account for its artifacts.
         fs::remove_dir(&self.path).context("removing only the owned empty runtime directory")?;
@@ -203,6 +250,153 @@ impl Drop for OwnedRuntime {
             let _ = self.remove_empty();
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServicePlan {
+    pub bootstrap: BootstrapReceipt,
+    pub identity: WorkerIdentity,
+    pub run_identity: String,
+    pub unit: String,
+    pub state_directory: String,
+    pub socket: String,
+    pub sandbox_paths: Vec<String>,
+    pub startup_seconds: u32,
+    pub shutdown_seconds: u32,
+    pub memory_max_bytes: u64,
+    pub cpu_quota_percent: u32,
+    pub max_db_gib: u32,
+    pub config: String,
+    pub systemd_args: Vec<String>,
+}
+
+fn sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// Freeze the source-owned bounded service configuration. This does not allocate
+/// runtime state, start a unit or establish actual socket/sandbox readiness.
+pub fn service_plan(
+    bootstrap: &BootstrapReceipt,
+    identity: &WorkerIdentity,
+    worker_temp: &Path,
+    run_identity: &str,
+) -> Result<ServicePlan> {
+    validate_identity(identity)?;
+    ensure!(
+        sha256(run_identity),
+        "invalid immutable service run identity"
+    );
+    ensure!(
+        sha256(&bootstrap.binary_sha256),
+        "invalid native tool binary digest"
+    );
+    ensure!(
+        bootstrap.nar_size > 0
+            && bootstrap.nar_hash.len() <= 80
+            && (bootstrap.nar_hash.starts_with("sha256:")
+                || bootstrap.nar_hash.starts_with("sha256-")),
+        "invalid native tool NAR identity"
+    );
+    let source = &bootstrap.source;
+    let manifest = EngineManifest {
+        schema_version: 1,
+        repository: source.engine_repository.clone(),
+        revision: source.engine_revision.clone(),
+        nixpkgs_revision: source.nixpkgs_revision.clone(),
+    };
+    let frozen = freeze_source(
+        &manifest,
+        &source.system,
+        &serde_json::json!({
+            "pname": "kvrocks", "version": source.version, "system": source.system,
+            "outputs": ["out"], "drvPath": source.derivation, "outPath": source.output,
+        }),
+    )?;
+    ensure!(
+        &frozen == source,
+        "native tool source differs from frozen worker pin"
+    );
+    let temp = worker_temp
+        .to_str()
+        .context("worker temporary path is not UTF-8")?;
+    ensure!(
+        worker_temp.is_absolute()
+            && worker_temp.file_name().is_some()
+            && worker_temp.components().all(|part| matches!(
+                part,
+                std::path::Component::RootDir | std::path::Component::Normal(_)
+            ))
+            && temp
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"/-_.".contains(&b)),
+        "invalid worker temporary directory"
+    );
+    let state_directory = worker_temp
+        .join(format!("simit-kvrocks-{run_identity}"))
+        .to_str()
+        .context("service state path is not UTF-8")?
+        .to_owned();
+    let unit = format!("simit-kvrocks-{run_identity}.service");
+    let socket = "/run/redis-sccache/redis.sock".to_owned();
+    let startup_seconds = 30;
+    let shutdown_seconds = 30;
+    let memory_max_bytes = 2 * 1024 * 1024 * 1024;
+    let cpu_quota_percent = 200;
+    let max_db_gib = 4;
+    // An absent bind directive follows the pinned Kvrocks Unix-only route.
+    // RestrictAddressFamilies also denies network sockets; actual listeners
+    // must independently be verified before admitting a consumer build.
+    let config = format!(
+        "port 16666\nunixsocket {socket}\nunixsocketperm 660\ndir {state_directory}\ndaemonize no\nsupervised no\nworkers 2\nmax-db-size {max_db_gib}\nrocksdb.block_cache_size 512\nrocksdb.max_background_jobs 2\nrocksdb.max_write_buffer_number 2\nrocksdb.write_buffer_size 64\n"
+    );
+    let mut systemd_args = args(&[
+        "--no-block",
+        "--service-type=exec",
+        &format!("--unit={unit}"),
+        &format!("--property=User={}", identity.user),
+        &format!("--property=Group={}", identity.group),
+        "--property=RuntimeDirectory=redis-sccache",
+        "--property=RuntimeDirectoryMode=0750",
+        "--property=RuntimeDirectoryPreserve=yes",
+        &format!("--property=MemoryMax={memory_max_bytes}"),
+        &format!("--property=CPUQuota={cpu_quota_percent}%"),
+        "--property=KillMode=control-group",
+        &format!("--property=TimeoutStartSec={startup_seconds}s"),
+        &format!("--property=TimeoutStopSec={shutdown_seconds}s"),
+        "--property=SendSIGKILL=no",
+        "--property=Restart=no",
+        "--property=RestrictAddressFamilies=AF_UNIX",
+        "--property=NoNewPrivileges=yes",
+        "--property=TasksMax=64",
+        "--property=LimitNOFILE=8192",
+    ]);
+    systemd_args.extend(args(&[
+        "--",
+        &format!("{}/bin/kvrocks", source.output),
+        "-c",
+        &format!("{state_directory}/kvrocks.conf"),
+    ]));
+    Ok(ServicePlan {
+        bootstrap: bootstrap.clone(),
+        identity: identity.clone(),
+        run_identity: run_identity.into(),
+        unit,
+        state_directory,
+        socket: socket.clone(),
+        sandbox_paths: vec![socket],
+        startup_seconds,
+        shutdown_seconds,
+        memory_max_bytes,
+        cpu_quota_percent,
+        max_db_gib,
+        config,
+        systemd_args,
+    })
 }
 
 /// Verify the socket and immediate runtime directory without following their
