@@ -206,10 +206,13 @@ fn reusable_report_consumes_the_explicit_token_only_when_posting_is_requested() 
     std::fs::create_dir_all(&bin).unwrap();
     std::fs::create_dir_all(&tools).unwrap();
     for (path, body) in [
-        (bin.join("jq"), "[ \"$POST_REQUESTED\" = true ]"),
+        (
+            bin.join("jq"),
+            "printf \"%s\\n\" \"$POST_REQUESTED\" >> jq-invoked; [ \"$POST_REQUESTED\" = true ]",
+        ),
         (
             tools.join("repo-review"),
-            "[ \"$GH_TOKEN\" = fixture-report-token ] && [ \"$PLAN_DIGEST\" = fixture-plan-digest ] || exit 1; touch report-posted; printf '%s\\n' '{\"posted\":true}'",
+            "[ \"$GH_TOKEN\" = fixture-report-token ] && [ \"$PLAN_DIGEST\" = fixture-plan-digest ] || exit 1; touch report-posted || exit; printf '%s\\n' '{\"posted\":true}'",
         ),
     ] {
         std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
@@ -220,9 +223,12 @@ fn reusable_report_consumes_the_explicit_token_only_when_posting_is_requested() 
     )
     .unwrap();
     for requested in ["false", "true"] {
+        // Capture command resolution and the actual stub invocation when the
+        // hosted environment differs, without changing shell initialization.
+        let harness = format!("set -x\ncommand -v jq >&2\ncommand -v touch >&2\n{script}");
         let output = Command::new("bash")
             .current_dir(root.path())
-            .args(["-c", script])
+            .args(["-c", &harness])
             .env("PATH", &path)
             .env("POST_REQUESTED", requested)
             .env("GH_TOKEN", "fixture-report-token")
@@ -231,8 +237,15 @@ fn reusable_report_consumes_the_explicit_token_only_when_posting_is_requested() 
             .unwrap();
         assert!(output.status.success(), "{output:?}");
         assert_eq!(
+            std::fs::read_to_string(root.path().join("jq-invoked")).ok(),
+            Some(format!("{requested}\n")),
+            "{output:?}"
+        );
+        std::fs::remove_file(root.path().join("jq-invoked")).unwrap();
+        assert_eq!(
             root.path().join("report-posted").exists(),
-            requested == "true"
+            requested == "true",
+            "{output:?}"
         );
     }
 }

@@ -238,7 +238,13 @@ fn build_workflow(
             },
             image,
             if runtime == Runtime::Nix {
-                format!("{prefix}{}", crate::render::ci::NIX_FORMAT_COMMAND)
+                // Crow preprocesses dollars before invoking the shell. Escape
+                // this generated shell/Nix command, including \${...}, so its
+                // runtime expressions survive that separate expansion layer.
+                format!(
+                    "{prefix}{}",
+                    crate::render::ci::NIX_FORMAT_COMMAND.replace('$', "$$")
+                )
             } else {
                 format!("{prefix}cargo fmt --all -- --check")
             },

@@ -489,7 +489,22 @@ pub fn render(inputs: &ReleaseWorkflowInputs<'_>) -> String {
 
     w.push_str("jobs:\n");
     if inputs.platform == Platform::Github && inputs.prebuild.is_some() {
-        w.push_str("  prebuild:\n    uses: ./.github/workflows/prebuild.yaml\n    with:\n      release: true\n");
+        // No reusable build or Attic credential is admitted before event-bound
+        // signed-tag validation. Every job checks out the same immutable SHA.
+        w.push_str(
+            "  validate:\n    permissions:\n      contents: read\n    timeout-minutes: 30\n",
+        );
+        writeln!(w, "    runs-on: {}", inputs.runner).expect("write");
+        if inputs.preinstalled_nix {
+            push_preinstalled_nix_env(&mut w, inputs.artifacts);
+        }
+        w.push_str("    steps:\n");
+        push_checkout(&mut w, inputs.platform);
+        if !inputs.preinstalled_nix {
+            push_install_nix(&mut w, inputs.platform, inputs.artifacts);
+        }
+        push_validate_tag(&mut w, inputs.artifacts);
+        w.push_str("  prebuild:\n    needs: validate\n    uses: ./.github/workflows/prebuild.yaml\n    with:\n      release: true\n");
         if let Some(attic) = inputs.attic.filter(|_| prebuild_publishes_attic(inputs)) {
             let token_secret = attic
                 .token_secret
@@ -504,7 +519,7 @@ pub fn render(inputs: &ReleaseWorkflowInputs<'_>) -> String {
     }
     w.push_str("  release:\n");
     if inputs.platform == Platform::Github && inputs.prebuild.is_some() {
-        w.push_str("    needs: prebuild\n");
+        w.push_str("    needs: [validate, prebuild]\n");
     }
     writeln!(w, "    runs-on: {}", inputs.runner).expect("write");
     match inputs.platform {
@@ -779,7 +794,7 @@ fn push_checkout(w: &mut String, platform: Platform) {
         w.push_str(&github_action_ref("actions/checkout", "v4.3.1"));
     }
     w.push('\n');
-    w.push_str("        with:\n          fetch-depth: 0\n");
+    w.push_str("        with:\n          fetch-depth: 0\n          ref: ${{ github.sha }}\n          persist-credentials: false\n");
 }
 
 fn push_install_nix(w: &mut String, platform: Platform, artifacts: &ArtifactsConfig) {
@@ -845,12 +860,19 @@ fn push_preinstalled_nix_env(w: &mut String, artifacts: &ArtifactsConfig) {
     w.push_str("      XDG_CACHE_HOME: \"/tmp/.cache\"\n");
 }
 
+pub(crate) fn tag_validation_step(artifacts: &ArtifactsConfig) -> String {
+    let mut step = String::new();
+    push_validate_tag(&mut step, artifacts);
+    step
+}
+
 fn push_validate_tag(w: &mut String, artifacts: &ArtifactsConfig) {
-    w.push_str("      - name: Validate tag\n        run: |\n          set -euo pipefail\n");
+    w.push_str("      - name: Validate tag\n        env:\n          GITHUB_TOKEN: ${{ github.token }}\n        run: |\n          set -euo pipefail\n");
     writeln!(w, "          {VERSION_FROM_REF}").expect("write");
     writeln!(w, "          echo \"$VERSION\" | grep -Eq '{TAG_REGEX}'").expect("write");
+    w.push_str(super::ci::authenticated_git_fetch_steps());
     w.push_str(
-        "          git fetch --force --tags origin \"refs/tags/${VERSION}:refs/tags/${VERSION}\"\n",
+        "          git_fetch --force --tags origin \"refs/tags/${VERSION}:refs/tags/${VERSION}\"\n",
     );
     w.push_str("          tag_worktree=\"$(mktemp -d)\"\n");
     w.push_str("          rmdir \"$tag_worktree\"\n");
@@ -859,7 +881,23 @@ fn push_validate_tag(w: &mut String, artifacts: &ArtifactsConfig) {
     w.push_str("            if [ -n \"${GNUPGHOME:-}\" ]; then rm -rf \"$GNUPGHOME\"; fi\n");
     w.push_str("          }\n");
     w.push_str("          trap cleanup_validation EXIT\n");
-    w.push_str("          git worktree add --detach \"$tag_worktree\" \"$VERSION\"\n");
+    w.push_str(
+        "          GNUPGHOME=\"$(mktemp -d)\"; export GNUPGHOME; chmod 700 \"$GNUPGHOME\"\n",
+    );
+    w.push_str("          git_fetch --no-tags origin HEAD\n");
+    w.push_str(
+        "          git show \"FETCH_HEAD:keys/maintainers.gpg\" > \"$GNUPGHOME/maintainers.gpg\"\n",
+    );
+    w.push_str("          test -s \"$GNUPGHOME/maintainers.gpg\"\n");
+    w.push_str("          gpg --batch --import \"$GNUPGHOME/maintainers.gpg\"\n");
+    w.push_str("          git verify-tag \"$VERSION\"\n");
+    w.push_str(
+        "          validated_sha=\"$(git rev-parse --verify \"refs/tags/${VERSION}^{commit}\")\"\n",
+    );
+    w.push_str("          checkout_sha=\"$(git rev-parse --verify HEAD)\"\n");
+    w.push_str("          event_sha=\"${GITHUB_SHA:-${FORGE_SHA:-${FORGEJO_SHA:-}}}\"\n");
+    w.push_str("          test -n \"$event_sha\" && test \"$validated_sha\" = \"$event_sha\" && test \"$checkout_sha\" = \"$event_sha\" || { echo \"Signed tag commit does not match the immutable event checkout\" >&2; exit 1; }\n");
+    w.push_str("          git worktree add --detach \"$tag_worktree\" \"$validated_sha\"\n");
     if let Some(attr) = &artifacts.version_attr {
         writeln!(
             w,
@@ -867,17 +905,11 @@ fn push_validate_tag(w: &mut String, artifacts: &ArtifactsConfig) {
         )
         .expect("write");
     }
-    w.push_str("          test -s \"$tag_worktree/keys/maintainers.gpg\"\n");
     w.push_str("          if ! grep -q \"^## \\[$VERSION\\] - [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]\" \"$tag_worktree/CHANGELOG.md\"; then\n");
     w.push_str("            echo \"CHANGELOG.md missing section for $VERSION\" >&2\n            exit 1\n          fi\n\n");
     w.push_str("          IS_PRERELEASE=false\n");
     writeln!(w, "          if printf '%s\\n' \"$VERSION\" | grep -Eq -- '{PRERELEASE_REGEX}'; then IS_PRERELEASE=true; fi").expect("write");
-    w.push_str(
-        "\n          GNUPGHOME=\"$(mktemp -d)\"; export GNUPGHOME; chmod 700 \"$GNUPGHOME\"\n",
-    );
-    w.push_str("          gpg --batch --import \"$tag_worktree/keys/maintainers.gpg\"\n");
-    w.push_str("          git verify-tag \"$VERSION\"\n");
-    w.push_str("          validated_sha=\"$(git -C \"$tag_worktree\" rev-parse HEAD)\"\n");
+    w.push('\n');
     w.push_str("          git checkout --detach \"$validated_sha\"\n");
     w.push_str("          { printf 'VERSION=%s\\n' \"$VERSION\"; printf 'IS_PRERELEASE=%s\\n' \"$IS_PRERELEASE\"; } > release-env\n");
 }
@@ -2875,6 +2907,108 @@ mod tests {
         assert!(!error.contains("${VERSION}"), "{error}");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn artifact_release_verifies_independent_keys_before_evaluating_tag_source() {
+        use std::{fs, os::unix::fs::PermissionsExt, process::Command};
+
+        let temp = tempfile::tempdir().unwrap();
+        let bin = temp.path().join("bin");
+        fs::create_dir(&bin).unwrap();
+        for (name, body) in [
+            (
+                "git",
+                r#"authenticated=0
+if [ "$1" = -c ]; then
+  [ "$2" = 'http.extraHeader=AUTHORIZATION: basic eC1hY2Nlc3MtdG9rZW46Zml4dHVyZS1yZWFkLXRva2Vu' ] || exit 94
+  authenticated=1; shift 2
+fi
+case "$1" in
+fetch) [ "$authenticated" = 1 ] || exit 95; case "$*" in *refs/tags/0.1.0:refs/tags/0.1.0*) touch tag-fetched;; esac;;
+show) [ "$2" = 'FETCH_HEAD:keys/maintainers.gpg' ] && [ "$TEST_KEY_AVAILABLE" = 1 ] || exit 90; printf default-branch-key;;
+verify-tag) [ -f tag-fetched ] && [ "$TEST_TAG_ACCEPTED" = 1 ] || exit 91; touch verified;;
+rev-parse) case "$3" in
+  'refs/tags/0.1.0^{commit}') printf verified-tag-commit;;
+  HEAD) printf '%s' "$TEST_CHECKOUT_SHA";;
+  *) exit 92;;
+esac;;
+worktree) case "$2" in
+  add) [ -f verified ] && [ "$5" = verified-tag-commit ] || exit 93; mkdir -p "$4"; printf '## [0.1.0] - 2026-10-04\n' > "$4/CHANGELOG.md";;
+  remove) rm -rf "$4";;
+  *) exit 94;;
+esac;;
+checkout) [ "$3" = verified-tag-commit ] || exit 95; touch checked-out;;
+*) exit 99;;
+esac"#,
+            ),
+            (
+                "gpg",
+                r#"[ "$1" = --batch ] && [ "$2" = --import ] && [ "$(cat "$3")" = default-branch-key ]"#,
+            ),
+            (
+                "nix",
+                "test -f verified || exit 96; touch evaluated; printf '0.1.0'",
+            ),
+        ] {
+            let path = bin.join(name);
+            fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let path = std::env::join_paths(
+            std::iter::once(bin).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+        )
+        .unwrap();
+        let mut config = artifacts();
+        config.version_attr = Some("demo".to_owned());
+        let mut step = String::new();
+        push_validate_tag(&mut step, &config);
+        let script = step
+            .split_once("        run: |\n")
+            .unwrap()
+            .1
+            .lines()
+            .map(|line| line.strip_prefix("          ").unwrap_or(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for (key_available, tag_accepted, checkout, event, accepted) in [
+            (
+                "0",
+                "1",
+                "verified-tag-commit",
+                "verified-tag-commit",
+                false,
+            ),
+            (
+                "1",
+                "0",
+                "verified-tag-commit",
+                "verified-tag-commit",
+                false,
+            ),
+            ("1", "1", "different-checkout", "verified-tag-commit", false),
+            ("1", "1", "verified-tag-commit", "different-event", false),
+            ("1", "1", "verified-tag-commit", "verified-tag-commit", true),
+        ] {
+            let _ = fs::remove_file(temp.path().join("tag-fetched"));
+            let output = Command::new("bash")
+                .current_dir(temp.path())
+                .args(["-c", &script])
+                .env("PATH", &path)
+                .env("TMPDIR", temp.path())
+                .env("GITHUB_REF_NAME", "0.1.0")
+                .env("GITHUB_TOKEN", "fixture-read-token")
+                .env("GITHUB_SHA", event)
+                .env("TEST_CHECKOUT_SHA", checkout)
+                .env("TEST_KEY_AVAILABLE", key_available)
+                .env("TEST_TAG_ACCEPTED", tag_accepted)
+                .output()
+                .unwrap();
+            assert_eq!(output.status.success(), accepted, "{output:?}");
+            assert_eq!(temp.path().join("evaluated").exists(), accepted);
+            assert_eq!(temp.path().join("checked-out").exists(), accepted);
+        }
+    }
+
     #[test]
     fn full_pipeline_has_every_channel_mechanic() {
         let (aur, copr, apt, codeberg, homebrew, scoop) =
@@ -2924,7 +3058,9 @@ mod tests {
                 "test \"$(nix eval --raw \"$tag_worktree#modde.version\")\" = \"$VERSION\""
             )
         );
-        assert!(workflow.contains("git worktree add --detach \"$tag_worktree\" \"$VERSION\""));
+        assert!(
+            workflow.contains("git worktree add --detach \"$tag_worktree\" \"$validated_sha\"")
+        );
         assert!(workflow.contains("git verify-tag \"$VERSION\""));
         assert!(workflow.contains("git checkout --detach \"$validated_sha\""));
         assert!(workflow.contains("export VERSION IS_PRERELEASE"));

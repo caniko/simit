@@ -180,7 +180,7 @@ fn nix_format_gate_supports_legacy_shells_and_propagates_formatter_failures() {
         for (name, script) in [
             (
                 "nix",
-                "#!/bin/sh\ncase \"$1\" in\n eval) printf '%s' \"$FORMAT_WRAPPER\"; exit \"$EVAL_STATUS\" ;;\n build) printf '%s' \"$FORMAT_WRAPPER\"; exit 0 ;;\n esac\nshift 2\nPATH=\"$FORMAT_BIN\" exec \"$@\"\n",
+                "#!/bin/sh\ncase \"$1\" in\n eval) case \"$*\" in *mainProgram*) printf treefmt;; *) printf '%s' \"$FORMAT_WRAPPER\";; esac; exit \"$EVAL_STATUS\" ;;\n build) printf '%s' \"$FORMAT_WRAPPER\"; exit 0 ;;\n esac\nshift 2\nPATH=\"$FORMAT_BIN\" exec \"$@\"\n",
             ),
             (
                 "cargo",
@@ -248,6 +248,218 @@ fn nix_format_gate_supports_legacy_shells_and_propagates_formatter_failures() {
             !log.exists(),
             "evaluation errors must not silently select Cargo formatting"
         );
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn nix_format_gate_runs_custom_flake_formatters_and_rejects_worktree_mutation() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    use std::process::Command;
+
+    for (split, crow_format) in [
+        (false, None),
+        (true, None),
+        (false, Some("yaml")),
+        (false, Some("jsonnet")),
+    ] {
+        let directory = fixture("nix", split, false);
+        let root = directory.path();
+        let bin = root.join("bin");
+        fs::create_dir(&bin).unwrap();
+        symlink("/bin/sh", bin.join("sh")).unwrap();
+        for tool in ["git", "mktemp", "rm"] {
+            let located = Command::new("sh")
+                .args(["-c", &format!("command -v {tool}")])
+                .output()
+                .unwrap();
+            assert!(located.status.success(), "{tool}: {located:?}");
+            symlink(
+                String::from_utf8(located.stdout).unwrap().trim(),
+                bin.join(tool),
+            )
+            .unwrap();
+        }
+        // Snapshot state must be external and cleaned on success or failure.
+        let snapshots = tempfile::tempdir().unwrap();
+        let wrapper = root.join("formatter");
+        fs::create_dir_all(wrapper.join("bin")).unwrap();
+        let custom = wrapper.join("bin/crossbow-fmt");
+        fs::write(&custom, "#!/bin/sh\nprintf 'crossbow-fmt %s\\n' \"$*\" > \"$FORMAT_LOG\"\n[ \"$#\" -eq 0 ] || exit 97\ncase \"$FORMAT_MUTATION\" in tracked) printf 'changed\\n' >> src/lib.rs;; staged) printf 'changed\\n' >> src/lib.rs; git add src/lib.rs;; untracked) printf 'new\\n' > new-output.txt;; existing-untracked) printf 'changed\\n' >> setup-output.txt;; esac\nexit \"$FORMAT_STATUS\"\n").unwrap();
+        fs::set_permissions(&custom, fs::Permissions::from_mode(0o755)).unwrap();
+        let nix = bin.join("nix");
+        fs::write(&nix, "#!/bin/sh\ncase \"$1\" in\n eval) case \"$*\" in *mainProgram*) printf '%s' \"$FORMAT_PROGRAM\";; *) printf '%s' \"$FORMAT_WRAPPER\";; esac;;\n build) printf '%s' \"$FORMAT_WRAPPER\";;\n develop) shift 2; PATH=\"$FORMAT_BIN\" exec \"$@\";;\n *) exit 98;;\nesac\n").unwrap();
+        fs::set_permissions(&nix, fs::Permissions::from_mode(0o755)).unwrap();
+        // No treefmt or Cargo fallback exists: a declared custom formatter
+        // must run, and a missing exported executable must fail explicitly.
+        let gate = if let Some(format) = crow_format {
+            let generated = common::simit()
+                .current_dir(root)
+                .args([
+                    "init",
+                    "ci",
+                    "--platform",
+                    "forgejo",
+                    "--ci-provider",
+                    "crow",
+                    "--crow-format",
+                    format,
+                    "--runner",
+                    "crow-agent",
+                ])
+                .output()
+                .unwrap();
+            assert!(generated.status.success(), "{generated:?}");
+            let file = fs::read_to_string(root.join(format!(".crow/build.{format}"))).unwrap();
+            let document: serde_yaml::Value = if format == "jsonnet" {
+                serde_yaml::from_str(file.split_once('\n').unwrap().1).unwrap()
+            } else {
+                serde_yaml::from_str(&file).unwrap()
+            };
+            let command = document["steps"]
+                .as_sequence()
+                .unwrap()
+                .iter()
+                .flat_map(|step| step["commands"].as_sequence().unwrap())
+                .filter_map(serde_yaml::Value::as_str)
+                .find(|command| command.contains("formatter_program="))
+                .expect("Crow CI must expose its format gate");
+            // The pipeline preprocessor consumes $$ as one literal dollar.
+            // No shell/Nix dollar may reach its variable-expression parser.
+            let mut expanded = String::new();
+            let mut characters = command.chars();
+            while let Some(character) = characters.next() {
+                if character == '$' {
+                    assert_eq!(
+                        characters.next(),
+                        Some('$'),
+                        "unescaped Crow interpolation: {command}"
+                    );
+                }
+                expanded.push(character);
+            }
+            assert!(expanded.contains(r"\${builtins.currentSystem}"));
+            expanded
+        } else {
+            commands(root, "ci")
+                .into_iter()
+                .find(|run| run.contains("formatter_program="))
+                .expect("ordinary CI must expose its format gate")
+        };
+        assert!(
+            Command::new("git")
+                .args(["init", "--quiet"])
+                .current_dir(root)
+                .status()
+                .unwrap()
+                .success()
+        );
+        fs::write(
+            root.join(".git/info/exclude"),
+            "/bin/\n/formatter/\n/format.log\n",
+        )
+        .unwrap();
+        assert!(
+            Command::new("git")
+                .args(["add", "."])
+                .current_dir(root)
+                .status()
+                .unwrap()
+                .success()
+        );
+        // extra_setup runs before the format gate. Its unchanged outputs are
+        // the formatter's baseline, including both untracked and tracked data.
+        let setup_source = "pub fn example() {}\n// generated by setup\n";
+        fs::write(root.join("src/lib.rs"), setup_source).unwrap();
+        fs::write(root.join("setup-output.txt"), "setup input\n").unwrap();
+        fs::write(root.join("staged-setup.txt"), "staged setup input\n").unwrap();
+        assert!(
+            Command::new("git")
+                .args(["add", "staged-setup.txt"])
+                .current_dir(root)
+                .status()
+                .unwrap()
+                .success()
+        );
+        for (program, status, mutation, expected_status) in [
+            ("crossbow-fmt", 0, "", 0),
+            ("crossbow-fmt", 17, "", 17),
+            ("missing-formatter", 0, "", 1),
+            ("crossbow-fmt", 0, "tracked", 1),
+            ("crossbow-fmt", 0, "staged", 1),
+            ("crossbow-fmt", 0, "untracked", 1),
+            ("crossbow-fmt", 0, "existing-untracked", 1),
+        ] {
+            let log = root.join("format.log");
+            let _ = fs::remove_file(&log);
+            let index_before = Command::new("git")
+                .args(["write-tree"])
+                .current_dir(root)
+                .output()
+                .unwrap();
+            assert!(index_before.status.success(), "{index_before:?}");
+            let output = Command::new("sh")
+                .args(["-c", &gate])
+                .current_dir(root)
+                .env("PATH", &bin)
+                .env("FORMAT_BIN", &bin)
+                .env("FORMAT_WRAPPER", &wrapper)
+                .env("FORMAT_PROGRAM", program)
+                .env("FORMAT_LOG", &log)
+                .env("FORMAT_STATUS", status.to_string())
+                .env("FORMAT_MUTATION", mutation)
+                .env("TMPDIR", snapshots.path())
+                .output()
+                .unwrap();
+            assert_eq!(
+                output.status.code(),
+                Some(expected_status),
+                "split={split}, crow_format={crow_format:?}: {output:?}"
+            );
+            assert_eq!(fs::read_dir(snapshots.path()).unwrap().count(), 0);
+            if program == "crossbow-fmt" {
+                assert_eq!(fs::read_to_string(log).unwrap(), "crossbow-fmt \n");
+            } else {
+                assert!(!log.exists());
+                assert!(
+                    String::from_utf8_lossy(&output.stderr)
+                        .contains("Declared flake formatter executable is missing")
+                );
+            }
+            if expected_status == 0 {
+                let index_after = Command::new("git")
+                    .args(["write-tree"])
+                    .current_dir(root)
+                    .output()
+                    .unwrap();
+                assert!(index_after.status.success(), "{index_after:?}");
+                assert_eq!(index_before.stdout, index_after.stdout);
+                assert_eq!(
+                    fs::read_to_string(root.join("src/lib.rs")).unwrap(),
+                    setup_source
+                );
+                assert_eq!(
+                    fs::read_to_string(root.join("setup-output.txt")).unwrap(),
+                    "setup input\n"
+                );
+                assert_eq!(
+                    fs::read_to_string(root.join("staged-setup.txt")).unwrap(),
+                    "staged setup input\n"
+                );
+            }
+            fs::write(root.join("src/lib.rs"), "pub fn example() {}\n").unwrap();
+            assert!(
+                Command::new("git")
+                    .args(["add", "src/lib.rs"])
+                    .current_dir(root)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            fs::write(root.join("src/lib.rs"), setup_source).unwrap();
+            fs::write(root.join("setup-output.txt"), "setup input\n").unwrap();
+            let _ = fs::remove_file(root.join("new-output.txt"));
+        }
     }
 }
 
