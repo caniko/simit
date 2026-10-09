@@ -93,7 +93,7 @@ fn template_encoding_bom_stays_outside_the_header_prefixed_yaml_payload() {
     let payload = fs::read_to_string(&source).unwrap();
     let with_bom = format!("\u{feff}{payload}");
     fs::write(&source, &with_bom).unwrap();
-    let original: serde_yaml::Value = serde_yaml::from_str(&with_bom).unwrap();
+    let original: serde_yaml::Value = serde_yaml::from_str(&payload).unwrap();
     assert_eq!(original["name"], "Project tests");
     let result = generate(&temp, &[]);
     assert!(result.status.success(), "{result:?}");
@@ -929,7 +929,11 @@ fn registry_audits_reject_configured_template_backend_mismatches_without_writes(
         fs::write(&cfg_path, &invalid).unwrap();
         let audit = audit_ci(temp.path());
         assert!(audit.is_err(), "{platform}: {audit:?}");
-        assert!(format!("{:#}", audit.unwrap_err()).contains("selected Actions platform"));
+        let error = format!("{:#}", audit.unwrap_err());
+        assert!(
+            error.contains("selected Actions platform"),
+            "{platform}: {error}"
+        );
         assert_eq!(
             simit::registry::detect_feature_status(temp.path())["ci"],
             FeatureStatus::Drift
