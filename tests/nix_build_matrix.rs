@@ -89,7 +89,7 @@ extra_env = { FLAKE_SSH_KEY = "${{ secrets.FLAKE_SSH_KEY }}" }
     assert_eq!(value["permissions"]["contents"], "read");
     assert_eq!(
         value["concurrency"]["group"],
-        "${{ github.workflow }}-${{ github.event.pull_request.head.ref || github.ref_name }}"
+        "${{ github.workflow }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event.pull_request.head.ref || github.ref_name }}"
     );
     let job = &value["jobs"]["build"];
     assert_eq!(job["timeout-minutes"], 90);
@@ -151,6 +151,65 @@ extra_env = { FLAKE_SSH_KEY = "${{ secrets.FLAKE_SSH_KEY }}" }
         simit::registry::FeatureStatus::Managed,
         "{audit:?}"
     );
+}
+
+#[test]
+fn scoped_nix_matrix_isolates_forks_and_coalesces_same_repository_push_and_pr() {
+    for options in [
+        "[ci.nix_build]\nonly = true",
+        "[ci.nix_build]\ncapture_results = true",
+        "[ci.nix_build]\nmax_jobs = 1",
+    ] {
+        let temp = project(options);
+        assert!(generate(&temp, &[]).status.success());
+        let value = workflow(&temp);
+        let group = value["concurrency"]["group"].as_str().unwrap();
+        let resolve = |head_repository: Option<&str>,
+                       head_branch: Option<&str>,
+                       repository: &str,
+                       branch: &str| {
+            let value = group
+                .replace("${{ github.workflow }}", "Nix installable builds")
+                .replace(
+                    "${{ github.event.pull_request.head.repo.full_name || github.repository }}",
+                    head_repository.unwrap_or(repository),
+                )
+                .replace(
+                    "${{ github.event.pull_request.head.ref || github.ref_name }}",
+                    head_branch.unwrap_or(branch),
+                );
+            assert!(
+                !value.contains("${{"),
+                "unrecognized concurrency input: {value}"
+            );
+            value
+        };
+        let push = resolve(None, None, "owner/project", "main");
+        let same_repository_pr = resolve(
+            Some("owner/project"),
+            Some("main"),
+            "owner/project",
+            "1/merge",
+        );
+        let first_fork = resolve(
+            Some("alice/project"),
+            Some("main"),
+            "owner/project",
+            "2/merge",
+        );
+        let second_fork = resolve(
+            Some("bob/project"),
+            Some("main"),
+            "owner/project",
+            "3/merge",
+        );
+        assert_eq!(push, same_repository_pr);
+        assert_ne!(first_fork, second_fork);
+        assert_ne!(push, first_fork);
+        assert_ne!(push, resolve(None, None, "owner/project", "another-branch"));
+        assert_eq!(value["concurrency"]["cancel-in-progress"], true);
+        assert!(generate(&temp, &["--check", "--diff"]).status.success());
+    }
 }
 
 #[test]

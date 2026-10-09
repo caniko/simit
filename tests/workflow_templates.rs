@@ -371,33 +371,44 @@ fn non_file_destinations_fail_before_rewriting_builtins() {
 
 #[test]
 fn retired_templates_with_moved_headers_are_removed_but_foreign_markers_survive() {
-    let temp = project();
-    assert!(generate(&temp, &[]).status.success());
-    let output = temp.path().join(".github/workflows/tests.yml");
-    let original = fs::read_to_string(&output).unwrap();
-    fs::write(&output, "\n# Project note\n".to_owned() + &original).unwrap();
-    let foreign = temp.path().join(".github/workflows/foreign.yml");
-    let foreign_content = "# Simit workflow template: project-note\nname: Foreign\n";
-    fs::write(&foreign, foreign_content).unwrap();
-    let cfg_path = temp.path().join("simit.toml");
-    let cfg = fs::read_to_string(&cfg_path).unwrap();
-    fs::write(
-        &cfg_path,
-        cfg.split("[ci.workflow_templates]").next().unwrap(),
-    )
-    .unwrap();
-    assert!(!generate(&temp, &["--check", "--diff"]).status.success());
-    assert!(output.is_file());
-    let result = generate(&temp, &[]);
-    assert!(result.status.success(), "{result:?}");
-    assert!(!output.exists());
-    assert_eq!(fs::read_to_string(&foreign).unwrap(), foreign_content);
-    assert!(generate(&temp, &["--check", "--diff"]).status.success());
-    // The preserved project workflow is reported as an unmanaged extra.
-    assert_eq!(
-        audit_ci(temp.path()).unwrap().status,
-        FeatureStatus::ManagedExtra
-    );
+    for preamble in [
+        "\n# Project note\n",
+        "--- # project note\n",
+        "%YAML 1.2\n--- # project note\n",
+        "%TAG !e! tag:example.com,2026:\n---\n",
+        "\u{feff}%YAML 1.1\n---\t# project note\n",
+    ] {
+        let temp = project();
+        assert!(generate(&temp, &[]).status.success());
+        let output = temp.path().join(".github/workflows/tests.yml");
+        let original = fs::read_to_string(&output).unwrap();
+        let edited = preamble.to_owned() + &original;
+        let yaml: serde_yaml::Value = serde_yaml::from_str(&edited).unwrap();
+        assert!(yaml["jobs"].is_mapping());
+        fs::write(&output, edited).unwrap();
+        let foreign = temp.path().join(".github/workflows/foreign.yml");
+        let foreign_content = "# Simit workflow template: project-note\nname: Foreign\n";
+        fs::write(&foreign, foreign_content).unwrap();
+        let cfg_path = temp.path().join("simit.toml");
+        let cfg = fs::read_to_string(&cfg_path).unwrap();
+        fs::write(
+            &cfg_path,
+            cfg.split("[ci.workflow_templates]").next().unwrap(),
+        )
+        .unwrap();
+        assert!(!generate(&temp, &["--check", "--diff"]).status.success());
+        assert!(output.is_file());
+        let result = generate(&temp, &[]);
+        assert!(result.status.success(), "{result:?}");
+        assert!(!output.exists());
+        assert_eq!(fs::read_to_string(&foreign).unwrap(), foreign_content);
+        assert!(generate(&temp, &["--check", "--diff"]).status.success());
+        // The preserved project workflow is reported as an unmanaged extra.
+        assert_eq!(
+            audit_ci(temp.path()).unwrap().status,
+            FeatureStatus::ManagedExtra
+        );
+    }
 }
 
 #[test]
@@ -915,5 +926,89 @@ fn missing_builtins_report_drift_when_only_template_outputs_remain() {
             audit_ci(temp.path()).unwrap().status,
             FeatureStatus::Managed
         );
+    }
+}
+
+#[test]
+fn project_audit_emits_an_executable_repair_when_only_templates_remain() {
+    for rust in [false, true] {
+        for platform in ["github", "forgejo"] {
+            for configured_backend in [false, true] {
+                let temp = project();
+                let cfg_path = temp.path().join("simit.toml");
+                let cfg = if rust {
+                    fs::write(temp.path().join("Cargo.toml"), "[package]\nname='audit-template-repair'\nversion='0.1.0'\nedition='2024'\n").unwrap();
+                    fs::create_dir(temp.path().join("src")).unwrap();
+                    fs::write(temp.path().join("src/main.rs"), "fn main() {}\n").unwrap();
+                    format!(
+                        "[ci]\nplatform='{platform}'\nprovider='actions'\nruntime='cargo'\nrunner='ubuntu-24.04'\n[ci.workflow_templates]\n'.{platform}/workflows/tests.yml'='.simit/templates/tests.yml'\n[ci.workflow_variables]\nrunner='windows-2022'\n"
+                    )
+                } else {
+                    let cfg = fs::read_to_string(&cfg_path)
+                        .unwrap()
+                        .replace("github", platform);
+                    if platform == "forgejo" {
+                        cfg.replace("[ci.nix_build]\nonly=true\n", "")
+                    } else {
+                        cfg
+                    }
+                };
+                fs::write(&cfg_path, cfg).unwrap();
+                assert!(generate(&temp, &[]).status.success());
+                // A template body must never infer the builtin runner or gates.
+                let template = temp.path().join(format!(".{platform}/workflows/tests.yml"));
+                let original = fs::read_to_string(&template).unwrap();
+                for entry in fs::read_dir(template.parent().unwrap()).unwrap() {
+                    let path = entry.unwrap().path();
+                    if path != template {
+                        fs::remove_file(path).unwrap();
+                    }
+                }
+                if !configured_backend {
+                    let mut cfg: toml_edit::DocumentMut =
+                        fs::read_to_string(&cfg_path).unwrap().parse().unwrap();
+                    cfg["ci"].as_table_mut().unwrap().remove("platform");
+                    cfg["ci"].as_table_mut().unwrap().remove("provider");
+                    fs::write(&cfg_path, cfg.to_string()).unwrap();
+                }
+                let report = common::simit()
+                    .current_dir(temp.path())
+                    .args(["projects", "audit", "--json"])
+                    .output()
+                    .unwrap();
+                assert_eq!(report.status.code(), Some(1), "{report:?}");
+                let report: serde_json::Value = serde_json::from_slice(&report.stdout).unwrap();
+                let project = &report["projects"][0];
+                assert_eq!(project["ciStatus"], "drift", "{project:?}");
+                assert!(
+                    project["errors"].as_array().unwrap().is_empty(),
+                    "{project:?}"
+                );
+                assert!(
+                    !project["missingFiles"].as_array().unwrap().is_empty(),
+                    "{project:?}"
+                );
+                let command = project["regenerateCommand"]
+                    .as_str()
+                    .expect("template-only drift needs a repair command");
+                assert!(
+                    command.contains(&format!("--platform {platform}")),
+                    "{command}"
+                );
+                assert!(!command.contains("windows-2022"), "{command}");
+                let output = common::simit()
+                    .current_dir(temp.path())
+                    .args(command.split_ascii_whitespace().skip(1))
+                    .output()
+                    .unwrap();
+                assert!(output.status.success(), "{command}: {output:?}");
+                assert_eq!(fs::read_to_string(&template).unwrap(), original);
+                assert!(generate(&temp, &["--check", "--diff"]).status.success());
+                assert_eq!(
+                    audit_ci(temp.path()).unwrap().status,
+                    FeatureStatus::Managed
+                );
+            }
+        }
     }
 }

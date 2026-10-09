@@ -44,7 +44,14 @@ pub(crate) fn workflow_preamble_lines(content: &str) -> impl Iterator<Item = &st
         .map(str::trim)
         .take_while(|line| {
             line.is_empty()
-                || *line == "---"
+                || line.strip_prefix("---").is_some_and(|suffix| {
+                    suffix.is_empty()
+                        || (suffix.starts_with([' ', '\t']) && suffix.trim_start().starts_with('#'))
+                })
+                || ["%YAML", "%TAG"].iter().any(|directive| {
+                    line.strip_prefix(*directive)
+                        .is_some_and(|suffix| suffix.starts_with([' ', '\t']))
+                })
                 || line.starts_with('#')
                 || line.starts_with("//")
                 || *line == LEGACY_GENERATED_WORKFLOW_MARKER
@@ -1055,8 +1062,9 @@ pub fn nix_build_matrix_file_with_options(
         workflow.push_str("permissions:\n  contents: read\n\n");
     }
     if platform == Platform::Github && *options != crate::config::NixBuildConfig::default() {
-        // Push and PR runs for the same source branch share one qualification.
-        workflow.push_str("concurrency:\n  group: ${{ github.workflow }}-${{ github.event.pull_request.head.ref || github.ref_name }}\n  cancel-in-progress: true\n\n");
+        // Coalesce one repository's push/PR branch without canceling unrelated
+        // forks that happen to use the same short branch name.
+        workflow.push_str("concurrency:\n  group: ${{ github.workflow }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event.pull_request.head.ref || github.ref_name }}\n  cancel-in-progress: true\n\n");
     } else {
         push_platform_concurrency(&mut workflow, platform);
     }

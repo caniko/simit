@@ -45,6 +45,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Require standalone ownership headers in the workflow preamble when retiring
   generated files; preserve hand-written workflows quoting marker strings in YAML
   bodies while recognizing moved headers, document separators, and Jsonnet comments.
+- Preserve template retirement through commented YAML document starts and YAML/TAG
+  directives; retain an executable project-audit repair command when only templates
+  remain, without inferring builtin policy from their bodies.
 - Keep the default development environment usable when a worktree lacks the
   optional sibling language-server checkout.
 - Wait for exact crates.io dependency resolution through Cargo after each
@@ -65,6 +68,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   generated-workflow checks and registry audits aligned.
 - Coalesce configured hosted Nix qualification runs for branch pushes and pull
   requests so the same source does not consume two hosted build matrices.
+- Isolate scoped Nix qualification concurrency by source repository, preserving
+  same-repository push/PR branch coalescing across unrelated fork branch names.
 - Reject a coordinated publication when the refetched signed tag resolves to a
   different commit than the immutable workflow event SHA, keeping validation
   and all later release jobs bound to the same source tree.

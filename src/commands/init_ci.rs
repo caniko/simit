@@ -1486,7 +1486,41 @@ pub(crate) fn project_regeneration_command(workspace_root: &Path) -> Result<Opti
     let forgejo = workflow_snapshots_for_platform(workspace_root, Platform::Forgejo)?;
     let github = workflow_snapshots_for_platform(workspace_root, Platform::Github)?;
     let (platform, snapshots) = match (forgejo.is_empty(), github.is_empty()) {
-        (true, true) => return Ok(None),
+        (true, true) => {
+            let cfg = ProjectConfig::load(workspace_root)?;
+            if cfg.ci.workflow_templates.is_empty() {
+                return Ok(None);
+            }
+            crate::render::workflow_templates::validate_config(&cfg.ci)?;
+            // Template bodies stay outside option inference. Their declared
+            // paths still identify the Actions backend needed to restore all
+            // missing builtins, for Cargo and Nix-only projects alike.
+            let declares = |directory: &str| {
+                cfg.ci
+                    .workflow_templates
+                    .keys()
+                    .any(|output| Path::new(output).parent() == Some(Path::new(directory)))
+            };
+            let platform = match (
+                declares(".forgejo/workflows"),
+                declares(".github/workflows"),
+            ) {
+                (true, false) => Platform::Forgejo,
+                (false, true) => Platform::Github,
+                _ => bail!("mixed workflow template platforms in configuration"),
+            };
+            if cfg
+                .ci
+                .platform
+                .is_some_and(|configured| configured != platform)
+            {
+                bail!("workflow template platform differs from the configured CI platform");
+            }
+            return Ok(Some(format!(
+                "simit init ci --platform {} --ci-provider actions",
+                platform.as_str()
+            )));
+        }
         (false, true) => (Platform::Forgejo, forgejo),
         (true, false) => (Platform::Github, github),
         (false, false) => bail!("mixed generated CI platforms in workflow tree"),
