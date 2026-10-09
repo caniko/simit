@@ -63,51 +63,76 @@ impl ManifestRelease {
     }
 
     pub(crate) fn parse(&self, content: &str) -> Result<Package> {
-        let (name, version, private) = if self.manifest.ends_with("/pyproject.toml") {
-            let doc: DocumentMut = content.parse()?;
-            let project = doc
-                .get("project")
-                .context("Python releases require static [project] metadata")?;
-            if let Some(dynamic) = project.get("dynamic").and_then(toml_edit::Item::as_array) {
+        let registry = super::native_registry::Registry::for_manifest(&self.manifest);
+        let (name, version, private) =
+            if matches!(registry, super::native_registry::Registry::Python) {
+                let doc: DocumentMut = content.parse()?;
+                let project = doc
+                    .get("project")
+                    .context("Python releases require static [project] metadata")?;
+                if let Some(dynamic) = project.get("dynamic").and_then(toml_edit::Item::as_array) {
+                    ensure!(
+                        !dynamic
+                            .iter()
+                            .any(|field| field.as_str() == Some("version")),
+                        "dynamic Python versions cannot be independently mutated"
+                    );
+                }
+                (
+                    project
+                        .get("name")
+                        .and_then(toml_edit::Item::as_str)
+                        .context("missing project.name")?
+                        .to_owned(),
+                    project
+                        .get("version")
+                        .and_then(toml_edit::Item::as_str)
+                        .context("Python releases require static project.version")?
+                        .to_owned(),
+                    false,
+                )
+            } else {
+                let doc: Value = serde_json::from_str(content)?;
+                (
+                    doc["name"]
+                        .as_str()
+                        .context("missing npm package name")?
+                        .to_owned(),
+                    doc["version"]
+                        .as_str()
+                        .context("npm releases require a static version")?
+                        .to_owned(),
+                    doc["private"].as_bool().unwrap_or(false),
+                )
+            };
+        ensure!(!name.is_empty(), "release package name cannot be empty");
+        let version = Version::parse(&version)?;
+        if self.publish && !private {
+            registry.version(&version)?;
+            if matches!(registry, super::native_registry::Registry::Npm) {
+                let doc: Value = serde_json::from_str(content)?;
                 ensure!(
-                    !dynamic
-                        .iter()
-                        .any(|field| field.as_str() == Some("version")),
-                    "dynamic Python versions cannot be independently mutated"
+                    doc["publishConfig"]["registry"].is_null()
+                        || doc["publishConfig"]["registry"]
+                            .as_str()
+                            .is_some_and(
+                                |url| url.trim_end_matches('/') == "https://registry.npmjs.org"
+                            ),
+                    "custom npm registry requires its own publication backend"
+                );
+                ensure!(
+                    version.pre.is_empty()
+                        || doc["publishConfig"]["tag"]
+                            .as_str()
+                            .is_some_and(|tag| !tag.is_empty()),
+                    "npm prereleases require an explicit publishConfig.tag"
                 );
             }
-            (
-                project
-                    .get("name")
-                    .and_then(toml_edit::Item::as_str)
-                    .context("missing project.name")?
-                    .to_owned(),
-                project
-                    .get("version")
-                    .and_then(toml_edit::Item::as_str)
-                    .context("Python releases require static project.version")?
-                    .to_owned(),
-                false,
-            )
-        } else {
-            let doc: Value = serde_json::from_str(content)?;
-            (
-                doc["name"]
-                    .as_str()
-                    .context("missing npm package name")?
-                    .to_owned(),
-                doc["version"]
-                    .as_str()
-                    .context("npm releases require a static version")?
-                    .to_owned(),
-                doc["private"].as_bool().unwrap_or(false),
-            )
-        };
-        ensure!(!name.is_empty(), "release package name cannot be empty");
+        }
         Ok(Package {
             config: self.clone(),
             name,
-            version: Version::parse(&version)?,
+            version,
             publish: self.publish && !private,
         })
     }
@@ -146,14 +171,11 @@ pub(super) fn validate(root: &Path, graph: &Graph) -> Result<()> {
             release.manifest
         );
         let package = release.load(root)?;
-        let registry = if release.manifest.ends_with("/pyproject.toml") {
-            "python"
-        } else {
-            "npm"
-        };
+        let registry = super::native_registry::Registry::for_manifest(&release.manifest);
         ensure!(
-            names.insert((registry, package.name.clone())),
-            "duplicate {registry} release package name {}",
+            names.insert((registry.name(), registry.package_key(&package.name))),
+            "duplicate {} release package name {}",
+            registry.name(),
             package.name
         );
     }
@@ -385,11 +407,18 @@ struct Update {
 
 impl Package {
     fn version_updates(&self, root: &Path, version: &Version) -> Result<Vec<Update>> {
+        if self.publish {
+            super::native_registry::Registry::for_manifest(&self.config.manifest)
+                .version(version)?;
+        }
         let path = root.join(&self.config.manifest);
         let before = fs::read(&path)?;
         let content = std::str::from_utf8(&before)?;
         let mut updates = Vec::new();
-        if self.config.manifest.ends_with("/pyproject.toml") {
+        if matches!(
+            super::native_registry::Registry::for_manifest(&self.config.manifest),
+            super::native_registry::Registry::Python
+        ) {
             let mut doc: DocumentMut = content.parse()?;
             doc["project"]["version"] = value(version.to_string());
             updates.push(Update {
@@ -420,18 +449,33 @@ impl Package {
                     .and_then(toml_edit::Item::as_array_of_tables_mut)
                 {
                     for package in packages.iter_mut() {
-                        if package.get("name").and_then(toml_edit::Item::as_str)
-                            == Some(self.name.as_str())
+                        let registry = super::native_registry::Registry::Python;
+                        if package
+                            .get("name")
+                            .and_then(toml_edit::Item::as_str)
+                            .is_some_and(|name| {
+                                registry.package_key(name) == registry.package_key(&self.name)
+                            })
                             && package.get("source").is_some_and(|source| {
                                 source.get("editable").is_some() || source.get("virtual").is_some()
                             })
                         {
+                            let current = registry
+                                .version(&self.version)
+                                .unwrap_or_else(|_| self.version.to_string());
                             ensure!(
-                                package.get("version").and_then(toml_edit::Item::as_str)
-                                    == Some(self.version.to_string().as_str()),
+                                package
+                                    .get("version")
+                                    .and_then(toml_edit::Item::as_str)
+                                    .is_some_and(|version| version == current
+                                        || version == self.version.to_string()),
                                 "uv.lock package version disagrees with manifest"
                             );
-                            package["version"] = value(version.to_string());
+                            package["version"] = value(
+                                registry
+                                    .version(version)
+                                    .unwrap_or_else(|_| version.to_string()),
+                            );
                             found = true;
                         }
                     }
@@ -492,6 +536,7 @@ impl Package {
                 });
             }
         }
+        self.config.parse(std::str::from_utf8(&updates[0].after)?)?;
         Ok(updates)
     }
 }

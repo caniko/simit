@@ -518,3 +518,207 @@ fn invalid_native_release_metadata_and_stale_locks_fail_before_mutation() {
         assert_eq!(git(root, &["tag", "--list"]), "");
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn native_registry_verification_checks_exact_identity_and_available_files() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    for (component, body, status, expected) in [
+        (
+            "python",
+            r#"{"info":{"name":"Py_Engine","version":"0.2.0"},"urls":[{"yanked":false,"digests":{"sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}}]}"#,
+            "200",
+            "pass",
+        ),
+        (
+            "python",
+            r#"{"info":{"name":"another-project","version":"0.2.0"},"urls":[{"yanked":false}]}"#,
+            "200",
+            "fail",
+        ),
+        (
+            "python",
+            r#"{"info":{"name":"py-engine","version":"0.2.0"},"urls":[{"yanked":true}]}"#,
+            "200",
+            "fail",
+        ),
+        ("python", "{}", "404", "fail"),
+        ("python", "unavailable", "503", "blocked"),
+        ("node", "not JSON", "200", "blocked"),
+        (
+            "node",
+            r#"{"name":"@example/node-engine","versions":{"1.3.0":{"name":"@example/node-engine","version":"1.3.0","dist":{"integrity":"sha512-retained"}}}}"#,
+            "200",
+            "pass",
+        ),
+        (
+            "node",
+            r#"{"name":"@example/node-engine","versions":{"1.3.0":{"name":"@example/node-engine","version":"1.4.0","dist":{"integrity":"sha512-retained"}}}}"#,
+            "200",
+            "fail",
+        ),
+        (
+            "node",
+            r#"{"name":"@example/node-engine","versions":{}}"#,
+            "200",
+            "fail",
+        ),
+    ] {
+        let temp = fixture();
+        let root = temp.path();
+        let config = fs::read_to_string(root.join("simit.toml")).unwrap();
+        write(
+            root,
+            "simit.toml",
+            &config.replace("publish = false", "publish = true"),
+        );
+        let npm: Value =
+            serde_json::from_slice(&fs::read(root.join("node/package.json")).unwrap()).unwrap();
+        let mut npm = npm;
+        npm["private"] = false.into();
+        write(root, "node/package.json", &npm.to_string());
+        git(root, &["add", "."]);
+        git(root, &["commit", "-qm", "Declare registry publication"]);
+        let tag = if component == "python" {
+            "py-engine/v0.2.0"
+        } else {
+            "node-engine/v1.3.0"
+        };
+        git(root, &["tag", tag]);
+        let tools = TempDir::new().unwrap();
+        let curl = tools.path().join("curl");
+        let request = tools.path().join("request");
+        fs::write(
+            &curl,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nprintf '%s\\n%s' '{}' {}\n",
+                request.display(),
+                body,
+                status
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&curl, fs::Permissions::from_mode(0o755)).unwrap();
+        let path = std::env::join_paths(
+            std::iter::once(tools.path().to_path_buf())
+                .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+        )
+        .unwrap();
+        let output = common::simit()
+            .current_dir(root)
+            .env("PATH", path)
+            .args(["release", "verify", "--component", component, "--json"])
+            .output()
+            .unwrap();
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        let registry = report["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["check"] == "registry publication")
+            .unwrap();
+        assert_eq!(registry["status"], expected, "{report}");
+        let request = fs::read_to_string(request).unwrap();
+        assert!(request.starts_with("--disable\n"));
+        assert!(
+            request.contains(if component == "python" {
+                "https://pypi.org/pypi/py-engine/0.2.0/json"
+            } else {
+                "https://registry.npmjs.org/@example%2Fnode-engine"
+            }),
+            "{request}"
+        );
+        assert_eq!(git(root, &["status", "--porcelain"]), "");
+    }
+}
+
+#[test]
+fn python_registry_normalization_rejects_duplicate_version_owners() {
+    let temp = fixture();
+    let root = temp.path();
+    write(
+        root,
+        "node/pyproject.toml",
+        "[project]\nname = 'Py_Engine'\nversion = '1.3.0'\n",
+    );
+    let config = fs::read_to_string(root.join("simit.toml")).unwrap();
+    write(
+        root,
+        "simit.toml",
+        &config.replace("node/package.json", "node/pyproject.toml"),
+    );
+    let output = run(root, &["monorepo", "plan", "--json"]);
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("duplicate python release package name"),
+        "{output:?}"
+    );
+}
+
+#[test]
+fn unsupported_public_native_versions_fail_before_mutation_and_uv_tracks_normalized_prereleases() {
+    let temp = fixture();
+    let root = temp.path();
+    let config = fs::read_to_string(root.join("simit.toml")).unwrap();
+    write(
+        root,
+        "simit.toml",
+        &config.replace("publish = false", "publish = true"),
+    );
+    git(root, &["add", "."]);
+    git(
+        root,
+        &["commit", "-qm", "Enable Python registry publication"],
+    );
+    let head = git(root, &["rev-parse", "HEAD"]);
+    let result = run(
+        root,
+        &[
+            "release",
+            "minor",
+            "--component",
+            "python",
+            "--pre",
+            "preview.1",
+            "--no-sign",
+            "--no-changelog",
+            "-m",
+            "unsupported version",
+        ],
+    );
+    assert!(!result.status.success(), "{result:?}");
+    assert_eq!(git(root, &["rev-parse", "HEAD"]), head);
+    assert_eq!(git(root, &["status", "--porcelain"]), "");
+    assert_eq!(git(root, &["tag", "--list"]), "");
+    let result = run(
+        root,
+        &[
+            "release",
+            "minor",
+            "--component",
+            "python",
+            "--pre",
+            "rc.4",
+            "--no-sign",
+            "--no-changelog",
+            "-m",
+            "Release Python prerelease",
+        ],
+    );
+    assert!(result.status.success(), "{result:?}");
+    assert!(
+        fs::read_to_string(root.join("python/pyproject.toml"))
+            .unwrap()
+            .contains("0.3.0-rc.4")
+    );
+    assert!(
+        fs::read_to_string(root.join("python/uv.lock"))
+            .unwrap()
+            .contains("0.3.0rc4")
+    );
+    assert_eq!(
+        git(root, &["tag", "--list"]).trim(),
+        "py-engine/v0.3.0-rc.4"
+    );
+}

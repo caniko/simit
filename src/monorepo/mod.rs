@@ -1,6 +1,7 @@
 //! One project-owned component graph shared by local planning and CI generation.
 
 pub(crate) mod ci;
+pub(crate) mod native_registry;
 mod plan;
 pub(crate) mod releases;
 

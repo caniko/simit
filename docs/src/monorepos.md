@@ -141,6 +141,7 @@ version providers are rejected.
 
 Package names are unique within their native registry, so Python and npm may
 both retain a package named `shared`. Release namespaces remain globally unique.
+Python names use the registry's case and `-`/`_`/`.` normalization for uniqueness.
 `--package` first selects an exact release namespace; a native package name is
 accepted only when it identifies one owner in the selected component. Use
 distinct namespaces such as `shared-python` and `shared-node` to choose between
@@ -156,7 +157,12 @@ their manifests. A dirty checkout or a failing prerequisite check prevents the
 version commit and tag.
 
 `publish` records registry eligibility (npm `private = true` always disables it).
-This declaration does not create Python/npm registry publication workflows;
-verification reports registry propagation as blocked for eligible packages until
-their native registry workflow is configured. Cargo publication remains managed
-by `[ci].publish_crates`.
+Registry publication remains separate from static version ownership.
+`release verify` checks eligible packages against the public native registry:
+PyPI's exact release metadata must contain a non-yanked file with a SHA-256 digest,
+and npm's abbreviated metadata must contain the matching package/version and
+distribution integrity. A missing, mismatched, or yanked release fails; transport,
+HTTP and malformed-metadata errors are reported as blocked. Private packages make
+no registry request. These read-only queries use a ten-second request deadline
+and a 4 MiB metadata limit. Cargo publication remains managed by
+`[ci].publish_crates`.

@@ -348,11 +348,30 @@ fn verify_manifest(
         ),
     });
     if package.publish {
-        results.push(CheckResult::blocked(
-            "registry publication",
-            "non-Cargo registry propagation is not configured",
-            "qualify publication through the package's native registry workflow",
-        ));
+        results.push(
+            match crate::monorepo::native_registry::available(package, version) {
+                Ok(true) => CheckResult::pass(
+                    "registry publication",
+                    format!(
+                        "{} {version} is available from its native registry",
+                        package.name
+                    ),
+                ),
+                Ok(false) => CheckResult::fail(
+                    "registry publication",
+                    format!(
+                        "{} {version} has no available matching registry release",
+                        package.name
+                    ),
+                    "publish the selected package through its native release workflow",
+                ),
+                Err(error) => CheckResult::blocked(
+                    "registry publication",
+                    error.to_string(),
+                    "restore native registry access and retry release verification",
+                ),
+            },
+        );
     }
     finish_report(results, command.json)
 }
