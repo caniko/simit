@@ -48,8 +48,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Preserve template retirement through commented YAML document starts and YAML/TAG
   directives; retain an executable project-audit repair command when only templates
   remain, without inferring builtin policy from their bodies.
-- Reject Unicode YAML line separators in template source/output paths before writes
-  so ownership comments cannot introduce malformed generated workflows.
+- Reject control characters, YAML-forbidden BMP noncharacters and Unicode line
+  separators in template source/output paths before writes so ownership comments
+  cannot introduce malformed generated workflows.
 - Keep the default development environment usable when a worktree lacks the
   optional sibling language-server checkout.
 - Wait for exact crates.io dependency resolution through Cargo after each

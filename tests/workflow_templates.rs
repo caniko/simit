@@ -137,8 +137,12 @@ fn invalid_templates_fail_before_any_outputs_are_written() {
 }
 
 #[test]
-fn yaml_line_separators_in_template_paths_fail_before_any_writes() {
-    for separator in ['\u{85}', '\u{2028}', '\u{2029}'] {
+fn yaml_nonprintable_characters_in_template_paths_fail_before_any_writes() {
+    let characters = (1..=0x1f)
+        .chain(0x7f..=0x9f)
+        .chain([0x2028, 0x2029, 0xfffe, 0xffff])
+        .map(|value| char::from_u32(value).unwrap());
+    for separator in characters {
         for source_path in [false, true] {
             let temp = project();
             assert!(generate(&temp, &[]).status.success());
@@ -155,13 +159,24 @@ fn yaml_line_separators_in_template_paths_fail_before_any_writes() {
             } else {
                 format!(".github/workflows/break{separator}in-output.yml")
             };
-            let (output, source) = if source_path {
+            // Windows refuses control characters in filenames itself. The
+            // mapping must still fail before any generated files are written.
+            let bad_source_created = source_path && (!cfg!(windows) || !separator.is_control());
+            if bad_source_created {
                 fs::write(temp.path().join(&bad_path), &source_bytes).unwrap();
+            }
+            let (output, source) = if source_path {
                 (".github/workflows/tests.yml", bad_path.as_str())
             } else {
                 (bad_path.as_str(), ".simit/templates/tests.yml")
             };
-            config(&temp, output, source, "ubuntu-24.04");
+            // Use TOML's escaped string representation so forbidden literal
+            // TOML controls reach path validation as actual decoded characters.
+            let mut cfg: toml_edit::DocumentMut = original_cfg.parse().unwrap();
+            let mappings = cfg["ci"]["workflow_templates"].as_table_mut().unwrap();
+            mappings.clear();
+            mappings.insert(output, toml_edit::value(source));
+            fs::write(&cfg_path, cfg.to_string()).unwrap();
             let candidate_cfg = fs::read_to_string(&cfg_path).unwrap();
             for args in [vec![], vec!["--check", "--diff"]] {
                 let result = generate(&temp, &args);
@@ -175,9 +190,9 @@ fn yaml_line_separators_in_template_paths_fail_before_any_writes() {
                 assert_eq!(fs::read(&template_output).unwrap(), output_bytes);
                 assert_eq!(fs::read(&original_source).unwrap(), source_bytes);
                 assert_eq!(fs::read_to_string(&cfg_path).unwrap(), candidate_cfg);
-                if source_path {
+                if bad_source_created {
                     assert_eq!(fs::read(temp.path().join(&bad_path)).unwrap(), source_bytes);
-                } else {
+                } else if !source_path {
                     assert!(!temp.path().join(&bad_path).exists());
                 }
             }

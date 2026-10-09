@@ -76,9 +76,12 @@ fn has_template_header(content: &str) -> bool {
 
 fn relative_path(value: &str) -> bool {
     !value.is_empty()
-        // YAML also treats NEL and Unicode line/paragraph separators as breaks.
-        // Paths appear verbatim in ownership comments, so reject every break.
-        && !value.contains(['\n', '\r', '\u{85}', '\u{2028}', '\u{2029}', '\0'])
+        // Paths appear verbatim in ownership comments. Reject controls, YAML's
+        // forbidden BMP noncharacters, and Unicode line/paragraph separators.
+        && !value.chars().any(|character| {
+            character.is_control()
+                || matches!(character, '\u{2028}' | '\u{2029}' | '\u{fffe}' | '\u{ffff}')
+        })
         && Path::new(value)
             .components()
             .all(|part| matches!(part, Component::Normal(_)))
