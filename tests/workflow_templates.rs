@@ -571,12 +571,8 @@ fn active_workflow_hard_links_are_rejected_but_exact_destinations_remain_declare
         let cfg_path = temp.path().join("simit.toml");
         let cfg = fs::read_to_string(&cfg_path)
             .unwrap()
-            .replace("github", platform);
-        let cfg = if platform == "forgejo" {
-            cfg.replace("[ci.nix_build]\nonly=true\n", "")
-        } else {
-            cfg
-        };
+            .replace("github", platform)
+            .replace("[ci.nix_build]\nonly=true\n", "");
         fs::write(&cfg_path, &cfg).unwrap();
         let result = generate(&temp, &[]);
         assert!(result.status.success(), "{platform}: {result:?}");
