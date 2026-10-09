@@ -3743,12 +3743,9 @@ fn yaml_double_quote(value: &str) -> String {
 
 fn push_checkout_step(workflow: &mut String, platform: Platform) {
     workflow.push_str("      - name: Checkout\n");
-    let version = if platform == Platform::Github {
-        "v7.0.1"
-    } else {
-        "v4.3.1"
-    };
-    push_action_uses(workflow, platform, "checkout", version);
+    // Arbitrary private runner labels do not attest the Node24 runner minimum.
+    // Keep the common Node20 checkout baseline for both Actions providers.
+    push_action_uses(workflow, platform, "checkout", "v4.3.1");
     workflow.push('\n');
 }
 

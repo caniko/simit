@@ -85,6 +85,33 @@ fn relative_path(value: &str) -> bool {
         && Path::new(value)
             .components()
             .all(|part| matches!(part, Component::Normal(_)))
+        && value.split('/').all(portable_component)
+}
+
+fn portable_component(value: &str) -> bool {
+    if value.is_empty()
+        || value.ends_with('.')
+        || value.ends_with(' ')
+        || value
+            .chars()
+            .any(|character| matches!(character, '<' | '>' | ':' | '"' | '\\' | '|' | '?' | '*'))
+    {
+        return false;
+    }
+    // Win32 reserves device names in every component, including names with an
+    // extension. Its COM/LPT aliases also recognize the superscript digits.
+    let stem = value
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .trim_end_matches(' ')
+        .to_ascii_uppercase();
+    !matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        && !matches!(
+            stem.strip_prefix("COM")
+                .or_else(|| stem.strip_prefix("LPT")),
+            Some("1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³")
+        )
 }
 
 fn variable_name(value: &str) -> bool {
