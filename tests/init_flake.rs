@@ -701,8 +701,8 @@ fn pure_uv_python_project_generates_py_harbor_flake() {
     assert!(status.success());
 
     let flake = read(&temp.path().join("flake.nix"));
-    assert!(flake.contains("py-harbor"));
-    assert!(flake.contains("py-harbor.lib"));
+    assert!(flake.contains("harbor.url") || flake.contains("harbor = {"));
+    assert!(flake.contains("harbor.lib.python"));
     assert!(flake.contains("mkUvDevShell"));
     assert!(flake.contains("mkUvCheckEnv"));
     assert!(flake.contains("mkUvAppPackage"));
@@ -870,6 +870,21 @@ checks = ["offline-tests", "typecheck"]
     let flake_path = temp.path().join("flake.nix");
     let modern = read(&flake_path).replace("py-harbor", "harbor-py");
     fs::write(&flake_path, modern).unwrap();
+    let check = simit()
+        .current_dir(temp.path())
+        .args(["init", "flake", "--check"])
+        .output()
+        .unwrap();
+    assert!(
+        check.status.success(),
+        "{}",
+        String::from_utf8_lossy(&check.stderr)
+    );
+
+    let namespaced = read(&flake_path)
+        .replace("harbor-py.lib", "harbor.lib.python")
+        .replace("harbor-py", "harbor");
+    fs::write(&flake_path, namespaced).unwrap();
     let check = simit()
         .current_dir(temp.path())
         .args(["init", "flake", "--check"])
@@ -1516,13 +1531,13 @@ fn cross_print_emits_multi_target_flake_with_contract() {
 
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("--- flake.nix"));
-    assert!(stdout.contains("rs-harbor.url = \"git+https://github.com/caniko/harbor-rs.git?ref=trunk&rev=b40cd4c4fdf6133962f67bd68a48bfd5d554d47f\";"));
-    assert!(stdout.contains("rs-harbor.lib.mkCrossPackages {"));
+    assert!(stdout.contains("harbor.url = \"git+https://github.com/caniko/harbor.git?ref=feat/harbor-monorepo-components&rev=7d99eb50c52d0a941e2996b97c469b32a7657ef4\";"));
+    assert!(stdout.contains("harbor.lib.rust.mkCrossPackages {"));
     assert!(stdout.contains(
         "targets = [\"native\" \"aarch64-linux\" \"windows\" \"darwin-x86_64\" \"darwin-aarch64\"];"
     ));
     assert!(stdout.contains("default = crossPackages.${pname};"));
-    assert!(stdout.contains("rs-harbor.lib.mkDevShells {"));
+    assert!(stdout.contains("harbor.lib.rust.mkDevShells {"));
     assert!(stdout.contains("canix:lPzPzKrmYqW5Rxa5r0uQWvCqD3S5nx0h2eCy7XD5JM8="));
     assert!(stdout.contains("cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY="));
     assert!(!stdout.contains("uqr0"));
@@ -1561,7 +1576,7 @@ fn cross_write_then_check_is_clean_and_detects_drift() {
     assert!(write_status.success());
 
     let flake = read(&temp.path().join("flake.nix"));
-    assert!(flake.contains("rs-harbor.lib.mkCrossPackages {"));
+    assert!(flake.contains("harbor.lib.rust.mkCrossPackages {"));
     assert!(flake.contains(
         "targets = [\"native\" \"aarch64-linux\" \"windows\" \"darwin-x86_64\" \"darwin-aarch64\"];"
     ));

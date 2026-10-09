@@ -30,6 +30,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Generate native Rust, cross Rust and Python flakes against one qualified Harbor
+  monorepo revision and its namespaced APIs. Keep MSRV toolchain manifests in
+  tracked source, preserve existing Rust library namespaces when patching hooks,
+  and recognize treefmt-normalized inherited hook bindings.
 - Normalize Python registry names and prerelease versions, keep local uv lock
   records aligned, and reject unsupported public version/publication settings
   before version mutation. Omit empty component-step environment mappings so
