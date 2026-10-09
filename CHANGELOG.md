@@ -17,6 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Project-owned Actions workflow templates and literal variables, sharing CI
   generation, configuration persistence, drift checks, and registry ownership.
+- Typed explicit Nixpkgs package/test additions unioned with upstream discovery,
+  including empty system mappings, with request-bound package-scoped broken
+  warnings and frozen selection/test identity validation.
+
 - Project-owned Rust CI commands through `[ci].check_command`, optional
   `nix_flake_check`, and opt-in Nix-runtime Cargo caching for Actions workflows.
 - Scoped GitHub Nix build-matrix options under `[ci.nix_build]`: exact-only
