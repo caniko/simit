@@ -422,9 +422,17 @@ fn coordinated_publication_preserves_five_member_ci_policies_and_dependency_orde
         read(&foreign),
         "name: Project-owned\non: [push]\njobs: {}\n"
     );
-    let config = read(&config_path);
-    assert!(config.contains("workspace_strategy = \"members\""));
-    assert!(config.contains("publish_strategy = \"coordinated\""));
+    // Persistence omits default values. Check the effective policy, so an
+    // absent default spelling still has to mean member CI and ordered publish.
+    let config = simit::config::ProjectConfig::load(temp.path()).unwrap();
+    assert_eq!(
+        config.ci.workspace_strategy,
+        simit::cli::WorkspaceStrategy::Members
+    );
+    assert_eq!(
+        config.ci.publish_strategy,
+        simit::config::PublishStrategy::Coordinated
+    );
     let publish: serde_yaml::Value = serde_yaml::from_str(&read(
         &temp.path().join(".github/workflows/publish-workspace.yaml"),
     ))

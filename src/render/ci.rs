@@ -969,8 +969,9 @@ pub fn nix_build_matrix_file_with_options(
         workflow.push_str("permissions:\n  contents: read\n\n");
     }
     if platform == Platform::Github && *options != crate::config::NixBuildConfig::default() {
-        // Push and PR runs for the same source branch share one qualification.
-        workflow.push_str("concurrency:\n  group: ${{ github.workflow }}-${{ github.event.pull_request.head.ref || github.ref_name }}\n  cancel-in-progress: true\n\n");
+        // Coalesce one repository's push/PR branch without canceling unrelated
+        // forks that happen to use the same short branch name.
+        workflow.push_str("concurrency:\n  group: ${{ github.workflow }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event.pull_request.head.ref || github.ref_name }}\n  cancel-in-progress: true\n\n");
     } else {
         push_platform_concurrency(&mut workflow, platform);
     }
