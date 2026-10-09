@@ -268,16 +268,20 @@ fn nix_format_gate_runs_custom_flake_formatters_and_rejects_worktree_mutation() 
         let bin = root.join("bin");
         fs::create_dir(&bin).unwrap();
         symlink("/bin/sh", bin.join("sh")).unwrap();
-        let git = Command::new("sh")
-            .args(["-c", "command -v git"])
-            .output()
+        for tool in ["git", "mktemp", "rm"] {
+            let located = Command::new("sh")
+                .args(["-c", &format!("command -v {tool}")])
+                .output()
+                .unwrap();
+            assert!(located.status.success(), "{tool}: {located:?}");
+            symlink(
+                String::from_utf8(located.stdout).unwrap().trim(),
+                bin.join(tool),
+            )
             .unwrap();
-        assert!(git.status.success(), "{git:?}");
-        symlink(
-            String::from_utf8(git.stdout).unwrap().trim(),
-            bin.join("git"),
-        )
-        .unwrap();
+        }
+        // Snapshot state must be external and cleaned on success or failure.
+        let snapshots = tempfile::tempdir().unwrap();
         let wrapper = root.join("formatter");
         fs::create_dir_all(wrapper.join("bin")).unwrap();
         let custom = wrapper.join("bin/crossbow-fmt");
@@ -388,6 +392,12 @@ fn nix_format_gate_runs_custom_flake_formatters_and_rejects_worktree_mutation() 
         ] {
             let log = root.join("format.log");
             let _ = fs::remove_file(&log);
+            let index_before = Command::new("git")
+                .args(["write-tree"])
+                .current_dir(root)
+                .output()
+                .unwrap();
+            assert!(index_before.status.success(), "{index_before:?}");
             let output = Command::new("sh")
                 .args(["-c", &gate])
                 .current_dir(root)
@@ -398,6 +408,7 @@ fn nix_format_gate_runs_custom_flake_formatters_and_rejects_worktree_mutation() 
                 .env("FORMAT_LOG", &log)
                 .env("FORMAT_STATUS", status.to_string())
                 .env("FORMAT_MUTATION", mutation)
+                .env("TMPDIR", snapshots.path())
                 .output()
                 .unwrap();
             assert_eq!(
@@ -405,6 +416,7 @@ fn nix_format_gate_runs_custom_flake_formatters_and_rejects_worktree_mutation() 
                 Some(expected_status),
                 "split={split}, crow_format={crow_format:?}: {output:?}"
             );
+            assert_eq!(fs::read_dir(snapshots.path()).unwrap().count(), 0);
             if program == "crossbow-fmt" {
                 assert_eq!(fs::read_to_string(log).unwrap(), "crossbow-fmt \n");
             } else {
@@ -415,6 +427,13 @@ fn nix_format_gate_runs_custom_flake_formatters_and_rejects_worktree_mutation() 
                 );
             }
             if expected_status == 0 {
+                let index_after = Command::new("git")
+                    .args(["write-tree"])
+                    .current_dir(root)
+                    .output()
+                    .unwrap();
+                assert!(index_after.status.success(), "{index_after:?}");
+                assert_eq!(index_before.stdout, index_after.stdout);
                 assert_eq!(
                     fs::read_to_string(root.join("src/lib.rs")).unwrap(),
                     setup_source
