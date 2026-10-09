@@ -314,15 +314,10 @@ fn pages_only_rejects_effective_template_platform_mismatches_before_writes() {
         } else {
             "github"
         };
-        let invalid_cfg = valid_cfg
-            .replace(
-                &format!("platform = \"{platform}\""),
-                &format!("platform = \"{other}\""),
-            )
-            .replace(
-                &format!("platform='{platform}'"),
-                &format!("platform='{other}'"),
-            );
+        let mut invalid: toml_edit::DocumentMut = valid_cfg.parse().unwrap();
+        assert_eq!(invalid["ci"]["platform"].as_str(), Some(platform));
+        invalid["ci"]["platform"] = toml_edit::value(other);
+        let invalid_cfg = invalid.to_string();
         assert_ne!(invalid_cfg, valid_cfg);
         fs::write(&cfg_path, &invalid_cfg).unwrap();
         for check in [true, false] {
