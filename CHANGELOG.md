@@ -17,6 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   package-qualified compare links and history bounded by owned paths.
 - Independent static Python/npm version owners, package-qualified tags, scoped
   lock updates, verification and prerequisite-gated tag synchronization.
+- Independent signed-tag Python/npm publication with complete native component
+  qualification, source-bound artifact receipts, exact registry checksum conflict
+  detection, private-package exclusion and bounded propagation verification.
 
 - Project-owned Rust CI commands through `[ci].check_command`, optional
   `nix_flake_check`, and opt-in Nix-runtime Cargo caching for Actions workflows.
@@ -27,6 +30,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Normalize Python registry names and prerelease versions, keep local uv lock
+  records aligned, and reject unsupported public version/publication settings
+  before version mutation. Omit empty component-step environment mappings so
+  generated qualification and native-publication workflows pass Actions linting.
 - Honor an absolute `XDG_DATA_HOME` registry override on macOS and other native
   platforms, keeping project fixtures isolated from the platform default home.
 - Bound native Nix prebuilds to one build job, two cores, and three hours while
