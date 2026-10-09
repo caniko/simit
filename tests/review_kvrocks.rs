@@ -317,3 +317,180 @@ fn kvrocks_runtime_allocation_is_exclusive_and_only_cleans_its_own_empty_directo
     assert!(!retained.join("new-runtime").exists());
     assert!(alias.is_symlink());
 }
+
+#[test]
+fn kvrocks_transient_service_plan_binds_native_tool_run_identity_and_bounded_resources() {
+    let manifest = EngineManifest {
+        schema_version: 1,
+        repository: "caniko/simit".into(),
+        revision: "c".repeat(40),
+        nixpkgs_revision: "d".repeat(40),
+    };
+    let package = json!({"pname":"kvrocks", "version":"2.14.0", "system":"x86_64-linux",
+        "outputs":["out"], "drvPath":format!("/nix/store/{}-kvrocks-2.14.0.drv", "0".repeat(32)),
+        "outPath":format!("/nix/store/{}-kvrocks-2.14.0", "1".repeat(32))});
+    let bootstrap = kvrocks::BootstrapReceipt {
+        source: kvrocks::freeze_source(&manifest, "x86_64-linux", &package).unwrap(),
+        nar_hash: format!("sha256:{}", "a".repeat(64)),
+        nar_size: 123456,
+        binary_sha256: "b".repeat(64),
+    };
+    let identity = kvrocks::parse_worker_identity(
+        "runner",
+        "nixbld",
+        "runner:x:1001:1001:Runner:/home/runner:/bin/bash\n",
+        "nixbld:x:30000:nixbld1,nixbld2\n",
+    )
+    .unwrap();
+    let run_identity = "e".repeat(64);
+    let plan = kvrocks::service_plan(
+        &bootstrap,
+        &identity,
+        std::path::Path::new("/home/runner/work/_temp"),
+        &run_identity,
+    )
+    .unwrap();
+    assert_eq!(plan.bootstrap, bootstrap);
+    assert_eq!(plan.identity, identity);
+    assert_eq!(plan.run_identity, run_identity);
+    assert_eq!(plan.unit, format!("simit-kvrocks-{run_identity}.service"));
+    assert_eq!(plan.socket, "/run/redis-sccache/redis.sock");
+    assert_eq!(plan.startup_seconds, 30);
+    assert_eq!(plan.shutdown_seconds, 30);
+    assert_eq!(plan.memory_max_bytes, 2 * 1024 * 1024 * 1024);
+    assert_eq!(plan.cpu_quota_percent, 200);
+    assert_eq!(plan.max_db_gib, 4);
+    assert_eq!(plan.sandbox_paths, [plan.socket.clone()]);
+    assert_eq!(
+        plan.state_directory,
+        format!("/home/runner/work/_temp/simit-kvrocks-{run_identity}")
+    );
+    let properties = &plan.systemd_args;
+    for required in [
+        "--no-block",
+        "--service-type=exec",
+        "--property=User=runner",
+        "--property=Group=nixbld",
+        "--property=RuntimeDirectory=redis-sccache",
+        "--property=RuntimeDirectoryMode=0750",
+        "--property=RuntimeDirectoryPreserve=yes",
+        "--property=MemoryMax=2147483648",
+        "--property=CPUQuota=200%",
+        "--property=KillMode=control-group",
+        "--property=TimeoutStopSec=30s",
+        "--property=SendSIGKILL=no",
+        "--property=Restart=no",
+        "--property=RestrictAddressFamilies=AF_UNIX",
+        "--property=NoNewPrivileges=yes",
+    ] {
+        assert!(properties.iter().any(|arg| arg == required), "{required}");
+    }
+    let tail = &properties[properties.len() - 4..];
+    assert_eq!(tail[0], "--");
+    assert_eq!(tail[1], format!("{}/bin/kvrocks", bootstrap.source.output));
+    assert_eq!(tail[2], "-c");
+    assert_eq!(tail[3], format!("{}/kvrocks.conf", plan.state_directory));
+    for required in [
+        "port 16666",
+        "unixsocket /run/redis-sccache/redis.sock",
+        "unixsocketperm 660",
+        "daemonize no",
+        "supervised no",
+        "workers 2",
+        "max-db-size 4",
+        "rocksdb.block_cache_size 512",
+        "rocksdb.max_background_jobs 2",
+        "rocksdb.max_write_buffer_number 2",
+        "rocksdb.write_buffer_size 64",
+    ] {
+        assert!(
+            plan.config.lines().any(|line| line == required),
+            "{required}"
+        );
+    }
+    assert!(!plan.config.lines().any(|line| line.starts_with("bind ")));
+    assert!(
+        serde_json::to_value(&plan)
+            .unwrap()
+            .get("bootstrap")
+            .is_some()
+    );
+    for invalid_run in ["", "latest", "../foreign", "-other", "a\nport 6379"] {
+        assert!(
+            kvrocks::service_plan(
+                &bootstrap,
+                &identity,
+                std::path::Path::new("/tmp/runner"),
+                invalid_run
+            )
+            .is_err()
+        );
+    }
+    for invalid_temp in [
+        "relative",
+        "/",
+        "/tmp/../foreign",
+        "/tmp/other state",
+        "/tmp/evil\nbind 0.0.0.0",
+    ] {
+        assert!(
+            kvrocks::service_plan(
+                &bootstrap,
+                &identity,
+                std::path::Path::new(invalid_temp),
+                &run_identity
+            )
+            .is_err()
+        );
+    }
+    for field in ["uid", "gid"] {
+        let mut invalid_identity = identity.clone();
+        if field == "uid" {
+            invalid_identity.uid = 0;
+        } else {
+            invalid_identity.gid = 0;
+        }
+        assert!(
+            kvrocks::service_plan(
+                &bootstrap,
+                &invalid_identity,
+                std::path::Path::new("/tmp/runner"),
+                &run_identity
+            )
+            .is_err()
+        );
+    }
+    let mut invalid_tool = bootstrap.clone();
+    invalid_tool.source.output = "/tmp/candidate-tool".into();
+    assert!(
+        kvrocks::service_plan(
+            &invalid_tool,
+            &identity,
+            std::path::Path::new("/tmp/runner"),
+            &run_identity
+        )
+        .is_err()
+    );
+    invalid_tool = bootstrap.clone();
+    invalid_tool.source.system = "x86_64-darwin".into();
+    assert!(
+        kvrocks::service_plan(
+            &invalid_tool,
+            &identity,
+            std::path::Path::new("/tmp/runner"),
+            &run_identity
+        )
+        .is_err()
+    );
+    invalid_tool = bootstrap;
+    invalid_tool.binary_sha256 = "latest".into();
+    assert!(
+        kvrocks::service_plan(
+            &invalid_tool,
+            &identity,
+            std::path::Path::new("/tmp/runner"),
+            &run_identity
+        )
+        .is_err()
+    );
+}
