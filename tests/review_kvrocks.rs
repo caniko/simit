@@ -378,13 +378,22 @@ fn kvrocks_transient_service_plan_binds_native_tool_run_identity_and_bounded_res
         "--property=CPUQuota=200%",
         "--property=KillMode=control-group",
         "--property=TimeoutStopSec=30s",
-        "--property=SendSIGKILL=no",
+        "--property=SendSIGKILL=yes",
+        "--property=KillSignal=SIGTERM",
+        "--property=FinalKillSignal=SIGKILL",
         "--property=Restart=no",
         "--property=RestrictAddressFamilies=AF_UNIX",
         "--property=NoNewPrivileges=yes",
     ] {
         assert!(properties.iter().any(|arg| arg == required), "{required}");
     }
+    // A timed stop is not bounded if systemd leaves a stubborn descendant alive.
+    // Final termination remains scoped to this run's owned control group.
+    assert!(
+        !properties
+            .iter()
+            .any(|arg| arg == "--property=SendSIGKILL=no")
+    );
     let tail = &properties[properties.len() - 4..];
     assert_eq!(tail[0], "--");
     assert_eq!(tail[1], format!("{}/bin/kvrocks", bootstrap.source.output));
