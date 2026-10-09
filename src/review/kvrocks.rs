@@ -593,6 +593,68 @@ mod tests {
     use std::os::unix::fs::MetadataExt;
 
     #[test]
+    fn runtime_inode_open_failure_rolls_back_only_the_new_empty_directory() {
+        const CHILD_PATH: &str = "SIMIT_TEST_EXHAUSTED_FD_RUNTIME";
+        if let Some(path) = std::env::var_os(CHILD_PATH) {
+            let path = std::path::PathBuf::from(path);
+            let metadata = path.parent().unwrap().metadata().unwrap();
+            let identity = WorkerIdentity {
+                user: "fixture".into(),
+                uid: metadata.uid(),
+                group: "fixture".into(),
+                gid: metadata.gid(),
+            };
+            let existed = path.exists();
+            let mut descriptors = Vec::new();
+            let exhaustion = loop {
+                match fs::File::open("/dev/null") {
+                    Ok(file) => descriptors.push(file),
+                    Err(error) => break error,
+                }
+            };
+            let result = OwnedRuntime::create(&path, &identity);
+            drop(descriptors);
+            assert_eq!(exhaustion.raw_os_error(), Some(24)); // EMFILE on Unix.
+            let error = result.err().expect("allocation must report the failure");
+            if existed {
+                assert!(error.to_string().contains("exclusively allocating"));
+                assert_eq!(fs::read(path.join("foreign")).unwrap(), b"preserve foreign");
+            } else {
+                assert!(error.to_string().contains("retaining owned runtime inode"));
+                assert!(fs::symlink_metadata(&path).is_err());
+            }
+            return;
+        }
+        // The descriptor limit belongs to a separate process, never to the
+        // parallel test runner. Exercise the real File::open EMFILE path.
+        let root = tempfile::tempdir().unwrap();
+        let runtime = root.path().join("runtime");
+        let child = || {
+            std::process::Command::new("/bin/sh")
+                .args([
+                    "-c",
+                    "ulimit -n 64 || exit; exec \"$1\" --exact review::kvrocks::tests::runtime_inode_open_failure_rolls_back_only_the_new_empty_directory --test-threads=1 --nocapture",
+                    "simit-fd-fixture",
+                ])
+                .arg(std::env::current_exe().unwrap())
+                .env(CHILD_PATH, &runtime)
+                .output()
+                .unwrap()
+        };
+        let output = child();
+        assert!(output.status.success(), "{output:?}");
+        assert!(fs::symlink_metadata(&runtime).is_err());
+        fs::create_dir(&runtime).unwrap();
+        fs::write(runtime.join("foreign"), b"preserve foreign").unwrap();
+        let output = child();
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(
+            fs::read(runtime.join("foreign")).unwrap(),
+            b"preserve foreign"
+        );
+    }
+
+    #[test]
     fn failed_runtime_initialization_releases_only_its_pinned_empty_inode() {
         let root = tempfile::tempdir().unwrap();
         let metadata = root.path().metadata().unwrap();
