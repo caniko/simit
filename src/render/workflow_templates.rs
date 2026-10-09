@@ -229,6 +229,7 @@ pub(crate) fn validate_backend(
 
 pub(crate) fn append(root: &Path, ci: &CiConfig, files: &mut Vec<GeneratedFile>) -> Result<()> {
     validate_config(ci)?;
+    validate_workflow_directories(root)?;
     if ci.workflow_templates.is_empty() {
         return Ok(());
     }
@@ -420,7 +421,27 @@ pub(crate) fn append(root: &Path, ci: &CiConfig, files: &mut Vec<GeneratedFile>)
     Ok(())
 }
 
+fn validate_workflow_directories(root: &Path) -> Result<()> {
+    for directory in [".github/workflows", ".forgejo/workflows"] {
+        // Audit and retirement must reject the same ancestor links, including
+        // an empty inactive platform and a removed final template mapping.
+        for ancestor in Path::new(directory)
+            .ancestors()
+            .filter(|path| !path.as_os_str().is_empty())
+        {
+            if root.join(ancestor).is_symlink() {
+                bail!(
+                    "workflow template planning crosses a symlink at {}",
+                    ancestor.display()
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn obsolete(root: &Path, files: &[GeneratedFile]) -> Result<Vec<PathBuf>> {
+    validate_workflow_directories(root)?;
     let expected = files
         .iter()
         .map(|file| &file.relative_path)
@@ -428,20 +449,6 @@ pub(crate) fn obsolete(root: &Path, files: &[GeneratedFile]) -> Result<Vec<PathB
     let mut obsolete = Vec::new();
     for directory in [".github/workflows", ".forgejo/workflows"] {
         let path = root.join(directory);
-        // Retirement still traverses these paths after the last mapping is
-        // removed. A canonical in-repository target does not grant ownership of
-        // the files behind an ancestor link; preserve them before any writes.
-        for ancestor in Path::new(directory)
-            .ancestors()
-            .filter(|path| !path.as_os_str().is_empty())
-        {
-            if root.join(ancestor).is_symlink() {
-                bail!(
-                    "workflow template retirement crosses a symlink at {}",
-                    ancestor.display()
-                );
-            }
-        }
         if !path.exists() {
             continue;
         }

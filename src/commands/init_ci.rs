@@ -612,6 +612,7 @@ fn run_pages_only(command: InitCiCommand) -> Result<()> {
     {
         bail!("Pages-only generation requires the Actions provider");
     }
+    crate::render::workflow_templates::validate_backend(&cfg.ci, CiProvider::Actions, platform)?;
     let snapshots = workflow_snapshots_for_platform(&workspace_root, platform)?;
     let inference = CiInference::from_workflows(&snapshots)?;
     let inferred_pages = infer_codeberg_pages_from_workflows(&snapshots)?;

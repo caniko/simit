@@ -38,24 +38,42 @@ pub fn is_generated_workflow_marker(content: &str) -> bool {
 /// Ownership headers can follow document separators, blanks and project notes,
 /// but quoted marker strings or script comments in a workflow body are data.
 pub(crate) fn workflow_preamble_lines(content: &str) -> impl Iterator<Item = &str> {
-    content
-        .trim_start_matches('\u{feff}')
-        .lines()
-        .map(str::trim)
-        .take_while(|line| {
-            line.is_empty()
-                || line.strip_prefix("---").is_some_and(|suffix| {
-                    suffix.is_empty()
-                        || (suffix.starts_with([' ', '\t']) && suffix.trim_start().starts_with('#'))
-                })
-                || ["%YAML", "%TAG"].iter().any(|directive| {
-                    line.strip_prefix(*directive)
-                        .is_some_and(|suffix| suffix.starts_with([' ', '\t']))
-                })
-                || line.starts_with('#')
+    let mut remaining = content.trim_start_matches('\u{feff}');
+    std::iter::from_fn(move || {
+        loop {
+            remaining = remaining.trim_start();
+            if remaining.is_empty() {
+                return None;
+            }
+            if let Some(comment) = remaining.strip_prefix("/*") {
+                // Jsonnet project notes can span lines or end before a header on
+                // the same line. Text inside them never establishes ownership.
+                let Some((_, tail)) = comment.split_once("*/") else {
+                    remaining = "";
+                    return None;
+                };
+                remaining = tail;
+                continue;
+            }
+            let (line, tail) = remaining.split_once('\n').unwrap_or((remaining, ""));
+            let line = line.trim();
+            if line.strip_prefix("---").is_some_and(|suffix| {
+                suffix.is_empty()
+                    || (suffix.starts_with([' ', '\t']) && suffix.trim_start().starts_with('#'))
+            }) || ["%YAML", "%TAG"].iter().any(|directive| {
+                line.strip_prefix(*directive)
+                    .is_some_and(|suffix| suffix.starts_with([' ', '\t']))
+            }) || line.starts_with('#')
                 || line.starts_with("//")
-                || *line == LEGACY_GENERATED_WORKFLOW_MARKER
-        })
+                || line == LEGACY_GENERATED_WORKFLOW_MARKER
+            {
+                remaining = tail;
+                return Some(line);
+            }
+            remaining = "";
+            return None;
+        }
+    })
 }
 const CARGO_NEXTEST_VERSION: &str = "0.9.100";
 const CARGO_DENY_VERSION: &str = "0.18.3";
