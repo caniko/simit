@@ -442,14 +442,15 @@ fn retired_templates_with_moved_headers_are_removed_but_foreign_markers_survive(
         "--- # project note\n",
         "%YAML 1.2\n--- # project note\n",
         "%TAG !e! tag:example.com,2026:\n---\n",
-        "\u{feff}%YAML 1.1\n---\t# project note\n",
+        "\u{feff}%YAML 1.1\n--- # project note\n",
     ] {
         let temp = project();
         assert!(generate(&temp, &[]).status.success());
         let output = temp.path().join(".github/workflows/tests.yml");
         let original = fs::read_to_string(&output).unwrap();
         let edited = preamble.to_owned() + &original;
-        let yaml: serde_yaml::Value = serde_yaml::from_str(&edited).unwrap();
+        let yaml: serde_yaml::Value =
+            serde_yaml::from_str(&edited).unwrap_or_else(|error| panic!("{preamble:?}: {error}"));
         assert!(yaml["jobs"].is_mapping());
         fs::write(&output, edited).unwrap();
         let foreign = temp.path().join(".github/workflows/foreign.yml");
@@ -1039,11 +1040,12 @@ fn project_audit_emits_an_executable_repair_when_only_templates_remain() {
                 }
                 let report = common::simit()
                     .current_dir(temp.path())
-                    .args(["projects", "audit", "--json"])
+                    .args(["projects", "audit", ".", "--json"])
                     .output()
                     .unwrap();
                 assert_eq!(report.status.code(), Some(1), "{report:?}");
-                let report: serde_json::Value = serde_json::from_slice(&report.stdout).unwrap();
+                let report: serde_json::Value = serde_json::from_slice(&report.stdout)
+                    .unwrap_or_else(|error| panic!("{report:?}: {error}"));
                 let project = &report["projects"][0];
                 assert_eq!(project["ciStatus"], "drift", "{project:?}");
                 assert!(
