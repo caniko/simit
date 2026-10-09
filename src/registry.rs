@@ -996,11 +996,11 @@ fn infer_expected_ci_files(
         files.push(crate::render::review_policy::file(policy)?);
     }
     if !config.ci.workflow_templates.is_empty() {
-        let (platform, provider) = infer_ci_target(marked)?.parts();
+        let backend = infer_ci_target(marked)?;
         crate::render::workflow_templates::validate_backend(
             &config.ci,
-            config.ci.provider.unwrap_or(provider),
-            config.ci.platform.unwrap_or(platform),
+            config.ci.provider.unwrap_or(backend.provider()),
+            config.ci.platform.unwrap_or(backend.platform()),
         )?;
     }
     crate::render::workflow_templates::append(workspace_root, &config.ci, &mut files)?;
