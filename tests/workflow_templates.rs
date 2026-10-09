@@ -260,7 +260,8 @@ fn configured_template_sources_are_in_the_actual_cargo_package_file_set() {
     for (_, source) in templates {
         let source = source.as_str().unwrap();
         assert!(
-            list.lines().any(|file| file == source),
+            list.lines()
+                .any(|file| file.replace(std::path::MAIN_SEPARATOR, "/") == source),
             "package omits {source}: {list}"
         );
         assert!(
@@ -449,10 +450,15 @@ fn retired_templates_with_moved_headers_are_removed_but_foreign_markers_survive(
         let output = temp.path().join(".github/workflows/tests.yml");
         let original = fs::read_to_string(&output).unwrap();
         let edited = preamble.to_owned() + &original;
+        // A BOM is an encoding prefix, not part of the decoded YAML document.
+        // The string-input libyaml parser rejects it on Windows; keep it in the
+        // actual workflow so generator ownership still exercises that prefix.
+        let document = edited.strip_prefix('\u{feff}').unwrap_or(&edited);
         let yaml: serde_yaml::Value =
-            serde_yaml::from_str(&edited).unwrap_or_else(|error| panic!("{preamble:?}: {error}"));
+            serde_yaml::from_str(document).unwrap_or_else(|error| panic!("{preamble:?}: {error}"));
         assert!(yaml["jobs"].is_mapping());
-        fs::write(&output, edited).unwrap();
+        fs::write(&output, &edited).unwrap();
+        assert_eq!(fs::read_to_string(&output).unwrap(), edited);
         let foreign = temp.path().join(".github/workflows/foreign.yml");
         let foreign_content = "# Simit workflow template: project-note\nname: Foreign\n";
         fs::write(&foreign, foreign_content).unwrap();
