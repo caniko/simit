@@ -42,6 +42,9 @@ with tempfile.TemporaryDirectory() as temp:
         '} "touch $out"; '
         'unrelated = final.runCommand "unrelated-1" { meta.broken = true; } "touch $out"; '
         'vortex-other = final.runCommand "vortex-other-1" { meta.broken = true; } "touch $out"; '
+        'openssl_3 = final.runCommand "openssl-3.0" { meta.broken = true; '
+        'passthru.tests.packaging = final.runCommand "openssl-packaging-3.0" {} "touch $out"; '
+        '} "touch $out"; '
         'darwin.builder = final.runCommand "blacklisted-fixture-1" {} "touch $out"; '
         '})]; })\n'
     )
@@ -86,3 +89,32 @@ with tempfile.TemporaryDirectory() as temp:
         print("Real pinned evaluator rejects meta.broken vortex without warning", str(error))
     else:
         raise AssertionError("broken vortex was admitted without the scoped warning")
+
+    # Nixpkgs problems.handlers is keyed by lib.getName, not the attribute path.
+    # Preserve the request's attribute-scoped identity while testing a different
+    # derivation name through the same actual pinned native policy/evaluator.
+    renamed = json.loads(json.dumps(plan))
+    renamed["request"] = {
+        "packages": ["openssl_3"], "checks": ["openssl_3.tests.packaging"],
+        "nixpkgs_broken_warnings": ["openssl_3"],
+    }
+    accepted = select(renamed, {})
+    assert {item["attribute"] for item in accepted["derivations"]} == {"openssl_3", "openssl_3.tests.packaging"}
+    assert {item["attribute"] for item in accepted["derivations"] if item["check"]} == {"openssl_3.tests.packaging"}
+    assert all(item["derivation"] for item in accepted["derivations"])
+    assert accepted["nixpkgs_broken_warnings"] == ["openssl_3"]
+    print("Real pinned evaluator accepts attribute openssl_3 with package name openssl and exact scoped warning")
+    for attribute in ("vortex", "unrelated", "absent", "darwin.builder"):
+        try:
+            select(renamed, {system: {attribute}})
+        except (RuntimeError, NixpkgsReviewError) as error:
+            print("Renamed scoped warning rejects", attribute, str(error))
+        else:
+            raise AssertionError("renamed scoped warning admitted unrelated/missing/blacklisted attribute: " + attribute)
+    renamed["request"]["nixpkgs_broken_warnings"] = []
+    try:
+        select(renamed, {})
+    except (RuntimeError, NixpkgsReviewError) as error:
+        print("Real pinned evaluator rejects broken openssl_3 without warning", str(error))
+    else:
+        raise AssertionError("broken openssl_3 was admitted without the scoped warning")
