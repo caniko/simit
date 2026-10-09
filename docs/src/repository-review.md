@@ -93,7 +93,7 @@ it cannot silently turn into a successful no-change result. Attributes in `check
 retain test identity through frozen selection, realization, and collection.
 
 The optional `nixpkgs_broken_warnings` array contains only explicitly requested
-top-level package names. For example, these request fields add a package and its
+top-level package attributes. For example, these request fields add a package and its
 packaging test while applying the warning only to that package:
 
 ```json
@@ -105,9 +105,13 @@ packaging test while applying the warning only to that package:
 }
 ```
 
-These are fields to insert into a complete v1 request. The adapter sets exactly
-`problems.handlers."vortex".broken = "warn"` in its Nixpkgs configuration;
-global broken-package permission remains disabled. Arbitrary Nix configuration
+These are fields to insert into a complete v1 request. On the tested checkout,
+the adapter resolves the requested attribute's `lib.getName` for its named broken
+handler: `openssl_3` therefore uses `problems.handlers."openssl".broken = "warn"`.
+It evaluates each warned attribute subtree separately; an unrelated selected
+attribute with the same package name does not inherit that warning. Upstream
+base/head discovery is preserved, including additions absent from the base.
+Global broken-package permission remains disabled during final selection. Arbitrary Nix configuration
 or evaluation arguments are not accepted. The pinned evaluator's `Attr.broken`
 flag means path evaluation failed, with no usable derivation identity; it is not
 an independent copy of `meta.broken`. Such failed evaluations remain rejected

@@ -60,7 +60,9 @@ with tempfile.TemporaryDirectory() as temp:
             "request": {"packages": ["vortex"], "checks": ["vortex.tests.packaging"],
                         "nixpkgs_broken_warnings": ["vortex"]}}
     config = adapter.scoped_nixpkgs_config(plan)
-    assert config == '{ problems.handlers."vortex".broken = "warn"; }'
+    assert 'pkgs.lib.getName (pkgs.lib.getAttrFromPath path pkgs)' in config
+    assert '[ "vortex" ]' in config and 'value.broken = "warn";' in config
+    assert 'allowBroken' not in config
     assert adapter.scoped_nixpkgs_config({"request": {}}) == "{  }"
     # As in the discovery cases above, this fixture records Nix I/O. Review's
     # constructor probes the native system before the selection boundary; do
@@ -78,11 +80,22 @@ with tempfile.TemporaryDirectory() as temp:
                       path=Path("/nix/store/" + "0" * 32 + "-" + name),
                       drv_path="/nix/store/" + "0" * 32 + "-" + name + ".drv")
                  for name in sorted(expected)]
+        observed = []
         def evaluate(names, native, allow, nix_path):
-            assert names == expected and native == system
-            return attrs
+            assert native == system
+            observed.append(set(names))
+            policy = Path(adapter.os.environ["NIXPKGS_CONFIG"]).read_text()
+            if names == additions:
+                assert '[ "vortex" ]' in policy and 'value.broken = "warn";' in policy
+            else:
+                assert names == discovery[system]
+                assert policy.endswith("{  }") and 'value.broken = "warn";' not in policy
+            return [attr for attr in attrs if attr.name in names]
         with patch.object(adapter, "nix_eval", side_effect=evaluate), patch.object(adapter.subprocess, "check_output", return_value=record["head"]):
             review.build(discovery, None)
+        assert observed[0] == additions
+        assert set().union(*observed) == expected
+        assert sum(map(len, observed)) == len(expected)
         result = json.loads(output.read_text())
         assert set(result["changed_attributes"]) == discovery.get(system, set())
         assert set(result["additional_attributes"]) == additions

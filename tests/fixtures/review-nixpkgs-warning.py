@@ -45,6 +45,7 @@ with tempfile.TemporaryDirectory() as temp:
         'openssl_3 = final.runCommand "openssl-3.0" { meta.broken = true; '
         'passthru.tests.packaging = final.runCommand "openssl-packaging-3.0" {} "touch $out"; '
         '} "touch $out"; '
+        'openssl_alias = final.runCommand "openssl-3.0" { meta.broken = true; } "touch $out"; '
         'darwin.builder = final.runCommand "blacklisted-fixture-1" {} "touch $out"; '
         '})]; })\n'
     )
@@ -104,7 +105,7 @@ with tempfile.TemporaryDirectory() as temp:
     assert all(item["derivation"] for item in accepted["derivations"])
     assert accepted["nixpkgs_broken_warnings"] == ["openssl_3"]
     print("Real pinned evaluator accepts attribute openssl_3 with package name openssl and exact scoped warning")
-    for attribute in ("vortex", "unrelated", "absent", "darwin.builder"):
+    for attribute in ("vortex", "unrelated", "absent", "darwin.builder", "openssl_alias"):
         try:
             select(renamed, {system: {attribute}})
         except (RuntimeError, NixpkgsReviewError) as error:
