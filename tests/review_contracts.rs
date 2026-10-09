@@ -48,6 +48,45 @@ fn plan() -> Plan {
     p.seal().unwrap();
     p
 }
+
+#[test]
+fn kvrocks_admission_cannot_silently_execute_without_the_owned_lifecycle() {
+    let mut p = plan();
+    p.request.expected_head = Some(HEAD.into());
+    p.request.expected_base = Some(BASE.into());
+    p.request.test_profile = "checks-rebuild-v1".into();
+    p.request.compiler_cache = Some(CompilerCache::KvrocksV1);
+    p.request_id = canonical_digest(&p.request).unwrap();
+    p.seal().unwrap();
+    p.validate().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let out = root.path().join("result");
+    let error = build(&p, "x86_64-linux", &out).unwrap_err().to_string();
+    assert!(
+        error.contains("owned lifecycle qualification is pending"),
+        "{error}"
+    );
+    assert!(
+        !out.exists(),
+        "unsupported execution must not create a receipt"
+    );
+
+    p.request.pr = None;
+    p.request.revision = Some(HEAD.into());
+    p.request.expected_base = None;
+    p.pr = None;
+    p.request_id = canonical_digest(&p.request).unwrap();
+    p.seal().unwrap();
+    p.validate().unwrap();
+    p.target.commit = BASE.into();
+    p.seal().unwrap();
+    let error = p.validate().unwrap_err().to_string();
+    assert!(
+        error.contains("target differs from the immutable revision"),
+        "{error}"
+    );
+}
+
 fn report(p: &Plan) -> PlatformResult {
     let reference = flake_ref(p);
     let mut e = EffectivePlan {

@@ -43,6 +43,24 @@ are validated identifiers, with the legacy names still accepted. `ATTIC_SERVER`,
 Simit's ordinary `[prebuild.attic]` settings do not grant review-cache authority.
 Publication stays disabled until endpoint/key verification and policy review.
 
+### Compiler-cache admission
+
+The optional request field `"compiler_cache": "kvrocks-v1"` selects the typed
+compiler-cache contract. Omission preserves legacy request serialization and
+identity. This field is independent of the Attic `cache_profile` and does not
+select a disk fallback or accept a worker command.
+
+Admission requires a Linux flake or external-flake head request using
+`checks-rebuild-v1`. PR requests bind both `expected_head` and `expected_base`;
+revision requests use a full lowercase commit SHA equal to `expected_head`.
+Plans also bind the resolved target to that immutable revision. Darwin, Nixpkgs,
+merge-mode and mutable-revision requests cannot select this profile.
+
+Execution currently rejects this opt-in before creating an output receipt.
+The owned bounded Kvrocks lifecycle, canonical sandbox socket mount, effective
+resource/source receipts and each exact wrapper's sandbox write/hit/cleanup
+qualification remain required before the build route can enable it.
+
 ## Client
 
 Clients can have no Cargo project or flake. Configure an exact controller pin and

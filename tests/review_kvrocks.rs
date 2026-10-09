@@ -41,6 +41,11 @@ fn kvrocks_is_an_explicit_immutable_linux_request_without_legacy_identity_drift(
     revision["revision"] = json!(HEAD);
     revision["expected_base"] = Value::Null;
     assert!(accepts(revision.clone()));
+    revision["revision"] = json!(BASE);
+    assert!(
+        !accepts(revision.clone()),
+        "the immutable revision must match the expected head"
+    );
     revision["revision"] = json!("trunk");
     assert!(
         !accepts(revision),
