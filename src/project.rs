@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::fs;
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
@@ -56,7 +56,7 @@ impl GeneratedPlan<'_> {
 /// Scan the shared workflow directories ([`.forgejo/workflows`],
 /// [`.github/workflows`], [`.crow`]) for generator-owned workflow files that
 /// are not part of `files` and would be left behind by a write.
-fn obsolete_generated_workflows(
+pub(crate) fn obsolete_generated_workflows(
     workspace_root: &Path,
     files: &[GeneratedFile],
     owns_name: fn(&OsStr) -> bool,
@@ -89,7 +89,10 @@ fn obsolete_generated_workflows(
                 continue;
             }
             let relative = PathBuf::from(relative_dir).join(entry.file_name());
-            if expected.contains(&relative) || !owns_name(entry.file_name().as_os_str()) {
+            if expected.iter().any(|expected| {
+                crate::render::workflow_templates::same_output(workspace_root, expected, &relative)
+            }) || !owns_name(entry.file_name().as_os_str())
+            {
                 continue;
             }
             let content =
@@ -173,7 +176,33 @@ pub fn write_generated_files(workspace_root: &Path, files: &[GeneratedFile]) -> 
             .parent()
             .ok_or_else(|| anyhow::anyhow!("generated path has no parent: {}", path.display()))?;
         fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
-        fs::write(&path, &file.content).with_context(|| format!("writing {}", path.display()))?;
+        // Replace the directory entry, never truncate an existing inode: a
+        // generated destination may be hard-linked to an unrelated project file.
+        let mut builder = tempfile::Builder::new();
+        builder.prefix(".simit-generated-");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            builder.permissions(fs::Permissions::from_mode(0o666));
+        }
+        let mut temporary = builder
+            .tempfile_in(parent)
+            .with_context(|| format!("creating temporary output for {}", path.display()))?;
+        temporary
+            .write_all(file.content.as_bytes())
+            .with_context(|| format!("writing {}", path.display()))?;
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) => temporary
+                .as_file()
+                .set_permissions(metadata.permissions())
+                .with_context(|| format!("preserving permissions for {}", path.display()))?,
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(error).with_context(|| format!("reading {}", path.display())),
+        }
+        refuse_symlink(&path)?;
+        temporary
+            .persist(&path)
+            .with_context(|| format!("replacing {}", path.display()))?;
     }
 
     Ok(())

@@ -95,11 +95,15 @@
           pathString = toString path;
         in
           (craneLib.filterCargoSources path type)
+          || builtins.elem pathString (map (name: "${toString ./.}/${name}") ["README.md" "LICENSE" "CHANGELOG.md"])
           || pkgs.lib.hasInfix "/src/review/assets/" pathString
           || pkgs.lib.hasSuffix "ci-actions.json" pathString
           || pkgs.lib.hasSuffix "/.github" pathString
           || pkgs.lib.hasSuffix "/.github/workflows" pathString
-          || pkgs.lib.hasInfix "/.github/workflows/" pathString;
+          || pkgs.lib.hasInfix "/.github/workflows/" pathString
+          || pkgs.lib.hasSuffix "/.simit" pathString
+          || pkgs.lib.hasSuffix "/.simit/workflows" pathString
+          || pkgs.lib.hasInfix "/.simit/workflows/" pathString;
       };
 
       commonArgs = {

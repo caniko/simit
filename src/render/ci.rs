@@ -28,8 +28,52 @@ pub const SIMIT_RELEASE_ARTIFACTS_BUILD_TYPE: &str = "https://simit.rs/release-a
 /// marker (no `# ` prefix) is recognized only for migration of pre-marker
 /// generation output; it is never written by current renderers.
 pub fn is_generated_workflow_marker(content: &str) -> bool {
-    content.contains(GENERATED_WORKFLOW_MARKER)
-        || content.contains(LEGACY_GENERATED_WORKFLOW_MARKER)
+    workflow_preamble_lines(content).any(|line| {
+        line == GENERATED_WORKFLOW_MARKER
+            || line == LEGACY_GENERATED_WORKFLOW_MARKER
+            || line.strip_prefix("// ") == Some(LEGACY_GENERATED_WORKFLOW_MARKER)
+    })
+}
+
+/// Ownership headers can follow document separators, blanks and project notes,
+/// but quoted marker strings or script comments in a workflow body are data.
+pub(crate) fn workflow_preamble_lines(content: &str) -> impl Iterator<Item = &str> {
+    let mut remaining = content.trim_start_matches('\u{feff}');
+    std::iter::from_fn(move || {
+        loop {
+            remaining = remaining.trim_start();
+            if remaining.is_empty() {
+                return None;
+            }
+            if let Some(comment) = remaining.strip_prefix("/*") {
+                // Jsonnet project notes can span lines or end before a header on
+                // the same line. Text inside them never establishes ownership.
+                let Some((_, tail)) = comment.split_once("*/") else {
+                    remaining = "";
+                    return None;
+                };
+                remaining = tail;
+                continue;
+            }
+            let (line, tail) = remaining.split_once('\n').unwrap_or((remaining, ""));
+            let line = line.trim();
+            if line.strip_prefix("---").is_some_and(|suffix| {
+                suffix.is_empty()
+                    || (suffix.starts_with([' ', '\t']) && suffix.trim_start().starts_with('#'))
+            }) || ["%YAML", "%TAG"].iter().any(|directive| {
+                line.strip_prefix(*directive)
+                    .is_some_and(|suffix| suffix.starts_with([' ', '\t']))
+            }) || line.starts_with('#')
+                || line.starts_with("//")
+                || line == LEGACY_GENERATED_WORKFLOW_MARKER
+            {
+                remaining = tail;
+                return Some(line);
+            }
+            remaining = "";
+            return None;
+        }
+    })
 }
 const CARGO_NEXTEST_VERSION: &str = "0.9.100";
 const CARGO_DENY_VERSION: &str = "0.18.3";
@@ -965,7 +1009,7 @@ pub fn nix_build_matrix_file_with_options(
     push_generated_workflow_header(&mut workflow);
     push_required_secrets_header(&mut workflow, &options.required_secrets);
     workflow.push_str(
-        "name: Nix installable builds\n\non:\n  push:\n  pull_request:\n  workflow_dispatch:\n\n",
+        "name: Nix installable builds\n\non:\n  push:\n    branches: [\"**\"]\n  pull_request:\n  workflow_dispatch:\n\n",
     );
     if platform == Platform::Github {
         workflow.push_str("permissions:\n  contents: read\n\n");
@@ -3714,6 +3758,8 @@ fn yaml_double_quote(value: &str) -> String {
 
 fn push_checkout_step(workflow: &mut String, platform: Platform) {
     workflow.push_str("      - name: Checkout\n");
+    // Arbitrary private runner labels do not attest the Node24 runner minimum.
+    // Keep the common Node20 checkout baseline for both Actions providers.
     push_action_uses(workflow, platform, "checkout", "v4.3.1");
     workflow.push('\n');
 }
@@ -3817,7 +3863,7 @@ fn push_install_nix_step_with_cache(
 
     workflow.push_str("      - name: Install Nix\n");
     workflow.push_str("        uses: ");
-    workflow.push_str(&github_action_ref("cachix/install-nix-action", "v31"));
+    workflow.push_str(&github_action_ref("cachix/install-nix-action", "v31.11.1"));
     if !substituters.is_empty() || !trusted_public_keys.is_empty() {
         workflow.push_str("\n        with:\n          extra_nix_config: |\n            experimental-features = nix-command flakes\n");
         if !substituters.is_empty() {

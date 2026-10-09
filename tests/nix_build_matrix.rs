@@ -40,6 +40,29 @@ fn workflow(temp: &TempDir) -> Value {
 }
 
 #[test]
+fn nix_matrix_qualifies_branch_pushes_and_pull_requests_without_tag_releases() {
+    for options in ["", "[ci.nix_build]\nonly = true\ncapture_results = true"] {
+        let temp = project(options);
+        let output = generate(&temp, &[]);
+        assert!(output.status.success(), "{output:?}");
+        let original = fs::read(temp.path().join(".github/workflows/nix-builds.yaml")).unwrap();
+        let value = workflow(&temp);
+        let events = value["on"].as_mapping().unwrap();
+        assert!(events.contains_key("pull_request"));
+        assert!(events.contains_key("workflow_dispatch"));
+        assert_eq!(value["on"]["push"]["branches"][0], "**");
+        assert!(value["on"]["push"]["tags-ignore"].is_null());
+        assert!(value["on"]["push"]["tags"].is_null());
+        assert!(generate(&temp, &["--check", "--diff"]).status.success());
+        assert!(generate(&temp, &[]).status.success());
+        assert_eq!(
+            original,
+            fs::read(temp.path().join(".github/workflows/nix-builds.yaml")).unwrap()
+        );
+    }
+}
+
+#[test]
 fn exact_nix_matrix_keeps_scoped_setup_limits_and_receipts_after_regeneration() {
     let temp = project(
         r#"[ci.nix_build]
@@ -100,11 +123,19 @@ extra_env = { FLAKE_SSH_KEY = "${{ secrets.FLAKE_SSH_KEY }}" }
             .unwrap()
             .contains("receipts/**")
     );
-    assert!(
-        upload["uses"]
-            .as_str()
+    assert_eq!(
+        upload["uses"],
+        simit::render::ci::github_action_ref("actions/upload-artifact", "v4.6.2")
+            .split(" #")
+            .next()
             .unwrap()
-            .starts_with("actions/upload-artifact@ea165f8")
+    );
+    assert_eq!(
+        steps[0]["uses"],
+        simit::render::ci::github_action_ref("actions/checkout", "v4.3.1")
+            .split(" #")
+            .next()
+            .unwrap()
     );
     let output = generate(&temp, &["--check", "--diff"]);
     assert!(output.status.success(), "{output:?}");
@@ -178,6 +209,29 @@ fn scoped_nix_matrix_isolates_forks_and_coalesces_same_repository_push_and_pr() 
         assert_ne!(push, resolve(None, None, "owner/project", "another-branch"));
         assert_eq!(value["concurrency"]["cancel-in-progress"], true);
         assert!(generate(&temp, &["--check", "--diff"]).status.success());
+    }
+}
+
+#[test]
+fn evidence_capture_rejects_effective_forgejo_before_action_pin_lookup_or_writes() {
+    for args in [vec![], vec!["--platform", "forgejo"]] {
+        let temp = project("[ci.nix_build]\nonly = true\ncapture_results = true");
+        let config_path = temp.path().join("simit.toml");
+        let config = fs::read_to_string(&config_path)
+            .unwrap()
+            .replace("platform = \"github\"\n", "");
+        fs::write(&config_path, &config).unwrap();
+        let output = generate(&temp, &args);
+        assert!(!output.status.success(), "{output:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("[ci.nix_build] options require GitHub Actions"),
+            "{stderr}"
+        );
+        assert!(!stderr.contains("panicked"));
+        assert_eq!(fs::read_to_string(&config_path).unwrap(), config);
+        assert!(!temp.path().join(".forgejo/workflows").exists());
+        assert!(!temp.path().join(".github/workflows").exists());
     }
 }
 
