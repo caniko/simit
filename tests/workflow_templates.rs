@@ -141,7 +141,9 @@ fn specialized_generation_preserves_templates_that_collide_with_its_outputs() {
     ] {
         let temp = project();
         let cfg_path = temp.path().join("simit.toml");
-        let cfg = fs::read_to_string(&cfg_path).unwrap();
+        let cfg = fs::read_to_string(&cfg_path)
+            .unwrap()
+            .replace("[ci.nix_build]\nonly=true\n", "");
         fs::write(&cfg_path, format!("{cfg}{extra}")).unwrap();
         let mut args = vec![mode];
         args.extend(options);

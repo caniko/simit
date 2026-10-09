@@ -167,6 +167,18 @@ pub(crate) fn validate_config(ci: &CiConfig) -> Result<()> {
         if crate::registry::is_release_workflow_path(Path::new(&portable_path(path))) {
             bail!("workflow template {output} collides with a release-owned workflow");
         }
+        // Specialized commands load the same configuration but deliberately
+        // skip the full append plan. Reserve their destinations here so they
+        // cannot replace a declared template before a later full reconciliation.
+        let portable = portable_path(path);
+        let normalized = Path::new(&portable);
+        if matches!(
+            normalized.file_name().and_then(|part| part.to_str()),
+            Some("pages.yaml" | "prebuild.yaml")
+        ) || crate::review::generation::is_review_path(normalized)
+        {
+            bail!("workflow template {output} collides with a built-in specialized workflow");
+        }
     }
     for name in ci.workflow_variables.keys() {
         if !variable_name(name) {
@@ -416,6 +428,20 @@ pub(crate) fn obsolete(root: &Path, files: &[GeneratedFile]) -> Result<Vec<PathB
     let mut obsolete = Vec::new();
     for directory in [".github/workflows", ".forgejo/workflows"] {
         let path = root.join(directory);
+        // Retirement still traverses these paths after the last mapping is
+        // removed. A canonical in-repository target does not grant ownership of
+        // the files behind an ancestor link; preserve them before any writes.
+        for ancestor in Path::new(directory)
+            .ancestors()
+            .filter(|path| !path.as_os_str().is_empty())
+        {
+            if root.join(ancestor).is_symlink() {
+                bail!(
+                    "workflow template retirement crosses a symlink at {}",
+                    ancestor.display()
+                );
+            }
+        }
         if !path.exists() {
             continue;
         }
