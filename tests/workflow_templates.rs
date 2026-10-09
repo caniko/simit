@@ -475,8 +475,14 @@ fn active_workflow_destination_aliases_fail_before_any_writes() {
                 let cfg = fs::read_to_string(&cfg_path)
                     .unwrap()
                     .replace("github", platform);
+                let cfg = if platform == "forgejo" {
+                    cfg.replace("[ci.nix_build]\nonly=true\n", "")
+                } else {
+                    cfg
+                };
                 fs::write(&cfg_path, cfg).unwrap();
-                assert!(generate(&temp, &[]).status.success());
+                let result = generate(&temp, &[]);
+                assert!(result.status.success(), "{platform}: {result:?}");
                 let directory = format!(".{platform}/workflows");
                 fs::remove_file(temp.path().join(&directory).join("tests.yml")).unwrap();
                 let active = temp.path().join(&directory).join(existing);
@@ -512,7 +518,7 @@ fn active_workflow_destination_aliases_fail_before_any_writes() {
                     assert_eq!(fs::read_to_string(&cfg_path).unwrap(), cfg);
                     assert_eq!(
                         fs::read_dir(temp.path().join(&directory)).unwrap().count(),
-                        2
+                        if platform == "forgejo" { 3 } else { 2 }
                     );
                 }
                 fs::remove_file(&active).unwrap();
@@ -535,8 +541,14 @@ fn active_workflow_hard_links_are_rejected_but_exact_destinations_remain_declare
         let cfg = fs::read_to_string(&cfg_path)
             .unwrap()
             .replace("github", platform);
+        let cfg = if platform == "forgejo" {
+            cfg.replace("[ci.nix_build]\nonly=true\n", "")
+        } else {
+            cfg
+        };
         fs::write(&cfg_path, &cfg).unwrap();
-        assert!(generate(&temp, &[]).status.success());
+        let result = generate(&temp, &[]);
+        assert!(result.status.success(), "{platform}: {result:?}");
         let directory = temp.path().join(format!(".{platform}/workflows"));
         let output = directory.join("tests.yml");
         let active = directory.join("foreign.yml");
@@ -565,10 +577,12 @@ fn active_workflow_hard_links_are_rejected_but_exact_destinations_remain_declare
         assert!(result.status.success(), "{platform}: {result:?}");
         assert_eq!(fs::read(&active).unwrap(), foreign);
         assert!(generate(&temp, &["--check", "--diff"]).status.success());
-        assert_eq!(
-            audit_ci(temp.path()).unwrap().status,
-            FeatureStatus::Managed
-        );
+        let audit = audit_ci(temp.path()).unwrap();
+        assert_eq!(audit.status, FeatureStatus::ManagedExtra);
+        assert!(audit.changed_files.is_empty());
+        assert!(audit.missing_files.is_empty());
+        assert!(audit.extra_generated_files.is_empty());
+        assert_eq!(fs::read(&active).unwrap(), foreign);
     }
 }
 
@@ -834,6 +848,76 @@ fn case_only_template_renames_preserve_the_generated_output_and_audit() {
                 );
             }
         }
+    }
+}
+
+#[test]
+fn registry_audits_reject_configured_template_backend_mismatches_without_writes() {
+    for platform in ["github", "forgejo"] {
+        let temp = project();
+        let cfg_path = temp.path().join("simit.toml");
+        let cfg = fs::read_to_string(&cfg_path)
+            .unwrap()
+            .replace("github", platform);
+        let cfg = if platform == "forgejo" {
+            cfg.replace("[ci.nix_build]\nonly=true\n", "")
+        } else {
+            cfg
+        };
+        fs::write(&cfg_path, &cfg).unwrap();
+        let result = generate(&temp, &[]);
+        assert!(result.status.success(), "{platform}: {result:?}");
+        assert_eq!(
+            audit_ci(temp.path()).unwrap().status,
+            FeatureStatus::Managed
+        );
+        let directory = temp.path().join(format!(".{platform}/workflows"));
+        let retained = fs::read_dir(&directory)
+            .unwrap()
+            .map(|entry| {
+                let path = entry.unwrap().path();
+                let content = fs::read(&path).unwrap();
+                (path, content)
+            })
+            .collect::<Vec<_>>();
+        let other = if platform == "github" {
+            "forgejo"
+        } else {
+            "github"
+        };
+        let invalid = fs::read_to_string(&cfg_path)
+            .unwrap()
+            .replace(
+                &format!("platform = \"{platform}\""),
+                &format!("platform = \"{other}\""),
+            )
+            .replace(
+                &format!("platform='{platform}'"),
+                &format!("platform='{other}'"),
+            );
+        fs::write(&cfg_path, &invalid).unwrap();
+        let audit = audit_ci(temp.path());
+        assert!(audit.is_err(), "{platform}: {audit:?}");
+        assert!(format!("{:#}", audit.unwrap_err()).contains("selected Actions platform"));
+        assert_eq!(
+            simit::registry::detect_feature_status(temp.path())["ci"],
+            FeatureStatus::Drift
+        );
+        for args in [vec![], vec!["--check", "--diff"]] {
+            let result = generate(&temp, &args);
+            assert!(!result.status.success(), "{platform}: {result:?}");
+        }
+        for (path, content) in retained {
+            assert_eq!(fs::read(path).unwrap(), content);
+        }
+        assert_eq!(fs::read_to_string(&cfg_path).unwrap(), invalid);
+        fs::write(&cfg_path, cfg).unwrap();
+        assert!(generate(&temp, &[]).status.success());
+        assert!(generate(&temp, &["--check", "--diff"]).status.success());
+        assert_eq!(
+            audit_ci(temp.path()).unwrap().status,
+            FeatureStatus::Managed
+        );
     }
 }
 
