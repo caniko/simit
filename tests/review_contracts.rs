@@ -169,6 +169,110 @@ fn strict_request_fields_selectors_and_platforms() {
     assert!(r.validate().is_err());
 }
 #[test]
+fn nixpkgs_additions_and_broken_warnings_are_typed_and_scoped() {
+    let mut request = example();
+    assert!(
+        serde_json::to_value(&request)
+            .unwrap()
+            .get("nixpkgs_broken_warnings")
+            .is_none()
+    );
+    request.backend = Backend::Nixpkgs;
+    request.repository = "NixOS/nixpkgs".into();
+    request.packages = vec!["vortex".into()];
+    request.checks = vec!["vortex.tests.packaging".into()];
+    request.nixpkgs_broken_warnings = vec!["vortex".into()];
+    request.validate().unwrap();
+    let with_warning = canonical_digest(&request).unwrap();
+    let mut ordinary = request.clone();
+    ordinary.nixpkgs_broken_warnings.clear();
+    assert_ne!(with_warning, canonical_digest(&ordinary).unwrap());
+    for attribute in [
+        "vortex..tests",
+        ".vortex",
+        "vortex.",
+        "vortex;import",
+        "vortex.${input}",
+    ] {
+        let mut invalid = request.clone();
+        invalid.checks = vec![attribute.into()];
+        assert!(invalid.validate().is_err(), "{attribute}");
+    }
+    for warnings in [
+        vec!["unrelated"],
+        vec!["vortex.tests.packaging"],
+        vec!["vortex", "vortex"],
+    ] {
+        let mut invalid = request.clone();
+        invalid.nixpkgs_broken_warnings = warnings.into_iter().map(str::to_owned).collect();
+        assert!(invalid.validate().is_err());
+    }
+    let mut invalid = request.clone();
+    invalid.packages.push("vortex.tests.packaging".into());
+    invalid.checks.clear();
+    invalid.nixpkgs_broken_warnings = vec!["vortex.tests.packaging".into()];
+    assert!(
+        invalid.validate().is_err(),
+        "warnings must remain top-level package scoped"
+    );
+    for backend in [Backend::Flake, Backend::ExternalFlake] {
+        let mut invalid = request.clone();
+        invalid.backend = backend;
+        assert!(invalid.validate().is_err());
+    }
+}
+
+#[test]
+fn frozen_nixpkgs_selection_binds_union_tests_scoped_policy_and_identity() {
+    let mut p = plan();
+    p.request.backend = Backend::Nixpkgs;
+    p.request.repository = "NixOS/nixpkgs".into();
+    p.request.packages = vec!["vortex".into()];
+    p.request.checks = vec!["vortex.tests.packaging".into()];
+    p.request.nixpkgs_broken_warnings = vec!["vortex".into()];
+    let mut selection = json!({"backend_version":"3.7.0", "tested_commit": HEAD,
+    "base_commit": BASE, "system":"x86_64-linux", "changed_attributes":[],
+    "additional_attributes":["vortex", "vortex.tests.packaging"],
+    "nixpkgs_broken_warnings":["vortex"], "derivations":[
+        {"attribute":"vortex", "aliases":[], "check":false},
+        {"attribute":"vortex.tests.packaging", "aliases":[], "check":true}
+    ]});
+    validate_nixpkgs_selection(&p, "x86_64-linux", &selection).unwrap();
+    // Empty discovery still admits explicit package/test additions. A nonempty
+    // discovery must remain in the frozen union as well.
+    selection["changed_attributes"] = json!(["hello"]);
+    assert!(validate_nixpkgs_selection(&p, "x86_64-linux", &selection).is_err());
+    selection["derivations"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"attribute":"hello", "aliases":[], "check":false}));
+    validate_nixpkgs_selection(&p, "x86_64-linux", &selection).unwrap();
+    for (field, value) in [
+        ("tested_commit", json!(MERGE)),
+        ("base_commit", json!(HEAD)),
+        ("system", json!("aarch64-linux")),
+        ("backend_version", json!("3.8.0")),
+        ("additional_attributes", json!(["vortex"])),
+        ("nixpkgs_broken_warnings", json!([])),
+        ("nixpkgs_broken_warnings", json!(["vortex", "hello"])),
+    ] {
+        let mut invalid = selection.clone();
+        invalid[field] = value;
+        assert!(
+            validate_nixpkgs_selection(&p, "x86_64-linux", &invalid).is_err(),
+            "{field}"
+        );
+    }
+    let mut invalid = selection.clone();
+    invalid["derivations"][1]["check"] = json!(false);
+    assert!(validate_nixpkgs_selection(&p, "x86_64-linux", &invalid).is_err());
+    let mut invalid = selection.clone();
+    invalid["derivations"].as_array_mut().unwrap().remove(1);
+    assert!(validate_nixpkgs_selection(&p, "x86_64-linux", &invalid).is_err());
+    assert!(validate_nixpkgs_selection(&p, "aarch64-linux", &selection).is_err());
+}
+
+#[test]
 fn rejects_path_option_and_token_injection() {
     for s in [
         "--help",

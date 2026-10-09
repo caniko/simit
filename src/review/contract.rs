@@ -77,6 +77,9 @@ pub struct Request {
     pub packages: Vec<String>,
     #[serde(default)]
     pub checks: Vec<String>,
+    /// Package-scoped Nixpkgs broken warnings; omitted for legacy request identity.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub nixpkgs_broken_warnings: Vec<String>,
     #[serde(default = "runner_default")]
     pub runner_profile: String,
     #[serde(default = "test_default")]
@@ -164,6 +167,9 @@ pub fn runner(system: &str) -> Result<(&'static str, &'static str, &'static str)
 fn unique(values: &[String]) -> bool {
     values.iter().collect::<BTreeSet<_>>().len() == values.len()
 }
+pub fn nixpkgs_attribute(value: &str) -> bool {
+    value.len() < 256 && value.split('.').all(name)
+}
 impl Request {
     pub fn validate(&self) -> Result<()> {
         ensure!(self.schema_version == VERSION, "unsupported schema version");
@@ -205,7 +211,27 @@ impl Request {
             "too many or duplicate outputs"
         );
         for s in self.packages.iter().chain(&self.checks) {
-            ensure!(name(s), "unsafe output name");
+            ensure!(
+                if self.backend == Backend::Nixpkgs {
+                    nixpkgs_attribute(s)
+                } else {
+                    name(s)
+                },
+                "unsafe output name"
+            );
+        }
+        ensure!(
+            self.nixpkgs_broken_warnings.len() <= 64 && unique(&self.nixpkgs_broken_warnings),
+            "too many or duplicate Nixpkgs broken warnings"
+        );
+        for package in &self.nixpkgs_broken_warnings {
+            ensure!(
+                self.backend == Backend::Nixpkgs
+                    && name(package)
+                    && !package.contains('.')
+                    && self.packages.contains(package),
+                "Nixpkgs broken warnings require an explicitly requested top-level package"
+            );
         }
         match self.backend {
             Backend::Nixpkgs => {
@@ -214,11 +240,8 @@ impl Request {
                     "nixpkgs backend requires a NixOS/nixpkgs PR"
                 );
                 ensure!(
-                    self.packages.is_empty()
-                        && self.checks.is_empty()
-                        && self.recipe.is_none()
-                        && self.directory == ".",
-                    "nixpkgs backend selects changed derivations, not flake outputs"
+                    self.recipe.is_none() && self.directory == ".",
+                    "nixpkgs backend does not accept a flake recipe or directory"
                 );
             }
             Backend::Flake | Backend::ExternalFlake => {
@@ -514,6 +537,7 @@ pub fn example() -> Request {
         systems: vec!["x86_64-linux".into()],
         packages: vec!["default".into()],
         checks: vec!["smoke".into()],
+        nixpkgs_broken_warnings: vec![],
         runner_profile: runner_default(),
         test_profile: test_default(),
         cache_profile: None,
