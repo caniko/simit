@@ -9,15 +9,15 @@ use crate::config::ProjectConfig;
 use crate::project::GeneratedFile;
 use crate::render::ci::{GENERATED_WORKFLOW_MARKER, github_action_ref, immutable_action_ref};
 
-fn checkout() -> Value {
+pub(super) fn checkout() -> Value {
     json!({"uses": github_action_ref("actions/checkout", "v4.3.1").split(" #").next().unwrap(), "with": {"fetch-depth": 0, "persist-credentials": false}})
 }
 
-fn install_nix() -> Value {
+pub(super) fn install_nix() -> Value {
     json!({"uses": immutable_action_ref("https://github.com/cachix/install-nix-action", "v31").trim_start_matches("https://github.com/").split(" #").next().unwrap()})
 }
 
-fn input_transport() -> Value {
+pub(super) fn input_transport() -> Value {
     // Imported public component locks may retain their original operator SSH
     // transport. Reuse exact revisions over HTTPS without deployment keys.
     let run = format!(
@@ -110,7 +110,11 @@ pub(crate) fn files(root: &Path, config: &ProjectConfig) -> Result<Vec<Generated
             // The project-owned command is one argument to sh, not an interpolated
             // expression; GitHub event data never enters a shell command.
             let quoted = format!("'{}'", gate.run.replace('\'', "'\\''"));
-            steps.push(json!({"name": gate.id, "timeout-minutes": gate.timeout_minutes, "env": gate.env, "run": format!("nix develop --print-build-logs .#ci --command sh -ec {quoted}")}));
+            let mut step = json!({"name": gate.id, "timeout-minutes": gate.timeout_minutes, "run": format!("nix develop --print-build-logs .#ci --command sh -ec {quoted}")});
+            if !gate.env.is_empty() {
+                step["env"] = json!(gate.env);
+            }
+            steps.push(step);
         }
         job["steps"] = json!(steps);
         jobs.insert(id, job);
@@ -127,6 +131,9 @@ pub(crate) fn files(root: &Path, config: &ProjectConfig) -> Result<Vec<Generated
             serde_yaml::to_string(&workflow)?
         ),
     }];
+    let native = super::native_ci::files(root, config, &workflow)?;
+    let has_native = !native.is_empty();
+    files.extend(native);
     if config.ci.publish_crates {
         let metadata = crate::cargo::cargo_metadata(&root.join("Cargo.toml"))?;
         if config.release.signing.trust_root.as_str() != "keys/maintainers.gpg" {
@@ -154,16 +161,9 @@ pub(crate) fn files(root: &Path, config: &ProjectConfig) -> Result<Vec<Generated
             let mut file = crate::render::ci::publish_independent_file(package, &runner, &options)?;
             let mut release: Value = serde_yaml::from_str(&file.content)?;
             release["permissions"] = json!({"contents": "read"});
-            let mut qualification = workflow["jobs"].clone();
             // A release always qualifies the entire graph on its native runners,
             // including non-Cargo checks, before the credentialed publish job.
-            let plan = qualification["plan"]["steps"]
-                .as_array_mut()
-                .context("qualification plan requires steps")?
-                .iter_mut()
-                .find(|step| step["id"] == "plan")
-                .context("qualification plan step is missing")?;
-            plan["env"]["BASE_REVISION"] = json!("");
+            let qualification = full_qualification(&workflow)?;
             release["jobs"]
                 .as_object_mut()
                 .context("release jobs must be a mapping")?
@@ -180,6 +180,8 @@ pub(crate) fn files(root: &Path, config: &ProjectConfig) -> Result<Vec<Generated
             );
             files.push(file);
         }
+    }
+    if config.ci.publish_crates || has_native {
         files.push(crate::release_trust::generated_file(
             root,
             config,
@@ -188,6 +190,18 @@ pub(crate) fn files(root: &Path, config: &ProjectConfig) -> Result<Vec<Generated
         )?);
     }
     Ok(files)
+}
+
+pub(super) fn full_qualification(workflow: &Value) -> Result<Value> {
+    let mut jobs = workflow["jobs"].clone();
+    let plan = jobs["plan"]["steps"]
+        .as_array_mut()
+        .context("qualification plan requires steps")?
+        .iter_mut()
+        .find(|step| step["id"] == "plan")
+        .context("qualification plan step is missing")?;
+    plan["env"]["BASE_REVISION"] = json!("");
+    Ok(jobs)
 }
 
 pub(crate) fn resolve_config(root: &Path, command: &InitCiCommand) -> Result<ProjectConfig> {

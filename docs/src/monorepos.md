@@ -157,7 +157,26 @@ their manifests. A dirty checkout or a failing prerequisite check prevents the
 version commit and tag.
 
 `publish` records registry eligibility (npm `private = true` always disables it).
-Registry publication remains separate from static version ownership.
+Eligible owners generate independent `publish-python-<namespace>.yaml` or
+`publish-npm-<namespace>.yaml` workflows. Each package-qualified signed tag
+qualifies the complete graph on every declared native runner, then validates
+the tag/event/HEAD identity, builds just that owner's wheel plus sdist or npm
+tarball, and transfers a source-bound checksum receipt to a separate publish
+job. The publish job verifies the signed tag again, rejects metadata/checksum
+conflicts, uploads only missing exact artifacts, and waits at most twenty
+registry reads separated by thirty-second waits for checksum-matching
+propagation. Failed uploads are accepted only if exact artifacts already exist.
+Credentials (`PYPI_API_TOKEN` or `NPM_TOKEN`) are confined to the publish step;
+npm packing and publishing disable lifecycle scripts. Native release steps use
+the project's root `ci` shell, which must provide Python 3.11+, GnuPG and `uv`
+or npm. Prepared npm files must already be present after component qualification;
+`publishConfig` access and distribution-tag settings are retained, while custom
+registries require a separate backend. npm prereleases require an explicit
+`publishConfig.tag`. Python owners retain SemVer in source/tags; public releases
+support stable versions and `alpha`, `beta`, `rc`, or `dev` numeric prereleases,
+mapped to PyPI's normalized metadata version. SemVer build metadata is unsupported
+for public native releases. All native publication requires `keys/maintainers.gpg`.
+
 `release verify` checks eligible packages against the public native registry:
 PyPI's exact release metadata must contain a non-yanked file with a SHA-256 digest,
 and npm's abbreviated metadata must contain the matching package/version and

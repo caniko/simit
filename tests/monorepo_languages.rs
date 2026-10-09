@@ -722,3 +722,97 @@ fn unsupported_public_native_versions_fail_before_mutation_and_uv_tracks_normali
         "py-engine/v0.3.0-rc.4"
     );
 }
+
+#[test]
+fn eligible_native_publication_qualifies_the_full_graph_and_preserves_private_owners() {
+    let temp = fixture();
+    let root = temp.path();
+    let config = fs::read_to_string(root.join("simit.toml")).unwrap();
+    write(
+        root,
+        "simit.toml",
+        &config.replace("publish = false", "publish = true"),
+    );
+    let generated = run(root, &["init", "ci"]);
+    assert!(generated.status.success(), "{generated:?}");
+    let path = root.join(".github/workflows/publish-python-py-engine.yaml");
+    let source = fs::read_to_string(&path).unwrap();
+    let workflow: serde_yaml::Value = serde_yaml::from_str(&source).unwrap();
+    assert_eq!(workflow["on"]["push"]["tags"][0], "py-engine/v[0-9]*");
+    assert_eq!(workflow["jobs"]["validate"]["needs"][0], "qualified");
+    assert_eq!(workflow["jobs"]["publish"]["needs"][0], "validate");
+    assert_eq!(workflow["permissions"]["contents"], "read");
+    for job in workflow["jobs"].as_mapping().unwrap().values() {
+        for step in job["steps"].as_sequence().unwrap() {
+            assert!(
+                step.get("env")
+                    .is_none_or(|env| env.as_mapping().is_none_or(|env| !env.is_empty()))
+            );
+        }
+    }
+    let plan_steps = workflow["jobs"]["plan"]["steps"].as_sequence().unwrap();
+    let plan = plan_steps.iter().find(|step| step["id"] == "plan").unwrap();
+    assert_eq!(plan["env"]["BASE_REVISION"], "");
+    assert!(source.contains("git verify-tag"));
+    assert!(source.contains("PYPI_API_TOKEN"));
+    for (id, job) in workflow["jobs"].as_mapping().unwrap() {
+        if id.as_str().unwrap() != "publish" {
+            assert!(!serde_yaml::to_string(job).unwrap().contains("secrets."));
+        }
+    }
+    assert!(
+        !root
+            .join(".github/workflows/publish-npm-node-engine.yaml")
+            .exists()
+    );
+    let npm: Value =
+        serde_json::from_slice(&fs::read(root.join("node/package.json")).unwrap()).unwrap();
+    let mut npm = npm;
+    npm["private"] = false.into();
+    write(root, "node/package.json", &npm.to_string());
+    let generated = run(root, &["init", "ci"]);
+    assert!(generated.status.success(), "{generated:?}");
+    let npm =
+        fs::read_to_string(root.join(".github/workflows/publish-npm-node-engine.yaml")).unwrap();
+    assert!(npm.contains("NPM_TOKEN"));
+    for entry in fs::read_dir(root.join(".github/workflows")).unwrap() {
+        let output = Command::new("actionlint")
+            .arg(entry.unwrap().path())
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+    }
+    assert!(
+        root.join(".github/scripts/simit-native-release.py")
+            .exists()
+    );
+    let original = fs::read_to_string(root.join("python/pyproject.toml")).unwrap();
+    write(
+        root,
+        "python/pyproject.toml",
+        &original.replace("0.2.0", "0.2.1"),
+    );
+    let check = run(root, &["init", "ci", "--check", "--diff"]);
+    assert!(check.status.success(), "{check:?}");
+    assert_eq!(fs::read_to_string(path).unwrap(), source);
+    let config = fs::read_to_string(root.join("simit.toml")).unwrap();
+    write(
+        root,
+        "simit.toml",
+        &config.replace("publish = true", "publish = false"),
+    );
+    let check = run(root, &["init", "ci", "--check"]);
+    assert!(!check.status.success(), "{check:?}");
+    let generated = run(root, &["init", "ci"]);
+    assert!(generated.status.success(), "{generated:?}");
+    assert!(
+        !root
+            .join(".github/workflows/publish-python-py-engine.yaml")
+            .exists()
+    );
+    assert!(
+        !root
+            .join(".github/workflows/publish-npm-node-engine.yaml")
+            .exists()
+    );
+}

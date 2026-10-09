@@ -2048,6 +2048,8 @@ fn is_ci_managed_workflow_name(name: &std::ffi::OsStr) -> bool {
         || name.starts_with("prebuild-")
         || name.starts_with("publish-crate-")
         || name.starts_with("publish-pypi-")
+        || name.starts_with("publish-python-")
+        || name.starts_with("publish-npm-")
         || name.starts_with("release-artifacts-")
 }
 

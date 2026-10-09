@@ -96,6 +96,8 @@
         in
           (craneLib.filterCargoSources path type)
           || pkgs.lib.hasInfix "/src/review/assets/" pathString
+          || pkgs.lib.hasSuffix "/src/monorepo/native_release.py" pathString
+          || pkgs.lib.hasSuffix "/tests/fixtures/native-release-contract.py" pathString
           || pkgs.lib.hasSuffix "ci-actions.json" pathString
           || pkgs.lib.hasSuffix "/.github" pathString
           || pkgs.lib.hasSuffix "/.github/workflows" pathString
@@ -118,7 +120,7 @@
         // {
           inherit cargoArtifacts;
           nativeBuildInputs = [preCommitBin];
-          nativeCheckInputs = [pkgs.git pkgs.gnupg];
+          nativeCheckInputs = [pkgs.git pkgs.gnupg pkgs.python3 pkgs.actionlint];
         });
 
       publicCargoArtifacts = publicCraneLib.buildDepsOnly commonArgs;
@@ -126,7 +128,7 @@
         // {
           cargoArtifacts = publicCargoArtifacts;
           nativeBuildInputs = [preCommitBin];
-          nativeCheckInputs = [pkgs.git pkgs.gnupg];
+          nativeCheckInputs = [pkgs.git pkgs.gnupg pkgs.python3 pkgs.actionlint];
         });
 
       actionlintCheck =
@@ -197,7 +199,7 @@
       nextestCheck = publicCraneLib.cargoNextest (commonArgs
         // {
           cargoArtifacts = publicCargoArtifacts;
-          nativeCheckInputs = [pkgs.git pkgs.gnupg];
+          nativeCheckInputs = [pkgs.git pkgs.gnupg pkgs.python3 pkgs.actionlint];
         });
 
       docCheck = publicCraneLib.cargoDoc (commonArgs
