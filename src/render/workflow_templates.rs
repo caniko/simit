@@ -299,11 +299,27 @@ pub(crate) fn append(root: &Path, ci: &CiConfig, files: &mut Vec<GeneratedFile>)
         }
         for active in &active_workflows {
             let active_relative = active.strip_prefix(root)?;
+            let portable_alias = portable_path(active_relative) == portable_path(&relative);
+            let owned_rename = portable_alias
+                && !active.is_symlink()
+                && !ci
+                    .workflow_templates
+                    .keys()
+                    .any(|path| Path::new(path) == active_relative)
+                && (!destination.try_exists()? || same_output(root, &relative, active_relative))
+                && fs::read_to_string(active).is_ok_and(|content| {
+                    super::ci::is_generated_workflow_marker(&content)
+                        && super::ci::workflow_preamble_lines(&content)
+                            .any(|line| line.strip_prefix(TEMPLATE_MARKER) == Some(source.as_str()))
+                });
             // Declaring the exact path is an explicit adoption. A differently
             // spelled portable alias or hard link must not claim another active
             // project workflow, even when the destination does not exist here.
+            // The same template's marked case/normalization rename retains the
+            // existing alias-aware retirement route; foreign ownership does not.
             if active_relative != relative
-                && (portable_path(active_relative) == portable_path(&relative)
+                && !owned_rename
+                && (portable_alias
                     || (destination.try_exists()?
                         && same_file::is_same_file(&destination, active)
                             .context("comparing active workflow destination identities")?))
