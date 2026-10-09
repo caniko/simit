@@ -230,20 +230,44 @@ timeout_minutes = 30
     // Tag-only triggers: no publish-on-PR.
     assert!(publish.contains("tags:\n      - \"[0-9]*\""));
     assert!(!publish.contains("pull_request"));
+    assert!(!publish.contains("workflow_dispatch"));
+    assert!(publish.contains("resume: rerun the original tag-push run"));
+    assert!(!publish.contains("re-dispatch"));
     // Least-privilege permissions.
     assert!(publish.contains("permissions:\n      contents: read\n      id-token: write"));
     // Serialize conflicting attempts.
     assert!(publish.contains("cancel-in-progress: false"));
     // Signed-tag + trust-root gating preserved (never disabled when missing).
     assert!(publish.contains("git verify-tag \"$tag\""));
-    assert!(publish.contains("test -s keys/maintainers.gpg"));
-    assert!(publish.contains("local_crate=\"target/package/${crate_name}-${version}.crate\""));
+    assert!(publish.contains("test -s \"$GNUPGHOME/maintainers.gpg\""));
+    assert!(
+        publish.contains("local_crate=\"${target_dir}/package/${crate_name}-${version}.crate\"")
+    );
+    assert!(publish.contains("cargo metadata --locked --no-deps --format-version 1"));
     // Lockstep validation for every publishable member.
     assert!(publish.contains("cargo pkgid -p a"));
     assert!(publish.contains("cargo pkgid -p d"));
     assert!(publish.contains("$(nix develop -c cargo pkgid -p a"));
-    assert!(publish.contains(".version | select(.num == $v) | .checksum"));
+    assert!(publish.contains(
+        ".version | select(.crate == $name and .num == $v and .yanked == false) | .checksum"
+    ));
     let parsed: serde_yaml::Value = serde_yaml::from_str(&publish).unwrap();
+    // The tag may move after validation. Every job that reads source, including
+    // required gates and transitive dependent publishers, retains the event SHA
+    // that validation requires the signed tag to match.
+    for (name, job) in parsed["jobs"].as_mapping().unwrap() {
+        let checkout = job["steps"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .find(|step| step["name"].as_str() == Some("Checkout"))
+            .unwrap();
+        assert_eq!(
+            checkout["with"]["ref"].as_str(),
+            Some("${{ github.sha }}"),
+            "job {name:?} must not resolve a mutable release ref"
+        );
+    }
     for job in ["validate", "gate-gel-integration", "publish-a"] {
         assert_eq!(
             parsed["jobs"][job]["env"]["CARGO_HOME"].as_str(),
@@ -278,6 +302,187 @@ timeout_minutes = 30
     // Auditable non-publishing summary.
     assert!(publish.contains("publish-report"));
     assert!(publish.contains("if: always()"));
+}
+
+#[test]
+fn member_workflows_have_unique_check_names_for_single_split_and_gate_jobs() {
+    for (platform, split) in [("github", false), ("forgejo", false), ("forgejo", true)] {
+        let temp = fixture_dir("release-plan-diamond");
+        let runner_map = if split {
+            "[ci.step_runners]\ncargo-clippy = 'lint-runner'\ncargo-test = 'test-runner'\n"
+        } else {
+            ""
+        };
+        fs::write(
+            temp.path().join("simit.toml"),
+            format!(
+                "[ci]\nplatform = '{platform}'\nruntime = 'cargo'\nrunner = 'fixture-linux'\nworkspace = false\nworkspace_strategy = 'members'\npackages = ['a', 'b']\nall_features = false\n{runner_map}\n[[ci.required_gates]]\nid = 'integration'\nrun = 'cargo test --no-default-features'\n"
+            ),
+        )
+        .unwrap();
+        let output = simit()
+            .current_dir(temp.path())
+            .args(["init", "ci"])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let mut names = std::collections::BTreeSet::new();
+        for member in ["a", "b"] {
+            let path = temp
+                .path()
+                .join(format!(".{platform}/workflows/ci-{member}.yaml"));
+            let text = read(&path);
+            let workflow: serde_yaml::Value = serde_yaml::from_str(&text).unwrap();
+            assert_eq!(
+                workflow["name"].as_str(),
+                Some(format!("CI ({member})").as_str())
+            );
+            let jobs = workflow["jobs"].as_mapping().unwrap();
+            assert_eq!(jobs.len(), if split { 4 } else { 2 });
+            for (id, job) in jobs {
+                let name = job["name"]
+                    .as_str()
+                    .expect("every member job needs a distinct check name");
+                assert_eq!(name, format!("{member} / {}", id.as_str().unwrap()));
+                assert!(
+                    names.insert(name.to_owned()),
+                    "ambiguous member check: {name}"
+                );
+            }
+            assert!(!text.contains("--all-features"));
+            assert!(text.contains("cargo test --no-default-features"));
+        }
+        let check = simit()
+            .current_dir(temp.path())
+            .args(["init", "ci", "--check", "--diff"])
+            .output()
+            .unwrap();
+        assert!(check.status.success(), "{check:?}");
+        assert_eq!(
+            simit::registry::audit_ci(temp.path()).unwrap().status,
+            simit::registry::FeatureStatus::Managed
+        );
+    }
+}
+
+#[test]
+fn coordinated_publication_preserves_five_member_ci_policies_and_dependency_order() {
+    let temp = init_coordinated_workspace(
+        "all_features = true\nwith_docs = true\n[[ci.required_gates]]\nid = 'member-contract'\nrun = 'cargo test --all-features'\n",
+    );
+    let config_path = temp.path().join("simit.toml");
+    let config = read(&config_path)
+        .replace(
+            "workspace_strategy = \"aggregate\"",
+            "workspace_strategy = \"members\"",
+        )
+        .replace(
+            "publish_strategy = \"coordinated\"",
+            "publish_strategy = \"members\"",
+        );
+    fs::write(&config_path, config).unwrap();
+    assert!(
+        simit()
+            .current_dir(temp.path())
+            .args(["init", "ci"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let mut member_ci = std::collections::BTreeMap::new();
+    for name in ["a", "b", "c", "d", "tool"] {
+        let ci = temp
+            .path()
+            .join(format!(".github/workflows/ci-{name}.yaml"));
+        let content = read(&ci);
+        assert!(content.contains(&format!("cargo test -p {name} --all-features")));
+        assert!(content.contains("cargo doc"));
+        assert!(content.contains("member-contract"));
+        member_ci.insert(ci, content);
+    }
+    // Only publication switches to a dependency-ordered carrier. CI policy,
+    // member selectors, check names and a project-owned workflow are retained.
+    let foreign = temp.path().join(".github/workflows/project-owned.yml");
+    fs::write(&foreign, "name: Project-owned\non: [push]\njobs: {}\n").unwrap();
+    let output = simit()
+        .current_dir(temp.path())
+        .args(["init", "ci", "--coordinated-publish"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    for (path, content) in &member_ci {
+        assert_eq!(
+            read(path),
+            *content,
+            "member CI must not change: {}",
+            path.display()
+        );
+    }
+    assert_eq!(
+        read(&foreign),
+        "name: Project-owned\non: [push]\njobs: {}\n"
+    );
+    // Persistence omits default values. Check the effective policy, so an
+    // absent default spelling still has to mean member CI and ordered publish.
+    let config = simit::config::ProjectConfig::load(temp.path()).unwrap();
+    assert_eq!(
+        config.ci.workspace_strategy,
+        simit::cli::WorkspaceStrategy::Members
+    );
+    assert_eq!(
+        config.ci.publish_strategy,
+        simit::config::PublishStrategy::Coordinated
+    );
+    let publish: serde_yaml::Value = serde_yaml::from_str(&read(
+        &temp.path().join(".github/workflows/publish-workspace.yaml"),
+    ))
+    .unwrap();
+    let jobs = &publish["jobs"];
+    assert!(jobs["publish-tool"].is_null());
+    for member in ["a", "b", "c", "d"] {
+        assert!(
+            !temp
+                .path()
+                .join(format!(".github/workflows/publish-crate-{member}.yaml"))
+                .exists()
+        );
+    }
+    assert!(
+        jobs["publish-b"]["needs"]
+            .as_sequence()
+            .unwrap()
+            .contains(&serde_yaml::Value::from("publish-a"))
+    );
+    assert!(
+        jobs["publish-d"]["needs"]
+            .as_sequence()
+            .unwrap()
+            .contains(&serde_yaml::Value::from("publish-b"))
+    );
+    assert!(
+        jobs["publish-d"]["needs"]
+            .as_sequence()
+            .unwrap()
+            .contains(&serde_yaml::Value::from("publish-c"))
+    );
+    assert!(
+        jobs["gate-member-contract"]["needs"]
+            .as_sequence()
+            .unwrap()
+            .contains(&serde_yaml::Value::from("validate"))
+    );
+    assert!(
+        simit()
+            .current_dir(temp.path())
+            .args(["init", "ci", "--check", "--diff"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert_eq!(
+        simit::registry::audit_ci(temp.path()).unwrap().status,
+        simit::registry::FeatureStatus::ManagedExtra
+    );
 }
 
 #[cfg(unix)]
@@ -322,7 +527,7 @@ fn coordinated_tag_validation_rejects_a_moved_tag_before_checkout() {
         ("gpg", "exit 0"),
         (
             "git",
-            "case \"$1\" in\nfetch|verify-tag) exit 0;;\nrev-list) printf '%s\\n' \"$TEST_TAG_SHA\";;\ncheckout) touch checkout-ran;;\n*) exit 99;;\nesac",
+            "case \"$1\" in\nfetch|verify-tag) exit 0;;\nshow) printf 'fixture trust root';;\nrev-list) printf '%s\\n' \"$TEST_TAG_SHA\";;\ncheckout) touch checkout-ran;;\n*) exit 99;;\nesac",
         ),
         ("cargo", "printf 'fixture@0.1.0\\n'"),
     ] {
@@ -614,8 +819,8 @@ fn coordinated_publish_preserves_signing_trust_when_config_missing() {
         .unwrap();
     assert!(status.success());
     let publish = read(&temp.path().join(".github/workflows/publish-workspace.yaml"));
-    assert!(publish.contains("test -s keys/maintainers.gpg"));
-    assert!(publish.contains("gpg --batch --import keys/maintainers.gpg"));
+    assert!(publish.contains("git show \"FETCH_HEAD:keys/maintainers.gpg\""));
+    assert!(publish.contains("gpg --batch --import \"$GNUPGHOME/maintainers.gpg\""));
     assert!(publish.contains("git verify-tag \"$tag\""));
 }
 
@@ -649,13 +854,15 @@ fn coordinated_publish_bounds_propagation_and_distinguishes_failures() {
     assert!(publish.contains("cargo fetch --manifest-path"));
     // Upload auth/ownership still fails fast; API readiness never replaces
     // dependency resolution, including when resuming an existing upload.
-    assert!(publish.contains("401|403) echo \"authorization/ownership failure"));
+    assert!(publish.contains("401|403)"));
+    assert!(publish.contains("authorization/ownership failure checking"));
     assert!(!publish.contains("simit publish-workspace propagation"));
 }
 
 #[cfg(unix)]
 #[test]
 fn coordinated_publication_waits_for_exact_cargo_resolution_even_when_api_is_ready() {
+    use sha2::Digest;
     use std::os::unix::fs::PermissionsExt;
     let temp = init_coordinated_workspace("");
     assert!(
@@ -690,6 +897,11 @@ fn coordinated_publication_waits_for_exact_cargo_resolution_even_when_api_is_rea
     let wait = steps.iter().position(|step| step["name"].as_str() == Some("Wait for exact registry resolution")).expect("publication must await Cargo index resolution in a separate step, including checksum resumes");
     assert!(wait > publish);
     let script = steps[wait]["run"].as_str().unwrap();
+    let target = temp.path().join("custom target/package");
+    fs::create_dir_all(&target).unwrap();
+    let archive = b"verified intended release\n";
+    fs::write(target.join("a-0.1.0.crate"), archive).unwrap();
+    let checksum = hex::encode(sha2::Sha256::digest(archive));
     let bin = temp.path().join("bin");
     fs::create_dir(&bin).unwrap();
     // Runtime-created fixtures are not processed by Nix's patchShebangs.
@@ -719,6 +931,7 @@ fn coordinated_publication_waits_for_exact_cargo_resolution_even_when_api_is_rea
             "cargo",
             r##"#!/usr/bin/env bash
 set -euo pipefail
+if [[ "$*" == "metadata --locked --no-deps --format-version 1" ]]; then printf '{"target_directory":"%s"}\n' "$TEST_TARGET"; exit 0; fi
 [[ "$*" == "fetch --manifest-path "* ]] || exit 92
 grep -F 'a = { version = "=0.1.0", registry = "crates-io", default-features = false }' "$3" >/dev/null || exit 93
 [[ ! -e "${3%/*}/Cargo.lock" ]] || exit 94
@@ -728,7 +941,8 @@ if [[ "$TEST_MODE" == missing || ( "$TEST_MODE" == delayed && "$count" == 1 ) ]]
 source='registry+https://github.com/rust-lang/crates.io-index'
 [[ "$TEST_MODE" != foreign ]] || source='path+file:///checkout/a'
 version=0.1.0; [[ "$TEST_MODE" != wrong-version ]] || version=0.1.1
-printf 'version = 4\n\n[[package]]\nname = "a"\nversion = "%s"\nsource = "%s"\n\n[[package]]\nname = "probe"\nversion = "0.0.0"\n' "$version" "$source" > "${3%/*}/Cargo.lock"
+checksum="$TEST_CHECKSUM"; [[ "$TEST_MODE" != wrong-checksum ]] || checksum=wrong
+printf 'version = 4\n\n[[package]]\nname = "a"\nversion = "%s"\nsource = "%s"\nchecksum = "%s"\n\n[[package]]\nname = "probe"\nversion = "0.0.0"\n' "$version" "$source" "$checksum" > "${3%/*}/Cargo.lock"
 "##,
         ),
     ] {
@@ -747,6 +961,7 @@ printf 'version = 4\n\n[[package]]\nname = "a"\nversion = "%s"\nsource = "%s"\n\
         ("missing", false, 20),
         ("foreign", false, 20),
         ("wrong-version", false, 20),
+        ("wrong-checksum", false, 20),
     ] {
         let state = temp.path().join(mode);
         fs::create_dir(&state).unwrap();
@@ -757,6 +972,8 @@ printf 'version = 4\n\n[[package]]\nname = "a"\nversion = "%s"\nsource = "%s"\n\
             .env("GITHUB_REF_NAME", "0.1.0")
             .env("TEST_MODE", mode)
             .env("TEST_STATE", &state)
+            .env("TEST_TARGET", target.parent().unwrap())
+            .env("TEST_CHECKSUM", &checksum)
             .output()
             .unwrap();
         assert_eq!(
@@ -769,6 +986,169 @@ printf 'version = 4\n\n[[package]]\nname = "a"\nversion = "%s"\nsource = "%s"\n\
         assert!(
             !state.join("api-probed").exists(),
             "API readiness cannot establish registry resolution"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn single_and_coordinated_publication_require_usable_checksum_bound_registry_archives() {
+    use sha2::Digest;
+    use std::os::unix::fs::PermissionsExt;
+
+    for runtime in ["cargo", "nix"] {
+        let mut readiness = Vec::new();
+        for coordinated in [false, true] {
+            let temp = if coordinated {
+                init_coordinated_workspace("")
+            } else {
+                let temp = TempDir::new().unwrap();
+                write_minimal_package(temp.path(), "a");
+                fs::write(temp.path().join("flake.nix"), "{}\n").unwrap();
+                fs::write(
+                    temp.path().join("simit.toml"),
+                    "[ci]\nplatform='github'\nrunner='ubuntu-24.04'\npublish_crates=true\n",
+                )
+                .unwrap();
+                temp
+            };
+            let output = simit()
+                .current_dir(temp.path())
+                .args(["init", "ci", "--runtime", runtime])
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            let (workflow, job) = if coordinated {
+                ("publish-workspace.yaml", "publish-a")
+            } else {
+                ("publish-crate.yaml", "publish")
+            };
+            let yaml: serde_yaml::Value =
+                serde_yaml::from_str(&read(&temp.path().join(".github/workflows").join(workflow)))
+                    .unwrap();
+            let steps = yaml["jobs"][job]["steps"].as_sequence().unwrap();
+            let publish_index = steps
+                .iter()
+                .position(|step| step["name"] == "Publish")
+                .unwrap();
+            let wait_index = steps
+                .iter()
+                .position(|step| step["name"] == "Wait for exact registry resolution")
+                .unwrap();
+            assert!(
+                wait_index > publish_index,
+                "checksum resumes must still await registry resolution"
+            );
+            readiness.push(steps[wait_index]["run"].as_str().unwrap().to_owned());
+            let script = steps[publish_index]["run"].as_str().unwrap();
+            let target = temp.path().join("custom target/package");
+            fs::create_dir_all(&target).unwrap();
+            let archive = b"intended verified release archive\n";
+            fs::write(target.join("a-0.1.0.crate"), archive).unwrap();
+            let checksum = hex::encode(sha2::Sha256::digest(archive));
+            let valid = serde_json::json!({"version":{"crate":"a","num":"0.1.0","yanked":false,"checksum":checksum}});
+            let bin = temp.path().join("bin");
+            fs::create_dir(&bin).unwrap();
+            for (name, contents) in [
+                (
+                    "nix",
+                    "#!/bin/sh\ntest \"$1\" = develop && test \"$2\" = -c || exit 91\nshift 2\nexec \"$@\"\n",
+                ),
+                (
+                    "cargo",
+                    "#!/bin/sh\nset -eu\nif [ \"$*\" = 'metadata --locked --no-deps --format-version 1' ]; then printf '{\"target_directory\":\"%s\"}\\n' \"$TEST_TARGET\"; exit 0; fi\ntest \"$1\" = publish || exit 92\nprintf '%s\\n' \"$*\" > \"$TEST_STATE/published\"\n",
+                ),
+                (
+                    "curl",
+                    "#!/bin/sh\nset -eu\nwhile [ \"$#\" -gt 0 ]; do case \"$1\" in -o) output=$2; shift;; https:*) test \"$1\" = 'https://crates.io/api/v1/crates/a/0.1.0' || exit 93;; esac; shift; done\ncp \"$TEST_STATE/registry.json\" \"$output\"\nif [ \"$TEST_HTTP\" = network ]; then exit 7; fi\nprintf '%s' \"$TEST_HTTP\"\n",
+                ),
+            ] {
+                let path = bin.join(name);
+                fs::write(&path, contents).unwrap();
+                fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+            for (mode, status, token, success, uploaded) in [
+                ("matching", "200", "", true, false),
+                ("conflict", "200", "fixture", false, false),
+                ("yanked", "200", "fixture", false, false),
+                ("wrong-version", "200", "fixture", false, false),
+                ("wrong-crate", "200", "fixture", false, false),
+                ("missing-yanked", "200", "fixture", false, false),
+                ("missing-checksum", "200", "fixture", false, false),
+                ("malformed", "200", "fixture", false, false),
+                ("absent", "404", "fixture", true, true),
+                ("no-token", "404", "", false, false),
+                ("unauthorized", "401", "fixture", false, false),
+                ("forbidden", "403", "fixture", false, false),
+                ("server-error", "503", "fixture", false, false),
+                ("network", "network", "fixture", false, false),
+            ] {
+                let state = temp.path().join(mode);
+                fs::create_dir(&state).unwrap();
+                let mut response = valid.clone();
+                match mode {
+                    "conflict" => response["version"]["checksum"] = "0".repeat(64).into(),
+                    "yanked" => response["version"]["yanked"] = true.into(),
+                    "wrong-version" => response["version"]["num"] = "0.1.1".into(),
+                    "wrong-crate" => response["version"]["crate"] = "other".into(),
+                    "missing-yanked" => {
+                        response["version"]
+                            .as_object_mut()
+                            .unwrap()
+                            .remove("yanked");
+                    }
+                    "missing-checksum" => {
+                        response["version"]
+                            .as_object_mut()
+                            .unwrap()
+                            .remove("checksum");
+                    }
+                    _ => {}
+                }
+                let json = if mode == "malformed" {
+                    "{invalid".to_owned()
+                } else {
+                    serde_json::to_string(&response).unwrap()
+                };
+                fs::write(state.join("registry.json"), json).unwrap();
+                let output = Command::new("bash")
+                    .args(["-c", script])
+                    .current_dir(temp.path())
+                    .env("PATH", &path)
+                    .env("GITHUB_REF_NAME", "0.1.0")
+                    .env("CRATES_IO_API_TOKEN", token)
+                    .env_remove("CARGO_REGISTRY_TOKEN")
+                    .env("TEST_TARGET", target.parent().unwrap())
+                    .env("TEST_STATE", &state)
+                    .env("TEST_HTTP", status)
+                    .output()
+                    .unwrap();
+                assert_eq!(
+                    output.status.success(),
+                    success,
+                    "{runtime}/{coordinated}/{mode}: {output:?}"
+                );
+                assert_eq!(
+                    state.join("published").exists(),
+                    uploaded,
+                    "{runtime}/{coordinated}/{mode}"
+                );
+                if uploaded {
+                    assert_eq!(
+                        read(&state.join("published")).trim(),
+                        if coordinated {
+                            "publish -p a"
+                        } else {
+                            "publish"
+                        }
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            readiness[0], readiness[1],
+            "single and coordinated publishers must use the same readiness gate"
         );
     }
 }
@@ -801,7 +1181,8 @@ fn coordinated_publish_conflict_is_not_success_and_resume_is_auditable() {
     assert!(publish.contains("conflict:"));
     assert!(publish.contains("refusing to treat as success"));
     // Resume guidance + always-run auditable report (not atomic rollback).
-    assert!(publish.contains("re-dispatch this workflow"));
+    assert!(publish.contains("resume: rerun the original tag-push run"));
+    assert!(!publish.contains("re-dispatch"));
     assert!(publish.contains("already-published crates with matching checksums exit 0"));
     assert!(publish.contains("see per-crate job statuses for the auditable result"));
 }

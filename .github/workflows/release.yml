@@ -28,6 +28,8 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           fetch-depth: 0
+          ref: ${{ github.sha }}
+          persist-credentials: false
       - uses: cachix/install-nix-action@ba0dd844c9180cbf77aa72a116d6fbc515d0e87b # v27
         with:
           extra_nix_config: |
@@ -43,12 +45,22 @@ jobs:
           git config --global --add url.https://github.com/.insteadOf git@github.com:
 
       - name: Validate tag
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           VERSION="${GITHUB_REF_NAME:-${FORGE_REF_NAME:-${FORGEJO_REF_NAME:-}}}"
           if [ -z "$VERSION" ]; then ref="${GITHUB_REF:-${FORGE_REF:-${FORGEJO_REF:-}}}"; VERSION="${ref#refs/tags/}"; fi
           echo "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-(rc|beta|alpha)\.[0-9]+)?$'
-          git fetch --force --tags origin "refs/tags/${VERSION}:refs/tags/${VERSION}"
+          git_fetch() {
+            if [ -n "${GITHUB_TOKEN:-}" ]; then
+              auth_header="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 | tr -d '\n')"
+              git -c "http.extraHeader=$auth_header" fetch "$@"
+            else
+              git fetch "$@"
+            fi
+          }
+          git_fetch --force --tags origin "refs/tags/${VERSION}:refs/tags/${VERSION}"
           tag_worktree="$(mktemp -d)"
           rmdir "$tag_worktree"
           cleanup_validation() {
@@ -56,9 +68,18 @@ jobs:
             if [ -n "${GNUPGHOME:-}" ]; then rm -rf "$GNUPGHOME"; fi
           }
           trap cleanup_validation EXIT
-          git worktree add --detach "$tag_worktree" "$VERSION"
+          GNUPGHOME="$(mktemp -d)"; export GNUPGHOME; chmod 700 "$GNUPGHOME"
+          git_fetch --no-tags origin HEAD
+          git show "FETCH_HEAD:keys/maintainers.gpg" > "$GNUPGHOME/maintainers.gpg"
+          test -s "$GNUPGHOME/maintainers.gpg"
+          gpg --batch --import "$GNUPGHOME/maintainers.gpg"
+          git verify-tag "$VERSION"
+          validated_sha="$(git rev-parse --verify "refs/tags/${VERSION}^{commit}")"
+          checkout_sha="$(git rev-parse --verify HEAD)"
+          event_sha="${GITHUB_SHA:-${FORGE_SHA:-${FORGEJO_SHA:-}}}"
+          test -n "$event_sha" && test "$validated_sha" = "$event_sha" && test "$checkout_sha" = "$event_sha" || { echo "Signed tag commit does not match the immutable event checkout" >&2; exit 1; }
+          git worktree add --detach "$tag_worktree" "$validated_sha"
           test "$(nix eval --raw "$tag_worktree#simit-x86_64-linux-musl.version")" = "$VERSION"
-          test -s "$tag_worktree/keys/maintainers.gpg"
           if ! grep -q "^## \[$VERSION\] - [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]" "$tag_worktree/CHANGELOG.md"; then
             echo "CHANGELOG.md missing section for $VERSION" >&2
             exit 1
@@ -67,10 +88,6 @@ jobs:
           IS_PRERELEASE=false
           if printf '%s\n' "$VERSION" | grep -Eq -- '-(rc|beta|alpha)\.[0-9]+$'; then IS_PRERELEASE=true; fi
 
-          GNUPGHOME="$(mktemp -d)"; export GNUPGHOME; chmod 700 "$GNUPGHOME"
-          gpg --batch --import "$tag_worktree/keys/maintainers.gpg"
-          git verify-tag "$VERSION"
-          validated_sha="$(git -C "$tag_worktree" rev-parse HEAD)"
           git checkout --detach "$validated_sha"
           { printf 'VERSION=%s\n' "$VERSION"; printf 'IS_PRERELEASE=%s\n' "$IS_PRERELEASE"; } > release-env
       - name: Check release credentials

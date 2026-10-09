@@ -122,7 +122,7 @@
         // {
           inherit cargoArtifacts;
           nativeBuildInputs = [preCommitBin];
-          nativeCheckInputs = [pkgs.git pkgs.gnupg pkgs.nodejs];
+          nativeCheckInputs = [pkgs.git pkgs.gnupg pkgs.nodejs pkgs.jq];
         });
 
       publicCargoArtifacts = publicCraneLib.buildDepsOnly commonArgs;
@@ -130,7 +130,7 @@
         // {
           cargoArtifacts = publicCargoArtifacts;
           nativeBuildInputs = [preCommitBin];
-          nativeCheckInputs = [pkgs.git pkgs.gnupg pkgs.nodejs];
+          nativeCheckInputs = [pkgs.git pkgs.gnupg pkgs.nodejs pkgs.jq];
         });
 
       actionlintCheck =
@@ -201,7 +201,7 @@
       nextestCheck = publicCraneLib.cargoNextest (commonArgs
         // {
           cargoArtifacts = publicCargoArtifacts;
-          nativeCheckInputs = [pkgs.git pkgs.gnupg pkgs.nodejs];
+          nativeCheckInputs = [pkgs.git pkgs.gnupg pkgs.nodejs pkgs.jq];
         });
 
       docCheck = publicCraneLib.cargoDoc (commonArgs
@@ -329,6 +329,7 @@
               cargo-nextest
               actionlint
               git
+              jq
               mdbook
               prettier
               pre-commit

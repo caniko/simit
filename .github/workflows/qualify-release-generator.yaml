@@ -1,0 +1,73 @@
+# Project-owned producer qualification; ordinary CI remains Simit-generated.
+name: Qualify signed-release generator
+
+on:
+  push:
+    branches: [maintenance/release-tag-binding, trunk]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event.pull_request.head.ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  qualify-release-generator:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      NIX_CONFIG: |
+        experimental-features = nix-command flakes
+        max-jobs = 1
+        cores = 2
+      CARGO_BUILD_JOBS: "2"
+      SIMIT_MAINTAINERS_GPG: ${{ github.workspace }}/keys/maintainers.gpg
+    steps:
+      - name: Checkout immutable execution source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Install Nix
+        uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31
+      - name: Configure GitHub input transport
+        run: |
+          git config --global --add url.https://github.com/.insteadOf ssh://git@github.com/
+          git config --global --add url.https://github.com/.insteadOf git@github.com:
+      - name: Capture source identity
+        run: |
+          mkdir -p "$RUNNER_TEMP/release-generator"
+          git rev-parse HEAD > "$RUNNER_TEMP/release-generator/revision"
+          git rev-parse 'HEAD^{tree}' > "$RUNNER_TEMP/release-generator/tree"
+          git ls-files -z | sort -z | sed -z 's|^|./|' | xargs -0 sha256sum -- > "$RUNNER_TEMP/release-generator/source.sha256"
+      - name: Lint signed-release workflows with the locked package set
+        run: nix shell --inputs-from . nixpkgs#actionlint -c actionlint .github/workflows/publish-crate.yaml .github/workflows/qualify-release-generator.yaml
+      - name: Build exact production generator
+        run: |
+          set -euo pipefail
+          nix build --no-link --no-update-lock-file --max-jobs 1 --cores 2 --json .#default > "$RUNNER_TEMP/release-generator/result.json"
+      - name: Regenerate and verify complete generator parity
+        run: |
+          set -euo pipefail
+          generator=$(python3 -c 'import json,os; print(os.path.join(json.load(open(os.path.join(os.environ["RUNNER_TEMP"], "release-generator/result.json")))[0]["outputs"]["out"], "bin/simit"))')
+          cp "$generator" "$RUNNER_TEMP/release-generator/simit"
+          sha256sum "$RUNNER_TEMP/release-generator/simit" > "$RUNNER_TEMP/release-generator/simit.sha256"
+          "$generator" init ci --platform github --runtime nix --runner ubuntu-latest --with-docs --publish-crates
+          "$generator" init ci --platform github --runtime nix --runner ubuntu-latest --with-docs --publish-crates --check --diff
+          git diff --check
+          git diff > "$RUNNER_TEMP/release-generator/regenerated.diff"
+          git status --porcelain --untracked-files=all > "$RUNNER_TEMP/release-generator/regenerated.status"
+          tar -czf "$RUNNER_TEMP/release-generator/regenerated.tar.gz" Cargo.toml .github/workflows
+          sha256sum "$RUNNER_TEMP/release-generator/regenerated.tar.gz" > "$RUNNER_TEMP/release-generator/regenerated.sha256"
+          git diff --exit-code -- Cargo.toml .github/workflows
+          test ! -s "$RUNNER_TEMP/release-generator/regenerated.status"
+      - name: Retain exact-source production and regeneration evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-generator-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 31
+          if-no-files-found: error
+          path: ${{ runner.temp }}/release-generator/**

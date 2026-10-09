@@ -84,6 +84,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   coordinated publication, because Cargo resolves them while packaging the
   lockfile. Path-only unpublished test helpers remain excluded from the plan.
 - Read explicitly dynamic Python versions, scripts, and optional extras from Poetry metadata when a project also declares PEP 621 metadata. Preserve static PEP 621 fields and uv dependency groups, use the same version provider for PyPI release-tag validation, and report unsupported dynamic version providers clearly.
+- Bind signed-tag publication to independently fetched default-branch keys and
+  the exact checkout before evaluating package metadata, including per-member
+  publishers; explicitly pin every coordinated release job to the immutable
+  event SHA and regenerate this repository's publisher from that renderer.
+- Give per-member GitHub/Forgejo jobs distinct package-qualified check names,
+  including split checks and integration gates; restrict GitHub crates.io
+  publishers to signed semver tag pushes, with retries on the original run.
+- Validate signed event-bound tags before VS Code credentials, reusable release
+  prebuilds and Windows builds/publication; keep all dependent jobs on the same
+  immutable event checkout and document retrying the original tag-push run.
+- Execute a declared flake formatter's exported executable, using `--ci` for
+  treefmt and no arguments for custom formatters; reject repository mutations
+  and fail on broken formatter exports.
+- Preserve formatter shell variables and Nix interpolation through Crow's
+  literal-dollar preprocessing in YAML and Jsonnet workflows.
+- Authenticate release verification fetches explicitly without persisting checkout
+  credentials; cover private fetches and shallow reusable prebuild tag retrieval.
 - Dispatch reviews through an explicit branch or tag resolving to the reviewed
   controller SHA, reject ref movement before checkout, and declare the optional
   reusable-workflow report credential.

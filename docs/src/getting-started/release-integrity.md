@@ -26,6 +26,35 @@ The key is discovered from `[release.signing].key`, `git config
 user.signingkey`, or `--key`/`--maintainer-key`. If no exportable key is
 available, simit blocks instead of generating an unsigned publish path.
 
+Land `keys/maintainers.gpg` on the repository's default branch before releasing.
+Generated publish workflows fetch that branch's keyring into an isolated GnuPG
+home rather than trusting keys supplied by the release checkout. A missing
+default-branch keyring fails publication. Key rotation must therefore land on
+the default branch before a tag signed by the replacement key is released.
+
+After verifying the signed tag, generated publish workflows require its peeled
+commit to equal the checkout being published, before package metadata, project
+`ci.extra_setup` commands, or publication execute. Checkout credentials are not
+persisted; private verification fetches use command-scoped authentication.
+GitHub crates.io publishers run only on signed semver tag
+pushes; they do not expose a branch-based manual dispatch. To retry publication,
+rerun the original tag-triggered run. Forgejo retains its existing dispatch
+surface and applies the same signed-tag/checkout validation.
+
+Coordinated workspace publication also binds the signed commit to the
+immutable workflow event SHA. Its validation job, required gates, all dependent
+publishers, and release report explicitly check out `${{ github.sha }}` rather
+than resolving the release tag again. A tag moved after validation cannot change
+the source used by later jobs. This applies to both package-scoped publishers
+and coordinated workspace publication; regenerate existing consumer workflows
+after selecting the qualified generator revision.
+
+An HTTP 200 for an existing crate version is not release acceptance. Publishers
+require an unyanked exact crate/version record and a checksum matching the local
+verified package archive, then independently resolve and fetch that exact
+registry source/version/checksum. A matching upload can be resumed by rerunning
+the original signed-tag run; a conflicting or unusable version fails closed.
+
 `keys/minisign.pub` is the public half of the offline minisign key used to
 sign `SHA256SUMS.txt`. Generate the keypair on the maintainer-controlled
 machine and store the secret key outside the repository:
@@ -61,6 +90,19 @@ top-level `release/` directory. It then writes and publishes:
 
 The SLSA predicate records the source commit, release workflow digest, optional
 `flake.lock` digest, artifact name, and artifact SHA-256.
+
+### Editor Marketplace Packages
+
+JetBrains publication reads the signing task's `signedArchiveFile` property and
+binds `verifyPluginSignature.inputArchiveFile` to that same archive. The verified
+output is used even when the project overrides its name or directory; missing,
+ambiguous, or unsigned selections fail before upload. See the
+[JetBrains signing task contract](https://plugins.jetbrains.com/docs/intellij/tools-intellij-platform-gradle-plugin-tasks.html#signPlugin-signedArchiveFile).
+
+VS Code Marketplace and Open VSX publishers pass every `release/*.vsix` package
+through the plural `--packagePath` option, preserving universal and target-specific
+packages. Qualification exercises publisher arguments and archive selection with
+offline fixtures; it does not perform a live marketplace upload.
 
 ## Consumer Verification
 

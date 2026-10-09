@@ -151,7 +151,16 @@ fn bootstraps_release_workflow_for_enabled_channels() {
     assert!(workflow.contains("  workflow_dispatch:\n\n"));
     assert!(!workflow.contains("      version:\n"));
     assert!(!workflow.contains("inputs.version"));
-    assert!(workflow.contains("git worktree add --detach \"$tag_worktree\" \"$VERSION\""));
+    assert!(workflow.contains("git worktree add --detach \"$tag_worktree\" \"$validated_sha\""));
+    assert!(!workflow.contains("git worktree add --detach \"$tag_worktree\" \"$VERSION\""));
+    let verify = workflow.find("git verify-tag \"$VERSION\"").unwrap();
+    let checkout = workflow
+        .find("git worktree add --detach \"$tag_worktree\" \"$validated_sha\"")
+        .unwrap();
+    assert!(
+        verify < checkout,
+        "tag signature must be verified before evaluating its checkout"
+    );
     assert!(workflow.contains("git checkout --detach \"$validated_sha\""));
     assert!(workflow.contains(
         "uses: https://github.com/cachix/install-nix-action@ba0dd844c9180cbf77aa72a116d6fbc515d0e87b # v27"
@@ -228,7 +237,7 @@ fn github_release_depends_on_prebuild_and_forwards_attic_secret() {
         )
         .replace(
             "runner = \"atlas\"\n",
-            "runner = \"ubuntu-24.04\"\nprebuild_binaries = true\n",
+            "runner = \"ubuntu-24.04\"\nprebuild_binaries = true\nversion_attr = \"demo\"\n",
         )
         .replace(
             "[aur]",
@@ -253,10 +262,62 @@ fn github_release_depends_on_prebuild_and_forwards_attic_secret() {
             .contains("# - ATTIC_TOKEN: repository secret for native prebuild Attic publication.")
     );
     assert!(!workflow.contains("# Runner credential: $ATTIC_TOKENS_DIR/demo"));
-    assert!(workflow.contains("prebuild:\n    uses: ./.github/workflows/prebuild.yaml"));
+    assert!(
+        workflow.contains(
+            "prebuild:\n    needs: validate\n    uses: ./.github/workflows/prebuild.yaml"
+        )
+    );
     assert!(workflow.contains("with:\n      release: true"));
     assert!(workflow.contains("attic_token: ${{ secrets.ATTIC_TOKEN }}"));
-    assert!(workflow.contains("release:\n    needs: prebuild"));
+    assert!(workflow.contains("release:\n    needs: [validate, prebuild]"));
+    let parsed: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
+    assert_eq!(
+        parsed["jobs"]["validate"]["permissions"]["contents"].as_str(),
+        Some("read")
+    );
+    for job in ["validate", "release"] {
+        let steps = parsed["jobs"][job]["steps"].as_sequence().unwrap();
+        assert_eq!(steps[0]["with"]["ref"].as_str(), Some("${{ github.sha }}"));
+        assert_eq!(
+            steps[0]["with"]["persist-credentials"].as_bool(),
+            Some(false)
+        );
+        let guard = steps
+            .iter()
+            .find(|step| step["name"].as_str() == Some("Validate tag"))
+            .unwrap()["run"]
+            .as_str()
+            .unwrap();
+        assert!(guard.contains("Signed tag commit does not match the immutable event checkout"));
+        assert!(guard.find("git verify-tag").unwrap() < guard.find("nix eval").unwrap());
+    }
+    let config = simit::config::ProjectConfig::load(project.path()).unwrap();
+    let prebuild = simit::render::ci::github_prebuild_file(
+        &config.ci.nix_system_runners,
+        &config.ci.nix_builds,
+        config.prebuild.as_ref().unwrap(),
+        &config.release.artifacts,
+        config.release.attic.as_ref(),
+    )
+    .unwrap()
+    .content;
+    let parsed: serde_yaml::Value = serde_yaml::from_str(&prebuild).unwrap();
+    let steps = parsed["jobs"]["build"]["steps"]
+        .as_sequence()
+        .expect("reusable prebuild must expose the build matrix job");
+    let validation = steps
+        .iter()
+        .position(|step| step["name"].as_str() == Some("Validate tag"))
+        .unwrap();
+    assert_eq!(
+        steps[validation]["if"].as_str(),
+        Some("${{ inputs.release }}")
+    );
+    assert!(steps[..=validation].iter().all(|step| {
+        !serde_yaml::to_string(&step["env"])
+            .unwrap()
+            .contains("secrets.")
+    }));
     assert!(workflow.contains("uses: actions/download-artifact@"));
     assert!(workflow.contains("pattern: release-*"));
     assert!(!workflow.contains("nix build '.#release-bundle'"));
