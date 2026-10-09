@@ -230,6 +230,205 @@ fn retirement_refuses_symlinked_workflow_directories_and_preserves_their_targets
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn audit_and_generation_reject_inactive_workflow_directory_links_without_writes() {
+    use std::os::unix::fs::symlink;
+    for link_parent in [false, true] {
+        let temp = project();
+        assert!(generate(&temp, &[]).status.success());
+        assert_eq!(
+            audit_ci(temp.path()).unwrap().status,
+            FeatureStatus::Managed
+        );
+        let cfg = fs::read(temp.path().join("simit.toml")).unwrap();
+        let template = temp.path().join(".github/workflows/tests.yml");
+        let bytes = fs::read(&template).unwrap();
+        let target = temp.path().join("retained-empty-directory");
+        fs::create_dir(&target).unwrap();
+        let relative = if link_parent {
+            ".forgejo"
+        } else {
+            ".forgejo/workflows"
+        };
+        if !link_parent {
+            fs::create_dir(temp.path().join(".forgejo")).unwrap();
+        }
+        let alias = temp.path().join(relative);
+        symlink(&target, &alias).unwrap();
+        let audit = audit_ci(temp.path());
+        assert!(audit.is_err(), "{relative}: {audit:?}");
+        assert!(format!("{:#}", audit.unwrap_err()).contains("symlink"));
+        assert_eq!(
+            simit::registry::detect_feature_status(temp.path())["ci"],
+            FeatureStatus::Drift
+        );
+        for args in [vec!["--check", "--diff"], vec![]] {
+            let result = generate(&temp, &args);
+            assert!(!result.status.success(), "{relative}: {result:?}");
+            assert!(String::from_utf8_lossy(&result.stderr).contains("symlink"));
+            assert_eq!(fs::read(&template).unwrap(), bytes);
+            assert_eq!(fs::read(temp.path().join("simit.toml")).unwrap(), cfg);
+            assert!(alias.is_symlink());
+            assert_eq!(fs::read_dir(&target).unwrap().count(), 0);
+        }
+        fs::remove_file(&alias).unwrap();
+        assert!(generate(&temp, &["--check", "--diff"]).status.success());
+        assert_eq!(
+            audit_ci(temp.path()).unwrap().status,
+            FeatureStatus::Managed
+        );
+    }
+}
+
+#[test]
+fn pages_only_rejects_effective_template_platform_mismatches_before_writes() {
+    for platform in ["github", "forgejo"] {
+        let temp = project();
+        let cfg_path = temp.path().join("simit.toml");
+        let cfg = fs::read_to_string(&cfg_path)
+            .unwrap()
+            .replace("github", platform)
+            .replace("[ci.nix_build]\nonly=true\n", "");
+        fs::write(&cfg_path, cfg).unwrap();
+        let args = [
+            "--pages-only",
+            "--with-pages",
+            "--pages-repo",
+            "caniko/example",
+        ];
+        let positive = generate(&temp, &args);
+        assert!(positive.status.success(), "{platform}: {positive:?}");
+        let valid_cfg = fs::read_to_string(&cfg_path).unwrap();
+        let directory = temp.path().join(format!(".{platform}/workflows"));
+        let retained = fs::read_dir(&directory)
+            .unwrap()
+            .map(|entry| {
+                let path = entry.unwrap().path();
+                let bytes = fs::read(&path).unwrap();
+                (path, bytes)
+            })
+            .collect::<Vec<_>>();
+        let other = if platform == "github" {
+            "forgejo"
+        } else {
+            "github"
+        };
+        let invalid_cfg = valid_cfg
+            .replace(
+                &format!("platform = \"{platform}\""),
+                &format!("platform = \"{other}\""),
+            )
+            .replace(
+                &format!("platform='{platform}'"),
+                &format!("platform='{other}'"),
+            );
+        assert_ne!(invalid_cfg, valid_cfg);
+        fs::write(&cfg_path, &invalid_cfg).unwrap();
+        for check in [true, false] {
+            let mut invocation = args.to_vec();
+            if check {
+                invocation.extend(["--check", "--diff"]);
+            }
+            let result = generate(&temp, &invocation);
+            assert!(!result.status.success(), "{platform}: {result:?}");
+            assert!(String::from_utf8_lossy(&result.stderr).contains("selected Actions platform"));
+            assert_eq!(fs::read_to_string(&cfg_path).unwrap(), invalid_cfg);
+            assert!(
+                !temp
+                    .path()
+                    .join(format!(".{other}/workflows/pages.yaml"))
+                    .exists()
+            );
+            for (path, bytes) in &retained {
+                assert_eq!(&fs::read(path).unwrap(), bytes);
+            }
+        }
+        fs::write(&cfg_path, valid_cfg).unwrap();
+        let mut check_args = args.to_vec();
+        check_args.extend(["--check", "--diff"]);
+        assert!(generate(&temp, &check_args).status.success());
+    }
+}
+
+#[test]
+fn jsonnet_block_notes_preserve_generated_ownership_but_never_claim_foreign_workflows() {
+    for prefix in [
+        "/* project license\n * retained note\n */\n",
+        "/* one line */ ",
+        "/* first */ /* second */\n// project note\n",
+    ] {
+        let temp = project();
+        fs::write(temp.path().join("simit.toml"), "[ci]\nprovider='crow'\nplatform='forgejo'\nruntime='cargo'\nrunner='crow-agent'\n[ci.crow]\nformat='jsonnet'\n").unwrap();
+        fs::write(
+            temp.path().join("Cargo.toml"),
+            "[package]\nname='preamble-fixture'\nversion='0.1.0'\nedition='2024'\n",
+        )
+        .unwrap();
+        fs::create_dir(temp.path().join("src")).unwrap();
+        fs::write(
+            temp.path().join("src/lib.rs"),
+            "pub fn value() -> u8 { 1 }\n",
+        )
+        .unwrap();
+        let args = [
+            "--ci-provider",
+            "crow",
+            "--crow-format",
+            "jsonnet",
+            "--runner",
+            "crow-agent",
+        ];
+        let positive = generate(&temp, &args);
+        assert!(positive.status.success(), "{positive:?}");
+        assert_eq!(
+            audit_ci(temp.path()).unwrap().status,
+            FeatureStatus::Managed
+        );
+        let path = temp.path().join(".crow/build.jsonnet");
+        let original = fs::read_to_string(&path).unwrap();
+        let with_note = format!("{prefix}{original}");
+        fs::write(&path, &with_note).unwrap();
+        assert!(simit::render::ci::is_generated_workflow_marker(&with_note));
+        assert_eq!(audit_ci(temp.path()).unwrap().status, FeatureStatus::Drift);
+        let checked = generate(&temp, &["--check", "--diff"]);
+        assert!(!checked.status.success(), "{checked:?}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), with_note);
+        let foreign = temp.path().join(".crow/foreign.jsonnet");
+        let foreign_payload = format!(
+            "/*\n// {}\n*/\n{{name: 'foreign'}}\n",
+            simit::render::ci::LEGACY_GENERATED_WORKFLOW_MARKER
+        );
+        fs::write(&foreign, &foreign_payload).unwrap();
+        assert!(!simit::render::ci::is_generated_workflow_marker(
+            &foreign_payload
+        ));
+        assert!(!simit::render::ci::is_generated_workflow_marker(&format!(
+            "/* {}",
+            simit::render::ci::GENERATED_WORKFLOW_MARKER
+        )));
+        let retired = generate(
+            &temp,
+            &[
+                "--ci-provider",
+                "actions",
+                "--platform",
+                "github",
+                "--runtime",
+                "cargo",
+                "--runner",
+                "ubuntu-24.04",
+            ],
+        );
+        assert!(retired.status.success(), "{retired:?}");
+        assert!(
+            !path.exists(),
+            "owned Crow workflow must retire behind a valid block note"
+        );
+        assert_eq!(fs::read_to_string(&foreign).unwrap(), foreign_payload);
+    }
+}
+
 #[test]
 fn invalid_templates_fail_before_any_outputs_are_written() {
     for (output, source, template) in [
