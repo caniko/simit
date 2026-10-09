@@ -1138,7 +1138,7 @@ pub fn nix_build_matrix_file_with_options(
             }
         }
         workflow.push_str("      - name: Upload Nix build evidence\n        if: always()\n");
-        push_action_uses(&mut workflow, platform, "upload-artifact", "v7.0.1");
+        push_action_uses(&mut workflow, platform, "upload-artifact", "v4.6.2");
         workflow.push_str(&format!("\n        with:\n          name: nix-build-${{{{ strategy.job-index }}}}\n          retention-days: {}\n          if-no-files-found: warn\n          path: |\n            ${{{{ runner.temp }}}}/simit-nix-build-${{{{ strategy.job-index }}}}\n", options.artifact_retention_days.unwrap_or(14)));
         for path in &options.artifact_paths {
             workflow.push_str(&format!("            {path}\n"));

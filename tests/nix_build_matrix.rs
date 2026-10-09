@@ -125,14 +125,14 @@ extra_env = { FLAKE_SSH_KEY = "${{ secrets.FLAKE_SSH_KEY }}" }
     );
     assert_eq!(
         upload["uses"],
-        simit::render::ci::github_action_ref("actions/upload-artifact", "v7.0.1")
+        simit::render::ci::github_action_ref("actions/upload-artifact", "v4.6.2")
             .split(" #")
             .next()
             .unwrap()
     );
     assert_eq!(
         steps[0]["uses"],
-        simit::render::ci::github_action_ref("actions/checkout", "v7.0.1")
+        simit::render::ci::github_action_ref("actions/checkout", "v4.3.1")
             .split(" #")
             .next()
             .unwrap()

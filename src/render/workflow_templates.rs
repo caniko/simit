@@ -297,6 +297,23 @@ pub(crate) fn append(root: &Path, ci: &CiConfig, files: &mut Vec<GeneratedFile>)
                 }
             }
         }
+        for active in &active_workflows {
+            let active_relative = active.strip_prefix(root)?;
+            // Declaring the exact path is an explicit adoption. A differently
+            // spelled portable alias or hard link must not claim another active
+            // project workflow, even when the destination does not exist here.
+            if active_relative != relative
+                && (portable_path(active_relative) == portable_path(&relative)
+                    || (destination.try_exists()?
+                        && same_file::is_same_file(&destination, active)
+                            .context("comparing active workflow destination identities")?))
+            {
+                bail!(
+                    "workflow template output {output} aliases an active Actions workflow at {}; use a distinct declared destination",
+                    active.display()
+                );
+            }
+        }
         if builtin_paths.contains(&portable_path(&relative)) {
             bail!("workflow template {output} collides with a built-in generated workflow");
         }

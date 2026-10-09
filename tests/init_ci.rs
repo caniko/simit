@@ -78,7 +78,7 @@ fn private_github_runner_generation_preserves_the_compatible_checkout_baseline()
     let temp = init_package(true);
     fs::write(
         temp.path().join("simit.toml"),
-        "[ci]\nplatform = 'github'\nprovider = 'actions'\nruntime = 'nix'\nrunner = 'private-legacy-linux'\nnix_builds = ['.#default']\n",
+        "[ci]\nplatform = 'github'\nprovider = 'actions'\nruntime = 'nix'\nrunner = 'private-legacy-linux'\nnix_builds = ['.#default']\n[ci.nix_build]\ncapture_results = true\n",
     )
     .unwrap();
     let result = simit()
@@ -110,6 +110,23 @@ fn private_github_runner_generation_preserves_the_compatible_checkout_baseline()
             !workflow.contains("actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"),
             "{path}: {workflow}"
         );
+        if path.ends_with("nix-builds.yaml") {
+            assert!(workflow.contains("Upload Nix build evidence"));
+            assert!(
+                workflow.contains(&simit::render::ci::github_action_ref(
+                    "actions/upload-artifact",
+                    "v4.6.2"
+                )),
+                "{path}: {workflow}"
+            );
+            assert!(
+                !workflow.contains(&simit::render::ci::github_action_ref(
+                    "actions/upload-artifact",
+                    "v7.0.1"
+                )),
+                "{path}: {workflow}"
+            );
+        }
     }
     assert!(
         simit()

@@ -78,7 +78,9 @@ Windows device names, reserved characters, and trailing dots or spaces are rejec
 before filesystem resolution. Destinations must be files with directory parents;
 validation rejects existing directories, symlinks, portable case-insensitive path
 collisions, and hard-linked aliases of template sources or planned outputs before
-any writes. Portable keys
+any writes. A destination also cannot alias a differently spelled active project
+workflow through portable case/normalization or a hard link; declaring the exact
+existing path retains explicit adoption behavior. Portable keys
 use Unicode canonical normalization and full case folding, so non-ASCII and
 composed/decomposed spellings cannot claim the same output. Existing aliases are
 also checked against the actual filesystem, excluding symlink endpoints from
