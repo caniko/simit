@@ -85,6 +85,7 @@ pub fn run(command: InitCiCommand) -> Result<()> {
         .or(cfg.ci.platform)
         .unwrap_or(Platform::Forgejo);
     let backend = CiBackend::from_parts(provider, platform)?;
+    crate::render::workflow_templates::validate_backend(&cfg.ci, provider, platform)?;
     validate_review_policy_backend(&cfg, platform, provider)?;
     if platform == Platform::Gitlab {
         return run_nix_only(command);
@@ -611,6 +612,7 @@ fn run_pages_only(command: InitCiCommand) -> Result<()> {
     {
         bail!("Pages-only generation requires the Actions provider");
     }
+    crate::render::workflow_templates::validate_backend(&cfg.ci, CiProvider::Actions, platform)?;
     let snapshots = workflow_snapshots_for_platform(&workspace_root, platform)?;
     let inference = CiInference::from_workflows(&snapshots)?;
     let inferred_pages = infer_codeberg_pages_from_workflows(&snapshots)?;
@@ -686,6 +688,7 @@ fn run_nix_only_at(command: InitCiCommand, workspace_root: &Path) -> Result<()> 
         .or(cfg.ci.provider)
         .unwrap_or(CiProvider::Actions);
     let _backend = CiBackend::from_parts(provider, platform)?;
+    crate::render::workflow_templates::validate_backend(&cfg.ci, provider, platform)?;
     validate_review_policy_backend(&cfg, platform, provider)?;
     if provider != CiProvider::Actions {
         bail!("Nix-only CI currently supports the Actions provider only");
@@ -890,6 +893,7 @@ fn run_python(command: InitCiCommand) -> Result<()> {
         return run_nix_only(command);
     }
     let backend = CiBackend::from_parts(provider, platform)?;
+    crate::render::workflow_templates::validate_backend(&cfg.ci, provider, platform)?;
     validate_review_policy_backend(&cfg, platform, provider)?;
     if backend.provider() == CiProvider::Crow {
         return run_crow_python(command, workspace_root, &cfg, platform);
@@ -1327,6 +1331,7 @@ pub(crate) fn workflow_snapshots_for_platform(
     workspace_root: &Path,
     platform: Platform,
 ) -> Result<Vec<WorkflowSnapshot>> {
+    let config = ProjectConfig::load(workspace_root)?;
     let workflow_dir = PathBuf::from(platform.workflow_dir());
     let absolute_dir = workspace_root.join(&workflow_dir);
     let entries = match fs::read_dir(&absolute_dir) {
@@ -1356,6 +1361,11 @@ pub(crate) fn workflow_snapshots_for_platform(
         let content =
             fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
         if generated_workflow_marker_present(&content)
+            && !crate::render::workflow_templates::is_template_output(
+                &config.ci,
+                &workflow_dir.join(entry.file_name()),
+                &content,
+            )
             && is_ci_managed_workflow_name(&entry.file_name())
         {
             snapshots.push(WorkflowSnapshot {
@@ -1468,7 +1478,41 @@ pub(crate) fn project_regeneration_command(workspace_root: &Path) -> Result<Opti
     let forgejo = workflow_snapshots_for_platform(workspace_root, Platform::Forgejo)?;
     let github = workflow_snapshots_for_platform(workspace_root, Platform::Github)?;
     let (platform, snapshots) = match (forgejo.is_empty(), github.is_empty()) {
-        (true, true) => return Ok(None),
+        (true, true) => {
+            let cfg = ProjectConfig::load(workspace_root)?;
+            if cfg.ci.workflow_templates.is_empty() {
+                return Ok(None);
+            }
+            crate::render::workflow_templates::validate_config(&cfg.ci)?;
+            // Template bodies stay outside option inference. Their declared
+            // paths still identify the Actions backend needed to restore all
+            // missing builtins, for Cargo and Nix-only projects alike.
+            let declares = |directory: &str| {
+                cfg.ci
+                    .workflow_templates
+                    .keys()
+                    .any(|output| Path::new(output).parent() == Some(Path::new(directory)))
+            };
+            let platform = match (
+                declares(".forgejo/workflows"),
+                declares(".github/workflows"),
+            ) {
+                (true, false) => Platform::Forgejo,
+                (false, true) => Platform::Github,
+                _ => bail!("mixed workflow template platforms in configuration"),
+            };
+            if cfg
+                .ci
+                .platform
+                .is_some_and(|configured| configured != platform)
+            {
+                bail!("workflow template platform differs from the configured CI platform");
+            }
+            return Ok(Some(format!(
+                "simit init ci --platform {} --ci-provider actions",
+                platform.as_str()
+            )));
+        }
         (false, true) => (Platform::Forgejo, forgejo),
         (true, false) => (Platform::Github, github),
         (false, false) => bail!("mixed generated CI platforms in workflow tree"),
@@ -1930,22 +1974,23 @@ fn reconcile_ci_files(
     check: bool,
     show_diff: bool,
 ) -> Result<()> {
-    if let Some(review) = ProjectConfig::load(workspace_root)?.review.as_ref() {
+    let config = ProjectConfig::load(workspace_root)?;
+    if let Some(review) = config.review.as_ref() {
         files.extend(crate::review::generation::files(review)?);
     }
-    if let Some(policy) = ProjectConfig::load(workspace_root)?.review_policy.as_ref() {
+    if let Some(policy) = config.review_policy.as_ref() {
         files.push(crate::render::review_policy::file(policy)?);
     }
-    let plan = project::GeneratedPlan {
-        files,
-        message,
-        owns_name: is_ci_managed_workflow_name,
-    };
-    if check {
-        plan.check(workspace_root, show_diff)
-    } else {
-        plan.write(workspace_root)
-    }
+    crate::render::workflow_templates::append(workspace_root, &config.ci, &mut files)?;
+    let mut obsolete =
+        project::obsolete_generated_workflows(workspace_root, &files, is_ci_managed_workflow_name)?;
+    obsolete.extend(crate::render::workflow_templates::obsolete(
+        workspace_root,
+        &files,
+    )?);
+    obsolete.sort();
+    obsolete.dedup();
+    project::reconcile_generated_files(workspace_root, &files, &obsolete, message, check, show_diff)
 }
 
 fn validate_review_policy_backend(

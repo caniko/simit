@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Project-owned Actions workflow templates and literal variables, sharing CI
+  generation, configuration persistence, drift checks, and registry ownership.
 - Typed explicit Nixpkgs package/test additions unioned with upstream discovery,
   including empty system mappings, with request-bound package-scoped broken
   warnings and frozen selection/test identity validation.
@@ -28,6 +30,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Exclude tag pushes from installable qualification matrices, retain release
+  workflow triggers, and use current pinned GitHub checkout and evidence-upload
+  actions in focused qualification.
+- Use the branch filter alone for installable qualification so consumers enforcing
+  branch-only CI can validate it without accepting redundant tag filters.
+- Reserve release-owned paths from project templates and keep template contents
+  out of built-in CI inference; qualify durable-branch updates and reject
+  committed generation drift after retaining its evidence.
+- Reserve every release-registry filename, reject generated template sources,
+  include untracked outputs in production parity, and isolate fork qualification
+  concurrency by source repository as well as branch.
+- Reject opposite-platform generated template sources, enforce effective CLI
+  backend constraints in check and write modes, and report missing built-ins as
+  ordinary drift even when only project template outputs remain.
+- Identify template outputs by configured path even after ownership-header edits,
+  and reject case-insensitive collisions with built-ins, releases, or other templates.
+- Require standalone ownership headers in the workflow preamble when retiring
+  generated files; preserve hand-written workflows quoting marker strings in YAML
+  bodies while recognizing moved headers, document separators, and Jsonnet comments.
+- Preserve template retirement through commented YAML document starts and YAML/TAG
+  directives; retain an executable project-audit repair command when only templates
+  remain, without inferring builtin policy from their bodies.
+- Reject control characters, YAML-forbidden BMP noncharacters and Unicode line
+  separators in template source/output paths before writes so ownership comments
+  cannot introduce malformed generated workflows.
+- Keep the default development environment usable when a worktree lacks the
+  optional sibling language-server checkout.
 - Wait for exact crates.io dependency resolution through Cargo after each
   coordinated workspace publication, including checksum-based resumes, before
   starting dependent jobs. Fetch and verify lockfile evidence for library and

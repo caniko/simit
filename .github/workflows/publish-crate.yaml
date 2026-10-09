@@ -24,6 +24,7 @@ jobs:
       NIX_CONFIG: "experimental-features = nix-command flakes"
       XDG_CACHE_HOME: "/tmp/.cache"
       CARGO_HOME: "/tmp/.cargo"
+      CARGO_BUILD_JOBS: "2"
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -32,7 +33,7 @@ jobs:
           persist-credentials: false
 
       - name: Install Nix
-        uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31
+        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
 
       - name: Configure GitHub input transport
         run: |
@@ -104,6 +105,9 @@ jobs:
             echo "Tag $tag does not match Cargo.toml package version $version" >&2
             exit 1
           fi
+
+      - name: Project setup
+        run: printf '%s\n' 'NIX_CONFIG<<SIMIT_NIX_LIMITS' 'experimental-features = nix-command flakes' 'max-jobs = 1' 'cores = 2' 'SIMIT_NIX_LIMITS' >> "$GITHUB_ENV"
 
       - name: Check flake
         run: nix flake check

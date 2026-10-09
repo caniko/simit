@@ -74,6 +74,71 @@ fn nix_format_jobs_are_uncached_across_providers_and_job_layouts() {
 }
 
 #[test]
+fn private_github_runner_generation_preserves_the_compatible_checkout_baseline() {
+    let temp = init_package(true);
+    fs::write(
+        temp.path().join("simit.toml"),
+        "[ci]\nplatform = 'github'\nprovider = 'actions'\nruntime = 'nix'\nrunner = 'private-legacy-linux'\nnix_builds = ['.#default']\n[ci.nix_build]\ncapture_results = true\n",
+    )
+    .unwrap();
+    let result = simit()
+        .current_dir(temp.path())
+        .args(["init", "ci", "--publish-crates"])
+        .output()
+        .unwrap();
+    assert!(result.status.success(), "{result:?}");
+    for path in [
+        ".github/workflows/ci.yaml",
+        ".github/workflows/publish-crate.yaml",
+        ".github/workflows/nix-builds.yaml",
+    ] {
+        let workflow = read(&temp.path().join(path));
+        assert_yaml_parses(&workflow);
+        assert!(
+            workflow.contains("runs-on: private-legacy-linux"),
+            "{path}: {workflow}"
+        );
+        // The pre-template default uses checkout v4's Node20 runtime. Arbitrary
+        // private labels do not attest the Node24 runner minimum of v5-v7.
+        assert!(
+            workflow.contains(
+                "uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1"
+            ),
+            "{path}: {workflow}"
+        );
+        assert!(
+            !workflow.contains("actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"),
+            "{path}: {workflow}"
+        );
+        if path.ends_with("nix-builds.yaml") {
+            assert!(workflow.contains("Upload Nix build evidence"));
+            assert!(
+                workflow.contains(&simit::render::ci::github_action_ref(
+                    "actions/upload-artifact",
+                    "v4.6.2"
+                )),
+                "{path}: {workflow}"
+            );
+            assert!(
+                !workflow.contains(&simit::render::ci::github_action_ref(
+                    "actions/upload-artifact",
+                    "v7.0.1"
+                )),
+                "{path}: {workflow}"
+            );
+        }
+    }
+    assert!(
+        simit()
+            .current_dir(temp.path())
+            .args(["init", "ci", "--publish-crates", "--check", "--diff"])
+            .status()
+            .unwrap()
+            .success()
+    );
+}
+
+#[test]
 fn github_required_gates_have_job_scoped_permissions() {
     let temp = init_package(true);
     fs::write(
@@ -2213,9 +2278,10 @@ fn github_nix_with_om_ci_replace_keeps_install_nix_action() {
     assert!(status.success());
 
     let ci = read(&temp.path().join(".github/workflows/ci.yaml"));
-    assert!(ci.contains(
-        "uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31"
-    ));
+    assert!(ci.contains(&format!(
+        "uses: {}",
+        simit::render::ci::github_action_ref("cachix/install-nix-action", "v31.11.1")
+    )));
     assert!(ci.contains("OMNIX_REF:"));
     assert!(ci.contains("nix run \"$OMNIX_REF\" -- ci run"));
     assert!(!ci.contains("run: nix flake check"));

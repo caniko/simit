@@ -39,6 +39,62 @@ with_msrv = true
 
 ## Generic CI vs Release Publishing
 
+### Project-owned workflow templates
+
+Projects with specialized Actions jobs can render their existing workflow
+templates through Simit alongside its built-in jobs:
+
+```toml
+[ci.workflow_templates]
+".github/workflows/tests.yml" = ".simit/templates/tests.yml"
+
+[ci.workflow_variables]
+runner = "${{ github.event.repository.fork && 'ubuntu-24.04' || 'ubuntu-latest-32-core' }}"
+```
+
+The template uses `@simit(runner)@` where this literal value belongs. Simit
+substitutes named values once, preserving GitHub `${{ ... }}` expressions and
+shell syntax. There are no recursive substitutions or implicit environment
+reads. Undefined variables and malformed rendered YAML fail before any output
+is written. Keep credentials as runtime Actions secret references, never literal
+values in committed templates or configuration.
+
+`simit init ci` renders the declared templates, marks their outputs as generated,
+and persists both mappings and variables. `--check --diff` and registry auditing
+use the same renderer, so edits to outputs, templates, or variables are detected.
+Removing a mapping retires outputs carrying both Simit generation and template
+markers, even when project comments precede those markers; unrelated workflows
+remain project-owned. Built-in and release-owned workflow collisions, paths
+outside the repository, and mismatched Actions platforms are rejected. Template
+contents do not participate in built-in check, package, or runner inference.
+Built-in generated workflows cannot be template sources: templates must remain
+project-owned inputs, rather than snapshots of outputs from an earlier run.
+Keep template sources outside Actions workflow directories, or give them a
+non-workflow extension such as `.yaml.in`, so the source is not itself executed.
+File identity is checked against both Actions workflow directories, so a hard
+link with a project-template spelling cannot duplicate an existing active job.
+Every source and destination component must be portable across supported hosts:
+Windows device names, reserved characters, and trailing dots or spaces are rejected
+before filesystem resolution. Destinations must be files with directory parents;
+validation rejects existing directories, symlinks, portable case-insensitive path
+collisions, and hard-linked aliases of template sources or planned outputs before
+any writes. A destination also cannot alias a differently spelled active project
+workflow through portable case/normalization or a hard link; declaring the exact
+existing path retains explicit adoption behavior. Portable keys
+use Unicode canonical normalization and full case folding, so non-ASCII and
+composed/decomposed spellings cannot claim the same output. Existing aliases are
+also checked against the actual filesystem, excluding symlink endpoints from
+case/normalization alias matching. Generated files replace their own
+directory entries atomically; an unrelated file hard-linked to a destination
+retains its original bytes and file identity. Existing permissions are preserved.
+This feature supports GitHub and Forgejo Actions, including exact-only Nix
+qualification; it does not replace the
+project's test selections or permission policy.
+
+When importing upstream CI, retain its presets in template sources and declare
+fork-specific policy through variables. Apply future upstream changes to those
+sources, then regenerate rather than modifying generated workflow files.
+
 ### Provider-review merge gate
 
 `canix-toolbelt` owns provider review, durable request accounting, and guarded
@@ -247,6 +303,11 @@ policy from the workspace root, including invocations from member directories.
 Select all required Rust checks explicitly as Nix installables in this mode.
 Rust and Python projects can also use the other matrix options alongside their
 ordinary CI.
+
+The installable matrix qualifies branch pushes, pull requests, and explicit
+dispatches. Its push trigger defines only `branches`, which excludes tag pushes
+without a tag filter under GitHub's workflow rules. Channel-specific release
+workflows retain their own triggers and publication policy.
 
 The nested environment and setup apply only to the build matrix. Bind every
 required secret to the same-named variable using `${{ secrets.NAME }}` under

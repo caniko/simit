@@ -17,6 +17,7 @@ include = [
   "/ci-actions.json",
   "/.github/workflows/*.yaml",
   "/.github/workflows/*.yml",
+  "/.simit/workflows/**",
   "/CHANGELOG.md",
   "/LICENSE",
   "/README.md",
@@ -36,6 +37,15 @@ scope = "full"
 [package.metadata.simit.ci]
 platform = "github"
 provider = "actions"
+extra_setup = [
+  "printf '%s\\n' 'NIX_CONFIG<<SIMIT_NIX_LIMITS' 'experimental-features = nix-command flakes' 'max-jobs = 1' 'cores = 2' 'SIMIT_NIX_LIMITS' >> \"$GITHUB_ENV\"",
+]
+
+[package.metadata.simit.ci.extra_env]
+CARGO_BUILD_JOBS = "2"
+
+[package.metadata.simit.ci.workflow_templates]
+".github/workflows/qualify-generator.yaml" = ".simit/workflows/qualify-generator.yaml.in"
 
 [package.metadata.simit.ci.pages]
 repo = "caniko/simit"
@@ -64,6 +74,7 @@ sign = true
 [dependencies]
 anyhow = "1"
 camino = { version = "1", features = ["serde1"] }
+caseless = "0.2.2"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
@@ -72,6 +83,7 @@ directories-next = "2"
 fs2 = "0.4"
 hex = "0.4"
 rnix = "0.12"
+same-file = "1"
 semver = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -79,5 +91,6 @@ serde_yaml = "0.9"
 sha2 = "0.10"
 schemars = "1"
 url = "2"
+unicode-normalization = "0.1.25"
 toml_edit = { version = "0.25", features = ["serde"] }
 tempfile = "3"
