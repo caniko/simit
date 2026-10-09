@@ -387,6 +387,105 @@ pub fn build(plan: &Plan, system: &str, out: &Path) -> Result<PlatformResult> {
     Ok(result)
 }
 
+/// Bind discovery, explicit additions and scoped policy to the frozen request.
+pub fn validate_nixpkgs_selection(plan: &Plan, system: &str, selection: &Value) -> Result<()> {
+    plan.request.validate()?;
+    let pr = plan
+        .pr
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("missing PR"))?;
+    ensure!(
+        plan.request.backend == Backend::Nixpkgs
+            && plan.request.systems.iter().any(|s| s == system)
+            && selection["tested_commit"] == plan.target.commit
+            && selection["base_commit"] == pr.base
+            && selection["system"] == system
+            && selection["backend_version"] == "3.7.0",
+        "Nixpkgs selection identity mismatch"
+    );
+    let additions = plan
+        .request
+        .packages
+        .iter()
+        .chain(&plan.request.checks)
+        .collect::<std::collections::BTreeSet<_>>();
+    let warnings = plan
+        .request
+        .nixpkgs_broken_warnings
+        .iter()
+        .collect::<std::collections::BTreeSet<_>>();
+    for (field, values) in [
+        ("additional_attributes", &additions),
+        ("nixpkgs_broken_warnings", &warnings),
+    ] {
+        // Retain legacy evidence for requests that have no opt-in selections.
+        ensure!(
+            (values.is_empty() && selection.get(field).is_none())
+                || selection[field] == serde_json::json!(values.iter().collect::<Vec<_>>()),
+            "Nixpkgs selection request/policy mismatch: {field}"
+        );
+    }
+    let changed = selection["changed_attributes"]
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("missing changed-package discovery"))?;
+    let selected = selection["derivations"]
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("missing Nixpkgs selection"))?;
+    let covers = |attribute: &str, name: &str| {
+        name == attribute
+            || name
+                .strip_prefix(attribute)
+                .is_some_and(|suffix| suffix.starts_with('.'))
+    };
+    let mut represented = vec![];
+    for item in selected {
+        let attribute = item["attribute"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("missing Nixpkgs attribute"))?;
+        let mut names = vec![attribute];
+        if let Some(aliases) = item.get("aliases") {
+            for alias in aliases
+                .as_array()
+                .ok_or_else(|| anyhow::anyhow!("invalid Nixpkgs aliases"))?
+            {
+                names.push(
+                    alias
+                        .as_str()
+                        .ok_or_else(|| anyhow::anyhow!("invalid Nixpkgs alias"))?,
+                );
+            }
+        }
+        let check = item["check"]
+            .as_bool()
+            .ok_or_else(|| anyhow::anyhow!("missing Nixpkgs check identity"))?;
+        ensure!(
+            check
+                || !plan
+                    .request
+                    .checks
+                    .iter()
+                    .any(|requested| names.iter().any(|name| covers(requested, name))),
+            "explicit Nixpkgs check is not marked as a test"
+        );
+        represented.extend(names);
+    }
+    for attribute in changed.iter().map(|name| name.as_str()) {
+        let attribute =
+            attribute.ok_or_else(|| anyhow::anyhow!("invalid discovered Nixpkgs attribute"))?;
+        ensure!(
+            represented.iter().any(|name| covers(attribute, name)),
+            "discovered Nixpkgs attribute lost from selection"
+        );
+    }
+    for attribute in additions {
+        ensure!(
+            represented.iter().any(|name| covers(attribute, name)),
+            "explicit Nixpkgs attribute lost from selection"
+        );
+    }
+    Ok(())
+}
+
 fn nixpkgs_prepare(plan: &Plan, system: &str, out: &Path) -> Result<EffectivePlan> {
     let pr = plan
         .pr
@@ -420,13 +519,7 @@ fn nixpkgs_prepare(plan: &Plan, system: &str, out: &Path) -> Result<EffectivePla
         Some(&out.join("nixpkgs-selection.log")),
     )?;
     let selection: Value = read_json(&selected_path)?;
-    ensure!(
-        selection["tested_commit"] == plan.target.commit
-            && selection["base_commit"] == pr.base
-            && selection["system"] == system
-            && selection["backend_version"] == "3.7.0",
-        "Nixpkgs selection identity mismatch"
-    );
+    validate_nixpkgs_selection(plan, system, &selection)?;
     let selected = selection["derivations"]
         .as_array()
         .ok_or_else(|| anyhow::anyhow!("missing Nixpkgs selection"))?;

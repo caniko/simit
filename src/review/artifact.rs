@@ -396,18 +396,7 @@ pub fn validate_bundle(plan: &Plan, r: &PlatformResult, path: &Path) -> Result<S
         ensure!(ep == r.effective, "effective plan file mismatch");
         if plan.request.backend == Backend::Nixpkgs {
             let selection: Value = super::read_json(&path.join("nixpkgs-selection.json"))?;
-            ensure!(
-                selection["tested_commit"] == plan.target.commit
-                    && selection["base_commit"]
-                        == plan
-                            .pr
-                            .as_ref()
-                            .ok_or_else(|| anyhow::anyhow!("missing PR"))?
-                            .base
-                    && selection["system"] == r.effective.system
-                    && selection["backend_version"] == "3.7.0",
-                "wrong Nixpkgs selection identity"
-            );
+            backend::validate_nixpkgs_selection(plan, &r.effective.system, &selection)?;
             let selected = selection["derivations"]
                 .as_array()
                 .ok_or_else(|| anyhow::anyhow!("missing selection report"))?;

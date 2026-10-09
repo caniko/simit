@@ -33,7 +33,9 @@ jobs:
               tools = import (simit + "/nix/review-tools.nix") { source = simit; system = "x86_64-linux"; inherit nixpkgs; };
             in {
               packages.x86_64-linux.repo-review = tools.package;
+              packages.x86_64-linux.selector-python = tools.selector.python;
               checks.x86_64-linux.selector = tools.selectorCheck;
+              lib.nixpkgsPath = nixpkgs.outPath;
             };
           }
           EOF
@@ -50,6 +52,12 @@ jobs:
           tools/bin/repo-review verify-engine --root controller-lock
           tools/bin/repo-review engine-info > "$evidence/engine.json"
           nix build path:./controller-lock#checks.x86_64-linux.selector --no-link --no-update-lock-file -L
+      - name: Verify scoped broken warnings through the actual pinned native evaluator
+        run: |
+          set -euo pipefail
+          python_root="$(nix build path:./controller-lock#selector-python --no-link --print-out-paths --no-update-lock-file --max-jobs 1 --cores 2)"
+          nixpkgs_source="$(nix eval --raw path:./controller-lock#lib.nixpkgsPath --no-update-lock-file)"
+          "$python_root/bin/python" tests/fixtures/review-nixpkgs-warning.py src/review/assets/nixpkgs.py "$nixpkgs_source"
       - name: Regenerate controller templates with the exact packaged producer
         run: |
           set -euo pipefail
