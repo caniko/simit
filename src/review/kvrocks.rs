@@ -390,3 +390,68 @@ pub fn bootstrap(plan: &Plan, system: &str, out: &Path) -> Result<BootstrapRecei
     write_json(&out.join("bootstrap.json"), &receipt)?;
     Ok(receipt)
 }
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::MetadataExt;
+
+    #[test]
+    fn failed_runtime_initialization_releases_only_its_pinned_empty_inode() {
+        let root = tempfile::tempdir().unwrap();
+        let metadata = root.path().metadata().unwrap();
+        // Deliberately different from the newly allocated inode. Rollback must
+        // not require an ownership change which the failing setup never made.
+        let identity = WorkerIdentity {
+            user: "fixture".into(),
+            uid: metadata.uid().checked_add(1).unwrap(),
+            group: "fixture".into(),
+            gid: metadata.gid(),
+        };
+        let runtime = root.path().join("runtime");
+        let failed = OwnedRuntime::create_with_setup(&runtime, &identity, |_| {
+            anyhow::bail!("fixture ownership setup failure")
+        });
+        assert!(failed.is_err());
+        assert!(fs::symlink_metadata(&runtime).is_err());
+
+        let failed = OwnedRuntime::create_with_setup(&runtime, &identity, |_| {
+            fs::write(
+                runtime.join("unclaimed"),
+                b"preserve unexpected initialization state",
+            )?;
+            anyhow::bail!("fixture mode setup failure")
+        });
+        assert!(failed.is_err());
+        assert_eq!(
+            fs::read(runtime.join("unclaimed")).unwrap(),
+            b"preserve unexpected initialization state"
+        );
+        fs::remove_file(runtime.join("unclaimed")).unwrap();
+        fs::remove_dir(&runtime).unwrap();
+
+        let retained = root.path().join("retained-allocated-inode");
+        let failed = OwnedRuntime::create_with_setup(&runtime, &identity, |_| {
+            fs::rename(&runtime, &retained)?;
+            fs::create_dir(&runtime)?;
+            fs::write(runtime.join("foreign"), b"preserve replacement inode")?;
+            anyhow::bail!("fixture path replacement during setup failure")
+        });
+        assert!(failed.is_err());
+        assert!(retained.is_dir());
+        assert_eq!(
+            fs::read(runtime.join("foreign")).unwrap(),
+            b"preserve replacement inode"
+        );
+        fs::remove_file(runtime.join("foreign")).unwrap();
+        fs::remove_dir(&runtime).unwrap();
+
+        let own_identity = WorkerIdentity {
+            uid: metadata.uid(),
+            ..identity
+        };
+        let positive = OwnedRuntime::create(&runtime, &own_identity).unwrap();
+        positive.cleanup().unwrap();
+        assert!(fs::symlink_metadata(&runtime).is_err());
+    }
+}
