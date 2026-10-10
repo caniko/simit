@@ -9,15 +9,19 @@ source/publisher workflow identities. The publisher context comes from GitHub's
 workflow context, and the run record must be fetched independently from GitHub.
 Candidate artifacts cannot supply these trust roots.
 
-Admission rejects fork runs, unsuccessful runs, branch dispatches, noncanonical
-semver tags and event/provider drift. Retries retain the original run ID while
+Push binding rejects fork runs, unsuccessful runs, dispatches, noncanonical
+semver head labels and event/provider drift. A native `head_branch` label cannot
+distinguish `refs/tags/1.2.3` from `refs/heads/1.2.3`; `BoundReleasePush` retains
+`source_head_label` and does not claim a tag identity. Independently trusted
+tag-trigger provenance remains a required gate before publication.
+Retries retain the original run ID while
 recording its current attempt. Artifact verification binds opaque archive bytes
 to the native artifact ID, run, repository, source SHA, expiry and SHA-256 digest
 under a trusted byte limit. GitHub artifact metadata does not identify the
 producing attempt; original-run archive reuse must not be described as fresh
 attempt production.
 
-These helpers establish identity admission only. Signed-tag verification, safe
+These helpers establish intermediate push identity only. Signed-tag verification, safe
 archive-member admission, archive-only publication, the protected environment's
 ref restrictions and actual credential enrollment remain separate required
 boundaries. The tag-controlled generator routes are not yet qualified for that

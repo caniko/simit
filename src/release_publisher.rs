@@ -3,8 +3,10 @@
 //! The policy and publisher context must come from the independently trusted
 //! workflow, and `provider_run` from the authenticated GitHub run API. Candidate
 //! artifacts, names, successful checks, or event data cannot supply that policy.
-//! This is admission metadata, not proof of a signed tag or safe credentials;
-//! signature verification and protected environment enrollment remain required.
+//! These native run fields bind a successful push with a semver head label.
+//! They do not distinguish a tag from a same-named branch. Tag-trigger provenance,
+//! signature verification and protected environment enrollment remain required
+//! before this intermediate identity can authorize publication.
 
 use std::io::Read;
 
@@ -69,14 +71,15 @@ pub struct EventRepository {
 
 /// Preserve the original run across retries, with a distinct attempt identity.
 #[derive(Debug, Serialize, PartialEq, Eq)]
-pub struct AdmittedReleaseRun {
+pub struct BoundReleasePush {
     pub source_run_id: u64,
     pub source_run_attempt: u64,
     pub source_workflow_id: u64,
     pub source_workflow_path: String,
     pub repository: String,
     pub source_repository_id: u64,
-    pub tag: String,
+    /// Native head label; never evidence that the original push used a tag ref.
+    pub source_head_label: String,
     pub source_sha: String,
     pub publisher_workflow_ref: String,
     pub publisher_workflow_sha: String,
@@ -116,12 +119,12 @@ pub struct ProviderBoundArtifact {
 /// any downloaded archive. Expected name and byte limit come from trusted policy.
 /// GitHub artifact metadata does not expose run_attempt: recovery may reuse an
 /// immutable artifact from the original run with the same source SHA. This is not
-/// proof that a particular attempt produced it. Signed-tag verification and safe
-/// member admission are still required before credential-bearing publication.
-/// Download endpoints must be constructed from the admitted repository/artifact
+/// proof that a particular attempt produced it. Tag-trigger provenance, signed-tag
+/// verification and safe member admission remain required before publication.
+/// Download endpoints must be constructed from the bound repository/artifact
 /// identity by trusted code, never selected from a candidate-provided URL.
 pub fn verify_release_artifact_archive(
-    run: &AdmittedReleaseRun,
+    run: &BoundReleasePush,
     artifact: &ReleaseArtifact,
     expected_name: &str,
     max_archive_bytes: u64,
@@ -149,7 +152,7 @@ pub fn verify_release_artifact_archive(
             && source.id == run.source_run_id
             && source.repository_id == run.source_repository_id
             && source.head_repository_id == run.source_repository_id
-            && source.head_branch == run.tag
+            && source.head_branch == run.source_head_label
             && source.head_sha == run.source_sha,
         "release artifact does not match the admitted original run and source"
     );
@@ -218,14 +221,16 @@ fn is_workflow_path(value: &str) -> bool {
         && (name.ends_with(".yaml") || name.ends_with(".yml"))
 }
 
-/// Reject failures, fork runs, branch dispatches, stale attempts and source drift
-/// before allowing any candidate checkout or credential-bearing publication.
-pub fn admit_release_run(
+/// Bind a successful original push to the trusted publisher context and native
+/// provider run. The returned intermediate identity cannot establish tag-trigger
+/// provenance: GitHub's run head label can also name a branch. This function does
+/// not authorize a candidate checkout or credential-bearing publication.
+pub fn bind_release_push(
     policy: &PublisherPolicy,
     context: &PublisherContext,
     event: &CompletedRunEvent,
     provider_run: &ReleaseRun,
-) -> Result<AdmittedReleaseRun> {
+) -> Result<BoundReleasePush> {
     let components: Vec<_> = policy.repository.split('/').collect();
     ensure!(
         components.len() == 2
@@ -298,16 +303,16 @@ pub fn admit_release_run(
         version.pre.is_empty()
             && version.build.is_empty()
             && version.to_string() == run.head_branch,
-        "release run must identify an exact numeric semver tag"
+        "release push must have an exact numeric semver head label"
     );
-    Ok(AdmittedReleaseRun {
+    Ok(BoundReleasePush {
         source_run_id: run.id,
         source_run_attempt: run.run_attempt,
         source_workflow_id: run.workflow_id,
         source_workflow_path: run.path.clone(),
         repository: policy.repository.clone(),
         source_repository_id: run.repository.id,
-        tag: run.head_branch.clone(),
+        source_head_label: run.head_branch.clone(),
         source_sha: run.head_sha.clone(),
         publisher_workflow_ref: context.workflow_ref.clone(),
         publisher_workflow_sha: context.workflow_sha.clone(),
@@ -317,6 +322,18 @@ pub fn admit_release_run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn semver_head_label_cannot_be_promoted_to_tag_trigger_provenance() {
+        // A semver-named branch and same-named tag can supply identical native
+        // run fields. This intermediate stage must preserve that limitation.
+        let (policy, context, event) = fixture();
+        let bound = bind_release_push(&policy, &context, &event, &event.workflow_run).unwrap();
+        let record = serde_json::to_value(bound).unwrap();
+        assert_eq!(record["source_head_label"], "1.2.3");
+        assert!(record.get("tag").is_none());
+        assert!(record.get("tag_trigger_verified").is_none());
+    }
 
     fn fixture() -> (PublisherPolicy, PublisherContext, CompletedRunEvent) {
         let policy = PublisherPolicy {
@@ -352,9 +369,9 @@ mod tests {
     #[test]
     fn retries_preserve_original_run_and_distinguish_attempts() {
         let (policy, context, mut event) = fixture();
-        let original = admit_release_run(&policy, &context, &event, &event.workflow_run).unwrap();
+        let original = bind_release_push(&policy, &context, &event, &event.workflow_run).unwrap();
         event.workflow_run.run_attempt = 2;
-        let retry = admit_release_run(&policy, &context, &event, &event.workflow_run).unwrap();
+        let retry = bind_release_push(&policy, &context, &event, &event.workflow_run).unwrap();
         assert_eq!(retry.source_run_id, original.source_run_id);
         assert_eq!(retry.source_sha, original.source_sha);
         assert_eq!(retry.source_run_attempt, 2);
@@ -392,7 +409,7 @@ mod tests {
                 git_ref: git_ref.into(),
                 ..context.clone()
             };
-            assert!(admit_release_run(&policy, &changed, &event, &event.workflow_run).is_err());
+            assert!(bind_release_push(&policy, &changed, &event, &event.workflow_run).is_err());
         }
     }
 
@@ -428,7 +445,7 @@ mod tests {
             let mut changed_event = fixture().2;
             changed_event.workflow_run = serde_json::from_value(changed).unwrap();
             assert!(
-                admit_release_run(
+                bind_release_push(
                     &policy,
                     &context,
                     &changed_event,
@@ -461,15 +478,15 @@ mod tests {
                 ..event.workflow_run.clone()
             },
         ] {
-            assert!(admit_release_run(&policy, &context, &event, &changed).is_err());
+            assert!(bind_release_push(&policy, &context, &event, &changed).is_err());
         }
     }
 
-    fn artifact_fixture() -> (AdmittedReleaseRun, ReleaseArtifact, Vec<u8>) {
+    fn artifact_fixture() -> (BoundReleasePush, ReleaseArtifact, Vec<u8>) {
         use sha2::{Digest, Sha256};
 
         let (policy, context, event) = fixture();
-        let run = admit_release_run(&policy, &context, &event, &event.workflow_run).unwrap();
+        let run = bind_release_push(&policy, &context, &event, &event.workflow_run).unwrap();
         // This layer binds opaque download bytes; ZIP members are checked later.
         let bytes = b"opaque provider archive bytes".to_vec();
         let artifact = serde_json::from_value(serde_json::json!({
@@ -478,7 +495,7 @@ mod tests {
             "workflow_run": {
                 "id": run.source_run_id, "repository_id": run.source_repository_id,
                 "head_repository_id": run.source_repository_id,
-                "head_branch": run.tag, "head_sha": run.source_sha
+                "head_branch": run.source_head_label, "head_sha": run.source_sha
             }
         }))
         .unwrap();
@@ -634,9 +651,9 @@ mod tests {
     fn run_admission_rejects_same_name_with_different_repository_ids() {
         let (policy, context, mut event) = fixture();
         event.workflow_run.head_repository.id += 1;
-        assert!(admit_release_run(&policy, &context, &event, &event.workflow_run).is_err());
+        assert!(bind_release_push(&policy, &context, &event, &event.workflow_run).is_err());
         let (policy, context, mut event) = fixture();
         event.repository.id += 1;
-        assert!(admit_release_run(&policy, &context, &event, &event.workflow_run).is_err());
+        assert!(bind_release_push(&policy, &context, &event, &event.workflow_run).is_err());
     }
 }
