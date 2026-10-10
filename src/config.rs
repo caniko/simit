@@ -555,6 +555,8 @@ impl CiConfig {
 pub struct NixBuildConfig {
     /// Emit just the declared installable matrix, including for language projects.
     pub only: bool,
+    /// Preserve independent push and PR producers instead of coalescing their runs.
+    pub separate_events: bool,
     pub timeout_minutes: Option<u64>,
     pub max_parallel: Option<u64>,
     pub max_jobs: Option<u64>,
@@ -3560,6 +3562,7 @@ fn set_nix_build_table(table: &mut Table, options: &NixBuildConfig) {
     let mut build = Table::new();
     build.set_implicit(false);
     set_bool(&mut build, "only", options.only);
+    set_bool(&mut build, "separate_events", options.separate_events);
     set_bool(&mut build, "kvm", options.kvm);
     set_bool(&mut build, "capture_results", options.capture_results);
     for (name, number) in [

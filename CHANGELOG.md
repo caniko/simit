@@ -15,6 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Opt-in `[ci.nix_build].separate_events` for independent push and pull-request
+  qualification without cross-event cancellation; ordinary coalescing remains
+  the default.
 - Project-owned Actions workflow templates and literal variables, sharing CI
   generation, configuration persistence, drift checks, and registry ownership.
 - Typed explicit Nixpkgs package/test additions unioned with upstream discovery,
