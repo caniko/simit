@@ -344,6 +344,13 @@ the earlier build failure. Both post-build command lists require
 
 Omitting `[ci.nix_build]` preserves the existing generated matrix defaults.
 
+Configured matrices normally coalesce a branch push with its pull request. Set
+`[ci.nix_build].separate_events = true` when acceptance requires both original
+producers: the concurrency group then includes the workflow ref and event name,
+so a PR cannot cancel its corresponding push. Newer revisions still supersede
+older runs within each event stream. Retain cancelled predecessors as failures;
+their receipts cannot substitute for either required successful producer.
+
 ## Required Integration Gates
 
 Project-owned custom flakes declare additional required gates without
