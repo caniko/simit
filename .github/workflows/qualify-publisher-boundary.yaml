@@ -1,0 +1,58 @@
+# Project-owned provider-free qualification of the independent publisher admission.
+name: Qualify publisher boundary
+
+on:
+  push:
+    branches: [fix/trusted-publisher-boundary]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publisher-boundary-${{ github.event_name }}-${{ github.event.pull_request.head.sha || github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  qualify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      NIX_CONFIG: |
+        experimental-features = nix-command flakes
+        max-jobs = 1
+        cores = 2
+      CARGO_BUILD_JOBS: "2"
+      SOURCE_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31
+      - name: Retain source and exercise publisher admission without credentials
+        run: |
+          set -euo pipefail
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$GITHUB_RUN_ATTEMPT" = 1
+          test "$(git rev-parse HEAD)" = "$SOURCE_HEAD"
+          EVIDENCE="$RUNNER_TEMP/publisher-boundary"
+          mkdir -p "$EVIDENCE"
+          git rev-parse HEAD > "$EVIDENCE/revision"
+          git rev-parse 'HEAD^{tree}' > "$EVIDENCE/tree"
+          git ls-files -z | sort -z | sed -z 's|^|./|' | xargs -0 sha256sum -- > "$EVIDENCE/source.sha256"
+          git config --global --add url.https://github.com/.insteadOf ssh://git@github.com/
+          git config --global --add url.https://github.com/.insteadOf git@github.com:
+          nix develop --max-jobs 1 --cores 2 -c cargo test --locked --lib release_publisher::tests 2>&1 | tee "$EVIDENCE/admission.log"
+      - name: Retain candidate credential-boundary regressions
+        run: |
+          set -euo pipefail
+          nix develop --max-jobs 1 --cores 2 -c cargo test --locked --test trusted_crate_publisher 2>&1 | tee "$RUNNER_TEMP/publisher-boundary/credential-boundary.log"
+      - name: Retain original qualification, including failed candidates
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: publisher-boundary-${{ github.event_name }}-${{ github.event.pull_request.head.sha || github.sha }}-${{ github.run_attempt }}
+          retention-days: 32
+          if-no-files-found: error
+          path: ${{ runner.temp }}/publisher-boundary/

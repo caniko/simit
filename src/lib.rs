@@ -32,6 +32,8 @@ pub mod python;
 pub mod readme_badges;
 /// Per-user registry of projects simit has acted on.
 pub mod registry;
+/// Independent default-branch publisher event and provider identity binding.
+pub mod release_publisher;
 /// Release maintainer trust-root discovery and validation.
 pub mod release_trust;
 /// Renderers for generated support files.
