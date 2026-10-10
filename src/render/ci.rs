@@ -1014,7 +1014,9 @@ pub fn nix_build_matrix_file_with_options(
     if platform == Platform::Github {
         workflow.push_str("permissions:\n  contents: read\n\n");
     }
-    if platform == Platform::Github && *options != crate::config::NixBuildConfig::default() {
+    if platform == Platform::Github && options.separate_events {
+        push_github_concurrency(&mut workflow);
+    } else if platform == Platform::Github && *options != crate::config::NixBuildConfig::default() {
         // Coalesce one repository's push/PR branch without canceling unrelated
         // forks that happen to use the same short branch name.
         workflow.push_str("concurrency:\n  group: ${{ github.workflow }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event.pull_request.head.ref || github.ref_name }}\n  cancel-in-progress: true\n\n");
