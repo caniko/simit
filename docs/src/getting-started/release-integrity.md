@@ -84,6 +84,12 @@ The publisher checks the native repository, workflow ID/path, original run and
 attempt, provider artifact SHA-256, default-branch keyring and maintainer-signed
 tag/source. It reconstructs package contents with isolated Cargo configuration
 and `cargo package --no-verify`, then compares every member before API upload.
+Reconstruction explicitly selects crates.io and uses a neutral filesystem-root
+working directory with absolute manifest/target paths and private `HOME` /
+`CARGO_HOME`. Cargo therefore does not inherit a candidate configuration or a
+Nix build directory's ancestor vendor replacement, which would hide coordinated
+unpublished workspace dependencies. This remains data-only packaging; candidate
+build scripts and credential providers are not executed.
 Member paths, permission modes and source/original-manifest bytes must match.
 Generated `Cargo.toml` and `Cargo.lock` compare as typed TOML, preserving manifest
 fields and the complete dependency/checksum graph while tolerating Cargo-version

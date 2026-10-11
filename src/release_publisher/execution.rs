@@ -460,13 +460,30 @@ fn write_verified_member(output: &Path, member: &CrateMember) -> Result<()> {
 }
 
 fn reconstruction_command(state: &Path, source: &Path, packages: &[String]) -> Result<Command> {
+    ensure!(
+        state.is_absolute() && source.is_absolute(),
+        "reconstruction requires absolute isolated paths"
+    );
     let mut cargo = data_command("cargo", state)?;
+    // Cargo searches .cargo/config in cwd and every ancestor, even with an
+    // explicit manifest path. A Nix /build ancestor can replace crates.io with
+    // a vendor directory, hiding coordinated unpublished workspace packages.
+    // Use a neutral filesystem-root cwd; all source/state paths stay explicit
+    // and HOME/CARGO_HOME remain private. Candidate configuration stays unread.
+    cargo.current_dir(
+        state
+            .ancestors()
+            .last()
+            .context("publisher state has no root")?,
+    );
     cargo
         .args([
             "package",
             "--locked",
             "--no-verify",
             "--allow-dirty",
+            "--registry",
+            "crates-io",
             "--manifest-path",
         ])
         .arg(source.join("Cargo.toml"));
@@ -988,6 +1005,15 @@ mod tests {
 
     #[test]
     fn real_cargo_reconstruction_is_data_only_and_packages_unpublished_workspace_dependencies() {
+        assert_data_only_workspace_reconstruction(false);
+    }
+
+    #[test]
+    fn real_cargo_reconstruction_supports_directory_source_replacement_in_packaged_gates() {
+        assert_data_only_workspace_reconstruction(true);
+    }
+
+    fn assert_data_only_workspace_reconstruction(directory_source: bool) {
         let state = TempDir::new().unwrap();
         for directory in [
             "home",
@@ -1035,6 +1061,13 @@ mod tests {
                 .arg(source.join("Cargo.toml")),
         )
         .unwrap();
+        if directory_source {
+            // buildRustPackage supplies this trusted source shape. It must not
+            // change the reconstruction registry or execute candidate config.
+            fs::create_dir(state.path().join(".cargo")).unwrap();
+            fs::create_dir(state.path().join("vendor")).unwrap();
+            fs::write(state.path().join(".cargo/config.toml"), format!("[source.crates-io]\nreplace-with='qualification-vendor'\n[source.qualification-vendor]\ndirectory={:?}\n", state.path().join("vendor"))).unwrap();
+        }
         let reconstruction = reconstruction_command(
             state.path(),
             &source,
