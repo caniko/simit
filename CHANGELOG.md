@@ -43,6 +43,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Isolate multi-system Nix flake-check concurrency by source repository so forks
+  with matching branch names cannot cancel each other's qualification, while
+  retaining same-repository push/PR coalescing.
 - Exclude tag pushes from installable qualification matrices, retain release
   workflow triggers, and use current pinned GitHub checkout and evidence-upload
   actions in focused qualification.
