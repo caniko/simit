@@ -87,7 +87,7 @@ hex = "0.4"
 reqwest = { version = "0.12", default-features = false, features = [
   "blocking",
   "json",
-  "rustls-tls",
+  "native-tls-vendored",
 ] }
 rnix = "0.12"
 same-file = "1"

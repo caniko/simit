@@ -2763,11 +2763,14 @@ fn publish_workflow(
         "# Before creating and pushing a release tag, run `simit changelog release <version>` locally.\n",
     );
     push_release_security_header(&mut workflow, false);
-    workflow.push_str(if platform == Platform::Github {
-        "name: Build Crate\n\n"
+    if platform == Platform::Github {
+        workflow.push_str(&format!(
+            "name: \"{}\"\n\n",
+            yaml_double_quote(&trusted_publisher::crate_build_display(&package.name))
+        ));
     } else {
-        "name: Publish Crate\n\n"
-    });
+        workflow.push_str("name: Publish Crate\n\n");
+    }
     if platform == Platform::Github {
         workflow.push_str(github_crate_publish_triggers());
     } else {
@@ -2775,8 +2778,7 @@ fn publish_workflow(
         workflow.push_str("on:\n  workflow_dispatch:\n\n");
     }
     if platform == Platform::Github {
-        // Per-crate workflows all display as "Publish Crate". Include the
-        // workflow path in the key so a tag starts every crate publisher;
+        // Include the workflow path so a tag starts every crate build;
         // serialize retries instead of cancelling a publication mid-upload.
         workflow.push_str("concurrency:\n  group: ${{ github.workflow_ref }}-${{ github.ref }}\n  cancel-in-progress: false\n\n");
     } else {
@@ -2784,7 +2786,11 @@ fn publish_workflow(
     }
     workflow.push_str("jobs:\n");
     workflow.push_str("  publish:\n");
-    push_release_permissions(&mut workflow, platform);
+    if platform == Platform::Github {
+        push_job_github_read_permissions(&mut workflow, platform);
+    } else {
+        push_release_permissions(&mut workflow, platform);
+    }
     workflow.push_str("    runs-on: ");
     workflow.push_str(&runs_on(runner));
     workflow.push('\n');

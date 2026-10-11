@@ -19,6 +19,7 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
         || command.source_workflow.is_some()
         || command.publisher_workflow.is_some()
         || command.publisher_output.is_some()
+        || !command.reconstruct_packages.is_empty()
     {
         bail!("publisher arguments require `simit release publisher`");
     }

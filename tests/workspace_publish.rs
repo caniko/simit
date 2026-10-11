@@ -248,8 +248,9 @@ timeout_minutes = 30
     // Signed-tag + trust-root gating preserved (never disabled when missing).
     assert!(publish.contains("git verify-tag \"$tag\""));
     assert!(publish.contains("test -s \"$GNUPGHOME/maintainers.gpg\""));
-    assert!(publish.contains("$target_dir/package/a-$version.crate"));
-    assert!(publish.contains("cargo metadata --locked --no-deps --format-version 1"));
+    assert!(publish.contains("$RUNNER_TEMP/simit-package-target/package/a-$version.crate"));
+    assert!(publish.contains("--target-dir \"$RUNNER_TEMP/simit-package-target\""));
+    assert!(!publish.contains(" | jq"));
     // Lockstep validation for every publishable member.
     assert!(publish.contains("cargo pkgid --locked -p a"));
     assert!(publish.contains("cargo pkgid --locked -p d"));

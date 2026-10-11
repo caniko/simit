@@ -80,6 +80,13 @@ fn assert_trusted_credential_boundary(mode: &str) {
         let workflow: Value = serde_yaml::from_str(&text).unwrap();
         if workflow["on"]["push"]["tags"].is_sequence() {
             signed_tag_routes += 1;
+            assert!(workflow["permissions"]["id-token"].is_null());
+            for job in workflow["jobs"].as_mapping().unwrap().values() {
+                assert!(
+                    job["permissions"]["id-token"].is_null(),
+                    "tag builds must not mint OIDC credentials"
+                );
+            }
             // GitHub loads a tag-push workflow from that tag. A writer can
             // remove every signature check from that definition; credentials
             // therefore belong to the independently trusted default-branch
@@ -132,4 +139,79 @@ fn member_publish_credentials_are_outside_the_tag_controlled_workflow() {
 #[test]
 fn coordinated_credentials_are_outside_the_tag_controlled_workflow() {
     assert_trusted_credential_boundary("coordinated");
+}
+
+#[test]
+fn member_completion_triggers_only_its_paired_trusted_publisher() {
+    let temp = publisher_project("members");
+    let directory = temp.path().join(".github/workflows");
+    let mut names = std::collections::BTreeSet::new();
+    for member in ["publisher-demo", "publisher-dependent"] {
+        let source: Value = serde_yaml::from_str(
+            &fs::read_to_string(directory.join(format!("publish-crate-{member}.yaml"))).unwrap(),
+        )
+        .unwrap();
+        let trusted: Value = serde_yaml::from_str(
+            &fs::read_to_string(directory.join(format!("trusted-publish-crate-{member}.yaml")))
+                .unwrap(),
+        )
+        .unwrap();
+        let name = source["name"].as_str().unwrap();
+        assert!(
+            names.insert(name.to_owned()),
+            "member build display names must be unique"
+        );
+        assert_eq!(
+            trusted["on"]["workflow_run"]["workflows"][0].as_str(),
+            Some(name)
+        );
+    }
+}
+
+#[test]
+fn retained_archive_builds_use_an_explicit_target_directory_without_jq() {
+    for mode in ["single", "members", "coordinated"] {
+        let temp = publisher_project(mode);
+        for entry in fs::read_dir(temp.path().join(".github/workflows")).unwrap() {
+            let path = entry.unwrap().path();
+            if !path
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("publish-")
+            {
+                continue;
+            }
+            let text = fs::read_to_string(path).unwrap();
+            assert!(
+                !text.contains(" | jq"),
+                "source archive route cannot assume jq is installed"
+            );
+            assert!(text.contains("--target-dir \"$RUNNER_TEMP/simit-package-target\""));
+            assert!(text.contains("$RUNNER_TEMP/simit-package-target/package/"));
+        }
+    }
+}
+
+#[test]
+fn publisher_dry_run_is_rejected_before_provider_or_registry_access() {
+    let result = common::simit()
+        .args([
+            "release",
+            "publisher",
+            "--publisher-stage",
+            "publish",
+            "--package",
+            "publisher-demo",
+            "--dry-run",
+        ])
+        .env_remove("GITHUB_REPOSITORY")
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(
+        stderr.contains("--dry-run is not supported for the trusted publisher"),
+        "{stderr}"
+    );
 }

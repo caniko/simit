@@ -93,6 +93,10 @@ fn api_json(client: &Client, token: &str, path: &str) -> Result<Value> {
 }
 
 pub fn run(command: ReleaseCommand) -> Result<()> {
+    ensure!(
+        !command.dry_run,
+        "--dry-run is not supported for the trusted publisher; use --publisher-stage prepare for credential-free verification"
+    );
     let stage = command
         .publisher_stage
         .context("--publisher-stage is required")?;
@@ -361,7 +365,11 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
     // and HOME/CARGO_HOME are fresh; env_clear removes wrappers, credential
     // providers, aliases, tokens and injected compiler flags. --no-verify never
     // compiles or runs a candidate build script. No Nix expression is evaluated.
-    reconstruct_packages(state.path(), &source, &reconstruction)?;
+    output(&mut reconstruction_command(
+        state.path(),
+        &source,
+        &reconstruction,
+    )?)?;
     let reconstructed = fs::read(
         state
             .path()
@@ -439,7 +447,7 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
     Ok(())
 }
 
-fn reconstruct_packages(state: &Path, source: &Path, packages: &[String]) -> Result<()> {
+fn reconstruction_command(state: &Path, source: &Path, packages: &[String]) -> Result<Command> {
     let mut cargo = data_command("cargo", state)?;
     cargo
         .args([
@@ -453,8 +461,7 @@ fn reconstruct_packages(state: &Path, source: &Path, packages: &[String]) -> Res
     for package in packages {
         cargo.args(["--package", package]);
     }
-    output(&mut cargo)?;
-    Ok(())
+    Ok(cargo)
 }
 
 fn string_array(item: Option<&toml_edit::Item>) -> Vec<String> {
@@ -945,13 +952,17 @@ mod tests {
                 .arg(source.join("Cargo.toml")),
         )
         .unwrap();
-        reconstruct_packages(
-            state.path(),
-            &source,
-            &[
-                "simit-admission-unpublished-a".into(),
-                "simit-admission-unpublished-b".into(),
-            ],
+        output(
+            reconstruction_command(
+                state.path(),
+                &source,
+                &[
+                    "simit-admission-unpublished-a".into(),
+                    "simit-admission-unpublished-b".into(),
+                ],
+            )
+            .unwrap()
+            .arg("--offline"),
         )
         .unwrap();
         let root = "simit-admission-unpublished-b-0.1.0";

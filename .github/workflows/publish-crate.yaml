@@ -2,7 +2,7 @@
 # Before creating and pushing a release tag, run `simit changelog release <version>` locally.
 # Required release trust roots and secrets:
 # - keys/maintainers.gpg: pinned maintainer OpenPGP public keys for git verify-tag.
-name: Build Crate
+name: "Build Crate simit"
 
 # GitHub crates.io publishers run only on signed semver tag pushes. Retry the original run rather than dispatching a branch.
 on:
@@ -18,7 +18,6 @@ jobs:
   publish:
     permissions:
       contents: read
-      id-token: write
     runs-on: ubuntu-latest
     env:
       NIX_CONFIG: "experimental-features = nix-command flakes"
@@ -129,10 +128,9 @@ jobs:
           set -euo pipefail
           version="${GITHUB_REF_NAME}"
           test "$(nix develop -c cargo pkgid --locked -p simit | awk -F'[#@]' 'NF > 1 {print $NF}' | tail -n 1)" = "$version"
-          nix develop -c cargo package --locked --allow-dirty --no-verify -p simit
-          target_dir="$(nix develop -c cargo metadata --locked --no-deps --format-version 1 | jq -er '.target_directory')"
+          nix develop -c cargo package --locked --allow-dirty --no-verify -p simit --target-dir "$RUNNER_TEMP/simit-package-target"
           mkdir -p "$RUNNER_TEMP/simit-crates/simit"
-          cp "$target_dir/package/simit-$version.crate" "$RUNNER_TEMP/simit-crates/simit/"
+          cp "$RUNNER_TEMP/simit-package-target/package/simit-$version.crate" "$RUNNER_TEMP/simit-crates/simit/"
       - name: Retain original-run archive simit
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:

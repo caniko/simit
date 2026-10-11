@@ -7,7 +7,7 @@ name: Trusted Crate Publisher
 
 on:
   workflow_run:
-    workflows: ["Build Crate"]
+    workflows: ["Build Crate simit"]
     types: [completed]
 
 permissions:

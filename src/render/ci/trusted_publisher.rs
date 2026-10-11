@@ -2,6 +2,10 @@
 
 use super::*;
 
+pub(super) fn crate_build_display(name: &str) -> String {
+    format!("Build Crate {name}")
+}
+
 pub(super) fn archive_steps(name: &str, runtime: Runtime) -> String {
     archive_steps_with_packaging(name, runtime, true)
 }
@@ -10,12 +14,14 @@ fn archive_steps_with_packaging(name: &str, runtime: Runtime, package: bool) -> 
     let prefix = command_prefix(runtime);
     let quoted = shell_word(name);
     let packaging = if package {
-        format!("          {prefix}cargo package --locked --allow-dirty --no-verify -p {quoted}\n")
+        format!(
+            "          {prefix}cargo package --locked --allow-dirty --no-verify -p {quoted} --target-dir \"$RUNNER_TEMP/simit-package-target\"\n"
+        )
     } else {
         String::new()
     };
     let mut w = format!(
-        "      - name: Build immutable archive {name}\n        run: |\n          set -euo pipefail\n          version=\"${{GITHUB_REF_NAME}}\"\n          test \"$({prefix}cargo pkgid --locked -p {quoted} | awk -F'[#@]' 'NF > 1 {{print $NF}}' | tail -n 1)\" = \"$version\"\n{packaging}          target_dir=\"$({prefix}cargo metadata --locked --no-deps --format-version 1 | jq -er '.target_directory')\"\n          mkdir -p \"$RUNNER_TEMP/simit-crates/{name}\"\n          cp \"$target_dir/package/{name}-$version.crate\" \"$RUNNER_TEMP/simit-crates/{name}/\"\n"
+        "      - name: Build immutable archive {name}\n        run: |\n          set -euo pipefail\n          version=\"${{GITHUB_REF_NAME}}\"\n          test \"$({prefix}cargo pkgid --locked -p {quoted} | awk -F'[#@]' 'NF > 1 {{print $NF}}' | tail -n 1)\" = \"$version\"\n{packaging}          mkdir -p \"$RUNNER_TEMP/simit-crates/{name}\"\n          cp \"$RUNNER_TEMP/simit-package-target/package/{name}-$version.crate\" \"$RUNNER_TEMP/simit-crates/{name}/\"\n"
     );
     w.push_str(&format!(
         "      - name: Retain original-run archive {name}\n"
@@ -109,7 +115,7 @@ pub(super) fn source_workflow(
         .iter()
         .map(|name| format!(" -p {}", shell_word(name)))
         .collect::<String>();
-    w.push_str(&format!("      - name: Package coordinated release set\n        run: {}cargo package --locked --allow-dirty --no-verify{selection}\n", command_prefix(runtime)));
+    w.push_str(&format!("      - name: Package coordinated release set\n        run: {}cargo package --locked --allow-dirty --no-verify{selection} --target-dir \"$RUNNER_TEMP/simit-package-target\"\n", command_prefix(runtime)));
     for name in names {
         w.push_str(&archive_steps_with_packaging(name, runtime, false));
     }
@@ -139,14 +145,14 @@ pub(super) fn publisher_file(
     let publisher_name = format!("trusted-{source_name}");
     let publisher_path = PathBuf::from(".github/workflows").join(&publisher_name);
     let source_display = if workspace {
-        "Build Workspace Crates"
+        "Build Workspace Crates".to_owned()
     } else {
-        "Build Crate"
+        crate_build_display(&plan[0].0)
     };
     let mut w = String::new();
     push_generated_workflow_header(&mut w);
     w.push_str("# Enroll only after moving CRATES_IO_API_TOKEN into the literal environment below,\n# restricting it to the exact protected default branch, and qualifying the engine revision.\n# Tag-controlled workflows must have no repository/org publishing credential.\n# Recovery: rerun the original signed-tag run; matching immutable archives remain reusable.\nname: Trusted Crate Publisher\n\non:\n  workflow_run:\n    workflows: [");
-    w.push_str(&format!("\"{}\"", yaml_double_quote(source_display)));
+    w.push_str(&format!("\"{}\"", yaml_double_quote(&source_display)));
     w.push_str("]\n    types: [completed]\n\npermissions:\n  contents: read\n  actions: read\n\nconcurrency:\n  group: simit-crates-${{ github.event.workflow_run.id }}\n  cancel-in-progress: false\n\njobs:\n");
     let mut previous: Option<String> = None;
     let reconstruction = plan
