@@ -861,6 +861,7 @@ fn is_supplementary_workflow(file: &WorkflowFile) -> bool {
             | "review-policy.yaml"
             | "review-compatibility.yml"
             | "qualify-release-generator.yaml"
+            | "qualify-publisher-boundary.yaml"
             | "credential-visibility.yaml"
             | "pages.yml"
             | "pages.yaml"
