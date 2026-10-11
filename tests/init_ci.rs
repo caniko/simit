@@ -901,7 +901,10 @@ runtime = "nix"
             .unwrap()
             .success()
     );
-    assert_eq!(workflow, read(&temp.path().join(".github/workflows/ci.yaml")));
+    assert_eq!(
+        workflow,
+        read(&temp.path().join(".github/workflows/ci.yaml"))
+    );
     assert_eq!(
         simit::registry::audit_ci(temp.path()).unwrap().status,
         simit::registry::FeatureStatus::Managed
