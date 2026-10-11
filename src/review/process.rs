@@ -44,7 +44,45 @@ pub fn run(
     run_command(command(program, args, cwd), log)
 }
 
-pub fn run_command(mut c: Command, log: Option<&Path>) -> Result<String> {
+#[derive(Clone, Copy)]
+pub struct CommandLimits {
+    pub timeout: Duration,
+    pub stdout_bytes: u64,
+    pub stderr_bytes: u64,
+}
+
+pub fn run_command(c: Command, log: Option<&Path>) -> Result<String> {
+    let program = c.get_program().to_string_lossy().into_owned();
+    let timeout = if program == "gh" {
+        60
+    } else if program == "git" {
+        300
+    } else {
+        2100
+    };
+    run_command_with_limits(
+        c,
+        log,
+        CommandLimits {
+            timeout: Duration::from_secs(timeout),
+            stdout_bytes: 16 * 1024 * 1024,
+            stderr_bytes: 64 * 1024 * 1024,
+        },
+    )
+}
+
+pub fn run_command_with_limits(
+    mut c: Command,
+    log: Option<&Path>,
+    limits: CommandLimits,
+) -> Result<String> {
+    ensure!(
+        !limits.timeout.is_zero() && limits.stdout_bytes > 0 && limits.stderr_bytes > 0,
+        "process limits must be positive"
+    );
+    let deadline = Instant::now()
+        .checked_add(limits.timeout)
+        .context("process deadline exceeds the monotonic clock")?;
     let program = c.get_program().to_string_lossy().into_owned();
     let mut stdout = tempfile::tempfile()?;
     let stderr = if let Some(p) = log {
@@ -57,21 +95,13 @@ pub fn run_command(mut c: Command, log: Option<&Path>) -> Result<String> {
     let mut child = c
         .spawn()
         .with_context(|| format!("cannot start {program}"))?;
-    let timeout = if program == "gh" {
-        60
-    } else if program == "git" {
-        300
-    } else {
-        2100
-    };
-    let deadline = Instant::now() + Duration::from_secs(timeout);
     let status = loop {
         if let Some(status) = child.try_wait()? {
             break status;
         }
         if Instant::now() >= deadline
-            || stdout.metadata()?.len() > 16 * 1024 * 1024
-            || stderr.metadata()?.len() > 64 * 1024 * 1024
+            || stdout.metadata()?.len() > limits.stdout_bytes
+            || stderr.metadata()?.len() > limits.stderr_bytes
         {
             let _ = child.kill();
             let _ = child.wait();
@@ -86,7 +116,8 @@ pub fn run_command(mut c: Command, log: Option<&Path>) -> Result<String> {
         status.code()
     );
     ensure!(
-        stdout.metadata()?.len() <= 16 * 1024 * 1024,
+        stdout.metadata()?.len() <= limits.stdout_bytes
+            && stderr.metadata()?.len() <= limits.stderr_bytes,
         "tool output too large"
     );
     stdout.rewind()?;
@@ -126,4 +157,58 @@ pub fn nix_args(values: &[&str]) -> Vec<String> {
         "false",
     ]));
     a
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    fn limits() -> CommandLimits {
+        CommandLimits {
+            timeout: Duration::from_secs(2),
+            stdout_bytes: 64,
+            stderr_bytes: 64,
+        }
+    }
+
+    #[test]
+    fn account_process_bounds_reject_completed_stdout_and_stderr_overflow() {
+        for script in ["printf '%080d' 0", "printf '%080d' 0 >&2"] {
+            let result = run_command_with_limits(
+                command("/bin/sh", &args(&["-c", script]), None),
+                None,
+                limits(),
+            );
+            assert!(result.is_err(), "accepted oversized tool output: {script}");
+        }
+        assert_eq!(
+            run_command_with_limits(
+                command("/bin/sh", &args(&["-c", "printf '1001\\n'"]), None),
+                None,
+                limits(),
+            )
+            .unwrap(),
+            "1001\n"
+        );
+    }
+
+    #[test]
+    fn account_process_deadline_terminates_a_stalled_lookup() {
+        let start = Instant::now();
+        let result = run_command_with_limits(
+            command("/bin/sh", &args(&["-c", "exec sleep 30"]), None),
+            None,
+            CommandLimits {
+                timeout: Duration::from_millis(50),
+                ..limits()
+            },
+        );
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("time/output limits")
+        );
+        assert!(start.elapsed() < Duration::from_secs(2));
+    }
 }

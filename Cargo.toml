@@ -104,3 +104,7 @@ toml_edit = { version = "0.25", features = ["serde"] }
 tempfile = "3"
 tar = "0.4"
 zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+signal-hook = "0.3.18"
+socket2 = "0.6.1"

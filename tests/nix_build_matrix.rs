@@ -40,6 +40,36 @@ fn workflow(temp: &TempDir) -> Value {
 }
 
 #[test]
+fn independent_nix_producer_events_survive_regeneration_without_cancelling_each_other() {
+    let temp =
+        project("[ci.nix_build]\nonly = true\ncapture_results = true\nseparate_events = true");
+    let output = generate(&temp, &[]);
+    assert!(output.status.success(), "{output:?}");
+    let value = workflow(&temp);
+    assert_eq!(
+        value["concurrency"]["group"],
+        "${{ github.workflow_ref }}-${{ github.event_name }}-${{ github.head_ref || github.ref_name }}"
+    );
+    assert_eq!(value["concurrency"]["cancel-in-progress"], true);
+    assert!(
+        fs::read_to_string(temp.path().join("simit.toml"))
+            .unwrap()
+            .contains("separate_events = true")
+    );
+    let original = fs::read(temp.path().join(".github/workflows/nix-builds.yaml")).unwrap();
+    assert!(generate(&temp, &["--check", "--diff"]).status.success());
+    assert!(generate(&temp, &[]).status.success());
+    assert_eq!(
+        original,
+        fs::read(temp.path().join(".github/workflows/nix-builds.yaml")).unwrap()
+    );
+    assert_eq!(
+        simit::registry::audit_ci(temp.path()).unwrap().status,
+        simit::registry::FeatureStatus::Managed
+    );
+}
+
+#[test]
 fn nix_matrix_qualifies_branch_pushes_and_pull_requests_without_tag_releases() {
     for options in ["", "[ci.nix_build]\nonly = true\ncapture_results = true"] {
         let temp = project(options);
