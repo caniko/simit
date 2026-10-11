@@ -217,6 +217,68 @@ fn publisher_dry_run_is_rejected_before_provider_or_registry_access() {
 }
 
 #[test]
+fn trusted_nix_gates_provision_runtime_before_execution_without_upload_credentials() {
+    for mode in ["single", "members", "coordinated"] {
+        let temp = publisher_project(mode);
+        let mut policy: toml_edit::DocumentMut = fs::read_to_string(temp.path().join("simit.toml"))
+            .unwrap()
+            .parse()
+            .unwrap();
+        policy["ci"]["runtime"] = toml_edit::value("nix");
+        fs::write(temp.path().join("flake.nix"), "{ outputs = _: {}; }\n").unwrap();
+        fs::write(temp.path().join("simit.toml"), format!("{policy}\n[[ci.required_gates]]\nid='nix-integration'\nrun='nix run .#test-gel'\ntimeout_minutes=30\n")).unwrap();
+        let output = common::simit()
+            .current_dir(temp.path())
+            .args(["init", "ci"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        for entry in fs::read_dir(temp.path().join(".github/workflows")).unwrap() {
+            let path = entry.unwrap().path();
+            if !path
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("trusted-publish-")
+            {
+                continue;
+            }
+            let text = fs::read_to_string(path).unwrap();
+            let workflow: Value = serde_yaml::from_str(&text).unwrap();
+            for (name, job) in workflow["jobs"].as_mapping().unwrap() {
+                if !name.as_str().unwrap().starts_with("verify-") {
+                    continue;
+                }
+                let steps = job["steps"].as_sequence().unwrap();
+                let install = steps
+                    .iter()
+                    .position(|step| {
+                        step["uses"]
+                            .as_str()
+                            .is_some_and(|uses| uses.starts_with("cachix/install-nix-action@"))
+                    })
+                    .expect("credential-free Nix gates need a provisioned Nix runtime");
+                let gate = steps
+                    .iter()
+                    .position(|step| step["name"] == "Required gate nix-integration")
+                    .unwrap();
+                assert!(install < gate);
+                assert!(job["environment"].is_null());
+                assert!(
+                    steps
+                        .iter()
+                        .all(|step| step["env"]["CRATES_IO_API_TOKEN"].is_null())
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn coordinated_package_names_keep_distinct_jobs_and_dependency_edges() {
     let temp = publisher_project("coordinated");
     fs::write(temp.path().join("Cargo.toml"), "[package]\nname='foo-bar'\nversion='0.1.0'\nedition='2024'\nlicense='MIT'\n[workspace]\nmembers=['dependent']\nresolver='3'\n").unwrap();

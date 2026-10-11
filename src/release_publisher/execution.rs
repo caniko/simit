@@ -572,6 +572,12 @@ fn validate_manifest_paths(source: &Path) -> Result<()> {
     ) -> Result<()> {
         if let Some(table) = item.as_table_like() {
             for (key, value) in table.iter() {
+                // Cargo explicitly ignores free-form package/workspace
+                // metadata. Dependency crates named metadata still retain
+                // their real filesystem-path checks.
+                if key == "metadata" && matches!(section, Some("package" | "workspace")) {
+                    continue;
+                }
                 if ["path", "readme", "license-file", "build", "workspace"].contains(&key) {
                     if let Some(path) = value.as_str() {
                         ensure!(
@@ -786,8 +792,28 @@ pub fn publish_archive_with(
     archive: &[u8],
     checksum: &str,
     token: Option<&str>,
+    registry: impl FnMut(&str, &str) -> Result<Option<Value>>,
+    upload: impl FnMut(&str, &Value, &[u8]) -> Result<()>,
+) -> Result<()> {
+    publish_archive_with_reconciliation(
+        metadata,
+        archive,
+        checksum,
+        token,
+        registry,
+        upload,
+        || std::thread::sleep(Duration::from_secs(30)),
+    )
+}
+
+fn publish_archive_with_reconciliation(
+    metadata: &Value,
+    archive: &[u8],
+    checksum: &str,
+    token: Option<&str>,
     mut registry: impl FnMut(&str, &str) -> Result<Option<Value>>,
     mut upload: impl FnMut(&str, &Value, &[u8]) -> Result<()>,
+    mut wait: impl FnMut(),
 ) -> Result<()> {
     let name = metadata["name"].as_str().context("missing upload name")?;
     let version = metadata["vers"]
@@ -807,14 +833,50 @@ pub fn publish_archive_with(
     let token = token
         .filter(|token| !token.is_empty())
         .context("publishing credential is required for a missing registry version")?;
-    upload(token, metadata, archive)
+    if let Err(upload_error) = upload(token, metadata, archive) {
+        // An upload may have committed even when its response is lost or
+        // unreadable. Never repeat it in this invocation: reconcile only the
+        // exact immutable registry identity, then let the caller's independent
+        // Cargo-resolution gate prove that the archive is actually usable.
+        for attempt in 0..20 {
+            if let Ok(Some(record)) = registry(name, version) {
+                ensure!(
+                    exact_registry_record(&record, name, version, checksum),
+                    "registry conflict, yanked crate or checksum mismatch after uncertain upload"
+                );
+                return Ok(());
+            }
+            if attempt < 19 {
+                wait();
+            }
+        }
+        return Err(upload_error.context("uncertain upload did not reconcile within the bounded wait; retain the original run and archive"));
+    }
+    Ok(())
 }
 
 fn upload_archive(client: &Client, token: &str, metadata: &Value, archive: &[u8]) -> Result<()> {
+    upload_archive_at(
+        client,
+        "https://crates.io/api/v1/crates/new",
+        token,
+        metadata,
+        archive,
+    )
+}
+
+fn upload_archive_at(
+    client: &Client,
+    endpoint: &str,
+    token: &str,
+    metadata: &Value,
+    archive: &[u8],
+) -> Result<()> {
     let response = client
-        .put("https://crates.io/api/v1/crates/new")
+        .put(endpoint)
         .header(reqwest::header::AUTHORIZATION, token)
         .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+        .header(reqwest::header::ACCEPT, "application/json")
         .body(upload_body(metadata, archive)?)
         .send()?
         .error_for_status()?;
@@ -826,7 +888,12 @@ fn upload_archive(client: &Client, token: &str, metadata: &Value, archive: &[u8]
     );
     let result: Value = serde_json::from_slice(&bytes)?;
     ensure!(
-        result.get("errors").is_none() && result["ok"] == true,
+        result.is_object()
+            && (result.get("errors").is_none_or(Value::is_null)
+                || result
+                    .get("errors")
+                    .and_then(Value::as_array)
+                    .is_some_and(Vec::is_empty)),
         "registry rejected verified archive upload"
     );
     Ok(())
@@ -928,6 +995,122 @@ pub fn wait_for_registry_with(
 mod tests {
     use super::*;
 
+    #[test]
+    fn documented_publish_responses_are_accepted_by_the_real_http_transport() {
+        use std::io::Write;
+        use std::net::TcpListener;
+        for (status, body, accepted) in [
+            (
+                200,
+                r#"{"warnings":{"invalid_categories":[],"invalid_badges":[],"other":[]}}"#,
+                true,
+            ),
+            (
+                201,
+                r#"{"warnings":{"other":["advisory"]},"errors":[]}"#,
+                true,
+            ),
+            (200, r#"{"errors":[{"detail":"rejected"}]}"#, false),
+            (403, r#"{"warnings":{}}"#, false),
+            (200, "not json", false),
+            (200, "null", false),
+            (200, r#"{"errors":{"detail":"malformed"}}"#, false),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = std::thread::spawn(move || {
+                let (mut socket, _) = listener.accept().unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut request = [0; 4096];
+                assert!(socket.read(&mut request).unwrap() > 0);
+                write!(socket, "HTTP/1.1 {status} fixture\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            });
+            let client = Client::builder()
+                .timeout(Duration::from_secs(5))
+                .no_proxy()
+                .build()
+                .unwrap();
+            let result = upload_archive_at(
+                &client,
+                &format!("http://{address}/api/v1/crates/new"),
+                "disposable-fixture-token",
+                &json!({"name":"fixture","vers":"0.1.0"}),
+                b"verified archive",
+            );
+            server.join().unwrap();
+            assert_eq!(result.is_ok(), accepted, "{status}: {body}: {result:?}");
+        }
+    }
+
+    #[test]
+    fn uncertain_uploads_reconcile_exact_registry_identity_without_reupload() {
+        let archive = b"verified archive";
+        let checksum = hex::encode(Sha256::digest(archive));
+        let metadata = json!({"name":"fixture","vers":"0.1.0"});
+        for final_record in [
+            Some(
+                json!({"version":{"crate":"fixture","num":"0.1.0","yanked":false,"checksum":checksum}}),
+            ),
+            Some(
+                json!({"version":{"crate":"other","num":"0.1.0","yanked":false,"checksum":checksum}}),
+            ),
+            Some(
+                json!({"version":{"crate":"fixture","num":"0.1.0","yanked":true,"checksum":checksum}}),
+            ),
+            Some(
+                json!({"version":{"crate":"fixture","num":"0.1.0","yanked":false,"checksum":"foreign"}}),
+            ),
+            None,
+        ] {
+            let mut reads = 0;
+            let mut uploads = 0;
+            let mut waits = 0;
+            let result = publish_archive_with_reconciliation(
+                &metadata,
+                archive,
+                &checksum,
+                Some("disposable-fixture-token"),
+                |_, _| {
+                    reads += 1;
+                    if reads <= 2 {
+                        Ok(None)
+                    } else {
+                        Ok(final_record.clone())
+                    }
+                },
+                |_, _, _| {
+                    uploads += 1;
+                    bail!("lost upload reply")
+                },
+                || {
+                    waits += 1;
+                },
+            );
+            assert_eq!(
+                result.is_ok(),
+                final_record
+                    .as_ref()
+                    .is_some_and(|record| exact_registry_record(
+                        record, "fixture", "0.1.0", &checksum
+                    )),
+                "{result:?}"
+            );
+            assert_eq!(uploads, 1);
+            assert!(reads <= 21 && waits <= 19);
+        }
+    }
+
+    #[test]
+    fn free_form_metadata_does_not_authorize_or_reject_filesystem_reads() {
+        let source = TempDir::new().unwrap();
+        for section in ["package.metadata.tool", "workspace.metadata.tool"] {
+            fs::write(source.path().join("Cargo.toml"), format!("[{section}]\npath='/api'\nbuild='external'\nworkspace='/outside'\nreadme='/etc/passwd'\nmembers=['/outside']\ninclude=['/outside']\nexclude=['/outside']\n")).unwrap();
+            validate_manifest_paths(source.path()).unwrap();
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn credential_free_extraction_preserves_verified_modes() {
@@ -988,6 +1171,7 @@ mod tests {
             "[dependencies]\nother={path='../../other'}",
             "[[bin]]\nname='escape'\npath='../../outside.rs'",
             "[workspace]\nmembers=['../../other']",
+            "[dependencies.metadata]\npath='../../other'",
         ] {
             fs::write(source.path().join("member/Cargo.toml"), declaration).unwrap();
             assert!(

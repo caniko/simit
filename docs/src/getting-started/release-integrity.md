@@ -90,6 +90,10 @@ working directory with absolute manifest/target paths and private `HOME` /
 Nix build directory's ancestor vendor replacement, which would hide coordinated
 unpublished workspace dependencies. This remains data-only packaging; candidate
 build scripts and credential providers are not executed.
+Free-form package/workspace metadata is excluded from Cargo filesystem-path
+validation; real package and dependency read paths still require containment in
+the signed checkout. Nix-runtime publishers provision Nix only in the
+credential-free verification job, before rerunning required source gates.
 Member paths, permission modes and source/original-manifest bytes must match.
 Generated `Cargo.toml` and `Cargo.lock` compare as typed TOML, preserving manifest
 fields and the complete dependency/checksum graph while tolerating Cargo-version
@@ -110,6 +114,11 @@ require an unyanked exact crate/version record and a checksum matching the local
 verified package archive, then independently resolve and fetch that exact
 registry source/version/checksum. A matching upload can be resumed by rerunning
 the original signed-tag run; a conflicting or unusable version fails closed.
+The publish API's successful warnings response does not require an `ok` field.
+Lost, malformed or unsuccessful upload replies trigger bounded registry
+reconciliation for the exact archive identity without a second upload; an unknown
+outcome retains the original run/archive for later reconciliation. Even a
+reconciled upload must pass the independent exact Cargo-resolution gate.
 
 `keys/minisign.pub` is the public half of the offline minisign key used to
 sign `SHA256SUMS.txt`. Generate the keypair on the maintainer-controlled

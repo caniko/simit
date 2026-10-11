@@ -415,6 +415,7 @@ pub fn files(request: FilesRequest<'_>) -> Result<Vec<GeneratedFile>> {
         if platform == Platform::Github {
             files.push(trusted_publisher::publisher_file(
                 &dir.join(workflow_file_name("publish-crate", file_suffix)),
+                runtime,
                 &runners.release,
                 &options,
                 &[(package.name.clone(), vec![])],
@@ -454,6 +455,7 @@ pub fn publish_files(
     if platform == Platform::Github {
         files.push(trusted_publisher::publisher_file(
             &source.relative_path,
+            runtime,
             runner,
             &options,
             &[(package.name.clone(), vec![])],
@@ -501,6 +503,7 @@ pub fn publish_workspace_files(
     };
     let publisher = trusted_publisher::publisher_file(
         &source.relative_path,
+        inputs.runtime,
         inputs.runner,
         &inputs.options,
         &inputs.plan,

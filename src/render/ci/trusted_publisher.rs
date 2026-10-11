@@ -136,6 +136,7 @@ fn bootstrap(w: &mut String) {
 
 pub(super) fn publisher_file(
     source_path: &Path,
+    runtime: Runtime,
     runner: &ResolvedRunner,
     options: &CiOptions,
     plan: &[(String, Vec<String>)],
@@ -184,6 +185,14 @@ pub(super) fn publisher_file(
         w.push_str(&runs_on(runner));
         w.push_str("\n    timeout-minutes: 60\n    steps:\n");
         bootstrap(&mut w);
+        if runtime == Runtime::Nix {
+            push_install_nix_step_with_cache(
+                &mut w,
+                Platform::Github,
+                &options.nix_substituters,
+                &options.nix_trusted_public_keys,
+            );
+        }
         w.push_str(&format!("      - name: Admit signed source and provider-bound archive {name}\n        env:\n          GITHUB_TOKEN: ${{{{ github.token }}}}\n        run: |\n          set -euo pipefail\n          .simit-publisher-engine/target/release/simit release publisher --publisher-stage prepare --repo \"$GITHUB_REPOSITORY\" --package {} --source-workflow {} --publisher-workflow {}{reconstruction} --publisher-output \"$RUNNER_TEMP/verified-{id}\" > \"$RUNNER_TEMP/verified-{id}.json\"\n", shell_word(name), shell_word(&source_path.to_string_lossy()), shell_word(&publisher_path.to_string_lossy())));
         // Fresh credential-free runner: candidate build scripts may execute here.
         // Publishing always re-admits on a separate hosted runner, never trusts
