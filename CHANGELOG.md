@@ -7,8 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-10-11
+
 ### Security
 
+- Separate signed-tag archive builders from default-branch, environment-only
+  crates.io upload workers. Bind admission to the independently qualified
+  publisher revision, enrollment, signer, tag, source, run and attempt; rebuild
+  and verify archive custody on fresh hosted workers before credentials enter.
+- Reconstruct archives from absolute paths and private Cargo state, reconcile
+  uncertain uploads by exact registry checksum, and require frozen dependency
+  resolution before dependent publication. Reject unsafe environment names in
+  configuration and direct renderer calls.
 - Require default-branch-restricted environment-only policy App credentials,
   reject unprovisionable GitHub secret names, and allow explicitly credentialed
   external reusable-controller runs to publish their exact-head report.
@@ -575,7 +585,8 @@ ci`, including the `~/.cargo/bin` key, rust-cache settings, and why Nix
 
 - Prepare the first public crates.io release.
 
-[Unreleased]: https://github.com/caniko/simit/compare/0.19.0...HEAD
+[Unreleased]: https://github.com/caniko/simit/compare/0.20.0...HEAD
+[0.20.0]: https://github.com/caniko/simit/compare/0.19.0...0.20.0
 [0.19.0]: https://github.com/caniko/simit/compare/0.18.1...0.19.0
 [0.18.1]: https://github.com/caniko/simit/compare/0.18.0...0.18.1
 [0.18.0]: https://github.com/caniko/simit/compare/0.17.15...0.18.0

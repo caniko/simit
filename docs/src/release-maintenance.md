@@ -13,15 +13,23 @@ Run the local release flow:
 simit release patch -m "release patch"
 ```
 
-The crates.io publish workflow runs when an exact semver tag is pushed. The
-workflow validates that the tag matches the Cargo package version, verifies the
-GPG-signed tag against `keys/maintainers.gpg`, runs a publish dry run, and
-requires `CRATES_IO_API_TOKEN` to publish.
+The GitHub archive-builder workflow runs when an exact signed semver tag is
+pushed. It verifies the tag against `keys/maintainers.gpg`, checks the package
+version and retains credential-free package archives. The independent publisher
+runs from the default branch on fresh hosted workers, verifies source, signer,
+tag, run, attempt and archive custody, then admits the exact archives to upload.
+Only its upload job enters `simit-crates-io` and receives `CRATES_IO_API_TOKEN`.
+
+Enroll that environment with deployment restricted to the literal default branch,
+and set the repository variable `SIMIT_PUBLISHER_REVISION` to an independently
+qualified immutable Simit revision. Keep repository-level publisher token copies
+absent. See [CI adoption](getting-started/ci-adoption.md) for the enrollment and
+independent-engine contract.
 
 Generate or refresh crates.io publish workflows explicitly:
 
 ```sh
-simit init ci --platform forgejo --publish-crates
+simit init ci --platform github --ci-provider actions --runtime nix --publish-crates
 ```
 
 For workspace repositories, each generated `publish-crate-<crate>.yaml`
@@ -35,16 +43,12 @@ CI-only runs do not require this trust root. Run `simit release trust check`
 before publishing if you want to validate the committed trust root separately
 from workflow generation.
 
-If a release workflow fails after its tag has already been pushed, commit the
-fix and move the current-version tag to the fixed commit:
-
-```sh
-simit release sync-up --push
-```
-
-The command reruns local release checks, retargets the existing version tag to
-`HEAD`, and force-updates only that tag on the remote. Without `--push`, it only
-moves the local tag.
+If a release workflow fails after its tag is pushed, retain the failed candidate
+and diagnose that exact original run. A transient native signed-tag failure may
+retry its original run after source and signature verification. An uncertain
+upload first reconciles the exact unyanked registry name, version and archive
+checksum; it never blindly reuploads. Source fixes need a fresh version and
+signed tag with new qualification. Never move a published release tag.
 
 Projects that publish Windows packages can add Chocolatey and Scoop jobs to
 the release artifact workflow. See
