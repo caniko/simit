@@ -68,6 +68,20 @@ pub fn unit_identity(plan: &ServicePlan, observation: &str) -> Result<UnitIdenti
     })
 }
 
+/// A cleanup-eligible failed unit is not evidence of a successful cache lifetime.
+/// Require the admitted live invocation both during execution and at normal EOF.
+pub fn validate_live_invocation(
+    plan: &ServicePlan,
+    admitted: &UnitIdentity,
+    observation: &str,
+) -> Result<()> {
+    ensure!(
+        unit_identity(plan, observation)? == *admitted,
+        "owned cache invocation changed during execution"
+    );
+    Ok(())
+}
+
 /// Observe the kernel's cgroup-v2 limits, rather than treating requested
 /// systemd properties as proof of actual resource enforcement.
 pub fn validate_limits(plan: &ServicePlan, memory: &str, cpu: &str, pids: &str) -> Result<()> {
@@ -285,6 +299,33 @@ mod tests {
             "e".repeat(32),
             plan.unit,
         )
+    }
+
+    #[test]
+    fn final_completion_rejects_failed_owned_units_while_preserving_cleanup() {
+        let plan = plan();
+        let live = properties(&plan);
+        let admitted = unit_identity(&plan, &live).unwrap();
+        validate_live_invocation(&plan, &admitted, &live).unwrap();
+        for ended in [
+            live.replace("ActiveState=active", "ActiveState=failed")
+                .replace("SubState=running", "SubState=failed")
+                .replace("MainPID=12345", "MainPID=0"),
+            live.replace("ActiveState=active", "ActiveState=inactive")
+                .replace("SubState=running", "SubState=dead")
+                .replace("MainPID=12345", "MainPID=0"),
+        ] {
+            // An own-unit exit after the last poll still permits graceful cleanup,
+            // but EOF cannot acknowledge a successful cache-enabled execution.
+            assert!(shutdown_required(&plan, Some(&admitted), &ended).unwrap());
+            assert!(validate_live_invocation(&plan, &admitted, &ended).is_err());
+        }
+        for replaced in [
+            live.replace(&admitted.invocation_id, &"f".repeat(32)),
+            live.replace("MainPID=12345", "MainPID=54321"),
+        ] {
+            assert!(validate_live_invocation(&plan, &admitted, &replaced).is_err());
+        }
     }
 
     #[test]

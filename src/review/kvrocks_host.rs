@@ -464,6 +464,23 @@ impl HostService {
         }
     }
 
+    fn observe_live(&self) -> Result<()> {
+        kvrocks_lifecycle::validate_live_invocation(
+            &self.plan,
+            self.invocation
+                .as_ref()
+                .context("cache has no admitted invocation")?,
+            &unit_properties(&self.plan)?,
+        )?;
+        kvrocks::verify_socket(Path::new(&self.plan.socket), &self.plan.identity)?;
+        let socket = fs::symlink_metadata(&self.plan.socket)?;
+        ensure!(
+            self.socket_identity == Some((socket.dev(), socket.ino())),
+            "owned cache socket was replaced during execution"
+        );
+        Ok(())
+    }
+
     fn stop(&mut self) -> Result<()> {
         if self.finished {
             return Ok(());
@@ -616,20 +633,12 @@ pub fn host() -> Result<serde_json::Value> {
     let lifetime = Instant::now() + Duration::from_secs(u64::from(owned.plan.lifetime_seconds));
     while !cancelled.load(Ordering::SeqCst) {
         ensure!(Instant::now() < lifetime, "owned cache lifetime exceeded");
-        let current =
-            kvrocks_lifecycle::unit_identity(&owned.plan, &unit_properties(&owned.plan)?)?;
-        ensure!(
-            owned.invocation.as_ref() == Some(&current),
-            "owned cache unit changed during compilation"
-        );
-        kvrocks::verify_socket(Path::new(&owned.plan.socket), &owned.plan.identity)?;
-        let socket = fs::symlink_metadata(&owned.plan.socket)?;
-        ensure!(
-            owned.socket_identity == Some((socket.dev(), socket.ino())),
-            "owned cache socket was replaced during compilation"
-        );
+        owned.observe_live()?;
         std::thread::sleep(Duration::from_secs(1));
     }
+    // Normal EOF may arrive after a service exit between periodic polls. Reject
+    // success before graceful stop; Drop still cleans an owned failed unit.
+    owned.observe_live()?;
     owned.stop()?;
     Ok(serde_json::json!({"stopped": true, "run_identity": owned.plan.run_identity}))
 }

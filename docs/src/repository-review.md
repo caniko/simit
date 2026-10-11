@@ -109,6 +109,11 @@ The service's 61-minute lifetime exceeds the generated 60-minute build window,
 including readiness/shutdown allowance; its independent supervisor additionally
 retains the host-startup and cleanup budgets.
 
+Normal control-pipe EOF revalidates the admitted invocation as active and the
+owned socket identity before acknowledging stop. A service that exited between
+periodic polls remains eligible for verified cleanup, but cannot produce a
+successful cache-lifetime receipt.
+
 Before consumer realization, the engine freezes and rebuilds an independent
 ordinary-sandbox socket probe with the canonical socket mounted through
 `extra-sandbox-paths`. The effective plan and retained probe bytes bind this
