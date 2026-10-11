@@ -242,8 +242,14 @@ pub fn prepare(plan: &Plan, system: &str, out: &Path) -> Result<EffectivePlan> {
 }
 
 pub fn build(plan: &Plan, system: &str, out: &Path) -> Result<PlatformResult> {
-    super::engine::verify_plan(plan)?;
     plan.validate()?;
+    // Admission is independently reviewable. Until the owned service, socket
+    // mount and effective-plan receipts exist, never silently run this uncached.
+    ensure!(
+        plan.request.compiler_cache.is_none(),
+        "Kvrocks compiler-cache execution is unavailable: owned lifecycle qualification is pending"
+    );
+    super::engine::verify_plan(plan)?;
     ensure!(
         plan.request.systems.iter().any(|s| s == system),
         "unrequested platform"
