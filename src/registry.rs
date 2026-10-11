@@ -1323,7 +1323,7 @@ fn infer_expected_primary_ci_files(
                     package,
                     &runners.release,
                     options.clone(),
-                ));
+                )?);
             }
         }
     }

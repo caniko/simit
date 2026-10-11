@@ -2,6 +2,30 @@
 
 use super::*;
 
+pub(super) fn validate_credential_free_source(workflow: &str, options: &CiOptions) -> Result<()> {
+    // Required gates also run against candidate source in the fresh trusted
+    // verify job, including when the tag workflow does not render those gates.
+    let inputs = std::iter::once(workflow).chain(options.required_gates.iter().flat_map(|gate| {
+        std::iter::once(gate.run.as_str()).chain(gate.env.values().map(String::as_str))
+    }));
+    for input in inputs {
+        for body in input.split("${{").skip(1) {
+            let Some((expression, _)) = body.split_once("}}") else {
+                continue;
+            };
+            if expression
+                .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+                .any(|word| word.eq_ignore_ascii_case("secrets"))
+            {
+                bail!(
+                    "release source workflows must not reference GitHub secrets; keep credentials in independently protected jobs"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn crate_build_display(name: &str) -> String {
     format!("Build Crate {name}")
 }
@@ -197,11 +221,19 @@ pub(super) fn publisher_file(
         // Fresh credential-free runner: candidate build scripts may execute here.
         // Publishing always re-admits on a separate hosted runner, never trusts
         // this job's filesystem, exports, output paths or candidate binaries.
-        w.push_str(&format!("      - name: Verify packaged contents {name}\n        working-directory: ${{{{ runner.temp }}}}\n        run: cargo publish --dry-run --locked --manifest-path \"$RUNNER_TEMP/verified-{id}/Cargo.toml\"\n"));
-        if !options.required_gates.is_empty() {
-            w.push_str("      - name: Checkout original source for required gates\n");
+        if runtime == Runtime::Nix || !options.required_gates.is_empty() {
+            w.push_str("      - name: Checkout original signed source for verification\n");
             push_action_uses(&mut w, Platform::Github, "checkout", "v4.3.1");
             w.push_str("        with:\n          ref: ${{ github.event.workflow_run.head_sha }}\n          path: .simit-release-source\n          persist-credentials: false\n");
+        }
+        let directory = if runtime == Runtime::Nix {
+            ".simit-release-source"
+        } else {
+            "${{ runner.temp }}"
+        };
+        let prefix = command_prefix(runtime);
+        w.push_str(&format!("      - name: Verify packaged contents {name}\n        working-directory: {directory}\n        run: {prefix}cargo publish --dry-run --locked --manifest-path \"$RUNNER_TEMP/verified-{id}/Cargo.toml\"\n"));
+        if !options.required_gates.is_empty() {
             for gate in &options.required_gates {
                 w.push_str(&format!("      - name: Required gate {}\n        timeout-minutes: {}\n        working-directory: .simit-release-source\n        env:\n", gate.id, gate.timeout_minutes));
                 if gate.env.is_empty() {

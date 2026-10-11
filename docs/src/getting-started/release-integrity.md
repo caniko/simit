@@ -102,6 +102,22 @@ identities, source bytes, extra files or permission bits are rejected.
 Coordinated releases package their full release set together and publish in
 dependency order, waiting for exact registry resolution before dependents run.
 A moved tag, foreign run, changed archive or escaping manifest path is rejected.
+Manifest validation follows the root Cargo workspace, member globs/exclusions and
+local dependency graph; unrelated invalid test-fixture manifests do not block a
+release. Nix projects verify the admitted packaged crate through the original
+signed source's `nix develop` environment on the credential-free runner.
+The signed normalized manifest must authorize crates.io publication: `publish =
+false`, an empty list or a list that excludes `crates-io` rejects before upload.
+Tag archive and candidate verification generation rejects GitHub `secrets`
+expressions, including global CI environment, setup and required-gate bindings.
+Nonsecret build limits and native GitHub labels remain available. Authenticated
+work belongs in independently protected jobs.
+
+Upload handling accepts Cargo's documented successful `warnings` response and
+rejects HTTP or explicit API errors. A lost upload response triggers bounded
+read-only reconciliation of the exact registry name, version, checksum and yanked
+state; it never repeats the upload in that invocation. Exact Cargo registry
+resolution remains required before dependents can publish.
 Regenerate existing consumer workflows after selecting the qualified generator.
 
 To retry publication, rerun the original signed-tag run. The earliest live

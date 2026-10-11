@@ -332,7 +332,7 @@ pub fn run(command: InitCiCommand) -> Result<()> {
                     package,
                     &runners.release,
                     options.clone(),
-                ));
+                )?);
             }
         }
     }

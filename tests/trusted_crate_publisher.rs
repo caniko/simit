@@ -267,6 +267,33 @@ fn trusted_nix_gates_provision_runtime_before_execution_without_upload_credentia
                     .position(|step| step["name"] == "Required gate nix-integration")
                     .unwrap();
                 assert!(install < gate);
+                let checkout = steps
+                    .iter()
+                    .position(|step| step["with"]["path"] == ".simit-release-source")
+                    .unwrap();
+                let verification = steps
+                    .iter()
+                    .position(|step| {
+                        step["name"]
+                            .as_str()
+                            .is_some_and(|name| name.starts_with("Verify packaged contents"))
+                    })
+                    .unwrap();
+                assert!(checkout < verification);
+                assert_eq!(
+                    steps[verification]["working-directory"],
+                    ".simit-release-source"
+                );
+                assert!(
+                    steps[verification]["run"]
+                        .as_str()
+                        .unwrap()
+                        .starts_with("nix develop -c cargo publish --dry-run")
+                );
+                assert_eq!(
+                    steps[checkout]["with"]["ref"],
+                    "${{ github.event.workflow_run.head_sha }}"
+                );
                 assert!(job["environment"].is_null());
                 assert!(
                     steps
@@ -315,5 +342,76 @@ fn coordinated_package_names_keep_distinct_jobs_and_dependency_edges() {
             .as_sequence()
             .unwrap()
             .contains(&Value::String("publish-foo-bar".into()))
+    );
+}
+
+#[test]
+fn tag_archive_generation_rejects_secret_contexts_in_all_publication_modes() {
+    for mode in ["single", "members", "coordinated"] {
+        for policy in [
+            "[ci.extra_env]\nTOKEN = '${{ secrets.TOKEN }}'\n",
+            "[ci.extra_env]\nTOKEN = '${{ sEcReTs[\"TOKEN\"] }}'\n",
+            "[ci.extra_env]\nTOKEN = '${{ toJSON(secrets) }}'\n",
+            "extra_setup = ['echo ${{ secrets.TOKEN }}']\n",
+            "[[ci.required_gates]]\nid='integration'\nrun='cargo test'\nenv={TOKEN='${{ secrets.TOKEN }}'}\n",
+        ] {
+            let temp = publisher_project(mode);
+            let files = fs::read_dir(temp.path().join(".github/workflows"))
+                .unwrap()
+                .map(|entry| {
+                    let path = entry.unwrap().path();
+                    let contents = fs::read(&path).unwrap();
+                    (path, contents)
+                })
+                .collect::<Vec<_>>();
+            let config = fs::read_to_string(temp.path().join("simit.toml")).unwrap();
+            fs::write(
+                temp.path().join("simit.toml"),
+                format!("{config}\n{policy}"),
+            )
+            .unwrap();
+            let output = common::simit()
+                .current_dir(temp.path())
+                .args(["init", "ci"])
+                .output()
+                .unwrap();
+            assert!(!output.status.success(), "{mode}: accepted {policy}");
+            let stderr = String::from_utf8(output.stderr).unwrap();
+            assert!(
+                stderr.contains("release source workflows must not reference GitHub secrets"),
+                "{stderr}"
+            );
+            for (path, original) in files {
+                assert_eq!(fs::read(path).unwrap(), original);
+            }
+        }
+    }
+}
+
+#[test]
+fn tag_archive_generation_retains_nonsecret_build_environment() {
+    let temp = publisher_project("coordinated");
+    let config = fs::read_to_string(temp.path().join("simit.toml")).unwrap();
+    fs::write(
+        temp.path().join("simit.toml"),
+        format!(
+            "{config}\n[ci.extra_env]\nCARGO_BUILD_JOBS='2'\nLABEL='${{{{ github.ref_name }}}}'\n"
+        ),
+    )
+    .unwrap();
+    let output = common::simit()
+        .current_dir(temp.path())
+        .args(["init", "ci"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let yaml: Value = serde_yaml::from_str(
+        &fs::read_to_string(temp.path().join(".github/workflows/publish-workspace.yaml")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(yaml["jobs"]["build"]["env"]["CARGO_BUILD_JOBS"], "2");
+    assert_eq!(
+        yaml["jobs"]["build"]["env"]["LABEL"],
+        "${{ github.ref_name }}"
     );
 }

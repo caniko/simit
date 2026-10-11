@@ -402,15 +402,19 @@ pub fn files(request: FilesRequest<'_>) -> Result<Vec<GeneratedFile>> {
     }];
 
     if options.publish_crates && package.is_publishable() {
+        let content = publish_workflow(
+            platform,
+            runtime,
+            package,
+            &runners.release,
+            options.clone(),
+        );
+        if platform == Platform::Github {
+            trusted_publisher::validate_credential_free_source(&content, &options)?;
+        }
         files.push(GeneratedFile {
             relative_path: dir.join(publish_name),
-            content: publish_workflow(
-                platform,
-                runtime,
-                package,
-                &runners.release,
-                options.clone(),
-            ),
+            content,
         });
         if platform == Platform::Github {
             files.push(trusted_publisher::publisher_file(
@@ -443,7 +447,7 @@ pub fn publish_files(
     package: &Package,
     runner: &ResolvedRunner,
     mut options: CiOptions,
-) -> Vec<GeneratedFile> {
+) -> Result<Vec<GeneratedFile>> {
     options.package_scoped = true;
     options.workspace_strategy = WorkspaceStrategy::Members;
     let source = GeneratedFile {
@@ -453,6 +457,7 @@ pub fn publish_files(
     };
     let mut files = vec![];
     if platform == Platform::Github {
+        trusted_publisher::validate_credential_free_source(&source.content, &options)?;
         files.push(trusted_publisher::publisher_file(
             &source.relative_path,
             runtime,
@@ -463,7 +468,7 @@ pub fn publish_files(
         ));
     }
     files.insert(0, source);
-    files
+    Ok(files)
 }
 
 /// Coordinated dependency-ordered workspace publish workflow.
@@ -501,6 +506,7 @@ pub fn publish_workspace_files(
             &inputs.versions,
         ),
     };
+    trusted_publisher::validate_credential_free_source(&source.content, &inputs.options)?;
     let publisher = trusted_publisher::publisher_file(
         &source.relative_path,
         inputs.runtime,

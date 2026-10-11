@@ -619,22 +619,110 @@ fn validate_manifest_paths(source: &Path) -> Result<()> {
         }
         Ok(())
     }
-    let mut directories = vec![source.to_path_buf()];
-    while let Some(directory) = directories.pop() {
-        for entry in fs::read_dir(&directory)? {
-            let entry = entry?;
-            let kind = entry.file_type()?;
-            if kind.is_dir() && entry.file_name() != ".git" {
-                directories.push(entry.path());
+    fn dependency_manifests(
+        table: &dyn toml_edit::TableLike,
+        parent: &Path,
+        pending: &mut Vec<std::path::PathBuf>,
+    ) {
+        for section in [
+            "dependencies",
+            "build-dependencies",
+            "dev-dependencies",
+            "replace",
+        ] {
+            if let Some(dependencies) = table.get(section).and_then(toml_edit::Item::as_table_like)
+            {
+                for (_, dependency) in dependencies.iter() {
+                    if let Some(path) = dependency
+                        .as_table_like()
+                        .and_then(|dependency| manifest_string(dependency, "path"))
+                    {
+                        pending.push(parent.join(path).join("Cargo.toml"));
+                    }
+                }
             }
-            if kind.is_file() && entry.file_name() == "Cargo.toml" {
-                let manifest: toml_edit::DocumentMut = fs::read_to_string(entry.path())?.parse()?;
-                inspect(
-                    source,
-                    &directory,
-                    &toml_edit::Item::Table(manifest.as_table().clone()),
-                    None,
-                )?;
+        }
+        for section in ["target", "patch"] {
+            if let Some(groups) = table.get(section).and_then(toml_edit::Item::as_table_like) {
+                for (_, group) in groups.iter() {
+                    if let Some(group) = group.as_table_like() {
+                        if section == "target" {
+                            dependency_manifests(group, parent, pending);
+                        } else {
+                            for (_, dependency) in group.iter() {
+                                if let Some(path) = dependency
+                                    .as_table_like()
+                                    .and_then(|dependency| manifest_string(dependency, "path"))
+                                {
+                                    pending.push(parent.join(path).join("Cargo.toml"));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let mut pending = vec![source.join("Cargo.toml")];
+    let mut visited = std::collections::BTreeSet::new();
+    while let Some(path) = pending.pop() {
+        // Missing references remain Cargo's packaging error. Never parse an
+        // unrelated fixture just because it has a Cargo.toml filename.
+        if !path.is_file() {
+            continue;
+        }
+        let path = fs::canonicalize(path)?;
+        ensure!(
+            path.starts_with(source),
+            "Cargo manifest path escapes signed source"
+        );
+        if !visited.insert(path.clone()) {
+            continue;
+        }
+        let parent = path.parent().context("manifest has no parent")?;
+        let manifest: toml_edit::DocumentMut = fs::read_to_string(&path)?.parse()?;
+        inspect(
+            source,
+            parent,
+            &toml_edit::Item::Table(manifest.as_table().clone()),
+            None,
+        )?;
+        dependency_manifests(manifest.as_table(), parent, &mut pending);
+        if let Some(package) = manifest
+            .get("package")
+            .and_then(toml_edit::Item::as_table_like)
+        {
+            if let Some(workspace) = manifest_string(package, "workspace") {
+                pending.push(parent.join(workspace).join("Cargo.toml"));
+            }
+        }
+        if let Some(workspace) = manifest
+            .get("workspace")
+            .and_then(toml_edit::Item::as_table_like)
+        {
+            dependency_manifests(workspace, parent, &mut pending);
+            let excluded = string_array(workspace.get("exclude"))
+                .into_iter()
+                .map(|pattern| glob::Pattern::new(&pattern))
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            for member in string_array(workspace.get("members")) {
+                let pattern = format!(
+                    "{}/{}",
+                    glob::Pattern::escape(&parent.to_string_lossy()),
+                    member
+                );
+                for member in glob::glob(&pattern)? {
+                    let member = member?;
+                    let relative = member
+                        .strip_prefix(parent)
+                        .context("workspace member escapes root")?;
+                    if !excluded
+                        .iter()
+                        .any(|pattern| pattern.matches_path(relative))
+                    {
+                        pending.push(member.join("Cargo.toml"));
+                    }
+                }
             }
         }
     }
@@ -656,6 +744,21 @@ fn upload_metadata(
         manifest_string(package, "name") == Some(name)
             && manifest_string(package, "version") == Some(version),
         "normalized crate name/version differs from trusted release selection"
+    );
+    let authorized = package.get("publish").is_none_or(|policy| {
+        policy.as_bool() == Some(true)
+            || policy.as_array().is_some_and(|registries| {
+                registries
+                    .iter()
+                    .all(|registry| registry.as_str().is_some())
+                    && registries
+                        .iter()
+                        .any(|registry| registry.as_str() == Some("crates-io"))
+            })
+    });
+    ensure!(
+        authorized,
+        "signed package.publish does not authorize publication to crates.io"
     );
     let mut dependencies = Vec::new();
     let mut add_dependencies = |tables: &dyn toml_edit::TableLike,
@@ -996,6 +1099,47 @@ mod tests {
     use super::*;
 
     #[test]
+    fn upload_metadata_enforces_the_signed_crates_io_publication_policy() {
+        for (policy, allowed) in [
+            ("", true),
+            ("publish=false", false),
+            ("publish=[]", false),
+            ("publish=['private']", false),
+            ("publish=['crates-io']", true),
+            ("publish=['private','crates-io']", true),
+            ("publish='crates-io'", false),
+            ("publish=['crates-io',1]", false),
+        ] {
+            let manifest: toml_edit::DocumentMut =
+                format!("[package]\nname='demo'\nversion='1.0.0'\n{policy}\n")
+                    .parse()
+                    .unwrap();
+            assert_eq!(
+                upload_metadata(&manifest, &BTreeMap::new(), "demo-1.0.0", "demo", "1.0.0").is_ok(),
+                allowed,
+                "{policy}"
+            );
+        }
+    }
+
+    #[test]
+    fn metadata_named_dependencies_keep_their_real_escape_checks() {
+        let source = TempDir::new().unwrap();
+        for declaration in [
+            "[dependencies.metadata]\npath='/outside'",
+            "[workspace.dependencies.metadata]\npath='/outside'",
+            "[target.'cfg(unix)'.dependencies.metadata]\npath='../outside'",
+            "[patch.crates-io.metadata]\npath='/outside'",
+        ] {
+            fs::write(source.path().join("Cargo.toml"), declaration).unwrap();
+            assert!(
+                validate_manifest_paths(source.path()).is_err(),
+                "{declaration}"
+            );
+        }
+    }
+
+    #[test]
     fn documented_publish_responses_are_accepted_by_the_real_http_transport() {
         use std::io::Write;
         use std::net::TcpListener;
@@ -1164,6 +1308,11 @@ mod tests {
     #[test]
     fn manifest_reads_cannot_escape_the_signed_checkout() {
         let source = TempDir::new().unwrap();
+        fs::write(
+            source.path().join("Cargo.toml"),
+            "[workspace]\nmembers=['member']\n",
+        )
+        .unwrap();
         fs::create_dir(source.path().join("member")).unwrap();
         for declaration in [
             "[package]\nreadme='/etc/passwd'",
@@ -1185,6 +1334,47 @@ mod tests {
         )
         .unwrap();
         validate_manifest_paths(source.path()).unwrap();
+    }
+
+    #[test]
+    fn manifest_validation_ignores_unreachable_cargo_fixtures_but_checks_the_graph() {
+        let source = TempDir::new().unwrap();
+        for directory in [
+            "crates/selected",
+            "crates/excluded",
+            "fixtures/invalid",
+            "local-dependency",
+        ] {
+            fs::create_dir_all(source.path().join(directory)).unwrap();
+        }
+        fs::write(
+            source.path().join("Cargo.toml"),
+            "[workspace]\nmembers=['crates/*']\nexclude=['crates/excluded']\n",
+        )
+        .unwrap();
+        fs::write(source.path().join("crates/selected/Cargo.toml"), "[package]\nname='selected'\nversion='1.0.0'\n[dependencies]\nlocal={path='../../local-dependency'}\n").unwrap();
+        fs::write(
+            source.path().join("local-dependency/Cargo.toml"),
+            "[package]\nname='local'\nversion='1.0.0'\n",
+        )
+        .unwrap();
+        fs::write(
+            source.path().join("fixtures/invalid/Cargo.toml"),
+            "intentionally invalid toml [[",
+        )
+        .unwrap();
+        fs::write(
+            source.path().join("crates/excluded/Cargo.toml"),
+            "[package]\nreadme='/outside'\n",
+        )
+        .unwrap();
+        validate_manifest_paths(source.path()).unwrap();
+        fs::write(
+            source.path().join("local-dependency/Cargo.toml"),
+            "[dependencies]\nescape={path='../../outside'}\n",
+        )
+        .unwrap();
+        assert!(validate_manifest_paths(source.path()).is_err());
     }
 
     #[test]
