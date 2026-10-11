@@ -33,6 +33,12 @@ pub enum Publication {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum CompilerCache {
+    KvrocksV1,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Recipe {
     pub repository: String,
@@ -79,6 +85,9 @@ pub struct Request {
     #[serde(default = "test_default")]
     pub test_profile: String,
     pub cache_profile: Option<String>,
+    /// Explicit compiler-cache admission; absent legacy requests keep their digest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compiler_cache: Option<CompilerCache>,
     #[serde(default)]
     pub publication: Publication,
     #[serde(default)]
@@ -258,6 +267,35 @@ impl Request {
         if let Some(c) = &self.cache_profile {
             ensure!(name(c), "unknown cache profile");
         }
+        if self.compiler_cache.is_some() {
+            ensure!(
+                matches!(self.backend, Backend::Flake | Backend::ExternalFlake)
+                    && self.mode == Mode::Head
+                    && self.test_profile == "checks-rebuild-v1"
+                    && self.systems.iter().all(|system| system.ends_with("-linux")),
+                "Kvrocks requires a native Linux flake head and checks-rebuild-v1"
+            );
+            let head = self
+                .expected_head
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("Kvrocks requires an immutable expected head"))?;
+            if self.pr.is_some() {
+                ensure!(
+                    self.expected_base.is_some(),
+                    "Kvrocks PR requests require an immutable expected base"
+                );
+            } else {
+                let revision = self
+                    .revision
+                    .as_deref()
+                    .ok_or_else(|| anyhow::anyhow!("Kvrocks requires an immutable revision"))?;
+                sha(revision)?;
+                ensure!(
+                    revision == head,
+                    "Kvrocks revision and expected head differ"
+                );
+            }
+        }
         ensure!(
             self.publication == Publication::None || self.cache_profile.is_some(),
             "publication requires named cache profile"
@@ -370,6 +408,12 @@ impl Plan {
             }
         } else {
             ensure!(self.request.pr.is_none(), "missing PR identity");
+            if self.request.compiler_cache.is_some() {
+                ensure!(
+                    self.request.revision.as_deref() == Some(self.target.commit.as_str()),
+                    "Kvrocks target differs from the immutable revision"
+                );
+            }
         }
         match (&self.recipe, &self.request.recipe) {
             (Some(i), Some(r)) => ensure!(
@@ -425,6 +469,8 @@ pub struct EffectivePlan {
     pub lock_digest: Option<String>,
     pub source_nar_hash: Option<String>,
     pub targets: Vec<Target>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compiler_cache: Option<super::kvrocks::CacheReceipt>,
     pub digest: String,
 }
 impl EffectivePlan {
@@ -448,6 +494,8 @@ pub struct PlatformResult {
     pub closure_export: Outcome,
     pub publication: Outcome,
     pub retrieval: Outcome,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compiler_cache_cleanup: Option<Outcome>,
     pub error: Option<String>,
     pub files: BTreeMap<String, String>,
     pub target_outcomes: BTreeMap<String, Outcome>,
@@ -457,6 +505,9 @@ pub struct PlatformResult {
 impl PlatformResult {
     pub fn successful(&self) -> bool {
         self.error.is_none()
+            && (self.plan.request.compiler_cache.is_none()
+                || (self.effective.compiler_cache.is_some()
+                    && self.compiler_cache_cleanup == Some(Outcome::Passed)))
             && match self.build {
                 Outcome::Passed => {
                     self.closure_export == Outcome::Passed
@@ -497,6 +548,7 @@ pub fn example() -> Request {
         runner_profile: runner_default(),
         test_profile: test_default(),
         cache_profile: None,
+        compiler_cache: None,
         publication: Publication::None,
         post_result: false,
     }

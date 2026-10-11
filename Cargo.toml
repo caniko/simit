@@ -94,3 +94,7 @@ url = "2"
 unicode-normalization = "0.1.25"
 toml_edit = { version = "0.25", features = ["serde"] }
 tempfile = "3"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+signal-hook = "0.3.18"
+socket2 = "0.6.1"

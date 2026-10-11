@@ -48,6 +48,42 @@ fn plan() -> Plan {
     p.seal().unwrap();
     p
 }
+
+#[test]
+fn kvrocks_admission_cannot_silently_execute_without_operator_worker_opt_in() {
+    let mut p = plan();
+    p.request.expected_head = Some(HEAD.into());
+    p.request.expected_base = Some(BASE.into());
+    p.request.test_profile = "checks-rebuild-v1".into();
+    p.request.compiler_cache = Some(CompilerCache::KvrocksV1);
+    p.request_id = canonical_digest(&p.request).unwrap();
+    p.seal().unwrap();
+    p.validate().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let out = root.path().join("result");
+    let error = build(&p, "x86_64-linux", &out).unwrap_err().to_string();
+    assert!(error.contains("explicit operator worker opt-in"), "{error}");
+    assert!(
+        !out.exists(),
+        "unsupported execution must not create a receipt"
+    );
+
+    p.request.pr = None;
+    p.request.revision = Some(HEAD.into());
+    p.request.expected_base = None;
+    p.pr = None;
+    p.request_id = canonical_digest(&p.request).unwrap();
+    p.seal().unwrap();
+    p.validate().unwrap();
+    p.target.commit = BASE.into();
+    p.seal().unwrap();
+    let error = p.validate().unwrap_err().to_string();
+    assert!(
+        error.contains("target differs from the immutable revision"),
+        "{error}"
+    );
+}
+
 fn report(p: &Plan) -> PlatformResult {
     let reference = flake_ref(p);
     let mut e = EffectivePlan {
@@ -58,6 +94,7 @@ fn report(p: &Plan) -> PlatformResult {
         lock_digest: None,
         source_nar_hash: Some("sha256-test".into()),
         targets: vec![],
+        compiler_cache: None,
         digest: String::new(),
     };
     e.lock_digest = Some(canonical_digest(e.lock.as_ref().unwrap()).unwrap());
@@ -98,6 +135,7 @@ fn report(p: &Plan) -> PlatformResult {
         closure_export: Outcome::Passed,
         publication: Outcome::NotRun,
         retrieval: Outcome::NotRun,
+        compiler_cache_cleanup: None,
         error: None,
         files: BTreeMap::new(),
         closure: BTreeMap::from([(
@@ -108,6 +146,158 @@ fn report(p: &Plan) -> PlatformResult {
                 references: vec![],
             },
         )]),
+    }
+}
+
+#[test]
+fn legacy_reports_keep_their_identity_and_cached_passes_require_admission_and_cleanup() {
+    let p = plan();
+    let legacy = report(&p);
+    let encoded = serde_json::to_value(&legacy).unwrap();
+    assert!(encoded.get("compiler_cache_cleanup").is_none());
+    assert!(encoded["effective"].get("compiler_cache").is_none());
+    let mut cached = p.clone();
+    cached.request.expected_head = Some(HEAD.into());
+    cached.request.expected_base = Some(BASE.into());
+    cached.request.test_profile = "checks-rebuild-v1".into();
+    cached.request.compiler_cache = Some(CompilerCache::KvrocksV1);
+    cached.request_id = canonical_digest(&cached.request).unwrap();
+    cached.seal().unwrap();
+    let mut result = report(&cached);
+    result
+        .test_evidence
+        .values_mut()
+        .for_each(|e| *e = "explicit-check-rebuild".into());
+    assert!(!result.successful());
+    assert!(
+        validate_result(&cached, &result)
+            .unwrap_err()
+            .to_string()
+            .contains("lacks lifecycle/sandbox admission")
+    );
+    result.compiler_cache_cleanup = Some(Outcome::Passed);
+    assert!(
+        !result.successful(),
+        "cleanup alone cannot establish a cached build"
+    );
+    assert!(validate_result(&cached, &result).is_err());
+}
+
+#[test]
+fn cached_reports_bind_the_engine_native_tool_supervisor_sandbox_and_cleanup() {
+    use simit::review::{engine::EngineManifest, kvrocks::*};
+    let mut p = plan();
+    p.request.expected_head = Some(HEAD.into());
+    p.request.expected_base = Some(BASE.into());
+    p.request.test_profile = "checks-rebuild-v1".into();
+    p.request.compiler_cache = Some(CompilerCache::KvrocksV1);
+    p.request_id = canonical_digest(&p.request).unwrap();
+    let manifest = EngineManifest {
+        schema_version: 1,
+        repository: "caniko/simit".into(),
+        revision: "d".repeat(40),
+        nixpkgs_revision: "e".repeat(40),
+    };
+    p.tool_lock = json!({"version": 7, "root": "root", "nodes": {
+        "root": {"inputs": {"simit": "simit", "nixpkgs": "nixpkgs"}},
+        "simit": {"locked": {"type": "github", "owner": "caniko", "repo": "simit", "rev": manifest.revision}},
+        "nixpkgs": {"locked": {"type": "github", "owner": "NixOS", "repo": "nixpkgs", "rev": manifest.nixpkgs_revision}},
+    }});
+    p.tool_lock_digest = canonical_digest(&p.tool_lock).unwrap();
+    p.seal().unwrap();
+    let bootstrap = BootstrapReceipt {
+        source: freeze_source(&manifest, "x86_64-linux", &json!({
+            "pname": "kvrocks", "version": "2.14.0", "system": "x86_64-linux", "outputs": ["out"],
+            "drvPath": format!("/nix/store/{}-kvrocks.drv", "2".repeat(32)),
+            "outPath": format!("/nix/store/{}-kvrocks", "3".repeat(32)),
+        })).unwrap(),
+        nar_hash: format!("sha256:{}", "f".repeat(64)), nar_size: 1, binary_sha256: "f".repeat(64),
+    };
+    let service = service_plan(
+        &bootstrap,
+        &WorkerIdentity {
+            user: "runner".into(),
+            uid: 1001,
+            group: "nixbld".into(),
+            gid: 30000,
+        },
+        std::path::Path::new("/var/lib"),
+        &canonical_digest(&(&p.digest, "x86_64-linux")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        service.state_directory,
+        format!("/var/lib/simit-kvrocks-{}", service.run_identity)
+    );
+    for invalid in [
+        "/",
+        "/var//lib",
+        "/var/lib/",
+        "/var/./lib",
+        "/var/../lib",
+        "var/lib",
+        "C:/var/lib",
+        "/var\\lib",
+    ] {
+        assert!(
+            service_plan(
+                &bootstrap,
+                &service.identity,
+                std::path::Path::new(invalid),
+                &service.run_identity
+            )
+            .is_err(),
+            "noncanonical Linux state path must be rejected: {invalid}"
+        );
+    }
+    let receipt = CacheReceipt {
+        ready: ReadyReceipt {
+            invocation: UnitIdentity {
+                invocation_id: "f".repeat(32),
+                pid: 100,
+                control_group: format!("/system.slice/{}", service.unit),
+            },
+            supervisor: UnitIdentity {
+                invocation_id: "e".repeat(32),
+                pid: 101,
+                control_group: format!("/system.slice/{}", supervisor_unit(&service)),
+            },
+            service,
+            socket_device: 1,
+            socket_inode: 2,
+        },
+        sandbox_derivation: format!("/nix/store/{}-probe.drv", "4".repeat(32)),
+        sandbox_output: format!("/nix/store/{}-probe", "5".repeat(32)),
+        sandbox_receipt_sha256: "f".repeat(64),
+    };
+    validate_cache_receipt(&p, "x86_64-linux", &receipt).unwrap();
+    let mut passing = report(&p);
+    passing.effective.compiler_cache = Some(receipt.clone());
+    passing.effective.seal().unwrap();
+    passing.compiler_cache_cleanup = Some(Outcome::Passed);
+    passing
+        .test_evidence
+        .values_mut()
+        .for_each(|value| *value = "explicit-check-rebuild".into());
+    validate_result(&p, &passing).unwrap();
+    assert!(passing.successful());
+    for cleanup in [None, Some(Outcome::Failed), Some(Outcome::NotRun)] {
+        let mut invalid = passing.clone();
+        invalid.compiler_cache_cleanup = cleanup;
+        assert!(!invalid.successful());
+        assert!(validate_result(&p, &invalid).is_err());
+    }
+    for mutation in 0..6 {
+        let mut invalid = receipt.clone();
+        match mutation {
+            0 => invalid.ready.service.bootstrap.source.engine_revision = "0".repeat(40),
+            1 => invalid.ready.service.run_identity = "0".repeat(64),
+            2 => invalid.ready.service.socket = "/run/foreign.sock".into(),
+            3 => invalid.ready.supervisor.control_group = "/user.slice/foreign".into(),
+            4 => invalid.ready.supervisor.invocation_id = "unknown".into(),
+            _ => invalid.sandbox_derivation = invalid.sandbox_output.clone(),
+        }
+        assert!(validate_cache_receipt(&p, "x86_64-linux", &invalid).is_err());
     }
 }
 #[test]
