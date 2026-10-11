@@ -469,6 +469,8 @@ pub struct EffectivePlan {
     pub lock_digest: Option<String>,
     pub source_nar_hash: Option<String>,
     pub targets: Vec<Target>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compiler_cache: Option<super::kvrocks::CacheReceipt>,
     pub digest: String,
 }
 impl EffectivePlan {
@@ -492,6 +494,8 @@ pub struct PlatformResult {
     pub closure_export: Outcome,
     pub publication: Outcome,
     pub retrieval: Outcome,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compiler_cache_cleanup: Option<Outcome>,
     pub error: Option<String>,
     pub files: BTreeMap<String, String>,
     pub target_outcomes: BTreeMap<String, Outcome>,
@@ -501,6 +505,9 @@ pub struct PlatformResult {
 impl PlatformResult {
     pub fn successful(&self) -> bool {
         self.error.is_none()
+            && (self.plan.request.compiler_cache.is_none()
+                || (self.effective.compiler_cache.is_some()
+                    && self.compiler_cache_cleanup == Some(Outcome::Passed)))
             && match self.build {
                 Outcome::Passed => {
                     self.closure_export == Outcome::Passed

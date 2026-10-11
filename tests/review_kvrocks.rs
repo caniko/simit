@@ -350,6 +350,27 @@ fn kvrocks_transient_service_plan_binds_native_tool_run_identity_and_bounded_res
         &run_identity,
     )
     .unwrap();
+    // Kvrocks reserves another 128 descriptors beyond both configurable maxima.
+    // Its retained defaults exceed the source-owned systemd hard limit.
+    let setting = |key: &str| -> u64 {
+        plan.config
+            .lines()
+            .find_map(|line| line.strip_prefix(&format!("{key} ")))
+            .unwrap_or_else(|| panic!("bounded service config must set {key}"))
+            .parse()
+            .unwrap()
+    };
+    let descriptor_limit: u64 = plan
+        .systemd_args
+        .iter()
+        .find_map(|arg| arg.strip_prefix("--property=LimitNOFILE="))
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(
+        setting("maxclients") + setting("rocksdb.max_open_files") + 128 <= descriptor_limit,
+        "Kvrocks descriptor demand exceeds its hard service limit"
+    );
     assert_eq!(plan.bootstrap, bootstrap);
     assert_eq!(plan.identity, identity);
     assert_eq!(plan.run_identity, run_identity);
@@ -398,7 +419,11 @@ fn kvrocks_transient_service_plan_binds_native_tool_run_identity_and_bounded_res
     assert_eq!(tail[0], "--");
     assert_eq!(tail[1], format!("{}/bin/kvrocks", bootstrap.source.output));
     assert_eq!(tail[2], "-c");
-    assert_eq!(tail[3], format!("{}/kvrocks.conf", plan.state_directory));
+    assert_eq!(tail[3], format!("{}/kvrocks.conf", plan.control_directory));
+    assert_eq!(
+        plan.control_directory,
+        format!("/run/simit-kvrocks-control-{run_identity}")
+    );
     for required in [
         "port 16666",
         "unixsocket /run/redis-sccache/redis.sock",

@@ -72,10 +72,48 @@ the same ownership and mode `0660`. These observations preserve foreign state;
 they do not reserve the runtime path or prove service ownership, Unix-only
 listeners, sandbox admission, or compiler-cache operation.
 
-Execution currently rejects this opt-in before creating an output receipt.
-The owned bounded Kvrocks lifecycle, canonical sandbox socket mount, effective
-resource/source receipts and each exact wrapper's sandbox write/hit/cleanup
-qualification remain required before the build route can enable it.
+Execution additionally requires explicit operator worker allocation opt-in:
+`repo-review build --compiler-cache-opt-in kvrocks-v1`. The generated build job
+reads this value from `vars.REPO_REVIEW_COMPILER_CACHE`. An immutable cache request
+with an absent or different worker opt-in fails before execution; it never runs
+silently uncached. Enabling that variable and approving the actual hosted resource
+allocation are operator-owned rollout actions.
+
+The packaged helper exclusively allocates per-run state below `/var/lib`, a
+root-owned configuration directory below `/run`, and the canonical runtime
+directory. It starts one transient Kvrocks service under the observed worker UID
+and `nixbld` GID. The preset enforces 2 GiB memory, 200% CPU, 64 tasks, an 8,192
+descriptor limit, and a 4 GiB SST database limit through `max-db-size`. Explicit
+client/RocksDB file maxima, plus Kvrocks' 128 reserved descriptors, fit that hard
+descriptor limit. The configuration is root-owned and read-only to the worker.
+
+Readiness has a 30-second service-start budget and verifies the live systemd
+invocation, process credentials/executable, kernel cgroup limits, socket ownership
+and mode, process-owned Unix-only listeners, and an exact bounded RESP2 PONG.
+An independently managed root supervisor retains the allocation inodes for the
+whole build. Worker/control-pipe EOF or termination triggers a 30-second SIGTERM
+grace followed, if needed, by SIGKILL within the verified service's own control
+group. State removal requires that cgroup to be empty and the original directory,
+configuration and socket identities to remain owned. Foreign or replaced state
+is preserved. PID-1 supervision allows cleanup to finish after runner cancellation
+kills the worker process tree; a finite supervisor lifetime also bounds abandoned
+jobs.
+
+Before consumer realization, the engine freezes and rebuilds an independent
+ordinary-sandbox socket probe with the canonical socket mounted through
+`extra-sandbox-paths`. The effective plan and retained probe bytes bind this
+admission to the native tool, service/supervisor invocations and immutable run.
+Consumer package/check builds use the same mount, preserve frozen target selection,
+and still rebuild each requested check. A passing cache-enabled report requires
+both admission and verified cleanup receipts. The native tool and probe retain
+GC roots while the lifecycle is active.
+
+These transport receipts do not establish compiler-cache acceptance. Every
+consumer still needs its exact pinned wrapper/compiler to perform a first cache
+write and second hit inside an ordinary sandbox, with the expected versioned
+namespace, zero cache I/O errors and daemon cleanup. Generator qualification,
+operator allocation/opt-in, and each consumer's production/runtime qualification
+remain independent gates.
 
 ## Client
 

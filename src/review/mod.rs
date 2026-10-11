@@ -9,6 +9,14 @@ pub mod engine;
 pub mod generation;
 pub mod github;
 pub mod kvrocks;
+#[cfg(target_os = "linux")]
+pub mod kvrocks_host;
+#[cfg(target_os = "linux")]
+pub mod kvrocks_lifecycle;
+#[cfg(target_os = "linux")]
+pub mod kvrocks_probe;
+#[cfg(target_os = "linux")]
+pub mod kvrocks_worker;
 pub mod process;
 pub mod service;
 

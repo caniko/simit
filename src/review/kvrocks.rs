@@ -9,11 +9,12 @@ use super::{
     write_json,
 };
 use anyhow::{Context, Result, ensure};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{fs, path::Path};
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NativeSource {
     pub engine_repository: String,
@@ -26,7 +27,7 @@ pub struct NativeSource {
     pub output: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct BootstrapReceipt {
     pub source: NativeSource,
@@ -35,7 +36,7 @@ pub struct BootstrapReceipt {
     pub binary_sha256: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct WorkerIdentity {
     pub user: String,
@@ -317,7 +318,7 @@ impl OwnedRuntime {
         Ok(current)
     }
 
-    fn verify_owned_path(&self) -> Result<()> {
+    pub(crate) fn verify_owned_path(&self) -> Result<()> {
         use std::os::unix::fs::MetadataExt;
         let current = self.verify_pinned_path()?;
         ensure!(
@@ -347,6 +348,56 @@ impl OwnedRuntime {
     pub fn cleanup(mut self) -> Result<()> {
         self.remove_empty()
     }
+
+    /// Once an external unit may own this directory, Drop must preserve it until
+    /// the lifecycle proves the cgroup empty and explicitly performs cleanup.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn preserve_on_drop(&mut self) {
+        self.cleaned = true;
+    }
+
+    /// The privileged lifecycle calls this only after proving its unit's cgroup
+    /// empty. The trusted parent pins the top-level pathname; sandbox builders
+    /// cannot write the group-read-only service state.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn cleanup_service_data(&mut self) -> Result<()> {
+        use std::os::unix::fs::MetadataExt;
+        fn inspect(path: &Path, identity: &WorkerIdentity, count: &mut usize) -> Result<()> {
+            for entry in fs::read_dir(path)? {
+                let entry = entry?;
+                let metadata = fs::symlink_metadata(entry.path())?;
+                *count += 1;
+                ensure!(
+                    *count <= 100_000,
+                    "owned service state has too many entries"
+                );
+                ensure!(
+                    metadata.uid() == identity.uid
+                        && metadata.gid() == identity.gid
+                        && (metadata.is_dir() || (metadata.is_file() && metadata.nlink() == 1)),
+                    "unexpected/foreign entry in owned service state; preserve it"
+                );
+                if metadata.is_dir() {
+                    inspect(&entry.path(), identity, count)?;
+                }
+            }
+            Ok(())
+        }
+        self.verify_owned_path()?;
+        inspect(&self.path, &self.identity, &mut 0)?;
+        self.verify_owned_path()?;
+        // std's directory removal does not follow symlinks. Inspection also
+        // refuses unexpected entries rather than adopting them.
+        for entry in fs::read_dir(&self.path)? {
+            let entry = entry?;
+            if fs::symlink_metadata(entry.path())?.is_dir() {
+                fs::remove_dir_all(entry.path())?;
+            } else {
+                fs::remove_file(entry.path())?;
+            }
+        }
+        self.remove_empty()
+    }
 }
 
 #[cfg(unix)]
@@ -358,7 +409,7 @@ impl Drop for OwnedRuntime {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ServicePlan {
     pub bootstrap: BootstrapReceipt,
@@ -366,6 +417,7 @@ pub struct ServicePlan {
     pub run_identity: String,
     pub unit: String,
     pub state_directory: String,
+    pub control_directory: String,
     pub socket: String,
     pub sandbox_paths: Vec<String>,
     pub startup_seconds: u32,
@@ -375,6 +427,158 @@ pub struct ServicePlan {
     pub max_db_gib: u32,
     pub config: String,
     pub systemd_args: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct UnitIdentity {
+    pub invocation_id: String,
+    pub pid: u32,
+    pub control_group: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ReadyReceipt {
+    pub service: ServicePlan,
+    pub invocation: UnitIdentity,
+    pub supervisor: UnitIdentity,
+    pub socket_device: u64,
+    pub socket_inode: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CacheReceipt {
+    pub ready: ReadyReceipt,
+    pub sandbox_derivation: String,
+    pub sandbox_output: String,
+    pub sandbox_receipt_sha256: String,
+}
+
+pub fn sandbox_arguments() -> Vec<String> {
+    args(&[
+        "--option",
+        "extra-sandbox-paths",
+        "/run/redis-sccache/redis.sock",
+    ])
+}
+
+pub fn validate_cache_receipt(plan: &Plan, system: &str, receipt: &CacheReceipt) -> Result<()> {
+    plan.validate()?;
+    ensure!(
+        plan.request.compiler_cache == Some(CompilerCache::KvrocksV1)
+            && plan
+                .request
+                .systems
+                .iter()
+                .any(|requested| requested == system),
+        "unexpected compiler cache receipt/platform"
+    );
+    let ready = &receipt.ready;
+    let source = &ready.service.bootstrap.source;
+    engine::verify_lock(
+        &plan.tool_lock,
+        &EngineManifest {
+            schema_version: 1,
+            repository: source.engine_repository.clone(),
+            revision: source.engine_revision.clone(),
+            nixpkgs_revision: source.nixpkgs_revision.clone(),
+        },
+    )?;
+    let expected = service_plan(
+        &ready.service.bootstrap,
+        &ready.service.identity,
+        Path::new("/var/lib"),
+        &super::canonical_digest(&(&plan.digest, system))?,
+    )?;
+    ensure!(
+        ready.service == expected
+            && source.system == system
+            && ready.service.identity.group == "nixbld"
+            && ready.socket_inode > 0
+            && ready.invocation.pid > 1
+            && ready.supervisor.pid > 1
+            && ready.supervisor.control_group
+                == format!("/system.slice/{}", supervisor_unit(&expected))
+            && invocation_id(&ready.supervisor.invocation_id)
+            && ready.invocation.control_group == format!("/system.slice/{}", expected.unit)
+            && ready.invocation.invocation_id.len() == 32
+            && ready
+                .invocation
+                .invocation_id
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+        "cache service/source/run identity differs from the immutable request"
+    );
+    artifact::store_path(&receipt.sandbox_derivation)?;
+    artifact::store_path(&receipt.sandbox_output)?;
+    ensure!(
+        receipt.sandbox_derivation.ends_with(".drv")
+            && !receipt.sandbox_output.ends_with(".drv")
+            && sha256(&receipt.sandbox_receipt_sha256),
+        "invalid frozen sandbox admission receipt"
+    );
+    Ok(())
+}
+
+pub fn invocation_id(value: &str) -> bool {
+    value.len() == 32
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+pub fn supervisor_unit(plan: &ServicePlan) -> String {
+    format!("simit-kvrocks-supervisor-{}.service", plan.run_identity)
+}
+
+/// The supervisor belongs to PID 1, so runner cancellation cannot kill it as a
+/// descendant before the service's thirty-second shutdown grace has elapsed.
+pub fn supervisor_arguments(
+    plan: &ServicePlan,
+    wrapper: &Path,
+    caller: u32,
+) -> Result<Vec<String>> {
+    let wrapper = wrapper
+        .to_str()
+        .context("non-UTF8 packaged engine wrapper")?;
+    let output = Path::new(wrapper)
+        .parent()
+        .and_then(Path::parent)
+        .context("missing engine store output")?;
+    artifact::store_path(output.to_str().context("non-UTF8 engine store output")?)?;
+    ensure!(
+        wrapper == format!("{}/bin/repo-review", output.display())
+            && caller == plan.identity.uid
+            && caller > 0
+            && caller < u32::MAX,
+        "invalid immutable supervisor caller/wrapper"
+    );
+    Ok(args(&[
+        "--pipe",
+        "--wait",
+        "--quiet",
+        "--collect",
+        "--service-type=exec",
+        &format!("--unit={}", supervisor_unit(plan)),
+        &format!(
+            "--description=Simit Kvrocks supervisor {}",
+            plan.run_identity
+        ),
+        "--property=User=root",
+        "--property=Group=root",
+        "--property=KillMode=control-group",
+        "--property=RuntimeMaxSec=2700s",
+        "--property=TimeoutStopSec=45s",
+        "--property=SendSIGKILL=yes",
+        "--property=KillSignal=SIGTERM",
+        "--property=FinalKillSignal=SIGKILL",
+        &format!("--setenv=SUDO_UID={caller}"),
+        "--",
+        wrapper,
+        "kvrocks-host",
+    ]))
 }
 
 fn sha256(value: &str) -> bool {
@@ -448,6 +652,7 @@ pub fn service_plan(
         .context("service state path is not UTF-8")?
         .to_owned();
     let unit = format!("simit-kvrocks-{run_identity}.service");
+    let control_directory = format!("/run/simit-kvrocks-control-{run_identity}");
     let socket = "/run/redis-sccache/redis.sock".to_owned();
     let startup_seconds = 30;
     let shutdown_seconds = 30;
@@ -458,12 +663,13 @@ pub fn service_plan(
     // RestrictAddressFamilies also denies network sockets; actual listeners
     // must independently be verified before admitting a consumer build.
     let config = format!(
-        "port 16666\nunixsocket {socket}\nunixsocketperm 660\ndir {state_directory}\ndaemonize no\nsupervised no\nworkers 2\nmax-db-size {max_db_gib}\nrocksdb.block_cache_size 512\nrocksdb.max_background_jobs 2\nrocksdb.max_write_buffer_number 2\nrocksdb.write_buffer_size 64\n"
+        "port 16666\nunixsocket {socket}\nunixsocketperm 660\ndir {state_directory}\ndaemonize no\nsupervised no\nworkers 2\nmaxclients 1024\nmax-db-size {max_db_gib}\nrocksdb.max_open_files 4096\nrocksdb.block_cache_size 512\nrocksdb.max_background_jobs 2\nrocksdb.max_write_buffer_number 2\nrocksdb.write_buffer_size 64\n"
     );
     let mut systemd_args = args(&[
         "--no-block",
         "--service-type=exec",
         &format!("--unit={unit}"),
+        &format!("--description=Simit Kvrocks {run_identity}"),
         &format!("--property=User={}", identity.user),
         &format!("--property=Group={}", identity.group),
         "--property=RuntimeDirectory=redis-sccache",
@@ -471,6 +677,8 @@ pub fn service_plan(
         "--property=RuntimeDirectoryPreserve=yes",
         &format!("--property=MemoryMax={memory_max_bytes}"),
         &format!("--property=CPUQuota={cpu_quota_percent}%"),
+        "--property=CPUQuotaPeriodSec=100ms",
+        "--property=RuntimeMaxSec=2700s",
         "--property=KillMode=control-group",
         &format!("--property=TimeoutStartSec={startup_seconds}s"),
         &format!("--property=TimeoutStopSec={shutdown_seconds}s"),
@@ -480,6 +688,8 @@ pub fn service_plan(
         "--property=Restart=no",
         "--property=RestrictAddressFamilies=AF_UNIX",
         "--property=NoNewPrivileges=yes",
+        "--property=ProtectSystem=strict",
+        &format!("--property=ReadWritePaths={state_directory} /run/redis-sccache"),
         "--property=TasksMax=64",
         "--property=LimitNOFILE=8192",
     ]);
@@ -487,7 +697,7 @@ pub fn service_plan(
         "--",
         &format!("{}/bin/kvrocks", source.output),
         "-c",
-        &format!("{state_directory}/kvrocks.conf"),
+        &format!("{control_directory}/kvrocks.conf"),
     ]));
     Ok(ServicePlan {
         bootstrap: bootstrap.clone(),
@@ -495,6 +705,7 @@ pub fn service_plan(
         run_identity: run_identity.into(),
         unit,
         state_directory,
+        control_directory,
         socket: socket.clone(),
         sandbox_paths: vec![socket],
         startup_seconds,
@@ -709,6 +920,44 @@ mod tests {
             ("getent", ["group", "nixbld"]) => Ok("nixbld:x:30000:\n".into()),
             _ => anyhow::bail!("unexpected account lookup: {program} {arguments:?}"),
         }
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn started_runtime_requires_explicit_cleanup_and_refuses_linked_foreign_state() {
+        let root = tempfile::tempdir().unwrap();
+        let metadata = fs::metadata(root.path()).unwrap();
+        let identity = WorkerIdentity {
+            user: "runner".into(),
+            uid: metadata.uid(),
+            group: "nixbld".into(),
+            gid: metadata.gid(),
+        };
+        let path = root.path().join("runtime");
+        let mut owned = OwnedRuntime::create(&path, &identity).unwrap();
+        owned.preserve_on_drop();
+        drop(owned);
+        assert!(
+            path.is_dir(),
+            "a possibly running service lost its directory through Drop"
+        );
+        fs::remove_dir(&path).unwrap();
+        let mut owned = OwnedRuntime::create(&path, &identity).unwrap();
+        owned.preserve_on_drop();
+        let external = root.path().join("sentinel");
+        fs::write(&external, "foreign data").unwrap();
+        std::os::unix::fs::symlink(&external, path.join("foreign-link")).unwrap();
+        assert!(owned.cleanup_service_data().is_err());
+        assert_eq!(fs::read_to_string(&external).unwrap(), "foreign data");
+        fs::remove_file(path.join("foreign-link")).unwrap();
+        fs::hard_link(&external, path.join("foreign-hard-link")).unwrap();
+        assert!(owned.cleanup_service_data().is_err());
+        fs::remove_file(path.join("foreign-hard-link")).unwrap();
+        fs::create_dir(path.join("db")).unwrap();
+        fs::write(path.join("db/data"), "owned service data").unwrap();
+        owned.cleanup_service_data().unwrap();
+        assert!(!path.exists());
+        assert_eq!(fs::read_to_string(&external).unwrap(), "foreign data");
     }
 
     #[test]
