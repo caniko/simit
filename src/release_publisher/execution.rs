@@ -17,7 +17,8 @@ use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
 use super::archive::{
-    MAX_CRATE_BYTES, crate_from_provider_zip, crate_members, verify_reconstructed_crate,
+    CrateMember, MAX_CRATE_BYTES, crate_from_provider_zip, crate_members,
+    verify_reconstructed_crate,
 };
 use super::{
     CompletedRunEvent, PublisherContext, PublisherPolicy, ReleaseArtifact, ReleaseRun,
@@ -382,7 +383,8 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
     let cargo_manifest = members
         .get(&format!("{root}/Cargo.toml"))
         .context("crate has no normalized manifest")?;
-    let cargo_manifest: toml_edit::DocumentMut = std::str::from_utf8(cargo_manifest)?.parse()?;
+    let cargo_manifest: toml_edit::DocumentMut =
+        std::str::from_utf8(&cargo_manifest.contents)?.parse()?;
     let metadata = upload_metadata(
         &cargo_manifest,
         &members,
@@ -407,7 +409,7 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
                     .context("invalid member root")?;
                 let output = destination.join(relative);
                 fs::create_dir_all(output.parent().context("member has no parent")?)?;
-                fs::write(output, content)?;
+                write_verified_member(&output, &content)?;
             }
             println!(
                 "{}",
@@ -443,6 +445,16 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
                 )?
             );
         }
+    }
+    Ok(())
+}
+
+fn write_verified_member(output: &Path, member: &CrateMember) -> Result<()> {
+    fs::write(output, &member.contents)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(output, fs::Permissions::from_mode(member.mode))?;
     }
     Ok(())
 }
@@ -535,7 +547,12 @@ fn validate_manifest_paths(source: &Path) -> Result<()> {
         }
         resolved.starts_with(source)
     }
-    fn inspect(source: &Path, parent: &Path, item: &toml_edit::Item) -> Result<()> {
+    fn inspect(
+        source: &Path,
+        parent: &Path,
+        item: &toml_edit::Item,
+        section: Option<&str>,
+    ) -> Result<()> {
         if let Some(table) = item.as_table_like() {
             for (key, value) in table.iter() {
                 if ["path", "readme", "license-file", "build", "workspace"].contains(&key) {
@@ -548,18 +565,33 @@ fn validate_manifest_paths(source: &Path) -> Result<()> {
                 }
                 if key == "members" || key == "exclude" || key == "include" {
                     for path in string_array(Some(value)) {
+                        let pattern = path.trim_start_matches('!');
+                        // Cargo package include/exclude uses gitignore-style
+                        // rooted patterns, not absolute filesystem paths.
+                        let pattern = if section == Some("package")
+                            && (key == "include" || key == "exclude")
+                        {
+                            pattern.strip_prefix('/').unwrap_or(pattern)
+                        } else {
+                            pattern
+                        };
                         ensure!(
-                            path_is_inside(source, parent, path.trim_start_matches('!')),
+                            path_is_inside(source, parent, pattern),
                             "Cargo manifest pattern escapes signed source"
                         );
                     }
                 }
-                inspect(source, parent, value)?;
+                inspect(source, parent, value, Some(key))?;
             }
         }
         if let Some(tables) = item.as_array_of_tables() {
             for table in tables {
-                inspect(source, parent, &toml_edit::Item::Table(table.clone()))?;
+                inspect(
+                    source,
+                    parent,
+                    &toml_edit::Item::Table(table.clone()),
+                    section,
+                )?;
             }
         }
         Ok(())
@@ -578,6 +610,7 @@ fn validate_manifest_paths(source: &Path) -> Result<()> {
                     source,
                     &directory,
                     &toml_edit::Item::Table(manifest.as_table().clone()),
+                    None,
                 )?;
             }
         }
@@ -587,7 +620,7 @@ fn validate_manifest_paths(source: &Path) -> Result<()> {
 
 fn upload_metadata(
     manifest: &toml_edit::DocumentMut,
-    members: &BTreeMap<String, Vec<u8>>,
+    members: &BTreeMap<String, CrateMember>,
     root: &str,
     name: &str,
     version: &str,
@@ -660,7 +693,7 @@ fn upload_metadata(
             members
                 .get(&format!("{root}/{file}"))
                 .context("declared readme is absent")
-                .and_then(|bytes| Ok(std::str::from_utf8(bytes)?.to_owned()))
+                .and_then(|member| Ok(std::str::from_utf8(&member.contents)?.to_owned()))
         })
         .transpose()?;
     Ok(json!({
@@ -878,6 +911,56 @@ pub fn wait_for_registry_with(
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[test]
+    fn credential_free_extraction_preserves_verified_modes() {
+        use std::os::unix::fs::PermissionsExt;
+        let destination = TempDir::new().unwrap();
+        let path = destination.path().join("script");
+        for mode in [0o644, 0o755, 0o600] {
+            let member = CrateMember {
+                contents: b"verified".to_vec(),
+                mode,
+            };
+            write_verified_member(&path, &member).unwrap();
+            assert_eq!(fs::read(&path).unwrap(), member.contents);
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                mode
+            );
+        }
+    }
+
+    #[test]
+    fn cargo_package_rooted_patterns_are_not_absolute_filesystem_reads() {
+        let source = TempDir::new().unwrap();
+        fs::write(
+            source.path().join("Cargo.toml"),
+            include_str!("../../Cargo.toml"),
+        )
+        .unwrap();
+        validate_manifest_paths(source.path()).unwrap();
+        for declaration in [
+            "[package]\ninclude=['/src/**/*.rs', '!/src/generated.rs']\nexclude=['/target/**']",
+            "[package]\ninclude=['/etc/passwd']",
+        ] {
+            fs::write(source.path().join("Cargo.toml"), declaration).unwrap();
+            validate_manifest_paths(source.path()).unwrap();
+        }
+        for declaration in [
+            "[package]\ninclude=['/../secret']",
+            "[workspace]\nmembers=['/etc']",
+            "[workspace]\nexclude=['/etc']",
+            "[package]\nreadme='/etc/passwd'",
+        ] {
+            fs::write(source.path().join("Cargo.toml"), declaration).unwrap();
+            assert!(
+                validate_manifest_paths(source.path()).is_err(),
+                "{declaration}"
+            );
+        }
+    }
+
     #[test]
     fn manifest_reads_cannot_escape_the_signed_checkout() {
         let source = TempDir::new().unwrap();
@@ -952,23 +1035,27 @@ mod tests {
                 .arg(source.join("Cargo.toml")),
         )
         .unwrap();
-        output(
-            reconstruction_command(
-                state.path(),
-                &source,
-                &[
-                    "simit-admission-unpublished-a".into(),
-                    "simit-admission-unpublished-b".into(),
-                ],
-            )
-            .unwrap()
-            .arg("--offline"),
+        let reconstruction = reconstruction_command(
+            state.path(),
+            &source,
+            &[
+                "simit-admission-unpublished-a".into(),
+                "simit-admission-unpublished-b".into(),
+            ],
         )
+        .unwrap()
+        .arg("--offline")
+        .output()
         .unwrap();
+        assert!(
+            reconstruction.status.success(),
+            "data-only packaging failed: {}",
+            String::from_utf8_lossy(&reconstruction.stderr)
+        );
         let root = "simit-admission-unpublished-b-0.1.0";
         let archive = fs::read(state.path().join(format!("target/package/{root}.crate"))).unwrap();
         let members = crate_members(&archive, root).unwrap();
-        let lock = std::str::from_utf8(&members[&format!("{root}/Cargo.lock")]).unwrap();
+        let lock = std::str::from_utf8(&members[&format!("{root}/Cargo.lock")].contents).unwrap();
         assert!(lock.contains("simit-admission-unpublished-a"));
         assert!(members.contains_key(&format!("{root}/build.rs")));
         let child = data_command("cargo", state.path()).unwrap();

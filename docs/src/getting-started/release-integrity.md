@@ -84,6 +84,11 @@ The publisher checks the native repository, workflow ID/path, original run and
 attempt, provider artifact SHA-256, default-branch keyring and maintainer-signed
 tag/source. It reconstructs package contents with isolated Cargo configuration
 and `cargo package --no-verify`, then compares every member before API upload.
+Member paths, permission modes and source/original-manifest bytes must match.
+Generated `Cargo.toml` and `Cargo.lock` compare as typed TOML, preserving manifest
+fields and the complete dependency/checksum graph while tolerating Cargo-version
+differences in comments, layout and lock-format 3/4 markers. Changed dependency
+identities, source bytes, extra files or permission bits are rejected.
 Coordinated releases package their full release set together and publish in
 dependency order, waiting for exact registry resolution before dependents run.
 A moved tag, foreign run, changed archive or escaping manifest path is rejected.

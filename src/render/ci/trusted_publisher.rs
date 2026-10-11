@@ -160,13 +160,15 @@ pub(super) fn publisher_file(
         .map(|(name, _)| format!(" --reconstruct-package {}", shell_word(name)))
         .collect::<String>();
     for (name, dependencies) in plan {
-        let id = sanitize_gate_id(name);
+        // Cargo names already use GitHub's permitted job-ID alphabet. Keep
+        // their spelling: collapsing '-'/'_' or case aliases distinct crates.
+        let id = name;
         let verify = format!("verify-{id}");
         let publish = format!("publish-{id}");
         w.push_str(&format!("  {verify}:\n"));
         let mut needs: Vec<String> = dependencies
             .iter()
-            .map(|dependency| format!("publish-{}", sanitize_gate_id(dependency)))
+            .map(|dependency| format!("publish-{dependency}"))
             .collect();
         if let Some(previous) = &previous {
             needs.push(previous.clone());
@@ -212,7 +214,7 @@ pub(super) fn publisher_file(
     }
     let jobs = plan
         .iter()
-        .map(|(name, _)| format!("publish-{}", sanitize_gate_id(name)))
+        .map(|(name, _)| format!("publish-{name}"))
         .collect::<Vec<_>>();
     w.push_str(&format!("  publish-report:\n    needs: [{}]\n    if: always()\n    runs-on: ubuntu-24.04\n    steps:\n      - name: Release result\n        env:\n          RESULTS: ${{{{ toJSON(needs) }}}}\n        run: |\n          printf '%s\\n' \"$RESULTS\"\n          echo 'resume: rerun the original tag-push run; already-published crates with matching checksums exit 0 after exact registry resolution'\n          echo 'see per-crate job statuses for the auditable result'\n", jobs.join(", ")));
     trim_trailing_blank_lines(&mut w);

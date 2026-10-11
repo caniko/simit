@@ -215,3 +215,43 @@ fn publisher_dry_run_is_rejected_before_provider_or_registry_access() {
         "{stderr}"
     );
 }
+
+#[test]
+fn coordinated_package_names_keep_distinct_jobs_and_dependency_edges() {
+    let temp = publisher_project("coordinated");
+    fs::write(temp.path().join("Cargo.toml"), "[package]\nname='foo-bar'\nversion='0.1.0'\nedition='2024'\nlicense='MIT'\n[workspace]\nmembers=['dependent']\nresolver='3'\n").unwrap();
+    fs::write(temp.path().join("dependent/Cargo.toml"), "[package]\nname='foo_bar'\nversion='0.1.0'\nedition='2024'\nlicense='MIT'\n[dependencies]\nfoo-bar={path='..',version='0.1.0'}\n").unwrap();
+    let output = common::simit()
+        .current_dir(temp.path())
+        .args(["init", "ci"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let workflow: Value = serde_yaml::from_str(
+        &fs::read_to_string(
+            temp.path()
+                .join(".github/workflows/trusted-publish-workspace.yaml"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let jobs = &workflow["jobs"];
+    assert_eq!(jobs.as_mapping().unwrap().len(), 5);
+    for name in ["foo-bar", "foo_bar"] {
+        assert!(jobs[format!("verify-{name}")].is_mapping());
+        assert_eq!(
+            jobs[format!("publish-{name}")]["needs"][0],
+            format!("verify-{name}")
+        );
+    }
+    assert!(
+        jobs["verify-foo_bar"]["needs"]
+            .as_sequence()
+            .unwrap()
+            .contains(&Value::String("publish-foo-bar".into()))
+    );
+}
