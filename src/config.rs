@@ -2074,10 +2074,9 @@ impl ProjectConfig {
             "simit project config: [ci].required_secrets",
             &self.ci.required_secrets,
         )?;
-        validate_nonempty_strings(
-            "simit project config: [ci].required_env",
-            &self.ci.required_env,
-        )?;
+        for name in &self.ci.required_env {
+            validate_environment_name("simit project config: [ci].required_env", name)?;
+        }
         validate_nonempty_strings(
             "simit project config: [ci].extra_setup",
             &self.ci.extra_setup,
@@ -3287,6 +3286,18 @@ fn validate_nonempty_strings(name: &str, values: &[String]) -> Result<()> {
 fn validate_nonempty_string(name: &str, value: &str) -> Result<()> {
     if value.trim().is_empty() {
         bail!("{name} must not be empty");
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_environment_name(name: &str, value: &str) -> Result<()> {
+    let mut bytes = value.bytes();
+    if !bytes
+        .next()
+        .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_')
+        || !bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    {
+        bail!("{name} must be an environment variable identifier matching [A-Za-z_][A-Za-z0-9_]*");
     }
     Ok(())
 }

@@ -354,6 +354,8 @@ fn nix_format_gate_runs_custom_flake_formatters_and_rejects_worktree_mutation() 
                 .unwrap()
                 .success()
         );
+        // Operator Git templates need not create info/ in disposable fixtures.
+        fs::create_dir_all(root.join(".git/info")).unwrap();
         fs::write(
             root.join(".git/info/exclude"),
             "/bin/\n/formatter/\n/format.log\n",

@@ -861,6 +861,7 @@ fn is_supplementary_workflow(file: &WorkflowFile) -> bool {
             | "review-policy.yaml"
             | "review-compatibility.yml"
             | "qualify-release-generator.yaml"
+            | "qualify-publisher-boundary.yaml"
             | "credential-visibility.yaml"
             | "pages.yml"
             | "pages.yaml"
@@ -1296,7 +1297,9 @@ fn infer_expected_primary_ci_files(
                     .map(|entry| (entry.package.name.clone(), entry.package.version.clone()))
                     .collect();
                 if !ordered.is_empty() {
-                    if let Ok(file) = ci::publish_workspace_file(
+                    // Plan discovery remains best-effort, but unsafe publisher
+                    // configuration must surface its actionable rendering error.
+                    let generated = ci::publish_workspace_files(
                         platform,
                         ci::PublishWorkspaceInputs {
                             runtime: resolved.runtime,
@@ -1305,9 +1308,8 @@ fn infer_expected_primary_ci_files(
                             plan: ordered,
                             versions,
                         },
-                    ) {
-                        files.push(file);
-                    }
+                    )?;
+                    files.extend(generated);
                 }
             }
         }
@@ -1316,13 +1318,13 @@ fn infer_expected_primary_ci_files(
     {
         for package in &packages {
             if package.is_publishable() {
-                files.push(ci::publish_file(
+                files.extend(ci::publish_files(
                     platform,
                     resolved.runtime,
                     package,
                     &runners.release,
                     options.clone(),
-                ));
+                )?);
             }
         }
     }
