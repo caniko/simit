@@ -1297,7 +1297,9 @@ fn infer_expected_primary_ci_files(
                     .map(|entry| (entry.package.name.clone(), entry.package.version.clone()))
                     .collect();
                 if !ordered.is_empty() {
-                    if let Ok(generated) = ci::publish_workspace_files(
+                    // Plan discovery remains best-effort, but unsafe publisher
+                    // configuration must surface its actionable rendering error.
+                    let generated = ci::publish_workspace_files(
                         platform,
                         ci::PublishWorkspaceInputs {
                             runtime: resolved.runtime,
@@ -1306,9 +1308,8 @@ fn infer_expected_primary_ci_files(
                             plan: ordered,
                             versions,
                         },
-                    ) {
-                        files.extend(generated);
-                    }
+                    )?;
+                    files.extend(generated);
                 }
             }
         }

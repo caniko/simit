@@ -420,7 +420,6 @@ pub fn files(request: FilesRequest<'_>) -> Result<Vec<GeneratedFile>> {
             files.push(trusted_publisher::publisher_file(
                 &dir.join(workflow_file_name("publish-crate", file_suffix)),
                 runtime,
-                &runners.release,
                 &options,
                 &[(package.name.clone(), vec![])],
                 false,
@@ -461,7 +460,6 @@ pub fn publish_files(
         files.push(trusted_publisher::publisher_file(
             &source.relative_path,
             runtime,
-            runner,
             &options,
             &[(package.name.clone(), vec![])],
             false,
@@ -510,7 +508,6 @@ pub fn publish_workspace_files(
     let publisher = trusted_publisher::publisher_file(
         &source.relative_path,
         inputs.runtime,
-        inputs.runner,
         &inputs.options,
         &inputs.plan,
         true,
@@ -533,7 +530,6 @@ fn publish_workspace_workflow(
     if platform == Platform::Github {
         return trusted_publisher::source_workflow(
             runtime,
-            runner,
             options,
             &plan
                 .iter()
@@ -2803,7 +2799,12 @@ fn publish_workflow(
         push_release_permissions(&mut workflow, platform);
     }
     workflow.push_str("    runs-on: ");
-    workflow.push_str(&runs_on(runner));
+    if platform == Platform::Github {
+        // Tag-controlled code can read private runners' mounted credentials.
+        workflow.push_str(trusted_publisher::CANDIDATE_RUNNER);
+    } else {
+        workflow.push_str(&runs_on(runner));
+    }
     workflow.push('\n');
     push_container(&mut workflow, platform, runtime, package);
     push_job_env(&mut workflow, platform, runtime, &options.extra_env, true);
@@ -3853,6 +3854,14 @@ fn push_event_checkout_step(workflow: &mut String, platform: Platform) {
 }
 
 fn push_extra_setup_steps(workflow: &mut String, extra_setup: &[String]) {
+    push_extra_setup_steps_with_context(workflow, extra_setup, |_| {});
+}
+
+fn push_extra_setup_steps_with_context(
+    workflow: &mut String,
+    extra_setup: &[String],
+    mut context: impl FnMut(&mut String),
+) {
     for (index, command) in extra_setup.iter().enumerate() {
         workflow.push_str("      - name: Project setup");
         if extra_setup.len() > 1 {
@@ -3860,6 +3869,7 @@ fn push_extra_setup_steps(workflow: &mut String, extra_setup: &[String]) {
             workflow.push_str(&(index + 1).to_string());
         }
         workflow.push('\n');
+        context(workflow);
         if command.contains('\n') {
             workflow.push_str("        run: |\n");
             for line in command.lines() {
@@ -3877,10 +3887,19 @@ fn push_extra_setup_steps(workflow: &mut String, extra_setup: &[String]) {
 }
 
 fn push_required_env_step(workflow: &mut String, required_env: &[String]) {
+    push_required_env_step_with_context(workflow, required_env, |_| {});
+}
+
+fn push_required_env_step_with_context(
+    workflow: &mut String,
+    required_env: &[String],
+    context: impl FnOnce(&mut String),
+) {
     if required_env.is_empty() {
         return;
     }
     workflow.push_str("      - name: Validate required environment\n");
+    context(workflow);
     workflow.push_str("        run: |\n");
     workflow.push_str("          set -euo pipefail\n");
     for name in required_env {

@@ -72,6 +72,12 @@ from the independent default branch. A fresh credential-free job verifies and
 compiles the packaged contents before a separate hosted upload job re-admits
 the original source and artifact. Candidate configuration, compiler wrappers,
 hooks and build scripts never execute with the registry credential.
+Tag archive builds and candidate verification always use fresh hosted
+`ubuntu-24.04` runners, irrespective of configured CI/release runner labels.
+Configured nonsecret build environment, required environment checks and setup
+are reapplied after source/archive admission and the exact signed-source checkout.
+They affect only candidate setup, compilation and gates; independent engine
+bootstrap, admission and the separate upload job do not consume them.
 
 Before enabling publication, the operator must move `CRATES_IO_API_TOKEN` into
 the literal `simit-crates-io` environment, restrict that environment to the exact
@@ -84,6 +90,11 @@ The publisher checks the native repository, workflow ID/path, original run and
 attempt, provider artifact SHA-256, default-branch keyring and maintainer-signed
 tag/source. It reconstructs package contents with isolated Cargo configuration
 and `cargo package --no-verify`, then compares every member before API upload.
+The complete signed source workflow must equal the independently enrolled
+workflow as typed YAML, including permissions, runners, jobs and credential
+contexts. Identical tag triggers alone do not authorize a modified workflow.
+Workflow changes require independent default-branch enrollment before a release;
+comments and YAML key ordering do not change execution authority.
 Reconstruction explicitly selects crates.io and uses a neutral filesystem-root
 working directory with absolute manifest/target paths and private `HOME` /
 `CARGO_HOME`. Cargo therefore does not inherit a candidate configuration or a

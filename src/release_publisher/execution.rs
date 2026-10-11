@@ -514,13 +514,18 @@ fn string_array(item: Option<&toml_edit::Item>) -> Vec<String> {
 
 /// Native run head labels do not prove a tag push. The provider's exact push
 /// source must contain the independently enrolled, exclusively tag-triggered
-/// workflow. A candidate cannot add a semver branch trigger or dispatch route.
+/// workflow definition. Binding only triggers would let the signed source add
+/// credential authority, private runners or alternate jobs under those triggers.
 fn verify_tag_only_source_workflow(signed: &[u8], enrolled: &[u8]) -> Result<()> {
     let workflow: serde_yaml::Value = serde_yaml::from_slice(signed)?;
     let enrollment: serde_yaml::Value = serde_yaml::from_slice(enrolled)?;
     ensure!(
         workflow["on"] == enrollment["on"],
         "signed workflow trigger differs from independently enrolled tag-only trigger"
+    );
+    ensure!(
+        workflow == enrollment,
+        "signed workflow definition differs from independently enrolled credential-free workflow"
     );
     let triggers = workflow["on"]
         .as_mapping()
@@ -1531,6 +1536,40 @@ mod tests {
                 || key == "GITHUB_TOKEN"
                 || key == "RUSTC_WRAPPER")
         );
+    }
+
+    #[test]
+    fn signed_workflow_cannot_change_enrolled_authority_with_identical_triggers() {
+        let enrolled = b"on:\n  push:\n    tags: ['[0-9]*']\npermissions:\n  contents: read\njobs:\n  build:\n    runs-on: ubuntu-24.04\n    steps:\n      - run: cargo package\n";
+        let original: serde_yaml::Value = serde_yaml::from_slice(enrolled).unwrap();
+        for mutation in [
+            "permissions: {id-token: write}",
+            "permissions: write-all",
+            "jobs: {build: {permissions: {id-token: write}}}",
+            "jobs: {build: {environment: simit-crates-io}}",
+            "jobs: {build: {env: {TOKEN: '${{ secrets.TOKEN }}'}}}",
+            "jobs: {build: {runs-on: atlas-nix-trusted}}",
+            "jobs: {build: {steps: [{run: 'echo ${{ secrets.TOKEN }}'}]}}",
+            "jobs: {extra: {runs-on: ubuntu-24.04, steps: [{run: 'echo bypass'}]}}",
+        ] {
+            let mut changed = original.clone();
+            let patch: serde_yaml::Value = serde_yaml::from_str(mutation).unwrap();
+            for (key, value) in patch.as_mapping().unwrap() {
+                changed
+                    .as_mapping_mut()
+                    .unwrap()
+                    .insert(key.clone(), value.clone());
+            }
+            assert_eq!(changed["on"], original["on"]);
+            let bytes = serde_yaml::to_string(&changed).unwrap();
+            assert!(
+                verify_tag_only_source_workflow(bytes.as_bytes(), enrolled).is_err(),
+                "accepted {mutation}"
+            );
+        }
+        // YAML key ordering, comments and formatting carry no execution authority.
+        let equivalent = b"# equivalent enrollment\njobs: {build: {steps: [{run: cargo package}], runs-on: ubuntu-24.04}}\npermissions: {contents: read}\non: {push: {tags: ['[0-9]*']}}\n";
+        verify_tag_only_source_workflow(equivalent, enrolled).unwrap();
     }
 
     #[test]

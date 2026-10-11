@@ -389,6 +389,164 @@ fn tag_archive_generation_rejects_secret_contexts_in_all_publication_modes() {
 }
 
 #[test]
+fn candidate_archive_and_verification_jobs_never_use_configured_trusted_runners() {
+    for mode in ["single", "members", "coordinated"] {
+        let temp = publisher_project(mode);
+        let config = fs::read_to_string(temp.path().join("simit.toml")).unwrap();
+        fs::write(
+            temp.path().join("simit.toml"),
+            config.replace("runner='ubuntu-latest'", "runner='atlas-nix-trusted'"),
+        )
+        .unwrap();
+        let output = common::simit()
+            .current_dir(temp.path())
+            .args(["init", "ci", "--runner", "atlas-nix-trusted"])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        for entry in fs::read_dir(temp.path().join(".github/workflows")).unwrap() {
+            let path = entry.unwrap().path();
+            let workflow: Value =
+                serde_yaml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+            let tag_build = workflow["on"]["push"]["tags"].is_sequence();
+            for (name, job) in workflow["jobs"].as_mapping().unwrap() {
+                if tag_build || name.as_str().unwrap().starts_with("verify-") {
+                    assert_eq!(
+                        job["runs-on"], "ubuntu-24.04",
+                        "{mode}: {path:?}/{name:?} exposes candidate code to a private runner"
+                    );
+                }
+            }
+        }
+        let ci = fs::read_to_string(temp.path().join(".github/workflows/ci.yaml"))
+            .or_else(|_| {
+                fs::read_to_string(temp.path().join(".github/workflows/ci-publisher-demo.yaml"))
+            })
+            .unwrap();
+        assert!(
+            ci.contains("atlas-nix-trusted"),
+            "ordinary CI runner selection must be preserved"
+        );
+    }
+}
+
+#[test]
+fn fresh_verification_reapplies_nonsecret_build_setup_without_influencing_upload() {
+    for mode in ["single", "members", "coordinated"] {
+        let temp = publisher_project(mode);
+        let config = fs::read_to_string(temp.path().join("simit.toml")).unwrap();
+        fs::write(temp.path().join("simit.toml"), format!("{config}\nextra_setup=['test -f Cargo.toml; printf ready > build-tool-state']\nrequired_env=['BUILD_TOOL_MODE']\n[ci.extra_env]\nBUILD_TOOL_MODE='required-native-library'\n")).unwrap();
+        let output = common::simit()
+            .current_dir(temp.path())
+            .args(["init", "ci"])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        for entry in fs::read_dir(temp.path().join(".github/workflows")).unwrap() {
+            let path = entry.unwrap().path();
+            if !path
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("trusted-publish-")
+            {
+                continue;
+            }
+            let workflow: Value = serde_yaml::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+            for (name, job) in workflow["jobs"].as_mapping().unwrap() {
+                let steps = job["steps"].as_sequence().unwrap();
+                if name.as_str().unwrap().starts_with("verify-") {
+                    let admission = steps
+                        .iter()
+                        .position(|step| {
+                            step["name"]
+                                .as_str()
+                                .is_some_and(|name| name.starts_with("Admit signed source"))
+                        })
+                        .unwrap();
+                    let checkout = steps
+                        .iter()
+                        .position(|step| step["with"]["path"] == ".simit-release-source")
+                        .expect("setup must run against the signed source");
+                    let setup = steps
+                        .iter()
+                        .position(|step| step["name"] == "Project setup")
+                        .expect("fresh verification is missing required native build setup");
+                    let verify = steps
+                        .iter()
+                        .position(|step| {
+                            step["name"]
+                                .as_str()
+                                .is_some_and(|name| name.starts_with("Verify packaged contents"))
+                        })
+                        .unwrap();
+                    assert!(admission < checkout && checkout < setup && setup < verify);
+                    for index in [setup, verify] {
+                        assert_eq!(
+                            steps[index]["env"]["BUILD_TOOL_MODE"],
+                            "required-native-library"
+                        );
+                    }
+                    assert_eq!(steps[setup]["working-directory"], ".simit-release-source");
+                    assert!(
+                        steps
+                            .iter()
+                            .any(|step| step["name"] == "Validate required environment")
+                    );
+                    for step in &steps[..=admission] {
+                        assert!(
+                            step["env"]["BUILD_TOOL_MODE"].is_null(),
+                            "build environment must not influence independent admission/bootstrap"
+                        );
+                    }
+                } else if name.as_str().unwrap().starts_with("publish-")
+                    && name.as_str() != Some("publish-report")
+                {
+                    assert!(job["env"]["BUILD_TOOL_MODE"].is_null());
+                    assert!(!steps.iter().any(|step| step["name"] == "Project setup"));
+                    assert!(
+                        steps
+                            .iter()
+                            .all(|step| step["env"]["BUILD_TOOL_MODE"].is_null())
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn coordinated_audit_propagates_unsafe_publisher_policy_without_modifying_workflows() {
+    let temp = publisher_project("coordinated");
+    let files = fs::read_dir(temp.path().join(".github/workflows"))
+        .unwrap()
+        .map(|entry| {
+            let path = entry.unwrap().path();
+            let bytes = fs::read(&path).unwrap();
+            (path, bytes)
+        })
+        .collect::<Vec<_>>();
+    let config = fs::read_to_string(temp.path().join("simit.toml")).unwrap();
+    fs::write(
+        temp.path().join("simit.toml"),
+        format!("{config}\n[ci.extra_env]\nTOKEN='${{{{ secrets.TOKEN }}}}'\n"),
+    )
+    .unwrap();
+    let result = simit::registry::audit_ci(temp.path());
+    assert!(
+        result.is_err(),
+        "unsafe coordinated publisher policy was swallowed as generic drift: {result:?}"
+    );
+    assert!(
+        format!("{:#}", result.unwrap_err())
+            .contains("release source workflows must not reference GitHub secrets")
+    );
+    for (path, bytes) in files {
+        assert_eq!(fs::read(path).unwrap(), bytes);
+    }
+}
+
+#[test]
 fn tag_archive_generation_retains_nonsecret_build_environment() {
     let temp = publisher_project("coordinated");
     let config = fs::read_to_string(temp.path().join("simit.toml")).unwrap();

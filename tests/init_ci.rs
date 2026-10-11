@@ -90,12 +90,19 @@ fn private_github_runner_generation_preserves_the_compatible_checkout_baseline()
     for path in [
         ".github/workflows/ci.yaml",
         ".github/workflows/publish-crate.yaml",
+        ".github/workflows/trusted-publish-crate.yaml",
         ".github/workflows/nix-builds.yaml",
     ] {
         let workflow = read(&temp.path().join(path));
         assert_yaml_parses(&workflow);
         assert!(
-            workflow.contains("runs-on: private-legacy-linux"),
+            workflow.contains(if path.contains("publish-crate") {
+                // Candidate builds must not inherit credentials mounted on a
+                // private CI/release runner, including with the Nix runtime.
+                "runs-on: ubuntu-24.04"
+            } else {
+                "runs-on: private-legacy-linux"
+            }),
             "{path}: {workflow}"
         );
         // The pre-template default uses checkout v4's Node20 runtime. Arbitrary

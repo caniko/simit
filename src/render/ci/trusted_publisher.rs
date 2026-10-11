@@ -2,6 +2,10 @@
 
 use super::*;
 
+// Candidate-controlled build scripts/setup run only on fresh hosted workers,
+// independently of configured CI/release runners and their mounted credentials.
+pub(super) const CANDIDATE_RUNNER: &str = "ubuntu-24.04";
+
 pub(super) fn validate_credential_free_source(workflow: &str, options: &CiOptions) -> Result<()> {
     // Required gates also run against candidate source in the fresh trusted
     // verify job, including when the tag workflow does not render those gates.
@@ -57,7 +61,6 @@ fn archive_steps_with_packaging(name: &str, runtime: Runtime, package: bool) -> 
 
 pub(super) fn source_workflow(
     runtime: Runtime,
-    runner: &ResolvedRunner,
     options: &CiOptions,
     names: &[String],
     workspace: bool,
@@ -74,7 +77,7 @@ pub(super) fn source_workflow(
     });
     w.push_str(github_crate_publish_triggers());
     w.push_str("permissions:\n  contents: read\n\nconcurrency:\n  group: ${{ github.workflow_ref }}-${{ github.ref }}\n  cancel-in-progress: false\n\njobs:\n  build:\n    runs-on: ");
-    w.push_str(&runs_on(runner));
+    w.push_str(CANDIDATE_RUNNER);
     w.push_str("\n    timeout-minutes: 60\n");
     push_job_env(&mut w, Platform::Github, runtime, &options.extra_env, true);
     w.push_str("    steps:\n");
@@ -161,7 +164,6 @@ fn bootstrap(w: &mut String) {
 pub(super) fn publisher_file(
     source_path: &Path,
     runtime: Runtime,
-    runner: &ResolvedRunner,
     options: &CiOptions,
     plan: &[(String, Vec<String>)],
     workspace: bool,
@@ -206,7 +208,7 @@ pub(super) fn publisher_file(
         // Path is also checked against its native workflow ID by the engine.
         w.push_str("    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'\n");
         w.push_str("    runs-on: ");
-        w.push_str(&runs_on(runner));
+        w.push_str(CANDIDATE_RUNNER);
         w.push_str("\n    timeout-minutes: 60\n    steps:\n");
         bootstrap(&mut w);
         if runtime == Runtime::Nix {
@@ -221,30 +223,36 @@ pub(super) fn publisher_file(
         // Fresh credential-free runner: candidate build scripts may execute here.
         // Publishing always re-admits on a separate hosted runner, never trusts
         // this job's filesystem, exports, output paths or candidate binaries.
-        if runtime == Runtime::Nix || !options.required_gates.is_empty() {
-            w.push_str("      - name: Checkout original signed source for verification\n");
-            push_action_uses(&mut w, Platform::Github, "checkout", "v4.3.1");
-            w.push_str("        with:\n          ref: ${{ github.event.workflow_run.head_sha }}\n          path: .simit-release-source\n          persist-credentials: false\n");
-        }
-        let directory = if runtime == Runtime::Nix {
-            ".simit-release-source"
-        } else {
-            "${{ runner.temp }}"
+        w.push_str("      - name: Checkout original signed source for verification\n");
+        push_action_uses(&mut w, Platform::Github, "checkout", "v4.3.1");
+        w.push_str("        with:\n          ref: ${{ github.event.workflow_run.head_sha }}\n          path: .simit-release-source\n          persist-credentials: false\n");
+        let directory = ".simit-release-source";
+        let candidate_context = |w: &mut String| {
+            push_candidate_context(w, runtime, &options.extra_env, directory);
         };
+        // Build configuration belongs only to the admitted candidate phase,
+        // never independent engine bootstrap, admission or upload.
+        push_required_env_step_with_context(&mut w, &options.required_env, candidate_context);
+        push_extra_setup_steps_with_context(&mut w, &options.extra_setup, candidate_context);
         let prefix = command_prefix(runtime);
-        w.push_str(&format!("      - name: Verify packaged contents {name}\n        working-directory: {directory}\n        run: {prefix}cargo publish --dry-run --locked --manifest-path \"$RUNNER_TEMP/verified-{id}/Cargo.toml\"\n"));
+        w.push_str(&format!("      - name: Verify packaged contents {name}\n"));
+        candidate_context(&mut w);
+        w.push_str(&format!("        run: {prefix}cargo publish --dry-run --locked --manifest-path \"$RUNNER_TEMP/verified-{id}/Cargo.toml\"\n"));
         if !options.required_gates.is_empty() {
             for gate in &options.required_gates {
-                w.push_str(&format!("      - name: Required gate {}\n        timeout-minutes: {}\n        working-directory: .simit-release-source\n        env:\n", gate.id, gate.timeout_minutes));
-                if gate.env.is_empty() {
-                    w.push_str("          SIMIT_REQUIRED_GATE: \"1\"\n");
-                }
-                for (key, value) in &gate.env {
-                    w.push_str(&format!(
-                        "          {key}: \"{}\"\n",
-                        yaml_double_quote(value)
-                    ));
-                }
+                w.push_str(&format!(
+                    "      - name: Required gate {}\n        timeout-minutes: {}\n",
+                    gate.id, gate.timeout_minutes
+                ));
+                let mut environment: BTreeMap<String, String> =
+                    options.extra_env.iter().cloned().collect();
+                environment.extend(gate.env.clone());
+                push_candidate_context(
+                    &mut w,
+                    runtime,
+                    &environment.into_iter().collect::<Vec<_>>(),
+                    directory,
+                );
                 w.push_str(&format!("        run: {}\n", gate.run));
             }
         }
@@ -262,5 +270,21 @@ pub(super) fn publisher_file(
     GeneratedFile {
         relative_path: publisher_path,
         content: w,
+    }
+}
+
+fn push_candidate_context(
+    w: &mut String,
+    runtime: Runtime,
+    environment: &[(String, String)],
+    directory: &str,
+) {
+    w.push_str(&format!("        working-directory: {directory}\n"));
+    let mut env = String::new();
+    push_job_env(&mut env, Platform::Github, runtime, environment, true);
+    for line in env.lines() {
+        w.push_str("    ");
+        w.push_str(line);
+        w.push('\n');
     }
 }
