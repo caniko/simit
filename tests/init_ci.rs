@@ -818,9 +818,57 @@ runtime = "nix"
     assert_yaml_parses(&workflow);
     let parsed: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
     assert_eq!(parsed["permissions"]["contents"], "read");
+    let group = parsed["concurrency"]["group"].as_str().unwrap();
+    let resolve = |head_repository: Option<&str>,
+                   head_branch: Option<&str>,
+                   repository: &str,
+                   branch: &str| {
+        let resolved = group
+            .replace("${{ github.workflow }}", "Nix flake check")
+            .replace(
+                "${{ github.event.pull_request.head.repo.full_name || github.repository }}",
+                head_repository.unwrap_or(repository),
+            )
+            .replace(
+                "${{ github.event.pull_request.head.ref || github.ref_name }}",
+                head_branch.unwrap_or(branch),
+            );
+        assert!(!resolved.contains("${{"), "unrecognized group: {resolved}");
+        resolved
+    };
+    let push = resolve(None, None, "owner/project", "feature");
+    let same_repository_pr = resolve(
+        Some("owner/project"),
+        Some("feature"),
+        "owner/project",
+        "1/merge",
+    );
+    let first_fork = resolve(
+        Some("alice/project"),
+        Some("feature"),
+        "owner/project",
+        "2/merge",
+    );
+    let second_fork = resolve(
+        Some("bob/project"),
+        Some("feature"),
+        "owner/project",
+        "3/merge",
+    );
+    assert_ne!(
+        first_fork, second_fork,
+        "unrelated forks must not cancel each other"
+    );
+    assert_ne!(
+        push, first_fork,
+        "fork PRs must not cancel repository pushes"
+    );
+    assert_eq!(push, same_repository_pr);
+    assert_ne!(push, resolve(None, None, "owner/project", "other-feature"));
+    assert_eq!(parsed["concurrency"]["cancel-in-progress"], true);
     assert_eq!(
         parsed["concurrency"]["group"],
-        "${{ github.workflow }}-${{ github.event.pull_request.head.ref || github.ref_name }}"
+        "${{ github.workflow }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event.pull_request.head.ref || github.ref_name }}"
     );
     assert_eq!(parsed["jobs"]["flake-check"]["strategy"]["max-parallel"], 2);
     assert_eq!(parsed["jobs"]["flake-check"]["timeout-minutes"], 60);
@@ -852,6 +900,22 @@ runtime = "nix"
         .status()
         .unwrap();
     assert!(check.success());
+    assert!(
+        simit()
+            .current_dir(temp.path())
+            .args(["init", "ci", "--platform", "github", "--runtime", "nix"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert_eq!(
+        workflow,
+        read(&temp.path().join(".github/workflows/ci.yaml"))
+    );
+    assert_eq!(
+        simit::registry::audit_ci(temp.path()).unwrap().status,
+        simit::registry::FeatureStatus::Managed
+    );
 }
 
 #[test]
