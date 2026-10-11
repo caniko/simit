@@ -75,6 +75,19 @@ jobs:
           )
           tar -czf "$evidence/generated.tar.gz" -C "$evidence/generated" .
           sha256sum "$evidence/generated.tar.gz" > "$evidence/generated.sha256"
+      - name: Export the conventional closure fixture through the packaged engine
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 tests/fixtures/review/retrieval.py --engine tools/bin/repo-review --controller-root controller-lock --out "$RUNNER_TEMP/review-generator/retrieval"
+      - name: Verify real closure retrieval and signature enforcement in fresh stores
+        env:
+          CARGO_BUILD_JOBS: "2"
+        run: |
+          set -euo pipefail
+          export REPO_REVIEW_FIXTURE_ROOT="$RUNNER_TEMP/review-generator/retrieval"
+          nix develop -c cargo test --locked --test review_retrieval -- --ignored --test-threads=1 2>&1 | tee "$RUNNER_TEMP/review-generator/retrieval-tests.log"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: ${{ always() }}
         with:

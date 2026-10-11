@@ -1,5 +1,13 @@
 # Release Maintenance
 
+The `pinned-tools` compatibility job builds the exact packaged review engine,
+exports the conventional fixture's closure, then explicitly runs both CI-only
+`review_retrieval` tests. Acceptance requires the empty-cache miss, rejection of
+unsigned and wrong-key copies even with consumer signature checks disabled, and
+an exact closure comparison after a correctly signed restore into a new store.
+The job retains the sealed fixture and actual retrieval-test log with its
+source-bound engine evidence; ordinary Cargo tests leave these tests ignored.
+
 Before publishing a release, add intended changes under `## [Unreleased]` in
 `CHANGELOG.md` and validate the changelog:
 
