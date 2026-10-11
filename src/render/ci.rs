@@ -772,8 +772,9 @@ pub fn nix_flake_ci_file_with_system_runners(
     workflow.push_str("name: Nix flake check\n\non:\n  push:\n  pull_request:\n\n");
     push_github_read_permissions(&mut workflow, platform);
     if platform == Platform::Github && !system_runners.is_empty() {
-        // Coalesce push and PR qualification for the same source branch.
-        workflow.push_str("concurrency:\n  group: ${{ github.workflow }}-${{ github.event.pull_request.head.ref || github.ref_name }}\n  cancel-in-progress: true\n\n");
+        // Coalesce one repository's push/PR branch while isolating same-named
+        // branches from unrelated forks.
+        workflow.push_str("concurrency:\n  group: ${{ github.workflow }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event.pull_request.head.ref || github.ref_name }}\n  cancel-in-progress: true\n\n");
     } else {
         push_platform_concurrency(&mut workflow, platform);
     }
