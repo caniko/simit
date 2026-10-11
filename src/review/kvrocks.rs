@@ -113,6 +113,61 @@ pub fn parse_worker_identity(
     })
 }
 
+fn observed_uid(value: &str) -> Result<u32> {
+    let number = value.strip_suffix('\n').unwrap_or(value);
+    ensure!(
+        !number.is_empty()
+            && number.len() <= 10
+            && number.bytes().all(|byte| byte.is_ascii_digit()),
+        "expected one bounded decimal process UID"
+    );
+    let uid: u32 = number.parse().context("invalid process UID")?;
+    ensure!(
+        uid != 0 && uid != u32::MAX,
+        "requires a non-root worker UID"
+    );
+    Ok(uid)
+}
+
+fn lookup_worker_identity_with(
+    mut observe: impl FnMut(&str, &[String]) -> Result<String>,
+) -> Result<WorkerIdentity> {
+    let effective_uid = observed_uid(&observe("id", &args(&["-u"]))?)?;
+    let real_uid = observed_uid(&observe("id", &args(&["-ru"]))?)?;
+    ensure!(effective_uid == real_uid, "worker process UID mismatch");
+    let user = observe("id", &args(&["-un"]))?;
+    let user = user.strip_suffix('\n').unwrap_or(&user);
+    account_name(user)?;
+    let passwd = observe("getent", &args(&["passwd", user]))?;
+    let group = observe("getent", &args(&["group", "nixbld"]))?;
+    let identity = parse_worker_identity(user, "nixbld", &passwd, &group)?;
+    ensure!(
+        identity.uid == effective_uid,
+        "worker account UID differs from the observed process"
+    );
+    Ok(identity)
+}
+
+/// Acquire identity from the unprivileged native worker before privileged
+/// allocation. Each NSS/tool lookup is bounded independently of consumer builds.
+pub fn lookup_worker_identity() -> Result<WorkerIdentity> {
+    ensure!(
+        cfg!(target_os = "linux"),
+        "Kvrocks requires a native Linux worker"
+    );
+    lookup_worker_identity_with(|program, arguments| {
+        super::process::run_command_with_limits(
+            super::process::command(program, arguments, None),
+            None,
+            super::process::CommandLimits {
+                timeout: std::time::Duration::from_secs(5),
+                stdout_bytes: 16 * 1024,
+                stderr_bytes: 16 * 1024,
+            },
+        )
+    })
+}
+
 /// Refuse any pre-existing runtime state, including dangling symlinks. This is
 /// an observation only; creation must still be exclusive in the owned lifecycle.
 pub fn refuse_existing_runtime(path: &Path) -> Result<()> {
@@ -642,6 +697,109 @@ pub fn bootstrap(plan: &Plan, system: &str, out: &Path) -> Result<BootstrapRecei
 mod tests {
     use super::*;
     use std::os::unix::fs::MetadataExt;
+
+    fn account_observation(program: &str, arguments: &[String]) -> Result<String> {
+        let arguments = arguments.iter().map(String::as_str).collect::<Vec<_>>();
+        match (program, arguments.as_slice()) {
+            ("id", ["-u"]) | ("id", ["-ru"]) => Ok("1001\n".into()),
+            ("id", ["-un"]) => Ok("runner\n".into()),
+            ("getent", ["passwd", "runner"]) => {
+                Ok("runner:x:1001:1001:CI runner:/home/runner:/bin/bash\n".into())
+            }
+            ("getent", ["group", "nixbld"]) => Ok("nixbld:x:30000:\n".into()),
+            _ => anyhow::bail!("unexpected account lookup: {program} {arguments:?}"),
+        }
+    }
+
+    #[test]
+    fn worker_lookup_binds_observed_process_identity_and_fixed_nix_build_group() {
+        let mut observed = Vec::new();
+        let identity = lookup_worker_identity_with(|program, arguments| {
+            observed.push((program.to_owned(), arguments.to_vec()));
+            account_observation(program, arguments)
+        })
+        .unwrap();
+        assert_eq!(
+            identity,
+            WorkerIdentity {
+                user: "runner".into(),
+                uid: 1001,
+                group: "nixbld".into(),
+                gid: 30000,
+            }
+        );
+        assert_eq!(
+            observed,
+            vec![
+                ("id".into(), args(&["-u"])),
+                ("id".into(), args(&["-ru"])),
+                ("id".into(), args(&["-un"])),
+                ("getent".into(), args(&["passwd", "runner"])),
+                ("getent".into(), args(&["group", "nixbld"])),
+            ]
+        );
+    }
+
+    #[test]
+    fn worker_lookup_propagates_each_tool_failure_without_further_observations() {
+        for failed_call in 0..5 {
+            let mut calls = 0;
+            let result = lookup_worker_identity_with(|program, arguments| {
+                let current = calls;
+                calls += 1;
+                if current == failed_call {
+                    anyhow::bail!("account lookup fixture failed at {current}");
+                }
+                account_observation(program, arguments)
+            });
+            assert!(result.is_err(), "failed account lookup {failed_call}");
+            assert_eq!(calls, failed_call + 1);
+        }
+    }
+
+    #[test]
+    fn worker_lookup_rejects_privileged_malformed_and_contradictory_identities() {
+        let cases = [
+            ("id", args(&["-u"]), "0\n"),
+            ("id", args(&["-u"]), "4294967295\n"),
+            ("id", args(&["-u"]), "4294967296\n"),
+            ("id", args(&["-u"]), "+1001\n"),
+            ("id", args(&["-u"]), "1001 \n"),
+            ("id", args(&["-u"]), "1001\n0\n"),
+            ("id", args(&["-ru"]), "0\n"),
+            ("id", args(&["-ru"]), "1002\n"),
+            ("id", args(&["-un"]), "runner\nroot\n"),
+            ("id", args(&["-un"]), "runner --uid=0\n"),
+            ("id", args(&["-un"]), "-runner\n"),
+            ("id", args(&["-un"]), ""),
+            (
+                "getent",
+                args(&["passwd", "runner"]),
+                "runner:x:1002:1001:CI runner:/home/runner:/bin/bash\n",
+            ),
+            (
+                "getent",
+                args(&["passwd", "runner"]),
+                "foreign:x:1001:1001:CI runner:/home/runner:/bin/bash\n",
+            ),
+            ("getent", args(&["group", "nixbld"]), "nixbld:x:0:\n"),
+            ("getent", args(&["group", "nixbld"]), "foreign:x:30000:\n"),
+            ("getent", args(&["group", "nixbld"]), ""),
+        ];
+        for (changed_program, changed_arguments, record) in cases {
+            let result = lookup_worker_identity_with(|program, arguments| {
+                if program == changed_program && arguments == changed_arguments {
+                    Ok(record.into())
+                } else {
+                    account_observation(program, arguments)
+                }
+            });
+            assert!(
+                result.is_err(),
+                "accepted contradictory worker observation {changed_program} {changed_arguments:?}: {record:?}"
+            );
+        }
+    }
 
     #[test]
     fn runtime_inode_open_failure_rolls_back_only_the_new_empty_directory() {
