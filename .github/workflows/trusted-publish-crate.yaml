@@ -21,7 +21,7 @@ concurrency:
 jobs:
   verify-simit:
     if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - name: Require independently qualified publisher engine
@@ -76,8 +76,22 @@ jobs:
           ref: ${{ github.event.workflow_run.head_sha }}
           path: .simit-release-source
           persist-credentials: false
+      - name: Project setup
+        working-directory: .simit-release-source
+        env:
+          NIX_CONFIG: "experimental-features = nix-command flakes"
+          XDG_CACHE_HOME: "/tmp/.cache"
+          CARGO_HOME: "/tmp/.cargo"
+          CARGO_BUILD_JOBS: "2"
+        run: printf '%s\n' 'NIX_CONFIG<<SIMIT_NIX_LIMITS' 'experimental-features = nix-command flakes' 'max-jobs = 1' 'cores = 2' 'SIMIT_NIX_LIMITS' >> "$GITHUB_ENV"
+
       - name: Verify packaged contents simit
         working-directory: .simit-release-source
+        env:
+          NIX_CONFIG: "experimental-features = nix-command flakes"
+          XDG_CACHE_HOME: "/tmp/.cache"
+          CARGO_HOME: "/tmp/.cargo"
+          CARGO_BUILD_JOBS: "2"
         run: nix develop -c cargo publish --dry-run --locked --manifest-path "$RUNNER_TEMP/verified-simit/Cargo.toml"
   publish-simit:
     needs: [verify-simit]
