@@ -2498,9 +2498,18 @@ fn generates_github_plain_cargo_workflows() {
     assert!(
         publish.contains(r#"cargo pkgid -p demo | awk -F'[#@]' 'NF > 1 {print $NF}' | tail -n 1"#)
     );
-    assert!(publish.contains("export CARGO_REGISTRY_TOKEN="));
-    assert!(publish.contains("checksum matches; resuming (already published)"));
-    assert!(publish.contains("invalid, mismatched or yanked registry version"));
+    assert!(!publish.contains("CARGO_REGISTRY_TOKEN"));
+    assert!(!publish.contains("CRATES_IO_API_TOKEN"));
+    let trusted = read(
+        &temp
+            .path()
+            .join(".github/workflows/trusted-publish-crate.yaml"),
+    );
+    assert!(trusted.contains("workflow_run:"));
+    assert!(trusted.contains("--publisher-stage publish"));
+    assert!(trusted.contains(
+        "already-published crates with matching checksums exit 0 after exact registry resolution"
+    ));
     assert!(!publish.contains("cargo login"));
     // Regression: the publish workflow must not infer the release version from
     // the first package in workspace-wide cargo metadata.

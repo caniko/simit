@@ -311,7 +311,7 @@ pub fn run(command: InitCiCommand) -> Result<()> {
         if ordered.is_empty() {
             bail!("coordinated workspace publication requires at least one publishable package");
         }
-        files.push(ci::publish_workspace_file(
+        files.extend(ci::publish_workspace_files(
             platform,
             ci::PublishWorkspaceInputs {
                 runtime: resolved.runtime,
@@ -326,7 +326,7 @@ pub fn run(command: InitCiCommand) -> Result<()> {
     {
         for package in &packages {
             if package.is_publishable() {
-                files.push(ci::publish_file(
+                files.extend(ci::publish_files(
                     platform,
                     resolved.runtime,
                     package,
@@ -2067,6 +2067,10 @@ fn is_ci_managed_workflow_name(name: &std::ffi::OsStr) -> bool {
             | "publish-crate.yml"
             | "publish-workspace.yaml"
             | "publish-workspace.yml"
+            | "trusted-publish-workspace.yaml"
+            | "trusted-publish-workspace.yml"
+            | "trusted-publish-crate.yaml"
+            | "trusted-publish-crate.yml"
             | "release-artifacts.yaml"
             | "release-artifacts.yml"
             | "nix-builds.yaml"
@@ -2086,6 +2090,7 @@ fn is_ci_managed_workflow_name(name: &std::ffi::OsStr) -> bool {
         || name.starts_with("nix-builds-")
         || name.starts_with("prebuild-")
         || name.starts_with("publish-crate-")
+        || name.starts_with("trusted-publish-crate-")
         || name.starts_with("publish-pypi-")
         || name.starts_with("release-artifacts-")
 }

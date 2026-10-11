@@ -1297,7 +1297,7 @@ fn infer_expected_primary_ci_files(
                     .map(|entry| (entry.package.name.clone(), entry.package.version.clone()))
                     .collect();
                 if !ordered.is_empty() {
-                    if let Ok(file) = ci::publish_workspace_file(
+                    if let Ok(generated) = ci::publish_workspace_files(
                         platform,
                         ci::PublishWorkspaceInputs {
                             runtime: resolved.runtime,
@@ -1307,7 +1307,7 @@ fn infer_expected_primary_ci_files(
                             versions,
                         },
                     ) {
-                        files.push(file);
+                        files.extend(generated);
                     }
                 }
             }
@@ -1317,7 +1317,7 @@ fn infer_expected_primary_ci_files(
     {
         for package in &packages {
             if package.is_publishable() {
-                files.push(ci::publish_file(
+                files.extend(ci::publish_files(
                     platform,
                     resolved.runtime,
                     package,

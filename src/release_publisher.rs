@@ -15,6 +15,9 @@ use semver::Version;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+pub mod archive;
+pub mod execution;
+
 #[derive(Debug, Clone)]
 pub struct PublisherPolicy {
     pub repository: String,
@@ -70,19 +73,60 @@ pub struct EventRepository {
 }
 
 /// Preserve the original run across retries, with a distinct attempt identity.
+/// Only admission can construct this identity; consumers cannot rewrite it.
+///
+/// ```compile_fail
+/// use simit::release_publisher::BoundReleasePush;
+/// fn replace_identity(bound: &mut BoundReleasePush) {
+///     bound.source_sha = "candidate-controlled".into();
+/// }
+/// ```
 #[derive(Debug, Serialize, PartialEq, Eq)]
 pub struct BoundReleasePush {
-    pub source_run_id: u64,
-    pub source_run_attempt: u64,
-    pub source_workflow_id: u64,
-    pub source_workflow_path: String,
-    pub repository: String,
-    pub source_repository_id: u64,
+    source_run_id: u64,
+    source_run_attempt: u64,
+    source_workflow_id: u64,
+    source_workflow_path: String,
+    repository: String,
+    source_repository_id: u64,
     /// Native head label; never evidence that the original push used a tag ref.
-    pub source_head_label: String,
-    pub source_sha: String,
-    pub publisher_workflow_ref: String,
-    pub publisher_workflow_sha: String,
+    source_head_label: String,
+    source_sha: String,
+    publisher_workflow_ref: String,
+    publisher_workflow_sha: String,
+}
+
+impl BoundReleasePush {
+    pub fn source_run_id(&self) -> u64 {
+        self.source_run_id
+    }
+    pub fn source_run_attempt(&self) -> u64 {
+        self.source_run_attempt
+    }
+    pub fn source_workflow_id(&self) -> u64 {
+        self.source_workflow_id
+    }
+    pub fn source_workflow_path(&self) -> &str {
+        &self.source_workflow_path
+    }
+    pub fn repository(&self) -> &str {
+        &self.repository
+    }
+    pub fn source_repository_id(&self) -> u64 {
+        self.source_repository_id
+    }
+    pub fn source_head_label(&self) -> &str {
+        &self.source_head_label
+    }
+    pub fn source_sha(&self) -> &str {
+        &self.source_sha
+    }
+    pub fn publisher_workflow_ref(&self) -> &str {
+        &self.publisher_workflow_ref
+    }
+    pub fn publisher_workflow_sha(&self) -> &str {
+        &self.publisher_workflow_sha
+    }
 }
 
 /// Native artifact metadata fetched by trusted code from the repository API.
@@ -221,6 +265,21 @@ fn is_workflow_path(value: &str) -> bool {
         && (name.ends_with(".yaml") || name.ends_with(".yml"))
 }
 
+// GitHub REST may qualify the path with its source ref while a completion
+// payload retains the bare path. Validate the filename and ref independently.
+fn workflow_path_matches(value: &str, expected: &str, head_label: &str, sha: &str) -> bool {
+    match value.split_once('@') {
+        None => value == expected,
+        Some((path, reference)) => {
+            path == expected
+                && (reference == head_label
+                    || reference == sha
+                    || reference == format!("refs/tags/{head_label}")
+                    || reference == format!("refs/heads/{head_label}"))
+        }
+    }
+}
+
 /// Bind a successful original push to the trusted publisher context and native
 /// provider run. The returned intermediate identity cannot establish tag-trigger
 /// provenance: GitHub's run head label can also name a branch. This function does
@@ -277,14 +336,29 @@ pub fn bind_release_push(
     );
     let run = &event.workflow_run;
     ensure!(
-        run == provider_run,
+        workflow_path_matches(
+            &run.path,
+            &policy.source_workflow_path,
+            &run.head_branch,
+            &run.head_sha
+        ) && workflow_path_matches(
+            &provider_run.path,
+            &policy.source_workflow_path,
+            &provider_run.head_branch,
+            &provider_run.head_sha
+        ),
+        "release workflow path or ref differs from admitted source"
+    );
+    let mut normalized_provider = provider_run.clone();
+    normalized_provider.path.clone_from(&run.path);
+    ensure!(
+        run == &normalized_provider,
         "release event and native provider run identity differ"
     );
     ensure!(
         run.id > 0
             && run.run_attempt > 0
             && run.workflow_id == policy.source_workflow_id
-            && run.path == policy.source_workflow_path
             && run.repository.id == event.repository.id
             && run.head_repository.id == event.repository.id
             && run.repository.full_name == policy.repository
@@ -309,7 +383,7 @@ pub fn bind_release_push(
         source_run_id: run.id,
         source_run_attempt: run.run_attempt,
         source_workflow_id: run.workflow_id,
-        source_workflow_path: run.path.clone(),
+        source_workflow_path: policy.source_workflow_path.clone(),
         repository: policy.repository.clone(),
         source_repository_id: run.repository.id,
         source_head_label: run.head_branch.clone(),
@@ -322,6 +396,36 @@ pub fn bind_release_push(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn admits_native_ref_qualified_paths_and_rejects_foreign_refs() {
+        let (policy, context, mut event) = fixture();
+        for reference in [
+            "1.2.3",
+            "refs/tags/1.2.3",
+            "refs/heads/1.2.3",
+            event.workflow_run.head_sha.as_str(),
+        ] {
+            let mut provider = event.workflow_run.clone();
+            provider.path = format!("{}@{reference}", policy.source_workflow_path);
+            let bound = bind_release_push(&policy, &context, &event, &provider).unwrap();
+            assert_eq!(bound.source_workflow_path(), policy.source_workflow_path);
+        }
+        for path in [
+            ".github/workflows/publish-crate.yaml@foreign",
+            ".github/workflows/other.yaml@1.2.3",
+            ".github/workflows/publish-crate.yaml@1.2.3@foreign",
+        ] {
+            let mut provider = event.workflow_run.clone();
+            provider.path = path.into();
+            assert!(
+                bind_release_push(&policy, &context, &event, &provider).is_err(),
+                "{path}"
+            );
+        }
+        event.workflow_run.path = format!("{}@1.2.3", policy.source_workflow_path);
+        bind_release_push(&policy, &context, &event, &event.workflow_run).unwrap();
+    }
 
     #[test]
     fn semver_head_label_cannot_be_promoted_to_tag_trigger_provenance() {

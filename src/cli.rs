@@ -347,6 +347,35 @@ pub struct ReleaseCommand {
         help = "Generate a new encrypted minisign keypair and replace the committed public key"
     )]
     pub rotate_minisign: bool,
+    #[arg(
+        long,
+        value_enum,
+        help = "Trusted publisher stage: prepare without credentials, or upload verified archives"
+    )]
+    pub publisher_stage: Option<PublisherStage>,
+    #[arg(
+        long,
+        help = "Exact credential-free source workflow path for the trusted publisher"
+    )]
+    pub source_workflow: Option<String>,
+    #[arg(
+        long,
+        help = "Exact independent default-branch publisher workflow path"
+    )]
+    pub publisher_workflow: Option<String>,
+    #[arg(long, help = "New directory for credential-free archive verification")]
+    pub publisher_output: Option<Utf8PathBuf>,
+    #[arg(
+        long = "reconstruct-package",
+        help = "Trusted workspace release members to package together for dependency resolution"
+    )]
+    pub reconstruct_packages: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum PublisherStage {
+    Prepare,
+    Publish,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -378,6 +407,11 @@ pub enum ReleaseAction {
     Plan,
     #[value(name = "secrets", help = "Manage remote release workflow secrets")]
     Secrets,
+    #[value(
+        name = "publisher",
+        help = "Verify original signed-run artifacts in an independent default-branch publisher"
+    )]
+    Publisher,
 }
 
 impl ReleaseAction {
@@ -387,7 +421,12 @@ impl ReleaseAction {
             Self::Minor => Some(BumpKind::Minor),
             Self::Major => Some(BumpKind::Major),
             Self::Prerelease => Some(BumpKind::Prerelease),
-            Self::SyncUp | Self::Trust | Self::Verify | Self::Plan | Self::Secrets => None,
+            Self::SyncUp
+            | Self::Trust
+            | Self::Verify
+            | Self::Plan
+            | Self::Secrets
+            | Self::Publisher => None,
         }
     }
 }

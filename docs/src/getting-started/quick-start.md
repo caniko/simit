@@ -81,9 +81,11 @@ For dependency-ordered workspace publication (opt-in, GitHub only), use:
 simit init ci --platform github --runtime nix --workspace --workspace-strategy aggregate --publish-crates --coordinated-publish
 ```
 
-This generates one `publish-workspace.yaml` that publishes prerequisites
-before dependents in `simit release plan` order, with signed-tag, lockstep,
-gate, and checksum-conflict gating. See `docs/integrations/chaosbox-v1.md`.
+This generates credential-free `publish-workspace.yaml` archive builds and an
+independent `trusted-publish-workspace.yaml` publisher. Publication follows
+`simit release plan` dependency order with signed-source, required-gate and
+checksum-conflict checks. Complete the operator-owned enrollment in
+[Release Integrity](release-integrity.md) before enabling uploads.
 
 Declare an additional required integration gate (e.g. Gel) without hand-editing
 YAML:

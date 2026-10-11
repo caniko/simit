@@ -43,7 +43,7 @@ jobs:
           git rev-parse 'HEAD^{tree}' > "$RUNNER_TEMP/release-generator/tree"
           git ls-files -z | sort -z | sed -z 's|^|./|' | xargs -0 sha256sum -- > "$RUNNER_TEMP/release-generator/source.sha256"
       - name: Lint signed-release workflows with the locked package set
-        run: nix shell --inputs-from . nixpkgs#actionlint -c actionlint .github/workflows/publish-crate.yaml .github/workflows/qualify-release-generator.yaml
+        run: nix shell --inputs-from . nixpkgs#actionlint -c actionlint .github/workflows/publish-crate.yaml .github/workflows/trusted-publish-crate.yaml .github/workflows/qualify-release-generator.yaml
       - name: Build exact production generator
         run: |
           set -euo pipefail

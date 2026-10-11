@@ -65,18 +65,34 @@ After verifying the signed tag, generated publish workflows require its peeled
 commit to equal the checkout being published, before package metadata, project
 `ci.extra_setup` commands, or publication execute. Checkout credentials are not
 persisted; private verification fetches use command-scoped authentication.
-GitHub crates.io publishers run only on signed semver tag
-pushes; they do not expose a branch-based manual dispatch. To retry publication,
-rerun the original tag-triggered run. Forgejo retains its existing dispatch
-surface and applies the same signed-tag/checkout validation.
+GitHub crates.io publication uses two generated workflows. The signed semver
+tag workflow builds credential-free archives and retains immutable per-attempt
+artifacts. Its `trusted-publish-*.yaml` companion executes through `workflow_run`
+from the independent default branch. A fresh credential-free job verifies and
+compiles the packaged contents before a separate hosted upload job re-admits
+the original source and artifact. Candidate configuration, compiler wrappers,
+hooks and build scripts never execute with the registry credential.
 
-Coordinated workspace publication also binds the signed commit to the
-immutable workflow event SHA. Its validation job, required gates, all dependent
-publishers, and release report explicitly check out `${{ github.sha }}` rather
-than resolving the release tag again. A tag moved after validation cannot change
-the source used by later jobs. This applies to both package-scoped publishers
-and coordinated workspace publication; regenerate existing consumer workflows
-after selecting the qualified generator revision.
+Before enabling publication, the operator must move `CRATES_IO_API_TOKEN` into
+the literal `simit-crates-io` environment, restrict that environment to the exact
+protected default branch, and remove repository/organization publishing secrets
+available to tag workflows. Set `vars.SIMIT_PUBLISHER_REVISION` to a qualified
+immutable 40-hex Simit revision. Generation does not provision these boundaries;
+an absent engine enrollment fails closed.
+
+The publisher checks the native repository, workflow ID/path, original run and
+attempt, provider artifact SHA-256, default-branch keyring and maintainer-signed
+tag/source. It reconstructs package contents with isolated Cargo configuration
+and `cargo package --no-verify`, then compares every member before API upload.
+Coordinated releases package their full release set together and publish in
+dependency order, waiting for exact registry resolution before dependents run.
+A moved tag, foreign run, changed archive or escaping manifest path is rejected.
+Regenerate existing consumer workflows after selecting the qualified generator.
+
+To retry publication, rerun the original signed-tag run. The earliest live
+immutable artifact from that run is reused; an artifact name alone does not
+prove attempt provenance. Forgejo retains its existing dispatch surface and
+signed-tag/checkout validation.
 
 An HTTP 200 for an existing crate version is not release acceptance. Publishers
 require an unyanked exact crate/version record and a checksum matching the local
