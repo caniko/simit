@@ -151,14 +151,18 @@ impl Supervisor {
         };
         let frame = serde_json::to_vec(&request)?;
         ensure!(
-            frame.len() < 65536,
+            (frame.len() as u64) < kvrocks::HOST_REQUEST_MAX_BYTES,
             "startup frame exceeds its bounded protocol"
         );
+        let deadline = Instant::now() + Duration::from_secs(kvrocks::WORKER_STARTUP_SECONDS);
         let input = owned.input.as_mut().context("missing control writer")?;
         input.write_all(&frame)?;
         input.write_all(b"\n")?;
         input.flush()?;
-        owned.ready = match owned.frames.recv_timeout(Duration::from_secs(190))? {
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .context("worker cache startup deadline exceeded")?;
+        owned.ready = match owned.frames.recv_timeout(remaining)? {
             Frame::Ready(ready) => *ready,
             Frame::Failed(error) => anyhow::bail!("cache supervisor rejected startup: {error}"),
             Frame::Stopped(_) => anyhow::bail!("cache supervisor stopped before readiness"),

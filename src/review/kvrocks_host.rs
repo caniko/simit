@@ -66,15 +66,45 @@ fn bounded_file(path: &Path, maximum: u64) -> Result<String> {
 }
 
 fn root_tool(program: &str, arguments: &[String], seconds: u64) -> Result<String> {
+    root_tool_with_timeout(program, arguments, Duration::from_secs(seconds))
+}
+
+fn root_tool_with_timeout(
+    program: &str,
+    arguments: &[String],
+    timeout: Duration,
+) -> Result<String> {
     process::run_command_with_limits(
         process::command(program, arguments, None),
         None,
         process::CommandLimits {
-            timeout: Duration::from_secs(seconds),
+            timeout,
             stdout_bytes: 1024 * 1024,
             stderr_bytes: 1024 * 1024,
         },
     )
+}
+
+struct StartupBudget {
+    deadline: Instant,
+}
+
+impl StartupBudget {
+    fn remaining(&self, phase_seconds: u64) -> Result<Duration> {
+        let remaining = self
+            .deadline
+            .checked_duration_since(Instant::now())
+            .context("shared cache startup deadline exceeded")?;
+        ensure!(
+            !remaining.is_zero(),
+            "shared cache startup deadline exceeded"
+        );
+        Ok(remaining.min(Duration::from_secs(phase_seconds)))
+    }
+
+    fn run(&self, program: &str, arguments: &[String], seconds: u64) -> Result<String> {
+        root_tool_with_timeout(program, arguments, self.remaining(seconds)?)
+    }
 }
 
 const UNIT_PROPERTIES: &str = "Id,Description,LoadState,ActiveState,SubState,InvocationID,MainPID,ControlGroup,User,Group,KillMode,TimeoutStopUSec,SendSIGKILL,KillSignal,FinalKillSignal,RestrictAddressFamilies,LimitNOFILE";
@@ -87,6 +117,20 @@ fn show_unit(unit: &str) -> Result<String> {
     root_tool(
         "/usr/bin/systemctl",
         &process::args(&["show", "--no-pager", "--property", UNIT_PROPERTIES, unit]),
+        5,
+    )
+}
+
+fn unit_properties_until(plan: &kvrocks::ServicePlan, deadline: Instant) -> Result<String> {
+    StartupBudget { deadline }.run(
+        "/usr/bin/systemctl",
+        &process::args(&[
+            "show",
+            "--no-pager",
+            "--property",
+            UNIT_PROPERTIES,
+            &plan.unit,
+        ]),
         5,
     )
 }
@@ -108,12 +152,12 @@ fn startup_frame(
 ) -> Result<HostRequest> {
     let (sender, receiver) = mpsc::sync_channel(1);
     std::thread::spawn(move || {
-        let mut input = BufReader::new(input.take(65537));
+        let mut input = BufReader::new(input.take(kvrocks::HOST_REQUEST_MAX_BYTES + 1));
         let frame = (|| -> Result<HostRequest> {
             let mut frame = String::new();
             input.read_line(&mut frame)?;
             ensure!(
-                frame.len() <= 65536 && frame.ends_with('\n'),
+                frame.len() as u64 <= kvrocks::HOST_REQUEST_MAX_BYTES && frame.ends_with('\n'),
                 "invalid bounded cache host frame"
             );
             Ok(serde_json::from_str(&frame)?)
@@ -126,7 +170,7 @@ fn startup_frame(
         cancelled.store(true, Ordering::SeqCst);
     });
     receiver
-        .recv_timeout(Duration::from_secs(5))
+        .recv_timeout(Duration::from_secs(kvrocks::STARTUP_FRAME_SECONDS))
         .context("bounded cache startup frame deadline exceeded")?
 }
 
@@ -157,11 +201,11 @@ fn cleanup_socket(
     Ok(())
 }
 
-fn validate_native_tool(request: &HostRequest) -> Result<()> {
+fn validate_native_tool(request: &HostRequest, budget: &StartupBudget) -> Result<()> {
     engine::verify_plan(&request.plan)?;
     let manifest = engine::manifest()?;
     let reference = kvrocks::tool_reference(&manifest, &request.system)?;
-    let package: serde_json::Value = serde_json::from_str(&root_tool(
+    let package: serde_json::Value = serde_json::from_str(&budget.run(
         "nix",
         &process::nix_args(&[
             "eval",
@@ -190,7 +234,7 @@ fn validate_native_tool(request: &HostRequest) -> Result<()> {
             && artifact::file_digest(&binary)? == request.bootstrap.binary_sha256,
         "native tool binary differs from its bootstrap receipt"
     );
-    let info: serde_json::Value = serde_json::from_str(&root_tool(
+    let info: serde_json::Value = serde_json::from_str(&budget.run(
         "nix",
         &process::nix_args(&["path-info", "--json", &request.bootstrap.source.output]),
         30,
@@ -227,7 +271,12 @@ struct HostService {
 }
 
 impl HostService {
-    fn allocate(plan: kvrocks::ServicePlan, supervisor: UnitIdentity) -> Result<Self> {
+    fn allocate(
+        plan: kvrocks::ServicePlan,
+        supervisor: UnitIdentity,
+        budget: &StartupBudget,
+    ) -> Result<Self> {
+        budget.remaining(5)?;
         for parent in [Path::new("/run"), Path::new("/var/lib")] {
             trusted_parent(parent)?;
         }
@@ -238,7 +287,7 @@ impl HostService {
         ] {
             kvrocks::refuse_existing_runtime(Path::new(path))?;
         }
-        let existing = root_tool(
+        let existing = budget.run(
             "/usr/bin/systemctl",
             &process::args(&["list-units", "--all", "--plain", "--no-legend", &plan.unit]),
             5,
@@ -300,6 +349,7 @@ impl HostService {
         file.write_all(owned.plan.config.as_bytes())?;
         file.sync_all()?;
         std::os::unix::fs::chown(config, Some(0), Some(owned.plan.identity.gid))?;
+        budget.remaining(5)?;
         Ok(owned)
     }
 
@@ -308,8 +358,10 @@ impl HostService {
     }
 
     fn observe_ready(&mut self, deadline: Instant) -> Result<ReadyReceipt> {
-        let invocation =
-            kvrocks_lifecycle::unit_identity(&self.plan, &unit_properties(&self.plan)?)?;
+        let invocation = kvrocks_lifecycle::unit_identity(
+            &self.plan,
+            &unit_properties_until(&self.plan, deadline)?,
+        )?;
         if let Some(prior) = &self.invocation {
             ensure!(
                 prior == &invocation,
@@ -368,7 +420,10 @@ impl HostService {
             ensure!(prior == socket_identity, "owned cache socket was replaced");
         }
         self.socket_identity = Some(socket_identity);
-        let current = kvrocks_lifecycle::unit_identity(&self.plan, &unit_properties(&self.plan)?)?;
+        let current = kvrocks_lifecycle::unit_identity(
+            &self.plan,
+            &unit_properties_until(&self.plan, deadline)?,
+        )?;
         ensure!(
             Instant::now() < deadline && current == invocation,
             "readiness expired or live unit changed during observation"
@@ -382,11 +437,13 @@ impl HostService {
         })
     }
 
-    fn start(&mut self, cancelled: &AtomicBool) -> Result<ReadyReceipt> {
+    fn start(&mut self, cancelled: &AtomicBool, budget: &StartupBudget) -> Result<ReadyReceipt> {
         ensure!(!cancelled.load(Ordering::SeqCst), "cache startup cancelled");
         // Arm before launch: an ambiguous failure still needs ownership
         // reconciliation and graceful own-unit cleanup.
-        let deadline = Instant::now() + Duration::from_secs(u64::from(self.plan.startup_seconds));
+        let deadline = budget
+            .deadline
+            .min(Instant::now() + Duration::from_secs(u64::from(self.plan.startup_seconds)));
         self.started = true;
         if let Some(state) = &mut self.state {
             state.preserve_on_drop();
@@ -394,7 +451,7 @@ impl HostService {
         if let Some(runtime) = &mut self.runtime {
             runtime.preserve_on_drop();
         }
-        root_tool("/usr/bin/systemd-run", &self.plan.systemd_args, 5)?;
+        StartupBudget { deadline }.run("/usr/bin/systemd-run", &self.plan.systemd_args, 5)?;
         loop {
             ensure!(!cancelled.load(Ordering::SeqCst), "cache startup cancelled");
             match self.observe_ready(deadline) {
@@ -492,10 +549,13 @@ impl Drop for HostService {
 /// EOF on the control pipe (including worker death/cancellation), or a termination
 /// signal, triggers verified own-unit graceful shutdown.
 pub fn host() -> Result<serde_json::Value> {
+    let budget = StartupBudget {
+        deadline: Instant::now() + Duration::from_secs(kvrocks::HOST_STARTUP_SECONDS),
+    };
     // A mutable development binary is never a privileged execution route.
     super::kvrocks_worker::wrapper()?;
     ensure!(
-        root_tool("id", &process::args(&["-u"]), 5)?.trim() == "0",
+        budget.run("id", &process::args(&["-u"]), 5)?.trim() == "0",
         "cache host helper requires sudo"
     );
     let caller: u32 = std::env::var("SUDO_UID")
@@ -518,18 +578,18 @@ pub fn host() -> Result<serde_json::Value> {
         request.identity.uid == caller,
         "privileged cache identity differs from original worker"
     );
-    let passwd = root_tool(
+    let passwd = budget.run(
         "getent",
         &process::args(&["passwd", &request.identity.user]),
         5,
     )?;
-    let group = root_tool("getent", &process::args(&["group", "nixbld"]), 5)?;
+    let group = budget.run("getent", &process::args(&["group", "nixbld"]), 5)?;
     ensure!(
         kvrocks::parse_worker_identity(&request.identity.user, "nixbld", &passwd, &group)?
             == request.identity,
         "privileged account lookup differs from original worker identity"
     );
-    validate_native_tool(&request)?;
+    validate_native_tool(&request, &budget)?;
     ensure!(!cancelled.load(Ordering::SeqCst), "cache startup cancelled");
     let service = request.service()?;
     let supervisor = kvrocks_lifecycle::supervisor_identity(
@@ -537,13 +597,23 @@ pub fn host() -> Result<serde_json::Value> {
         std::process::id(),
         &std::env::var("INVOCATION_ID")
             .context("cache supervisor requires a managed invocation")?,
-        &show_unit(&kvrocks::supervisor_unit(&service))?,
+        &budget.run(
+            "/usr/bin/systemctl",
+            &process::args(&[
+                "show",
+                "--no-pager",
+                "--property",
+                UNIT_PROPERTIES,
+                &kvrocks::supervisor_unit(&service),
+            ]),
+            5,
+        )?,
     )?;
-    let mut owned = HostService::allocate(service, supervisor)?;
-    let receipt = owned.start(&cancelled)?;
+    let mut owned = HostService::allocate(service, supervisor, &budget)?;
+    let receipt = owned.start(&cancelled, &budget)?;
     println!("{}", serde_json::to_string(&receipt)?);
     std::io::stdout().flush()?;
-    let lifetime = Instant::now() + Duration::from_secs(2700);
+    let lifetime = Instant::now() + Duration::from_secs(u64::from(owned.plan.lifetime_seconds));
     while !cancelled.load(Ordering::SeqCst) {
         ensure!(Instant::now() < lifetime, "owned cache lifetime exceeded");
         let current =
@@ -620,6 +690,93 @@ mod tests {
     use std::os::unix::net::UnixListener;
 
     #[test]
+    fn startup_phases_share_a_deadline_with_a_larger_worker_handoff_budget() {
+        let budget = StartupBudget {
+            deadline: Instant::now() + Duration::from_secs(10),
+        };
+        assert!(budget.remaining(120).unwrap() <= Duration::from_secs(10));
+        assert_eq!(budget.remaining(5).unwrap(), Duration::from_secs(5));
+        let expired = StartupBudget {
+            deadline: Instant::now() - Duration::from_secs(1),
+        };
+        // A depleted budget refuses a new process before spawning it.
+        assert!(
+            expired
+                .run("missing-startup-fixture-executable", &[], 120)
+                .unwrap_err()
+                .to_string()
+                .contains("shared cache startup deadline")
+        );
+        const {
+            assert!(
+                kvrocks::WORKER_STARTUP_SECONDS
+                    >= kvrocks::HOST_STARTUP_SECONDS + 3 * kvrocks::STARTUP_FRAME_SECONDS
+            );
+        }
+    }
+
+    #[test]
+    fn startup_frame_accepts_a_valid_plan_with_a_large_controller_lock() {
+        use super::super::contract::{VERSION, WORKFLOW, example};
+        let mut request = example();
+        let head = "a".repeat(40);
+        request.pr = None;
+        request.revision = Some(head.clone());
+        request.expected_head = Some(head.clone());
+        request.test_profile = "checks-rebuild-v1".into();
+        request.compiler_cache = Some(CompilerCache::KvrocksV1);
+        let identity = serde_json::json!({"id": 1, "repository": request.repository, "commit": head, "tree": head});
+        let lock = serde_json::json!({"large_controller_lock": "x".repeat(128 * 1024)});
+        let mut plan: Plan = serde_json::from_value(serde_json::json!({
+            "schema_version": VERSION, "request_id": canonical_digest(&request).unwrap(), "request": request,
+            "target": identity, "pr": null, "recipe": null, "controller": identity, "workflow": WORKFLOW,
+            "tool_lock": lock, "tool_lock_digest": canonical_digest(&lock).unwrap(),
+            "run_repository": "OWNER/REPOSITORY", "run_id": 1, "run_attempt": 1, "digest": "",
+        })).unwrap();
+        plan.seal().unwrap();
+        plan.validate().unwrap();
+        let host = HostRequest {
+            plan,
+            system: "x86_64-linux".into(),
+            bootstrap: kvrocks::BootstrapReceipt {
+                source: kvrocks::NativeSource {
+                    engine_repository: "caniko/simit".into(),
+                    engine_revision: "b".repeat(40),
+                    nixpkgs_revision: "c".repeat(40),
+                    system: "x86_64-linux".into(),
+                    version: "2.14.0".into(),
+                    installable: format!(
+                        "github:NixOS/nixpkgs/{}#legacyPackages.x86_64-linux.kvrocks",
+                        "c".repeat(40)
+                    ),
+                    derivation: format!("/nix/store/{}-kvrocks.drv", "0".repeat(32)),
+                    output: format!("/nix/store/{}-kvrocks", "1".repeat(32)),
+                },
+                nar_hash: format!("sha256:{}", "d".repeat(64)),
+                nar_size: 1,
+                binary_sha256: "e".repeat(64),
+            },
+            identity: kvrocks::WorkerIdentity {
+                user: "runner".into(),
+                uid: 1001,
+                group: "nixbld".into(),
+                gid: 30000,
+            },
+        };
+        host.service().unwrap();
+        let mut frame = serde_json::to_vec(&host).unwrap();
+        frame.push(b'\n');
+        assert!(frame.len() > 65536);
+        let decoded = startup_frame(
+            std::io::Cursor::new(frame),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .unwrap();
+        assert_eq!(decoded.plan.digest, host.plan.digest);
+        assert_eq!(decoded.service().unwrap(), host.service().unwrap());
+    }
+
+    #[test]
     fn failed_allocation_and_replaced_runtime_preserve_foreign_socket_bytes() {
         let root = tempfile::tempdir().unwrap();
         let runtime = root.path().join("runtime");
@@ -657,7 +814,11 @@ mod tests {
 
     #[test]
     fn malformed_or_oversized_startup_frames_revoke_the_host_lifetime() {
-        for input in [b"{}".to_vec(), b"{}\n".to_vec(), vec![b'x'; 65537]] {
+        for input in [
+            b"{}".to_vec(),
+            b"{}\n".to_vec(),
+            vec![b'x'; kvrocks::HOST_REQUEST_MAX_BYTES as usize + 1],
+        ] {
             let cancelled = Arc::new(AtomicBool::new(false));
             assert!(startup_frame(std::io::Cursor::new(input), cancelled.clone()).is_err());
         }

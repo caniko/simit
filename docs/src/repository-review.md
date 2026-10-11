@@ -99,6 +99,16 @@ is preserved. PID-1 supervision allows cleanup to finish after runner cancellati
 kills the worker process tree; a finite supervisor lifetime also bounds abandoned
 jobs.
 
+The host's complete identity/native-tool/allocation/startup sequence shares a
+240-second deadline. Individual external operations use their own smaller caps
+or the remaining shared budget. The worker allows that budget plus the launcher
+and frame handoff, rather than expiring during otherwise permitted host phases.
+Startup frames admit the full 16 MiB plan-file contract plus bounded native/
+worker receipts, with a 32 MiB frame ceiling and a five-second read deadline.
+The service's 61-minute lifetime exceeds the generated 60-minute build window,
+including readiness/shutdown allowance; its independent supervisor additionally
+retains the host-startup and cleanup budgets.
+
 Before consumer realization, the engine freezes and rebuilds an independent
 ordinary-sandbox socket probe with the canonical socket mounted through
 `extra-sandbox-paths`. The effective plan and retained probe bytes bind this

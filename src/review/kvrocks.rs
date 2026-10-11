@@ -14,6 +14,17 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{fs, path::Path};
 
+// The host frame embeds the complete bounded plan plus native/worker receipts.
+#[cfg(target_os = "linux")]
+pub(crate) const HOST_REQUEST_MAX_BYTES: u64 = 2 * super::MAX_JSON_BYTES;
+#[cfg(target_os = "linux")]
+pub(crate) const STARTUP_FRAME_SECONDS: u64 = 5;
+pub(crate) const HOST_STARTUP_SECONDS: u64 = 240;
+// Launcher identity/frame/managed-start handoff, then response delivery.
+#[cfg(target_os = "linux")]
+pub(crate) const WORKER_STARTUP_SECONDS: u64 = HOST_STARTUP_SECONDS + 3 * STARTUP_FRAME_SECONDS + 5;
+const BUILD_WINDOW_SECONDS: u32 = 60 * 60;
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NativeSource {
@@ -422,6 +433,7 @@ pub struct ServicePlan {
     pub sandbox_paths: Vec<String>,
     pub startup_seconds: u32,
     pub shutdown_seconds: u32,
+    pub lifetime_seconds: u32,
     pub memory_max_bytes: u64,
     pub cpu_quota_percent: u32,
     pub max_db_gib: u32,
@@ -569,7 +581,13 @@ pub fn supervisor_arguments(
         "--property=User=root",
         "--property=Group=root",
         "--property=KillMode=control-group",
-        "--property=RuntimeMaxSec=2700s",
+        &format!(
+            "--property=RuntimeMaxSec={}s",
+            HOST_STARTUP_SECONDS
+                + u64::from(plan.lifetime_seconds)
+                + u64::from(plan.shutdown_seconds)
+                + 15
+        ),
         "--property=TimeoutStopSec=45s",
         "--property=SendSIGKILL=yes",
         "--property=KillSignal=SIGTERM",
@@ -653,6 +671,7 @@ pub fn service_plan(
     let socket = "/run/redis-sccache/redis.sock".to_owned();
     let startup_seconds = 30;
     let shutdown_seconds = 30;
+    let lifetime_seconds = BUILD_WINDOW_SECONDS + startup_seconds + shutdown_seconds;
     let memory_max_bytes = 2 * 1024 * 1024 * 1024;
     let cpu_quota_percent = 200;
     let max_db_gib = 4;
@@ -675,7 +694,7 @@ pub fn service_plan(
         &format!("--property=MemoryMax={memory_max_bytes}"),
         &format!("--property=CPUQuota={cpu_quota_percent}%"),
         "--property=CPUQuotaPeriodSec=100ms",
-        "--property=RuntimeMaxSec=2700s",
+        &format!("--property=RuntimeMaxSec={lifetime_seconds}s"),
         "--property=KillMode=control-group",
         &format!("--property=TimeoutStartSec={startup_seconds}s"),
         &format!("--property=TimeoutStopSec={shutdown_seconds}s"),
@@ -707,6 +726,7 @@ pub fn service_plan(
         sandbox_paths: vec![socket],
         startup_seconds,
         shutdown_seconds,
+        lifetime_seconds,
         memory_max_bytes,
         cpu_quota_percent,
         max_db_gib,

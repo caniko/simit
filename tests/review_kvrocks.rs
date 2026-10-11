@@ -378,6 +378,41 @@ fn kvrocks_transient_service_plan_binds_native_tool_run_identity_and_bounded_res
     assert_eq!(plan.socket, "/run/redis-sccache/redis.sock");
     assert_eq!(plan.startup_seconds, 30);
     assert_eq!(plan.shutdown_seconds, 30);
+    let workflow: serde_yaml::Value =
+        serde_yaml::from_str(include_str!("../src/review/assets/review-repository.yml")).unwrap();
+    let build_seconds = workflow["jobs"]["build"]["timeout-minutes"]
+        .as_u64()
+        .unwrap()
+        * 60;
+    let runtime_seconds: u64 = plan
+        .systemd_args
+        .iter()
+        .find_map(|arg| arg.strip_prefix("--property=RuntimeMaxSec="))
+        .unwrap()
+        .trim_end_matches('s')
+        .parse()
+        .unwrap();
+    assert!(
+        runtime_seconds >= build_seconds + u64::from(plan.shutdown_seconds),
+        "a healthy cache must outlive the workflow build window and shutdown grace"
+    );
+    let wrapper = format!(
+        "/nix/store/{}-simit-review-tools/bin/repo-review",
+        "2".repeat(32)
+    );
+    let supervisor =
+        kvrocks::supervisor_arguments(&plan, std::path::Path::new(&wrapper), identity.uid).unwrap();
+    let supervisor_seconds: u64 = supervisor
+        .iter()
+        .find_map(|arg| arg.strip_prefix("--property=RuntimeMaxSec="))
+        .unwrap()
+        .trim_end_matches('s')
+        .parse()
+        .unwrap();
+    assert!(
+        supervisor_seconds > runtime_seconds + u64::from(plan.shutdown_seconds),
+        "supervisor must retain the service lifetime and cleanup grace"
+    );
     assert_eq!(plan.memory_max_bytes, 2 * 1024 * 1024 * 1024);
     assert_eq!(plan.cpu_quota_percent, 200);
     assert_eq!(plan.max_db_gib, 4);
