@@ -26,7 +26,7 @@
       version = (builtins.fromTOML (builtins.readFile "${source}/Cargo.toml")).package.version;
       src = pkgs.lib.cleanSource source;
       cargoLock.lockFile = "${source}/Cargo.lock";
-      nativeBuildInputs = [pkgs.makeWrapper];
+      nativeBuildInputs = [pkgs.makeWrapper pkgs.perl];
       # The full Simit suite invokes release preflight in temporary Cargo
       # projects, so its nested quality commands need the matching toolchain.
       nativeCheckInputs = [pkgs.git pkgs.gnupg pkgs.clippy pkgs.rustfmt pkgs.nodejs pkgs.jq];
