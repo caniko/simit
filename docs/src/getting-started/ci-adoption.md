@@ -373,12 +373,13 @@ Each gate has a stable `id`, one explicit single-line `run` command (a `nix
 run`, `nix build`, or `nix flake check` invocation for flake targets), a
 bounded `timeout_minutes` (1–360, default 30), and scoped `env`. Gates render
 as dedicated `gate-<id>` jobs in CI (same push/PR triggers, once per run) and
-as prerequisite jobs in the coordinated publish workflow at the exact signed
+as credential-free prerequisite steps in the coordinated publisher at the exact signed
 revision. Any gate failure blocks publication. Gate setup lives in `run`/`env`
 only — never in global `[ci].extra_setup`, so publishing and artifact jobs do
 not inherit test-only services or credentials. Release secrets
 (`CRATES_IO_API_TOKEN`, minisign, etc.) must never appear in gate `env`; they
-belong only to tag-triggered publish jobs.
+belong only to independent default-branch upload jobs in the protected
+`simit-crates-io` environment.
 
 ## Coordinated Workspace Publication
 
@@ -400,7 +401,8 @@ simit init ci --platform github --check --diff
 ```
 
 Switching strategies removes only obsolete simit-owned outputs (generated
-`publish-crate-*.yaml` vs generated `publish-workspace.yaml`); handwritten
+`publish-crate-*.yaml` and `trusted-publish-crate-*.yaml` vs generated
+`publish-workspace.yaml` and `trusted-publish-workspace.yaml`); handwritten
 workflows are never deleted. Other backends (Forgejo, Crow, GitLab) fail
 explicitly instead of silently degrading.
 
@@ -410,6 +412,12 @@ docs and required-gate policies, and select `publish_strategy = "coordinated"`
 for the dependency-ordered release carrier. With an already configured workspace,
 `simit init ci --coordinated-publish` retains that CI selection. Do not migrate a
 consumer to aggregate CI merely to enable ordered publication.
+
+GitHub tag workflows retain credential-free archives; their independently trusted
+`workflow_run` companions own registry uploads. Enrollment requires a qualified
+`vars.SIMIT_PUBLISHER_REVISION`, default-branch-restricted `simit-crates-io`
+environment and removal of tag-accessible publishing secrets. See
+[Release Integrity](release-integrity.md) before enabling this route.
 
 Both single-crate and coordinated publishers compare the intended verified local
 archive with the registry response before resuming an existing version. The

@@ -90,12 +90,19 @@ fn private_github_runner_generation_preserves_the_compatible_checkout_baseline()
     for path in [
         ".github/workflows/ci.yaml",
         ".github/workflows/publish-crate.yaml",
+        ".github/workflows/trusted-publish-crate.yaml",
         ".github/workflows/nix-builds.yaml",
     ] {
         let workflow = read(&temp.path().join(path));
         assert_yaml_parses(&workflow);
         assert!(
-            workflow.contains("runs-on: private-legacy-linux"),
+            workflow.contains(if path.contains("publish-crate") {
+                // Candidate builds must not inherit credentials mounted on a
+                // private CI/release runner, including with the Nix runtime.
+                "runs-on: ubuntu-24.04"
+            } else {
+                "runs-on: private-legacy-linux"
+            }),
             "{path}: {workflow}"
         );
         // The pre-template default uses checkout v4's Node20 runtime. Arbitrary
@@ -2498,9 +2505,18 @@ fn generates_github_plain_cargo_workflows() {
     assert!(
         publish.contains(r#"cargo pkgid -p demo | awk -F'[#@]' 'NF > 1 {print $NF}' | tail -n 1"#)
     );
-    assert!(publish.contains("export CARGO_REGISTRY_TOKEN="));
-    assert!(publish.contains("checksum matches; resuming (already published)"));
-    assert!(publish.contains("invalid, mismatched or yanked registry version"));
+    assert!(!publish.contains("CARGO_REGISTRY_TOKEN"));
+    assert!(!publish.contains("CRATES_IO_API_TOKEN"));
+    let trusted = read(
+        &temp
+            .path()
+            .join(".github/workflows/trusted-publish-crate.yaml"),
+    );
+    assert!(trusted.contains("workflow_run:"));
+    assert!(trusted.contains("--publisher-stage publish"));
+    assert!(trusted.contains(
+        "already-published crates with matching checksums exit 0 after exact registry resolution"
+    ));
     assert!(!publish.contains("cargo login"));
     // Regression: the publish workflow must not infer the release version from
     // the first package in workspace-wide cargo metadata.

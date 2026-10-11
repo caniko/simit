@@ -1,5 +1,34 @@
 # Release Integrity
 
+## Independent Publisher Admission
+
+The `release_publisher` library binds a completed release event to its native
+GitHub Actions run before an independently trusted default-branch publisher can
+consume its artifacts. Policy supplies the exact repository, default branch and
+source/publisher workflow identities. The publisher context comes from GitHub's
+workflow context, and the run record must be fetched independently from GitHub.
+Candidate artifacts cannot supply these trust roots.
+
+Push binding rejects fork runs, unsuccessful runs, dispatches, noncanonical
+semver head labels and event/provider drift. A native `head_branch` label cannot
+distinguish `refs/tags/1.2.3` from `refs/heads/1.2.3`; `BoundReleasePush` retains
+`source_head_label` and does not claim a tag identity. Independently trusted
+tag-trigger provenance remains a required gate before publication.
+Retries retain the original run ID while
+recording its current attempt. Artifact verification binds opaque archive bytes
+to the native artifact ID, run, repository, source SHA, expiry and SHA-256 digest
+under a trusted byte limit. GitHub artifact metadata does not identify the
+producing attempt; original-run archive reuse must not be described as fresh
+attempt production.
+
+These helpers establish intermediate push identity only. Signed-tag verification, safe
+archive-member admission, archive-only publication, the protected environment's
+ref restrictions and actual credential enrollment remain separate required
+boundaries. The tag-controlled generator routes are not yet qualified for that
+independent credential boundary. `Qualify publisher boundary` retains both helper
+test results and the three generated credential-boundary regressions, including
+failed candidates.
+
 Generated release workflows treat signed tags and signed artifacts as part of
 the release contract.
 
@@ -36,24 +65,100 @@ After verifying the signed tag, generated publish workflows require its peeled
 commit to equal the checkout being published, before package metadata, project
 `ci.extra_setup` commands, or publication execute. Checkout credentials are not
 persisted; private verification fetches use command-scoped authentication.
-GitHub crates.io publishers run only on signed semver tag
-pushes; they do not expose a branch-based manual dispatch. To retry publication,
-rerun the original tag-triggered run. Forgejo retains its existing dispatch
-surface and applies the same signed-tag/checkout validation.
+GitHub crates.io publication uses two generated workflows. The signed semver
+tag workflow builds credential-free archives and retains immutable per-attempt
+artifacts. Its `trusted-publish-*.yaml` companion executes through `workflow_run`
+from the independent default branch. A fresh credential-free job verifies and
+compiles the packaged contents before a separate hosted upload job re-admits
+the original source and artifact. Candidate configuration, compiler wrappers,
+hooks and build scripts never execute with the registry credential.
+Tag archive builds and candidate verification always use fresh hosted
+`ubuntu-24.04` runners, irrespective of configured CI/release runner labels.
+Configured nonsecret build environment, required environment checks and setup
+are reapplied after source/archive admission and the exact signed-source checkout.
+They affect only candidate setup, compilation and gates; independent engine
+bootstrap, admission and the separate upload job do not consume them.
 
-Coordinated workspace publication also binds the signed commit to the
-immutable workflow event SHA. Its validation job, required gates, all dependent
-publishers, and release report explicitly check out `${{ github.sha }}` rather
-than resolving the release tag again. A tag moved after validation cannot change
-the source used by later jobs. This applies to both package-scoped publishers
-and coordinated workspace publication; regenerate existing consumer workflows
-after selecting the qualified generator revision.
+Before enabling publication, the operator must move `CRATES_IO_API_TOKEN` into
+the literal `simit-crates-io` environment, restrict that environment to the exact
+protected default branch, and remove repository/organization publishing secrets
+available to tag workflows. Set `vars.SIMIT_PUBLISHER_REVISION` to a qualified
+immutable 40-hex Simit revision. Generation does not provision these boundaries;
+an absent engine enrollment fails closed.
+
+The publisher checks the native repository, workflow ID/path, original run and
+attempt, provider artifact SHA-256, default-branch keyring and maintainer-signed
+tag/source. It reconstructs package contents with isolated Cargo configuration
+and `cargo package --no-verify`, then compares every member before API upload.
+The complete signed source workflow must equal the independently enrolled
+workflow as typed YAML, including permissions, runners, jobs and credential
+contexts. Identical tag triggers alone do not authorize a modified workflow.
+Workflow changes require independent default-branch enrollment before a release;
+comments and YAML key ordering do not change execution authority.
+Reconstruction explicitly selects crates.io and uses a neutral filesystem-root
+working directory with absolute manifest/target paths and private `HOME` /
+`CARGO_HOME`. Cargo therefore does not inherit a candidate configuration or a
+Nix build directory's ancestor vendor replacement, which would hide coordinated
+unpublished workspace dependencies. This remains data-only packaging; candidate
+build scripts and credential providers are not executed.
+Free-form package/workspace metadata is excluded from Cargo filesystem-path
+validation; real package and dependency read paths still require containment in
+the signed checkout. Nix-runtime publishers provision Nix only in the
+credential-free verification job, before rerunning required source gates.
+Member paths, permission modes and source/original-manifest bytes must match.
+Generated `Cargo.toml` and `Cargo.lock` compare as typed TOML, preserving manifest
+fields and the complete dependency/checksum graph while tolerating Cargo-version
+differences in comments, layout and lock-format 3/4 markers. Changed dependency
+identities, source bytes, extra files or permission bits are rejected.
+Coordinated releases package their full release set together and publish in
+dependency order, waiting for exact registry resolution before dependents run.
+A moved tag, foreign run, changed archive or escaping manifest path is rejected.
+Manifest validation follows the root Cargo workspace, member globs/exclusions and
+local dependency graph; unrelated invalid test-fixture manifests do not block a
+release. Nix projects verify the admitted packaged crate through the original
+signed source's `nix develop` environment on the credential-free runner.
+Isolated reconstruction retains only the fixed public GitHub SSH-to-HTTPS rewrites
+and uses Cargo's Git CLI transport; ambient Git configuration, SSH agents and
+provider/registry credentials are not forwarded to dependency fetches.
+The signed normalized manifest must authorize crates.io publication: `publish =
+false`, an empty list or a list that excludes `crates-io` rejects before upload.
+Tag archive and candidate verification generation rejects GitHub `secrets`
+expressions, including global CI environment, setup and required-gate bindings.
+Those configurable build inputs also reject `github.token`, whole-`github`
+serialization, wildcard access and dynamic `github` indexing. Statically selected
+non-token fields such as `github.ref_name` and `github['ref_name']` remain supported.
+Quoted expression delimiters cannot hide credential references.
+Required-environment names and candidate environment keys must be ASCII variable
+identifiers (`[A-Za-z_][A-Za-z0-9_]*`), including for direct renderer callers.
+Shell default expansions, command substitutions and GitHub expressions cannot be
+embedded in names; invalid bindings reject before generated files are written.
+The fixed generator-owned admission steps retain command-local read-only provider
+authentication for signed-source fetches; build inputs cannot copy that token.
+Nonsecret build limits and native GitHub labels remain available. Authenticated
+work belongs in independently protected jobs.
+
+Upload handling accepts Cargo's documented successful `warnings` response and
+rejects HTTP or explicit API errors. A lost upload response triggers bounded
+read-only reconciliation of the exact registry name, version, checksum and yanked
+state; it never repeats the upload in that invocation. Exact Cargo registry
+resolution remains required before dependents can publish.
+Regenerate existing consumer workflows after selecting the qualified generator.
+
+To retry publication, rerun the original signed-tag run. The earliest live
+immutable artifact from that run is reused; an artifact name alone does not
+prove attempt provenance. Forgejo retains its existing dispatch surface and
+signed-tag/checkout validation.
 
 An HTTP 200 for an existing crate version is not release acceptance. Publishers
 require an unyanked exact crate/version record and a checksum matching the local
 verified package archive, then independently resolve and fetch that exact
 registry source/version/checksum. A matching upload can be resumed by rerunning
 the original signed-tag run; a conflicting or unusable version fails closed.
+The publish API's successful warnings response does not require an `ok` field.
+Lost, malformed or unsuccessful upload replies trigger bounded registry
+reconciliation for the exact archive identity without a second upload; an unknown
+outcome retains the original run/archive for later reconciliation. Even a
+reconciled upload must pass the independent exact Cargo-resolution gate.
 
 `keys/minisign.pub` is the public half of the offline minisign key used to
 sign `SHA256SUMS.txt`. Generate the keypair on the maintainer-controlled

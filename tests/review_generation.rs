@@ -177,6 +177,7 @@ fn controller_identity_rejects_ref_movement_before_publishing_checkout_outputs()
 #[cfg(unix)]
 #[test]
 fn reusable_report_consumes_the_explicit_token_only_when_posting_is_requested() {
+    use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
     let root = tempfile::tempdir().unwrap();
     std::fs::write(
@@ -215,8 +216,17 @@ fn reusable_report_consumes_the_explicit_token_only_when_posting_is_requested() 
             "[ \"$GH_TOKEN\" = fixture-report-token ] && [ \"$PLAN_DIGEST\" = fixture-plan-digest ] || exit 1; touch report-posted || exit; printf '%s\\n' '{\"posted\":true}'",
         ),
     ] {
-        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // Publish a closed, complete executable inode. Hosted Linux can reject
+        // an immediately executed in-place write with ETXTBSY; the invocation
+        // assertions below must still detect a stub that did not run.
+        let mut fixture = tempfile::NamedTempFile::new_in(path.parent().unwrap()).unwrap();
+        writeln!(fixture, "#!/bin/sh\n{body}").unwrap();
+        fixture.as_file().sync_all().unwrap();
+        fixture
+            .as_file()
+            .set_permissions(std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+        fixture.into_temp_path().persist(path).unwrap();
     }
     let path = std::env::join_paths(
         std::iter::once(bin).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),

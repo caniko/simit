@@ -110,6 +110,9 @@
         inherit src;
         strictDeps = true;
         cargoExtraArgs = "--all-features";
+        # The publisher's license-compatible TLS backend builds OpenSSL from
+        # its pinned Cargo source, including for static cross packages.
+        nativeBuildInputs = [pkgs.perl];
       };
 
       cargoArtifacts = craneLib.buildDepsOnly commonArgs;
@@ -121,7 +124,7 @@
       package = craneLib.buildPackage (commonArgs
         // {
           inherit cargoArtifacts;
-          nativeBuildInputs = [preCommitBin];
+          nativeBuildInputs = commonArgs.nativeBuildInputs ++ [preCommitBin];
           nativeCheckInputs = [pkgs.git pkgs.gnupg pkgs.nodejs pkgs.jq];
         });
 
@@ -129,7 +132,7 @@
       publicPackage = publicCraneLib.buildPackage (commonArgs
         // {
           cargoArtifacts = publicCargoArtifacts;
-          nativeBuildInputs = [preCommitBin];
+          nativeBuildInputs = commonArgs.nativeBuildInputs ++ [preCommitBin];
           nativeCheckInputs = [pkgs.git pkgs.gnupg pkgs.nodejs pkgs.jq];
         });
 
