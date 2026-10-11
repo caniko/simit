@@ -1,6 +1,7 @@
 //! Paired credential-free source builds and independent default-branch publishers.
 
 use super::*;
+use anyhow::Context;
 
 // Candidate-controlled build scripts/setup run only on fresh hosted workers,
 // independently of configured CI/release runners and their mounted credentials.
@@ -9,14 +10,24 @@ pub(super) const CANDIDATE_RUNNER: &str = "ubuntu-24.04";
 pub(super) fn validate_credential_free_source(workflow: &str, options: &CiOptions) -> Result<()> {
     // Required gates also run against candidate source in the fresh trusted
     // verify job, including when the tag workflow does not render those gates.
-    let inputs = std::iter::once(workflow).chain(options.required_gates.iter().flat_map(|gate| {
-        std::iter::once(gate.run.as_str()).chain(gate.env.values().map(String::as_str))
-    }));
-    for input in inputs {
-        for body in input.split("${{").skip(1) {
-            let Some((expression, _)) = body.split_once("}}") else {
-                continue;
-            };
+    let candidate_inputs = options
+        .extra_env
+        .iter()
+        .map(|(_, value)| value.as_str())
+        .chain(options.extra_setup.iter().map(String::as_str))
+        .chain(options.required_gates.iter().flat_map(|gate| {
+            std::iter::once(gate.run.as_str()).chain(gate.env.values().map(String::as_str))
+        }));
+    // The generator's fixed signed-tag admission step needs command-local
+    // read-only provider authentication. User-controlled build bindings must
+    // never copy that token into candidate setup, compilation or gates.
+    let inputs =
+        std::iter::once((workflow, false)).chain(candidate_inputs.map(|input| (input, true)));
+    for (mut input, candidate_input) in inputs {
+        while let Some((_, body)) = input.split_once("${{") {
+            let (expression, remainder) = github_expression(body)
+                .context("release source workflows must use complete GitHub expressions")?;
+            input = remainder;
             if expression
                 .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
                 .any(|word| word.eq_ignore_ascii_case("secrets"))
@@ -25,9 +36,94 @@ pub(super) fn validate_credential_free_source(workflow: &str, options: &CiOption
                     "release source workflows must not reference GitHub secrets; keep credentials in independently protected jobs"
                 );
             }
+            if candidate_input && references_github_authentication(expression) {
+                bail!(
+                    "release source workflows must not reference GitHub authentication contexts; use a static non-token github field and keep credentials in independently protected jobs"
+                );
+            }
         }
     }
     Ok(())
+}
+
+// Expression terminators/openers inside quoted literals are data, not syntax.
+// GitHub escapes a single quote inside its string literals by doubling it.
+fn github_expression(body: &str) -> Option<(&str, &str)> {
+    let bytes = body.as_bytes();
+    let mut quoted = false;
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'\'' {
+            if quoted && bytes.get(index + 1) == Some(&b'\'') {
+                index += 2;
+                continue;
+            }
+            quoted = !quoted;
+        }
+        if !quoted && bytes[index..].starts_with(b"}}") {
+            return Some((&body[..index], &body[index + 2..]));
+        }
+        index += 1;
+    }
+    None
+}
+
+fn references_github_authentication(expression: &str) -> bool {
+    fn identifier(byte: u8) -> bool {
+        byte.is_ascii_alphanumeric() || byte == b'_'
+    }
+    fn static_property(tail: &str) -> Option<&str> {
+        let tail = tail.trim_start();
+        if let Some(property) = tail.strip_prefix('.') {
+            let property = property.trim_start();
+            let length = property
+                .bytes()
+                .take_while(|byte| identifier(*byte))
+                .count();
+            return (length > 0).then_some(&property[..length]);
+        }
+        let property = tail.strip_prefix('[')?.trim_start().strip_prefix('\'')?;
+        let (property, remainder) = property.split_once('\'')?;
+        (remainder.trim_start().starts_with(']')
+            && !property.is_empty()
+            && property.bytes().all(identifier))
+        .then_some(property)
+    }
+    let expression = expression.to_ascii_lowercase();
+    let bytes = expression.as_bytes();
+    let mut characters = expression.char_indices().peekable();
+    let mut quoted = false;
+    while let Some((index, character)) = characters.next() {
+        if character == '\'' {
+            if quoted && characters.peek().is_some_and(|(_, next)| *next == '\'') {
+                characters.next();
+                continue;
+            }
+            quoted = !quoted;
+            continue;
+        }
+        if quoted || !expression[index..].starts_with("github") {
+            continue;
+        }
+        if index
+            .checked_sub(1)
+            .is_some_and(|previous| identifier(bytes[previous]))
+            || bytes
+                .get(index + "github".len())
+                .is_some_and(|byte| identifier(*byte))
+            || expression[..index].trim_end().ends_with('.')
+        {
+            continue;
+        }
+        // Whole-context serialization, wildcard and dynamic indexing can expose
+        // github.token too; only statically addressed non-token fields are safe.
+        if static_property(&expression[index + "github".len()..])
+            .is_none_or(|property| property == "token")
+        {
+            return true;
+        }
+    }
+    false
 }
 
 pub(super) fn crate_build_display(name: &str) -> String {

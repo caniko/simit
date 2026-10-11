@@ -547,13 +547,81 @@ fn coordinated_audit_propagates_unsafe_publisher_policy_without_modifying_workfl
 }
 
 #[test]
+fn credential_free_inputs_reject_github_token_and_indirect_context_access() {
+    for mode in ["single", "members", "coordinated"] {
+        let temp = publisher_project(mode);
+        let config = fs::read_to_string(temp.path().join("simit.toml")).unwrap();
+        let files = fs::read_dir(temp.path().join(".github/workflows"))
+            .unwrap()
+            .map(|entry| {
+                let path = entry.unwrap().path();
+                let bytes = fs::read(&path).unwrap();
+                (path, bytes)
+            })
+            .collect::<Vec<_>>();
+        for expression in [
+            "${{ github.token }}",
+            "${{ GitHub . TOKEN }}",
+            "${{ github['token'] }}",
+            "${{ toJSON(github) }}",
+            "${{ github.* }}",
+            "${{ github[format('to{0}', 'ken')] }}",
+            "${{ format('}}{0}', github.token) }}",
+            "${{ format('${{}}{0}', github.token) }}",
+        ] {
+            for policy in [
+                format!(
+                    "[ci.extra_env]\nTOKEN={}\n",
+                    toml_edit::Value::from(expression)
+                ),
+                format!(
+                    "extra_setup=[{}]\n",
+                    toml_edit::Value::from(format!("echo {expression}"))
+                ),
+                format!(
+                    "[[ci.required_gates]]\nid='integration'\nrun='cargo test'\nenv={{TOKEN={}}}\n",
+                    toml_edit::Value::from(expression)
+                ),
+                format!(
+                    "[[ci.required_gates]]\nid='integration'\nrun={}\n",
+                    toml_edit::Value::from(format!("echo {expression}"))
+                ),
+            ] {
+                fs::write(
+                    temp.path().join("simit.toml"),
+                    format!("{config}\n{policy}"),
+                )
+                .unwrap();
+                let output = common::simit()
+                    .current_dir(temp.path())
+                    .args(["init", "ci"])
+                    .output()
+                    .unwrap();
+                assert!(
+                    !output.status.success(),
+                    "{mode}: accepted credential expression {policy}"
+                );
+                let stderr = String::from_utf8(output.stderr).unwrap();
+                assert!(
+                    stderr.contains("must not reference GitHub authentication contexts"),
+                    "{stderr}"
+                );
+                for (path, bytes) in &files {
+                    assert_eq!(fs::read(path).unwrap(), *bytes);
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn tag_archive_generation_retains_nonsecret_build_environment() {
     let temp = publisher_project("coordinated");
     let config = fs::read_to_string(temp.path().join("simit.toml")).unwrap();
     fs::write(
         temp.path().join("simit.toml"),
         format!(
-            "{config}\n[ci.extra_env]\nCARGO_BUILD_JOBS='2'\nLABEL='${{{{ github.ref_name }}}}'\n"
+            "{config}\n[ci.extra_env]\nCARGO_BUILD_JOBS='2'\nLABEL='${{{{ github.ref_name }}}}'\nBRACKET_LABEL=\"${{{{ github['ref_name'] }}}}\"\nEVENT='${{{{ toJSON(github.event) }}}}'\nLITERAL_LABEL=\"${{{{ format('github', github['ref_name']) }}}}\"\n"
         ),
     )
     .unwrap();
@@ -571,5 +639,17 @@ fn tag_archive_generation_retains_nonsecret_build_environment() {
     assert_eq!(
         yaml["jobs"]["build"]["env"]["LABEL"],
         "${{ github.ref_name }}"
+    );
+    assert_eq!(
+        yaml["jobs"]["build"]["env"]["BRACKET_LABEL"],
+        "${{ github['ref_name'] }}"
+    );
+    assert_eq!(
+        yaml["jobs"]["build"]["env"]["EVENT"],
+        "${{ toJSON(github.event) }}"
+    );
+    assert_eq!(
+        yaml["jobs"]["build"]["env"]["LITERAL_LABEL"],
+        "${{ format('github', github['ref_name']) }}"
     );
 }
