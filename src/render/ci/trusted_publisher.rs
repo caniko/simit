@@ -8,6 +8,19 @@ use anyhow::Context;
 pub(super) const CANDIDATE_RUNNER: &str = "ubuntu-24.04";
 
 pub(super) fn validate_credential_free_source(workflow: &str, options: &CiOptions) -> Result<()> {
+    // Names are shell/YAML syntax, never expressions or executable defaults.
+    // Recheck direct renderer callers as well as ProjectConfig consumers.
+    for name in &options.required_env {
+        crate::config::validate_environment_name("release source required_env", name)?;
+    }
+    for (name, _) in &options.extra_env {
+        crate::config::validate_environment_name("release source extra_env key", name)?;
+    }
+    for gate in &options.required_gates {
+        for name in gate.env.keys() {
+            crate::config::validate_environment_name("release source required gate env key", name)?;
+        }
+    }
     // Required gates also run against candidate source in the fresh trusted
     // verify job, including when the tag workflow does not render those gates.
     let candidate_inputs = options

@@ -127,8 +127,12 @@ expressions, including global CI environment, setup and required-gate bindings.
 Those configurable build inputs also reject `github.token`, whole-`github`
 serialization, wildcard access and dynamic `github` indexing. Statically selected
 non-token fields such as `github.ref_name` and `github['ref_name']` remain supported.
-Quoted expression delimiters cannot hide credential references. The fixed
-generator-owned admission steps retain command-local read-only provider
+Quoted expression delimiters cannot hide credential references.
+Required-environment names and candidate environment keys must be ASCII variable
+identifiers (`[A-Za-z_][A-Za-z0-9_]*`), including for direct renderer callers.
+Shell default expansions, command substitutions and GitHub expressions cannot be
+embedded in names; invalid bindings reject before generated files are written.
+The fixed generator-owned admission steps retain command-local read-only provider
 authentication for signed-source fetches; build inputs cannot copy that token.
 Nonsecret build limits and native GitHub labels remain available. Authenticated
 work belongs in independently protected jobs.

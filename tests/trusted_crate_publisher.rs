@@ -653,3 +653,124 @@ fn tag_archive_generation_retains_nonsecret_build_environment() {
         "${{ format('github', github['ref_name']) }}"
     );
 }
+
+#[test]
+fn required_environment_names_cannot_inject_candidate_shell_or_credentials() {
+    for mode in ["single", "members", "coordinated"] {
+        let temp = publisher_project(mode);
+        let config = fs::read_to_string(temp.path().join("simit.toml")).unwrap();
+        let files = fs::read_dir(temp.path().join(".github/workflows"))
+            .unwrap()
+            .map(|entry| {
+                let path = entry.unwrap().path();
+                let bytes = fs::read(&path).unwrap();
+                (path, bytes)
+            })
+            .collect::<Vec<_>>();
+        for name in [
+            "SIMIT_UNSET:-$(printf '%s' '${{ github.token }}' > candidate-token)",
+            "SIMIT_UNSET:-$(touch candidate-effect)",
+            "${{ github.token }}",
+            "BUILD-MODE",
+            " BUILD_MODE",
+            "1BUILD_MODE",
+        ] {
+            fs::write(
+                temp.path().join("simit.toml"),
+                format!(
+                    "{config}\nrequired_env=[{}]\n",
+                    toml_edit::Value::from(name)
+                ),
+            )
+            .unwrap();
+            let output = common::simit()
+                .current_dir(temp.path())
+                .args(["init", "ci"])
+                .output()
+                .unwrap();
+            assert!(
+                !output.status.success(),
+                "{mode}: accepted executable required_env {name}"
+            );
+            let stderr = String::from_utf8(output.stderr).unwrap();
+            assert!(
+                stderr.contains("required_env")
+                    && stderr.contains("environment variable identifier"),
+                "{stderr}"
+            );
+            for (path, bytes) in &files {
+                assert_eq!(fs::read(path).unwrap(), *bytes);
+            }
+            assert!(!temp.path().join("candidate-token").exists());
+            assert!(!temp.path().join("candidate-effect").exists());
+        }
+    }
+}
+
+#[test]
+fn direct_publisher_rendering_validates_all_candidate_environment_names() {
+    use simit::cli::{Platform, Runtime};
+    use simit::config::RequiredGate;
+    use simit::render::ci::{CiOptions, PublishWorkspaceInputs, publish_workspace_files};
+    use simit::user_config::ResolvedRunner;
+    let runner = ResolvedRunner {
+        name: None,
+        labels: vec!["ubuntu-latest".into()],
+    };
+    let render = |options| {
+        publish_workspace_files(
+            Platform::Github,
+            PublishWorkspaceInputs {
+                runtime: Runtime::Cargo,
+                runner: &runner,
+                options,
+                plan: vec![("publisher-demo".into(), vec![])],
+                versions: vec![("publisher-demo".into(), "0.1.0".into())],
+            },
+        )
+    };
+    for name in [
+        "VALUE:-$(touch effect)",
+        "${{ github.token }}",
+        "[invalid]",
+        "",
+        "1VALUE",
+    ] {
+        for location in ["required_env", "extra_env", "gate.env"] {
+            let mut options = CiOptions::default();
+            match location {
+                "required_env" => options.required_env.push(name.into()),
+                "extra_env" => options.extra_env.push((name.into(), "safe".into())),
+                _ => options.required_gates.push(RequiredGate {
+                    id: "build".into(),
+                    run: "cargo test".into(),
+                    timeout_minutes: 1,
+                    env: [(name.into(), "safe".into())].into(),
+                }),
+            }
+            let result = render(options);
+            assert!(
+                result.is_err(),
+                "direct renderer accepted {location} name {name}: {result:?}"
+            );
+            assert!(
+                format!("{:#}", result.unwrap_err()).contains("environment variable identifier")
+            );
+        }
+    }
+    let valid = CiOptions {
+        required_env: vec!["BUILD_MODE".into(), "_BUILD_MODE2".into()],
+        extra_env: vec![
+            ("BUILD_MODE".into(), "release".into()),
+            ("_BUILD_MODE2".into(), "release".into()),
+        ],
+        ..CiOptions::default()
+    };
+    let files = render(valid).unwrap();
+    assert_eq!(files.len(), 2);
+    assert!(
+        files
+            .iter()
+            .all(|file| file.content.contains("${BUILD_MODE:-}"))
+    );
+}
