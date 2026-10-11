@@ -61,6 +61,14 @@ fn data_command(program: &str, state: &Path) -> Result<Command> {
         )
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        // Recreate only the fixed trusted transport policy. Never inherit
+        // candidate/global Git config, SSH agents or provider credentials.
+        .env("GIT_CONFIG_COUNT", "2")
+        .env("GIT_CONFIG_KEY_0", "url.https://github.com/.insteadOf")
+        .env("GIT_CONFIG_VALUE_0", "ssh://git@github.com/")
+        .env("GIT_CONFIG_KEY_1", "url.https://github.com/.insteadOf")
+        .env("GIT_CONFIG_VALUE_1", "git@github.com:")
+        .env("CARGO_NET_GIT_FETCH_WITH_CLI", "true")
         .env("GNUPGHOME", state.join("gpg"));
     Ok(command)
 }
@@ -226,10 +234,10 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
     let mut fetch = data_command("git", state.path())?;
     // Read-only Actions authentication; never forward a crates.io token to Git.
     fetch
-        .env("GIT_CONFIG_COUNT", "1")
-        .env("GIT_CONFIG_KEY_0", "http.https://github.com/.extraheader")
+        .env("GIT_CONFIG_COUNT", "3")
+        .env("GIT_CONFIG_KEY_2", "http.https://github.com/.extraheader")
         .env(
-            "GIT_CONFIG_VALUE_0",
+            "GIT_CONFIG_VALUE_2",
             format!(
                 "Authorization: Basic {}",
                 base64::engine::general_purpose::STANDARD.encode(format!("x-access-token:{token}"))
@@ -1097,6 +1105,58 @@ pub fn wait_for_registry_with(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn isolated_reconstruction_rewrites_public_github_ssh_inputs_without_credentials() {
+        let state = TempDir::new().unwrap();
+        fs::create_dir(state.path().join("home")).unwrap();
+        let repository = state.path().join("transport.git");
+        output(
+            data_command("git", state.path())
+                .unwrap()
+                .args(["init", "--bare"])
+                .arg(&repository),
+        )
+        .unwrap();
+        for original in [
+            "ssh://git@github.com/owner/dependency.git",
+            "git@github.com:owner/dependency.git",
+        ] {
+            output(
+                data_command("git", state.path())
+                    .unwrap()
+                    .arg("--git-dir")
+                    .arg(&repository)
+                    .args(["config", "remote.origin.url", original]),
+            )
+            .unwrap();
+            let resolved = output(
+                data_command("git", state.path())
+                    .unwrap()
+                    .arg("--git-dir")
+                    .arg(&repository)
+                    .args(["remote", "get-url", "origin"]),
+            )
+            .unwrap();
+            assert_eq!(
+                String::from_utf8(resolved.stdout).unwrap().trim(),
+                "https://github.com/owner/dependency.git"
+            );
+        }
+        let cargo = data_command("cargo", state.path()).unwrap();
+        assert!(
+            cargo
+                .get_envs()
+                .any(|(key, value)| key == "CARGO_NET_GIT_FETCH_WITH_CLI"
+                    && value == Some(std::ffi::OsStr::new("true")))
+        );
+        assert!(
+            !cargo.get_envs().any(|(key, _)| key == "CRATES_IO_API_TOKEN"
+                || key == "GITHUB_TOKEN"
+                || key == "SSH_AUTH_SOCK"
+                || key == "GIT_CONFIG_KEY_2")
+        );
+    }
 
     #[test]
     fn upload_metadata_enforces_the_signed_crates_io_publication_policy() {

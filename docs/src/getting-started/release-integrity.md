@@ -106,6 +106,9 @@ Manifest validation follows the root Cargo workspace, member globs/exclusions an
 local dependency graph; unrelated invalid test-fixture manifests do not block a
 release. Nix projects verify the admitted packaged crate through the original
 signed source's `nix develop` environment on the credential-free runner.
+Isolated reconstruction retains only the fixed public GitHub SSH-to-HTTPS rewrites
+and uses Cargo's Git CLI transport; ambient Git configuration, SSH agents and
+provider/registry credentials are not forwarded to dependency fetches.
 The signed normalized manifest must authorize crates.io publication: `publish =
 false`, an empty list or a list that excludes `crates-io` rejects before upload.
 Tag archive and candidate verification generation rejects GitHub `secrets`
