@@ -70,9 +70,15 @@ jobs:
         run: |
           set -euo pipefail
           .simit-publisher-engine/target/release/simit release publisher --publisher-stage prepare --repo "$GITHUB_REPOSITORY" --package simit --source-workflow .github/workflows/publish-crate.yaml --publisher-workflow .github/workflows/trusted-publish-crate.yaml --reconstruct-package simit --publisher-output "$RUNNER_TEMP/verified-simit" > "$RUNNER_TEMP/verified-simit.json"
+      - name: Checkout original signed source for verification
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          path: .simit-release-source
+          persist-credentials: false
       - name: Verify packaged contents simit
-        working-directory: ${{ runner.temp }}
-        run: cargo publish --dry-run --locked --manifest-path "$RUNNER_TEMP/verified-simit/Cargo.toml"
+        working-directory: .simit-release-source
+        run: nix develop -c cargo publish --dry-run --locked --manifest-path "$RUNNER_TEMP/verified-simit/Cargo.toml"
   publish-simit:
     needs: [verify-simit]
     runs-on: ubuntu-24.04
