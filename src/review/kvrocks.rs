@@ -634,23 +634,20 @@ pub fn service_plan(
     let temp = worker_temp
         .to_str()
         .context("worker temporary path is not UTF-8")?;
+    // This is a Linux service contract, including when a Windows client reads
+    // its artifact. Do not interpret the serialized path with host semantics.
     ensure!(
-        worker_temp.is_absolute()
-            && worker_temp.file_name().is_some()
-            && worker_temp.components().all(|part| matches!(
-                part,
-                std::path::Component::RootDir | std::path::Component::Normal(_)
-            ))
+        temp.starts_with('/')
+            && temp.len() > 1
+            && temp[1..]
+                .split('/')
+                .all(|part| !part.is_empty() && part != "." && part != "..")
             && temp
                 .bytes()
                 .all(|b| b.is_ascii_alphanumeric() || b"/-_.".contains(&b)),
         "invalid worker temporary directory"
     );
-    let state_directory = worker_temp
-        .join(format!("simit-kvrocks-{run_identity}"))
-        .to_str()
-        .context("service state path is not UTF-8")?
-        .to_owned();
+    let state_directory = format!("{temp}/simit-kvrocks-{run_identity}");
     let unit = format!("simit-kvrocks-{run_identity}.service");
     let control_directory = format!("/run/simit-kvrocks-control-{run_identity}");
     let socket = "/run/redis-sccache/redis.sock".to_owned();

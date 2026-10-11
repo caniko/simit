@@ -225,6 +225,31 @@ fn cached_reports_bind_the_engine_native_tool_supervisor_sandbox_and_cleanup() {
         &canonical_digest(&(&p.digest, "x86_64-linux")).unwrap(),
     )
     .unwrap();
+    assert_eq!(
+        service.state_directory,
+        format!("/var/lib/simit-kvrocks-{}", service.run_identity)
+    );
+    for invalid in [
+        "/",
+        "/var//lib",
+        "/var/lib/",
+        "/var/./lib",
+        "/var/../lib",
+        "var/lib",
+        "C:/var/lib",
+        "/var\\lib",
+    ] {
+        assert!(
+            service_plan(
+                &bootstrap,
+                &service.identity,
+                std::path::Path::new(invalid),
+                &service.run_identity
+            )
+            .is_err(),
+            "noncanonical Linux state path must be rejected: {invalid}"
+        );
+    }
     let receipt = CacheReceipt {
         ready: ReadyReceipt {
             invocation: UnitIdentity {
