@@ -209,6 +209,85 @@ fn independent_lanes_can_retire_realization_without_retiring_evaluation() {
 }
 
 #[test]
+fn effective_backend_overrides_cannot_silently_drop_group_admission() {
+    let temp = project(
+        "[ci.nix_build]\ncapture_results = true\ncheck_systems = [\"x86_64-linux\"]\n[ci.nix_build.groups]\nall = [\".#checks.x86_64-linux.client\", \".#checks.x86_64-linux.recovery\"]",
+    );
+    let config = temp.path().join("simit.toml");
+    let before = fs::read_to_string(&config)
+        .unwrap()
+        .replace("platform = \"github\"\n", "")
+        .replace("provider = \"actions\"\n", "");
+    fs::write(&config, &before).unwrap();
+    fs::write(
+        temp.path().join("Cargo.toml"),
+        "[package]\nname = \"client\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )
+    .unwrap();
+    fs::create_dir(temp.path().join("src")).unwrap();
+    fs::write(temp.path().join("src/lib.rs"), "pub fn client() {}\n").unwrap();
+    let output = generate(&temp, &["--platform", "forgejo", "--ci-provider", "crow"]);
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("effective GitHub Actions backend"),
+        "{output:?}"
+    );
+    assert_eq!(fs::read_to_string(&config).unwrap(), before);
+    assert!(!temp.path().join(".crow").exists());
+    assert!(!temp.path().join(".github/workflows").exists());
+}
+
+#[test]
+fn unsupported_lane_backends_reject_generation_and_existing_workflow_audits() {
+    for (platform, provider) in [("forgejo", "crow"), ("gitlab", "actions")] {
+        let temp = project("");
+        fs::write(
+            temp.path().join("Cargo.toml"),
+            "[package]\nname = \"client\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+        )
+        .unwrap();
+        fs::create_dir(temp.path().join("src")).unwrap();
+        fs::write(temp.path().join("src/lib.rs"), "pub fn client() {}\n").unwrap();
+        let config = temp.path().join("simit.toml");
+        let supported = format!(
+            "[ci]\nplatform = \"{platform}\"\nprovider = \"{provider}\"\nruntime = \"nix\"\nrunner = \"codefloe-global\"\n"
+        );
+        fs::write(&config, &supported).unwrap();
+        assert!(generate(&temp, &[]).status.success());
+        let changed = format!("{supported}independent_lanes = true\n");
+        fs::write(&config, &changed).unwrap();
+        let error = simit::registry::audit_ci(temp.path()).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("effective GitHub Actions backend"),
+            "{error:#}"
+        );
+        let output = generate(&temp, &[]);
+        assert!(!output.status.success(), "{output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("independent_lanes"),
+            "{output:?}"
+        );
+        assert_eq!(fs::read_to_string(&config).unwrap(), changed);
+    }
+    let temp = project("independent_lanes = true");
+    fs::write(
+        temp.path().join("pyproject.toml"),
+        "[project]\nname = \"client\"\nversion = \"0.1.0\"\nrequires-python = \">=3.12\"\n",
+    )
+    .unwrap();
+    fs::write(temp.path().join("uv.lock"), "version = 1\n").unwrap();
+    let before = fs::read(temp.path().join("simit.toml")).unwrap();
+    let output = generate(&temp, &["--platform", "forgejo", "--ci-provider", "crow"]);
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("independent_lanes"),
+        "{output:?}"
+    );
+    assert_eq!(fs::read(temp.path().join("simit.toml")).unwrap(), before);
+    assert!(!temp.path().join(".crow").exists());
+}
+
+#[test]
 fn independent_nix_producer_events_survive_regeneration_without_cancelling_each_other() {
     let temp =
         project("[ci.nix_build]\nonly = true\ncapture_results = true\nseparate_events = true");

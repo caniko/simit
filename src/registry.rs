@@ -1023,6 +1023,9 @@ fn infer_expected_primary_ci_files(
     // file drift. `{:#}` keeps the offending keys in the message.
     let config =
         ProjectConfig::load(workspace_root).context("loading simit project configuration")?;
+    config
+        .ci
+        .validate_effective_backend(backend.provider(), backend.platform())?;
     crate::render::ci::custody::validate_backend(
         &config.ci,
         backend.provider(),

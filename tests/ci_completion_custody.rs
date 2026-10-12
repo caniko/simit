@@ -86,6 +86,54 @@ fn completion_custody_uses_default_branch_code_without_executing_producer_source
 }
 
 #[test]
+fn unsupported_effective_custody_backends_reject_before_writing_any_language_workflow() {
+    for language in ["nix", "rust", "python"] {
+        let temp = project();
+        let config = temp.path().join("simit.toml");
+        let before = fs::read_to_string(&config)
+            .unwrap()
+            .replace("platform = \"github\"\n", "")
+            .replace("provider = \"actions\"\n", "");
+        fs::write(&config, &before).unwrap();
+        if language == "rust" {
+            fs::write(
+                temp.path().join("Cargo.toml"),
+                "[package]\nname = \"client\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+            )
+            .unwrap();
+            fs::create_dir(temp.path().join("src")).unwrap();
+            fs::write(temp.path().join("src/lib.rs"), "pub fn client() {}\n").unwrap();
+        } else if language == "python" {
+            fs::write(
+                temp.path().join("pyproject.toml"),
+                "[project]\nname = \"client\"\nversion = \"0.1.0\"\nrequires-python = \">=3.11\"\n",
+            )
+            .unwrap();
+        }
+        let output = common::simit()
+            .current_dir(temp.path())
+            .args([
+                "init",
+                "ci",
+                "--platform",
+                "forgejo",
+                "--ci-provider",
+                "crow",
+            ])
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{language}: {output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("effective GitHub Actions backend"),
+            "{language}: {output:?}"
+        );
+        assert_eq!(fs::read_to_string(&config).unwrap(), before);
+        assert!(!temp.path().join(".crow").exists());
+        assert!(!temp.path().join(".github/workflows").exists());
+    }
+}
+
+#[test]
 fn generated_collector_keeps_missing_originals_pending_and_reports_complete_source_bound_custody() {
     let temp = project();
     let output = common::simit()
