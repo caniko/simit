@@ -3962,6 +3962,14 @@ fn yaml_double_quote(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
+fn yaml_json_scalar(value: &str) -> String {
+    if value.contains('"') {
+        format!("'{}'", value.replace('\'', "''"))
+    } else {
+        format!("\"{}\"", yaml_double_quote(value))
+    }
+}
+
 fn push_checkout_step(workflow: &mut String, platform: Platform, runner: &ResolvedRunner) {
     let version = github_action_version(Some(runner), "v7.0.1", "v4.3.1");
     push_checkout_step_with_version(workflow, platform, version);

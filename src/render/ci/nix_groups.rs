@@ -30,9 +30,9 @@ pub(super) fn render(
     workflow.push_str(&format!("jobs:\n  build:\n    name: build (${{{{ matrix.group }}}})\n    runs-on: {}\n    timeout-minutes: {}\n    strategy:\n      fail-fast: false\n      max-parallel: {}\n      matrix:\n        include:\n", runs_on(runner), options.timeout_minutes.unwrap_or(40), options.max_parallel.unwrap_or(2)));
     for (name, members) in &options.groups {
         workflow.push_str(&format!(
-            "          - group: \"{}\"\n            installables: \"{}\"\n",
+            "          - group: \"{}\"\n            installables: {}\n",
             yaml_double_quote(name),
-            yaml_double_quote(&serde_json::to_string(members)?)
+            yaml_json_scalar(&serde_json::to_string(members)?)
         ));
     }
     if !options.dependency_installables.is_empty() {
@@ -83,14 +83,15 @@ pub(super) fn render(
             serde_json::to_string(&options.fresh_installables)?,
         ),
     ] {
-        workflow.push_str(&format!(
-            "          {key}: \"{}\"\n",
-            yaml_double_quote(&value)
-        ));
+        workflow.push_str(&format!("          {key}: {}\n", yaml_json_scalar(&value)));
     }
     workflow.push_str("        run: |\n");
     for line in include_str!("nix_group.py").lines() {
-        workflow.push_str(&format!("          {line}\n"));
+        if line.is_empty() {
+            workflow.push('\n');
+        } else {
+            workflow.push_str(&format!("          {line}\n"));
+        }
     }
     for (index, script) in options.post_build.iter().enumerate() {
         workflow.push_str(&format!(
