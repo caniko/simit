@@ -29,7 +29,7 @@ pub fn run(command: Command) -> Result<()> {
             // This CLI exits after its one command. Retain handlers for that entire
             // lifetime; unregistering signal-hook actions does not restore defaults.
             // The library never installs these process-global handlers.
-            #[cfg(target_os = "linux")]
+            #[cfg(unix)]
             for signal in [signal_hook::consts::SIGINT, signal_hook::consts::SIGTERM] {
                 signal_hook::flag::register(signal, cancellation.0.clone())?;
             }

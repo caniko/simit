@@ -1,6 +1,7 @@
 //! Opt-in Nix groups keep shared dependencies on one runner and retain each gate.
 use super::*;
 use crate::config::NixBuildConfig;
+use anyhow::ensure;
 
 pub(super) fn render(
     runner: &ResolvedRunner,
@@ -10,6 +11,20 @@ pub(super) fn render(
     trusted_public_keys: &[String],
     options: &NixBuildConfig,
 ) -> Result<GeneratedFile> {
+    let macos = runner
+        .labels
+        .iter()
+        .any(|label| label.eq_ignore_ascii_case("macos"));
+    ensure!(
+        !runner.labels.iter().any(|label| {
+            label.starts_with("windows-")
+                || label == "macos-13"
+                || label.starts_with("macos-")
+                    && (label.ends_with("-intel") || label.ends_with("-large"))
+                || macos && (label.eq_ignore_ascii_case("x64") || label == "x86_64")
+        }),
+        "unsupported grouped engine runner: only x86_64-linux, aarch64-linux and aarch64-darwin have an immutable engine package"
+    );
     let mut workflow = String::new();
     push_generated_workflow_header(&mut workflow);
     push_required_secrets_header(&mut workflow, &options.required_secrets);
@@ -56,7 +71,30 @@ pub(super) fn render(
     );
     // Enrollment is administrator-owned. Never build the engine from the producer
     // checkout or silently resolve a moving branch when the pin is absent.
-    workflow.push_str("      - name: Provision grouped-build Rust engine\n        shell: bash\n        env:\n          SIMIT_CI_ENGINE_REVISION: ${{ vars.SIMIT_CI_ENGINE_REVISION }}\n          BASH_ENV: ''\n          ENV: ''\n          NIX_CONFIG: 'experimental-features = nix-command flakes'\n          NIX_USER_CONF_FILES: /dev/null\n          NIX_PATH: ''\n        run: |\n          [[ \"$SIMIT_CI_ENGINE_REVISION\" =~ ^[0-9a-f]{40}$ ]] || { echo 'Enroll an immutable SIMIT_CI_ENGINE_REVISION containing ci nix-group' >&2; exit 1; }\n          engine_path=$(env -u GH_TOKEN -u GITHUB_TOKEN -u GITHUB_OAUTH_TOKEN -u ATTIC_TOKEN -u CACHIX_AUTH_TOKEN -u CACHIX_SIGNING_KEY nix build --no-link --no-update-lock-file --print-out-paths --option accept-flake-config false --option substituters https://cache.nixos.org \"github:caniko/simit/$SIMIT_CI_ENGINE_REVISION#default\")\n          [[ \"$engine_path\" =~ ^/nix/store/[0-9a-z]{32}-[A-Za-z0-9+._?=-]+$ ]] || { echo 'Invalid engine output inventory' >&2; exit 1; }\n          test -x \"$engine_path/bin/simit\"\n          \"$engine_path/bin/simit\" ci nix-group --help > /dev/null\n          printf '%s\\n' \"$SIMIT_CI_ENGINE_REVISION\" > \"$SIMIT_NIX_BUILD_RESULTS/engine-source-revision\"\n          sha256sum \"$engine_path/bin/simit\" > \"$SIMIT_NIX_BUILD_RESULTS/engine-executable.sha256\"\n          printf '%s\\n' \"SIMIT_CI_ENGINE=$engine_path/bin/simit\" >> \"$GITHUB_ENV\"\n");
+    workflow.push_str(r#"      - name: Provision grouped-build Rust engine
+        shell: bash
+        env:
+          SIMIT_CI_ENGINE_REVISION: ${{ vars.SIMIT_CI_ENGINE_REVISION }}
+          BASH_ENV: ''
+          ENV: ''
+          NIX_CONFIG: 'experimental-features = nix-command flakes'
+          NIX_USER_CONF_FILES: /dev/null
+          NIX_PATH: ''
+        run: |
+          [[ "$SIMIT_CI_ENGINE_REVISION" =~ ^[0-9a-f]{40}$ ]] || { echo 'Enroll an immutable SIMIT_CI_ENGINE_REVISION containing ci nix-group' >&2; exit 1; }
+          case "$(uname -s):$(uname -m)" in
+            Linux:x86_64|Linux:aarch64|Linux:arm64|Darwin:arm64|Darwin:aarch64) ;;
+            *) echo 'unsupported grouped engine runner system' >&2; exit 1 ;;
+          esac
+          engine_path=$(env -u GH_TOKEN -u GITHUB_TOKEN -u GITHUB_OAUTH_TOKEN -u ATTIC_TOKEN -u CACHIX_AUTH_TOKEN -u CACHIX_SIGNING_KEY nix build --no-link --no-update-lock-file --print-out-paths --option accept-flake-config false --option access-tokens '' --option substituters https://cache.nixos.org "github:caniko/simit/$SIMIT_CI_ENGINE_REVISION#default")
+          [[ "$engine_path" =~ ^/nix/store/[0-9a-z]{32}-[A-Za-z0-9+._?=-]+$ ]] || { echo 'Invalid engine output inventory' >&2; exit 1; }
+          test -x "$engine_path/bin/simit"
+          "$engine_path/bin/simit" ci nix-group --help > /dev/null
+          printf '%s\n' "$SIMIT_CI_ENGINE_REVISION" > "$SIMIT_NIX_BUILD_RESULTS/engine-source-revision"
+          engine_digest=$(nix hash file --type sha256 --base16 "$engine_path/bin/simit")
+          printf '%s  %s\n' "$engine_digest" "$engine_path/bin/simit" > "$SIMIT_NIX_BUILD_RESULTS/engine-executable.sha256"
+          printf '%s\n' "SIMIT_CI_ENGINE=$engine_path/bin/simit" >> "$GITHUB_ENV"
+"#);
     push_required_env_step_with_context(&mut workflow, &options.required_secrets, |w| {
         push_producer_env(w, options)
     });

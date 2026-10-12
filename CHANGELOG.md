@@ -30,6 +30,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Preserve Unix cancellation and signal exit statuses across grouped execution,
+  retain admission diagnostics, and force fresh rebuilds onto the current worker.
+  Bootstrap uses public credential-free Nix fetching and portable hashing, with
+  unsupported Intel macOS runner admission rejected before generation writes.
 - Enforce grouped-build admission under Python optimization and preserve each
   installable's hook context, including shell-only diagnostics after setup or
   preflight failures. Provision the grouped interpreter and retain unset timeouts.

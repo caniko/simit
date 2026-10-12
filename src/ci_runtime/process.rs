@@ -134,7 +134,14 @@ fn run_bounded(
                         && stderr.metadata()?.len() <= limits.stderr,
                     "completed group process exceeded output limits"
                 );
-                return Ok(status.code().unwrap_or(128));
+                #[cfg(unix)]
+                let signal_status = {
+                    use std::os::unix::process::ExitStatusExt;
+                    status.signal().map(|signal| -signal)
+                };
+                #[cfg(not(unix))]
+                let signal_status = None;
+                return Ok(status.code().or(signal_status).unwrap_or(128));
             }
             ensure!(
                 Instant::now() < deadline,

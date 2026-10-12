@@ -52,8 +52,13 @@ This read-only producer bootstrap is not enrollment for privileged completion
 custody or release publishing; those engines have separate authority contracts.
 Producer `extra_env` bindings apply only to setup, validation, execution and
 diagnostic steps after provisioning. Engine provisioning clears shell startup
-files and uses controlled Nix configuration and public substitution. Grouped
-configuration cannot override reserved `SIMIT_CI_*`, `SIMIT_NIX_*` or
+files and uses controlled Nix configuration and public substitution. Bootstrap
+explicitly clears Nix `access-tokens` for its build, including tokens
+installed by a preceding Nix action, and hashes the engine with `nix hash file`.
+The immutable engine supports `x86_64-linux`, `aarch64-linux` and
+`aarch64-darwin`. Known Intel macOS grouped runner labels reject during
+generation; custom runners must pass the system guard before provisioning.
+Grouped configuration cannot override reserved `SIMIT_CI_*`, `SIMIT_NIX_*` or
 `INSTALLABLES` runtime inputs.
 
 The command reads the generated environment lists, or accepts
@@ -69,15 +74,20 @@ Retained `simit.nix-group.v1` receipts preserve source/tree/run/attempt/event,
 ordered results, hook statuses and numbered member directories. Optional
 `fresh_execution` is present only for fresh members. A fresh member must first
 materialize successfully with valid output JSON, then pass current-worker
-`--rebuild`. Ordinary materialization is never fresh acceptance. Fresh evidence
+`--rebuild` with an explicit empty `builders` override, preventing configured
+remote builders from replacing current-worker execution. Ordinary materialization
+is never fresh acceptance. Fresh evidence
 retains the transport predecessor's filenames: `build.log` for materialization,
 `materialization-result.json`, `fresh-build.log` for rebuilding, and `result.json`
 for the final result. Malformed successful output and failed builds/hooks fail the group while subsequent
 members still run. Dispatch and process-limit failures are recorded as status
-125; member stdout/stderr and hook output are retained as separate files.
+125; Unix signal termination retains the v1 negative signal status (for example,
+`-9` for SIGKILL). Member stdout/stderr and hook output are retained as separate
+files, and failed admission observations include their actionable stderr in the
+CLI diagnostic.
 Subprocess output is bounded to 16 MiB stdout and 64 MiB stderr per command,
 with a six-hour maximum process lifetime; configured workflow timeouts still
-apply. Linux cancellation stops execution and terminates the current process
+apply. Unix cancellation stops execution and terminates the current process
 group rather than executing later members.
 Embedding applications use `execute_with` with a caller-owned `Cancellation`
 token and `Runner`. The library installs no process-global signal handlers. The

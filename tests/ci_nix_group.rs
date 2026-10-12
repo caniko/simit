@@ -255,6 +255,14 @@ fn fresh_materialization_never_substitutes_for_current_worker_rebuild() {
                 .count(),
             1
         );
+        let rebuild = calls
+            .lines()
+            .find(|line| line.contains("--rebuild"))
+            .unwrap();
+        assert!(
+            rebuild.contains("--option builders  "),
+            "fresh rebuild must disable configured remote builders: {rebuild}"
+        );
         let row = &f.receipt()["results"][0];
         for name in [
             "build.log",
@@ -424,7 +432,6 @@ fn cancellation_between_commands_prevents_all_later_hooks_and_members() {
     assert!(!f.root.path().join("results/1").exists());
 }
 
-#[cfg(target_os = "linux")]
 #[test]
 fn cancellation_retains_incomplete_receipt_and_stops_later_members_and_descendants() {
     use std::time::{Duration, Instant};
@@ -465,4 +472,30 @@ fn cancellation_retains_incomplete_receipt_and_stops_later_members_and_descendan
     assert!(!f.root.path().join("results/1").exists());
     std::thread::sleep(Duration::from_millis(2200));
     assert!(!late.exists());
+}
+
+#[test]
+fn signalled_members_and_hooks_preserve_negative_v1_signal_identity() {
+    let mut f = Fixture::new();
+    f.spec["post_build_always"] = json!(["kill -TERM $$"]);
+    let output = f.run("signalled");
+    assert!(!output.status.success(), "{output:?}");
+    assert_eq!(f.receipt()["results"][0]["exit_status"], -9);
+    assert_eq!(
+        f.receipt()["results"][0]["post_build_always_statuses"][0],
+        -15
+    );
+    assert_eq!(f.receipt()["complete"], true);
+}
+
+#[test]
+fn failed_admission_observations_retain_actionable_diagnostics_in_cli_output() {
+    let f = Fixture::new();
+    let output = f.run("eval-fail");
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("actionable Nix evaluation diagnostic"),
+        "{output:?}"
+    );
+    assert!(!f.calls().contains("build"));
 }

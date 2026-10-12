@@ -94,6 +94,13 @@ fn grouped_installables_share_a_runner_with_complete_per_output_evidence() {
             .contains("github:caniko/simit/$SIMIT_CI_ENGINE_REVISION#default")
     );
     assert!(!steps[setup]["run"].as_str().unwrap().contains("cargo run"));
+    assert!(!steps[setup]["run"].as_str().unwrap().contains("sha256sum"));
+    assert!(
+        steps[setup]["run"]
+            .as_str()
+            .unwrap()
+            .contains("nix hash file")
+    );
     assert!(
         setup
             < steps
@@ -111,6 +118,39 @@ fn grouped_installables_share_a_runner_with_complete_per_output_evidence() {
         simit::registry::audit_ci(temp.path()).unwrap().status,
         simit::registry::FeatureStatus::Managed
     );
+}
+
+#[test]
+fn unsupported_intel_macos_grouped_runners_reject_before_writes() {
+    for runner in [
+        "macos-13",
+        "macos-15-intel",
+        "macos-14-large",
+        "macos-15-large",
+        "macos-26-intel",
+    ] {
+        let temp = project(
+            "[ci.nix_build]\nonly = true\ncapture_results = true\n[ci.nix_build.groups]\nnetwork = [\".#checks.x86_64-linux.client\", \".#checks.x86_64-linux.recovery\"]",
+        );
+        let before = fs::read_to_string(temp.path().join("simit.toml")).unwrap();
+        fs::write(
+            temp.path().join("simit.toml"),
+            before.replace("ubuntu-24.04", runner),
+        )
+        .unwrap();
+        let configured = fs::read(temp.path().join("simit.toml")).unwrap();
+        let output = generate(&temp, &[]);
+        assert!(!output.status.success(), "{runner}: {output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("unsupported grouped engine runner"),
+            "{output:?}"
+        );
+        assert_eq!(
+            fs::read(temp.path().join("simit.toml")).unwrap(),
+            configured
+        );
+        assert!(!temp.path().join(".github").exists());
+    }
 }
 
 #[test]
@@ -304,9 +344,23 @@ fn engine_bootstrap_never_sources_producer_shell_startup_or_nix_configuration() 
         temp.path().join("candidate-startup.sh"),
     )
     .unwrap();
+    std::os::unix::fs::symlink(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/group-platform.sh"),
+        bin.join("uname"),
+    )
+    .unwrap();
     let marker = temp.path().join("candidate-marker");
     let observation = temp.path().join("bootstrap-observation");
-    for pin in ["", "trunk", &"a".repeat(40)] {
+    for (pin, os, arch, admitted) in [
+        ("", "Linux", "x86_64", false),
+        ("trunk", "Linux", "x86_64", false),
+        (&*"a".repeat(40), "Linux", "x86_64", true),
+        (&*"a".repeat(40), "Darwin", "arm64", true),
+        (&*"a".repeat(40), "Darwin", "x86_64", false),
+    ] {
+        if observation.exists() {
+            fs::remove_file(&observation).unwrap();
+        }
         let mut command = Command::new("bash");
         command
             .current_dir(temp.path())
@@ -323,6 +377,8 @@ fn engine_bootstrap_never_sources_producer_shell_startup_or_nix_configuration() 
             .env("GROUP_BOOTSTRAP_OBSERVATION", &observation)
             .env("GROUP_CALLS", temp.path().join("bootstrap-calls"))
             .env("GROUP_CASE", "bootstrap")
+            .env("GROUP_OS", os)
+            .env("GROUP_ARCH", arch)
             .env(
                 "PATH",
                 std::env::join_paths(
@@ -346,7 +402,7 @@ fn engine_bootstrap_never_sources_producer_shell_startup_or_nix_configuration() 
         // Controlled Nix intentionally returns an invalid store path; bootstrap cannot enroll it.
         assert!(!output.status.success(), "{output:?}");
         assert!(!marker.exists());
-        assert_eq!(observation.exists(), pin.len() == 40, "{output:?}");
+        assert_eq!(observation.exists(), admitted, "{output:?}");
     }
 }
 

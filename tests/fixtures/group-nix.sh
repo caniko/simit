@@ -8,6 +8,7 @@ if [ "${GROUP_CASE:-}" = bootstrap ]; then
     test "$NIX_CONFIG" = 'experimental-features = nix-command flakes'
     test "$NIX_USER_CONF_FILES" = /dev/null
     test -z "${TEST_BINDING:-}"
+    case "$*" in *'--option access-tokens '*) : ;; *) exit 78 ;; esac
     printf checked > "$GROUP_BOOTSTRAP_OBSERVATION"
     printf '%s\n' not-a-store-path
     exit 0
@@ -17,6 +18,7 @@ case "$1" in
     case "${GROUP_CASE:-success}" in
       missing) printf '%s\n' '{"client":"/nix/store/client.drv","recovery":"/nix/store/recovery.drv","new-check":"/nix/store/new.drv"}' ;;
       empty) printf '%s\n' '{}' ;;
+      eval-fail) printf '%s\n' 'actionable Nix evaluation diagnostic' >&2; exit 6 ;;
       *) printf '%s\n' '{"client":"/nix/store/client.drv","recovery":"/nix/store/recovery.drv"}' ;;
     esac
     ;;
@@ -27,6 +29,7 @@ case "$1" in
       malformed) printf '%s\n' 'not-json'; exit 0 ;;
       fresh-fail) case "$*" in *--rebuild*) exit 9 ;; esac ;;
       spawn-fail) rm "$0"; exit 7 ;;
+      signalled) case "$*" in *client*) kill -KILL $$ ;; esac ;;
     esac
     printf '%s\n' '[{"drvPath":"/nix/store/result.drv","outputs":{"out":"/nix/store/result"}}]'
     ;;

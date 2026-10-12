@@ -470,7 +470,11 @@ fn observe(
         runner,
         cancellation,
     )?;
-    ensure!(status == 0, "{program} observation failed ({status})");
+    ensure!(
+        status == 0,
+        "{program} observation failed ({status}): {}",
+        String::from_utf8_lossy(&fs::read(&stderr)?)
+    );
     Ok(fs::read_to_string(stdout)?)
 }
 
@@ -510,7 +514,7 @@ fn build(
         "--json",
     ]);
     if matches!(phase, BuildPhase::Rebuild) {
-        command.arg("--rebuild");
+        command.args(["--rebuild", "--option", "builders", ""]);
     }
     command.args(limits).arg(installable);
     // Dispatch/limit failures are member failures, not reasons to lose later evidence.
