@@ -39,6 +39,24 @@ with_msrv = true
 
 ## Generic CI vs Release Publishing
 
+### Primary-only regeneration
+
+Use the persisted project policy to regenerate verification and native-build
+workflows during a dependency migration:
+
+```sh
+simit init ci --primary-only --check --diff
+simit init ci --primary-only
+simit init ci --primary-only --check --diff
+```
+
+This scope includes ordinary member/aggregate CI, native Nix matrices and
+prebuild workflows. Publisher, release, Pages and review workflows are preserved
+byte-for-byte, together with `simit.toml`, release trust roots and README badges.
+The check reports drift only in the selected scope. Full generation remains the
+default; run its separate drift gate when intentionally changing publication
+configuration. `--primary-only` cannot be combined with the other scope selectors.
+
 ### Project-owned workflow templates
 
 Projects with specialized Actions jobs can render their existing workflow

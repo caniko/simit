@@ -293,7 +293,7 @@ pub fn run(command: InitCiCommand) -> Result<()> {
             step_runners: &step_runners,
         })?);
     }
-    if coordinated {
+    if coordinated && !command.primary_only {
         if !publish_crates {
             bail!("coordinated workspace publication requires --publish-crates");
         }
@@ -414,8 +414,8 @@ pub fn run(command: InitCiCommand) -> Result<()> {
         )
     );
     let trust_overrides = TrustOverrides {
-        key: command.maintainer_key,
-        trust_root: command.maintainers_gpg,
+        key: command.maintainer_key.clone(),
+        trust_root: command.maintainers_gpg.clone(),
     };
     maybe_push_deny_template(
         workspace_root,
@@ -423,7 +423,7 @@ pub fn run(command: InitCiCommand) -> Result<()> {
         command.check,
         &mut files,
     );
-    if publish_crates || with_artifacts {
+    if (publish_crates || with_artifacts) && !command.primary_only {
         files.push(release_trust::generated_file(
             workspace_root,
             &cfg,
@@ -433,10 +433,17 @@ pub fn run(command: InitCiCommand) -> Result<()> {
     }
 
     if command.check {
-        reconcile_ci_files(workspace_root, files, &check_message, true, command.diff)?;
-        upgrade::update_readme_badges_if_present(workspace_root, true, command.diff)
+        reconcile_ci_files(workspace_root, files, &check_message, &command)?;
+        if command.primary_only {
+            Ok(())
+        } else {
+            upgrade::update_readme_badges_if_present(workspace_root, true, command.diff)
+        }
     } else {
-        reconcile_ci_files(workspace_root, files, &check_message, false, false)?;
+        reconcile_ci_files(workspace_root, files, &check_message, &command)?;
+        if command.primary_only {
+            return Ok(());
+        }
         if ProjectConfig::can_persist_ci(workspace_root)? {
             ProjectConfig::write_ci(workspace_root, &persisted_ci)?;
         }
@@ -816,10 +823,13 @@ fn run_nix_only_at(command: InitCiCommand, workspace_root: &Path) -> Result<()> 
         if platform == Platform::Gitlab {
             project::check_generated_files(workspace_root, &files, &message, command.diff)?;
         } else {
-            reconcile_ci_files(workspace_root, files, &message, true, command.diff)?;
+            reconcile_ci_files(workspace_root, files, &message, &command)?;
         }
     } else {
-        reconcile_ci_files(workspace_root, files, &message, false, false)?;
+        reconcile_ci_files(workspace_root, files, &message, &command)?;
+        if command.primary_only {
+            return Ok(());
+        }
         let mut persisted_ci = cfg.ci;
         persisted_ci.provider = Some(CiProvider::Actions);
         persisted_ci.platform = Some(platform);
@@ -993,10 +1003,17 @@ fn run_python(command: InitCiCommand) -> Result<()> {
     );
 
     if command.check {
-        reconcile_ci_files(workspace_root, files, &check_message, true, command.diff)?;
-        upgrade::update_readme_badges_if_present(workspace_root, true, command.diff)
+        reconcile_ci_files(workspace_root, files, &check_message, &command)?;
+        if command.primary_only {
+            Ok(())
+        } else {
+            upgrade::update_readme_badges_if_present(workspace_root, true, command.diff)
+        }
     } else {
-        reconcile_ci_files(workspace_root, files, &check_message, false, false)?;
+        reconcile_ci_files(workspace_root, files, &check_message, &command)?;
+        if command.primary_only {
+            return Ok(());
+        }
         if ProjectConfig::can_persist_ci(workspace_root)? {
             ProjectConfig::write_ci(workspace_root, &persisted_ci)?;
         }
@@ -1160,10 +1177,13 @@ fn run_crow(
     let check_message =
         "Crow CI workflows are not up to date; run `simit init ci --ci-provider crow`".to_owned();
     if command.check {
-        reconcile_ci_files(workspace_root, files, &check_message, true, command.diff)?;
+        reconcile_ci_files(workspace_root, files, &check_message, &command)?;
         Ok(())
     } else {
-        reconcile_ci_files(workspace_root, files, "Crow CI workflows", false, false)?;
+        reconcile_ci_files(workspace_root, files, "Crow CI workflows", &command)?;
+        if command.primary_only {
+            return Ok(());
+        }
         if ProjectConfig::can_persist_ci(workspace_root)? {
             ProjectConfig::write_ci(workspace_root, &persisted_ci)?;
         }
@@ -1235,17 +1255,13 @@ fn run_crow_python(
             workspace_root,
             files,
             "Crow Python CI workflows are not up to date; run `simit init ci --ci-provider crow`",
-            true,
-            command.diff,
+            &command,
         )?;
     } else {
-        reconcile_ci_files(
-            workspace_root,
-            files,
-            "Crow Python CI workflows",
-            false,
-            false,
-        )?;
+        reconcile_ci_files(workspace_root, files, "Crow Python CI workflows", &command)?;
+        if command.primary_only {
+            return Ok(());
+        }
         if ProjectConfig::can_persist_ci(workspace_root)? {
             ProjectConfig::write_ci(workspace_root, &persisted_ci)?;
         }
@@ -1547,6 +1563,7 @@ pub(crate) fn project_regeneration_command(workspace_root: &Path) -> Result<Opti
         resolved.publish_crates || with_artifacts || with_homebrew || windows_packagers;
     let inferred_pages = infer_codeberg_pages_from_workflows(&snapshots)?;
     let command = InitCiCommand {
+        primary_only: false,
         pages_only: false,
         prebuild_only: false,
         review_only: false,
@@ -1971,8 +1988,7 @@ fn reconcile_ci_files(
     workspace_root: &Path,
     mut files: Vec<project::GeneratedFile>,
     message: &str,
-    check: bool,
-    show_diff: bool,
+    command: &InitCiCommand,
 ) -> Result<()> {
     let config = ProjectConfig::load(workspace_root)?;
     if let Some(review) = config.review.as_ref() {
@@ -1982,6 +1998,28 @@ fn reconcile_ci_files(
         files.push(crate::render::review_policy::file(policy)?);
     }
     crate::render::workflow_templates::append(workspace_root, &config.ci, &mut files)?;
+    if command.primary_only {
+        files.retain(|file| {
+            file.relative_path == Path::new("deny.toml")
+                || file
+                    .relative_path
+                    .file_name()
+                    .is_some_and(is_primary_ci_workflow_name)
+        });
+        let obsolete = project::obsolete_generated_workflows(
+            workspace_root,
+            &files,
+            is_primary_ci_workflow_name,
+        )?;
+        return project::reconcile_generated_files(
+            workspace_root,
+            &files,
+            &obsolete,
+            message,
+            command.check,
+            command.diff,
+        );
+    }
     let mut obsolete =
         project::obsolete_generated_workflows(workspace_root, &files, is_ci_managed_workflow_name)?;
     obsolete.extend(crate::render::workflow_templates::obsolete(
@@ -1990,7 +2028,38 @@ fn reconcile_ci_files(
     )?);
     obsolete.sort();
     obsolete.dedup();
-    project::reconcile_generated_files(workspace_root, &files, &obsolete, message, check, show_diff)
+    project::reconcile_generated_files(
+        workspace_root,
+        &files,
+        &obsolete,
+        message,
+        command.check,
+        command.diff,
+    )
+}
+
+fn is_primary_ci_workflow_name(name: &std::ffi::OsStr) -> bool {
+    let Some(name) = name.to_str() else {
+        return false;
+    };
+    matches!(
+        name,
+        ".gitlab-ci.yml"
+            | "build.yaml"
+            | "build.yml"
+            | "build.jsonnet"
+            | "ci.yaml"
+            | "ci.yml"
+            | "nix-builds.yaml"
+            | "nix-builds.yml"
+            | "prebuild.yaml"
+            | "prebuild.yml"
+    ) || ["ci-", "build-"].iter().any(|prefix| {
+        name.starts_with(prefix)
+            && [".yaml", ".yml", ".jsonnet"]
+                .iter()
+                .any(|suffix| name.ends_with(suffix))
+    })
 }
 
 fn validate_review_policy_backend(
