@@ -1073,8 +1073,15 @@ pub fn nix_build_matrix_file_with_options(
         push_github_concurrency(&mut workflow);
     } else if platform == Platform::Github && *options != crate::config::NixBuildConfig::default() {
         // Coalesce one repository's push/PR branch without canceling unrelated
-        // forks that happen to use the same short branch name.
-        workflow.push_str("concurrency:\n  group: ${{ github.workflow }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event.pull_request.head.ref || github.ref_name }}\n  cancel-in-progress: true\n\n");
+        // forks or a tag that happens to use the same branch name.
+        let ref_group = if options.push_tags.is_empty() {
+            "${{ github.event.pull_request.head.ref || github.ref_name }}"
+        } else {
+            "${{ github.ref_type == 'tag' && github.ref || format('refs/heads/{0}', github.event.pull_request.head.ref || github.ref_name) }}"
+        };
+        workflow.push_str("concurrency:\n  group: ${{ github.workflow }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-");
+        workflow.push_str(ref_group);
+        workflow.push_str("\n  cancel-in-progress: true\n\n");
     } else {
         push_platform_concurrency(&mut workflow, platform);
     }

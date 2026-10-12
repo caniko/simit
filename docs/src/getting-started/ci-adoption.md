@@ -355,8 +355,10 @@ Nix matrices qualify branch pushes by default. Set
 `[ci.nix_build].push_tags = ["**"]` to also qualify every tag push, including when
 adopting a workflow that previously used an unfiltered `push:` trigger. More
 selective GitHub tag patterns and ordered exclusions are supported, for example
-`push_tags = ["v*", "!v*-preview"]`. Tag patterns survive regeneration and drift
-checks; omitting them retains the branch-only default.
+`push_tags = ["v*", "!v*-preview"]`. A nonempty list must include at least one
+positive pattern. Tag patterns survive regeneration and drift checks; omitting
+them retains the branch-only default. Tag-enabled coalescing keeps tags separate
+from same-named branches and pull requests while coalescing a branch's push and PR.
 
 ## Required Integration Gates
 

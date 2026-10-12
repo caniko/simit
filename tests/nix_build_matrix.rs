@@ -227,6 +227,7 @@ fn scoped_nix_matrix_isolates_forks_and_coalesces_same_repository_push_and_pr() 
         "[ci.nix_build]\nonly = true",
         "[ci.nix_build]\ncapture_results = true",
         "[ci.nix_build]\nmax_jobs = 1",
+        "[ci.nix_build]\nonly = true\npush_tags = [\"**\"]",
     ] {
         let temp = project(options);
         assert!(generate(&temp, &[]).status.success());
@@ -235,7 +236,8 @@ fn scoped_nix_matrix_isolates_forks_and_coalesces_same_repository_push_and_pr() 
         let resolve = |head_repository: Option<&str>,
                        head_branch: Option<&str>,
                        repository: &str,
-                       branch: &str| {
+                       branch: &str,
+                       ref_type: &str| {
             let value = group
                 .replace("${{ github.workflow }}", "Nix installable builds")
                 .replace(
@@ -245,6 +247,14 @@ fn scoped_nix_matrix_isolates_forks_and_coalesces_same_repository_push_and_pr() 
                 .replace(
                     "${{ github.event.pull_request.head.ref || github.ref_name }}",
                     head_branch.unwrap_or(branch),
+                )
+                .replace(
+                    "${{ github.ref_type == 'tag' && github.ref || format('refs/heads/{0}', github.event.pull_request.head.ref || github.ref_name) }}",
+                    &if ref_type == "tag" {
+                        format!("refs/tags/{branch}")
+                    } else {
+                        format!("refs/heads/{}", head_branch.unwrap_or(branch))
+                    },
                 );
             assert!(
                 !value.contains("${{"),
@@ -252,29 +262,45 @@ fn scoped_nix_matrix_isolates_forks_and_coalesces_same_repository_push_and_pr() 
             );
             value
         };
-        let push = resolve(None, None, "owner/project", "main");
+        let push = resolve(None, None, "owner/project", "main", "branch");
         let same_repository_pr = resolve(
             Some("owner/project"),
             Some("main"),
             "owner/project",
             "1/merge",
+            "branch",
         );
         let first_fork = resolve(
             Some("alice/project"),
             Some("main"),
             "owner/project",
             "2/merge",
+            "branch",
         );
         let second_fork = resolve(
             Some("bob/project"),
             Some("main"),
             "owner/project",
             "3/merge",
+            "branch",
         );
         assert_eq!(push, same_repository_pr);
         assert_ne!(first_fork, second_fork);
         assert_ne!(push, first_fork);
-        assert_ne!(push, resolve(None, None, "owner/project", "another-branch"));
+        assert_ne!(
+            push,
+            resolve(None, None, "owner/project", "another-branch", "branch")
+        );
+        if options.contains("push_tags") {
+            let tag = resolve(None, None, "owner/project", "main", "tag");
+            assert_ne!(tag, push);
+            assert_ne!(tag, same_repository_pr);
+            assert_ne!(
+                tag,
+                resolve(None, None, "owner/project", "refs/tags/main", "branch")
+            );
+            assert_eq!(tag, resolve(None, None, "owner/project", "main", "tag"));
+        }
         assert_eq!(value["concurrency"]["cancel-in-progress"], true);
         assert!(generate(&temp, &["--check", "--diff"]).status.success());
     }
@@ -729,9 +755,58 @@ fn exact_matrix_replaces_only_previously_managed_primary_workflows() {
 }
 
 #[test]
+fn direct_nix_matrix_rendering_rejects_invalid_tag_filters() {
+    use simit::cli::Platform;
+    use simit::config::NixBuildConfig;
+    use simit::render::ci::nix_build_matrix_file_with_options;
+    use simit::user_config::ResolvedRunner;
+
+    let runner = ResolvedRunner {
+        name: None,
+        labels: vec!["ubuntu-24.04".into()],
+    };
+    let render = |patterns: &[&str]| {
+        let options = NixBuildConfig {
+            push_tags: patterns.iter().map(|pattern| (*pattern).into()).collect(),
+            ..NixBuildConfig::default()
+        };
+        nix_build_matrix_file_with_options(
+            Platform::Github,
+            &runner,
+            &[".#default".into()],
+            &[],
+            &[],
+            &[],
+            &options,
+        )
+    };
+    for patterns in [
+        vec![""],
+        vec!["bad\npattern"],
+        vec!["!private-*"],
+        vec!["!one", "!two"],
+    ] {
+        assert!(
+            render(&patterns)
+                .unwrap_err()
+                .to_string()
+                .contains("push_tags")
+        );
+    }
+    for patterns in [vec![], vec!["**", "!private-*"], vec![r"\!literal"]] {
+        assert!(render(&patterns).is_ok(), "{patterns:?}");
+    }
+}
+
+#[test]
 fn matrix_options_reject_invalid_or_ignored_configuration() {
     for (options, expected) in [
         ("[ci.nix_build]\npush_tags = [\"\"]", "push_tags"),
+        ("[ci.nix_build]\npush_tags = [\"!private-*\"]", "push_tags"),
+        (
+            "[ci.nix_build]\npush_tags = [\"!one\", \"!two\"]",
+            "push_tags",
+        ),
         (
             "[ci.nix_build]\npush_tags = [\"bad\\npattern\"]",
             "push_tags",

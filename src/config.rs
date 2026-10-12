@@ -590,6 +590,16 @@ impl NixBuildConfig {
                 "simit project config: [ci.nix_build].push_tags requires nonempty patterns without control characters"
             );
         }
+        if !self.push_tags.is_empty()
+            && self
+                .push_tags
+                .iter()
+                .all(|pattern| pattern.starts_with('!'))
+        {
+            bail!(
+                "simit project config: [ci.nix_build].push_tags requires at least one positive pattern"
+            );
+        }
         Ok(())
     }
 }
