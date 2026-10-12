@@ -27,7 +27,14 @@ pub(super) fn render(
     } else {
         workflow.push_str("concurrency:\n  group: nix-groups-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.ref_type == 'tag' && github.ref || format('refs/heads/{0}', github.event.pull_request.head.ref || github.ref_name) }}\n  cancel-in-progress: true\n\n");
     }
-    workflow.push_str(&format!("jobs:\n  build:\n    name: build (${{{{ matrix.group }}}})\n    runs-on: {}\n    timeout-minutes: {}\n    strategy:\n      fail-fast: false\n      max-parallel: {}\n      matrix:\n        include:\n", runs_on(runner), options.timeout_minutes.unwrap_or(40), options.max_parallel.unwrap_or(2)));
+    workflow.push_str(&format!(
+        "jobs:\n  build:\n    name: build (${{{{ matrix.group }}}})\n    runs-on: {}\n",
+        runs_on(runner)
+    ));
+    if let Some(timeout) = options.timeout_minutes {
+        workflow.push_str(&format!("    timeout-minutes: {timeout}\n"));
+    }
+    workflow.push_str(&format!("    strategy:\n      fail-fast: false\n      max-parallel: {}\n      matrix:\n        include:\n", options.max_parallel.unwrap_or(2)));
     for (name, members) in &options.groups {
         workflow.push_str(&format!(
             "          - group: \"{}\"\n            installables: {}\n",
@@ -55,6 +62,16 @@ pub(super) fn render(
         substituters,
         trusted_public_keys,
     );
+    workflow.push_str("      - name: Provision grouped-build Python\n");
+    push_action_uses(
+        &mut workflow,
+        Platform::Github,
+        Some(runner),
+        "setup-python",
+        "v6.3.0",
+        "v5.6.0",
+    );
+    workflow.push_str("\n        with:\n          python-version: '3.12'\n");
     push_required_env_step(&mut workflow, &options.required_secrets);
     if options.kvm {
         workflow.push_str("      - name: Enable hosted KVM\n        run: |\n          test \"${RUNNER_ENVIRONMENT:-}\" = github-hosted\n          test -c /dev/kvm\n          sudo chmod a+rw /dev/kvm\n          test -r /dev/kvm && test -w /dev/kvm\n");
@@ -82,6 +99,14 @@ pub(super) fn render(
             "SIMIT_NIX_FRESH",
             serde_json::to_string(&options.fresh_installables)?,
         ),
+        (
+            "SIMIT_NIX_POST_BUILD",
+            serde_json::to_string(&options.post_build)?,
+        ),
+        (
+            "SIMIT_NIX_POST_BUILD_ALWAYS",
+            serde_json::to_string(&options.post_build_always)?,
+        ),
     ] {
         workflow.push_str(&format!("          {key}: {}\n", yaml_json_scalar(&value)));
     }
@@ -93,21 +118,7 @@ pub(super) fn render(
             workflow.push_str(&format!("          {line}\n"));
         }
     }
-    for (index, script) in options.post_build.iter().enumerate() {
-        workflow.push_str(&format!(
-            "      - name: Retain Nix results {}\n        run: |\n",
-            index + 1
-        ));
-        for line in script.lines() {
-            workflow.push_str(&format!("          {line}\n"));
-        }
-    }
-    for (index, script) in options.post_build_always.iter().enumerate() {
-        workflow.push_str(&format!("      - name: Retain Nix diagnostics {}\n        if: ${{{{ !cancelled() }}}}\n        run: |\n", index + 1));
-        for line in script.lines() {
-            workflow.push_str(&format!("          {line}\n"));
-        }
-    }
+    push_diagnostics_fallback(&mut workflow, options);
     workflow.push_str("      - name: Upload Nix build evidence\n        if: always()\n");
     push_action_uses(
         &mut workflow,
@@ -134,4 +145,26 @@ pub(super) fn render(
         relative_path: PathBuf::from(".github/workflows/nix-builds.yaml"),
         content: workflow,
     })
+}
+
+fn push_diagnostics_fallback(workflow: &mut String, options: &NixBuildConfig) {
+    if options.post_build_always.is_empty() {
+        return;
+    }
+    // The collectors must survive failed interpreter provisioning or admission.
+    // Render static member arms so the fallback needs only the job's shell.
+    workflow.push_str("      - name: Retain uncollected group diagnostics\n        if: ${{ !cancelled() }}\n        env:\n          SIMIT_NIX_GROUP: ${{ matrix.group }}\n          SIMIT_NIX_BUILD_RESULTS: ${{ runner.temp }}/simit-nix-build-${{ strategy.job-index }}\n        run: |\n          group_root=\"$SIMIT_NIX_BUILD_RESULTS\"\n          collector_failed=0\n          case \"$SIMIT_NIX_GROUP\" in\n");
+    for (name, members) in &options.groups {
+        workflow.push_str(&format!("            {})\n", shell_word(name)));
+        for (index, installable) in members.iter().enumerate() {
+            workflow.push_str(&format!("              export INSTALLABLE={}\n              export SIMIT_NIX_BUILD_RESULTS=\"$group_root/{index}\"\n              mkdir -p \"$SIMIT_NIX_BUILD_RESULTS\"\n              if [ ! -e \"$SIMIT_NIX_BUILD_RESULTS/diagnostics-complete\" ]; then\n", shell_word(installable)));
+            for (hook, script) in options.post_build_always.iter().enumerate() {
+                let quoted = shell_word(script).replace('\n', "\n          ");
+                workflow.push_str(&format!("                status=0\n                bash -e -o pipefail -c {quoted} || status=$?\n                printf '%s\\n' \"$status\" > \"$SIMIT_NIX_BUILD_RESULTS/fallback-diagnostic-{hook}.status\"\n                if [ \"$status\" -ne 0 ]; then collector_failed=1; fi\n"));
+            }
+            workflow.push_str("                printf 'completed\\n' > \"$SIMIT_NIX_BUILD_RESULTS/diagnostics-complete\"\n              fi\n");
+        }
+        workflow.push_str("              ;;\n");
+    }
+    workflow.push_str("            *) echo 'Unknown Nix diagnostic group' >&2; exit 1 ;;\n          esac\n          exit \"$collector_failed\"\n");
 }

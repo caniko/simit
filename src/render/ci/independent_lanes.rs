@@ -44,11 +44,11 @@ pub(super) fn render(
         );
         if lane == "rust" {
             push_nix_cargo_cache_steps(&mut workflow, platform, &runners.ci, &options, lane);
-            push_nix_cargo_bin_path_step(&mut workflow);
         }
+        push_nix_cargo_bin_path_step(&mut workflow);
         push_extra_setup_steps(&mut workflow, &options.extra_setup);
         match lane {
-            "evaluation" => workflow.push_str("      - name: Evaluate complete flake\n        run: nix flake check --no-build --no-update-lock-file\n\n"),
+            "evaluation" => workflow.push_str("      - name: Evaluate complete flake\n        run: nix flake check --no-build --all-systems --no-update-lock-file\n\n"),
             "realization" => workflow.push_str("      - name: Realize complete flake checks\n        run: nix flake check --no-update-lock-file\n\n"),
             _ => {
                 let mut rust_options = options.clone();

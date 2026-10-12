@@ -91,6 +91,16 @@ pub(super) fn job(
     workflow.push_str("        with:\n          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}\n          ref: ${{ github.event.pull_request.head.sha || github.sha }}\n          persist-credentials: false\n");
     push_install_nix_step_with_cache(workflow, Platform::Github, substituters, keys);
     push_required_env_step(workflow, &options.required_secrets);
+    workflow.push_str("      - name: Provision dependency-transport Python\n");
+    push_action_uses(
+        workflow,
+        Platform::Github,
+        Some(runner),
+        "setup-python",
+        "v6.3.0",
+        "v5.6.0",
+    );
+    workflow.push_str("\n        with:\n          python-version: '3.12'\n");
     push_extra_setup_steps(workflow, extra_setup);
     push_extra_setup_steps(workflow, &options.extra_setup);
     push_required_env_step(workflow, &options.required_env);

@@ -60,6 +60,23 @@ fn dependency_transport_is_same_run_and_runtime_jobs_still_execute_fresh() {
         .iter()
         .find(|s| s["name"] == "Build and export dependency closure")
         .unwrap();
+    let python = steps
+        .iter()
+        .position(|s| s["name"] == "Provision dependency-transport Python")
+        .unwrap();
+    assert!(
+        python
+            < steps
+                .iter()
+                .position(|s| s["name"] == "Build and export dependency closure")
+                .unwrap()
+    );
+    assert!(
+        steps[python]["uses"]
+            .as_str()
+            .unwrap()
+            .starts_with("actions/setup-python@")
+    );
     assert_eq!(export["shell"], "python");
     assert!(export["run"].as_str().unwrap().contains("nix-store"));
     let steps = value["jobs"]["build"]["steps"].as_sequence().unwrap();

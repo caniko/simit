@@ -18,7 +18,7 @@ DEFINITION = {'drvPath': DRV, 'outputs': {'out': OUT}}
 
 
 class Transport(unittest.TestCase):
-    def execute(self, change=None, alias=False, transitive=False):
+    def execute(self, change=None, alias=False, transitive=False, optimized=False):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             archive = root / 'closure.nar.gz'
@@ -59,7 +59,7 @@ class Transport(unittest.TestCase):
                    'GITHUB_RUN_ID': '123', 'GITHUB_RUN_ATTEMPT': '1'}
             with patch.dict(os.environ, env), patch('subprocess.check_output', output), patch('subprocess.run', run), patch.object(Path, 'is_file', autospec=True, side_effect=lambda p: False if str(p) == 'flake.lock' else p.exists()):
                 try:
-                    exec(compile(PROGRAM, '<generated-dependencies>', 'exec'), {})
+                    exec(compile(PROGRAM, '<generated-dependencies>', 'exec', optimize=2 if optimized else 0), {})
                 except (AssertionError, RuntimeError):
                     return False, effects
             return True, effects
@@ -93,6 +93,19 @@ class Transport(unittest.TestCase):
         accepted, effects = self.execute(('closure', [OUT, '/nix/store/' + '2' * 32 + '-runtime']))
         self.assertFalse(accepted)
         self.assertEqual(effects, [])
+
+    def test_optimized_python_keeps_every_provenance_and_qualification_fence(self):
+        for field, value in [('head', 'c' * 40), ('run', 'other'), ('attempt', 2),
+                             ('archive_sha256', '0' * 64), ('archive_bytes', 0),
+                             ('closure', [OUT, '/nix/store/' + '2' * 32 + '-runtime']),
+                             ('uncompressed_bytes', 2 * 1024 * 1024)]:
+            accepted, effects = self.execute((field, value), optimized=True)
+            self.assertFalse(accepted, field)
+            self.assertEqual(effects, [], field)
+        for flag in ['alias', 'transitive']:
+            accepted, effects = self.execute(optimized=True, **{flag: True})
+            self.assertFalse(accepted, flag)
+            self.assertEqual(effects, [], flag)
 
 
 unittest.main()

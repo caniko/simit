@@ -2825,7 +2825,11 @@ fn push_required_gate_jobs(
             }
         }
         workflow.push_str("    steps:\n");
-        push_checkout_step(workflow, platform, &runners.ci);
+        if options.independent_lanes {
+            push_source_head_checkout(workflow, &runners.ci);
+        } else {
+            push_checkout_step(workflow, platform, &runners.ci);
+        }
         if runtime == Runtime::Nix {
             push_install_nix_step_with_cache(
                 workflow,
