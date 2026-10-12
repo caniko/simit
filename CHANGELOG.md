@@ -28,6 +28,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Normalize completion-custody repository casing, bind status contexts to the
+  exact branch, and bound aggregate downloads, retained bytes, archive expansion,
+  inventories and capture time before source-head success can be published.
 - Preserve completion-custody source/attempt admission, capture budgets and
   failure revocation when Python optimization is enabled.
 - Enforce grouped-build admission under Python optimization and preserve each

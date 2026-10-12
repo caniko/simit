@@ -48,6 +48,14 @@ impl Config {
         if self.producers.is_empty() || self.producers.len() > 10 {
             bail!("[ci.custody].producers must enroll between 1 and 10 workflows");
         }
+        let inventory: usize = self
+            .producers
+            .values()
+            .map(|producer| producer.jobs.len() + producer.artifacts.len())
+            .sum();
+        if inventory > 100 {
+            bail!("[ci.custody] can enroll at most 100 jobs and artifacts in total");
+        }
         let mut paths = std::collections::BTreeSet::new();
         for (name, producer) in &self.producers {
             if producer.workflow == ".github/workflows/producer-custody.yaml"

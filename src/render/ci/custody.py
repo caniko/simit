@@ -5,12 +5,24 @@ import io
 import json
 import os
 import re
+import queue
+import struct
 import subprocess
+import threading
+import time
 import zipfile
 from pathlib import Path
 from urllib.parse import urlencode, quote
 
 MAX_BYTES = 512 * 1024 * 1024
+MAX_CAPTURE_BYTES = MAX_BYTES
+MAX_EXPANDED_BYTES = MAX_BYTES
+MAX_CAPTURE_REQUESTS = 256
+MAX_CAPTURE_FILES = 256
+MAX_ARCHIVE_MEMBERS = 10000
+MAX_DIRECTORY_BYTES = 16 * 1024 * 1024
+MAX_CAPTURE_SECONDS = 360
+MAX_EVENT_BYTES = 1024 * 1024
 
 
 def require(condition, message):
@@ -18,16 +30,121 @@ def require(condition, message):
         raise RuntimeError(message)
 
 
-def api(repository, endpoint):
-    return subprocess.check_output(['gh', 'api', '--allow-escape-sequences', '--hostname', 'github.com',
-                                    f'repos/{repository}/{endpoint}'], timeout=90)
+def api(repository, endpoint, maximum=MAX_BYTES, timeout=90):
+    """Bound downloads during receipt, including stalled pipes and diagnostics."""
+    require(maximum >= 0 and timeout > 0, 'Capture budget exhausted')
+    command = ['gh', 'api', '--allow-escape-sequences', '--hostname', 'github.com',
+               f'repos/{repository}/{endpoint}']
+    deadline = time.monotonic() + timeout
+    buffers = {'stdout': bytearray(), 'stderr': bytearray()}
+    events = queue.Queue(maxsize=4)
+    stop = threading.Event()
+
+    def receive(pipe, name):
+        try:
+            while not stop.is_set():
+                raw = os.read(pipe.fileno(), 65536)
+                while not stop.is_set():
+                    try:
+                        events.put((name, raw), timeout=0.1)
+                        break
+                    except queue.Full:
+                        pass
+                if not raw:
+                    return
+        except Exception as error:
+            while not stop.is_set():
+                try:
+                    events.put((name, error), timeout=0.1)
+                    return
+                except queue.Full:
+                    pass
+
+    with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as process:
+        readers = [threading.Thread(target=receive, args=(pipe, name), daemon=True, name='custody-download-' + name)
+                   for pipe, name in [(process.stdout, 'stdout'), (process.stderr, 'stderr')]]
+        for reader in readers:
+            reader.start()
+        try:
+            completed = set()
+            while len(completed) < 2:
+                remaining = deadline - time.monotonic()
+                require(remaining > 0, 'Provider download timed out')
+                try:
+                    name, chunk = events.get(timeout=remaining)
+                except queue.Empty as error:
+                    raise RuntimeError('Provider download timed out') from error
+                if isinstance(chunk, Exception):
+                    raise chunk
+                limit = maximum if name == 'stdout' else 65536
+                require(len(buffers[name]) + len(chunk) <= limit, 'Provider response exceeds capture budget')
+                if chunk:
+                    buffers[name].extend(chunk)
+                else:
+                    completed.add(name)
+            status = process.wait(timeout=max(0, deadline - time.monotonic()))
+            if status:
+                raise subprocess.CalledProcessError(status, command, stderr=bytes(buffers['stderr']))
+        finally:
+            stop.set()
+            if process.poll() is None:
+                process.kill()
+            process.wait(timeout=5)
+            for reader in readers:
+                reader.join(timeout=1)
+            require(not any(reader.is_alive() for reader in readers), 'Provider pipe reader did not stop')
+    return bytes(buffers['stdout'])
 
 
-def pages(repository, endpoint, key):
+class CaptureBudget:
+    def __init__(self):
+        self.downloaded = self.retained = self.expanded = 0
+        self.requests = self.files = self.members = 0
+        self.deadline = time.monotonic() + MAX_CAPTURE_SECONDS
+
+    def request(self, repository, endpoint):
+        self.requests += 1
+        require(self.requests <= MAX_CAPTURE_REQUESTS, 'Capture request inventory exceeds its bound')
+        remaining = self.deadline - time.monotonic()
+        require(remaining > 0, 'Aggregate capture deadline exceeded')
+        raw = api(repository, endpoint, maximum=min(MAX_BYTES, MAX_CAPTURE_BYTES - self.downloaded),
+                  timeout=min(90, remaining))
+        self.downloaded += len(raw)
+        require(self.downloaded <= MAX_CAPTURE_BYTES, 'Aggregate download budget exceeded')
+        return raw
+
+    def retain(self, path, raw):
+        self.files += 1
+        self.retained += len(raw)
+        require(self.files <= MAX_CAPTURE_FILES and self.retained <= MAX_CAPTURE_BYTES,
+                'Aggregate retained custody budget exceeded')
+        path.write_bytes(raw)
+
+    def archive(self, entries):
+        self.members += len(entries)
+        self.expanded += sum(entry.file_size for entry in entries)
+        require(self.members <= MAX_ARCHIVE_MEMBERS and self.expanded <= MAX_EXPANDED_BYTES,
+                'Aggregate archive expansion budget exceeded')
+
+
+def repository_identity(value):
+    require(isinstance(value, str) and re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', value),
+            'Invalid repository identity')
+    return value.lower()
+
+
+def branch_identity(value):
+    require(isinstance(value, str) and 0 < len(value.encode()) <= 1024
+            and not any(ord(character) < 32 or ord(character) == 127 for character in value),
+            'Invalid branch identity')
+    return hashlib.sha256(value.encode()).hexdigest()
+
+
+def pages(repository, endpoint, key, fetch=None):
     collected, total = [], None
     for page in range(1, 21):
         separator = '&' if '?' in endpoint else '?'
-        response = json.loads(api(repository, f'{endpoint}{separator}per_page=100&page={page}'))
+        response = json.loads((fetch or api)(repository, f'{endpoint}{separator}per_page=100&page={page}'))
         count = response['total_count']
         require(type(count) is int and 0 <= count <= 2000, 'Provider inventory exceeds its bound')
         require(total is None or total == count, 'Provider inventory changed during collection')
@@ -40,37 +157,125 @@ def pages(repository, endpoint, key):
     raise RuntimeError('Provider inventory exceeds bounded collection')
 
 
-def zip_members(raw):
+def zip_inventory(raw, budget):
+    """Bound actual directory records before ZipFile eagerly creates ZipInfo objects.
+
+    Match CPython zipfile's _EndRecData/_RealGetContents framing, including
+    concatenated archives and ZIP64 end records. _EndRecData reads only the
+    bounded EOCD tail and fixed ZIP64 records; it never parses member inventory.
+    """
+    require(time.monotonic() < budget.deadline, 'Aggregate capture deadline exceeded')
+    end = zipfile._EndRecData(io.BytesIO(raw))
+    require(end is not None, 'Missing archive directory footer')
+    require(end[zipfile._ECD_DISK_NUMBER] == end[zipfile._ECD_DISK_START] == 0
+            and end[zipfile._ECD_ENTRIES_THIS_DISK] == end[zipfile._ECD_ENTRIES_TOTAL],
+            'Unsupported split archive')
+    size = end[zipfile._ECD_SIZE]
+    stop = end[zipfile._ECD_LOCATION]
+    if end[zipfile._ECD_SIGNATURE] == zipfile.stringEndArchive64:
+        # 3.12 returns the classic EOCD location; 3.14 returns the ZIP64 record
+        # location (and supports extensible data). Use the actual footer framing.
+        if raw[stop:stop + 4] == zipfile.stringEndArchive:
+            stop -= zipfile.sizeEndCentDir64 + zipfile.sizeEndCentDir64Locator
+        require(raw[stop:stop + 4] == zipfile.stringEndArchive64, 'Invalid ZIP64 directory footer')
+    position = stop - size
+    require(0 <= size <= MAX_DIRECTORY_BYTES and 0 <= position <= stop <= len(raw)
+            and 0 <= end[zipfile._ECD_OFFSET] <= position,
+            'Archive directory exceeds custody bounds')
+    count = expanded = 0
+    while position < stop:
+        require(time.monotonic() < budget.deadline, 'Aggregate capture deadline exceeded')
+        require(position + zipfile.sizeCentralDir <= stop, 'Truncated archive directory record')
+        header = struct.unpack_from(zipfile.structCentralDir, raw, position)
+        require(header[zipfile._CD_SIGNATURE] == zipfile.stringCentralDir, 'Invalid archive directory record')
+        require(header[zipfile._CD_COMPRESS_TYPE] in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED),
+                'Unsupported custody compression method')
+        count += 1
+        require(budget.members + count <= MAX_ARCHIVE_MEMBERS, 'Aggregate archive member budget exceeded')
+        extra_start = position + zipfile.sizeCentralDir + header[zipfile._CD_FILENAME_LENGTH]
+        extra_end = extra_start + header[zipfile._CD_EXTRA_FIELD_LENGTH]
+        next_position = extra_end + header[zipfile._CD_COMMENT_LENGTH]
+        require(next_position <= stop, 'Truncated archive directory fields')
+        file_size = header[zipfile._CD_UNCOMPRESSED_SIZE]
+        cursor = extra_start
+        while cursor < extra_end:
+            require(time.monotonic() < budget.deadline, 'Aggregate capture deadline exceeded')
+            require(cursor + 4 <= extra_end, 'Truncated archive extra field')
+            kind, length = struct.unpack_from('<HH', raw, cursor)
+            cursor += 4
+            require(cursor + length <= extra_end, 'Truncated archive extra field')
+            if kind == 1 and file_size == 0xffffffff:
+                require(length >= 8, 'Missing ZIP64 member size')
+                file_size = struct.unpack_from('<Q', raw, cursor)[0]
+            cursor += length
+        require(file_size != 0xffffffff, 'Missing ZIP64 member size')
+        expanded += file_size
+        require(expanded <= MAX_BYTES and budget.expanded + expanded <= MAX_EXPANDED_BYTES,
+                'Aggregate archive expansion budget exceeded')
+        position = next_position
+    require(count == end[zipfile._ECD_ENTRIES_TOTAL], 'Archive directory count differs')
+    require(time.monotonic() < budget.deadline, 'Aggregate capture deadline exceeded')
+    return count, expanded
+
+
+def zip_members(raw, budget=None):
     require(len(raw) <= MAX_BYTES, 'Archive exceeds custody budget')
+    budget = budget or CaptureBudget()
+    count, expanded = zip_inventory(raw, budget)
     with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+        require(time.monotonic() < budget.deadline, 'Aggregate capture deadline exceeded')
         entries = archive.infolist()
+        require(len(entries) == count and sum(entry.file_size for entry in entries) == expanded,
+                'Archive directory interpretation differs')
+        budget.archive(entries)
         names = [entry.filename for entry in entries]
         require(len(names) == len(set(names)), 'Duplicate archive members')
         require(sum(entry.file_size for entry in entries) <= MAX_BYTES, 'Expanded archive exceeds custody budget')
         for name in names:
             require(not name.startswith('/') and '..' not in Path(name).parts, 'Unsafe archive member')
-        return {entry.filename: hashlib.sha256(archive.read(entry)).hexdigest()
-                for entry in entries if not entry.is_dir()}
+        members = {}
+        for entry in entries:
+            require(time.monotonic() < budget.deadline, 'Aggregate capture deadline exceeded')
+            if entry.is_dir():
+                continue
+            digest = hashlib.sha256()
+            read_bytes = 0
+            with archive.open(entry) as stream:
+                while True:
+                    require(time.monotonic() < budget.deadline, 'Aggregate capture deadline exceeded')
+                    chunk = stream.read(65536)
+                    if not chunk:
+                        break
+                    read_bytes += len(chunk)
+                    require(read_bytes <= entry.file_size, 'Archive member exceeds admitted size')
+                    digest.update(chunk)
+            require(read_bytes == entry.file_size, 'Archive member size differs')
+            members[entry.filename] = digest.hexdigest()
+        return members
 
 
 def validate_run(run, head, branch, event, name, producer, attempt, repository):
     require(type(run['id']) is int and run['id'] > 0, 'Invalid producer run identity')
-    require(run['repository']['full_name'] == repository, 'Producer repository differs')
-    require(run['head_repository']['full_name'] == repository, 'Fork custody requires separate enrollment')
+    require(repository_identity(run['repository']['full_name']) == repository, 'Producer repository differs')
+    require(repository_identity(run['head_repository']['full_name']) == repository, 'Fork custody requires separate enrollment')
     require(run['head_sha'] == head and run['head_branch'] == branch, 'Producer source differs')
     require(run['event'] == event and run['path'] == producer['workflow'] and run['name'] == name, 'Producer workflow or event differs')
     require(run['run_attempt'] == attempt, 'Latest producer attempt is not the enrolled original')
 
 
-def capture(config, payload, root):
-    repository = config['repository']
+def capture(config, payload, root, budget=None):
+    repository = repository_identity(config['repository'])
+    budget = budget or CaptureBudget()
+    fetch = budget.request
     require(os.environ['RUNNER_ENVIRONMENT'] == 'github-hosted', 'Custody requires a hosted collector')
-    require(repository == os.environ['GITHUB_REPOSITORY'] == payload['repository']['full_name'], 'Collector repository differs')
+    require(repository == repository_identity(os.environ['GITHUB_REPOSITORY'])
+            == repository_identity(payload['repository']['full_name']), 'Collector repository differs')
     event_run = payload['workflow_run']
     require(type(event_run['id']) is int and event_run['id'] > 0, 'Invalid completion run identity')
-    require(event_run['head_repository']['full_name'] == repository, 'Completion source repository differs')
+    require(repository_identity(event_run['head_repository']['full_name']) == repository, 'Completion source repository differs')
     require(re.fullmatch(r'[0-9a-f]{40}', event_run['head_sha']), 'Invalid completion source head')
     require(event_run['event'] in ['push', 'pull_request'], 'Unsupported completion event')
+    branch_identity(event_run['head_branch'])
     receipt = {'schema': 'simit.producer-custody.v1', 'repository': repository,
                'head': event_run['head_sha'], 'branch': event_run['head_branch'], 'event': event_run['event'],
                'state': 'waiting', 'qualified': False, 'observation_is_execution': False,
@@ -80,7 +285,7 @@ def capture(config, payload, root):
     write(root / 'receipt.json', receipt)
     # Retain the safely established reporting target before querying/admitting
     # attempts, so rejected reruns and provider failures revoke prior success.
-    trigger = json.loads(api(repository, f"actions/runs/{event_run['id']}"))
+    trigger = json.loads(fetch(repository, f"actions/runs/{event_run['id']}"))
     require(trigger['event'] in ['push', 'pull_request'] and trigger['status'] == 'completed', 'Trigger is not an eligible completion')
     for key in ['head_sha', 'event', 'path', 'head_branch', 'run_attempt']:
         require(trigger[key] == event_run[key], 'Completion event changed')
@@ -90,8 +295,8 @@ def capture(config, payload, root):
     # workflow_run fires when either enrolled workflow completes. A missing or
     # incomplete sibling stays pending until its own completion event arrives.
     candidates = pages(repository, 'actions/runs?' + urlencode({'head_sha': receipt['head'],
-                       'event': receipt['event']}), 'workflow_runs')
-    write(root / 'discovery.json', candidates)
+                       'event': receipt['event']}), 'workflow_runs', fetch)
+    write(root / 'discovery.json', candidates, budget)
     selected = {}
     for name, producer in config['producers'].items():
         matching = [run for run in candidates if run['path'] == producer['workflow']
@@ -99,18 +304,18 @@ def capture(config, payload, root):
         require(len(matching) <= 1, 'Duplicate original producer identity')
         if not matching:
             return receipt
-        run = json.loads(api(repository, f"actions/runs/{matching[0]['id']}"))
+        run = json.loads(fetch(repository, f"actions/runs/{matching[0]['id']}"))
         validate_run(run, receipt['head'], receipt['branch'], receipt['event'], name,
                      producer, config['producer_attempt'], repository)
         selected[name] = run
     if any(run['status'] != 'completed' for run in selected.values()):
         return receipt
-    commit = json.loads(api(repository, f"git/commits/{receipt['head']}"))
+    commit = json.loads(fetch(repository, f"git/commits/{receipt['head']}"))
     require(commit['sha'] == receipt['head'], 'Source commit differs')
     receipt['tree'] = commit['tree']['sha']
     source_hashes = {}
     for name, producer in config['producers'].items():
-        source = json.loads(api(repository, 'contents/' + quote(producer['workflow'], safe='/')
+        source = json.loads(fetch(repository, 'contents/' + quote(producer['workflow'], safe='/')
                                 + '?ref=' + receipt['head']))
         require(source['encoding'] == 'base64' and source['type'] == 'file', 'Invalid enrolled workflow content')
         raw = base64.b64decode(source['content'], validate=False)
@@ -119,9 +324,9 @@ def capture(config, payload, root):
         run = selected[name]
         folder = root / str(run['id'])
         folder.mkdir()
-        write(folder / 'terminal.json', run)
-        jobs = pages(repository, f"actions/runs/{run['id']}/attempts/{config['producer_attempt']}/jobs", 'jobs')
-        write(folder / 'jobs.json', jobs)
+        write(folder / 'terminal.json', run, budget)
+        jobs = pages(repository, f"actions/runs/{run['id']}/attempts/{config['producer_attempt']}/jobs", 'jobs', fetch)
+        write(folder / 'jobs.json', jobs, budget)
         required = {job_name: [job for job in jobs if job['name'] == job_name] for job_name in producer['jobs']}
         require(all(len(rows) == 1 for rows in required.values()), 'Missing or duplicate enrolled jobs')
         require(all(job['run_id'] == run['id'] and job['head_sha'] == receipt['head']
@@ -130,17 +335,17 @@ def capture(config, payload, root):
         for job_name, rows in required.items():
             job = rows[0]
             require(type(job['id']) is int and job['id'] > 0, 'Invalid enrolled job identity')
-            log = api(repository, f"actions/jobs/{job['id']}/logs")
+            log = fetch(repository, f"actions/jobs/{job['id']}/logs")
             require(log and len(log) <= MAX_BYTES, 'Missing or oversized enrolled-job provider log')
-            (folder / f"job-{job['id']}.log").write_bytes(log)
+            budget.retain(folder / f"job-{job['id']}.log", log)
             job_logs.append({'id': job['id'], 'name': job_name, 'sha256': hashlib.sha256(log).hexdigest()})
-        raw = api(repository, f"actions/runs/{run['id']}/attempts/{config['producer_attempt']}/logs")
-        (folder / 'provider-logs.zip').write_bytes(raw)
-        members = zip_members(raw)
+        raw = fetch(repository, f"actions/runs/{run['id']}/attempts/{config['producer_attempt']}/logs")
+        members = zip_members(raw, budget)
+        budget.retain(folder / 'provider-logs.zip', raw)
         require(members or run['conclusion'] != 'success', 'Successful producer has no provider logs')
-        write(folder / 'provider-log-members.json', members)
-        artifacts = pages(repository, f"actions/runs/{run['id']}/artifacts", 'artifacts')
-        write(folder / 'artifacts.json', artifacts)
+        write(folder / 'provider-log-members.json', members, budget)
+        artifacts = pages(repository, f"actions/runs/{run['id']}/artifacts", 'artifacts', fetch)
+        write(folder / 'artifacts.json', artifacts, budget)
         retained = []
         for artifact_name in producer['artifacts']:
             matching = [artifact for artifact in artifacts if artifact['name'] == artifact_name]
@@ -149,13 +354,14 @@ def capture(config, payload, root):
             require(type(artifact['id']) is int and artifact['id'] > 0 and artifact['expired'] is False, 'Invalid or expired enrolled artifact')
             require(artifact['size_in_bytes'] <= MAX_BYTES, 'Enrolled artifact exceeds custody budget')
             require(artifact['workflow_run']['id'] == run['id'] and artifact['workflow_run']['head_sha'] == receipt['head'], 'Artifact source or run differs')
-            raw = api(repository, f"actions/artifacts/{artifact['id']}/zip")
+            raw = fetch(repository, f"actions/artifacts/{artifact['id']}/zip")
             checksum = hashlib.sha256(raw).hexdigest()
             if artifact.get('digest') is not None:
                 require(artifact['digest'] == 'sha256:' + checksum, 'Provider artifact checksum differs')
-            (folder / f"artifact-{artifact['id']}.zip").write_bytes(raw)
+            members = zip_members(raw, budget)
+            budget.retain(folder / f"artifact-{artifact['id']}.zip", raw)
             retained.append({'id': artifact['id'], 'name': artifact_name, 'sha256': checksum,
-                             'members': zip_members(raw)})
+                             'members': members})
         receipt['producers'].append({'run_id': run['id'], 'workflow': producer['workflow'],
                                      'name': name, 'job_logs': job_logs,
                                      'event': run['event'], 'attempt': run['run_attempt'],
@@ -165,31 +371,40 @@ def capture(config, payload, root):
     # Revalidate immediately before reporting; a later rerun cannot launder a
     # failed original, even if it completed while custody was being downloaded.
     for name, run in selected.items():
-        latest = json.loads(api(repository, f"actions/runs/{run['id']}"))
+        latest = json.loads(fetch(repository, f"actions/runs/{run['id']}"))
         validate_run(latest, receipt['head'], receipt['branch'], receipt['event'], name,
                      config['producers'][name], config['producer_attempt'], repository)
         require(latest['status'] == 'completed' and latest['conclusion'] == run['conclusion'], 'Producer conclusion changed during capture')
     receipt['source_workflow_sha256'] = source_hashes
+    receipt['capture_budget'] = {'downloaded_bytes': budget.downloaded, 'retained_bytes': budget.retained,
+                                 'expanded_bytes': budget.expanded, 'requests': budget.requests,
+                                 'files': budget.files, 'archive_members': budget.members}
     receipt['capture_complete'] = True
     receipt['state'] = 'ready' if all(row['conclusion'] == 'success' and row['jobs_accepted'] for row in receipt['producers']) else 'failed'
     return receipt
 
 
-def write(path, value):
-    path.write_text(json.dumps(value, indent=2) + '\n')
+def write(path, value, budget=None):
+    raw = (json.dumps(value, indent=2) + '\n').encode()
+    if budget:
+        budget.retain(path, raw)
+    else:
+        path.write_bytes(raw)
 
 
 def report(config, root):
+    repository = repository_identity(config['repository'])
+    fetch = CaptureBudget().request
     receipt = json.loads((root / 'receipt.json').read_text())
-    require(receipt['repository'] == config['repository'] and receipt['policy'] == config, 'Reporting receipt policy differs')
+    require(receipt['repository'] == repository and receipt['policy'] == config, 'Reporting receipt policy differs')
     require(re.fullmatch(r'[0-9a-f]{40}', receipt['head']) and receipt['event'] in ['push', 'pull_request'], 'Invalid reporting target')
     if receipt['state'] == 'ready':
         try:
             require(len(receipt['producers']) == len(config['producers']), 'Reporting producer inventory differs')
             for row in receipt['producers']:
-                latest = json.loads(api(config['repository'], f"actions/runs/{row['run_id']}"))
+                latest = json.loads(fetch(repository, f"actions/runs/{row['run_id']}"))
                 validate_run(latest, receipt['head'], receipt['branch'], receipt['event'], row['name'],
-                             config['producers'][row['name']], config['producer_attempt'], config['repository'])
+                             config['producers'][row['name']], config['producer_attempt'], repository)
                 require(latest['status'] == 'completed' and latest['conclusion'] == row['conclusion'], 'Producer conclusion changed before reporting')
         except Exception as error:
             receipt.update(state='failed', report_error=str(error))
@@ -197,9 +412,9 @@ def report(config, root):
     upload_ok = os.environ['SIMIT_CUSTODY_UPLOAD_OUTCOME'] == 'success' and os.environ['SIMIT_CUSTODY_ARTIFACT_ID'].isdigit()
     state = 'success' if receipt['state'] == 'ready' and receipt['capture_complete'] and upload_ok else 'pending' if receipt['state'] == 'waiting' and upload_ok else 'failure'
     identity = hashlib.sha256(json.dumps({'policy': config, 'producers': receipt['producers']}, sort_keys=True).encode()).hexdigest()[:16]
-    context = config['status_context'] + '/' + receipt['event']
+    context = config['status_context'] + '/' + receipt['event'] + '/' + branch_identity(receipt['branch'])
     try:
-        previous = pages(config['repository'], f"commits/{receipt['head']}/status", 'statuses')
+        previous = pages(repository, f"commits/{receipt['head']}/status", 'statuses', fetch)
     except Exception as error:
         # Deduplication is an optimization; it must never suppress revocation.
         # An incomplete inventory also cannot establish a successful observation.
@@ -210,9 +425,9 @@ def report(config, root):
     current = next((status for status in previous if status['context'] == context), None)
     if current is None or current['state'] != state or current['description'] != description:
         data = {'state': state, 'context': context, 'description': description,
-                'target_url': f"https://github.com/{config['repository']}/actions/runs/{os.environ['GITHUB_RUN_ID']}"}
+                'target_url': f"https://github.com/{repository}/actions/runs/{os.environ['GITHUB_RUN_ID']}"}
         subprocess.run(['gh', 'api', '--hostname', 'github.com', '--method', 'POST',
-                        f"repos/{config['repository']}/statuses/{receipt['head']}", '--input', '-'],
+                        f"repos/{repository}/statuses/{receipt['head']}", '--input', '-'],
                        input=json.dumps(data).encode(), check=True, timeout=90)
     return 1 if state == 'failure' else 0
 
@@ -223,10 +438,23 @@ def main():
     root.mkdir(exist_ok=True)
     if os.environ['SIMIT_CUSTODY_PHASE'] == 'report':
         return report(config, root)
-    payload_bytes = Path(os.environ['GITHUB_EVENT_PATH']).read_bytes()
-    (root / 'event.json').write_bytes(payload_bytes)
+    with Path(os.environ['GITHUB_EVENT_PATH']).open('rb') as event:
+        payload_bytes = event.read(MAX_EVENT_BYTES + 1)
+    require(len(payload_bytes) <= MAX_EVENT_BYTES, 'Completion event exceeds its bound')
+    budget = CaptureBudget()
+    budget.retain(root / 'event.json', payload_bytes)
     try:
-        receipt = capture(config, json.loads(payload_bytes), root)
+        receipt = capture(config, json.loads(payload_bytes), root, budget)
+        receipt['members'] = {}
+        for path in sorted(root.rglob('*')):
+            if path.is_file() and path.name != 'receipt.json':
+                with path.open('rb') as stream:
+                    digest = hashlib.sha256()
+                    while chunk := stream.read(65536):
+                        require(time.monotonic() < budget.deadline, 'Aggregate capture deadline exceeded')
+                        digest.update(chunk)
+                receipt['members'][str(path.relative_to(root))] = digest.hexdigest()
+        write(root / 'receipt.json', receipt, budget)
     except Exception as error:
         path = root / 'receipt.json'
         if path.exists():
@@ -234,9 +462,6 @@ def main():
             receipt.update(state='failed', error=str(error))
             write(path, receipt)
         raise
-    receipt['members'] = {str(path.relative_to(root)): hashlib.sha256(path.read_bytes()).hexdigest()
-                          for path in sorted(root.rglob('*')) if path.is_file() and path.name != 'receipt.json'}
-    write(root / 'receipt.json', receipt)
     return 0
 
 

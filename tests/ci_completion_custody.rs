@@ -134,6 +134,26 @@ fn unsupported_effective_custody_backends_reject_before_writing_any_language_wor
 }
 
 #[test]
+fn oversized_enrolled_capture_inventory_rejects_before_workflow_effects() {
+    let temp = project();
+    let config = temp.path().join("simit.toml");
+    let jobs: Vec<_> = (0..101).map(|i| format!("job-{i}")).collect();
+    let source = fs::read_to_string(&config)
+        .unwrap()
+        .replace("jobs = [\"test\"]", &format!("jobs = {jobs:?}"));
+    fs::write(&config, &source).unwrap();
+    let output = common::simit()
+        .current_dir(temp.path())
+        .args(["init", "ci"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("at most 100 jobs and artifacts"));
+    assert_eq!(fs::read_to_string(&config).unwrap(), source);
+    assert!(!temp.path().join(".github/workflows").exists());
+}
+
+#[test]
 fn generated_collector_keeps_missing_originals_pending_and_reports_complete_source_bound_custody() {
     let temp = project();
     let output = common::simit()

@@ -438,10 +438,27 @@ successful observation in both ordinary and optimized interpreter modes.
 
 The observer retains source-workflow hashes, original jobs, provider log archives
 and required artifact bytes. Archives are hashed without extraction. Capture and
-upload must both complete before source-head status success. Reporting is
+API downloads share a 512 MiB wire budget; retained files and total archive
+expansion each have a separate 512 MiB aggregate budget. At most 256 requests,
+256 retained files and 10,000 archive members are admitted within a six-minute
+capture deadline. Downloads and member hashes stream in 64 KiB chunks; oversized
+or stalled provider downloads terminate and reap their own child processes.
+Before constructing the ZIP reader, custody scans actual central-directory
+records under a 16 MiB directory bound, the remaining aggregate member/expansion
+budgets and the original deadline. Forged footer counts cannot bypass that scan.
+Stored and deflated provider archives, including ZIP64, are supported; other
+compression methods fail admission before any member decompression.
+Enrollment accepts at most 100 jobs/artifacts across all producers. Budget
+failures retain the established failure-reporting target.
+
+Capture and upload must both complete before source-head status success. Reporting is
 idempotent and explicitly targets the producer commit, not the observer's default-
-branch SHA. Separate `/push` and `/pull_request` status contexts preserve producer
-independence. Same-repository branch/PR custody is supported; signed-tag release
+branch SHA. Status contexts are `<status_context>/<event>/<branch-sha256>`, using
+the full SHA-256 of the exact, case-sensitive branch name. Separate event and
+branch contexts prevent another branch at the same commit from replacing its
+pending/failure status. Enroll the branch-specific contexts before replacing
+existing protection. Repository identity is compared case-insensitively, matching
+GitHub's owner/repository naming rules. Same-repository branch/PR custody is supported; signed-tag release
 attempt policy and fork custody require separately qualified enrollment.
 
 The observer has only contents/actions read and statuses write permissions. It
