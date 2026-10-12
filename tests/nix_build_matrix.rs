@@ -783,6 +783,10 @@ fn direct_nix_matrix_rendering_rejects_invalid_tag_filters() {
     for patterns in [
         vec![""],
         vec!["bad\npattern"],
+        vec!["bad\u{2028}pattern"],
+        vec!["bad\u{2029}pattern"],
+        vec!["bad\u{fffe}pattern"],
+        vec!["bad\u{ffff}pattern"],
         vec!["!private-*"],
         vec!["!one", "!two"],
     ] {
@@ -793,7 +797,12 @@ fn direct_nix_matrix_rendering_rejects_invalid_tag_filters() {
                 .contains("push_tags")
         );
     }
-    for patterns in [vec![], vec!["**", "!private-*"], vec![r"\!literal"]] {
+    for patterns in [
+        vec![],
+        vec!["**", "!private-*"],
+        vec![r"\!literal"],
+        vec!["发布-α-*"],
+    ] {
         assert!(render(&patterns).is_ok(), "{patterns:?}");
     }
 }
@@ -809,6 +818,22 @@ fn matrix_options_reject_invalid_or_ignored_configuration() {
         ),
         (
             "[ci.nix_build]\npush_tags = [\"bad\\npattern\"]",
+            "push_tags",
+        ),
+        (
+            "[ci.nix_build]\npush_tags = [\"bad\\u2028pattern\"]",
+            "push_tags",
+        ),
+        (
+            "[ci.nix_build]\npush_tags = [\"bad\\u2029pattern\"]",
+            "push_tags",
+        ),
+        (
+            "[ci.nix_build]\npush_tags = [\"bad\\uFFFEpattern\"]",
+            "push_tags",
+        ),
+        (
+            "[ci.nix_build]\npush_tags = [\"bad\\uFFFFpattern\"]",
             "push_tags",
         ),
         ("[ci.nix_build]\ntimeout_minutes = 0", "timeout_minutes"),

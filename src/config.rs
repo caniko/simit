@@ -581,13 +581,15 @@ pub struct NixBuildConfig {
 
 impl NixBuildConfig {
     pub(crate) fn validate_push_tags(&self) -> Result<()> {
-        if self
-            .push_tags
-            .iter()
-            .any(|pattern| pattern.trim().is_empty() || pattern.chars().any(char::is_control))
-        {
+        if self.push_tags.iter().any(|pattern| {
+            pattern.trim().is_empty()
+                || pattern.chars().any(|character| {
+                    character.is_control()
+                        || matches!(character, '\u{2028}' | '\u{2029}' | '\u{fffe}' | '\u{ffff}')
+                })
+        }) {
             bail!(
-                "simit project config: [ci.nix_build].push_tags requires nonempty patterns without control characters"
+                "simit project config: [ci.nix_build].push_tags requires nonempty patterns without controls, Unicode line separators, or YAML-forbidden characters"
             );
         }
         if !self.push_tags.is_empty()
