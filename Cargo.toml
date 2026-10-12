@@ -111,9 +111,13 @@ tempfile = "3"
 tar = "0.4"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
+[[example]]
+name = "ci-stream-oracle"
+path = "tests/fixtures/ci-stream-oracle.rs"
+
 [target.'cfg(target_os = "linux")'.dependencies]
 signal-hook = "0.3.18"
 socket2 = "0.6.1"
 
 [target.'cfg(unix)'.dependencies]
-rustix = { version = "1", features = ["process"] }
+rustix = { version = "1", features = ["fs", "process"] }

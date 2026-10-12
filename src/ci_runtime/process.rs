@@ -2,7 +2,7 @@
 use super::cancellation::Cancellation;
 use anyhow::{Context, Result, ensure};
 use std::{
-    fs::OpenOptions,
+    fs::{File, OpenOptions},
     io::Write,
     path::Path,
     process::{Child, Command, Stdio},
@@ -32,7 +32,14 @@ impl Runner for CommandRunner {
         stderr: &Path,
         cancellation: &Cancellation,
     ) -> Result<i32> {
-        run_bounded(command, stdout, stderr, cancellation, Limits::default())
+        run_bounded(
+            command,
+            stdout,
+            stderr,
+            cancellation,
+            Limits::default(),
+            None,
+        )
     }
 }
 
@@ -53,6 +60,26 @@ struct Limits {
     stdout: u64,
     stderr: u64,
 }
+
+pub(super) fn run_with_input(
+    command: &mut Command,
+    input: File,
+    stdout: &Path,
+    stderr: &Path,
+    cancellation: &Cancellation,
+) -> Result<i32> {
+    run_bounded(
+        command,
+        stdout,
+        stderr,
+        cancellation,
+        Limits {
+            stdout: 32 * 1024 * 1024,
+            ..Limits::default()
+        },
+        Some(input),
+    )
+}
 impl Default for Limits {
     fn default() -> Self {
         Self {
@@ -69,6 +96,7 @@ fn run_bounded(
     stderr_path: &Path,
     cancellation: &Cancellation,
     limits: Limits,
+    input: Option<File>,
 ) -> Result<i32> {
     cancellation.check()?;
     let stdout = OpenOptions::new()
@@ -85,7 +113,7 @@ fn run_bounded(
         command.process_group(0);
     }
     command
-        .stdin(Stdio::null())
+        .stdin(input.map_or_else(Stdio::null, Stdio::from))
         .stdout(stdout.try_clone()?)
         .stderr(stderr.try_clone()?);
     let result = (|| {
@@ -141,6 +169,7 @@ mod tests {
                     stdout: 32,
                     stderr: 64,
                 },
+                None,
             );
             assert_eq!(result.ok(), expected);
             assert!(root.path().join("stdout").is_file());
@@ -163,10 +192,37 @@ mod tests {
                 stdout: 32,
                 stderr: 64,
             },
+            None,
         );
         assert!(result.is_err());
         assert!(start.elapsed() < Duration::from_secs(1));
         std::thread::sleep(Duration::from_millis(250));
         assert!(!marker.exists());
+    }
+
+    #[test]
+    fn descriptor_input_is_not_replaced_with_null_and_output_is_retained() {
+        use std::io::Seek;
+        let root = tempfile::tempdir().unwrap();
+        let mut input = tempfile::tempfile().unwrap();
+        input.write_all(b"\0binary\xff").unwrap();
+        input.rewind().unwrap();
+        let status = run_with_input(
+            Command::new("sh").args(["-c", "cat; printf diagnostic >&2"]),
+            input,
+            &root.path().join("stdout"),
+            &root.path().join("stderr"),
+            &Cancellation::default(),
+        )
+        .unwrap();
+        assert_eq!(status, 0);
+        assert_eq!(
+            std::fs::read(root.path().join("stdout")).unwrap(),
+            b"\0binary\xff"
+        );
+        assert_eq!(
+            std::fs::read(root.path().join("stderr")).unwrap(),
+            b"diagnostic"
+        );
     }
 }

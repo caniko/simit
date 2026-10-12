@@ -96,6 +96,48 @@ v1 receipts remain readable as evidence, but a new Rust source needs its own
 original-attempt hosted qualification. Offline integrity checks do not establish
 current provider acceptance, merge readiness or publication authorization.
 
+### Native dependency stream admission
+
+`simit::ci_runtime::dependencies` ports the reviewed export-stream admission
+boundary from signed Simit source `a9874535107dd6cf335ab7c4bdfd9a9252c0c691`.
+Its `ArchiveAdmission` inputs must come from separately validated source/run
+provenance and fresh dependency/qualification evaluation. They are byte and
+inventory expectations, not qualification authority. The transport workflow's
+provenance/evaluation/export policy adapters remain a separate migration slice.
+
+`admit_archive` checks archive size and checksum while copying the compressed
+bytes into a private descriptor. It decompresses only that checksum-bound
+snapshot into another anonymous descriptor, then parses the **entire** strict
+Nix writer grammar before returning a one-use `VerifiedArchive`. Both descriptors
+are explicitly mode `0600` and unlinked on Unix. Replacing or modifying the
+original archive after admission cannot replace the imported bytes.
+
+The actual record set must exactly equal the admitted closure, include every
+evaluated dependency root, and exclude all qualification outputs. Record paths
+and deriver metadata use canonical `/nix/store` syntax; references must be
+sorted, unique and wholly inside the closure. Legacy signature framing must be
+zero. The terminal marker must be followed immediately by EOF, with no remaining
+declared bytes. Parsing bounds include 100,000 paths, 1,000,000 nodes and
+references, bounded strings and byte budgets, and streamed 64 KiB content reads.
+
+Importer compatibility follows Nix **2.34.8** `src/libutil/archive.cc`: node
+depth is strictly below **64**, directory names are at most **255 bytes**,
+and symlink targets are at most **4095 bytes**. The first invalid value is denied
+even in a second record after a valid first record, before any import effect.
+Directory names are sorted as raw bytes, including non-UTF-8 names.
+
+`VerifiedArchive::restore` dispatches one `nix-store --import` with the fully
+rewound validated descriptor, then verifies admitted paths and observes evaluated
+roots. Nonzero import/verification status produces no successful restore receipt.
+`consume` supports a caller-owned importer with the same descriptor and one-use
+lifetime. Restoration receipts always state `qualification_execution: false`;
+fresh checks still require their separate current-worker rebuild.
+
+Protocol sources:
+
+- [Nix export/import framing](https://github.com/NixOS/nix/blob/adbf23e8184bbbe8d786aad1f362443b6542e0a4/src/libstore/export-import.cc)
+- [Nix 2.34.8 importer grammar and limits](https://github.com/NixOS/nix/blob/2.34.8/src/libutil/archive.cc)
+
 ### Project-owned workflow templates
 
 Projects with specialized Actions jobs can render their existing workflow

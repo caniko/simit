@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Native dependency export-stream admission with importer-compatible NAR bounds,
+  exact closure/reference binding, and one-use private descriptor restoration.
 - Native `simit ci nix-group` and library execution contracts replace embedded
   grouped-build Python and its Python test harness. Enroll an immutable
   `SIMIT_CI_ENGINE_REVISION` repository variable before adopting regenerated
