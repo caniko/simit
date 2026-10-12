@@ -190,6 +190,10 @@ minimal profile. The shell reads this source asset rather than `builtins.toFile`
 which does not materialize its result during read-only no-build evaluation.
 Commit the manifest alongside the generated flake; parity checks reject a missing
 or stale version. Hooks-only and custom modes preserve project-owned manifests.
+Full canonical regeneration also migrates the recognized prior generated inline
+MSRV binding before accepting hook wiring. Full checks report that migration as
+drift. Modified or dynamic inline manifests require an explicit project edit;
+Simit does not discard extra toolchain settings to force the migration.
 Existing/custom flakes must provide the
 same shell contract; hooks-only generation leaves their shells project-owned.
 Use Harbor's `mkToolchain` with an exact-version toolchain manifest and its

@@ -36,6 +36,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   inventories and capture time before source-head success can be published.
 - Preserve completion-custody source/attempt admission, capture budgets and
   failure revocation when Python optimization is enabled.
+- Migrate recognized inline MSRV bindings in existing canonical flakes before
+  hook-wiring shortcuts, and detect that required source migration in full checks.
 - Generate MSRV toolchain manifests as source assets so no-build, read-only Nix
   evaluation succeeds on cold stores without changing the declared compiler.
 - Enforce grouped-build admission under Python optimization and preserve each
