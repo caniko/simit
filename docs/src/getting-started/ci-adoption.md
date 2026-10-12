@@ -430,7 +430,11 @@ stream without extraction: actual records must exactly match the admitted closur
 and every declared reference stays inside it. Duplicate, missing, extra, malformed,
 truncated or trailing records reject before any canonical-store import. Parsing
 bounds paths, references, tree depth/nodes and control fields, and streams file
-payloads in 64 KiB chunks. Validation and import use the same unlinked, mode-0600
+payloads in 64 KiB chunks. NAR depth is less than 64; entry names and symlink
+targets are at most 255 and 4095 bytes, respectively, matching the
+[Nix 2.34.8 importer limits](https://github.com/NixOS/nix/blob/2.34.8/src/libutil/archive.cc).
+These bounds apply to the entire stream before import, including later records.
+Validation and import use the same unlinked, mode-0600
 spool descriptor. The parser follows [Nix's export framing](https://github.com/NixOS/nix/blob/adbf23e8184bbbe8d786aad1f362443b6542e0a4/src/libstore/export-import.cc)
 and [NAR writer grammar](https://github.com/NixOS/nix/blob/adbf23e8184bbbe8d786aad1f362443b6542e0a4/doc/manual/src/protocols/nix-archive.md).
 Legacy export signatures are rejected; archive integrity is distinct from hosted

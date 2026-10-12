@@ -230,6 +230,30 @@ class Transport(unittest.TestCase):
             self.assertEqual(effects[0], ['nix-store', '--import'])
             self.assertEqual(sum(command == ['nix-store', '--import'] for command in effects), 1)
 
+    def test_importer_first_invalid_tree_bounds_reject_even_after_a_valid_record(self):
+        deep = regular()
+        for _ in range(64):
+            deep = directory([(b'a', deep)])
+        for label, node in [('name256', directory([(b'a' * 256, regular())])),
+                            ('target4096', symlink(b'a' * 4096)), ('depth64', deep)]:
+            with self.subTest(boundary=label):
+                self.denied(exported(record(), record(OTHER, node=node)),
+                            ('closure', [OUT, OTHER]), maximum=65536)
+
+    def test_importer_last_valid_tree_bounds_still_admit_the_complete_stream(self):
+        deep = regular()
+        for _ in range(63):
+            deep = directory([(b'a', deep)])
+        for label, node in [('name255', directory([(b'a' * 255, regular())])),
+                            ('target4095', symlink(b'a' * 4095)), ('depth63', deep)]:
+            for optimized in [False, True]:
+                with self.subTest(boundary=label, optimized=optimized):
+                    accepted, effects = self.execute(('closure', [OUT, OTHER]),
+                        data=exported(record(), record(OTHER, node=node)),
+                        optimized=optimized, maximum=65536)
+                    self.assertTrue(accepted)
+                    self.assertEqual(sum(command == ['nix-store', '--import'] for command in effects), 1)
+
 
 class ParserBounds(unittest.TestCase):
     def setUp(self):

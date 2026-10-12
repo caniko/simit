@@ -36,11 +36,12 @@ class ExportInventory:
 
     Protocol: Nix adbf23e8184bbbe8d786aad1f362443b6542e0a4,
     src/libstore/export-import.cc and doc/manual/src/protocols/nix-archive.md.
+    Importer limits: https://github.com/NixOS/nix/blob/2.34.8/src/libutil/archive.cc
     """
     MAX_PATHS = 100000
     MAX_NODES = 1000000
     MAX_REFERENCES = 1000000
-    MAX_DEPTH = 128
+    MAX_DEPTH = 64
 
     def __init__(self, stream, size):
         self.stream = stream
@@ -100,7 +101,7 @@ class ExportInventory:
             self.contents()
         elif kind == b'symlink':
             self.expect(b'target')
-            target = self.string(65536)
+            target = self.string(4095)
             require(target and b'\0' not in target, 'Invalid NAR symlink target')
         elif kind == b'directory':
             previous = b''
@@ -111,7 +112,7 @@ class ExportInventory:
                 require(field == b'entry', 'Invalid directory NAR fields')
                 self.expect(b'(')
                 self.expect(b'name')
-                name = self.string(4096)
+                name = self.string(255)
                 require(name > previous and name not in [b'.', b'..'] and b'/' not in name
                         and b'\0' not in name, 'Invalid or unordered NAR entry name')
                 previous = name
