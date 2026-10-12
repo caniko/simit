@@ -354,9 +354,9 @@ pub fn migrate_msrv_toolchain(content: &str) -> Result<String> {
         let Some(binding) = cast_nix_node::<rnix::ast::AttrpathValue>(node.clone()) else {
             continue;
         };
-        if !binding
+        if binding
             .attrpath()
-            .is_some_and(|path| path.to_string() == "toolchainFile")
+            .is_none_or(|path| path.to_string() != "toolchainFile")
         {
             continue;
         }
