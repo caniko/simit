@@ -447,6 +447,10 @@ The compressed-size budget includes zlib's default worst-case DEFLATE expansion
 plus gzip framing allowance. Export checks the same bound before marking an
 archive complete that import checks before store effects; the uncompressed
 budget is enforced separately throughout both streams.
+Import admits compressed size, checksum and the complete decompressed byte
+budget before derivation evaluation, which can itself instantiate store objects
+or trigger IFD. The admitted bytes stay in one private, unlinked spool through
+source/graph checks and import.
 
 Consumers verify source commit/tree, lock bytes,
 repository, run, attempt, expected derivations/output paths, archive checksum and

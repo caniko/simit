@@ -7,6 +7,7 @@ import re
 import struct
 import subprocess
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 
 
@@ -197,9 +198,62 @@ class ExportInventory:
         require(self.remaining == 0 and self.stream.read(1) == b'', 'Trailing export data')
 
 
+def discover():
+    check_drvs = set()
+    qualification_outputs = set()
+    expression = 'd: { drvPath = d.drvPath; outputs = builtins.listToAttrs (map (name: { inherit name; value = d.${name}.outPath; }) d.outputs); }'
+    for system in systems:
+        checks = evaluate(f'.#checks.{system}', 'checks: builtins.mapAttrs (_: d: { drvPath = d.drvPath; outputs = builtins.listToAttrs (map (name: { inherit name; value = d.${name}.outPath; }) d.outputs); }) checks')
+        require(isinstance(checks, dict) and checks, 'Invalid discovered check inventory')
+        check_drvs.update(definition['drvPath'] for definition in checks.values())
+        qualification_outputs.update(path for definition in checks.values() for path in definition['outputs'].values())
+    definitions = {installable: evaluate(installable, expression) for installable in dependencies}
+    qualification = {installable: evaluate(installable, expression) for installable in plan}
+    qualified_drvs = {definition['drvPath'] for definition in qualification.values()}
+    qualification_outputs.update(path for definition in qualification.values() for path in definition['outputs'].values())
+    for definition in definitions.values():
+        require(definition['drvPath'] not in check_drvs | qualified_drvs, 'A qualification derivation was enrolled as a build input')
+        require(definition['outputs'] and all(re.fullmatch(r'/nix/store/[a-z0-9]{32}-[^/\s]+', path)
+                                             for path in definition['outputs'].values()), 'Invalid dependency output paths')
+    graph = json.loads(subprocess.check_output(['nix', 'derivation', 'show', '--recursive',
+                                               *sorted(definition['drvPath'] for definition in definitions.values())], text=True))
+    require(isinstance(graph, dict) and graph, 'Invalid build-input graph')
+    require(not set(graph) & (check_drvs | qualified_drvs), 'Build-input graph contains a qualification derivation')
+    return definitions, qualification_outputs
+
+
+@contextmanager
+def preflight_import(manifest_path, archive, identity, maximum, compressed_maximum):
+    # Forcing drvPath can instantiate store objects or trigger IFD. Admit both
+    # byte budgets before any Nix evaluation, keeping the same private spool
+    # through later source/graph admission and the eventual import effect.
+    require(manifest_path.is_file() and not manifest_path.is_symlink(), 'Invalid dependency manifest file')
+    manifest = json.loads(manifest_path.read_text())
+    require(all(manifest.get(key) == value for key, value in identity.items()), 'Dependency provenance differs from this source/run')
+    require(manifest['complete'] is True, 'Dependency manifest is incomplete')
+    require(type(manifest['uncompressed_bytes']) is int and 0 <= manifest['uncompressed_bytes'] <= maximum,
+            'Declared dependency transport exceeds budget')
+    verify_command = store_paths_command('--verify-path', manifest['closure'])
+    require(archive.is_file() and not archive.is_symlink() and archive.stat().st_size == manifest['archive_bytes'], 'Invalid dependency archive file or size')
+    require(archive.stat().st_size <= compressed_maximum, 'Compressed dependency archive exceeds budget')
+    require(digest(archive) == manifest['archive_sha256'], 'Dependency archive checksum mismatch')
+    # TemporaryFile is unlinked and mode 0600; do not reopen a replaceable path.
+    with tempfile.TemporaryFile(dir=archive.parent) as stream:
+        size = 0
+        with gzip.open(archive, 'rb') as compressed:
+            while chunk := compressed.read(1024 * 1024):
+                size += len(chunk)
+                require(size <= maximum, 'Decompressed dependency transport exceeds budget')
+                stream.write(chunk)
+        require(size == manifest['uncompressed_bytes'], 'Dependency transport was truncated')
+        stream.seek(0)
+        yield manifest, stream, size, verify_command
+
+
 root = Path(os.environ['SIMIT_DEPENDENCY_ROOT'])
 root.mkdir(exist_ok=True)
 mode = os.environ['SIMIT_DEPENDENCY_MODE']
+require(mode in ['export', 'import'], 'Unknown dependency transport operation')
 maximum = int(os.environ['SIMIT_DEPENDENCY_MAX_BYTES'])
 compressed_maximum = compressed_budget(maximum)
 dependencies = json.loads(os.environ['SIMIT_NIX_DEPENDENCIES'])
@@ -219,29 +273,10 @@ identity = {'schema': 'simit.nix-dependencies.v1', 'head': head, 'tree': tree,
             'flake_lock_sha256': digest(Path('flake.lock')) if Path('flake.lock').is_file() else None}
 require(dependencies and systems and len(set(dependencies)) == len(dependencies), 'Invalid dependency enrollment')
 require(not set(dependencies) & set(plan), 'Dependency enrollment overlaps qualification plan')
-check_drvs = set()
-qualification_outputs = set()
-expression = 'd: { drvPath = d.drvPath; outputs = builtins.listToAttrs (map (name: { inherit name; value = d.${name}.outPath; }) d.outputs); }'
-for system in systems:
-    checks = evaluate(f'.#checks.{system}', 'checks: builtins.mapAttrs (_: d: { drvPath = d.drvPath; outputs = builtins.listToAttrs (map (name: { inherit name; value = d.${name}.outPath; }) d.outputs); }) checks')
-    require(isinstance(checks, dict) and checks, 'Invalid discovered check inventory')
-    check_drvs.update(definition['drvPath'] for definition in checks.values())
-    qualification_outputs.update(path for definition in checks.values() for path in definition['outputs'].values())
-definitions = {installable: evaluate(installable, expression) for installable in dependencies}
-qualification = {installable: evaluate(installable, expression) for installable in plan}
-qualified_drvs = {definition['drvPath'] for definition in qualification.values()}
-qualification_outputs.update(path for definition in qualification.values() for path in definition['outputs'].values())
-for definition in definitions.values():
-    require(definition['drvPath'] not in check_drvs | qualified_drvs, 'A qualification derivation was enrolled as a build input')
-    require(definition['outputs'] and all(re.fullmatch(r'/nix/store/[a-z0-9]{32}-[^/\s]+', path)
-                                         for path in definition['outputs'].values()), 'Invalid dependency output paths')
-graph = json.loads(subprocess.check_output(['nix', 'derivation', 'show', '--recursive',
-                                           *sorted(definition['drvPath'] for definition in definitions.values())], text=True))
-require(isinstance(graph, dict) and graph, 'Invalid build-input graph')
-require(not set(graph) & (check_drvs | qualified_drvs), 'Build-input graph contains a qualification derivation')
 manifest_path = root / 'manifest.json'
 archive = root / 'closure.nar.gz'
 if mode == 'export':
+    definitions, qualification_outputs = discover()
     manifest = {**identity, 'definitions': definitions, 'complete': False}
     manifest_path.write_text(json.dumps(manifest, indent=2) + '\n')
     outputs = set()
@@ -281,26 +316,11 @@ if mode == 'export':
                     archive_sha256=digest(archive), archive_bytes=archive.stat().st_size)
     manifest_path.write_text(json.dumps(manifest, indent=2) + '\n')
 elif mode == 'import':
-    require(manifest_path.is_file() and not manifest_path.is_symlink(), 'Invalid dependency manifest file')
-    manifest = json.loads(manifest_path.read_text())
-    require(all(manifest.get(key) == value for key, value in identity.items()), 'Dependency provenance differs from this source/run')
-    require(manifest['complete'] is True and manifest['definitions'] == definitions, 'Dependency manifest is incomplete or its definitions differ')
-    require(not set(manifest['closure']) & qualification_outputs, 'Dependency closure contains qualification outputs')
-    verify_command = store_paths_command('--verify-path', manifest['closure'])
-    require(archive.is_file() and not archive.is_symlink() and archive.stat().st_size == manifest['archive_bytes'], 'Invalid dependency archive file or size')
-    require(archive.stat().st_size <= compressed_maximum, 'Compressed dependency archive exceeds budget')
-    require(digest(archive) == manifest['archive_sha256'], 'Dependency archive checksum mismatch')
-    paths = sorted(path for definition in definitions.values() for path in definition['outputs'].values())
-    # An unlinked mode-0600 spool keeps the validated bytes on the same private
-    # descriptor through import, rather than reopening a replaceable pathname.
-    with gzip.open(archive, 'rb') as compressed, tempfile.TemporaryFile(dir=root) as stream:
-        size = 0
-        while chunk := compressed.read(1024 * 1024):
-            size += len(chunk)
-            require(size <= maximum, 'Decompressed dependency transport exceeds budget')
-            stream.write(chunk)
-        require(size == manifest['uncompressed_bytes'], 'Dependency transport was truncated')
-        stream.seek(0)
+    with preflight_import(manifest_path, archive, identity, maximum, compressed_maximum) as (manifest, stream, size, verify_command):
+        definitions, qualification_outputs = discover()
+        require(manifest['definitions'] == definitions, 'Dependency manifest definitions differ')
+        require(not set(manifest['closure']) & qualification_outputs, 'Dependency closure contains qualification outputs')
+        paths = sorted(path for definition in definitions.values() for path in definition['outputs'].values())
         ExportInventory(stream, size).validate(manifest['closure'], paths, qualification_outputs)
         stream.seek(0)
         with (root / 'import.log').open('wb') as log:
@@ -309,5 +329,3 @@ elif mode == 'import':
     subprocess.run(['nix', 'path-info', *paths], check=True)
     (root / 'import-receipt.json').write_text(json.dumps({**identity, 'archive_sha256': manifest['archive_sha256'],
                                                        'restored': paths, 'qualification_execution': False}, indent=2) + '\n')
-else:
-    raise RuntimeError('Unknown dependency transport operation')

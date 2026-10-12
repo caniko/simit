@@ -83,6 +83,7 @@ class Transport(unittest.TestCase):
                 manifest[change[0]] = change[1]
             (root / 'manifest.json').write_text(json.dumps(manifest))
             effects = []
+            self.last_evaluations = []
             original_stat = Path.stat
 
             def archive_stat(path, *args, **kwargs):
@@ -94,6 +95,8 @@ class Transport(unittest.TestCase):
                 return result
 
             def output(command, **kwargs):
+                if command[0] == 'nix':
+                    self.last_evaluations.append(command)
                 if command[0] == 'git':
                     return HEAD if command[-1] == 'HEAD' else TREE
                 if command[0:3] == ['nix', 'derivation', 'show']:
@@ -175,6 +178,25 @@ class Transport(unittest.TestCase):
                                              optimized=optimized)
             self.assertFalse(accepted)
             self.assertFalse(any(command[0] == 'nix-store' for command in effects))
+            self.assertEqual(self.last_evaluations, [])
+
+    def test_decompressed_import_budget_rejects_before_any_derivation_evaluation(self):
+        data = exported(record(node=regular(b'a' * 2048)))
+        for optimized in [False, True]:
+            # An untrusted manifest can claim an in-budget size while its gzip
+            # member expands beyond it. Neither eval nor derivation show may run.
+            accepted, effects = self.execute(('uncompressed_bytes', 256), data=data,
+                                             maximum=1024, optimized=optimized)
+            self.assertFalse(accepted)
+            self.assertEqual(effects, [])
+            self.assertEqual(self.last_evaluations, [])
+
+    def test_unknown_transport_mode_rejects_before_any_nix_effect(self):
+        for optimized in [False, True]:
+            accepted, effects = self.execute(mode='invalid', optimized=optimized)
+            self.assertFalse(accepted)
+            self.assertEqual(effects, [])
+            self.assertEqual(self.last_evaluations, [])
 
     def test_complete_multi_output_derivation_exports_and_imports_both_roots(self):
         dev = '/nix/store/' + '4' * 32 + '-development'
