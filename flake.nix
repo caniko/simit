@@ -99,6 +99,8 @@
           || pkgs.lib.hasInfix "/src/review/assets/" pathString
           || pkgs.lib.hasSuffix "/src/render/ci/nix_group.py" pathString
           || pkgs.lib.hasSuffix "/tests/fixtures/nix-groups-contract.py" pathString
+          || pkgs.lib.hasSuffix "/tests/fixtures/report-jq.sh" pathString
+          || pkgs.lib.hasSuffix "/tests/fixtures/report-cli.sh" pathString
           || pkgs.lib.hasSuffix "ci-actions.json" pathString
           || pkgs.lib.hasSuffix "/.github" pathString
           || pkgs.lib.hasSuffix "/.github/workflows" pathString
