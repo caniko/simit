@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Opt-in completion-driven custody for enrolled original branch/PR producers,
+  with bounded log/artifact capture and idempotent producer-source status reports.
+
+### Added
+
 - Opt-in shared-store Nix build groups with complete installable assignments,
   discovered-check coverage admission and per-output failure evidence.
 - Independent Rust, full-flake evaluation and optional realization lanes for

@@ -391,6 +391,50 @@ member fails the job while the other members still produce diagnostic evidence.
 Grouped jobs have `build (<group>)` contexts. Qualify the new evidence and migrate
 required contexts together before retiring a monolithic flake-check gate.
 
+### Completion-driven producer custody
+
+`[ci.custody]` generates a trusted default-branch `workflow_run` observer. Enroll
+workflow names, source paths, every required job name and every required artifact
+name. Branch/PR producers must use original attempt 1; the observer never reruns
+producers and never checks out or executes their source or artifacts.
+
+```toml
+[ci.custody]
+repository = "owner/repository"
+producer_attempt = 1
+status_context = "simit/producer-custody"
+
+[ci.custody.producers.CI]
+workflow = ".github/workflows/ci.yaml"
+jobs = ["rust", "evaluation"]
+
+[ci.custody.producers."Nix installable builds"]
+workflow = ".github/workflows/nix-builds.yaml"
+jobs = ["build (network)", "build (pinentry)"]
+artifacts = ["nix-build-0", "nix-build-1"]
+```
+
+GitHub executes `workflow_run` from the default branch and fires it when **any**
+listed workflow completes. Install the observer on that branch before testing
+it with candidate producers. The first event may record a pending observation;
+the last completion aggregates every enrolled producer for the same source head,
+branch and event. Duplicate identities, nonoriginal attempts, missing jobs or
+artifacts, failed/skipped required jobs and incomplete custody cannot succeed.
+
+The observer retains source-workflow hashes, original jobs, provider log archives
+and required artifact bytes. Archives are hashed without extraction. Capture and
+upload must both complete before source-head status success. Reporting is
+idempotent and explicitly targets the producer commit, not the observer's default-
+branch SHA. Separate `/push` and `/pull_request` status contexts preserve producer
+independence. Same-repository branch/PR custody is supported; signed-tag release
+attempt policy and fork custody require separately qualified enrollment.
+
+The observer has only contents/actions read and statuses write permissions. It
+provides observation custody, not independent execution acceptance. Keep native
+test/build contexts and consumer receipt validation authoritative. Qualify its
+default-branch installation, completion ordering, source-head reporting and
+all-producer aggregation before replacing an existing waiting collector.
+
 Configured matrices normally coalesce a branch push with its pull request. Set
 `[ci.nix_build].separate_events = true` when acceptance requires both original
 producers: the concurrency group then includes the workflow ref and event name,

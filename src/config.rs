@@ -22,6 +22,7 @@ use toml_edit::{Array, DocumentMut, InlineTable, Item, Table, Value, value};
 
 use crate::cli::{CiProvider, CrowWorkflowFormat, Platform, Runtime, WorkspaceStrategy};
 use crate::user_config::validate_runner_label;
+pub mod custody;
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -456,6 +457,9 @@ pub struct CiConfig {
     /// Options scoped to the hosted Nix installable matrix, never release jobs.
     #[serde(default)]
     pub nix_build: NixBuildConfig,
+    /// Completion-driven capture of enrolled original CI producers.
+    #[serde(default)]
+    pub custody: Option<custody::Config>,
     /// Additional required integration gates (e.g. `nix run .#test-gel`).
     /// Rendered as dedicated required jobs; failures block publication.
     #[serde(default)]
@@ -2036,6 +2040,14 @@ impl ProjectConfig {
         validate_nonempty_strings("simit project config: [ci].packages", &self.ci.packages)?;
         validate_nonempty_strings("simit project config: [ci].nix_builds", &self.ci.nix_builds)?;
         validate_nix_build_config(self)?;
+        if let Some(custody) = &self.ci.custody {
+            custody.validate()?;
+            if self.ci.platform.is_some_and(|p| p != Platform::Github)
+                || self.ci.provider.is_some_and(|p| p != CiProvider::Actions)
+            {
+                bail!("[ci.custody] requires GitHub Actions");
+            }
+        }
         if self
             .ci
             .nix_builds
@@ -3698,6 +3710,24 @@ fn set_nix_build_table(table: &mut Table, options: &NixBuildConfig) {
 }
 
 fn set_ci_table(table: &mut Table, ci: &CiConfig) {
+    if let Some(config) = &ci.custody {
+        let mut custody = Table::new();
+        custody["repository"] = value(&config.repository);
+        custody["status_context"] = value(&config.status_context);
+        custody["producer_attempt"] = value(config.producer_attempt as i64);
+        let mut producers = Table::new();
+        for (name, producer) in &config.producers {
+            let mut entry = Table::new();
+            entry["workflow"] = value(&producer.workflow);
+            set_string_array(&mut entry, "jobs", &producer.jobs);
+            set_string_array(&mut entry, "artifacts", &producer.artifacts);
+            producers[name] = Item::Table(entry);
+        }
+        custody["producers"] = Item::Table(producers);
+        table["custody"] = Item::Table(custody);
+    } else {
+        table.remove("custody");
+    }
     set_optional_string(table, "provider", ci.provider.map(ci_provider_name));
     set_optional_string(table, "platform", ci.platform.map(Platform::as_str));
     set_optional_string(table, "runtime", ci.runtime.map(runtime_name));
