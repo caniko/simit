@@ -346,6 +346,47 @@ fn coordinated_package_names_keep_distinct_jobs_and_dependency_edges() {
 }
 
 #[test]
+fn wide_publisher_report_keeps_formatter_stable_dependency_edges() {
+    let temp = publisher_project("coordinated");
+    let first = "publisher-alpha-with-a-long-package-name";
+    let second = "publisher-beta-with-a-long-package-name";
+    fs::write(
+        temp.path().join("Cargo.toml"),
+        format!("[package]\nname='{first}'\nversion='0.1.0'\nedition='2024'\nlicense='MIT'\n[workspace]\nmembers=['dependent']\nresolver='3'\n"),
+    )
+    .unwrap();
+    fs::write(
+        temp.path().join("dependent/Cargo.toml"),
+        format!("[package]\nname='{second}'\nversion='0.1.0'\nedition='2024'\nlicense='MIT'\n[dependencies]\n{first}={{path='..',version='0.1.0'}}\n"),
+    )
+    .unwrap();
+    let output = common::simit()
+        .current_dir(temp.path())
+        .args(["init", "ci"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let text = fs::read_to_string(
+        temp.path()
+            .join(".github/workflows/trusted-publish-workspace.yaml"),
+    )
+    .unwrap();
+    assert!(text.contains("  publish-report:\n    needs:\n      - publish-"));
+    let workflow: Value = serde_yaml::from_str(&text).unwrap();
+    let needs = &workflow["jobs"]["publish-report"]["needs"];
+    assert_eq!(needs[0], format!("publish-{first}"));
+    assert_eq!(needs[1], format!("publish-{second}"));
+    assert_eq!(needs.as_sequence().unwrap().len(), 2);
+    assert_eq!(workflow["jobs"]["publish-report"]["if"], "always()");
+    let check = common::simit()
+        .current_dir(temp.path())
+        .args(["init", "ci", "--check", "--diff"])
+        .output()
+        .unwrap();
+    assert!(check.status.success(), "{check:?}");
+}
+
+#[test]
 fn tag_archive_generation_rejects_secret_contexts_in_all_publication_modes() {
     for mode in ["single", "members", "coordinated"] {
         for policy in [
