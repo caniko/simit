@@ -47,6 +47,128 @@ fn write_archive(root: &Path, raw: &[u8], admission: &mut ArchiveAdmission) -> s
 }
 
 #[test]
+fn case_hack_collisions_are_denied_before_any_import_effect() {
+    let root = tempfile::tempdir().unwrap();
+    let out = path('0', "input");
+    for names in [
+        vec![b"A".to_vec(), b"A~nix~case~hack~1".to_vec(), b"a".to_vec()],
+        vec![b"A".to_vec(), b"a".to_vec()],
+        vec![vec![0xff, b'A'], vec![0xff, b'a']],
+    ] {
+        let node = directory(
+            names
+                .into_iter()
+                .map(|name| (name, regular(b"", false)))
+                .collect(),
+        );
+        let raw = export(vec![record(&out, node, &[], "")]);
+        let mut admission = admitted(vec![out.clone()]);
+        let archive = write_archive(root.path(), &raw, &mut admission);
+        let mut imports = 0;
+        let result = admit_archive(&archive, root.path(), &admission, &Cancellation::default())
+            .and_then(|archive| {
+                archive.consume(|_| {
+                    imports += 1;
+                    Ok(())
+                })
+            });
+        assert!(result.is_err());
+        assert_eq!(imports, 0);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn oversized_environment_is_denied_before_restore_mutates_the_store() {
+    use simit::ci_runtime::dependencies::StoreTools;
+    use std::{os::unix::fs::symlink, process::Command};
+    const CHILD: &str = "SIMIT_RESTORE_ENV_BUDGET_TEST_ROOT";
+    if let Some(root) = std::env::var_os(CHILD) {
+        let root = std::path::PathBuf::from(root);
+        let out = path('0', "input");
+        let raw = export(vec![record(&out, regular(b"", false), &[], "")]);
+        let mut admission = admitted(vec![out]);
+        let archive = write_archive(&root, &raw, &mut admission);
+        let fixture =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/dependency-store.sh");
+        let tools = StoreTools {
+            nix_store: root.join("nix-store"),
+            nix: root.join("nix"),
+        };
+        symlink(&fixture, &tools.nix_store).unwrap();
+        symlink(&fixture, &tools.nix).unwrap();
+        let result = admit_archive(&archive, &root, &admission, &Cancellation::default())
+            .unwrap()
+            .restore_with_tools(&root, &tools);
+        assert!(result.is_err(), "{result:?}");
+        assert!(!root.join("effects").exists());
+        assert!(!root.join("imported").exists());
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "oversized_environment_is_denied_before_restore_mutates_the_store",
+            "--nocapture",
+        ])
+        .env(CHILD, root.path())
+        .env("SIMIT_RESTORE_EXCESS_ENV", "x".repeat(70000))
+        .env("SIMIT_RESTORE_MORE_ENV", "x".repeat(70000))
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+}
+
+#[cfg(unix)]
+#[test]
+fn long_path_closures_restore_with_portable_argv_batches_for_paths_and_roots() {
+    use simit::ci_runtime::dependencies::StoreTools;
+    use std::os::unix::fs::symlink;
+    let root = tempfile::tempdir().unwrap();
+    let closure: Vec<_> = (0..1100)
+        .map(|index| path('0', &format!("{}{:05}", "x".repeat(206), index)))
+        .collect();
+    assert!(closure.iter().all(|path| path.len() == 255));
+    let raw = export(
+        closure
+            .iter()
+            .map(|path| record(path, regular(b"", false), &[], ""))
+            .collect(),
+    );
+    let mut admission = admitted(closure.clone());
+    admission.outputs = closure.clone();
+    let archive = write_archive(root.path(), &raw, &mut admission);
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/dependency-store.sh");
+    let tools = StoreTools {
+        nix_store: root.path().join("nix-store"),
+        nix: root.path().join("nix"),
+    };
+    symlink(&fixture, &tools.nix_store).unwrap();
+    symlink(&fixture, &tools.nix).unwrap();
+    fs::write(root.path().join("argv-budget"), b"65536").unwrap();
+    let receipt = admit_archive(&archive, root.path(), &admission, &Cancellation::default())
+        .unwrap()
+        .restore_with_tools(root.path(), &tools)
+        .unwrap();
+    assert_eq!(receipt.restored, closure);
+    assert!(!receipt.qualification_execution);
+    let effects = fs::read_to_string(root.path().join("effects")).unwrap();
+    assert_eq!(
+        effects.lines().filter(|line| *line == "--import").count(),
+        1
+    );
+    for flag in ["--verify-path", "path-info"] {
+        let observed: Vec<_> = effects
+            .lines()
+            .filter(|line| line.starts_with(flag))
+            .flat_map(|line| line.split_whitespace().skip(1))
+            .collect();
+        assert_eq!(observed, receipt.restored);
+    }
+}
+
+#[test]
 fn entire_record_inventory_and_closed_sorted_references_are_admitted() {
     let root = path('0', "input");
     let other = path('3', "other");

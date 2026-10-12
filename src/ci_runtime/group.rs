@@ -548,10 +548,19 @@ fn hooks(
         .iter()
         .enumerate()
         .map(|(index, script)| {
+            cancellation.check()?;
+            let script_path = folder.join(format!("{category}-{index}.script"));
+            let mut script_file = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&script_path)?;
+            script_file.write_all(script.as_bytes())?;
+            drop(script_file);
             let mut command = std::process::Command::new("bash");
             command
                 .current_dir(cwd)
-                .args(["-e", "-o", "pipefail", "-c", script])
+                .args(["-e", "-o", "pipefail", "--"])
+                .arg(&script_path)
                 .env("INSTALLABLE", installable)
                 .env("SIMIT_NIX_BUILD_RESULTS", folder);
             member_status(dispatch(

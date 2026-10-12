@@ -11,6 +11,7 @@ use flate2::read::MultiGzDecoder;
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeSet,
+    ffi::{OsStr, OsString},
     fs::{self, File},
     io::{Read, Seek, Write},
     path::{Path, PathBuf},
@@ -21,6 +22,11 @@ const MAX_NODES: u64 = 1_000_000;
 const MAX_REFERENCES: u64 = 1_000_000;
 const MAX_DEPTH: usize = 64;
 const COMPRESSED_OVERHEAD: u64 = 1024 * 1024;
+// Include inherited environment, strings, terminators and pointer tables.
+// Leave ample headroom below Darwin's 256 KiB combined exec limit, including
+// interpreter/wrapper overhead for independently provisioned executables.
+const EXEC_BYTE_BUDGET: usize = 128 * 1024;
+const PATH_BATCH_BYTE_BUDGET: usize = 60 * 1024;
 
 /// Expected bytes and inventories obtained from separately validated provenance
 /// and fresh evaluation. These values alone establish no source/run authority.
@@ -149,9 +155,23 @@ impl VerifiedArchive {
         let outputs = self.outputs.clone();
         let digest = self.digest.clone();
         let cancellation = self.cancellation.clone();
+        // Freeze the accounted environment and prepare every command batch
+        // before import. An impossible exec envelope must have zero store effects.
+        let environment: Vec<_> = std::env::vars_os().collect();
+        exec_batches(&[], tools.nix_store.as_os_str(), "--import", &environment)?;
+        let verify = exec_batches(
+            &closure,
+            tools.nix_store.as_os_str(),
+            "--verify-path",
+            &environment,
+        )?;
+        let roots = exec_batches(&outputs, tools.nix.as_os_str(), "path-info", &environment)?;
         self.consume(|stream| {
             let mut command = std::process::Command::new(&tools.nix_store);
-            command.arg("--import");
+            command
+                .env_clear()
+                .envs(environment.iter().cloned())
+                .arg("--import");
             let status = super::process::run_with_input(
                 &mut command,
                 stream,
@@ -164,10 +184,14 @@ impl VerifiedArchive {
                 "dependency import failed ({status}); see retained import log"
             );
             let mut runner = CommandRunner;
-            for (index, paths) in closure.chunks(1024).enumerate() {
+            for (index, paths) in verify.into_iter().enumerate() {
                 cancellation.check()?;
                 let mut command = std::process::Command::new(&tools.nix_store);
-                command.arg("--verify-path").args(paths);
+                command
+                    .env_clear()
+                    .envs(environment.iter().cloned())
+                    .arg("--verify-path")
+                    .args(&closure[paths]);
                 let status = runner.run(
                     &mut command,
                     &evidence_root.join(format!("verify-{index}.stdout")),
@@ -179,10 +203,14 @@ impl VerifiedArchive {
                     "dependency path verification failed ({status})"
                 );
             }
-            for (index, paths) in outputs.chunks(1024).enumerate() {
+            for (index, paths) in roots.into_iter().enumerate() {
                 cancellation.check()?;
                 let mut command = std::process::Command::new(&tools.nix);
-                command.arg("path-info").args(paths);
+                command
+                    .env_clear()
+                    .envs(environment.iter().cloned())
+                    .arg("path-info")
+                    .args(&outputs[paths]);
                 let status = runner.run(
                     &mut command,
                     &evidence_root.join(format!("roots-{index}.stdout")),
@@ -208,6 +236,50 @@ impl VerifiedArchive {
         self.stream.rewind()?;
         importer(self.stream)
     }
+}
+
+fn exec_batches(
+    paths: &[String],
+    executable: &OsStr,
+    flag: &str,
+    environment: &[(OsString, OsString)],
+) -> Result<Vec<std::ops::Range<usize>>> {
+    let pointer = std::mem::size_of::<usize>().max(8);
+    let base = environment.iter().try_fold(
+        // Two pointer-table terminators, argv[0], and the fixed argument.
+        2 * pointer + executable.len() + 1 + pointer + flag.len() + 1 + pointer,
+        |size, (key, value)| {
+            size.checked_add(key.len())
+                .and_then(|size| size.checked_add(value.len()))
+                .and_then(|size| size.checked_add(2 + pointer))
+                .context("restore exec environment size overflow")
+        },
+    )?;
+    ensure!(
+        base < EXEC_BYTE_BUDGET,
+        "restore exec environment exceeds byte budget"
+    );
+    let batch_budget = EXEC_BYTE_BUDGET.min(base + PATH_BATCH_BYTE_BUDGET);
+    let mut batches = Vec::new();
+    let mut start = 0;
+    let mut size = base;
+    for (index, path) in paths.iter().enumerate() {
+        let bytes = path.len() + 1 + pointer;
+        ensure!(
+            bytes <= batch_budget - base,
+            "restore path exceeds exec byte budget"
+        );
+        if bytes > batch_budget - size {
+            batches.push(start..index);
+            start = index;
+            size = base;
+        }
+        size += bytes;
+    }
+    if start < paths.len() {
+        batches.push(start..paths.len());
+    }
+    Ok(batches)
 }
 
 /// Hash and decompress a pinned regular archive, then parse every record before
@@ -511,6 +583,7 @@ impl<R: Read> ExportInventory<'_, R> {
             }
             b"directory" => {
                 let mut previous = Vec::new();
+                let mut folded = BTreeSet::new();
                 loop {
                     let field = self.string(32)?;
                     if field == b")" {
@@ -527,6 +600,14 @@ impl<R: Read> ExportInventory<'_, R> {
                             && !name.contains(&b'/')
                             && !name.contains(&0),
                         "invalid or unordered NAR entry name"
+                    );
+                    // Nix 2.34.8's default Darwin case hack can rewrite aliases
+                    // into names colliding with real entries. Conservatively
+                    // deny ASCII case aliases on every platform before import,
+                    // retaining unsigned byte ordering and non-UTF8 names.
+                    ensure!(
+                        folded.insert(name.iter().map(u8::to_ascii_lowercase).collect::<Vec<_>>()),
+                        "NAR directory contains case-hack aliases"
                     );
                     previous = name;
                     self.expect(b"node")?;

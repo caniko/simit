@@ -114,6 +114,24 @@ impl Fixture {
 }
 
 #[test]
+fn accepted_megabyte_hooks_execute_without_an_oversized_argv() {
+    let mut f = Fixture::new();
+    let mut script = String::from("#");
+    script.push_str(&"x".repeat(1024 * 1024 - 200));
+    script.push_str("\nprintf '%s' \"$INSTALLABLE\" > \"$SIMIT_NIX_BUILD_RESULTS/large-hook\"\n");
+    f.spec["post_build"] = json!([script]);
+    let output = f.run("success");
+    assert!(output.status.success(), "{output:?}");
+    for (index, member) in f.spec["members"].as_array().unwrap().iter().enumerate() {
+        assert_eq!(
+            fs::read_to_string(f.root.path().join(format!("results/{index}/large-hook"))).unwrap(),
+            member.as_str().unwrap()
+        );
+    }
+    assert_eq!(f.receipt()["success"], true);
+}
+
+#[test]
 fn complete_receipt_preserves_member_evidence_and_hook_context() {
     let f = Fixture::new();
     let output = f.run("success");

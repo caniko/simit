@@ -3,6 +3,14 @@
 set -eu
 root=$(dirname "$0")
 printf '%s\n' "$*" >> "$root/effects"
+if test -f "$root/argv-budget"; then
+  bytes=0
+  for argument in "$@"; do bytes=$((bytes + ${#argument} + 9)); done
+  if test "$bytes" -gt "$(cat "$root/argv-budget")"; then
+    printf '%s\n' 'argument list exceeds fixture exec limit' >&2
+    exit 98
+  fi
+fi
 case "$1" in
   --import)
     cat > "$root/imported"

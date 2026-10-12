@@ -3,9 +3,10 @@ use super::cancellation::Cancellation;
 use anyhow::{Context, Result, ensure};
 use std::{
     fs::{File, OpenOptions},
-    io::Write,
+    io::{Read, Write},
     path::Path,
     process::{Child, Command, Stdio},
+    sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant},
 };
 
@@ -43,8 +44,8 @@ impl Runner for CommandRunner {
     }
 }
 
-struct ChildGuard(Child);
-impl Drop for ChildGuard {
+struct ChildGuard<'a>(Child, &'a AtomicBool);
+impl Drop for ChildGuard<'_> {
     fn drop(&mut self) {
         #[cfg(unix)]
         if let Some(pid) = rustix::process::Pid::from_raw(self.0.id() as i32) {
@@ -52,6 +53,7 @@ impl Drop for ChildGuard {
         }
         let _ = self.0.kill();
         let _ = self.0.wait();
+        self.1.store(true, Ordering::SeqCst);
     }
 }
 
@@ -98,6 +100,64 @@ fn run_bounded(
     limits: Limits,
     input: Option<File>,
 ) -> Result<i32> {
+    run_bounded_with_readers(
+        command,
+        stdout_path,
+        stderr_path,
+        cancellation,
+        limits,
+        input,
+        &mut Readers::default(),
+    )
+}
+
+#[derive(Default)]
+struct Readers {
+    #[cfg(test)]
+    fail_after: Option<usize>,
+    #[cfg(test)]
+    started: usize,
+}
+
+impl Readers {
+    fn start<'scope, 'env: 'scope>(
+        &mut self,
+        scope: &'scope std::thread::Scope<'scope, 'env>,
+        input: impl Read + Send + 'scope,
+        output: File,
+        maximum: u64,
+        signals: (&'scope AtomicBool, &'scope AtomicBool),
+    ) -> Result<std::thread::ScopedJoinHandle<'scope, Result<()>>> {
+        #[cfg(test)]
+        {
+            ensure!(
+                self.fail_after != Some(self.started),
+                "cannot start output capture reader"
+            );
+            self.started += 1;
+        }
+        let (stopped, failed) = signals;
+        std::thread::Builder::new()
+            .spawn_scoped(scope, move || {
+                let result = capture(input, output, maximum, stopped);
+                if result.is_err() {
+                    failed.store(true, Ordering::SeqCst);
+                }
+                result
+            })
+            .context("cannot start output capture reader")
+    }
+}
+
+fn run_bounded_with_readers(
+    command: &mut Command,
+    stdout_path: &Path,
+    stderr_path: &Path,
+    cancellation: &Cancellation,
+    limits: Limits,
+    input: Option<File>,
+    readers: &mut Readers,
+) -> Result<i32> {
     cancellation.check()?;
     let stdout = OpenOptions::new()
         .write(true)
@@ -114,51 +174,247 @@ fn run_bounded(
     }
     command
         .stdin(input.map_or_else(Stdio::null, Stdio::from))
-        .stdout(stdout.try_clone()?)
-        .stderr(stderr.try_clone()?);
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     let result = (|| {
-        let mut child = ChildGuard(command.spawn().context("cannot dispatch group process")?);
         let deadline = Instant::now()
             .checked_add(limits.timeout)
             .context("invalid process deadline")?;
-        loop {
-            cancellation.check()?;
-            ensure!(
-                stdout.metadata()?.len() <= limits.stdout
-                    && stderr.metadata()?.len() <= limits.stderr,
-                "group process exceeded output limits"
+        let stopped = AtomicBool::new(false);
+        let capture_failed = AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            let mut child = ChildGuard(
+                command.spawn().context("cannot dispatch group process")?,
+                &stopped,
             );
-            if let Some(status) = child.0.try_wait()? {
-                ensure!(
-                    stdout.metadata()?.len() <= limits.stdout
-                        && stderr.metadata()?.len() <= limits.stderr,
-                    "completed group process exceeded output limits"
-                );
-                #[cfg(unix)]
-                let signal_status = {
-                    use std::os::unix::process::ExitStatusExt;
-                    status.signal().map(|signal| -signal)
-                };
-                #[cfg(not(unix))]
-                let signal_status = None;
-                return Ok(status.code().or(signal_status).unwrap_or(128));
+            let output = child.0.stdout.take().context("missing stdout pipe")?;
+            let errors = child.0.stderr.take().context("missing stderr pipe")?;
+            #[cfg(unix)]
+            {
+                // Nonblocking reads allow cleanup even when an escaped descendant
+                // retains a pipe. Readers drain available bytes before stopping.
+                use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
+                fcntl_setfl(&output, fcntl_getfl(&output)? | OFlags::NONBLOCK)?;
+                fcntl_setfl(&errors, fcntl_getfl(&errors)? | OFlags::NONBLOCK)?;
             }
-            ensure!(
-                Instant::now() < deadline,
-                "group process exceeded time limit"
-            );
-            std::thread::sleep(Duration::from_millis(20));
-        }
+            let stdout_file = stdout.try_clone()?;
+            let stderr_file = stderr.try_clone()?;
+            let stdout_reader = readers.start(
+                scope,
+                output,
+                stdout_file,
+                limits.stdout,
+                (&stopped, &capture_failed),
+            )?;
+            let stderr_reader = readers.start(
+                scope,
+                errors,
+                stderr_file,
+                limits.stderr,
+                (&stopped, &capture_failed),
+            )?;
+            let outcome = (|| {
+                loop {
+                    cancellation.check()?;
+                    ensure!(
+                        !capture_failed.load(Ordering::SeqCst),
+                        "group process output capture failed"
+                    );
+                    if let Some(status) = child.0.try_wait()? {
+                        #[cfg(unix)]
+                        let signal_status = {
+                            use std::os::unix::process::ExitStatusExt;
+                            status.signal().map(|signal| -signal)
+                        };
+                        #[cfg(not(unix))]
+                        let signal_status = None;
+                        return Ok(status.code().or(signal_status).unwrap_or(128));
+                    }
+                    ensure!(
+                        Instant::now() < deadline,
+                        "group process exceeded time limit"
+                    );
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            })();
+            // Kill owned descendants before joining readers; inherited pipes
+            // must never prevent cancellation or deadline cleanup.
+            drop(child);
+            let stdout_result = stdout_reader
+                .join()
+                .map_err(|_| anyhow::anyhow!("stdout capture thread panicked"))?;
+            let stderr_result = stderr_reader
+                .join()
+                .map_err(|_| anyhow::anyhow!("stderr capture thread panicked"))?;
+            if outcome
+                .as_ref()
+                .is_err_and(|error: &anyhow::Error| error.is::<super::cancellation::Cancelled>())
+            {
+                return outcome;
+            }
+            stdout_result?;
+            stderr_result?;
+            outcome
+        })
     })();
     if let Err(error) = &result {
-        writeln!(stderr, "simit: {error}")?;
+        // Diagnostics share the same hard stderr budget as child bytes.
+        let diagnostic = format!("simit: {error}\n");
+        let remaining = limits.stderr.saturating_sub(stderr.metadata()?.len());
+        let length = diagnostic
+            .len()
+            .min(remaining.try_into().unwrap_or(usize::MAX));
+        stderr.write_all(&diagnostic.as_bytes()[..length])?;
     }
     result
+}
+
+fn capture(
+    mut input: impl Read,
+    mut output: File,
+    maximum: u64,
+    stopped: &AtomicBool,
+) -> Result<()> {
+    let mut remaining = maximum;
+    let mut buffer = [0; 64 * 1024];
+    loop {
+        let count = match input.read(&mut buffer) {
+            Ok(0) => return Ok(()),
+            Ok(count) => count,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                if stopped.load(Ordering::SeqCst) {
+                    return Ok(());
+                }
+                std::thread::sleep(Duration::from_millis(5));
+                continue;
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let admitted = count.min(remaining.try_into().unwrap_or(usize::MAX));
+        output.write_all(&buffer[..admitted])?;
+        remaining -= admitted as u64;
+        ensure!(admitted == count, "group process exceeded output limits");
+    }
 }
 
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    #[test]
+    fn partial_reader_start_failure_returns_error_and_cleans_up() {
+        for fail_after in [0, 1] {
+            let root = tempfile::tempdir().unwrap();
+            let marker = root.path().join("late-effect");
+            let start = Instant::now();
+            let result = run_bounded_with_readers(
+                Command::new("sh")
+                    .args(["-c", "sleep 0.2; touch \"$MARKER\""])
+                    .env("MARKER", &marker),
+                &root.path().join("stdout"),
+                &root.path().join("stderr"),
+                &Cancellation::default(),
+                Limits {
+                    timeout: Duration::from_secs(2),
+                    stdout: 32,
+                    stderr: 256,
+                },
+                None,
+                &mut Readers {
+                    fail_after: Some(fail_after),
+                    started: 0,
+                },
+            );
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("cannot start output capture reader")
+            );
+            assert!(start.elapsed() < Duration::from_secs(1));
+            std::thread::sleep(Duration::from_millis(250));
+            assert!(!marker.exists());
+        }
+    }
+
+    #[test]
+    fn child_cleanup_stops_a_reader_even_without_pipe_eof() {
+        struct Pending;
+        impl Read for Pending {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::ErrorKind::WouldBlock.into())
+            }
+        }
+        let stopped = AtomicBool::new(false);
+        let output = tempfile::tempfile().unwrap();
+        std::thread::scope(|scope| {
+            use std::os::unix::process::CommandExt;
+            let reader = scope.spawn(|| capture(Pending, output, 32, &stopped));
+            let child = ChildGuard(
+                Command::new("sh")
+                    .args(["-c", "sleep 10"])
+                    .process_group(0)
+                    .spawn()
+                    .unwrap(),
+                &stopped,
+            );
+            drop(child);
+            assert!(stopped.load(Ordering::SeqCst));
+            reader.join().unwrap().unwrap();
+        });
+    }
+    #[test]
+    fn rapid_output_is_capped_before_evidence_files_grow() {
+        for script in [
+            "head -c 262144 /dev/zero",
+            "head -c 262144 /dev/zero >&2",
+            "head -c 262144 /dev/zero & head -c 262144 /dev/zero >&2; wait",
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let stdout = root.path().join("stdout");
+            let stderr = root.path().join("stderr");
+            let result = run_bounded(
+                Command::new("sh").args(["-c", script]),
+                &stdout,
+                &stderr,
+                &Cancellation::default(),
+                Limits {
+                    timeout: Duration::from_secs(2),
+                    stdout: 32,
+                    stderr: 64,
+                },
+                None,
+            );
+            assert!(result.is_err());
+            assert!(std::fs::metadata(&stdout).unwrap().len() <= 32);
+            assert!(std::fs::metadata(&stderr).unwrap().len() <= 64);
+        }
+    }
+    #[test]
+    fn both_pipes_drain_exact_limit_binary_output_after_child_exit() {
+        let root = tempfile::tempdir().unwrap();
+        let stdout = root.path().join("stdout");
+        let stderr = root.path().join("stderr");
+        let status = run_bounded(
+            Command::new("sh").args([
+                "-c",
+                "head -c 131072 /dev/zero & head -c 131072 /dev/zero >&2; wait; exit 7",
+            ]),
+            &stdout,
+            &stderr,
+            &Cancellation::default(),
+            Limits {
+                timeout: Duration::from_secs(2),
+                stdout: 131072,
+                stderr: 131072,
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(status, 7);
+        assert_eq!(std::fs::read(stdout).unwrap(), vec![0; 131072]);
+        assert_eq!(std::fs::read(stderr).unwrap(), vec![0; 131072]);
+    }
     #[test]
     fn nonzero_output_bytes_are_retained_and_overflow_is_denied() {
         for (script, expected) in [

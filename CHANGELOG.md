@@ -30,6 +30,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Enforce grouped stdout/stderr limits before evidence writes, execute accepted
+  large hooks from retained scripts, and make output-reader startup failure-safe.
+  Deny NAR case-hack aliases before import and budget restore argv/environment
+  bytes before any store mutation for portable closure verification.
 - Preserve Unix cancellation and signal exit statuses across grouped execution,
   retain admission diagnostics, and force fresh rebuilds onto the current worker.
   Bootstrap uses public credential-free Nix fetching and portable hashing, with

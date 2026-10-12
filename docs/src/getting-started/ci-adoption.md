@@ -85,10 +85,13 @@ members still run. Dispatch and process-limit failures are recorded as status
 `-9` for SIGKILL). Member stdout/stderr and hook output are retained as separate
 files, and failed admission observations include their actionable stderr in the
 CLI diagnostic.
-Subprocess output is bounded to 16 MiB stdout and 64 MiB stderr per command,
+Subprocess output is capped before evidence writes to 16 MiB stdout and 64 MiB stderr per command,
 with a six-hour maximum process lifetime; configured workflow timeouts still
 apply. Unix cancellation stops execution and terminates the current process
 group rather than executing later members.
+Accepted hooks up to 1 MiB execute from retained `.script` files, avoiding
+platform per-argument limits. Output-reader startup failures return through the
+same dispatch-failure path and clean up any started readers and child processes.
 Embedding applications use `execute_with` with a caller-owned `Cancellation`
 token and `Runner`. The library installs no process-global signal handlers. The
 CLI owns one cancellation flag across its entire command lifetime, including
@@ -135,10 +138,16 @@ depth is strictly below **64**, directory names are at most **255 bytes**,
 and symlink targets are at most **4095 bytes**. The first invalid value is denied
 even in a second record after a valid first record, before any import effect.
 Directory names are sorted as raw bytes, including non-UTF-8 names.
+ASCII case aliases within a directory are conservatively denied on all platforms
+before import, preventing Darwin's case-hack rewrites from colliding with real entries.
 
 `VerifiedArchive::restore` dispatches one `nix-store --import` with the fully
 rewound validated descriptor, then verifies admitted paths and observes evaluated
 roots. Nonzero import/verification status produces no successful restore receipt.
+All restore command batches are prepared before import against a 128 KiB combined
+argv/environment budget, including string terminators and pointer tables. Path
+batches additionally use at most 60 KiB. Commands inherit the same frozen,
+accounted environment; an oversized environment fails before store mutation.
 `consume` supports a caller-owned importer with the same descriptor and one-use
 lifetime. Restoration receipts always state `qualification_execution: false`;
 fresh checks still require their separate current-worker rebuild.
