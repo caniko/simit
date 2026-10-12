@@ -1017,6 +1017,9 @@ fn custom_mode_refuses_rustfmt_package_disagreement_before_writing() {
 #[test]
 fn custom_mode_accepts_skillnet_rs_harbor_flake() {
     let temp = init_package();
+    let toolchain = temp.path().join("rust-toolchain-msrv.toml");
+    let owned_manifest = "[toolchain]\nchannel = \"1.90.0\"\nprofile = \"default\"\n";
+    fs::write(&toolchain, owned_manifest).unwrap();
     fs::write(
         temp.path().join("simit.toml"),
         custom_skillnet_flake_config(),
@@ -1039,6 +1042,7 @@ fn custom_mode_accepts_skillnet_rs_harbor_flake() {
     assert_eq!(flake, with_rustfmt_package_arg(custom_skillnet_flake()));
     assert!(temp.path().join("nix/treefmt.nix").exists());
     assert!(temp.path().join("nix/pre-commit.nix").exists());
+    assert_eq!(fs::read_to_string(&toolchain).unwrap(), owned_manifest);
 
     let check_status = simit()
         .current_dir(temp.path())
