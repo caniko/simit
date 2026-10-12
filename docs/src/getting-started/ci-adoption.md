@@ -497,6 +497,8 @@ provides observation custody, not independent execution acceptance. Keep native
 test/build contexts and consumer receipt validation authoritative. Qualify its
 default-branch installation, completion ordering, source-head reporting and
 all-producer aggregation before replacing an existing waiting collector.
+Use the [installed-observer acceptance procedure](../ci-custody-acceptance.md)
+to retain both completion orders, isolation and live failure/revocation evidence.
 
 Simit's own enrollment observes its native `CI/test` producer and a short,
 source-bound `Custody qualification fixture` producer. The fixture uploads inert
