@@ -286,27 +286,15 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
         &signed_workflow.stdout,
         &fs::read(trusted_root.join(&policy.source_workflow_path))?,
     )?;
-    output(
-        data_command("git", state.path())?
-            .arg("-C")
-            .arg(&source)
-            .args(["checkout", "--detach", &bound.source_sha]),
-    )?;
+    checkout_signed_source(state.path(), &source, &bound.source_sha)?;
     let tracked = output(
         data_command("git", state.path())?
             .arg("-C")
             .arg(&source)
             .args(["ls-files", "--stage", "-z"]),
     )?;
-    ensure!(
-        tracked
-            .stdout
-            .split(|byte| *byte == 0)
-            .filter(|record| !record.is_empty())
-            .all(|record| record.starts_with(b"100644 ") || record.starts_with(b"100755 ")),
-        "signed packaging source contains symlinks or submodules"
-    );
-    validate_manifest_paths(&source)?;
+    let inert_links = super::source::validate_tree(&source, &tracked.stdout)?;
+    validate_manifest_paths_with_links(&source, &inert_links)?;
 
     let artifact_prefix = format!("simit-crate-{name}-");
     let mut artifacts = Vec::new();
@@ -388,6 +376,7 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
     verify_reconstructed_crate(&candidate, &reconstructed, &root)?;
     let checksum = hex::encode(Sha256::digest(&candidate));
     let members = crate_members(&candidate, &root)?;
+    super::source::reject_link_members(&members, &root, &source, &inert_links)?;
     let cargo_manifest = members
         .get(&format!("{root}/Cargo.toml"))
         .context("crate has no normalized manifest")?;
@@ -464,6 +453,23 @@ fn write_verified_member(output: &Path, member: &CrateMember) -> Result<()> {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(output, fs::Permissions::from_mode(member.mode))?;
     }
+    Ok(())
+}
+
+fn checkout_signed_source(state: &Path, source: &Path, revision: &str) -> Result<()> {
+    // Represent signed symlink blobs as inert target-text files. Cargo may not
+    // consume them as manifests, declared inputs or archive members below.
+    output(data_command("git", state)?.arg("-C").arg(source).args([
+        "config",
+        "core.symlinks",
+        "false",
+    ]))?;
+    output(
+        data_command("git", state)?
+            .arg("-C")
+            .arg(source)
+            .args(["checkout", "--detach", revision]),
+    )?;
     Ok(())
 }
 
@@ -555,8 +561,21 @@ fn manifest_string<'a>(table: &'a dyn toml_edit::TableLike, key: &str) -> Option
 
 /// Cargo data-only packaging can read declared manifests, targets, readmes and
 /// licenses. Keep all such reads inside the signed checkout before invoking it.
+#[cfg(test)]
 fn validate_manifest_paths(source: &Path) -> Result<()> {
-    fn path_is_inside(source: &Path, parent: &Path, value: &str) -> bool {
+    validate_manifest_paths_with_links(source, &std::collections::BTreeSet::new())
+}
+
+fn validate_manifest_paths_with_links(
+    source: &Path,
+    links: &std::collections::BTreeSet<std::path::PathBuf>,
+) -> Result<()> {
+    fn path_is_inside(
+        source: &Path,
+        parent: &Path,
+        value: &str,
+        links: &std::collections::BTreeSet<std::path::PathBuf>,
+    ) -> bool {
         let path = Path::new(value);
         if path.is_absolute() || value.contains('\\') {
             return false;
@@ -575,13 +594,14 @@ fn validate_manifest_paths(source: &Path) -> Result<()> {
                 return false;
             }
         }
-        resolved.starts_with(source)
+        resolved.starts_with(source) && !links.contains(&resolved)
     }
     fn inspect(
         source: &Path,
         parent: &Path,
         item: &toml_edit::Item,
         section: Option<&str>,
+        links: &std::collections::BTreeSet<std::path::PathBuf>,
     ) -> Result<()> {
         if let Some(table) = item.as_table_like() {
             for (key, value) in table.iter() {
@@ -594,8 +614,8 @@ fn validate_manifest_paths(source: &Path) -> Result<()> {
                 if ["path", "readme", "license-file", "build", "workspace"].contains(&key) {
                     if let Some(path) = value.as_str() {
                         ensure!(
-                            path_is_inside(source, parent, path),
-                            "Cargo manifest path escapes signed source"
+                            path_is_inside(source, parent, path, links),
+                            "Cargo manifest path escapes signed source or depends on a Git symlink"
                         );
                     }
                 }
@@ -612,12 +632,12 @@ fn validate_manifest_paths(source: &Path) -> Result<()> {
                             pattern
                         };
                         ensure!(
-                            path_is_inside(source, parent, pattern),
-                            "Cargo manifest pattern escapes signed source"
+                            path_is_inside(source, parent, pattern, links),
+                            "Cargo manifest pattern escapes signed source or depends on a Git symlink"
                         );
                     }
                 }
-                inspect(source, parent, value, Some(key))?;
+                inspect(source, parent, value, Some(key), links)?;
             }
         }
         if let Some(tables) = item.as_array_of_tables() {
@@ -627,6 +647,7 @@ fn validate_manifest_paths(source: &Path) -> Result<()> {
                     parent,
                     &toml_edit::Item::Table(table.clone()),
                     section,
+                    links,
                 )?;
             }
         }
@@ -677,6 +698,10 @@ fn validate_manifest_paths(source: &Path) -> Result<()> {
         }
     }
     let mut pending = vec![source.join("Cargo.toml")];
+    ensure!(
+        !links.contains(&source.join("Cargo.lock")),
+        "Cargo lock depends on a signed Git symlink"
+    );
     let mut visited = std::collections::BTreeSet::new();
     while let Some(path) = pending.pop() {
         // Missing references remain Cargo's packaging error. Never parse an
@@ -689,6 +714,10 @@ fn validate_manifest_paths(source: &Path) -> Result<()> {
             path.starts_with(source),
             "Cargo manifest path escapes signed source"
         );
+        ensure!(
+            !links.contains(&path),
+            "Cargo manifest depends on a signed Git symlink"
+        );
         if !visited.insert(path.clone()) {
             continue;
         }
@@ -699,6 +728,7 @@ fn validate_manifest_paths(source: &Path) -> Result<()> {
             parent,
             &toml_edit::Item::Table(manifest.as_table().clone()),
             None,
+            links,
         )?;
         dependency_manifests(manifest.as_table(), parent, &mut pending);
         if let Some(package) = manifest
@@ -1110,6 +1140,188 @@ pub fn wait_for_registry_with(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(unix)]
+    fn data_only_checkout_keeps_hook_links_inert_and_git_source_clean() {
+        let state = TempDir::new().unwrap();
+        let fixture = state.path().join("fixture");
+        output(
+            data_command("git", state.path())
+                .unwrap()
+                .arg("init")
+                .arg(&fixture),
+        )
+        .unwrap();
+        fs::write(fixture.join("README.md"), "regular source").unwrap();
+        fs::create_dir(fixture.join("src")).unwrap();
+        fs::write(fixture.join("src/lib.rs"), "pub fn safe() {}\n").unwrap();
+        fs::write(fixture.join("Cargo.toml"), "[package]\nname='simit-inert-source-fixture'\nversion='1.0.0'\nedition='2021'\nlicense='MIT'\ninclude=['src/**','README.md']\n[workspace]\n").unwrap();
+        output(
+            data_command("cargo", state.path())
+                .unwrap()
+                .args(["generate-lockfile", "--offline", "--manifest-path"])
+                .arg(fixture.join("Cargo.toml")),
+        )
+        .unwrap();
+        let secret = state.path().join("outside-secret");
+        fs::write(&secret, "must never appear in the checkout").unwrap();
+        std::os::unix::fs::symlink(&secret, fixture.join(".pre-commit-config.yaml")).unwrap();
+        output(
+            data_command("git", state.path())
+                .unwrap()
+                .arg("-C")
+                .arg(&fixture)
+                .args(["add", "."]),
+        )
+        .unwrap();
+        // Operator-authorized disposable fixture identity; never release metadata.
+        output(
+            data_command("git", state.path())
+                .unwrap()
+                .arg("-C")
+                .arg(&fixture)
+                .args([
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.com",
+                    "-c",
+                    "commit.gpgsign=false",
+                    "commit",
+                    "-m",
+                    "fixture",
+                ]),
+        )
+        .unwrap();
+        let revision = output(
+            data_command("git", state.path())
+                .unwrap()
+                .arg("-C")
+                .arg(&fixture)
+                .args(["rev-parse", "HEAD"]),
+        )
+        .unwrap();
+        let revision = String::from_utf8(revision.stdout).unwrap();
+        let packages = ["simit-inert-source-fixture".to_owned()];
+        let archive_root = "simit-inert-source-fixture-1.0.0";
+        let archive = state
+            .path()
+            .join(format!("target/package/{archive_root}.crate"));
+        output(
+            reconstruction_command(state.path(), &fixture, &packages)
+                .unwrap()
+                .arg("--offline"),
+        )
+        .unwrap();
+        let candidate = fs::read(&archive).unwrap();
+        let source = state.path().join("source");
+        output(
+            data_command("git", state.path())
+                .unwrap()
+                .arg("init")
+                .arg(&source),
+        )
+        .unwrap();
+        output(
+            data_command("git", state.path())
+                .unwrap()
+                .arg("-C")
+                .arg(&source)
+                .arg("fetch")
+                .arg(&fixture)
+                .arg(revision.trim()),
+        )
+        .unwrap();
+        checkout_signed_source(state.path(), &source, revision.trim()).unwrap();
+        let tracked = output(
+            data_command("git", state.path())
+                .unwrap()
+                .arg("-C")
+                .arg(&source)
+                .args(["ls-files", "--stage", "-z"]),
+        )
+        .unwrap();
+        let links = super::super::source::validate_tree(&source, &tracked.stdout).unwrap();
+        validate_manifest_paths_with_links(&source, &links).unwrap();
+        output(
+            reconstruction_command(state.path(), &source, &packages)
+                .unwrap()
+                .arg("--offline"),
+        )
+        .unwrap();
+        let reconstructed = fs::read(archive).unwrap();
+        verify_reconstructed_crate(&candidate, &reconstructed, archive_root).unwrap();
+        let members = crate_members(&candidate, archive_root).unwrap();
+        super::super::source::reject_link_members(&members, archive_root, &source, &links).unwrap();
+        assert!(!members.contains_key(&format!("{archive_root}/.pre-commit-config.yaml")));
+        let link = source.join(".pre-commit-config.yaml");
+        assert_eq!(links, std::collections::BTreeSet::from([link.clone()]));
+        assert!(fs::symlink_metadata(&link).unwrap().is_file());
+        assert_eq!(fs::read_to_string(&link).unwrap(), secret.to_str().unwrap());
+        assert_eq!(
+            fs::read_to_string(secret).unwrap(),
+            "must never appear in the checkout"
+        );
+        let status = output(
+            data_command("git", state.path())
+                .unwrap()
+                .arg("-C")
+                .arg(&source)
+                .args(["status", "--porcelain"]),
+        )
+        .unwrap();
+        assert!(status.stdout.is_empty());
+    }
+
+    #[test]
+    fn manifest_and_lock_inputs_cannot_depend_on_inert_git_links() {
+        let source = TempDir::new().unwrap();
+        let root = source.path();
+        for (declaration, path) in [
+            ("[package]\nname='demo'\nversion='1.0.0'\n", "Cargo.toml"),
+            ("[package]\nname='demo'\nversion='1.0.0'\n", "Cargo.lock"),
+            (
+                "[package]\nname='demo'\nversion='1.0.0'\nreadme='README.md'\n",
+                "README.md",
+            ),
+            (
+                "[package]\nname='demo'\nversion='1.0.0'\nlicense-file='LICENSE'\n",
+                "LICENSE",
+            ),
+            (
+                "[package]\nname='demo'\nversion='1.0.0'\nbuild='build.rs'\n",
+                "build.rs",
+            ),
+            (
+                "[package]\nname='demo'\nversion='1.0.0'\n[lib]\npath='src/lib.rs'\n",
+                "src/lib.rs",
+            ),
+            ("[dependencies.other]\npath='other'\n", "other"),
+        ] {
+            fs::write(root.join("Cargo.toml"), declaration).unwrap();
+            let links = std::collections::BTreeSet::from([root.join(path)]);
+            assert!(
+                validate_manifest_paths_with_links(root, &links).is_err(),
+                "{path}"
+            );
+        }
+        let child = root.join("member");
+        fs::create_dir(&child).unwrap();
+        fs::write(root.join("Cargo.toml"), "[workspace]\nmembers=['member']\n").unwrap();
+        fs::write(
+            child.join("Cargo.toml"),
+            "[package]\nname='demo'\nversion='1.0.0'\nreadme='../README.md'\n",
+        )
+        .unwrap();
+        assert!(
+            validate_manifest_paths_with_links(
+                root,
+                &std::collections::BTreeSet::from([root.join("README.md")])
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn isolated_reconstruction_rewrites_public_github_ssh_inputs_without_credentials() {
