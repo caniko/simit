@@ -28,6 +28,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Check out signed Git symlinks as inert target-text files during independent
+  archive reconstruction, admitting unrelated tooling links without following
+  them. Continue rejecting submodules and any Cargo manifest, declared input,
+  lockfile or archive member that depends on a Git symlink.
 - Keep the independently checked-out publisher engine in its own Cargo
   workspace, so it can build beneath a candidate workspace without joining it.
   Retain single-crate resolution and independent regression fixtures.
