@@ -105,16 +105,22 @@ fn private_github_runner_generation_preserves_the_compatible_checkout_baseline()
             }),
             "{path}: {workflow}"
         );
-        // The pre-template default uses checkout v4's Node20 runtime. Arbitrary
-        // private labels do not attest the Node24 runner minimum of v5-v7.
+        // Private labels do not attest the Node24 runner minimum. Strict
+        // publication jobs use their own known hosted capacity.
         assert!(
-            workflow.contains(
-                "uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1"
-            ),
+            workflow.contains(&simit::render::ci::github_action_ref(
+                "actions/checkout",
+                if path.contains("publish-crate") {
+                    "v7.0.1"
+                } else {
+                    "v4.3.1"
+                }
+            )),
             "{path}: {workflow}"
         );
         assert!(
-            !workflow.contains("actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"),
+            path.contains("publish-crate")
+                || !workflow.contains("actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"),
             "{path}: {workflow}"
         );
         if path.ends_with("nix-builds.yaml") {
@@ -143,6 +149,74 @@ fn private_github_runner_generation_preserves_the_compatible_checkout_baseline()
             .unwrap()
             .success()
     );
+}
+
+#[test]
+fn native_runner_matrices_keep_unknown_workers_on_compatible_actions() {
+    for (arm_runner, checkout, upload) in [
+        ("ubuntu-24.04-arm", "v7.0.1", "v7.0.2"),
+        ("private-arm-worker", "v4.3.1", "v4.6.2"),
+    ] {
+        let temp = init_flake_only();
+        fs::write(
+            temp.path().join("simit.toml"),
+            format!(
+                r#"[ci]
+platform = "github"
+provider = "actions"
+runtime = "nix"
+nix_builds = [".#default"]
+[ci.nix_system_runners]
+x86_64-linux = "ubuntu-24.04"
+aarch64-linux = "{arm_runner}"
+[prebuild]
+release_archives = true
+[release.artifacts]
+prebuild_binaries = true
+"#
+            ),
+        )
+        .unwrap();
+        let output = simit()
+            .current_dir(temp.path())
+            .args(["init", "ci"])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        for path in [
+            ".github/workflows/ci.yaml",
+            ".github/workflows/prebuild.yaml",
+        ] {
+            let workflow = read(&temp.path().join(path));
+            assert_yaml_parses(&workflow);
+            assert!(
+                workflow.contains(&simit::render::ci::github_action_ref(
+                    "actions/checkout",
+                    checkout
+                )),
+                "{path}: {workflow}"
+            );
+            if path.ends_with("prebuild.yaml") {
+                assert!(
+                    workflow.contains(&simit::render::ci::github_action_ref(
+                        "actions/upload-artifact",
+                        upload
+                    )),
+                    "{path}: {workflow}"
+                );
+                assert!(workflow.contains("ref: ${{ github.sha }}"));
+                assert!(workflow.contains("persist-credentials: false"));
+            }
+        }
+        assert!(
+            simit()
+                .current_dir(temp.path())
+                .args(["init", "ci", "--check", "--diff"])
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
 }
 
 #[test]
@@ -2531,9 +2605,11 @@ fn generates_github_plain_cargo_workflows() {
         "uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable"
     ));
     assert!(ci.contains("toolchain: stable"));
-    assert!(ci.contains("uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0"));
+    assert!(ci.contains("uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0"));
     assert!(!ci.contains("https://code.forgejo.org/actions/cache@v4"));
-    assert!(ci.contains("uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2"));
+    assert!(
+        ci.contains("uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2")
+    );
     assert!(ci.contains("path: ~/.cargo/bin"));
     assert!(ci.contains("hashFiles('.github/workflows/*.yaml')"));
     assert!(!ci.contains("hashFiles('.forgejo/workflows/ci.yaml', '.github/workflows/ci.yaml')"));
@@ -2550,11 +2626,13 @@ fn generates_github_plain_cargo_workflows() {
     assert!(publish.contains("on:\n  push:\n    tags:\n      - \"[0-9]*\"\n"));
     assert!(!publish.contains("workflow_dispatch"));
     assert!(
-        publish.contains("uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0")
+        publish.contains("uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0")
     );
     assert!(!publish.contains("https://code.forgejo.org/actions/cache@v4"));
     assert!(
-        publish.contains("uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2")
+        publish.contains(
+            "uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2"
+        )
     );
     assert!(publish.contains("path: ~/.cargo/bin"));
     assert!(publish.contains("hashFiles('.github/workflows/*.yaml')"));

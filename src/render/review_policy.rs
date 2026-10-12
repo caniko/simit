@@ -76,7 +76,7 @@ pub fn file(config: &Config) -> Result<GeneratedFile> {
         .replace("%MARKER%", ci::GENERATED_WORKFLOW_MARKER)
         .replace(
             "%CHECKOUT%",
-            &ci::github_action_ref("actions/checkout", "v4.3.1"),
+            &ci::github_action_ref("actions/checkout", "v7.0.1"),
         )
         .replace(
             "%APP_ACTION%",

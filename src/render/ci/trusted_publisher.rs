@@ -163,7 +163,14 @@ fn archive_steps_with_packaging(name: &str, runtime: Runtime, package: bool) -> 
     w.push_str(&format!(
         "      - name: Retain original-run archive {name}\n"
     ));
-    push_action_uses(&mut w, Platform::Github, "upload-artifact", "v4.6.2");
+    push_action_uses(
+        &mut w,
+        Platform::Github,
+        None,
+        "upload-artifact",
+        "v7.0.2",
+        "v4.6.2",
+    );
     w.push_str(&format!("        with:\n          name: simit-crate-{name}-${{{{ github.run_attempt }}}}\n          path: ${{{{ runner.temp }}}}/simit-crates/{name}/*.crate\n          if-no-files-found: error\n          retention-days: 30\n\n"));
     w
 }
@@ -190,7 +197,7 @@ pub(super) fn source_workflow(
     w.push_str("\n    timeout-minutes: 60\n");
     push_job_env(&mut w, Platform::Github, runtime, &options.extra_env, true);
     w.push_str("    steps:\n");
-    push_event_checkout_step(&mut w, Platform::Github);
+    push_event_checkout_step(&mut w, Platform::Github, None);
     if runtime == Runtime::Nix {
         push_install_nix_step_with_cache(
             &mut w,
@@ -262,9 +269,9 @@ pub(super) fn source_workflow(
 fn bootstrap(w: &mut String) {
     w.push_str("      - name: Require independently qualified publisher engine\n        env:\n          PUBLISHER_REVISION: ${{ vars.SIMIT_PUBLISHER_REVISION }}\n        run: |\n          set -euo pipefail\n          [[ \"$PUBLISHER_REVISION\" =~ ^[0-9a-f]{40}$ ]] || { echo 'Enroll a qualified immutable Simit publisher revision' >&2; exit 1; }\n");
     w.push_str("      - name: Checkout independent publisher source\n");
-    push_action_uses(w, Platform::Github, "checkout", "v4.3.1");
+    push_action_uses(w, Platform::Github, None, "checkout", "v7.0.1", "v4.3.1");
     w.push_str("        with:\n          ref: ${{ github.workflow_sha }}\n          persist-credentials: false\n      - name: Checkout qualified publisher engine\n");
-    push_action_uses(w, Platform::Github, "checkout", "v4.3.1");
+    push_action_uses(w, Platform::Github, None, "checkout", "v7.0.1", "v4.3.1");
     w.push_str("        with:\n          repository: caniko/simit\n          ref: ${{ vars.SIMIT_PUBLISHER_REVISION }}\n          path: .simit-publisher-engine\n          persist-credentials: false\n");
     push_rust_setup_step(w, Platform::Github);
     w.push_str("      - name: Build trusted publisher engine\n        working-directory: .simit-publisher-engine\n        run: cargo build --release --locked\n");
@@ -333,7 +340,14 @@ pub(super) fn publisher_file(
         // Publishing always re-admits on a separate hosted runner, never trusts
         // this job's filesystem, exports, output paths or candidate binaries.
         w.push_str("      - name: Checkout original signed source for verification\n");
-        push_action_uses(&mut w, Platform::Github, "checkout", "v4.3.1");
+        push_action_uses(
+            &mut w,
+            Platform::Github,
+            None,
+            "checkout",
+            "v7.0.1",
+            "v4.3.1",
+        );
         w.push_str("        with:\n          ref: ${{ github.event.workflow_run.head_sha }}\n          path: .simit-release-source\n          persist-credentials: false\n");
         let directory = ".simit-release-source";
         let candidate_context = |w: &mut String| {

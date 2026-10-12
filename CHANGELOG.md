@@ -14,6 +14,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   configuration regeneration. Reject exclusion-only filters and keep tag refs
   separate from same-named branch/PR cancellation groups.
 
+### Fixed
+
+- Use immutable Node 24 action revisions on recognized GitHub-hosted runners
+  and credential-free release workers. Preserve the Node 20 action baseline
+  for private runner labels and Forgejo, together with signed-tag admission,
+  independent trust roots, and archive custody verification.
+
 ## [0.20.0] - 2026-10-11
 
 ### Security
