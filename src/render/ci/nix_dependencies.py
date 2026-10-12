@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+import struct
 import subprocess
 import tempfile
 from pathlib import Path
@@ -28,7 +29,27 @@ def canonical_store_path(raw):
     # Nix StorePath::checkName, with the literal canonical store root only.
     return (isinstance(raw, bytes) and len(raw) <= 255
             and re.fullmatch(rb'/nix/store/[0123456789abcdfghijklmnpqrsvwxyz]{32}-[A-Za-z0-9+._?=-]{1,211}', raw)
-            and raw[44:] not in [b'.', b'..'] and not raw[44:].startswith((b'.-', b'..-')))
+             and raw[44:] not in [b'.', b'..'] and not raw[44:].startswith((b'.-', b'..-')))
+
+
+def store_paths_command(operation, paths):
+    """Admit the complete argv before export or any subsequent import effect."""
+    require(isinstance(paths, list) and 0 < len(paths) <= ExportInventory.MAX_PATHS
+            and all(isinstance(path, str) and path.isascii()
+                    and canonical_store_path(path.encode()) for path in paths),
+            'Invalid dependency command inventory')
+    command = ['nix-store', operation, *paths]
+    # execve shares ARG_MAX between argument strings, the inherited environment
+    # and both pointer arrays. Leave headroom for executable/platform overhead;
+    # never split or concatenate independently terminated Nix export streams.
+    limit = os.sysconf('SC_ARG_MAX')
+    strings = sum(len(os.fsencode(value)) + 1 for value in command)
+    strings += sum(len(os.fsencode(key)) + len(os.fsencode(value)) + 2
+                   for key, value in os.environ.items())
+    pointers = (len(command) + len(os.environ) + 2) * struct.calcsize('P')
+    require(limit > 0 and strings + pointers <= limit - min(65536, limit // 4),
+            'Dependency store command exceeds worker argument budget')
+    return command
 
 
 class ExportInventory:
@@ -233,8 +254,9 @@ if mode == 'export':
     closure = sorted(closure_data)
     require(all(re.fullmatch(r'/nix/store/[a-z0-9]{32}-[^/\s]+', path) for path in closure), 'Invalid dependency closure paths')
     require(not set(closure) & qualification_outputs, 'Dependency closure contains qualification outputs')
+    export_command = store_paths_command('--export', closure)
     with (root / 'export.log').open('wb') as log, gzip.open(archive, 'wb', compresslevel=1) as compressed:
-        with subprocess.Popen(['nix-store', '--export', *closure], stdout=subprocess.PIPE, stderr=log) as producer:
+        with subprocess.Popen(export_command, stdout=subprocess.PIPE, stderr=log) as producer:
             size = 0
             while chunk := producer.stdout.read(1024 * 1024):
                 size += len(chunk)
@@ -253,6 +275,7 @@ elif mode == 'import':
     require(all(manifest.get(key) == value for key, value in identity.items()), 'Dependency provenance differs from this source/run')
     require(manifest['complete'] is True and manifest['definitions'] == definitions, 'Dependency manifest is incomplete or its definitions differ')
     require(not set(manifest['closure']) & qualification_outputs, 'Dependency closure contains qualification outputs')
+    verify_command = store_paths_command('--verify-path', manifest['closure'])
     require(archive.is_file() and not archive.is_symlink() and archive.stat().st_size == manifest['archive_bytes'], 'Invalid dependency archive file or size')
     require(archive.stat().st_size <= maximum + 1024 * 1024, 'Compressed dependency archive exceeds budget')
     require(digest(archive) == manifest['archive_sha256'], 'Dependency archive checksum mismatch')
@@ -271,7 +294,7 @@ elif mode == 'import':
         stream.seek(0)
         with (root / 'import.log').open('wb') as log:
             subprocess.run(['nix-store', '--import'], stdin=stream, stdout=log, stderr=subprocess.STDOUT, check=True)
-    subprocess.run(['nix-store', '--verify-path', *manifest['closure']], check=True)
+    subprocess.run(verify_command, check=True)
     subprocess.run(['nix', 'path-info', *paths], check=True)
     (root / 'import-receipt.json').write_text(json.dumps({**identity, 'archive_sha256': manifest['archive_sha256'],
                                                        'restored': paths, 'qualification_execution': False}, indent=2) + '\n')

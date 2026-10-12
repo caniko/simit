@@ -106,6 +106,9 @@ pub(super) fn job(
         "v5.6.0",
     );
     workflow.push_str("\n        with:\n          python-version: '3.12'\n");
+    if options.kvm {
+        workflow.push_str("      - name: Enable hosted KVM\n        run: |\n          test \"${RUNNER_ENVIRONMENT:-}\" = github-hosted\n          test -c /dev/kvm\n          sudo chmod a+rw /dev/kvm\n          test -r /dev/kvm && test -w /dev/kvm\n");
+    }
     push_extra_setup_steps(workflow, extra_setup);
     push_extra_setup_steps(workflow, &options.extra_setup);
     push_required_env_step(workflow, &options.required_env);

@@ -452,6 +452,14 @@ producer authority. An alias of a discovered check or a declared
 qualification output is refused. A failed dependency producer blocks consuming
 groups; its builder and export diagnostics remain available.
 
+`kvm = true` enables hosted KVM on both the dependency producer and each consuming
+worker before custom setup or builds. Export and post-import verification also
+admit their complete argument vectors against the current worker's `ARG_MAX`,
+charging inherited environment strings and pointer arrays with platform headroom.
+A byte-budget-valid closure can still exceed this process limit; it is rejected
+before export, or before any import when verification would exceed the consumer's
+limit. Independently terminated export streams are never concatenated.
+
 `fresh_installables` first materializes cold outputs and dependencies normally,
 then requires an explicit `--rebuild` on the current worker. Nix check mode needs
 valid outputs, so an uncached check can execute twice; materialization alone never

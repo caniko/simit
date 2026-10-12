@@ -151,6 +151,60 @@ fn dependency_producer_preserves_configured_nix_config() {
 }
 
 #[test]
+fn dependency_producer_enables_kvm_before_setup_and_export_when_requested() {
+    for enabled in [false, true] {
+        let temp = project();
+        let path = temp.path().join("simit.toml");
+        let mut config = fs::read_to_string(&path)
+            .unwrap()
+            .parse::<toml_edit::DocumentMut>()
+            .unwrap();
+        config["ci"]["nix_build"]["kvm"] = toml_edit::value(enabled);
+        let mut setup = toml_edit::Array::new();
+        setup.push("echo dependency-kvm-setup");
+        config["ci"]["nix_build"]["extra_setup"] = toml_edit::value(setup);
+        fs::write(&path, config.to_string()).unwrap();
+        let output = common::simit()
+            .current_dir(temp.path())
+            .args(["init", "ci"])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let value: Value = serde_yaml::from_str(
+            &fs::read_to_string(temp.path().join(".github/workflows/nix-builds.yaml")).unwrap(),
+        )
+        .unwrap();
+        let mut kvm_runs = Vec::new();
+        for job in ["dependencies", "build"] {
+            let steps = value["jobs"][job]["steps"].as_sequence().unwrap();
+            let kvm: Vec<_> = steps
+                .iter()
+                .enumerate()
+                .filter(|(_, step)| step["name"] == "Enable hosted KVM")
+                .collect();
+            assert_eq!(kvm.len(), usize::from(enabled), "job={job}");
+            if enabled {
+                let setup = steps
+                    .iter()
+                    .position(|step| {
+                        step["run"]
+                            .as_str()
+                            .is_some_and(|run| run.contains("echo dependency-kvm-setup"))
+                    })
+                    .unwrap();
+                assert!(kvm[0].0 < setup, "job={job}");
+                kvm_runs.push(kvm[0].1["run"].as_str().unwrap().to_owned());
+            }
+        }
+        if enabled {
+            assert_eq!(kvm_runs[0], kvm_runs[1]);
+            assert!(kvm_runs[0].contains("test -c /dev/kvm"));
+            assert!(kvm_runs[0].contains("test -r /dev/kvm && test -w /dev/kvm"));
+        }
+    }
+}
+
+#[test]
 fn qualification_outputs_cannot_be_enrolled_as_transport_dependencies() {
     let temp = project();
     let path = temp.path().join("simit.toml");

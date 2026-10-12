@@ -64,7 +64,8 @@ def exported(*records):
 
 class Transport(unittest.TestCase):
     def execute(self, change=None, alias=False, transitive=False, optimized=False,
-                data=None, maximum=1024):
+                data=None, maximum=1024, mode='import', closure=None, argument_limit=None,
+                extra_environment=None):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             archive = root / 'closure.nar.gz'
@@ -86,6 +87,8 @@ class Transport(unittest.TestCase):
                     return HEAD if command[-1] == 'HEAD' else TREE
                 if command[0:3] == ['nix', 'derivation', 'show']:
                     return json.dumps({DRV: {}, **({'/nix/store/runtime.drv': {}} if transitive else {})})
+                if command[0:3] == ['nix', 'path-info', '--json']:
+                    return json.dumps({path: {'narSize': 1} for path in closure or [OUT]})
                 if command[4].startswith('.#checks'):
                     check = {'drvPath': DRV if alias else '/nix/store/runtime.drv',
                              'outputs': {'out': '/nix/store/' + '2' * 32 + '-runtime'}}
@@ -102,20 +105,75 @@ class Transport(unittest.TestCase):
                         info = os.fstat(kwargs['stdin'].fileno())
                         self.assertEqual(info.st_mode & 0o777, 0o600)
                         self.assertEqual(info.st_nlink, 0)
-                return subprocess.CompletedProcess(command, 0)
+                stdout = json.dumps([DEFINITION]).encode() if command[0:2] == ['nix', 'build'] else None
+                return subprocess.CompletedProcess(command, 0, stdout=stdout)
 
-            env = {'SIMIT_DEPENDENCY_ROOT': str(root), 'SIMIT_DEPENDENCY_MODE': 'import',
+            class Producer:
+                def __init__(self, command, **kwargs):
+                    effects.append(command)
+                    self.stdout = io.BytesIO(data)
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *args):
+                    pass
+
+                def wait(self):
+                    return 0
+
+            env = {'SIMIT_DEPENDENCY_ROOT': str(root), 'SIMIT_DEPENDENCY_MODE': mode,
                    'SIMIT_DEPENDENCY_MAX_BYTES': str(maximum), 'SIMIT_NIX_DEPENDENCIES': '[".#input"]',
                    'SIMIT_NIX_PLAN': '[".#checks.x86_64-linux.runtime"]',
                    'SIMIT_NIX_CHECK_SYSTEMS': '["x86_64-linux"]', 'SIMIT_NIX_LIMITS': '[]',
                    'GITHUB_SHA': HEAD, 'GITHUB_EVENT_NAME': 'push', 'GITHUB_REPOSITORY': 'owner/repo',
                    'GITHUB_RUN_ID': '123', 'GITHUB_RUN_ATTEMPT': '1'}
-            with patch.dict(os.environ, env), patch('subprocess.check_output', output), patch('subprocess.run', run), patch.object(Path, 'is_file', autospec=True, side_effect=lambda p: False if str(p) == 'flake.lock' else p.exists()):
+            env.update(extra_environment or {})
+            sysconf = os.sysconf
+            def observed_limit(name):
+                return argument_limit if argument_limit is not None and name == 'SC_ARG_MAX' else sysconf(name)
+            with patch.dict(os.environ, env), patch('os.sysconf', observed_limit), patch('subprocess.check_output', output), patch('subprocess.run', run), patch('subprocess.Popen', Producer), patch.object(Path, 'is_file', autospec=True, side_effect=lambda p: False if str(p) == 'flake.lock' else p.exists()):
                 try:
                     exec(compile(PROGRAM, '<generated-dependencies>', 'exec', optimize=2 if optimized else 0), {})
                 except (AssertionError, RuntimeError):
                     return False, effects
             return True, effects
+
+    def test_small_closure_exports_and_imports_under_the_worker_argument_limit(self):
+        for mode in ['export', 'import']:
+            for optimized in [False, True]:
+                accepted, effects = self.execute(mode=mode, optimized=optimized, argument_limit=262144)
+                self.assertTrue(accepted)
+                operation = '--export' if mode == 'export' else '--import'
+                self.assertEqual(sum(command[:2] == ['nix-store', operation] for command in effects), 1)
+
+    def test_size_valid_export_inventory_exceeding_argv_budget_denies_before_export(self):
+        closure = [OUT] + ['/nix/store/' + '0' * 32 + '-' + str(index) + 'x' * 190 for index in range(1000)]
+        for optimized in [False, True]:
+            accepted, effects = self.execute(mode='export', closure=closure,
+                                             maximum=8 * 1024 * 1024, optimized=optimized,
+                                             argument_limit=262144)
+            self.assertFalse(accepted)
+            self.assertFalse(any(command[0] == 'nix-store' for command in effects))
+
+    def test_size_valid_import_inventory_exceeding_argv_budget_denies_before_import(self):
+        closure = [OUT] + ['/nix/store/' + '0' * 32 + '-' + str(index) + 'x' * 190 for index in range(1000)]
+        data = exported(*(record(path) for path in closure))
+        for optimized in [False, True]:
+            accepted, effects = self.execute(('closure', closure), data=data,
+                                             maximum=8 * 1024 * 1024, optimized=optimized,
+                                             argument_limit=262144)
+            self.assertFalse(accepted)
+            self.assertEqual(effects, [])
+
+    def test_inherited_environment_is_charged_to_the_worker_argument_budget(self):
+        for mode in ['export', 'import']:
+            for optimized in [False, True]:
+                accepted, effects = self.execute(mode=mode, optimized=optimized,
+                                                 argument_limit=262144,
+                                                 extra_environment={'TRANSPORT_AMBIENT': 'x' * 200000})
+                self.assertFalse(accepted)
+                self.assertFalse(any(command[0] == 'nix-store' for command in effects))
 
     def test_valid_same_run_dependency_is_imported_but_never_accepted_as_qualification(self):
         accepted, effects = self.execute()
