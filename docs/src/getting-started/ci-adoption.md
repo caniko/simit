@@ -374,6 +374,38 @@ member fails the job while the other members still produce diagnostic evidence.
 Grouped jobs have `build (<group>)` contexts. Qualify the new evidence and migrate
 required contexts together before retiring a monolithic flake-check gate.
 
+### CI dependency reuse
+
+`[ci.cache]` declares public credential-free HTTPS substituters and signing keys
+for CI independently of release publication. An explicit empty table disables
+inherited release-cache settings; omitting the table preserves that inheritance.
+Keep using `with_nix_cargo_cache = true` for the existing native Cargo cache.
+
+```toml
+[ci.cache]
+substituters = ["https://cache.example.org"]
+trusted_public_keys = ["cache.example.org:PUBLIC_KEY_BASE64"]
+
+[ci.nix_build]
+dependency_installables = [".#ci-patched-zellij"]
+dependency_max_mib = 2048
+fresh_installables = [".#checks.x86_64-linux.pinentry-runtime"]
+```
+
+Dependency transport requires groups and discovered `check_systems`. It builds
+only selected build inputs in a separate fresh worker and exports their complete
+closure to a same-run artifact. Consumers verify source commit/tree, lock bytes,
+repository, run, attempt, expected derivations/output paths, archive checksum and
+transport budget before importing. An alias of a discovered check or a declared
+qualification output is refused. A failed dependency producer blocks consuming
+groups; its builder and export diagnostics remain available.
+
+`fresh_installables` passes `--rebuild` for selected qualification derivations,
+so cached dependencies are reused while runtime tests execute on their current
+hosted workers. Restored dependencies never constitute test acceptance. Keep
+VMs and other runtime checks in this explicit fresh set, and measure export,
+download/import and cache-hit costs alongside end-to-end latency.
+
 Configured matrices normally coalesce a branch push with its pull request. Set
 `[ci.nix_build].separate_events = true` when acceptance requires both original
 producers: the concurrency group then includes the workflow ref and event name,

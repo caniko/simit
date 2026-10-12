@@ -434,6 +434,8 @@ impl ResolvedCiInputs {
             unit_tests_only: self.unit_tests_only,
             nix_substituters: cfg.release.artifacts.substituters.clone(),
             nix_trusted_public_keys: cfg.release.artifacts.trusted_public_keys.clone(),
+            ci_nix_substituters: cfg.ci_cache_artifacts().substituters,
+            ci_nix_trusted_public_keys: cfg.ci_cache_artifacts().trusted_public_keys,
             with_nextest: self.with_nextest,
             with_nix_cargo_cache: self.with_nix_cargo_cache,
             nix_flake_check: self.nix_flake_check,

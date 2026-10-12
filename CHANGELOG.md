@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- CI-scoped public Nix cache configuration and bounded same-run build-input
+  closure transport with exact source/run/attempt/derivation provenance.
+- Explicit fresh qualification installables, retaining runtime execution while
+  restoring only build dependencies.
+
+### Added
+
 - Opt-in shared-store Nix build groups with complete installable assignments,
   discovered-check coverage admission and per-output failure evidence.
 
