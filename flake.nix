@@ -2,11 +2,11 @@
   description = "Semver-aware git commit helper for Rust projects";
 
   inputs = {
-    rs-harbor.url = "github:caniko/harbor-rs/fac8049316846e0ef1c1e6acd92aed7a337b333a";
+    harbor.url = "git+https://github.com/caniko/harbor.git?ref=feat/harbor-monorepo-components&rev=7d99eb50c52d0a941e2996b97c469b32a7657ef4";
 
-    nixpkgs.follows = "rs-harbor/nixpkgs";
-    rust-overlay.follows = "rs-harbor/rust-overlay";
-    crane.follows = "rs-harbor/crane";
+    nixpkgs.follows = "harbor/nixpkgs";
+    rust-overlay.follows = "harbor/rust-overlay";
+    crane.follows = "harbor/crane";
     flake-utils.url = "github:numtide/flake-utils";
     treefmt-nix = {
       url = "github:numtide/treefmt-nix";
@@ -35,7 +35,7 @@
     self,
     advisory-db,
     nixpkgs,
-    rs-harbor,
+    harbor,
     plinth,
     flake-utils,
     rust-overlay,
@@ -50,19 +50,19 @@
         overlays = [(import rust-overlay)];
       };
 
-      toolchain = rs-harbor.lib.mkToolchain {
+      toolchain = harbor.lib.rust.mkToolchain {
         inherit pkgs;
         toolchainProfile = "nightly";
       };
       inherit (toolchain) craneLib;
-      cross = rs-harbor.lib.mkCross {inherit pkgs system;};
+      cross = harbor.lib.rust.mkCross {inherit pkgs system;};
       simitVersion = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).package.version;
       # `nix run github:caniko/simit` is the public CLI
       # distribution path and must work on runners without canix's managed
       # sccache transport. Keep cached derivations for Simit's own checks,
       # but make the default runnable package self-contained.
       publicCraneLib =
-        (rs-harbor.lib.mkToolchain {
+        (harbor.lib.rust.mkToolchain {
           inherit pkgs;
           toolchainProfile = "nightly";
           cache.enable = false;
@@ -97,6 +97,8 @@
           (craneLib.filterCargoSources path type)
           || builtins.elem pathString (map (name: "${toString ./.}/${name}") ["README.md" "LICENSE" "CHANGELOG.md"])
           || pkgs.lib.hasInfix "/src/review/assets/" pathString
+          || pkgs.lib.hasSuffix "/src/monorepo/native_release.py" pathString
+          || pkgs.lib.hasSuffix "/tests/fixtures/native-release-contract.py" pathString
           || pkgs.lib.hasSuffix "ci-actions.json" pathString
           || pkgs.lib.hasSuffix "/.github" pathString
           || pkgs.lib.hasSuffix "/.github/workflows" pathString
@@ -125,7 +127,7 @@
         // {
           inherit cargoArtifacts;
           nativeBuildInputs = commonArgs.nativeBuildInputs ++ [preCommitBin];
-          nativeCheckInputs = [pkgs.git pkgs.gnupg pkgs.nodejs pkgs.jq];
+          nativeCheckInputs = [pkgs.git pkgs.gnupg pkgs.nodejs pkgs.jq pkgs.python3 pkgs.actionlint];
         });
 
       publicCargoArtifacts = publicCraneLib.buildDepsOnly commonArgs;
@@ -133,7 +135,7 @@
         // {
           cargoArtifacts = publicCargoArtifacts;
           nativeBuildInputs = commonArgs.nativeBuildInputs ++ [preCommitBin];
-          nativeCheckInputs = [pkgs.git pkgs.gnupg pkgs.nodejs pkgs.jq];
+          nativeCheckInputs = [pkgs.git pkgs.gnupg pkgs.nodejs pkgs.jq pkgs.python3 pkgs.actionlint];
         });
 
       actionlintCheck =
@@ -150,7 +152,7 @@
       staticPackages =
         if system == "x86_64-linux"
         then
-          rs-harbor.lib.mkCrossPackages {
+          harbor.lib.rust.mkCrossPackages {
             inherit pkgs cross;
             craneLib = publicCraneLib;
             pname = "simit";
@@ -167,7 +169,7 @@
       binaryRelease =
         if system == "x86_64-linux"
         then
-          rs-harbor.lib.mkBinaryRelease {
+          harbor.lib.rust.mkBinaryRelease {
             inherit pkgs;
             pname = "simit";
             version = simitVersion;
@@ -204,7 +206,7 @@
       nextestCheck = publicCraneLib.cargoNextest (commonArgs
         // {
           cargoArtifacts = publicCargoArtifacts;
-          nativeCheckInputs = [pkgs.git pkgs.gnupg pkgs.nodejs pkgs.jq];
+          nativeCheckInputs = [pkgs.git pkgs.gnupg pkgs.nodejs pkgs.jq pkgs.python3 pkgs.actionlint];
         });
 
       docCheck = publicCraneLib.cargoDoc (commonArgs
@@ -296,22 +298,18 @@
         ];
       in {
         msrv = let
-          msrvToolchain = rs-harbor.lib.mkToolchain {
+          msrvToolchain = harbor.lib.rust.mkToolchain {
             inherit pkgs;
-            toolchainFile = builtins.toFile "rust-toolchain-msrv.toml" ''
-              [toolchain]
-              channel = "1.85.0"
-              profile = "minimal"
-            '';
+            toolchainFile = ./nix/rust-toolchain-msrv.toml;
             withRustAnalyzer = false;
             crossTargets = [];
             cache.enable = false;
           };
         in
-          (rs-harbor.lib.mkDevShells {
+          (harbor.lib.rust.mkDevShells {
             inherit pkgs;
             inherit (msrvToolchain) craneLib;
-            cross = rs-harbor.lib.mkCross {
+            cross = harbor.lib.rust.mkCross {
               inherit pkgs system;
               enableOsxcross = false;
             };
@@ -326,6 +324,7 @@
           checks = self.checks.${system};
           packages = with pkgs;
             [
+              treefmtEval.config.build.wrapper
               alejandra
               cargo-audit
               cargo-deny
@@ -345,7 +344,7 @@
 
         docs = publicCraneLib.devShell {
           checks = self.checks.${system};
-          packages = docsPackages ++ pre-commit-check.enabledPackages;
+          packages = [treefmtEval.config.build.wrapper] ++ docsPackages ++ pre-commit-check.enabledPackages;
           shellHook = pre-commit-check.shellHook;
         };
       };

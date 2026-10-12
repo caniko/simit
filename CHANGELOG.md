@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- A mixed-language monorepo component graph for changed-path qualification,
+  member discovery, shared formatter composition, and native GitHub CI.
+- Independent Cargo release planning, package-scoped version bumps, verification,
+  tag sync, and publication through signed `<package>/v<version>` tags.
+- Separate credential-free component builders and protected default-branch
+  Cargo publishers, binding the complete signed native tag, an independently
+  enrolled package namespace, original provider run, and archive checksum.
+- Component-scoped Git release notes and automatic changelog drafting, with
+  package-qualified compare links and history bounded by owned paths.
+- Independent static Python/npm version owners, package-qualified tags, scoped
+  lock updates, verification and prerequisite-gated tag synchronization.
+- Independent signed-tag Python/npm publication with complete native component
+  qualification, source-bound artifact receipts, exact registry checksum conflict
+  detection, private-package exclusion and bounded propagation verification.
 - Opt-in `[ci.nix_build].push_tags` patterns to retain tag-push qualification
   alongside branch and pull-request gates, with ordered exclusions and stable
   configuration regeneration. Reject exclusion-only filters and keep tag refs
@@ -29,6 +43,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and credential-free release workers. Preserve the Node 20 action baseline
   for private runner labels and Forgejo, together with signed-tag admission,
   independent trust roots, and archive custody verification.
+- Select the compatible action runtime for every monorepo component's native
+  runner matrix; require recognized hosted workers and reject candidate
+  authentication contexts before generating independent Cargo builders.
 
 ## [0.20.0] - 2026-10-11
 
@@ -101,6 +118,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   starting dependent jobs. Fetch and verify lockfile evidence for library and
   binary-only crates, with bounded retries and individual calls; crates.io web
   API readiness alone no longer advances the publication plan.
+- Generate native Rust, cross Rust and Python flakes against one qualified Harbor
+  monorepo revision and its namespaced APIs. Keep MSRV toolchain manifests in
+  tracked source, preserve existing Rust library namespaces when patching hooks,
+  and recognize treefmt-normalized inherited hook bindings.
+- Normalize Python registry names and prerelease versions, keep local uv lock
+  records aligned, and reject unsupported public version/publication settings
+  before version mutation. Omit empty component-step environment mappings so
+  generated qualification and native-publication workflows pass Actions linting.
+- Honor an absolute `XDG_DATA_HOME` registry override on macOS and other native
+  platforms, keeping project fixtures isolated from the platform default home.
+- Bound native Nix prebuilds to one build job, two cores, and three hours while
+  streaming builder logs for package-test diagnostics.
+- Stream Nix builder logs while bootstrapping monorepo qualification and
+  publication shells so native package-test failures retain their diagnostics.
+- Resolve public GitHub and Codeberg SSH inputs over HTTPS before monorepo
+  qualification, including the full native graph used for package publication.
+
+- Include Nix builder-phase output in captured build artifacts so hosted
+  cancellations retain build diagnostics alongside client messages and results.
 - Give native GitHub Nix flake matrices read-only permissions, coalesced push/PR
   concurrency, bounded parallelism and timeouts, and explicit build-resource limits.
 - Resolve and check out fork PR heads from their source repository while keeping

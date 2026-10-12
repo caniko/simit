@@ -22,7 +22,7 @@ use super::archive::{
 };
 use super::{
     CompletedRunEvent, PublisherContext, PublisherPolicy, ReleaseArtifact, ReleaseRun,
-    bind_release_push, verify_release_artifact_archive,
+    bind_independent_release_push, bind_release_push, verify_release_artifact_archive,
 };
 use crate::cli::{PublisherStage, ReleaseCommand};
 
@@ -115,6 +115,11 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
     );
     let name = &command.packages[0];
     package_name(name)?;
+    let namespace = command.tag_namespace.as_deref();
+    ensure!(
+        namespace.is_none_or(|package| package == name),
+        "publisher tag namespace must equal the selected crate"
+    );
     let reconstruction = if command.reconstruct_packages.is_empty() {
         vec![name.clone()]
     } else {
@@ -190,7 +195,11 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
         &token,
         &format!("repos/{repository}/actions/runs/{}", event.workflow_run.id),
     )?)?;
-    let bound = bind_release_push(&policy, &context, &event, &provider)?;
+    let bound = if let Some(package) = namespace {
+        bind_independent_release_push(&policy, &context, &event, &provider, package)?
+    } else {
+        bind_release_push(&policy, &context, &event, &provider)?
+    };
     let state = TempDir::new()?;
     for directory in ["home", "cargo-home", "gpg"] {
         fs::create_dir(state.path().join(directory))?;
@@ -282,10 +291,16 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
                 bound.source_sha, policy.source_workflow_path
             )),
     )?;
-    verify_tag_only_source_workflow(
-        &signed_workflow.stdout,
-        &fs::read(trusted_root.join(&policy.source_workflow_path))?,
-    )?;
+    let enrolled_workflow = fs::read(trusted_root.join(&policy.source_workflow_path))?;
+    if namespace.is_some() {
+        verify_tag_only_source_workflow_with_namespace(
+            &signed_workflow.stdout,
+            &enrolled_workflow,
+            namespace,
+        )?;
+    } else {
+        verify_tag_only_source_workflow(&signed_workflow.stdout, &enrolled_workflow)?;
+    }
     checkout_signed_source(state.path(), &source, &bound.source_sha)?;
     let tracked = output(
         data_command("git", state.path())?
@@ -356,7 +371,7 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
         MAX_PROVIDER_BYTES,
         bytes.as_slice(),
     )?;
-    let root = format!("{name}-{}", bound.source_head_label);
+    let root = format!("{name}-{}", bound.release_version);
     let candidate = crate_from_provider_zip(&bytes, &format!("{root}.crate"))?;
     // Cargo configuration is discovered from cwd, not --manifest-path. The cwd
     // and HOME/CARGO_HOME are fresh; env_clear removes wrappers, credential
@@ -387,7 +402,7 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
         &members,
         &root,
         name,
-        &bound.source_head_label,
+        &bound.release_version,
     )?;
     match stage {
         PublisherStage::Prepare => {
@@ -432,7 +447,7 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
                 &client,
                 state.path(),
                 name,
-                &bound.source_head_label,
+                &bound.release_version,
                 &checksum,
             )?;
             println!(
@@ -523,6 +538,20 @@ fn string_array(item: Option<&toml_edit::Item>) -> Vec<String> {
 /// workflow definition. Binding only triggers would let the signed source add
 /// credential authority, private runners or alternate jobs under those triggers.
 fn verify_tag_only_source_workflow(signed: &[u8], enrolled: &[u8]) -> Result<()> {
+    verify_tag_only_source_workflow_with_namespace(signed, enrolled, None)
+}
+
+fn verify_tag_only_source_workflow_with_namespace(
+    signed: &[u8],
+    enrolled: &[u8],
+    namespace: Option<&str>,
+) -> Result<()> {
+    let tag_pattern = if let Some(package) = namespace {
+        package_name(package)?;
+        format!("{package}/v[0-9]*")
+    } else {
+        "[0-9]*".to_owned()
+    };
     let workflow: serde_yaml::Value = serde_yaml::from_slice(signed)?;
     let enrollment: serde_yaml::Value = serde_yaml::from_slice(enrolled)?;
     ensure!(
@@ -549,7 +578,9 @@ fn verify_tag_only_source_workflow(signed: &[u8], enrolled: &[u8]) -> Result<()>
             && push
                 .get(serde_yaml::Value::String("tags".into()))
                 .and_then(serde_yaml::Value::as_sequence)
-                .is_some_and(|tags| tags.len() == 1 && tags[0].as_str() == Some("[0-9]*")),
+                .is_some_and(
+                    |tags| tags.len() == 1 && tags[0].as_str() == Some(tag_pattern.as_str())
+                ),
         "source publication must have only the enrolled semver tag filter"
     );
     Ok(())
@@ -1794,6 +1825,33 @@ mod tests {
         ] {
             assert!(verify_tag_only_source_workflow(changed, enrolled).is_err());
             assert!(verify_tag_only_source_workflow(changed, changed).is_err());
+        }
+    }
+
+    #[test]
+    fn independent_source_enrollment_keeps_exact_namespace_and_tag_only_authority() {
+        let enrolled = b"on:\n  push:\n    tags: ['harbor-cache/v[0-9]*']\n";
+        verify_tag_only_source_workflow_with_namespace(enrolled, enrolled, Some("harbor-cache"))
+            .unwrap();
+        assert!(verify_tag_only_source_workflow(enrolled, enrolled).is_err());
+        assert!(
+            verify_tag_only_source_workflow_with_namespace(enrolled, enrolled, Some("harbor-sdk"))
+                .is_err()
+        );
+        for changed in [
+            &b"on:\n  push:\n    tags: ['[0-9]*']\n"[..],
+            &b"on:\n  push:\n    branches: ['harbor-cache/v1.2.3']\n"[..],
+            &b"on:\n  push:\n    tags: ['harbor-cache/v[0-9]*']\n  workflow_dispatch:\n"[..],
+            &b"on:\n  push:\n    tags: ['harbor-cache/v[0-9]*', 'harbor-sdk/v[0-9]*']\n"[..],
+        ] {
+            assert!(
+                verify_tag_only_source_workflow_with_namespace(
+                    changed,
+                    changed,
+                    Some("harbor-cache")
+                )
+                .is_err()
+            );
         }
     }
 

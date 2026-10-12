@@ -153,7 +153,7 @@ fn bootstraps_release_workflow_for_enabled_channels() {
     assert!(!workflow.contains("inputs.version"));
     assert!(workflow.contains("git worktree add --detach \"$tag_worktree\" \"$validated_sha\""));
     assert!(!workflow.contains("git worktree add --detach \"$tag_worktree\" \"$VERSION\""));
-    let verify = workflow.find("git verify-tag \"$VERSION\"").unwrap();
+    let verify = workflow.find("git verify-tag \"$TAG\"").unwrap();
     let checkout = workflow
         .find("git worktree add --detach \"$tag_worktree\" \"$validated_sha\"")
         .unwrap();

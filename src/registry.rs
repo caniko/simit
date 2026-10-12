@@ -153,9 +153,20 @@ impl Default for Registry {
 }
 
 pub fn registry_path() -> Result<Utf8PathBuf> {
-    let dirs =
-        ProjectDirs::from("", "", "simit").context("resolving per-user simit data directory")?;
-    Utf8PathBuf::from_path_buf(dirs.data_dir().join("projects.toml")).map_err(|path| {
+    // ProjectDirs applies XDG overrides on Linux only. Honor the documented
+    // override before asking for a native default, including in macOS sandboxes.
+    let path = if let Some(data_home) = env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+    {
+        data_home.join("simit/projects.toml")
+    } else {
+        ProjectDirs::from("", "", "simit")
+            .context("resolving per-user simit data directory")?
+            .data_dir()
+            .join("projects.toml")
+    };
+    Utf8PathBuf::from_path_buf(path).map_err(|path| {
         anyhow::anyhow!("simit registry path is not valid UTF-8: {}", path.display())
     })
 }
@@ -1019,6 +1030,9 @@ fn infer_expected_primary_ci_files(
     // file drift. `{:#}` keeps the offending keys in the message.
     let config =
         ProjectConfig::load(workspace_root).context("loading simit project configuration")?;
+    if config.monorepo.is_some() {
+        return crate::monorepo::ci::files(workspace_root, &config);
+    }
     let snapshots = workflow_snapshots(marked);
     if backend.provider() == CiProvider::Crow {
         return infer_expected_crow_files(workspace_root, marked, &snapshots);

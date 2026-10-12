@@ -45,6 +45,8 @@ pub enum Commands {
     Config(ConfigCommand),
     #[command(about = "Inspect and maintain the per-user project registry")]
     Projects(ProjectsCommand),
+    #[command(about = "Plan qualification for declarative repository components")]
+    Monorepo(MonorepoCommand),
     #[command(about = "Apply deterministic simit project upgrades")]
     Upgrade(UpgradeCommand),
     #[command(about = "Print shell completion scripts")]
@@ -68,6 +70,28 @@ pub struct TestCommand {
         help = "Test executable and arguments, after -- (no shell expansion)"
     )]
     pub command: Vec<OsString>,
+}
+
+#[derive(Debug, Args)]
+pub struct MonorepoCommand {
+    #[command(subcommand)]
+    pub action: MonorepoAction,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum MonorepoAction {
+    #[command(about = "Print affected components in dependency order without writing files")]
+    Plan(MonorepoPlanCommand),
+}
+
+#[derive(Debug, Args)]
+pub struct MonorepoPlanCommand {
+    #[arg(long, value_name = "REVISION", conflicts_with = "changed_paths")]
+    pub base: Option<String>,
+    #[arg(long = "changed-path", value_name = "PATH", action = clap::ArgAction::Append)]
+    pub changed_paths: Vec<String>,
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Args)]
@@ -199,6 +223,13 @@ pub struct CommitCommand {
 
 #[derive(Debug, Args)]
 pub struct ReleaseCommand {
+    #[arg(
+        long,
+        value_name = "ID",
+        conflicts_with = "workspace",
+        help = "Select the owning monorepo component for an independent release"
+    )]
+    pub component: Option<String>,
     #[arg(
         long,
         value_enum,
@@ -365,6 +396,11 @@ pub struct ReleaseCommand {
     pub publisher_workflow: Option<String>,
     #[arg(long, help = "New directory for credential-free archive verification")]
     pub publisher_output: Option<Utf8PathBuf>,
+    #[arg(
+        long,
+        help = "Trusted package namespace for an independent <package>/v<version> tag"
+    )]
+    pub tag_namespace: Option<String>,
     #[arg(
         long = "reconstruct-package",
         help = "Trusted workspace release members to package together for dependency resolution"

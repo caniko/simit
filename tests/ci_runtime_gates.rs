@@ -167,7 +167,7 @@ fn nix_format_gate_supports_legacy_shells_and_propagates_formatter_failures() {
         let root = directory.path();
         let gate = commands(root, "ci")
             .into_iter()
-            .find(|run| run.contains("treefmt --ci"))
+            .find(|run| run.contains("formatter_expr="))
             .unwrap();
         let bin = root.join("bin");
         fs::create_dir(&bin).unwrap();
@@ -208,6 +208,7 @@ fn nix_format_gate_supports_legacy_shells_and_propagates_formatter_failures() {
             }
             let log = root.join("format.log");
             let output = Command::new("sh")
+                .current_dir(root)
                 .args(["-c", &gate])
                 .env("PATH", &bin)
                 .env("FORMAT_BIN", &bin)
@@ -234,6 +235,7 @@ fn nix_format_gate_supports_legacy_shells_and_propagates_formatter_failures() {
         }
         let log = root.join("eval-failure.log");
         let output = Command::new("sh")
+            .current_dir(root)
             .args(["-c", &gate])
             .env("PATH", &bin)
             .env("FORMAT_BIN", &bin)
@@ -563,9 +565,16 @@ fn generated_flakes_supply_a_native_msrv_shell_for_both_build_modes() {
         let flake = fs::read_to_string(directory.path().join("flake.nix")).unwrap();
         assert!(flake.contains("msrv ="), "cross={cross}: {flake}");
         assert!(
-            flake.contains("channel = \"1.88.0\""),
+            flake.contains("toolchainFile = ./nix/rust-toolchain-msrv.toml;"),
             "cross={cross}: {flake}"
         );
+        let manifest = fs::read_to_string(directory.path().join("nix/rust-toolchain-msrv.toml"))
+            .unwrap()
+            .parse::<toml_edit::DocumentMut>()
+            .unwrap();
+        assert_eq!(manifest["toolchain"]["channel"].as_str(), Some("1.88.0"));
+        assert_eq!(manifest["toolchain"]["profile"].as_str(), Some("minimal"));
+        assert!(!flake.contains("builtins.toFile"));
         assert!(flake.contains("CARGO_ENCODED_RUSTFLAGS = \"\""));
         assert!(flake.contains("RUSTFLAGS = \"\""));
     }
