@@ -40,6 +40,78 @@ fn workflow(temp: &TempDir) -> Value {
 }
 
 #[test]
+fn grouped_installables_share_a_runner_with_complete_per_output_evidence() {
+    let temp = project(
+        "[ci.nix_build]\nonly = true\ncapture_results = true\nseparate_events = true\nmax_parallel = 4\n[ci.nix_build.groups]\nnetwork = [\".#checks.x86_64-linux.client\", \".#checks.x86_64-linux.recovery\"]",
+    );
+    let result = generate(&temp, &[]);
+    assert!(result.status.success(), "{result:?}");
+    let value = workflow(&temp);
+    let job = &value["jobs"]["build"];
+    assert_eq!(job["strategy"]["max-parallel"], 4);
+    assert_eq!(job["strategy"]["matrix"]["include"][0]["group"], "network");
+    let steps = job["steps"].as_sequence().unwrap();
+    let build = steps
+        .iter()
+        .find(|s| s["name"] == "Build Nix group")
+        .unwrap();
+    assert_eq!(build["shell"], "python");
+    assert!(build["run"].as_str().unwrap().contains("installables.json"));
+    assert!(generate(&temp, &["--check", "--diff"]).status.success());
+    assert!(generate(&temp, &[]).status.success());
+    assert_eq!(
+        simit::registry::audit_ci(temp.path()).unwrap().status,
+        simit::registry::FeatureStatus::Managed
+    );
+}
+
+#[test]
+fn invalid_group_coverage_rejects_before_any_workflow_or_config_write() {
+    for groups in [
+        "network = [\".#checks.x86_64-linux.client\"]",
+        "network = [\".#checks.x86_64-linux.client\", \".#checks.x86_64-linux.recovery\", \".#unknown\"]",
+        "network = [\".#checks.x86_64-linux.client\", \".#checks.x86_64-linux.recovery\"]\nother = [\".#checks.x86_64-linux.client\"]",
+        "network = []",
+    ] {
+        let temp = project(&format!(
+            "[ci.nix_build]\nonly = true\ncapture_results = true\n[ci.nix_build.groups]\n{groups}"
+        ));
+        let before = fs::read(temp.path().join("simit.toml")).unwrap();
+        let result = generate(&temp, &[]);
+        assert!(!result.status.success(), "{groups}: {result:?}");
+        assert!(
+            String::from_utf8_lossy(&result.stderr).contains("groups"),
+            "{result:?}"
+        );
+        assert_eq!(before, fs::read(temp.path().join("simit.toml")).unwrap());
+        assert!(!temp.path().join(".github/workflows").exists());
+    }
+}
+
+#[test]
+fn generated_group_program_fences_source_and_coverage_and_retains_failed_outputs() {
+    let temp = project(
+        "[ci.nix_build]\nonly = true\ncapture_results = true\ncheck_systems = [\"x86_64-linux\"]\n[ci.nix_build.groups]\nnetwork = [\".#checks.x86_64-linux.client\", \".#checks.x86_64-linux.recovery\"]",
+    );
+    assert!(generate(&temp, &[]).status.success());
+    let value = workflow(&temp);
+    let steps = value["jobs"]["build"]["steps"].as_sequence().unwrap();
+    let build = steps
+        .iter()
+        .find(|s| s["name"] == "Build Nix group")
+        .unwrap();
+    let program = temp.path().join("group.py");
+    fs::write(&program, build["run"].as_str().unwrap()).unwrap();
+    let output = Command::new("python3")
+        .arg("-c")
+        .arg(include_str!("fixtures/nix-groups-contract.py"))
+        .arg(&program)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+}
+
+#[test]
 fn independent_nix_producer_events_survive_regeneration_without_cancelling_each_other() {
     let temp =
         project("[ci.nix_build]\nonly = true\ncapture_results = true\nseparate_events = true");

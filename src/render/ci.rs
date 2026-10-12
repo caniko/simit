@@ -14,6 +14,7 @@ use crate::config::{
 use crate::project::GeneratedFile;
 use crate::user_config::{ResolvedCiRunners, ResolvedRunner};
 
+mod nix_groups;
 mod trusted_publisher;
 
 pub const OMNIX_REF_DEFAULT: &str = "github:juspay/omnix/v1.3.2";
@@ -1067,6 +1068,17 @@ pub fn nix_build_matrix_file_with_options(
         bail!("[ci.nix_build] options require GitHub Actions");
     }
     options.validate_push_tags()?;
+    options.validate_groups(installables)?;
+    if !options.groups.is_empty() {
+        return nix_groups::render(
+            runner,
+            installables,
+            extra_setup,
+            substituters,
+            trusted_public_keys,
+            options,
+        );
+    }
 
     let mut workflow = String::new();
     push_generated_workflow_header(&mut workflow);

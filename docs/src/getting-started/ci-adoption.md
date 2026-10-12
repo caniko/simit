@@ -344,6 +344,36 @@ the earlier build failure. Both post-build command lists require
 
 Omitting `[ci.nix_build]` preserves the existing generated matrix defaults.
 
+### Shared-store Nix groups
+
+`[ci.nix_build.groups]` partitions every entry in `ci.nix_builds` into named
+jobs. Related packages and checks share a fresh hosted runner's Nix store, so
+their common dependencies are built once within that job. Group membership
+must be complete, nonempty and disjoint; `capture_results = true` is required.
+
+```toml
+[ci.nix_build]
+capture_results = true
+max_parallel = 4
+max_jobs = 1
+cores = 2
+check_systems = ["x86_64-linux"]
+
+[ci.nix_build.groups]
+pinentry = [".#pinentry", ".#checks.x86_64-linux.pinentry"]
+network = [".#checks.x86_64-linux.network"]
+```
+
+The example assumes those are all declared installables and all checks on the
+selected system. `check_systems` discovers the actual check derivations before
+realization and refuses an unassigned check. Include checks supplied by imported
+flake modules too. Every group retains a source-bound coverage manifest and a
+separate result, exit status and builder log for every installable. A failed
+member fails the job while the other members still produce diagnostic evidence.
+
+Grouped jobs have `build (<group>)` contexts. Qualify the new evidence and migrate
+required contexts together before retiring a monolithic flake-check gate.
+
 Configured matrices normally coalesce a branch push with its pull request. Set
 `[ci.nix_build].separate_events = true` when acceptance requires both original
 producers: the concurrency group then includes the workflow ref and event name,

@@ -559,6 +559,10 @@ pub struct NixBuildConfig {
     pub separate_events: bool,
     /// Opt into tag pushes alongside all branch pushes; preserve pattern order.
     pub push_tags: Vec<String>,
+    /// Partition all declared installables into jobs sharing a Nix store.
+    pub groups: BTreeMap<String, Vec<String>>,
+    /// Require every discovered check on these systems to have a group owner.
+    pub check_systems: Vec<String>,
     pub timeout_minutes: Option<u64>,
     pub max_parallel: Option<u64>,
     pub max_jobs: Option<u64>,
@@ -580,6 +584,56 @@ pub struct NixBuildConfig {
 }
 
 impl NixBuildConfig {
+    pub(crate) fn validate_groups(&self, installables: &[String]) -> Result<()> {
+        if self.groups.is_empty() {
+            if !self.check_systems.is_empty() {
+                bail!("[ci.nix_build].check_systems requires groups");
+            }
+            return Ok(());
+        }
+        if !self.capture_results {
+            bail!("[ci.nix_build].groups requires capture_results");
+        }
+        let declared = installables
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>();
+        if declared.len() != installables.len() {
+            bail!("[ci.nix_build].groups cannot partition duplicate nix_builds");
+        }
+        let mut assigned = std::collections::BTreeSet::new();
+        for (name, members) in &self.groups {
+            if name.is_empty()
+                || name.len() > 64
+                || !name
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+                || members.is_empty()
+            {
+                bail!("[ci.nix_build].groups requires nonempty groups with identifier names");
+            }
+            for member in members {
+                if !declared.contains(member) || !assigned.insert(member) {
+                    bail!(
+                        "[ci.nix_build].groups has an unknown or duplicate installable {member:?}"
+                    );
+                }
+            }
+        }
+        if assigned != declared {
+            bail!("[ci.nix_build].groups must assign every declared installable");
+        }
+        for system in &self.check_systems {
+            if system.is_empty()
+                || !system
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+            {
+                bail!("[ci.nix_build].check_systems has an invalid system");
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn validate_push_tags(&self) -> Result<()> {
         if self.push_tags.iter().any(|pattern| {
             pattern.trim().is_empty()
@@ -3514,6 +3568,7 @@ fn validate_nix_build_config(config: &ProjectConfig) -> Result<()> {
         bail!("simit project config: [ci.nix_build].only requires the Nix runtime");
     }
     options.validate_push_tags()?;
+    options.validate_groups(&ci.nix_builds)?;
     for (name, number, min, max) in [
         ("timeout_minutes", options.timeout_minutes, 1, 360),
         ("max_parallel", options.max_parallel, 1, 256),
@@ -3605,6 +3660,14 @@ fn set_nix_build_table(table: &mut Table, options: &NixBuildConfig) {
     set_bool(&mut build, "only", options.only);
     set_bool(&mut build, "separate_events", options.separate_events);
     set_string_array(&mut build, "push_tags", &options.push_tags);
+    set_string_array(&mut build, "check_systems", &options.check_systems);
+    if !options.groups.is_empty() {
+        let mut groups = Table::new();
+        for (name, members) in &options.groups {
+            set_string_array(&mut groups, name, members);
+        }
+        build["groups"] = Item::Table(groups);
+    }
     set_bool(&mut build, "kvm", options.kvm);
     set_bool(&mut build, "capture_results", options.capture_results);
     for (name, number) in [
