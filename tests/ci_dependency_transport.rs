@@ -284,6 +284,74 @@ fn qualification_output_selectors_reject_only_when_transport_is_enabled() {
 }
 
 #[test]
+fn transport_qualification_plan_requires_local_source_without_writes() {
+    for installable in ["github:owner/repo#runtime", "path:../other#runtime", ".#"] {
+        for transport in [true, false] {
+            let temp = project();
+            let path = temp.path().join("simit.toml");
+            let mut before = fs::read_to_string(&path)
+                .unwrap()
+                .replace(".#checks.x86_64-linux.runtime", installable);
+            if !transport {
+                before = before
+                    .replace("dependency_installables = [\".#ci-dependency\"]\n", "")
+                    .replace("dependency_max_mib = 256\n", "");
+            }
+            fs::write(&path, &before).unwrap();
+            let output = common::simit()
+                .current_dir(temp.path())
+                .args(["init", "ci"])
+                .output()
+                .unwrap();
+            assert_eq!(output.status.success(), !transport, "{output:?}");
+            if transport {
+                let diagnostic = String::from_utf8_lossy(&output.stderr);
+                assert!(diagnostic.contains("nix_builds"), "{output:?}");
+                assert!(diagnostic.contains("local derivations"), "{output:?}");
+                assert_eq!(fs::read_to_string(&path).unwrap(), before);
+                assert!(!temp.path().join(".github/workflows").exists());
+            }
+        }
+    }
+}
+
+#[test]
+fn dependency_timeout_preserves_omitted_and_explicit_runner_limits() {
+    for timeout in [None, Some(240)] {
+        let temp = project();
+        let path = temp.path().join("simit.toml");
+        let mut config = fs::read_to_string(&path)
+            .unwrap()
+            .parse::<toml_edit::DocumentMut>()
+            .unwrap();
+        if let Some(value) = timeout {
+            config["ci"]["nix_build"]["timeout_minutes"] = toml_edit::value(value);
+        }
+        fs::write(&path, config.to_string()).unwrap();
+        let output = common::simit()
+            .current_dir(temp.path())
+            .args(["init", "ci"])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let workflow: Value = serde_yaml::from_str(
+            &fs::read_to_string(temp.path().join(".github/workflows/nix-builds.yaml")).unwrap(),
+        )
+        .unwrap();
+        for job in ["dependencies", "build"] {
+            if let Some(value) = timeout {
+                assert_eq!(
+                    workflow["jobs"][job]["timeout-minutes"].as_i64(),
+                    Some(value)
+                );
+            } else {
+                assert!(workflow["jobs"][job]["timeout-minutes"].is_null());
+            }
+        }
+    }
+}
+
+#[test]
 fn downloaded_dependency_provenance_is_checked_before_any_store_import() {
     let temp = project();
     let output = common::simit()

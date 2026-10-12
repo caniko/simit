@@ -81,10 +81,13 @@ pub(super) fn job(
         return Ok(());
     }
     workflow.push_str(&format!(
-        "\n  dependencies:\n    runs-on: {}\n    timeout-minutes: {}\n    env:\n",
-        runs_on(runner),
-        options.timeout_minutes.unwrap_or(40)
+        "\n  dependencies:\n    runs-on: {}\n",
+        runs_on(runner)
     ));
+    if let Some(timeout) = options.timeout_minutes {
+        workflow.push_str(&format!("    timeout-minutes: {timeout}\n"));
+    }
+    workflow.push_str("    env:\n");
     if !options.extra_env.contains_key("NIX_CONFIG") {
         workflow.push_str("      NIX_CONFIG: \"experimental-features = nix-command flakes\"\n");
     }

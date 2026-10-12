@@ -65,7 +65,8 @@ def exported(*records):
 class Transport(unittest.TestCase):
     def execute(self, change=None, alias=False, transitive=False, optimized=False,
                 data=None, maximum=1024, mode='import', closure=None, argument_limit=None,
-                extra_environment=None, definition=None, built_definition=None):
+                extra_environment=None, definition=None, built_definition=None,
+                compressed_size=None):
         definition = definition or DEFINITION
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -76,12 +77,21 @@ class Transport(unittest.TestCase):
                         'repository': 'owner/repo', 'run': '123', 'attempt': 1,
                         'flake_lock_sha256': None, 'complete': True,
                         'definitions': {'.#input': definition}, 'closure': closure or [OUT],
-                        'uncompressed_bytes': len(data), 'archive_bytes': archive.stat().st_size,
+                        'uncompressed_bytes': len(data), 'archive_bytes': archive.stat().st_size if compressed_size is None else compressed_size,
                         'archive_sha256': hashlib.sha256(archive.read_bytes()).hexdigest()}
             if change:
                 manifest[change[0]] = change[1]
             (root / 'manifest.json').write_text(json.dumps(manifest))
             effects = []
+            original_stat = Path.stat
+
+            def archive_stat(path, *args, **kwargs):
+                result = original_stat(path, *args, **kwargs)
+                if path == archive and compressed_size is not None:
+                    fields = list(result)
+                    fields[6] = compressed_size
+                    return os.stat_result(fields)
+                return result
 
             def output(command, **kwargs):
                 if command[0] == 'git':
@@ -133,12 +143,38 @@ class Transport(unittest.TestCase):
             sysconf = os.sysconf
             def observed_limit(name):
                 return argument_limit if argument_limit is not None and name == 'SC_ARG_MAX' else sysconf(name)
-            with patch.dict(os.environ, env), patch('os.sysconf', observed_limit), patch('subprocess.check_output', output), patch('subprocess.run', run), patch('subprocess.Popen', Producer), patch.object(Path, 'is_file', autospec=True, side_effect=lambda p: False if str(p) == 'flake.lock' else p.exists()):
+            with patch.dict(os.environ, env), patch('os.sysconf', observed_limit), patch('subprocess.check_output', output), patch('subprocess.run', run), patch('subprocess.Popen', Producer), patch.object(Path, 'stat', archive_stat), patch.object(Path, 'is_file', autospec=True, side_effect=lambda p: False if str(p) == 'flake.lock' else p.exists()):
                 try:
                     exec(compile(PROGRAM, '<generated-dependencies>', 'exec', optimize=2 if optimized else 0), {})
                 except (AssertionError, RuntimeError):
+                    self.last_manifest = json.loads((root / 'manifest.json').read_text())
                     return False, effects
+            self.last_manifest = json.loads((root / 'manifest.json').read_text())
             return True, effects
+
+    def test_large_incompressible_archive_budget_is_shared_by_both_modes(self):
+        # Exercise multi-GiB size admission with bounded valid NAR bytes rather
+        # than allocating or compressing a multi-GiB fixture. zlib's default
+        # DEFLATE bound permits approximately 2.5 MiB overhead at 8 GiB.
+        maximum = 8 * 1024**3
+        compressed_size = maximum + 5 * 1024**2 // 2
+        for optimized in [False, True]:
+            for mode in ['export', 'import']:
+                accepted, effects = self.execute(mode=mode, maximum=maximum,
+                                                 compressed_size=compressed_size,
+                                                 optimized=optimized)
+                self.assertTrue(accepted, (mode, effects))
+
+    def test_oversized_compressed_archive_cannot_complete_or_import(self):
+        for optimized in [False, True]:
+            accepted, _ = self.execute(mode='export', maximum=1024,
+                                       compressed_size=2 * 1024**2, optimized=optimized)
+            self.assertFalse(accepted)
+            self.assertFalse(self.last_manifest['complete'])
+            accepted, effects = self.execute(maximum=1024, compressed_size=2 * 1024**2,
+                                             optimized=optimized)
+            self.assertFalse(accepted)
+            self.assertFalse(any(command[0] == 'nix-store' for command in effects))
 
     def test_complete_multi_output_derivation_exports_and_imports_both_roots(self):
         dev = '/nix/store/' + '4' * 32 + '-development'

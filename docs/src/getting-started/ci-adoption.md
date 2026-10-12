@@ -438,6 +438,16 @@ as `.#ci-patched-zellij`; transport builds every output. Explicit `^out`, `^dev`
 and `^*` selectors are rejected before generation, both in dependency enrollment
 and in qualification plans using dependency transport. Selectors in workflows
 without dependency transport retain their existing behavior.
+Transport-enabled qualification plans also require bare `.#attribute` local
+derivations; remote and path references cannot drift between producer, import
+admission and the group build. Both the dependency producer and consuming groups
+inherit the runner's default timeout when `timeout_minutes` is omitted.
+
+The compressed-size budget includes zlib's default worst-case DEFLATE expansion
+plus gzip framing allowance. Export checks the same bound before marking an
+archive complete that import checks before store effects; the uncompressed
+budget is enforced separately throughout both streams.
+
 Consumers verify source commit/tree, lock bytes,
 repository, run, attempt, expected derivations/output paths, archive checksum and
 transport budget before importing. The consumer parses the full Nix export/NAR

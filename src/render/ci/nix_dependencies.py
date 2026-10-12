@@ -20,6 +20,15 @@ def digest(path):
         return hashlib.file_digest(stream, 'sha256').hexdigest()
 
 
+def compressed_budget(maximum):
+    # zlib's default windowBits=15/memLevel=8 deflateBound, plus ample room
+    # for the fixed closure.nar.gz gzip header/trailer. GzipFile.write uses
+    # Z_NO_FLUSH until close, so chunked writes do not add sync-flush overhead.
+    # https://github.com/madler/zlib/blob/v1.3.1/deflate.c#L825-L894
+    require(isinstance(maximum, int) and maximum > 0, 'Invalid transport budget')
+    return maximum + (maximum >> 12) + (maximum >> 14) + (maximum >> 25) + 1024 * 1024
+
+
 def evaluate(installable, expression):
     return json.loads(subprocess.check_output(['nix', 'eval', '--json', '--no-update-lock-file',
                                                installable, '--apply', expression], text=True))
@@ -192,6 +201,7 @@ root = Path(os.environ['SIMIT_DEPENDENCY_ROOT'])
 root.mkdir(exist_ok=True)
 mode = os.environ['SIMIT_DEPENDENCY_MODE']
 maximum = int(os.environ['SIMIT_DEPENDENCY_MAX_BYTES'])
+compressed_maximum = compressed_budget(maximum)
 dependencies = json.loads(os.environ['SIMIT_NIX_DEPENDENCIES'])
 plan = json.loads(os.environ['SIMIT_NIX_PLAN'])
 systems = json.loads(os.environ['SIMIT_NIX_CHECK_SYSTEMS'])
@@ -266,6 +276,7 @@ if mode == 'export':
                     raise RuntimeError('Export stream exceeds transport budget')
                 compressed.write(chunk)
             require(producer.wait() == 0, 'Dependency export failed')
+    require(archive.stat().st_size <= compressed_maximum, 'Compressed dependency archive exceeds budget')
     manifest.update(complete=True, closure=closure, uncompressed_bytes=size,
                     archive_sha256=digest(archive), archive_bytes=archive.stat().st_size)
     manifest_path.write_text(json.dumps(manifest, indent=2) + '\n')
@@ -277,7 +288,7 @@ elif mode == 'import':
     require(not set(manifest['closure']) & qualification_outputs, 'Dependency closure contains qualification outputs')
     verify_command = store_paths_command('--verify-path', manifest['closure'])
     require(archive.is_file() and not archive.is_symlink() and archive.stat().st_size == manifest['archive_bytes'], 'Invalid dependency archive file or size')
-    require(archive.stat().st_size <= maximum + 1024 * 1024, 'Compressed dependency archive exceeds budget')
+    require(archive.stat().st_size <= compressed_maximum, 'Compressed dependency archive exceeds budget')
     require(digest(archive) == manifest['archive_sha256'], 'Dependency archive checksum mismatch')
     paths = sorted(path for definition in definitions.values() for path in definition['outputs'].values())
     # An unlinked mode-0600 spool keeps the validated bytes on the same private

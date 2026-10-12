@@ -668,6 +668,15 @@ impl NixBuildConfig {
                 "[ci].nix_builds does not support output selectors when dependency transport is enabled; use unselected derivations"
             );
         }
+        if !self.dependency_installables.is_empty()
+            && installables
+                .iter()
+                .any(|member| !member.starts_with(".#") || member.len() <= 2)
+        {
+            bail!(
+                "[ci].nix_builds must use source-bound local derivations when dependency transport is enabled"
+            );
+        }
         if self.groups.is_empty() {
             if !self.check_systems.is_empty() {
                 bail!("[ci.nix_build].check_systems requires groups");
