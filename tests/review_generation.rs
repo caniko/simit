@@ -177,8 +177,7 @@ fn controller_identity_rejects_ref_movement_before_publishing_checkout_outputs()
 #[cfg(unix)]
 #[test]
 fn reusable_report_consumes_the_explicit_token_only_when_posting_is_requested() {
-    use std::io::Write;
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::symlink;
     let root = tempfile::tempdir().unwrap();
     std::fs::write(
         root.path().join("simit.toml"),
@@ -206,27 +205,20 @@ fn reusable_report_consumes_the_explicit_token_only_when_posting_is_requested() 
     let tools = root.path().join("tools/bin");
     std::fs::create_dir_all(&bin).unwrap();
     std::fs::create_dir_all(&tools).unwrap();
-    for (path, body) in [
-        (
-            bin.join("jq"),
-            "printf \"%s\\n\" \"$POST_REQUESTED\" >> jq-invoked; [ \"$POST_REQUESTED\" = true ]",
-        ),
-        (
-            tools.join("repo-review"),
-            "[ \"$GH_TOKEN\" = fixture-report-token ] && [ \"$PLAN_DIGEST\" = fixture-plan-digest ] || exit 1; touch report-posted || exit; printf '%s\\n' '{\"posted\":true}'",
-        ),
+    for (path, fixture) in [
+        (bin.join("jq"), "report-jq.sh"),
+        (tools.join("repo-review"), "report-cli.sh"),
     ] {
-        // Publish a closed, complete executable inode. Hosted Linux can reject
-        // an immediately executed in-place write with ETXTBSY; the invocation
-        // assertions below must still detect a stub that did not run.
-        let mut fixture = tempfile::NamedTempFile::new_in(path.parent().unwrap()).unwrap();
-        writeln!(fixture, "#!/bin/sh\n{body}").unwrap();
-        fixture.as_file().sync_all().unwrap();
-        fixture
-            .as_file()
-            .set_permissions(std::fs::Permissions::from_mode(0o755))
-            .unwrap();
-        fixture.into_temp_path().persist(path).unwrap();
+        // Never open an executable inode for writing in this parallel test
+        // process: a concurrently forked child can retain the writer even after
+        // the parent closes it. Link the already-published tracked fixtures.
+        symlink(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures")
+                .join(fixture),
+            path,
+        )
+        .unwrap();
     }
     let path = std::env::join_paths(
         std::iter::once(bin).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),

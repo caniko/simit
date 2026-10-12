@@ -19,10 +19,11 @@
     # plinth trunk trips both of this flake's `nix flake check` gates: it still
     # declares the retired Codeberg nix-cache-pin mirror (whose trunk orphaned
     # the revision we locked), and its Cargo.lock wants dioxus 0.7.9 while our
-    # nixpkgs ships dioxus-cli 0.7.10.  fix/dioxus-0.7.10 is what canix pins for
-    # the same reason, and it predates the nix-cache-pin input entirely.
+    # nixpkgs ships dioxus-cli 0.7.10. This compatibility successor preserves
+    # fix/dioxus-0.7.10 and its exact tartan revision, using public GitHub Cargo
+    # transport. It still predates the nix-cache-pin input entirely.
     plinth = {
-      url = "git+https://github.com/caniko/plinth.git?ref=fix/dioxus-0.7.10&rev=4718cc09d9d1b54cc10e23e60c37b656bf7285a6";
+      url = "git+https://github.com/caniko/plinth.git?ref=fix/tartan-github-transport-20261012-ses-ed08&rev=79d5a44310f6a7f620a8ebcf8c6dc78389cf4a36";
       inputs.nixpkgs.follows = "nixpkgs";
     };
     advisory-db = {
@@ -97,6 +98,10 @@
           (craneLib.filterCargoSources path type)
           || builtins.elem pathString (map (name: "${toString ./.}/${name}") ["README.md" "LICENSE" "CHANGELOG.md"])
           || pkgs.lib.hasInfix "/src/review/assets/" pathString
+          || pkgs.lib.hasSuffix "/src/render/ci/nix_group.py" pathString
+          || pkgs.lib.hasSuffix "/tests/fixtures/nix-groups-contract.py" pathString
+          || pkgs.lib.hasSuffix "/tests/fixtures/report-jq.sh" pathString
+          || pkgs.lib.hasSuffix "/tests/fixtures/report-cli.sh" pathString
           || pkgs.lib.hasSuffix "ci-actions.json" pathString
           || pkgs.lib.hasSuffix "/.github" pathString
           || pkgs.lib.hasSuffix "/.github/workflows" pathString
@@ -125,7 +130,7 @@
         // {
           inherit cargoArtifacts;
           nativeBuildInputs = commonArgs.nativeBuildInputs ++ [preCommitBin];
-          nativeCheckInputs = [pkgs.git pkgs.gnupg pkgs.nodejs pkgs.jq];
+          nativeCheckInputs = [pkgs.git pkgs.gnupg pkgs.nodejs pkgs.jq pkgs.python3];
         });
 
       publicCargoArtifacts = publicCraneLib.buildDepsOnly commonArgs;
@@ -133,7 +138,7 @@
         // {
           cargoArtifacts = publicCargoArtifacts;
           nativeBuildInputs = commonArgs.nativeBuildInputs ++ [preCommitBin];
-          nativeCheckInputs = [pkgs.git pkgs.gnupg pkgs.nodejs pkgs.jq];
+          nativeCheckInputs = [pkgs.git pkgs.gnupg pkgs.nodejs pkgs.jq pkgs.python3];
         });
 
       actionlintCheck =
@@ -204,7 +209,7 @@
       nextestCheck = publicCraneLib.cargoNextest (commonArgs
         // {
           cargoArtifacts = publicCargoArtifacts;
-          nativeCheckInputs = [pkgs.git pkgs.gnupg pkgs.nodejs pkgs.jq];
+          nativeCheckInputs = [pkgs.git pkgs.gnupg pkgs.nodejs pkgs.jq pkgs.python3];
         });
 
       docCheck = publicCraneLib.cargoDoc (commonArgs
@@ -298,11 +303,7 @@
         msrv = let
           msrvToolchain = rs-harbor.lib.mkToolchain {
             inherit pkgs;
-            toolchainFile = builtins.toFile "rust-toolchain-msrv.toml" ''
-              [toolchain]
-              channel = "1.85.0"
-              profile = "minimal"
-            '';
+            toolchainFile = ./rust-toolchain-msrv.toml;
             withRustAnalyzer = false;
             crossTargets = [];
             cache.enable = false;

@@ -54,7 +54,7 @@ pub fn run(command: InitFlakeCommand) -> Result<()> {
     let rust_edition = cargo::rustfmt_edition(&metadata)?;
     let rust_version = workspace_rust_version(&metadata);
     let audit_tools = resolve_audit_tools(workspace_root, &cfg, &languages, &metadata)?;
-    let all_files = flake::files_with_components(
+    let mut all_files = flake::files_with_components(
         &languages,
         &rust_edition,
         rust_version.as_deref(),
@@ -62,6 +62,11 @@ pub fn run(command: InitFlakeCommand) -> Result<()> {
         audit_tools,
         &cfg.flake.components,
     );
+    // The MSRV manifest belongs to the generated shell, not to hook policy.
+    // A custom flake owns its toolchain selection and any existing manifest.
+    if cfg.flake.mode == FlakeMode::Custom {
+        all_files.retain(|file| file.relative_path != Path::new("rust-toolchain-msrv.toml"));
+    }
     // Cross mode generates a project-owned multi-target flake.nix, so it always
     // operates at full scope regardless of any configured default.
     let scope = if cross_targets.is_some() {
@@ -116,6 +121,11 @@ pub fn run(command: InitFlakeCommand) -> Result<()> {
             .iter()
             .find(|file| file.relative_path == Path::new("nix/treefmt.nix"))
             .is_some_and(|file| flake::treefmt_module_wants_rustfmt_package(&file.content));
+        let content = if scope == FlakeScope::Full && rust_version.is_some() {
+            flake::migrate_msrv_toolchain(&content)?
+        } else {
+            content
+        };
         let patched = flake::patch_existing(&content, audit_tools, generated_module_needs_package)?;
         let mut patched_files = files.clone();
         let flake_file = patched_files
@@ -531,6 +541,21 @@ fn check_files(
         let path = workspace_root.join(&file.relative_path);
         match fs::read_to_string(&path) {
             Ok(actual) if file.relative_path == Path::new("flake.nix") => {
+                if cfg.flake.mode != FlakeMode::Custom
+                    && scope == FlakeScope::Full
+                    && rust_version.is_some()
+                {
+                    let migrated = flake::migrate_msrv_toolchain(&actual)?;
+                    if migrated != actual {
+                        mismatches.push(
+                            "flake.nix needs the source-backed MSRV manifest migration".to_owned(),
+                        );
+                        if show_diff {
+                            diffs.push(unified_diff("flake.nix", &actual, &migrated));
+                        }
+                        continue;
+                    }
+                }
                 // In cross mode the multi-target flake is canonical, so it must
                 // match exactly; the hook-wiring escape hatch (which a stale
                 // single-target flake would satisfy) is only valid for the
@@ -646,7 +671,10 @@ fn check_files(
 fn hook_files(files: &[GeneratedFile]) -> Vec<GeneratedFile> {
     files
         .iter()
-        .filter(|file| file.relative_path != Path::new("flake.nix"))
+        .filter(|file| {
+            file.relative_path != Path::new("flake.nix")
+                && file.relative_path != Path::new("rust-toolchain-msrv.toml")
+        })
         .cloned()
         .collect()
 }

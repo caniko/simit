@@ -1019,6 +1019,9 @@ fn infer_expected_primary_ci_files(
     // file drift. `{:#}` keeps the offending keys in the message.
     let config =
         ProjectConfig::load(workspace_root).context("loading simit project configuration")?;
+    config
+        .ci
+        .validate_effective_backend(backend.provider(), backend.platform())?;
     let snapshots = workflow_snapshots(marked);
     if backend.provider() == CiProvider::Crow {
         return infer_expected_crow_files(workspace_root, marked, &snapshots);
@@ -1186,6 +1189,10 @@ fn infer_expected_primary_ci_files(
         &cli,
         Some(&inference),
     )?;
+    // Audit the same resolved contract as init before GitHub's runner map reset.
+    if config.ci.independent_lanes && !resolved.step_runners.is_empty() {
+        bail!("[ci].independent_lanes cannot be combined with step_runners");
+    }
     if metadata.workspace_members.len() > 1 && resolved.packages.is_empty() {
         resolved.workspace = true;
     }
