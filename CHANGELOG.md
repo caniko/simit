@@ -18,6 +18,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Opt-in shared-store Nix build groups with complete installable assignments,
   discovered-check coverage admission and per-output failure evidence.
+- Independent Rust, full-flake evaluation and optional realization lanes for
+  GitHub-hosted Rust/Nix projects, retaining all existing quality steps.
 
 ### Added
 

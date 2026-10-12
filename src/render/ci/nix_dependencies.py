@@ -40,17 +40,25 @@ identity = {'schema': 'simit.nix-dependencies.v1', 'head': head, 'tree': tree,
 assert dependencies and systems and len(set(dependencies)) == len(dependencies)
 assert not set(dependencies) & set(plan)
 check_drvs = set()
-for system in systems:
-    checks = evaluate(f'.#checks.{system}', 'checks: builtins.mapAttrs (_: d: d.drvPath) checks')
-    assert isinstance(checks, dict) and checks, 'Invalid discovered check inventory'
-    check_drvs.update(checks.values())
+qualification_outputs = set()
 expression = 'd: { drvPath = d.drvPath; outputs = builtins.listToAttrs (map (name: { inherit name; value = d.${name}.outPath; }) d.outputs); }'
+for system in systems:
+    checks = evaluate(f'.#checks.{system}', 'checks: builtins.mapAttrs (_: d: { drvPath = d.drvPath; outputs = builtins.listToAttrs (map (name: { inherit name; value = d.${name}.outPath; }) d.outputs); }) checks')
+    assert isinstance(checks, dict) and checks, 'Invalid discovered check inventory'
+    check_drvs.update(definition['drvPath'] for definition in checks.values())
+    qualification_outputs.update(path for definition in checks.values() for path in definition['outputs'].values())
 definitions = {installable: evaluate(installable, expression) for installable in dependencies}
-qualified_drvs = {evaluate(installable, 'd: d.drvPath') for installable in plan}
+qualification = {installable: evaluate(installable, expression) for installable in plan}
+qualified_drvs = {definition['drvPath'] for definition in qualification.values()}
+qualification_outputs.update(path for definition in qualification.values() for path in definition['outputs'].values())
 for definition in definitions.values():
     assert definition['drvPath'] not in check_drvs | qualified_drvs, 'A qualification derivation was enrolled as a build input'
     assert definition['outputs'] and all(re.fullmatch(r'/nix/store/[a-z0-9]{32}-[^/\s]+', path)
                                          for path in definition['outputs'].values())
+graph = json.loads(subprocess.check_output(['nix', 'derivation', 'show', '--recursive',
+                                           *sorted(definition['drvPath'] for definition in definitions.values())], text=True))
+assert isinstance(graph, dict) and graph
+assert not set(graph) & (check_drvs | qualified_drvs), 'Build-input graph contains a qualification derivation'
 manifest_path = root / 'manifest.json'
 archive = root / 'closure.nar.gz'
 if mode == 'export':
@@ -75,6 +83,7 @@ if mode == 'export':
     assert sum(row['narSize'] for row in closure_data.values()) <= maximum, 'Dependency closure exceeds its transport budget'
     closure = sorted(closure_data)
     assert all(re.fullmatch(r'/nix/store/[a-z0-9]{32}-[^/\s]+', path) for path in closure)
+    assert not set(closure) & qualification_outputs, 'Dependency closure contains qualification outputs'
     with (root / 'export.log').open('wb') as log, gzip.open(archive, 'wb', compresslevel=1) as compressed:
         with subprocess.Popen(['nix-store', '--export', *closure], stdout=subprocess.PIPE, stderr=log) as producer:
             size = 0
@@ -94,6 +103,7 @@ elif mode == 'import':
     manifest = json.loads(manifest_path.read_text())
     assert all(manifest.get(key) == value for key, value in identity.items()), 'Dependency provenance differs from this source/run'
     assert manifest['complete'] is True and manifest['definitions'] == definitions
+    assert not set(manifest['closure']) & qualification_outputs, 'Dependency closure contains qualification outputs'
     assert archive.is_file() and not archive.is_symlink() and archive.stat().st_size == manifest['archive_bytes']
     assert archive.stat().st_size <= maximum + 1024 * 1024
     assert digest(archive) == manifest['archive_sha256'], 'Dependency archive checksum mismatch'

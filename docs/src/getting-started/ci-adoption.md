@@ -346,6 +346,23 @@ Omitting `[ci.nix_build]` preserves the existing generated matrix defaults.
 
 ### Shared-store Nix groups
 
+Rust projects using GitHub Actions with the Nix runtime can opt into
+`[ci].independent_lanes = true`. The `rust` lane retains the existing format,
+test, quality, docs, generator and package steps. The `evaluation` lane evaluates
+the complete flake without building. With the default `nix_flake_check = true`,
+the `realization` lane also builds all flake checks. These lanes start independently
+and retain the same push and PR triggers. Step-runner overrides and `om_ci` are
+not supported together with this opt-in.
+
+Setting `nix_flake_check = false` omits only the realization lane. Establish
+complete discovered-check and declared-production-output coverage through the
+groups below, qualify their receipts, then migrate required branch contexts
+before removing overlapping full-flake realization.
+
+Native required contexts change from `test` to `rust`, `evaluation` and,
+when enabled, `realization` (with workspace member prefixes where applicable).
+Enroll every applicable lane and group context before retiring `test`.
+
 `[ci.nix_build.groups]` partitions every entry in `ci.nix_builds` into named
 jobs. Related packages and checks share a fresh hosted runner's Nix store, so
 their common dependencies are built once within that job. Group membership
@@ -400,9 +417,11 @@ transport budget before importing. An alias of a discovered check or a declared
 qualification output is refused. A failed dependency producer blocks consuming
 groups; its builder and export diagnostics remain available.
 
-`fresh_installables` passes `--rebuild` for selected qualification derivations,
-so cached dependencies are reused while runtime tests execute on their current
-hosted workers. Restored dependencies never constitute test acceptance. Keep
+`fresh_installables` first materializes cold outputs and dependencies normally,
+then requires an explicit `--rebuild` on the current worker. Nix check mode needs
+valid outputs, so an uncached check can execute twice; materialization alone never
+constitutes acceptance. Both direct aliases and transitive qualification outputs
+are rejected from dependency transport before export/import. Keep
 VMs and other runtime checks in this explicit fresh set, and measure export,
 download/import and cache-hit costs alongside end-to-end latency.
 

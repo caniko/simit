@@ -51,6 +51,28 @@ fn grouped_installables_share_a_runner_with_complete_per_output_evidence() {
     assert_eq!(job["strategy"]["max-parallel"], 4);
     assert_eq!(job["strategy"]["matrix"]["include"][0]["group"], "network");
     let steps = job["steps"].as_sequence().unwrap();
+    let checkout = steps.iter().find(|s| s["name"] == "Checkout").unwrap();
+    assert_eq!(
+        checkout["with"]["ref"],
+        "${{ github.event.pull_request.head.sha || github.sha }}"
+    );
+    assert_eq!(
+        checkout["with"]["repository"],
+        "${{ github.event.pull_request.head.repo.full_name || github.repository }}"
+    );
+    assert_eq!(checkout["with"]["persist-credentials"], false);
+    assert!(
+        value["concurrency"]["group"]
+            .as_str()
+            .unwrap()
+            .contains("github.event_name")
+    );
+    assert!(
+        value["concurrency"]["group"]
+            .as_str()
+            .unwrap()
+            .contains("head.repo.full_name")
+    );
     let build = steps
         .iter()
         .find(|s| s["name"] == "Build Nix group")
@@ -109,6 +131,160 @@ fn generated_group_program_fences_source_and_coverage_and_retains_failed_outputs
         .output()
         .unwrap();
     assert!(output.status.success(), "{output:?}");
+}
+
+#[test]
+fn independent_rust_evaluation_and_realization_lanes_preserve_all_steps() {
+    let temp = project("independent_lanes = true\nwith_docs = true\nall_features = true");
+    fs::write(
+        temp.path().join("Cargo.toml"),
+        "[package]\nname = \"client\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )
+    .unwrap();
+    fs::create_dir(temp.path().join("src")).unwrap();
+    fs::write(temp.path().join("src/lib.rs"), "pub fn client() {}\n").unwrap();
+    let output = generate(&temp, &[]);
+    assert!(output.status.success(), "{output:?}");
+    let value: Value = serde_yaml::from_str(
+        &fs::read_to_string(temp.path().join(".github/workflows/ci.yaml")).unwrap(),
+    )
+    .unwrap();
+    for name in ["rust", "evaluation", "realization"] {
+        assert!(value["jobs"][name]["steps"].is_sequence(), "{value:?}");
+        assert!(value["jobs"][name]["needs"].is_null());
+    }
+    let rust = value["jobs"]["rust"]["steps"].as_sequence().unwrap();
+    assert!(
+        rust.iter()
+            .any(|s| s["run"] == "nix develop -c cargo test --all-features")
+    );
+    assert!(
+        rust.iter()
+            .any(|s| s["run"] == "nix develop .#docs -c cargo doc --no-deps --all-features")
+    );
+    assert!(rust.iter().any(|s| s["name"] == "Clippy all features"));
+    assert!(!rust.iter().any(|s| s["name"] == "Check flake"));
+    assert_eq!(value["on"]["push"]["branches"][0], "**");
+    assert!(
+        value["on"]
+            .as_mapping()
+            .unwrap()
+            .contains_key(Value::String("pull_request".into()))
+    );
+    assert!(generate(&temp, &["--check", "--diff"]).status.success());
+    assert_eq!(
+        simit::registry::audit_ci(temp.path()).unwrap().status,
+        simit::registry::FeatureStatus::Managed
+    );
+}
+
+#[test]
+fn independent_lanes_can_retire_realization_without_retiring_evaluation() {
+    let temp = project(
+        "independent_lanes = true\nnix_flake_check = false\ncheck_command = \"cargo test --locked\"",
+    );
+    fs::write(
+        temp.path().join("Cargo.toml"),
+        "[package]\nname = \"client\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )
+    .unwrap();
+    fs::create_dir(temp.path().join("src")).unwrap();
+    fs::write(temp.path().join("src/lib.rs"), "pub fn client() {}\n").unwrap();
+    assert!(generate(&temp, &[]).status.success());
+    let value: Value = serde_yaml::from_str(
+        &fs::read_to_string(temp.path().join(".github/workflows/ci.yaml")).unwrap(),
+    )
+    .unwrap();
+    assert!(value["jobs"]["realization"].is_null());
+    assert!(value["jobs"]["evaluation"]["steps"].is_sequence());
+    assert!(
+        value["jobs"]["rust"]["steps"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .any(|s| s["run"]
+                .as_str()
+                .is_some_and(|run| run.trim_end() == "nix develop -c sh -c 'cargo test --locked'"))
+    );
+}
+
+#[test]
+fn effective_backend_overrides_cannot_silently_drop_group_admission() {
+    let temp = project(
+        "[ci.nix_build]\ncapture_results = true\ncheck_systems = [\"x86_64-linux\"]\n[ci.nix_build.groups]\nall = [\".#checks.x86_64-linux.client\", \".#checks.x86_64-linux.recovery\"]",
+    );
+    let config = temp.path().join("simit.toml");
+    let before = fs::read_to_string(&config)
+        .unwrap()
+        .replace("platform = \"github\"\n", "")
+        .replace("provider = \"actions\"\n", "");
+    fs::write(&config, &before).unwrap();
+    fs::write(
+        temp.path().join("Cargo.toml"),
+        "[package]\nname = \"client\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )
+    .unwrap();
+    fs::create_dir(temp.path().join("src")).unwrap();
+    fs::write(temp.path().join("src/lib.rs"), "pub fn client() {}\n").unwrap();
+    let output = generate(&temp, &["--platform", "forgejo", "--ci-provider", "crow"]);
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("effective GitHub Actions backend"),
+        "{output:?}"
+    );
+    assert_eq!(fs::read_to_string(&config).unwrap(), before);
+    assert!(!temp.path().join(".crow").exists());
+    assert!(!temp.path().join(".github/workflows").exists());
+}
+
+#[test]
+fn unsupported_lane_backends_reject_generation_and_existing_workflow_audits() {
+    for (platform, provider) in [("forgejo", "crow"), ("gitlab", "actions")] {
+        let temp = project("");
+        fs::write(
+            temp.path().join("Cargo.toml"),
+            "[package]\nname = \"client\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+        )
+        .unwrap();
+        fs::create_dir(temp.path().join("src")).unwrap();
+        fs::write(temp.path().join("src/lib.rs"), "pub fn client() {}\n").unwrap();
+        let config = temp.path().join("simit.toml");
+        let supported = format!(
+            "[ci]\nplatform = \"{platform}\"\nprovider = \"{provider}\"\nruntime = \"nix\"\nrunner = \"codefloe-global\"\n"
+        );
+        fs::write(&config, &supported).unwrap();
+        assert!(generate(&temp, &[]).status.success());
+        let changed = format!("{supported}independent_lanes = true\n");
+        fs::write(&config, &changed).unwrap();
+        let error = simit::registry::audit_ci(temp.path()).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("effective GitHub Actions backend"),
+            "{error:#}"
+        );
+        let output = generate(&temp, &[]);
+        assert!(!output.status.success(), "{output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("independent_lanes"),
+            "{output:?}"
+        );
+        assert_eq!(fs::read_to_string(&config).unwrap(), changed);
+    }
+    let temp = project("independent_lanes = true");
+    fs::write(
+        temp.path().join("pyproject.toml"),
+        "[project]\nname = \"client\"\nversion = \"0.1.0\"\nrequires-python = \">=3.12\"\n",
+    )
+    .unwrap();
+    fs::write(temp.path().join("uv.lock"), "version = 1\n").unwrap();
+    let before = fs::read(temp.path().join("simit.toml")).unwrap();
+    let output = generate(&temp, &["--platform", "forgejo", "--ci-provider", "crow"]);
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("independent_lanes"),
+        "{output:?}"
+    );
+    assert_eq!(fs::read(temp.path().join("simit.toml")).unwrap(), before);
+    assert!(!temp.path().join(".crow").exists());
 }
 
 #[test]

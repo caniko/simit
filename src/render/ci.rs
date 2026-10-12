@@ -14,6 +14,7 @@ use crate::config::{
 use crate::project::GeneratedFile;
 use crate::user_config::{ResolvedCiRunners, ResolvedRunner};
 
+mod independent_lanes;
 mod nix_dependencies;
 mod nix_groups;
 mod trusted_publisher;
@@ -172,6 +173,7 @@ pub struct CiOptions {
     /// CI-only cache policy; publication uses the separate nix_* fields.
     pub ci_nix_substituters: Vec<String>,
     pub ci_nix_trusted_public_keys: Vec<String>,
+    pub independent_lanes: bool,
     pub nix_builds: Vec<String>,
     pub all_features: bool,
     pub unit_tests_only: bool,
@@ -222,6 +224,7 @@ impl Default for CiOptions {
         Self {
             ci_nix_substituters: Vec::new(),
             ci_nix_trusted_public_keys: Vec::new(),
+            independent_lanes: false,
             nix_builds: Vec::new(),
             all_features: true,
             unit_tests_only: false,
@@ -361,6 +364,17 @@ impl Default for HomebrewPlatformSet {
 }
 
 pub fn files(request: FilesRequest<'_>) -> Result<Vec<GeneratedFile>> {
+    if request.options.independent_lanes
+        && (request.platform != Platform::Github
+            || request.provider != CiProvider::Actions
+            || request.runtime != Runtime::Nix
+            || !request.step_runners.is_empty()
+            || request.options.om_ci != OmCiMode::Off)
+    {
+        bail!(
+            "[ci].independent_lanes requires GitHub Actions Rust/Nix without step_runners or om_ci"
+        );
+    }
     if request.provider == CiProvider::Crow {
         return crate::render::crow::files(crate::render::crow::FilesRequest {
             format: request.crow.format,
@@ -781,6 +795,9 @@ pub fn python_ci_file(
     check_outputs: &[String],
     components: &[CiComponent],
 ) -> Result<GeneratedFile> {
+    if options.independent_lanes {
+        bail!("[ci].independent_lanes requires GitHub Actions Rust/Nix CI");
+    }
     if runtime != Runtime::Nix {
         bail!("Python uv CI generation requires --runtime nix");
     }
@@ -2131,7 +2148,12 @@ fn python_ci_workflow(
     workflow.push_str("    steps:\n");
     push_checkout_step(&mut workflow, platform, runner);
     push_required_env_step(&mut workflow, &options.required_env);
-    push_install_nix_step(&mut workflow, platform);
+    push_install_nix_step_with_cache(
+        &mut workflow,
+        platform,
+        &options.ci_nix_substituters,
+        &options.ci_nix_trusted_public_keys,
+    );
     push_extra_setup_steps(&mut workflow, &options.extra_setup);
     if selected(CiComponent::FlakeWiring) {
         workflow.push_str("      - name: Check generated flake wiring\n");
@@ -2317,7 +2339,9 @@ fn ci_workflow(
     options: CiOptions,
     step_runners: &BTreeMap<String, ResolvedRunner>,
 ) -> String {
-    if step_runners.is_empty() {
+    if options.independent_lanes {
+        independent_lanes::render(platform, package, self_check, runners, options)
+    } else if step_runners.is_empty() {
         ci_workflow_single_job(platform, runtime, package, self_check, runners, options)
     } else {
         ci_workflow_multi_job(
@@ -3941,6 +3965,15 @@ fn yaml_double_quote(value: &str) -> String {
 fn push_checkout_step(workflow: &mut String, platform: Platform, runner: &ResolvedRunner) {
     let version = github_action_version(Some(runner), "v7.0.1", "v4.3.1");
     push_checkout_step_with_version(workflow, platform, version);
+}
+
+fn push_source_head_checkout(workflow: &mut String, runner: &ResolvedRunner) {
+    push_checkout_step(workflow, Platform::Github, runner);
+    workflow.push_str("        with:\n          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}\n          ref: ${{ github.event.pull_request.head.sha || github.sha }}\n          persist-credentials: false\n");
+}
+
+fn push_independent_source_concurrency(workflow: &mut String) {
+    workflow.push_str("concurrency:\n  group: ${{ github.workflow_ref }}-${{ github.event_name }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.ref_type == 'tag' && github.ref || format('refs/heads/{0}', github.event.pull_request.head.ref || github.ref_name) }}\n  cancel-in-progress: true\n\n");
 }
 
 fn push_checkout_step_with_version(workflow: &mut String, platform: Platform, version: &str) {

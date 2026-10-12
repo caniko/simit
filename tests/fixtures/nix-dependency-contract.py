@@ -18,7 +18,7 @@ DEFINITION = {'drvPath': DRV, 'outputs': {'out': OUT}}
 
 
 class Transport(unittest.TestCase):
-    def execute(self, change=None, alias=False):
+    def execute(self, change=None, alias=False, transitive=False):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             archive = root / 'closure.nar.gz'
@@ -38,10 +38,12 @@ class Transport(unittest.TestCase):
             def output(command, **kwargs):
                 if command[0] == 'git':
                     return HEAD if command[-1] == 'HEAD' else TREE
-                if command[-1] == 'd: d.drvPath':
-                    return json.dumps('/nix/store/runtime.drv')
+                if command[0:3] == ['nix', 'derivation', 'show']:
+                    return json.dumps({DRV: {}, **({'/nix/store/runtime.drv': {}} if transitive else {})})
                 if command[4].startswith('.#checks'):
-                    return json.dumps({'runtime': DRV if alias else '/nix/store/runtime.drv'})
+                    check = {'drvPath': DRV if alias else '/nix/store/runtime.drv',
+                             'outputs': {'out': '/nix/store/' + '2' * 32 + '-runtime'}}
+                    return json.dumps({'runtime': check}) if command[4] == '.#checks.x86_64-linux' else json.dumps(check)
                 return json.dumps(DEFINITION)
 
             def run(command, **kwargs):
@@ -79,6 +81,16 @@ class Transport(unittest.TestCase):
 
     def test_package_alias_of_a_check_is_rejected_before_import(self):
         accepted, effects = self.execute(alias=True)
+        self.assertFalse(accepted)
+        self.assertEqual(effects, [])
+
+    def test_distinct_root_with_a_transitive_check_cannot_be_transported(self):
+        accepted, effects = self.execute(transitive=True)
+        self.assertFalse(accepted)
+        self.assertEqual(effects, [])
+
+    def test_authenticated_manifest_cannot_enroll_a_qualification_output_in_its_closure(self):
+        accepted, effects = self.execute(('closure', [OUT, '/nix/store/' + '2' * 32 + '-runtime']))
         self.assertFalse(accepted)
         self.assertEqual(effects, [])
 

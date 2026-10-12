@@ -439,6 +439,7 @@ impl ResolvedCiInputs {
             with_nextest: self.with_nextest,
             with_nix_cargo_cache: self.with_nix_cargo_cache,
             nix_flake_check: self.nix_flake_check,
+            independent_lanes: cfg.ci.independent_lanes,
             with_msrv: self.with_msrv,
             with_audit: self.with_audit,
             with_deny: self.with_deny,
