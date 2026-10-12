@@ -590,7 +590,7 @@ pub struct NixBuildConfig {
     pub groups: BTreeMap<String, Vec<String>>,
     /// Require every discovered check on these systems to have a group owner.
     pub check_systems: Vec<String>,
-    /// Build-only inputs transported between fresh workers in this workflow run.
+    /// Unselected local build inputs; transport includes every derivation output.
     pub dependency_installables: Vec<String>,
     /// Bound the uncompressed transported closure; defaults to 2048 MiB.
     pub dependency_max_mib: Option<u64>,
@@ -646,6 +646,11 @@ impl NixBuildConfig {
         }
         let mut dependencies = std::collections::BTreeSet::new();
         for member in &self.dependency_installables {
+            if member.contains('^') {
+                bail!(
+                    "[ci.nix_build].dependency_installables does not support output selectors; dependency transport builds all outputs of unselected local derivations"
+                );
+            }
             if !member.starts_with(".#")
                 || member.contains("checks.")
                 || installables.contains(member)
@@ -655,6 +660,13 @@ impl NixBuildConfig {
                     "[ci.nix_build].dependency_installables must be unique local build inputs, not qualification outputs"
                 );
             }
+        }
+        if !self.dependency_installables.is_empty()
+            && installables.iter().any(|member| member.contains('^'))
+        {
+            bail!(
+                "[ci].nix_builds does not support output selectors when dependency transport is enabled; use unselected derivations"
+            );
         }
         if self.groups.is_empty() {
             if !self.check_systems.is_empty() {

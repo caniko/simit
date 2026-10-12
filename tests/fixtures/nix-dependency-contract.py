@@ -65,7 +65,8 @@ def exported(*records):
 class Transport(unittest.TestCase):
     def execute(self, change=None, alias=False, transitive=False, optimized=False,
                 data=None, maximum=1024, mode='import', closure=None, argument_limit=None,
-                extra_environment=None):
+                extra_environment=None, definition=None, built_definition=None):
+        definition = definition or DEFINITION
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             archive = root / 'closure.nar.gz'
@@ -74,7 +75,7 @@ class Transport(unittest.TestCase):
             manifest = {'schema': 'simit.nix-dependencies.v1', 'head': HEAD, 'tree': TREE,
                         'repository': 'owner/repo', 'run': '123', 'attempt': 1,
                         'flake_lock_sha256': None, 'complete': True,
-                        'definitions': {'.#input': DEFINITION}, 'closure': [OUT],
+                        'definitions': {'.#input': definition}, 'closure': closure or [OUT],
                         'uncompressed_bytes': len(data), 'archive_bytes': archive.stat().st_size,
                         'archive_sha256': hashlib.sha256(archive.read_bytes()).hexdigest()}
             if change:
@@ -93,7 +94,7 @@ class Transport(unittest.TestCase):
                     check = {'drvPath': DRV if alias else '/nix/store/runtime.drv',
                              'outputs': {'out': '/nix/store/' + '2' * 32 + '-runtime'}}
                     return json.dumps({'runtime': check}) if command[4] == '.#checks.x86_64-linux' else json.dumps(check)
-                return json.dumps(DEFINITION)
+                return json.dumps(definition)
 
             def run(command, **kwargs):
                 if command[0] != 'git':
@@ -105,7 +106,7 @@ class Transport(unittest.TestCase):
                         info = os.fstat(kwargs['stdin'].fileno())
                         self.assertEqual(info.st_mode & 0o777, 0o600)
                         self.assertEqual(info.st_nlink, 0)
-                stdout = json.dumps([DEFINITION]).encode() if command[0:2] == ['nix', 'build'] else None
+                stdout = json.dumps([built_definition or definition]).encode() if command[0:2] == ['nix', 'build'] else None
                 return subprocess.CompletedProcess(command, 0, stdout=stdout)
 
             class Producer:
@@ -138,6 +139,34 @@ class Transport(unittest.TestCase):
                 except (AssertionError, RuntimeError):
                     return False, effects
             return True, effects
+
+    def test_complete_multi_output_derivation_exports_and_imports_both_roots(self):
+        dev = '/nix/store/' + '4' * 32 + '-development'
+        definition = {'drvPath': DRV, 'outputs': {'out': OUT, 'dev': dev}}
+        data = exported(record(OUT), record(dev))
+        for optimized in [False, True]:
+            accepted, effects = self.execute(mode='export', definition=definition,
+                                             closure=[OUT, dev], data=data, optimized=optimized)
+            self.assertTrue(accepted)
+            build = next(command for command in effects if command[:2] == ['nix', 'build'])
+            self.assertEqual([value for value in build if value.startswith('.#')], ['.#input^*'])
+            export = next(command for command in effects if command[:2] == ['nix-store', '--export'])
+            self.assertEqual(set(export[2:]), {OUT, dev})
+            accepted, effects = self.execute(definition=definition, closure=[OUT, dev],
+                                             data=data, optimized=optimized)
+            self.assertTrue(accepted)
+            verify = next(command for command in effects if command[:2] == ['nix-store', '--verify-path'])
+            self.assertEqual(set(verify[2:]), {OUT, dev})
+
+    def test_build_omitting_a_declared_output_denies_before_export(self):
+        dev = '/nix/store/' + '4' * 32 + '-development'
+        definition = {'drvPath': DRV, 'outputs': {'out': OUT, 'dev': dev}}
+        for optimized in [False, True]:
+            accepted, effects = self.execute(mode='export', definition=definition,
+                                             built_definition=DEFINITION, closure=[OUT, dev],
+                                             optimized=optimized)
+            self.assertFalse(accepted)
+            self.assertFalse(any(command[0] == 'nix-store' for command in effects))
 
     def test_small_closure_exports_and_imports_under_the_worker_argument_limit(self):
         for mode in ['export', 'import']:

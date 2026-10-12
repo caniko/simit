@@ -433,7 +433,12 @@ fresh_installables = [".#checks.x86_64-linux.pinentry-runtime"]
 
 Dependency transport requires groups and discovered `check_systems`. It builds
 only selected build inputs in a separate fresh worker and exports their complete
-closure to a same-run artifact. Consumers verify source commit/tree, lock bytes,
+closure to a same-run artifact. Enroll unselected local derivation attributes such
+as `.#ci-patched-zellij`; transport builds every output. Explicit `^out`, `^dev`
+and `^*` selectors are rejected before generation, both in dependency enrollment
+and in qualification plans using dependency transport. Selectors in workflows
+without dependency transport retain their existing behavior.
+Consumers verify source commit/tree, lock bytes,
 repository, run, attempt, expected derivations/output paths, archive checksum and
 transport budget before importing. The consumer parses the full Nix export/NAR
 stream without extraction: actual records must exactly match the admitted closure

@@ -228,6 +228,62 @@ fn qualification_outputs_cannot_be_enrolled_as_transport_dependencies() {
 }
 
 #[test]
+fn dependency_output_selectors_reject_before_generation() {
+    for selector in ["dev", "out", "*"] {
+        let temp = project();
+        let path = temp.path().join("simit.toml");
+        let before = fs::read_to_string(&path)
+            .unwrap()
+            .replace(".#ci-dependency", &format!(".#ci-dependency^{selector}"));
+        fs::write(&path, &before).unwrap();
+        let output = common::simit()
+            .current_dir(temp.path())
+            .args(["init", "ci"])
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{output:?}");
+        let diagnostic = String::from_utf8_lossy(&output.stderr);
+        assert!(diagnostic.contains("dependency_installables"), "{output:?}");
+        assert!(diagnostic.contains("output selectors"), "{output:?}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), before);
+        assert!(!temp.path().join(".github/workflows").exists());
+    }
+}
+
+#[test]
+fn qualification_output_selectors_reject_only_when_transport_is_enabled() {
+    for selector in ["dev", "out", "*"] {
+        for transport in [true, false] {
+            let temp = project();
+            let path = temp.path().join("simit.toml");
+            let mut before = fs::read_to_string(&path).unwrap().replace(
+                ".#checks.x86_64-linux.runtime",
+                &format!(".#runtime^{selector}"),
+            );
+            if !transport {
+                before = before
+                    .replace("dependency_installables = [\".#ci-dependency\"]\n", "")
+                    .replace("dependency_max_mib = 256\n", "");
+            }
+            fs::write(&path, &before).unwrap();
+            let output = common::simit()
+                .current_dir(temp.path())
+                .args(["init", "ci"])
+                .output()
+                .unwrap();
+            assert_eq!(output.status.success(), !transport, "{output:?}");
+            if transport {
+                let diagnostic = String::from_utf8_lossy(&output.stderr);
+                assert!(diagnostic.contains("nix_builds"), "{output:?}");
+                assert!(diagnostic.contains("output selectors"), "{output:?}");
+                assert_eq!(fs::read_to_string(&path).unwrap(), before);
+                assert!(!temp.path().join(".github/workflows").exists());
+            }
+        }
+    }
+}
+
+#[test]
 fn downloaded_dependency_provenance_is_checked_before_any_store_import() {
     let temp = project();
     let output = common::simit()
