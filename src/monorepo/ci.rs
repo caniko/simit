@@ -110,7 +110,7 @@ pub(crate) fn files(root: &Path, config: &ProjectConfig) -> Result<Vec<Generated
             // The project-owned command is one argument to sh, not an interpolated
             // expression; GitHub event data never enters a shell command.
             let quoted = format!("'{}'", gate.run.replace('\'', "'\\''"));
-            let mut step = json!({"name": gate.id, "timeout-minutes": gate.timeout_minutes, "run": format!("nix develop --print-build-logs .#ci --command sh -ec {quoted}")});
+            let mut step = json!({"name": gate.id, "timeout-minutes": gate.timeout_minutes, "run": format!("# Expand the project command inside the Nix child shell.\n# shellcheck disable=SC2016\nnix develop --print-build-logs .#ci --command sh -ec {quoted}")});
             if !gate.env.is_empty() {
                 step["env"] = json!(gate.env);
             }
