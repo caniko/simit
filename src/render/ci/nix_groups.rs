@@ -23,7 +23,7 @@ pub(super) fn render(
     workflow
         .push_str("  pull_request:\n  workflow_dispatch:\n\npermissions:\n  contents: read\n\n");
     if options.separate_events {
-        push_github_concurrency(&mut workflow);
+        push_independent_source_concurrency(&mut workflow);
     } else {
         workflow.push_str("concurrency:\n  group: nix-groups-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.ref_type == 'tag' && github.ref || format('refs/heads/{0}', github.event.pull_request.head.ref || github.ref_name) }}\n  cancel-in-progress: true\n\n");
     }
@@ -43,7 +43,7 @@ pub(super) fn render(
         workflow.push_str(&format!("      {name}: \"{}\"\n", yaml_double_quote(value)));
     }
     workflow.push_str("    steps:\n");
-    push_checkout_step(&mut workflow, Platform::Github, runner);
+    push_source_head_checkout(&mut workflow, runner);
     workflow.push_str("      - name: Prepare Nix build evidence\n        run: |\n          SIMIT_NIX_BUILD_RESULTS=\"$RUNNER_TEMP/simit-nix-build-${{ strategy.job-index }}\"\n          mkdir -p \"$SIMIT_NIX_BUILD_RESULTS\"\n          printf '%s\\n' \"SIMIT_NIX_BUILD_RESULTS=$SIMIT_NIX_BUILD_RESULTS\" >> \"$GITHUB_ENV\"\n          git rev-parse HEAD > \"$SIMIT_NIX_BUILD_RESULTS/revision\"\n");
     push_install_nix_step_with_cache(
         &mut workflow,

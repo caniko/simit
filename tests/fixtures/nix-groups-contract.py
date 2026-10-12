@@ -14,7 +14,7 @@ MEMBERS = ['.#checks.x86_64-linux.client', '.#checks.x86_64-linux.recovery']
 
 
 class Groups(unittest.TestCase):
-    def execute(self, *, fail=False, malformed=False, missing=False, foreign=False):
+    def execute(self, *, fail=False, malformed=False, missing=False, foreign=False, pr=False):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             builds = []
@@ -44,6 +44,11 @@ class Groups(unittest.TestCase):
                    'SIMIT_NIX_LIMITS': '["--max-jobs","1","--cores","2"]',
                    'GITHUB_SHA': 'c' * 40 if foreign else HEAD, 'GITHUB_EVENT_NAME': 'push',
                    'GITHUB_RUN_ID': '123', 'GITHUB_RUN_ATTEMPT': '1'}
+            if pr:
+                event = root / 'event.json'
+                event.write_text(json.dumps({'pull_request': {'head': {'sha': HEAD}}}))
+                env.update(GITHUB_EVENT_NAME='pull_request', GITHUB_SHA='c' * 40,
+                           GITHUB_EVENT_PATH=str(event))
             with patch.dict(os.environ, env), patch('subprocess.check_output', output), patch('subprocess.run', run):
                 try:
                     exec(compile(PROGRAM, '<generated-group>', 'exec'), {})
@@ -82,6 +87,13 @@ class Groups(unittest.TestCase):
         self.assertEqual(status, 1)
         self.assertEqual(builds, [])
         self.assertIsNone(receipt)
+
+    def test_pr_head_is_qualified_separately_from_synthetic_merge(self):
+        status, builds, receipt, _ = self.execute(pr=True)
+        self.assertEqual(status, 0)
+        self.assertEqual(builds, MEMBERS)
+        self.assertEqual(receipt['head'], HEAD)
+        self.assertEqual(receipt['event'], 'pull_request')
 
     def test_malformed_success_is_not_accepted_and_other_outputs_still_run(self):
         status, builds, receipt, _ = self.execute(malformed=True)

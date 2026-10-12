@@ -51,6 +51,28 @@ fn grouped_installables_share_a_runner_with_complete_per_output_evidence() {
     assert_eq!(job["strategy"]["max-parallel"], 4);
     assert_eq!(job["strategy"]["matrix"]["include"][0]["group"], "network");
     let steps = job["steps"].as_sequence().unwrap();
+    let checkout = steps.iter().find(|s| s["name"] == "Checkout").unwrap();
+    assert_eq!(
+        checkout["with"]["ref"],
+        "${{ github.event.pull_request.head.sha || github.sha }}"
+    );
+    assert_eq!(
+        checkout["with"]["repository"],
+        "${{ github.event.pull_request.head.repo.full_name || github.repository }}"
+    );
+    assert_eq!(checkout["with"]["persist-credentials"], false);
+    assert!(
+        value["concurrency"]["group"]
+            .as_str()
+            .unwrap()
+            .contains("github.event_name")
+    );
+    assert!(
+        value["concurrency"]["group"]
+            .as_str()
+            .unwrap()
+            .contains("head.repo.full_name")
+    );
     let build = steps
         .iter()
         .find(|s| s["name"] == "Build Nix group")
@@ -109,6 +131,81 @@ fn generated_group_program_fences_source_and_coverage_and_retains_failed_outputs
         .output()
         .unwrap();
     assert!(output.status.success(), "{output:?}");
+}
+
+#[test]
+fn independent_rust_evaluation_and_realization_lanes_preserve_all_steps() {
+    let temp = project("independent_lanes = true\nwith_docs = true\nall_features = true");
+    fs::write(
+        temp.path().join("Cargo.toml"),
+        "[package]\nname = \"client\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )
+    .unwrap();
+    fs::create_dir(temp.path().join("src")).unwrap();
+    fs::write(temp.path().join("src/lib.rs"), "pub fn client() {}\n").unwrap();
+    let output = generate(&temp, &[]);
+    assert!(output.status.success(), "{output:?}");
+    let value: Value = serde_yaml::from_str(
+        &fs::read_to_string(temp.path().join(".github/workflows/ci.yaml")).unwrap(),
+    )
+    .unwrap();
+    for name in ["rust", "evaluation", "realization"] {
+        assert!(value["jobs"][name]["steps"].is_sequence(), "{value:?}");
+        assert!(value["jobs"][name]["needs"].is_null());
+    }
+    let rust = value["jobs"]["rust"]["steps"].as_sequence().unwrap();
+    assert!(
+        rust.iter()
+            .any(|s| s["run"] == "nix develop -c cargo test --all-features")
+    );
+    assert!(
+        rust.iter()
+            .any(|s| s["run"] == "nix develop .#docs -c cargo doc --no-deps --all-features")
+    );
+    assert!(rust.iter().any(|s| s["name"] == "Clippy all features"));
+    assert!(!rust.iter().any(|s| s["name"] == "Check flake"));
+    assert_eq!(value["on"]["push"]["branches"][0], "**");
+    assert!(
+        value["on"]
+            .as_mapping()
+            .unwrap()
+            .contains_key(Value::String("pull_request".into()))
+    );
+    assert!(generate(&temp, &["--check", "--diff"]).status.success());
+    assert_eq!(
+        simit::registry::audit_ci(temp.path()).unwrap().status,
+        simit::registry::FeatureStatus::Managed
+    );
+}
+
+#[test]
+fn independent_lanes_can_retire_realization_without_retiring_evaluation() {
+    let temp = project(
+        "independent_lanes = true\nnix_flake_check = false\ncheck_command = \"cargo test --locked\"",
+    );
+    fs::write(
+        temp.path().join("Cargo.toml"),
+        "[package]\nname = \"client\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )
+    .unwrap();
+    fs::create_dir(temp.path().join("src")).unwrap();
+    fs::write(temp.path().join("src/lib.rs"), "pub fn client() {}\n").unwrap();
+    assert!(generate(&temp, &[]).status.success());
+    let value: Value = serde_yaml::from_str(
+        &fs::read_to_string(temp.path().join(".github/workflows/ci.yaml")).unwrap(),
+    )
+    .unwrap();
+    assert!(value["jobs"]["realization"].is_null());
+    assert!(value["jobs"]["evaluation"]["steps"].is_sequence());
+    assert!(
+        value["jobs"]["rust"]["steps"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .any(|s| s["run"]
+                .as_str()
+                .is_some_and(|run| run.trim_end() == "nix develop -c sh -c 'cargo test --locked'"))
+    );
 }
 
 #[test]

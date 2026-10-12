@@ -437,6 +437,9 @@ pub struct CiConfig {
     /// Run `nix flake check` alongside a project Cargo command in Nix CI.
     #[serde(default)]
     pub nix_flake_check: Option<bool>,
+    /// Start Rust, flake evaluation and optional realization independently.
+    #[serde(default)]
+    pub independent_lanes: bool,
     #[serde(default)]
     pub workspace_strategy: WorkspaceStrategy,
     /// Opt-in coordinated dependency-ordered workspace publication.
@@ -522,6 +525,9 @@ impl CiConfig {
     /// Shared by Nix-only generation and drift auditing. Call after CLI overrides
     /// so an explicit false can disable a configured unsupported option.
     pub(crate) fn validate_nix_only_language_options(&self) -> Result<()> {
+        if self.independent_lanes {
+            bail!("[ci].independent_lanes requires Rust language CI");
+        }
         for (name, enabled) in [
             ("with_nextest", self.with_nextest),
             ("with_nix_cargo_cache", self.with_nix_cargo_cache),
@@ -3701,6 +3707,7 @@ fn set_ci_table(table: &mut Table, ci: &CiConfig) {
     set_bool(table, "workspace", ci.workspace);
     set_optional_string(table, "check_command", ci.check_command.as_deref());
     set_optional_bool_default_true(table, "nix_flake_check", ci.nix_flake_check);
+    set_bool(table, "independent_lanes", ci.independent_lanes);
     set_optional_string(
         table,
         "workspace_strategy",
