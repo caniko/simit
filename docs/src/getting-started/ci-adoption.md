@@ -349,7 +349,9 @@ Omitting `[ci.nix_build]` preserves the existing generated matrix defaults.
 Rust projects using GitHub Actions with the Nix runtime can opt into
 `[ci].independent_lanes = true`. The `rust` lane retains the existing format,
 test, quality, docs, generator and package steps. The `evaluation` lane evaluates
-the complete flake without building. With the default `nix_flake_check = true`,
+the complete flake on all systems without building. Required-gate jobs qualify
+the same immutable PR head as these lanes. Every lane adds Cargo's configured
+binary directory before project setup. With the default `nix_flake_check = true`,
 the `realization` lane also builds all flake checks. These lanes start independently
 and retain the same push and PR triggers. Step-runner overrides and `om_ci` are
 not supported together with this opt-in.
@@ -367,6 +369,9 @@ Enroll every applicable lane and group context before retiring `test`.
 jobs. Related packages and checks share a fresh hosted runner's Nix store, so
 their common dependencies are built once within that job. Group membership
 must be complete, nonempty and disjoint; `capture_results = true` is required.
+Grouped jobs provision Python 3.12 through a pinned setup action, including on
+custom runners. An omitted `timeout_minutes` retains the runner's default job
+timeout rather than introducing a group-specific limit.
 
 ```toml
 [ci.nix_build]
@@ -387,6 +392,13 @@ realization and refuses an unassigned check. Include checks supplied by imported
 flake modules too. Every group retains a source-bound coverage manifest and a
 separate result, exit status and builder log for every installable. A failed
 member fails the job while the other members still produce diagnostic evidence.
+Post-build hooks run for each successful member with `INSTALLABLE` and
+`SIMIT_NIX_BUILD_RESULTS` bound to that member's numbered evidence directory.
+Diagnostic hooks run for every member, including after failed setup or admission;
+a command-shell fallback collects any member skipped before the Python build
+loop. Completed diagnostic phases are marked to prevent duplicate collection.
+Hook failures fail the group while remaining members still run. Admission checks
+remain enforced when Python optimization is enabled.
 
 Grouped jobs have `build (<group>)` contexts. Qualify the new evidence and migrate
 required contexts together before retiring a monolithic flake-check gate.
@@ -420,6 +432,9 @@ it with candidate producers. The first event may record a pending observation;
 the last completion aggregates every enrolled producer for the same source head,
 branch and event. Duplicate identities, nonoriginal attempts, missing jobs or
 artifacts, failed/skipped required jobs and incomplete custody cannot succeed.
+Admission and bounded-capture checks use explicit errors and remain enforced
+when Python optimization is enabled. Failed revalidation revokes a previously
+successful observation in both ordinary and optimized interpreter modes.
 
 The observer retains source-workflow hashes, original jobs, provider log archives
 and required artifact bytes. Archives are hashed without extraction. Capture and

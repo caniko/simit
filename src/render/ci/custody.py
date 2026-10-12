@@ -13,6 +13,11 @@ from urllib.parse import urlencode, quote
 MAX_BYTES = 512 * 1024 * 1024
 
 
+def require(condition, message):
+    if not condition:
+        raise RuntimeError(message)
+
+
 def api(repository, endpoint):
     return subprocess.check_output(['gh', 'api', '--allow-escape-sequences', '--hostname', 'github.com',
                                     f'repos/{repository}/{endpoint}'], timeout=90)
@@ -24,11 +29,11 @@ def pages(repository, endpoint, key):
         separator = '&' if '?' in endpoint else '?'
         response = json.loads(api(repository, f'{endpoint}{separator}per_page=100&page={page}'))
         count = response['total_count']
-        assert type(count) is int and 0 <= count <= 2000
-        assert total is None or total == count, 'Provider inventory changed during collection'
+        require(type(count) is int and 0 <= count <= 2000, 'Provider inventory exceeds its bound')
+        require(total is None or total == count, 'Provider inventory changed during collection')
         total = count
         rows = response[key]
-        assert isinstance(rows, list) and len(rows) == min(100, total - len(collected))
+        require(isinstance(rows, list) and len(rows) == min(100, total - len(collected)), 'Provider page is incomplete')
         collected.extend(rows)
         if len(collected) == total:
             return collected
@@ -36,36 +41,36 @@ def pages(repository, endpoint, key):
 
 
 def zip_members(raw):
-    assert len(raw) <= MAX_BYTES, 'Archive exceeds custody budget'
+    require(len(raw) <= MAX_BYTES, 'Archive exceeds custody budget')
     with zipfile.ZipFile(io.BytesIO(raw)) as archive:
         entries = archive.infolist()
         names = [entry.filename for entry in entries]
-        assert len(names) == len(set(names)), 'Duplicate archive members'
-        assert sum(entry.file_size for entry in entries) <= MAX_BYTES, 'Expanded archive exceeds custody budget'
+        require(len(names) == len(set(names)), 'Duplicate archive members')
+        require(sum(entry.file_size for entry in entries) <= MAX_BYTES, 'Expanded archive exceeds custody budget')
         for name in names:
-            assert not name.startswith('/') and '..' not in Path(name).parts, 'Unsafe archive member'
+            require(not name.startswith('/') and '..' not in Path(name).parts, 'Unsafe archive member')
         return {entry.filename: hashlib.sha256(archive.read(entry)).hexdigest()
                 for entry in entries if not entry.is_dir()}
 
 
 def validate_run(run, head, branch, event, name, producer, attempt, repository):
-    assert type(run['id']) is int and run['id'] > 0
-    assert run['repository']['full_name'] == repository
-    assert run['head_repository']['full_name'] == repository, 'Fork custody requires separate enrollment'
-    assert run['head_sha'] == head and run['head_branch'] == branch
-    assert run['event'] == event and run['path'] == producer['workflow'] and run['name'] == name
-    assert run['run_attempt'] == attempt, 'Latest producer attempt is not the enrolled original'
+    require(type(run['id']) is int and run['id'] > 0, 'Invalid producer run identity')
+    require(run['repository']['full_name'] == repository, 'Producer repository differs')
+    require(run['head_repository']['full_name'] == repository, 'Fork custody requires separate enrollment')
+    require(run['head_sha'] == head and run['head_branch'] == branch, 'Producer source differs')
+    require(run['event'] == event and run['path'] == producer['workflow'] and run['name'] == name, 'Producer workflow or event differs')
+    require(run['run_attempt'] == attempt, 'Latest producer attempt is not the enrolled original')
 
 
 def capture(config, payload, root):
     repository = config['repository']
-    assert os.environ['RUNNER_ENVIRONMENT'] == 'github-hosted'
-    assert repository == os.environ['GITHUB_REPOSITORY'] == payload['repository']['full_name']
+    require(os.environ['RUNNER_ENVIRONMENT'] == 'github-hosted', 'Custody requires a hosted collector')
+    require(repository == os.environ['GITHUB_REPOSITORY'] == payload['repository']['full_name'], 'Collector repository differs')
     event_run = payload['workflow_run']
-    assert type(event_run['id']) is int and event_run['id'] > 0
-    assert event_run['head_repository']['full_name'] == repository
-    assert re.fullmatch(r'[0-9a-f]{40}', event_run['head_sha'])
-    assert event_run['event'] in ['push', 'pull_request']
+    require(type(event_run['id']) is int and event_run['id'] > 0, 'Invalid completion run identity')
+    require(event_run['head_repository']['full_name'] == repository, 'Completion source repository differs')
+    require(re.fullmatch(r'[0-9a-f]{40}', event_run['head_sha']), 'Invalid completion source head')
+    require(event_run['event'] in ['push', 'pull_request'], 'Unsupported completion event')
     receipt = {'schema': 'simit.producer-custody.v1', 'repository': repository,
                'head': event_run['head_sha'], 'branch': event_run['head_branch'], 'event': event_run['event'],
                'state': 'waiting', 'qualified': False, 'observation_is_execution': False,
@@ -76,10 +81,10 @@ def capture(config, payload, root):
     # Retain the safely established reporting target before querying/admitting
     # attempts, so rejected reruns and provider failures revoke prior success.
     trigger = json.loads(api(repository, f"actions/runs/{event_run['id']}"))
-    assert trigger['event'] in ['push', 'pull_request'] and trigger['status'] == 'completed'
+    require(trigger['event'] in ['push', 'pull_request'] and trigger['status'] == 'completed', 'Trigger is not an eligible completion')
     for key in ['head_sha', 'event', 'path', 'head_branch', 'run_attempt']:
-        assert trigger[key] == event_run[key], 'Completion event changed'
-    assert trigger['name'] in config['producers']
+        require(trigger[key] == event_run[key], 'Completion event changed')
+    require(trigger['name'] in config['producers'], 'Trigger workflow is not enrolled')
     validate_run(trigger, receipt['head'], receipt['branch'], receipt['event'],
                  trigger['name'], config['producers'][trigger['name']], config['producer_attempt'], repository)
     # workflow_run fires when either enrolled workflow completes. A missing or
@@ -91,7 +96,7 @@ def capture(config, payload, root):
     for name, producer in config['producers'].items():
         matching = [run for run in candidates if run['path'] == producer['workflow']
                     and run['head_branch'] == receipt['branch']]
-        assert len(matching) <= 1, 'Duplicate original producer identity'
+        require(len(matching) <= 1, 'Duplicate original producer identity')
         if not matching:
             return receipt
         run = json.loads(api(repository, f"actions/runs/{matching[0]['id']}"))
@@ -101,15 +106,15 @@ def capture(config, payload, root):
     if any(run['status'] != 'completed' for run in selected.values()):
         return receipt
     commit = json.loads(api(repository, f"git/commits/{receipt['head']}"))
-    assert commit['sha'] == receipt['head']
+    require(commit['sha'] == receipt['head'], 'Source commit differs')
     receipt['tree'] = commit['tree']['sha']
     source_hashes = {}
     for name, producer in config['producers'].items():
         source = json.loads(api(repository, 'contents/' + quote(producer['workflow'], safe='/')
                                 + '?ref=' + receipt['head']))
-        assert source['encoding'] == 'base64' and source['type'] == 'file'
+        require(source['encoding'] == 'base64' and source['type'] == 'file', 'Invalid enrolled workflow content')
         raw = base64.b64decode(source['content'], validate=False)
-        assert hashlib.sha1(b'blob ' + str(len(raw)).encode() + b'\0' + raw).hexdigest() == source['sha']
+        require(hashlib.sha1(b'blob ' + str(len(raw)).encode() + b'\0' + raw).hexdigest() == source['sha'], 'Workflow Git blob checksum differs')
         source_hashes[producer['workflow']] = hashlib.sha256(raw).hexdigest()
         run = selected[name]
         folder = root / str(run['id'])
@@ -118,36 +123,36 @@ def capture(config, payload, root):
         jobs = pages(repository, f"actions/runs/{run['id']}/attempts/{config['producer_attempt']}/jobs", 'jobs')
         write(folder / 'jobs.json', jobs)
         required = {job_name: [job for job in jobs if job['name'] == job_name] for job_name in producer['jobs']}
-        assert all(len(rows) == 1 for rows in required.values()), 'Missing or duplicate enrolled jobs'
-        assert all(job['run_id'] == run['id'] and job['head_sha'] == receipt['head']
-                   and job['run_attempt'] == config['producer_attempt'] for job in jobs)
+        require(all(len(rows) == 1 for rows in required.values()), 'Missing or duplicate enrolled jobs')
+        require(all(job['run_id'] == run['id'] and job['head_sha'] == receipt['head']
+                   and job['run_attempt'] == config['producer_attempt'] for job in jobs), 'Job source or attempt differs')
         job_logs = []
         for job_name, rows in required.items():
             job = rows[0]
-            assert type(job['id']) is int and job['id'] > 0
+            require(type(job['id']) is int and job['id'] > 0, 'Invalid enrolled job identity')
             log = api(repository, f"actions/jobs/{job['id']}/logs")
-            assert log and len(log) <= MAX_BYTES, 'Missing or oversized enrolled-job provider log'
+            require(log and len(log) <= MAX_BYTES, 'Missing or oversized enrolled-job provider log')
             (folder / f"job-{job['id']}.log").write_bytes(log)
             job_logs.append({'id': job['id'], 'name': job_name, 'sha256': hashlib.sha256(log).hexdigest()})
         raw = api(repository, f"actions/runs/{run['id']}/attempts/{config['producer_attempt']}/logs")
         (folder / 'provider-logs.zip').write_bytes(raw)
         members = zip_members(raw)
-        assert members or run['conclusion'] != 'success', 'Successful producer has no provider logs'
+        require(members or run['conclusion'] != 'success', 'Successful producer has no provider logs')
         write(folder / 'provider-log-members.json', members)
         artifacts = pages(repository, f"actions/runs/{run['id']}/artifacts", 'artifacts')
         write(folder / 'artifacts.json', artifacts)
         retained = []
         for artifact_name in producer['artifacts']:
             matching = [artifact for artifact in artifacts if artifact['name'] == artifact_name]
-            assert len(matching) == 1, 'Missing or duplicate enrolled artifacts'
+            require(len(matching) == 1, 'Missing or duplicate enrolled artifacts')
             artifact = matching[0]
-            assert type(artifact['id']) is int and artifact['id'] > 0 and artifact['expired'] is False
-            assert artifact['size_in_bytes'] <= MAX_BYTES, 'Enrolled artifact exceeds custody budget'
-            assert artifact['workflow_run']['id'] == run['id'] and artifact['workflow_run']['head_sha'] == receipt['head']
+            require(type(artifact['id']) is int and artifact['id'] > 0 and artifact['expired'] is False, 'Invalid or expired enrolled artifact')
+            require(artifact['size_in_bytes'] <= MAX_BYTES, 'Enrolled artifact exceeds custody budget')
+            require(artifact['workflow_run']['id'] == run['id'] and artifact['workflow_run']['head_sha'] == receipt['head'], 'Artifact source or run differs')
             raw = api(repository, f"actions/artifacts/{artifact['id']}/zip")
             checksum = hashlib.sha256(raw).hexdigest()
             if artifact.get('digest') is not None:
-                assert artifact['digest'] == 'sha256:' + checksum, 'Provider artifact checksum differs'
+                require(artifact['digest'] == 'sha256:' + checksum, 'Provider artifact checksum differs')
             (folder / f"artifact-{artifact['id']}.zip").write_bytes(raw)
             retained.append({'id': artifact['id'], 'name': artifact_name, 'sha256': checksum,
                              'members': zip_members(raw)})
@@ -163,7 +168,7 @@ def capture(config, payload, root):
         latest = json.loads(api(repository, f"actions/runs/{run['id']}"))
         validate_run(latest, receipt['head'], receipt['branch'], receipt['event'], name,
                      config['producers'][name], config['producer_attempt'], repository)
-        assert latest['status'] == 'completed' and latest['conclusion'] == run['conclusion']
+        require(latest['status'] == 'completed' and latest['conclusion'] == run['conclusion'], 'Producer conclusion changed during capture')
     receipt['source_workflow_sha256'] = source_hashes
     receipt['capture_complete'] = True
     receipt['state'] = 'ready' if all(row['conclusion'] == 'success' and row['jobs_accepted'] for row in receipt['producers']) else 'failed'
@@ -176,16 +181,16 @@ def write(path, value):
 
 def report(config, root):
     receipt = json.loads((root / 'receipt.json').read_text())
-    assert receipt['repository'] == config['repository'] and receipt['policy'] == config
-    assert re.fullmatch(r'[0-9a-f]{40}', receipt['head']) and receipt['event'] in ['push', 'pull_request']
+    require(receipt['repository'] == config['repository'] and receipt['policy'] == config, 'Reporting receipt policy differs')
+    require(re.fullmatch(r'[0-9a-f]{40}', receipt['head']) and receipt['event'] in ['push', 'pull_request'], 'Invalid reporting target')
     if receipt['state'] == 'ready':
         try:
-            assert len(receipt['producers']) == len(config['producers'])
+            require(len(receipt['producers']) == len(config['producers']), 'Reporting producer inventory differs')
             for row in receipt['producers']:
                 latest = json.loads(api(config['repository'], f"actions/runs/{row['run_id']}"))
                 validate_run(latest, receipt['head'], receipt['branch'], receipt['event'], row['name'],
                              config['producers'][row['name']], config['producer_attempt'], config['repository'])
-                assert latest['status'] == 'completed' and latest['conclusion'] == row['conclusion']
+                require(latest['status'] == 'completed' and latest['conclusion'] == row['conclusion'], 'Producer conclusion changed before reporting')
         except Exception as error:
             receipt.update(state='failed', report_error=str(error))
             write(root / 'report-failure.json', receipt)

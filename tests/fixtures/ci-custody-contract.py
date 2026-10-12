@@ -19,6 +19,8 @@ HEAD = 'a' * 40
 
 
 class Custody(unittest.TestCase):
+    optimization = 0
+
     def setUp(self):
         self.root = tempfile.TemporaryDirectory()
         self.addCleanup(self.root.cleanup)
@@ -45,7 +47,7 @@ class Custody(unittest.TestCase):
             archive.writestr('retained.txt', 'ordinary untrusted log data')
         self.zip = stream.getvalue()
         self.namespace = {'__name__': 'contract'}
-        exec(compile(PROGRAM, '<generated-custody>', 'exec'), self.namespace)
+        exec(compile(PROGRAM, '<generated-custody>', 'exec', optimize=self.optimization), self.namespace)
         self.namespace['api'] = self.api
         self.environment = patch.dict(os.environ, {'RUNNER_ENVIRONMENT': 'github-hosted',
             'GITHUB_REPOSITORY': 'owner/repo', 'GITHUB_SHA': 'c' * 40, 'GITHUB_RUN_ID': '900',
@@ -143,11 +145,11 @@ class Custody(unittest.TestCase):
 
     def test_duplicate_originals_and_nonoriginal_attempts_reject(self):
         self.runs.append({**self.runs[1], 'id': 3})
-        with self.assertRaises(AssertionError):
+        with self.assertRaises(RuntimeError):
             self.captured()
         self.runs.pop()
         self.runs[1]['run_attempt'] = 2
-        with self.assertRaises(AssertionError):
+        with self.assertRaises(RuntimeError):
             self.captured()
         self.assertEqual(self.effects, [])
 
@@ -156,7 +158,7 @@ class Custody(unittest.TestCase):
                           'description': 'old admitted observation'}]
         self.runs[0]['run_attempt'] = 2
         self.payload['workflow_run'] = copy.deepcopy(self.runs[0])
-        with self.assertRaises(AssertionError):
+        with self.assertRaises(RuntimeError):
             self.main_capture()
         self.assertEqual(self.report(), 1)
         self.assertEqual(self.effects[-1][1]['state'], 'failure')
@@ -182,14 +184,14 @@ class Custody(unittest.TestCase):
 
     def test_fork_sibling_with_identical_sha_branch_and_workflow_is_rejected(self):
         self.runs[1]['head_repository'] = {'full_name': 'fork/repo'}
-        with self.assertRaises(AssertionError):
+        with self.assertRaises(RuntimeError):
             self.main_capture()
         self.assertEqual(self.report(), 1)
         self.assertEqual(self.effects[-1][1]['state'], 'failure')
 
     def test_missing_enrolled_job_log_rejects_even_with_nonempty_run_archive(self):
         self.job_logs.pop(20)
-        with self.assertRaises(AssertionError):
+        with self.assertRaises(RuntimeError):
             self.main_capture()
         self.assertEqual(self.report(), 1)
         self.assertEqual(self.effects[-1][1]['state'], 'failure')
@@ -209,7 +211,7 @@ class Custody(unittest.TestCase):
                           'description': 'old admitted observation'}]
         self.runs[0]['run_attempt'] = 2
         self.payload['workflow_run'] = copy.deepcopy(self.runs[0])
-        with self.assertRaises(AssertionError):
+        with self.assertRaises(RuntimeError):
             self.main_capture()
         original_api = self.namespace['api']
         def oversized(repository, endpoint):
@@ -239,9 +241,13 @@ class Custody(unittest.TestCase):
         with zipfile.ZipFile(stream, 'w') as archive:
             archive.writestr('same', 'first')
             archive.writestr('same', 'second')
-        with self.assertRaises(AssertionError):
+        with self.assertRaises(RuntimeError):
             self.namespace['zip_members'](stream.getvalue())
         self.assertEqual(list(self.folder.iterdir()), [])
+
+
+class OptimizedCustody(Custody):
+    optimization = 2
 
 
 unittest.main()

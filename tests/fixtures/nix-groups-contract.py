@@ -9,12 +9,14 @@ from pathlib import Path
 from unittest.mock import patch
 
 PROGRAM = Path(sys.argv.pop()).read_text()
+FALLBACK = Path(sys.argv.pop()).read_text()
+REAL_RUN = subprocess.run
 HEAD = 'a' * 40
 MEMBERS = ['.#checks.x86_64-linux.client', '.#checks.x86_64-linux.recovery']
 
 
 class Groups(unittest.TestCase):
-    def execute(self, *, fail=False, malformed=False, missing=False, foreign=False, pr=False):
+    def execute(self, *, fail=False, malformed=False, missing=False, foreign=False, pr=False, optimized=False, hook_fail=False, setup_fail=False):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             builds = []
@@ -30,6 +32,10 @@ class Groups(unittest.TestCase):
             def run(command, **kwargs):
                 if command[0] == 'git':
                     return subprocess.CompletedProcess(command, 0)
+                if command[0] == 'bash':
+                    if hook_fail:
+                        return subprocess.CompletedProcess(command, 19)
+                    return REAL_RUN(command, **kwargs)
                 self.assertEqual(command[0:2], ['nix', 'build'])
                 self.assertIn('--print-build-logs', command)
                 self.assertEqual(command[-5:-1], ['--max-jobs', '1', '--cores', '2'])
@@ -43,7 +49,10 @@ class Groups(unittest.TestCase):
                    'SIMIT_NIX_PLAN': json.dumps(MEMBERS), 'SIMIT_NIX_CHECK_SYSTEMS': '["x86_64-linux"]',
                    'SIMIT_NIX_LIMITS': '["--max-jobs","1","--cores","2"]',
                    'GITHUB_SHA': 'c' * 40 if foreign else HEAD, 'GITHUB_EVENT_NAME': 'push',
-                   'GITHUB_RUN_ID': '123', 'GITHUB_RUN_ATTEMPT': '1'}
+                    'GITHUB_RUN_ID': '123', 'GITHUB_RUN_ATTEMPT': '1'}
+            env['SIMIT_NIX_GROUP'] = 'network'
+            env.update(SIMIT_NIX_POST_BUILD=json.dumps(["test -s \"$SIMIT_NIX_BUILD_RESULTS/result.json\" && test -s \"$SIMIT_NIX_BUILD_RESULTS/build.log\" && printf '%s' \"$INSTALLABLE\" > \"$SIMIT_NIX_BUILD_RESULTS/hook-member\""]),
+                       SIMIT_NIX_POST_BUILD_ALWAYS=json.dumps(["printf '%s' \"$INSTALLABLE\" > \"$SIMIT_NIX_BUILD_RESULTS/hook-diagnostic\""]))
             if pr:
                 event = root / 'event.json'
                 event.write_text(json.dumps({'pull_request': {'head': {'sha': HEAD}}}))
@@ -51,13 +60,28 @@ class Groups(unittest.TestCase):
                            GITHUB_EVENT_PATH=str(event))
             with patch.dict(os.environ, env), patch('subprocess.check_output', output), patch('subprocess.run', run):
                 try:
-                    exec(compile(PROGRAM, '<generated-group>', 'exec'), {})
+                    if setup_fail:
+                        raise SystemExit(1)
+                    exec(compile(PROGRAM, '<generated-group>', 'exec', optimize=2 if optimized else 0), {})
                 except SystemExit as error:
                     status = error.code
-                except AssertionError:
+                except (AssertionError, RuntimeError):
                     status = 1
+                collected = REAL_RUN(['bash', '-e', '-o', 'pipefail', '-c', FALLBACK])
+                self.assertEqual(collected.returncode, 0)
             receipt = json.loads((root / 'receipt.json').read_text()) if (root / 'receipt.json').exists() else None
             logs = [p.read_text() for p in root.glob('*/build.log')]
+            if not hook_fail:
+                for index, member in enumerate(MEMBERS):
+                    self.assertEqual((root / str(index) / 'hook-diagnostic').read_text(), member)
+            if receipt and receipt.get('complete') and not hook_fail:
+                for index, row in enumerate(receipt['results']):
+                    folder = root / str(index)
+                    self.assertEqual((folder / 'hook-diagnostic').read_text(), MEMBERS[index])
+                    self.assertFalse((folder / 'fallback-diagnostic-0.status').exists())
+                    self.assertEqual((folder / 'hook-member').exists(), row['exit_status'] == 0 and row['output_map_valid'])
+                    if (folder / 'hook-member').exists():
+                        self.assertEqual((folder / 'hook-member').read_text(), MEMBERS[index])
             return status, builds, receipt, logs
 
     def test_failure_retains_all_outputs_and_diagnostics(self):
@@ -84,6 +108,24 @@ class Groups(unittest.TestCase):
 
     def test_wrong_source_rejects_before_realization(self):
         status, builds, receipt, _ = self.execute(foreign=True)
+        self.assertEqual(status, 1)
+        self.assertEqual(builds, [])
+        self.assertIsNone(receipt)
+
+    def test_optimized_python_cannot_disable_source_or_coverage_admission(self):
+        for kwargs in [{'foreign': True}, {'missing': True}]:
+            status, builds, _, _ = self.execute(optimized=True, **kwargs)
+            self.assertEqual(status, 1)
+            self.assertEqual(builds, [])
+
+    def test_post_build_failure_fails_group_but_other_outputs_still_run(self):
+        status, builds, receipt, _ = self.execute(hook_fail=True)
+        self.assertEqual(status, 1)
+        self.assertEqual(builds, MEMBERS)
+        self.assertFalse(receipt['success'])
+
+    def test_failed_setup_collects_member_diagnostics_without_python_or_realization(self):
+        status, builds, receipt, _ = self.execute(setup_fail=True)
         self.assertEqual(status, 1)
         self.assertEqual(builds, [])
         self.assertIsNone(receipt)
