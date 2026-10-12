@@ -351,6 +351,13 @@ so a PR cannot cancel its corresponding push. Newer revisions still supersede
 older runs within each event stream. Retain cancelled predecessors as failures;
 their receipts cannot substitute for either required successful producer.
 
+Nix matrices qualify branch pushes by default. Set
+`[ci.nix_build].push_tags = ["**"]` to also qualify every tag push, including when
+adopting a workflow that previously used an unfiltered `push:` trigger. More
+selective GitHub tag patterns and ordered exclusions are supported, for example
+`push_tags = ["v*", "!v*-preview"]`. Tag patterns survive regeneration and drift
+checks; omitting them retains the branch-only default.
+
 ## Required Integration Gates
 
 Project-owned custom flakes declare additional required gates without

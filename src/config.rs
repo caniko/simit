@@ -557,6 +557,8 @@ pub struct NixBuildConfig {
     pub only: bool,
     /// Preserve independent push and PR producers instead of coalescing their runs.
     pub separate_events: bool,
+    /// Opt into tag pushes alongside all branch pushes; preserve pattern order.
+    pub push_tags: Vec<String>,
     pub timeout_minutes: Option<u64>,
     pub max_parallel: Option<u64>,
     pub max_jobs: Option<u64>,
@@ -575,6 +577,21 @@ pub struct NixBuildConfig {
     /// Required secrets must be explicitly bound under `extra_env`.
     pub required_secrets: Vec<String>,
     pub required_env: Vec<String>,
+}
+
+impl NixBuildConfig {
+    pub(crate) fn validate_push_tags(&self) -> Result<()> {
+        if self
+            .push_tags
+            .iter()
+            .any(|pattern| pattern.trim().is_empty() || pattern.chars().any(char::is_control))
+        {
+            bail!(
+                "simit project config: [ci.nix_build].push_tags requires nonempty patterns without control characters"
+            );
+        }
+        Ok(())
+    }
 }
 
 /// `[prebuild]` - native GitHub Nix builds shared by CI and releases.
@@ -3484,6 +3501,7 @@ fn validate_nix_build_config(config: &ProjectConfig) -> Result<()> {
     if options.only && ci.runtime == Some(Runtime::Cargo) {
         bail!("simit project config: [ci.nix_build].only requires the Nix runtime");
     }
+    options.validate_push_tags()?;
     for (name, number, min, max) in [
         ("timeout_minutes", options.timeout_minutes, 1, 360),
         ("max_parallel", options.max_parallel, 1, 256),
@@ -3574,6 +3592,7 @@ fn set_nix_build_table(table: &mut Table, options: &NixBuildConfig) {
     build.set_implicit(false);
     set_bool(&mut build, "only", options.only);
     set_bool(&mut build, "separate_events", options.separate_events);
+    set_string_array(&mut build, "push_tags", &options.push_tags);
     set_bool(&mut build, "kvm", options.kvm);
     set_bool(&mut build, "capture_results", options.capture_results);
     for (name, number) in [

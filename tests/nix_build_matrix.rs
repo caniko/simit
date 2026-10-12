@@ -93,6 +93,47 @@ fn nix_matrix_qualifies_branch_pushes_and_pull_requests_without_tag_releases() {
 }
 
 #[test]
+fn explicit_nix_matrix_tag_patterns_preserve_push_coverage_after_regeneration() {
+    let temp = project(
+        "[ci.nix_build]\nonly = true\nseparate_events = true\npush_tags = [\"**\", \"!private-*\"]",
+    );
+    let output = generate(&temp, &[]);
+    assert!(output.status.success(), "{output:?}");
+    let value = workflow(&temp);
+    assert_eq!(value["on"]["push"]["branches"][0], "**");
+    assert_eq!(value["on"]["push"]["tags"][0], "**");
+    assert_eq!(value["on"]["push"]["tags"][1], "!private-*");
+    assert!(value["on"]["push"]["tags-ignore"].is_null());
+    assert!(
+        value["on"]
+            .as_mapping()
+            .unwrap()
+            .contains_key("pull_request")
+    );
+    let original = fs::read(temp.path().join(".github/workflows/nix-builds.yaml")).unwrap();
+    assert!(generate(&temp, &["--check", "--diff"]).status.success());
+    assert!(generate(&temp, &[]).status.success());
+    assert_eq!(
+        original,
+        fs::read(temp.path().join(".github/workflows/nix-builds.yaml")).unwrap()
+    );
+    let config: toml::Value =
+        toml::from_str(&fs::read_to_string(temp.path().join("simit.toml")).unwrap()).unwrap();
+    assert_eq!(
+        config["ci"]["nix_build"]["push_tags"][0].as_str(),
+        Some("**")
+    );
+    assert_eq!(
+        config["ci"]["nix_build"]["push_tags"][1].as_str(),
+        Some("!private-*")
+    );
+    assert_eq!(
+        simit::registry::audit_ci(temp.path()).unwrap().status,
+        simit::registry::FeatureStatus::Managed
+    );
+}
+
+#[test]
 fn exact_nix_matrix_keeps_scoped_setup_limits_and_receipts_after_regeneration() {
     let temp = project(
         r#"[ci.nix_build]
@@ -693,6 +734,11 @@ fn exact_matrix_replaces_only_previously_managed_primary_workflows() {
 #[test]
 fn matrix_options_reject_invalid_or_ignored_configuration() {
     for (options, expected) in [
+        ("[ci.nix_build]\npush_tags = [\"\"]", "push_tags"),
+        (
+            "[ci.nix_build]\npush_tags = [\"bad\\npattern\"]",
+            "push_tags",
+        ),
         ("[ci.nix_build]\ntimeout_minutes = 0", "timeout_minutes"),
         ("[ci.nix_build]\nmax_parallel = 0", "max_parallel"),
         ("[ci.nix_build]\nmax_jobs = 0", "max_jobs"),

@@ -1053,13 +1053,19 @@ pub fn nix_build_matrix_file_with_options(
     if platform != Platform::Github && *options != crate::config::NixBuildConfig::default() {
         bail!("[ci.nix_build] options require GitHub Actions");
     }
+    options.validate_push_tags()?;
 
     let mut workflow = String::new();
     push_generated_workflow_header(&mut workflow);
     push_required_secrets_header(&mut workflow, &options.required_secrets);
-    workflow.push_str(
-        "name: Nix installable builds\n\non:\n  push:\n    branches: [\"**\"]\n  pull_request:\n  workflow_dispatch:\n\n",
-    );
+    workflow.push_str("name: Nix installable builds\n\non:\n  push:\n    branches: [\"**\"]\n");
+    if !options.push_tags.is_empty() {
+        workflow.push_str("    tags:\n");
+        for pattern in &options.push_tags {
+            workflow.push_str(&format!("      - \"{}\"\n", yaml_double_quote(pattern)));
+        }
+    }
+    workflow.push_str("  pull_request:\n  workflow_dispatch:\n\n");
     if platform == Platform::Github {
         workflow.push_str("permissions:\n  contents: read\n\n");
     }
