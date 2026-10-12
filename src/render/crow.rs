@@ -115,6 +115,9 @@ impl Step {
 }
 
 pub fn files(request: FilesRequest<'_>) -> Result<Vec<GeneratedFile>> {
+    if request.options.independent_lanes {
+        bail!("independent_lanes requires GitHub Actions Rust/Nix CI");
+    }
     if request.options.with_nix_cargo_cache {
         bail!("with_nix_cargo_cache requires the Actions provider");
     }
@@ -681,6 +684,9 @@ pub fn python_ci_file(
     check_outputs: &[String],
     components: &[crate::config::CiComponent],
 ) -> Result<GeneratedFile> {
+    if options.independent_lanes {
+        bail!("independent_lanes requires GitHub Actions Rust/Nix CI");
+    }
     if options.check_command.is_some() || options.with_nix_cargo_cache || !options.nix_flake_check {
         bail!(
             "check_command, with_nix_cargo_cache and nix_flake_check=false require Rust language CI"

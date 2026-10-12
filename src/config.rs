@@ -522,6 +522,24 @@ pub struct CiConfig {
 }
 
 impl CiConfig {
+    pub(crate) fn validate_effective_backend(
+        &self,
+        provider: CiProvider,
+        platform: Platform,
+    ) -> Result<()> {
+        if (self.independent_lanes || self.nix_build != NixBuildConfig::default())
+            && (provider != CiProvider::Actions || platform != Platform::Github)
+        {
+            if self.independent_lanes {
+                bail!("independent_lanes requires the effective GitHub Actions backend");
+            }
+            bail!(
+                "[ci.nix_build] options require GitHub Actions (effective GitHub Actions backend)"
+            );
+        }
+        Ok(())
+    }
+
     /// Shared by Nix-only generation and drift auditing. Call after CLI overrides
     /// so an explicit false can disable a configured unsupported option.
     pub(crate) fn validate_nix_only_language_options(&self) -> Result<()> {
