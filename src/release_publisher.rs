@@ -373,13 +373,7 @@ pub fn bind_release_push(
             && is_sha(&run.head_sha),
         "release run must be a successful completed push with an exact source SHA"
     );
-    let version = Version::parse(&run.head_branch)?;
-    ensure!(
-        version.pre.is_empty()
-            && version.build.is_empty()
-            && version.to_string() == run.head_branch,
-        "release push must have an exact numeric semver head label"
-    );
+    head_label_version(&run.head_branch)?;
     Ok(BoundReleasePush {
         source_run_id: run.id,
         source_run_attempt: run.run_attempt,
@@ -392,6 +386,20 @@ pub fn bind_release_push(
         publisher_workflow_ref: context.workflow_ref.clone(),
         publisher_workflow_sha: context.workflow_sha.clone(),
     })
+}
+
+// This establishes canonical syntax only. The enrolled workflow separately
+// binds the selected package and whether its tag is independently namespaced.
+pub(super) fn head_label_version(label: &str) -> Result<Version> {
+    if let Some((package, _)) = label.split_once('/') {
+        return Ok(crate::release_identity::ReleaseTag::parse_for_package(package, label)?.version);
+    }
+    let version = Version::parse(label)?;
+    ensure!(
+        version.pre.is_empty() && version.build.is_empty() && version.to_string() == label,
+        "release push must have an exact numeric semver head label"
+    );
+    Ok(version)
 }
 
 #[cfg(test)]
@@ -438,6 +446,29 @@ mod tests {
         assert_eq!(record["source_head_label"], "1.2.3");
         assert!(record.get("tag").is_none());
         assert!(record.get("tag_trigger_verified").is_none());
+    }
+
+    #[test]
+    fn package_head_labels_keep_the_canonical_tag_separate_from_the_version() {
+        let (policy, context, mut event) = fixture();
+        for tag in ["worker/v1.2.3", "worker/v1.2.3-rc.1"] {
+            event.workflow_run.head_branch = tag.into();
+            let bound = bind_release_push(&policy, &context, &event, &event.workflow_run).unwrap();
+            assert_eq!(bound.source_head_label(), tag);
+        }
+        for tag in [
+            "worker/1.2.3",
+            "worker/v01.2.3",
+            "../v1.2.3",
+            "worker/vv1.2.3",
+            "worker/v1.2",
+        ] {
+            event.workflow_run.head_branch = tag.into();
+            assert!(
+                bind_release_push(&policy, &context, &event, &event.workflow_run).is_err(),
+                "{tag}"
+            );
+        }
     }
 
     fn fixture() -> (PublisherPolicy, PublisherContext, CompletedRunEvent) {

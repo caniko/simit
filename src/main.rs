@@ -29,6 +29,12 @@ fn main() {
 
 fn run() -> Result<()> {
     let cli = Cli::parse();
+    if matches!(&cli.command, Commands::Init(command) if matches!(command.action, InitAction::Ci(_) | InitAction::Flake(_)))
+    {
+        if let Some(root) = simit::monorepo::find_root(&std::env::current_dir()?)? {
+            std::env::set_current_dir(root)?;
+        }
+    }
     match cli.command {
         Commands::Review(command) => simit::review::cli::finish(command),
         Commands::Commit(command) => commands::commit::run(command),
@@ -63,6 +69,7 @@ fn run() -> Result<()> {
         Commands::Config(command) => commands::config::run(command),
         Commands::Test(command) => commands::test::run(command),
         Commands::Projects(command) => commands::projects::run(command),
+        Commands::Monorepo(command) => simit::monorepo::run(command),
         Commands::Upgrade(command) => commands::upgrade::run(command),
         Commands::Completions(command) => commands::completions::run(command),
         Commands::Man(command) => commands::man::run(command),

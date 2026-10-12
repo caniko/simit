@@ -70,6 +70,76 @@ fn read(path: &Path) -> String {
     fs::read_to_string(path).unwrap_or_else(|err| panic!("reading {}: {err}", path.display()))
 }
 
+#[test]
+fn project_treefmt_is_available_in_generated_shells_and_missing_wiring_is_drift() {
+    let temp = init_package();
+    fs::write(
+        temp.path().join("simit.toml"),
+        "[flake]\nscope = \"full\"\n",
+    )
+    .unwrap();
+    let output = simit()
+        .current_dir(temp.path())
+        .args(["init", "flake"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let path = temp.path().join("flake.nix");
+    let flake = read(&path);
+    assert!(flake.contains("          treefmtEval.config.build.wrapper\n"));
+    let broken = flake.replace(
+        "          treefmtEval.config.build.wrapper\n",
+        "          # treefmtEval.config.build.wrapper\n",
+    );
+    fs::write(&path, broken).unwrap();
+    let output = simit()
+        .current_dir(temp.path())
+        .args(["init", "flake", "--check", "--diff"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let output = simit()
+        .current_dir(temp.path())
+        .args(["init", "flake"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(read(&path).contains("          treefmtEval.config.build.wrapper\n"));
+}
+
+#[test]
+fn python_and_cross_shells_use_the_project_treefmt_wrapper() {
+    let temp = init_python_project();
+    let output = simit()
+        .current_dir(temp.path())
+        .args(["init", "flake", "--scope", "full", "--print"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains(
+        "extraPackages = [treefmtEval.config.build.wrapper] ++ pre-commit-check.enabledPackages"
+    ));
+    let temp = init_package();
+    let output = simit()
+        .current_dir(temp.path())
+        .args(["init", "flake", "--cross", "--print"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stdout)
+            .contains("          treefmtEval.config.build.wrapper\n")
+    );
+}
+
 fn patchable_flake() -> &'static str {
     r#"{
   description = "Rust project";
@@ -200,6 +270,7 @@ fn custom_rs_harbor_flake() -> &'static str {
       devShells.default = craneLib.devShell {
         checks = self.checks.${system};
         packages = with pkgs; [
+          treefmtEval.config.build.wrapper
           cargo-audit
           cargo-nextest
           pre-commit
@@ -321,6 +392,7 @@ fn custom_skillnet_flake() -> &'static str {
       devShells.default = craneLib.devShell {
         checks = self.checks.${system};
         packages = with pkgs; [
+          treefmtEval.config.build.wrapper
           cargo-nextest
           pre-commit
           rust-analyzer
@@ -332,6 +404,7 @@ fn custom_skillnet_flake() -> &'static str {
         inherit (toolchain) craneLib;
         cross = rs-harbor.lib.mkCross {inherit pkgs system;};
         packages = with pkgs; [
+          treefmtEval.config.build.wrapper
           mdbook
           pre-commit
           rust-analyzer
@@ -628,8 +701,8 @@ fn pure_uv_python_project_generates_py_harbor_flake() {
     assert!(status.success());
 
     let flake = read(&temp.path().join("flake.nix"));
-    assert!(flake.contains("py-harbor"));
-    assert!(flake.contains("py-harbor.lib"));
+    assert!(flake.contains("harbor.url") || flake.contains("harbor = {"));
+    assert!(flake.contains("harbor.lib.python"));
     assert!(flake.contains("mkUvDevShell"));
     assert!(flake.contains("mkUvCheckEnv"));
     assert!(flake.contains("mkUvAppPackage"));
@@ -768,8 +841,10 @@ checks = ["offline-tests", "typecheck"]
           pkgs = py.mkPkgs { system = "x86_64-linux"; };
           treefmtEval = treefmt-nix.lib.evalModule pkgs (import ./nix/treefmt.nix);
         in treefmtEval.config.build.check self;
-      devShells.x86_64-linux.hooks = {
-        packages = [] ++ pre-commit-check.enabledPackages;
+      devShells.x86_64-linux.hooks = let
+        treefmtEval = treefmt-nix.lib.evalModule pkgs (import ./nix/treefmt.nix);
+      in {
+        packages = [treefmtEval.config.build.wrapper] ++ pre-commit-check.enabledPackages;
         shellHook = pre-commit-check.shellHook;
       };
     };
@@ -795,6 +870,21 @@ checks = ["offline-tests", "typecheck"]
     let flake_path = temp.path().join("flake.nix");
     let modern = read(&flake_path).replace("py-harbor", "harbor-py");
     fs::write(&flake_path, modern).unwrap();
+    let check = simit()
+        .current_dir(temp.path())
+        .args(["init", "flake", "--check"])
+        .output()
+        .unwrap();
+    assert!(
+        check.status.success(),
+        "{}",
+        String::from_utf8_lossy(&check.stderr)
+    );
+
+    let namespaced = read(&flake_path)
+        .replace("harbor-py.lib", "harbor.lib.python")
+        .replace("harbor-py", "harbor");
+    fs::write(&flake_path, namespaced).unwrap();
     let check = simit()
         .current_dir(temp.path())
         .args(["init", "flake", "--check"])
@@ -1095,6 +1185,7 @@ fn custom_mode_requires_docs_shell_when_docs_outputs_are_advertised() {
         inherit (toolchain) craneLib;
         cross = rs-harbor.lib.mkCross {inherit pkgs system;};
         packages = with pkgs; [
+          treefmtEval.config.build.wrapper
           mdbook
           pre-commit
           rust-analyzer
@@ -1440,13 +1531,13 @@ fn cross_print_emits_multi_target_flake_with_contract() {
 
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("--- flake.nix"));
-    assert!(stdout.contains("rs-harbor.url = \"git+https://github.com/caniko/harbor-rs.git?ref=trunk&rev=b40cd4c4fdf6133962f67bd68a48bfd5d554d47f\";"));
-    assert!(stdout.contains("rs-harbor.lib.mkCrossPackages {"));
+    assert!(stdout.contains("harbor.url = \"git+https://github.com/caniko/harbor.git?ref=feat/harbor-monorepo-components&rev=7d99eb50c52d0a941e2996b97c469b32a7657ef4\";"));
+    assert!(stdout.contains("harbor.lib.rust.mkCrossPackages {"));
     assert!(stdout.contains(
         "targets = [\"native\" \"aarch64-linux\" \"windows\" \"darwin-x86_64\" \"darwin-aarch64\"];"
     ));
     assert!(stdout.contains("default = crossPackages.${pname};"));
-    assert!(stdout.contains("rs-harbor.lib.mkDevShells {"));
+    assert!(stdout.contains("harbor.lib.rust.mkDevShells {"));
     assert!(stdout.contains("canix:lPzPzKrmYqW5Rxa5r0uQWvCqD3S5nx0h2eCy7XD5JM8="));
     assert!(stdout.contains("cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY="));
     assert!(!stdout.contains("uqr0"));
@@ -1485,7 +1576,7 @@ fn cross_write_then_check_is_clean_and_detects_drift() {
     assert!(write_status.success());
 
     let flake = read(&temp.path().join("flake.nix"));
-    assert!(flake.contains("rs-harbor.lib.mkCrossPackages {"));
+    assert!(flake.contains("harbor.lib.rust.mkCrossPackages {"));
     assert!(flake.contains(
         "targets = [\"native\" \"aarch64-linux\" \"windows\" \"darwin-x86_64\" \"darwin-aarch64\"];"
     ));
@@ -1570,7 +1661,7 @@ fn generic_custom_flake() -> &'static str {
       formatter = treefmtEval.config.build.wrapper;
       checks.formatting = treefmtEval.config.build.check self;
       devShells.default = pkgs.mkShell {
-        packages = pre-commit-check.enabledPackages;
+        packages = [treefmtEval.config.build.wrapper] ++ pre-commit-check.enabledPackages;
         shellHook = pre-commit-check.shellHook;
       };
     };

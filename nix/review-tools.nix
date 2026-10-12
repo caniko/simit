@@ -29,7 +29,9 @@
       nativeBuildInputs = [pkgs.makeWrapper pkgs.perl];
       # The full Simit suite invokes release preflight in temporary Cargo
       # projects, so its nested quality commands need the matching toolchain.
-      nativeCheckInputs = [pkgs.git pkgs.gnupg pkgs.clippy pkgs.rustfmt pkgs.nodejs pkgs.jq];
+      # Monorepo publication fixtures lint workflows and execute the Python
+      # publisher contract in isolation.
+      nativeCheckInputs = [pkgs.git pkgs.gnupg pkgs.clippy pkgs.rustfmt pkgs.nodejs pkgs.jq pkgs.actionlint pkgs.python3];
       postInstall = ''
         for binary in simit repo-review; do
           wrapProgram "$out/bin/$binary" \

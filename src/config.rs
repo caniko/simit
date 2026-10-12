@@ -27,6 +27,8 @@ use crate::user_config::validate_runner_label;
 #[serde(deny_unknown_fields)]
 pub struct ProjectConfig {
     #[serde(default)]
+    pub monorepo: Option<crate::monorepo::Config>,
+    #[serde(default)]
     pub review_policy: Option<crate::render::review_policy::Config>,
     #[serde(default)]
     pub review: Option<crate::review::generation::Config>,
@@ -715,6 +717,11 @@ pub struct CodebergPagesConfig {
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ReleaseConfig {
+    /// Git tag prefix; package and artifact versions remain unprefixed.
+    #[serde(default)]
+    pub tag_prefix: crate::release_identity::TagPrefix,
+    #[serde(default)]
+    pub notes: ReleaseNotesConfig,
     /// Changelog drafting performed before a release commit is created.
     #[serde(default)]
     pub changelog: ReleaseChangelogConfig,
@@ -751,6 +758,38 @@ pub struct ReleaseChangelogConfig {
     /// Draft `[Unreleased]` from commits before `simit release` promotes it.
     #[serde(default)]
     pub auto_draft: bool,
+}
+
+/// Explicit notes policy overrides the legacy hosted `body_from_changelog` flag.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ReleaseNotesConfig {
+    pub source: Option<ReleaseNotesSource>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ReleaseNotesSource {
+    Changelog,
+    Git,
+    None,
+}
+
+impl ReleaseConfig {
+    pub fn notes_source(&self, platform: Platform) -> ReleaseNotesSource {
+        self.notes.source.unwrap_or_else(|| {
+            let body_from_changelog = match platform {
+                Platform::Github => self.github.as_ref().map(|r| r.body_from_changelog),
+                Platform::Forgejo => self.codeberg.as_ref().map(|r| r.body_from_changelog),
+                Platform::Gitlab => None,
+            };
+            if body_from_changelog == Some(false) {
+                ReleaseNotesSource::None
+            } else {
+                ReleaseNotesSource::Changelog
+            }
+        })
+    }
 }
 
 /// `[release.publish]` — downstream publisher failure policy.
@@ -1728,6 +1767,7 @@ fn default_cargo_deb_version() -> String {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedHomebrew {
+    pub tag_prefix: crate::release_identity::TagPrefix,
     pub name: String,
     pub binaries: Vec<String>,
     pub tap_url: String,
@@ -1755,6 +1795,7 @@ pub struct HomebrewOverrides<'a> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedChocolatey {
+    pub tag_prefix: crate::release_identity::TagPrefix,
     pub name: String,
     pub id: String,
     pub title: String,
@@ -1803,6 +1844,7 @@ pub struct ChocolateyOverrides<'a> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedScoop {
+    pub tag_prefix: crate::release_identity::TagPrefix,
     pub name: String,
     pub bucket_url: String,
     pub bucket_token_secret: String,
@@ -1830,6 +1872,7 @@ pub struct ScoopOverrides<'a> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedAur {
+    pub tag_prefix: crate::release_identity::TagPrefix,
     pub name: String,
     pub description: String,
     pub url: String,
@@ -1948,6 +1991,9 @@ impl ProjectConfig {
     }
 
     fn validate_common(&self) -> Result<()> {
+        if let Some(monorepo) = &self.monorepo {
+            monorepo.validate()?;
+        }
         crate::render::workflow_templates::validate_config(&self.ci)?;
         if let Some(policy) = &self.review_policy {
             policy.validate()?;
@@ -2542,6 +2588,7 @@ impl ProjectConfig {
         }
 
         Ok(ResolvedHomebrew {
+            tag_prefix: self.release.tag_prefix,
             name,
             binaries,
             tap_url,
@@ -2663,6 +2710,7 @@ impl ProjectConfig {
         reject_basic_auth_url("chocolatey.push.source", &push_source)?;
 
         Ok(ResolvedChocolatey {
+            tag_prefix: self.release.tag_prefix,
             name,
             id,
             title,
@@ -2758,6 +2806,7 @@ impl ProjectConfig {
         }
 
         Ok(ResolvedScoop {
+            tag_prefix: self.release.tag_prefix,
             name,
             bucket_url,
             bucket_token_secret: cfg.map_or_else(default_scoop_bucket_token_secret, |scoop| {
@@ -2891,6 +2940,7 @@ impl ProjectConfig {
             .unwrap_or_else(|| format!("{host}/{download_repo}.git"));
 
         Ok(ResolvedAur {
+            tag_prefix: self.release.tag_prefix,
             name,
             description,
             url,
@@ -3957,7 +4007,7 @@ fn load_flake_config(workspace_root: &Path) -> Result<Option<ProjectConfigSource
     }))
 }
 
-fn flake_declares_simit_config(path: &Path) -> Result<bool> {
+pub(crate) fn flake_declares_simit_config(path: &Path) -> Result<bool> {
     let text =
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     Ok(text

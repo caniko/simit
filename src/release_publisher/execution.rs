@@ -282,9 +282,15 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
                 bound.source_sha, policy.source_workflow_path
             )),
     )?;
-    verify_tag_only_source_workflow(
+    let namespace = verify_tag_only_source_workflow(
         &signed_workflow.stdout,
         &fs::read(trusted_root.join(&policy.source_workflow_path))?,
+    )?;
+    let version = enrolled_release_version(
+        namespace.as_deref(),
+        &bound.source_head_label,
+        name,
+        &reconstruction,
     )?;
     checkout_signed_source(state.path(), &source, &bound.source_sha)?;
     let tracked = output(
@@ -356,7 +362,7 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
         MAX_PROVIDER_BYTES,
         bytes.as_slice(),
     )?;
-    let root = format!("{name}-{}", bound.source_head_label);
+    let root = format!("{name}-{version}");
     let candidate = crate_from_provider_zip(&bytes, &format!("{root}.crate"))?;
     // Cargo configuration is discovered from cwd, not --manifest-path. The cwd
     // and HOME/CARGO_HOME are fresh; env_clear removes wrappers, credential
@@ -382,13 +388,7 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
         .context("crate has no normalized manifest")?;
     let cargo_manifest: toml_edit::DocumentMut =
         std::str::from_utf8(&cargo_manifest.contents)?.parse()?;
-    let metadata = upload_metadata(
-        &cargo_manifest,
-        &members,
-        &root,
-        name,
-        &bound.source_head_label,
-    )?;
+    let metadata = upload_metadata(&cargo_manifest, &members, &root, name, &version)?;
     match stage {
         PublisherStage::Prepare => {
             ensure!(
@@ -428,13 +428,7 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
                 &candidate,
                 &checksum,
             )?;
-            wait_for_registry(
-                &client,
-                state.path(),
-                name,
-                &bound.source_head_label,
-                &checksum,
-            )?;
+            wait_for_registry(&client, state.path(), name, &version, &checksum)?;
             println!(
                 "{}",
                 serde_json::to_string(
@@ -522,7 +516,7 @@ fn string_array(item: Option<&toml_edit::Item>) -> Vec<String> {
 /// source must contain the independently enrolled, exclusively tag-triggered
 /// workflow definition. Binding only triggers would let the signed source add
 /// credential authority, private runners or alternate jobs under those triggers.
-fn verify_tag_only_source_workflow(signed: &[u8], enrolled: &[u8]) -> Result<()> {
+fn verify_tag_only_source_workflow(signed: &[u8], enrolled: &[u8]) -> Result<Option<String>> {
     let workflow: serde_yaml::Value = serde_yaml::from_slice(signed)?;
     let enrollment: serde_yaml::Value = serde_yaml::from_slice(enrolled)?;
     ensure!(
@@ -545,14 +539,52 @@ fn verify_tag_only_source_workflow(signed: &[u8], enrolled: &[u8]) -> Result<()>
         .and_then(serde_yaml::Value::as_mapping)
         .context("source workflow has no push trigger")?;
     ensure!(
-        push.len() == 1
-            && push
-                .get(serde_yaml::Value::String("tags".into()))
-                .and_then(serde_yaml::Value::as_sequence)
-                .is_some_and(|tags| tags.len() == 1 && tags[0].as_str() == Some("[0-9]*")),
-        "source publication must have only the enrolled semver tag filter"
+        push.len() == 1,
+        "source publication must have only a tag filter"
     );
-    Ok(())
+    let tags = push
+        .get(serde_yaml::Value::String("tags".into()))
+        .and_then(serde_yaml::Value::as_sequence)
+        .context("source publication requires tag filters")?;
+    ensure!(
+        tags.len() == 1,
+        "source publication requires exactly one enrolled tag filter"
+    );
+    let filter = tags[0]
+        .as_str()
+        .context("enrolled tag filter must be a string")?;
+    if filter == "[0-9]*" {
+        return Ok(None);
+    }
+    let namespace = filter
+        .strip_suffix("/v[0-9]*")
+        .context("unsupported enrolled package tag filter")?;
+    crate::release_identity::ReleaseTag::for_package(namespace, semver::Version::new(0, 0, 0))?;
+    Ok(Some(namespace.to_owned()))
+}
+
+fn enrolled_release_version(
+    namespace: Option<&str>,
+    tag: &str,
+    selected: &str,
+    reconstruction: &[String],
+) -> Result<String> {
+    if let Some(namespace) = namespace {
+        ensure!(
+            namespace == selected && reconstruction == [selected],
+            "independent publication selects only its enrolled package"
+        );
+        return Ok(
+            crate::release_identity::ReleaseTag::parse_for_package(namespace, tag)?
+                .version
+                .to_string(),
+        );
+    }
+    ensure!(
+        !tag.contains('/'),
+        "coordinated publication requires an unnamespaced tag"
+    );
+    Ok(super::head_label_version(tag)?.to_string())
 }
 
 fn manifest_string<'a>(table: &'a dyn toml_edit::TableLike, key: &str) -> Option<&'a str> {
@@ -1748,6 +1780,69 @@ mod tests {
                 || key == "GITHUB_TOKEN"
                 || key == "RUSTC_WRAPPER")
         );
+    }
+
+    #[test]
+    fn independently_enrolled_package_trigger_preserves_full_workflow_identity() {
+        let enrolled = b"on:\n  push:\n    tags: ['worker/v[0-9]*']\npermissions: {contents: read}\njobs: {}\n";
+        assert_eq!(
+            verify_tag_only_source_workflow(enrolled, enrolled)
+                .unwrap()
+                .as_deref(),
+            Some("worker")
+        );
+        let foreign =
+            b"on:\n  push:\n    tags: ['other/v[0-9]*']\npermissions: {contents: read}\njobs: {}\n";
+        assert!(verify_tag_only_source_workflow(foreign, enrolled).is_err());
+    }
+
+    #[test]
+    fn enrolled_tag_namespace_binds_selection_and_archive_version() {
+        let selected = vec!["worker".to_owned()];
+        for (tag, version) in [
+            ("worker/v1.2.3", "1.2.3"),
+            ("worker/v1.2.3-rc.1", "1.2.3-rc.1"),
+        ] {
+            assert_eq!(
+                enrolled_release_version(Some("worker"), tag, "worker", &selected).unwrap(),
+                version
+            );
+            assert!(enrolled_release_version(None, tag, "worker", &selected).is_err());
+        }
+        for tag in ["1.2.3", "other/v1.2.3", "worker/1.2.3", "worker/v01.2.3"] {
+            assert!(
+                enrolled_release_version(Some("worker"), tag, "worker", &selected).is_err(),
+                "{tag}"
+            );
+        }
+        assert!(
+            enrolled_release_version(Some("worker"), "worker/v1.2.3", "other", &selected).is_err()
+        );
+        assert!(
+            enrolled_release_version(
+                Some("worker"),
+                "worker/v1.2.3",
+                "worker",
+                &["worker".into(), "engine".into()]
+            )
+            .is_err()
+        );
+        assert_eq!(
+            enrolled_release_version(None, "1.2.3", "worker", &selected).unwrap(),
+            "1.2.3"
+        );
+        for filter in [
+            "*/v[0-9]*",
+            "../v[0-9]*",
+            "worker/v*",
+            "worker/v[0-9]*,other/v[0-9]*",
+        ] {
+            let source = format!("on:\n  push:\n    tags: ['{filter}']\njobs: {{}}\n");
+            assert!(
+                verify_tag_only_source_workflow(source.as_bytes(), source.as_bytes()).is_err(),
+                "{filter}"
+            );
+        }
     }
 
     #[test]

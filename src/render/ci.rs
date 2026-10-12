@@ -15,6 +15,7 @@ use crate::project::GeneratedFile;
 use crate::user_config::{ResolvedCiRunners, ResolvedRunner};
 
 mod trusted_publisher;
+pub(crate) use trusted_publisher::validate_credential_free_source;
 
 pub const OMNIX_REF_DEFAULT: &str = "github:juspay/omnix/v1.3.2";
 pub const GENERATED_WORKFLOW_MARKER: &str =
@@ -80,11 +81,13 @@ pub(crate) fn workflow_preamble_lines(content: &str) -> impl Iterator<Item = &st
 const CARGO_NEXTEST_VERSION: &str = "0.9.100";
 const CARGO_DENY_VERSION: &str = "0.18.3";
 const CARGO_DENY_POLICY_CHECKS: &str = "bans licenses sources";
+#[cfg(all(test, unix))]
+mod formatter_tests;
 // Custom/legacy Nix shells may expose rustfmt without a treefmt wrapper.
 // Prefer the complete project formatter, and never mask its failure. Custom
 // formatters compare their actual input/output, including setup-generated files.
 // An external alternate index snapshots content without staging the real index.
-pub(crate) const NIX_FORMAT_COMMAND: &str = r#"sh -c 'formatter_expr="let root = toString ./.; flake = builtins.getFlake (if builtins.pathExists ./.git then \"git+file://\" + root else root); in if flake ? formatter.\${builtins.currentSystem} then flake.formatter.\${builtins.currentSystem} else null"; formatter=$(nix eval --impure --raw --expr "let f = ($formatter_expr); in if f == null then \"\" else f.drvPath") || exit; if [ -n "$formatter" ]; then formatter_program=$(nix eval --impure --raw --expr "let f = ($formatter_expr); in f.meta.mainProgram or (f.pname or (builtins.parseDrvName f.name).name)") || exit; formatter_path=$(nix build --no-link --print-out-paths "$formatter^out") || exit; formatter_exe="$formatter_path/bin/$formatter_program"; if [ ! -x "$formatter_exe" ]; then echo "Declared flake formatter executable is missing: $formatter_exe" >&2; exit 1; fi; if [ "$formatter_program" = treefmt ]; then exec "$formatter_exe" --ci; fi; repository_root=$(git rev-parse --show-toplevel) || exit; index_tree=$(git -C "$repository_root" write-tree) || exit; snapshot_dir=$(mktemp -d "${TMPDIR:-/tmp}/simit-format.XXXXXXXX") || exit; trap "rm -rf -- \"\$snapshot_dir\"" 0; trap "exit 129" HUP; trap "exit 130" INT; trap "exit 143" TERM; snapshot_dir=$(cd "$snapshot_dir" && pwd -P) || exit; case "$snapshot_dir/" in "$repository_root/"*) echo "Formatter snapshot directory must be outside the repository" >&2; exit 1;; esac; snapshot_worktree() { GIT_INDEX_FILE="$snapshot_dir/index" git -C "$repository_root" read-tree "$index_tree" && GIT_INDEX_FILE="$snapshot_dir/index" git -C "$repository_root" add --all -- . && GIT_INDEX_FILE="$snapshot_dir/index" git -C "$repository_root" write-tree; }; before_tree=$(snapshot_worktree) || exit; "$formatter_exe" || exit; after_tree=$(snapshot_worktree) || exit; current_index=$(git -C "$repository_root" write-tree) || exit; if [ "$before_tree" != "$after_tree" ] || [ "$index_tree" != "$current_index" ]; then echo "Formatter modified repository content or staging" >&2; exit 1; fi; exit 0; fi; if command -v treefmt >/dev/null 2>&1; then exec treefmt --ci; else exec cargo fmt --all -- --check; fi'"#;
+pub(crate) const NIX_FORMAT_COMMAND: &str = r#"sh -c 'formatter_expr="let root = toString ./.; flake = builtins.getFlake (if builtins.pathExists ./.git then \"git+file://\" + root else root); in if flake ? formatter.\${builtins.currentSystem} then flake.formatter.\${builtins.currentSystem} else null"; formatter=$(nix eval --impure --raw --expr "let f = ($formatter_expr); in if f == null then \"\" else f.drvPath") || exit; if [ -n "$formatter" ]; then formatter_program=$(nix eval --impure --raw --expr "let f = ($formatter_expr); in f.meta.mainProgram or (f.pname or (builtins.parseDrvName f.name).name)") || exit; formatter_path=$(nix build --no-link --print-out-paths "$formatter^out") || exit; formatter_exe="$formatter_path/bin/$formatter_program"; if [ ! -x "$formatter_exe" ]; then echo "Declared flake formatter executable is missing: $formatter_exe" >&2; exit 1; fi; if [ "$formatter_program" = treefmt ]; then exec "$formatter_exe" --ci; fi; repository_root=$(git rev-parse --show-toplevel) || exit; index_tree=$(git -C "$repository_root" write-tree) || exit; snapshot_dir=$(mktemp -d "${TMPDIR:-/tmp}/simit-format.XXXXXXXX") || exit; trap "rm -rf -- \"\$snapshot_dir\"" 0; trap "exit 129" HUP; trap "exit 130" INT; trap "exit 143" TERM; snapshot_dir=$(cd "$snapshot_dir" && pwd -P) || exit; case "$snapshot_dir/" in "$repository_root/"*) echo "Formatter snapshot directory must be outside the repository" >&2; exit 1;; esac; snapshot_worktree() { GIT_INDEX_FILE="$snapshot_dir/index" git -C "$repository_root" read-tree "$index_tree" && GIT_INDEX_FILE="$snapshot_dir/index" git -C "$repository_root" add --all -- . && GIT_INDEX_FILE="$snapshot_dir/index" git -C "$repository_root" write-tree; }; before_tree=$(snapshot_worktree) || exit; "$formatter_exe" || exit; after_tree=$(snapshot_worktree) || exit; current_index=$(git -C "$repository_root" write-tree) || exit; if [ "$before_tree" != "$after_tree" ] || [ "$index_tree" != "$current_index" ]; then echo "Formatter modified repository content or staging" >&2; exit 1; fi; exit 0; fi; if [ -f nix/treefmt.nix ] || [ -f treefmt.toml ] || [ -f .treefmt.toml ]; then echo "treefmt policy requires a flake formatter output; run simit init flake" >&2; exit 1; fi; if command -v treefmt >/dev/null 2>&1; then exec treefmt --ci; else exec cargo fmt --all -- --check; fi'"#;
 
 #[derive(Debug, Deserialize)]
 struct ActionPin {
@@ -502,6 +505,7 @@ pub fn publish_workspace_files(
             &inputs.options,
             &inputs.plan,
             &inputs.versions,
+            None,
         ),
     };
     trusted_publisher::validate_credential_free_source(&source.content, &inputs.options)?;
@@ -526,6 +530,7 @@ fn publish_workspace_workflow(
     options: &CiOptions,
     plan: &[(String, Vec<String>)],
     versions: &[(String, String)],
+    independent_package: Option<&str>,
 ) -> String {
     if platform == Platform::Github {
         return trusted_publisher::source_workflow(
@@ -536,6 +541,7 @@ fn publish_workspace_workflow(
                 .map(|(name, _)| name.clone())
                 .collect::<Vec<_>>(),
             true,
+            independent_package,
         );
     }
     let mut w = String::new();
@@ -544,8 +550,19 @@ fn publish_workspace_workflow(
     w.push_str("# coordinated workspace publish: prerequisites before dependents.\n");
     w.push_str("# Before creating and pushing a release tag, run `simit changelog release <version>` locally.\n");
     push_release_security_header(&mut w, false);
-    w.push_str("name: Publish Workspace\n\n");
-    w.push_str(github_crate_publish_triggers());
+    w.push_str(&format!(
+        "name: Publish {}\n\n",
+        independent_package.unwrap_or("Workspace")
+    ));
+    w.push_str("on:\n");
+    if let Some(package) = independent_package {
+        w.push_str(&format!(
+            "  push:\n    tags:\n      - \"{package}/v[0-9]*\"\n"
+        ));
+    } else {
+        w.push_str("  push:\n    tags:\n      - \"[0-9]*\"\n");
+    }
+    w.push('\n');
     // Serialize conflicting release attempts; never cancel a publish halfway.
     w.push_str("concurrency:\n");
     w.push_str("  group: ${{ github.workflow_ref }}-${{ github.ref }}\n");
@@ -576,7 +593,12 @@ fn publish_workspace_workflow(
     w.push_str("        run: |\n");
     w.push_str("          set -euo pipefail\n");
     w.push_str("          tag=\"${GITHUB_REF_NAME:-${GITHUB_REF#refs/tags/}}\"\n");
-    w.push_str("          if ! printf '%s\\n' \"$tag\" | grep -Eq '^[0-9]+\\.[0-9]+\\.[0-9]+$'; then echo \"Tag must be an exact semver version like 0.1.1, got '$tag'\" >&2; exit 1; fi\n");
+    if let Some(package) = independent_package {
+        w.push_str(&format!("          case \"$tag\" in {package}/v*) version=\"${{tag#{package}/v}}\" ;; *) echo 'Tag does not belong to this package' >&2; exit 1 ;; esac\n"));
+        w.push_str("          if ! printf '%s\\n' \"$version\" | grep -Eq '^[0-9]+\\.[0-9]+\\.[0-9]+([+-][0-9A-Za-z.+-]+)?$'; then echo 'Invalid package release version' >&2; exit 1; fi\n");
+    } else {
+        w.push_str("          if ! printf '%s\\n' \"$tag\" | grep -Eq '^[0-9]+\\.[0-9]+\\.[0-9]+$'; then echo \"Tag must be an exact semver version like 0.1.1, got '$tag'\" >&2; exit 1; fi\n");
+    }
     w.push_str(&release_trust_root_steps());
     w.push_str("          git_fetch --force --tags origin \"refs/tags/${tag}:refs/tags/${tag}\"\n");
     w.push_str("          git verify-tag \"$tag\"\n");
@@ -590,10 +612,20 @@ fn publish_workspace_workflow(
         w.push_str(command_prefix(runtime));
         w.push_str("cargo pkgid -p ");
         w.push_str(&shell_word(name));
-        w.push_str(" | awk -F'[#@]' 'NF > 1 {print $NF}' | tail -n 1)\" = \"$tag\" || { echo \"");
+        w.push_str(" | awk -F'[#@]' 'NF > 1 {print $NF}' | tail -n 1)\" = \"");
+        w.push_str(if independent_package.is_some() {
+            "$version"
+        } else {
+            "$tag"
+        });
+        w.push_str("\" || { echo \"");
         w.push_str(name);
         w.push(' ');
-        w.push_str(version);
+        w.push_str(if independent_package.is_some() {
+            "version"
+        } else {
+            version
+        });
         w.push_str(" does not match tag $tag\" >&2; exit 1; }\n");
     }
     // Required gates as prerequisite jobs (exact revision, failure blocks publish).
@@ -717,6 +749,46 @@ fn publish_workspace_workflow(
     w.push_str("          echo \"resume: rerun the original tag-push run; already-published crates with matching checksums exit 0, conflicts fail\"\n");
     trim_trailing_blank_lines(&mut w);
     w
+}
+
+/// Independently tagged publication retains the signed exact-source, packaged
+/// archive, checksum conflict, and bounded propagation gates of workspace publishing.
+/// Dependencies must already exist in the registry; only the tagged package is
+/// published. Component integration gates run before any credentialed job.
+pub fn publish_independent_files(
+    package: &Package,
+    runner: &ResolvedRunner,
+    options: &CiOptions,
+) -> Result<Vec<GeneratedFile>> {
+    crate::release_identity::ReleaseTag::for_package(
+        &package.name,
+        semver::Version::parse(&package.version)?,
+    )?;
+    if !package.is_publishable() {
+        bail!("{} is not publishable", package.name);
+    }
+    let source = GeneratedFile {
+        relative_path: PathBuf::from(".github/workflows")
+            .join(format!("publish-crate-{}.yaml", package.name)),
+        content: publish_workspace_workflow(
+            Platform::Github,
+            Runtime::Nix,
+            runner,
+            options,
+            &[(package.name.clone(), Vec::new())],
+            &[(package.name.clone(), package.version.clone())],
+            Some(&package.name),
+        ),
+    };
+    trusted_publisher::validate_credential_free_source(&source.content, options)?;
+    let publisher = trusted_publisher::publisher_file(
+        &source.relative_path,
+        Runtime::Nix,
+        options,
+        &[(package.name.clone(), Vec::new())],
+        false,
+    );
+    Ok(vec![source, publisher])
 }
 
 pub fn codeberg_pages_file(
@@ -940,7 +1012,7 @@ pub fn github_prebuild_file(
         workflow.push_str(runner);
         workflow.push('\n');
     }
-    workflow.push_str("    runs-on: ${{ matrix.runner }}\n    steps:\n");
+    workflow.push_str("    runs-on: ${{ matrix.runner }}\n    timeout-minutes: 180\n    steps:\n");
     let checkout_version = github_matrix_action_version(system_runners, "v7.0.1", "v4.3.1");
     let artifact_version = github_matrix_action_version(system_runners, "v7.0.2", "v4.6.2");
     push_event_checkout_step_with_version(&mut workflow, Platform::Github, checkout_version);
@@ -966,7 +1038,7 @@ pub fn github_prebuild_file(
             workflow.push_str(&shell_quote(installable));
             workflow.push_str(" --out-link ");
             workflow.push_str(&shell_quote(&format!(".simit-prebuild/ci-{index}")));
-            workflow.push('\n');
+            workflow.push_str(" --print-build-logs --max-jobs 1 --cores 2\n");
         }
     }
     if prebuild.release_archives {
@@ -977,7 +1049,7 @@ pub fn github_prebuild_file(
             workflow.push_str(&shell_quote(&format!(".#{}", attr)));
             workflow.push_str(" --out-link ");
             workflow.push_str(&shell_quote(&link));
-            workflow.push('\n');
+            workflow.push_str(" --print-build-logs --max-jobs 1 --cores 2\n");
             workflow.push_str("          manifests=(");
             workflow.push_str(&format!("{link}/*-release-manifest.json"));
             workflow.push_str(")\n          test \"${#manifests[@]}\" -eq 1\n          jq -e --arg version \"$VERSION\" '(.schemaVersion == 2) and (.version == $version) and (.artifacts | length > 0)' \"${manifests[0]}\" >/dev/null\n");
@@ -1146,7 +1218,9 @@ pub fn nix_build_matrix_file_with_options(
         command.push_str(&format!(" --cores {cores}"));
     }
     if options.capture_results {
-        command.push_str(" --json");
+        // Builder phases go to stderr only when explicitly requested. Retaining
+        // the client diagnostics alone cannot explain a cancelled build.
+        command.push_str(" --print-build-logs --json");
         workflow.push_str(&format!("        run: |\n          set -euo pipefail\n          exec 3> >(tee \"$SIMIT_NIX_BUILD_RESULTS/build.log\" >&2)\n          log_pid=$!\n          status=0\n          {command} \"$INSTALLABLE\" 2>&3 | tee \"$SIMIT_NIX_BUILD_RESULTS/result.json\" || status=$?\n          exec 3>&-\n          wait \"$log_pid\"\n          exit \"$status\"\n"));
         for (index, script) in options.post_build.iter().enumerate() {
             workflow.push_str(&format!(
@@ -2963,7 +3037,7 @@ fn artifacts_workflow(
         workflow.push_str(&runs_on(&runners.release));
         workflow.push_str("\n    steps:\n");
         push_event_checkout_step(&mut workflow, platform, Some(&runners.release));
-        workflow.push_str(&validate_release_tag_step(None, None));
+        workflow.push_str(&validate_release_tag_step(None, None, None));
     }
     workflow.push_str("  ");
     workflow.push_str(linux_job_name);
@@ -2980,7 +3054,7 @@ fn artifacts_workflow(
     workflow.push_str("    steps:\n");
     push_event_checkout_step(&mut workflow, platform, Some(&runners.release));
     push_required_env_step(&mut workflow, &options.required_env);
-    workflow.push_str(&validate_release_tag_step(None, None));
+    workflow.push_str(&validate_release_tag_step(None, None, None));
     match runtime {
         Runtime::Nix => {
             push_install_nix_step(&mut workflow, platform);
@@ -4124,11 +4198,19 @@ fn push_install_nix_step_with_cache(
     push_github_input_transport(workflow);
 }
 
+pub(crate) const GITHUB_INPUT_TRANSPORT: &str = "git config --global --add url.https://github.com/.insteadOf ssh://git@github.com/\ngit config --global --add url.https://github.com/.insteadOf git@github.com:\n";
+
 pub(crate) fn push_github_input_transport(workflow: &mut String) {
     // Public GitHub flake inputs often retain operator SSH URLs in their locks.
     // Hosted runners have no SSH key; resolve those inputs over HTTPS without
     // changing pinned revisions or borrowing deployment credentials.
-    workflow.push_str("      - name: Configure GitHub input transport\n        run: |\n          git config --global --add url.https://github.com/.insteadOf ssh://git@github.com/\n          git config --global --add url.https://github.com/.insteadOf git@github.com:\n\n");
+    workflow.push_str("      - name: Configure GitHub input transport\n        run: |\n");
+    for line in GITHUB_INPUT_TRANSPORT.lines() {
+        workflow.push_str("          ");
+        workflow.push_str(line);
+        workflow.push('\n');
+    }
+    workflow.push('\n');
 }
 
 fn push_nix_cargo_bin_path_step(workflow: &mut String) {
@@ -4794,6 +4876,7 @@ fn release_trust_root_steps() -> String {
 fn validate_release_tag_step(
     cargo_command_prefix: Option<&str>,
     package_name: Option<&str>,
+    independent: Option<&str>,
 ) -> String {
     let version_check = if let (Some(cargo_command_prefix), Some(package_name)) =
         (cargo_command_prefix, package_name)
@@ -4817,6 +4900,13 @@ fn validate_release_tag_step(
         String::new()
     };
     let trust_root = release_trust_root_steps();
+    let tag_check = if let Some(package) = independent {
+        format!(
+            "          case \"$tag\" in {package}/v*) version=\"${{tag#{package}/v}}\" ;; *) echo 'Tag does not belong to this package' >&2; exit 1 ;; esac\n          if ! printf '%s\\n' \"$version\" | grep -Eq '^[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z.-]+)?(\\+[0-9A-Za-z.-]+)?$'; then echo 'Invalid package release version' >&2; exit 1; fi\n"
+        )
+    } else {
+        "          if ! printf '%s\\n' \"$tag\" | grep -Eq '^[0-9]+\\.[0-9]+\\.[0-9]+$'; then\n            echo \"Tag must be an exact semver version like 0.1.1, got '$tag'\" >&2\n            exit 1\n          fi\n".to_owned()
+    };
 
     format!(
         r#"      - name: Validate signed release tag
@@ -4830,10 +4920,7 @@ fn validate_release_tag_step(
             tag="${{ref#refs/tags/}}"
           fi
 
-          if ! printf '%s\n' "$tag" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-            echo "Tag must be an exact semver version like 0.1.1, got '$tag'" >&2
-            exit 1
-          fi
+{tag_check}
           if ! command -v gpg >/dev/null 2>&1; then
             if command -v apt-get >/dev/null 2>&1; then
               apt-get update
@@ -4858,7 +4945,7 @@ fn validate_release_tag_step(
 }
 
 fn validate_tag_step(cargo_command_prefix: &str, package_name: &str) -> String {
-    validate_release_tag_step(Some(cargo_command_prefix), Some(package_name))
+    validate_release_tag_step(Some(cargo_command_prefix), Some(package_name), None)
 }
 
 fn publish_step(

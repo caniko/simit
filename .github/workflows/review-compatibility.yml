@@ -1,7 +1,13 @@
 name: Review engine compatibility
 on:
   push:
-    branches: [feat/repository-review, feat/provider-review-policy, trunk]
+    branches:
+      [
+        feat/repository-review,
+        feat/provider-review-policy,
+        migrate/harbor-monorepo-reconcile-20261012-current,
+        trunk,
+      ]
   pull_request:
 permissions:
   contents: read

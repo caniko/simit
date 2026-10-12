@@ -1,8 +1,9 @@
 # Project Registry
 
-Simit keeps a per-user project registry at `$XDG_DATA_HOME/simit/projects.toml`,
-or the platform default data directory when `XDG_DATA_HOME` is unset. Mutating
-commands update this registry after their primary work succeeds, so registry
+Simit keeps a per-user project registry at `$XDG_DATA_HOME/simit/projects.toml`
+on every supported platform when `XDG_DATA_HOME` is an absolute path. It uses
+the platform default data directory when the override is unset, empty, or relative.
+Mutating commands update this registry after their primary work succeeds, so registry
 failures warn but do not fail the command that generated project files.
 
 The registry records each project path, package name, first and last time simit

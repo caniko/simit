@@ -3,7 +3,11 @@ name: Qualify publisher boundary
 
 on:
   push:
-    branches: [fix/trusted-publisher-boundary]
+    branches:
+      [
+        fix/trusted-publisher-boundary,
+        migrate/harbor-monorepo-reconcile-20261012-current,
+      ]
   pull_request:
 
 permissions:

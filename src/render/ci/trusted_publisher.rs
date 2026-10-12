@@ -7,7 +7,7 @@ use anyhow::Context;
 // independently of configured CI/release runners and their mounted credentials.
 pub(super) const CANDIDATE_RUNNER: &str = "ubuntu-24.04";
 
-pub(super) fn validate_credential_free_source(workflow: &str, options: &CiOptions) -> Result<()> {
+pub(crate) fn validate_credential_free_source(workflow: &str, options: &CiOptions) -> Result<()> {
     // Names are shell/YAML syntax, never expressions or executable defaults.
     // Recheck direct renderer callers as well as ProjectConfig consumers.
     for name in &options.required_env {
@@ -144,10 +144,15 @@ pub(super) fn crate_build_display(name: &str) -> String {
 }
 
 pub(super) fn archive_steps(name: &str, runtime: Runtime) -> String {
-    archive_steps_with_packaging(name, runtime, true)
+    archive_steps_with_packaging(name, runtime, true, None)
 }
 
-fn archive_steps_with_packaging(name: &str, runtime: Runtime, package: bool) -> String {
+fn archive_steps_with_packaging(
+    name: &str,
+    runtime: Runtime,
+    package: bool,
+    independent: Option<&str>,
+) -> String {
     let prefix = command_prefix(runtime);
     let quoted = shell_word(name);
     let packaging = if package {
@@ -157,8 +162,12 @@ fn archive_steps_with_packaging(name: &str, runtime: Runtime, package: bool) -> 
     } else {
         String::new()
     };
+    let version = match independent {
+        Some(name) => format!("${{GITHUB_REF_NAME#{name}/v}}"),
+        None => "${GITHUB_REF_NAME}".to_owned(),
+    };
     let mut w = format!(
-        "      - name: Build immutable archive {name}\n        run: |\n          set -euo pipefail\n          version=\"${{GITHUB_REF_NAME}}\"\n          test \"$({prefix}cargo pkgid --locked -p {quoted} | awk -F'[#@]' 'NF > 1 {{print $NF}}' | tail -n 1)\" = \"$version\"\n{packaging}          mkdir -p \"$RUNNER_TEMP/simit-crates/{name}\"\n          cp \"$RUNNER_TEMP/simit-package-target/package/{name}-$version.crate\" \"$RUNNER_TEMP/simit-crates/{name}/\"\n"
+        "      - name: Build immutable archive {name}\n        run: |\n          set -euo pipefail\n          version=\"{version}\"\n          test \"$({prefix}cargo pkgid --locked -p {quoted} | awk -F'[#@]' 'NF > 1 {{print $NF}}' | tail -n 1)\" = \"$version\"\n{packaging}          mkdir -p \"$RUNNER_TEMP/simit-crates/{name}\"\n          cp \"$RUNNER_TEMP/simit-package-target/package/{name}-$version.crate\" \"$RUNNER_TEMP/simit-crates/{name}/\"\n"
     );
     w.push_str(&format!(
         "      - name: Retain original-run archive {name}\n"
@@ -180,18 +189,27 @@ pub(super) fn source_workflow(
     options: &CiOptions,
     names: &[String],
     workspace: bool,
+    independent: Option<&str>,
 ) -> String {
     let mut w = String::new();
     push_generated_workflow_header(&mut w);
     w.push_str(
         "# Credential-free signed-tag build. Rerun the original signed-tag run for recovery.\n",
     );
-    w.push_str(if workspace {
-        "name: Build Workspace Crates\n\n"
+    w.push_str(&if let Some(package) = independent {
+        format!("name: {}\n\n", crate_build_display(package))
+    } else if workspace {
+        "name: Build Workspace Crates\n\n".to_owned()
     } else {
-        "name: Build Crate\n\n"
+        "name: Build Crate\n\n".to_owned()
     });
-    w.push_str(github_crate_publish_triggers());
+    if let Some(package) = independent {
+        w.push_str(&format!(
+            "on:\n  push:\n    tags:\n      - \"{package}/v[0-9]*\"\n\n"
+        ));
+    } else {
+        w.push_str(github_crate_publish_triggers());
+    }
     w.push_str("permissions:\n  contents: read\n\nconcurrency:\n  group: ${{ github.workflow_ref }}-${{ github.ref }}\n  cancel-in-progress: false\n\njobs:\n  build:\n    runs-on: ");
     w.push_str(CANDIDATE_RUNNER);
     w.push_str("\n    timeout-minutes: 60\n");
@@ -208,7 +226,7 @@ pub(super) fn source_workflow(
     } else {
         push_rust_setup_step(&mut w, Platform::Github);
     }
-    w.push_str(&validate_release_tag_step(None, None));
+    w.push_str(&validate_release_tag_step(None, None, independent));
     push_required_env_step(&mut w, &options.required_env);
     push_extra_setup_steps(&mut w, &options.extra_setup);
     if options.om_ci != OmCiMode::Off {
@@ -260,7 +278,12 @@ pub(super) fn source_workflow(
         .collect::<String>();
     w.push_str(&format!("      - name: Package coordinated release set\n        run: {}cargo package --locked --allow-dirty --no-verify{selection} --target-dir \"$RUNNER_TEMP/simit-package-target\"\n", command_prefix(runtime)));
     for name in names {
-        w.push_str(&archive_steps_with_packaging(name, runtime, false));
+        w.push_str(&archive_steps_with_packaging(
+            name,
+            runtime,
+            false,
+            independent,
+        ));
     }
     trim_trailing_blank_lines(&mut w);
     w

@@ -65,8 +65,11 @@ fn nix_format_jobs_are_uncached_across_providers_and_job_layouts() {
         );
         let workflow = read(&temp.path().join(path));
         assert_yaml_parses(&workflow);
+        // Crow escapes shell dollars for its own interpolation pass.
+        let shell_workflow = workflow.replace("$$", "$");
         assert!(
-            workflow.contains("treefmt --ci"),
+            shell_workflow.contains("formatter_program\" = treefmt")
+                && shell_workflow.contains("exec \"$formatter_exe\" --ci"),
             "{platform}/{provider}: {workflow}"
         );
         assert!(!workflow.contains("treefmt --fail-on-change"));
@@ -1067,6 +1070,8 @@ token_secret = "ATTIC_TOKEN"
     assert!(workflow.contains("workflow_call:\n    inputs:\n      release:"));
     assert!(workflow.contains("secrets:\n      attic_token:\n        required: true"));
     assert!(workflow.contains("runs-on: ${{ matrix.runner }}"));
+    assert!(workflow.contains("timeout-minutes: 180"));
+    assert!(workflow.contains("--print-build-logs --max-jobs 1 --cores 2"));
     assert!(workflow.contains("nix build '.#server' --out-link '.simit-prebuild/ci-0'"));
     assert!(
         workflow.contains("nix build '.#release-bundle' --out-link '.simit-prebuild/release-0'")

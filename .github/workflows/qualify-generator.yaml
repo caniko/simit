@@ -4,7 +4,12 @@ name: Qualify generator and retain regeneration
 
 on:
   push:
-    branches: ["fix/hermes-workflow-templates", "trunk"]
+    branches:
+      [
+        "fix/hermes-workflow-templates",
+        "migrate/harbor-monorepo-reconcile-20261012-current",
+        "trunk",
+      ]
   pull_request:
   workflow_dispatch:
 

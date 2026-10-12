@@ -14,8 +14,8 @@ pub const CANIX_CACHE_KEY: &str = "canix:lPzPzKrmYqW5Rxa5r0uQWvCqD3S5nx0h2eCy7XD
 pub const CANIX_CACHE_URL: &str = "https://attic.candee.baby/canix";
 /// Upstream cache.nixos.org public key, advertised alongside the canix cache.
 pub const NIXOS_CACHE_KEY: &str = "cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=";
-/// Pinned rs-harbor revision providing the fleet-wide Rust cache contract.
-pub const RS_HARBOR_REV: &str = "b40cd4c4fdf6133962f67bd68a48bfd5d554d47f";
+/// Exact Harbor revision qualified on every required native component runner.
+pub const HARBOR_REV: &str = "7d99eb50c52d0a941e2996b97c469b32a7657ef4";
 
 const TREEFMT_INPUT: &str = "    treefmt-nix.url = \"github:numtide/treefmt-nix\";\n";
 const GIT_HOOKS_INPUT: &str = "    git-hooks.url = \"github:cachix/git-hooks.nix\";\n";
@@ -35,6 +35,7 @@ const HOOK_BINDINGS: &str = r#"      fmtToolchain = rs-harbor.lib.mkToolchain {i
 const FORMATTER_OUTPUT: &str = "      formatter = treefmtEval.config.build.wrapper;\n";
 const FORMATTING_CHECK: &str = "        formatting = treefmtEval.config.build.check self;\n";
 const PRE_COMMIT_PACKAGE: &str = "          pre-commit\n";
+const TREEFMT_SHELL_PACKAGE: &str = "          treefmtEval.config.build.wrapper\n";
 const CARGO_AUDIT_PACKAGE: &str = "          cargo-audit\n";
 const CARGO_DENY_PACKAGE: &str = "          cargo-deny\n";
 const RELEASE_DEV_SHELL_PACKAGES: &str = r#"          cargo-about
@@ -98,7 +99,7 @@ pub fn files_with_components(
         Some(targets) => cross_template_with_msrv(targets, audit_tools, rust_version),
         None => template(audit_tools, rust_version),
     };
-    vec![
+    let mut files = vec![
         GeneratedFile {
             relative_path: PathBuf::from("flake.nix"),
             content: flake_content,
@@ -111,7 +112,17 @@ pub fn files_with_components(
             relative_path: PathBuf::from("nix/pre-commit.nix"),
             content: pre_commit_nix(languages, rust_version, audit_tools, components),
         },
-    ]
+    ];
+    if let Some(version) = rust_version {
+        files.push(GeneratedFile {
+            relative_path: PathBuf::from("nix/rust-toolchain-msrv.toml"),
+            content: format!(
+                "[toolchain]\nchannel = \"{}\"\nprofile = \"minimal\"\n",
+                rust_overlay_version(version)
+            ),
+        });
+    }
+    files
 }
 
 pub fn print_files(files: &[GeneratedFile]) {
@@ -175,6 +186,13 @@ const PINNED_TREEFMT_CALL: &str =
 const FMT_TOOLCHAIN_BINDING: &str =
     "fmtToolchain = rs-harbor.lib.mkToolchain {inherit pkgs; toolchainProfile = \"nightly\";};";
 
+fn rust_library(content: &str) -> &'static str {
+    ["harbor.lib.rust", "harbor-rs.lib", "rs-harbor.lib"]
+        .into_iter()
+        .find(|library| content.contains(library))
+        .unwrap_or("rs-harbor.lib")
+}
+
 /// Migrate an old-shape treefmtEval call site to the pinned rustfmtPackage
 /// contract, inserting the fmtToolchain binding it depends on. Both edits
 /// happen in memory; callers must only write the result when this returns
@@ -201,7 +219,8 @@ fn migrate_treefmt_call(patched: &mut String) -> Result<()> {
             .chars()
             .take_while(|ch| ch.is_whitespace())
             .collect();
-        let binding = format!("{indent}{FMT_TOOLCHAIN_BINDING}\n");
+        let binding = FMT_TOOLCHAIN_BINDING.replace("rs-harbor.lib", rust_library(patched));
+        let binding = format!("{indent}{binding}\n");
         patched.insert_str(line_start, &binding);
     }
     *patched = patched.replace(BARE_TREEFMT_CALL, PINNED_TREEFMT_CALL);
@@ -280,9 +299,10 @@ pub fn patch_existing(
         .lines()
         .any(|line| line.trim_start().starts_with("treefmtEval ="))
     {
+        let hook_bindings = HOOK_BINDINGS.replace("rs-harbor.lib", rust_library(&patched));
         ensure_after_statement(
             &mut patched,
-            HOOK_BINDINGS,
+            &hook_bindings,
             "package = craneLib.buildPackage",
             "package binding",
             "hook bindings must be inserted after the package binding in the system let",
@@ -349,6 +369,7 @@ pub fn has_required_wiring_with_audit_tools(content: &str, audit_tools: AuditToo
         .all(|snippet| content.contains(snippet))
         && has_rust_toolchain_hook_package(content)
         && has_treefmt_wrapper_argument(content)
+        && has_treefmt_shell_package(content)
         && has_pre_commit_shell_hook(content)
         && (!audit_tools.audit || content.contains("cargo-audit"))
         && (!audit_tools.deny || content.contains("cargo-deny"))
@@ -372,8 +393,7 @@ pub fn custom_wiring_mismatches(
     {
         missing.push("flake.nix custom mode: missing git-hooks input".to_owned());
     }
-    if !content.contains("treefmtEval = treefmt-nix.lib.evalModule pkgs (import ./nix/treefmt.nix")
-    {
+    if !has_treefmt_eval_import(content) {
         missing.push(
             "flake.nix custom mode: missing treefmtEval import of ./nix/treefmt.nix".to_owned(),
         );
@@ -415,11 +435,15 @@ pub fn custom_wiring_mismatches(
             }
         }
         FlakeBackend::PyHarbor => {
-            if !content.contains("py-harbor") && !content.contains("harbor-py") {
+            let namespaced = content.contains("harbor.lib.python");
+            if !content.contains("py-harbor") && !content.contains("harbor-py") && !namespaced {
                 missing
                     .push("flake.nix custom mode: missing py-harbor input or binding".to_owned());
             }
-            if !content.contains("py-harbor.lib") && !content.contains("harbor-py.lib") {
+            if !content.contains("py-harbor.lib")
+                && !content.contains("harbor-py.lib")
+                && !namespaced
+            {
                 missing.push("flake.nix custom mode: missing py-harbor.lib usage".to_owned());
             }
         }
@@ -432,6 +456,11 @@ pub fn custom_wiring_mismatches(
         missing.push("flake.nix custom mode: missing formatting check".to_owned());
     }
     if config.pre_commit_shell_hook {
+        if !has_treefmt_shell_package(content) {
+            missing.push(
+                "flake.nix custom mode: dev shell packages must include treefmtEval.config.build.wrapper".to_owned(),
+            );
+        }
         if !content.contains("pre-commit-check.enabledPackages") {
             missing.push(
                 "flake.nix custom mode: dev shell missing pre-commit-check.enabledPackages"
@@ -559,6 +588,48 @@ pub fn flake_passes_rustfmt_package(flake_content: &str) -> bool {
             call.as_ref()
                 .is_some_and(|arguments| arguments.contains("rustfmtPackage"))
         })
+    })
+}
+
+fn has_treefmt_eval_import(content: &str) -> bool {
+    use rnix::ast::Expr;
+
+    fn imports_policy<T: rnix::ast::AstNode>(argument: T) -> bool {
+        argument.syntax().descendants().any(|node| {
+            let Some(import) = cast_nix_node::<rnix::ast::Apply>(node) else {
+                return false;
+            };
+            matches!(import.lambda().and_then(unparen), Some(Expr::Ident(id)) if id.to_string() == "import")
+                && matches!(import.argument().and_then(unparen), Some(Expr::Path(path)) if path.to_string() == "./nix/treefmt.nix")
+        })
+    }
+
+    let parsed = rnix::Root::parse(content);
+    if !parsed.errors().is_empty() {
+        return false;
+    }
+    parsed.syntax().descendants().any(|node| {
+        let Some(binding) = cast_nix_node::<rnix::ast::AttrpathValue>(node) else {
+            return false;
+        };
+        if binding.attrpath().is_none_or(|path| path.to_string() != "treefmtEval") {
+            return false;
+        }
+        let Some(Expr::Apply(module)) = binding.value().and_then(unparen) else {
+            return false;
+        };
+        let Some(Expr::Apply(pkgs_call)) = module.lambda().and_then(unparen) else {
+            return false;
+        };
+        let Some(Expr::Select(function)) = pkgs_call.lambda().and_then(unparen) else {
+            return false;
+        };
+        if function.to_string().split_whitespace().collect::<String>() != "treefmt-nix.lib.evalModule"
+            || !matches!(pkgs_call.argument().and_then(unparen), Some(Expr::Ident(id)) if id.to_string() == "pkgs")
+        {
+            return false;
+        }
+        module.argument().is_some_and(imports_policy)
     })
 }
 
@@ -891,6 +962,18 @@ fn ensure_after_statement(
 }
 
 fn ensure_dev_shell_packages(content: &mut String, audit_tools: AuditTools) -> Result<()> {
+    if !has_treefmt_shell_package(content) {
+        let index = unique_anchor(
+            content,
+            "        packages = with pkgs; [\n",
+            "devShell packages",
+            "add treefmtEval.config.build.wrapper to the dev shell packages",
+        )?;
+        content.insert_str(
+            index + "        packages = with pkgs; [\n".len(),
+            TREEFMT_SHELL_PACKAGE,
+        );
+    }
     if audit_tools.audit {
         ensure_explicit_dev_shell_package(
             content,
@@ -977,29 +1060,24 @@ fn unique_anchor(content: &str, anchor: &str, anchor_name: &str, reason: &str) -
 /// Inserted via marker replacement after rendering so both outputs stay
 /// byte-identical to the previous inline lists.
 const DEVSHELL_PACKAGES_MARKER: &str = "@@DEVSHELL_PACKAGES@@";
-const DEVSHELL_PACKAGES: &str = "        packages = with pkgs; [\n          cargo-about\n          cargo-audit\n          cargo-cyclonedx\n          cargo-deny\n          cargo-llvm-cov\n          cargo-sbom\n          cargo-nextest\n          cosign\n          file\n          gnutar\n          gzip\n          jq\n          minisign\n          nodejs\n          pre-commit\n          rpm\n          util-linux\n          unzip\n          zip\n          reprepro\n          rust-analyzer\n          taplo\n        ] ++ pre-commit-check.enabledPackages;";
+const DEVSHELL_PACKAGES: &str = "        packages = with pkgs; [\n          treefmtEval.config.build.wrapper\n          cargo-about\n          cargo-audit\n          cargo-cyclonedx\n          cargo-deny\n          cargo-llvm-cov\n          cargo-sbom\n          cargo-nextest\n          cosign\n          file\n          gnutar\n          gzip\n          jq\n          minisign\n          nodejs\n          pre-commit\n          rpm\n          util-linux\n          unzip\n          zip\n          reprepro\n          rust-analyzer\n          taplo\n        ] ++ pre-commit-check.enabledPackages;";
 
 fn msrv_shell(rust_version: Option<&str>, attribute: &str) -> String {
-    let Some(version) = rust_version else {
+    if rust_version.is_none() {
         return String::new();
-    };
-    let version = rust_overlay_version(version);
+    }
     format!(
         r#"{attribute} = let
-        msrvToolchain = rs-harbor.lib.mkToolchain {{
+        msrvToolchain = harbor.lib.rust.mkToolchain {{
           inherit pkgs;
-          toolchainFile = builtins.toFile "rust-toolchain-msrv.toml" ''
-            [toolchain]
-            channel = "{version}"
-            profile = "minimal"
-          '';
+          toolchainFile = ./nix/rust-toolchain-msrv.toml;
           withRustAnalyzer = false;
           crossTargets = [];
         }};
-      in (rs-harbor.lib.mkDevShells {{
+      in (harbor.lib.rust.mkDevShells {{
         inherit pkgs;
         inherit (msrvToolchain) craneLib;
-        cross = rs-harbor.lib.mkCross {{inherit pkgs system; enableOsxcross = false;}};
+        cross = harbor.lib.rust.mkCross {{inherit pkgs system; enableOsxcross = false;}};
         opencodeLsp.enable = false;
         extraEnv = {{RUSTFLAGS = ""; CARGO_ENCODED_RUSTFLAGS = "";}};
       }}).default;"#
@@ -1011,10 +1089,10 @@ fn template(audit_tools: AuditTools, rust_version: Option<&str>) -> String {
   description = "Rust project";
 
   inputs = {
-    rs-harbor.url = "git+https://github.com/caniko/harbor-rs.git?ref=trunk&rev=a3e5f76326f0f02de230cb2fba66fa3c1c7171cb";
-    nixpkgs.follows = "rs-harbor/nixpkgs";
-    rust-overlay.follows = "rs-harbor/rust-overlay";
-    crane.follows = "rs-harbor/crane";
+    harbor.url = "git+https://github.com/caniko/harbor.git?ref=feat/harbor-monorepo-components&rev=@@HARBOR_REV@@";
+    nixpkgs.follows = "harbor/nixpkgs";
+    rust-overlay.follows = "harbor/rust-overlay";
+    crane.follows = "harbor/crane";
     flake-utils.url = "github:numtide/flake-utils";
     treefmt-nix.url = "github:numtide/treefmt-nix";
     git-hooks.url = "github:cachix/git-hooks.nix";
@@ -1022,7 +1100,7 @@ fn template(audit_tools: AuditTools, rust_version: Option<&str>) -> String {
 
   outputs = {
     self,
-    rs-harbor,
+    harbor,
     nixpkgs,
     rust-overlay,
     crane,
@@ -1037,9 +1115,9 @@ fn template(audit_tools: AuditTools, rust_version: Option<&str>) -> String {
         overlays = [(import rust-overlay)];
       };
 
-      toolchain = rs-harbor.lib.mkToolchain {inherit pkgs;};
+      toolchain = harbor.lib.rust.mkToolchain {inherit pkgs;};
       inherit (toolchain) craneLib rustToolchain;
-      fmtToolchain = rs-harbor.lib.mkToolchain {inherit pkgs; toolchainProfile = "nightly";};
+      fmtToolchain = harbor.lib.rust.mkToolchain {inherit pkgs; toolchainProfile = "nightly";};
       src = craneLib.cleanCargoSource ./.;
       commonArgs = {
         inherit src;
@@ -1215,7 +1293,7 @@ fn template(audit_tools: AuditTools, rust_version: Option<&str>) -> String {
 
 "#
     .to_owned();
-    content = content.replace("a3e5f76326f0f02de230cb2fba66fa3c1c7171cb", RS_HARBOR_REV);
+    content = content.replace("@@HARBOR_REV@@", HARBOR_REV);
     content = content.replace(DEVSHELL_PACKAGES_MARKER, DEVSHELL_PACKAGES);
     content = content.replace(
         "@@MSRV_SHELL@@",
@@ -1265,8 +1343,8 @@ fn python_template(project: &python::Project) -> String {
   inputs = {{
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
-    py-harbor = {{
-      url = "git+https://github.com/caniko/harbor-py.git";
+    harbor = {{
+      url = "git+https://github.com/caniko/harbor.git?ref=feat/harbor-monorepo-components&rev={harbor_rev}";
       inputs.nixpkgs.follows = "nixpkgs";
     }};
 
@@ -1277,13 +1355,13 @@ fn python_template(project: &python::Project) -> String {
   outputs = {{
     self,
     nixpkgs,
-    py-harbor,
+    harbor,
     treefmt-nix,
     git-hooks,
     ...
   }}:
     let
-      py = py-harbor.lib;
+      py = harbor.lib.python;
 
       mkDevShells =
         system:
@@ -1303,7 +1381,7 @@ fn python_template(project: &python::Project) -> String {
             inherit pkgs;
             uvExtra = "{cpu_extra}";
             devGroup = "{dev_group}";
-            extraPackages = pre-commit-check.enabledPackages;
+            extraPackages = [treefmtEval.config.build.wrapper] ++ pre-commit-check.enabledPackages;
             shellHookSuffix = pre-commit-check.shellHook;
           }};
         }};
@@ -1427,6 +1505,7 @@ fn python_template(project: &python::Project) -> String {
         env_name = env_name,
         scripts = scripts,
         first_script = first_script,
+        harbor_rev = HARBOR_REV,
     )
 }
 
@@ -1496,11 +1575,11 @@ fn cross_template_with_msrv(
   }};
 
   inputs = {{
-    rs-harbor.url = "git+https://github.com/caniko/harbor-rs.git?ref=trunk&rev=a3e5f76326f0f02de230cb2fba66fa3c1c7171cb";
+    harbor.url = "git+https://github.com/caniko/harbor.git?ref=feat/harbor-monorepo-components&rev={harbor_rev}";
 
-    nixpkgs.follows = "rs-harbor/nixpkgs";
-    rust-overlay.follows = "rs-harbor/rust-overlay";
-    crane.follows = "rs-harbor/crane";
+    nixpkgs.follows = "harbor/nixpkgs";
+    rust-overlay.follows = "harbor/rust-overlay";
+    crane.follows = "harbor/crane";
     flake-utils.url = "github:numtide/flake-utils";
 
     treefmt-nix = {{
@@ -1516,7 +1595,7 @@ fn cross_template_with_msrv(
   outputs = {{
     self,
     nixpkgs,
-    rs-harbor,
+    harbor,
     rust-overlay,
     crane,
     flake-utils,
@@ -1530,11 +1609,11 @@ fn cross_template_with_msrv(
         overlays = [(import rust-overlay)];
       }};
 
-      toolchain = rs-harbor.lib.mkToolchain {{inherit pkgs;}};
+      toolchain = harbor.lib.rust.mkToolchain {{inherit pkgs;}};
       inherit (toolchain) craneLib buildCache;
       rustToolchain = toolchain.rustToolchain;
-      fmtToolchain = rs-harbor.lib.mkToolchain {{inherit pkgs; toolchainProfile = "nightly";}};
-      cross = rs-harbor.lib.mkCross {{inherit pkgs system;}};
+      fmtToolchain = harbor.lib.rust.mkToolchain {{inherit pkgs; toolchainProfile = "nightly";}};
+      cross = harbor.lib.rust.mkCross {{inherit pkgs system;}};
 
       cargoToml = builtins.fromTOML (builtins.readFile ./Cargo.toml);
       pname = cargoToml.package.name or cargoToml.workspace.package.name;
@@ -1545,7 +1624,7 @@ fn cross_template_with_msrv(
         strictDeps = true;
       }};
 
-      crossPackages = rs-harbor.lib.mkCrossPackages {{
+      crossPackages = harbor.lib.rust.mkCrossPackages {{
         inherit pkgs cross pname commonArgs;
         inherit (toolchain) craneLib;
         inherit buildCache;
@@ -1578,7 +1657,7 @@ fn cross_template_with_msrv(
           }});
         fmt = craneLib.cargoFmt {{inherit src;}};
       }};
-      devShells = (rs-harbor.lib.mkDevShells {{
+      devShells = (harbor.lib.rust.mkDevShells {{
         inherit pkgs cross;
         inherit (toolchain) craneLib;
         @@DEVSHELL_PACKAGES@@
@@ -1729,8 +1808,8 @@ fn cross_template_with_msrv(
         nixos_key = NIXOS_CACHE_KEY,
         target_list = target_list,
         default_attr = default_attr,
+        harbor_rev = HARBOR_REV,
     );
-    content = content.replace("a3e5f76326f0f02de230cb2fba66fa3c1c7171cb", RS_HARBOR_REV);
     content = content.replace(DEVSHELL_PACKAGES_MARKER, DEVSHELL_PACKAGES);
     content = content.replace("@@MSRV_SHELL@@", &msrv_shell(rust_version, "msrv"));
     insert_template_audit_packages(&mut content, audit_tools);
@@ -1841,11 +1920,56 @@ fn treefmt_nix(languages: &Languages, rust_edition: &str) -> String {
 fn has_rust_toolchain_hook_package(content: &str) -> bool {
     content.contains("inherit rustToolchain;")
         || content.contains("inherit pkgs rustToolchain;")
+        || content.contains("inherit (toolchain) rustToolchain;")
         || content.contains("rustToolchain = toolchain.rustToolchain;")
 }
 
 fn has_treefmt_wrapper_argument(content: &str) -> bool {
     content.contains("treefmtWrapper = treefmtEval.config.build.wrapper;")
+}
+
+fn has_treefmt_shell_package(content: &str) -> bool {
+    use rnix::ast::{Attr, AttrpathValue};
+
+    fn includes_wrapper<T: rnix::ast::AstNode>(value: T) -> bool {
+        value
+            .syntax()
+            .descendants()
+            .filter(|node| node.kind() == rnix::SyntaxKind::NODE_SELECT)
+            .any(|select| {
+                let tokens: String = select
+                    .descendants_with_tokens()
+                    .filter_map(|node| node.into_token())
+                    .filter(|token| {
+                        !matches!(
+                            token.kind(),
+                            rnix::SyntaxKind::TOKEN_WHITESPACE | rnix::SyntaxKind::TOKEN_COMMENT
+                        )
+                    })
+                    .map(|token| token.text().to_owned())
+                    .collect();
+                tokens == "treefmtEval.config.build.wrapper"
+            })
+    }
+
+    let parsed = rnix::Root::parse(content);
+    if !parsed.errors().is_empty() {
+        return false;
+    }
+    parsed
+        .syntax()
+        .descendants()
+        .filter_map(cast_nix_node::<AttrpathValue>)
+        .any(|binding| {
+            let Some(Attr::Ident(name)) = binding.attrpath().and_then(|path| path.attrs().last())
+            else {
+                return false;
+            };
+            if !matches!(name.to_string().as_str(), "packages" | "extraPackages") {
+                return false;
+            }
+            binding.value().is_some_and(includes_wrapper)
+        })
 }
 
 fn has_pre_commit_check_binding(content: &str) -> bool {
@@ -1866,10 +1990,11 @@ fn has_formatting_check(content: &str) -> bool {
 }
 
 fn has_pre_commit_shell_hook(content: &str) -> bool {
-    (content.contains("shellHook =")
-        || content.contains("shellHookSuffix =")
-        || content.contains("extraShellHook ="))
-        && content.contains("pre-commit-check.shellHook")
+    content.contains("inherit (pre-commit-check) shellHook;")
+        || ((content.contains("shellHook =")
+            || content.contains("shellHookSuffix =")
+            || content.contains("extraShellHook ="))
+            && content.contains("pre-commit-check.shellHook"))
 }
 
 fn pre_commit_nix(
@@ -2040,6 +2165,25 @@ mod tests {
     use crate::project::Languages;
 
     #[test]
+    fn custom_treefmt_import_survives_formatter_line_breaks() {
+        let binding = "treefmtEval =\n treefmt-nix.lib.evalModule pkgs\n (import ./nix/treefmt.nix { rustfmtPackage = rustToolchain; } { inherit pkgs; }\n // { settings.global.excludes = [\"third_party/**\"]; });";
+        assert!(has_treefmt_eval_import(&format!("{{ {binding} }}")));
+        assert!(!has_treefmt_eval_import(&format!("{{ # {binding}\n }}")));
+        assert!(!has_treefmt_eval_import(&format!("{{ /* {binding} */ }}")));
+        assert!(!has_treefmt_eval_import(&format!(
+            "{{ {} }}",
+            binding.replace("treefmtEval", "unused")
+        )));
+        assert!(!has_treefmt_eval_import(&format!(
+            "{{ {} }}",
+            binding.replace("./nix/treefmt.nix", "./other.nix")
+        )));
+        assert!(!has_treefmt_eval_import(
+            "{ treefmtEval = null; unused = import ./nix/treefmt.nix; }"
+        ));
+    }
+
+    #[test]
     fn generated_policy_recognition_rejects_disabled_or_commented_coverage() {
         let languages = Languages {
             nix: true,
@@ -2180,7 +2324,7 @@ mod tests {
         formatting = treefmtEval.config.build.check self;
       };
       devShells.default = {
-        packages = [ pre-commit ] ++ pre-commit-check.enabledPackages;
+        packages = [ pre-commit treefmtEval.config.build.wrapper ] ++ pre-commit-check.enabledPackages;
         shellHook = pre-commit-check.shellHook;
       };
       legacyPackages = let
@@ -2265,6 +2409,20 @@ mod tests {
     }
 
     #[test]
+    fn patch_existing_keeps_the_projects_rust_library_namespace() {
+        for library in ["harbor.lib.rust", "harbor-rs.lib", "rs-harbor.lib"] {
+            let original = OLD_WIRED_FLAKE.replace("rs-harbor.lib", library);
+            let patched = patch_existing(&original, AuditTools::default(), true).unwrap();
+            assert!(patched.contains(&format!("fmtToolchain = {library}.mkToolchain")));
+            assert_eq!(patched.matches("treefmtEval =").count(), 1);
+            assert_eq!(
+                patched,
+                patch_existing(&patched, AuditTools::default(), true).unwrap()
+            );
+        }
+    }
+
+    #[test]
     fn patch_existing_leaves_bare_call_alone_without_rust() {
         let patched = patch_existing(OLD_WIRED_FLAKE, AuditTools::default(), false).unwrap();
         assert!(patched.contains("(import ./nix/treefmt.nix)"));
@@ -2309,9 +2467,9 @@ mod tests {
         assert!(flake.contains("package = craneLib.buildPackage"));
         assert!(flake.contains("packages.default = package;"));
         assert!(!flake.contains("mkCrossPackages"));
-        assert!(flake.contains("toolchain = rs-harbor.lib.mkToolchain {inherit pkgs;};"));
+        assert!(flake.contains("toolchain = harbor.lib.rust.mkToolchain {inherit pkgs;};"));
         assert!(flake.contains("package = craneLib.buildPackage"));
-        assert!(!flake.contains("rs-harbor.lib.mkBuildCachePolicy"));
+        assert!(!flake.contains("harbor.lib.rust.mkBuildCachePolicy"));
         assert!(flake.contains("cargo-about"));
         assert!(flake.contains("cargo-audit"));
         assert!(flake.contains("cargo-deny"));
@@ -2374,17 +2532,17 @@ mod tests {
 
         // rs-harbor input and follows wiring.
         assert!(flake.contains(&format!(
-            "rs-harbor.url = \"git+https://github.com/caniko/harbor-rs.git?ref=trunk&rev={RS_HARBOR_REV}\";"
+            "harbor.url = \"git+https://github.com/caniko/harbor.git?ref=feat/harbor-monorepo-components&rev={HARBOR_REV}\";"
         )));
-        assert!(flake.contains("nixpkgs.follows = \"rs-harbor/nixpkgs\";"));
-        assert!(flake.contains("rust-overlay.follows = \"rs-harbor/rust-overlay\";"));
-        assert!(flake.contains("crane.follows = \"rs-harbor/crane\";"));
+        assert!(flake.contains("nixpkgs.follows = \"harbor/nixpkgs\";"));
+        assert!(flake.contains("rust-overlay.follows = \"harbor/rust-overlay\";"));
+        assert!(flake.contains("crane.follows = \"harbor/crane\";"));
         assert!(flake.contains("flake-utils.url = \"github:numtide/flake-utils\";"));
 
         // Toolchain + cross + mkCrossPackages call with the exact argument set.
-        assert!(flake.contains("toolchain = rs-harbor.lib.mkToolchain {inherit pkgs;};"));
-        assert!(flake.contains("cross = rs-harbor.lib.mkCross {inherit pkgs system;};"));
-        assert!(flake.contains("rs-harbor.lib.mkCrossPackages {"));
+        assert!(flake.contains("toolchain = harbor.lib.rust.mkToolchain {inherit pkgs;};"));
+        assert!(flake.contains("cross = harbor.lib.rust.mkCross {inherit pkgs system;};"));
+        assert!(flake.contains("harbor.lib.rust.mkCrossPackages {"));
         assert!(flake.contains("inherit pkgs cross pname commonArgs;"));
         assert!(flake.contains("inherit (toolchain) craneLib buildCache;"));
 
@@ -2397,7 +2555,7 @@ mod tests {
         assert!(flake.contains("default = crossPackages.${pname};"));
 
         // Dev shells via rs-harbor and treefmt/git-hooks wiring preserved.
-        assert!(flake.contains("rs-harbor.lib.mkDevShells {"));
+        assert!(flake.contains("harbor.lib.rust.mkDevShells {"));
         assert!(flake.contains("cargo-audit"));
         assert!(flake.contains("cargo-deny"));
         assert!(flake.contains("cargo-about"));
@@ -2435,7 +2593,7 @@ mod tests {
             "treefmtEval = treefmt-nix.lib.evalModule pkgs (import ./nix/treefmt.nix { rustfmtPackage = fmtToolchain.rustToolchain; });"
         ));
         assert!(flake.contains(
-            "fmtToolchain = rs-harbor.lib.mkToolchain {inherit pkgs; toolchainProfile = \"nightly\";};"
+            "fmtToolchain = harbor.lib.rust.mkToolchain {inherit pkgs; toolchainProfile = \"nightly\";};"
         ));
 
         // Correct, current canix key plus cache.nixos.org key; not the stale key.
