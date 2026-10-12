@@ -824,14 +824,14 @@
       "locked": {
         "lastModified": 1791821206,
         "narHash": "sha256-Y75hWzgbSnpei/t8bUU5ZG6ZZZ6B4JLZmsebgMMvRk4=",
-        "ref": "fix/dioxus-0.7.10",
+        "ref": "fix/tartan-github-transport-20261012-ses-ed08",
         "rev": "79d5a44310f6a7f620a8ebcf8c6dc78389cf4a36",
         "revCount": 236,
         "type": "git",
         "url": "https://github.com/caniko/plinth.git"
       },
       "original": {
-        "ref": "fix/dioxus-0.7.10",
+        "ref": "fix/tartan-github-transport-20261012-ses-ed08",
         "rev": "79d5a44310f6a7f620a8ebcf8c6dc78389cf4a36",
         "type": "git",
         "url": "https://github.com/caniko/plinth.git"
