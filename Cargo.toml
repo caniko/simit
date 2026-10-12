@@ -1,3 +1,8 @@
+[workspace]
+# The trusted publisher checks this source out beneath a candidate workspace.
+# Keep its resolution and locked engine build independent of that candidate.
+resolver = "3"
+
 [package]
 name = "simit"
 default-run = "simit"
