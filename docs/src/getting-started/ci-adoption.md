@@ -425,7 +425,16 @@ Dependency transport requires groups and discovered `check_systems`. It builds
 only selected build inputs in a separate fresh worker and exports their complete
 closure to a same-run artifact. Consumers verify source commit/tree, lock bytes,
 repository, run, attempt, expected derivations/output paths, archive checksum and
-transport budget before importing. An alias of a discovered check or a declared
+transport budget before importing. The consumer parses the full Nix export/NAR
+stream without extraction: actual records must exactly match the admitted closure
+and every declared reference stays inside it. Duplicate, missing, extra, malformed,
+truncated or trailing records reject before any canonical-store import. Parsing
+bounds paths, references, tree depth/nodes and control fields, and streams file
+payloads in 64 KiB chunks. Validation and import use the same unlinked, mode-0600
+spool descriptor. The parser follows [Nix's export framing](https://github.com/NixOS/nix/blob/adbf23e8184bbbe8d786aad1f362443b6542e0a4/src/libstore/export-import.cc)
+and [NAR writer grammar](https://github.com/NixOS/nix/blob/adbf23e8184bbbe8d786aad1f362443b6542e0a4/doc/manual/src/protocols/nix-archive.md).
+Legacy export signatures are rejected; archive integrity is distinct from hosted
+producer authority. An alias of a discovered check or a declared
 qualification output is refused. A failed dependency producer blocks consuming
 groups; its builder and export diagnostics remain available.
 
