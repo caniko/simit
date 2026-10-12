@@ -435,6 +435,14 @@ test/build contexts and consumer receipt validation authoritative. Qualify its
 default-branch installation, completion ordering, source-head reporting and
 all-producer aggregation before replacing an existing waiting collector.
 
+Simit's own enrollment observes its native `CI/test` producer and a short,
+source-bound `Custody qualification fixture` producer. The fixture uploads inert
+Python text as archive data; the observer hashes it without executing it. Their
+different completion times exercise pending-to-complete aggregation. Before the
+observer is merged onto the default branch, candidate workflow runs qualify the
+generator and fixture only. Retain the merged-source observer events and subsequent
+branch/PR events to qualify installation, source-head reporting and ordering.
+
 Configured matrices normally coalesce a branch push with its pull request. Set
 `[ci.nix_build].separate_events = true` when acceptance requires both original
 producers: the concurrency group then includes the workflow ref and event name,

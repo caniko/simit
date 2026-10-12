@@ -27,10 +27,10 @@ pub fn file(config: &Config) -> Result<GeneratedFile> {
     for name in config.producers.keys() {
         workflow.push_str(&format!("      - \"{}\"\n", yaml_double_quote(name)));
     }
-    workflow.push_str("    types: [completed]\n\npermissions:\n  contents: read\n  actions: read\n  statuses: write\n\nconcurrency:\n  group: custody-${{ github.event.workflow_run.head_repository.full_name }}-${{ github.event.workflow_run.head_sha }}-${{ github.event.workflow_run.event }}\n  cancel-in-progress: false\n\njobs:\n  collect:\n    runs-on: ubuntu-24.04\n    timeout-minutes: 10\n    env:\n      GH_HOST: github.com\n      GH_TOKEN: ${{ github.token }}\n      SIMIT_CUSTODY_ROOT: ${{ runner.temp }}/simit-producer-custody\n");
+    workflow.push_str("    types: [completed]\n\npermissions:\n  contents: read\n  actions: read\n  statuses: write\n\nconcurrency:\n  group: custody-${{ github.event.workflow_run.head_repository.full_name }}-${{ github.event.workflow_run.head_sha }}-${{ github.event.workflow_run.event }}\n  cancel-in-progress: false\n\njobs:\n  collect:\n    runs-on: ubuntu-24.04\n    timeout-minutes: 10\n    env:\n      GH_HOST: github.com\n      GH_TOKEN: ${{ github.token }}\n");
     workflow.push_str(&format!(
-        "      SIMIT_CUSTODY_CONFIG: \"{}\"\n    steps:\n",
-        yaml_double_quote(&serde_json::to_string(config)?)
+        "      SIMIT_CUSTODY_CONFIG: '{}'\n    steps:\n",
+        serde_json::to_string(config)?.replace('\'', "''")
     ));
     for phase in ["capture", "report"] {
         if phase == "report" {
@@ -50,13 +50,17 @@ pub fn file(config: &Config) -> Result<GeneratedFile> {
         } else {
             "Report custody on producer source head"
         };
-        workflow.push_str(&format!("      - name: {name}\n        if: always()\n        shell: python\n        env:\n          SIMIT_CUSTODY_PHASE: {phase}\n"));
+        workflow.push_str(&format!("      - name: {name}\n        if: always()\n        shell: python\n        env:\n          SIMIT_CUSTODY_ROOT: ${{{{ runner.temp }}}}/simit-producer-custody\n          SIMIT_CUSTODY_PHASE: {phase}\n"));
         if phase == "report" {
             workflow.push_str("          SIMIT_CUSTODY_UPLOAD_OUTCOME: ${{ steps.custody-upload.outcome }}\n          SIMIT_CUSTODY_ARTIFACT_ID: ${{ steps.custody-upload.outputs.artifact-id }}\n");
         }
         workflow.push_str("        run: |\n");
         for line in include_str!("custody.py").lines() {
-            workflow.push_str(&format!("          {line}\n"));
+            if line.is_empty() {
+                workflow.push('\n');
+            } else {
+                workflow.push_str(&format!("          {line}\n"));
+            }
         }
     }
     Ok(GeneratedFile {
