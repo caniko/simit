@@ -12,7 +12,7 @@ import threading
 import time
 import zipfile
 from pathlib import Path
-from urllib.parse import urlencode, quote
+from urllib.parse import urlencode, quote, urlsplit, unquote
 
 MAX_BYTES = 512 * 1024 * 1024
 MAX_CAPTURE_BYTES = MAX_BYTES
@@ -30,11 +30,15 @@ def require(condition, message):
         raise RuntimeError(message)
 
 
-def api(repository, endpoint, maximum=MAX_BYTES, timeout=90):
+def api(repository, endpoint, maximum=MAX_BYTES, timeout=90, query=None):
     """Bound downloads during receipt, including stalled pipes and diagnostics."""
     require(maximum >= 0 and timeout > 0, 'Capture budget exhausted')
-    command = ['gh', 'api', '--allow-escape-sequences', '--hostname', 'github.com',
-               f'repos/{repository}/{endpoint}']
+    command = ['gh', 'api', '--allow-escape-sequences', '--hostname', 'github.com']
+    if query is None:
+        command.append(f'repos/{repository}/{endpoint}')
+    else:
+        require(endpoint == 'graphql', 'Invalid workflow-file proof endpoint')
+        command.extend(['graphql', '--method', 'POST', '--raw-field', 'query=' + query])
     deadline = time.monotonic() + timeout
     buffers = {'stdout': bytearray(), 'stderr': bytearray()}
     events = queue.Queue(maxsize=4)
@@ -102,13 +106,14 @@ class CaptureBudget:
         self.requests = self.files = self.members = 0
         self.deadline = time.monotonic() + MAX_CAPTURE_SECONDS
 
-    def request(self, repository, endpoint):
+    def request(self, repository, endpoint, query=None):
         self.requests += 1
         require(self.requests <= MAX_CAPTURE_REQUESTS, 'Capture request inventory exceeds its bound')
         remaining = self.deadline - time.monotonic()
         require(remaining > 0, 'Aggregate capture deadline exceeded')
+        options = {'query': query} if query is not None else {}
         raw = api(repository, endpoint, maximum=min(MAX_BYTES, MAX_CAPTURE_BYTES - self.downloaded),
-                  timeout=min(90, remaining))
+                  timeout=min(90, remaining), **options)
         self.downloaded += len(raw)
         require(self.downloaded <= MAX_CAPTURE_BYTES, 'Aggregate download budget exceeded')
         return raw
@@ -346,6 +351,58 @@ def validate_run(run, head, branch, event, name, producer, attempt, repository, 
     require(run_identity(run, repository) == snapshot, 'Producer target or observed snapshot differs')
 
 
+def workflow_revision(run, workflow, repository, fetch, proof_path=None, budget=None):
+    """Bind the executed file, independently of source head or checkout revision.
+
+    GitHub's documented WorkflowRunFile is the executed workflow file and its
+    repositoryFileUrl links to that file. Only immutable commit URLs are proof:
+    https://docs.github.com/en/graphql/reference/actions#workflowrunfile
+    REST head_sha, referenced reusable workflows, logs and today's merge ref do
+    not identify the historical top-level workflow definition.
+    """
+    node_id = run.get('node_id')
+    require(isinstance(node_id, str) and 0 < len(node_id) <= 256, 'Missing native workflow run node identity')
+    query = ('query { node(id: ' + json.dumps(node_id) + ') { ... on WorkflowRun { '
+             'id databaseId runAttempt event checkSuite { databaseId repository { databaseId nameWithOwner } } '
+             'file { path repositoryName repositoryFileUrl run { id databaseId runAttempt } } } } }')
+    raw = fetch(repository, 'graphql', query=query)
+    if proof_path is not None:
+        budget.retain(proof_path, raw)
+    response = json.loads(raw)
+    require(isinstance(response, dict) and not response.get('errors')
+            and isinstance(response.get('data'), dict), 'Native workflow-file proof query failed')
+    node = response['data'].get('node')
+    require(isinstance(node, dict) and node.get('id') == node_id, 'Native workflow run node differs')
+    suite = node['checkSuite']
+    for actual, expected in [(node['databaseId'], run['id']), (node['runAttempt'], run['run_attempt']),
+                             (suite['databaseId'], run['check_suite_id']),
+                             (suite['repository']['databaseId'], run['repository']['id'])]:
+        require(type(actual) is int and type(expected) is int and actual > 0 and actual == expected,
+                'Native workflow-file run identity differs')
+    require(node['event'] == run['event']
+            and repository_identity(suite['repository']['nameWithOwner']) == repository,
+            'Native workflow-file event or repository differs')
+    file = node['file']
+    require(isinstance(file, dict), 'Historical executed workflow file proof unavailable')
+    require(file['path'] == workflow and repository_identity(file['repositoryName']) == repository,
+            'Executed workflow file or repository differs')
+    parent = file['run']
+    require(parent['id'] == node_id and type(parent['databaseId']) is int and parent['databaseId'] == run['id']
+            and type(parent['runAttempt']) is int and parent['runAttempt'] == run['run_attempt'],
+            'Executed workflow file belongs to another run or attempt')
+    require(isinstance(file['repositoryFileUrl'], str), 'Missing executed workflow file URL')
+    url = urlsplit(file['repositoryFileUrl'])
+    parts = url.path.split('/', 5)
+    require(url.scheme == 'https' and url.netloc == 'github.com' and not url.query and not url.fragment
+            and len(parts) == 6 and parts[3] == 'blob', 'Invalid executed workflow file URL')
+    require(repository_identity(unquote(parts[1]) + '/' + unquote(parts[2])) == repository
+            and re.fullmatch(r'[0-9a-f]{40}', parts[4]) and unquote(parts[5]) == workflow,
+            'Executed workflow file URL is not an immutable enrolled revision')
+    return {'commit': parts[4], 'workflow': workflow, 'repository': repository,
+            'repository_id': run['repository']['id'], 'node_id': node_id,
+            'run_id': run['id'], 'attempt': run['run_attempt'], 'check_suite_id': run['check_suite_id']}
+
+
 def capture(config, payload, root, budget=None):
     repository = repository_identity(config['repository'])
     budget = budget or CaptureBudget()
@@ -412,16 +469,27 @@ def capture(config, payload, root, budget=None):
     receipt['tree'] = commit['tree']['sha']
     source_hashes = {}
     for name, producer in config['producers'].items():
-        source = json.loads(fetch(repository, 'contents/' + quote(producer['workflow'], safe='/')
-                                + '?ref=' + receipt['head']))
-        require(source['encoding'] == 'base64' and source['type'] == 'file', 'Invalid enrolled workflow content')
-        raw = base64.b64decode(source['content'], validate=False)
-        require(hashlib.sha1(b'blob ' + str(len(raw)).encode() + b'\0' + raw).hexdigest() == source['sha'], 'Workflow Git blob checksum differs')
-        source_hashes[producer['workflow']] = hashlib.sha256(raw).hexdigest()
         run = selected[name]
         folder = root / str(run['id'])
         folder.mkdir()
         write(folder / 'terminal.json', run, budget)
+        revision = workflow_revision(run, producer['workflow'], repository, fetch,
+                                     folder / 'workflow-run-file.json', budget)
+        raw_commit = fetch(repository, f"git/commits/{revision['commit']}")
+        budget.retain(folder / 'workflow-commit.json', raw_commit)
+        workflow_commit = json.loads(raw_commit)
+        require(workflow_commit['sha'] == revision['commit']
+                and re.fullmatch(r'[0-9a-f]{40}', workflow_commit['tree']['sha']), 'Workflow commit or tree differs')
+        raw_source = fetch(repository, 'contents/' + quote(producer['workflow'], safe='/')
+                           + '?ref=' + revision['commit'])
+        budget.retain(folder / 'workflow-content.json', raw_source)
+        source = json.loads(raw_source)
+        require(source['encoding'] == 'base64' and source['type'] == 'file', 'Invalid enrolled workflow content')
+        raw = base64.b64decode(source['content'], validate=False)
+        require(hashlib.sha1(b'blob ' + str(len(raw)).encode() + b'\0' + raw).hexdigest() == source['sha'], 'Workflow Git blob checksum differs')
+        budget.retain(folder / 'workflow.yaml', raw)
+        workflow_checksum = hashlib.sha256(raw).hexdigest()
+        source_hashes[producer['workflow']] = workflow_checksum
         jobs = pages(repository, f"actions/runs/{run['id']}/attempts/{config['producer_attempt']}/jobs", 'jobs', fetch)
         write(folder / 'jobs.json', jobs, budget)
         required = {job_name: [job for job in jobs if job['name'] == job_name] for job_name in producer['jobs']}
@@ -460,6 +528,8 @@ def capture(config, payload, root, budget=None):
             retained.append({'id': artifact['id'], 'name': artifact_name, 'sha256': checksum,
                              'members': members})
         receipt['producers'].append({'run_id': run['id'], 'workflow': producer['workflow'],
+                                      'workflow_revision': revision, 'workflow_tree': workflow_commit['tree']['sha'],
+                                      'source_workflow_sha256': workflow_checksum,
                                       'name': name, 'job_logs': job_logs, 'snapshot': run_identity(run, repository),
                                      'event': run['event'], 'attempt': run['run_attempt'],
                                      'conclusion': run['conclusion'], 'logs_sha256': hashlib.sha256((folder / 'provider-logs.zip').read_bytes()).hexdigest(),
@@ -472,6 +542,10 @@ def capture(config, payload, root, budget=None):
         validate_run(latest, receipt['head'], receipt['branch'], receipt['event'], name,
                       config['producers'][name], config['producer_attempt'], repository, snapshot)
         require(latest['status'] == 'completed' and latest['conclusion'] == run['conclusion'], 'Producer conclusion changed during capture')
+        row = next(row for row in receipt['producers'] if row['name'] == name)
+        require(workflow_revision(latest, config['producers'][name]['workflow'], repository, fetch,
+                                  root / str(run['id']) / 'workflow-run-file-final.json', budget)
+                == row['workflow_revision'], 'Executed workflow revision changed during capture')
     receipt['source_workflow_sha256'] = source_hashes
     receipt['capture_budget'] = {'downloaded_bytes': budget.downloaded, 'retained_bytes': budget.retained,
                                  'expanded_bytes': budget.expanded, 'requests': budget.requests,
@@ -510,6 +584,8 @@ def report(config, root):
                              config['producers'][row['name']], config['producer_attempt'], repository, snapshot)
                 require(row['snapshot'] == snapshot, 'Reporting producer snapshot differs')
                 require(latest['status'] == 'completed' and latest['conclusion'] == row['conclusion'], 'Producer conclusion changed before reporting')
+                require(workflow_revision(latest, row['workflow'], repository, fetch)
+                        == row['workflow_revision'], 'Executed workflow revision changed before reporting')
         except Exception as error:
             receipt.update(state='failed', report_error=str(error))
             write(root / 'report-failure.json', receipt)

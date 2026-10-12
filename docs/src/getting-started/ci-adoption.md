@@ -446,8 +446,28 @@ Admission and bounded-capture checks use explicit errors and remain enforced
 when Python optimization is enabled. Failed revalidation revokes a previously
 successful observation in both ordinary and optimized interpreter modes.
 
-The observer retains source-workflow hashes, original jobs, provider log archives
-and required artifact bytes. Archives are hashed without extraction. Capture and
+The observer binds each producer's workflow definition through GitHub's native
+[`WorkflowRun.file` / `WorkflowRunFile`](https://docs.github.com/en/graphql/reference/actions#workflowrunfile)
+record, documented as an executed workflow file. Its repository, path, parent run,
+attempt, event and check-suite repository must match the admitted original. The
+`repositoryFileUrl` must identify an immutable 40-hex commit; custody fetches and
+hashes the enrolled file at that revision, retaining the native response, commit,
+Git blob metadata and workflow bytes. Each producer row records `workflow_revision`,
+`workflow_tree` and `source_workflow_sha256`. The receipt's `head` / `tree` remain
+the source-head identity, which can differ from the workflow-definition revision.
+
+Raw REST `head_sha`, checkout logs, referenced reusable workflows and the current
+PR merge ref are not substitutes for historical executed-file proof. This matters
+when the base introduced or changed a workflow absent or different at the PR head.
+Unavailable file records or mutable file URLs fail closed at the established
+status target. Capture-final and post-upload report requery the native executed-file
+record; revision drift revokes success in the same stable context. A native file
+record at the raw head is admitted as that explicit provider proof, not inferred
+from the source head. Installed-token access to these GraphQL records remains a
+live acceptance gate.
+
+The observer retains original jobs, provider log archives and required artifact
+bytes. Archives are hashed without extraction. Capture and
 API downloads share a 512 MiB wire budget; retained files and total archive
 expansion each have a separate 512 MiB aggregate budget. At most 256 requests,
 256 retained files and 10,000 archive members are admitted within a six-minute

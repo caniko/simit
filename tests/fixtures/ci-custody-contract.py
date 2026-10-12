@@ -35,6 +35,7 @@ class Custody(unittest.TestCase):
                            'CI': {'workflow': '.github/workflows/ci.yaml', 'jobs': ['test'], 'artifacts': []},
                            'Nix': {'workflow': '.github/workflows/nix-builds.yaml', 'jobs': ['build'], 'artifacts': ['nix-build-0']}}}
         self.runs = [{'id': index, 'name': name, 'head_sha': HEAD, 'head_branch': 'feature',
+                      'node_id': f'workflow-node-{index}', 'check_suite_id': index * 100,
                       'path': producer['workflow'], 'run_attempt': 1, 'event': 'pull_request',
                       'status': 'completed', 'conclusion': 'success',
                       'repository': {'id': 7, 'full_name': 'owner/repo'}, 'head_repository': {'id': 7, 'full_name': 'owner/repo'},
@@ -50,6 +51,14 @@ class Custody(unittest.TestCase):
         blob = b'name: fixture\non: push\n'
         self.source = {'type': 'file', 'encoding': 'base64', 'content': base64.b64encode(blob).decode(),
                        'sha': hashlib.sha1(b'blob ' + str(len(blob)).encode() + b'\0' + blob).hexdigest()}
+        self.workflow_files = {run['node_id']: {'data': {'node': {
+            'id': run['node_id'], 'databaseId': run['id'], 'runAttempt': 1, 'event': run['event'],
+            'checkSuite': {'databaseId': run['check_suite_id'],
+                           'repository': {'databaseId': 7, 'nameWithOwner': 'owner/repo'}},
+            'file': {'path': run['path'], 'repositoryName': 'owner/repo',
+                     'repositoryFileUrl': f"https://github.com/owner/repo/blob/{HEAD}/{run['path']}",
+                     'run': {'id': run['node_id'], 'databaseId': run['id'], 'runAttempt': 1}}
+        }}} for run in self.runs}
         stream = io.BytesIO()
         with zipfile.ZipFile(stream, 'w') as archive:
             archive.writestr('retained.txt', 'ordinary untrusted log data')
@@ -67,10 +76,13 @@ class Custody(unittest.TestCase):
     def api(self, repository, endpoint, **limits):
         self.assertEqual(repository, 'owner/repo')
         self.calls.append(endpoint)
+        if endpoint == 'graphql':
+            node_id = next(node for node in self.workflow_files if json.dumps(node) in limits['query'])
+            return json.dumps(self.workflow_files[node_id]).encode()
         if endpoint.startswith('actions/runs?'):
             return json.dumps({'total_count': len(self.runs), 'workflow_runs': self.runs}).encode()
         if endpoint.startswith('git/commits/'):
-            return json.dumps({'sha': HEAD, 'tree': {'sha': 'b' * 40}}).encode()
+            return json.dumps({'sha': endpoint.split('/')[-1], 'tree': {'sha': 'b' * 40}}).encode()
         if endpoint.startswith('contents/'):
             return json.dumps(self.source).encode()
         if endpoint.startswith('commits/') and '/status?' in endpoint:
@@ -113,6 +125,161 @@ class Custody(unittest.TestCase):
             return subprocess.CompletedProcess(command, 0)
         with patch('subprocess.run', effect):
             return self.namespace['report'](self.config, self.folder)
+
+    def workflow_revision(self, run_id, revision):
+        self.workflow_files[f'workflow-node-{run_id}']['data']['node']['file']['repositoryFileUrl'] = (
+            f"https://github.com/owner/repo/blob/{revision}/{self.runs[run_id - 1]['path'].partition('@')[0]}")
+
+    def test_pr_hashes_native_executed_workflows_missing_from_raw_head(self):
+        revisions = ['e' * 40, 'f' * 40]
+        for run_id, revision in enumerate(revisions, 1):
+            self.workflow_revision(run_id, revision)
+        original_api = self.namespace['api']
+        def absent_on_head(repository, endpoint, **limits):
+            if endpoint.startswith('contents/') and urlsplit(endpoint).query == 'ref=' + HEAD:
+                raise RuntimeError('workflow did not exist at raw PR head')
+            return original_api(repository, endpoint, **limits)
+        self.namespace['api'] = absent_on_head
+        receipt = self.captured()
+        self.assertEqual(receipt['state'], 'ready')
+        self.assertEqual(receipt['head'], HEAD)
+        for row, revision in zip(receipt['producers'], revisions):
+            self.assertEqual(row['workflow_revision']['commit'], revision)
+            self.assertEqual(row['workflow_revision']['run_id'], row['run_id'])
+            self.assertTrue((self.folder / str(row['run_id']) / 'workflow-run-file.json').is_file())
+        self.assertEqual(self.report(), 0)
+        self.assertIn('repos/owner/repo/statuses/' + HEAD, self.effects[-1][0])
+        self.assertFalse(any('refs/pull/' in endpoint for endpoint in self.calls))
+
+    def test_pr_hashes_executed_bytes_instead_of_different_head_workflow(self):
+        revision = 'e' * 40
+        self.workflow_revision(1, revision)
+        original_api = self.namespace['api']
+        raw = b'name: base-introduced workflow\non: pull_request\n'
+        source = {'type': 'file', 'encoding': 'base64', 'content': base64.b64encode(raw).decode(),
+                  'sha': hashlib.sha1(b'blob ' + str(len(raw)).encode() + b'\0' + raw).hexdigest()}
+        def changed_on_base(repository, endpoint, **limits):
+            if endpoint.startswith('contents/') and urlsplit(endpoint).query == 'ref=' + revision:
+                self.calls.append(endpoint)
+                return json.dumps(source).encode()
+            return original_api(repository, endpoint, **limits)
+        self.namespace['api'] = changed_on_base
+        receipt = self.captured()
+        self.assertEqual(receipt['source_workflow_sha256'][self.runs[0]['path']], hashlib.sha256(raw).hexdigest())
+        self.assertEqual((self.folder / '1' / 'workflow.yaml').read_bytes(), raw)
+
+    def test_checkout_and_reusable_workflow_revisions_are_not_definition_proof(self):
+        for run in self.runs:
+            run['referenced_workflows'] = [{'path': 'owner/repo/.github/workflows/reusable.yaml@trunk',
+                                          'sha': 'f' * 40}]
+        self.job_logs[10] = b'git checkout ' + ('e' * 40).encode() + b'\n'
+        receipt = self.captured()
+        self.assertEqual(receipt['producers'][0]['workflow_revision']['commit'], HEAD)
+
+    def test_unavailable_or_mutable_executed_file_proof_revokes_without_guessing(self):
+        original = copy.deepcopy(self.workflow_files)
+        parent = self.folder
+        for value in [None, 'https://github.com/owner/repo/blob/refs/pull/5/merge/.github/workflows/ci.yaml',
+                      'https://github.com/owner/repo/blob/trunk/.github/workflows/ci.yaml']:
+            with self.subTest(value=value), tempfile.TemporaryDirectory(dir=parent) as directory:
+                self.folder = Path(directory)
+                self.calls.clear()
+                self.workflow_files = copy.deepcopy(original)
+                node = self.workflow_files['workflow-node-1']['data']['node']
+                if value is None:
+                    node['file'] = None
+                else:
+                    node['file']['repositoryFileUrl'] = value
+                with self.assertRaises(RuntimeError):
+                    self.main_capture()
+                self.assertEqual(self.report(), 1)
+                self.assertEqual(self.effects[-1][1]['context'], CONTEXT)
+                self.assertFalse(any(endpoint.startswith('contents/') for endpoint in self.calls))
+            self.folder = parent
+
+    def test_native_file_proof_requires_exact_run_attempt_repository_and_path(self):
+        original = copy.deepcopy(self.workflow_files)
+        parent = self.folder
+        changes = [(('id',), 'other-node'), (('databaseId',), 3), (('databaseId',), True), (('runAttempt',), 2),
+                   (('event',), 'push'), (('checkSuite', 'databaseId'), 999),
+                   (('checkSuite', 'repository', 'databaseId'), 8),
+                   (('checkSuite', 'repository', 'nameWithOwner'), 'fork/repo'),
+                   (('file', 'run', 'id'), 'other-node'),
+                   (('file', 'run', 'databaseId'), 2), (('file', 'run', 'runAttempt'), 2),
+                   (('file', 'repositoryName'), 'fork/repo'), (('file', 'path'), '.github/workflows/other.yaml'),
+                   (('file', 'repositoryFileUrl'), f'https://github.com/fork/repo/blob/{HEAD}/.github/workflows/ci.yaml'),
+                   (('file', 'repositoryFileUrl'), f'https://github.com/owner/repo/blob/{HEAD}/.github/workflows/other.yaml')]
+        url = f'https://github.com/owner/repo/blob/{HEAD}/.github/workflows/ci.yaml'
+        changes.extend((('file', 'repositoryFileUrl'), value) for value in
+                       [None, url.replace('https:', 'http:'), url.replace('github.com', 'github.com.evil'),
+                        url.replace('github.com', 'user@github.com'), url + '?ref=trunk', url + '#fragment'])
+        for path, value in changes:
+            with self.subTest(path=path), tempfile.TemporaryDirectory(dir=parent) as directory:
+                self.folder = Path(directory)
+                self.calls.clear()
+                self.workflow_files = copy.deepcopy(original)
+                target = self.workflow_files['workflow-node-1']['data']['node']
+                for key in path[:-1]:
+                    target = target[key]
+                target[path[-1]] = value
+                with self.assertRaises(RuntimeError):
+                    self.main_capture()
+                self.assertEqual(self.report(), 1)
+                self.assertEqual(self.effects[-1][1]['context'], CONTEXT)
+                self.assertFalse(any(endpoint.startswith('contents/') for endpoint in self.calls))
+            self.folder = parent
+
+    def test_partial_errored_null_and_unavailable_native_proof_never_falls_back(self):
+        original_api = self.namespace['api']
+        parent = self.folder
+        partial = copy.deepcopy(self.workflow_files['workflow-node-1'])
+        partial['errors'] = [{'message': 'partial native lookup failed'}]
+        for response in [partial, {'data': None}, {'data': {}}, {'data': {'node': None}}, None]:
+            with self.subTest(response=response), tempfile.TemporaryDirectory(dir=parent) as directory:
+                self.folder = Path(directory)
+                self.calls.clear()
+                def unavailable(repository, endpoint, **limits):
+                    if endpoint == 'graphql':
+                        if response is None:
+                            raise RuntimeError('native workflow-file provider unavailable')
+                        return json.dumps(response).encode()
+                    return original_api(repository, endpoint, **limits)
+                self.namespace['api'] = unavailable
+                with self.assertRaises(RuntimeError):
+                    self.main_capture()
+                self.assertEqual(self.report(), 1)
+                self.assertEqual(self.effects[-1][1]['context'], CONTEXT)
+                self.assertFalse(any(endpoint.startswith('contents/') for endpoint in self.calls))
+            self.folder = parent
+            self.namespace['api'] = original_api
+
+    def test_workflow_definition_drift_at_capture_final_and_report_revokes_same_target(self):
+        original_api = self.namespace['api']
+        for phase in ['capture-final', 'report']:
+            with self.subTest(phase=phase), tempfile.TemporaryDirectory(dir=self.folder) as directory:
+                root, self.folder = self.folder, Path(directory)
+                proof_calls = 0
+                def changed(repository, endpoint, **limits):
+                    nonlocal proof_calls
+                    raw = original_api(repository, endpoint, **limits)
+                    if endpoint == 'graphql' and json.dumps('workflow-node-1') in limits['query']:
+                        proof_calls += 1
+                        if proof_calls == (2 if phase == 'capture-final' else 3):
+                            response = json.loads(raw)
+                            response['data']['node']['file']['repositoryFileUrl'] = (
+                                f'https://github.com/owner/repo/blob/{"e" * 40}/.github/workflows/ci.yaml')
+                            return json.dumps(response).encode()
+                    return raw
+                self.namespace['api'] = changed
+                if phase == 'capture-final':
+                    with self.assertRaises(RuntimeError):
+                        self.main_capture()
+                else:
+                    self.captured()
+                self.assertEqual(self.report(), 1)
+                self.assertEqual(self.effects[-1][1]['context'], CONTEXT)
+                self.folder = root
+                self.namespace['api'] = original_api
 
     def test_ref_qualified_paths_capture_the_same_enrolled_originals(self):
         original_runs, original_payload = copy.deepcopy(self.runs), copy.deepcopy(self.payload)
@@ -315,6 +482,7 @@ class Custody(unittest.TestCase):
         for run in self.runs:
             run['event'] = 'push'
             run['pull_requests'] = None
+            self.workflow_files[run['node_id']]['data']['node']['event'] = 'push'
         self.payload['workflow_run'] = copy.deepcopy(self.runs[0])
         self.assertEqual(self.captured()['state'], 'ready')
         self.assertEqual(self.report(), 0)
@@ -730,16 +898,20 @@ class Downloads(unittest.TestCase):
         self.namespace = {'__name__': 'contract'}
         exec(compile(PROGRAM, '<generated-custody>', 'exec', optimize=self.optimization), self.namespace)
 
-    def download(self, source, maximum, timeout=5):
+    def download(self, source, maximum, timeout=5, query=None):
         create = subprocess.Popen
         children = []
         def fixture(command, **kwargs):
+            if query is not None:
+                self.assertEqual(command, ['gh', 'api', '--allow-escape-sequences', '--hostname', 'github.com',
+                                           'graphql', '--method', 'POST', '--raw-field', 'query=' + query])
             child = create([sys.executable, '-c', source], **kwargs)
             children.append(child)
             return child
         try:
             with patch('subprocess.Popen', fixture):
-                return self.namespace['api']('owner/repo', 'fixture', maximum=maximum, timeout=timeout)
+                return self.namespace['api']('owner/repo', 'fixture' if query is None else 'graphql',
+                                             maximum=maximum, timeout=timeout, query=query)
         finally:
             self.assertEqual(len(children), 1)
             self.assertIsNotNone(children[0].poll())
@@ -761,6 +933,12 @@ class Downloads(unittest.TestCase):
     def test_failed_provider_download_cannot_return_partial_success(self):
         with self.assertRaises(subprocess.CalledProcessError):
             self.download("import sys; sys.stdout.buffer.write(b'x'); sys.exit(1)", maximum=1)
+
+    def test_graphql_proof_uses_post_without_losing_response_bounds(self):
+        query = 'query { node(id: "native-node") { id } }'
+        self.assertEqual(self.download("print('{}', end='')", maximum=2, query=query), b'{}')
+        with self.assertRaises(RuntimeError):
+            self.download("print('{}', end='')", maximum=1, query=query)
 
 
 class OptimizedCustody(Custody):
