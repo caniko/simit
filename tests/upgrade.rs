@@ -25,6 +25,8 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT"
+
+[workspace]
 "#
         ),
     )
@@ -45,6 +47,8 @@ edition = "2024"
 rust-version = "1.85"
 license = "MIT"
 repository = "https://codeberg.org/caniko/{name}"
+
+[workspace]
 "#
         ),
     )

@@ -28,6 +28,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Keep the independently checked-out publisher engine in its own Cargo
+  workspace, so it can build beneath a candidate workspace without joining it.
+  Retain single-crate resolution and independent regression fixtures.
+- Render long trusted-publisher dependency lists as formatter-stable block
+  sequences, preserving dependency order and short inline arrays.
 - Use immutable Node 24 action revisions on recognized GitHub-hosted runners
   and credential-free release workers. Preserve the Node 20 action baseline
   for private runner labels and Forgejo, together with signed-tag admission,

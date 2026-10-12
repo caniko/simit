@@ -5,6 +5,41 @@ use tempfile::TempDir;
 
 mod common;
 
+#[test]
+fn trusted_engine_checkout_is_a_workspace_independent_of_the_candidate() {
+    let candidate = publisher_project("coordinated");
+    let engine = candidate.path().join(".simit-publisher-engine");
+    fs::create_dir_all(engine.join("src")).unwrap();
+    fs::write(engine.join("Cargo.toml"), include_str!("../Cargo.toml")).unwrap();
+    fs::write(engine.join("Cargo.lock"), include_str!("../Cargo.lock")).unwrap();
+    fs::write(engine.join("src/main.rs"), "fn main() {}\n").unwrap();
+
+    let output = std::process::Command::new(env!("CARGO"))
+        .current_dir(&engine)
+        .args([
+            "metadata",
+            "--locked",
+            "--offline",
+            "--no-deps",
+            "--format-version",
+            "1",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "trusted engine must not join the candidate workspace: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let metadata: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        std::path::Path::new(metadata["workspace_root"].as_str().unwrap()),
+        engine
+    );
+    assert_eq!(metadata["workspace_members"].as_array().unwrap().len(), 1);
+    assert_eq!(metadata["packages"][0]["name"], "simit");
+}
+
 fn publisher_project(mode: &str) -> TempDir {
     let temp = TempDir::new().unwrap();
     let workspace = mode != "single";
@@ -343,6 +378,47 @@ fn coordinated_package_names_keep_distinct_jobs_and_dependency_edges() {
             .unwrap()
             .contains(&Value::String("publish-foo-bar".into()))
     );
+}
+
+#[test]
+fn wide_publisher_report_keeps_formatter_stable_dependency_edges() {
+    let temp = publisher_project("coordinated");
+    let first = "publisher-alpha-with-a-long-package-name";
+    let second = "publisher-beta-with-a-long-package-name";
+    fs::write(
+        temp.path().join("Cargo.toml"),
+        format!("[package]\nname='{first}'\nversion='0.1.0'\nedition='2024'\nlicense='MIT'\n[workspace]\nmembers=['dependent']\nresolver='3'\n"),
+    )
+    .unwrap();
+    fs::write(
+        temp.path().join("dependent/Cargo.toml"),
+        format!("[package]\nname='{second}'\nversion='0.1.0'\nedition='2024'\nlicense='MIT'\n[dependencies]\n{first}={{path='..',version='0.1.0'}}\n"),
+    )
+    .unwrap();
+    let output = common::simit()
+        .current_dir(temp.path())
+        .args(["init", "ci"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let text = fs::read_to_string(
+        temp.path()
+            .join(".github/workflows/trusted-publish-workspace.yaml"),
+    )
+    .unwrap();
+    assert!(text.contains("  publish-report:\n    needs:\n      - publish-"));
+    let workflow: Value = serde_yaml::from_str(&text).unwrap();
+    let needs = &workflow["jobs"]["publish-report"]["needs"];
+    assert_eq!(needs[0], format!("publish-{first}"));
+    assert_eq!(needs[1], format!("publish-{second}"));
+    assert_eq!(needs.as_sequence().unwrap().len(), 2);
+    assert_eq!(workflow["jobs"]["publish-report"]["if"], "always()");
+    let check = common::simit()
+        .current_dir(temp.path())
+        .args(["init", "ci", "--check", "--diff"])
+        .output()
+        .unwrap();
+    assert!(check.status.success(), "{check:?}");
 }
 
 #[test]

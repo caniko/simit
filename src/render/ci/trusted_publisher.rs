@@ -319,7 +319,7 @@ pub(super) fn publisher_file(
         needs.sort();
         needs.dedup();
         if !needs.is_empty() {
-            w.push_str(&format!("    needs: [{}]\n", needs.join(", ")));
+            push_needs(&mut w, &needs);
         }
         // Path is also checked against its native workflow ID by the engine.
         w.push_str("    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'\n");
@@ -379,7 +379,9 @@ pub(super) fn publisher_file(
                 w.push_str(&format!("        run: {}\n", gate.run));
             }
         }
-        w.push_str(&format!("  {publish}:\n    needs: [{verify}]\n    runs-on: ubuntu-24.04\n    timeout-minutes: 60\n    environment:\n      name: simit-crates-io\n    steps:\n"));
+        w.push_str(&format!("  {publish}:\n"));
+        push_needs(&mut w, std::slice::from_ref(&verify));
+        w.push_str("    runs-on: ubuntu-24.04\n    timeout-minutes: 60\n    environment:\n      name: simit-crates-io\n    steps:\n");
         bootstrap(&mut w);
         w.push_str(&format!("      - name: Upload independently verified archive {name}\n        env:\n          GITHUB_TOKEN: ${{{{ github.token }}}}\n          CRATES_IO_API_TOKEN: ${{{{ secrets.CRATES_IO_API_TOKEN }}}}\n        run: .simit-publisher-engine/target/release/simit release publisher --publisher-stage publish --repo \"$GITHUB_REPOSITORY\" --package {} --source-workflow {} --publisher-workflow {}{reconstruction}\n", shell_word(name), shell_word(&source_path.to_string_lossy()), shell_word(&publisher_path.to_string_lossy())));
         previous = Some(publish);
@@ -388,11 +390,26 @@ pub(super) fn publisher_file(
         .iter()
         .map(|(name, _)| format!("publish-{name}"))
         .collect::<Vec<_>>();
-    w.push_str(&format!("  publish-report:\n    needs: [{}]\n    if: always()\n    runs-on: ubuntu-24.04\n    steps:\n      - name: Release result\n        env:\n          RESULTS: ${{{{ toJSON(needs) }}}}\n        run: |\n          printf '%s\\n' \"$RESULTS\"\n          echo 'resume: rerun the original tag-push run; already-published crates with matching checksums exit 0 after exact registry resolution'\n          echo 'see per-crate job statuses for the auditable result'\n", jobs.join(", ")));
+    w.push_str("  publish-report:\n");
+    push_needs(&mut w, &jobs);
+    w.push_str("    if: always()\n    runs-on: ubuntu-24.04\n    steps:\n      - name: Release result\n        env:\n          RESULTS: ${{ toJSON(needs) }}\n        run: |\n          printf '%s\\n' \"$RESULTS\"\n          echo 'resume: rerun the original tag-push run; already-published crates with matching checksums exit 0 after exact registry resolution'\n          echo 'see per-crate job statuses for the auditable result'\n");
     trim_trailing_blank_lines(&mut w);
     GeneratedFile {
         relative_path: publisher_path,
         content: w,
+    }
+}
+
+fn push_needs(w: &mut String, needs: &[String]) {
+    let inline = format!("    needs: [{}]\n", needs.join(", "));
+    if inline.trim_end().len() <= 80 {
+        w.push_str(&inline);
+    } else {
+        // Block sequences retain their representation through YAML formatters.
+        w.push_str("    needs:\n");
+        for job in needs {
+            w.push_str(&format!("      - {job}\n"));
+        }
     }
 }
 
