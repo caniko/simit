@@ -98,7 +98,7 @@ pub fn files_with_components(
         Some(targets) => cross_template_with_msrv(targets, audit_tools, rust_version),
         None => template(audit_tools, rust_version),
     };
-    vec![
+    let mut files = vec![
         GeneratedFile {
             relative_path: PathBuf::from("flake.nix"),
             content: flake_content,
@@ -111,7 +111,17 @@ pub fn files_with_components(
             relative_path: PathBuf::from("nix/pre-commit.nix"),
             content: pre_commit_nix(languages, rust_version, audit_tools, components),
         },
-    ]
+    ];
+    if let Some(version) = rust_version {
+        files.push(GeneratedFile {
+            relative_path: PathBuf::from("rust-toolchain-msrv.toml"),
+            content: format!(
+                "[toolchain]\nchannel = \"{}\"\nprofile = \"minimal\"\n",
+                rust_overlay_version(version)
+            ),
+        });
+    }
+    files
 }
 
 pub fn print_files(files: &[GeneratedFile]) {
@@ -980,19 +990,14 @@ const DEVSHELL_PACKAGES_MARKER: &str = "@@DEVSHELL_PACKAGES@@";
 const DEVSHELL_PACKAGES: &str = "        packages = with pkgs; [\n          cargo-about\n          cargo-audit\n          cargo-cyclonedx\n          cargo-deny\n          cargo-llvm-cov\n          cargo-sbom\n          cargo-nextest\n          cosign\n          file\n          gnutar\n          gzip\n          jq\n          minisign\n          nodejs\n          pre-commit\n          rpm\n          util-linux\n          unzip\n          zip\n          reprepro\n          rust-analyzer\n          taplo\n        ] ++ pre-commit-check.enabledPackages;";
 
 fn msrv_shell(rust_version: Option<&str>, attribute: &str) -> String {
-    let Some(version) = rust_version else {
+    if rust_version.is_none() {
         return String::new();
-    };
-    let version = rust_overlay_version(version);
+    }
     format!(
         r#"{attribute} = let
         msrvToolchain = rs-harbor.lib.mkToolchain {{
           inherit pkgs;
-          toolchainFile = builtins.toFile "rust-toolchain-msrv.toml" ''
-            [toolchain]
-            channel = "{version}"
-            profile = "minimal"
-          '';
+          toolchainFile = ./rust-toolchain-msrv.toml;
           withRustAnalyzer = false;
           crossTargets = [];
         }};

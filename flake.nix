@@ -302,11 +302,7 @@
         msrv = let
           msrvToolchain = rs-harbor.lib.mkToolchain {
             inherit pkgs;
-            toolchainFile = builtins.toFile "rust-toolchain-msrv.toml" ''
-              [toolchain]
-              channel = "1.85.0"
-              profile = "minimal"
-            '';
+            toolchainFile = ./rust-toolchain-msrv.toml;
             withRustAnalyzer = false;
             crossTargets = [];
             cache.enable = false;

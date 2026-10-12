@@ -23,6 +23,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Generate MSRV toolchain manifests as source assets so no-build, read-only Nix
+  evaluation succeeds on cold stores without changing the declared compiler.
 - Enforce grouped-build admission under Python optimization and preserve each
   installable's hook context, including shell-only diagnostics after setup or
   preflight failures. Provision the grouped interpreter and retain unset timeouts.
