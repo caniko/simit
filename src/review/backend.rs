@@ -234,6 +234,7 @@ pub fn prepare(plan: &Plan, system: &str, out: &Path) -> Result<EffectivePlan> {
         lock: Some(lock),
         source_nar_hash,
         targets,
+        compiler_cache: None,
         digest: String::new(),
     };
     e.seal()?;
@@ -242,8 +243,26 @@ pub fn prepare(plan: &Plan, system: &str, out: &Path) -> Result<EffectivePlan> {
 }
 
 pub fn build(plan: &Plan, system: &str, out: &Path) -> Result<PlatformResult> {
-    super::engine::verify_plan(plan)?;
+    build_with_cache_opt_in(plan, system, out, None)
+}
+
+pub fn build_with_cache_opt_in(
+    plan: &Plan,
+    system: &str,
+    out: &Path,
+    cache_opt_in: Option<&str>,
+) -> Result<PlatformResult> {
     plan.validate()?;
+    ensure!(
+        plan.request.compiler_cache.is_none() || cache_opt_in == Some("kvrocks-v1"),
+        "Kvrocks requires an explicit operator worker opt-in; never run silently uncached"
+    );
+    #[cfg(not(target_os = "linux"))]
+    ensure!(
+        plan.request.compiler_cache.is_none(),
+        "Kvrocks requires a native Linux worker"
+    );
+    super::engine::verify_plan(plan)?;
     ensure!(
         plan.request.systems.iter().any(|s| s == system),
         "unrequested platform"
@@ -261,6 +280,7 @@ pub fn build(plan: &Plan, system: &str, out: &Path) -> Result<PlatformResult> {
             lock_digest: None,
             source_nar_hash: None,
             targets: vec![],
+            compiler_cache: None,
             digest: String::new(),
         },
         runner_architecture: String::new(),
@@ -271,12 +291,15 @@ pub fn build(plan: &Plan, system: &str, out: &Path) -> Result<PlatformResult> {
         closure_export: Outcome::NotRun,
         publication: Outcome::NotRun,
         retrieval: Outcome::NotRun,
+        compiler_cache_cleanup: None,
         error: None,
         files: BTreeMap::new(),
         closure: BTreeMap::new(),
         target_outcomes: BTreeMap::new(),
         test_evidence: BTreeMap::new(),
     };
+    #[cfg(target_os = "linux")]
+    let mut cache = None::<super::kvrocks_worker::Supervisor>;
     let execution = (|| -> Result<()> {
         result.runner_architecture = run("uname", &args(&["-m"]), None, None)?.trim().into();
         let (_, arch, sandbox) = runner(system)?;
@@ -291,27 +314,44 @@ pub fn build(plan: &Plan, system: &str, out: &Path) -> Result<PlatformResult> {
             .trim()
             .into();
         ensure!(result.sandbox == sandbox, "sandbox policy mismatch");
+        #[cfg(target_os = "linux")]
+        if plan.request.compiler_cache.is_some() {
+            cache = Some(super::kvrocks_worker::Supervisor::start(plan, system, out)?);
+        }
         result.effective = if plan.request.backend == Backend::Nixpkgs {
             nixpkgs_prepare(plan, system, out)?
         } else {
             prepare(plan, system, out)?
         };
+        #[cfg(target_os = "linux")]
+        if let Some(cache) = &mut cache {
+            let receipt = cache.admit_sandbox(out)?;
+            super::kvrocks::validate_cache_receipt(plan, system, &receipt)?;
+            result.effective.compiler_cache = Some(receipt);
+            result.effective.seal()?;
+            write_json(&out.join("effective-plan.json"), &result.effective)?;
+        }
         if result.effective.targets.is_empty() {
             ensure!(plan.request.backend == Backend::Nixpkgs, "absent targets");
             result.build = Outcome::NoChanges;
             return Ok(());
         }
         result.build = Outcome::Passed;
+        let cache_arguments = if plan.request.compiler_cache.is_some() {
+            super::kvrocks::sandbox_arguments()
+        } else {
+            Vec::new()
+        };
         for (index, t) in result.effective.targets.iter().enumerate() {
+            #[cfg(target_os = "linux")]
+            if let Some(cache) = &mut cache {
+                cache.ensure_alive()?;
+            }
             let selected = format!("{}^*", t.derivation);
             let log = out.join(format!("build-{index}.log"));
-            let success = run(
-                "nix",
-                &nix_args(&["build", "--no-link", "--json", "-L", &selected]),
-                None,
-                Some(&log),
-            )
-            .is_ok();
+            let mut arguments = nix_args(&["build", "--no-link", "--json", "-L", &selected]);
+            arguments.extend(cache_arguments.clone());
+            let success = run("nix", &arguments, None, Some(&log)).is_ok();
             let mut outcome = if success {
                 Outcome::Passed
             } else {
@@ -320,9 +360,12 @@ pub fn build(plan: &Plan, system: &str, out: &Path) -> Result<PlatformResult> {
             if t.check && success {
                 if plan.request.test_profile == "checks-rebuild-v1" {
                     // Rebuild only the selected check, never unrelated dependencies.
+                    let mut arguments =
+                        nix_args(&["build", "--no-link", "--rebuild", "-L", &selected]);
+                    arguments.extend(cache_arguments.clone());
                     if run(
                         "nix",
-                        &nix_args(&["build", "--no-link", "--rebuild", "-L", &selected]),
+                        &arguments,
                         None,
                         Some(&out.join(format!("test-{index}.log"))),
                     )
@@ -364,11 +407,36 @@ pub fn build(plan: &Plan, system: &str, out: &Path) -> Result<PlatformResult> {
             result.build == Outcome::Passed,
             "one or more requested targets failed"
         );
+        #[cfg(target_os = "linux")]
+        if let Some(cache) = &mut cache {
+            result.compiler_cache_cleanup = Some(Outcome::Failed);
+            let receipt = cache.stop()?;
+            write_json(&out.join("compiler-cache-cleanup.json"), &receipt)?;
+            result.compiler_cache_cleanup = Some(Outcome::Passed);
+        }
         result.closure_export = Outcome::Failed;
         artifact::export(&mut result, out)?;
         result.closure_export = Outcome::Passed;
         Ok(())
     })();
+    #[cfg(target_os = "linux")]
+    if let Some(cache) = &mut cache {
+        if result.compiler_cache_cleanup != Some(Outcome::Passed) {
+            match cache.stop() {
+                Ok(receipt) => {
+                    write_json(&out.join("compiler-cache-cleanup.json"), &receipt)?;
+                    result.compiler_cache_cleanup = Some(Outcome::Passed);
+                }
+                Err(error) => {
+                    result.compiler_cache_cleanup = Some(Outcome::Failed);
+                    write_json(
+                        &out.join("compiler-cache-cleanup.json"),
+                        &serde_json::json!({"stopped": false, "error": error.to_string()}),
+                    )?;
+                }
+            }
+        }
+    }
     if let Err(e) = execution {
         if result.build == Outcome::NotRun {
             result.build = if e.to_string().starts_with("unsupported:") {
@@ -379,12 +447,120 @@ pub fn build(plan: &Plan, system: &str, out: &Path) -> Result<PlatformResult> {
         }
         result.error = Some(e.to_string());
     }
+    if plan.request.compiler_cache.is_some()
+        && result.compiler_cache_cleanup != Some(Outcome::Passed)
+        && result.build == Outcome::Passed
+    {
+        result.build = Outcome::Failed;
+        result
+            .error
+            .get_or_insert_with(|| "owned compiler cache cleanup is unproven".into());
+    }
     if result.effective.digest.is_empty() {
         result.effective.seal()?;
     }
     result.files = artifact::inventory(out)?;
     write_json(&out.join("review-result.json"), &result)?;
     Ok(result)
+}
+
+/// Bind discovery, explicit additions and scoped policy to the frozen request.
+pub fn validate_nixpkgs_selection(plan: &Plan, system: &str, selection: &Value) -> Result<()> {
+    plan.request.validate()?;
+    let pr = plan
+        .pr
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("missing PR"))?;
+    ensure!(
+        plan.request.backend == Backend::Nixpkgs
+            && plan.request.systems.iter().any(|s| s == system)
+            && selection["tested_commit"] == plan.target.commit
+            && selection["base_commit"] == pr.base
+            && selection["system"] == system
+            && selection["backend_version"] == "3.7.0",
+        "Nixpkgs selection identity mismatch"
+    );
+    let additions = plan
+        .request
+        .packages
+        .iter()
+        .chain(&plan.request.checks)
+        .collect::<std::collections::BTreeSet<_>>();
+    let warnings = plan
+        .request
+        .nixpkgs_broken_warnings
+        .iter()
+        .collect::<std::collections::BTreeSet<_>>();
+    for (field, values) in [
+        ("additional_attributes", &additions),
+        ("nixpkgs_broken_warnings", &warnings),
+    ] {
+        // Retain legacy evidence for requests that have no opt-in selections.
+        ensure!(
+            (values.is_empty() && selection.get(field).is_none())
+                || selection[field] == serde_json::json!(values.iter().collect::<Vec<_>>()),
+            "Nixpkgs selection request/policy mismatch: {field}"
+        );
+    }
+    let changed = selection["changed_attributes"]
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("missing changed-package discovery"))?;
+    let selected = selection["derivations"]
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("missing Nixpkgs selection"))?;
+    let covers = |attribute: &str, name: &str| {
+        name == attribute
+            || name
+                .strip_prefix(attribute)
+                .is_some_and(|suffix| suffix.starts_with('.'))
+    };
+    let mut represented = vec![];
+    for item in selected {
+        let attribute = item["attribute"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("missing Nixpkgs attribute"))?;
+        let mut names = vec![attribute];
+        if let Some(aliases) = item.get("aliases") {
+            for alias in aliases
+                .as_array()
+                .ok_or_else(|| anyhow::anyhow!("invalid Nixpkgs aliases"))?
+            {
+                names.push(
+                    alias
+                        .as_str()
+                        .ok_or_else(|| anyhow::anyhow!("invalid Nixpkgs alias"))?,
+                );
+            }
+        }
+        let check = item["check"]
+            .as_bool()
+            .ok_or_else(|| anyhow::anyhow!("missing Nixpkgs check identity"))?;
+        ensure!(
+            check
+                || !plan
+                    .request
+                    .checks
+                    .iter()
+                    .any(|requested| names.iter().any(|name| covers(requested, name))),
+            "explicit Nixpkgs check is not marked as a test"
+        );
+        represented.extend(names);
+    }
+    for attribute in changed.iter().map(|name| name.as_str()) {
+        let attribute =
+            attribute.ok_or_else(|| anyhow::anyhow!("invalid discovered Nixpkgs attribute"))?;
+        ensure!(
+            represented.iter().any(|name| covers(attribute, name)),
+            "discovered Nixpkgs attribute lost from selection"
+        );
+    }
+    for attribute in additions {
+        ensure!(
+            represented.iter().any(|name| covers(attribute, name)),
+            "explicit Nixpkgs attribute lost from selection"
+        );
+    }
+    Ok(())
 }
 
 fn nixpkgs_prepare(plan: &Plan, system: &str, out: &Path) -> Result<EffectivePlan> {
@@ -420,13 +596,7 @@ fn nixpkgs_prepare(plan: &Plan, system: &str, out: &Path) -> Result<EffectivePla
         Some(&out.join("nixpkgs-selection.log")),
     )?;
     let selection: Value = read_json(&selected_path)?;
-    ensure!(
-        selection["tested_commit"] == plan.target.commit
-            && selection["base_commit"] == pr.base
-            && selection["system"] == system
-            && selection["backend_version"] == "3.7.0",
-        "Nixpkgs selection identity mismatch"
-    );
+    validate_nixpkgs_selection(plan, system, &selection)?;
     let selected = selection["derivations"]
         .as_array()
         .ok_or_else(|| anyhow::anyhow!("missing Nixpkgs selection"))?;
@@ -487,6 +657,7 @@ fn nixpkgs_prepare(plan: &Plan, system: &str, out: &Path) -> Result<EffectivePla
         lock_digest: None,
         source_nar_hash: None,
         targets,
+        compiler_cache: None,
         digest: String::new(),
     };
     e.seal()?;

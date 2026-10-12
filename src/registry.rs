@@ -585,7 +585,19 @@ pub fn audit_ci(workspace_root: &Path) -> Result<CiAudit> {
         .collect::<BTreeMap<_, _>>();
     let mut actual = marked
         .iter()
-        .map(|file| (file.relative_path.clone(), file.content.clone()))
+        .map(|file| {
+            let path = expected
+                .keys()
+                .find(|path| {
+                    crate::render::workflow_templates::same_output(
+                        workspace_root,
+                        path,
+                        &file.relative_path,
+                    )
+                })
+                .unwrap_or(&file.relative_path);
+            (path.clone(), file.content.clone())
+        })
         .collect::<BTreeMap<_, _>>();
     for path in expected.keys().filter(|p| p.starts_with(".github/actions")) {
         if let Ok(content) = fs::read_to_string(workspace_root.join(path)) {
@@ -832,10 +844,12 @@ fn detect_ci_status(workspace_root: &Path) -> FeatureStatus {
 }
 
 fn is_release_workflow(file: &WorkflowFile) -> bool {
+    is_release_workflow_path(&file.relative_path)
+}
+
+pub(crate) fn is_release_workflow_path(path: &Path) -> bool {
     matches!(
-        file.relative_path
-            .file_name()
-            .and_then(|name| name.to_str()),
+        path.file_name().and_then(|name| name.to_str()),
         Some(
             "release.yml"
                 | "release.yaml"
@@ -855,7 +869,10 @@ fn is_supplementary_workflow(file: &WorkflowFile) -> bool {
     matches!(
         name,
         "credential-visibility.yml"
+            | "review-policy.yaml"
             | "review-compatibility.yml"
+            | "qualify-release-generator.yaml"
+            | "qualify-publisher-boundary.yaml"
             | "credential-visibility.yaml"
             | "pages.yml"
             | "pages.yaml"
@@ -943,7 +960,15 @@ fn marked_workflows_drift(workspace_root: &Path, marked: &[WorkflowFile]) -> boo
         || expected.len() != marked.len()
         || marked.iter().any(|workflow| {
             expected
-                .get(&workflow.relative_path)
+                .iter()
+                .find(|(path, _)| {
+                    crate::render::workflow_templates::same_output(
+                        workspace_root,
+                        path,
+                        &workflow.relative_path,
+                    )
+                })
+                .map(|(_, content)| content)
                 .is_none_or(|content| content != &workflow.content)
         })
 }
@@ -953,25 +978,51 @@ fn infer_expected_ci_files(
     marked: &[WorkflowFile],
 ) -> Result<Vec<project::GeneratedFile>> {
     let config = ProjectConfig::load(workspace_root)?;
+    if !config.ci.workflow_templates.is_empty() {
+        let backend = infer_ci_target(marked)?;
+        crate::render::workflow_templates::validate_backend(
+            &config.ci,
+            config.ci.provider.unwrap_or(backend.provider()),
+            config.ci.platform.unwrap_or(backend.platform()),
+        )?;
+    }
     let primary: Vec<_> = marked
         .iter()
-        .filter(|file| !crate::review::generation::is_review_path(&file.relative_path))
+        .filter(|file| {
+            !crate::review::generation::is_review_path(&file.relative_path)
+                && file.relative_path != Path::new(crate::render::review_policy::PATH)
+                && !crate::render::workflow_templates::is_template_output(
+                    &config.ci,
+                    &file.relative_path,
+                    &file.content,
+                )
+        })
         .cloned()
         .collect();
-    let mut files = if primary.is_empty() && config.review.is_some() {
+    let mut files = if primary.is_empty()
+        && (config.review.is_some() || config.review_policy.is_some())
+        && config.ci.workflow_templates.is_empty()
+    {
         Vec::new()
     } else {
-        infer_expected_primary_ci_files(workspace_root, &primary)?
+        // Template paths identify the backend, but their bodies must not infer
+        // built-in packages, checks or runners, even when every built-in is missing.
+        infer_expected_primary_ci_files(workspace_root, &primary, infer_ci_target(marked)?)?
     };
     if let Some(review) = config.review.as_ref() {
         files.extend(crate::review::generation::files(review)?);
     }
+    if let Some(policy) = config.review_policy.as_ref() {
+        files.push(crate::render::review_policy::file(policy)?);
+    }
+    crate::render::workflow_templates::append(workspace_root, &config.ci, &mut files)?;
     Ok(files)
 }
 
 fn infer_expected_primary_ci_files(
     workspace_root: &Path,
     marked: &[WorkflowFile],
+    backend: CiBackend,
 ) -> Result<Vec<project::GeneratedFile>> {
     // A configuration that will not load is a reportable condition, not a
     // default: swallowing it here hid unsupported/legacy schema behind whatever
@@ -982,7 +1033,6 @@ fn infer_expected_primary_ci_files(
     if config.monorepo.is_some() {
         return crate::monorepo::ci::files(workspace_root, &config);
     }
-    let backend = infer_ci_target(marked)?;
     let snapshots = workflow_snapshots(marked);
     if backend.provider() == CiProvider::Crow {
         return infer_expected_crow_files(workspace_root, marked, &snapshots);
@@ -1011,7 +1061,19 @@ fn infer_expected_primary_ci_files(
             &CiCliOverrides::default(),
             Some(&inference),
         )?;
-        let runner = infer_primary_runner(marked, "ci")?;
+        let runner = if marked.is_empty() {
+            crate::user_config::UserConfig::default()
+                .resolve_ci_runners(
+                    platform,
+                    resolved.runtime,
+                    resolved.runner.as_deref(),
+                    resolved.windows_runner.as_deref(),
+                    false,
+                )?
+                .ci
+        } else {
+            infer_primary_runner(marked, "ci")?
+        };
         let options = resolved.ci_options(&config, false, resolved.omnix_ref.clone());
         let mut files = vec![crate::render::ci::python_ci_file(
             platform,
@@ -1167,7 +1229,19 @@ fn infer_expected_primary_ci_files(
     let package_scoped = metadata.workspace_members.len() > 1
         && resolved.workspace_strategy == crate::cli::WorkspaceStrategy::Members;
     let windows_runner = infer_windows_runner(marked);
-    let inferred_ci_runner = infer_primary_runner(marked, "ci")?;
+    let inferred_ci_runner = if marked.is_empty() {
+        crate::user_config::UserConfig::default()
+            .resolve_ci_runners(
+                platform,
+                resolved.runtime,
+                resolved.runner.as_deref(),
+                resolved.windows_runner.as_deref(),
+                false,
+            )?
+            .ci
+    } else {
+        infer_primary_runner(marked, "ci")?
+    };
     let inferred_release_runner = infer_primary_runner(marked, "publish-crate")
         .unwrap_or_else(|_| inferred_ci_runner.clone());
     let runners = ResolvedCiRunners {
@@ -1237,7 +1311,9 @@ fn infer_expected_primary_ci_files(
                     .map(|entry| (entry.package.name.clone(), entry.package.version.clone()))
                     .collect();
                 if !ordered.is_empty() {
-                    if let Ok(file) = ci::publish_workspace_file(
+                    // Plan discovery remains best-effort, but unsafe publisher
+                    // configuration must surface its actionable rendering error.
+                    let generated = ci::publish_workspace_files(
                         platform,
                         ci::PublishWorkspaceInputs {
                             runtime: resolved.runtime,
@@ -1246,9 +1322,8 @@ fn infer_expected_primary_ci_files(
                             plan: ordered,
                             versions,
                         },
-                    ) {
-                        files.push(file);
-                    }
+                    )?;
+                    files.extend(generated);
                 }
             }
         }
@@ -1257,13 +1332,13 @@ fn infer_expected_primary_ci_files(
     {
         for package in &packages {
             if package.is_publishable() {
-                files.push(ci::publish_file(
+                files.extend(ci::publish_files(
                     platform,
                     resolved.runtime,
                     package,
                     &runners.release,
                     options.clone(),
-                ));
+                )?);
             }
         }
     }

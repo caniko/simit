@@ -2,7 +2,7 @@
   description = "Semver-aware git commit helper for Rust projects";
 
   inputs = {
-    harbor.url = "git+https://github.com/caniko/harbor.git?ref=feat/harbor-monorepo-components&rev=7d99eb50c52d0a941e2996b97c469b32a7657ef4";
+    harbor.url = "git+https://github.com/caniko/harbor.git?ref=feat/harbor-monorepo-components&rev=e8b1996580e4ecd51dd402edf4a16d9df88e3a1b";
 
     nixpkgs.follows = "harbor/nixpkgs";
     rust-overlay.follows = "harbor/rust-overlay";
@@ -16,13 +16,9 @@
       url = "github:cachix/git-hooks.nix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
-    # plinth trunk trips both of this flake's `nix flake check` gates: it still
-    # declares the retired Codeberg nix-cache-pin mirror (whose trunk orphaned
-    # the revision we locked), and its Cargo.lock wants dioxus 0.7.9 while our
-    # nixpkgs ships dioxus-cli 0.7.10.  fix/dioxus-0.7.10 is what canix pins for
-    # the same reason, and it predates the nix-cache-pin input entirely.
+    # Consume the exact locally and hosted-qualified static-site/library repair.
     plinth = {
-      url = "git+https://github.com/caniko/plinth.git?ref=fix/dioxus-0.7.10&rev=4718cc09d9d1b54cc10e23e60c37b656bf7285a6";
+      url = "git+https://github.com/caniko/plinth.git?ref=migrate/harbor-combined-20261012-features&rev=534dfa6dd6217db97b7ccd313501120a3c34d912";
       inputs.nixpkgs.follows = "nixpkgs";
     };
     advisory-db = {
@@ -95,19 +91,26 @@
           pathString = toString path;
         in
           (craneLib.filterCargoSources path type)
+          || builtins.elem pathString (map (name: "${toString ./.}/${name}") ["README.md" "LICENSE" "CHANGELOG.md"])
           || pkgs.lib.hasInfix "/src/review/assets/" pathString
           || pkgs.lib.hasSuffix "/src/monorepo/native_release.py" pathString
           || pkgs.lib.hasSuffix "/tests/fixtures/native-release-contract.py" pathString
           || pkgs.lib.hasSuffix "ci-actions.json" pathString
           || pkgs.lib.hasSuffix "/.github" pathString
           || pkgs.lib.hasSuffix "/.github/workflows" pathString
-          || pkgs.lib.hasInfix "/.github/workflows/" pathString;
+          || pkgs.lib.hasInfix "/.github/workflows/" pathString
+          || pkgs.lib.hasSuffix "/.simit" pathString
+          || pkgs.lib.hasSuffix "/.simit/workflows" pathString
+          || pkgs.lib.hasInfix "/.simit/workflows/" pathString;
       };
 
       commonArgs = {
         inherit src;
         strictDeps = true;
         cargoExtraArgs = "--all-features";
+        # The publisher's license-compatible TLS backend builds OpenSSL from
+        # its pinned Cargo source, including for static cross packages.
+        nativeBuildInputs = [pkgs.perl];
       };
 
       cargoArtifacts = craneLib.buildDepsOnly commonArgs;
@@ -119,16 +122,16 @@
       package = craneLib.buildPackage (commonArgs
         // {
           inherit cargoArtifacts;
-          nativeBuildInputs = [preCommitBin];
-          nativeCheckInputs = [pkgs.git pkgs.gnupg pkgs.python3 pkgs.actionlint];
+          nativeBuildInputs = commonArgs.nativeBuildInputs ++ [preCommitBin];
+          nativeCheckInputs = [pkgs.git pkgs.gnupg pkgs.nodejs pkgs.jq pkgs.python3 pkgs.actionlint];
         });
 
       publicCargoArtifacts = publicCraneLib.buildDepsOnly commonArgs;
       publicPackage = publicCraneLib.buildPackage (commonArgs
         // {
           cargoArtifacts = publicCargoArtifacts;
-          nativeBuildInputs = [preCommitBin];
-          nativeCheckInputs = [pkgs.git pkgs.gnupg pkgs.python3 pkgs.actionlint];
+          nativeBuildInputs = commonArgs.nativeBuildInputs ++ [preCommitBin];
+          nativeCheckInputs = [pkgs.git pkgs.gnupg pkgs.nodejs pkgs.jq pkgs.python3 pkgs.actionlint];
         });
 
       actionlintCheck =
@@ -199,7 +202,7 @@
       nextestCheck = publicCraneLib.cargoNextest (commonArgs
         // {
           cargoArtifacts = publicCargoArtifacts;
-          nativeCheckInputs = [pkgs.git pkgs.gnupg pkgs.python3 pkgs.actionlint];
+          nativeCheckInputs = [pkgs.git pkgs.gnupg pkgs.nodejs pkgs.jq pkgs.python3 pkgs.actionlint];
         });
 
       docCheck = publicCraneLib.cargoDoc (commonArgs
@@ -324,6 +327,7 @@
               cargo-nextest
               actionlint
               git
+              jq
               mdbook
               prettier
               pre-commit

@@ -1,7 +1,13 @@
 name: Review engine compatibility
 on:
   push:
-    branches: [feat/repository-review, trunk]
+    branches:
+      [
+        feat/repository-review,
+        feat/provider-review-policy,
+        migrate/harbor-monorepo-reconcile-20261012,
+        trunk,
+      ]
   pull_request:
 permissions:
   contents: read
@@ -9,6 +15,12 @@ jobs:
   pinned-tools:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    env:
+      NIX_CONFIG: |
+        experimental-features = nix-command flakes
+        max-jobs = 1
+        cores = 2
+      CARGO_BUILD_JOBS: "2"
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -27,20 +39,74 @@ jobs:
               tools = import (simit + "/nix/review-tools.nix") { source = simit; system = "x86_64-linux"; inherit nixpkgs; };
             in {
               packages.x86_64-linux.repo-review = tools.package;
+              packages.x86_64-linux.selector-python = tools.selector.python;
               checks.x86_64-linux.selector = tools.selectorCheck;
+              lib.nixpkgsPath = nixpkgs.outPath;
             };
           }
           EOF
           curl --fail --location https://raw.githubusercontent.com/caniko/nixpkgs-review-gha/f7bad6b95787f752cedbf50e09c5bf4ae0f39a07/flake.lock > controller-lock/flake.lock
           nix flake lock path:./controller-lock
-          nix build path:./controller-lock#repo-review --out-link tools --no-update-lock-file -L
+          evidence="$RUNNER_TEMP/review-generator"
+          mkdir -p "$evidence"
+          git rev-parse HEAD > "$evidence/revision"
+          git rev-parse 'HEAD^{tree}' > "$evidence/tree"
+          git ls-files -z | sort -z | sed -z 's|^|./|' | xargs -0 sha256sum -- > "$evidence/source.sha256"
+          cp controller-lock/flake.lock "$evidence/flake.lock"
+          sha256sum "$evidence/flake.lock" > "$evidence/lock.sha256"
+          nix build path:./controller-lock#repo-review --out-link tools --no-update-lock-file --max-jobs 1 --cores 2 --json -L > "$evidence/result.json"
           tools/bin/repo-review verify-engine --root controller-lock
+          tools/bin/repo-review engine-info > "$evidence/engine.json"
           nix build path:./controller-lock#checks.x86_64-linux.selector --no-link --no-update-lock-file -L
+      - name: Verify scoped broken warnings through the actual pinned native evaluator
+        run: |
+          set -euo pipefail
+          python_root="$(nix build path:./controller-lock#selector-python --no-link --print-out-paths --no-update-lock-file --max-jobs 1 --cores 2)"
+          nixpkgs_source="$(nix eval --raw path:./controller-lock#lib.nixpkgsPath --no-update-lock-file)"
+          "$python_root/bin/python" tests/fixtures/review-nixpkgs-warning.py src/review/assets/nixpkgs.py "$nixpkgs_source"
+      - name: Regenerate controller templates with the exact packaged producer
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/review-generator"
+          cp -L tools/bin/simit "$evidence/simit"
+          cp -L tools/bin/.simit-wrapped "$evidence/simit-unwrapped"
+          sha256sum "$evidence/simit" "$evidence/simit-unwrapped" > "$evidence/binary.sha256"
+          mkdir -p "$evidence/generated"
+          printf '%s\n' '[review]' 'role = "controller"' > "$evidence/generated/simit.toml"
+          printf '%s\n' '{ outputs = _: {}; }' > "$evidence/generated/flake.nix"
+          (
+            cd "$evidence/generated"
+            "$GITHUB_WORKSPACE/tools/bin/simit" init ci --review-only
+            "$GITHUB_WORKSPACE/tools/bin/simit" init ci --review-only --check --diff
+          )
+          tar -czf "$evidence/generated.tar.gz" -C "$evidence/generated" .
+          sha256sum "$evidence/generated.tar.gz" > "$evidence/generated.sha256"
+      - name: Export the conventional closure fixture through the packaged engine
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 tests/fixtures/review/retrieval.py --engine tools/bin/repo-review --controller-root controller-lock --out "$RUNNER_TEMP/review-generator/retrieval"
+      - name: Verify real closure retrieval and signature enforcement in fresh stores
+        env:
+          CARGO_BUILD_JOBS: "2"
+        run: |
+          set -euo pipefail
+          export REPO_REVIEW_FIXTURE_ROOT="$RUNNER_TEMP/review-generator/retrieval"
+          nix develop -c cargo test --locked --test review_retrieval -- --ignored --test-threads=1 2>&1 | tee "$RUNNER_TEMP/review-generator/retrieval-tests.log"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: ${{ always() }}
         with:
           name: controller-lock
           path: controller-lock/flake.lock
+          if-no-files-found: error
+      - name: Retain exact producer, lock, and generated-template evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: review-generator-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/review-generator/**
+          retention-days: 31
           if-no-files-found: error
   compatibility:
     strategy:
@@ -56,6 +122,8 @@ jobs:
         run: rustup toolchain install 1.85.0 --profile minimal
       - name: Compile both frontends and verify review contracts on MSRV
         run: cargo +1.85.0 test --locked --test review_cli --test review_engine --test review_generation --test review_contracts
+      - name: Verify portable workflow templates on MSRV
+        run: cargo +1.85.0 test --locked --test workflow_templates
       - name: Verify packaged runtime assets
         shell: bash
         run: |

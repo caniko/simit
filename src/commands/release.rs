@@ -12,6 +12,17 @@ use crate::registry;
 use crate::release_trust::{self, TrustOverrides};
 
 pub fn run(command: ReleaseCommand) -> Result<()> {
+    if command.action == ReleaseAction::Publisher {
+        return crate::release_publisher::execution::run(command);
+    }
+    if command.publisher_stage.is_some()
+        || command.source_workflow.is_some()
+        || command.publisher_workflow.is_some()
+        || command.publisher_output.is_some()
+        || !command.reconstruct_packages.is_empty()
+    {
+        bail!("publisher arguments require `simit release publisher`");
+    }
     if command.component.is_some()
         && !matches!(
             command.action,

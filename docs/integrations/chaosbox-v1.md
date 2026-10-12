@@ -61,8 +61,9 @@ Notes:
 - Gate `id` values must match `[a-zA-Z0-9_-]+`, be unique (including after
   sanitization: `a_b` vs `a-b` collide as `gate-a-b`), and stay stable:
   they become `gate-<id>` job names and `needs` references.
-- `publish_strategy = "coordinated"` requires `publish_crates = true`,
-  `--workspace`, and `--workspace-strategy aggregate`. Other backends fail
+- `publish_strategy = "coordinated"` requires `publish_crates = true` and
+  `--workspace`. Ordinary CI can retain either the member or aggregate strategy;
+  dependency-order publication does not remove member CI policies. Other backends fail
   explicitly (Forgejo/Crow/GitLab are not silently degraded in v1).
 
 ## Generation and drift-check commands
@@ -107,23 +108,24 @@ Scope:
   workflow. CI gate jobs run in parallel with `test`; enforcement is via
   branch protection requiring both `test` and `gate-gel-integration` green
   (no `needs` edge by design, for faster PR feedback).
-- Release scope: `gate-gel-integration` job in `publish-workspace.yaml`,
-  `needs: [validate]`, re-run at the exact signed tag revision before any
-  `cargo publish`. Publish jobs `need` the gate chain, so gate failure blocks
-  publication.
+- Release scope: credential-free required-gate steps at the exact signed
+  revision in `trusted-publish-workspace.yaml`. Upload jobs depend on successful
+  packaged-content verification and gates, so gate failure blocks publication.
 
 Gel service creation/cleanup belongs to the project/harbor-db test facility
 invoked by `. #test-gel`; simit only invokes the declared check. Credentials
 for Gel (e.g. local fixture tokens) go in gate `env`, never in global
 `extra_setup`/`extra_env`. Release secrets (`CRATES_IO_API_TOKEN`, minisign,
-cosign) appear only in tag-triggered publish jobs, never in ordinary PR jobs.
+cosign) must be scoped to their independently protected release jobs. The crates.io
+token belongs only to the default-branch `simit-crates-io` environment upload jobs.
 
 ## Coordinated dependency-ordered publication
 
 Selection is the `--coordinated-publish` flag / `publish_strategy =
 "coordinated"` above. The generator consumes `simit release plan`
-(`release-plan/v1` JSON, unchanged) and emits one
-`.github/workflows/publish-workspace.yaml` with explicit `needs` edges.
+(`release-plan/v1` JSON, unchanged) and emits credential-free
+`.github/workflows/publish-workspace.yaml` builds plus an independent
+`trusted-publish-workspace.yaml` publisher with explicit `needs` edges.
 Independent per-member workflows triggered by the same tag do not order;
 this single workflow does.
 
@@ -133,19 +135,24 @@ Runtime contract (lockstep v1):
   the tag (`cargo pkgid -p <crate>` compared to `$tag` after `git verify-tag`
   - checkout of the validated SHA). Development-only `publish = false`
     members are excluded from the plan and publish jobs.
-- Triggers only on tags (`[0-9]*`) + `workflow_dispatch`. No publish-on-PR.
-- Least-privilege permissions (`contents: read`, `id-token: write`), pinned
+- Triggers only on signed semver tag pushes (`[0-9]*`); retry the original run.
+  No branch-based manual dispatch or publish-on-PR.
+- Least-privilege permissions (`contents: read`, publisher `actions: read`), pinned
   actions, serialized concurrency (`cancel-in-progress: false`).
 - Maintainer trust root preserved: `test -s keys/maintainers.gpg` + `git
 verify-tag`; missing configuration fails instead of disabling signing.
 
 Per-crate publish steps in plan order, each with:
 
-1. `cargo package -p <crate> --allow-dirty` (archive + verification build;
-   for dependents this succeeds only after prerequisites are live).
-2. `cargo publish -p <crate> --dry-run`.
-3. Bounded existence preflight + `cargo publish -p <crate>`.
-4. Bounded propagation wait (`seq 1 20`, `sleep 30`) before dependents.
+1. Package the complete release set together with `--no-verify` in the
+   credential-free tag build, retaining each immutable original-run artifact.
+2. Independently admit the native run, signed source and provider digest;
+   reconstruct contents in isolated Cargo configuration and compare every member.
+3. Compile the packaged crate using credential-free `cargo publish --dry-run`.
+4. Re-admit on a fresh hosted runner, check the exact registry checksum, then
+   upload archive bytes through the registry API without executing candidate code.
+5. Bound exact registry resolution to 20 attempts with 30-second intervals
+   before dependents, including checksum-matched recovery.
 
 Conflict handling is honest, not blind:
 
@@ -158,7 +165,7 @@ Conflict handling is honest, not blind:
 
 A halfway failure is not atomic rollback. The `publish-report` job (`if:
 always()`) plus per-crate job statuses form the auditable result. Resume by
-re-dispatching the workflow: matching checksums skip, conflicts fail, missing
+rerunning the original tag-push run: matching checksums skip, conflicts fail, missing
 versions publish in order. Preflight never blindly republishes or skips.
 
 Dependency semantics (tested against `cargo metadata`):
@@ -178,8 +185,10 @@ verify-tag` against `keys/maintainers.gpg`), `CHANGELOG.md` section for the
 - `keys/maintainers.gpg` committed; `[release.signing].key` set or `git config
 user.signingkey` / `--maintainer-key` available at generation time.
   Generation fails closed when signing is required but unconfigured.
-- `CRATES_IO_API_TOKEN` repo secret for publish jobs only. No secrets on
-  untrusted PRs; no untrusted PR code on privileged release runners.
+- `CRATES_IO_API_TOKEN` only in the literal `simit-crates-io` environment,
+  restricted to the exact protected default branch; remove tag-accessible
+  repository/organization publishing secrets. Enroll a qualified immutable Simit
+  engine via `vars.SIMIT_PUBLISHER_REVISION`. Generation does not provision this.
 - Jev is the only runtime inference provider; public CI uses the local
   protocol fixture. No real TypeSafe credential in ordinary CI; TypeSafe-gated
   steps (if any) belong in tag-only publish jobs or self-hosted release
@@ -191,7 +200,7 @@ user.signingkey` / `--maintainer-key` available at generation time.
   (`simit release plan --dry-run-package`, now labeled as such).
 - Verification/build from packaged contents: `cargo package --allow-dirty`.
 - Registry dry-run: `cargo publish --dry-run`.
-- Actual publication: `cargo publish` in plan order.
+- Actual publication: independently verified archive API uploads in plan order.
 
 `--no-verify` is never presented as verification. For a new workspace whose
 internal versions are not yet on crates.io, dependents' stage-2 verification

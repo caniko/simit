@@ -38,6 +38,8 @@ pub mod registry;
 pub mod release_identity;
 /// Deterministic release notes from the exact tagged Git history.
 pub mod release_notes;
+/// Independent default-branch publisher event and provider identity binding.
+pub mod release_publisher;
 /// Release maintainer trust-root discovery and validation.
 pub mod release_trust;
 /// Renderers for generated support files.

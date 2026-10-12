@@ -39,6 +39,129 @@ with_msrv = true
 
 ## Generic CI vs Release Publishing
 
+### Project-owned workflow templates
+
+Projects with specialized Actions jobs can render their existing workflow
+templates through Simit alongside its built-in jobs:
+
+```toml
+[ci.workflow_templates]
+".github/workflows/tests.yml" = ".simit/templates/tests.yml"
+
+[ci.workflow_variables]
+runner = "${{ github.event.repository.fork && 'ubuntu-24.04' || 'ubuntu-latest-32-core' }}"
+```
+
+The template uses `@simit(runner)@` where this literal value belongs. Simit
+substitutes named values once, preserving GitHub `${{ ... }}` expressions and
+shell syntax. There are no recursive substitutions or implicit environment
+reads. Undefined variables and malformed rendered YAML fail before any output
+is written. Keep credentials as runtime Actions secret references, never literal
+values in committed templates or configuration.
+
+`simit init ci` renders the declared templates, marks their outputs as generated,
+and persists both mappings and variables. `--check --diff` and registry auditing
+use the same renderer, so edits to outputs, templates, or variables are detected.
+Removing a mapping retires outputs carrying both Simit generation and template
+markers, even when project comments precede those markers; unrelated workflows
+remain project-owned. Built-in and release-owned workflow collisions, paths
+outside the repository, and mismatched Actions platforms are rejected. Template
+contents do not participate in built-in check, package, or runner inference.
+Built-in generated workflows cannot be template sources: templates must remain
+project-owned inputs, rather than snapshots of outputs from an earlier run.
+Keep template sources outside Actions workflow directories, or give them a
+non-workflow extension such as `.yaml.in`, so the source is not itself executed.
+File identity is checked against both Actions workflow directories, so a hard
+link with a project-template spelling cannot duplicate an existing active job.
+Every source and destination component must be portable across supported hosts:
+Windows device names, reserved characters, and trailing dots or spaces are rejected
+before filesystem resolution. Destinations must be files with directory parents;
+validation rejects existing directories, symlinks, portable case-insensitive path
+collisions, and hard-linked aliases of template sources or planned outputs before
+any writes. A destination also cannot alias a differently spelled active project
+workflow through portable case/normalization or a hard link; declaring the exact
+existing path retains explicit adoption behavior. Portable keys
+use Unicode canonical normalization and full case folding, so non-ASCII and
+composed/decomposed spellings cannot claim the same output. Existing aliases are
+also checked against the actual filesystem, excluding symlink endpoints from
+case/normalization alias matching. Generated files replace their own
+directory entries atomically; an unrelated file hard-linked to a destination
+retains its original bytes and file identity. Existing permissions are preserved.
+This feature supports GitHub and Forgejo Actions, including exact-only Nix
+qualification; it does not replace the
+project's test selections or permission policy.
+
+When importing upstream CI, retain its presets in template sources and declare
+fork-specific policy through variables. Apply future upstream changes to those
+sources, then regenerate rather than modifying generated workflow files.
+
+### Provider-review merge gate
+
+`canix-toolbelt` owns provider review, durable request accounting, and guarded
+merging. Simit can generate its trusted `review-policy` coordinator separately
+from ordinary CI and from the build-oriented `[review]` controller:
+
+```toml
+[ci]
+platform = "github"
+provider = "actions"
+
+[review_policy]
+toolbelt_version = "0.2.0" # select a qualified, published stable release
+app_id_secret = "REVIEW_POLICY_APP_ID"
+app_private_key_secret = "REVIEW_POLICY_APP_PRIVATE_KEY"
+credential_environment = "review-policy"
+# Optional policy from the trusted default-branch checkout, JSON or Pkl:
+# policy_path = "policy/review.json"
+```
+
+Generate and verify with `simit init ci --platform github` and
+`simit init ci --platform github --check --diff`. Do not enable a version before
+its crates.io publication has been independently verified.
+
+Provision a **dedicated policy GitHub App**, install it on each enrolled
+repository. Store its ID/private key **only as secrets of the configured
+credential environment**, and restrict that environment's deployment branch
+policy to the repository's exact default branch. Do not also create
+repository-level copies: a branch-controlled workflow could use those without
+the environment boundary. The workflow's ref condition is an additional guard;
+the platform-enforced environment restriction protects the credential when a
+manual dispatch selects an edited non-default-branch workflow. Configure and
+verify that boundary before enabling the coordinator.
+This is separate from Greptile's installed App: Greptile supplies review records;
+the policy App authenticates the normalized acceptance check. The policy App
+needs repository `Checks: write`, `Contents: read`, `Pull requests: read`,
+`Issues: read`, and GitHub's mandatory `Metadata: read`. Do not grant contents
+write, administration write, or a merge credential to the coordinator.
+
+The workflow executes only on the default-branch ref, checks out its exact
+trusted event SHA with credentials disabled, and installs the exact locked
+registry engine. It never executes PR source. PR/comment events reconcile
+individual candidates; a bounded, ten-minute scheduled sweep covers completed
+bot reviews, dismissals, and delayed feedback. Collection waits up to ten
+minutes for event-triggered runs without requesting another provider review.
+Scheduled sweeps enumerate every open-PR page, up to the supported 5000-PR
+bound, collect without waiting in batches of twenty, and allow an active sweep
+to finish before the next. Exceeding the bound fails explicitly without claiming
+partial qualification. All findings remain
+blocking until source fixes receive a fresh review or repository writers record
+exact-finding evidence-backed dispositions.
+
+After the first check is published, configure classic branch protection with
+strict up-to-date checks and administrator enforcement. Require `review-policy`
+with its **dedicated App ID**, plus the repository's actual required CI contexts
+and human-approval policy. Do not bind the review context to the shared GitHub
+Actions App: PR-controlled workflows can otherwise impersonate that context.
+Unconfigured protection, absent credentials, unsupported rulesets/merge queues,
+and missing or failed CI remain merge blockers.
+
+The normal operator flow is `canix-toolbelt review ensure --pr URL`, investigate
+and fix every confirmed finding, repeat ensure after each head change, then
+`canix-toolbelt merge --pr URL --apply` for an authorized merge. Canix's direct
+library consumer exposes the equivalent `canix repo review` / `canix repo merge`
+surface once its qualified release is installed. A `ready` receipt cannot
+replace the merge command's live revalidation.
+
 ### Rust feature coverage and MSRV environments
 
 Rust Actions workflows honor `ci.all_features` for tests and Clippy in both
@@ -51,6 +174,14 @@ With `ci.with_msrv = true`, Cargo jobs install and select the declared
 `rustc --version` matches that version before compiling all targets with the
 configured feature policy. A default-shell alias pointing at a newer compiler
 does not satisfy the MSRV gate.
+
+Nix-runtime format checks use the declared `formatter.<system>` executable,
+selected from `meta.mainProgram`, `pname`, or the derivation name. A treefmt
+formatter runs with `--ci`; custom formatters run without assumed arguments,
+then the gate rejects tracked, index, or untracked-file changes. A custom
+formatter's nonzero exit status is preserved. A missing executable fails the
+gate. Only projects without a flake formatter fall back to shell-provided
+treefmt, then Cargo formatting when treefmt is absent.
 
 New Rust flakes generated by `simit init flake` include the native `msrv` shell
 when Cargo declares a minimum version. Existing/custom flakes must provide the
@@ -109,6 +240,12 @@ For a Forgejo Nix workspace with release artifacts and cargo-deny:
 simit init ci --platform forgejo --runtime nix --runner atlas-nix-trusted \
   --workspace --with-artifacts --with-deny --check --diff
 ```
+
+Per-member GitHub and Forgejo workflows use package-qualified job names, such as
+`my-crate / test` and `my-crate / gate-integration`. These are distinct required
+check names even when several members use the same job IDs. Regenerate existing
+workflows and select the qualified names in branch protection when adopting this
+generator; single-package and aggregate workflow check names retain their shape.
 
 If the project also publishes a Homebrew tap, keep the tap metadata in project
 config when possible. Command-line overrides work, but config makes future
@@ -182,6 +319,7 @@ capture_results = true
 artifact_retention_days = 14
 extra_setup = ["python3 ci/prepare-input-access.py"]
 post_build = ["python3 ci/retain-receipts.py"]
+post_build_always = ["python3 ci/retain-diagnostics.py"]
 artifact_paths = ["${{ runner.temp }}/receipts/**"]
 required_secrets = ["FLAKE_SSH_KEY"]
 
@@ -199,6 +337,11 @@ policy from the workspace root, including invocations from member directories.
 Select all required Rust checks explicitly as Nix installables in this mode.
 Rust and Python projects can also use the other matrix options alongside their
 ordinary CI.
+
+The installable matrix qualifies branch pushes, pull requests, and explicit
+dispatches. Its push trigger defines only `branches`, which excludes tag pushes
+without a tag filter under GitHub's workflow rules. Channel-specific release
+workflows retain their own triggers and publication policy.
 
 The nested environment and setup apply only to the build matrix. Bind every
 required secret to the same-named variable using `${{ secrets.NAME }}` under
@@ -225,7 +368,31 @@ action runs even after failure and includes any explicit `artifact_paths`.
 Artifacts retain evidence, not Nix store closures; an empty or partial result
 file after failure is not a passing receipt.
 
+Use `post_build_always` for diagnostic collection that must run after a failed
+build or setup step. These commands run with `if: ${{ !cancelled() }}` before
+artifact upload, honoring workflow cancellation. They must handle an absent or
+partial build log and result map. A collector failure still fails the job, and a
+successful collector never clears
+the earlier build failure. Both post-build command lists require
+`capture_results = true`. Keep qualification receipt validation in `post_build`.
+
 Omitting `[ci.nix_build]` preserves the existing generated matrix defaults.
+
+Configured matrices normally coalesce a branch push with its pull request. Set
+`[ci.nix_build].separate_events = true` when acceptance requires both original
+producers: the concurrency group then includes the workflow ref and event name,
+so a PR cannot cancel its corresponding push. Newer revisions still supersede
+older runs within each event stream. Retain cancelled predecessors as failures;
+their receipts cannot substitute for either required successful producer.
+
+Nix matrices qualify branch pushes by default. Set
+`[ci.nix_build].push_tags = ["**"]` to also qualify every tag push, including when
+adopting a workflow that previously used an unfiltered `push:` trigger. More
+selective GitHub tag patterns and ordered exclusions are supported, for example
+`push_tags = ["v*", "!v*-preview"]`. A nonempty list must include at least one
+positive pattern. Tag patterns survive regeneration and drift checks; omitting
+them retains the branch-only default. Tag-enabled coalescing keeps tags separate
+from same-named branches and pull requests while coalescing a branch's push and PR.
 
 ## Required Integration Gates
 
@@ -249,12 +416,13 @@ Each gate has a stable `id`, one explicit single-line `run` command (a `nix
 run`, `nix build`, or `nix flake check` invocation for flake targets), a
 bounded `timeout_minutes` (1–360, default 30), and scoped `env`. Gates render
 as dedicated `gate-<id>` jobs in CI (same push/PR triggers, once per run) and
-as prerequisite jobs in the coordinated publish workflow at the exact signed
+as credential-free prerequisite steps in the coordinated publisher at the exact signed
 revision. Any gate failure blocks publication. Gate setup lives in `run`/`env`
 only — never in global `[ci].extra_setup`, so publishing and artifact jobs do
 not inherit test-only services or credentials. Release secrets
 (`CRATES_IO_API_TOKEN`, minisign, etc.) must never appear in gate `env`; they
-belong only to tag-triggered publish jobs.
+belong only to independent default-branch upload jobs in the protected
+`simit-crates-io` environment.
 
 ## Coordinated Workspace Publication
 
@@ -276,9 +444,34 @@ simit init ci --platform github --check --diff
 ```
 
 Switching strategies removes only obsolete simit-owned outputs (generated
-`publish-crate-*.yaml` vs generated `publish-workspace.yaml`); handwritten
+`publish-crate-*.yaml` and `trusted-publish-crate-*.yaml` vs generated
+`publish-workspace.yaml` and `trusted-publish-workspace.yaml`); handwritten
 workflows are never deleted. Other backends (Forgejo, Crow, GitLab) fail
 explicitly instead of silently degrading.
+
+Publication strategy does not require changing ordinary CI strategy. Keep
+`workspace_strategy = "members"` for existing per-member test, lint, feature,
+docs and required-gate policies, and select `publish_strategy = "coordinated"`
+for the dependency-ordered release carrier. With an already configured workspace,
+`simit init ci --coordinated-publish` retains that CI selection. Do not migrate a
+consumer to aggregate CI merely to enable ordered publication.
+
+GitHub tag workflows retain credential-free archives; their independently trusted
+`workflow_run` companions own registry uploads. Enrollment requires a qualified
+`vars.SIMIT_PUBLISHER_REVISION`, default-branch-restricted `simit-crates-io`
+environment and removal of tag-accessible publishing secrets. See
+[Release Integrity](release-integrity.md) before enabling this route.
+
+Both single-crate and coordinated publishers compare the intended verified local
+archive with the registry response before resuming an existing version. The
+response must identify the exact crate/version, be unyanked, and contain the same
+SHA-256 checksum. Missing, malformed and conflicting records fail. Publication
+and checksum-matched recovery both require bounded independent Cargo fetches of
+the exact registry version, source and checksum before the workflow succeeds.
+
+Generated GitHub Pages deploys share the repository-wide `github-pages`
+concurrency group across manual/push events and refs, without canceling an active
+deployment. Ordinary CI keeps its separate event/ref-scoped concurrency.
 
 ## Non-Publishable Crates
 

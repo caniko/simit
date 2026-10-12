@@ -40,6 +40,97 @@ fn workflow(temp: &TempDir) -> Value {
 }
 
 #[test]
+fn independent_nix_producer_events_survive_regeneration_without_cancelling_each_other() {
+    let temp =
+        project("[ci.nix_build]\nonly = true\ncapture_results = true\nseparate_events = true");
+    let output = generate(&temp, &[]);
+    assert!(output.status.success(), "{output:?}");
+    let value = workflow(&temp);
+    assert_eq!(
+        value["concurrency"]["group"],
+        "${{ github.workflow_ref }}-${{ github.event_name }}-${{ github.head_ref || github.ref_name }}"
+    );
+    assert_eq!(value["concurrency"]["cancel-in-progress"], true);
+    assert!(
+        fs::read_to_string(temp.path().join("simit.toml"))
+            .unwrap()
+            .contains("separate_events = true")
+    );
+    let original = fs::read(temp.path().join(".github/workflows/nix-builds.yaml")).unwrap();
+    assert!(generate(&temp, &["--check", "--diff"]).status.success());
+    assert!(generate(&temp, &[]).status.success());
+    assert_eq!(
+        original,
+        fs::read(temp.path().join(".github/workflows/nix-builds.yaml")).unwrap()
+    );
+    assert_eq!(
+        simit::registry::audit_ci(temp.path()).unwrap().status,
+        simit::registry::FeatureStatus::Managed
+    );
+}
+
+#[test]
+fn nix_matrix_qualifies_branch_pushes_and_pull_requests_without_tag_releases() {
+    for options in ["", "[ci.nix_build]\nonly = true\ncapture_results = true"] {
+        let temp = project(options);
+        let output = generate(&temp, &[]);
+        assert!(output.status.success(), "{output:?}");
+        let original = fs::read(temp.path().join(".github/workflows/nix-builds.yaml")).unwrap();
+        let value = workflow(&temp);
+        let events = value["on"].as_mapping().unwrap();
+        assert!(events.contains_key("pull_request"));
+        assert!(events.contains_key("workflow_dispatch"));
+        assert_eq!(value["on"]["push"]["branches"][0], "**");
+        assert!(value["on"]["push"]["tags-ignore"].is_null());
+        assert!(value["on"]["push"]["tags"].is_null());
+        assert!(generate(&temp, &["--check", "--diff"]).status.success());
+        assert!(generate(&temp, &[]).status.success());
+        assert_eq!(
+            original,
+            fs::read(temp.path().join(".github/workflows/nix-builds.yaml")).unwrap()
+        );
+    }
+}
+
+#[test]
+fn explicit_nix_matrix_tag_patterns_preserve_push_coverage_after_regeneration() {
+    let temp = project(
+        "[ci.nix_build]\nonly = true\nseparate_events = true\npush_tags = [\"**\", \"!private-*\"]",
+    );
+    let output = generate(&temp, &[]);
+    assert!(output.status.success(), "{output:?}");
+    let value = workflow(&temp);
+    assert_eq!(value["on"]["push"]["branches"][0], "**");
+    assert_eq!(value["on"]["push"]["tags"][0], "**");
+    assert_eq!(value["on"]["push"]["tags"][1], "!private-*");
+    assert!(value["on"]["push"]["tags-ignore"].is_null());
+    assert!(
+        value["on"]
+            .as_mapping()
+            .unwrap()
+            .contains_key("pull_request")
+    );
+    let original = fs::read(temp.path().join(".github/workflows/nix-builds.yaml")).unwrap();
+    assert!(generate(&temp, &["--check", "--diff"]).status.success());
+    assert!(generate(&temp, &[]).status.success());
+    assert_eq!(
+        original,
+        fs::read(temp.path().join(".github/workflows/nix-builds.yaml")).unwrap()
+    );
+    let config: toml_edit::DocumentMut = fs::read_to_string(temp.path().join("simit.toml"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    let tags = config["ci"]["nix_build"]["push_tags"].as_array().unwrap();
+    assert_eq!(tags.get(0).unwrap().as_str(), Some("**"));
+    assert_eq!(tags.get(1).unwrap().as_str(), Some("!private-*"));
+    assert_eq!(
+        simit::registry::audit_ci(temp.path()).unwrap().status,
+        simit::registry::FeatureStatus::Managed
+    );
+}
+
+#[test]
 fn exact_nix_matrix_keeps_scoped_setup_limits_and_receipts_after_regeneration() {
     let temp = project(
         r#"[ci.nix_build]
@@ -66,7 +157,7 @@ extra_env = { FLAKE_SSH_KEY = "${{ secrets.FLAKE_SSH_KEY }}" }
     assert_eq!(value["permissions"]["contents"], "read");
     assert_eq!(
         value["concurrency"]["group"],
-        "${{ github.workflow }}-${{ github.event.pull_request.head.ref || github.ref_name }}"
+        "${{ github.workflow }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event.pull_request.head.ref || github.ref_name }}"
     );
     let job = &value["jobs"]["build"];
     assert_eq!(job["timeout-minutes"], 90);
@@ -100,11 +191,19 @@ extra_env = { FLAKE_SSH_KEY = "${{ secrets.FLAKE_SSH_KEY }}" }
             .unwrap()
             .contains("receipts/**")
     );
-    assert!(
-        upload["uses"]
-            .as_str()
+    assert_eq!(
+        upload["uses"],
+        simit::render::ci::github_action_ref("actions/upload-artifact", "v7.0.2")
+            .split(" #")
+            .next()
             .unwrap()
-            .starts_with("actions/upload-artifact@cf430e0")
+    );
+    assert_eq!(
+        steps[0]["uses"],
+        simit::render::ci::github_action_ref("actions/checkout", "v7.0.1")
+            .split(" #")
+            .next()
+            .unwrap()
     );
     let output = generate(&temp, &["--check", "--diff"]);
     assert!(output.status.success(), "{output:?}");
@@ -120,6 +219,114 @@ extra_env = { FLAKE_SSH_KEY = "${{ secrets.FLAKE_SSH_KEY }}" }
         simit::registry::FeatureStatus::Managed,
         "{audit:?}"
     );
+}
+
+#[test]
+fn scoped_nix_matrix_isolates_forks_and_coalesces_same_repository_push_and_pr() {
+    for options in [
+        "[ci.nix_build]\nonly = true",
+        "[ci.nix_build]\ncapture_results = true",
+        "[ci.nix_build]\nmax_jobs = 1",
+        "[ci.nix_build]\nonly = true\npush_tags = [\"**\"]",
+    ] {
+        let temp = project(options);
+        assert!(generate(&temp, &[]).status.success());
+        let value = workflow(&temp);
+        let group = value["concurrency"]["group"].as_str().unwrap();
+        let resolve = |head_repository: Option<&str>,
+                       head_branch: Option<&str>,
+                       repository: &str,
+                       branch: &str,
+                       ref_type: &str| {
+            let value = group
+                .replace("${{ github.workflow }}", "Nix installable builds")
+                .replace(
+                    "${{ github.event.pull_request.head.repo.full_name || github.repository }}",
+                    head_repository.unwrap_or(repository),
+                )
+                .replace(
+                    "${{ github.event.pull_request.head.ref || github.ref_name }}",
+                    head_branch.unwrap_or(branch),
+                )
+                .replace(
+                    "${{ github.ref_type == 'tag' && github.ref || format('refs/heads/{0}', github.event.pull_request.head.ref || github.ref_name) }}",
+                    &if ref_type == "tag" {
+                        format!("refs/tags/{branch}")
+                    } else {
+                        format!("refs/heads/{}", head_branch.unwrap_or(branch))
+                    },
+                );
+            assert!(
+                !value.contains("${{"),
+                "unrecognized concurrency input: {value}"
+            );
+            value
+        };
+        let push = resolve(None, None, "owner/project", "main", "branch");
+        let same_repository_pr = resolve(
+            Some("owner/project"),
+            Some("main"),
+            "owner/project",
+            "1/merge",
+            "branch",
+        );
+        let first_fork = resolve(
+            Some("alice/project"),
+            Some("main"),
+            "owner/project",
+            "2/merge",
+            "branch",
+        );
+        let second_fork = resolve(
+            Some("bob/project"),
+            Some("main"),
+            "owner/project",
+            "3/merge",
+            "branch",
+        );
+        assert_eq!(push, same_repository_pr);
+        assert_ne!(first_fork, second_fork);
+        assert_ne!(push, first_fork);
+        assert_ne!(
+            push,
+            resolve(None, None, "owner/project", "another-branch", "branch")
+        );
+        if options.contains("push_tags") {
+            let tag = resolve(None, None, "owner/project", "main", "tag");
+            assert_ne!(tag, push);
+            assert_ne!(tag, same_repository_pr);
+            assert_ne!(
+                tag,
+                resolve(None, None, "owner/project", "refs/tags/main", "branch")
+            );
+            assert_eq!(tag, resolve(None, None, "owner/project", "main", "tag"));
+        }
+        assert_eq!(value["concurrency"]["cancel-in-progress"], true);
+        assert!(generate(&temp, &["--check", "--diff"]).status.success());
+    }
+}
+
+#[test]
+fn evidence_capture_rejects_effective_forgejo_before_action_pin_lookup_or_writes() {
+    for args in [vec![], vec!["--platform", "forgejo"]] {
+        let temp = project("[ci.nix_build]\nonly = true\ncapture_results = true");
+        let config_path = temp.path().join("simit.toml");
+        let config = fs::read_to_string(&config_path)
+            .unwrap()
+            .replace("platform = \"github\"\n", "");
+        fs::write(&config_path, &config).unwrap();
+        let output = generate(&temp, &args);
+        assert!(!output.status.success(), "{output:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("[ci.nix_build] options require GitHub Actions"),
+            "{stderr}"
+        );
+        assert!(!stderr.contains("panicked"));
+        assert_eq!(fs::read_to_string(&config_path).unwrap(), config);
+        assert!(!temp.path().join(".forgejo/workflows").exists());
+        assert!(!temp.path().join(".github/workflows").exists());
+    }
 }
 
 #[test]
@@ -158,6 +365,61 @@ fn rust_flake_can_select_exact_nix_gates_from_its_workspace_root() {
             fs::read(temp.path().join(".github/workflows/nix-builds.yaml")).unwrap()
         );
     }
+}
+
+#[test]
+fn diagnostics_run_after_failed_builds_before_upload_without_relaxing_the_gate() {
+    let temp = project(
+        "[ci.nix_build]\nonly = true\ncapture_results = true\npost_build = [\"echo qualified\"]\npost_build_always = [\"python3 ci/retain-diagnostics.py\"]",
+    );
+    let output = generate(&temp, &[]);
+    assert!(output.status.success(), "{output:?}");
+    let value = workflow(&temp);
+    let steps = value["jobs"]["build"]["steps"].as_sequence().unwrap();
+    let build = steps
+        .iter()
+        .position(|s| s["name"] == "Build ${{ matrix.installable }}")
+        .unwrap();
+    let success = steps
+        .iter()
+        .position(|s| s["name"] == "Retain Nix results 1")
+        .unwrap();
+    let diagnostics = steps
+        .iter()
+        .position(|s| s["name"] == "Retain Nix diagnostics 1")
+        .unwrap();
+    let upload = steps
+        .iter()
+        .position(|s| s["name"] == "Upload Nix build evidence")
+        .unwrap();
+    assert!(build < success && success < diagnostics && diagnostics < upload);
+    assert!(steps[success]["if"].is_null());
+    assert_eq!(steps[diagnostics]["if"], "${{ !cancelled() }}");
+    assert_eq!(steps[upload]["if"], "always()");
+    assert!(
+        steps[build]["run"]
+            .as_str()
+            .unwrap()
+            .contains("exit \"$status\"")
+    );
+    assert!(steps.iter().all(|s| s["continue-on-error"].is_null()));
+    assert!(generate(&temp, &["--check", "--diff"]).status.success());
+    assert!(
+        fs::read_to_string(temp.path().join("simit.toml"))
+            .unwrap()
+            .contains("post_build_always")
+    );
+
+    let invalid = project("[ci.nix_build]\npost_build_always = [\"echo diagnostics\"]");
+    let output = generate(&invalid, &[]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("capture_results"));
+    assert!(
+        !invalid
+            .path()
+            .join(".github/workflows/nix-builds.yaml")
+            .exists()
+    );
 }
 
 #[test]
@@ -493,8 +755,87 @@ fn exact_matrix_replaces_only_previously_managed_primary_workflows() {
 }
 
 #[test]
+fn direct_nix_matrix_rendering_rejects_invalid_tag_filters() {
+    use simit::cli::Platform;
+    use simit::config::NixBuildConfig;
+    use simit::render::ci::nix_build_matrix_file_with_options;
+    use simit::user_config::ResolvedRunner;
+
+    let runner = ResolvedRunner {
+        name: None,
+        labels: vec!["ubuntu-24.04".into()],
+    };
+    let render = |patterns: &[&str]| {
+        let options = NixBuildConfig {
+            push_tags: patterns.iter().map(|pattern| (*pattern).into()).collect(),
+            ..NixBuildConfig::default()
+        };
+        nix_build_matrix_file_with_options(
+            Platform::Github,
+            &runner,
+            &[".#default".into()],
+            &[],
+            &[],
+            &[],
+            &options,
+        )
+    };
+    for patterns in [
+        vec![""],
+        vec!["bad\npattern"],
+        vec!["bad\u{2028}pattern"],
+        vec!["bad\u{2029}pattern"],
+        vec!["bad\u{fffe}pattern"],
+        vec!["bad\u{ffff}pattern"],
+        vec!["!private-*"],
+        vec!["!one", "!two"],
+    ] {
+        assert!(
+            render(&patterns)
+                .unwrap_err()
+                .to_string()
+                .contains("push_tags")
+        );
+    }
+    for patterns in [
+        vec![],
+        vec!["**", "!private-*"],
+        vec![r"\!literal"],
+        vec!["发布-α-*"],
+    ] {
+        assert!(render(&patterns).is_ok(), "{patterns:?}");
+    }
+}
+
+#[test]
 fn matrix_options_reject_invalid_or_ignored_configuration() {
     for (options, expected) in [
+        ("[ci.nix_build]\npush_tags = [\"\"]", "push_tags"),
+        ("[ci.nix_build]\npush_tags = [\"!private-*\"]", "push_tags"),
+        (
+            "[ci.nix_build]\npush_tags = [\"!one\", \"!two\"]",
+            "push_tags",
+        ),
+        (
+            "[ci.nix_build]\npush_tags = [\"bad\\npattern\"]",
+            "push_tags",
+        ),
+        (
+            "[ci.nix_build]\npush_tags = [\"bad\\u2028pattern\"]",
+            "push_tags",
+        ),
+        (
+            "[ci.nix_build]\npush_tags = [\"bad\\u2029pattern\"]",
+            "push_tags",
+        ),
+        (
+            "[ci.nix_build]\npush_tags = [\"bad\\uFFFEpattern\"]",
+            "push_tags",
+        ),
+        (
+            "[ci.nix_build]\npush_tags = [\"bad\\uFFFFpattern\"]",
+            "push_tags",
+        ),
         ("[ci.nix_build]\ntimeout_minutes = 0", "timeout_minutes"),
         ("[ci.nix_build]\nmax_parallel = 0", "max_parallel"),
         ("[ci.nix_build]\nmax_jobs = 0", "max_jobs"),

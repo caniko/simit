@@ -248,6 +248,26 @@ pub fn validate_result(plan: &Plan, result: &PlatformResult) -> Result<()> {
     let mut copy = e.clone();
     copy.seal()?;
     ensure!(copy.digest == e.digest, "effective plan digest mismatch");
+    match (&plan.request.compiler_cache, &e.compiler_cache) {
+        (Some(_), Some(receipt)) => {
+            super::kvrocks::validate_cache_receipt(plan, &e.system, receipt)?
+        }
+        (None, None) => ensure!(
+            result.compiler_cache_cleanup.is_none(),
+            "unexpected cache cleanup claim"
+        ),
+        (Some(_), None) => ensure!(
+            result.build != Outcome::Passed,
+            "passing cached build lacks lifecycle/sandbox admission"
+        ),
+        (None, Some(_)) => anyhow::bail!("unrequested compiler cache receipt"),
+    }
+    if plan.request.compiler_cache.is_some() && result.build == Outcome::Passed {
+        ensure!(
+            result.compiler_cache_cleanup == Some(Outcome::Passed),
+            "cached build cleanup is unproven"
+        );
+    }
     let (_, arch, sandbox) = runner(&e.system)?;
     // Failure reports can legitimately stop before runner inspection.
     if matches!(result.build, Outcome::Passed | Outcome::NoChanges) {
@@ -394,20 +414,38 @@ pub fn validate_bundle(plan: &Plan, r: &PlatformResult, path: &Path) -> Result<S
         );
         let ep: EffectivePlan = super::read_json(&path.join("effective-plan.json"))?;
         ensure!(ep == r.effective, "effective plan file mismatch");
+        if let Some(receipt) = &r.effective.compiler_cache {
+            let cached: super::kvrocks::CacheReceipt =
+                super::read_json(&path.join("compiler-cache-sandbox.json"))?;
+            ensure!(&cached == receipt, "cache admission receipt file mismatch");
+            let probe = path.join("compiler-cache-probe.json");
+            ensure!(
+                file_digest(&probe)? == receipt.sandbox_receipt_sha256
+                    && super::read_json::<Value>(&probe)?
+                        == serde_json::json!({"socket": "/run/redis-sccache/redis.sock", "resp2_ping": true}),
+                "sandbox output bytes differ from the admission receipt"
+            );
+            let cleanup: Value = super::read_json(&path.join("compiler-cache-cleanup.json"))?;
+            if r.compiler_cache_cleanup == Some(Outcome::Passed) {
+                ensure!(
+                    cleanup
+                        == serde_json::json!({"stopped": true, "run_identity": receipt.ready.service.run_identity}),
+                    "cache cleanup file does not bind the owned lifetime"
+                );
+            } else {
+                ensure!(
+                    r.compiler_cache_cleanup == Some(Outcome::Failed)
+                        && cleanup["stopped"] == false
+                        && cleanup["error"]
+                            .as_str()
+                            .is_some_and(|error| !error.is_empty()),
+                    "failed cache cleanup lacks its retained failure receipt"
+                );
+            }
+        }
         if plan.request.backend == Backend::Nixpkgs {
             let selection: Value = super::read_json(&path.join("nixpkgs-selection.json"))?;
-            ensure!(
-                selection["tested_commit"] == plan.target.commit
-                    && selection["base_commit"]
-                        == plan
-                            .pr
-                            .as_ref()
-                            .ok_or_else(|| anyhow::anyhow!("missing PR"))?
-                            .base
-                    && selection["system"] == r.effective.system
-                    && selection["backend_version"] == "3.7.0",
-                "wrong Nixpkgs selection identity"
-            );
+            backend::validate_nixpkgs_selection(plan, &r.effective.system, &selection)?;
             let selected = selection["derivations"]
                 .as_array()
                 .ok_or_else(|| anyhow::anyhow!("missing selection report"))?;

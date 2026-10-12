@@ -21,17 +21,19 @@ fn managed_formatter_failures_never_fall_back_to_cargo_or_ambient_treefmt() {
     fs::write(root.join("nix/treefmt.nix"), "{}").unwrap();
     executable(
         &bin.join("nix"),
-        "#!/bin/sh\ncase $1 in eval) test \"$MODE\" != eval-failed || exit 7; test \"$MODE\" = missing || echo /fixture.drv;; build) echo \"$WRAPPER\";; esac\n",
+        "#!/bin/sh\ncase $1 in eval) test \"$MODE\" != eval-failed || exit 7; case \"$*\" in *f.meta.mainProgram*) echo treefmt;; *) test \"$MODE\" = missing || echo /fixture.drv;; esac;; build) echo \"$WRAPPER\";; esac\n",
     );
     executable(&bin.join("cargo"), "#!/bin/sh\necho cargo-fallback\n");
     executable(&bin.join("treefmt"), "#!/bin/sh\necho ambient-treefmt\n");
+    let shell = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+        .map(|directory| directory.join("sh"))
+        .find(|path| path.is_file())
+        .unwrap();
+    std::os::unix::fs::symlink(&shell, bin.join("sh")).unwrap();
     let run = |mode: &str| {
-        Command::new("sh")
+        Command::new(&shell)
             .current_dir(root)
-            .env(
-                "PATH",
-                format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
-            )
+            .env("PATH", &bin)
             .env("MODE", mode)
             .env("WRAPPER", &wrapper)
             .args(["-c", NIX_FORMAT_COMMAND])
@@ -57,6 +59,10 @@ fn managed_formatter_failures_never_fall_back_to_cargo_or_ambient_treefmt() {
     assert_eq!(output.stdout, b"project-treefmt\n");
 
     fs::remove_file(root.join("nix/treefmt.nix")).unwrap();
+    let output = run("missing");
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"ambient-treefmt\n");
+    fs::remove_file(bin.join("treefmt")).unwrap();
     let output = run("missing");
     assert!(output.status.success());
     assert_eq!(output.stdout, b"cargo-fallback\n");

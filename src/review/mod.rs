@@ -8,6 +8,15 @@ pub mod contract;
 pub mod engine;
 pub mod generation;
 pub mod github;
+pub mod kvrocks;
+#[cfg(target_os = "linux")]
+pub mod kvrocks_host;
+#[cfg(target_os = "linux")]
+pub mod kvrocks_lifecycle;
+#[cfg(target_os = "linux")]
+pub mod kvrocks_probe;
+#[cfg(target_os = "linux")]
+pub mod kvrocks_worker;
 pub mod process;
 pub mod service;
 
@@ -15,6 +24,8 @@ use anyhow::{Result, ensure};
 use serde::{Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use std::{fs, path::Path};
+
+pub(crate) const MAX_JSON_BYTES: u64 = 16 * 1024 * 1024;
 
 pub fn digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
@@ -28,7 +39,7 @@ pub fn canonical_digest<T: Serialize>(value: &T) -> Result<String> {
 pub fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T> {
     let meta = fs::symlink_metadata(path)?;
     ensure!(
-        meta.is_file() && meta.len() <= 16 * 1024 * 1024,
+        meta.is_file() && meta.len() <= MAX_JSON_BYTES,
         "invalid JSON file"
     );
     Ok(serde_json::from_slice(&fs::read(path)?)?)

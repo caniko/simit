@@ -29,6 +29,8 @@ pub struct ProjectConfig {
     #[serde(default)]
     pub monorepo: Option<crate::monorepo::Config>,
     #[serde(default)]
+    pub review_policy: Option<crate::render::review_policy::Config>,
+    #[serde(default)]
     pub review: Option<crate::review::generation::Config>,
     #[serde(default)]
     pub prebuild: Option<PrebuildConfig>,
@@ -490,6 +492,12 @@ pub struct CiConfig {
     pub extra_setup: Vec<String>,
     #[serde(default)]
     pub extra_env: BTreeMap<String, String>,
+    /// Project-owned workflow templates, keyed by generated workflow path.
+    #[serde(default)]
+    pub workflow_templates: BTreeMap<String, String>,
+    /// Literal values substituted for `@simit(name)@` in workflow templates.
+    #[serde(default)]
+    pub workflow_variables: BTreeMap<String, String>,
     #[serde(default)]
     pub required_secrets: Vec<String>,
     #[serde(default)]
@@ -549,6 +557,10 @@ impl CiConfig {
 pub struct NixBuildConfig {
     /// Emit just the declared installable matrix, including for language projects.
     pub only: bool,
+    /// Preserve independent push and PR producers instead of coalescing their runs.
+    pub separate_events: bool,
+    /// Opt into tag pushes alongside all branch pushes; preserve pattern order.
+    pub push_tags: Vec<String>,
     pub timeout_minutes: Option<u64>,
     pub max_parallel: Option<u64>,
     pub max_jobs: Option<u64>,
@@ -561,10 +573,39 @@ pub struct NixBuildConfig {
     pub artifact_paths: Vec<String>,
     pub extra_setup: Vec<String>,
     pub post_build: Vec<String>,
+    /// Collect diagnostics before upload even when setup or realization failed.
+    pub post_build_always: Vec<String>,
     pub extra_env: BTreeMap<String, String>,
     /// Required secrets must be explicitly bound under `extra_env`.
     pub required_secrets: Vec<String>,
     pub required_env: Vec<String>,
+}
+
+impl NixBuildConfig {
+    pub(crate) fn validate_push_tags(&self) -> Result<()> {
+        if self.push_tags.iter().any(|pattern| {
+            pattern.trim().is_empty()
+                || pattern.chars().any(|character| {
+                    character.is_control()
+                        || matches!(character, '\u{2028}' | '\u{2029}' | '\u{fffe}' | '\u{ffff}')
+                })
+        }) {
+            bail!(
+                "simit project config: [ci.nix_build].push_tags requires nonempty patterns without controls, Unicode line separators, or YAML-forbidden characters"
+            );
+        }
+        if !self.push_tags.is_empty()
+            && self
+                .push_tags
+                .iter()
+                .all(|pattern| pattern.starts_with('!'))
+        {
+            bail!(
+                "simit project config: [ci.nix_build].push_tags requires at least one positive pattern"
+            );
+        }
+        Ok(())
+    }
 }
 
 /// `[prebuild]` - native GitHub Nix builds shared by CI and releases.
@@ -1953,6 +1994,15 @@ impl ProjectConfig {
         if let Some(monorepo) = &self.monorepo {
             monorepo.validate()?;
         }
+        crate::render::workflow_templates::validate_config(&self.ci)?;
+        if let Some(policy) = &self.review_policy {
+            policy.validate()?;
+            if self.ci.platform.is_some_and(|p| p != Platform::Github)
+                || self.ci.provider.is_some_and(|p| p != CiProvider::Actions)
+            {
+                bail!("[review_policy] requires GitHub Actions");
+            }
+        }
         if let Some(review) = &self.review {
             review.validate()?;
         }
@@ -2099,10 +2149,9 @@ impl ProjectConfig {
             "simit project config: [ci].required_secrets",
             &self.ci.required_secrets,
         )?;
-        validate_nonempty_strings(
-            "simit project config: [ci].required_env",
-            &self.ci.required_env,
-        )?;
+        for name in &self.ci.required_env {
+            validate_environment_name("simit project config: [ci].required_env", name)?;
+        }
         validate_nonempty_strings(
             "simit project config: [ci].extra_setup",
             &self.ci.extra_setup,
@@ -3320,6 +3369,18 @@ fn validate_nonempty_string(name: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn validate_environment_name(name: &str, value: &str) -> Result<()> {
+    let mut bytes = value.bytes();
+    if !bytes
+        .next()
+        .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_')
+        || !bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    {
+        bail!("{name} must be an environment variable identifier matching [A-Za-z_][A-Za-z0-9_]*");
+    }
+    Ok(())
+}
+
 fn validate_github_actions_secret_identifier(name: &str, value: &str) -> Result<()> {
     validate_secret_name(name, value)?;
     if value.to_ascii_uppercase().starts_with("GITHUB_") {
@@ -3502,6 +3563,7 @@ fn validate_nix_build_config(config: &ProjectConfig) -> Result<()> {
     if options.only && ci.runtime == Some(Runtime::Cargo) {
         bail!("simit project config: [ci.nix_build].only requires the Nix runtime");
     }
+    options.validate_push_tags()?;
     for (name, number, min, max) in [
         ("timeout_minutes", options.timeout_minutes, 1, 360),
         ("max_parallel", options.max_parallel, 1, 256),
@@ -3519,16 +3581,19 @@ fn validate_nix_build_config(config: &ProjectConfig) -> Result<()> {
         }
     }
     if !options.capture_results
-        && (!options.post_build.is_empty() || options.artifact_retention_days.is_some())
+        && (!options.post_build.is_empty()
+            || !options.post_build_always.is_empty()
+            || options.artifact_retention_days.is_some())
     {
         bail!(
-            "simit project config: [ci.nix_build].post_build and artifact_retention_days require capture_results"
+            "simit project config: [ci.nix_build].post_build, post_build_always and artifact_retention_days require capture_results"
         );
     }
     for (name, values) in [
         ("artifact_paths", &options.artifact_paths),
         ("extra_setup", &options.extra_setup),
         ("post_build", &options.post_build),
+        ("post_build_always", &options.post_build_always),
     ] {
         validate_nonempty_strings(
             &format!("simit project config: [ci.nix_build].{name}"),
@@ -3588,6 +3653,8 @@ fn set_nix_build_table(table: &mut Table, options: &NixBuildConfig) {
     let mut build = Table::new();
     build.set_implicit(false);
     set_bool(&mut build, "only", options.only);
+    set_bool(&mut build, "separate_events", options.separate_events);
+    set_string_array(&mut build, "push_tags", &options.push_tags);
     set_bool(&mut build, "kvm", options.kvm);
     set_bool(&mut build, "capture_results", options.capture_results);
     for (name, number) in [
@@ -3604,6 +3671,7 @@ fn set_nix_build_table(table: &mut Table, options: &NixBuildConfig) {
     set_string_array(&mut build, "artifact_paths", &options.artifact_paths);
     set_string_array(&mut build, "extra_setup", &options.extra_setup);
     set_string_array(&mut build, "post_build", &options.post_build);
+    set_string_array(&mut build, "post_build_always", &options.post_build_always);
     set_string_map(&mut build, "extra_env", &options.extra_env);
     set_string_array(&mut build, "required_secrets", &options.required_secrets);
     set_string_array(&mut build, "required_env", &options.required_env);
@@ -3662,6 +3730,8 @@ fn set_ci_table(table: &mut Table, ci: &CiConfig) {
     set_required_gates_table(table, &ci.required_gates);
     set_string_array(table, "extra_setup", &ci.extra_setup);
     set_string_map(table, "extra_env", &ci.extra_env);
+    set_string_map(table, "workflow_templates", &ci.workflow_templates);
+    set_string_map(table, "workflow_variables", &ci.workflow_variables);
     set_string_map(table, "step_runners", &ci.step_runners);
     set_string_array(table, "required_secrets", &ci.required_secrets);
     set_string_array(table, "required_env", &ci.required_env);

@@ -43,6 +43,93 @@ are validated identifiers, with the legacy names still accepted. `ATTIC_SERVER`,
 Simit's ordinary `[prebuild.attic]` settings do not grant review-cache authority.
 Publication stays disabled until endpoint/key verification and policy review.
 
+### Compiler-cache admission
+
+The optional request field `"compiler_cache": "kvrocks-v1"` selects the typed
+compiler-cache contract. Omission preserves legacy request serialization and
+identity. This field is independent of the Attic `cache_profile` and does not
+select a disk fallback or accept a worker command.
+
+Admission requires a Linux flake or external-flake head request using
+`checks-rebuild-v1`. PR requests bind both `expected_head` and `expected_base`;
+revision requests use a full lowercase commit SHA equal to `expected_head`.
+Plans also bind the resolved target to that immutable revision. Darwin, Nixpkgs,
+merge-mode and mutable-revision requests cannot select this profile.
+
+The lifecycle's native-tool bootstrap derives `legacyPackages.<system>.kvrocks`
+only from the packaged engine manifest's direct controller Nixpkgs revision.
+It independently freezes the package version, native derivation and output,
+realizes that exact output with no remote builders or IFD, and retains its NAR
+and binary hashes. The requested platform must match both the worker architecture
+and native Nix system. The consumer flake, recipe and their cache-dependent Rust
+closures do not supply this transport tool.
+
+Worker preflight parses the actual runner and Nix build-group account records,
+rejects root/ambiguous identities, and refuses existing runtime state, including
+dangling symlinks. Socket metadata verification requires a non-symlink runtime
+directory owned by that runner/group with mode `0750`, and a Unix socket with
+the same ownership and mode `0660`. These observations preserve foreign state;
+they do not reserve the runtime path or prove service ownership, Unix-only
+listeners, sandbox admission, or compiler-cache operation.
+
+Execution additionally requires explicit operator worker allocation opt-in:
+`repo-review build --compiler-cache-opt-in kvrocks-v1`. The generated build job
+reads this value from `vars.REPO_REVIEW_COMPILER_CACHE`. An immutable cache request
+with an absent or different worker opt-in fails before execution; it never runs
+silently uncached. Enabling that variable and approving the actual hosted resource
+allocation are operator-owned rollout actions.
+
+The packaged helper exclusively allocates per-run state below `/var/lib`, a
+root-owned configuration directory below `/run`, and the canonical runtime
+directory. It starts one transient Kvrocks service under the observed worker UID
+and `nixbld` GID. The preset enforces 2 GiB memory, 200% CPU, 64 tasks, an 8,192
+descriptor limit, and a 4 GiB SST database limit through `max-db-size`. Explicit
+client/RocksDB file maxima, plus Kvrocks' 128 reserved descriptors, fit that hard
+descriptor limit. The configuration is root-owned and read-only to the worker.
+
+Readiness has a 30-second service-start budget and verifies the live systemd
+invocation, process credentials/executable, kernel cgroup limits, socket ownership
+and mode, process-owned Unix-only listeners, and an exact bounded RESP2 PONG.
+An independently managed root supervisor retains the allocation inodes for the
+whole build. Worker/control-pipe EOF or termination triggers a 30-second SIGTERM
+grace followed, if needed, by SIGKILL within the verified service's own control
+group. State removal requires that cgroup to be empty and the original directory,
+configuration and socket identities to remain owned. Foreign or replaced state
+is preserved. PID-1 supervision allows cleanup to finish after runner cancellation
+kills the worker process tree; a finite supervisor lifetime also bounds abandoned
+jobs.
+
+The host's complete identity/native-tool/allocation/startup sequence shares a
+240-second deadline. Individual external operations use their own smaller caps
+or the remaining shared budget. The worker allows that budget plus the launcher
+and frame handoff, rather than expiring during otherwise permitted host phases.
+Startup frames admit the full 16 MiB plan-file contract plus bounded native/
+worker receipts, with a 32 MiB frame ceiling and a five-second read deadline.
+The service's 61-minute lifetime exceeds the generated 60-minute build window,
+including readiness/shutdown allowance; its independent supervisor additionally
+retains the host-startup and cleanup budgets.
+
+Normal control-pipe EOF revalidates the admitted invocation as active and the
+owned socket identity before acknowledging stop. A service that exited between
+periodic polls remains eligible for verified cleanup, but cannot produce a
+successful cache-lifetime receipt.
+
+Before consumer realization, the engine freezes and rebuilds an independent
+ordinary-sandbox socket probe with the canonical socket mounted through
+`extra-sandbox-paths`. The effective plan and retained probe bytes bind this
+admission to the native tool, service/supervisor invocations and immutable run.
+Consumer package/check builds use the same mount, preserve frozen target selection,
+and still rebuild each requested check. A passing cache-enabled report requires
+both admission and verified cleanup receipts. The native tool and probe retain
+GC roots while the lifecycle is active.
+
+These transport receipts do not establish compiler-cache acceptance. Every
+consumer still needs its exact pinned wrapper/compiler to perform a first cache
+write and second hit inside an ordinary sandbox, with the expected versioned
+namespace, zero cache I/O errors and daemon cleanup. Generator qualification,
+operator allocation/opt-in, and each consumer's production/runtime qualification
+remain independent gates.
+
 ## Client
 
 Clients can have no Cargo project or flake. Configure an exact controller pin and
@@ -60,6 +147,67 @@ Get complete request JSON with `simit review example`; the abbreviated example
 above is explanatory and must be replaced. The generated reusable-workflow call
 pins a full SHA and forwards no secrets. Controller identity is resolved through
 GitHub OIDC, independently of the calling repository.
+
+## Dispatch an exact reviewed controller
+
+GitHub workflow dispatch accepts a branch or tag name rather than a raw commit.
+Supply both the reviewed full SHA and a named ref that resolves to it:
+
+```sh
+simit review dispatch request.json --controller your-owner/your-controller \
+  --revision 0123456789abcdef0123456789abcdef0123456789 \
+  --dispatch-ref reviewed-release
+```
+
+The CLI rejects missing, ambiguous, unsafe, and mismatched refs before submission.
+It sends the reviewed SHA as `controller_revision`; the workflow compares that
+precondition with its GitHub OIDC identity before any checkout. A ref moving after
+the preflight therefore fails instead of selecting a different controller. Keep
+the workflow registered on the controller's default branch and publish the named
+branch or tag through the controller's existing review process.
+
+Reusable callers may explicitly forward the optional report-only `GH_TOKEN`
+secret. Omission retains manual reporting; generated clients forward no secrets.
+The report credential is used only by the reporting job.
+
+## Explicit Nixpkgs additions and scoped broken warnings
+
+For the `nixpkgs` backend, `packages` and `checks` are optional dot-separated
+attribute paths. They are unioned with upstream changed-package discovery for
+each requested system, including when discovery returns no system entry. An
+explicit attribute that does not evaluate to a usable derivation fails selection;
+it cannot silently turn into a successful no-change result. Attributes in `checks`
+retain test identity through frozen selection, realization, and collection.
+
+The optional `nixpkgs_broken_warnings` array contains only explicitly requested
+top-level package attributes. For example, these request fields add a package and its
+packaging test while applying the warning only to that package:
+
+```json
+{
+  "backend": "nixpkgs",
+  "packages": ["vortex"],
+  "checks": ["vortex.tests.packaging"],
+  "nixpkgs_broken_warnings": ["vortex"]
+}
+```
+
+These are fields to insert into a complete v1 request. On the tested checkout,
+the adapter resolves the requested attribute's `lib.getName` for its named broken
+handler: `openssl_3` therefore uses `problems.handlers."openssl".broken = "warn"`.
+It evaluates each warned attribute subtree separately; an unrelated selected
+attribute with the same package name does not inherit that warning. Upstream
+base/head discovery is preserved, including additions absent from the base.
+Global broken-package permission remains disabled during final selection. Arbitrary Nix configuration
+or evaluation arguments are not accepted. The pinned evaluator's `Attr.broken`
+flag means path evaluation failed, with no usable derivation identity; it is not
+an independent copy of `meta.broken`. Such failed evaluations remain rejected
+even under a warning. A scoped warning must produce a usable evaluated derivation.
+The frozen report binds additions,
+scoped warnings, test identities, system, and exact head/base to the request.
+Omitting the new array preserves existing request serialization and digests.
+Deployment still requires a qualified immutable engine/controller pin and actual
+package/test/cache receipts on the consumer's exact candidate.
 
 ## Interfaces and trust boundaries
 

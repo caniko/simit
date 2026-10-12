@@ -99,14 +99,23 @@ drafting uses only component-owned paths since the latest reachable package tag.
 Changelog compare links use the same package namespace. Component release mutation
 requires a clean checkout.
 
-Set `[ci].publish_crates = true` to generate one independently tagged publication
-workflow per publishable Cargo member. Each `<package>/v<version>` release first
-qualifies the entire component graph on its declared native runners, verifies the
-signed tag against `keys/maintainers.gpg`, and checks its exact checkout and package
-version. It publishes only the tagged package, retains the package/archive checksum
-and registry propagation checks, and requires local dependencies to be published
-already. Qualification jobs have no registry credentials. Publication uses the
-repository's existing `CRATES_IO_API_TOKEN` secret.
+Set `[ci].publish_crates = true` to generate a paired source-build and trusted
+publication workflow for each publishable Cargo member. The credential-free
+`publish-crate-<package>.yaml` qualifies the entire component graph on its declared
+native runners before building the selected archive. It verifies the signed
+`<package>/v<version>` tag against the default-branch `keys/maintainers.gpg`, and
+checks its exact checkout and plain SemVer package version.
+
+The `trusted-publish-crate-<package>.yaml` companion runs from the independently
+enrolled default branch after successful source qualification. It rechecks the
+signature, source SHA, complete enrolled workflow and provider-bound archive,
+then publishes only the tagged package. Its enrolled tag filter binds that
+package namespace; bare or foreign-package tags cannot authorize publication.
+Package/archive checksum conflicts and bounded registry propagation checks are
+retained, and local dependencies must already be published. Registry credentials
+belong only to the protected `simit-crates-io` upload environment. Enroll the
+qualified engine and credential boundary as described in
+[Release Integrity](getting-started/release-integrity.md) before releasing.
 
 `simit release verify --component <id> --package <name>` checks the package's
 adjacent changelog and namespaced tag. `simit release sync-up` accepts the same

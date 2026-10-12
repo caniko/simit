@@ -12,6 +12,17 @@ pub struct Cli {
 }
 #[derive(Debug, Subcommand)]
 pub enum Cmd {
+    /// Authenticate sudo caller and launch the independent owned supervisor.
+    #[cfg(target_os = "linux")]
+    #[command(hide = true)]
+    KvrocksLaunch,
+    /// Privileged owned-cache supervisor; one bounded startup frame on stdin.
+    #[cfg(target_os = "linux")]
+    #[command(hide = true)]
+    KvrocksHost,
+    /// Bounded ordinary-sandbox Unix socket admission probe.
+    #[cfg(target_os = "linux")]
+    KvrocksProbe,
     /// Report the immutable engine identity supplied by the pinned Nix package.
     EngineInfo,
     VerifyEngine {
@@ -49,6 +60,9 @@ pub enum Cmd {
         controller: String,
         #[arg(long)]
         revision: String,
+        /// Branch or tag name resolving to the reviewed controller revision.
+        #[arg(long)]
+        dispatch_ref: String,
     },
     Status {
         #[arg(long)]
@@ -81,6 +95,9 @@ pub enum Cmd {
         system: String,
         #[arg(long)]
         output: PathBuf,
+        /// Worker allocation opt-in, separate from the immutable request profile.
+        #[arg(long)]
+        compiler_cache_opt_in: Option<String>,
     },
     Collect {
         #[arg(long)]
@@ -171,6 +188,12 @@ fn request(path: &str) -> Result<Request> {
 }
 pub fn execute(command: Cmd) -> Result<(Value, i32)> {
     let value = match command {
+        #[cfg(target_os = "linux")]
+        Cmd::KvrocksLaunch => super::kvrocks_host::launch()?,
+        #[cfg(target_os = "linux")]
+        Cmd::KvrocksHost => super::kvrocks_host::host()?,
+        #[cfg(target_os = "linux")]
+        Cmd::KvrocksProbe => super::kvrocks_probe::sandbox()?,
         Cmd::EngineInfo => serde_json::to_value(super::engine::manifest()?)?,
         Cmd::VerifyEngine { root } => {
             let manifest = super::engine::manifest()?;
@@ -215,7 +238,8 @@ pub fn execute(command: Cmd) -> Result<(Value, i32)> {
             request: p,
             controller,
             revision,
-        } => service::dispatch(&request(&p)?, &controller, &revision)?,
+            dispatch_ref,
+        } => service::dispatch(&request(&p)?, &controller, &revision, &dispatch_ref)?,
         Cmd::Status {
             controller,
             run,
@@ -236,8 +260,14 @@ pub fn execute(command: Cmd) -> Result<(Value, i32)> {
             plan,
             system,
             output,
+            compiler_cache_opt_in,
         } => {
-            let r = backend::build(&read_json(&plan)?, &system, &output)?;
+            let r = backend::build_with_cache_opt_in(
+                &read_json(&plan)?,
+                &system,
+                &output,
+                compiler_cache_opt_in.as_deref(),
+            )?;
             let code = if r.successful() {
                 0
             } else if r.build == Outcome::Unsupported {

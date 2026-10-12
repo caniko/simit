@@ -158,7 +158,9 @@ pub(crate) fn files(root: &Path, config: &ProjectConfig) -> Result<Vec<Generated
                 publish_crates: true,
                 ..Default::default()
             };
-            let mut file = crate::render::ci::publish_independent_file(package, &runner, &options)?;
+            let mut publication =
+                crate::render::ci::publish_independent_files(package, &runner, &options)?;
+            let file = &mut publication[0];
             let mut release: Value = serde_yaml::from_str(&file.content)?;
             release["permissions"] = json!({"contents": "read"});
             // A release always qualifies the entire graph on its native runners,
@@ -173,12 +175,23 @@ pub(crate) fn files(root: &Path, config: &ProjectConfig) -> Result<Vec<Generated
                         .context("qualification jobs must be a mapping")?
                         .clone(),
                 );
-            release["jobs"]["validate"]["needs"] = json!(["qualified"]);
+            release["jobs"]["build"]["needs"] = json!(["qualified"]);
             file.content = format!(
                 "{GENERATED_WORKFLOW_MARKER}\n{}",
                 serde_yaml::to_string(&release)?
             );
-            files.push(file);
+            // Native gates remain on their declared runners. Validate their
+            // candidate bindings without rerunning the graph on the publisher.
+            let candidate_policy = crate::render::ci::CiOptions {
+                required_gates: graph
+                    .components
+                    .values()
+                    .flat_map(|component| component.checks.clone())
+                    .collect(),
+                ..options.clone()
+            };
+            crate::render::ci::validate_credential_free_source(&file.content, &candidate_policy)?;
+            files.extend(publication);
         }
     }
     if config.ci.publish_crates || has_native {

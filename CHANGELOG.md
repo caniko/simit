@@ -27,16 +27,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Independent signed-tag Python/npm publication with complete native component
   qualification, source-bound artifact receipts, exact registry checksum conflict
   detection, private-package exclusion and bounded propagation verification.
-
-- Project-owned Rust CI commands through `[ci].check_command`, optional
-  `nix_flake_check`, and opt-in Nix-runtime Cargo caching for Actions workflows.
-- Scoped GitHub Nix build-matrix options under `[ci.nix_build]`: exact-only
-  flake qualification, private-input environment/preflight and setup, KVM,
-  bounded realization, and retained source/output metadata, build diagnostics
-  and project-exported receipts.
+- Opt-in `[ci.nix_build].push_tags` patterns to retain tag-push qualification
+  alongside branch and pull-request gates, with ordered exclusions and stable
+  configuration regeneration. Reject exclusion-only filters and keep tag refs
+  separate from same-named branch/PR cancellation groups.
 
 ### Fixed
 
+- Keep independent Cargo package tags, full native component qualification and
+  plain archive versions when using the credential-free source/trusted-publisher
+  boundary. Enrolled workflows bind publication to exactly one package namespace.
 - Generate native Rust, cross Rust and Python flakes against one qualified Harbor
   monorepo revision and its namespaced APIs. Keep MSRV toolchain manifests in
   tracked source, preserve existing Rust library namespaces when patching hooks,
@@ -54,8 +54,84 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Resolve public GitHub and Codeberg SSH inputs over HTTPS before monorepo
   qualification, including the full native graph used for package publication.
 
+- Use immutable Node 24 action revisions on recognized GitHub-hosted runners
+  and credential-free release workers. Preserve the Node 20 action baseline
+  for private runner labels and Forgejo, together with signed-tag admission,
+  independent trust roots, and archive custody verification.
+
+## [0.20.0] - 2026-10-11
+
+### Security
+
+- Separate signed-tag archive builders from default-branch, environment-only
+  crates.io upload workers. Bind admission to the independently qualified
+  publisher revision, enrollment, signer, tag, source, run and attempt; rebuild
+  and verify archive custody on fresh hosted workers before credentials enter.
+- Reconstruct archives from absolute paths and private Cargo state, reconcile
+  uncertain uploads by exact registry checksum, and require frozen dependency
+  resolution before dependent publication. Reject unsafe environment names in
+  configuration and direct renderer calls.
+- Require default-branch-restricted environment-only policy App credentials,
+  reject unprovisionable GitHub secret names, and allow explicitly credentialed
+  external reusable-controller runs to publish their exact-head report.
+
+### Added
+
+- Opt-in `[ci.nix_build].separate_events` for independent push and pull-request
+  qualification without cross-event cancellation; ordinary coalescing remains
+  the default.
+- Project-owned Actions workflow templates and literal variables, sharing CI
+  generation, configuration persistence, drift checks, and registry ownership.
+- Typed explicit Nixpkgs package/test additions unioned with upstream discovery,
+  including empty system mappings, with request-bound package-scoped broken
+  warnings and frozen selection/test identity validation.
+
+- Project-owned Rust CI commands through `[ci].check_command`, optional
+  `nix_flake_check`, and opt-in Nix-runtime Cargo caching for Actions workflows.
+- Scoped GitHub Nix build-matrix options under `[ci.nix_build]`: exact-only
+  flake qualification, private-input environment/preflight and setup, KVM,
+  bounded realization, and retained source/output metadata, build diagnostics
+  and project-exported receipts.
+
+### Fixed
+
 - Include Nix builder-phase output in captured build artifacts so hosted
   cancellations retain build diagnostics alongside client messages and results.
+- Isolate multi-system Nix flake-check concurrency by source repository so forks
+  with matching branch names cannot cancel each other's qualification, while
+  retaining same-repository push/PR coalescing.
+- Exclude tag pushes from installable qualification matrices, retain release
+  workflow triggers, and use current pinned GitHub checkout and evidence-upload
+  actions in focused qualification.
+- Use the branch filter alone for installable qualification so consumers enforcing
+  branch-only CI can validate it without accepting redundant tag filters.
+- Reserve release-owned paths from project templates and keep template contents
+  out of built-in CI inference; qualify durable-branch updates and reject
+  committed generation drift after retaining its evidence.
+- Reserve every release-registry filename, reject generated template sources,
+  include untracked outputs in production parity, and isolate fork qualification
+  concurrency by source repository as well as branch.
+- Reject opposite-platform generated template sources, enforce effective CLI
+  backend constraints in check and write modes, and report missing built-ins as
+  ordinary drift even when only project template outputs remain.
+- Identify template outputs by configured path even after ownership-header edits,
+  and reject case-insensitive collisions with built-ins, releases, or other templates.
+- Require standalone ownership headers in the workflow preamble when retiring
+  generated files; preserve hand-written workflows quoting marker strings in YAML
+  bodies while recognizing moved headers, document separators, and Jsonnet comments.
+- Preserve template retirement through commented YAML document starts and YAML/TAG
+  directives; retain an executable project-audit repair command when only templates
+  remain, without inferring builtin policy from their bodies.
+- Reject control characters, YAML-forbidden BMP noncharacters and Unicode line
+  separators in template source/output paths before writes so ownership comments
+  cannot introduce malformed generated workflows.
+- Keep the default development environment usable when a worktree lacks the
+  optional sibling language-server checkout.
+- Wait for exact crates.io dependency resolution through Cargo after each
+  coordinated workspace publication, including checksum-based resumes, before
+  starting dependent jobs. Fetch and verify lockfile evidence for library and
+  binary-only crates, with bounded retries and individual calls; crates.io web
+  API readiness alone no longer advances the publication plan.
 - Give native GitHub Nix flake matrices read-only permissions, coalesced push/PR
   concurrency, bounded parallelism and timeouts, and explicit build-resource limits.
 - Resolve and check out fork PR heads from their source repository while keeping
@@ -69,6 +145,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   generated-workflow checks and registry audits aligned.
 - Coalesce configured hosted Nix qualification runs for branch pushes and pull
   requests so the same source does not consume two hosted build matrices.
+- Isolate scoped Nix qualification concurrency by source repository, preserving
+  same-repository push/PR branch coalescing across unrelated fork branch names.
 - Reject a coordinated publication when the refetched signed tag resolves to a
   different commit than the immutable workflow event SHA, keeping validation
   and all later release jobs bound to the same source tree.
@@ -76,6 +154,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   coordinated publication, because Cargo resolves them while packaging the
   lockfile. Path-only unpublished test helpers remain excluded from the plan.
 - Read explicitly dynamic Python versions, scripts, and optional extras from Poetry metadata when a project also declares PEP 621 metadata. Preserve static PEP 621 fields and uv dependency groups, use the same version provider for PyPI release-tag validation, and report unsupported dynamic version providers clearly.
+- Bind signed-tag publication to independently fetched default-branch keys and
+  the exact checkout before evaluating package metadata, including per-member
+  publishers; explicitly pin every coordinated release job to the immutable
+  event SHA and regenerate this repository's publisher from that renderer.
+- Give per-member GitHub/Forgejo jobs distinct package-qualified check names,
+  including split checks and integration gates; restrict GitHub crates.io
+  publishers to signed semver tag pushes, with retries on the original run.
+- Validate signed event-bound tags before VS Code credentials, reusable release
+  prebuilds and Windows builds/publication; keep all dependent jobs on the same
+  immutable event checkout and document retrying the original tag-push run.
+- Execute a declared flake formatter's exported executable, using `--ci` for
+  treefmt and no arguments for custom formatters; reject repository mutations
+  and fail on broken formatter exports.
+- Preserve formatter shell variables and Nix interpolation through Crow's
+  literal-dollar preprocessing in YAML and Jsonnet workflows.
+- Authenticate release verification fetches explicitly without persisting checkout
+  credentials; cover private fetches and shallow reusable prebuild tag retrieval.
+- Dispatch reviews through an explicit branch or tag resolving to the reviewed
+  controller SHA, reject ref movement before checkout, and declare the optional
+  reusable-workflow report credential.
+- Honor cancellation when collecting Nix diagnostics while retaining collectors
+  after build or setup failures.
 
 ## [0.19.0] - 2026-09-30
 
@@ -542,7 +642,8 @@ ci`, including the `~/.cargo/bin` key, rust-cache settings, and why Nix
 
 - Prepare the first public crates.io release.
 
-[Unreleased]: https://github.com/caniko/simit/compare/0.19.0...HEAD
+[Unreleased]: https://github.com/caniko/simit/compare/0.20.0...HEAD
+[0.20.0]: https://github.com/caniko/simit/compare/0.19.0...0.20.0
 [0.19.0]: https://github.com/caniko/simit/compare/0.18.1...0.19.0
 [0.18.1]: https://github.com/caniko/simit/compare/0.18.0...0.18.1
 [0.18.0]: https://github.com/caniko/simit/compare/0.17.15...0.18.0

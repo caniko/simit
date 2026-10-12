@@ -65,11 +65,160 @@ fn nix_format_jobs_are_uncached_across_providers_and_job_layouts() {
         );
         let workflow = read(&temp.path().join(path));
         assert_yaml_parses(&workflow);
+        // Crow escapes shell dollars for its own interpolation pass.
+        let shell_workflow = workflow.replace("$$", "$");
         assert!(
-            workflow.contains("bin/treefmt\" --ci"),
+            shell_workflow.contains("formatter_program\" = treefmt")
+                && shell_workflow.contains("exec \"$formatter_exe\" --ci"),
             "{platform}/{provider}: {workflow}"
         );
         assert!(!workflow.contains("treefmt --fail-on-change"));
+    }
+}
+
+#[test]
+fn private_github_runner_generation_preserves_the_compatible_checkout_baseline() {
+    let temp = init_package(true);
+    fs::write(
+        temp.path().join("simit.toml"),
+        "[ci]\nplatform = 'github'\nprovider = 'actions'\nruntime = 'nix'\nrunner = 'private-legacy-linux'\nnix_builds = ['.#default']\n[ci.nix_build]\ncapture_results = true\n",
+    )
+    .unwrap();
+    let result = simit()
+        .current_dir(temp.path())
+        .args(["init", "ci", "--publish-crates"])
+        .output()
+        .unwrap();
+    assert!(result.status.success(), "{result:?}");
+    for path in [
+        ".github/workflows/ci.yaml",
+        ".github/workflows/publish-crate.yaml",
+        ".github/workflows/trusted-publish-crate.yaml",
+        ".github/workflows/nix-builds.yaml",
+    ] {
+        let workflow = read(&temp.path().join(path));
+        assert_yaml_parses(&workflow);
+        assert!(
+            workflow.contains(if path.contains("publish-crate") {
+                // Candidate builds must not inherit credentials mounted on a
+                // private CI/release runner, including with the Nix runtime.
+                "runs-on: ubuntu-24.04"
+            } else {
+                "runs-on: private-legacy-linux"
+            }),
+            "{path}: {workflow}"
+        );
+        // Private labels do not attest the Node24 runner minimum. Strict
+        // publication jobs use their own known hosted capacity.
+        assert!(
+            workflow.contains(&simit::render::ci::github_action_ref(
+                "actions/checkout",
+                if path.contains("publish-crate") {
+                    "v7.0.1"
+                } else {
+                    "v4.3.1"
+                }
+            )),
+            "{path}: {workflow}"
+        );
+        assert!(
+            path.contains("publish-crate")
+                || !workflow.contains("actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"),
+            "{path}: {workflow}"
+        );
+        if path.ends_with("nix-builds.yaml") {
+            assert!(workflow.contains("Upload Nix build evidence"));
+            assert!(
+                workflow.contains(&simit::render::ci::github_action_ref(
+                    "actions/upload-artifact",
+                    "v4.6.2"
+                )),
+                "{path}: {workflow}"
+            );
+            assert!(
+                !workflow.contains(&simit::render::ci::github_action_ref(
+                    "actions/upload-artifact",
+                    "v7.0.1"
+                )),
+                "{path}: {workflow}"
+            );
+        }
+    }
+    assert!(
+        simit()
+            .current_dir(temp.path())
+            .args(["init", "ci", "--publish-crates", "--check", "--diff"])
+            .status()
+            .unwrap()
+            .success()
+    );
+}
+
+#[test]
+fn native_runner_matrices_keep_unknown_workers_on_compatible_actions() {
+    for (arm_runner, checkout, upload) in [
+        ("ubuntu-24.04-arm", "v7.0.1", "v7.0.2"),
+        ("private-arm-worker", "v4.3.1", "v4.6.2"),
+    ] {
+        let temp = init_flake_only();
+        fs::write(
+            temp.path().join("simit.toml"),
+            format!(
+                r#"[ci]
+platform = "github"
+provider = "actions"
+runtime = "nix"
+nix_builds = [".#default"]
+[ci.nix_system_runners]
+x86_64-linux = "ubuntu-24.04"
+aarch64-linux = "{arm_runner}"
+[prebuild]
+release_archives = true
+[release.artifacts]
+prebuild_binaries = true
+"#
+            ),
+        )
+        .unwrap();
+        let output = simit()
+            .current_dir(temp.path())
+            .args(["init", "ci"])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        for path in [
+            ".github/workflows/ci.yaml",
+            ".github/workflows/prebuild.yaml",
+        ] {
+            let workflow = read(&temp.path().join(path));
+            assert_yaml_parses(&workflow);
+            assert!(
+                workflow.contains(&simit::render::ci::github_action_ref(
+                    "actions/checkout",
+                    checkout
+                )),
+                "{path}: {workflow}"
+            );
+            if path.ends_with("prebuild.yaml") {
+                assert!(
+                    workflow.contains(&simit::render::ci::github_action_ref(
+                        "actions/upload-artifact",
+                        upload
+                    )),
+                    "{path}: {workflow}"
+                );
+                assert!(workflow.contains("ref: ${{ github.sha }}"));
+                assert!(workflow.contains("persist-credentials: false"));
+            }
+        }
+        assert!(
+            simit()
+                .current_dir(temp.path())
+                .args(["init", "ci", "--check", "--diff"])
+                .status()
+                .unwrap()
+                .success()
+        );
     }
 }
 
@@ -666,7 +815,8 @@ fn generates_forgejo_nix_workflows() {
     assert!(publish.contains("CRATES_IO_API_TOKEN is required"));
     assert!(publish.contains("export CARGO_REGISTRY_TOKEN="));
     assert!(publish.contains("https://crates.io/api/v1/crates/${crate_name}/${version}"));
-    assert!(publish.contains("already published on crates.io; skipping publish"));
+    assert!(publish.contains("checksum matches; resuming (already published)"));
+    assert!(publish.contains("invalid, mismatched or yanked registry version"));
     assert!(!publish.contains("cargo login"));
     assert_maintainer_key_written(temp.path());
 }
@@ -745,9 +895,57 @@ runtime = "nix"
     assert_yaml_parses(&workflow);
     let parsed: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
     assert_eq!(parsed["permissions"]["contents"], "read");
+    let group = parsed["concurrency"]["group"].as_str().unwrap();
+    let resolve = |head_repository: Option<&str>,
+                   head_branch: Option<&str>,
+                   repository: &str,
+                   branch: &str| {
+        let resolved = group
+            .replace("${{ github.workflow }}", "Nix flake check")
+            .replace(
+                "${{ github.event.pull_request.head.repo.full_name || github.repository }}",
+                head_repository.unwrap_or(repository),
+            )
+            .replace(
+                "${{ github.event.pull_request.head.ref || github.ref_name }}",
+                head_branch.unwrap_or(branch),
+            );
+        assert!(!resolved.contains("${{"), "unrecognized group: {resolved}");
+        resolved
+    };
+    let push = resolve(None, None, "owner/project", "feature");
+    let same_repository_pr = resolve(
+        Some("owner/project"),
+        Some("feature"),
+        "owner/project",
+        "1/merge",
+    );
+    let first_fork = resolve(
+        Some("alice/project"),
+        Some("feature"),
+        "owner/project",
+        "2/merge",
+    );
+    let second_fork = resolve(
+        Some("bob/project"),
+        Some("feature"),
+        "owner/project",
+        "3/merge",
+    );
+    assert_ne!(
+        first_fork, second_fork,
+        "unrelated forks must not cancel each other"
+    );
+    assert_ne!(
+        push, first_fork,
+        "fork PRs must not cancel repository pushes"
+    );
+    assert_eq!(push, same_repository_pr);
+    assert_ne!(push, resolve(None, None, "owner/project", "other-feature"));
+    assert_eq!(parsed["concurrency"]["cancel-in-progress"], true);
     assert_eq!(
         parsed["concurrency"]["group"],
-        "${{ github.workflow }}-${{ github.event.pull_request.head.ref || github.ref_name }}"
+        "${{ github.workflow }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event.pull_request.head.ref || github.ref_name }}"
     );
     assert_eq!(parsed["jobs"]["flake-check"]["strategy"]["max-parallel"], 2);
     assert_eq!(parsed["jobs"]["flake-check"]["timeout-minutes"], 60);
@@ -779,6 +977,22 @@ runtime = "nix"
         .status()
         .unwrap();
     assert!(check.success());
+    assert!(
+        simit()
+            .current_dir(temp.path())
+            .args(["init", "ci", "--platform", "github", "--runtime", "nix"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert_eq!(
+        workflow,
+        read(&temp.path().join(".github/workflows/ci.yaml"))
+    );
+    assert_eq!(
+        simit::registry::audit_ci(temp.path()).unwrap().status,
+        simit::registry::FeatureStatus::Managed
+    );
 }
 
 #[test]
@@ -839,6 +1053,20 @@ token_secret = "ATTIC_TOKEN"
 
     let workflow = read(&temp.path().join(".github/workflows/prebuild.yaml"));
     assert_yaml_parses(&workflow);
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
+    // A push and its PR must each retain their required prebuild check.
+    assert_eq!(
+        yaml["concurrency"]["group"].as_str(),
+        Some(
+            "${{ github.workflow_ref }}-${{ github.event_name }}-${{ github.head_ref || github.ref_name }}-prebuild"
+        )
+    );
+    assert_eq!(
+        yaml["concurrency"]["cancel-in-progress"].as_str(),
+        Some(
+            "${{ !inputs.release && (github.event_name == 'push' || github.event_name == 'pull_request') }}"
+        )
+    );
     assert!(workflow.contains("workflow_call:\n    inputs:\n      release:"));
     assert!(workflow.contains("secrets:\n      attic_token:\n        required: true"));
     assert!(workflow.contains("runs-on: ${{ matrix.runner }}"));
@@ -1452,6 +1680,15 @@ fn github_nix_can_generate_github_pages_workflow() {
 
     let pages = read(&temp.path().join(".github/workflows/pages.yaml"));
     assert_yaml_parses(&pages);
+    let value: serde_yaml::Value = serde_yaml::from_str(&pages).unwrap();
+    assert_eq!(value["concurrency"]["group"], "github-pages");
+    assert_eq!(value["concurrency"]["cancel-in-progress"], false);
+    assert!(value["on"]["workflow_dispatch"].is_null());
+    assert_eq!(value["on"]["push"]["branches"][0], "trunk");
+    let ci: serde_yaml::Value =
+        serde_yaml::from_str(&read(&temp.path().join(".github/workflows/ci.yaml"))).unwrap();
+    assert_ne!(ci["concurrency"]["group"], value["concurrency"]["group"]);
+    assert_eq!(ci["concurrency"]["cancel-in-progress"], true);
     assert!(pages.contains("permissions:\n  contents: read\n  pages: write\n  id-token: write"));
     assert!(pages.contains("uses: actions/checkout@"));
     assert!(pages.contains("uses: actions/configure-pages@"));
@@ -1715,6 +1952,24 @@ prepublish_commands = ["nix flake check --no-build"]
     assert_yaml_parses(&workflow);
     assert!(workflow.contains("# Generated by simit."));
     assert!(workflow.contains("name: Publish VS Code Extension"));
+    let parsed: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
+    let steps = parsed["jobs"]["publish"]["steps"].as_sequence().unwrap();
+    let verification = steps
+        .iter()
+        .position(|step| {
+            step["name"].as_str() == Some("Validate release tag and extension version")
+        })
+        .unwrap();
+    let credentials = steps
+        .iter()
+        .position(|step| step["name"].as_str() == Some("Validate publish credentials"))
+        .unwrap();
+    assert!(verification < credentials);
+    assert!(steps[..=verification].iter().all(|step| {
+        !serde_yaml::to_string(&step["env"])
+            .unwrap()
+            .contains("secrets.")
+    }));
     assert!(workflow.contains("tags: [\"[0-9]*.[0-9]*.[0-9]*\"]"));
     assert!(workflow.contains("runs-on: atlas-nix-trusted"));
     assert!(workflow.contains("CODEBERG_TOKEN: ${{ secrets.codeberg_token }}"));
@@ -1780,8 +2035,10 @@ prepublish_commands = ["nix flake check --no-build"]
         "nix develop -c npx --yes ovsx create-namespace \"$OVSX_NAMESPACE\" --pat \"$PUBLISH_PAT\" || true"
     ));
     assert!(workflow.contains(
-        "nix develop -c npx --yes ovsx publish release/*.vsix --pat \"$PUBLISH_PAT\" --skip-duplicate"
+        "nix develop -c npx --yes ovsx publish --packagePath release/*.vsix --pat \"$PUBLISH_PAT\" --skip-duplicate"
     ));
+    #[cfg(unix)]
+    verify_editor_publish_package_arguments(temp.path(), &parsed);
 
     let check = simit_with_user_config(temp.path())
         .current_dir(temp.path())
@@ -1872,6 +2129,155 @@ prepublish_commands = ["nix flake check --no-build"]
     assert!(!workflow.contains("pkl-lsp-jetbrains"));
     assert!(workflow.contains("upload-artifact"));
     assert!(!workflow.contains("secrets.JETBRAINS_MARKETPLACE_TOKEN"));
+    #[cfg(unix)]
+    verify_jetbrains_signed_archive_selection(temp.path(), &yaml);
+}
+
+#[cfg(unix)]
+fn verify_editor_publish_package_arguments(root: &Path, yaml: &serde_yaml::Value) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let bin = root.join("publisher-bin");
+    fs::create_dir_all(&bin).unwrap();
+    let nix = bin.join("nix");
+    fs::write(
+        &nix,
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$PUBLISH_ARGUMENTS\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&nix, fs::Permissions::from_mode(0o755)).unwrap();
+    let release = root.join("release");
+    fs::create_dir(&release).unwrap();
+    let names = [
+        "universal",
+        "linux-x64",
+        "linux-arm64",
+        "darwin-x64",
+        "darwin-arm64",
+        "win32-x64",
+    ];
+    for name in names {
+        fs::write(release.join(format!("plugin-{name}.vsix")), "fixture").unwrap();
+    }
+    let path = std::env::join_paths(
+        std::iter::once(bin).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+    )
+    .unwrap();
+    for publisher in ["@vscode/vsce", "ovsx"] {
+        let script = yaml["jobs"]["publish"]["steps"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .filter_map(|step| step["run"].as_str())
+            .flat_map(str::lines)
+            .find(|line| line.contains(&format!("{publisher} publish ")))
+            .unwrap();
+        let arguments = root.join("publisher-arguments");
+        let result = Command::new("bash")
+            .args(["-c", script])
+            .current_dir(root)
+            .env("PATH", &path)
+            .env("PUBLISH_PAT", "fixture-not-a-token")
+            .env("PUBLISH_ARGUMENTS", &arguments)
+            .output()
+            .unwrap();
+        assert!(result.status.success(), "{publisher}: {result:?}");
+        let arguments = fs::read_to_string(arguments).unwrap();
+        let args = arguments.lines().collect::<Vec<_>>();
+        let start = args.iter().position(|arg| *arg == "--packagePath").unwrap() + 1;
+        let end = args.iter().position(|arg| *arg == "--pat").unwrap();
+        assert_eq!(end - start, 6, "{publisher}: {args:?}");
+        for name in names {
+            assert!(args[start..end].contains(&format!("release/plugin-{name}.vsix").as_str()));
+        }
+    }
+}
+
+#[cfg(unix)]
+fn verify_jetbrains_signed_archive_selection(root: &Path, yaml: &serde_yaml::Value) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let script = yaml["jobs"]["publish"]["steps"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .find(|step| step["name"] == "Sign plugin")
+        .unwrap()["run"]
+        .as_str()
+        .unwrap()
+        .replace(
+            "${{ github.event.inputs.version || github.ref_name }}",
+            "1.0.0",
+        );
+    assert!(script.contains("verify.inputArchiveFile.set(sign.signedArchiveFile)"));
+    assert!(script.contains("sign.signedArchiveFile.get().asFile"));
+    let bin = root.join("signer-bin");
+    fs::create_dir_all(&bin).unwrap();
+    let nix = bin.join("nix");
+    fs::write(&nix, r#"#!/bin/sh
+set -eu
+case "$*" in
+  *'--init-script '*) ;;
+  *) exit 1;;
+esac
+case "$SIGNED_ARCHIVE_CASE" in
+  default) signed="$PWD/build/distributions/pkl-lsp-1.0.0-signed.zip";;
+  override) signed="$PWD/custom outputs/verified.zip";;
+  missing) signed="$PWD/missing.zip";;
+  ambiguous) printf 'first.zip\nsecond.zip\n' > "$RUNNER_TEMP/jetbrains-plugin-signed-path"; exit 0;;
+  unsigned) signed="$PWD/build/distributions/pkl-lsp-1.0.0.zip";;
+esac
+if [ "$SIGNED_ARCHIVE_CASE" != missing ] && [ "$SIGNED_ARCHIVE_CASE" != unsigned ]; then
+  mkdir -p "$(dirname "$signed")"
+  printf 'verified signed fixture' > "$signed"
+fi
+printf '%s\n' "$signed" > "$RUNNER_TEMP/jetbrains-plugin-signed-path"
+"#).unwrap();
+    fs::set_permissions(&nix, fs::Permissions::from_mode(0o755)).unwrap();
+    let path = std::env::join_paths(
+        std::iter::once(bin).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+    )
+    .unwrap();
+    for (case, accepted) in [
+        ("default", true),
+        ("override", true),
+        ("missing", false),
+        ("ambiguous", false),
+        ("unsigned", false),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("jetbrains-plugin-unsigned.zip"),
+            "unsigned fixture",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("jetbrains-plugin-archive-name"),
+            "pkl-lsp-1.0.0.zip\n",
+        )
+        .unwrap();
+        fs::write(temp.path().join("private-key-password"), "fixture-password").unwrap();
+        let plugin = root.join(format!("signing-{case}"));
+        fs::create_dir_all(&plugin).unwrap();
+        let result = Command::new("bash")
+            .args(["-c", &script])
+            .current_dir(root)
+            .env("PATH", &path)
+            .env("PLUGIN_DIR", plugin)
+            .env("RUNNER_TEMP", temp.path())
+            .env("SIGNED_ARCHIVE_CASE", case)
+            .output()
+            .unwrap();
+        assert_eq!(result.status.success(), accepted, "{case}: {result:?}");
+        let output = temp.path().join("jetbrains-plugin-signed.zip");
+        assert_eq!(output.exists(), accepted);
+        if accepted {
+            assert_eq!(
+                fs::read_to_string(output).unwrap(),
+                "verified signed fixture"
+            );
+        }
+    }
 }
 
 #[test]
@@ -2022,9 +2428,10 @@ fn github_nix_with_om_ci_replace_keeps_install_nix_action() {
     assert!(status.success());
 
     let ci = read(&temp.path().join(".github/workflows/ci.yaml"));
-    assert!(ci.contains(
-        "uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31"
-    ));
+    assert!(ci.contains(&format!(
+        "uses: {}",
+        simit::render::ci::github_action_ref("cachix/install-nix-action", "v31.11.1")
+    )));
     assert!(ci.contains("OMNIX_REF:"));
     assert!(ci.contains("nix run \"$OMNIX_REF\" -- ci run"));
     assert!(!ci.contains("run: nix flake check"));
@@ -2221,9 +2628,8 @@ fn generates_github_plain_cargo_workflows() {
     let publish = read(&temp.path().join(".github/workflows/publish-crate.yaml"));
     assert!(publish.contains("group: ${{ github.workflow_ref }}-${{ github.ref }}"));
     assert!(publish.contains("cancel-in-progress: false"));
-    assert!(
-        publish.contains("on:\n  push:\n    tags:\n      - \"[0-9]*\"\n  workflow_dispatch:\n")
-    );
+    assert!(publish.contains("on:\n  push:\n    tags:\n      - \"[0-9]*\"\n"));
+    assert!(!publish.contains("workflow_dispatch"));
     assert!(
         publish.contains("uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0")
     );
@@ -2246,8 +2652,18 @@ fn generates_github_plain_cargo_workflows() {
     assert!(
         publish.contains(r#"cargo pkgid -p demo | awk -F'[#@]' 'NF > 1 {print $NF}' | tail -n 1"#)
     );
-    assert!(publish.contains("export CARGO_REGISTRY_TOKEN="));
-    assert!(publish.contains("already published on crates.io; skipping publish"));
+    assert!(!publish.contains("CARGO_REGISTRY_TOKEN"));
+    assert!(!publish.contains("CRATES_IO_API_TOKEN"));
+    let trusted = read(
+        &temp
+            .path()
+            .join(".github/workflows/trusted-publish-crate.yaml"),
+    );
+    assert!(trusted.contains("workflow_run:"));
+    assert!(trusted.contains("--publisher-stage publish"));
+    assert!(trusted.contains(
+        "already-published crates with matching checksums exit 0 after exact registry resolution"
+    ));
     assert!(!publish.contains("cargo login"));
     // Regression: the publish workflow must not infer the release version from
     // the first package in workspace-wide cargo metadata.
@@ -3085,9 +3501,10 @@ fn github_workspace_workflows_have_path_scoped_concurrency() {
                 .join(format!(".github/workflows/ci-{member}.yaml")),
         );
         let yaml: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
-        assert_eq!(yaml["name"].as_str(), Some("CI"));
+        let expected_name = format!("CI ({member})");
+        assert_eq!(yaml["name"].as_str(), Some(expected_name.as_str()));
         let group = yaml["concurrency"]["group"].as_str().unwrap();
-        // Display names collide across member workflows; the path must key cancellation.
+        // Workflow identity must still isolate source paths and event types.
         assert!(group.contains("${{ github.workflow_ref }}"), "{group}");
         assert!(group.contains("${{ github.event_name }}"), "{group}");
         assert!(
@@ -4309,7 +4726,36 @@ fn github_chocolatey_and_scoop_share_windows_artifacts() {
     );
     assert!(workflow.contains("name: Publish Chocolatey package"));
     assert!(workflow.contains("name: Publish Scoop bucket"));
-    assert!(workflow.contains("needs: build-windows"));
+    assert!(workflow.contains("needs: [validate, build-windows]"));
+    let parsed: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
+    for name in ["build-linux", "build-windows"] {
+        assert_eq!(parsed["jobs"][name]["needs"].as_str(), Some("validate"));
+    }
+    for name in [
+        "validate",
+        "build-linux",
+        "build-windows",
+        "publish-windows-packages",
+    ] {
+        let job = &parsed["jobs"][name];
+        assert!(job["if"].is_null(), "validation failure must skip {name}");
+        let checkout = job["steps"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .find(|step| step["name"].as_str() == Some("Checkout"))
+            .unwrap();
+        assert_eq!(checkout["with"]["ref"].as_str(), Some("${{ github.sha }}"));
+        assert_eq!(
+            checkout["with"]["persist-credentials"].as_bool(),
+            Some(false)
+        );
+    }
+    assert!(
+        serde_yaml::to_string(&parsed["jobs"]["validate"])
+            .unwrap()
+            .contains("Signed tag commit does not match the checkout")
+    );
     assert!(workflow.contains("pattern: windows-*"));
 
     let first = workflow;

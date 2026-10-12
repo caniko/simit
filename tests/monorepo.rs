@@ -684,6 +684,11 @@ fn component_release_mutates_only_its_package_and_adjacent_changelog() {
     git(&["init", "-q"]);
     git(&["config", "user.name", "Simit disposable fixture"]);
     git(&["config", "user.email", "fixture@example.invalid"]);
+    // The fixture owns its hook configuration for both the seed commit and
+    // the release command's subsequent commit; operator hooks are unrelated.
+    fs::create_dir(temp.path().join("fixture-hooks")).unwrap();
+    git(&["config", "core.hooksPath", "fixture-hooks"]);
+    git(&["config", "commit.gpgsign", "false"]);
     let lock = Command::new("cargo")
         .current_dir(temp.path())
         .args(["generate-lockfile", "--offline"])
@@ -795,7 +800,7 @@ fn independent_publication_qualifies_native_components_and_keeps_version_drift_s
     let workflow: serde_yaml::Value = serde_yaml::from_str(&text).unwrap();
     assert_eq!(workflow["on"]["push"]["tags"][0], "worker/v[0-9]*");
     assert_eq!(workflow["permissions"]["contents"], "read");
-    assert_eq!(workflow["jobs"]["validate"]["needs"][0], "qualified");
+    assert_eq!(workflow["jobs"]["build"]["needs"][0], "qualified");
     assert_eq!(
         workflow["jobs"]["plan"]["steps"]
             .as_sequence()
@@ -825,12 +830,35 @@ fn independent_publication_qualifies_native_components_and_keeps_version_drift_s
         .filter_map(|k| k.as_str())
         .filter(|k| k.starts_with("publish-") && *k != "publish-report")
         .collect();
-    assert_eq!(publishes, ["publish-worker"]);
+    assert!(publishes.is_empty(), "candidate source must never publish");
+    assert!(!text.contains("${{ secrets."));
+    let publisher_text = fs::read_to_string(
+        temp.path()
+            .join(".github/workflows/trusted-publish-crate-worker.yaml"),
+    )
+    .unwrap();
+    let publisher: serde_yaml::Value = serde_yaml::from_str(&publisher_text).unwrap();
+    assert_eq!(
+        publisher["on"]["workflow_run"]["workflows"][0],
+        workflow["name"]
+    );
+    assert_eq!(
+        publisher["jobs"]["publish-worker"]["needs"][0],
+        "verify-worker"
+    );
+    assert_eq!(
+        publisher["jobs"]["publish-worker"]["environment"]["name"],
+        "simit-crates-io"
+    );
+    assert!(publisher["jobs"]["publish-engine"].is_null());
+    assert!(publisher_text.contains(
+        "--package worker --source-workflow .github/workflows/publish-crate-worker.yaml"
+    ));
     assert!(text.contains("git verify-tag"));
-    assert!(text.contains("git rev-list -n 1 \"$tag\""));
-    assert!(text.contains("${GITHUB_SHA:?missing workflow event SHA}"));
-    assert!(text.contains("version=\"${version#*/v}\""));
-    assert!(text.contains("cargo package -p worker"));
+    assert!(text.contains("refs/tags/${tag}^{commit}"));
+    assert!(text.contains("Signed tag commit does not match the checkout being published"));
+    assert!(text.contains("version=\"${GITHUB_REF_NAME#worker/v}\""));
+    assert!(text.contains("cargo package --locked --allow-dirty --no-verify -p worker"));
     let manifest = fs::read_to_string(temp.path().join("crates/worker/Cargo.toml")).unwrap();
     write(
         temp.path(),
@@ -844,6 +872,14 @@ fn independent_publication_qualifies_native_components_and_keeps_version_drift_s
         .unwrap();
     assert!(output.status.success(), "{output:?}");
     assert_eq!(fs::read_to_string(path).unwrap(), text);
+    assert_eq!(
+        fs::read_to_string(
+            temp.path()
+                .join(".github/workflows/trusted-publish-crate-worker.yaml")
+        )
+        .unwrap(),
+        publisher_text
+    );
     fs::remove_file(
         temp.path()
             .join(".github/workflows/publish-crate-engine.yaml"),
@@ -884,6 +920,46 @@ fn assert_public_input_transport(job: &serde_yaml::Value) {
         assert!(run.contains(&format!("url.https://{forge}/.insteadOf git@{forge}:")));
     }
     assert!(!run.contains("secrets."));
+}
+
+#[test]
+fn independent_publication_rejects_credentials_in_native_component_gates() {
+    let temp = fixture();
+    let mut config = fs::read_to_string(temp.path().join("simit.toml"))
+        .unwrap()
+        .replace(
+            "runtime = \"nix\"",
+            "runtime = \"nix\"\npublish_crates = true",
+        );
+    for id in ["core", "rust", "python", "worker"] {
+        config = config.replace(
+            &format!("id = \"{id}\""),
+            &format!("id = \"{id}\"\nchecks = [{{ id = \"qualify\", run = \"true\" }}]"),
+        );
+    }
+    for expression in [
+        "secrets.CRATES_IO_API_TOKEN",
+        "github.token",
+        "toJSON(github)",
+    ] {
+        let candidate = config.replacen(
+            "run = \"true\"",
+            &format!("run = \"true\", env = {{ AUTH = \"${{{{ {expression} }}}}\" }}"),
+            1,
+        );
+        write(temp.path(), "simit.toml", &candidate);
+        let output = common::simit()
+            .current_dir(temp.path())
+            .args(["init", "ci"])
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("must not reference GitHub"),
+            "{output:?}"
+        );
+        assert!(!temp.path().join(".github/workflows").exists());
+    }
 }
 
 fn fixture_git(root: &Path, args: &[&str]) -> String {

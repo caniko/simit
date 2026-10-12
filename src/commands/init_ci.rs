@@ -102,6 +102,8 @@ pub fn run(command: InitCiCommand) -> Result<()> {
         .or(cfg.ci.platform)
         .unwrap_or(Platform::Forgejo);
     let backend = CiBackend::from_parts(provider, platform)?;
+    crate::render::workflow_templates::validate_backend(&cfg.ci, provider, platform)?;
+    validate_review_policy_backend(&cfg, platform, provider)?;
     if platform == Platform::Gitlab {
         return run_nix_only(command);
     }
@@ -136,14 +138,6 @@ pub fn run(command: InitCiCommand) -> Result<()> {
                 "coordinated workspace publication cannot be combined with --package selectors; it releases the lockstep workspace"
             );
         }
-        if resolved.workspace_strategy == crate::cli::WorkspaceStrategy::Members
-            && metadata.workspace_members.len() > 1
-        {
-            // Coordinated publish pairs with aggregate CI (one workspace check).
-            // Member CI still works but would duplicate gates; require the
-            // explicit aggregate selection so generation stays deterministic.
-            bail!("coordinated workspace publication requires --workspace-strategy aggregate");
-        }
     }
     if resolved.workspace_strategy == crate::cli::WorkspaceStrategy::Aggregate
         && ((resolved.publish_crates && !coordinated)
@@ -151,10 +145,9 @@ pub fn run(command: InitCiCommand) -> Result<()> {
             || command.with_chocolatey
             || command.with_scoop)
     {
-        // Coordinated publish is workspace-level (one publish-workspace.yaml
-        // in release-plan order), so it pairs with aggregate CI instead of
-        // tripping the per-member publishing rule; the check above already
-        // requires aggregate when coordinated publish is selected.
+        // Publication strategy is independent of ordinary member/aggregate CI.
+        // A coordinated carrier supports either; separate package publishers
+        // still cannot be combined with aggregate CI.
         bail!("aggregate workspace CI cannot be combined with crate or platform publishing");
     }
     if command.with_homebrew && resolved.runtime != Runtime::Nix {
@@ -335,7 +328,7 @@ pub fn run(command: InitCiCommand) -> Result<()> {
         if ordered.is_empty() {
             bail!("coordinated workspace publication requires at least one publishable package");
         }
-        files.push(ci::publish_workspace_file(
+        files.extend(ci::publish_workspace_files(
             platform,
             ci::PublishWorkspaceInputs {
                 runtime: resolved.runtime,
@@ -350,13 +343,13 @@ pub fn run(command: InitCiCommand) -> Result<()> {
     {
         for package in &packages {
             if package.is_publishable() {
-                files.push(ci::publish_file(
+                files.extend(ci::publish_files(
                     platform,
                     resolved.runtime,
                     package,
                     &runners.release,
                     options.clone(),
-                ));
+                )?);
             }
         }
     }
@@ -636,6 +629,7 @@ fn run_pages_only(command: InitCiCommand) -> Result<()> {
     {
         bail!("Pages-only generation requires the Actions provider");
     }
+    crate::render::workflow_templates::validate_backend(&cfg.ci, CiProvider::Actions, platform)?;
     let snapshots = workflow_snapshots_for_platform(&workspace_root, platform)?;
     let inference = CiInference::from_workflows(&snapshots)?;
     let inferred_pages = infer_codeberg_pages_from_workflows(&snapshots)?;
@@ -711,6 +705,8 @@ fn run_nix_only_at(command: InitCiCommand, workspace_root: &Path) -> Result<()> 
         .or(cfg.ci.provider)
         .unwrap_or(CiProvider::Actions);
     let _backend = CiBackend::from_parts(provider, platform)?;
+    crate::render::workflow_templates::validate_backend(&cfg.ci, provider, platform)?;
+    validate_review_policy_backend(&cfg, platform, provider)?;
     if provider != CiProvider::Actions {
         bail!("Nix-only CI currently supports the Actions provider only");
     }
@@ -914,6 +910,8 @@ fn run_python(command: InitCiCommand) -> Result<()> {
         return run_nix_only(command);
     }
     let backend = CiBackend::from_parts(provider, platform)?;
+    crate::render::workflow_templates::validate_backend(&cfg.ci, provider, platform)?;
+    validate_review_policy_backend(&cfg, platform, provider)?;
     if backend.provider() == CiProvider::Crow {
         return run_crow_python(command, workspace_root, &cfg, platform);
     }
@@ -1350,6 +1348,7 @@ pub(crate) fn workflow_snapshots_for_platform(
     workspace_root: &Path,
     platform: Platform,
 ) -> Result<Vec<WorkflowSnapshot>> {
+    let config = ProjectConfig::load(workspace_root)?;
     let workflow_dir = PathBuf::from(platform.workflow_dir());
     let absolute_dir = workspace_root.join(&workflow_dir);
     let entries = match fs::read_dir(&absolute_dir) {
@@ -1379,6 +1378,11 @@ pub(crate) fn workflow_snapshots_for_platform(
         let content =
             fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
         if generated_workflow_marker_present(&content)
+            && !crate::render::workflow_templates::is_template_output(
+                &config.ci,
+                &workflow_dir.join(entry.file_name()),
+                &content,
+            )
             && is_ci_managed_workflow_name(&entry.file_name())
         {
             snapshots.push(WorkflowSnapshot {
@@ -1491,7 +1495,41 @@ pub(crate) fn project_regeneration_command(workspace_root: &Path) -> Result<Opti
     let forgejo = workflow_snapshots_for_platform(workspace_root, Platform::Forgejo)?;
     let github = workflow_snapshots_for_platform(workspace_root, Platform::Github)?;
     let (platform, snapshots) = match (forgejo.is_empty(), github.is_empty()) {
-        (true, true) => return Ok(None),
+        (true, true) => {
+            let cfg = ProjectConfig::load(workspace_root)?;
+            if cfg.ci.workflow_templates.is_empty() {
+                return Ok(None);
+            }
+            crate::render::workflow_templates::validate_config(&cfg.ci)?;
+            // Template bodies stay outside option inference. Their declared
+            // paths still identify the Actions backend needed to restore all
+            // missing builtins, for Cargo and Nix-only projects alike.
+            let declares = |directory: &str| {
+                cfg.ci
+                    .workflow_templates
+                    .keys()
+                    .any(|output| Path::new(output).parent() == Some(Path::new(directory)))
+            };
+            let platform = match (
+                declares(".forgejo/workflows"),
+                declares(".github/workflows"),
+            ) {
+                (true, false) => Platform::Forgejo,
+                (false, true) => Platform::Github,
+                _ => bail!("mixed workflow template platforms in configuration"),
+            };
+            if cfg
+                .ci
+                .platform
+                .is_some_and(|configured| configured != platform)
+            {
+                bail!("workflow template platform differs from the configured CI platform");
+            }
+            return Ok(Some(format!(
+                "simit init ci --platform {} --ci-provider actions",
+                platform.as_str()
+            )));
+        }
         (false, true) => (Platform::Forgejo, forgejo),
         (true, false) => (Platform::Github, github),
         (false, false) => bail!("mixed generated CI platforms in workflow tree"),
@@ -1953,19 +1991,36 @@ fn reconcile_ci_files(
     check: bool,
     show_diff: bool,
 ) -> Result<()> {
-    if let Some(review) = ProjectConfig::load(workspace_root)?.review.as_ref() {
+    let config = ProjectConfig::load(workspace_root)?;
+    if let Some(review) = config.review.as_ref() {
         files.extend(crate::review::generation::files(review)?);
     }
-    let plan = project::GeneratedPlan {
-        files,
-        message,
-        owns_name: is_ci_managed_workflow_name,
-    };
-    if check {
-        plan.check(workspace_root, show_diff)
-    } else {
-        plan.write(workspace_root)
+    if let Some(policy) = config.review_policy.as_ref() {
+        files.push(crate::render::review_policy::file(policy)?);
     }
+    crate::render::workflow_templates::append(workspace_root, &config.ci, &mut files)?;
+    let mut obsolete =
+        project::obsolete_generated_workflows(workspace_root, &files, is_ci_managed_workflow_name)?;
+    obsolete.extend(crate::render::workflow_templates::obsolete(
+        workspace_root,
+        &files,
+    )?);
+    obsolete.sort();
+    obsolete.dedup();
+    project::reconcile_generated_files(workspace_root, &files, &obsolete, message, check, show_diff)
+}
+
+fn validate_review_policy_backend(
+    config: &ProjectConfig,
+    platform: Platform,
+    provider: CiProvider,
+) -> Result<()> {
+    if config.review_policy.is_some()
+        && (platform != Platform::Github || provider != CiProvider::Actions)
+    {
+        bail!("[review_policy] requires the effective CI backend to be GitHub Actions");
+    }
+    Ok(())
 }
 
 fn cleanup_obsolete_nix_workflows(
@@ -2020,6 +2075,7 @@ fn is_ci_managed_workflow_name(name: &std::ffi::OsStr) -> bool {
     matches!(
         name,
         "build.yaml"
+            | "review-policy.yaml"
             | "build.yml"
             | "build.jsonnet"
             | "ci.yaml"
@@ -2028,6 +2084,10 @@ fn is_ci_managed_workflow_name(name: &std::ffi::OsStr) -> bool {
             | "publish-crate.yml"
             | "publish-workspace.yaml"
             | "publish-workspace.yml"
+            | "trusted-publish-workspace.yaml"
+            | "trusted-publish-workspace.yml"
+            | "trusted-publish-crate.yaml"
+            | "trusted-publish-crate.yml"
             | "release-artifacts.yaml"
             | "release-artifacts.yml"
             | "nix-builds.yaml"
@@ -2047,6 +2107,7 @@ fn is_ci_managed_workflow_name(name: &std::ffi::OsStr) -> bool {
         || name.starts_with("nix-builds-")
         || name.starts_with("prebuild-")
         || name.starts_with("publish-crate-")
+        || name.starts_with("trusted-publish-crate-")
         || name.starts_with("publish-pypi-")
         || name.starts_with("publish-python-")
         || name.starts_with("publish-npm-")

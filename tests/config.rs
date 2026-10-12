@@ -23,6 +23,38 @@ fn load_cargo_manifest(manifest: &str) -> anyhow::Result<ProjectConfig> {
     ProjectConfig::load(temp.path())
 }
 
+#[test]
+fn required_environment_configuration_accepts_only_variable_identifiers() {
+    for name in ["BUILD_MODE", "_MODE", "build_mode2"] {
+        let config = load_toml(&format!(
+            "[ci]\nrequired_env=[{}]\n",
+            toml_edit::Value::from(name)
+        ))
+        .unwrap();
+        assert_eq!(config.ci.required_env, [name]);
+    }
+    for name in [
+        "MODE:-$(touch effect)",
+        "${{ github.token }}",
+        "1MODE",
+        " MODE",
+        "MODE-2",
+        "MÖDE",
+        "MODE\nNEXT",
+        "",
+    ] {
+        let result = load_toml(&format!(
+            "[ci]\nrequired_env=[{}]\n",
+            toml_edit::Value::from(name)
+        ));
+        assert!(
+            result.is_err(),
+            "accepted executable environment name {name}"
+        );
+        assert!(format!("{:#}", result.unwrap_err()).contains("environment variable identifier"));
+    }
+}
+
 fn env_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))

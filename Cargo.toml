@@ -1,7 +1,7 @@
 [package]
 name = "simit"
 default-run = "simit"
-version = "0.19.0"
+version = "0.20.0"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT"
@@ -17,6 +17,7 @@ include = [
   "/ci-actions.json",
   "/.github/workflows/*.yaml",
   "/.github/workflows/*.yml",
+  "/.simit/workflows/**",
   "/CHANGELOG.md",
   "/LICENSE",
   "/README.md",
@@ -42,6 +43,16 @@ runner = "ubuntu-latest"
 with_docs = true
 publish_crates = true
 nix_builds = [".#default"]
+
+extra_setup = [
+  "printf '%s\\n' 'NIX_CONFIG<<SIMIT_NIX_LIMITS' 'experimental-features = nix-command flakes' 'max-jobs = 1' 'cores = 2' 'SIMIT_NIX_LIMITS' >> \"$GITHUB_ENV\"",
+]
+
+[package.metadata.simit.ci.extra_env]
+CARGO_BUILD_JOBS = "2"
+
+[package.metadata.simit.ci.workflow_templates]
+".github/workflows/qualify-generator.yaml" = ".simit/workflows/qualify-generator.yaml.in"
 
 # The production package runs the complete native test suite. macOS must
 # qualify registry isolation before downstream flakes consume this producer.
@@ -74,15 +85,25 @@ sign = true
 
 [dependencies]
 anyhow = "1"
+base64 = "0.22"
 camino = { version = "1", features = ["serde1"] }
+caseless = "0.2.2"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
 clap_mangen = "0.3"
 directories-next = "2"
 fs2 = "0.4"
+flate2 = "1"
+glob = "0.3"
 hex = "0.4"
+reqwest = { version = "0.12", default-features = false, features = [
+  "blocking",
+  "json",
+  "native-tls-vendored",
+] }
 rnix = "0.12"
+same-file = "1"
 semver = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -90,5 +111,12 @@ serde_yaml = "0.9"
 sha2 = "0.10"
 schemars = "1"
 url = "2"
+unicode-normalization = "0.1.25"
 toml_edit = { version = "0.25", features = ["serde"] }
 tempfile = "3"
+tar = "0.4"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+signal-hook = "0.3.18"
+socket2 = "0.6.1"
