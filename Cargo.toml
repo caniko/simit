@@ -22,6 +22,7 @@ include = [
   "/LICENSE",
   "/README.md",
   "/src/**/*.rs",
+  "/src/render/ci/*.py",
   "/src/review/assets/**",
   "/tests/**/*.rs",
   "/tests/fixtures/**",
