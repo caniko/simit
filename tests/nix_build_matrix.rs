@@ -314,10 +314,13 @@ capture_results = true
         fs::create_dir(&runner_bin).unwrap();
         let nix = runner_bin.join("nix");
         fs::write(&nix, "#!/bin/sh\nprintf '%s' \"$FAKE_NATIVE_NIX_SYSTEM\"\n").unwrap();
+        let uname = runner_bin.join("uname");
+        fs::write(&uname, "#!/bin/sh\ncase \"$1\" in -s) printf Linux;; -m) printf '%s' \"${FAKE_NATIVE_NIX_SYSTEM%-linux}\";; *) exit 99;; esac\n").unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(&nix, fs::Permissions::from_mode(0o755)).unwrap();
+            fs::set_permissions(&uname, fs::Permissions::from_mode(0o755)).unwrap();
         }
         for actual in ["aarch64-linux", "x86_64-linux"] {
             let output = Command::new("bash")
@@ -411,6 +414,81 @@ fn native_exact_matrix_rejects_ambiguous_or_unmapped_systems_before_writes() {
             assert_eq!(fs::read_to_string(&config_path).unwrap(), config);
             assert!(!temp.path().join(".github/workflows").exists());
         }
+    }
+}
+
+#[test]
+fn native_exact_matrix_checks_hardware_when_nix_system_is_overridden() {
+    let temp = project(
+        r#"[ci.nix_build]
+only = true
+[ci.nix_build.system_runners]
+"x86_64-linux" = "ubuntu-24.04"
+[ci.nix_build.extra_env]
+NIX_CONFIG = "eval-system = aarch64-linux"
+"#,
+    );
+    let generated = generate(&temp, &[]);
+    assert!(generated.status.success(), "{generated:?}");
+    let value = workflow(&temp);
+    let step = value["jobs"]["build"]["steps"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .find(|step| step["name"] == "Verify native Nix runner")
+        .unwrap();
+    let script = step["run"].as_str().unwrap();
+    let bin = temp.path().join("hardware-bin");
+    fs::create_dir(&bin).unwrap();
+    for (name, content) in [
+        ("nix", "#!/bin/sh\nprintf '%s' aarch64-linux\n"),
+        (
+            "uname",
+            "#!/bin/sh\ncase \"$1\" in\n-s) printf '%s' \"$FAKE_KERNEL\";;\n-m) printf '%s' \"$FAKE_CPU\";;\n*) exit 99;;\nesac\n",
+        ),
+    ] {
+        let path = bin.join(name);
+        fs::write(&path, content).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+    for (kernel, cpu, accepted) in [
+        ("Linux", "aarch64", true),
+        ("Linux", "arm64", true),
+        ("Linux", "x86_64", false),
+        ("Darwin", "arm64", false),
+        ("Linux", "unknown", false),
+        ("Windows_NT", "arm64", false),
+    ] {
+        let output = Command::new("bash")
+            .args(["-e", "-c", script])
+            .env(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    bin.display(),
+                    std::env::var("PATH").unwrap_or_default()
+                ),
+            )
+            .env("EXPECTED_NIX_SYSTEM", "aarch64-linux")
+            .env(
+                "NIX_CONFIG",
+                value["jobs"]["build"]["env"]["NIX_CONFIG"]
+                    .as_str()
+                    .unwrap(),
+            )
+            .env("FAKE_KERNEL", kernel)
+            .env("FAKE_CPU", cpu)
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.success(),
+            accepted,
+            "{kernel}/{cpu}: {output:?}"
+        );
     }
 }
 

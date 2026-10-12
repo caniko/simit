@@ -275,7 +275,9 @@ Every installable must explicitly select a system, for example
 `.#checks.aarch64-linux.cargo-test` or `.#packages.x86_64-linux.server`, and
 that system must have a runner entry. The generator emits one job per declared
 installable, rather than running each gate on every architecture. It verifies
-the runner's native Nix system before project setup or realization. With `kvm = true`,
+the runner's OS/CPU identity independently of Nix configuration, then checks the
+configured Nix system before project setup or realization. Linux, Darwin and
+FreeBSD kernel names are recognized; unsupported kernels fail closed. With `kvm = true`,
 KVM setup runs only for `x86_64-linux` rows; ARM rows do not require `/dev/kvm`.
 The existing `[ci].runner` remains the runner for ordinary language CI. Without
 the exact-build map, the installable matrix retains its single-runner behavior.
