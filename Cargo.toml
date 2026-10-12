@@ -46,6 +46,7 @@ CARGO_BUILD_JOBS = "2"
 
 [package.metadata.simit.ci.workflow_templates]
 ".github/workflows/qualify-generator.yaml" = ".simit/workflows/qualify-generator.yaml.in"
+".github/workflows/qualify-nix-transport.yaml" = ".simit/workflows/qualify-nix-transport.yaml.in"
 
 [package.metadata.simit.ci.pages]
 repo = "caniko/simit"

@@ -13,16 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   closure transport with exact source/run/attempt/derivation provenance.
 - Explicit fresh qualification installables, retaining runtime execution while
   restoring only build dependencies.
-
-### Added
-
 - Opt-in shared-store Nix build groups with complete installable assignments,
   discovered-check coverage admission and per-output failure evidence.
 - Independent Rust, full-flake evaluation and optional realization lanes for
   GitHub-hosted Rust/Nix projects, retaining all existing quality steps.
-
-### Added
-
 - Opt-in `[ci.nix_build].push_tags` patterns to retain tag-push qualification
   alongside branch and pull-request gates, with ordered exclusions and stable
   configuration regeneration. Reject exclusion-only filters and keep tag refs
