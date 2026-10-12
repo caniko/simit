@@ -378,7 +378,8 @@ pub fn execute_with(
             cancellation,
         )?;
         let materialize_valid = !fresh
-            || (status == 0 && output_map_valid(&fs::read(folder.join("materialize.json"))?));
+            || (status == 0
+                && output_map_valid(&fs::read(folder.join("materialization-result.json"))?));
         if fresh && materialize_valid {
             status = build(
                 &cwd,
@@ -391,8 +392,10 @@ pub fn execute_with(
             )?;
         } else if fresh {
             // Retain the failed materialization as the member result too.
-            fs::copy(folder.join("materialize.json"), folder.join("result.json"))?;
-            fs::copy(folder.join("materialize.log"), folder.join("build.log"))?;
+            fs::copy(
+                folder.join("materialization-result.json"),
+                folder.join("result.json"),
+            )?;
         }
         let valid = materialize_valid
             && status == 0
@@ -488,9 +491,13 @@ fn build(
     cancellation: &Cancellation,
 ) -> Result<i32> {
     let materialize = matches!(phase, BuildPhase::Materialize);
-    let name = if materialize { "materialize" } else { "result" };
-    let log = if materialize {
-        "materialize.log"
+    let name = if materialize {
+        "materialization-result"
+    } else {
+        "result"
+    };
+    let log = if matches!(phase, BuildPhase::Rebuild) {
+        "fresh-build.log"
     } else {
         "build.log"
     };

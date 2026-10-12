@@ -256,6 +256,17 @@ fn fresh_materialization_never_substitutes_for_current_worker_rebuild() {
             1
         );
         let row = &f.receipt()["results"][0];
+        for name in [
+            "build.log",
+            "materialization-result.json",
+            "fresh-build.log",
+            "result.json",
+        ] {
+            assert!(
+                f.root.path().join("results/0").join(name).is_file(),
+                "missing transport-compatible fresh evidence {name}"
+            );
+        }
         assert_eq!(row["fresh_execution"], case == "success");
         if case == "fresh-fail" {
             assert_eq!(row["exit_status"], 9);
@@ -284,6 +295,24 @@ fn invalid_spec_cannot_inject_nix_flags_or_accept_unknown_fields() {
         let output = f.run("success");
         assert!(!output.status.success(), "{key}: {output:?}");
         assert!(f.calls().is_empty());
+    }
+}
+
+#[test]
+fn failed_or_malformed_materialization_never_dispatches_a_fresh_rebuild() {
+    for case in ["fail", "malformed"] {
+        let mut f = Fixture::new();
+        f.spec["fresh_installables"] = json!([".#checks.x86_64-linux.client"]);
+        let output = f.run(case);
+        assert!(!output.status.success(), "{output:?}");
+        assert!(!f.calls().contains("--rebuild"));
+        assert_eq!(f.receipt()["results"][0]["fresh_execution"], false);
+        assert_eq!(f.receipt()["complete"], true);
+        assert!(f.root.path().join("results/1/hook-diagnostic").is_file());
+        assert_eq!(
+            fs::read(f.root.path().join("results/0/result.json")).unwrap(),
+            fs::read(f.root.path().join("results/0/materialization-result.json")).unwrap()
+        );
     }
 }
 

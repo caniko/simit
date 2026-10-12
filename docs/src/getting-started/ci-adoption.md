@@ -69,8 +69,10 @@ Retained `simit.nix-group.v1` receipts preserve source/tree/run/attempt/event,
 ordered results, hook statuses and numbered member directories. Optional
 `fresh_execution` is present only for fresh members. A fresh member must first
 materialize successfully with valid output JSON, then pass current-worker
-`--rebuild`. Ordinary materialization is never fresh acceptance. Malformed
-successful output and failed builds/hooks fail the group while subsequent
+`--rebuild`. Ordinary materialization is never fresh acceptance. Fresh evidence
+retains the transport predecessor's filenames: `build.log` for materialization,
+`materialization-result.json`, `fresh-build.log` for rebuilding, and `result.json`
+for the final result. Malformed successful output and failed builds/hooks fail the group while subsequent
 members still run. Dispatch and process-limit failures are recorded as status
 125; member stdout/stderr and hook output are retained as separate files.
 Subprocess output is bounded to 16 MiB stdout and 64 MiB stderr per command,
