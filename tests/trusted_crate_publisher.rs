@@ -5,6 +5,41 @@ use tempfile::TempDir;
 
 mod common;
 
+#[test]
+fn trusted_engine_checkout_is_a_workspace_independent_of_the_candidate() {
+    let candidate = publisher_project("coordinated");
+    let engine = candidate.path().join(".simit-publisher-engine");
+    fs::create_dir_all(engine.join("src")).unwrap();
+    fs::write(engine.join("Cargo.toml"), include_str!("../Cargo.toml")).unwrap();
+    fs::write(engine.join("Cargo.lock"), include_str!("../Cargo.lock")).unwrap();
+    fs::write(engine.join("src/main.rs"), "fn main() {}\n").unwrap();
+
+    let output = std::process::Command::new(env!("CARGO"))
+        .current_dir(&engine)
+        .args([
+            "metadata",
+            "--locked",
+            "--offline",
+            "--no-deps",
+            "--format-version",
+            "1",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "trusted engine must not join the candidate workspace: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let metadata: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        std::path::Path::new(metadata["workspace_root"].as_str().unwrap()),
+        engine
+    );
+    assert_eq!(metadata["workspace_members"].as_array().unwrap().len(), 1);
+    assert_eq!(metadata["packages"][0]["name"], "simit");
+}
+
 fn publisher_project(mode: &str) -> TempDir {
     let temp = TempDir::new().unwrap();
     let workspace = mode != "single";
