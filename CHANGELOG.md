@@ -11,16 +11,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Opt-in completion-driven custody for enrolled original branch/PR producers,
   with bounded log/artifact capture and idempotent producer-source status reports.
-
-### Added
-
+- CI-scoped public Nix cache configuration and bounded same-run build-input
+  closure transport with exact source/run/attempt/derivation provenance.
+- Explicit fresh qualification installables, retaining runtime execution while
+  restoring only build dependencies.
 - Opt-in shared-store Nix build groups with complete installable assignments,
   discovered-check coverage admission and per-output failure evidence.
 - Independent Rust, full-flake evaluation and optional realization lanes for
   GitHub-hosted Rust/Nix projects, retaining all existing quality steps.
-
-### Added
-
 - Opt-in `[ci.nix_build].push_tags` patterns to retain tag-push qualification
   alongside branch and pull-request gates, with ordered exclusions and stable
   configuration regeneration. Reject exclusion-only filters and keep tag refs
@@ -28,6 +26,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Bind completion-custody workflow hashes to GitHub's native executed-file
+  revision, independently of raw PR heads or producer checkout revisions, with
+  fresh proof revalidation before capture completion and after upload.
 - Bind completion custody to one validated PR/base target and observed snapshots,
   derive case-safe collection queues from that identity, validate composed status
   contexts, and reserve bounded upload/report time before publication.
@@ -36,6 +37,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   inventories and capture time before source-head success can be published.
 - Preserve completion-custody source/attempt admission, capture budgets and
   failure revocation when Python optimization is enabled.
+- Bind the full dependency export stream's actual path/reference inventory to the
+  admitted closure before canonical-store import, using a bounded non-extracting
+  NAR parser and one private spool descriptor through validation and import.
+  Align NAR depth, entry-name and symlink-target bounds with the Nix importer
+  so invalid later records reject before any preceding record can be imported.
+- Keep dependency transport's source, provenance, size and qualification-closure
+  fences active under Python optimization; provision the dependency producer's
+  interpreter on custom runners as well as hosted workers.
 - Migrate recognized inline MSRV bindings in existing canonical flakes before
   hook-wiring shortcuts, and detect that required source migration in full checks.
 - Generate MSRV toolchain manifests as source assets so no-build, read-only Nix

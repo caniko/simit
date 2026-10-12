@@ -347,8 +347,8 @@ pub fn run(command: InitCiCommand) -> Result<()> {
             &runners.ci,
             &options.nix_builds,
             &options.extra_setup,
-            &options.nix_substituters,
-            &options.nix_trusted_public_keys,
+            &options.ci_nix_substituters,
+            &options.ci_nix_trusted_public_keys,
             &cfg.ci.nix_build,
         )?);
     }
@@ -777,7 +777,7 @@ fn run_nix_only_at(command: InitCiCommand, workspace_root: &Path) -> Result<()> 
             platform,
             &ResolvedRunner::literal(&runner)?,
             &system_runners,
-            &cfg.release.artifacts,
+            &cfg.ci_cache_artifacts(),
             &cfg.ci.components,
         )?,
     };
@@ -792,8 +792,8 @@ fn run_nix_only_at(command: InitCiCommand, workspace_root: &Path) -> Result<()> 
             &ResolvedRunner::literal(&runner)?,
             &cfg.ci.nix_builds,
             &cfg.ci.extra_setup,
-            &cfg.release.artifacts.substituters,
-            &cfg.release.artifacts.trusted_public_keys,
+            &cfg.ci_cache_artifacts().substituters,
+            &cfg.ci_cache_artifacts().trusted_public_keys,
             &cfg.ci.nix_build,
         )?);
     }
@@ -959,8 +959,8 @@ fn run_python(command: InitCiCommand) -> Result<()> {
             &runners.ci,
             &options.nix_builds,
             &options.extra_setup,
-            &options.nix_substituters,
-            &options.nix_trusted_public_keys,
+            &options.ci_nix_substituters,
+            &options.ci_nix_trusted_public_keys,
             &cfg.ci.nix_build,
         )?);
     }

@@ -528,6 +528,80 @@ observer is merged onto the default branch, candidate workflow runs qualify the
 generator and fixture only. Retain the merged-source observer events and subsequent
 branch/PR events to qualify installation, source-head reporting and ordering.
 
+### CI dependency reuse
+
+`[ci.cache]` declares public credential-free HTTPS substituters and signing keys
+for CI independently of release publication. An explicit empty table disables
+inherited release-cache settings; omitting the table preserves that inheritance.
+Keep using `with_nix_cargo_cache = true` for the existing native Cargo cache.
+
+```toml
+[ci.cache]
+substituters = ["https://cache.example.org"]
+trusted_public_keys = ["cache.example.org:PUBLIC_KEY_BASE64"]
+
+[ci.nix_build]
+dependency_installables = [".#ci-patched-zellij"]
+dependency_max_mib = 2048
+fresh_installables = [".#checks.x86_64-linux.pinentry-runtime"]
+```
+
+Dependency transport requires groups and discovered `check_systems`. It builds
+only selected build inputs in a separate fresh worker and exports their complete
+closure to a same-run artifact. Enroll unselected local derivation attributes such
+as `.#ci-patched-zellij`; transport builds every output. Explicit `^out`, `^dev`
+and `^*` selectors are rejected before generation, both in dependency enrollment
+and in qualification plans using dependency transport. Selectors in workflows
+without dependency transport retain their existing behavior.
+Transport-enabled qualification plans also require bare `.#attribute` local
+derivations; remote and path references cannot drift between producer, import
+admission and the group build. Both the dependency producer and consuming groups
+inherit the runner's default timeout when `timeout_minutes` is omitted.
+
+The compressed-size budget includes zlib's default worst-case DEFLATE expansion
+plus gzip framing allowance. Export checks the same bound before marking an
+archive complete that import checks before store effects; the uncompressed
+budget is enforced separately throughout both streams.
+Import admits compressed size, checksum and the complete decompressed byte
+budget before derivation evaluation, which can itself instantiate store objects
+or trigger IFD. The admitted bytes stay in one private, unlinked spool through
+source/graph checks and import.
+
+Consumers verify source commit/tree, lock bytes,
+repository, run, attempt, expected derivations/output paths, archive checksum and
+transport budget before importing. The consumer parses the full Nix export/NAR
+stream without extraction: actual records must exactly match the admitted closure
+and every declared reference stays inside it. Duplicate, missing, extra, malformed,
+truncated or trailing records reject before any canonical-store import. Parsing
+bounds paths, references, tree depth/nodes and control fields, and streams file
+payloads in 64 KiB chunks. NAR depth is less than 64; entry names and symlink
+targets are at most 255 and 4095 bytes, respectively, matching the
+[Nix 2.34.8 importer limits](https://github.com/NixOS/nix/blob/2.34.8/src/libutil/archive.cc).
+These bounds apply to the entire stream before import, including later records.
+Validation and import use the same unlinked, mode-0600
+spool descriptor. The parser follows [Nix's export framing](https://github.com/NixOS/nix/blob/adbf23e8184bbbe8d786aad1f362443b6542e0a4/src/libstore/export-import.cc)
+and [NAR writer grammar](https://github.com/NixOS/nix/blob/adbf23e8184bbbe8d786aad1f362443b6542e0a4/doc/manual/src/protocols/nix-archive.md).
+Legacy export signatures are rejected; archive integrity is distinct from hosted
+producer authority. An alias of a discovered check or a declared
+qualification output is refused. A failed dependency producer blocks consuming
+groups; its builder and export diagnostics remain available.
+
+`kvm = true` enables hosted KVM on both the dependency producer and each consuming
+worker before custom setup or builds. Export and post-import verification also
+admit their complete argument vectors against the current worker's `ARG_MAX`,
+charging inherited environment strings and pointer arrays with platform headroom.
+A byte-budget-valid closure can still exceed this process limit; it is rejected
+before export, or before any import when verification would exceed the consumer's
+limit. Independently terminated export streams are never concatenated.
+
+`fresh_installables` first materializes cold outputs and dependencies normally,
+then requires an explicit `--rebuild` on the current worker. Nix check mode needs
+valid outputs, so an uncached check can execute twice; materialization alone never
+constitutes acceptance. Both direct aliases and transitive qualification outputs
+are rejected from dependency transport before export/import. Keep
+VMs and other runtime checks in this explicit fresh set, and measure export,
+download/import and cache-hit costs alongside end-to-end latency.
+
 Configured matrices normally coalesce a branch push with its pull request. Set
 `[ci.nix_build].separate_events = true` when acceptance requires both original
 producers: the concurrency group then includes the workflow ref and event name,
