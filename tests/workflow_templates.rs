@@ -497,9 +497,12 @@ fn yaml_nonprintable_characters_in_template_paths_fail_before_any_writes() {
             } else {
                 format!(".github/workflows/break{separator}in-output.yml")
             };
-            // Windows refuses control characters in filenames itself. The
-            // mapping must still fail before any generated files are written.
-            let bad_source_created = source_path && (!cfg!(windows) || !separator.is_control());
+            // Some filesystems refuse these names before Simit sees them:
+            // Windows rejects controls, and APFS rejects Unicode noncharacters.
+            // All mappings must still reach validation without changing outputs.
+            let filesystem_allows_name = !(cfg!(windows) && separator.is_control())
+                && !(cfg!(target_os = "macos") && matches!(separator, '\u{fffe}' | '\u{ffff}'));
+            let bad_source_created = source_path && filesystem_allows_name;
             if bad_source_created {
                 fs::write(temp.path().join(&bad_path), &source_bytes).unwrap();
             }
