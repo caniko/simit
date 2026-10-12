@@ -2,6 +2,41 @@
   "$schema": "https://json.schemastore.org/renovate.json",
   "actions": [
     {
+      "name": "https://github.com/actions/checkout",
+      "version": "v7.0.1",
+      "sha": "3d3c42e5aac5ba805825da76410c181273ba90b1"
+    },
+    {
+      "name": "https://github.com/actions/cache",
+      "version": "v6.1.0",
+      "sha": "55cc8345863c7cc4c66a329aec7e433d2d1c52a9"
+    },
+    {
+      "name": "https://github.com/actions/upload-artifact",
+      "version": "v7.0.2",
+      "sha": "cf430e030ddbb5b0abf93d22962f4752f3646cd9"
+    },
+    {
+      "name": "https://github.com/actions/download-artifact",
+      "version": "v8.0.2",
+      "sha": "9000827ccba6bdab643e8b6fd33ac0654aef8333"
+    },
+    {
+      "name": "https://github.com/actions/upload-pages-artifact",
+      "version": "v5.0.0",
+      "sha": "fc324d3547104276b827a68afc52ff2a11cc49c9"
+    },
+    {
+      "name": "https://github.com/actions/deploy-pages",
+      "version": "v5.0.1",
+      "sha": "368f82528645a54fb793d4d04e342629a3f51346"
+    },
+    {
+      "name": "https://github.com/Swatinem/rust-cache",
+      "version": "v2.9.2",
+      "sha": "6323deb102c322ba6fcbdcafc7e3dddab59af2b6"
+    },
+    {
       "name": "https://code.forgejo.org/actions/checkout",
       "version": "v4.3.1",
       "sha": "34e114876b0b11c390a56381ad16ebd13914f8d5"

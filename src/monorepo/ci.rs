@@ -10,7 +10,7 @@ use crate::project::GeneratedFile;
 use crate::render::ci::{GENERATED_WORKFLOW_MARKER, github_action_ref, immutable_action_ref};
 
 pub(super) fn checkout() -> Value {
-    json!({"uses": github_action_ref("actions/checkout", "v4.3.1").split(" #").next().unwrap(), "with": {"fetch-depth": 0, "persist-credentials": false}})
+    json!({"uses": github_action_ref("actions/checkout", "v7.0.1").split(" #").next().unwrap(), "with": {"fetch-depth": 0, "persist-credentials": false}})
 }
 
 pub(super) fn install_nix() -> Value {

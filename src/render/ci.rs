@@ -983,7 +983,7 @@ pub fn github_prebuild_file(
             workflow.push_str(" -mindepth 1 -maxdepth 1 -type f ! -name '*-release-manifest.json' -print | LC_ALL=C sort)\n");
         }
         workflow.push_str("      - name: Upload unsigned release archives\n        if: ${{ inputs.release && github.event_name != 'pull_request' }}\n        uses: ");
-        workflow.push_str(&github_action_ref("actions/upload-artifact", "v4.6.2"));
+        workflow.push_str(&github_action_ref("actions/upload-artifact", "v7.0.2"));
         workflow.push_str("\n        with:\n          name: release-${{ matrix.system }}\n          path: release\n          if-no-files-found: error\n          retention-days: 1\n");
     }
     if let Some(attic) = attic {
@@ -1003,7 +1003,7 @@ pub fn github_prebuild_file(
         workflow.push_str(&shell_quote(attic_app));
         workflow.push('\n');
         workflow.push_str("      - name: Upload flake input manifest\n        if: ${{ (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) || (inputs.release && github.event_name != 'pull_request') }}\n        uses: ");
-        workflow.push_str(&github_action_ref("actions/upload-artifact", "v4.6.2"));
+        workflow.push_str(&github_action_ref("actions/upload-artifact", "v7.0.2"));
         workflow.push_str("\n        with:\n          name: flake-inputs-${{ matrix.system }}\n          path: attic-paths.txt\n          if-no-files-found: error\n          retention-days: 7\n");
     }
 
@@ -1135,7 +1135,13 @@ pub fn nix_build_matrix_file_with_options(
             }
         }
         workflow.push_str("      - name: Upload Nix build evidence\n        if: always()\n");
-        push_action_uses(&mut workflow, platform, "upload-artifact", "v4.6.2");
+        push_action_uses(
+            &mut workflow,
+            platform,
+            "upload-artifact",
+            "v7.0.2",
+            "v4.6.2",
+        );
         workflow.push_str(&format!("\n        with:\n          name: nix-build-${{{{ strategy.job-index }}}}\n          retention-days: {}\n          if-no-files-found: warn\n          path: |\n            ${{{{ runner.temp }}}}/simit-nix-build-${{{{ strategy.job-index }}}}\n", options.artifact_retention_days.unwrap_or(14)));
         for path in &options.artifact_paths {
             workflow.push_str(&format!("            {path}\n"));
@@ -1244,10 +1250,13 @@ fn github_pages_workflow(runner: &ResolvedRunner, pages: &CodebergPagesOptions) 
         workflow.push_str(" result-pages-site/.domains\n");
     }
     workflow.push_str("      - name: Upload Pages artifact\n        uses: ");
-    workflow.push_str(&github_action_ref("actions/upload-pages-artifact", "v3"));
+    workflow.push_str(&github_action_ref(
+        "actions/upload-pages-artifact",
+        "v5.0.0",
+    ));
     workflow.push_str("\n        with:\n          path: result-pages-site\n");
     workflow.push_str("      - name: Deploy GitHub Pages\n        id: deployment\n        uses: ");
-    workflow.push_str(&github_action_ref("actions/deploy-pages", "v4"));
+    workflow.push_str(&github_action_ref("actions/deploy-pages", "v5.0.1"));
     workflow.push('\n');
     workflow
 }
@@ -1363,7 +1372,13 @@ fn jetbrains_plugin_workflow(
     workflow.push_str("          stat --printf='plugin archive size: %s bytes\\n' \"$RUNNER_TEMP/jetbrains-plugin-unsigned.zip\"\n\n");
     push_jetbrains_sign_and_publish(&mut workflow, jetbrains);
     workflow.push_str("      - name: Upload signed plugin artifact\n");
-    push_action_uses(&mut workflow, platform, "upload-artifact", "v4.6.2");
+    push_action_uses(
+        &mut workflow,
+        platform,
+        "upload-artifact",
+        "v7.0.2",
+        "v4.6.2",
+    );
     workflow.push_str("        with:\n");
     workflow.push_str("          name: ");
     workflow.push_str(artifact_label);
@@ -2904,7 +2919,7 @@ fn push_windows_build_job(
     workflow.push_str(" --target ${{ matrix.target }}\n\n");
     push_windows_archive_step(workflow, package, options);
     workflow.push_str("      - name: Upload Windows archives\n");
-    push_action_uses(workflow, platform, "upload-artifact", "v4.6.2");
+    push_action_uses(workflow, platform, "upload-artifact", "v7.0.2", "v4.6.2");
     workflow.push_str("        with:\n");
     workflow.push_str("          name: windows-${{ matrix.arch }}\n");
     workflow.push_str("          path: release/*.zip\n");
@@ -2924,7 +2939,7 @@ fn push_windows_publish_job(
     workflow.push_str("    steps:\n");
     push_checkout_step(workflow, platform);
     workflow.push_str("      - name: Download Windows archives\n");
-    push_action_uses(workflow, platform, "download-artifact", "v4.3.0");
+    push_action_uses(workflow, platform, "download-artifact", "v8.0.2", "v4.3.0");
     workflow.push_str("        with:\n");
     workflow.push_str("          pattern: windows-*\n");
     workflow.push_str("          path: release\n");
@@ -3740,7 +3755,7 @@ fn yaml_double_quote(value: &str) -> String {
 
 fn push_checkout_step(workflow: &mut String, platform: Platform) {
     workflow.push_str("      - name: Checkout\n");
-    push_action_uses(workflow, platform, "checkout", "v4.3.1");
+    push_action_uses(workflow, platform, "checkout", "v7.0.1", "v4.3.1");
     workflow.push('\n');
 }
 
@@ -3801,17 +3816,26 @@ fn push_required_env_step(workflow: &mut String, required_env: &[String]) {
     workflow.push('\n');
 }
 
-fn push_action_uses(workflow: &mut String, platform: Platform, action: &str, version: &str) {
+fn push_action_uses(
+    workflow: &mut String,
+    platform: Platform,
+    action: &str,
+    github_version: &str,
+    forgejo_version: &str,
+) {
     if platform == Platform::Forgejo {
         // The generated Forgejo workflows use exact commits. The helper is
         // deliberately called for every action so a newly added action cannot
         // silently reintroduce a mutable tag.
         workflow.push_str("        uses: ");
-        workflow.push_str(&forgejo_action_ref(action, version));
+        workflow.push_str(&forgejo_action_ref(action, forgejo_version));
         workflow.push('\n');
     } else {
         workflow.push_str("        uses: ");
-        workflow.push_str(&github_action_ref(&format!("actions/{action}"), version));
+        workflow.push_str(&github_action_ref(
+            &format!("actions/{action}"),
+            github_version,
+        ));
         workflow.push('\n');
     }
 }
@@ -3891,7 +3915,7 @@ fn push_nix_cargo_cache_steps(
         return;
     }
     workflow.push_str("      - name: Cache Nix Cargo registry + target\n");
-    push_action_uses(workflow, platform, "cache", "v4.3.0");
+    push_action_uses(workflow, platform, "cache", "v6.1.0", "v4.3.0");
     workflow.push_str("        with:\n          path: |\n            /tmp/.cargo/registry\n            /tmp/.cargo/git\n            target\n");
     workflow.push_str(&format!("          key: cargo-nix-${{{{ runner.os }}}}-${{{{ runner.arch }}}}-{scope}-${{{{ hashFiles('Cargo.lock', 'flake.lock', 'flake.nix', 'rust-toolchain.toml', '.cargo/config', '.cargo/config.toml') }}}}\n          restore-keys: |\n            cargo-nix-${{{{ runner.os }}}}-${{{{ runner.arch }}}}-{scope}-\n\n"));
 }
@@ -4015,7 +4039,7 @@ fn push_rust_setup_step(workflow: &mut String, platform: Platform) {
 
 fn push_rust_cache_steps(workflow: &mut String, platform: Platform) {
     workflow.push_str("      - name: Cache cargo bin (tools)\n");
-    push_action_uses(workflow, platform, "cache", "v4.3.0");
+    push_action_uses(workflow, platform, "cache", "v6.1.0", "v4.3.0");
     workflow.push_str("        with:\n");
     workflow.push_str("          path: ~/.cargo/bin\n");
     let workflow_glob = match platform {
@@ -4037,7 +4061,7 @@ fn push_rust_cache_steps(workflow: &mut String, platform: Platform) {
     }
     workflow.push_str("      - name: Cache cargo registry + target\n");
     workflow.push_str("        uses: ");
-    workflow.push_str(&github_action_ref("Swatinem/rust-cache", "v2"));
+    workflow.push_str(&github_action_ref("Swatinem/rust-cache", "v2.9.2"));
     workflow.push('\n');
     workflow.push_str("        with:\n");
     workflow.push_str("          cache-all-crates: \"true\"\n");

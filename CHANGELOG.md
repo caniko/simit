@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Generate GitHub CI, publication and Pages workflows with immutable Node 24
+  checkout, cache and artifact actions. Action updates are owned by the shared
+  Simit registry; Forgejo action versions retain their separate compatibility
+  contract.
+
 ### Added
 
 - A mixed-language monorepo component graph for changed-path qualification,

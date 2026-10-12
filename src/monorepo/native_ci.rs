@@ -56,14 +56,14 @@ pub(super) fn files(
                 tag_check.clone(),
                 run("pack"),
             ];
-            validate_steps.push(json!({"uses": action("actions/upload-artifact", "v4.6.2"), "with": {"name": artifact_name, "path": "${{ runner.temp }}/native-release-dist", "if-no-files-found": "error", "retention-days": 7}}));
+            validate_steps.push(json!({"uses": action("actions/upload-artifact", "v7.0.2"), "with": {"name": artifact_name, "path": "${{ runner.temp }}/native-release-dist", "if-no-files-found": "error", "retention-days": 7}}));
             let mut publish_steps = vec![
                 super::ci::checkout(),
                 super::ci::install_nix(),
                 super::ci::input_transport(),
                 tag_check,
             ];
-            publish_steps.push(json!({"uses": action("actions/download-artifact", "v4.3.0"), "with": {"name": artifact_name, "path": "${{ runner.temp }}/native-release-dist"}}));
+            publish_steps.push(json!({"uses": action("actions/download-artifact", "v8.0.2"), "with": {"name": artifact_name, "path": "${{ runner.temp }}/native-release-dist"}}));
             let mut publish = run("publish");
             publish["env"] = match registry {
                 Registry::Python => json!({"UV_PUBLISH_TOKEN": "${{ secrets.PYPI_API_TOKEN }}"}),

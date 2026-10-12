@@ -104,7 +104,7 @@ extra_env = { FLAKE_SSH_KEY = "${{ secrets.FLAKE_SSH_KEY }}" }
         upload["uses"]
             .as_str()
             .unwrap()
-            .starts_with("actions/upload-artifact@ea165f8")
+            .starts_with("actions/upload-artifact@cf430e0")
     );
     let output = generate(&temp, &["--check", "--diff"]);
     assert!(output.status.success(), "{output:?}");

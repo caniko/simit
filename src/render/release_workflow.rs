@@ -794,7 +794,7 @@ fn push_checkout(w: &mut String, platform: Platform) {
     if platform == Platform::Forgejo {
         w.push_str(&forgejo_action_ref("checkout", "v4.3.1"));
     } else {
-        w.push_str(&github_action_ref("actions/checkout", "v4.3.1"));
+        w.push_str(&github_action_ref("actions/checkout", "v7.0.1"));
     }
     w.push('\n');
     w.push_str("        with:\n          fetch-depth: 0\n");
@@ -1148,7 +1148,7 @@ fn push_build_srpm(w: &mut String, copr: &ResolvedCopr) {
 
 fn push_download_prebuilt_archives(w: &mut String) {
     w.push_str("      - name: Download native release archives\n        uses: ");
-    w.push_str(&github_action_ref("actions/download-artifact", "v4.3.0"));
+    w.push_str(&github_action_ref("actions/download-artifact", "v8.0.2"));
     w.push_str("\n        with:\n          pattern: release-*\n          path: .simit-prebuilt\n");
     w.push_str("      - name: Collect native release archives\n        run: |\n          set -euo pipefail\n          mkdir -p release\n          count=0\n          while IFS= read -r file; do\n            name=\"$(basename \"$file\")\"\n            test ! -e \"release/$name\" || { echo \"native release asset collision: $name\" >&2; exit 1; }\n            cp \"$file\" \"release/$name\"\n            count=$((count + 1))\n          done < <(find .simit-prebuilt -mindepth 2 -type f -print | LC_ALL=C sort)\n          test \"$count\" -gt 0\n");
 }

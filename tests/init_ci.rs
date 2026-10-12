@@ -2203,9 +2203,11 @@ fn generates_github_plain_cargo_workflows() {
         "uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable"
     ));
     assert!(ci.contains("toolchain: stable"));
-    assert!(ci.contains("uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0"));
+    assert!(ci.contains("uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0"));
     assert!(!ci.contains("https://code.forgejo.org/actions/cache@v4"));
-    assert!(ci.contains("uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2"));
+    assert!(
+        ci.contains("uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2")
+    );
     assert!(ci.contains("path: ~/.cargo/bin"));
     assert!(ci.contains("hashFiles('.github/workflows/*.yaml')"));
     assert!(!ci.contains("hashFiles('.forgejo/workflows/ci.yaml', '.github/workflows/ci.yaml')"));
@@ -2223,11 +2225,13 @@ fn generates_github_plain_cargo_workflows() {
         publish.contains("on:\n  push:\n    tags:\n      - \"[0-9]*\"\n  workflow_dispatch:\n")
     );
     assert!(
-        publish.contains("uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0")
+        publish.contains("uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0")
     );
     assert!(!publish.contains("https://code.forgejo.org/actions/cache@v4"));
     assert!(
-        publish.contains("uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2")
+        publish.contains(
+            "uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2"
+        )
     );
     assert!(publish.contains("path: ~/.cargo/bin"));
     assert!(publish.contains("hashFiles('.github/workflows/*.yaml')"));
