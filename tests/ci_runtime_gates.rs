@@ -543,6 +543,57 @@ fn github_nix_input_transport_works_without_a_runner_ssh_key() {
 }
 
 #[test]
+fn existing_generated_msrv_shell_migrates_before_wiring_shortcuts() {
+    let directory = fixture("nix", false, true);
+    fs::remove_file(directory.path().join("flake.nix")).unwrap();
+    let run = |arguments: &[&str]| {
+        common::simit()
+            .current_dir(directory.path())
+            .args(arguments)
+            .output()
+            .unwrap()
+    };
+    assert!(run(&["init", "flake", "--scope", "full"]).status.success());
+    let path = directory.path().join("flake.nix");
+    let modern = fs::read_to_string(&path).unwrap();
+    let legacy = modern.replace("toolchainFile = ./rust-toolchain-msrv.toml;", "toolchainFile = builtins.toFile \"rust-toolchain-msrv.toml\" ''\n            [toolchain]\n            channel = \"1.88.0\"\n            profile = \"minimal\"\n          '';" );
+    assert_ne!(legacy, modern);
+    fs::write(&path, &legacy).unwrap();
+    let output = run(&["init", "flake", "--scope", "full", "--check", "--diff"]);
+    assert!(
+        !output.status.success(),
+        "legacy shell must fail full parity even with valid hooks and a current manifest"
+    );
+    assert_eq!(fs::read_to_string(&path).unwrap(), legacy);
+    assert!(
+        run(&["init", "flake", "--scope", "hooks-only"])
+            .status
+            .success()
+    );
+    assert_eq!(fs::read_to_string(&path).unwrap(), legacy);
+    assert!(run(&["init", "flake", "--scope", "full"]).status.success());
+    assert_eq!(fs::read_to_string(&path).unwrap(), modern);
+    assert!(
+        run(&["init", "flake", "--scope", "full", "--check"])
+            .status
+            .success()
+    );
+    assert!(run(&["init", "flake", "--scope", "full"]).status.success());
+    assert_eq!(fs::read_to_string(&path).unwrap(), modern);
+    let unknown = legacy.replace(
+        "profile = \"minimal\"",
+        "profile = \"minimal\"\n            components = [\"clippy\"]",
+    );
+    fs::write(&path, &unknown).unwrap();
+    let output = run(&["init", "flake", "--scope", "full"]);
+    assert!(
+        !output.status.success(),
+        "unrecognized toolchain content must not be overwritten"
+    );
+    assert_eq!(fs::read_to_string(&path).unwrap(), unknown);
+}
+
+#[test]
 fn generated_flakes_supply_a_native_msrv_shell_for_both_build_modes() {
     for cross in [false, true] {
         let directory = fixture("nix", false, true);

@@ -121,6 +121,11 @@ pub fn run(command: InitFlakeCommand) -> Result<()> {
             .iter()
             .find(|file| file.relative_path == Path::new("nix/treefmt.nix"))
             .is_some_and(|file| flake::treefmt_module_wants_rustfmt_package(&file.content));
+        let content = if scope == FlakeScope::Full && rust_version.is_some() {
+            flake::migrate_msrv_toolchain(&content)?
+        } else {
+            content
+        };
         let patched = flake::patch_existing(&content, audit_tools, generated_module_needs_package)?;
         let mut patched_files = files.clone();
         let flake_file = patched_files
@@ -536,6 +541,21 @@ fn check_files(
         let path = workspace_root.join(&file.relative_path);
         match fs::read_to_string(&path) {
             Ok(actual) if file.relative_path == Path::new("flake.nix") => {
+                if cfg.flake.mode != FlakeMode::Custom
+                    && scope == FlakeScope::Full
+                    && rust_version.is_some()
+                {
+                    let migrated = flake::migrate_msrv_toolchain(&actual)?;
+                    if migrated != actual {
+                        mismatches.push(
+                            "flake.nix needs the source-backed MSRV manifest migration".to_owned(),
+                        );
+                        if show_diff {
+                            diffs.push(unified_diff("flake.nix", &actual, &migrated));
+                        }
+                        continue;
+                    }
+                }
                 // In cross mode the multi-target flake is canonical, so it must
                 // match exactly; the hook-wiring escape hatch (which a stale
                 // single-target flake would satisfy) is only valid for the
