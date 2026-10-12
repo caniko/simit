@@ -42,6 +42,10 @@ pub(super) fn render(
             yaml_json_scalar(&serde_json::to_string(members)?)
         ));
     }
+    if !options.dependency_installables.is_empty() {
+        // The build job consumes only a complete same-run dependency producer.
+        workflow.push_str("    needs: [dependencies]\n");
+    }
     workflow.push_str("    env:\n");
     if !options.extra_env.contains_key("NIX_CONFIG") {
         workflow.push_str("      NIX_CONFIG: \"experimental-features = nix-command flakes\"\n");
@@ -75,6 +79,7 @@ pub(super) fn render(
     push_extra_setup_steps(&mut workflow, extra_setup);
     push_extra_setup_steps(&mut workflow, &options.extra_setup);
     push_required_env_step(&mut workflow, &options.required_env);
+    nix_dependencies::import(&mut workflow, runner, options, installables)?;
     let mut limits = Vec::new();
     if let Some(value) = options.max_jobs {
         limits.extend(["--max-jobs".to_owned(), value.to_string()]);
@@ -90,6 +95,10 @@ pub(super) fn render(
             serde_json::to_string(&options.check_systems)?,
         ),
         ("SIMIT_NIX_LIMITS", serde_json::to_string(&limits)?),
+        (
+            "SIMIT_NIX_FRESH",
+            serde_json::to_string(&options.fresh_installables)?,
+        ),
         (
             "SIMIT_NIX_POST_BUILD",
             serde_json::to_string(&options.post_build)?,
@@ -123,6 +132,15 @@ pub(super) fn render(
     for path in &options.artifact_paths {
         workflow.push_str(&format!("            {path}\n"));
     }
+    nix_dependencies::job(
+        &mut workflow,
+        runner,
+        extra_setup,
+        substituters,
+        trusted_public_keys,
+        options,
+        installables,
+    )?;
     Ok(GeneratedFile {
         relative_path: PathBuf::from(".github/workflows/nix-builds.yaml"),
         content: workflow,

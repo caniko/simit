@@ -15,6 +15,7 @@ use crate::project::GeneratedFile;
 use crate::user_config::{ResolvedCiRunners, ResolvedRunner};
 
 mod independent_lanes;
+mod nix_dependencies;
 mod nix_groups;
 mod trusted_publisher;
 
@@ -169,6 +170,9 @@ pub enum OmCiMode {
 
 #[derive(Debug, Clone)]
 pub struct CiOptions {
+    /// CI-only cache policy; publication uses the separate nix_* fields.
+    pub ci_nix_substituters: Vec<String>,
+    pub ci_nix_trusted_public_keys: Vec<String>,
     pub independent_lanes: bool,
     pub nix_builds: Vec<String>,
     pub all_features: bool,
@@ -218,6 +222,8 @@ pub struct CodebergPagesOptions {
 impl Default for CiOptions {
     fn default() -> Self {
         Self {
+            ci_nix_substituters: Vec::new(),
+            ci_nix_trusted_public_keys: Vec::new(),
             independent_lanes: false,
             nix_builds: Vec::new(),
             all_features: true,
@@ -2142,7 +2148,12 @@ fn python_ci_workflow(
     workflow.push_str("    steps:\n");
     push_checkout_step(&mut workflow, platform, runner);
     push_required_env_step(&mut workflow, &options.required_env);
-    push_install_nix_step(&mut workflow, platform);
+    push_install_nix_step_with_cache(
+        &mut workflow,
+        platform,
+        &options.ci_nix_substituters,
+        &options.ci_nix_trusted_public_keys,
+    );
     push_extra_setup_steps(&mut workflow, &options.extra_setup);
     if selected(CiComponent::FlakeWiring) {
         workflow.push_str("      - name: Check generated flake wiring\n");
@@ -2382,7 +2393,12 @@ fn ci_workflow_single_job(
 
     match runtime {
         Runtime::Nix => {
-            push_install_nix_step(&mut workflow, platform);
+            push_install_nix_step_with_cache(
+                &mut workflow,
+                platform,
+                &options.ci_nix_substituters,
+                &options.ci_nix_trusted_public_keys,
+            );
             push_nix_cargo_cache_steps(&mut workflow, platform, &runners.ci, &options, "test");
             push_nix_cargo_bin_path_step(&mut workflow);
             push_extra_setup_steps(&mut workflow, &options.extra_setup);
@@ -2715,7 +2731,12 @@ fn ci_workflow_multi_job(
 
         match runtime {
             Runtime::Nix => {
-                push_install_nix_step(&mut workflow, platform);
+                push_install_nix_step_with_cache(
+                    &mut workflow,
+                    platform,
+                    &options.ci_nix_substituters,
+                    &options.ci_nix_trusted_public_keys,
+                );
                 push_nix_cargo_cache_steps(
                     &mut workflow,
                     platform,
@@ -2813,8 +2834,8 @@ fn push_required_gate_jobs(
             push_install_nix_step_with_cache(
                 workflow,
                 platform,
-                &options.nix_substituters,
-                &options.nix_trusted_public_keys,
+                &options.ci_nix_substituters,
+                &options.ci_nix_trusted_public_keys,
             );
         } else {
             push_rust_setup_step(workflow, platform);

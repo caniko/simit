@@ -10,6 +10,7 @@ members = json.loads(os.environ['INSTALLABLES'])
 plan = json.loads(os.environ['SIMIT_NIX_PLAN'])
 systems = json.loads(os.environ['SIMIT_NIX_CHECK_SYSTEMS'])
 limits = json.loads(os.environ['SIMIT_NIX_LIMITS'])
+fresh = json.loads(os.environ.get('SIMIT_NIX_FRESH', '[]'))
 post_build = json.loads(os.environ['SIMIT_NIX_POST_BUILD'])
 post_build_always = json.loads(os.environ['SIMIT_NIX_POST_BUILD_ALWAYS'])
 
@@ -59,10 +60,21 @@ for index, installable in enumerate(members):
     folder = root / str(index)
     folder.mkdir()
     (folder / 'installable').write_text(installable + '\n')
+    # Nix's --rebuild is check mode: it requires valid existing outputs. A
+    # normal materialization first handles cold outputs and dependency/cache
+    # restoration. Its result alone never accepts an enrolled fresh check.
     with (folder / 'build.log').open('wb') as log:
         result = subprocess.run(['nix', 'build', '--no-link', '--no-update-lock-file',
-                                 '--print-build-logs', '--json', *limits, installable],
-                                stdout=subprocess.PIPE, stderr=log)
+                                  '--print-build-logs', '--json', *limits, installable],
+                                 stdout=subprocess.PIPE, stderr=log)
+    fresh_executed = False
+    if installable in fresh and result.returncode == 0:
+        (folder / 'materialization-result.json').write_bytes(result.stdout)
+        with (folder / 'fresh-build.log').open('wb') as log:
+            result = subprocess.run(['nix', 'build', '--no-link', '--no-update-lock-file',
+                                      '--print-build-logs', '--json', '--rebuild', *limits, installable],
+                                     stdout=subprocess.PIPE, stderr=log)
+        fresh_executed = result.returncode == 0
     (folder / 'result.json').write_bytes(result.stdout)
     valid = False
     if result.returncode == 0:
@@ -80,7 +92,7 @@ for index, installable in enumerate(members):
     diagnostic_hooks = hooks(post_build_always, folder, installable)
     save(folder / 'diagnostics-complete', diagnostic_hooks)
     row = {'installable': installable, 'exit_status': result.returncode,
-           'output_map_valid': valid, 'evidence': str(index),
+           'output_map_valid': valid, 'fresh_execution': fresh_executed, 'evidence': str(index),
            'post_build_statuses': success_hooks, 'post_build_always_statuses': diagnostic_hooks}
     receipt['results'].append(row)
     save(folder / 'status.json', row)
