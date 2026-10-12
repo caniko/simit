@@ -117,16 +117,13 @@ fn explicit_nix_matrix_tag_patterns_preserve_push_coverage_after_regeneration() 
         original,
         fs::read(temp.path().join(".github/workflows/nix-builds.yaml")).unwrap()
     );
-    let config: toml::Value =
-        toml::from_str(&fs::read_to_string(temp.path().join("simit.toml")).unwrap()).unwrap();
-    assert_eq!(
-        config["ci"]["nix_build"]["push_tags"][0].as_str(),
-        Some("**")
-    );
-    assert_eq!(
-        config["ci"]["nix_build"]["push_tags"][1].as_str(),
-        Some("!private-*")
-    );
+    let config: toml_edit::DocumentMut = fs::read_to_string(temp.path().join("simit.toml"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    let tags = config["ci"]["nix_build"]["push_tags"].as_array().unwrap();
+    assert_eq!(tags.get(0).unwrap().as_str(), Some("**"));
+    assert_eq!(tags.get(1).unwrap().as_str(), Some("!private-*"));
     assert_eq!(
         simit::registry::audit_ci(temp.path()).unwrap().status,
         simit::registry::FeatureStatus::Managed
