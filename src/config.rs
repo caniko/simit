@@ -563,6 +563,8 @@ pub struct NixBuildConfig {
     pub max_parallel: Option<u64>,
     pub max_jobs: Option<u64>,
     pub cores: Option<u64>,
+    /// Native runner for each system-qualified exact installable; no cross product.
+    pub system_runners: BTreeMap<String, String>,
     pub kvm: bool,
     /// Retain exact source/installable metadata and Nix's JSON output map.
     pub capture_results: bool,
@@ -580,6 +582,46 @@ pub struct NixBuildConfig {
 }
 
 impl NixBuildConfig {
+    pub(crate) fn validate_system_runners(&self, installables: &[String]) -> Result<()> {
+        validate_system_runner_map(
+            "simit project config: [ci.nix_build].system_runners",
+            &self.system_runners,
+        )?;
+        if !self.system_runners.is_empty() {
+            for installable in installables {
+                self.installable_system(installable)?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn installable_system<'a>(&self, installable: &'a str) -> Result<&'a str> {
+        let invalid = || {
+            anyhow!(
+                "[ci.nix_build].system_runners requires system-qualified installables such as .#checks.aarch64-linux.test: {installable}"
+            )
+        };
+        let (_, attribute) = installable.split_once('#').ok_or_else(invalid)?;
+        let mut parts = attribute.splitn(3, '.');
+        let output = parts.next().ok_or_else(invalid)?;
+        let system = parts.next().ok_or_else(invalid)?;
+        let name = parts.next().ok_or_else(invalid)?;
+        if !matches!(
+            output,
+            "checks" | "packages" | "legacyPackages" | "devShells"
+        ) || name.is_empty()
+            || !system
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        {
+            return Err(invalid());
+        }
+        if !self.system_runners.contains_key(system) {
+            bail!("[ci.nix_build].system_runners has no native runner for {system}: {installable}");
+        }
+        Ok(system)
+    }
+
     pub(crate) fn validate_push_tags(&self) -> Result<()> {
         if self.push_tags.iter().any(|pattern| {
             pattern.trim().is_empty()
@@ -3514,6 +3556,7 @@ fn validate_nix_build_config(config: &ProjectConfig) -> Result<()> {
         bail!("simit project config: [ci.nix_build].only requires the Nix runtime");
     }
     options.validate_push_tags()?;
+    options.validate_system_runners(&ci.nix_builds)?;
     for (name, number, min, max) in [
         ("timeout_minutes", options.timeout_minutes, 1, 360),
         ("max_parallel", options.max_parallel, 1, 256),
@@ -3605,6 +3648,7 @@ fn set_nix_build_table(table: &mut Table, options: &NixBuildConfig) {
     set_bool(&mut build, "only", options.only);
     set_bool(&mut build, "separate_events", options.separate_events);
     set_string_array(&mut build, "push_tags", &options.push_tags);
+    set_string_map(&mut build, "system_runners", &options.system_runners);
     set_bool(&mut build, "kvm", options.kvm);
     set_bool(&mut build, "capture_results", options.capture_results);
     for (name, number) in [

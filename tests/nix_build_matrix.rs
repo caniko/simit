@@ -222,6 +222,199 @@ extra_env = { FLAKE_SSH_KEY = "${{ secrets.FLAKE_SSH_KEY }}" }
 }
 
 #[test]
+fn native_exact_matrix_routes_each_gate_once_and_limits_kvm_to_x86_linux() {
+    for rust_project in [false, true] {
+        let temp = project(
+            r#"[ci.nix_build]
+only = true
+timeout_minutes = 90
+max_parallel = 2
+max_jobs = 1
+cores = 2
+kvm = true
+capture_results = true
+
+[ci.nix_build.system_runners]
+"aarch64-linux" = "ubuntu-24.04-arm"
+"x86_64-linux" = "ubuntu-24.04"
+"#,
+        );
+        let config_path = temp.path().join("simit.toml");
+        let original_config = fs::read_to_string(&config_path).unwrap().replace(
+            ".#checks.x86_64-linux.recovery",
+            ".#checks.aarch64-linux.recovery",
+        );
+        fs::write(&config_path, &original_config).unwrap();
+        if rust_project {
+            fs::write(
+                temp.path().join("Cargo.toml"),
+                "[package]\nname = \"native-contract\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+            )
+            .unwrap();
+            fs::create_dir(temp.path().join("src")).unwrap();
+            fs::write(temp.path().join("src/main.rs"), "fn main() {}\n").unwrap();
+        }
+        let output = generate(&temp, &[]);
+        assert!(output.status.success(), "{output:?}");
+        assert!(!temp.path().join(".github/workflows/ci.yaml").exists());
+        let value = workflow(&temp);
+        let job = &value["jobs"]["build"];
+        assert_eq!(job["runs-on"], "${{ matrix.runner }}");
+        assert_eq!(job["name"], "build (${{ matrix.installable }})");
+        assert_eq!(job["timeout-minutes"], 90);
+        assert_eq!(job["strategy"]["max-parallel"], 2);
+        let matrix = &job["strategy"]["matrix"];
+        assert!(matrix["installable"].is_null());
+        let rows = matrix["include"].as_sequence().unwrap();
+        assert_eq!(rows.len(), 2, "no missing or cross-product gates");
+        for (row, installable, system, runner) in [
+            (
+                &rows[0],
+                ".#checks.x86_64-linux.client",
+                "x86_64-linux",
+                "ubuntu-24.04",
+            ),
+            (
+                &rows[1],
+                ".#checks.aarch64-linux.recovery",
+                "aarch64-linux",
+                "ubuntu-24.04-arm",
+            ),
+        ] {
+            assert_eq!(row["installable"], installable);
+            assert_eq!(row["system"], system);
+            assert_eq!(row["runner"], runner);
+        }
+        let steps = job["steps"].as_sequence().unwrap();
+        let verify = steps
+            .iter()
+            .position(|step| step["name"] == "Verify native Nix runner")
+            .unwrap();
+        let kvm = steps
+            .iter()
+            .position(|step| step["name"] == "Enable hosted KVM")
+            .unwrap();
+        let build = steps
+            .iter()
+            .position(|step| step["name"] == "Build ${{ matrix.installable }}")
+            .unwrap();
+        assert!(verify < kvm && kvm < build);
+        assert_eq!(steps[kvm]["if"], "${{ matrix.system == 'x86_64-linux' }}");
+        assert_eq!(
+            steps[verify]["env"]["EXPECTED_NIX_SYSTEM"],
+            "${{ matrix.system }}"
+        );
+        assert!(
+            steps[verify]["run"]
+                .as_str()
+                .unwrap()
+                .contains("builtins.currentSystem")
+        );
+        let runner_bin = temp.path().join("runner-bin");
+        fs::create_dir(&runner_bin).unwrap();
+        let nix = runner_bin.join("nix");
+        fs::write(&nix, "#!/bin/sh\nprintf '%s' \"$FAKE_NATIVE_NIX_SYSTEM\"\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&nix, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        for actual in ["aarch64-linux", "x86_64-linux"] {
+            let output = Command::new("bash")
+                .args(["-e", "-c", steps[verify]["run"].as_str().unwrap()])
+                .env(
+                    "PATH",
+                    format!(
+                        "{}:{}",
+                        runner_bin.display(),
+                        std::env::var("PATH").unwrap_or_default()
+                    ),
+                )
+                .env("EXPECTED_NIX_SYSTEM", "aarch64-linux")
+                .env("FAKE_NATIVE_NIX_SYSTEM", actual)
+                .output()
+                .unwrap();
+            assert_eq!(
+                output.status.success(),
+                actual == "aarch64-linux",
+                "{output:?}"
+            );
+            if actual != "aarch64-linux" {
+                assert!(
+                    String::from_utf8_lossy(&output.stderr).contains("Native Nix runner mismatch")
+                );
+            }
+        }
+        assert!(
+            steps[build]["run"]
+                .as_str()
+                .unwrap()
+                .contains("--no-update-lock-file --max-jobs 1 --cores 2 --json")
+        );
+        assert!(steps.iter().all(|step| step["continue-on-error"].is_null()));
+        let generated = fs::read(temp.path().join(".github/workflows/nix-builds.yaml")).unwrap();
+        let persisted = fs::read(&config_path).unwrap();
+        assert!(generate(&temp, &["--check", "--diff"]).status.success());
+        assert!(generate(&temp, &[]).status.success());
+        assert_eq!(
+            generated,
+            fs::read(temp.path().join(".github/workflows/nix-builds.yaml")).unwrap()
+        );
+        assert_eq!(persisted, fs::read(&config_path).unwrap());
+        assert_eq!(
+            simit::registry::audit_ci(temp.path()).unwrap().status,
+            simit::registry::FeatureStatus::Managed
+        );
+    }
+}
+
+#[test]
+fn native_exact_matrix_rejects_ambiguous_or_unmapped_systems_before_writes() {
+    for (installable, mapping, expected) in [
+        (
+            ".#checks.aarch64-linux.recovery",
+            "\"x86_64-linux\" = \"ubuntu-24.04\"",
+            "aarch64-linux",
+        ),
+        (
+            ".#recovery",
+            "\"x86_64-linux\" = \"ubuntu-24.04\"",
+            "system-qualified",
+        ),
+        (
+            ".#checks.\"aarch64-linux\".recovery",
+            "\"x86_64-linux\" = \"ubuntu-24.04\"",
+            "system-qualified",
+        ),
+        (
+            ".#checks.x86_64-linux.recovery",
+            "\"x86_64-linux\" = \"\"",
+            "runner",
+        ),
+    ] {
+        let temp = project(&format!(
+            "[ci.nix_build]\nonly = true\n[ci.nix_build.system_runners]\n{mapping}"
+        ));
+        let config_path = temp.path().join("simit.toml");
+        let config = fs::read_to_string(&config_path).unwrap().replace(
+            ".#checks.x86_64-linux.recovery",
+            &installable.replace('"', "\\\""),
+        );
+        fs::write(&config_path, &config).unwrap();
+        for args in [vec![], vec!["--check", "--diff"]] {
+            let output = generate(&temp, &args);
+            assert!(!output.status.success(), "{output:?}");
+            assert!(
+                String::from_utf8_lossy(&output.stderr).contains(expected),
+                "{output:?}"
+            );
+            assert_eq!(fs::read_to_string(&config_path).unwrap(), config);
+            assert!(!temp.path().join(".github/workflows").exists());
+        }
+    }
+}
+
+#[test]
 fn scoped_nix_matrix_isolates_forks_and_coalesces_same_repository_push_and_pr() {
     for options in [
         "[ci.nix_build]\nonly = true",

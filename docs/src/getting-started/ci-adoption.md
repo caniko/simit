@@ -263,6 +263,23 @@ Declare the exact installables that qualify a feature in `[ci].nix_builds`.
 GitHub Actions projects can configure their matrix independently of ordinary
 checks and release jobs:
 
+For native multi-architecture builds, set `[ci.nix_build.system_runners]`:
+
+```toml
+[ci.nix_build.system_runners]
+"x86_64-linux" = "ubuntu-24.04"
+"aarch64-linux" = "ubuntu-24.04-arm"
+```
+
+Every installable must explicitly select a system, for example
+`.#checks.aarch64-linux.cargo-test` or `.#packages.x86_64-linux.server`, and
+that system must have a runner entry. The generator emits one job per declared
+installable, rather than running each gate on every architecture. It verifies
+the runner's native Nix system before project setup or realization. With `kvm = true`,
+KVM setup runs only for `x86_64-linux` rows; ARM rows do not require `/dev/kvm`.
+The existing `[ci].runner` remains the runner for ordinary language CI. Without
+the exact-build map, the installable matrix retains its single-runner behavior.
+
 ```toml
 [ci]
 platform = "github"

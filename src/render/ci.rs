@@ -1054,6 +1054,8 @@ pub fn nix_build_matrix_file_with_options(
         bail!("[ci.nix_build] options require GitHub Actions");
     }
     options.validate_push_tags()?;
+    options.validate_system_runners(installables)?;
+    let native_runners = !options.system_runners.is_empty();
 
     let mut workflow = String::new();
     push_generated_workflow_header(&mut workflow);
@@ -1086,19 +1088,38 @@ pub fn nix_build_matrix_file_with_options(
         push_platform_concurrency(&mut workflow, platform);
     }
     workflow.push_str("jobs:\n  build:\n    runs-on: ");
-    workflow.push_str(&runs_on(runner));
+    if native_runners {
+        workflow.push_str("${{ matrix.runner }}\n    name: build (${{ matrix.installable }})");
+    } else {
+        workflow.push_str(&runs_on(runner));
+    }
     workflow.push('\n');
     if let Some(timeout) = options.timeout_minutes {
         workflow.push_str(&format!("    timeout-minutes: {timeout}\n"));
     }
     workflow.push_str(&format!(
-        "    strategy:\n      fail-fast: false\n      max-parallel: {}\n      matrix:\n        installable:\n",
+        "    strategy:\n      fail-fast: false\n      max-parallel: {}\n      matrix:\n",
         options.max_parallel.unwrap_or(2)
     ));
-    for installable in installables {
-        workflow.push_str("          - \"");
-        workflow.push_str(&yaml_double_quote(installable));
-        workflow.push_str("\"\n");
+    if native_runners {
+        workflow.push_str("        include:\n");
+        for installable in installables {
+            let system = options.installable_system(installable)?;
+            let runner = &options.system_runners[system];
+            workflow.push_str(&format!(
+                "          - installable: \"{}\"\n            system: \"{}\"\n            runner: \"{}\"\n",
+                yaml_double_quote(installable),
+                yaml_double_quote(system),
+                yaml_double_quote(runner),
+            ));
+        }
+    } else {
+        workflow.push_str("        installable:\n");
+        for installable in installables {
+            workflow.push_str("          - \"");
+            workflow.push_str(&yaml_double_quote(installable));
+            workflow.push_str("\"\n");
+        }
     }
     workflow.push_str("    env:\n");
     if !options.extra_env.contains_key("NIX_CONFIG") {
@@ -1114,8 +1135,15 @@ pub fn nix_build_matrix_file_with_options(
     }
     push_install_nix_step_with_cache(&mut workflow, platform, substituters, trusted_public_keys);
     push_required_env_step(&mut workflow, &options.required_secrets);
+    if native_runners {
+        workflow.push_str("      - name: Verify native Nix runner\n        env:\n          EXPECTED_NIX_SYSTEM: ${{ matrix.system }}\n        run: |\n          actual_system=\"$(nix eval --impure --raw --expr builtins.currentSystem)\"\n          if [ \"$actual_system\" != \"$EXPECTED_NIX_SYSTEM\" ]; then\n            echo \"Native Nix runner mismatch: expected $EXPECTED_NIX_SYSTEM, got $actual_system\" >&2\n            exit 1\n          fi\n");
+    }
     if options.kvm {
-        workflow.push_str("      - name: Enable hosted KVM\n        run: |\n          test \"${RUNNER_ENVIRONMENT:-}\" = github-hosted\n          test -c /dev/kvm\n          sudo chmod a+rw /dev/kvm\n          test -r /dev/kvm && test -w /dev/kvm\n");
+        workflow.push_str("      - name: Enable hosted KVM\n");
+        if native_runners {
+            workflow.push_str("        if: ${{ matrix.system == 'x86_64-linux' }}\n");
+        }
+        workflow.push_str("        run: |\n          test \"${RUNNER_ENVIRONMENT:-}\" = github-hosted\n          test -c /dev/kvm\n          sudo chmod a+rw /dev/kvm\n          test -r /dev/kvm && test -w /dev/kvm\n");
     }
     push_extra_setup_steps(&mut workflow, extra_setup);
     push_extra_setup_steps(&mut workflow, &options.extra_setup);
