@@ -18,6 +18,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   configuration regeneration. Reject exclusion-only filters and keep tag refs
   separate from same-named branch/PR cancellation groups.
 
+### Fixed
+
+- Verify native exact-build runners against OS/CPU identity independently of
+  Nix's configurable `eval-system` and `system` settings, preventing a configured
+  system override from admitting the wrong hardware architecture.
+
 ## [0.20.0] - 2026-10-11
 
 ### Security
