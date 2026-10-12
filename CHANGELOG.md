@@ -23,6 +23,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Enforce grouped-build admission under Python optimization and preserve each
+  installable's hook context, including shell-only diagnostics after setup or
+  preflight failures. Provision the grouped interpreter and retain unset timeouts.
+- Qualify one immutable PR head across independent lanes and required gates,
+  evaluate all flake systems, preserve Cargo tool paths in every lane and reject
+  unsupported step-runner overrides before normalization.
 - Check out signed Git symlinks as inert target-text files during independent
   archive reconstruction, admitting unrelated tooling links without following
   them. Continue rejecting submodules and any Cargo manifest, declared input,
