@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Opt-in `[ci.nix_build].push_tags` patterns to retain tag-push qualification
+  alongside branch and pull-request gates, with ordered exclusions and stable
+  configuration regeneration. Reject exclusion-only filters and keep tag refs
+  separate from same-named branch/PR cancellation groups.
+
 ## [0.20.0] - 2026-10-11
 
 ### Security
