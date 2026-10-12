@@ -114,6 +114,81 @@ class Custody(unittest.TestCase):
         with patch('subprocess.run', effect):
             return self.namespace['report'](self.config, self.folder)
 
+    def test_ref_qualified_paths_capture_the_same_enrolled_originals(self):
+        original_runs, original_payload = copy.deepcopy(self.runs), copy.deepcopy(self.payload)
+        for reference in ['feature', 'refs/heads/feature', HEAD, 'refs/pull/5/merge', 'refs/pull/5/head']:
+            for observation in ['event', 'native', 'discovery', 'all']:
+                with self.subTest(reference=reference, observation=observation):
+                    self.runs = copy.deepcopy(original_runs)
+                    self.payload = copy.deepcopy(original_payload)
+                    if observation in ['event', 'all']:
+                        self.payload['workflow_run']['path'] += '@' + reference
+                    if observation in ['native', 'all']:
+                        for run in self.runs:
+                            run['path'] += '@' + reference
+                    discovery = copy.deepcopy(self.runs)
+                    if observation == 'discovery':
+                        for run in discovery:
+                            run['path'] += '@' + reference
+                    def api(repository, endpoint, **limits):
+                        if endpoint.startswith('actions/runs?'):
+                            self.calls.append(endpoint)
+                            return json.dumps({'total_count': len(discovery), 'workflow_runs': discovery}).encode()
+                        return self.api(repository, endpoint, **limits)
+                    self.namespace['api'] = api
+                    with tempfile.TemporaryDirectory(dir=self.folder) as directory:
+                        root = Path(directory)
+                        receipt = self.namespace['capture'](self.config, self.payload, root)
+                        self.assertEqual(receipt['state'], 'ready')
+                        self.assertTrue(receipt['capture_complete'])
+                        for run in self.runs:
+                            retained = json.loads((root / str(run['id']) / 'terminal.json').read_text())
+                            self.assertEqual(retained['path'], run['path'])
+
+    def test_invalid_workflow_qualifiers_never_capture_complete_custody(self):
+        original_runs, original_payload = copy.deepcopy(self.runs), copy.deepcopy(self.payload)
+        for value in [None, [], {}, '', '.github/workflows/other.yaml@feature',
+                      '.github/workflows/ci.yaml@', '.github/workflows/ci.yaml@other',
+                      '.github/workflows/ci.yaml@feature@other', '.github/workflows/ci.yaml@refs/heads/trunk',
+                      '.github/workflows/ci.yaml@refs/pull/6/merge', '.github/workflows/ci.yaml@refs/pull/6/head']:
+            for observation in ['event', 'native', 'discovery']:
+                with self.subTest(value=value, observation=observation):
+                    self.runs = copy.deepcopy(original_runs)
+                    self.payload = copy.deepcopy(original_payload)
+                    if observation == 'event':
+                        self.payload['workflow_run']['path'] = value
+                    if observation == 'native':
+                        self.runs[0]['path'] = value
+                    discovery = copy.deepcopy(self.runs)
+                    if observation == 'discovery':
+                        discovery[0]['path'] = value
+                    def api(repository, endpoint, **limits):
+                        if endpoint.startswith('actions/runs?'):
+                            self.calls.append(endpoint)
+                            return json.dumps({'total_count': len(discovery), 'workflow_runs': discovery}).encode()
+                        return self.api(repository, endpoint, **limits)
+                    self.namespace['api'] = api
+                    with tempfile.TemporaryDirectory(dir=self.folder) as directory:
+                        root = Path(directory)
+                        if observation == 'discovery':
+                            receipt = self.namespace['capture'](self.config, self.payload, root)
+                            self.assertEqual(receipt['state'], 'waiting')
+                            self.assertFalse(receipt['capture_complete'])
+                        else:
+                            with self.assertRaises(RuntimeError):
+                                self.namespace['capture'](self.config, self.payload, root)
+                        self.assertFalse(any(root.glob('*/provider-logs.zip')))
+                        self.assertFalse(self.effects)
+
+    def test_duplicate_originals_cannot_hide_behind_ref_qualified_paths(self):
+        duplicate = copy.deepcopy(self.runs[0])
+        duplicate.update(id=3, path=duplicate['path'] + '@feature')
+        self.runs.append(duplicate)
+        with self.assertRaises(RuntimeError):
+            self.captured()
+        self.assertFalse(any(self.folder.glob('*/provider-logs.zip')))
+        self.assertFalse(self.effects)
+
     def test_either_completion_stays_pending_until_all_originals_complete(self):
         self.runs[1]['status'] = 'in_progress'
         receipt = self.captured()

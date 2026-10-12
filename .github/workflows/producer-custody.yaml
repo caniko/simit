@@ -353,12 +353,26 @@ jobs:
               return snapshot, status_context(config, snapshot['target'])
 
 
+          def workflow_path_matches(value, expected, snapshot):
+              """Accept provider ref qualifications only for the observed source target."""
+              if not isinstance(value, str):
+                  return False
+              path, separator, reference = value.partition('@')
+              target = snapshot['target']
+              references = {snapshot['head'], target['branch'], 'refs/heads/' + target['branch']}
+              if target['event'] == 'pull_request':
+                  number = target['pull_request']['number']
+                  references.update({f'refs/pull/{number}/head', f'refs/pull/{number}/merge'})
+              return path == expected and (not separator or reference in references)
+
+
           def validate_run(run, head, branch, event, name, producer, attempt, repository, snapshot):
               require(type(run['id']) is int and run['id'] > 0, 'Invalid producer run identity')
               require(repository_identity(run['repository']['full_name']) == repository, 'Producer repository differs')
               require(repository_identity(run['head_repository']['full_name']) == repository, 'Fork custody requires separate enrollment')
               require(run['head_sha'] == head and run['head_branch'] == branch, 'Producer source differs')
-              require(run['event'] == event and run['path'] == producer['workflow'] and run['name'] == name, 'Producer workflow or event differs')
+              require(run['event'] == event and workflow_path_matches(run['path'], producer['workflow'], snapshot)
+                      and run['name'] == name, 'Producer workflow or event differs')
               require(run['run_attempt'] == attempt, 'Latest producer attempt is not the enrolled original')
               require(run_identity(run, repository) == snapshot, 'Producer target or observed snapshot differs')
 
@@ -389,9 +403,11 @@ jobs:
               # attempts, so rejected reruns and provider failures revoke prior success.
               trigger = json.loads(fetch(repository, f"actions/runs/{event_run['id']}"))
               require(trigger['event'] in ['push', 'pull_request'] and trigger['status'] == 'completed', 'Trigger is not an eligible completion')
-              for key in ['head_sha', 'event', 'path', 'head_branch', 'run_attempt']:
+              for key in ['head_sha', 'event', 'head_branch', 'run_attempt']:
                   require(trigger[key] == event_run[key], 'Completion event changed')
               require(trigger['name'] in config['producers'], 'Trigger workflow is not enrolled')
+              require(workflow_path_matches(event_run['path'], config['producers'][trigger['name']]['workflow'], snapshot),
+                      'Completion workflow path differs')
               validate_run(trigger, receipt['head'], receipt['branch'], receipt['event'],
                            trigger['name'], config['producers'][trigger['name']], config['producer_attempt'], repository, snapshot)
               receipt['trigger_snapshot'] = run_identity(trigger, repository)
@@ -404,7 +420,8 @@ jobs:
               for name, producer in config['producers'].items():
                   matching = []
                   for candidate in candidates:
-                      if (candidate['path'] != producer['workflow'] or candidate['head_branch'] != receipt['branch']
+                      if (not workflow_path_matches(candidate['path'], producer['workflow'], snapshot)
+                              or candidate['head_branch'] != receipt['branch']
                               or candidate['event'] != receipt['event'] or candidate['head_sha'] != receipt['head']):
                           continue
                       identity = run_identity(candidate, repository)
@@ -939,12 +956,26 @@ jobs:
               return snapshot, status_context(config, snapshot['target'])
 
 
+          def workflow_path_matches(value, expected, snapshot):
+              """Accept provider ref qualifications only for the observed source target."""
+              if not isinstance(value, str):
+                  return False
+              path, separator, reference = value.partition('@')
+              target = snapshot['target']
+              references = {snapshot['head'], target['branch'], 'refs/heads/' + target['branch']}
+              if target['event'] == 'pull_request':
+                  number = target['pull_request']['number']
+                  references.update({f'refs/pull/{number}/head', f'refs/pull/{number}/merge'})
+              return path == expected and (not separator or reference in references)
+
+
           def validate_run(run, head, branch, event, name, producer, attempt, repository, snapshot):
               require(type(run['id']) is int and run['id'] > 0, 'Invalid producer run identity')
               require(repository_identity(run['repository']['full_name']) == repository, 'Producer repository differs')
               require(repository_identity(run['head_repository']['full_name']) == repository, 'Fork custody requires separate enrollment')
               require(run['head_sha'] == head and run['head_branch'] == branch, 'Producer source differs')
-              require(run['event'] == event and run['path'] == producer['workflow'] and run['name'] == name, 'Producer workflow or event differs')
+              require(run['event'] == event and workflow_path_matches(run['path'], producer['workflow'], snapshot)
+                      and run['name'] == name, 'Producer workflow or event differs')
               require(run['run_attempt'] == attempt, 'Latest producer attempt is not the enrolled original')
               require(run_identity(run, repository) == snapshot, 'Producer target or observed snapshot differs')
 
@@ -975,9 +1006,11 @@ jobs:
               # attempts, so rejected reruns and provider failures revoke prior success.
               trigger = json.loads(fetch(repository, f"actions/runs/{event_run['id']}"))
               require(trigger['event'] in ['push', 'pull_request'] and trigger['status'] == 'completed', 'Trigger is not an eligible completion')
-              for key in ['head_sha', 'event', 'path', 'head_branch', 'run_attempt']:
+              for key in ['head_sha', 'event', 'head_branch', 'run_attempt']:
                   require(trigger[key] == event_run[key], 'Completion event changed')
               require(trigger['name'] in config['producers'], 'Trigger workflow is not enrolled')
+              require(workflow_path_matches(event_run['path'], config['producers'][trigger['name']]['workflow'], snapshot),
+                      'Completion workflow path differs')
               validate_run(trigger, receipt['head'], receipt['branch'], receipt['event'],
                            trigger['name'], config['producers'][trigger['name']], config['producer_attempt'], repository, snapshot)
               receipt['trigger_snapshot'] = run_identity(trigger, repository)
@@ -990,7 +1023,8 @@ jobs:
               for name, producer in config['producers'].items():
                   matching = []
                   for candidate in candidates:
-                      if (candidate['path'] != producer['workflow'] or candidate['head_branch'] != receipt['branch']
+                      if (not workflow_path_matches(candidate['path'], producer['workflow'], snapshot)
+                              or candidate['head_branch'] != receipt['branch']
                               or candidate['event'] != receipt['event'] or candidate['head_sha'] != receipt['head']):
                           continue
                       identity = run_identity(candidate, repository)
@@ -1526,12 +1560,26 @@ jobs:
               return snapshot, status_context(config, snapshot['target'])
 
 
+          def workflow_path_matches(value, expected, snapshot):
+              """Accept provider ref qualifications only for the observed source target."""
+              if not isinstance(value, str):
+                  return False
+              path, separator, reference = value.partition('@')
+              target = snapshot['target']
+              references = {snapshot['head'], target['branch'], 'refs/heads/' + target['branch']}
+              if target['event'] == 'pull_request':
+                  number = target['pull_request']['number']
+                  references.update({f'refs/pull/{number}/head', f'refs/pull/{number}/merge'})
+              return path == expected and (not separator or reference in references)
+
+
           def validate_run(run, head, branch, event, name, producer, attempt, repository, snapshot):
               require(type(run['id']) is int and run['id'] > 0, 'Invalid producer run identity')
               require(repository_identity(run['repository']['full_name']) == repository, 'Producer repository differs')
               require(repository_identity(run['head_repository']['full_name']) == repository, 'Fork custody requires separate enrollment')
               require(run['head_sha'] == head and run['head_branch'] == branch, 'Producer source differs')
-              require(run['event'] == event and run['path'] == producer['workflow'] and run['name'] == name, 'Producer workflow or event differs')
+              require(run['event'] == event and workflow_path_matches(run['path'], producer['workflow'], snapshot)
+                      and run['name'] == name, 'Producer workflow or event differs')
               require(run['run_attempt'] == attempt, 'Latest producer attempt is not the enrolled original')
               require(run_identity(run, repository) == snapshot, 'Producer target or observed snapshot differs')
 
@@ -1562,9 +1610,11 @@ jobs:
               # attempts, so rejected reruns and provider failures revoke prior success.
               trigger = json.loads(fetch(repository, f"actions/runs/{event_run['id']}"))
               require(trigger['event'] in ['push', 'pull_request'] and trigger['status'] == 'completed', 'Trigger is not an eligible completion')
-              for key in ['head_sha', 'event', 'path', 'head_branch', 'run_attempt']:
+              for key in ['head_sha', 'event', 'head_branch', 'run_attempt']:
                   require(trigger[key] == event_run[key], 'Completion event changed')
               require(trigger['name'] in config['producers'], 'Trigger workflow is not enrolled')
+              require(workflow_path_matches(event_run['path'], config['producers'][trigger['name']]['workflow'], snapshot),
+                      'Completion workflow path differs')
               validate_run(trigger, receipt['head'], receipt['branch'], receipt['event'],
                            trigger['name'], config['producers'][trigger['name']], config['producer_attempt'], repository, snapshot)
               receipt['trigger_snapshot'] = run_identity(trigger, repository)
@@ -1577,7 +1627,8 @@ jobs:
               for name, producer in config['producers'].items():
                   matching = []
                   for candidate in candidates:
-                      if (candidate['path'] != producer['workflow'] or candidate['head_branch'] != receipt['branch']
+                      if (not workflow_path_matches(candidate['path'], producer['workflow'], snapshot)
+                              or candidate['head_branch'] != receipt['branch']
                               or candidate['event'] != receipt['event'] or candidate['head_sha'] != receipt['head']):
                           continue
                       identity = run_identity(candidate, repository)
