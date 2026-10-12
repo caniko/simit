@@ -286,6 +286,50 @@ fn independent_lanes_reject_configured_step_runners_before_normalization() {
 }
 
 #[test]
+fn independent_lane_audits_reject_step_runners_without_writes() {
+    let temp = project("independent_lanes = true");
+    fs::write(
+        temp.path().join("Cargo.toml"),
+        "[package]\nname = \"client\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )
+    .unwrap();
+    fs::create_dir(temp.path().join("src")).unwrap();
+    fs::write(temp.path().join("src/lib.rs"), "pub fn client() {}\n").unwrap();
+    let output = generate(&temp, &[]);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        simit::registry::audit_ci(temp.path()).unwrap().status,
+        simit::registry::FeatureStatus::Managed
+    );
+    let workflows = fs::read_dir(temp.path().join(".github/workflows"))
+        .unwrap()
+        .map(|entry| {
+            let path = entry.unwrap().path();
+            let bytes = fs::read(&path).unwrap();
+            (path, bytes)
+        })
+        .collect::<Vec<_>>();
+    let path = temp.path().join("simit.toml");
+    let mut config = fs::read_to_string(&path)
+        .unwrap()
+        .parse::<toml_edit::DocumentMut>()
+        .unwrap();
+    config["ci"]["step_runners"]["test"] = toml_edit::value("ubuntu-24.04");
+    let before = config.to_string();
+    fs::write(&path, &before).unwrap();
+    let error = simit::registry::audit_ci(temp.path()).unwrap_err();
+    assert!(format!("{error:#}").contains("step_runners"), "{error:#}");
+    assert_eq!(
+        simit::registry::detect_feature_status(temp.path())["ci"],
+        simit::registry::FeatureStatus::Drift
+    );
+    assert_eq!(fs::read_to_string(&path).unwrap(), before);
+    for (path, bytes) in workflows {
+        assert_eq!(fs::read(path).unwrap(), bytes);
+    }
+}
+
+#[test]
 fn effective_backend_overrides_cannot_silently_drop_group_admission() {
     let temp = project(
         "[ci.nix_build]\ncapture_results = true\ncheck_systems = [\"x86_64-linux\"]\n[ci.nix_build.groups]\nall = [\".#checks.x86_64-linux.client\", \".#checks.x86_64-linux.recovery\"]",
