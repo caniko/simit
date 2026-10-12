@@ -34,6 +34,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   retain admission diagnostics, and force fresh rebuilds onto the current worker.
   Bootstrap uses public credential-free Nix fetching and portable hashing, with
   unsupported Intel macOS runner admission rejected before generation writes.
+- Migrate recognized inline MSRV bindings in existing canonical flakes before
+  hook-wiring shortcuts, and detect that required source migration in full checks.
 - Generate MSRV toolchain manifests as source assets so no-build, read-only Nix
   evaluation succeeds on cold stores without changing the declared compiler.
 - Enforce grouped-build admission under Python optimization and preserve each
