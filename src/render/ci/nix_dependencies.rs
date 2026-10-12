@@ -33,14 +33,15 @@ fn program(
         ),
         ("SIMIT_NIX_LIMITS", serde_json::to_string(&limits)?),
     ] {
-        workflow.push_str(&format!(
-            "          {name}: \"{}\"\n",
-            yaml_double_quote(&value)
-        ));
+        workflow.push_str(&format!("          {name}: {}\n", yaml_json_scalar(&value)));
     }
     workflow.push_str("        run: |\n");
     for line in include_str!("nix_dependencies.py").lines() {
-        workflow.push_str(&format!("          {line}\n"));
+        if line.is_empty() {
+            workflow.push('\n');
+        } else {
+            workflow.push_str(&format!("          {line}\n"));
+        }
     }
     Ok(())
 }
