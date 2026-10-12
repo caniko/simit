@@ -801,6 +801,24 @@ fn independent_publication_qualifies_native_components_and_keeps_version_drift_s
     assert_eq!(workflow["on"]["push"]["tags"][0], "worker/v[0-9]*");
     assert_eq!(workflow["permissions"]["contents"], "read");
     assert_eq!(workflow["jobs"]["build"]["needs"][0], "qualified");
+    assert_eq!(workflow["jobs"]["plan"]["needs"][0], "verify-source");
+    let verification = &workflow["jobs"]["verify-source"];
+    assert!(verification["if"].is_null());
+    assert!(verification["continue-on-error"].is_null());
+    let verification_text = serde_yaml::to_string(verification).unwrap();
+    assert!(verification_text.contains("git verify-tag"));
+    assert!(verification_text.contains("FETCH_HEAD:keys/maintainers.gpg"));
+    assert!(verification_text.contains("refs/tags/${tag}^{commit}"));
+    assert!(!verification_text.contains("nix develop"));
+    assert!(!verification_text.contains("nix eval"));
+    assert!(!verification_text.contains("cargo "));
+    assert!(!verification_text.contains("secrets."));
+    let branch_workflow: serde_yaml::Value = serde_yaml::from_str(
+        &fs::read_to_string(temp.path().join(".github/workflows/ci.yaml")).unwrap(),
+    )
+    .unwrap();
+    assert!(branch_workflow["jobs"]["verify-source"].is_null());
+    assert!(branch_workflow["jobs"]["plan"]["needs"].is_null());
     assert_eq!(
         workflow["jobs"]["plan"]["steps"]
             .as_sequence()

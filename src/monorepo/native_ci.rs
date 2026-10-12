@@ -73,7 +73,7 @@ pub(super) fn files(
             let runner = config.ci.runner.as_deref().unwrap_or("ubuntu-latest");
             let mut workflow = json!({"name": format!("Publish {} {}", registry.name(), owner.namespace), "on": {"push": {"tags": [format!("{}/v[0-9]*", owner.namespace)]}}, "permissions": {"contents": "read"}, "concurrency": {"group": format!("publish-native-{}-${{{{ github.ref }}}}", owner.namespace), "cancel-in-progress": false}, "jobs": {"validate": {"needs": ["qualified"], "runs-on": runner, "timeout-minutes": 30, "env": env, "steps": validate_steps}, "publish": {"needs": ["validate"], "runs-on": runner, "timeout-minutes": 20, "env": env, "steps": publish_steps}}});
             workflow["jobs"].as_object_mut().unwrap().extend(
-                super::ci::full_qualification(qualification)?
+                super::ci::full_qualification(qualification, &owner.namespace, runner)?
                     .as_object()
                     .unwrap()
                     .clone(),

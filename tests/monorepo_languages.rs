@@ -740,6 +740,17 @@ fn eligible_native_publication_qualifies_the_full_graph_and_preserves_private_ow
     let workflow: serde_yaml::Value = serde_yaml::from_str(&source).unwrap();
     assert_eq!(workflow["on"]["push"]["tags"][0], "py-engine/v[0-9]*");
     assert_eq!(workflow["jobs"]["validate"]["needs"][0], "qualified");
+    assert_eq!(workflow["jobs"]["plan"]["needs"][0], "verify-source");
+    let verification = &workflow["jobs"]["verify-source"];
+    assert!(verification["if"].is_null());
+    assert!(verification["continue-on-error"].is_null());
+    let verification_text = serde_yaml::to_string(verification).unwrap();
+    assert!(verification_text.contains("git verify-tag"));
+    assert!(verification_text.contains("FETCH_HEAD:keys/maintainers.gpg"));
+    assert!(!verification_text.contains("nix develop"));
+    assert!(!verification_text.contains("nix eval"));
+    assert!(!verification_text.contains("cargo "));
+    assert!(!verification_text.contains("secrets."));
     assert_eq!(workflow["jobs"]["publish"]["needs"][0], "validate");
     assert_eq!(workflow["permissions"]["contents"], "read");
     for job in workflow["jobs"].as_mapping().unwrap().values() {

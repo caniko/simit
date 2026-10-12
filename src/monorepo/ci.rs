@@ -141,7 +141,7 @@ pub(crate) fn files(root: &Path, config: &ProjectConfig) -> Result<Vec<Generated
                 "independent Cargo publication currently requires the keys/maintainers.gpg trust root"
             );
         }
-        let runner = crate::user_config::ResolvedRunner {
+        let publication_runner = crate::user_config::ResolvedRunner {
             name: None,
             labels: vec![runner.to_owned()],
         };
@@ -158,14 +158,17 @@ pub(crate) fn files(root: &Path, config: &ProjectConfig) -> Result<Vec<Generated
                 publish_crates: true,
                 ..Default::default()
             };
-            let mut publication =
-                crate::render::ci::publish_independent_files(package, &runner, &options)?;
+            let mut publication = crate::render::ci::publish_independent_files(
+                package,
+                &publication_runner,
+                &options,
+            )?;
             let file = &mut publication[0];
             let mut release: Value = serde_yaml::from_str(&file.content)?;
             release["permissions"] = json!({"contents": "read"});
             // A release always qualifies the entire graph on its native runners,
             // including non-Cargo checks, before the credentialed publish job.
-            let qualification = full_qualification(&workflow)?;
+            let qualification = full_qualification(&workflow, &package.name, runner)?;
             release["jobs"]
                 .as_object_mut()
                 .context("release jobs must be a mapping")?
@@ -205,8 +208,23 @@ pub(crate) fn files(root: &Path, config: &ProjectConfig) -> Result<Vec<Generated
     Ok(files)
 }
 
-pub(super) fn full_qualification(workflow: &Value) -> Result<Value> {
+pub(super) fn full_qualification(workflow: &Value, namespace: &str, runner: &str) -> Result<Value> {
     let mut jobs = workflow["jobs"].clone();
+    // Component planning itself evaluates the tag's Nix source. Verify its
+    // signature with the default-branch trust root before admitting that graph.
+    // Reuse the canonical shell-only verifier without any Cargo version lookup.
+    let tag_steps: Vec<Value> = serde_yaml::from_str(
+        &crate::render::ci::validate_release_tag_step(None, None, Some(namespace)),
+    )?;
+    let mut verification_steps = vec![checkout(), input_transport()];
+    verification_steps.extend(tag_steps);
+    jobs["verify-source"] = json!({
+        "runs-on": runner,
+        "timeout-minutes": 15,
+        "permissions": {"contents": "read"},
+        "steps": verification_steps,
+    });
+    jobs["plan"]["needs"] = json!(["verify-source"]);
     let plan = jobs["plan"]["steps"]
         .as_array_mut()
         .context("qualification plan requires steps")?

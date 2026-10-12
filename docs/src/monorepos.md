@@ -101,10 +101,12 @@ requires a clean checkout.
 
 Set `[ci].publish_crates = true` to generate a paired source-build and trusted
 publication workflow for each publishable Cargo member. The credential-free
-`publish-crate-<package>.yaml` qualifies the entire component graph on its declared
-native runners before building the selected archive. It verifies the signed
-`<package>/v<version>` tag against the default-branch `keys/maintainers.gpg`, and
-checks its exact checkout and plain SemVer package version.
+`publish-crate-<package>.yaml` first verifies the signed `<package>/v<version>`
+tag and exact checkout against the default-branch `keys/maintainers.gpg` in a
+credential-free job. Planning and component qualification depend on that job,
+so no tag-controlled Nix or Cargo code runs before signature verification.
+It then qualifies the entire component graph on its declared native runners
+before checking the plain SemVer package version and building the selected archive.
 
 The `trusted-publish-crate-<package>.yaml` companion runs from the independently
 enrolled default branch after successful source qualification. It rechecks the
@@ -167,8 +169,9 @@ version commit and tag.
 
 `publish` records registry eligibility (npm `private = true` always disables it).
 Eligible owners generate independent `publish-python-<namespace>.yaml` or
-`publish-npm-<namespace>.yaml` workflows. Each package-qualified signed tag
-qualifies the complete graph on every declared native runner, then validates
+`publish-npm-<namespace>.yaml` workflows. Each package-qualified signed tag is
+verified before planning or evaluating the release source. It then qualifies
+the complete graph on every declared native runner and validates
 the tag/event/HEAD identity, builds just that owner's wheel plus sdist or npm
 tarball, and transfers a source-bound checksum receipt to a separate publish
 job. The publish job verifies the signed tag again, rejects metadata/checksum

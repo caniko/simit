@@ -4873,7 +4873,7 @@ fn release_trust_root_steps() -> String {
     )
 }
 
-fn validate_release_tag_step(
+pub(crate) fn validate_release_tag_step(
     cargo_command_prefix: Option<&str>,
     package_name: Option<&str>,
     independent: Option<&str>,
