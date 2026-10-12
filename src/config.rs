@@ -3652,6 +3652,15 @@ fn validate_nix_build_config(config: &ProjectConfig) -> Result<()> {
                 "simit project config: [ci.nix_build].extra_env cannot override SIMIT_NIX_BUILD_RESULTS"
             );
         }
+        if !options.groups.is_empty()
+            && (name.starts_with("SIMIT_CI_")
+                || name.starts_with("SIMIT_NIX_")
+                || name == "INSTALLABLES")
+        {
+            bail!(
+                "simit project config: grouped [ci.nix_build].extra_env cannot override reserved runtime variable {name}"
+            );
+        }
     }
     for name in &options.required_env {
         validate_github_actions_secret_identifier(

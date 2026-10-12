@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Native `simit ci nix-group` and library execution contracts replace embedded
+  grouped-build Python and its Python test harness. Enroll an immutable
+  `SIMIT_CI_ENGINE_REVISION` repository variable before adopting regenerated
+  grouped workflows. Retain v1 receipts, shell-only failure diagnostics and
+  materialize-plus-rebuild execution for fresh members.
 - Opt-in shared-store Nix build groups with complete installable assignments,
   discovered-check coverage admission and per-output failure evidence.
 - Independent Rust, full-flake evaluation and optional realization lanes for

@@ -42,13 +42,9 @@ pub(super) fn render(
             yaml_json_scalar(&serde_json::to_string(members)?)
         ));
     }
-    workflow.push_str("    env:\n");
-    if !options.extra_env.contains_key("NIX_CONFIG") {
-        workflow.push_str("      NIX_CONFIG: \"experimental-features = nix-command flakes\"\n");
-    }
-    for (name, value) in &options.extra_env {
-        workflow.push_str(&format!("      {name}: \"{}\"\n", yaml_double_quote(value)));
-    }
+    // Producer shell startup files/configuration cannot participate in bootstrap.
+    workflow
+        .push_str("    env:\n      NIX_CONFIG: \"experimental-features = nix-command flakes\"\n");
     workflow.push_str("    steps:\n");
     push_source_head_checkout(&mut workflow, runner);
     workflow.push_str("      - name: Prepare Nix build evidence\n        run: |\n          SIMIT_NIX_BUILD_RESULTS=\"$RUNNER_TEMP/simit-nix-build-${{ strategy.job-index }}\"\n          mkdir -p \"$SIMIT_NIX_BUILD_RESULTS\"\n          printf '%s\\n' \"SIMIT_NIX_BUILD_RESULTS=$SIMIT_NIX_BUILD_RESULTS\" >> \"$GITHUB_ENV\"\n          git rev-parse HEAD > \"$SIMIT_NIX_BUILD_RESULTS/revision\"\n");
@@ -58,23 +54,24 @@ pub(super) fn render(
         substituters,
         trusted_public_keys,
     );
-    workflow.push_str("      - name: Provision grouped-build Python\n");
-    push_action_uses(
-        &mut workflow,
-        Platform::Github,
-        Some(runner),
-        "setup-python",
-        "v6.3.0",
-        "v5.6.0",
-    );
-    workflow.push_str("\n        with:\n          python-version: '3.12'\n");
-    push_required_env_step(&mut workflow, &options.required_secrets);
+    // Enrollment is administrator-owned. Never build the engine from the producer
+    // checkout or silently resolve a moving branch when the pin is absent.
+    workflow.push_str("      - name: Provision grouped-build Rust engine\n        shell: bash\n        env:\n          SIMIT_CI_ENGINE_REVISION: ${{ vars.SIMIT_CI_ENGINE_REVISION }}\n          BASH_ENV: ''\n          ENV: ''\n          NIX_CONFIG: 'experimental-features = nix-command flakes'\n          NIX_USER_CONF_FILES: /dev/null\n          NIX_PATH: ''\n        run: |\n          [[ \"$SIMIT_CI_ENGINE_REVISION\" =~ ^[0-9a-f]{40}$ ]] || { echo 'Enroll an immutable SIMIT_CI_ENGINE_REVISION containing ci nix-group' >&2; exit 1; }\n          engine_path=$(env -u GH_TOKEN -u GITHUB_TOKEN -u GITHUB_OAUTH_TOKEN -u ATTIC_TOKEN -u CACHIX_AUTH_TOKEN -u CACHIX_SIGNING_KEY nix build --no-link --no-update-lock-file --print-out-paths --option accept-flake-config false --option substituters https://cache.nixos.org \"github:caniko/simit/$SIMIT_CI_ENGINE_REVISION#default\")\n          [[ \"$engine_path\" =~ ^/nix/store/[0-9a-z]{32}-[A-Za-z0-9+._?=-]+$ ]] || { echo 'Invalid engine output inventory' >&2; exit 1; }\n          test -x \"$engine_path/bin/simit\"\n          \"$engine_path/bin/simit\" ci nix-group --help > /dev/null\n          printf '%s\\n' \"$SIMIT_CI_ENGINE_REVISION\" > \"$SIMIT_NIX_BUILD_RESULTS/engine-source-revision\"\n          sha256sum \"$engine_path/bin/simit\" > \"$SIMIT_NIX_BUILD_RESULTS/engine-executable.sha256\"\n          printf '%s\\n' \"SIMIT_CI_ENGINE=$engine_path/bin/simit\" >> \"$GITHUB_ENV\"\n");
+    push_required_env_step_with_context(&mut workflow, &options.required_secrets, |w| {
+        push_producer_env(w, options)
+    });
     if options.kvm {
         workflow.push_str("      - name: Enable hosted KVM\n        run: |\n          test \"${RUNNER_ENVIRONMENT:-}\" = github-hosted\n          test -c /dev/kvm\n          sudo chmod a+rw /dev/kvm\n          test -r /dev/kvm && test -w /dev/kvm\n");
     }
-    push_extra_setup_steps(&mut workflow, extra_setup);
-    push_extra_setup_steps(&mut workflow, &options.extra_setup);
-    push_required_env_step(&mut workflow, &options.required_env);
+    push_extra_setup_steps_with_context(&mut workflow, extra_setup, |w| {
+        push_producer_env(w, options)
+    });
+    push_extra_setup_steps_with_context(&mut workflow, &options.extra_setup, |w| {
+        push_producer_env(w, options)
+    });
+    push_required_env_step_with_context(&mut workflow, &options.required_env, |w| {
+        push_producer_env(w, options)
+    });
     let mut limits = Vec::new();
     if let Some(value) = options.max_jobs {
         limits.extend(["--max-jobs".to_owned(), value.to_string()]);
@@ -82,7 +79,8 @@ pub(super) fn render(
     if let Some(value) = options.cores {
         limits.extend(["--cores".to_owned(), value.to_string()]);
     }
-    workflow.push_str("      - name: Build Nix group\n        shell: python\n        env:\n          INSTALLABLES: ${{ matrix.installables }}\n");
+    workflow.push_str("      - name: Build Nix group\n        shell: bash\n        env:\n          INSTALLABLES: ${{ matrix.installables }}\n");
+    push_producer_env_lines(&mut workflow, options);
     for (key, value) in [
         ("SIMIT_NIX_PLAN", serde_json::to_string(installables)?),
         (
@@ -101,14 +99,7 @@ pub(super) fn render(
     ] {
         workflow.push_str(&format!("          {key}: {}\n", yaml_json_scalar(&value)));
     }
-    workflow.push_str("        run: |\n");
-    for line in include_str!("nix_group.py").lines() {
-        if line.is_empty() {
-            workflow.push('\n');
-        } else {
-            workflow.push_str(&format!("          {line}\n"));
-        }
-    }
+    workflow.push_str("        run: |\n          \"$SIMIT_CI_ENGINE\" ci nix-group\n");
     push_diagnostics_fallback(&mut workflow, options);
     workflow.push_str("      - name: Upload Nix build evidence\n        if: always()\n");
     push_action_uses(
@@ -133,9 +124,11 @@ fn push_diagnostics_fallback(workflow: &mut String, options: &NixBuildConfig) {
     if options.post_build_always.is_empty() {
         return;
     }
-    // The collectors must survive failed interpreter provisioning or admission.
+    // The collectors must survive failed engine provisioning or admission.
     // Render static member arms so the fallback needs only the job's shell.
-    workflow.push_str("      - name: Retain uncollected group diagnostics\n        if: ${{ !cancelled() }}\n        env:\n          SIMIT_NIX_GROUP: ${{ matrix.group }}\n          SIMIT_NIX_BUILD_RESULTS: ${{ runner.temp }}/simit-nix-build-${{ strategy.job-index }}\n        run: |\n          group_root=\"$SIMIT_NIX_BUILD_RESULTS\"\n          collector_failed=0\n          case \"$SIMIT_NIX_GROUP\" in\n");
+    workflow.push_str("      - name: Retain uncollected group diagnostics\n        if: ${{ !cancelled() }}\n        env:\n          SIMIT_NIX_GROUP: ${{ matrix.group }}\n          SIMIT_NIX_BUILD_RESULTS: ${{ runner.temp }}/simit-nix-build-${{ strategy.job-index }}\n");
+    push_producer_env_lines(workflow, options);
+    workflow.push_str("        run: |\n          group_root=\"$SIMIT_NIX_BUILD_RESULTS\"\n          collector_failed=0\n          case \"$SIMIT_NIX_GROUP\" in\n");
     for (name, members) in &options.groups {
         workflow.push_str(&format!("            {})\n", shell_word(name)));
         for (index, installable) in members.iter().enumerate() {
@@ -149,4 +142,20 @@ fn push_diagnostics_fallback(workflow: &mut String, options: &NixBuildConfig) {
         workflow.push_str("              ;;\n");
     }
     workflow.push_str("            *) echo 'Unknown Nix diagnostic group' >&2; exit 1 ;;\n          esac\n          exit \"$collector_failed\"\n");
+}
+
+fn push_producer_env(workflow: &mut String, options: &NixBuildConfig) {
+    if !options.extra_env.is_empty() {
+        workflow.push_str("        env:\n");
+        push_producer_env_lines(workflow, options);
+    }
+}
+
+fn push_producer_env_lines(workflow: &mut String, options: &NixBuildConfig) {
+    for (name, value) in &options.extra_env {
+        workflow.push_str(&format!(
+            "          {name}: \"{}\"\n",
+            yaml_double_quote(value)
+        ));
+    }
 }

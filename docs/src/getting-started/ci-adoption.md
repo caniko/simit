@@ -39,6 +39,61 @@ with_msrv = true
 
 ## Generic CI vs Release Publishing
 
+### Native grouped Nix executor
+
+Grouped workflows invoke `simit ci nix-group`. Before adopting regenerated
+workflows, enroll the repository variable `SIMIT_CI_ENGINE_REVISION` with the
+exact 40-character lowercase Git revision of a qualified Simit engine containing
+that command. Provisioning builds `github:caniko/simit/<revision>#default`, not
+the producer checkout, and retains the selected source revision and executable
+SHA-256 in the evidence root. Missing or malformed enrollment and an engine
+without the command fail the job. There is no moving-ref or Python fallback.
+This read-only producer bootstrap is not enrollment for privileged completion
+custody or release publishing; those engines have separate authority contracts.
+Producer `extra_env` bindings apply only to setup, validation, execution and
+diagnostic steps after provisioning. Engine provisioning clears shell startup
+files and uses controlled Nix configuration and public substitution. Grouped
+configuration cannot override reserved `SIMIT_CI_*`, `SIMIT_NIX_*` or
+`INSTALLABLES` runtime inputs.
+
+The command reads the generated environment lists, or accepts
+`--spec <file> --results <directory>`. The public
+`simit::ci_runtime::group::execute` function uses the same typed contract. A JSON
+spec has schema `simit.nix-group-spec.v1`, with `members`, `plan`, `check_systems`,
+`limits`, `post_build`, `post_build_always` and optional `fresh_installables`.
+Unknown fields, invalid membership and unsupported Nix flags fail before Nix
+execution. The results directory must already exist and contain no earlier
+group receipt or member evidence.
+
+Retained `simit.nix-group.v1` receipts preserve source/tree/run/attempt/event,
+ordered results, hook statuses and numbered member directories. Optional
+`fresh_execution` is present only for fresh members. A fresh member must first
+materialize successfully with valid output JSON, then pass current-worker
+`--rebuild`. Ordinary materialization is never fresh acceptance. Malformed
+successful output and failed builds/hooks fail the group while subsequent
+members still run. Dispatch and process-limit failures are recorded as status
+125; member stdout/stderr and hook output are retained as separate files.
+Subprocess output is bounded to 16 MiB stdout and 64 MiB stderr per command,
+with a six-hour maximum process lifetime; configured workflow timeouts still
+apply. Linux cancellation stops execution and terminates the current process
+group rather than executing later members.
+Embedding applications use `execute_with` with a caller-owned `Cancellation`
+token and `Runner`. The library installs no process-global signal handlers. The
+CLI owns one cancellation flag across its entire command lifetime, including
+the gaps between subprocesses, and checks cancellation before every dispatch.
+
+The shell-only diagnostic fallback remains cancellation-aware and runs after
+setup, provisioning or admission failure. Its completion markers prevent
+duplicate collection. The native integration suite executes the generated
+invocation and this fallback using the actual packaged CLI at controlled Nix
+process boundaries. These checks replace the authored Python group harness;
+other Python fixtures retain their own packaging inputs until migrated.
+
+Execution receipts are local evidence, not forge authority. Historical Python
+v1 receipts remain readable as evidence, but a new Rust source needs its own
+original-attempt hosted qualification. Offline integrity checks do not establish
+current provider acceptance, merge readiness or publication authorization.
+
 ### Project-owned workflow templates
 
 Projects with specialized Actions jobs can render their existing workflow

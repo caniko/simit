@@ -30,6 +30,7 @@ fn main() {
 fn run() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
+        Commands::Ci(command) => simit::ci_runtime::cli::run(command),
         Commands::Review(command) => simit::review::cli::finish(command),
         Commands::Commit(command) => commands::commit::run(command),
         Commands::Release(command) => commands::release::run(command),

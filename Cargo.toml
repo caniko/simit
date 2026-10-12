@@ -114,3 +114,6 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 [target.'cfg(target_os = "linux")'.dependencies]
 signal-hook = "0.3.18"
 socket2 = "0.6.1"
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", features = ["process"] }
