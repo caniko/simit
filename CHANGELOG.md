@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Opt-in `[ci.nix_build.system_runners]` for native exact-installable matrices.
+  Route each system-qualified gate to its declared runner, reject missing or
+  ambiguous mappings before writes, verify the native Nix architecture, and
+  restrict hosted KVM setup to x86 Linux rows.
 - Opt-in `[ci.nix_build].push_tags` patterns to retain tag-push qualification
   alongside branch and pull-request gates, with ordered exclusions and stable
   configuration regeneration. Reject exclusion-only filters and keep tag refs
