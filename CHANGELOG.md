@@ -28,6 +28,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Bind completion custody to one validated PR/base target and observed snapshots,
+  derive case-safe collection queues from that identity, validate composed status
+  contexts, and reserve bounded upload/report time before publication.
 - Normalize completion-custody repository casing, bind status contexts to the
   exact branch, and bound aggregate downloads, retained bytes, archive expansion,
   inventories and capture time before source-head success can be published.

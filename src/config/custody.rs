@@ -40,10 +40,12 @@ impl Config {
             );
         }
         if self.status_context.is_empty()
-            || self.status_context.len() > 100
+            || self.status_context.len() + "/pull_request/".len() + 64 > 100
             || self.status_context.chars().any(char::is_control)
         {
-            bail!("[ci.custody].status_context must be a nonempty single-line context");
+            bail!(
+                "[ci.custody].status_context must be a nonempty single-line prefix of at most 22 bytes for the composed 100-byte context"
+            );
         }
         if self.producers.is_empty() || self.producers.len() > 10 {
             bail!("[ci.custody].producers must enroll between 1 and 10 workflows");

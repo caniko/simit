@@ -254,13 +254,82 @@ def zip_members(raw, budget=None):
         return members
 
 
-def validate_run(run, head, branch, event, name, producer, attempt, repository):
+def run_identity(run, repository):
+    """Separate a stable status target from provider-observed admission snapshots.
+
+    PR association SHAs are observed API data, not historical base-execution
+    provenance. Ambiguous/missing associations never fall back to a branch target.
+    """
+    def positive(value):
+        require(type(value) is int and value > 0, 'Invalid repository or PR identity')
+        return value
+    def sha(value):
+        require(isinstance(value, str) and re.fullmatch(r'[0-9a-f]{40}', value), 'Invalid observed source SHA')
+        return value
+    repo, head_repo = run['repository'], run['head_repository']
+    require(repository_identity(repo['full_name']) == repository
+            == repository_identity(head_repo['full_name']), 'Producer repository differs or requires fork enrollment')
+    repo_id, head_id = positive(repo['id']), positive(head_repo['id'])
+    require(repo_id == head_id, 'Producer repository IDs differ')
+    event = run['event']
+    require(event in ['push', 'pull_request'], 'Unsupported completion event')
+    branch = run['head_branch']
+    branch_identity(branch)
+    head = sha(run['head_sha'])
+    target = {'repository': {'id': repo_id, 'name': repository}, 'event': event,
+              'head_repository': {'id': head_id, 'name': repository}, 'branch': branch}
+    base = None
+    if event == 'pull_request':
+        associations = run.get('pull_requests')
+        require(isinstance(associations, list) and len(associations) == 1,
+                'PR custody requires one unambiguous provider association')
+        pr = associations[0]
+        number, pr_id = positive(pr['number']), positive(pr['id'])
+        require(isinstance(pr['url'], str) and pr['url'].lower()
+                == f'https://api.github.com/repos/{repository}/pulls/{number}', 'PR target URL differs')
+        require(positive(pr['head']['repo']['id']) == head_id
+                and positive(pr['base']['repo']['id']) == repo_id, 'PR repository IDs differ')
+        require(pr['head']['ref'] == branch and sha(pr['head']['sha']) == head, 'PR observed head differs')
+        base_ref = pr['base']['ref']
+        branch_identity(base_ref)
+        base = sha(pr['base']['sha'])
+        target['pull_request'] = {'id': pr_id, 'number': number,
+                                  'base_repository_id': repo_id, 'base_ref': base_ref}
+    return {'target': target, 'head': head, 'observed_base_sha': base}
+
+
+def status_context(config, target):
+    digest = hashlib.sha256(json.dumps(target, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+    context = config['status_context'] + '/' + target['event'] + '/' + digest
+    # Simit's bounded composed-context contract, enforced independently of the
+    # provider's response so failure revocation uses an admitted status target.
+    require(config['status_context'] and len(context.encode()) <= 100
+            and not any(ord(character) < 32 or ord(character) == 127 for character in context),
+            'Composed custody status context exceeds its bound')
+    return context
+
+
+def completion_identity(config, payload):
+    repository = repository_identity(config['repository'])
+    require(os.environ['RUNNER_ENVIRONMENT'] == 'github-hosted', 'Custody requires a hosted collector')
+    require(repository == repository_identity(os.environ['GITHUB_REPOSITORY'])
+            == repository_identity(payload['repository']['full_name']), 'Collector repository differs')
+    run = payload['workflow_run']
+    require(type(run['id']) is int and run['id'] > 0, 'Invalid completion run identity')
+    snapshot = run_identity(run, repository)
+    require(type(payload['repository']['id']) is int
+            and payload['repository']['id'] == snapshot['target']['repository']['id'], 'Collector repository ID differs')
+    return snapshot, status_context(config, snapshot['target'])
+
+
+def validate_run(run, head, branch, event, name, producer, attempt, repository, snapshot):
     require(type(run['id']) is int and run['id'] > 0, 'Invalid producer run identity')
     require(repository_identity(run['repository']['full_name']) == repository, 'Producer repository differs')
     require(repository_identity(run['head_repository']['full_name']) == repository, 'Fork custody requires separate enrollment')
     require(run['head_sha'] == head and run['head_branch'] == branch, 'Producer source differs')
     require(run['event'] == event and run['path'] == producer['workflow'] and run['name'] == name, 'Producer workflow or event differs')
     require(run['run_attempt'] == attempt, 'Latest producer attempt is not the enrolled original')
+    require(run_identity(run, repository) == snapshot, 'Producer target or observed snapshot differs')
 
 
 def capture(config, payload, root, budget=None):
@@ -276,10 +345,12 @@ def capture(config, payload, root, budget=None):
     require(re.fullmatch(r'[0-9a-f]{40}', event_run['head_sha']), 'Invalid completion source head')
     require(event_run['event'] in ['push', 'pull_request'], 'Unsupported completion event')
     branch_identity(event_run['head_branch'])
+    snapshot, context = completion_identity(config, payload)
     receipt = {'schema': 'simit.producer-custody.v1', 'repository': repository,
                'head': event_run['head_sha'], 'branch': event_run['head_branch'], 'event': event_run['event'],
                'state': 'waiting', 'qualified': False, 'observation_is_execution': False,
                'capture_complete': False, 'producers': [], 'policy': config,
+               'snapshot': snapshot, 'status_context': context,
                'collector_head': os.environ['GITHUB_SHA'], 'collector_run': os.environ['GITHUB_RUN_ID'],
                'collector_attempt': int(os.environ['GITHUB_RUN_ATTEMPT'])}
     write(root / 'receipt.json', receipt)
@@ -291,7 +362,8 @@ def capture(config, payload, root, budget=None):
         require(trigger[key] == event_run[key], 'Completion event changed')
     require(trigger['name'] in config['producers'], 'Trigger workflow is not enrolled')
     validate_run(trigger, receipt['head'], receipt['branch'], receipt['event'],
-                 trigger['name'], config['producers'][trigger['name']], config['producer_attempt'], repository)
+                 trigger['name'], config['producers'][trigger['name']], config['producer_attempt'], repository, snapshot)
+    receipt['trigger_snapshot'] = run_identity(trigger, repository)
     # workflow_run fires when either enrolled workflow completes. A missing or
     # incomplete sibling stays pending until its own completion event arrives.
     candidates = pages(repository, 'actions/runs?' + urlencode({'head_sha': receipt['head'],
@@ -299,14 +371,22 @@ def capture(config, payload, root, budget=None):
     write(root / 'discovery.json', candidates, budget)
     selected = {}
     for name, producer in config['producers'].items():
-        matching = [run for run in candidates if run['path'] == producer['workflow']
-                    and run['head_branch'] == receipt['branch']]
+        matching = []
+        for candidate in candidates:
+            if (candidate['path'] != producer['workflow'] or candidate['head_branch'] != receipt['branch']
+                    or candidate['event'] != receipt['event'] or candidate['head_sha'] != receipt['head']):
+                continue
+            identity = run_identity(candidate, repository)
+            if identity['target'] != snapshot['target']:
+                continue
+            require(identity == snapshot, 'Sibling observed snapshot differs')
+            matching.append(candidate)
         require(len(matching) <= 1, 'Duplicate original producer identity')
         if not matching:
             return receipt
         run = json.loads(fetch(repository, f"actions/runs/{matching[0]['id']}"))
         validate_run(run, receipt['head'], receipt['branch'], receipt['event'], name,
-                     producer, config['producer_attempt'], repository)
+                      producer, config['producer_attempt'], repository, snapshot)
         selected[name] = run
     if any(run['status'] != 'completed' for run in selected.values()):
         return receipt
@@ -363,7 +443,7 @@ def capture(config, payload, root, budget=None):
             retained.append({'id': artifact['id'], 'name': artifact_name, 'sha256': checksum,
                              'members': members})
         receipt['producers'].append({'run_id': run['id'], 'workflow': producer['workflow'],
-                                     'name': name, 'job_logs': job_logs,
+                                      'name': name, 'job_logs': job_logs, 'snapshot': run_identity(run, repository),
                                      'event': run['event'], 'attempt': run['run_attempt'],
                                      'conclusion': run['conclusion'], 'logs_sha256': hashlib.sha256((folder / 'provider-logs.zip').read_bytes()).hexdigest(),
                                      'jobs_accepted': all(rows[0]['status'] == 'completed' and rows[0]['conclusion'] == 'success' for rows in required.values()),
@@ -373,7 +453,7 @@ def capture(config, payload, root, budget=None):
     for name, run in selected.items():
         latest = json.loads(fetch(repository, f"actions/runs/{run['id']}"))
         validate_run(latest, receipt['head'], receipt['branch'], receipt['event'], name,
-                     config['producers'][name], config['producer_attempt'], repository)
+                      config['producers'][name], config['producer_attempt'], repository, snapshot)
         require(latest['status'] == 'completed' and latest['conclusion'] == run['conclusion'], 'Producer conclusion changed during capture')
     receipt['source_workflow_sha256'] = source_hashes
     receipt['capture_budget'] = {'downloaded_bytes': budget.downloaded, 'retained_bytes': budget.retained,
@@ -398,13 +478,20 @@ def report(config, root):
     receipt = json.loads((root / 'receipt.json').read_text())
     require(receipt['repository'] == repository and receipt['policy'] == config, 'Reporting receipt policy differs')
     require(re.fullmatch(r'[0-9a-f]{40}', receipt['head']) and receipt['event'] in ['push', 'pull_request'], 'Invalid reporting target')
+    snapshot = receipt['snapshot']
+    require(snapshot['head'] == receipt['head'] and snapshot['target']['event'] == receipt['event']
+            and snapshot['target']['branch'] == receipt['branch']
+            and snapshot['target']['repository']['name'] == repository, 'Reporting target identity differs')
+    context = status_context(config, snapshot['target'])
+    require(receipt['status_context'] == context, 'Reporting context differs')
     if receipt['state'] == 'ready':
         try:
             require(len(receipt['producers']) == len(config['producers']), 'Reporting producer inventory differs')
             for row in receipt['producers']:
                 latest = json.loads(fetch(repository, f"actions/runs/{row['run_id']}"))
                 validate_run(latest, receipt['head'], receipt['branch'], receipt['event'], row['name'],
-                             config['producers'][row['name']], config['producer_attempt'], repository)
+                             config['producers'][row['name']], config['producer_attempt'], repository, snapshot)
+                require(row['snapshot'] == snapshot, 'Reporting producer snapshot differs')
                 require(latest['status'] == 'completed' and latest['conclusion'] == row['conclusion'], 'Producer conclusion changed before reporting')
         except Exception as error:
             receipt.update(state='failed', report_error=str(error))
@@ -412,7 +499,6 @@ def report(config, root):
     upload_ok = os.environ['SIMIT_CUSTODY_UPLOAD_OUTCOME'] == 'success' and os.environ['SIMIT_CUSTODY_ARTIFACT_ID'].isdigit()
     state = 'success' if receipt['state'] == 'ready' and receipt['capture_complete'] and upload_ok else 'pending' if receipt['state'] == 'waiting' and upload_ok else 'failure'
     identity = hashlib.sha256(json.dumps({'policy': config, 'producers': receipt['producers']}, sort_keys=True).encode()).hexdigest()[:16]
-    context = config['status_context'] + '/' + receipt['event'] + '/' + branch_identity(receipt['branch'])
     try:
         previous = pages(repository, f"commits/{receipt['head']}/status", 'statuses', fetch)
     except Exception as error:
@@ -434,6 +520,18 @@ def report(config, root):
 
 def main():
     config = json.loads(os.environ['SIMIT_CUSTODY_CONFIG'])
+    if os.environ['SIMIT_CUSTODY_PHASE'] == 'identity':
+        with Path(os.environ['GITHUB_EVENT_PATH']).open('rb') as event:
+            raw = event.read(MAX_EVENT_BYTES + 1)
+        require(len(raw) <= MAX_EVENT_BYTES, 'Completion event exceeds its bound')
+        snapshot, _ = completion_identity(config, json.loads(raw))
+        digest = hashlib.sha256(json.dumps(snapshot['target'], sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+        # Hex-only groups preserve case-sensitive refs despite case-insensitive
+        # Actions concurrency. Same-target pending replacements are observations
+        # of the same producer set; other branches/PRs/bases have distinct queues.
+        with Path(os.environ['GITHUB_OUTPUT']).open('a') as output:
+            output.write('group=' + snapshot['head'] + '-' + digest + '\n')
+        return 0
     root = Path(os.environ['SIMIT_CUSTODY_ROOT'])
     root.mkdir(exist_ok=True)
     if os.environ['SIMIT_CUSTODY_PHASE'] == 'report':

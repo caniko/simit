@@ -17,7 +17,10 @@ from unittest.mock import patch
 
 PROGRAM = Path(sys.argv.pop()).read_text()
 HEAD = 'a' * 40
-CONTEXT = 'simit/custody/pull_request/' + hashlib.sha256(b'feature').hexdigest()
+TARGET = {'repository': {'id': 7, 'name': 'owner/repo'}, 'event': 'pull_request',
+          'head_repository': {'id': 7, 'name': 'owner/repo'}, 'branch': 'feature',
+          'pull_request': {'id': 70, 'number': 5, 'base_repository_id': 7, 'base_ref': 'trunk'}}
+CONTEXT = 'simit/custody/pull_request/' + hashlib.sha256(json.dumps(TARGET, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
 
 
 class Custody(unittest.TestCase):
@@ -34,9 +37,12 @@ class Custody(unittest.TestCase):
         self.runs = [{'id': index, 'name': name, 'head_sha': HEAD, 'head_branch': 'feature',
                       'path': producer['workflow'], 'run_attempt': 1, 'event': 'pull_request',
                       'status': 'completed', 'conclusion': 'success',
-                      'repository': {'full_name': 'owner/repo'}, 'head_repository': {'full_name': 'owner/repo'}}
+                      'repository': {'id': 7, 'full_name': 'owner/repo'}, 'head_repository': {'id': 7, 'full_name': 'owner/repo'},
+                      'pull_requests': [{'id': 70, 'number': 5, 'url': 'https://api.github.com/repos/owner/repo/pulls/5',
+                          'head': {'ref': 'feature', 'sha': HEAD, 'repo': {'id': 7}},
+                          'base': {'ref': 'trunk', 'sha': 'd' * 40, 'repo': {'id': 7}}}]}
                      for index, (name, producer) in enumerate(self.config['producers'].items(), 1)]
-        self.payload = {'repository': {'full_name': 'owner/repo'}, 'workflow_run': copy.deepcopy(self.runs[0])}
+        self.payload = {'repository': {'id': 7, 'full_name': 'owner/repo'}, 'workflow_run': copy.deepcopy(self.runs[0])}
         self.previous = []
         self.effects = []
         self.calls = []
@@ -116,6 +122,192 @@ class Custody(unittest.TestCase):
         self.assertFalse(any(endpoint.endswith('/logs') for endpoint in self.calls))
         self.assertEqual(self.report(), 0)
         self.assertEqual(self.effects[0][1]['state'], 'pending')
+
+    def test_another_pr_or_base_cannot_fill_the_target_sibling(self):
+        for field, value in [('number', 6), ('base_ref', 'release')]:
+            with self.subTest(field=field):
+                other = copy.deepcopy(self.runs[1])
+                pr = other['pull_requests'][0]
+                if field == 'number':
+                    pr.update(id=71, number=value, url='https://api.github.com/repos/owner/repo/pulls/6')
+                else:
+                    pr['base']['ref'] = value
+                self.runs[1] = other
+                receipt = self.captured()
+                self.assertEqual(receipt['state'], 'waiting')
+                self.assertFalse(receipt['capture_complete'])
+                self.assertEqual(self.report(), 0)
+                self.assertEqual(self.effects[-1][1]['state'], 'pending')
+
+    def test_valid_other_target_is_excluded_before_duplicate_counting(self):
+        other = copy.deepcopy(self.runs[1])
+        other['id'] = 3
+        other['pull_requests'][0]['base']['ref'] = 'release'
+        self.runs.append(other)
+        self.assertEqual(self.captured()['state'], 'ready')
+
+    def test_missing_or_ambiguous_pr_identity_never_gets_a_branch_only_receipt(self):
+        pr = self.runs[0]['pull_requests'][0]
+        for value in [None, [], {}, [pr, pr]]:
+            with self.subTest(value=value):
+                self.payload['workflow_run']['pull_requests'] = value
+                with self.assertRaises((RuntimeError, KeyError)):
+                    self.main_capture()
+                self.assertFalse((self.folder / 'receipt.json').exists())
+        self.payload['workflow_run'].pop('pull_requests')
+        with self.assertRaises((RuntimeError, KeyError)):
+            self.main_capture()
+        self.assertFalse((self.folder / 'receipt.json').exists())
+
+    def test_invalid_pr_snapshots_reject_before_receipt(self):
+        original = copy.deepcopy(self.payload)
+        for path, value in [(('id',), True), (('number',), 0), (('url',), 'https://api.github.com/repos/other/repo/pulls/5'),
+                            (('head', 'sha'), 'e' * 40), (('head', 'ref'), 'other'),
+                            (('head', 'repo', 'id'), 8), (('base', 'repo', 'id'), False),
+                            (('base', 'sha'), 'invalid'), (('base', 'ref'), '')]:
+            with self.subTest(path=path, value=value):
+                self.payload = copy.deepcopy(original)
+                target = self.payload['workflow_run']['pull_requests'][0]
+                for key in path[:-1]:
+                    target = target[key]
+                target[path[-1]] = value
+                with self.assertRaises((RuntimeError, KeyError)):
+                    self.main_capture()
+                self.assertFalse((self.folder / 'receipt.json').exists())
+
+    def test_snapshot_changes_at_trigger_capture_final_and_report_cannot_succeed(self):
+        original_api = self.namespace['api']
+        for phase in ['trigger', 'capture-final', 'report']:
+            with self.subTest(phase=phase):
+                if phase == 'report':
+                    self.captured()
+                details = 0
+                def changed(repository, endpoint, **limits):
+                    nonlocal details
+                    raw = original_api(repository, endpoint, **limits)
+                    if endpoint == 'actions/runs/1':
+                        details += 1
+                        if phase != 'capture-final' or details == 3:
+                            run = json.loads(raw)
+                            run['pull_requests'][0]['base']['sha'] = 'e' * 40
+                            return json.dumps(run).encode()
+                    return raw
+                self.namespace['api'] = changed
+                if phase != 'report':
+                    with self.assertRaises(RuntimeError):
+                        self.main_capture()
+                self.assertEqual(self.report(), 1)
+                self.assertEqual(self.effects[-1][1]['state'], 'failure')
+                self.assertEqual(self.effects[-1][1]['context'], CONTEXT)
+                self.namespace['api'] = original_api
+                for path in self.folder.iterdir():
+                    if path.is_dir():
+                        import shutil
+                        shutil.rmtree(path)
+                    else:
+                        path.unlink()
+
+    def test_sibling_observed_base_sha_mismatch_revokes_the_stable_context(self):
+        self.runs[1]['pull_requests'][0]['base']['sha'] = 'e' * 40
+        with self.assertRaises(RuntimeError):
+            self.main_capture()
+        self.assertEqual(self.report(), 1)
+        self.assertEqual(self.effects[-1][1]['context'], CONTEXT)
+
+    def test_pr_and_base_contexts_are_distinct_but_snapshot_updates_keep_revocation_target(self):
+        snapshot = self.namespace['run_identity'](self.runs[0], 'owner/repo')
+        first = self.namespace['status_context'](self.config, snapshot['target'])
+        for field, value in [('number', 6), ('base_ref', 'release'), ('base_ref', 'TRUNK')]:
+            other = copy.deepcopy(snapshot['target'])
+            other['pull_request'][field] = value
+            self.assertNotEqual(self.namespace['status_context'](self.config, other), first)
+        self.runs[0]['pull_requests'][0]['base']['sha'] = 'e' * 40
+        updated = self.namespace['run_identity'](self.runs[0], 'owner/repo')
+        self.assertNotEqual(snapshot, updated)
+        self.assertEqual(self.namespace['status_context'](self.config, updated['target']), first)
+
+    def test_composed_context_bytes_are_bounded_before_post(self):
+        target = self.namespace['run_identity'](self.runs[0], 'owner/repo')['target']
+        for prefix in ['a' * 22, '\u00e9' * 11]:
+            self.config['status_context'] = prefix
+            self.assertEqual(len(self.namespace['status_context'](self.config, target).encode()), 100)
+        for prefix in ['a' * 23, '\u00e9' * 12]:
+            self.config['status_context'] = prefix
+            with self.assertRaises(RuntimeError):
+                self.namespace['status_context'](self.config, target)
+
+    def test_push_identity_is_not_inferred_from_associated_prs(self):
+        for run in self.runs:
+            run['event'] = 'push'
+            run['pull_requests'] = None
+        self.payload['workflow_run'] = copy.deepcopy(self.runs[0])
+        self.assertEqual(self.captured()['state'], 'ready')
+        self.assertEqual(self.report(), 0)
+        self.assertIn('/push/', self.effects[-1][1]['context'])
+
+    def test_identity_phase_emits_case_sensitive_branch_pr_base_groups_without_api_effects(self):
+        event = self.folder / 'identity-event.json'
+        output = self.folder / 'outputs'
+        def group(payload):
+            event.write_text(json.dumps(payload))
+            output.write_text('')
+            with patch.dict(os.environ, {'SIMIT_CUSTODY_CONFIG': json.dumps(self.config),
+                    'SIMIT_CUSTODY_PHASE': 'identity', 'GITHUB_EVENT_PATH': str(event),
+                    'GITHUB_OUTPUT': str(output)}):
+                self.assertEqual(self.namespace['main'](), 0)
+            return output.read_text()
+        first = group(self.payload)
+        self.assertTrue(first.startswith('group=' + HEAD + '-'))
+        self.assertEqual(first, first.lower())
+        for change in ['head_case', 'base_case', 'base_ref', 'pr']:
+            payload = copy.deepcopy(self.payload)
+            run = payload['workflow_run']
+            pr = run['pull_requests'][0]
+            if change == 'head_case':
+                run['head_branch'] = pr['head']['ref'] = 'FEATURE'
+            elif change == 'base_case':
+                pr['base']['ref'] = 'TRUNK'
+            elif change == 'base_ref':
+                pr['base']['ref'] = 'release'
+            else:
+                pr.update(id=71, number=6, url='https://api.github.com/repos/owner/repo/pulls/6')
+            self.assertNotEqual(group(payload), first)
+        changed_snapshot = copy.deepcopy(self.payload)
+        changed_snapshot['workflow_run']['pull_requests'][0]['base']['sha'] = 'e' * 40
+        self.assertEqual(group(changed_snapshot), first)
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.effects, [])
+        self.assertFalse((self.folder / 'receipt.json').exists())
+
+    def test_identity_phase_rejects_ambiguous_pr_before_emitting_concurrency_output(self):
+        event = self.folder / 'identity-event.json'
+        output = self.folder / 'outputs'
+        self.payload['workflow_run']['pull_requests'] = []
+        event.write_text(json.dumps(self.payload))
+        with patch.dict(os.environ, {'SIMIT_CUSTODY_CONFIG': json.dumps(self.config),
+                'SIMIT_CUSTODY_PHASE': 'identity', 'GITHUB_EVENT_PATH': str(event), 'GITHUB_OUTPUT': str(output)}):
+            with self.assertRaises(RuntimeError):
+                self.namespace['main']()
+        self.assertFalse(output.exists())
+
+    def test_expired_report_budget_still_posts_failure_to_the_admitted_target(self):
+        self.captured()
+        original = self.namespace['CaptureBudget']
+        class Expired(original):
+            def __init__(self):
+                super().__init__()
+                self.deadline = 0
+        self.namespace['CaptureBudget'] = Expired
+        self.assertEqual(self.report(), 1)
+        self.assertEqual(self.effects[-1][1]['state'], 'failure')
+        self.assertEqual(self.effects[-1][1]['context'], CONTEXT)
+
+    def test_malformed_relevant_sibling_association_cannot_establish_success(self):
+        self.runs[1]['pull_requests'] = None
+        with self.assertRaises(RuntimeError):
+            self.main_capture()
+        self.assertEqual(self.report(), 1)
+        self.assertEqual(self.effects[-1][1]['context'], CONTEXT)
 
     def test_complete_custody_reports_source_head_not_default_branch_and_is_idempotent(self):
         receipt = self.captured()
@@ -263,11 +455,13 @@ class Custody(unittest.TestCase):
         first = self.effects[-1][1]
         self.previous = [first]
         # A later observation has the same source SHA and event, but another branch.
-        receipt = json.loads((self.folder / 'receipt.json').read_text())
-        receipt['branch'] = 'different/branch'
         for run in self.runs:
-            run['head_branch'] = receipt['branch']
-        self.namespace['write'](self.folder / 'receipt.json', receipt)
+            run['head_branch'] = 'different/branch'
+            run['pull_requests'][0]['head']['ref'] = run['head_branch']
+        self.payload['workflow_run'] = copy.deepcopy(self.runs[0])
+        self.folder = self.folder / 'second-collector'
+        self.folder.mkdir()
+        self.captured()
         self.report()
         self.assertEqual(len(self.effects), 2)
         self.assertNotEqual(first['context'], self.effects[-1][1]['context'])

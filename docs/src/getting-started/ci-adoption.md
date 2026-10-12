@@ -459,12 +459,33 @@ failures retain the established failure-reporting target.
 
 Capture and upload must both complete before source-head status success. Reporting is
 idempotent and explicitly targets the producer commit, not the observer's default-
-branch SHA. Status contexts are `<status_context>/<event>/<branch-sha256>`, using
-the full SHA-256 of the exact, case-sensitive branch name. Separate event and
-branch contexts prevent another branch at the same commit from replacing its
-pending/failure status. Enroll the branch-specific contexts before replacing
-existing protection. Repository identity is compared case-insensitively, matching
-GitHub's owner/repository naming rules. Same-repository branch/PR custody is supported; signed-tag release
+branch SHA. Status contexts are `<status_context>/<event>/<target-sha256>`, using
+the full SHA-256 of the canonical stable target identity: repository IDs and
+normalized names, event, exact case-sensitive head branch, and, for PRs, PR ID,
+number, base repository ID and exact base ref. The prefix is at most 22 UTF-8
+bytes under Simit's 100-byte composed-context contract. Different PRs or bases
+at the same commit cannot satisfy each other's contexts. Enroll the exact target
+contexts before replacing existing protection. Repository names are compared
+case-insensitively, matching GitHub's owner/repository naming rules.
+
+PR custody requires exactly one valid provider PR association, including matching
+head SHA/ref and repository IDs. Missing, ambiguous or malformed associations fail
+without inventing a branch-only reporting target. Discovery, selected details,
+capture-final and report-time revalidation bind the stable identity and observed
+head/base SHA snapshots. Snapshot equality is conservative admission of observed
+API data, not authenticated historical base-execution provenance. The observed
+base SHA stays out of the status key so later changes can revoke the same target.
+
+A token-free, contents-read identity job derives the full target digest before
+collection. Collection uses that digest plus head SHA in job-level concurrency;
+different branches, PRs, base refs and case-distinct refs have distinct queues.
+Pending replacement within one target observes the same enrolled producer set.
+The collect job reserves 25 minutes for six-minute capture, upload bounded to five
+minutes, six-minute report lookups and a separate 90-second status POST. Reporting
+runs after failed upload and exhausted lookup budgets to publish failure when the
+completion target was safely established.
+
+Same-repository branch/PR custody is supported; signed-tag release
 attempt policy and fork custody require separately qualified enrollment.
 
 The observer has only contents/actions read and statuses write permissions. It

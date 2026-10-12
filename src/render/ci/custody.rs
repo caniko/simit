@@ -27,14 +27,20 @@ pub fn file(config: &Config) -> Result<GeneratedFile> {
     for name in config.producers.keys() {
         workflow.push_str(&format!("      - \"{}\"\n", yaml_double_quote(name)));
     }
-    workflow.push_str("    types: [completed]\n\npermissions:\n  contents: read\n  actions: read\n  statuses: write\n\nconcurrency:\n  group: custody-${{ github.event.workflow_run.head_repository.full_name }}-${{ github.event.workflow_run.head_sha }}-${{ github.event.workflow_run.event }}\n  cancel-in-progress: false\n\njobs:\n  collect:\n    runs-on: ubuntu-24.04\n    timeout-minutes: 10\n    env:\n      GH_HOST: github.com\n      GH_TOKEN: ${{ github.token }}\n");
+    workflow.push_str("    types: [completed]\n\npermissions:\n  contents: read\n  actions: read\n  statuses: write\n\njobs:\n  identity:\n    runs-on: ubuntu-24.04\n    timeout-minutes: 2\n    permissions:\n      contents: read\n    outputs:\n      group: ${{ steps.identity.outputs.group }}\n    steps:\n      - name: Establish completion target identity\n        id: identity\n        shell: python\n        env:\n          SIMIT_CUSTODY_PHASE: identity\n");
+    workflow.push_str(&format!(
+        "          SIMIT_CUSTODY_CONFIG: '{}'\n        run: |\n",
+        serde_json::to_string(config)?.replace('\'', "''")
+    ));
+    push_program(&mut workflow);
+    workflow.push_str("  collect:\n    needs: [identity]\n    concurrency:\n      group: custody-${{ needs.identity.outputs.group }}\n      cancel-in-progress: false\n    runs-on: ubuntu-24.04\n    timeout-minutes: 25\n    env:\n      GH_HOST: github.com\n      GH_TOKEN: ${{ github.token }}\n");
     workflow.push_str(&format!(
         "      SIMIT_CUSTODY_CONFIG: '{}'\n    steps:\n",
         serde_json::to_string(config)?.replace('\'', "''")
     ));
     for phase in ["capture", "report"] {
         if phase == "report" {
-            workflow.push_str("      - name: Upload completed-producer custody\n        id: custody-upload\n        if: always()\n");
+            workflow.push_str("      - name: Upload completed-producer custody\n        id: custody-upload\n        if: always()\n        timeout-minutes: 5\n");
             push_action_uses(
                 &mut workflow,
                 Platform::Github,
@@ -55,16 +61,20 @@ pub fn file(config: &Config) -> Result<GeneratedFile> {
             workflow.push_str("          SIMIT_CUSTODY_UPLOAD_OUTCOME: ${{ steps.custody-upload.outcome }}\n          SIMIT_CUSTODY_ARTIFACT_ID: ${{ steps.custody-upload.outputs.artifact-id }}\n");
         }
         workflow.push_str("        run: |\n");
-        for line in include_str!("custody.py").lines() {
-            if line.is_empty() {
-                workflow.push('\n');
-            } else {
-                workflow.push_str(&format!("          {line}\n"));
-            }
-        }
+        push_program(&mut workflow);
     }
     Ok(GeneratedFile {
         relative_path: PathBuf::from(PATH),
         content: workflow,
     })
+}
+
+fn push_program(workflow: &mut String) {
+    for line in include_str!("custody.py").lines() {
+        if line.is_empty() {
+            workflow.push('\n');
+        } else {
+            workflow.push_str(&format!("          {line}\n"));
+        }
+    }
 }

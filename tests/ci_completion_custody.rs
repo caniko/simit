@@ -58,8 +58,33 @@ fn completion_custody_uses_default_branch_code_without_executing_producer_source
     );
     assert_eq!(value["permissions"]["statuses"], "write");
     assert_eq!(value["permissions"]["actions"], "read");
-    assert_eq!(value["concurrency"]["cancel-in-progress"], false);
+    assert!(value.get("concurrency").is_none());
+    assert_eq!(
+        value["jobs"]["collect"]["concurrency"]["cancel-in-progress"],
+        false
+    );
+    assert_eq!(
+        value["jobs"]["collect"]["concurrency"]["group"],
+        "custody-${{ needs.identity.outputs.group }}"
+    );
+    assert_eq!(value["jobs"]["collect"]["needs"][0], "identity");
+    assert_eq!(value["jobs"]["identity"]["permissions"]["contents"], "read");
+    assert!(
+        value["jobs"]["identity"]["permissions"]
+            .get("statuses")
+            .is_none()
+    );
+    assert_eq!(
+        value["jobs"]["identity"]["outputs"]["group"],
+        "${{ steps.identity.outputs.group }}"
+    );
+    assert_eq!(value["jobs"]["collect"]["timeout-minutes"], 25);
     let steps = value["jobs"]["collect"]["steps"].as_sequence().unwrap();
+    let upload = steps
+        .iter()
+        .find(|step| step["id"] == "custody-upload")
+        .unwrap();
+    assert_eq!(upload["timeout-minutes"], 5);
     assert!(!steps.iter().any(|s| s["name"] == "Checkout"));
     assert!(!fs::read_to_string(&file).unwrap().contains("gh run watch"));
     let report = steps
@@ -130,6 +155,34 @@ fn unsupported_effective_custody_backends_reject_before_writing_any_language_wor
         assert_eq!(fs::read_to_string(&config).unwrap(), before);
         assert!(!temp.path().join(".crow").exists());
         assert!(!temp.path().join(".github/workflows").exists());
+    }
+}
+
+#[test]
+fn composed_custody_context_limit_rejects_before_generated_effects() {
+    for (prefix, accepted) in [
+        ("a".repeat(22), true),
+        ("a".repeat(23), false),
+        ("é".repeat(11), true),
+        ("é".repeat(12), false),
+    ] {
+        let temp = project();
+        let config = temp.path().join("simit.toml");
+        let before = fs::read_to_string(&config)
+            .unwrap()
+            .replace("simit/producer-custody", &prefix);
+        fs::write(&config, &before).unwrap();
+        let output = common::simit()
+            .current_dir(temp.path())
+            .args(["init", "ci"])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.success(), accepted, "{output:?}");
+        if !accepted {
+            assert_eq!(fs::read_to_string(&config).unwrap(), before);
+            assert!(!temp.path().join(".github/workflows").exists());
+            assert!(String::from_utf8_lossy(&output.stderr).contains("composed 100-byte context"));
+        }
     }
 }
 
