@@ -53,6 +53,12 @@ fn dependency_transport_is_same_run_and_runtime_jobs_still_execute_fresh() {
     )
     .unwrap();
     assert_eq!(value["jobs"]["build"]["needs"][0], "dependencies");
+    for job in ["dependencies", "build"] {
+        assert_eq!(
+            value["jobs"][job]["env"]["NIX_CONFIG"],
+            "experimental-features = nix-command flakes"
+        );
+    }
     let steps = value["jobs"]["dependencies"]["steps"]
         .as_sequence()
         .unwrap();
@@ -113,6 +119,35 @@ fn dependency_transport_is_same_run_and_runtime_jobs_still_execute_fresh() {
         simit::registry::audit_ci(temp.path()).unwrap().status,
         simit::registry::FeatureStatus::Managed
     );
+}
+
+#[test]
+fn dependency_producer_preserves_configured_nix_config() {
+    let temp = project();
+    let path = temp.path().join("simit.toml");
+    let mut config = fs::read_to_string(&path)
+        .unwrap()
+        .parse::<toml_edit::DocumentMut>()
+        .unwrap();
+    let nix_config = "system-features = kvm big-parallel";
+    let other_env = "retained \"quoted\" \\literal";
+    config["ci"]["nix_build"]["extra_env"]["NIX_CONFIG"] = toml_edit::value(nix_config);
+    config["ci"]["nix_build"]["extra_env"]["TRANSPORT_TEST"] = toml_edit::value(other_env);
+    fs::write(&path, config.to_string()).unwrap();
+    let output = common::simit()
+        .current_dir(temp.path())
+        .args(["init", "ci"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let value: Value = serde_yaml::from_str(
+        &fs::read_to_string(temp.path().join(".github/workflows/nix-builds.yaml")).unwrap(),
+    )
+    .unwrap();
+    for job in ["dependencies", "build"] {
+        assert_eq!(value["jobs"][job]["env"]["NIX_CONFIG"], nix_config);
+        assert_eq!(value["jobs"][job]["env"]["TRANSPORT_TEST"], other_env);
+    }
 }
 
 #[test]

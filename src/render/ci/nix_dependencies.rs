@@ -80,11 +80,16 @@ pub(super) fn job(
     if options.dependency_installables.is_empty() {
         return Ok(());
     }
-    workflow.push_str(&format!("\n  dependencies:\n    runs-on: {}\n    timeout-minutes: {}\n    env:\n      NIX_CONFIG: \"experimental-features = nix-command flakes\"\n", runs_on(runner), options.timeout_minutes.unwrap_or(40)));
+    workflow.push_str(&format!(
+        "\n  dependencies:\n    runs-on: {}\n    timeout-minutes: {}\n    env:\n",
+        runs_on(runner),
+        options.timeout_minutes.unwrap_or(40)
+    ));
+    if !options.extra_env.contains_key("NIX_CONFIG") {
+        workflow.push_str("      NIX_CONFIG: \"experimental-features = nix-command flakes\"\n");
+    }
     for (name, value) in &options.extra_env {
-        if name != "NIX_CONFIG" {
-            workflow.push_str(&format!("      {name}: \"{}\"\n", yaml_double_quote(value)));
-        }
+        workflow.push_str(&format!("      {name}: \"{}\"\n", yaml_double_quote(value)));
     }
     workflow.push_str("    steps:\n");
     push_checkout_step(workflow, Platform::Github, runner);
