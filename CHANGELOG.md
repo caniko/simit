@@ -53,6 +53,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Preserve unset npm publication access so releasing an existing restricted
+  package does not change its visibility; provenance checks existing visibility.
 - Reject workflow expressions in component gate environments before planning or
   generation, preserving literal local/hosted gate parity.
 - Preserve primary-only scope in component CI self-checks so independently

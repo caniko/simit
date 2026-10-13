@@ -11,7 +11,7 @@ sys.dont_write_bytecode = True
 import tarfile
 import tempfile
 import subprocess
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 import zipfile
 
 spec = importlib.util.spec_from_file_location("native", sys.argv[1])
@@ -110,6 +110,13 @@ with tempfile.TemporaryDirectory() as temp:
     assert body["versions"]["1.2.3"]["publishConfig"] == npm["publishConfig"]
     assert base64.b64decode(body["_attachments"][tarball.name]["data"]) == tarball.read_bytes()
     assert body["dist-tags"] == {"stable": "1.2.3"}
+    for config, expected in [({}, None), ({"access": None}, None), ({"access": "public"}, "public"), ({"access": "restricted"}, "restricted")]:
+        actual.upload_native(root, npm_identity, [tarball.name], {"publishConfig": config}, "fixture")
+        assert json.loads(requests[-1].data)["access"] == expected, config
+    for invalid in ["private", False, 42, {}, []]:
+        before = len(requests)
+        refuses(lambda: actual.upload_native(root, npm_identity, [tarball.name], {"publishConfig": {"access": invalid}}, "fixture"))
+        assert len(requests) == before
     refuses(lambda: actual.upload_native(root, npm_identity, [tarball.name], {"publishConfig": {"registry": "https://attacker.invalid"}}, "fixture"))
     before = len(requests)
     for tag in ["v1", "v1.4", "vv1.4", "v1.2.3", "v1.2.3-beta.1", "v1.x", "v1.2.x-beta", "vx.x.x-beta", "x", "X", "X.X.X"]:
@@ -151,6 +158,36 @@ with tempfile.TemporaryDirectory() as temp:
     provenance = attachments[npm_identity["name"] + "-1.2.3.sigstore"]
     assert json.loads(provenance["data"])["mediaType"] == provenance["content_type"]
     assert len(provenance["data"].encode()) == provenance["length"]
+    # Unset access plus provenance checks visibility without promoting private
+    # packages, redirects or an unavailable/ambiguous registry response.
+    def visibility_response(value):
+        response = MagicMock()
+        response.__enter__.return_value.read.return_value = json.dumps(value).encode()
+        return response
+    with patch.object(actual.urllib.request, "build_opener") as opener, patch.object(actual, "provenance_bundle", return_value={"mediaType": "application/json"}) as signer:
+        opener.return_value.open.return_value = visibility_response({"public": True})
+        actual.upload_native(root, npm_identity, [tarball.name], {"publishConfig": {"provenance": True}}, "fixture")
+        assert json.loads(requests[-1].data)["access"] is None
+        request = opener.return_value.open.call_args.args[0]
+        assert request.full_url == "https://registry.npmjs.org/-/package/%40example%2Fnative/visibility"
+        assert request.get_header("Authorization") == "Bearer fixture"
+        assert opener.call_args.args[0] is actual.NoRedirect
+        signer.reset_mock()
+        before = len(requests)
+        for value in [{"public": False}, {}, {"public": "true"}]:
+            opener.return_value.open.return_value = visibility_response(value)
+            refuses(lambda: actual.upload_native(root, npm_identity, [tarball.name], {"publishConfig": {"provenance": True}}, "fixture"))
+        opener.return_value.open.side_effect = actual.urllib.error.HTTPError(request.full_url, 404, "fixture", {}, None)
+        refuses(lambda: actual.upload_native(root, npm_identity, [tarball.name], {"publishConfig": {"provenance": True}}, "fixture"))
+        opener.return_value.open.side_effect = actual.urllib.error.HTTPError(request.full_url, 500, "fixture", {}, None)
+        try:
+            actual.upload_native(root, npm_identity, [tarball.name], {"publishConfig": {"provenance": True}}, "fixture")
+        except actual.urllib.error.HTTPError as error:
+            assert error.code == 500
+        else:
+            raise AssertionError("visibility provider error accepted")
+        signer.assert_not_called()
+        assert len(requests) == before
     # An existing exact tarball under a different channel is not a propagated
     # release. Recovery must reconcile only the signed channel, without repack.
     npm_out = root / "npm-out"

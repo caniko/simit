@@ -252,6 +252,21 @@ def upload_request(request):
         require(len(body) <= 4 * 1024 * 1024, "upload response exceeds byte limit")
 
 
+def npm_public_visibility(identity, token):
+    # Match libnpmpublish's provenance admission without changing package access.
+    url = "https://registry.npmjs.org/-/package/" + urllib.parse.quote(identity["name"], safe="") + "/visibility"
+    request = urllib.request.Request(url, headers={"Authorization": "Bearer " + token, "Accept": "application/json"})
+    try:
+        with urllib.request.build_opener(NoRedirect).open(request, timeout=60) as response:
+            body = response.read(4 * 1024 * 1024 + 1)
+            require(len(body) <= 4 * 1024 * 1024, "visibility response exceeds byte limit")
+            return json.loads(body).get("public") is True
+    except urllib.error.HTTPError as error:
+        if error.code == 404:
+            return False
+        raise
+
+
 def provenance_bundle(identity, archive):
     # Global npm/sigstore comes from the protected hosted worker, not the signed
     # candidate or downloaded archive. Neither child receives a registry token.
@@ -284,14 +299,15 @@ def upload_native(out, identity, files, manifest, token):
         require(config.get("registry", "https://registry.npmjs.org/").rstrip("/") == "https://registry.npmjs.org", "unapproved npm registry")
         tag = config.get("tag", "latest")
         require(valid_npm_dist_tag(tag), "invalid signed npm dist-tag")
-        access = config.get("access", "public")
-        require(access in ("public", "restricted"), "invalid signed npm access")
+        # npm CLI's unset access preserves the current registry visibility.
+        access = config.get("access")
+        require(access in (None, "public", "restricted"), "invalid signed npm access")
         require(access != "restricted" or identity["name"].startswith("@"), "restricted npm access requires a scoped package")
         package["_id"] = identity["name"] + "@" + identity["version"]
         package["dist"] = {"shasum": hashlib.sha1(archive).hexdigest(), "integrity": "sha512-" + base64.b64encode(hashlib.sha512(archive).digest()).decode(), "tarball": "https://registry.npmjs.org/" + urllib.parse.quote(identity["name"], safe="@/") + "/-/" + name}
         body = {"_id": identity["name"], "name": identity["name"], "access": access, "dist-tags": {tag: identity["version"]}, "versions": {identity["version"]: package}, "_attachments": {name: {"content_type": "application/octet-stream", "data": base64.b64encode(archive).decode(), "length": len(archive)}}}
         if config.get("provenance", False):
-            require(access == "public", "npm provenance requires public access")
+            require(access == "public" or npm_public_visibility(identity, token), "npm provenance requires public access or an existing public package")
             bundle = provenance_bundle(identity, archive)
             serialized = json.dumps(bundle, separators=(",", ":"))
             # npm's libnpmpublish sends provenance JSON directly, unlike the
