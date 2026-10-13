@@ -399,11 +399,12 @@ pub fn run(command: InitCiCommand) -> Result<()> {
     if !command.primary_only && wants_vscode {
         let vscode = vscode_options(&cfg)?;
         let vscode_runner = vscode_runner(&vscode, &runners.release)?;
-        files.push(ci::vscode_extension_file(
+        files.push(ci::vscode_extension_file_with_prefix(
             platform,
             resolved.runtime,
             &vscode_runner,
             &vscode,
+            cfg.release.tag_prefix,
         )?);
     }
     if !command.primary_only && wants_jetbrains {

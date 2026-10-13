@@ -871,13 +871,23 @@ pub fn vscode_extension_file(
     runner: &ResolvedRunner,
     vscode: &ResolvedVscode,
 ) -> Result<GeneratedFile> {
+    vscode_extension_file_with_prefix(platform, runtime, runner, vscode, Default::default())
+}
+
+pub fn vscode_extension_file_with_prefix(
+    platform: Platform,
+    runtime: Runtime,
+    runner: &ResolvedRunner,
+    vscode: &ResolvedVscode,
+    prefix: crate::release_identity::TagPrefix,
+) -> Result<GeneratedFile> {
     if runtime != Runtime::Nix {
         bail!("VS Code extension workflow generation requires --runtime nix");
     }
 
     Ok(GeneratedFile {
         relative_path: PathBuf::from(platform.workflow_dir()).join("publish-vscode-extension.yaml"),
-        content: vscode_extension_workflow(platform, runner, vscode),
+        content: vscode_extension_workflow(platform, runner, vscode, prefix),
     })
 }
 
@@ -1520,13 +1530,17 @@ fn vscode_extension_workflow(
     platform: Platform,
     runner: &ResolvedRunner,
     vscode: &ResolvedVscode,
+    prefix: crate::release_identity::TagPrefix,
 ) -> String {
     let mut workflow = String::new();
     push_generated_workflow_header(&mut workflow);
     workflow.push_str("name: Publish VS Code Extension\n\n");
     workflow.push_str("on:\n");
     workflow.push_str("  push:\n");
-    workflow.push_str("    tags: [\"[0-9]*.[0-9]*.[0-9]*\"]\n");
+    workflow.push_str(&format!(
+        "    tags: [\"{}[0-9]*.[0-9]*.[0-9]*\"]\n",
+        prefix.as_str()
+    ));
     workflow.push_str("  workflow_dispatch:\n\n");
     push_platform_concurrency(&mut workflow, platform);
     workflow.push_str("jobs:\n");
@@ -1539,7 +1553,7 @@ fn vscode_extension_workflow(
     workflow.push_str("    steps:\n");
     push_event_checkout_step(&mut workflow, platform, Some(runner));
     push_install_nix_step(&mut workflow, platform);
-    push_vscode_version_validation(&mut workflow, vscode);
+    push_vscode_version_validation(&mut workflow, vscode, prefix);
     push_vscode_credential_preflight(&mut workflow, vscode);
     for (index, command) in vscode.prepublish_commands.iter().enumerate() {
         workflow.push_str("      - name: Prepublish command ");
@@ -1915,12 +1929,20 @@ fn push_vscode_credential_preflight(workflow: &mut String, vscode: &ResolvedVsco
     workflow.push_str("          resolve_pat ovsx >/dev/null\n\n");
 }
 
-fn push_vscode_version_validation(workflow: &mut String, vscode: &ResolvedVscode) {
+fn push_vscode_version_validation(
+    workflow: &mut String,
+    vscode: &ResolvedVscode,
+    prefix: crate::release_identity::TagPrefix,
+) {
     workflow.push_str("      - name: Validate release tag and extension version\n");
     workflow.push_str("        env:\n          GITHUB_TOKEN: ${{ github.token }}\n");
     workflow.push_str("        run: |\n");
     workflow.push_str("          set -euo pipefail\n");
-    workflow.push_str("          VERSION=\"${GITHUB_REF_NAME#v}\"\n");
+    if prefix == crate::release_identity::TagPrefix::V {
+        workflow.push_str("          case \"$GITHUB_REF_NAME\" in v*) VERSION=\"${GITHUB_REF_NAME#v}\" ;; *) echo 'Tag prefix mismatch' >&2; exit 1 ;; esac\n");
+    } else {
+        workflow.push_str("          VERSION=\"$GITHUB_REF_NAME\"\n");
+    }
     workflow.push_str("          printf '%s\\n' \"$VERSION\" | grep -Eq '^[0-9]+\\.[0-9]+\\.[0-9]+$' || { echo \"release tag must be an exact semver version\"; exit 1; }\n");
     workflow.push_str(&release_trust_root_steps());
     workflow.push_str("          git_fetch --force --tags origin \"refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}\"\n");

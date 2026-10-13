@@ -2050,6 +2050,76 @@ prepublish_commands = ["nix flake check --no-build"]
     assert!(check.success());
 }
 
+#[cfg(unix)]
+#[test]
+fn vscode_publishers_use_configured_release_tag_prefix() {
+    for platform in ["github", "forgejo"] {
+        for prefix in ["", "v"] {
+            let temp = init_package(true);
+            fs::write(temp.path().join("simit.toml"), format!(
+                "[ci]\nruntime='nix'\n[release]\ntag_prefix='{prefix}'\n[vscode]\ncodeberg_repo='example/extension'\n"
+            )).unwrap();
+            let output = simit_with_user_config(temp.path())
+                .current_dir(temp.path())
+                .args([
+                    "init",
+                    "ci",
+                    "--platform",
+                    platform,
+                    "--runtime",
+                    "nix",
+                    "--with-vscode",
+                ])
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            let directory = if platform == "github" {
+                ".github"
+            } else {
+                ".forgejo"
+            };
+            let output = simit_with_user_config(temp.path())
+                .current_dir(temp.path())
+                .args(["init", "ci", "--check"])
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{platform}/{prefix}: {output:?}");
+            let workflow = read(&temp.path().join(format!(
+                "{directory}/workflows/publish-vscode-extension.yaml"
+            )));
+            let doc: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
+            assert_eq!(
+                doc["on"]["push"]["tags"][0],
+                format!("{prefix}[0-9]*.[0-9]*.[0-9]*")
+            );
+            let script = doc["jobs"]["publish"]["steps"]
+                .as_sequence()
+                .unwrap()
+                .iter()
+                .find(|step| step["name"] == "Validate release tag and extension version")
+                .unwrap()["run"]
+                .as_str()
+                .unwrap();
+            let version_script = script.split("git_fetch()").next().unwrap();
+            for tag in ["1.2.3", "v1.2.3", "vv1.2.3", "branch"] {
+                let output = Command::new("bash")
+                    .args([
+                        "-c",
+                        &format!("{version_script}\ntest \"$VERSION\" = 1.2.3"),
+                    ])
+                    .env("GITHUB_REF_NAME", tag)
+                    .output()
+                    .unwrap();
+                assert_eq!(
+                    output.status.success(),
+                    tag == format!("{prefix}1.2.3"),
+                    "{platform}/{prefix}/{tag}: {output:?}"
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn forgejo_nix_can_generate_jetbrains_publish_workflow() {
     let temp = init_package(true);
