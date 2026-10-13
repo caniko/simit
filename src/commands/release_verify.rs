@@ -289,7 +289,8 @@ fn verify_manifest(
         version.clone(),
     )?;
     let platform =
-        crate::ci_resolution::release_backend(&selection.project, None, None)?.platform();
+        crate::ci_resolution::release_backend(&selection.project, command.platform, None)?
+            .platform();
     let script = crate::release_notes::component_git_notes_script(
         &package.config.namespace,
         &selection.graph.components[&selection.component].paths,

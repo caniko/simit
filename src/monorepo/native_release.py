@@ -67,6 +67,7 @@ def context():
         config = data.get("publishConfig", {})
         require(config.get("registry", "https://registry.npmjs.org/").rstrip("/") == "https://registry.npmjs.org", "custom npm registry requires its own publication backend")
         require(not ("tag" not in config and "-" in version), "npm prereleases require an explicit publishConfig.tag")
+        require(isinstance(config.get("tag", "latest"), str) and re.fullmatch(r"[a-zA-Z][a-zA-Z0-9_.-]*", config.get("tag", "latest")), "invalid signed npm dist-tag")
     native_version = python_version(version) if registry == "python" else version
     return manifest.parent.resolve(), (Path(os.environ["RUNNER_TEMP"]) / "native-release-dist").resolve(), {
         "schemaVersion": 2, "registry": registry, "name": package, "version": native_version,

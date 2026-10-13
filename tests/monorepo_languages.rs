@@ -387,6 +387,35 @@ fn native_notes_and_repository_trust_resolve_without_cargo_metadata() {
             .contains("release notes explicitly disabled"),
         "{report}"
     );
+    write(
+        root,
+        "simit.toml",
+        &format!(
+            "{}\n[release.codeberg]\nrepo='example/native'\nbody_from_changelog=true\n",
+            fs::read_to_string(root.join("simit.toml"))
+                .unwrap()
+                .replace("[ci]", "[ci]\nplatform='forgejo'")
+        ),
+    );
+    let explicit = run(
+        root,
+        &[
+            "release",
+            "verify",
+            "--component",
+            "python",
+            "--platform",
+            "github",
+            "--json",
+        ],
+    );
+    let report: Value = serde_json::from_slice(&explicit.stdout).unwrap();
+    assert!(
+        report
+            .to_string()
+            .contains("release notes explicitly disabled"),
+        "{report}"
+    );
     let status = run(&root.join("node"), &["release", "trust", "status"]);
     assert!(status.status.success(), "{status:?}");
     let check = run(&root.join("python"), &["release", "trust", "check"]);
@@ -395,6 +424,87 @@ fn native_notes_and_repository_trust_resolve_without_cargo_metadata() {
         String::from_utf8_lossy(&check.stderr).contains("maintainers.gpg"),
         "{check:?}"
     );
+}
+
+#[test]
+fn ancestor_locks_are_skipped_unless_they_own_or_declare_the_workspace_package() {
+    for declared in [false, true] {
+        let temp = fixture();
+        let root = temp.path();
+        let unrelated = r#"{"name":"independent-root","version":"9.0.0","lockfileVersion":3,"packages":{"":{"name":"independent-root","version":"9.0.0"}}}"#;
+        write(root, "package-lock.json", unrelated);
+        let workspaces = if declared {
+            ",\"workspaces\":[\"n*\"]"
+        } else {
+            ""
+        };
+        write(
+            root,
+            "package.json",
+            &format!("{{\"name\":\"independent-root\",\"version\":\"9.0.0\"{workspaces}}}"),
+        );
+        git(root, &["add", "."]);
+        git(root, &["commit", "-qm", "ancestor npm project"]);
+        let original = fs::read(root.join("node/package.json")).unwrap();
+        let output = run(
+            root,
+            &[
+                "release",
+                "patch",
+                "--component",
+                "node",
+                "--no-sign",
+                "-m",
+                "release node",
+            ],
+        );
+        assert_eq!(output.status.success(), !declared, "{output:?}");
+        assert_eq!(
+            fs::read_to_string(root.join("package-lock.json")).unwrap(),
+            unrelated
+        );
+        if declared {
+            assert!(
+                String::from_utf8_lossy(&output.stderr)
+                    .contains("npm workspace lock has no package record"),
+                "{output:?}"
+            );
+            assert_eq!(fs::read(root.join("node/package.json")).unwrap(), original);
+            assert!(git(root, &["tag", "--list"]).is_empty());
+        }
+    }
+}
+
+#[test]
+fn invalid_public_npm_dist_tags_reject_during_generation() {
+    for version in ["1.3.0", "1.3.0-rc.1"] {
+        for tag in [
+            serde_json::json!("release candidate"),
+            serde_json::json!(""),
+            serde_json::json!("1latest"),
+            serde_json::json!(null),
+            serde_json::json!(7),
+        ] {
+            let temp = fixture();
+            let root = temp.path();
+            let config = fs::read_to_string(root.join("simit.toml"))
+                .unwrap()
+                .replace("publish = false", "publish = true");
+            write(root, "simit.toml", &config);
+            write(root, "node/package.json", &serde_json::json!({"name":"@example/node-engine","version":version,"publishConfig":{"tag":tag}}).to_string());
+            let output = run(root, &["init", "ci"]);
+            assert!(!output.status.success(), "{output:?}");
+            assert!(
+                String::from_utf8_lossy(&output.stderr).contains("npm"),
+                "{output:?}"
+            );
+            assert!(
+                !root
+                    .join(".github/workflows/trusted-publish-npm-node-engine.yaml")
+                    .exists()
+            );
+        }
+    }
 }
 
 #[test]

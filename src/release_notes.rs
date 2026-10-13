@@ -27,7 +27,7 @@ previous=''
 best_distance=''
 while IFS= read -r candidate; do
   [ "$candidate" != "$TAG" ] || continue
-  printf '%s\n' "$candidate" | grep -Eq '^PREFIX[0-9]+\.[0-9]+\.[0-9]+(-(rc|beta|alpha)\.[0-9]+)?$' || continue
+  printf '%s\n' "$candidate" | grep -Eq '^PREFIX[0-9]+\.[0-9]+\.[0-9]+(-(rc|beta|alpha|dev)(\.[0-9]+)?)?$' || continue
   distance=$(git rev-list --count "$candidate..$TAG")
   [ "$distance" -gt 0 ] || continue
   if [ -z "$best_distance" ] || [ "$distance" -lt "$best_distance" ]; then

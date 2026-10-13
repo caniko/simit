@@ -52,6 +52,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sources, and resolve native-only repository trust without Cargo metadata.
 - Preserve prefixed Homebrew release URLs and require the treefmt wrapper in
   dev-shell package bindings rather than unrelated package declarations.
+- Honor explicit native verification backends and supported prerelease Git-note
+  ranges; skip unrelated ancestor npm locks and reject invalid dist tags during
+  publication enrollment.
 - Verify native exact-build runners against OS/CPU identity independently of
   Nix's configurable `eval-system` and `system` settings, preventing a configured
   system override from admitting the wrong hardware architecture.

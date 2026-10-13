@@ -245,6 +245,53 @@ fn git_notes_are_bounded_by_the_release_tag() {
 }
 
 #[test]
+fn native_git_notes_start_after_supported_prerelease_tags() {
+    for previous in ["1.2.3-dev.1", "1.2.3-alpha", "1.2.3-beta", "1.2.3-rc.2"] {
+        let dir = project("");
+        let root = dir.path();
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .current_dir(root)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.name", "Simit note fixture"]);
+        git(&["config", "user.email", "fixture@example.invalid"]);
+        git(&["config", "commit.gpgsign", "false"]);
+        git(&["config", "tag.gpgsign", "false"]);
+        git(&["add", "."]);
+        git(&["commit", "-qm", "Prior prerelease history"]);
+        git(&["tag", &format!("native/v{previous}")]);
+        fs::write(
+            root.join("src/main.rs"),
+            "fn main() { println!(\"new\"); }\n",
+        )
+        .unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-qm", "New component fix"]);
+        git(&["tag", "native/v1.2.3"]);
+        let script =
+            simit::release_notes::component_git_notes_script("native", &["src".into()]).unwrap();
+        let output = Command::new("bash")
+            .current_dir(root)
+            .args(["-c", &script])
+            .env("TAG", "native/v1.2.3")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let notes = String::from_utf8(output.stdout).unwrap();
+        assert!(notes.contains("New component fix"), "{notes}");
+        assert!(
+            !notes.contains("Prior prerelease history"),
+            "{previous}: {notes}"
+        );
+    }
+}
+
+#[test]
 fn package_downloads_use_tags_but_archive_names_use_versions() {
     let dir = project(
         "[release]\ntag_prefix = \"v\"\n\n[homebrew]\ndescription = \"Player\"\nhomepage = \"https://example.com/player\"\nlicense = \"MIT\"\ndownload_repo = \"example/player\"\ntap_url = \"https://example.com/tap.git\"\n",

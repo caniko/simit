@@ -134,6 +134,18 @@ impl ManifestRelease {
                             .is_some_and(|tag| !tag.is_empty()),
                     "npm prereleases require an explicit publishConfig.tag"
                 );
+                if let Some(tag) = doc["publishConfig"].get("tag") {
+                    ensure!(
+                        tag.as_str().is_some_and(|tag| {
+                            tag.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
+                                && tag.bytes().all(|byte| {
+                                    byte.is_ascii_alphanumeric()
+                                        || matches!(byte, b'_' | b'.' | b'-')
+                                })
+                        }),
+                        "invalid signed npm dist-tag"
+                    );
+                }
             }
         }
         Ok(Package {
@@ -535,6 +547,12 @@ impl Package {
                         doc["version"] = json!(version.to_string());
                     }
                     let workspace = !relative.is_empty();
+                    if workspace
+                        && doc["packages"].get(&relative).is_none()
+                        && !declares_npm_workspace(directory, &relative)?
+                    {
+                        continue;
+                    }
                     ensure!(
                         !workspace || doc["packages"].get(&relative).is_some(),
                         "npm workspace lock has no package record for {relative}; regenerate the lock before releasing"
@@ -565,6 +583,42 @@ impl Package {
 
 fn json_bytes(doc: &Value) -> Result<Vec<u8>> {
     Ok(format!("{}\n", serde_json::to_string_pretty(doc)?).into_bytes())
+}
+
+fn declares_npm_workspace(directory: &Path, relative: &str) -> Result<bool> {
+    let manifest = directory.join("package.json");
+    if !manifest.is_file() {
+        return Ok(false);
+    }
+    ensure!(
+        !fs::symlink_metadata(&manifest)?.file_type().is_symlink(),
+        "npm workspace manifest must not be a symlink"
+    );
+    let doc: Value = serde_json::from_slice(&fs::read(manifest)?)?;
+    let workspaces = &doc["workspaces"];
+    let patterns = workspaces
+        .as_array()
+        .or_else(|| workspaces["packages"].as_array());
+    let Some(patterns) = patterns else {
+        return Ok(false);
+    };
+    let options = glob::MatchOptions {
+        require_literal_separator: true,
+        ..Default::default()
+    };
+    let mut included = false;
+    for pattern in patterns {
+        let pattern = pattern
+            .as_str()
+            .context("npm workspace patterns must be strings")?;
+        let (negative, pattern) = pattern
+            .strip_prefix('!')
+            .map_or((false, pattern), |pattern| (true, pattern));
+        if glob::Pattern::new(pattern)?.matches_with(relative, options) {
+            included = !negative;
+        }
+    }
+    Ok(included)
 }
 
 pub(crate) fn qualify(selection: &Selection) -> Result<()> {
