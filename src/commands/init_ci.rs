@@ -894,12 +894,13 @@ fn github_prebuild_file(cfg: &ProjectConfig) -> Result<Option<project::Generated
     let Some(prebuild) = &cfg.prebuild else {
         return Ok(None);
     };
-    Ok(Some(ci::github_prebuild_file(
+    Ok(Some(ci::github_prebuild_file_with_prefix(
         prebuild.effective_system_runners(&cfg.ci),
         &cfg.ci.nix_builds,
         prebuild,
         &cfg.release.artifacts,
         cfg.release.attic.as_ref(),
+        cfg.release.tag_prefix,
     )?))
 }
 

@@ -585,6 +585,14 @@ fn invalid_public_npm_dist_tags_reject_during_generation() {
             serde_json::json!("1latest"),
             serde_json::json!(null),
             serde_json::json!(7),
+            serde_json::json!("v1.4"),
+            serde_json::json!("vv1.4"),
+            serde_json::json!("v1.2.3-beta.1"),
+            serde_json::json!("v1.x"),
+            serde_json::json!("vX"),
+            serde_json::json!("x"),
+            serde_json::json!("X.X"),
+            serde_json::json!("vx.x.x-beta"),
         ] {
             let temp = fixture();
             let root = temp.path();
@@ -603,6 +611,89 @@ fn invalid_public_npm_dist_tags_reject_during_generation() {
                 !root
                     .join(".github/workflows/trusted-publish-npm-node-engine.yaml")
                     .exists()
+            );
+        }
+    }
+}
+
+#[test]
+fn python_bump_updates_each_declared_owning_uv_lock() {
+    for stale in [false, true] {
+        let temp = fixture();
+        let root = temp.path();
+        write(
+            root,
+            "pyproject.toml",
+            "[tool.uv.workspace]\nmembers=['python']\n",
+        );
+        write(
+            root,
+            "uv.lock",
+            &format!(
+                "version=1\n[[package]]\nname='py-engine'\nversion='{}'\nsource={{editable='python'}}\n[[package]]\nname='unrelated'\nversion='9.0.0'\nsource={{registry='https://pypi.org/simple'}}\n",
+                if stale { "0.1.0" } else { "0.2.0" }
+            ),
+        );
+        git(root, &["add", "."]);
+        git(root, &["commit", "-qm", "owning Python workspace"]);
+        let before: Vec<_> = ["python/pyproject.toml", "python/uv.lock", "uv.lock"]
+            .iter()
+            .map(|file| fs::read(root.join(file)).unwrap())
+            .collect();
+        let output = run(
+            root,
+            &[
+                "release",
+                "patch",
+                "--component",
+                "python",
+                "--no-sign",
+                "--no-changelog",
+                "-m",
+                "release python",
+            ],
+        );
+        assert_eq!(output.status.success(), !stale, "{output:?}");
+        if stale {
+            for (index, file) in ["python/pyproject.toml", "python/uv.lock", "uv.lock"]
+                .iter()
+                .enumerate()
+            {
+                assert_eq!(fs::read(root.join(file)).unwrap(), before[index]);
+            }
+            assert!(
+                String::from_utf8_lossy(&output.stderr)
+                    .contains("uv.lock package version disagrees")
+            );
+        } else {
+            for file in ["python/uv.lock", "uv.lock"] {
+                let doc: toml_edit::DocumentMut = fs::read_to_string(root.join(file))
+                    .unwrap()
+                    .parse()
+                    .unwrap();
+                let packages = doc["package"].as_array_of_tables().unwrap();
+                assert_eq!(
+                    packages
+                        .iter()
+                        .find(|package| package["name"].as_str() == Some("py-engine"))
+                        .unwrap()["version"]
+                        .as_str(),
+                    Some("0.2.1")
+                );
+            }
+            let doc: toml_edit::DocumentMut = fs::read_to_string(root.join("uv.lock"))
+                .unwrap()
+                .parse()
+                .unwrap();
+            assert_eq!(
+                doc["package"]
+                    .as_array_of_tables()
+                    .unwrap()
+                    .iter()
+                    .find(|package| package["name"].as_str() == Some("unrelated"))
+                    .unwrap()["version"]
+                    .as_str(),
+                Some("9.0.0")
             );
         }
     }

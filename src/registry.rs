@@ -1406,12 +1406,13 @@ fn push_prebuild_file(
     let Some(prebuild) = &config.prebuild else {
         return Ok(());
     };
-    files.push(crate::render::ci::github_prebuild_file(
+    files.push(crate::render::ci::github_prebuild_file_with_prefix(
         prebuild.effective_system_runners(&config.ci),
         &config.ci.nix_builds,
         prebuild,
         &config.release.artifacts,
         config.release.attic.as_ref(),
+        config.release.tag_prefix,
     )?);
     Ok(())
 }

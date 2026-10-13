@@ -4,6 +4,7 @@
 import base64
 import email.parser
 import hashlib
+import itertools
 import json
 import os
 from pathlib import Path
@@ -46,6 +47,34 @@ def digest(path, algorithm="sha256"):
         return hashlib.file_digest(source, algorithm).digest()
 
 
+def valid_npm_dist_tag(tag):
+    if not isinstance(tag, str) or not re.fullmatch(r"[a-zA-Z][a-zA-Z0-9_.-]*", tag):
+        return False
+    # This ASCII grammar excludes range operators/whitespace/build metadata.
+    # npm still recognizes v-prefixed versions and x-ranges, including bare x.
+    candidate = tag.lstrip("v")
+    core, separator, pre = candidate.partition("-")
+    parts = core.split(".")
+    if len(parts) > 3 or (separator and (len(parts) != 3 or not pre or any(
+        not re.fullmatch(r"[0-9A-Za-z-]+", part) or (part.isdigit() and len(part) > 1 and part.startswith("0"))
+        for part in pre.split(".")
+    ))):
+        return True
+    wildcard = False
+    for part in parts:
+        if part in ("x", "X"):
+            wildcard = True
+        elif wildcard or not re.fullmatch(r"0|[1-9][0-9]*", part) or len(part) > 16 or int(part) > 9_007_199_254_740_991:
+            return True
+    if not wildcard and len(parts) == 3 and len(tag) - len(candidate) > 1:
+        return True
+    if len(parts) < 3 or wildcard:
+        numeric = list(itertools.takewhile(lambda part: part not in ("x", "X"), parts))
+        if numeric and int(numeric[-1]) == 9_007_199_254_740_991:
+            return True
+    return False
+
+
 def context():
     manifest = Path(os.environ["SIMIT_NATIVE_MANIFEST"])
     require(not manifest.is_absolute() and ".." not in manifest.parts, "invalid manifest path")
@@ -67,7 +96,7 @@ def context():
         config = data.get("publishConfig", {})
         require(config.get("registry", "https://registry.npmjs.org/").rstrip("/") == "https://registry.npmjs.org", "custom npm registry requires its own publication backend")
         require(not ("tag" not in config and "-" in version), "npm prereleases require an explicit publishConfig.tag")
-        require(isinstance(config.get("tag", "latest"), str) and re.fullmatch(r"[a-zA-Z][a-zA-Z0-9_.-]*", config.get("tag", "latest")), "invalid signed npm dist-tag")
+        require(valid_npm_dist_tag(config.get("tag", "latest")), "invalid signed npm dist-tag")
     native_version = python_version(version) if registry == "python" else version
     return manifest.parent.resolve(), (Path(os.environ["RUNNER_TEMP"]) / "native-release-dist").resolve(), {
         "schemaVersion": 2, "registry": registry, "name": package, "version": native_version,
@@ -237,7 +266,7 @@ def upload_native(out, identity, files, manifest, token):
         config = manifest.get("publishConfig", {})
         require(config.get("registry", "https://registry.npmjs.org/").rstrip("/") == "https://registry.npmjs.org", "unapproved npm registry")
         tag = config.get("tag", "latest")
-        require(isinstance(tag, str) and re.fullmatch(r"[a-zA-Z][a-zA-Z0-9_.-]*", tag), "invalid signed npm dist-tag")
+        require(valid_npm_dist_tag(tag), "invalid signed npm dist-tag")
         access = config.get("access", "public")
         require(access in ("public", "restricted"), "invalid signed npm access")
         require(access != "restricted" or identity["name"].startswith("@"), "restricted npm access requires a scoped package")

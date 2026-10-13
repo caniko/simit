@@ -983,6 +983,76 @@ fn unsupported_ci_options_fail_before_writing_and_shared_bumps_are_rejected() {
 }
 
 #[test]
+#[cfg(unix)]
+fn component_native_system_guard_rejects_wrong_architecture_and_eval_failure() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = fixture();
+    let root = temp.path();
+    enroll_release_checks(root);
+    let config = fs::read_to_string(root.join("simit.toml"))
+        .unwrap()
+        .replace(
+            "runtime = \"nix\"",
+            "runtime = \"nix\"\nnix_system_runners = { aarch64-linux = 'ubuntu-24.04' }",
+        )
+        .replace(
+            "id = \"python\"",
+            "id = \"python\"\nsystems = ['aarch64-linux']",
+        );
+    write(root, "simit.toml", &config);
+    let output = common::simit()
+        .current_dir(root)
+        .args(["init", "ci"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let workflow: serde_yaml::Value =
+        serde_yaml::from_str(&fs::read_to_string(root.join(".github/workflows/ci.yaml")).unwrap())
+            .unwrap();
+    let steps = workflow["jobs"]["component-python"]["steps"]
+        .as_sequence()
+        .unwrap();
+    let index = steps
+        .iter()
+        .position(|step| step["name"] == "Verify runner system")
+        .unwrap();
+    assert!(
+        index
+            < steps
+                .iter()
+                .position(|step| step["name"] == "test")
+                .unwrap()
+    );
+    let script = steps[index]["run"].as_str().unwrap();
+    write(
+        root,
+        "bin/nix",
+        "#!/bin/sh\nprintf '%s' \"$FIXTURE_NIX_SYSTEM\"\nexit \"$FIXTURE_NIX_STATUS\"\n",
+    );
+    fs::set_permissions(root.join("bin/nix"), fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!(
+        "{}:{}",
+        root.join("bin").display(),
+        std::env::var("PATH").unwrap()
+    );
+    for (system, status, success) in [
+        ("aarch64-linux", "0", true),
+        ("x86_64-linux", "0", false),
+        ("aarch64-linux", "1", false),
+    ] {
+        let output = Command::new("bash")
+            .args(["-euo", "pipefail", "-c", script])
+            .env("PATH", &path)
+            .env("EXPECTED_NIX_SYSTEM", "aarch64-linux")
+            .env("FIXTURE_NIX_SYSTEM", system)
+            .env("FIXTURE_NIX_STATUS", status)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.success(), success, "{output:?}");
+    }
+}
+
+#[test]
 fn independent_publication_qualifies_native_components_and_keeps_version_drift_stable() {
     let temp = fixture();
     let mut config = fs::read_to_string(temp.path().join("simit.toml")).unwrap();
@@ -1035,6 +1105,30 @@ fn independent_publication_qualifies_native_components_and_keeps_version_drift_s
     assert_eq!(
         workflow["jobs"]["component-python"]["strategy"]["matrix"]["include"][0]["runner"],
         "macos-14"
+    );
+    let steps = workflow["jobs"]["component-python"]["steps"]
+        .as_sequence()
+        .unwrap();
+    let system_guard = steps
+        .iter()
+        .position(|step| step["name"] == "Verify runner system")
+        .unwrap();
+    assert!(
+        system_guard
+            < steps
+                .iter()
+                .position(|step| step["name"] == "Verify generated workflows")
+                .unwrap()
+    );
+    assert_eq!(
+        steps[system_guard]["env"]["EXPECTED_NIX_SYSTEM"],
+        "${{ matrix.system }}"
+    );
+    assert!(
+        steps[system_guard]["run"]
+            .as_str()
+            .unwrap()
+            .contains("builtins.currentSystem")
     );
     let publishes: Vec<_> = workflow["jobs"]
         .as_mapping()

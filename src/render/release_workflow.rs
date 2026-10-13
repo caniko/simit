@@ -886,14 +886,12 @@ fn push_preinstalled_nix_env(w: &mut String, artifacts: &ArtifactsConfig) {
     w.push_str("      XDG_CACHE_HOME: \"/tmp/.cache\"\n");
 }
 
-pub(crate) fn tag_validation_step(artifacts: &ArtifactsConfig) -> String {
+pub(crate) fn tag_validation_step(
+    artifacts: &ArtifactsConfig,
+    prefix: crate::release_identity::TagPrefix,
+) -> String {
     let mut step = String::new();
-    push_validate_tag(
-        &mut step,
-        artifacts,
-        crate::release_identity::TagPrefix::None,
-        ReleaseNotesSource::Changelog,
-    );
+    push_validate_tag(&mut step, artifacts, prefix, ReleaseNotesSource::Changelog);
     step
 }
 

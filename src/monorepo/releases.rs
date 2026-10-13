@@ -140,13 +140,8 @@ impl ManifestRelease {
                 );
                 if let Some(tag) = doc["publishConfig"].get("tag") {
                     ensure!(
-                        tag.as_str().is_some_and(|tag| {
-                            tag.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
-                                && tag.bytes().all(|byte| {
-                                    byte.is_ascii_alphanumeric()
-                                        || matches!(byte, b'_' | b'.' | b'-')
-                                })
-                        }),
+                        tag.as_str()
+                            .is_some_and(super::native_registry::valid_npm_dist_tag),
                         "invalid signed npm dist-tag"
                     );
                 }
@@ -521,7 +516,6 @@ impl Package {
                         before,
                         after: doc.to_string().into_bytes(),
                     });
-                    break;
                 }
             }
         } else {

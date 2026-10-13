@@ -5161,6 +5161,92 @@ pypi_token_secret = "PYPI_API_TOKEN"
 }
 
 #[test]
+#[cfg(unix)]
+fn pypi_publishers_validate_the_configured_tag_prefix_before_version_lookup() {
+    use simit::cli::{Platform, Runtime};
+    use simit::release_identity::TagPrefix;
+    use simit::render::ci::{CiOptions, maturin_publish_file, python_publish_file};
+    use simit::user_config::ResolvedRunner;
+    use std::os::unix::fs::PermissionsExt;
+    let temp = TempDir::new().unwrap();
+    let nix = temp.path().join("nix");
+    fs::write(
+        &nix,
+        "#!/bin/sh\nprintf '%s' \"${FIXTURE_VERSION:-1.2.3}\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&nix, fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!(
+        "{}:{}",
+        temp.path().display(),
+        std::env::var("PATH").unwrap()
+    );
+    let runner = ResolvedRunner {
+        name: None,
+        labels: vec!["ubuntu-24.04".into()],
+    };
+    for (prefix, expected) in [(TagPrefix::V, "v1.2.3"), (TagPrefix::None, "1.2.3")] {
+        let options = CiOptions {
+            tag_prefix: prefix,
+            ..Default::default()
+        };
+        for platform in [Platform::Github, Platform::Forgejo] {
+            for file in [
+                python_publish_file(platform, Runtime::Nix, &runner, &options).unwrap(),
+                maturin_publish_file(platform, Runtime::Nix, &runner, &options).unwrap(),
+            ] {
+                let workflow: serde_yaml::Value = serde_yaml::from_str(&file.content).unwrap();
+                assert_eq!(
+                    workflow["on"]["push"]["tags"][0].as_str(),
+                    Some(if prefix == TagPrefix::V {
+                        "v[0-9]*"
+                    } else {
+                        "[0-9]*"
+                    })
+                );
+                let script = workflow["jobs"]["publish"]["steps"]
+                    .as_sequence()
+                    .unwrap()
+                    .iter()
+                    .find(|step| step["name"] == "Validate release tag")
+                    .unwrap()["run"]
+                    .as_str()
+                    .unwrap();
+                for (tag, success) in [
+                    (expected, true),
+                    (
+                        if prefix == TagPrefix::V {
+                            "1.2.3"
+                        } else {
+                            "v1.2.3"
+                        },
+                        false,
+                    ),
+                    ("v1.2", false),
+                    ("v1.2.3;exit 0", false),
+                ] {
+                    let output = Command::new("bash")
+                        .args(["-euo", "pipefail", "-c", script])
+                        .env("PATH", &path)
+                        .env("GITHUB_REF_NAME", tag)
+                        .output()
+                        .unwrap();
+                    assert_eq!(output.status.success(), success, "{tag}: {output:?}");
+                }
+                let output = Command::new("bash")
+                    .args(["-euo", "pipefail", "-c", script])
+                    .env("PATH", &path)
+                    .env("GITHUB_REF_NAME", expected)
+                    .env("FIXTURE_VERSION", "1.2.4")
+                    .output()
+                    .unwrap();
+                assert!(!output.status.success(), "{output:?}");
+            }
+        }
+    }
+}
+
+#[test]
 fn python_poetry_dynamic_version_generates_convergent_publish_workflow() {
     let temp = init_python_project();
     fs::write(

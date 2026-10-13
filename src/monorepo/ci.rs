@@ -123,6 +123,9 @@ pub(crate) fn files(
             })
         };
         let mut steps = vec![checkout(node24), install_nix(node24), input_transport()];
+        if !component.systems.is_empty() {
+            steps.push(json!({"name": "Verify runner system", "shell":"bash", "env":{"EXPECTED_NIX_SYSTEM":"${{ matrix.system }}"}, "run":"set -euo pipefail\nactual_system=$(nix eval --impure --raw --expr builtins.currentSystem)\nif [ \"$actual_system\" != \"$EXPECTED_NIX_SYSTEM\" ]; then\n  echo \"Native Nix runner mismatch: expected $EXPECTED_NIX_SYSTEM, got $actual_system\" >&2\n  exit 1\nfi\n"}));
+        }
         steps.push(json!({"name": "Verify generated workflows", "run": "nix develop --print-build-logs .#ci --command simit init ci --check"}));
         for gate in &component.checks {
             // The project-owned command is one argument to Bash, not an interpolated

@@ -60,6 +60,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Revalidate Cargo component source identity after qualification, skip unrelated
   ancestor uv locks, validate namespace length during admission, and preserve
   consumer npm lifecycle metadata without executing it in the publisher.
+- Carry tag prefixes through reusable prebuild and PyPI workflows, reject
+  SemVer-range npm distribution tags, update every owning uv workspace lock,
+  and verify each component matrix runner's native Nix system before its gates.
 - Admit dependency attributes outside the actual checks namespace, apply CI cache
   policy on preinstalled Forgejo Nix, and explain full reruns for attempt-bound
   transport. Reject Darwin case-hack aliases before import and bind checksum and

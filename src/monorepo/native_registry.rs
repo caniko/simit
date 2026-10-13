@@ -7,6 +7,62 @@ use serde_json::Value;
 
 use super::releases::Package;
 
+/// npm tags share a namespace with versions and cannot be SemVer ranges.
+/// Within our ASCII tag grammar, only v-prefixed versions/x-ranges and bare
+/// x-ranges can be ranges; operators, whitespace and build metadata are excluded.
+pub(crate) fn valid_npm_dist_tag(tag: &str) -> bool {
+    if !tag.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
+        || !tag
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'-'))
+    {
+        return false;
+    }
+    let candidate = tag.trim_start_matches('v');
+    let (core, pre) = candidate
+        .split_once('-')
+        .map_or((candidate, None), |(core, pre)| (core, Some(pre)));
+    let parts: Vec<_> = core.split('.').collect();
+    if parts.len() > 3
+        || pre.is_some_and(|pre| {
+            parts.len() != 3 || pre.is_empty() || semver::Prerelease::new(pre).is_err()
+        })
+    {
+        return true;
+    }
+    let mut wildcard = false;
+    let is_range = parts.iter().all(|part| {
+        if matches!(*part, "x" | "X") {
+            wildcard = true;
+            true
+        } else {
+            !wildcard
+                && (*part == "0" || !part.starts_with('0'))
+                && part.bytes().all(|byte| byte.is_ascii_digit())
+                && part
+                    .parse::<u64>()
+                    .is_ok_and(|number| number <= 9_007_199_254_740_991)
+        }
+    });
+    if !is_range || (!wildcard && parts.len() == 3 && tag.len() - candidate.len() > 1) {
+        return true;
+    }
+    if parts.len() < 3 || wildcard {
+        // npm expands partial numeric ranges to an exclusive next version.
+        // An increment beyond JavaScript's safe integer ceiling is not a range.
+        if let Some(last) = parts
+            .iter()
+            .take_while(|part| !matches!(**part, "x" | "X"))
+            .last()
+        {
+            return last
+                .parse::<u64>()
+                .is_ok_and(|number| number == 9_007_199_254_740_991);
+        }
+    }
+    false
+}
+
 #[derive(Clone, Copy)]
 pub(crate) enum Registry {
     Python,
@@ -169,6 +225,44 @@ pub(crate) fn available(package: &Package, version: &Version) -> Result<bool> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn npm_tags_exclude_semver_ranges_but_keep_named_channels() {
+        for tag in [
+            "v1",
+            "v1.4",
+            "vv1.4",
+            "v1.2.3",
+            "v1.2.3-beta.1",
+            "v1.x",
+            "v1.2.x-beta",
+            "vx.x.x-beta",
+            "x",
+            "X",
+            "X.X.X",
+        ] {
+            assert!(!valid_npm_dist_tag(tag), "{tag}");
+        }
+        for tag in [
+            "latest",
+            "next",
+            "stable",
+            "release-candidate",
+            "vnext",
+            "v1-beta",
+            "v1.4-beta",
+            "V1.4",
+            "v01.4",
+            "v1.2.3-",
+            "v1.2.3-beta_1",
+            "v1.2.3-beta.01",
+            "xfoo",
+            "vv1.2.3",
+            "v9007199254740991",
+            "v0.9007199254740991",
+        ] {
+            assert!(valid_npm_dist_tag(tag), "{tag}");
+        }
+    }
     use super::*;
 
     #[test]

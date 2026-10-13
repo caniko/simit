@@ -1030,6 +1030,24 @@ pub fn github_prebuild_file(
     artifacts: &ArtifactsConfig,
     attic: Option<&AtticConfig>,
 ) -> Result<GeneratedFile> {
+    github_prebuild_file_with_prefix(
+        system_runners,
+        nix_builds,
+        prebuild,
+        artifacts,
+        attic,
+        crate::release_identity::TagPrefix::None,
+    )
+}
+
+pub fn github_prebuild_file_with_prefix(
+    system_runners: &BTreeMap<String, String>,
+    nix_builds: &[String],
+    prebuild: &PrebuildConfig,
+    artifacts: &ArtifactsConfig,
+    attic: Option<&AtticConfig>,
+    prefix: crate::release_identity::TagPrefix,
+) -> Result<GeneratedFile> {
     if system_runners.is_empty() {
         bail!("GitHub prebuild requires at least one native system runner");
     }
@@ -1079,7 +1097,7 @@ pub fn github_prebuild_file(
     );
     // Reusable release prebuilds also validate their own event checkout before
     // any project-controlled evaluation/build or Attic credential use.
-    let validation = super::release_workflow::tag_validation_step(artifacts);
+    let validation = super::release_workflow::tag_validation_step(artifacts, prefix);
     workflow.push_str(&validation.replacen(
         "        run: |",
         "        if: ${{ inputs.release }}\n        run: |",
@@ -2361,7 +2379,10 @@ fn python_publish_workflow(
     workflow.push_str("name: Publish to PyPI\n\n");
     workflow.push_str("on:\n");
     workflow.push_str("  push:\n");
-    workflow.push_str("    tags: [\"[0-9]*\"]\n\n");
+    workflow.push_str(&format!(
+        "    tags: [\"{}[0-9]*\"]\n\n",
+        options.tag_prefix.as_str()
+    ));
     push_provider_concurrency(&mut workflow, platform);
     workflow.push_str("jobs:\n");
     workflow.push_str("  publish:\n");
@@ -2385,7 +2406,7 @@ fn python_publish_workflow(
     push_checkout_step(&mut workflow, platform, runner);
     push_required_env_step(&mut workflow, &options.required_env);
     push_install_nix_step(&mut workflow, platform);
-    push_validate_pypi_tag_step(&mut workflow);
+    push_validate_pypi_tag_step(&mut workflow, options.tag_prefix);
     push_extra_setup_steps(&mut workflow, &options.extra_setup);
     workflow.push_str("      - name: Build Nix package\n");
     workflow.push_str("        run: nix build .# --no-link\n\n");
@@ -2438,7 +2459,10 @@ fn maturin_publish_workflow(
     workflow.push_str("name: Publish to PyPI\n\n");
     workflow.push_str("on:\n");
     workflow.push_str("  push:\n");
-    workflow.push_str("    tags: [\"[0-9]*\"]\n\n");
+    workflow.push_str(&format!(
+        "    tags: [\"{}[0-9]*\"]\n\n",
+        options.tag_prefix.as_str()
+    ));
     push_provider_concurrency(&mut workflow, platform);
     workflow.push_str("jobs:\n");
     workflow.push_str("  publish:\n");
@@ -2456,7 +2480,7 @@ fn maturin_publish_workflow(
     push_checkout_step(&mut workflow, platform, runner);
     push_required_env_step(&mut workflow, &options.required_env);
     push_install_nix_step(&mut workflow, platform);
-    push_validate_pypi_tag_step(&mut workflow);
+    push_validate_pypi_tag_step(&mut workflow, options.tag_prefix);
     push_extra_setup_steps(&mut workflow, &options.extra_setup);
     workflow.push_str("      - name: Build and publish to PyPI\n");
     workflow.push_str("        env:\n");
@@ -5056,18 +5080,24 @@ fn runs_on(runner: &ResolvedRunner) -> String {
     format!("[{labels}]")
 }
 
-fn push_validate_pypi_tag_step(workflow: &mut String) {
+fn push_validate_pypi_tag_step(workflow: &mut String, prefix: crate::release_identity::TagPrefix) {
     workflow.push_str(
         r#"      - name: Validate release tag
         run: |
           set -euo pipefail
           tag="${GITHUB_REF_NAME:-${FORGE_REF_NAME:-${CODEBERG_REF_NAME:-}}}"
-          if ! printf '%s\n' "$tag" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+          release_version="$tag"
+"#,
+    );
+    if prefix == crate::release_identity::TagPrefix::V {
+        workflow.push_str("          case \"$tag\" in v*) release_version=\"${tag#v}\" ;; *) echo 'Tag prefix mismatch' >&2; exit 1 ;; esac\n");
+    }
+    workflow.push_str(r#"          if ! printf '%s\n' "$release_version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
             echo "Tag must be an exact semver version like 0.1.1, got '$tag'" >&2
             exit 1
           fi
           version="$(nix eval --raw --impure --expr 'let metadata = builtins.fromTOML (builtins.readFile ./pyproject.toml); in if metadata ? project.version then metadata.project.version else if metadata ? project && builtins.elem "version" (metadata.project.dynamic or []) && metadata ? tool.poetry.version then metadata.tool.poetry.version else if !(metadata ? project) && metadata ? tool.poetry.version then metadata.tool.poetry.version else throw "No supported Python project version provider"')"
-          if [ "$tag" != "$version" ]; then
+          if [ "$release_version" != "$version" ]; then
             echo "Tag $tag does not match project version $version" >&2
             exit 1
           fi
