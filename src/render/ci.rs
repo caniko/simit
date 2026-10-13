@@ -184,6 +184,7 @@ pub struct CiOptions {
     pub ci_nix_substituters: Vec<String>,
     pub ci_nix_trusted_public_keys: Vec<String>,
     pub independent_lanes: bool,
+    pub separate_events: bool,
     pub nix_builds: Vec<String>,
     pub all_features: bool,
     pub unit_tests_only: bool,
@@ -236,6 +237,7 @@ impl Default for CiOptions {
             ci_nix_substituters: Vec::new(),
             ci_nix_trusted_public_keys: Vec::new(),
             independent_lanes: false,
+            separate_events: false,
             nix_builds: Vec::new(),
             all_features: true,
             unit_tests_only: false,
@@ -384,6 +386,11 @@ pub fn primary_files(request: FilesRequest<'_>) -> Result<Vec<GeneratedFile>> {
 }
 
 fn files_for_scope(request: FilesRequest<'_>, primary_only: bool) -> Result<Vec<GeneratedFile>> {
+    if request.options.separate_events
+        && (request.platform != Platform::Github || request.provider != CiProvider::Actions)
+    {
+        bail!("[ci].separate_events requires GitHub Actions Rust CI");
+    }
     if request.options.independent_lanes
         && (request.platform != Platform::Github
             || request.provider != CiProvider::Actions
@@ -898,6 +905,9 @@ pub fn python_ci_file(
     check_outputs: &[String],
     components: &[CiComponent],
 ) -> Result<GeneratedFile> {
+    if options.separate_events {
+        bail!("[ci].separate_events requires GitHub Actions Rust CI");
+    }
     if options.independent_lanes {
         bail!("[ci].independent_lanes requires GitHub Actions Rust/Nix CI");
     }
@@ -1214,6 +1224,7 @@ pub fn nix_build_matrix_file_with_options(
         bail!("[ci.nix_build] options require GitHub Actions");
     }
     options.validate_push_tags()?;
+    options.validate_runtime_inputs()?;
     options.validate_system_runners(installables)?;
     let native_runners = !options.system_runners.is_empty();
     options.validate_groups(installables)?;
@@ -1380,10 +1391,19 @@ pub fn nix_build_matrix_file_with_options(
 }
 
 fn push_native_nix_runner_step(workflow: &mut String) {
+    push_native_nix_runner_step_with_context(workflow, |_| {});
+}
+
+fn push_native_nix_runner_step_with_context(
+    workflow: &mut String,
+    context: impl FnOnce(&mut String),
+) {
     // Nixpkgs lib.systems.elaborate.uname.processor uses ppc spellings for
     // the unambiguous PowerPC systems; never infer ambiguous CPU endianness
     // from Nix's configurable identity.
-    workflow.push_str("      - name: Verify native Nix runner\n        env:\n          EXPECTED_NIX_SYSTEM: ${{ matrix.system }}\n        run: |\n          set -euo pipefail\n          machine=\"$(uname -m)\"\n          case \"$machine\" in\n            arm64) machine=aarch64 ;;\n            amd64) machine=x86_64 ;;\n            i386|i486|i586) machine=i686 ;;\n            ppc) machine=powerpc ;;\n            ppcle) machine=powerpcle ;;\n            ppc64) machine=powerpc64 ;;\n            ppc64le) machine=powerpc64le ;;\n          esac\n          kernel=\"$(uname -s)\"\n          case \"$kernel\" in\n            Linux) os=linux ;;\n            Darwin) os=darwin ;;\n            FreeBSD) os=freebsd ;;\n            *) echo \"Unsupported native Nix runner kernel: $kernel\" >&2; exit 1 ;;\n          esac\n          actual_system=\"$machine-$os\"\n          if [ \"$actual_system\" != \"$EXPECTED_NIX_SYSTEM\" ]; then\n            echo \"Native Nix runner mismatch: expected $EXPECTED_NIX_SYSTEM, got hardware $actual_system\" >&2\n            exit 1\n          fi\n          nix_system=\"$(nix eval --impure --raw --expr builtins.currentSystem)\"\n          if [ \"$nix_system\" != \"$EXPECTED_NIX_SYSTEM\" ]; then\n            echo \"Native Nix runner mismatch: expected $EXPECTED_NIX_SYSTEM, got configured Nix system $nix_system\" >&2\n            exit 1\n          fi\n          printf 'Verified native hardware %s and Nix system %s\\n' \"$actual_system\" \"$nix_system\"\n");
+    workflow.push_str("      - name: Verify native Nix runner\n        env:\n          EXPECTED_NIX_SYSTEM: ${{ matrix.system }}\n");
+    context(workflow);
+    workflow.push_str("        run: |\n          set -euo pipefail\n          machine=\"$(uname -m)\"\n          case \"$machine\" in\n            arm64) machine=aarch64 ;;\n            amd64) machine=x86_64 ;;\n            i386|i486|i586) machine=i686 ;;\n            ppc) machine=powerpc ;;\n            ppcle) machine=powerpcle ;;\n            ppc64) machine=powerpc64 ;;\n            ppc64le) machine=powerpc64le ;;\n          esac\n          kernel=\"$(uname -s)\"\n          case \"$kernel\" in\n            Linux) os=linux ;;\n            Darwin) os=darwin ;;\n            FreeBSD) os=freebsd ;;\n            *) echo \"Unsupported native Nix runner kernel: $kernel\" >&2; exit 1 ;;\n          esac\n          actual_system=\"$machine-$os\"\n          if [ \"$actual_system\" != \"$EXPECTED_NIX_SYSTEM\" ]; then\n            echo \"Native Nix runner mismatch: expected $EXPECTED_NIX_SYSTEM, got hardware $actual_system\" >&2\n            exit 1\n          fi\n          nix_system=\"$(nix eval --impure --raw --expr builtins.currentSystem)\"\n          if [ \"$nix_system\" != \"$EXPECTED_NIX_SYSTEM\" ]; then\n            echo \"Native Nix runner mismatch: expected $EXPECTED_NIX_SYSTEM, got configured Nix system $nix_system\" >&2\n            exit 1\n          fi\n          printf 'Verified native hardware %s and Nix system %s\\n' \"$actual_system\" \"$nix_system\"\n");
 }
 
 pub fn gitlab_nix_flake_workflow() -> String {
@@ -4078,7 +4098,11 @@ fn push_github_concurrency(workflow: &mut String) {
 }
 
 fn push_rust_ci_concurrency(workflow: &mut String, platform: Platform, options: &CiOptions) {
-    if platform == Platform::Github && options.workspace_strategy == WorkspaceStrategy::Aggregate {
+    if platform == Platform::Github && options.separate_events {
+        push_independent_source_concurrency(workflow);
+    } else if platform == Platform::Github
+        && options.workspace_strategy == WorkspaceStrategy::Aggregate
+    {
         // workflow_ref contains the event ref, so it cannot coalesce a branch
         // push with its PR merge ref. Aggregate CI has one stable workflow path.
         // Include the source repository so a fork's same-named branch is distinct.

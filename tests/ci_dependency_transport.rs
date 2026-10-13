@@ -40,6 +40,33 @@ runtime = [".#checks.x86_64-linux.runtime"]
 }
 
 #[test]
+fn transport_runtime_environment_cannot_be_overridden_before_generation_writes() {
+    for key in [
+        "SIMIT_DEPENDENCY_MODE",
+        "SIMIT_DEPENDENCY_ROOT",
+        "SIMIT_DEPENDENCY_MAX_BYTES",
+    ] {
+        let temp = project();
+        let path = temp.path().join("simit.toml");
+        let before = format!(
+            "{}\n[ci.nix_build.extra_env]\n{key} = 'producer-override'\n",
+            fs::read_to_string(&path).unwrap()
+        );
+        fs::write(&path, &before).unwrap();
+        let output = common::simit()
+            .current_dir(temp.path())
+            .args(["init", "ci"])
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{key}: {output:?}");
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(error.contains("reserved") && error.contains(key), "{error}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), before);
+        assert!(!temp.path().join(".github/workflows").exists());
+    }
+}
+
+#[test]
 fn dependency_transport_is_same_run_and_runtime_jobs_still_execute_fresh() {
     let temp = project();
     let output = common::simit()
@@ -124,7 +151,12 @@ fn dependency_transport_is_same_run_and_runtime_jobs_still_execute_fresh() {
         .iter()
         .find(|s| s["name"] == "Build Nix group")
         .unwrap();
-    assert!(build["run"].as_str().unwrap().contains("--rebuild"));
+    assert!(
+        build["run"]
+            .as_str()
+            .unwrap()
+            .contains("\"fresh_installables\":[\".#checks.x86_64-linux.runtime\"]")
+    );
     assert!(
         fs::read_to_string(temp.path().join(".github/workflows/nix-builds.yaml"))
             .unwrap()
@@ -167,10 +199,31 @@ fn dependency_producer_preserves_configured_nix_config() {
         &fs::read_to_string(temp.path().join(".github/workflows/nix-builds.yaml")).unwrap(),
     )
     .unwrap();
-    for job in ["dependencies", "build"] {
-        assert_eq!(value["jobs"][job]["env"]["NIX_CONFIG"], nix_config);
-        assert_eq!(value["jobs"][job]["env"]["TRANSPORT_TEST"], other_env);
+    assert_eq!(
+        value["jobs"]["dependencies"]["env"]["NIX_CONFIG"],
+        nix_config
+    );
+    assert_eq!(
+        value["jobs"]["dependencies"]["env"]["TRANSPORT_TEST"],
+        other_env
+    );
+    // Producer configuration belongs to producer steps, never the independent
+    // native engine bootstrap's shell or Nix input resolution.
+    let steps = value["jobs"]["build"]["steps"].as_sequence().unwrap();
+    for name in ["Verify and import dependency closure", "Build Nix group"] {
+        let step = steps.iter().find(|s| s["name"] == name).unwrap();
+        assert_eq!(step["env"]["NIX_CONFIG"], nix_config);
+        assert_eq!(step["env"]["TRANSPORT_TEST"], other_env);
     }
+    let bootstrap = steps
+        .iter()
+        .find(|s| s["name"] == "Provision grouped-build Rust engine")
+        .unwrap();
+    assert_eq!(
+        bootstrap["env"]["NIX_CONFIG"],
+        "experimental-features = nix-command flakes"
+    );
+    assert!(bootstrap["env"]["TRANSPORT_TEST"].is_null());
 }
 
 #[test]

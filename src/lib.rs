@@ -12,6 +12,8 @@ pub mod cargo;
 pub mod changelog;
 /// Shared CI option resolution for generation and drift detection.
 pub mod ci_resolution;
+/// Versioned grouped CI execution, separate from rendering and qualification authority.
+pub mod ci_runtime;
 /// Command-line argument definitions.
 pub mod cli;
 /// Command implementations used by the binary.

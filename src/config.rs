@@ -443,6 +443,9 @@ pub struct CiConfig {
     /// Start Rust, flake evaluation and optional realization independently.
     #[serde(default)]
     pub independent_lanes: bool,
+    /// Retain independent GitHub Rust CI push and PR originals, including aggregate CI.
+    #[serde(default)]
+    pub separate_events: bool,
     #[serde(default)]
     pub workspace_strategy: WorkspaceStrategy,
     /// Opt-in coordinated dependency-ordered workspace publication.
@@ -536,6 +539,10 @@ impl CiConfig {
         provider: CiProvider,
         platform: Platform,
     ) -> Result<()> {
+        if self.separate_events && (provider != CiProvider::Actions || platform != Platform::Github)
+        {
+            bail!("[ci].separate_events requires the effective GitHub Actions backend");
+        }
         if (self.independent_lanes || self.nix_build != NixBuildConfig::default())
             && (provider != CiProvider::Actions || platform != Platform::Github)
         {
@@ -552,6 +559,9 @@ impl CiConfig {
     /// Shared by Nix-only generation and drift auditing. Call after CLI overrides
     /// so an explicit false can disable a configured unsupported option.
     pub(crate) fn validate_nix_only_language_options(&self) -> Result<()> {
+        if self.separate_events {
+            bail!("[ci].separate_events requires Rust language CI");
+        }
         if self.independent_lanes {
             bail!("[ci].independent_lanes requires Rust language CI");
         }
@@ -807,6 +817,30 @@ impl NixBuildConfig {
             }
         }
         Ok(system)
+    }
+
+    /// Generator-owned environment and retained scripts must stay runtime data.
+    pub(crate) fn validate_runtime_inputs(&self) -> Result<()> {
+        for name in self.extra_env.keys() {
+            if name.starts_with("SIMIT_DEPENDENCY_") {
+                bail!(
+                    "simit project config: [ci.nix_build].extra_env cannot override reserved transport variable {name}"
+                );
+            }
+        }
+        if !self.groups.is_empty() {
+            for (name, values) in [
+                ("post_build", &self.post_build),
+                ("post_build_always", &self.post_build_always),
+            ] {
+                if values.iter().any(|script| script.contains("${{")) {
+                    bail!(
+                        "simit project config: grouped [ci.nix_build].{name} cannot contain Actions expressions in retained hook scripts; bind expressions through extra_env and reference shell variables instead"
+                    );
+                }
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn validate_push_tags(&self) -> Result<()> {
@@ -3845,6 +3879,7 @@ fn validate_nix_build_config(config: &ProjectConfig) -> Result<()> {
         bail!("simit project config: [ci.nix_build].only requires the Nix runtime");
     }
     options.validate_push_tags()?;
+    options.validate_runtime_inputs()?;
     options.validate_system_runners(&ci.nix_builds)?;
     options.validate_groups(&ci.nix_builds)?;
     for (name, number, min, max) in [
@@ -3904,6 +3939,15 @@ fn validate_nix_build_config(config: &ProjectConfig) -> Result<()> {
         if name == "SIMIT_NIX_BUILD_RESULTS" {
             bail!(
                 "simit project config: [ci.nix_build].extra_env cannot override SIMIT_NIX_BUILD_RESULTS"
+            );
+        }
+        if !options.groups.is_empty()
+            && (name.starts_with("SIMIT_CI_")
+                || name.starts_with("SIMIT_NIX_")
+                || name == "INSTALLABLES")
+        {
+            bail!(
+                "simit project config: grouped [ci.nix_build].extra_env cannot override reserved runtime variable {name}"
             );
         }
     }
@@ -4027,6 +4071,7 @@ fn set_ci_table(table: &mut Table, ci: &CiConfig) {
     set_optional_string(table, "check_command", ci.check_command.as_deref());
     set_optional_bool_default_true(table, "nix_flake_check", ci.nix_flake_check);
     set_bool(table, "independent_lanes", ci.independent_lanes);
+    set_bool(table, "separate_events", ci.separate_events);
     set_optional_string(
         table,
         "workspace_strategy",
