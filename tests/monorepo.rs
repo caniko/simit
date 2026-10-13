@@ -286,6 +286,31 @@ fn monorepo_rejects_unsupported_extension_publication_before_reconciliation() {
             .unwrap();
         assert!(output.status.success(), "{output:?}");
         assert_eq!(fs::read_to_string(root.join(path)).unwrap(), publisher);
+        let ci: serde_yaml::Value = serde_yaml::from_str(
+            &fs::read_to_string(root.join(".github/workflows/ci.yaml")).unwrap(),
+        )
+        .unwrap();
+        for id in ["core", "rust", "python", "worker"] {
+            let step = ci["jobs"][format!("component-{id}")]["steps"]
+                .as_sequence()
+                .unwrap()
+                .iter()
+                .find(|step| step["name"] == "Verify generated workflows")
+                .unwrap();
+            let (_, command) = step["run"]
+                .as_str()
+                .unwrap()
+                .split_once("--command simit ")
+                .unwrap();
+            let output = common::simit()
+                .current_dir(root)
+                .args(command.split_whitespace())
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{id}: {output:?}");
+        }
+        assert_eq!(fs::read_to_string(root.join(path)).unwrap(), publisher);
+        assert_eq!(fs::read_to_string(root.join("simit.toml")).unwrap(), config);
     }
 }
 

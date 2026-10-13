@@ -53,6 +53,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Preserve primary-only scope in component CI self-checks so independently
+  managed extension publishers do not block qualification.
 - Skip crates.io registry and token verification for Cargo packages whose publish
   policy excludes crates.io, using the same eligibility as publisher generation.
 - Build native publication archives on a fixed hosted runner and independently
