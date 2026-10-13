@@ -117,27 +117,26 @@ pub(super) fn render(
     if let Some(value) = options.cores {
         limits.extend(["--cores".to_owned(), value.to_string()]);
     }
-    workflow.push_str("      - name: Build Nix group\n        shell: bash\n        env:\n          INSTALLABLES: ${{ matrix.installables }}\n");
+    workflow.push_str("      - name: Build Nix group\n        shell: bash\n        env:\n          SIMIT_NIX_GROUP: ${{ matrix.group }}\n");
     push_producer_env_lines(&mut workflow, options);
-    for (key, value) in [
-        ("SIMIT_NIX_PLAN", serde_json::to_string(installables)?),
-        (
-            "SIMIT_NIX_CHECK_SYSTEMS",
-            serde_json::to_string(&options.check_systems)?,
-        ),
-        ("SIMIT_NIX_LIMITS", serde_json::to_string(&limits)?),
-        (
-            "SIMIT_NIX_POST_BUILD",
-            serde_json::to_string(&options.post_build)?,
-        ),
-        (
-            "SIMIT_NIX_POST_BUILD_ALWAYS",
-            serde_json::to_string(&options.post_build_always)?,
-        ),
-    ] {
-        workflow.push_str(&format!("          {key}: {}\n", yaml_json_scalar(&value)));
+    // GitHub runs this step from a file. Keep the spec (including accepted
+    // megabyte hooks) in that file and use Bash's builtin printf, never argv/env.
+    workflow.push_str("        run: |\n          case \"$SIMIT_NIX_GROUP\" in\n");
+    for (name, members) in &options.groups {
+        let spec = crate::ci_runtime::group::GroupSpec {
+            schema: "simit.nix-group-spec.v1".into(),
+            members: members.clone(),
+            plan: installables.to_vec(),
+            check_systems: options.check_systems.clone(),
+            limits: limits.clone(),
+            post_build: options.post_build.clone(),
+            post_build_always: options.post_build_always.clone(),
+            fresh_installables: Vec::new(),
+        };
+        let quoted = shell_word(&serde_json::to_string(&spec)?);
+        workflow.push_str(&format!("            {})\n              (umask 077; set -C; printf '%s' {quoted} > \"$SIMIT_NIX_BUILD_RESULTS/group-spec.json\")\n              ;;\n", shell_word(name)));
     }
-    workflow.push_str("        run: |\n          \"$SIMIT_CI_ENGINE\" ci nix-group\n");
+    workflow.push_str("            *) echo 'Unknown Nix execution group' >&2; exit 1 ;;\n          esac\n          \"$SIMIT_CI_ENGINE\" ci nix-group --spec \"$SIMIT_NIX_BUILD_RESULTS/group-spec.json\"\n");
     push_diagnostics_fallback(&mut workflow, options);
     workflow.push_str("      - name: Upload Nix build evidence\n        if: always()\n");
     push_action_uses(
@@ -173,7 +172,9 @@ fn push_diagnostics_fallback(workflow: &mut String, options: &NixBuildConfig) {
             workflow.push_str(&format!("              export INSTALLABLE={}\n              export SIMIT_NIX_BUILD_RESULTS=\"$group_root/{index}\"\n              mkdir -p \"$SIMIT_NIX_BUILD_RESULTS\"\n              if [ ! -e \"$SIMIT_NIX_BUILD_RESULTS/diagnostics-complete\" ]; then\n", shell_word(installable)));
             for (hook, script) in options.post_build_always.iter().enumerate() {
                 let quoted = shell_word(script).replace('\n', "\n          ");
-                workflow.push_str(&format!("                status=0\n                bash -e -o pipefail -c {quoted} || status=$?\n                printf '%s\\n' \"$status\" > \"$SIMIT_NIX_BUILD_RESULTS/fallback-diagnostic-{hook}.status\"\n                if [ \"$status\" -ne 0 ]; then collector_failed=1; fi\n"));
+                let wrapper = shell_word(crate::ci_runtime::group::HOOK_FILE_COMMAND)
+                    .replace('\n', "\n          ");
+                workflow.push_str(&format!("                (umask 077; set -C; printf '%s' {quoted} > \"$SIMIT_NIX_BUILD_RESULTS/fallback-diagnostic-{hook}.script\")\n                status=0\n                SIMIT_NIX_HOOK_FILE=\"$SIMIT_NIX_BUILD_RESULTS/fallback-diagnostic-{hook}.script\" bash -e -o pipefail -c {wrapper} || status=$?\n                printf '%s\\n' \"$status\" > \"$SIMIT_NIX_BUILD_RESULTS/fallback-diagnostic-{hook}.status\"\n                if [ \"$status\" -ne 0 ]; then collector_failed=1; fi\n"));
             }
             workflow.push_str("                printf 'completed\\n' > \"$SIMIT_NIX_BUILD_RESULTS/diagnostics-complete\"\n              fi\n");
         }

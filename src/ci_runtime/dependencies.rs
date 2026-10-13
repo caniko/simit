@@ -23,10 +23,26 @@ const MAX_REFERENCES: u64 = 1_000_000;
 const MAX_DEPTH: usize = 64;
 const COMPRESSED_OVERHEAD: u64 = 1024 * 1024;
 // Include inherited environment, strings, terminators and pointer tables.
-// Leave ample headroom below Darwin's 256 KiB combined exec limit, including
-// interpreter/wrapper overhead for independently provisioned executables.
-const EXEC_BYTE_BUDGET: usize = 128 * 1024;
+// Supported Linux execve has a 128 KiB floor even with a reduced stack; Darwin
+// allows 256 KiB. Reserve at least 32 KiB for resolved executable/interpreter
+// paths and platform bookkeeping, rather than using either kernel limit fully.
+const EXEC_BYTE_BUDGET: usize = 96 * 1024;
 const PATH_BATCH_BYTE_BUDGET: usize = 60 * 1024;
+
+// Match #56's producer envelope: default zlib deflateBound terms plus gzip
+// header/trailer headroom. All arithmetic must fail closed before spool/import.
+fn compressed_budget(maximum: u64) -> Result<u64> {
+    ensure!(maximum > 0, "invalid transport budget");
+    [
+        maximum >> 12,
+        maximum >> 14,
+        maximum >> 25,
+        COMPRESSED_OVERHEAD,
+    ]
+    .into_iter()
+    .try_fold(maximum, |total, overhead| total.checked_add(overhead))
+    .context("compressed transport budget overflow")
+}
 
 /// Expected bytes and inventories obtained from separately validated provenance
 /// and fresh evaluation. These values alone establish no source/run authority.
@@ -54,10 +70,7 @@ impl ArchiveAdmission {
             !self.closure.is_empty() && self.closure.len() <= MAX_PATHS,
             "invalid admitted export inventory"
         );
-        ensure!(
-            self.maximum_bytes > 0 && self.maximum_bytes <= u64::MAX - COMPRESSED_OVERHEAD,
-            "invalid transport budget"
-        );
+        compressed_budget(self.maximum_bytes)?;
         ensure!(
             self.closure
                 .iter()
@@ -303,7 +316,7 @@ pub fn admit_archive(
     let mut compressed = open_regular(archive)?;
     ensure!(
         compressed.metadata()?.len() == admission.archive_bytes
-            && admission.archive_bytes <= admission.maximum_bytes + COMPRESSED_OVERHEAD,
+            && admission.archive_bytes <= compressed_budget(admission.maximum_bytes)?,
         "invalid compressed dependency archive size"
     );
     ensure!(
@@ -636,4 +649,83 @@ fn canonical_store_path(raw: &[u8]) -> bool {
             && !rest[33..].starts_with(b".-")
             && !rest[33..].starts_with(b"..-")
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compressed_envelope_matches_producer_deflate_bound_without_overflow() {
+        let maximum = 16 * 1024 * 1024 * 1024;
+        assert_eq!(
+            compressed_budget(maximum).unwrap(),
+            maximum + (maximum >> 12) + (maximum >> 14) + (maximum >> 25) + 1024 * 1024
+        );
+        assert!(compressed_budget(maximum).unwrap() > maximum + COMPRESSED_OVERHEAD);
+        assert!(compressed_budget(0).is_err());
+        assert!(compressed_budget(u64::MAX).is_err());
+        assert!(compressed_budget(u64::MAX - COMPRESSED_OVERHEAD).is_err());
+    }
+
+    #[test]
+    fn transport_inventory_rejects_overflowing_compressed_envelopes() {
+        let path = format!("/nix/store/{}-input", "0".repeat(32));
+        let admission = ArchiveAdmission {
+            closure: vec![path.clone()],
+            outputs: vec![path],
+            qualification_outputs: BTreeSet::new(),
+            archive_bytes: 0,
+            archive_sha256: String::new(),
+            uncompressed_bytes: 0,
+            maximum_bytes: u64::MAX - COMPRESSED_OVERHEAD,
+        };
+        assert!(admission.inventory().is_err());
+    }
+
+    #[test]
+    fn exec_budget_counts_environment_pointers_and_exact_batch_edges() {
+        // Choose an environment leaving exactly two 255-byte paths including
+        // their terminators and pointers. Adding one byte splits the batch.
+        let pointer = std::mem::size_of::<usize>().max(8);
+        let path = format!("/nix/store/{}-{}", "0".repeat(32), "x".repeat(211));
+        assert_eq!(path.len(), 255);
+        let paths = vec![path; 5];
+        let fixed = 2 * pointer + 9 + 1 + pointer + 13 + 1 + pointer + 1 + 2 + pointer;
+        let env_bytes = EXEC_BYTE_BUDGET - fixed - 2 * (256 + pointer);
+        for extra in [0, 1] {
+            let environment = vec![(
+                OsString::from("X"),
+                OsString::from("x".repeat(env_bytes + extra)),
+            )];
+            let batches = exec_batches(
+                &paths,
+                OsStr::new("nix-store"),
+                "--verify-path",
+                &environment,
+            )
+            .unwrap();
+            assert_eq!(
+                batches,
+                if extra == 0 {
+                    vec![0..2, 2..4, 4..5]
+                } else {
+                    vec![0..1, 1..2, 2..3, 3..4, 4..5]
+                }
+            );
+            assert_eq!(
+                batches.into_iter().flatten().collect::<Vec<_>>(),
+                (0..paths.len()).collect::<Vec<_>>()
+            );
+        }
+        assert!(
+            exec_batches(
+                &paths,
+                OsStr::new("nix-store"),
+                "--verify-path",
+                &[("X".into(), "x".repeat(EXEC_BYTE_BUDGET).into())]
+            )
+            .is_err()
+        );
+    }
 }

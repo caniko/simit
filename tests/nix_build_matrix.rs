@@ -108,9 +108,11 @@ fn grouped_installables_share_a_runner_with_complete_per_output_evidence() {
                 .position(|s| s["name"] == "Build Nix group")
                 .unwrap()
     );
-    assert_eq!(
-        build["run"].as_str().unwrap().trim(),
-        "\"$SIMIT_CI_ENGINE\" ci nix-group"
+    assert!(
+        build["run"]
+            .as_str()
+            .unwrap()
+            .contains("\"$SIMIT_CI_ENGINE\" ci nix-group")
     );
     assert!(generate(&temp, &["--check", "--diff"]).status.success());
     assert!(generate(&temp, &[]).status.success());
@@ -179,9 +181,27 @@ fn invalid_group_coverage_rejects_before_any_workflow_or_config_write() {
 #[cfg(unix)]
 #[test]
 fn generated_group_invocation_and_fallback_execute_the_packaged_rust_cli() {
-    let temp = project(
-        "[ci.nix_build]\nonly = true\ncapture_results = true\ncheck_systems = [\"x86_64-linux\"]\npost_build = [\"test -s \\\"$SIMIT_NIX_BUILD_RESULTS/result.json\\\" && test -s \\\"$SIMIT_NIX_BUILD_RESULTS/build.log\\\" && printf '%s' \\\"$INSTALLABLE\\\" > \\\"$SIMIT_NIX_BUILD_RESULTS/hook-member\\\"\"]\npost_build_always = [\"printf '%s' \\\"$INSTALLABLE\\\" > \\\"$SIMIT_NIX_BUILD_RESULTS/hook-diagnostic\\\"\"]\n[ci.nix_build.groups]\nnetwork = [\".#checks.x86_64-linux.client\", \".#checks.x86_64-linux.recovery\"]",
-    );
+    generated_group_fixture(None);
+}
+
+#[cfg(unix)]
+fn generated_group_fixture(hook_size: Option<usize>) {
+    let success = "test -s \"$SIMIT_NIX_BUILD_RESULTS/result.json\" && test -s \"$SIMIT_NIX_BUILD_RESULTS/build.log\" && printf '%s' \"$INSTALLABLE\" > \"$SIMIT_NIX_BUILD_RESULTS/hook-member\"";
+    let diagnostic = "printf '%s' \"$INSTALLABLE\" > \"$SIMIT_NIX_BUILD_RESULTS/hook-diagnostic\"";
+    let pad = |script: &str| match hook_size {
+        Some(size) => {
+            let body = format!("\ntest \"$0\" = bash; test \"$#\" = 0; {script}");
+            let hook = format!("#{}{body}", "x".repeat(size - body.len() - 1));
+            assert_eq!(hook.len(), size);
+            hook
+        }
+        None => script.to_owned(),
+    };
+    let temp = project(&format!(
+        "[ci.nix_build]\nonly = true\ncapture_results = true\ncheck_systems = [\"x86_64-linux\"]\npost_build = [{}]\npost_build_always = [{}]\n[ci.nix_build.groups]\nnetwork = [\".#checks.x86_64-linux.client\", \".#checks.x86_64-linux.recovery\"]",
+        serde_json::to_string(&pad(success)).unwrap(),
+        serde_json::to_string(&pad(diagnostic)).unwrap()
+    ));
     assert!(generate(&temp, &[]).status.success());
     let value = workflow(&temp);
     let steps = value["jobs"]["build"]["steps"].as_sequence().unwrap();
@@ -196,6 +216,10 @@ fn generated_group_invocation_and_fallback_execute_the_packaged_rust_cli() {
         .unwrap();
     assert_eq!(diagnostics["if"], "${{ !cancelled() }}");
     let fallback = diagnostics["run"].as_str().unwrap();
+    let source_file = temp.path().join("build-step.sh");
+    let fallback_file = temp.path().join("fallback-step.sh");
+    fs::write(&source_file, source).unwrap();
+    fs::write(&fallback_file, fallback).unwrap();
     let bin = temp.path().join("bin");
     fs::create_dir(&bin).unwrap();
     std::os::unix::fs::symlink(
@@ -249,13 +273,13 @@ fn generated_group_invocation_and_fallback_execute_the_packaged_rust_cli() {
         let mut command = Command::new("bash");
         command
             .current_dir(temp.path())
-            .args([
-                "-e",
-                "-o",
-                "pipefail",
-                "-c",
-                if setup_failed { "exit 1" } else { source },
-            ])
+            .args(["-e", "-o", "pipefail"]);
+        if setup_failed {
+            command.args(["-c", "exit 1"]);
+        } else {
+            command.arg(&source_file);
+        }
+        command
             .env("SIMIT_CI_ENGINE", env!("CARGO_BIN_EXE_simit"))
             .env(
                 "INSTALLABLES",
@@ -264,6 +288,7 @@ fn generated_group_invocation_and_fallback_execute_the_packaged_rust_cli() {
                     .unwrap(),
             )
             .env("SIMIT_NIX_BUILD_RESULTS", &root)
+            .env("SIMIT_NIX_GROUP", "network")
             .env("GITHUB_SHA", head.trim())
             .env("GITHUB_EVENT_NAME", "push")
             .env("GITHUB_RUN_ID", "123")
@@ -279,7 +304,7 @@ fn generated_group_invocation_and_fallback_execute_the_packaged_rust_cli() {
                 .unwrap(),
             );
         for (key, value) in build["env"].as_mapping().unwrap() {
-            if key != "INSTALLABLES" {
+            if !value.as_str().unwrap().contains("${{") {
                 command.env(key.as_str().unwrap(), value.as_str().unwrap());
             }
         }
@@ -292,7 +317,8 @@ fn generated_group_invocation_and_fallback_execute_the_packaged_rust_cli() {
         for _ in 0..2 {
             let result = Command::new("bash")
                 .current_dir(temp.path())
-                .args(["-e", "-o", "pipefail", "-c", fallback])
+                .args(["-e", "-o", "pipefail"])
+                .arg(&fallback_file)
                 .env("SIMIT_NIX_BUILD_RESULTS", &root)
                 .env("SIMIT_NIX_GROUP", "network")
                 .output()
@@ -307,6 +333,14 @@ fn generated_group_invocation_and_fallback_execute_the_packaged_rust_cli() {
                 setup_failed || case == "missing"
             );
         }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn generated_large_hooks_cross_file_boundaries_in_engine_and_fallback() {
+    for size in [128 * 1024 + 1, 1024 * 1024] {
+        generated_group_fixture(Some(size));
     }
 }
 

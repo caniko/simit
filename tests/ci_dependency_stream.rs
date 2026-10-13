@@ -77,6 +77,45 @@ fn case_hack_collisions_are_denied_before_any_import_effect() {
     }
 }
 
+#[test]
+fn nearby_case_hack_suffixes_and_separate_directories_remain_admissible() {
+    let out = path('0', "input");
+    for names in [
+        vec![b"A".to_vec(), b"A~nix~case~hack~1".to_vec(), b"a1".to_vec()],
+        vec![b"A~nix~case~hack~1".to_vec(), b"a~nix~case~hack~2".to_vec()],
+        vec![vec![0xfe, b'A'], vec![0xff, b'a']],
+    ] {
+        let raw = export(vec![record(
+            &out,
+            directory(
+                names
+                    .into_iter()
+                    .map(|name| (name, regular(b"", false)))
+                    .collect(),
+            ),
+            &[],
+            "",
+        )]);
+        parse(&raw, &admitted(vec![out.clone()])).unwrap();
+    }
+    let raw = export(vec![record(
+        &out,
+        directory(vec![
+            (
+                b"one".to_vec(),
+                directory(vec![(b"A".to_vec(), regular(b"", false))]),
+            ),
+            (
+                b"two".to_vec(),
+                directory(vec![(b"a".to_vec(), regular(b"", false))]),
+            ),
+        ]),
+        &[],
+        "",
+    )]);
+    parse(&raw, &admitted(vec![out])).unwrap();
+}
+
 #[cfg(unix)]
 #[test]
 fn oversized_environment_is_denied_before_restore_mutates_the_store() {
@@ -126,6 +165,26 @@ fn long_path_closures_restore_with_portable_argv_batches_for_paths_and_roots() {
     use simit::ci_runtime::dependencies::StoreTools;
     use std::os::unix::fs::symlink;
     let root = tempfile::tempdir().unwrap();
+    // A large but viable inherited environment reduces the available path
+    // envelope. Isolate it in a subprocess rather than mutating global env.
+    const CHILD: &str = "SIMIT_RESTORE_VALID_ENV_BUDGET_ROOT";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .env_clear()
+            .env("PATH", std::env::var_os("PATH").unwrap())
+            .env("TMPDIR", std::env::temp_dir())
+            .args([
+                "--exact",
+                "long_path_closures_restore_with_portable_argv_batches_for_paths_and_roots",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env("SIMIT_RESTORE_VALID_LARGE_ENV", "x".repeat(70000))
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        return;
+    }
     let closure: Vec<_> = (0..1100)
         .map(|index| path('0', &format!("{}{:05}", "x".repeat(206), index)))
         .collect();

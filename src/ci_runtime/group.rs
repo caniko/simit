@@ -14,6 +14,11 @@ use super::{
     process::{CommandRunner, Runner},
 };
 
+// Only this small wrapper crosses execve. Bash builtins read/eval the private
+// file without stripping trailing newlines or changing bash -c's $0, $@, stdin,
+// errexit or pipefail semantics. The script itself never occupies argv or env.
+pub(crate) const HOOK_FILE_COMMAND: &str = "IFS= read -r -d '' SIMIT_NIX_HOOK_SCRIPT < \"$SIMIT_NIX_HOOK_FILE\" || :\neval -- \"$SIMIT_NIX_HOOK_SCRIPT\"";
+
 /// Versioned execution input. This describes execution, not qualification authority.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -550,17 +555,21 @@ fn hooks(
         .map(|(index, script)| {
             cancellation.check()?;
             let script_path = folder.join(format!("{category}-{index}.script"));
-            let mut script_file = fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&script_path)?;
+            let mut options = fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let mut script_file = options.open(&script_path)?;
             script_file.write_all(script.as_bytes())?;
             drop(script_file);
             let mut command = std::process::Command::new("bash");
             command
                 .current_dir(cwd)
-                .args(["-e", "-o", "pipefail", "--"])
-                .arg(&script_path)
+                .args(["-e", "-o", "pipefail", "-c", HOOK_FILE_COMMAND])
+                .env("SIMIT_NIX_HOOK_FILE", &script_path)
                 .env("INSTALLABLE", installable)
                 .env("SIMIT_NIX_BUILD_RESULTS", folder);
             member_status(dispatch(

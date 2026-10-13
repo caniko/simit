@@ -115,20 +115,32 @@ impl Fixture {
 
 #[test]
 fn accepted_megabyte_hooks_execute_without_an_oversized_argv() {
-    let mut f = Fixture::new();
-    let mut script = String::from("#");
-    script.push_str(&"x".repeat(1024 * 1024 - 200));
-    script.push_str("\nprintf '%s' \"$INSTALLABLE\" > \"$SIMIT_NIX_BUILD_RESULTS/large-hook\"\n");
-    f.spec["post_build"] = json!([script]);
-    let output = f.run("success");
-    assert!(output.status.success(), "{output:?}");
-    for (index, member) in f.spec["members"].as_array().unwrap().iter().enumerate() {
-        assert_eq!(
-            fs::read_to_string(f.root.path().join(format!("results/{index}/large-hook"))).unwrap(),
-            member.as_str().unwrap()
-        );
+    use std::os::unix::fs::PermissionsExt;
+    for size in [128 * 1024 + 1, 1024 * 1024] {
+        let mut f = Fixture::new();
+        let body = "\ntest \"$0\" = bash; test \"$#\" = 0; printf '%s' \"$INSTALLABLE\" > \"$SIMIT_NIX_BUILD_RESULTS/large-hook\"\n";
+        let script = format!("#{}{body}", "x".repeat(size - body.len() - 1));
+        assert_eq!(script.len(), size);
+        f.spec["post_build"] = json!([script]);
+        f.spec["post_build_always"] = f.spec["post_build"].clone();
+        let output = f.run("success");
+        assert!(output.status.success(), "{output:?}");
+        for (index, member) in f.spec["members"].as_array().unwrap().iter().enumerate() {
+            let root = f.root.path().join(format!("results/{index}"));
+            assert_eq!(
+                fs::read_to_string(root.join("large-hook")).unwrap(),
+                member.as_str().unwrap()
+            );
+            for category in ["post-build", "post-build-always"] {
+                let file = root.join(format!("{category}-0.script"));
+                assert_eq!(
+                    fs::metadata(file).unwrap().permissions().mode() & 0o777,
+                    0o600
+                );
+            }
+        }
+        assert_eq!(f.receipt()["success"], true);
     }
-    assert_eq!(f.receipt()["success"], true);
 }
 
 #[test]

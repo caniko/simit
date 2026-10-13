@@ -301,6 +301,80 @@ fn capture(
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sustained_concurrent_streams_cancel_and_retain_diagnostics() {
+        let root = tempfile::tempdir().unwrap();
+        let token = Cancellation::default();
+        let marker = root.path().join("started");
+        let late = root.path().join("late-effect");
+        std::thread::scope(|scope| {
+            let run = scope.spawn(|| run_bounded(
+                Command::new("sh").args(["-c", "printf '\\377\\000diagnostic' >&2; touch \"$MARKER\"; (sleep 0.5; touch \"$LATE\") & (while :; do printf 'abcdefgh'; sleep 0.01; done) & while :; do printf 'errors' >&2; sleep 0.01; done"])
+                    .env("MARKER", &marker).env("LATE", &late),
+                &root.path().join("stdout"), &root.path().join("stderr"), &token,
+                Limits { timeout: Duration::from_secs(2), stdout: 65536, stderr: 65536 }, None,
+            ));
+            let deadline = Instant::now() + Duration::from_secs(1);
+            while !marker.exists() {
+                assert!(Instant::now() < deadline);
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            token.cancel();
+            assert!(
+                run.join()
+                    .unwrap()
+                    .unwrap_err()
+                    .is::<super::super::cancellation::Cancelled>()
+            );
+        });
+        let stderr = std::fs::read(root.path().join("stderr")).unwrap();
+        assert!(stderr.starts_with(b"\xff\0diagnostic"));
+        assert!(
+            stderr
+                .windows(b"cancelled".len())
+                .any(|bytes| bytes == b"cancelled")
+        );
+        assert!(stderr.len() <= 65536);
+        std::thread::sleep(Duration::from_millis(600));
+        assert!(!late.exists());
+    }
+
+    #[test]
+    fn escaped_pipe_fixture() {
+        if let Some(marker) = std::env::var_os("SIMIT_ESCAPED_PIPE_MARKER") {
+            rustix::process::setsid().unwrap();
+            std::fs::write(marker, std::process::id().to_string()).unwrap();
+            std::thread::sleep(Duration::from_secs(10));
+        }
+    }
+
+    #[test]
+    fn inherited_pipe_descriptors_do_not_require_eof_after_child_exit() {
+        let root = tempfile::tempdir().unwrap();
+        let marker = root.path().join("escaped-pid");
+        let start = Instant::now();
+        let result = run_bounded(
+            Command::new("sh").args(["-c", "\"$TEST_EXE\" --exact ci_runtime::process::tests::escaped_pipe_fixture --nocapture & while test ! -s \"$SIMIT_ESCAPED_PIPE_MARKER\"; do sleep 0.01; done; printf '\\377\\000retained'"])
+                .env("TEST_EXE", std::env::current_exe().unwrap()).env("SIMIT_ESCAPED_PIPE_MARKER", &marker),
+            &root.path().join("stdout"), &root.path().join("stderr"), &Cancellation::default(),
+            Limits { timeout: Duration::from_secs(2), stdout: 65536, stderr: 65536 }, None,
+        );
+        // The escaped fixture is deliberately outside our process group. Clean
+        // it up explicitly after proving the runner did not wait for its EOF.
+        let pid = std::fs::read_to_string(marker).unwrap().parse().unwrap();
+        let _ = rustix::process::kill_process(
+            rustix::process::Pid::from_raw(pid).unwrap(),
+            rustix::process::Signal::KILL,
+        );
+        assert_eq!(result.unwrap(), 0);
+        assert!(start.elapsed() < Duration::from_secs(1));
+        assert!(
+            std::fs::read(root.path().join("stdout"))
+                .unwrap()
+                .ends_with(b"\xff\0retained")
+        );
+    }
     #[test]
     fn partial_reader_start_failure_returns_error_and_cleans_up() {
         for fail_after in [0, 1] {

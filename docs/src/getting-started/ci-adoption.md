@@ -90,7 +90,11 @@ with a six-hour maximum process lifetime; configured workflow timeouts still
 apply. Unix cancellation stops execution and terminates the current process
 group rather than executing later members.
 Accepted hooks up to 1 MiB execute from retained `.script` files, avoiding
-platform per-argument limits. Output-reader startup failures return through the
+platform per-argument limits. The generated workflow writes a private JSON spec
+using a shell builtin instead of putting hooks into environment strings, and its
+diagnostic fallback uses the same private-file transport. A small Bash wrapper
+preserves `bash -c` argument identity, stdin and trailing script newlines.
+Output-reader startup failures return through the
 same dispatch-failure path and clean up any started readers and child processes.
 Embedding applications use `execute_with` with a caller-owned `Cancellation`
 token and `Runner`. The library installs no process-global signal handlers. The
@@ -144,10 +148,16 @@ before import, preventing Darwin's case-hack rewrites from colliding with real e
 `VerifiedArchive::restore` dispatches one `nix-store --import` with the fully
 rewound validated descriptor, then verifies admitted paths and observes evaluated
 roots. Nonzero import/verification status produces no successful restore receipt.
-All restore command batches are prepared before import against a 128 KiB combined
+All restore command batches are prepared before import against a 96 KiB combined
 argv/environment budget, including string terminators and pointer tables. Path
 batches additionally use at most 60 KiB. Commands inherit the same frozen,
 accounted environment; an oversized environment fails before store mutation.
+The envelope reserves at least 32 KiB beneath supported Linux's 128 KiB exec
+floor and 160 KiB beneath Darwin's 256 KiB limit for platform/interpreter overhead.
+The compressed envelope matches the transport producer's default zlib bound
+(`maximum + (maximum >> 12) + (maximum >> 14) + (maximum >> 25) + 1 MiB`),
+using checked arithmetic. These library checks do not complete the transport or
+custody adapters' source/provider admission and zero-Nix-before-byte-admission gates.
 `consume` supports a caller-owned importer with the same descriptor and one-use
 lifetime. Restoration receipts always state `qualification_execution: false`;
 fresh checks still require their separate current-worker rebuild.
