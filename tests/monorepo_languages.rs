@@ -1210,7 +1210,7 @@ fn native_registry_verification_checks_exact_identity_and_available_files() {
         ("node", "not JSON", "200", "blocked"),
         (
             "node",
-            r#"{"name":"@example/node-engine","versions":{"1.3.0":{"name":"@example/node-engine","version":"1.3.0","dist":{"integrity":"sha512-retained"}}}}"#,
+            r#"{"name":"@example/node-engine","versions":{"1.3.0":{"name":"@example/node-engine","version":"1.3.0","dist":{"integrity":"sha512-retained"}}},"dist-tags":{"latest":"1.3.0"}}"#,
             "200",
             "pass",
         ),
@@ -1310,6 +1310,57 @@ fn native_registry_verification_checks_exact_identity_and_available_files() {
             "{request}"
         );
         assert_eq!(git(root, &["status", "--porcelain"]), "");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn npm_registry_verification_requires_the_admitted_dist_tag() {
+    use std::os::unix::fs::PermissionsExt;
+    for (tag, tags, expected) in [
+        (None, serde_json::json!({"latest":"1.3.0"}), "pass"),
+        (None, serde_json::json!({}), "fail"),
+        (Some("next"), serde_json::json!({"next":"1.3.0"}), "pass"),
+        (Some("next"), serde_json::json!({"latest":"1.3.0"}), "fail"),
+        (Some("next"), serde_json::json!({"next":"1.2.0"}), "fail"),
+    ] {
+        let temp = fixture();
+        let root = temp.path();
+        let config = fs::read_to_string(root.join("simit.toml"))
+            .unwrap()
+            .replace("publish = false", "publish = true");
+        write(root, "simit.toml", &config);
+        let mut manifest = serde_json::json!({"name":"@example/node-engine","version":"1.3.0"});
+        if let Some(tag) = tag {
+            manifest["publishConfig"] = serde_json::json!({"tag":tag});
+        }
+        write(root, "node/package.json", &manifest.to_string());
+        let body = serde_json::json!({"name":"@example/node-engine","versions":{"1.3.0":{"name":"@example/node-engine","version":"1.3.0","dist":{"integrity":"sha512-abc"}}},"dist-tags":tags});
+        write(
+            root,
+            "bin/curl",
+            &format!("#!/bin/sh\nprintf '%s\\n200' '{}'\n", body),
+        );
+        fs::set_permissions(root.join("bin/curl"), fs::Permissions::from_mode(0o755)).unwrap();
+        let path = std::env::join_paths(
+            std::iter::once(root.join("bin"))
+                .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+        )
+        .unwrap();
+        let output = Command::new(env!("CARGO_BIN_EXE_simit"))
+            .current_dir(root)
+            .env("PATH", path)
+            .args(["release", "verify", "--component", "node", "--json"])
+            .output()
+            .unwrap();
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        let result = report["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["check"] == "registry publication")
+            .unwrap();
+        assert_eq!(result["status"], expected, "{tag:?}/{tags}: {report}");
     }
 }
 

@@ -68,7 +68,7 @@ impl ManifestRelease {
 
     pub(crate) fn parse(&self, content: &str) -> Result<Package> {
         let registry = super::native_registry::Registry::for_manifest(&self.manifest);
-        let (name, version, private) =
+        let (name, version, private, dist_tag) =
             if matches!(registry, super::native_registry::Registry::Python) {
                 let doc: DocumentMut = content.parse()?;
                 let project = doc
@@ -94,6 +94,7 @@ impl ManifestRelease {
                         .context("Python releases require static project.version")?
                         .to_owned(),
                     false,
+                    None,
                 )
             } else {
                 let doc: Value = serde_json::from_str(content)?;
@@ -115,6 +116,12 @@ impl ManifestRelease {
                         .context("npm releases require a static version")?
                         .to_owned(),
                     doc["private"].as_bool().unwrap_or(false),
+                    Some(
+                        doc["publishConfig"]["tag"]
+                            .as_str()
+                            .unwrap_or("latest")
+                            .to_owned(),
+                    ),
                 )
             };
         ensure!(!name.is_empty(), "release package name cannot be empty");
@@ -175,6 +182,7 @@ impl ManifestRelease {
             name,
             version,
             publish: self.publish && !private,
+            dist_tag,
         })
     }
 }
@@ -185,6 +193,7 @@ pub(crate) struct Package {
     pub name: String,
     pub version: Version,
     pub publish: bool,
+    pub dist_tag: Option<String>,
 }
 
 pub(super) fn validate(root: &Path, graph: &Graph) -> Result<()> {

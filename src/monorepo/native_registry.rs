@@ -283,7 +283,12 @@ pub(crate) fn available(package: &Package, version: &Version) -> Result<bool> {
         body.len() <= 4 * 1024 * 1024,
         "native registry metadata exceeds 4 MiB"
     );
-    Ok(registry.available(&serde_json::from_str(body)?, &package.name, &version))
+    let body: Value = serde_json::from_str(body)?;
+    Ok(registry.available(&body, &package.name, &version)
+        && package
+            .dist_tag
+            .as_deref()
+            .is_none_or(|tag| body["dist-tags"][tag] == version))
 }
 
 #[cfg(test)]
