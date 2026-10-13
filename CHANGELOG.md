@@ -34,6 +34,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Preserve explicitly selected custody protocols when persisting CI option changes.
 - Admit dependency attributes outside the actual checks namespace, apply CI cache
   policy on preinstalled Forgejo Nix, and explain full reruns for attempt-bound
   transport. Reject Darwin case-hack aliases before import and bind checksum and

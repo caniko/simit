@@ -107,6 +107,77 @@ fn sealed_custody_is_explicit_and_uploads_capsules_before_aggregate_reporting() 
 }
 
 #[test]
+fn custody_protocol_survives_ci_option_updates_and_regeneration() {
+    use simit::config::ProjectConfig;
+    use simit::config::custody::Protocol;
+
+    for rust_project in [false, true] {
+        for (protocol, expected) in [
+            ("strict-v1", Protocol::StrictV1),
+            ("sealed-v2", Protocol::SealedV2),
+        ] {
+            let temp = project();
+            if rust_project {
+                fs::write(
+                    temp.path().join("Cargo.toml"),
+                    "[package]\nname = \"custody-fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+                )
+                .unwrap();
+                fs::create_dir(temp.path().join("src")).unwrap();
+                fs::write(temp.path().join("src/main.rs"), "fn main() {}\n").unwrap();
+            }
+            let path = temp.path().join("simit.toml");
+            fs::write(
+                &path,
+                fs::read_to_string(&path).unwrap().replace(
+                    "[ci.custody]\n",
+                    &format!("[ci.custody]\nprotocol = \"{protocol}\"\n"),
+                ),
+            )
+            .unwrap();
+            let before = ProjectConfig::load(temp.path()).unwrap().ci.custody;
+            let workflow = temp.path().join(".github/workflows/producer-custody.yaml");
+            let initial = common::simit()
+                .current_dir(temp.path())
+                .args(["init", "ci"])
+                .output()
+                .unwrap();
+            assert!(initial.status.success(), "{protocol}: {initial:?}");
+            let observer = fs::read(&workflow).unwrap();
+
+            let update = common::simit()
+                .current_dir(temp.path())
+                .args(["init", "ci", "--runner", "ubuntu-latest"])
+                .output()
+                .unwrap();
+            assert!(update.status.success(), "{protocol}: {update:?}");
+            let reloaded = ProjectConfig::load(temp.path()).unwrap();
+            assert_eq!(reloaded.ci.runner.as_deref(), Some("ubuntu-latest"));
+            assert_eq!(reloaded.ci.custody, before);
+            assert_eq!(reloaded.ci.custody.as_ref().unwrap().protocol, expected);
+            assert_eq!(fs::read(&workflow).unwrap(), observer);
+            if expected == Protocol::StrictV1 {
+                assert!(!fs::read_to_string(&path).unwrap().contains("protocol ="));
+            }
+            for args in [
+                vec!["init", "ci", "--check", "--diff"],
+                vec!["init", "ci"],
+                vec!["init", "ci", "--check", "--diff"],
+            ] {
+                let output = common::simit()
+                    .current_dir(temp.path())
+                    .args(args)
+                    .output()
+                    .unwrap();
+                assert!(output.status.success(), "{protocol}: {output:?}");
+                assert_eq!(fs::read(&workflow).unwrap(), observer);
+                assert_eq!(ProjectConfig::load(temp.path()).unwrap().ci.custody, before);
+            }
+        }
+    }
+}
+
+#[test]
 fn custody_protocol_is_versioned_without_changing_default_generation() {
     use simit::config::custody::Protocol;
     let temp = project();
