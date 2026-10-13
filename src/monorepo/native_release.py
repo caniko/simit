@@ -231,8 +231,9 @@ def upload_native(out, identity, files, manifest, token):
         name = files[0]
         archive = (out / name).read_bytes()
         package = json.loads(tar_metadata(out / name, "npm"))
-        # Package configuration is data. It cannot choose endpoints, credentials,
-        # hooks or command-line options; only the signed policy chooses dist-tag/access.
+        # Package configuration remains registry metadata, including consumer
+        # lifecycle scripts. No candidate hooks execute here; only the signed
+        # policy chooses upload endpoints, credentials, dist-tag and access.
         config = manifest.get("publishConfig", {})
         require(config.get("registry", "https://registry.npmjs.org/").rstrip("/") == "https://registry.npmjs.org", "unapproved npm registry")
         tag = config.get("tag", "latest")
@@ -240,7 +241,6 @@ def upload_native(out, identity, files, manifest, token):
         access = config.get("access", "public")
         require(access in ("public", "restricted"), "invalid signed npm access")
         require(access != "restricted" or identity["name"].startswith("@"), "restricted npm access requires a scoped package")
-        package = {key: value for key, value in package.items() if key in ("name", "version", "description", "license", "dependencies", "optionalDependencies", "peerDependencies", "peerDependenciesMeta", "engines", "bin", "main", "module", "types", "exports", "repository", "homepage", "keywords", "author", "contributors", "os", "cpu")}
         package["_id"] = identity["name"] + "@" + identity["version"]
         package["dist"] = {"shasum": hashlib.sha1(archive).hexdigest(), "integrity": "sha512-" + base64.b64encode(hashlib.sha512(archive).digest()).decode(), "tarball": "https://registry.npmjs.org/" + urllib.parse.quote(identity["name"], safe="@/") + "/-/" + name}
         body = {"_id": identity["name"], "name": identity["name"], "access": access, "dist-tags": {tag: identity["version"]}, "versions": {identity["version"]: package}, "_attachments": {name: {"content_type": "application/octet-stream", "data": base64.b64encode(archive).decode(), "length": len(archive)}}}

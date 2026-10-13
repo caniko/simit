@@ -172,6 +172,11 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
     }
 
     git::release_preflight(workspace_root, create_tag, sign_tag, &tag)?;
+    let qualified_head = command
+        .component
+        .as_ref()
+        .map(|_| git::head_commit(workspace_root))
+        .transpose()?;
     if command.component.is_some() {
         git::ensure_worktree_clean(workspace_root)?;
     }
@@ -217,6 +222,13 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
         crate::monorepo::releases::qualify_component(workspace_root, &config, component)?;
     }
     git::run_project_checks(workspace_root)?;
+    if let Some(head) = qualified_head {
+        git::ensure_worktree_clean(workspace_root)?;
+        anyhow::ensure!(
+            git::head_commit(workspace_root)? == head,
+            "release HEAD changed during qualification"
+        );
+    }
     let workspace_version_bumped = command.component.is_none()
         && cargo::update_workspace_version(
             workspace_root,

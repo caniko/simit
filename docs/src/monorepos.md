@@ -187,7 +187,10 @@ The protected helper uploads the admitted bytes directly to the fixed registry
 endpoint. It never runs candidate Nix expressions, scripts, package hooks or
 package configuration with those credentials. Recovery reruns the original
 signed-tag run and reuses its first retained archive, including partial uploads;
-it does not rebuild a replacement archive in the publisher. Native build steps use
+only archives from successful original attempts with a successful hosted
+`validate` builder job are eligible. Failed attempts cannot contribute retry
+bytes, and duplicate attempt artifact names are rejected. It does not rebuild
+a replacement archive in the publisher. Native build steps use
 the project's root `ci` shell, which must provide Python 3.11+, GnuPG and `uv`
 or npm. Prepared npm files must already be present after component qualification;
 `publishConfig` access and distribution-tag settings are retained, while custom
@@ -201,6 +204,9 @@ owners retain SemVer in source/tags; public Python releases
 support stable versions and `alpha`, `beta`, `rc`, or `dev` numeric prereleases,
 mapped to PyPI's normalized metadata version. SemVer build metadata is unsupported
 for public native releases. All native publication requires `keys/maintainers.gpg`.
+Native namespaces are limited to 64 ASCII bytes at configuration admission.
+Registry metadata retains npm lifecycle scripts for consumers; the protected
+publisher never executes those scripts.
 
 Component gates use the same `bash -euo pipefail -c` command semantics locally
 and in generated CI, including quoted commands, environment and timeouts. The

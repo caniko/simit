@@ -46,6 +46,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Build native publication archives on a fixed hosted runner and independently
   require that builder during protected publisher admission.
+- Reuse native retry archives only from successful original hosted-builder
+  attempts, rejecting failed-attempt forgeries and ambiguous artifact names.
 - Run component prerequisites before Cargo release mutation and required gates
   before credentialed prebuild publication; share the effective notes policy.
 - Update nested npm workspace lock records, support explicitly owned root Cargo
@@ -55,6 +57,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Honor explicit native verification backends and supported prerelease Git-note
   ranges; skip unrelated ancestor npm locks and reject invalid dist tags during
   publication enrollment.
+- Revalidate Cargo component source identity after qualification, skip unrelated
+  ancestor uv locks, validate namespace length during admission, and preserve
+  consumer npm lifecycle metadata without executing it in the publisher.
 - Verify native exact-build runners against OS/CPU identity independently of
   Nix's configurable `eval-system` and `system` settings, preventing a configured
   system override from admitting the wrong hardware architecture.

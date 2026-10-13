@@ -94,7 +94,7 @@ with tempfile.TemporaryDirectory() as temp:
     assert b'name="license_expression"' in requests[0].data
     assert b'name="license_file"' in requests[0].data
     assert b'name="requires_dist"' in requests[0].data
-    npm = {"name": "@example/native", "version": "1.2.3", "scripts": {"prepublishOnly": "exit 99"}, "publishConfig": {"registry": "https://attacker.invalid", "provenance": True}}
+    npm = {"name": "@example/native", "version": "1.2.3", "scripts": {"prepublishOnly": "exit 99", "preinstall": "exit 99", "install": "exit 99", "postinstall": "exit 99"}, "publishConfig": {"registry": "https://attacker.invalid", "provenance": True}}
     tarball = root / "native-1.2.3.tgz"
     with tarfile.open(tarball, "w:gz") as archive:
         data = json.dumps(npm).encode()
@@ -106,8 +106,8 @@ with tempfile.TemporaryDirectory() as temp:
     request = requests[-1]
     assert request.full_url == "https://registry.npmjs.org/%40example%2Fnative"
     body = json.loads(request.data)
-    assert "scripts" not in body["versions"]["1.2.3"]
-    assert "publishConfig" not in body["versions"]["1.2.3"]
+    assert body["versions"]["1.2.3"]["scripts"] == npm["scripts"]
+    assert body["versions"]["1.2.3"]["publishConfig"] == npm["publishConfig"]
     assert base64.b64decode(body["_attachments"][tarball.name]["data"]) == tarball.read_bytes()
     assert body["dist-tags"] == {"stable": "1.2.3"}
     refuses(lambda: actual.upload_native(root, npm_identity, [tarball.name], {"publishConfig": {"registry": "https://attacker.invalid"}}, "fixture"))

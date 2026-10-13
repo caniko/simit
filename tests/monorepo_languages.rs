@@ -476,6 +476,107 @@ fn ancestor_locks_are_skipped_unless_they_own_or_declare_the_workspace_package()
 }
 
 #[test]
+fn python_ancestor_locks_require_declared_workspace_ownership() {
+    for (declared, record, excluded) in [
+        (false, false, false),
+        (false, true, false),
+        (true, false, false),
+        (true, true, false),
+        (true, true, true),
+    ] {
+        let temp = fixture();
+        let root = temp.path();
+        fs::remove_file(root.join("python/uv.lock")).unwrap();
+        let workspace = if declared {
+            format!(
+                "\n[tool.uv.workspace]\nmembers=['py*']\nexclude={}\n",
+                if excluded { "['python']" } else { "[]" }
+            )
+        } else {
+            String::new()
+        };
+        write(
+            root,
+            "pyproject.toml",
+            &format!("[project]\nname='independent-root'\nversion='9.0.0'\n{workspace}"),
+        );
+        let lock = format!(
+            "version=1\n[[package]]\nname='independent-root'\nversion='9.0.0'\nsource={{editable='.'}}\n{}",
+            if record {
+                "[[package]]\nname='py-engine'\nversion='0.2.0'\nsource={editable='python'}\n"
+            } else {
+                ""
+            }
+        );
+        write(root, "uv.lock", &lock);
+        git(root, &["add", "."]);
+        git(root, &["commit", "-qm", "ancestor Python project"]);
+        let output = run(
+            root,
+            &[
+                "release",
+                "patch",
+                "--component",
+                "python",
+                "--no-sign",
+                "--no-changelog",
+                "-m",
+                "release python",
+            ],
+        );
+        assert_eq!(
+            output.status.success(),
+            !declared || excluded || record,
+            "{output:?}"
+        );
+        let after = fs::read_to_string(root.join("uv.lock")).unwrap();
+        if declared && !excluded && record {
+            let document: toml_edit::DocumentMut = after.parse().unwrap();
+            let packages = document["package"].as_array_of_tables().unwrap();
+            assert_eq!(
+                packages
+                    .iter()
+                    .find(|package| package["name"].as_str() == Some("py-engine"))
+                    .unwrap()["version"]
+                    .as_str(),
+                Some("0.2.1")
+            );
+            assert_eq!(
+                packages
+                    .iter()
+                    .find(|package| package["name"].as_str() == Some("independent-root"))
+                    .unwrap()["version"]
+                    .as_str(),
+                Some("9.0.0")
+            );
+        } else {
+            assert_eq!(after, lock);
+        }
+    }
+}
+
+#[test]
+fn native_namespace_length_matches_protected_publisher_admission() {
+    for length in [64, 65] {
+        let temp = fixture();
+        let root = temp.path();
+        let namespace = "a".repeat(length);
+        let config = fs::read_to_string(root.join("simit.toml"))
+            .unwrap()
+            .replace("py-engine\"", &format!("{namespace}\""));
+        write(root, "simit.toml", &config);
+        let output = run(root, &["init", "ci"]);
+        assert_eq!(output.status.success(), length == 64, "{output:?}");
+        if length == 65 {
+            assert!(
+                String::from_utf8_lossy(&output.stderr).contains("64 bytes"),
+                "{output:?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn invalid_public_npm_dist_tags_reject_during_generation() {
     for version in ["1.3.0", "1.3.0-rc.1"] {
         for tag in [

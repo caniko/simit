@@ -373,23 +373,63 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
         }
         ensure!(page < 10, "original run has too many artifacts");
     }
-    // Keep the first immutable original-run archive for checksum-bound retries.
-    // Artifact names do not attest attempt provenance; signed content is checked below.
+    // Native receipts cannot reconstruct built wheels/tarballs from source.
+    // Only a successful hosted archive-builder attempt can supply reusable bytes.
     artifacts.sort_by_key(|artifact| artifact.id);
-    let artifact = artifacts
-        .first()
-        .context("original run has no live crate artifact")?;
+    let artifact = if native {
+        select_native_artifact(
+            &artifacts,
+            &artifact_prefix,
+            bound.source_run_attempt,
+            |attempt| {
+                let prior: ReleaseRun = serde_json::from_value(api_json(
+                    &client,
+                    &token,
+                    &format!(
+                        "repos/{repository}/actions/runs/{}/attempts/{attempt}",
+                        bound.source_run_id
+                    ),
+                )?)?;
+                let mut jobs = Vec::new();
+                for page in 1..=10 {
+                    let data = api_json(
+                        &client,
+                        &token,
+                        &format!(
+                            "repos/{repository}/actions/runs/{}/attempts/{attempt}/jobs?per_page=100&page={page}",
+                            bound.source_run_id
+                        ),
+                    )?;
+                    let entries = data["jobs"]
+                        .as_array()
+                        .context("missing original-attempt jobs")?;
+                    jobs.extend(entries.iter().cloned());
+                    if entries.len() < 100 {
+                        break;
+                    }
+                    ensure!(page < 10, "original attempt has too many jobs");
+                }
+                native_attempt_succeeded(&provider, &prior, attempt, &jobs)
+            },
+        )?
+    } else {
+        artifacts
+            .first()
+            .context("original run has no live crate artifact")?
+    };
+    let selected_id = artifact.id;
+    let selected_name = artifact.name.clone();
+    let selected_digest = artifact.digest.clone();
     let artifact: ReleaseArtifact = serde_json::from_value(api_json(
         &client,
         &token,
         &format!("repos/{repository}/actions/artifacts/{}", artifact.id),
     )?)?;
     ensure!(
-        artifact
-            .name
-            .strip_prefix(&artifact_prefix)
-            .and_then(|attempt| attempt.parse::<u64>().ok())
-            .is_some_and(|attempt| (1..=bound.source_run_attempt).contains(&attempt)),
+        artifact.id == selected_id
+            && artifact.name == selected_name
+            && artifact.digest == selected_digest
+            && !artifact.expired,
         "refetched artifact differs from enrolled original-run identity"
     );
     let mut bytes = Vec::new();
@@ -643,6 +683,86 @@ fn verify_tag_only_source_workflow_with_prefix(
         "source publication must have only the enrolled semver tag filter"
     );
     Ok(())
+}
+
+fn select_native_artifact<'a>(
+    artifacts: &'a [ReleaseArtifact],
+    prefix: &str,
+    max_attempt: u64,
+    mut attempt_succeeded: impl FnMut(u64) -> Result<bool>,
+) -> Result<&'a ReleaseArtifact> {
+    let mut proofs = BTreeMap::new();
+    let mut selected: Option<&ReleaseArtifact> = None;
+    let mut names = std::collections::BTreeSet::new();
+    for artifact in artifacts {
+        let Some(attempt) = artifact
+            .name
+            .strip_prefix(prefix)
+            .and_then(|number| number.parse::<u64>().ok())
+        else {
+            continue;
+        };
+        if artifact.expired
+            || !(1..=max_attempt).contains(&attempt)
+            || artifact.name != format!("{prefix}{attempt}")
+        {
+            continue;
+        }
+        ensure!(
+            names.insert(&artifact.name),
+            "native artifact attempt has ambiguous provider archives"
+        );
+        let succeeded = match proofs.entry(attempt) {
+            std::collections::btree_map::Entry::Occupied(proof) => *proof.get(),
+            std::collections::btree_map::Entry::Vacant(proof) => {
+                *proof.insert(attempt_succeeded(attempt)?)
+            }
+        };
+        if succeeded && selected.is_none_or(|old| artifact.id < old.id) {
+            selected = Some(artifact);
+        }
+    }
+    selected.context("original run has no artifact from a successful hosted native builder attempt")
+}
+
+fn native_attempt_succeeded(
+    current: &ReleaseRun,
+    prior: &ReleaseRun,
+    attempt: u64,
+    jobs: &[Value],
+) -> Result<bool> {
+    ensure!(
+        prior.id == current.id
+            && prior.run_attempt == attempt
+            && attempt <= current.run_attempt
+            && prior.workflow_id == current.workflow_id
+            && prior.path == current.path
+            && prior.event == "push"
+            && prior.head_branch == current.head_branch
+            && prior.head_sha == current.head_sha
+            && prior.repository == current.repository
+            && prior.head_repository == current.head_repository,
+        "original native attempt identity differs from admitted source run"
+    );
+    if prior.status != "completed" || prior.conclusion.as_deref() != Some("success") {
+        return Ok(false);
+    }
+    let builders: Vec<_> = jobs
+        .iter()
+        .filter(|job| job["name"] == "validate")
+        .collect();
+    ensure!(
+        builders.len() == 1,
+        "native attempt requires exactly one archive builder job"
+    );
+    let job = builders[0];
+    Ok(job["run_id"].as_u64() == Some(prior.id)
+        && job["run_attempt"].as_u64() == Some(attempt)
+        && job["head_sha"].as_str() == Some(prior.head_sha.as_str())
+        && job["status"] == "completed"
+        && job["conclusion"] == "success"
+        && job["runner_group_name"] == "GitHub Actions"
+        && job["labels"] == json!(["ubuntu-24.04"]))
 }
 
 fn verify_native_builder(enrolled: &[u8]) -> Result<()> {
@@ -1238,6 +1358,67 @@ pub fn wait_for_registry_with(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn native_retry_reuses_only_successful_hosted_builder_archives() {
+        let current: ReleaseRun = serde_json::from_value(json!({
+            "id": 42, "run_attempt": 3, "workflow_id": 7,
+            "path": ".github/workflows/publish-npm-native.yaml", "event": "push",
+            "status": "completed", "conclusion": "success", "head_branch": "native/v1.2.3", "head_sha": "b".repeat(40),
+            "repository": {"id": 1, "full_name": "owner/repo"}, "head_repository": {"id": 1, "full_name": "owner/repo"}
+        })).unwrap();
+        let job = |attempt| json!({"name":"validate", "run_id":42, "run_attempt":attempt, "head_sha":"b".repeat(40), "status":"completed", "conclusion":"success", "runner_group_name":"GitHub Actions", "labels":["ubuntu-24.04"]});
+        let artifact = |id, suffix: &str| {
+            serde_json::from_value::<ReleaseArtifact>(json!({"id":id,"name":format!("native-release-native-{suffix}"),"expired":false,"digest":"sha256:abc","workflow_run":null})).unwrap()
+        };
+        let artifacts = vec![
+            artifact(1, "1"),
+            artifact(2, "2"),
+            artifact(3, "3"),
+            artifact(4, "01"),
+        ];
+        let mut queried = Vec::new();
+        let selected = select_native_artifact(&artifacts, "native-release-native-", 3, |attempt| {
+            queried.push(attempt);
+            let mut prior = current.clone();
+            prior.run_attempt = attempt;
+            if attempt == 1 {
+                prior.conclusion = Some("failure".into());
+            }
+            native_attempt_succeeded(&current, &prior, attempt, &[job(attempt)])
+        })
+        .unwrap();
+        assert_eq!(
+            selected.id, 2,
+            "failed-attempt forgery must not win over original successful bytes"
+        );
+        assert_eq!(queried, vec![1, 2, 3]);
+        assert!(
+            select_native_artifact(&artifacts, "native-release-native-", 3, |_| Ok(false)).is_err()
+        );
+        let duplicates = vec![artifact(2, "2"), artifact(9, "2")];
+        assert!(
+            select_native_artifact(&duplicates, "native-release-native-", 3, |_| Ok(true)).is_err()
+        );
+        let mut prior = current.clone();
+        prior.run_attempt = 2;
+        for (key, value) in [
+            ("conclusion", json!("failure")),
+            ("runner_group_name", json!("Private runners")),
+            ("run_attempt", json!(1)),
+            ("head_sha", json!("c".repeat(40))),
+            ("labels", json!(["self-hosted", "ubuntu-24.04"])),
+        ] {
+            let mut bad = job(2);
+            bad[key] = value;
+            assert!(
+                !native_attempt_succeeded(&current, &prior, 2, &[bad]).unwrap(),
+                "{key}"
+            );
+        }
+        prior.head_sha = "c".repeat(40);
+        assert!(native_attempt_succeeded(&current, &prior, 2, &[job(2)]).is_err());
+    }
+
     #[test]
     fn native_archive_builder_is_independently_hosted() {
         for runner in [

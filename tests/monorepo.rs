@@ -731,6 +731,81 @@ fn root_cargo_package_uses_explicit_source_ownership() {
 }
 
 #[test]
+fn cargo_release_rejects_gate_created_changes_and_commits() {
+    for commit in [false, true] {
+        let temp = fixture();
+        let root = temp.path();
+        enroll_release_checks(root);
+        write(root, ".gitignore", "target/\n");
+        let gate = if commit {
+            "printf '\\n' >> crates/worker/src/lib.rs && git add crates/worker/src/lib.rs && git -c core.hooksPath=/dev/null commit -qm gate-change"
+        } else {
+            "printf '\\n' >> crates/worker/src/lib.rs"
+        };
+        let config = fs::read_to_string(root.join("simit.toml")).unwrap();
+        let mut config: toml_edit::DocumentMut = config.parse().unwrap();
+        let components = config["monorepo"]["components"]
+            .as_array_of_tables_mut()
+            .unwrap();
+        let worker = components
+            .iter_mut()
+            .find(|component| component["id"].as_str() == Some("worker"))
+            .unwrap();
+        worker["checks"]
+            .as_array_mut()
+            .unwrap()
+            .get_mut(0)
+            .unwrap()
+            .as_inline_table_mut()
+            .unwrap()
+            .insert("run", gate.into());
+        write(root, "simit.toml", &config.to_string());
+        let lock = Command::new("cargo")
+            .current_dir(root)
+            .args(["generate-lockfile", "--offline"])
+            .output()
+            .unwrap();
+        assert!(lock.status.success(), "{lock:?}");
+        fixture_git(root, &["init", "-q"]);
+        fixture_git(root, &["config", "user.name", "Simit fixture"]);
+        fixture_git(root, &["config", "user.email", "fixture@example.invalid"]);
+        fixture_git(root, &["config", "commit.gpgsign", "false"]);
+        fixture_git(root, &["add", "."]);
+        fixture_git(root, &["commit", "-qm", "original source"]);
+        let before = fs::read(root.join("crates/worker/Cargo.toml")).unwrap();
+        let output = common::simit()
+            .current_dir(root)
+            .args([
+                "release",
+                "patch",
+                "--component",
+                "worker",
+                "--no-sign",
+                "--no-changelog",
+                "-m",
+                "release worker",
+            ])
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{output:?}");
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            error.contains(if commit {
+                "release HEAD changed during qualification"
+            } else {
+                "worktree"
+            }),
+            "{output:?}"
+        );
+        assert_eq!(
+            fs::read(root.join("crates/worker/Cargo.toml")).unwrap(),
+            before
+        );
+        assert!(fixture_git(root, &["tag", "--list"]).is_empty());
+    }
+}
+
+#[test]
 fn independent_verification_uses_adjacent_notes_and_owned_tag() {
     let temp = fixture();
     let root = temp.path();
@@ -1287,6 +1362,12 @@ fn component_automatic_changelog_drafting_uses_only_owned_history() {
     let temp = history_fixture();
     let root = temp.path();
     enroll_release_checks(root);
+    let lock = Command::new("cargo")
+        .current_dir(root)
+        .args(["generate-lockfile", "--offline"])
+        .output()
+        .unwrap();
+    assert!(lock.status.success(), "{lock:?}");
     let support = TempDir::new().unwrap();
     let prompt = support.path().join("prompt");
     let script = support.path().join("codex");

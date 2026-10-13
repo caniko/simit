@@ -28,6 +28,10 @@ impl ManifestRelease {
         super::validate_relative_path(&self.manifest)?;
         ReleaseTag::for_package(&self.namespace, Version::new(0, 0, 0))?;
         ensure!(
+            self.namespace.len() <= 64,
+            "native release namespace must be at most 64 bytes"
+        );
+        ensure!(
             matches!(
                 Path::new(&self.manifest)
                     .file_name()
@@ -441,9 +445,8 @@ impl Package {
                 before,
                 after: doc.to_string().into_bytes(),
             });
-            for directory in path
-                .parent()
-                .context("manifest has no parent")?
+            let package_directory = path.parent().context("manifest has no parent")?;
+            for directory in package_directory
                 .ancestors()
                 .take_while(|directory| directory.starts_with(root))
             {
@@ -458,6 +461,15 @@ impl Package {
                 );
                 let before = fs::read(&lock)?;
                 let mut doc: DocumentMut = std::str::from_utf8(&before)?.parse()?;
+                let relative = package_directory
+                    .strip_prefix(directory)?
+                    .to_str()
+                    .context("non-UTF-8 Python workspace path")?
+                    .replace('\\', "/");
+                let local_source = if relative.is_empty() { "." } else { &relative };
+                if !relative.is_empty() && !declares_uv_workspace(directory, &relative)? {
+                    continue;
+                }
                 let mut found = false;
                 if let Some(packages) = doc
                     .get_mut("package")
@@ -472,7 +484,10 @@ impl Package {
                                 registry.package_key(name) == registry.package_key(&self.name)
                             })
                             && package.get("source").is_some_and(|source| {
-                                source.get("editable").is_some() || source.get("virtual").is_some()
+                                ["editable", "virtual"].iter().any(|key| {
+                                    source.get(key).and_then(toml_edit::Item::as_str)
+                                        == Some(local_source)
+                                })
                             })
                         {
                             let current = registry
@@ -619,6 +634,48 @@ fn declares_npm_workspace(directory: &Path, relative: &str) -> Result<bool> {
         }
     }
     Ok(included)
+}
+
+fn declares_uv_workspace(directory: &Path, relative: &str) -> Result<bool> {
+    let manifest = directory.join("pyproject.toml");
+    if !manifest.is_file() {
+        return Ok(false);
+    }
+    ensure!(
+        !fs::symlink_metadata(&manifest)?.file_type().is_symlink(),
+        "uv workspace manifest must not be a symlink"
+    );
+    let doc: DocumentMut = fs::read_to_string(manifest)?.parse()?;
+    let workspace = doc
+        .get("tool")
+        .and_then(|tool| tool.get("uv"))
+        .and_then(|uv| uv.get("workspace"));
+    let Some(workspace) = workspace else {
+        return Ok(false);
+    };
+    let matches = |key: &str| -> Result<bool> {
+        let Some(patterns) = workspace.get(key).and_then(toml_edit::Item::as_array) else {
+            return Ok(false);
+        };
+        for pattern in patterns {
+            if glob::Pattern::new(
+                pattern
+                    .as_str()
+                    .context("uv workspace patterns must be strings")?,
+            )?
+            .matches_with(
+                relative,
+                glob::MatchOptions {
+                    require_literal_separator: true,
+                    ..Default::default()
+                },
+            ) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    };
+    Ok(matches("members")? && !matches("exclude")?)
 }
 
 pub(crate) fn qualify(selection: &Selection) -> Result<()> {
