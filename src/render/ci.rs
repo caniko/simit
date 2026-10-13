@@ -364,6 +364,15 @@ impl Default for HomebrewPlatformSet {
 }
 
 pub fn files(request: FilesRequest<'_>) -> Result<Vec<GeneratedFile>> {
+    files_for_scope(request, false)
+}
+
+/// Ordinary CI retains its complete policy, but does not plan publication outputs.
+pub fn primary_files(request: FilesRequest<'_>) -> Result<Vec<GeneratedFile>> {
+    files_for_scope(request, true)
+}
+
+fn files_for_scope(request: FilesRequest<'_>, primary_only: bool) -> Result<Vec<GeneratedFile>> {
     if request.options.independent_lanes
         && (request.platform != Platform::Github
             || request.provider != CiProvider::Actions
@@ -376,7 +385,7 @@ pub fn files(request: FilesRequest<'_>) -> Result<Vec<GeneratedFile>> {
         );
     }
     if request.provider == CiProvider::Crow {
-        return crate::render::crow::files(crate::render::crow::FilesRequest {
+        let request = crate::render::crow::FilesRequest {
             format: request.crow.format,
             crow: request.crow,
             runtime: request.runtime,
@@ -386,7 +395,12 @@ pub fn files(request: FilesRequest<'_>) -> Result<Vec<GeneratedFile>> {
             runners: request.runners,
             options: request.options,
             step_runners: request.step_runners,
-        });
+        };
+        return if primary_only {
+            crate::render::crow::primary_files(request)
+        } else {
+            crate::render::crow::files(request)
+        };
     }
     let FilesRequest {
         provider: _,
@@ -422,7 +436,7 @@ pub fn files(request: FilesRequest<'_>) -> Result<Vec<GeneratedFile>> {
         ),
     }];
 
-    if options.publish_crates && package.is_publishable() {
+    if !primary_only && options.publish_crates && package.is_publishable() {
         let content = publish_workflow(
             platform,
             runtime,
@@ -448,7 +462,7 @@ pub fn files(request: FilesRequest<'_>) -> Result<Vec<GeneratedFile>> {
         }
     }
 
-    if options.with_artifacts {
+    if !primary_only && options.with_artifacts {
         files.push(GeneratedFile {
             relative_path: dir.join(artifacts_name),
             content: artifacts_workflow(platform, runtime, package, runners, &options),

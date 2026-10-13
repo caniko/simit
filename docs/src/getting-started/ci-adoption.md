@@ -50,12 +50,22 @@ simit init ci --primary-only
 simit init ci --primary-only --check --diff
 ```
 
-This scope includes ordinary member/aggregate CI, native Nix matrices and
+This scope includes ordinary member/aggregate CI (including independent lanes), native Nix matrices and
 prebuild workflows. Publisher, release, Pages and review workflows are preserved
 byte-for-byte, together with `simit.toml`, release trust roots and README badges.
 The check reports drift only in the selected scope. Full generation remains the
 default; run its separate drift gate when intentionally changing publication
 configuration. `--primary-only` cannot be combined with the other scope selectors.
+
+Project templates are a separate owner, regardless of their output basename:
+`ci-release.yaml` and `build-release.yaml` do not become primary CI. Scoped
+generation validates declared template paths and destination protections but
+does not load or render template sources, publisher or review material. Template
+outputs retain their ownership markers after a mapping is removed; only full
+generation retires them. Primary cleanup still removes obsolete marked built-in
+CI workflows and preserves hand-owned files. Policy files such as `deny.toml`
+are not created in this scope. Printed repair commands retain `--primary-only`
+and the effective platform/provider, including Crow format overrides.
 
 ### Project-owned workflow templates
 
