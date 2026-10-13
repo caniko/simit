@@ -433,6 +433,44 @@ Declare the exact installables that qualify a feature in `[ci].nix_builds`.
 GitHub Actions projects can configure their matrix independently of ordinary
 checks and release jobs:
 
+For native multi-architecture builds, set `[ci.nix_build.system_runners]`:
+
+```toml
+[ci.nix_build.system_runners]
+"x86_64-linux" = "ubuntu-24.04"
+"aarch64-linux" = "ubuntu-24.04-arm"
+```
+
+Every installable must explicitly select a system, for example
+`.#checks.aarch64-linux.cargo-test`, `.#packages.x86_64-linux.server`, or
+`.#formatter.aarch64-linux`, and
+that system must have a runner entry. The generator emits one job per declared
+installable, rather than running each gate on every architecture. It verifies
+the runner's OS/CPU identity independently of Nix configuration, then checks the
+configured Nix system before project setup or realization. Linux, Darwin and
+FreeBSD kernel names are recognized; unsupported kernels fail closed. With `kvm = true`,
+KVM setup runs only for `x86_64-linux` rows; ARM rows do not require `/dev/kvm`.
+The existing `[ci].runner` remains the runner for ordinary language CI. Without
+the exact-build map, the installable matrix retains its single-runner behavior.
+Standard `formatter.<system>`, `defaultPackage.<system>` and `devShell.<system>`
+outputs select their system without a trailing name.
+Output selectors such as `^out`, `^out,dev` and `^*` remain intact in generated
+installables; routing extracts the system from the attribute path alone.
+Node action versions follow
+the mapped workers: if any mapped worker needs the compatible Node 20 baseline,
+all rows use that baseline independently of the ordinary language CI runner.
+Unambiguous PowerPC uname spellings (`ppc`, `ppcle`, `ppc64`, `ppc64le`) normalize
+to Nix's corresponding `powerpc` names before comparison.
+
+The map also supports `[ci.nix_build.groups]`: every group must contain only
+installables for one system, and the group runs on that system's mapped runner.
+Mixed-system groups reject before configuration or workflow writes. Group jobs
+use the same hardware/Nix guard and x86 Linux-only KVM condition as ungrouped
+rows, while retaining per-member evidence and hooks. Native mappings currently
+cannot combine with `dependency_installables`: the single dependency producer
+does not support native per-system routing, so this combination rejects before
+writes rather than realizing foreign dependencies on one worker.
+
 ```toml
 [ci]
 platform = "github"

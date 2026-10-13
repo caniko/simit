@@ -11,20 +11,31 @@ pub(super) fn render(
     trusted_public_keys: &[String],
     options: &NixBuildConfig,
 ) -> Result<GeneratedFile> {
-    let macos = runner
-        .labels
-        .iter()
-        .any(|label| label.eq_ignore_ascii_case("macos"));
-    ensure!(
-        !runner.labels.iter().any(|label| {
-            label.starts_with("windows-")
-                || label == "macos-13"
-                || label.starts_with("macos-")
-                    && (label.ends_with("-intel") || label.ends_with("-large"))
-                || macos && (label.eq_ignore_ascii_case("x64") || label == "x86_64")
-        }),
-        "unsupported grouped engine runner: only x86_64-linux, aarch64-linux and aarch64-darwin have an immutable engine package"
-    );
+    let native_runners = !options.system_runners.is_empty();
+    if native_runners {
+        for members in options.groups.values() {
+            let system = options.group_system(members)?;
+            ensure!(
+                matches!(system, "x86_64-linux" | "aarch64-linux" | "aarch64-darwin"),
+                "unsupported grouped engine runner: {system} has no immutable engine package"
+            );
+        }
+    } else {
+        let macos = runner
+            .labels
+            .iter()
+            .any(|label| label.eq_ignore_ascii_case("macos"));
+        ensure!(
+            !runner.labels.iter().any(|label| {
+                label.starts_with("windows-")
+                    || label == "macos-13"
+                    || label.starts_with("macos-")
+                        && (label.ends_with("-intel") || label.ends_with("-large"))
+                    || macos && (label.eq_ignore_ascii_case("x64") || label == "x86_64")
+            }),
+            "unsupported grouped engine runner: only x86_64-linux, aarch64-linux and aarch64-darwin have an immutable engine package"
+        );
+    }
     let mut workflow = String::new();
     push_generated_workflow_header(&mut workflow);
     push_required_secrets_header(&mut workflow, &options.required_secrets);
@@ -44,7 +55,11 @@ pub(super) fn render(
     }
     workflow.push_str(&format!(
         "jobs:\n  build:\n    name: build (${{{{ matrix.group }}}})\n    runs-on: {}\n",
-        runs_on(runner)
+        if native_runners {
+            "${{ matrix.runner }}".to_owned()
+        } else {
+            runs_on(runner)
+        }
     ));
     if let Some(timeout) = options.timeout_minutes {
         workflow.push_str(&format!("    timeout-minutes: {timeout}\n"));
@@ -56,6 +71,14 @@ pub(super) fn render(
             yaml_double_quote(name),
             yaml_json_scalar(&serde_json::to_string(members)?)
         ));
+        if native_runners {
+            let system = options.group_system(members)?;
+            workflow.push_str(&format!(
+                "            system: \"{}\"\n            runner: \"{}\"\n",
+                yaml_double_quote(system),
+                yaml_double_quote(&options.system_runners[system]),
+            ));
+        }
     }
     if !options.dependency_installables.is_empty() {
         // The build job consumes only a complete same-run dependency producer.
@@ -65,7 +88,10 @@ pub(super) fn render(
     workflow
         .push_str("    env:\n      NIX_CONFIG: \"experimental-features = nix-command flakes\"\n");
     workflow.push_str("    steps:\n");
-    push_source_head_checkout(&mut workflow, runner);
+    push_source_head_checkout_with_version(
+        &mut workflow,
+        nix_build_action_version(runner, options, "v7.0.1", "v4.3.1"),
+    );
     workflow.push_str("      - name: Prepare Nix build evidence\n        run: |\n          SIMIT_NIX_BUILD_RESULTS=\"$RUNNER_TEMP/simit-nix-build-${{ strategy.job-index }}\"\n          mkdir -p \"$SIMIT_NIX_BUILD_RESULTS\"\n          printf '%s\\n' \"SIMIT_NIX_BUILD_RESULTS=$SIMIT_NIX_BUILD_RESULTS\" >> \"$GITHUB_ENV\"\n          git rev-parse HEAD > \"$SIMIT_NIX_BUILD_RESULTS/revision\"\n");
     push_install_nix_step_with_cache(
         &mut workflow,
@@ -73,6 +99,16 @@ pub(super) fn render(
         substituters,
         trusted_public_keys,
     );
+    if native_runners {
+        push_native_nix_runner_step_with_context(&mut workflow, |w| {
+            w.push_str("          BASH_ENV: ''\n          ENV: ''\n");
+            for key in ["NIX_CONFIG", "NIX_USER_CONF_FILES", "NIX_PATH"] {
+                if let Some(value) = options.extra_env.get(key) {
+                    w.push_str(&format!("          {key}: {}\n", yaml_json_scalar(value)));
+                }
+            }
+        });
+    }
     // Enrollment is administrator-owned. Never build the engine from the producer
     // checkout or silently resolve a moving branch when the pin is absent.
     workflow.push_str(r#"      - name: Provision grouped-build Rust engine
@@ -103,7 +139,11 @@ pub(super) fn render(
         push_producer_env(w, options)
     });
     if options.kvm {
-        workflow.push_str("      - name: Enable hosted KVM\n        run: |\n          test \"${RUNNER_ENVIRONMENT:-}\" = github-hosted\n          test -c /dev/kvm\n          sudo chmod a+rw /dev/kvm\n          test -r /dev/kvm && test -w /dev/kvm\n");
+        workflow.push_str("      - name: Enable hosted KVM\n");
+        if native_runners {
+            workflow.push_str("        if: ${{ matrix.system == 'x86_64-linux' }}\n");
+        }
+        workflow.push_str("        run: |\n          test \"${RUNNER_ENVIRONMENT:-}\" = github-hosted\n          test -c /dev/kvm\n          sudo chmod a+rw /dev/kvm\n          test -r /dev/kvm && test -w /dev/kvm\n");
     }
     push_extra_setup_steps_with_context(&mut workflow, extra_setup, |w| {
         push_producer_env(w, options)
@@ -148,9 +188,9 @@ pub(super) fn render(
     push_action_uses(
         &mut workflow,
         Platform::Github,
-        Some(runner),
+        None,
         "upload-artifact",
-        "v7.0.2",
+        nix_build_action_version(runner, options, "v7.0.2", "v4.6.2"),
         "v4.6.2",
     );
     workflow.push_str(&format!("\n        with:\n          name: nix-build-${{{{ strategy.job-index }}}}\n          retention-days: {}\n          if-no-files-found: error\n          path: |\n            ${{{{ runner.temp }}}}/simit-nix-build-${{{{ strategy.job-index }}}}\n", options.artifact_retention_days.unwrap_or(14)));
