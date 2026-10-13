@@ -35,6 +35,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   homogeneous group to its declared system, retain the hardware guard and scoped
   KVM setup, and reject mixed-system groups or unsupported native dependency
   transport before writing configuration or workflows.
+- Select exact-build action versions from mapped workers, support standard
+  two-segment system derivation outputs, and recognize unambiguous PowerPC uname
+  aliases while preserving independent hardware verification.
 - Bind the full dependency export stream's actual path/reference inventory to the
   admitted closure before canonical-store import, using a bounded non-extracting
   NAR parser and one private spool descriptor through validation and import.

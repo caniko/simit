@@ -759,11 +759,15 @@ impl NixBuildConfig {
         let mut parts = attribute.splitn(3, '.');
         let output = parts.next().ok_or_else(invalid)?;
         let system = parts.next().ok_or_else(invalid)?;
-        let name = parts.next().ok_or_else(invalid)?;
-        if !matches!(
-            output,
-            "checks" | "packages" | "legacyPackages" | "devShells"
-        ) || name.is_empty()
+        let name = parts.next();
+        let valid_output = match output {
+            "checks" | "packages" | "legacyPackages" | "devShells" => {
+                name.is_some_and(|name| !name.is_empty())
+            }
+            "formatter" | "defaultPackage" | "devShell" => name.is_none(),
+            _ => false,
+        };
+        if !valid_output
             || !system
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))

@@ -282,7 +282,8 @@ For native multi-architecture builds, set `[ci.nix_build.system_runners]`:
 ```
 
 Every installable must explicitly select a system, for example
-`.#checks.aarch64-linux.cargo-test` or `.#packages.x86_64-linux.server`, and
+`.#checks.aarch64-linux.cargo-test`, `.#packages.x86_64-linux.server`, or
+`.#formatter.aarch64-linux`, and
 that system must have a runner entry. The generator emits one job per declared
 installable, rather than running each gate on every architecture. It verifies
 the runner's OS/CPU identity independently of Nix configuration, then checks the
@@ -291,6 +292,12 @@ FreeBSD kernel names are recognized; unsupported kernels fail closed. With `kvm 
 KVM setup runs only for `x86_64-linux` rows; ARM rows do not require `/dev/kvm`.
 The existing `[ci].runner` remains the runner for ordinary language CI. Without
 the exact-build map, the installable matrix retains its single-runner behavior.
+Standard `formatter.<system>`, `defaultPackage.<system>` and `devShell.<system>`
+outputs select their system without a trailing name. Node action versions follow
+the mapped workers: if any mapped worker needs the compatible Node 20 baseline,
+all rows use that baseline independently of the ordinary language CI runner.
+Unambiguous PowerPC uname spellings (`ppc`, `ppcle`, `ppc64`, `ppc64le`) normalize
+to Nix's corresponding `powerpc` names before comparison.
 
 The map also supports `[ci.nix_build.groups]`: every group must contain only
 installables for one system, and the group runs on that system's mapped runner.

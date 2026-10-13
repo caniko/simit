@@ -67,7 +67,10 @@ pub(super) fn render(
         workflow.push_str(&format!("      {name}: \"{}\"\n", yaml_double_quote(value)));
     }
     workflow.push_str("    steps:\n");
-    push_source_head_checkout(&mut workflow, runner);
+    push_source_head_checkout_with_version(
+        &mut workflow,
+        nix_build_action_version(runner, options, "v7.0.1", "v4.3.1"),
+    );
     workflow.push_str("      - name: Prepare Nix build evidence\n        run: |\n          SIMIT_NIX_BUILD_RESULTS=\"$RUNNER_TEMP/simit-nix-build-${{ strategy.job-index }}\"\n          mkdir -p \"$SIMIT_NIX_BUILD_RESULTS\"\n          printf '%s\\n' \"SIMIT_NIX_BUILD_RESULTS=$SIMIT_NIX_BUILD_RESULTS\" >> \"$GITHUB_ENV\"\n          git rev-parse HEAD > \"$SIMIT_NIX_BUILD_RESULTS/revision\"\n");
     push_install_nix_step_with_cache(
         &mut workflow,
@@ -82,9 +85,9 @@ pub(super) fn render(
     push_action_uses(
         &mut workflow,
         Platform::Github,
-        Some(runner),
+        None,
         "setup-python",
-        "v6.3.0",
+        nix_build_action_version(runner, options, "v6.3.0", "v5.6.0"),
         "v5.6.0",
     );
     workflow.push_str("\n        with:\n          python-version: '3.12'\n");
@@ -143,9 +146,9 @@ pub(super) fn render(
     push_action_uses(
         &mut workflow,
         Platform::Github,
-        Some(runner),
+        None,
         "upload-artifact",
-        "v7.0.2",
+        nix_build_action_version(runner, options, "v7.0.2", "v4.6.2"),
         "v4.6.2",
     );
     workflow.push_str(&format!("\n        with:\n          name: nix-build-${{{{ strategy.job-index }}}}\n          retention-days: {}\n          if-no-files-found: error\n          path: |\n            ${{{{ runner.temp }}}}/simit-nix-build-${{{{ strategy.job-index }}}}\n", options.artifact_retention_days.unwrap_or(14)));

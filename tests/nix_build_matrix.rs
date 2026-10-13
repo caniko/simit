@@ -897,6 +897,16 @@ fn native_exact_matrix_rejects_ambiguous_or_unmapped_systems_before_writes() {
             "system-qualified",
         ),
         (
+            ".#formatter.aarch64-linux.extra",
+            "\"aarch64-linux\" = \"ubuntu-24.04-arm\"\n\"x86_64-linux\" = \"ubuntu-24.04\"",
+            "system-qualified",
+        ),
+        (
+            ".#checks.x86_64-linux",
+            "\"x86_64-linux\" = \"ubuntu-24.04\"",
+            "system-qualified",
+        ),
+        (
             ".#checks.x86_64-linux.recovery",
             "\"x86_64-linux\" = \"\"",
             "runner",
@@ -921,6 +931,185 @@ fn native_exact_matrix_rejects_ambiguous_or_unmapped_systems_before_writes() {
             assert_eq!(fs::read_to_string(&config_path).unwrap(), config);
             assert!(!temp.path().join(".github/workflows").exists());
         }
+    }
+}
+
+#[test]
+fn native_exact_matrix_selects_actions_from_mapped_workers() {
+    for grouped in [false, true] {
+        for (ordinary, mapped, checkout, upload, python) in [
+            (
+                "ubuntu-24.04",
+                "private-worker",
+                "v4.3.1",
+                "v4.6.2",
+                "v5.6.0",
+            ),
+            (
+                "private-worker",
+                "ubuntu-24.04",
+                "v7.0.1",
+                "v7.0.2",
+                "v6.3.0",
+            ),
+        ] {
+            let groups = if grouped {
+                "[ci.nix_build.groups]\nnetwork = [\".#checks.x86_64-linux.client\", \".#checks.x86_64-linux.recovery\"]\n"
+            } else {
+                ""
+            };
+            let temp = project(&format!(
+                "[ci.nix_build]\nonly = true\ncapture_results = true\n{groups}[ci.nix_build.system_runners]\n\"x86_64-linux\" = \"{mapped}\""
+            ));
+            let path = temp.path().join("simit.toml");
+            let config = fs::read_to_string(&path).unwrap().replace(
+                "runner = \"ubuntu-24.04\"",
+                &format!("runner = \"{ordinary}\""),
+            );
+            fs::write(path, config).unwrap();
+            let output = generate(&temp, &[]);
+            assert!(output.status.success(), "{output:?}");
+            let value = workflow(&temp);
+            let steps = value["jobs"]["build"]["steps"].as_sequence().unwrap();
+            for (name, action, version) in [
+                ("Checkout", "checkout", checkout),
+                ("Upload Nix build evidence", "upload-artifact", upload),
+            ] {
+                let step = steps.iter().find(|s| s["name"] == name).unwrap();
+                let reference =
+                    simit::render::ci::github_action_ref(&format!("actions/{action}"), version);
+                assert_eq!(
+                    step["uses"],
+                    reference.split(" #").next().unwrap(),
+                    "ordinary={ordinary}, mapped={mapped}, grouped={grouped}"
+                );
+            }
+            if grouped {
+                let step = steps
+                    .iter()
+                    .find(|s| s["name"] == "Provision grouped-build Python")
+                    .unwrap();
+                let reference =
+                    simit::render::ci::github_action_ref("actions/setup-python", python);
+                assert_eq!(step["uses"], reference.split(" #").next().unwrap());
+            }
+            assert!(generate(&temp, &["--check", "--diff"]).status.success());
+        }
+    }
+}
+
+#[test]
+fn native_exact_matrix_accepts_standard_system_derivation_outputs() {
+    for grouped in [false, true] {
+        for installable in [
+            ".#formatter.aarch64-linux",
+            ".#defaultPackage.aarch64-linux",
+            ".#devShell.aarch64-linux",
+        ] {
+            let groups = if grouped {
+                format!(
+                    "[ci.nix_build.groups]\nx86 = [\".#checks.x86_64-linux.client\"]\narm = [\"{installable}\"]\n"
+                )
+            } else {
+                String::new()
+            };
+            let temp = project(&format!(
+                "[ci.nix_build]\nonly = true\ncapture_results = true\n{groups}[ci.nix_build.system_runners]\n\"x86_64-linux\" = \"ubuntu-24.04\"\n\"aarch64-linux\" = \"ubuntu-24.04-arm\""
+            ));
+            let path = temp.path().join("simit.toml");
+            let before = fs::read_to_string(&path)
+                .unwrap()
+                .replace(".#checks.x86_64-linux.recovery", installable);
+            fs::write(&path, before).unwrap();
+            let output = generate(&temp, &[]);
+            assert!(
+                output.status.success(),
+                "{installable}, grouped={grouped}: {output:?}"
+            );
+            let value = workflow(&temp);
+            let rows = value["jobs"]["build"]["strategy"]["matrix"]["include"]
+                .as_sequence()
+                .unwrap();
+            let row = rows
+                .iter()
+                .find(|r| r["system"] == "aarch64-linux")
+                .unwrap();
+            assert_eq!(row["runner"], "ubuntu-24.04-arm");
+            if grouped {
+                assert_eq!(
+                    serde_json::from_str::<Vec<String>>(row["installables"].as_str().unwrap())
+                        .unwrap(),
+                    vec![installable]
+                );
+            } else {
+                assert_eq!(row["installable"], installable);
+            }
+            assert!(generate(&temp, &["--check", "--diff"]).status.success());
+            assert_eq!(
+                simit::registry::audit_ci(temp.path()).unwrap().status,
+                simit::registry::FeatureStatus::Managed
+            );
+        }
+    }
+}
+
+#[test]
+fn native_exact_matrix_normalizes_unambiguous_hardware_aliases() {
+    let temp = project(
+        "[ci.nix_build]\nonly = true\n[ci.nix_build.system_runners]\n\"x86_64-linux\" = \"ubuntu-24.04\"",
+    );
+    assert!(generate(&temp, &[]).status.success());
+    let value = workflow(&temp);
+    let script = value["jobs"]["build"]["steps"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"] == "Verify native Nix runner")
+        .unwrap()["run"]
+        .as_str()
+        .unwrap();
+    let bin = temp.path().join("alias-bin");
+    fs::create_dir(&bin).unwrap();
+    for (name, text) in [
+        (
+            "uname",
+            "#!/bin/sh\ncase \"$1\" in -m) printf '%s' \"$FAKE_CPU\";; -s) printf Linux;; *) exit 99;; esac\n",
+        ),
+        ("nix", "#!/bin/sh\nprintf '%s' \"$FAKE_NIX_SYSTEM\"\n"),
+    ] {
+        let path = bin.join(name);
+        fs::write(&path, text).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+    for (cpu, expected) in [
+        ("ppc64le", "powerpc64le-linux"),
+        ("ppc64", "powerpc64-linux"),
+        ("ppcle", "powerpcle-linux"),
+        ("ppc", "powerpc-linux"),
+        ("amd64", "x86_64-linux"),
+        ("arm64", "aarch64-linux"),
+        ("i386", "i686-linux"),
+    ] {
+        let output = Command::new("bash")
+            .args(["-c", script])
+            .env(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    bin.display(),
+                    std::env::var("PATH").unwrap_or_default()
+                ),
+            )
+            .env("FAKE_CPU", cpu)
+            .env("EXPECTED_NIX_SYSTEM", expected)
+            .env("FAKE_NIX_SYSTEM", expected)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{cpu} -> {expected}: {output:?}");
     }
 }
 
