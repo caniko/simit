@@ -257,10 +257,18 @@ def upload_native(out, identity, files, manifest, token):
         else:
             text = tar_metadata(path, "python")
         metadata = email.parser.Parser().parsestr(text)
-        fields = [(":action", "file_upload"), ("protocol_version", "1"), ("name", identity["name"]), ("version", identity["version"]), ("filetype", "bdist_wheel" if name.endswith(".whl") else "sdist"), ("pyversion", name.rsplit("-", 3)[-3] if name.endswith(".whl") else "source"), ("sha256_digest", digest(path).hex()), ("metadata_version", metadata.get("Metadata-Version", "2.1"))]
-        for key in ("Summary", "Home-page", "Author", "Author-email", "Maintainer", "Maintainer-email", "License", "Keywords", "Platform", "Classifier", "Requires-Python", "Requires-Dist", "Provides-Extra", "Project-URL", "Description-Content-Type"):
-            fields.extend((key.lower().replace("-", "_"), value) for value in metadata.get_all(key, []))
-        fields.append(("description", metadata.get_payload()))
+        metadata_version = metadata.get("Metadata-Version", "2.1")
+        require(re.fullmatch(r"[0-9]+\.[0-9]+", metadata_version), "invalid metadata version")
+        fields = [(":action", "file_upload"), ("protocol_version", "1"), ("name", re.sub(r"[^A-Za-z0-9.]+", "-", identity["name"])), ("version", identity["version"]), ("filetype", "bdist_wheel" if name.endswith(".whl") else "sdist"), ("pyversion", name.rsplit("-", 3)[-3] if name.endswith(".whl") else "source"), ("sha256_digest", digest(path).hex()), ("metadata_version", metadata_version)]
+        # Warehouse's legacy form names are not uniformly the Core Metadata
+        # header names. Match Twine's _RAW_TO_PACKAGE_METADATA contract, retaining
+        # repeated fields and PEP 639 licensing without loading package code.
+        form_names = {"Classifier": "classifiers", "Project-URL": "project_urls", "License-File": "license_file"}
+        for key in ("Summary", "Home-page", "Author", "Author-email", "Maintainer", "Maintainer-email", "License", "Keywords", "Platform", "Supported-Platform", "Download-URL", "Classifier", "Requires", "Provides", "Obsoletes", "Requires-Python", "Requires-Dist", "Provides-Dist", "Obsoletes-Dist", "Requires-External", "Provides-Extra", "Project-URL", "Description-Content-Type", "Dynamic", "License-Expression", "License-File"):
+            if key == "License-File" and tuple(map(int, metadata_version.split("."))) < (2, 4):
+                continue
+            fields.extend((form_names.get(key, key.lower().replace("-", "_")), value) for value in metadata.get_all(key, []))
+        fields.append(("description", metadata.get_payload() or metadata.get("Description", "")))
         boundary = "simit-" + os.urandom(24).hex()
         body = bytearray()
         for key, value in fields:

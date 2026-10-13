@@ -31,7 +31,7 @@ with tempfile.TemporaryDirectory() as temp:
     root = Path(temp)
     identity = {"schemaVersion": 2, "registry": "python", "name": "example", "version": "1.2.3", "namespace": "python-owner", "tag": "python-owner/v1.2.3", "source": "b" * 40, "repository": "owner/repo", "workflow": ".github/workflows/publish-python-python-owner.yaml", "runId": 42}
     wheel = root / "example-1.2.3-py3-none-any.whl"
-    metadata = b"Metadata-Version: 2.1\nName: example\nVersion: 1.2.3\nSummary: test\n\nOriginal source\n"
+    metadata = b"Metadata-Version: 2.4\nName: example\nVersion: 1.2.3\nSummary: test\nClassifier: Programming Language :: Python\nClassifier: License :: OSI Approved :: MIT License\nProject-URL: Source, https://example.com/source\nLicense-Expression: MIT\nLicense-File: LICENSE\nRequires-Dist: dependency>=1\n\nOriginal source\n"
     with zipfile.ZipFile(wheel, "w") as archive:
         archive.writestr("example-1.2.3.dist-info/METADATA", metadata)
     sdist = root / "example-1.2.3.tar.gz"
@@ -86,6 +86,12 @@ with tempfile.TemporaryDirectory() as temp:
     actual.upload_native(root, identity, [wheel.name], {}, "disposable-fixture-token")
     assert requests[0].full_url == "https://upload.pypi.org/legacy/"
     assert original[wheel.name] in requests[0].data
+    assert requests[0].data.count(b'name="classifiers"') == 2
+    assert b'name="classifier"' not in requests[0].data
+    assert b'name="project_urls"' in requests[0].data
+    assert b'name="license_expression"' in requests[0].data
+    assert b'name="license_file"' in requests[0].data
+    assert b'name="requires_dist"' in requests[0].data
     npm = {"name": "@example/native", "version": "1.2.3", "scripts": {"prepublishOnly": "exit 99"}, "publishConfig": {"registry": "https://attacker.invalid", "provenance": True}}
     tarball = root / "native-1.2.3.tgz"
     with tarfile.open(tarball, "w:gz") as archive:
