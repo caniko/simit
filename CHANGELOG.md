@@ -37,6 +37,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Honor the documented absolute `XDG_DATA_HOME` project-registry override on
+  macOS and Windows as well as Linux, retaining native defaults when unset.
 - Reject grouped execution specs above the shared 16 MiB serialized JSON budget
   before generation writes or runtime effects, counting JSON escapes while
   preserving the individual 1 MiB hook limit.

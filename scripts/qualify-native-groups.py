@@ -14,8 +14,8 @@ def require(condition, message):
         raise RuntimeError(message)
 
 
-def output(*args, cwd=None):
-    return subprocess.check_output(args, cwd=cwd, text=True).strip()
+def output(*args, cwd=None, stderr=None):
+    return subprocess.check_output(args, cwd=cwd, stderr=stderr, text=True).strip()
 
 
 source = Path(__file__).resolve().parent.parent
@@ -39,10 +39,12 @@ hashes = []
 for name in output('git', 'ls-tree', '-r', '--name-only', head, cwd=source).splitlines():
     hashes.append(f'{hashlib.sha256((source / name).read_bytes()).hexdigest()}  {name}\n')
 (root / 'source.sha256').write_text(''.join(hashes))
-result = json.loads(output('nix', 'build', '--json', '--no-link', '--no-update-lock-file',
-                           '--max-jobs', '1', '--cores', '2', '--option', 'accept-flake-config', 'false',
-                           '--option', 'access-tokens', '', '--option', 'substituters', 'https://cache.nixos.org',
-                           f'github:caniko/simit/{head}#default', cwd=source))
+with (root / 'production-build.log').open('wb') as log:
+    result = json.loads(output('nix', 'build', '--print-build-logs', '--json', '--no-link',
+                               '--no-update-lock-file', '--max-jobs', '1', '--cores', '2',
+                               '--option', 'accept-flake-config', 'false', '--option', 'access-tokens', '',
+                               '--option', 'substituters', 'https://cache.nixos.org',
+                               f'github:caniko/simit/{head}#default', cwd=source, stderr=log))
 require(len(result) == 1 and set(result[0]['outputs']) == {'out'}, 'Invalid production inventory')
 engine = Path(result[0]['outputs']['out']) / 'bin/simit'
 require(engine.is_file(), 'Production engine is missing')
