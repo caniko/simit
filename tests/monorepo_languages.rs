@@ -1246,6 +1246,24 @@ fn native_registry_verification_checks_exact_identity_and_available_files() {
             .find(|check| check["check"] == "registry publication")
             .unwrap();
         assert_eq!(registry["status"], expected, "{report}");
+        let secret = report["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["check"] == "remote secrets")
+            .expect("public native owners must report unverifiable credentials");
+        assert_eq!(secret["status"], "blocked");
+        assert!(
+            secret["message"]
+                .as_str()
+                .unwrap()
+                .contains(if component == "python" {
+                    "PYPI_API_TOKEN"
+                } else {
+                    "NPM_TOKEN"
+                }),
+            "{report}"
+        );
         let request = fs::read_to_string(request).unwrap();
         assert!(request.starts_with("--disable\n"));
         assert!(

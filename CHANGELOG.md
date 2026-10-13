@@ -53,6 +53,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Report protected Python/npm publisher credentials as locally unverifiable even
+  when the selected release is already present in its registry.
 - Preserve unset npm publication access so releasing an existing restricted
   package does not change its visibility; provenance checks existing visibility.
 - Reject workflow expressions in component gate environments before planning or

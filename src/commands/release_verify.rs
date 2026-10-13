@@ -349,6 +349,19 @@ fn verify_manifest(
         ),
     });
     if package.publish {
+        let credential = if matches!(
+            crate::monorepo::native_registry::Registry::for_manifest(&package.config.manifest),
+            crate::monorepo::native_registry::Registry::Python
+        ) {
+            "PYPI_API_TOKEN"
+        } else {
+            "NPM_TOKEN"
+        };
+        results.push(CheckResult::blocked(
+            "remote secrets",
+            format!("remote credentials: {credential} presence not verifiable locally"),
+            "check the protected publisher environment and repository Actions settings",
+        ));
         results.push(
             match crate::monorepo::native_registry::available(package, version) {
                 Ok(true) => CheckResult::pass(
