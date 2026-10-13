@@ -484,6 +484,84 @@ fn evidence_reuse_and_dangling_receipt_symlinks_fail_without_overwriting() {
 }
 
 #[test]
+fn stale_numbered_member_evidence_denies_before_any_dispatch_or_write() {
+    use simit::ci_runtime::{cancellation::Cancellation, group, process::Runner};
+
+    #[derive(Default)]
+    struct NoDispatch(usize);
+    impl Runner for NoDispatch {
+        fn run(
+            &mut self,
+            _command: &mut Command,
+            _stdout: &Path,
+            _stderr: &Path,
+            _cancellation: &Cancellation,
+        ) -> anyhow::Result<i32> {
+            self.0 += 1;
+            anyhow::bail!("admission dispatched a command before checking member evidence")
+        }
+    }
+    for name in ["0", "1", "2", "999999999999999999999999", "00"] {
+        for kind in ["directory", "file", "symlink"] {
+            let f = Fixture::new();
+            let root = f.root.path().join("results");
+            fs::write(root.join("revision"), "preparation evidence").unwrap();
+            let prior = root.join(name);
+            match kind {
+                "directory" => {
+                    fs::create_dir(&prior).unwrap();
+                    fs::write(prior.join("fallback-diagnostic-0.script"), "previous hook").unwrap();
+                }
+                "file" => fs::write(&prior, "previous evidence").unwrap(),
+                _ => symlink("missing", &prior).unwrap(),
+            }
+            let spec: group::GroupSpec = serde_json::from_value(f.spec.clone()).unwrap();
+            let source = group::Source {
+                head: f.head.clone(),
+                event: "push".into(),
+                run: "123".into(),
+                attempt: 1,
+            };
+            let mut runner = NoDispatch::default();
+            let error = group::execute_with(
+                &spec,
+                &source,
+                f.root.path(),
+                &root,
+                &mut runner,
+                &Cancellation::default(),
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(
+                error.contains("member evidence") && error.contains(name),
+                "{error}"
+            );
+            assert_eq!(runner.0, 0);
+            let output = f.run("success");
+            assert!(!output.status.success(), "{name}/{kind}: {output:?}");
+            assert!(f.calls().is_empty());
+            assert_eq!(
+                fs::read_to_string(root.join("revision")).unwrap(),
+                "preparation evidence"
+            );
+            for path in ["receipt.json", "coverage.json", "installables.json"] {
+                assert!(!root.join(path).exists(), "unexpected write: {path}");
+            }
+            assert_eq!(fs::read_dir(&root).unwrap().count(), 2);
+            match kind {
+                "directory" => assert_eq!(
+                    fs::read_to_string(prior.join("fallback-diagnostic-0.script")).unwrap(),
+                    "previous hook"
+                ),
+                "file" => assert_eq!(fs::read_to_string(prior).unwrap(), "previous evidence"),
+                _ => assert_eq!(fs::read_link(prior).unwrap(), Path::new("missing")),
+            }
+        }
+    }
+}
+
+#[test]
 fn declared_nonlocal_installables_and_zero_cores_remain_supported_as_argv_data() {
     let mut f = Fixture::new();
     f.spec["members"] = json!(["github:owner/project/revision#package; touch injected"]);

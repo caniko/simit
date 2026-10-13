@@ -37,6 +37,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Reject all pre-existing numbered member evidence before grouped Git/Nix
+  observations or evidence writes, including interrupted/fallback-only attempts,
+  out-of-range indices, files and dangling symlinks.
 - Bound complete grouped workflow files to GitHub's 500 KB limit before writes,
   require an explicit nonempty runtime evidence directory, reserve transport
   environment keys, and reject Actions expressions in retained grouped hooks.

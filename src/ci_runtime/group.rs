@@ -307,6 +307,20 @@ pub fn execute_with(
             "group evidence already exists: {name}"
         );
     }
+    // Interrupted executions and shell-only diagnostics can leave member evidence
+    // without a top-level receipt. Reserve every decimal entry, including indices
+    // outside this spec and dangling symlinks, before observing Git/Nix or writing.
+    for entry in fs::read_dir(root)? {
+        cancellation.check()?;
+        let name = entry?.file_name();
+        ensure!(
+            !name.to_str().is_some_and(|name| {
+                !name.is_empty() && name.bytes().all(|byte| byte.is_ascii_digit())
+            }),
+            "member evidence already exists: {}",
+            name.to_string_lossy()
+        );
+    }
     let root = root.canonicalize()?;
     let cwd = cwd.canonicalize()?;
     let head = observe(&cwd, "git", &["rev-parse", "HEAD"], runner, cancellation)?;

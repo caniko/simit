@@ -103,6 +103,10 @@ counts all embedded specs, repeated diagnostic fallbacks, YAML escaping and
 transport steps; generation rejects overflow before writing project files.
 The CLI requires a nonempty `--results` or `SIMIT_NIX_BUILD_RESULTS` evidence
 directory and rejects missing or empty inputs before execution.
+The evidence root must have no prior receipt, inventory, coverage manifest or
+numbered member entries. Interrupted and fallback-only attempts, including
+out-of-range member indices, reject before Git/Nix dispatch or evidence writes;
+choose a fresh evidence root rather than mixing attempts.
 Output-reader startup failures return through the
 same dispatch-failure path and clean up any started readers and child processes.
 Embedding applications use `execute_with` with a caller-owned `Cancellation`
