@@ -7,6 +7,7 @@ on:
       [
         fix/trusted-publisher-boundary,
         migrate/harbor-monorepo-reconcile-20261012-current,
+        fix/monorepo-nix-diagnostics-20261014,
       ]
   pull_request:
 
