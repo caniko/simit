@@ -220,6 +220,12 @@ Independent crates.io workflow generation honors Cargo's registry allowlist:
 unpublished and alternate-only members remain qualified but receive no crates.io
 builder or protected publisher. Unrestricted members and allowlists containing
 `crates-io` retain both workflows.
+Native archive retries require the original hosted upload step's artifact ID and
+digest from GitHub's attempt-specific step logs. A later same-name replacement
+does not inherit the original attempt's success. Missing or ambiguous upload
+logs fail admission. The protected Python uploader consumes the engine's
+already-normalized registry version, including prereleases. Public Python names
+follow the Core Metadata grammar; npm `private` must be absent or boolean.
 
 Configured VS Code and JetBrains extension publishers remain independently
 managed. Full monorepo CI generation rejects those sections before reconciling

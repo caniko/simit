@@ -156,13 +156,47 @@ fn non_utf8_git_paths_select_full_graph_without_losing_known_paths() {
                 "base",
             ],
         );
-        let base = fixture_git(root, &["rev-parse", "HEAD"]);
+        let mut base = fixture_git(root, &["rev-parse", "HEAD"]);
         let filename = std::ffi::OsString::from_vec(b"python/invalid-\xff.py".to_vec());
-        fs::write(root.join(filename), "changed\n").unwrap();
-        write(root, "python/server.py", "known change\n");
         if tracked {
-            fixture_git(root, &["add", "."]);
+            // Git objects can contain byte paths that APFS cannot materialize.
+            // Put one in an ancestor tree, then compare its deletion against
+            // our representable working tree without creating an invalid file.
+            let blob = fixture_git(root, &["rev-parse", "HEAD:python/server.py"]);
+            let mut cacheinfo = format!("100644,{},", blob.trim()).into_bytes();
+            cacheinfo.extend_from_slice(filename.as_encoded_bytes());
+            let status = Command::new("git")
+                .current_dir(root)
+                .args(["update-index", "--add", "--cacheinfo"])
+                .arg(std::ffi::OsString::from_vec(cacheinfo))
+                .status()
+                .unwrap();
+            assert!(status.success());
+            let tree = fixture_git(root, &["write-tree"]);
+            base = fixture_git(
+                root,
+                &[
+                    "-c",
+                    "commit.gpgsign=false",
+                    "commit-tree",
+                    tree.trim(),
+                    "-p",
+                    "HEAD",
+                    "-m",
+                    "byte path ancestor",
+                ],
+            );
+            fixture_git(root, &["read-tree", "HEAD"]);
+        } else if let Err(error) = fs::write(root.join(filename), "changed\n") {
+            // No untracked byte path exists if the native filesystem rejects
+            // it. The decoder test still exercises that input on every OS.
+            assert!(
+                cfg!(target_os = "macos") && error.raw_os_error() == Some(92),
+                "{error}"
+            );
+            continue;
         }
+        write(root, "python/server.py", "known change\n");
         let output = common::simit()
             .current_dir(root)
             .args(["monorepo", "plan", "--json", "--base", base.trim()])

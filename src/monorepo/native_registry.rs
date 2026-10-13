@@ -7,6 +7,21 @@ use serde_json::Value;
 
 use super::releases::Package;
 
+/// Core Metadata distribution names are ASCII and alphanumeric at both ends.
+/// https://packaging.python.org/en/latest/specifications/name-normalization/
+pub(crate) fn valid_python_package_name(name: &str) -> bool {
+    name.as_bytes()
+        .first()
+        .is_some_and(u8::is_ascii_alphanumeric)
+        && name
+            .as_bytes()
+            .last()
+            .is_some_and(u8::is_ascii_alphanumeric)
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
 /// Match npm's `validForOldPackages` admission (also used by npm publish),
 /// preserving warning-only legacy names rather than imposing new-package rules.
 /// https://github.com/npm/validate-npm-package-name/blob/v7.0.2/lib/index.js

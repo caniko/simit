@@ -97,6 +97,10 @@ impl ManifestRelease {
                 )
             } else {
                 let doc: Value = serde_json::from_str(content)?;
+                ensure!(
+                    doc.get("private").is_none_or(Value::is_boolean),
+                    "npm private must be boolean when present"
+                );
                 (
                     doc["name"]
                         .as_str()
@@ -113,6 +117,12 @@ impl ManifestRelease {
         let version = Version::parse(&version)?;
         if self.publish && !private {
             registry.version(&version)?;
+            if matches!(registry, super::native_registry::Registry::Python) {
+                ensure!(
+                    super::native_registry::valid_python_package_name(&name),
+                    "invalid Python package name {name:?}"
+                );
+            }
             if matches!(registry, super::native_registry::Registry::Npm) {
                 ensure!(
                     super::native_registry::valid_npm_package_name(&name),

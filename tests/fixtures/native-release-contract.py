@@ -19,6 +19,16 @@ spec.loader.exec_module(publisher)
 
 
 class NativeRelease(unittest.TestCase):
+    def test_protected_python_prerelease_identity_is_already_normalized(self):
+        for version in ["1.2.3a1", "1.2.3b0", "1.2.3rc1", "1.2.3.dev2"]:
+            with self.subTest(version=version):
+                admission = {"identity": self.identity | {"version": version, "workflowId": 7}, "artifactAttempt": 1, "maxAttempt": 2, "manifest": {}}
+                path = self.out / "admission.json"
+                path.write_text(json.dumps(admission))
+                with patch.object(sys, "argv", ["publisher.py", "admitted-publish", str(path), str(self.out)]), patch.object(publisher, "publish") as upload:
+                    publisher.main()
+                    self.assertEqual(upload.call_args.args[1]["version"], version)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)

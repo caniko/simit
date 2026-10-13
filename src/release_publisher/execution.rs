@@ -313,12 +313,14 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
             )),
     )?;
     let enrolled_workflow = fs::read(trusted_root.join(&policy.source_workflow_path))?;
-    if native {
-        verify_native_builder(
+    let native_upload_name = if native {
+        Some(verify_native_builder(
             &enrolled_workflow,
             namespace.context("native publisher requires namespace")?,
-        )?;
-    }
+        )?)
+    } else {
+        None
+    };
     if namespace.is_some() || tag_prefix == crate::release_identity::TagPrefix::V {
         verify_tag_only_source_workflow_with_prefix(
             &signed_workflow.stdout,
@@ -384,7 +386,7 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
             &artifacts,
             &artifact_prefix,
             bound.source_run_attempt,
-            |attempt| {
+            |attempt, artifact| {
                 let prior: ReleaseRun = serde_json::from_value(api_json(
                     &client,
                     &token,
@@ -412,7 +414,32 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
                     }
                     ensure!(page < 10, "original attempt has too many jobs");
                 }
-                native_attempt_succeeded(&provider, &prior, attempt, &jobs)
+                if !native_attempt_succeeded(&provider, &prior, attempt, &jobs)? {
+                    return Ok(false);
+                }
+                // Run success and an attempt-qualified name are insufficient:
+                // another runner can delete/recreate an old artifact. GitHub's
+                // original hosted upload step log independently binds ID/digest.
+                let mut logs = Vec::new();
+                client.get(format!("https://api.github.com/repos/{repository}/actions/runs/{}/attempts/{attempt}/logs", bound.source_run_id))
+                    .bearer_auth(&token).send()?.error_for_status()?
+                    .take(MAX_PROVIDER_BYTES + 1).read_to_end(&mut logs)?;
+                ensure!(
+                    logs.len() as u64 <= MAX_PROVIDER_BYTES,
+                    "native attempt logs exceed byte limit"
+                );
+                let builder = jobs
+                    .iter()
+                    .find(|job| job["name"] == "validate")
+                    .context("missing hosted native builder")?;
+                native_upload_matches_artifact(
+                    artifact,
+                    builder,
+                    &logs,
+                    native_upload_name
+                        .as_deref()
+                        .context("missing enrolled native upload step")?,
+                )
             },
         )?
     } else {
@@ -692,12 +719,10 @@ fn select_native_artifact<'a>(
     artifacts: &'a [ReleaseArtifact],
     prefix: &str,
     max_attempt: u64,
-    mut attempt_succeeded: impl FnMut(u64) -> Result<bool>,
+    mut attempt_attested: impl FnMut(u64, &ReleaseArtifact) -> Result<bool>,
 ) -> Result<&'a ReleaseArtifact> {
-    // The independently enrolled hosted job must complete its unconditional,
-    // immutable upload of this exact attempt name. A same-name forgery makes
-    // that upload fail; successful job proof plus uniqueness excludes it.
-    let mut proofs = BTreeMap::new();
+    // Independently bind the selected ID and digest to the original successful
+    // hosted upload, not a same-name replacement created by a later attempt.
     let mut selected: Option<&ReleaseArtifact> = None;
     let mut names = std::collections::BTreeSet::new();
     for artifact in artifacts {
@@ -718,17 +743,85 @@ fn select_native_artifact<'a>(
             names.insert(&artifact.name),
             "native artifact attempt has ambiguous provider archives"
         );
-        let succeeded = match proofs.entry(attempt) {
-            std::collections::btree_map::Entry::Occupied(proof) => *proof.get(),
-            std::collections::btree_map::Entry::Vacant(proof) => {
-                *proof.insert(attempt_succeeded(attempt)?)
-            }
-        };
+        let succeeded = attempt_attested(attempt, artifact)?;
         if succeeded && selected.is_none_or(|old| artifact.id < old.id) {
             selected = Some(artifact);
         }
     }
     selected.context("original run has no artifact from a successful hosted native builder attempt")
+}
+
+fn native_upload_matches_artifact(
+    artifact: &ReleaseArtifact,
+    builder: &Value,
+    logs: &[u8],
+    name: &str,
+) -> Result<bool> {
+    let steps = builder["steps"]
+        .as_array()
+        .context("hosted builder has no step records")?;
+    let uploads: Vec<_> = steps.iter().filter(|step| step["name"] == name).collect();
+    ensure!(
+        uploads.len() == 1,
+        "hosted builder requires one native upload step record"
+    );
+    let upload = uploads[0];
+    if upload["status"] != "completed" || upload["conclusion"] != "success" {
+        return Ok(false);
+    }
+    let number = upload["number"]
+        .as_u64()
+        .filter(|number| *number > 0)
+        .context("native upload step has no provider number")?;
+    // GitHub's log ZIP separates steps. Qualification and packing output cannot
+    // impersonate the trusted action by echoing its messages into another step.
+    let filename = name.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_");
+    let path = format!("validate/{number}_{filename}.txt");
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(logs))?;
+    ensure!(
+        archive.len() <= 10_000 && archive.file_names().filter(|name| *name == path).count() == 1,
+        "original native upload log is missing or ambiguous"
+    );
+    let mut log = archive.by_name(&path)?;
+    const MAX_LOG_BYTES: u64 = 4 * 1024 * 1024;
+    ensure!(
+        log.size() <= MAX_LOG_BYTES,
+        "native upload log exceeds byte limit"
+    );
+    let mut text = String::new();
+    log.by_ref()
+        .take(MAX_LOG_BYTES + 1)
+        .read_to_string(&mut text)?;
+    ensure!(
+        text.len() as u64 <= MAX_LOG_BYTES,
+        "native upload log exceeds byte limit"
+    );
+    let messages: Vec<_> = text
+        .lines()
+        .filter_map(|line| {
+            let (timestamp, message) = line.split_once(' ')?;
+            chrono::DateTime::parse_from_rfc3339(timestamp).ok()?;
+            Some(message)
+        })
+        .collect();
+    let digests: Vec<_> = messages
+        .iter()
+        .filter_map(|message| message.strip_prefix("SHA256 digest of uploaded artifact is "))
+        .collect();
+    let finalized = format!(
+        "Artifact {} successfully finalized. Artifact ID ",
+        artifact.name
+    );
+    let ids: Vec<_> = messages
+        .iter()
+        .filter_map(|message| message.strip_prefix(&finalized))
+        .collect();
+    ensure!(
+        digests.len() == 1 && ids.len() == 1,
+        "native upload log must bind a unique artifact ID and digest"
+    );
+    Ok(ids[0].parse::<u64>().ok() == Some(artifact.id)
+        && artifact.digest.as_deref() == Some(format!("sha256:{}", digests[0]).as_str()))
 }
 
 fn native_attempt_succeeded(
@@ -771,7 +864,7 @@ fn native_attempt_succeeded(
         && job["labels"] == json!(["ubuntu-24.04"]))
 }
 
-fn verify_native_builder(enrolled: &[u8], namespace: &str) -> Result<()> {
+fn verify_native_builder(enrolled: &[u8], namespace: &str) -> Result<String> {
     let workflow: serde_yaml::Value = serde_yaml::from_slice(enrolled)?;
     ensure!(
         workflow["jobs"]["validate"]["runs-on"].as_str() == Some("ubuntu-24.04"),
@@ -802,7 +895,10 @@ fn verify_native_builder(enrolled: &[u8], namespace: &str) -> Result<()> {
             && (upload["with"]["overwrite"].is_null() || upload["with"]["overwrite"] == false),
         "native builder requires an unconditional immutable upload whose failure fails the job"
     );
-    Ok(())
+    Ok(upload["name"]
+        .as_str()
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("Run {expected_action}")))
 }
 
 fn manifest_string<'a>(table: &'a dyn toml_edit::TableLike, key: &str) -> Option<&'a str> {
@@ -1389,6 +1485,148 @@ pub fn wait_for_registry_with(
 
 #[cfg(test)]
 mod tests {
+    fn native_upload_logs(id: u64, attempt: u64, digest: &str, extra: &str) -> Vec<u8> {
+        use std::io::Write;
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        zip.start_file(
+            "validate/7_Upload native release archive.txt",
+            zip::write::SimpleFileOptions::default(),
+        )
+        .unwrap();
+        let log = format!(
+            "2026-10-13T15:29:40Z SHA256 digest of uploaded artifact is {digest}\n2026-10-13T15:29:41Z Artifact native-release-native-{attempt} successfully finalized. Artifact ID {id}\n{extra}"
+        );
+        zip.write_all(log.as_bytes()).unwrap();
+        zip.finish().unwrap().into_inner()
+    }
+
+    fn native_upload_step() -> Value {
+        json!({"steps":[{"name":"Upload native release archive","number":7,"status":"completed","conclusion":"success"}]})
+    }
+
+    #[test]
+    fn native_retry_rejects_replaced_archive_after_original_success() {
+        let artifact = |id, attempt| {
+            serde_json::from_value::<ReleaseArtifact>(json!({"id":id,"name":format!("native-release-native-{attempt}"),"expired":false,"digest":format!("sha256:{}", "a".repeat(64)),"workflow_run":null})).unwrap()
+        };
+        // Attempt 1 originally uploaded ID 1. A compromised qualification rerun
+        // deletes it and recreates the same name with ID 4 before hosted ID 5.
+        let artifacts = [artifact(4, 1), artifact(5, 2)];
+        let selected = select_native_artifact(
+            &artifacts,
+            "native-release-native-",
+            2,
+            |attempt, artifact| {
+                let logs = native_upload_logs(
+                    if attempt == 1 { 1 } else { 5 },
+                    attempt,
+                    &"a".repeat(64),
+                    "",
+                );
+                native_upload_matches_artifact(
+                    artifact,
+                    &native_upload_step(),
+                    &logs,
+                    "Upload native release archive",
+                )
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            selected.id, 5,
+            "a successful old attempt cannot attest replacement bytes"
+        );
+    }
+
+    #[test]
+    fn native_upload_proof_binds_digest_and_provider_step_not_candidate_echoes() {
+        use std::io::Write;
+        let artifact: ReleaseArtifact = serde_json::from_value(json!({"id":1,"name":"native-release-native-1","expired":false,"digest":format!("sha256:{}", "a".repeat(64)),"workflow_run":null})).unwrap();
+        let job = native_upload_step();
+        assert!(
+            native_upload_matches_artifact(
+                &artifact,
+                &job,
+                &native_upload_logs(1, 1, &"a".repeat(64), ""),
+                "Upload native release archive"
+            )
+            .unwrap()
+        );
+        assert!(
+            !native_upload_matches_artifact(
+                &artifact,
+                &job,
+                &native_upload_logs(9, 1, &"a".repeat(64), ""),
+                "Upload native release archive"
+            )
+            .unwrap()
+        );
+        assert!(
+            !native_upload_matches_artifact(
+                &artifact,
+                &job,
+                &native_upload_logs(1, 1, &"b".repeat(64), ""),
+                "Upload native release archive"
+            )
+            .unwrap()
+        );
+        assert!(native_upload_matches_artifact(&artifact, &job, &native_upload_logs(1, 1, &"a".repeat(64), "2026-10-13T15:29:41Z Artifact native-release-native-1 successfully finalized. Artifact ID 1\n"), "Upload native release archive").is_err());
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        zip.start_file(
+            "component-private/7_Upload native release archive.txt",
+            zip::write::SimpleFileOptions::default(),
+        )
+        .unwrap();
+        zip.write_all(format!("2026-10-13T15:29:40Z SHA256 digest of uploaded artifact is {}\n2026-10-13T15:29:41Z Artifact native-release-native-1 successfully finalized. Artifact ID 1\n", "a".repeat(64)).as_bytes()).unwrap();
+        let forged = zip.finish().unwrap().into_inner();
+        assert!(
+            native_upload_matches_artifact(
+                &artifact,
+                &job,
+                &forged,
+                "Upload native release archive"
+            )
+            .is_err()
+        );
+        let mut wrong_step = job.clone();
+        wrong_step["steps"][0]["number"] = json!(8);
+        assert!(
+            native_upload_matches_artifact(
+                &artifact,
+                &wrong_step,
+                &native_upload_logs(1, 1, &"a".repeat(64), ""),
+                "Upload native release archive"
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn native_upload_proof_reads_the_actual_pinned_action_log_protocol() {
+        use std::io::Write;
+        let artifact: ReleaseArtifact = serde_json::from_value(json!({"id":11826996696_u64,"name":"primary-ci-integration-430a6d5be5027d10c80f34c1d9c47d013b0ce2e5-1","expired":false,"digest":"sha256:15206afe6e8a9dabe1b1e05cfa42a0883b99cad13428c729c498eb340d569fae","workflow_run":null})).unwrap();
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        zip.start_file(
+            "validate/7_Upload native release archive.txt",
+            zip::write::SimpleFileOptions::default(),
+        )
+        .unwrap();
+        zip.write_all(include_bytes!(
+            "../../tests/fixtures/native-upload-step.txt"
+        ))
+        .unwrap();
+        let archive = zip.finish().unwrap().into_inner();
+        assert!(
+            native_upload_matches_artifact(
+                &artifact,
+                &native_upload_step(),
+                &archive,
+                "Upload native release archive"
+            )
+            .unwrap()
+        );
+    }
+
     #[test]
     fn native_retry_reuses_only_successful_hosted_builder_archives() {
         let current: ReleaseRun = serde_json::from_value(json!({
@@ -1408,15 +1646,20 @@ mod tests {
             artifact(4, "01"),
         ];
         let mut queried = Vec::new();
-        let selected = select_native_artifact(&artifacts, "native-release-native-", 3, |attempt| {
-            queried.push(attempt);
-            let mut prior = current.clone();
-            prior.run_attempt = attempt;
-            if attempt == 1 {
-                prior.conclusion = Some("failure".into());
-            }
-            native_attempt_succeeded(&current, &prior, attempt, &[job(attempt)])
-        })
+        let selected = select_native_artifact(
+            &artifacts,
+            "native-release-native-",
+            3,
+            |attempt, _artifact| {
+                queried.push(attempt);
+                let mut prior = current.clone();
+                prior.run_attempt = attempt;
+                if attempt == 1 {
+                    prior.conclusion = Some("failure".into());
+                }
+                native_attempt_succeeded(&current, &prior, attempt, &[job(attempt)])
+            },
+        )
         .unwrap();
         assert_eq!(
             selected.id, 2,
@@ -1424,11 +1667,13 @@ mod tests {
         );
         assert_eq!(queried, vec![1, 2, 3]);
         assert!(
-            select_native_artifact(&artifacts, "native-release-native-", 3, |_| Ok(false)).is_err()
+            select_native_artifact(&artifacts, "native-release-native-", 3, |_, _| Ok(false))
+                .is_err()
         );
         let duplicates = vec![artifact(2, "2"), artifact(9, "2")];
         assert!(
-            select_native_artifact(&duplicates, "native-release-native-", 3, |_| Ok(true)).is_err()
+            select_native_artifact(&duplicates, "native-release-native-", 3, |_, _| Ok(true))
+                .is_err()
         );
         let mut prior = current.clone();
         prior.run_attempt = 2;
@@ -1452,13 +1697,24 @@ mod tests {
 
     #[test]
     fn native_archive_builder_is_independently_hosted() {
+        let action = crate::render::ci::github_action_ref("actions/upload-artifact", "v7.0.2");
+        let action = action.split(" #").next().unwrap();
+        let unnamed = json!({"jobs":{"validate":{"runs-on":"ubuntu-24.04","steps":[{"uses":action,"with":{"name":"native-release-native-${{ github.run_attempt }}"}}]}}});
+        assert_eq!(
+            super::verify_native_builder(
+                serde_yaml::to_string(&unnamed).unwrap().as_bytes(),
+                "native"
+            )
+            .unwrap(),
+            format!("Run {action}")
+        );
         for runner in [
             "ubuntu-24.04",
             "self-hosted",
             "private-builder",
             "${{ inputs.runner }}",
         ] {
-            let workflow = json!({"jobs":{"validate":{"runs-on":runner,"steps":[{"uses":crate::render::ci::github_action_ref("actions/upload-artifact", "v7.0.2").split(" #").next().unwrap(),"with":{"name":"native-release-native-${{ github.run_attempt }}"}}]}}});
+            let workflow = json!({"jobs":{"validate":{"runs-on":runner,"steps":[{"id":"native-upload","name":"Upload native release archive","uses":crate::render::ci::github_action_ref("actions/upload-artifact", "v7.0.2").split(" #").next().unwrap(),"with":{"name":"native-release-native-${{ github.run_attempt }}"}}]}}});
             assert_eq!(
                 super::verify_native_builder(
                     &serde_yaml::to_string(&workflow).unwrap().into_bytes(),
@@ -1483,7 +1739,7 @@ mod tests {
                 json!({"name":"native-release-native-${{ github.run_attempt }}", "overwrite":true}),
             ),
         ] {
-            let mut workflow = json!({"jobs":{"validate":{"runs-on":"ubuntu-24.04","steps":[{"uses":crate::render::ci::github_action_ref("actions/upload-artifact", "v7.0.2").split(" #").next().unwrap(),"with":{"name":"native-release-native-${{ github.run_attempt }}"}}]}}});
+            let mut workflow = json!({"jobs":{"validate":{"runs-on":"ubuntu-24.04","steps":[{"id":"native-upload","name":"Upload native release archive","uses":crate::render::ci::github_action_ref("actions/upload-artifact", "v7.0.2").split(" #").next().unwrap(),"with":{"name":"native-release-native-${{ github.run_attempt }}"}}]}}});
             workflow["jobs"]["validate"]["steps"][0][key] = value;
             let error = super::verify_native_builder(
                 serde_yaml::to_string(&workflow).unwrap().as_bytes(),

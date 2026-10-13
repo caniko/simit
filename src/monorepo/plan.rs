@@ -137,6 +137,10 @@ pub fn changed_paths(root: &Path, base: &str) -> Result<ChangedPaths> {
         root,
         &["ls-files", "--others", "--exclude-standard", "-z"],
     )?);
+    Ok(decode_paths(&paths))
+}
+
+fn decode_paths(paths: &[u8]) -> ChangedPaths {
     let mut changed = ChangedPaths {
         paths: Vec::new(),
         full: false,
@@ -147,7 +151,7 @@ pub fn changed_paths(root: &Path, base: &str) -> Result<ChangedPaths> {
             Err(_) => changed.full = true,
         }
     }
-    Ok(changed)
+    changed
 }
 
 fn git(root: &Path, args: &[&str]) -> Result<Vec<u8>> {
@@ -164,4 +168,17 @@ fn git(root: &Path, args: &[&str]) -> Result<Vec<u8>> {
         );
     }
     Ok(output.stdout)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn byte_path_decoder_preserves_known_paths_and_forces_full_qualification() {
+        let changed = super::decode_paths(b"python/server.py\0python/invalid-\xff.py\0");
+        assert!(changed.full);
+        assert_eq!(changed.paths, ["python/server.py"]);
+        let known = super::decode_paths(b"python/server.py\0");
+        assert!(!known.full);
+        assert_eq!(known.paths, ["python/server.py"]);
+    }
 }

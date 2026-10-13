@@ -84,6 +84,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Git paths, and normalize Cargo workspace member paths on Windows.
 - Omit independent crates.io publishers for alternate-only or unpublished Cargo
   members while retaining their component qualification.
+- Bind native retry archives to the original hosted upload step's provider ID and
+  digest, rejecting same-name replacements made by later qualification attempts.
+- Preserve already-normalized Python prerelease identities at protected upload,
+  validate public distribution names and npm private flag types before enrollment,
+  and qualify byte-path planning without materializing invalid APFS filenames.
 - Honor the documented absolute `XDG_DATA_HOME` project-registry override on
   macOS and Windows as well as Linux, retaining native defaults when unset.
 - Preserve `SIMIT_NIX_FRESH` in environment-mode grouped execution, retain

@@ -63,7 +63,7 @@ pub(super) fn files(
                 tag_check.clone(),
                 run("pack"),
             ];
-            validate_steps.push(json!({"uses": action("actions/upload-artifact", if node24 { "v7.0.2" } else { "v4.6.2" }), "with": {"name": artifact_name, "path": "${{ runner.temp }}/native-release-dist", "if-no-files-found": "error", "retention-days": 30}}));
+            validate_steps.push(json!({"id": "native-upload", "name": "Upload native release archive", "uses": action("actions/upload-artifact", if node24 { "v7.0.2" } else { "v4.6.2" }), "with": {"name": artifact_name, "path": "${{ runner.temp }}/native-release-dist", "if-no-files-found": "error", "retention-days": 30}}));
             let display = format!("Build {} {}", registry.name(), owner.namespace);
             let mut workflow = json!({"name": display, "on": {"push": {"tags": [format!("{}/v[0-9]*", owner.namespace)]}}, "permissions": {"contents": "read"}, "concurrency": {"group": format!("publish-native-{}-${{{{ github.ref }}}}", owner.namespace), "cancel-in-progress": false}, "jobs": {"validate": {"needs": ["qualified"], "runs-on": runner, "timeout-minutes": 30, "env": env, "steps": validate_steps}}});
             workflow["jobs"].as_object_mut().unwrap().extend(

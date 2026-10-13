@@ -99,6 +99,8 @@ def context():
     require(source == tagged == os.environ["GITHUB_SHA"], "release source differs from signed tag/event")
     data = tomllib.loads(manifest.read_text())["project"] if registry == "python" else json.loads(manifest.read_text())
     require(data["name"] == package and data["version"] == version, "tagged manifest identity/version mismatch")
+    if registry == "npm":
+        require("private" not in data or isinstance(data["private"], bool), "npm private must be boolean when present")
     require(not data.get("private", False), "private packages cannot be published")
     if registry == "npm":
         require(valid_npm_package_name(package), "invalid npm package name")
@@ -137,6 +139,7 @@ def archive_identity(path, identity):
     if identity["registry"] == "npm":
         data = json.loads(tar_metadata(path, "npm"))
         require(valid_npm_package_name(data["name"]), "invalid npm package name")
+        require("private" not in data or isinstance(data["private"], bool), "npm private must be boolean when present")
         require(not data.get("private", False), "packed package is private")
         require(data.get("publishConfig", {}).get("registry", "https://registry.npmjs.org/").rstrip("/") == "https://registry.npmjs.org", "packed npm registry is not public npm")
         name, version = data["name"], data["version"]
@@ -291,6 +294,9 @@ def upload_native(out, identity, files, manifest, token):
             require(access == "public", "npm provenance requires public access")
             bundle = provenance_bundle(identity, archive)
             serialized = json.dumps(bundle, separators=(",", ":"))
+            # npm's libnpmpublish sends provenance JSON directly, unlike the
+            # tarball's base64 data. Preserve its registry protocol.
+            # https://github.com/npm/cli/blob/v11.4.2/workspaces/libnpmpublish/lib/publish.js
             body["_attachments"][identity["name"] + "-" + identity["version"] + ".sigstore"] = {"content_type": bundle["mediaType"], "data": serialized, "length": len(serialized.encode())}
         request = urllib.request.Request("https://registry.npmjs.org/" + urllib.parse.quote(identity["name"], safe=""), data=json.dumps(body).encode(), method="PUT", headers={"Authorization": "Bearer " + token, "Content-Type": "application/json"})
         upload_request(request)
@@ -376,8 +382,8 @@ def main():
         identity = admission["identity"]
         # workflowId is checked by the native provider boundary, not candidate receipts.
         identity.pop("workflowId")
-        if identity["registry"] == "python":
-            identity["version"] = python_version(identity["version"])
+        # The protected Rust engine supplies the normalized registry version;
+        # packing alone converts the signed manifest's SemVer spelling.
         require(1 <= admission["artifactAttempt"] <= admission["maxAttempt"], "invalid original-run artifact attempt")
         publish(Path(sys.argv[3]), identity, admission["artifactAttempt"], admission["manifest"])
     else:

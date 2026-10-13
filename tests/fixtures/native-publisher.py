@@ -148,6 +148,9 @@ with tempfile.TemporaryDirectory() as temp:
     attachments = json.loads(requests[-1].data)["_attachments"]
     assert base64.b64decode(attachments[tarball.name]["data"]) == tarball.read_bytes()
     assert npm_identity["name"] + "-1.2.3.sigstore" in attachments
+    provenance = attachments[npm_identity["name"] + "-1.2.3.sigstore"]
+    assert json.loads(provenance["data"])["mediaType"] == provenance["content_type"]
+    assert len(provenance["data"].encode()) == provenance["length"]
     # An existing exact tarball under a different channel is not a propagated
     # release. Recovery must reconcile only the signed channel, without repack.
     npm_out = root / "npm-out"

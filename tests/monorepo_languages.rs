@@ -700,6 +700,59 @@ fn python_bump_updates_each_declared_owning_uv_lock() {
 }
 
 #[test]
+fn native_manifest_names_and_private_types_reject_before_enrollment() {
+    for name in ["bad/name", "-hidden", "hidden-", "bad name", "éclair"] {
+        let temp = fixture();
+        let root = temp.path();
+        let config = fs::read_to_string(root.join("simit.toml"))
+            .unwrap()
+            .replace("publish = false", "publish = true");
+        write(root, "simit.toml", &config);
+        write(
+            root,
+            "python/pyproject.toml",
+            &format!("[project]\nname = '{name}'\nversion = '0.2.0'\n"),
+        );
+        let output = run(root, &["init", "ci"]);
+        assert!(!output.status.success(), "{name}: {output:?}");
+        assert!(String::from_utf8_lossy(&output.stderr).contains("invalid Python package name"));
+        assert!(
+            !root
+                .join(".github/workflows/publish-python-python-engine.yaml")
+                .exists()
+        );
+    }
+    for private in [
+        serde_json::json!("false"),
+        serde_json::json!(0),
+        serde_json::json!(null),
+        serde_json::json!({}),
+        serde_json::json!([]),
+    ] {
+        let temp = fixture();
+        let root = temp.path();
+        let config = fs::read_to_string(root.join("simit.toml"))
+            .unwrap()
+            .replace("publish = false", "publish = true");
+        write(root, "simit.toml", &config);
+        write(
+            root,
+            "node/package.json",
+            &serde_json::json!({"name":"node-engine","version":"1.3.0","private":private})
+                .to_string(),
+        );
+        let output = run(root, &["init", "ci"]);
+        assert!(!output.status.success(), "{private}: {output:?}");
+        assert!(String::from_utf8_lossy(&output.stderr).contains("npm private must be boolean"));
+        assert!(
+            !root
+                .join(".github/workflows/trusted-publish-npm-node-engine.yaml")
+                .exists()
+        );
+    }
+}
+
+#[test]
 fn native_npm_names_are_admitted_before_publication_enrollment() {
     for (name, valid) in [
         ("bad name", false),
