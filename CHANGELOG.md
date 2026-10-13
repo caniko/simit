@@ -52,6 +52,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   retain admission diagnostics, and force fresh rebuilds onto the current worker.
   Bootstrap uses public credential-free Nix fetching and portable hashing, with
   unsupported Intel macOS runner admission rejected before generation writes.
+- Admit dependency attributes outside the actual checks namespace, apply CI cache
+  policy on preinstalled Forgejo Nix, and explain full reruns for attempt-bound
+  transport. Reject Darwin case-hack aliases before import and bind checksum and
+  decompression to one private compressed snapshot.
 - Verify native exact-build runners against OS/CPU identity independently of
   Nix's configurable `eval-system` and `system` settings, preventing a configured
   system override from admitting the wrong hardware architecture.

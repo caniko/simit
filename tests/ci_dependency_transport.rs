@@ -92,6 +92,29 @@ fn dependency_transport_is_same_run_and_runtime_jobs_still_execute_fresh() {
         .unwrap();
     assert!(download["with"]["run-id"].is_null());
     assert!(download["with"]["github-token"].is_null());
+    assert_eq!(download["id"], "simit-dependency-download");
+    assert!(
+        download["with"]["name"]
+            .as_str()
+            .unwrap()
+            .contains("github.run_attempt")
+    );
+    let guidance = steps
+        .iter()
+        .find(|s| s["name"] == "Explain missing attempt-bound dependencies")
+        .unwrap();
+    assert!(
+        guidance["if"]
+            .as_str()
+            .unwrap()
+            .contains("steps.simit-dependency-download.outcome == 'failure'")
+    );
+    assert!(
+        guidance["run"]
+            .as_str()
+            .unwrap()
+            .contains("Re-run all jobs")
+    );
     assert!(
         steps
             .iter()
@@ -232,25 +255,56 @@ fn dependency_producer_enables_kvm_before_setup_and_export_when_requested() {
 
 #[test]
 fn qualification_outputs_cannot_be_enrolled_as_transport_dependencies() {
-    let temp = project();
-    let path = temp.path().join("simit.toml");
-    let before = fs::read_to_string(&path).unwrap().replace(
-        "dependency_installables = [\".#ci-dependency\"]",
-        "dependency_installables = [\".#checks.x86_64-linux.runtime\"]",
-    );
-    fs::write(&path, &before).unwrap();
-    let output = common::simit()
-        .current_dir(temp.path())
-        .args(["init", "ci"])
-        .output()
+    for installable in [".#checks", ".#checks.x86_64-linux.runtime"] {
+        let temp = project();
+        let path = temp.path().join("simit.toml");
+        let before = fs::read_to_string(&path).unwrap().replace(
+            "dependency_installables = [\".#ci-dependency\"]",
+            &format!("dependency_installables = [\"{installable}\"]"),
+        );
+        fs::write(&path, &before).unwrap();
+        let output = common::simit()
+            .current_dir(temp.path())
+            .args(["init", "ci"])
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("dependency_installables"),
+            "{output:?}"
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), before);
+        assert!(!temp.path().join(".github/workflows").exists());
+    }
+}
+
+#[test]
+fn dependency_names_outside_the_checks_namespace_remain_usable() {
+    for installable in [".#mychecks.foo", ".#packages.x86_64-linux.prechecks.tool"] {
+        let temp = project();
+        let path = temp.path().join("simit.toml");
+        fs::write(
+            &path,
+            fs::read_to_string(&path)
+                .unwrap()
+                .replace(".#ci-dependency", installable),
+        )
         .unwrap();
-    assert!(!output.status.success(), "{output:?}");
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains("dependency_installables"),
-        "{output:?}"
-    );
-    assert_eq!(fs::read_to_string(&path).unwrap(), before);
-    assert!(!temp.path().join(".github/workflows").exists());
+        let output = common::simit()
+            .current_dir(temp.path())
+            .args(["init", "ci"])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{installable}: {output:?}");
+        assert!(
+            common::simit()
+                .current_dir(temp.path())
+                .args(["init", "ci", "--check", "--diff"])
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
 }
 
 #[test]
