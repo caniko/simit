@@ -98,7 +98,7 @@ pub fn files_with_components(
         Some(targets) => cross_template_with_msrv(targets, audit_tools, rust_version),
         None => template(audit_tools, rust_version),
     };
-    vec![
+    let mut files = vec![
         GeneratedFile {
             relative_path: PathBuf::from("flake.nix"),
             content: flake_content,
@@ -111,7 +111,17 @@ pub fn files_with_components(
             relative_path: PathBuf::from("nix/pre-commit.nix"),
             content: pre_commit_nix(languages, rust_version, audit_tools, components),
         },
-    ]
+    ];
+    if let Some(version) = rust_version {
+        files.push(GeneratedFile {
+            relative_path: PathBuf::from("rust-toolchain-msrv.toml"),
+            content: format!(
+                "[toolchain]\nchannel = \"{}\"\nprofile = \"minimal\"\n",
+                rust_overlay_version(version)
+            ),
+        });
+    }
+    files
 }
 
 pub fn print_files(files: &[GeneratedFile]) {
@@ -312,6 +322,104 @@ pub fn patch_existing(
     )?;
 
     Ok(patched)
+}
+
+/// Migrate only the statically recognized, previously generated MSRV manifest.
+/// Custom/hook-only callers do not invoke this project-owned shell migration.
+pub fn migrate_msrv_toolchain(content: &str) -> Result<String> {
+    use rnix::ast::{Expr, InterpolPart};
+
+    fn literal(expr: Option<Expr>) -> Option<String> {
+        let Expr::Str(value) = expr.and_then(unparen)? else {
+            return None;
+        };
+        value
+            .normalized_parts()
+            .into_iter()
+            .try_fold(String::new(), |mut result, part| {
+                match part {
+                    InterpolPart::Literal(part) => result.push_str(&part),
+                    InterpolPart::Interpolation(_) => return None,
+                }
+                Some(result)
+            })
+    }
+
+    let parsed = rnix::Root::parse(content);
+    if !parsed.errors().is_empty() {
+        bail!("cannot parse flake.nix for the MSRV source-manifest migration");
+    }
+    let mut ranges = Vec::new();
+    for node in parsed.syntax().descendants() {
+        let Some(binding) = cast_nix_node::<rnix::ast::AttrpathValue>(node.clone()) else {
+            continue;
+        };
+        if binding
+            .attrpath()
+            .is_none_or(|path| path.to_string() != "toolchainFile")
+        {
+            continue;
+        }
+        let Some(expr) = binding.value() else {
+            continue;
+        };
+        let Some(Expr::Apply(outer)) = unparen(expr.clone()) else {
+            continue;
+        };
+        let Some(Expr::Apply(inner)) = outer.lambda().and_then(unparen) else {
+            continue;
+        };
+        if inner
+            .lambda()
+            .and_then(unparen)
+            .is_none_or(|lambda| lambda.to_string() != "builtins.toFile")
+            || literal(inner.argument()).as_deref() != Some("rust-toolchain-msrv.toml")
+        {
+            continue;
+        }
+        let document =
+            literal(outer.argument()).and_then(|text| text.parse::<toml_edit::DocumentMut>().ok());
+        let valid = document.as_ref().is_some_and(|document| {
+            document.as_table().len() == 1
+                && document
+                    .get("toolchain")
+                    .and_then(toml_edit::Item::as_table)
+                    .is_some_and(|table| {
+                        table.len() == 2
+                            && table.get("profile").and_then(toml_edit::Item::as_str)
+                                == Some("minimal")
+                            && table
+                                .get("channel")
+                                .and_then(toml_edit::Item::as_str)
+                                .is_some_and(|channel| semver::Version::parse(channel).is_ok())
+                    })
+        });
+        if !valid {
+            bail!(
+                "unrecognized inline MSRV toolchain manifest; migrate toolchainFile to ./rust-toolchain-msrv.toml explicitly before regeneration"
+            );
+        }
+        let value_node = node
+            .last_child()
+            .ok_or_else(|| anyhow::anyhow!("missing inline MSRV expression"))?;
+        if value_node.to_string() != expr.to_string() {
+            bail!("unsupported inline MSRV expression shape");
+        }
+        ranges.push(value_node.text_range());
+    }
+    if ranges.len() > 1 {
+        bail!(
+            "multiple inline MSRV toolchain manifests; migrate their bindings explicitly before regeneration"
+        );
+    }
+    let mut migrated = content.to_owned();
+    if let Some(range) = ranges.first() {
+        migrated.replace_range(
+            usize::from(range.start())..usize::from(range.end()),
+            "./rust-toolchain-msrv.toml",
+        );
+    }
+    Ok(migrated)
 }
 
 pub fn has_required_wiring(content: &str) -> bool {
@@ -980,19 +1088,14 @@ const DEVSHELL_PACKAGES_MARKER: &str = "@@DEVSHELL_PACKAGES@@";
 const DEVSHELL_PACKAGES: &str = "        packages = with pkgs; [\n          cargo-about\n          cargo-audit\n          cargo-cyclonedx\n          cargo-deny\n          cargo-llvm-cov\n          cargo-sbom\n          cargo-nextest\n          cosign\n          file\n          gnutar\n          gzip\n          jq\n          minisign\n          nodejs\n          pre-commit\n          rpm\n          util-linux\n          unzip\n          zip\n          reprepro\n          rust-analyzer\n          taplo\n        ] ++ pre-commit-check.enabledPackages;";
 
 fn msrv_shell(rust_version: Option<&str>, attribute: &str) -> String {
-    let Some(version) = rust_version else {
+    if rust_version.is_none() {
         return String::new();
-    };
-    let version = rust_overlay_version(version);
+    }
     format!(
         r#"{attribute} = let
         msrvToolchain = rs-harbor.lib.mkToolchain {{
           inherit pkgs;
-          toolchainFile = builtins.toFile "rust-toolchain-msrv.toml" ''
-            [toolchain]
-            channel = "{version}"
-            profile = "minimal"
-          '';
+          toolchainFile = ./rust-toolchain-msrv.toml;
           withRustAnalyzer = false;
           crossTargets = [];
         }};

@@ -543,6 +543,57 @@ fn github_nix_input_transport_works_without_a_runner_ssh_key() {
 }
 
 #[test]
+fn existing_generated_msrv_shell_migrates_before_wiring_shortcuts() {
+    let directory = fixture("nix", false, true);
+    fs::remove_file(directory.path().join("flake.nix")).unwrap();
+    let run = |arguments: &[&str]| {
+        common::simit()
+            .current_dir(directory.path())
+            .args(arguments)
+            .output()
+            .unwrap()
+    };
+    assert!(run(&["init", "flake", "--scope", "full"]).status.success());
+    let path = directory.path().join("flake.nix");
+    let modern = fs::read_to_string(&path).unwrap();
+    let legacy = modern.replace("toolchainFile = ./rust-toolchain-msrv.toml;", "toolchainFile = builtins.toFile \"rust-toolchain-msrv.toml\" ''\n            [toolchain]\n            channel = \"1.88.0\"\n            profile = \"minimal\"\n          '';" );
+    assert_ne!(legacy, modern);
+    fs::write(&path, &legacy).unwrap();
+    let output = run(&["init", "flake", "--scope", "full", "--check", "--diff"]);
+    assert!(
+        !output.status.success(),
+        "legacy shell must fail full parity even with valid hooks and a current manifest"
+    );
+    assert_eq!(fs::read_to_string(&path).unwrap(), legacy);
+    assert!(
+        run(&["init", "flake", "--scope", "hooks-only"])
+            .status
+            .success()
+    );
+    assert_eq!(fs::read_to_string(&path).unwrap(), legacy);
+    assert!(run(&["init", "flake", "--scope", "full"]).status.success());
+    assert_eq!(fs::read_to_string(&path).unwrap(), modern);
+    assert!(
+        run(&["init", "flake", "--scope", "full", "--check"])
+            .status
+            .success()
+    );
+    assert!(run(&["init", "flake", "--scope", "full"]).status.success());
+    assert_eq!(fs::read_to_string(&path).unwrap(), modern);
+    let unknown = legacy.replace(
+        "profile = \"minimal\"",
+        "profile = \"minimal\"\n            components = [\"clippy\"]",
+    );
+    fs::write(&path, &unknown).unwrap();
+    let output = run(&["init", "flake", "--scope", "full"]);
+    assert!(
+        !output.status.success(),
+        "unrecognized toolchain content must not be overwritten"
+    );
+    assert_eq!(fs::read_to_string(&path).unwrap(), unknown);
+}
+
+#[test]
 fn generated_flakes_supply_a_native_msrv_shell_for_both_build_modes() {
     for cross in [false, true] {
         let directory = fixture("nix", false, true);
@@ -563,11 +614,53 @@ fn generated_flakes_supply_a_native_msrv_shell_for_both_build_modes() {
         let flake = fs::read_to_string(directory.path().join("flake.nix")).unwrap();
         assert!(flake.contains("msrv ="), "cross={cross}: {flake}");
         assert!(
-            flake.contains("channel = \"1.88.0\""),
+            flake.contains("toolchainFile = ./rust-toolchain-msrv.toml;"),
             "cross={cross}: {flake}"
         );
+        assert!(!flake.contains("builtins.toFile \"rust-toolchain-msrv.toml\""));
+        let manifest = fs::read_to_string(directory.path().join("rust-toolchain-msrv.toml"))
+            .expect(
+                "MSRV manifest must be a generated source asset, readable in no-build evaluation",
+            );
+        let manifest = manifest.parse::<toml_edit::DocumentMut>().unwrap();
+        assert_eq!(manifest["toolchain"]["channel"].as_str(), Some("1.88.0"));
+        assert_eq!(manifest["toolchain"]["profile"].as_str(), Some("minimal"));
         assert!(flake.contains("CARGO_ENCODED_RUSTFLAGS = \"\""));
         assert!(flake.contains("RUSTFLAGS = \"\""));
+        let mut check = common::simit();
+        check
+            .current_dir(directory.path())
+            .args(["init", "flake", "--scope", "full", "--check"]);
+        if cross {
+            check.args(["--cross", "--target", "native"]);
+        }
+        let output = check.output().unwrap();
+        assert!(output.status.success(), "{output:?}");
+        fs::write(
+            directory.path().join("rust-toolchain-msrv.toml"),
+            "[toolchain]\nchannel = \"1.99.0\"\nprofile = \"minimal\"\n",
+        )
+        .unwrap();
+        let output = check.output().unwrap();
+        assert!(
+            !output.status.success(),
+            "stale MSRV assets must fail parity"
+        );
+        assert!(String::from_utf8_lossy(&output.stderr).contains("rust-toolchain-msrv.toml"));
+
+        let owned_manifest =
+            fs::read_to_string(directory.path().join("rust-toolchain-msrv.toml")).unwrap();
+        let output = common::simit()
+            .current_dir(directory.path())
+            .args(["init", "flake", "--scope", "hooks-only"])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(
+            fs::read_to_string(directory.path().join("rust-toolchain-msrv.toml")).unwrap(),
+            owned_manifest,
+            "hooks-only must preserve project-owned toolchain assets"
+        );
     }
 }
 

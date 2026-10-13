@@ -14,6 +14,9 @@ use crate::config::{
 use crate::project::GeneratedFile;
 use crate::user_config::{ResolvedCiRunners, ResolvedRunner};
 
+mod independent_lanes;
+mod nix_dependencies;
+mod nix_groups;
 mod trusted_publisher;
 
 pub const OMNIX_REF_DEFAULT: &str = "github:juspay/omnix/v1.3.2";
@@ -167,6 +170,10 @@ pub enum OmCiMode {
 
 #[derive(Debug, Clone)]
 pub struct CiOptions {
+    /// CI-only cache policy; publication uses the separate nix_* fields.
+    pub ci_nix_substituters: Vec<String>,
+    pub ci_nix_trusted_public_keys: Vec<String>,
+    pub independent_lanes: bool,
     pub nix_builds: Vec<String>,
     pub all_features: bool,
     pub unit_tests_only: bool,
@@ -215,6 +222,9 @@ pub struct CodebergPagesOptions {
 impl Default for CiOptions {
     fn default() -> Self {
         Self {
+            ci_nix_substituters: Vec::new(),
+            ci_nix_trusted_public_keys: Vec::new(),
+            independent_lanes: false,
             nix_builds: Vec::new(),
             all_features: true,
             unit_tests_only: false,
@@ -354,6 +364,17 @@ impl Default for HomebrewPlatformSet {
 }
 
 pub fn files(request: FilesRequest<'_>) -> Result<Vec<GeneratedFile>> {
+    if request.options.independent_lanes
+        && (request.platform != Platform::Github
+            || request.provider != CiProvider::Actions
+            || request.runtime != Runtime::Nix
+            || !request.step_runners.is_empty()
+            || request.options.om_ci != OmCiMode::Off)
+    {
+        bail!(
+            "[ci].independent_lanes requires GitHub Actions Rust/Nix without step_runners or om_ci"
+        );
+    }
     if request.provider == CiProvider::Crow {
         return crate::render::crow::files(crate::render::crow::FilesRequest {
             format: request.crow.format,
@@ -560,7 +581,7 @@ fn publish_workspace_workflow(
     push_release_permissions(&mut w, platform);
     push_job_env(&mut w, platform, runtime, &[], true);
     w.push_str("    steps:\n");
-    push_event_checkout_step(&mut w, platform);
+    push_event_checkout_step(&mut w, platform, Some(runner));
     if runtime == Runtime::Nix {
         push_install_nix_step_with_cache(
             &mut w,
@@ -614,7 +635,7 @@ fn publish_workspace_workflow(
             .collect();
         push_job_env(&mut w, platform, runtime, &gate_env, true);
         w.push_str("    steps:\n");
-        push_event_checkout_step(&mut w, platform);
+        push_event_checkout_step(&mut w, platform, Some(runner));
         if runtime == Runtime::Nix {
             push_install_nix_step_with_cache(
                 &mut w,
@@ -665,7 +686,7 @@ fn publish_workspace_workflow(
         push_release_permissions(&mut w, platform);
         push_job_env(&mut w, platform, runtime, &[], true);
         w.push_str("    steps:\n");
-        push_event_checkout_step(&mut w, platform);
+        push_event_checkout_step(&mut w, platform, Some(runner));
         if runtime == Runtime::Nix {
             push_install_nix_step_with_cache(
                 &mut w,
@@ -676,7 +697,7 @@ fn publish_workspace_workflow(
             push_nix_cargo_bin_path_step(&mut w);
         } else {
             push_rust_setup_step(&mut w, platform);
-            push_rust_cache_steps(&mut w, platform);
+            push_rust_cache_steps(&mut w, platform, runner);
         }
         let prefix = command_prefix(runtime);
         // Stage 1-2: archive construction + verification build from packaged contents.
@@ -709,7 +730,7 @@ fn publish_workspace_workflow(
     w.push('\n');
     push_release_permissions(&mut w, platform);
     w.push_str("    steps:\n");
-    push_event_checkout_step(&mut w, platform);
+    push_event_checkout_step(&mut w, platform, Some(runner));
     w.push_str("      - name: Release result\n");
     w.push_str("        run: |\n");
     w.push_str("          set -euo pipefail\n");
@@ -774,6 +795,9 @@ pub fn python_ci_file(
     check_outputs: &[String],
     components: &[CiComponent],
 ) -> Result<GeneratedFile> {
+    if options.independent_lanes {
+        bail!("[ci].independent_lanes requires GitHub Actions Rust/Nix CI");
+    }
     if runtime != Runtime::Nix {
         bail!("Python uv CI generation requires --runtime nix");
     }
@@ -848,7 +872,12 @@ pub fn nix_flake_ci_file_with_system_runners(
     workflow.push_str(
         "    env:\n      NIX_CONFIG: \"experimental-features = nix-command flakes\"\n    steps:\n",
     );
-    push_checkout_step(&mut workflow, platform);
+    if system_runners.is_empty() {
+        push_checkout_step(&mut workflow, platform, runner);
+    } else {
+        let version = github_matrix_action_version(system_runners, "v7.0.1", "v4.3.1");
+        push_checkout_step_with_version(&mut workflow, platform, version);
+    }
     push_install_nix_step_with_cache(
         &mut workflow,
         platform,
@@ -936,7 +965,9 @@ pub fn github_prebuild_file(
         workflow.push('\n');
     }
     workflow.push_str("    runs-on: ${{ matrix.runner }}\n    steps:\n");
-    push_event_checkout_step(&mut workflow, Platform::Github);
+    let checkout_version = github_matrix_action_version(system_runners, "v7.0.1", "v4.3.1");
+    let artifact_version = github_matrix_action_version(system_runners, "v7.0.2", "v4.6.2");
+    push_event_checkout_step_with_version(&mut workflow, Platform::Github, checkout_version);
     push_install_nix_step_with_cache(
         &mut workflow,
         Platform::Github,
@@ -979,7 +1010,10 @@ pub fn github_prebuild_file(
             workflow.push_str(" -mindepth 1 -maxdepth 1 -type f ! -name '*-release-manifest.json' -print | LC_ALL=C sort)\n");
         }
         workflow.push_str("      - name: Upload unsigned release archives\n        if: ${{ inputs.release && github.event_name != 'pull_request' }}\n        uses: ");
-        workflow.push_str(&github_action_ref("actions/upload-artifact", "v4.6.2"));
+        workflow.push_str(&github_action_ref(
+            "actions/upload-artifact",
+            artifact_version,
+        ));
         workflow.push_str("\n        with:\n          name: release-${{ matrix.system }}\n          path: release\n          if-no-files-found: error\n          retention-days: 1\n");
     }
     if let Some(attic) = attic {
@@ -999,7 +1033,10 @@ pub fn github_prebuild_file(
         workflow.push_str(&shell_quote(attic_app));
         workflow.push('\n');
         workflow.push_str("      - name: Upload flake input manifest\n        if: ${{ (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) || (inputs.release && github.event_name != 'pull_request') }}\n        uses: ");
-        workflow.push_str(&github_action_ref("actions/upload-artifact", "v4.6.2"));
+        workflow.push_str(&github_action_ref(
+            "actions/upload-artifact",
+            artifact_version,
+        ));
         workflow.push_str("\n        with:\n          name: flake-inputs-${{ matrix.system }}\n          path: attic-paths.txt\n          if-no-files-found: error\n          retention-days: 7\n");
     }
 
@@ -1054,6 +1091,17 @@ pub fn nix_build_matrix_file_with_options(
         bail!("[ci.nix_build] options require GitHub Actions");
     }
     options.validate_push_tags()?;
+    options.validate_groups(installables)?;
+    if !options.groups.is_empty() {
+        return nix_groups::render(
+            runner,
+            installables,
+            extra_setup,
+            substituters,
+            trusted_public_keys,
+            options,
+        );
+    }
 
     let mut workflow = String::new();
     push_generated_workflow_header(&mut workflow);
@@ -1108,7 +1156,7 @@ pub fn nix_build_matrix_file_with_options(
         workflow.push_str(&format!("      {key}: \"{}\"\n", yaml_double_quote(value)));
     }
     workflow.push_str("    steps:\n");
-    push_checkout_step(&mut workflow, platform);
+    push_checkout_step(&mut workflow, platform, runner);
     if options.capture_results {
         workflow.push_str("      - name: Prepare Nix build evidence\n        env:\n          INSTALLABLE: ${{ matrix.installable }}\n        run: |\n          SIMIT_NIX_BUILD_RESULTS=\"$RUNNER_TEMP/simit-nix-build-${{ strategy.job-index }}\"\n          printf '%s\\n' \"SIMIT_NIX_BUILD_RESULTS=$SIMIT_NIX_BUILD_RESULTS\" >> \"$GITHUB_ENV\"\n          mkdir -p \"$SIMIT_NIX_BUILD_RESULTS\"\n          git rev-parse HEAD > \"$SIMIT_NIX_BUILD_RESULTS/revision\"\n          printf '%s\\n' \"$INSTALLABLE\" > \"$SIMIT_NIX_BUILD_RESULTS/installable\"\n");
     }
@@ -1155,7 +1203,14 @@ pub fn nix_build_matrix_file_with_options(
             }
         }
         workflow.push_str("      - name: Upload Nix build evidence\n        if: always()\n");
-        push_action_uses(&mut workflow, platform, "upload-artifact", "v4.6.2");
+        push_action_uses(
+            &mut workflow,
+            platform,
+            Some(runner),
+            "upload-artifact",
+            "v7.0.2",
+            "v4.6.2",
+        );
         workflow.push_str(&format!("\n        with:\n          name: nix-build-${{{{ strategy.job-index }}}}\n          retention-days: {}\n          if-no-files-found: warn\n          path: |\n            ${{{{ runner.temp }}}}/simit-nix-build-${{{{ strategy.job-index }}}}\n", options.artifact_retention_days.unwrap_or(14)));
         for path in &options.artifact_paths {
             workflow.push_str(&format!("            {path}\n"));
@@ -1203,7 +1258,7 @@ fn codeberg_pages_workflow(runner: &ResolvedRunner, pages: &CodebergPagesOptions
     workflow.push_str("    env:\n");
     workflow.push_str("      NIX_CONFIG: \"experimental-features = nix-command flakes\"\n");
     workflow.push_str("    steps:\n");
-    push_checkout_step(&mut workflow, Platform::Forgejo);
+    push_checkout_step(&mut workflow, Platform::Forgejo, runner);
     push_extra_setup_steps(&mut workflow, &pages.extra_setup);
     if let Some(canonical_domain) = &pages.canonical_domain {
         workflow.push_str("      - name: Validate Pages domain\n");
@@ -1251,7 +1306,7 @@ fn github_pages_workflow(runner: &ResolvedRunner, pages: &CodebergPagesOptions) 
     workflow.push_str(&runs_on(runner));
     workflow.push_str("\n    environment:\n      name: github-pages\n      url: ${{ steps.deployment.outputs.page_url }}");
     workflow.push_str("\n    env:\n      NIX_CONFIG: \"experimental-features = nix-command flakes\"\n    steps:\n");
-    push_checkout_step(&mut workflow, Platform::Github);
+    push_checkout_step(&mut workflow, Platform::Github, runner);
     push_install_nix_step(&mut workflow, Platform::Github);
     push_extra_setup_steps(&mut workflow, &pages.extra_setup);
     workflow.push_str("      - name: Configure GitHub Pages\n        uses: ");
@@ -1266,10 +1321,16 @@ fn github_pages_workflow(runner: &ResolvedRunner, pages: &CodebergPagesOptions) 
         workflow.push_str(" result-pages-site/.domains\n");
     }
     workflow.push_str("      - name: Upload Pages artifact\n        uses: ");
-    workflow.push_str(&github_action_ref("actions/upload-pages-artifact", "v3"));
+    workflow.push_str(&github_action_ref(
+        "actions/upload-pages-artifact",
+        github_action_version(Some(runner), "v5.0.0", "v3"),
+    ));
     workflow.push_str("\n        with:\n          path: result-pages-site\n");
     workflow.push_str("      - name: Deploy GitHub Pages\n        id: deployment\n        uses: ");
-    workflow.push_str(&github_action_ref("actions/deploy-pages", "v4"));
+    workflow.push_str(&github_action_ref(
+        "actions/deploy-pages",
+        github_action_version(Some(runner), "v5.0.1", "v4"),
+    ));
     workflow.push('\n');
     workflow
 }
@@ -1295,7 +1356,7 @@ fn vscode_extension_workflow(
     workflow.push_str("    env:\n");
     workflow.push_str("      NIX_CONFIG: \"experimental-features = nix-command flakes\"\n");
     workflow.push_str("    steps:\n");
-    push_event_checkout_step(&mut workflow, platform);
+    push_event_checkout_step(&mut workflow, platform, Some(runner));
     push_install_nix_step(&mut workflow, platform);
     push_vscode_version_validation(&mut workflow, vscode);
     push_vscode_credential_preflight(&mut workflow, vscode);
@@ -1352,7 +1413,7 @@ fn jetbrains_plugin_workflow(
     workflow.push_str("    env:\n");
     workflow.push_str("      NIX_CONFIG: \"experimental-features = nix-command flakes\"\n");
     workflow.push_str("    steps:\n");
-    push_checkout_step(&mut workflow, platform);
+    push_checkout_step(&mut workflow, platform, runner);
     push_install_nix_step(&mut workflow, platform);
     push_jetbrains_credential_preflight(&mut workflow, jetbrains);
     push_jetbrains_version_validation(&mut workflow, jetbrains);
@@ -1385,7 +1446,14 @@ fn jetbrains_plugin_workflow(
     workflow.push_str("          stat --printf='plugin archive size: %s bytes\\n' \"$RUNNER_TEMP/jetbrains-plugin-unsigned.zip\"\n\n");
     push_jetbrains_sign_and_publish(&mut workflow, jetbrains);
     workflow.push_str("      - name: Upload signed plugin artifact\n");
-    push_action_uses(&mut workflow, platform, "upload-artifact", "v4.6.2");
+    push_action_uses(
+        &mut workflow,
+        platform,
+        Some(runner),
+        "upload-artifact",
+        "v7.0.2",
+        "v4.6.2",
+    );
     workflow.push_str("        with:\n");
     workflow.push_str("          name: ");
     workflow.push_str(artifact_label);
@@ -2078,9 +2146,14 @@ fn python_ci_workflow(
         false,
     );
     workflow.push_str("    steps:\n");
-    push_checkout_step(&mut workflow, platform);
+    push_checkout_step(&mut workflow, platform, runner);
     push_required_env_step(&mut workflow, &options.required_env);
-    push_install_nix_step(&mut workflow, platform);
+    push_install_nix_step_with_cache(
+        &mut workflow,
+        platform,
+        &options.ci_nix_substituters,
+        &options.ci_nix_trusted_public_keys,
+    );
     push_extra_setup_steps(&mut workflow, &options.extra_setup);
     if selected(CiComponent::FlakeWiring) {
         workflow.push_str("      - name: Check generated flake wiring\n");
@@ -2168,7 +2241,7 @@ fn python_publish_workflow(
         false,
     );
     workflow.push_str("    steps:\n");
-    push_checkout_step(&mut workflow, platform);
+    push_checkout_step(&mut workflow, platform, runner);
     push_required_env_step(&mut workflow, &options.required_env);
     push_install_nix_step(&mut workflow, platform);
     push_validate_pypi_tag_step(&mut workflow);
@@ -2239,7 +2312,7 @@ fn maturin_publish_workflow(
         true,
     );
     workflow.push_str("    steps:\n");
-    push_checkout_step(&mut workflow, platform);
+    push_checkout_step(&mut workflow, platform, runner);
     push_required_env_step(&mut workflow, &options.required_env);
     push_install_nix_step(&mut workflow, platform);
     push_validate_pypi_tag_step(&mut workflow);
@@ -2266,7 +2339,9 @@ fn ci_workflow(
     options: CiOptions,
     step_runners: &BTreeMap<String, ResolvedRunner>,
 ) -> String {
-    if step_runners.is_empty() {
+    if options.independent_lanes {
+        independent_lanes::render(platform, package, self_check, runners, options)
+    } else if step_runners.is_empty() {
         ci_workflow_single_job(platform, runtime, package, self_check, runners, options)
     } else {
         ci_workflow_multi_job(
@@ -2313,13 +2388,18 @@ fn ci_workflow_single_job(
     push_container(&mut workflow, platform, runtime, package);
     push_job_env(&mut workflow, platform, runtime, &options.extra_env, true);
     workflow.push_str("    steps:\n");
-    push_checkout_step(&mut workflow, platform);
+    push_checkout_step(&mut workflow, platform, &runners.ci);
     push_required_env_step(&mut workflow, &options.required_env);
 
     match runtime {
         Runtime::Nix => {
-            push_install_nix_step(&mut workflow, platform);
-            push_nix_cargo_cache_steps(&mut workflow, platform, &options, "test");
+            push_install_nix_step_with_cache(
+                &mut workflow,
+                platform,
+                &options.ci_nix_substituters,
+                &options.ci_nix_trusted_public_keys,
+            );
+            push_nix_cargo_cache_steps(&mut workflow, platform, &runners.ci, &options, "test");
             push_nix_cargo_bin_path_step(&mut workflow);
             push_extra_setup_steps(&mut workflow, &options.extra_setup);
             if options.check_command.is_none() {
@@ -2369,7 +2449,7 @@ fn ci_workflow_single_job(
         }
         Runtime::Cargo => {
             push_rust_setup_step(&mut workflow, platform);
-            push_rust_cache_steps(&mut workflow, platform);
+            push_rust_cache_steps(&mut workflow, platform, &runners.ci);
             push_extra_setup_steps(&mut workflow, &options.extra_setup);
             if let Some(command) = options.check_command.as_deref() {
                 workflow.push_str(&project_check_step_yaml(runtime, command));
@@ -2646,19 +2726,30 @@ fn ci_workflow_multi_job(
         push_container(&mut workflow, platform, runtime, package);
         push_job_env(&mut workflow, platform, runtime, &options.extra_env, true);
         workflow.push_str("    steps:\n");
-        push_checkout_step(&mut workflow, platform);
+        push_checkout_step(&mut workflow, platform, job.runner);
         push_required_env_step(&mut workflow, &options.required_env);
 
         match runtime {
             Runtime::Nix => {
-                push_install_nix_step(&mut workflow, platform);
-                push_nix_cargo_cache_steps(&mut workflow, platform, &options, &job.name);
+                push_install_nix_step_with_cache(
+                    &mut workflow,
+                    platform,
+                    &options.ci_nix_substituters,
+                    &options.ci_nix_trusted_public_keys,
+                );
+                push_nix_cargo_cache_steps(
+                    &mut workflow,
+                    platform,
+                    job.runner,
+                    &options,
+                    &job.name,
+                );
                 push_nix_cargo_bin_path_step(&mut workflow);
                 push_extra_setup_steps(&mut workflow, &options.extra_setup);
             }
             Runtime::Cargo => {
                 push_rust_setup_step(&mut workflow, platform);
-                push_rust_cache_steps(&mut workflow, platform);
+                push_rust_cache_steps(&mut workflow, platform, job.runner);
                 push_extra_setup_steps(&mut workflow, &options.extra_setup);
             }
         }
@@ -2734,13 +2825,17 @@ fn push_required_gate_jobs(
             }
         }
         workflow.push_str("    steps:\n");
-        push_checkout_step(workflow, platform);
+        if options.independent_lanes {
+            push_source_head_checkout(workflow, &runners.ci);
+        } else {
+            push_checkout_step(workflow, platform, &runners.ci);
+        }
         if runtime == Runtime::Nix {
             push_install_nix_step_with_cache(
                 workflow,
                 platform,
-                &options.nix_substituters,
-                &options.nix_trusted_public_keys,
+                &options.ci_nix_substituters,
+                &options.ci_nix_trusted_public_keys,
             );
         } else {
             push_rust_setup_step(workflow, platform);
@@ -2777,6 +2872,15 @@ fn publish_workflow(
     runner: &ResolvedRunner,
     options: CiOptions,
 ) -> String {
+    let candidate_runner = ResolvedRunner {
+        name: None,
+        labels: vec![trusted_publisher::CANDIDATE_RUNNER.to_owned()],
+    };
+    let runner = if platform == Platform::Github {
+        &candidate_runner
+    } else {
+        runner
+    };
     let mut workflow = String::new();
     push_generated_workflow_header(&mut workflow);
     push_required_secrets_header(&mut workflow, &options.required_secrets);
@@ -2823,7 +2927,7 @@ fn publish_workflow(
     push_container(&mut workflow, platform, runtime, package);
     push_job_env(&mut workflow, platform, runtime, &options.extra_env, true);
     workflow.push_str("    steps:\n");
-    push_event_checkout_step(&mut workflow, platform);
+    push_event_checkout_step(&mut workflow, platform, Some(runner));
     push_required_env_step(&mut workflow, &options.required_env);
 
     match runtime {
@@ -2859,7 +2963,7 @@ fn publish_workflow(
         }
         Runtime::Cargo => {
             push_rust_setup_step(&mut workflow, platform);
-            push_rust_cache_steps(&mut workflow, platform);
+            push_rust_cache_steps(&mut workflow, platform, runner);
             workflow.push_str(&validate_tag_step(command_prefix(runtime), &package.name));
             push_extra_setup_steps(&mut workflow, &options.extra_setup);
             push_test_steps(&mut workflow, runtime, package, &options);
@@ -2914,7 +3018,7 @@ fn artifacts_workflow(
         workflow.push_str("  validate:\n    permissions:\n      contents: read\n    timeout-minutes: 30\n    runs-on: ");
         workflow.push_str(&runs_on(&runners.release));
         workflow.push_str("\n    steps:\n");
-        push_event_checkout_step(&mut workflow, platform);
+        push_event_checkout_step(&mut workflow, platform, Some(&runners.release));
         workflow.push_str(&validate_release_tag_step(None, None));
     }
     workflow.push_str("  ");
@@ -2930,7 +3034,7 @@ fn artifacts_workflow(
     push_container(&mut workflow, platform, runtime, package);
     push_job_env(&mut workflow, platform, runtime, &options.extra_env, true);
     workflow.push_str("    steps:\n");
-    push_event_checkout_step(&mut workflow, platform);
+    push_event_checkout_step(&mut workflow, platform, Some(&runners.release));
     push_required_env_step(&mut workflow, &options.required_env);
     workflow.push_str(&validate_release_tag_step(None, None));
     match runtime {
@@ -2943,7 +3047,7 @@ fn artifacts_workflow(
         }
         Runtime::Cargo => {
             push_rust_setup_step(&mut workflow, platform);
-            push_rust_cache_steps(&mut workflow, platform);
+            push_rust_cache_steps(&mut workflow, platform, &runners.release);
             push_extra_setup_steps(&mut workflow, &options.extra_setup);
             workflow.push_str("      - name: Build release binary\n");
             workflow.push_str("        run: cargo build --release --locked");
@@ -3004,7 +3108,7 @@ fn push_windows_build_job(
         workflow.push('\n');
     }
     workflow.push_str("    steps:\n");
-    push_event_checkout_step(workflow, platform);
+    push_event_checkout_step(workflow, platform, Some(windows_runner));
     push_windows_rust_setup_step(workflow, platform);
     workflow.push_str("      - name: Install Windows target\n");
     workflow.push_str("        run: rustup target add ${{ matrix.target }}\n\n");
@@ -3014,7 +3118,14 @@ fn push_windows_build_job(
     workflow.push_str(" --target ${{ matrix.target }}\n\n");
     push_windows_archive_step(workflow, package, options);
     workflow.push_str("      - name: Upload Windows archives\n");
-    push_action_uses(workflow, platform, "upload-artifact", "v4.6.2");
+    push_action_uses(
+        workflow,
+        platform,
+        Some(windows_runner),
+        "upload-artifact",
+        "v7.0.2",
+        "v4.6.2",
+    );
     workflow.push_str("        with:\n");
     workflow.push_str("          name: windows-${{ matrix.arch }}\n");
     workflow.push_str("          path: release/*.zip\n");
@@ -3032,9 +3143,16 @@ fn push_windows_publish_job(
     workflow.push_str(&runs_on(windows_runner));
     workflow.push('\n');
     workflow.push_str("    steps:\n");
-    push_event_checkout_step(workflow, platform);
+    push_event_checkout_step(workflow, platform, Some(windows_runner));
     workflow.push_str("      - name: Download Windows archives\n");
-    push_action_uses(workflow, platform, "download-artifact", "v4.3.0");
+    push_action_uses(
+        workflow,
+        platform,
+        Some(windows_runner),
+        "download-artifact",
+        "v8.0.2",
+        "v4.3.0",
+    );
     workflow.push_str("        with:\n");
     workflow.push_str("          pattern: windows-*\n");
     workflow.push_str("          path: release\n");
@@ -3848,17 +3966,46 @@ fn yaml_double_quote(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
-fn push_checkout_step(workflow: &mut String, platform: Platform) {
+fn yaml_json_scalar(value: &str) -> String {
+    if value.contains('"') {
+        format!("'{}'", value.replace('\'', "''"))
+    } else {
+        format!("\"{}\"", yaml_double_quote(value))
+    }
+}
+
+fn push_checkout_step(workflow: &mut String, platform: Platform, runner: &ResolvedRunner) {
+    let version = github_action_version(Some(runner), "v7.0.1", "v4.3.1");
+    push_checkout_step_with_version(workflow, platform, version);
+}
+
+fn push_source_head_checkout(workflow: &mut String, runner: &ResolvedRunner) {
+    push_checkout_step(workflow, Platform::Github, runner);
+    workflow.push_str("        with:\n          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}\n          ref: ${{ github.event.pull_request.head.sha || github.sha }}\n          persist-credentials: false\n");
+}
+
+fn push_independent_source_concurrency(workflow: &mut String) {
+    workflow.push_str("concurrency:\n  group: ${{ github.workflow_ref }}-${{ github.event_name }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.ref_type == 'tag' && github.ref || format('refs/heads/{0}', github.event.pull_request.head.ref || github.ref_name) }}\n  cancel-in-progress: true\n\n");
+}
+
+fn push_checkout_step_with_version(workflow: &mut String, platform: Platform, version: &str) {
     workflow.push_str("      - name: Checkout\n");
-    // Arbitrary private runner labels do not attest the Node24 runner minimum.
-    // Keep the common Node20 checkout baseline for both Actions providers.
-    push_action_uses(workflow, platform, "checkout", "v4.3.1");
+    push_action_uses(workflow, platform, None, "checkout", version, "v4.3.1");
     workflow.push('\n');
 }
 
-fn push_event_checkout_step(workflow: &mut String, platform: Platform) {
+fn push_event_checkout_step(
+    workflow: &mut String,
+    platform: Platform,
+    runner: Option<&ResolvedRunner>,
+) {
+    let version = github_action_version(runner, "v7.0.1", "v4.3.1");
+    push_event_checkout_step_with_version(workflow, platform, version);
+}
+
+fn push_event_checkout_step_with_version(workflow: &mut String, platform: Platform, version: &str) {
     workflow.push_str("      - name: Checkout\n");
-    push_action_uses(workflow, platform, "checkout", "v4.3.1");
+    push_action_uses(workflow, platform, None, "checkout", version, "v4.3.1");
     // Tag validation binds its peeled commit to this immutable event identity.
     // Gates and every dependent publisher must use that same commit even if the
     // tag moves after validation; no downstream job resolves the tag again.
@@ -3942,18 +4089,75 @@ fn push_required_env_step_with_context(
     workflow.push('\n');
 }
 
-fn push_action_uses(workflow: &mut String, platform: Platform, action: &str, version: &str) {
+fn push_action_uses(
+    workflow: &mut String,
+    platform: Platform,
+    runner: Option<&ResolvedRunner>,
+    action: &str,
+    github_version: &str,
+    forgejo_version: &str,
+) {
     if platform == Platform::Forgejo {
         // The generated Forgejo workflows use exact commits. The helper is
         // deliberately called for every action so a newly added action cannot
         // silently reintroduce a mutable tag.
         workflow.push_str("        uses: ");
-        workflow.push_str(&forgejo_action_ref(action, version));
+        workflow.push_str(&forgejo_action_ref(action, forgejo_version));
         workflow.push('\n');
     } else {
         workflow.push_str("        uses: ");
+        let version = github_action_version(runner, github_version, forgejo_version);
         workflow.push_str(&github_action_ref(&format!("actions/{action}"), version));
         workflow.push('\n');
+    }
+}
+
+// None marks fixed hosted capacity or an already resolved action version.
+// Unknown/private labels retain their existing Node20 contract.
+fn github_action_version<'a>(
+    runner: Option<&ResolvedRunner>,
+    node24: &'a str,
+    legacy: &'a str,
+) -> &'a str {
+    if runner.is_none_or(|runner| {
+        matches!(runner.labels.as_slice(), [label] if github_runner_supports_node24(label))
+    }) {
+        node24
+    } else {
+        legacy
+    }
+}
+
+pub(super) fn github_runner_supports_node24(label: &str) -> bool {
+    matches!(
+        label,
+        "ubuntu-latest"
+            | "ubuntu-24.04"
+            | "ubuntu-24.04-arm"
+            | "ubuntu-22.04"
+            | "windows-latest"
+            | "windows-2022"
+            | "windows-2025"
+            | "macos-latest"
+            | "macos-14"
+            | "macos-15"
+            | "macos-26"
+    )
+}
+
+fn github_matrix_action_version<'a>(
+    runners: &BTreeMap<String, String>,
+    node24: &'a str,
+    legacy: &'a str,
+) -> &'a str {
+    if !runners.is_empty()
+        && runners
+            .values()
+            .all(|label| github_runner_supports_node24(label))
+    {
+        node24
+    } else {
+        legacy
     }
 }
 
@@ -4017,6 +4221,7 @@ fn push_om_ci_step(workflow: &mut String, options: &CiOptions) {
 fn push_nix_cargo_cache_steps(
     workflow: &mut String,
     platform: Platform,
+    runner: &ResolvedRunner,
     options: &CiOptions,
     scope: &str,
 ) {
@@ -4024,7 +4229,14 @@ fn push_nix_cargo_cache_steps(
         return;
     }
     workflow.push_str("      - name: Cache Nix Cargo registry + target\n");
-    push_action_uses(workflow, platform, "cache", "v4.3.0");
+    push_action_uses(
+        workflow,
+        platform,
+        Some(runner),
+        "cache",
+        "v6.1.0",
+        "v4.3.0",
+    );
     workflow.push_str("        with:\n          path: |\n            /tmp/.cargo/registry\n            /tmp/.cargo/git\n            target\n");
     workflow.push_str(&format!("          key: cargo-nix-${{{{ runner.os }}}}-${{{{ runner.arch }}}}-{scope}-${{{{ hashFiles('Cargo.lock', 'flake.lock', 'flake.nix', 'rust-toolchain.toml', '.cargo/config', '.cargo/config.toml') }}}}\n          restore-keys: |\n            cargo-nix-${{{{ runner.os }}}}-${{{{ runner.arch }}}}-{scope}-\n\n"));
 }
@@ -4152,9 +4364,16 @@ fn push_rust_setup_step(workflow: &mut String, platform: Platform) {
     }
 }
 
-fn push_rust_cache_steps(workflow: &mut String, platform: Platform) {
+fn push_rust_cache_steps(workflow: &mut String, platform: Platform, runner: &ResolvedRunner) {
     workflow.push_str("      - name: Cache cargo bin (tools)\n");
-    push_action_uses(workflow, platform, "cache", "v4.3.0");
+    push_action_uses(
+        workflow,
+        platform,
+        Some(runner),
+        "cache",
+        "v6.1.0",
+        "v4.3.0",
+    );
     workflow.push_str("        with:\n");
     workflow.push_str("          path: ~/.cargo/bin\n");
     let workflow_glob = match platform {
@@ -4176,7 +4395,10 @@ fn push_rust_cache_steps(workflow: &mut String, platform: Platform) {
     }
     workflow.push_str("      - name: Cache cargo registry + target\n");
     workflow.push_str("        uses: ");
-    workflow.push_str(&github_action_ref("Swatinem/rust-cache", "v2"));
+    workflow.push_str(&github_action_ref(
+        "Swatinem/rust-cache",
+        github_action_version(Some(runner), "v2.9.2", "v2"),
+    ));
     workflow.push('\n');
     workflow.push_str("        with:\n");
     workflow.push_str("          cache-all-crates: \"true\"\n");

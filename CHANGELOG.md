@@ -9,10 +9,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- CI-scoped public Nix cache configuration and bounded same-run build-input
+  closure transport with exact source/run/attempt/derivation provenance.
+- Explicit fresh qualification installables, retaining runtime execution while
+  restoring only build dependencies.
+- Opt-in shared-store Nix build groups with complete installable assignments,
+  discovered-check coverage admission and per-output failure evidence.
+- Independent Rust, full-flake evaluation and optional realization lanes for
+  GitHub-hosted Rust/Nix projects, retaining all existing quality steps.
 - Opt-in `[ci.nix_build].push_tags` patterns to retain tag-push qualification
   alongside branch and pull-request gates, with ordered exclusions and stable
   configuration regeneration. Reject exclusion-only filters and keep tag refs
   separate from same-named branch/PR cancellation groups.
+
+### Fixed
+
+- Bind the full dependency export stream's actual path/reference inventory to the
+  admitted closure before canonical-store import, using a bounded non-extracting
+  NAR parser and one private spool descriptor through validation and import.
+  Align NAR depth, entry-name and symlink-target bounds with the Nix importer
+  so invalid later records reject before any preceding record can be imported.
+- Keep dependency transport's source, provenance, size and qualification-closure
+  fences active under Python optimization; provision the dependency producer's
+  interpreter on custom runners as well as hosted workers.
+- Migrate recognized inline MSRV bindings in existing canonical flakes before
+  hook-wiring shortcuts, and detect that required source migration in full checks.
+- Generate MSRV toolchain manifests as source assets so no-build, read-only Nix
+  evaluation succeeds on cold stores without changing the declared compiler.
+- Enforce grouped-build admission under Python optimization and preserve each
+  installable's hook context, including shell-only diagnostics after setup or
+  preflight failures. Provision the grouped interpreter and retain unset timeouts.
+- Qualify one immutable PR head across independent lanes and required gates,
+  evaluate all flake systems, preserve Cargo tool paths in every lane and reject
+  unsupported step-runner overrides before normalization.
+- Check out signed Git symlinks as inert target-text files during independent
+  archive reconstruction, admitting unrelated tooling links without following
+  them. Continue rejecting submodules and any Cargo manifest, declared input,
+  lockfile or archive member that depends on a Git symlink.
+- Keep the independently checked-out publisher engine in its own Cargo
+  workspace, so it can build beneath a candidate workspace without joining it.
+  Retain single-crate resolution and independent regression fixtures.
+- Render long trusted-publisher dependency lists as formatter-stable block
+  sequences, preserving dependency order and short inline arrays.
+- Use immutable Node 24 action revisions on recognized GitHub-hosted runners
+  and credential-free release workers. Preserve the Node 20 action baseline
+  for private runner labels and Forgejo, together with signed-tag admission,
+  independent trust roots, and archive custody verification.
 
 ## [0.20.0] - 2026-10-11
 

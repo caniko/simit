@@ -85,6 +85,7 @@ pub fn run(command: InitCiCommand) -> Result<()> {
         .or(cfg.ci.platform)
         .unwrap_or(Platform::Forgejo);
     let backend = CiBackend::from_parts(provider, platform)?;
+    cfg.ci.validate_effective_backend(provider, platform)?;
     crate::render::workflow_templates::validate_backend(&cfg.ci, provider, platform)?;
     validate_review_policy_backend(&cfg, platform, provider)?;
     if platform == Platform::Gitlab {
@@ -99,6 +100,9 @@ pub fn run(command: InitCiCommand) -> Result<()> {
     let cli_overrides = ci_cli_overrides(&command);
     let mut resolved =
         ResolvedCiInputs::resolve(workspace_root, &cfg, &cli_overrides, Some(&inference))?;
+    if cfg.ci.independent_lanes && !resolved.step_runners.is_empty() {
+        bail!("[ci].independent_lanes cannot be combined with step_runners");
+    }
     if resolved.granular && platform == Platform::Forgejo {
         apply_granular_step_runners(&mut resolved.step_runners, resolved.runtime);
     }
@@ -342,8 +346,8 @@ pub fn run(command: InitCiCommand) -> Result<()> {
             &runners.ci,
             &options.nix_builds,
             &options.extra_setup,
-            &options.nix_substituters,
-            &options.nix_trusted_public_keys,
+            &options.ci_nix_substituters,
+            &options.ci_nix_trusted_public_keys,
             &cfg.ci.nix_build,
         )?);
     }
@@ -695,6 +699,7 @@ fn run_nix_only_at(command: InitCiCommand, workspace_root: &Path) -> Result<()> 
         .or(cfg.ci.provider)
         .unwrap_or(CiProvider::Actions);
     let _backend = CiBackend::from_parts(provider, platform)?;
+    cfg.ci.validate_effective_backend(provider, platform)?;
     crate::render::workflow_templates::validate_backend(&cfg.ci, provider, platform)?;
     validate_review_policy_backend(&cfg, platform, provider)?;
     if provider != CiProvider::Actions {
@@ -777,7 +782,7 @@ fn run_nix_only_at(command: InitCiCommand, workspace_root: &Path) -> Result<()> 
             platform,
             &ResolvedRunner::literal(&runner)?,
             &system_runners,
-            &cfg.release.artifacts,
+            &cfg.ci_cache_artifacts(),
             &cfg.ci.components,
         )?,
     };
@@ -792,8 +797,8 @@ fn run_nix_only_at(command: InitCiCommand, workspace_root: &Path) -> Result<()> 
             &ResolvedRunner::literal(&runner)?,
             &cfg.ci.nix_builds,
             &cfg.ci.extra_setup,
-            &cfg.release.artifacts.substituters,
-            &cfg.release.artifacts.trusted_public_keys,
+            &cfg.ci_cache_artifacts().substituters,
+            &cfg.ci_cache_artifacts().trusted_public_keys,
             &cfg.ci.nix_build,
         )?);
     }
@@ -903,6 +908,7 @@ fn run_python(command: InitCiCommand) -> Result<()> {
         return run_nix_only(command);
     }
     let backend = CiBackend::from_parts(provider, platform)?;
+    cfg.ci.validate_effective_backend(provider, platform)?;
     crate::render::workflow_templates::validate_backend(&cfg.ci, provider, platform)?;
     validate_review_policy_backend(&cfg, platform, provider)?;
     if backend.provider() == CiProvider::Crow {
@@ -960,8 +966,8 @@ fn run_python(command: InitCiCommand) -> Result<()> {
             &runners.ci,
             &options.nix_builds,
             &options.extra_setup,
-            &options.nix_substituters,
-            &options.nix_trusted_public_keys,
+            &options.ci_nix_substituters,
+            &options.ci_nix_trusted_public_keys,
             &cfg.ci.nix_build,
         )?);
     }

@@ -1,3 +1,8 @@
+[workspace]
+# The trusted publisher checks this source out beneath a candidate workspace.
+# Keep its resolution and locked engine build independent of that candidate.
+resolver = "3"
+
 [package]
 name = "simit"
 default-run = "simit"
@@ -22,6 +27,7 @@ include = [
   "/LICENSE",
   "/README.md",
   "/src/**/*.rs",
+  "/src/render/ci/*.py",
   "/src/review/assets/**",
   "/tests/**/*.rs",
   "/tests/fixtures/**",
@@ -46,6 +52,7 @@ CARGO_BUILD_JOBS = "2"
 
 [package.metadata.simit.ci.workflow_templates]
 ".github/workflows/qualify-generator.yaml" = ".simit/workflows/qualify-generator.yaml.in"
+".github/workflows/qualify-nix-transport.yaml" = ".simit/workflows/qualify-nix-transport.yaml.in"
 
 [package.metadata.simit.ci.pages]
 repo = "caniko/simit"
