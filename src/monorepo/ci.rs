@@ -178,10 +178,21 @@ pub(crate) fn files(
         for package in metadata.packages.iter().filter(|p| {
             metadata.workspace_members.contains(&p.id) && p.is_publishable_to_crates_io()
         }) {
-            crate::commands::release_plan::build_release_plan(
+            let plan = crate::commands::release_plan::build_release_plan(
                 &metadata,
                 std::slice::from_ref(&package.name),
             )?;
+            if let Some(dependency) = plan
+                .entries
+                .iter()
+                .find(|entry| !entry.package.is_publishable_to_crates_io())
+            {
+                bail!(
+                    "package {} has a local dependency {} not authorized for crates.io",
+                    package.name,
+                    dependency.package.name
+                );
+            }
             let options = crate::render::ci::CiOptions {
                 publish_crates: true,
                 ..Default::default()

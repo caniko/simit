@@ -661,7 +661,10 @@ fn qualification_generation_is_complete_and_member_stable() {
     }
     let text = fs::read_to_string(temp.path().join(".github/workflows/ci.yaml")).unwrap();
     let yaml: serde_yaml::Value = serde_yaml::from_str(&text).unwrap();
-    assert_eq!(yaml["concurrency"]["group"], "monorepo-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event.pull_request.head.ref || github.ref_name }}");
+    assert_eq!(
+        yaml["concurrency"]["group"],
+        "monorepo-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event.pull_request.head.ref || github.ref_name }}"
+    );
     for id in [
         "plan",
         "component-core",
@@ -1487,6 +1490,88 @@ fn independent_publishers_require_crates_io_allowlist_and_preserve_qualification
         }
         let ci = fs::read_to_string(root.join(".github/workflows/ci.yaml")).unwrap();
         assert!(ci.contains("component-worker:"));
+    }
+}
+
+#[test]
+fn independent_publishers_require_crates_io_dependency_closure() {
+    for transitive in [false, true] {
+        for eligible in [false, true] {
+            let temp = fixture();
+            let root = temp.path();
+            enroll_release_checks(root);
+            let mut config = fs::read_to_string(root.join("simit.toml"))
+                .unwrap()
+                .replace(
+                    "runtime = \"nix\"",
+                    "runtime = \"nix\"\npublish_crates = true",
+                );
+            let dependency = if transitive {
+                let workspace = fs::read_to_string(root.join("Cargo.toml"))
+                    .unwrap()
+                    .replace(
+                        "\"crates/engine\", \"crates/worker\"",
+                        "\"crates/engine\", \"crates/worker\", \"crates/leaf\"",
+                    );
+                write(root, "Cargo.toml", &workspace);
+                write(
+                    root,
+                    "crates/leaf/Cargo.toml",
+                    "[package]\nname='leaf'\nversion='0.1.0'\nedition='2024'\n",
+                );
+                write(root, "crates/leaf/src/lib.rs", "pub fn leaf() {}\n");
+                config = config.replace(
+                    "id = \"core\"",
+                    "id = \"core\"\ncargo_packages = [\"leaf\"]",
+                );
+                let manifest = fs::read_to_string(root.join("crates/engine/Cargo.toml")).unwrap();
+                write(
+                    root,
+                    "crates/engine/Cargo.toml",
+                    &format!("{manifest}leaf = {{path='../leaf',version='0.1.0'}}\n"),
+                );
+                "leaf"
+            } else {
+                "engine"
+            };
+            write(root, "simit.toml", &config);
+            let path = format!("crates/{dependency}/Cargo.toml");
+            let manifest = fs::read_to_string(root.join(&path)).unwrap();
+            let policy = if eligible {
+                "publish = ['internal', 'crates-io']"
+            } else {
+                "publish = ['internal']"
+            };
+            write(
+                root,
+                &path,
+                &manifest.replacen("[package]", &format!("[package]\n{policy}"), 1),
+            );
+            let output = common::simit()
+                .current_dir(root)
+                .args(["init", "ci"])
+                .output()
+                .unwrap();
+            assert_eq!(
+                output.status.success(),
+                eligible,
+                "{transitive}/{eligible}: {output:?}"
+            );
+            if !eligible {
+                let error = String::from_utf8_lossy(&output.stderr);
+                assert!(
+                    error.contains("not authorized for crates.io") && error.contains(dependency),
+                    "{output:?}"
+                );
+                assert!(!root.join(".github/workflows/ci.yaml").exists());
+                let output = common::simit()
+                    .current_dir(root)
+                    .args(["init", "ci", "--primary-only"])
+                    .output()
+                    .unwrap();
+                assert!(output.status.success(), "{output:?}");
+            }
+        }
     }
 }
 

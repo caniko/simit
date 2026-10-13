@@ -53,6 +53,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Require independent crates.io publishers' complete local dependency closure to
+  allow crates.io, rejecting alternate-only dependencies before workflow writes.
 - Namespace monorepo qualification concurrency by source repository so identically
   named fork branches do not cancel one another's runs.
 - Reject non-object npm publishConfig at enrollment and protected admission.
