@@ -119,6 +119,10 @@ with tempfile.TemporaryDirectory() as temp:
     for tag in ["latest", "next", "stable", "release-candidate", "vnext", "v1-beta", "v1.4-beta", "V1.4", "v01.4", "v1.2.3-", "v1.2.3-beta_1", "v1.2.3-beta.01", "xfoo", "vv1.2.3", "v9007199254740991", "v0.9007199254740991"]:
         assert actual.valid_npm_dist_tag(tag), tag
     before = len(requests)
+    for provenance in ["true", 1, {}, []]:
+        refuses(lambda: actual.upload_native(root, npm_identity, [tarball.name], {"publishConfig": {"provenance": provenance}}, "fixture"))
+    assert len(requests) == before
+    before = len(requests)
     refuses(lambda: actual.upload_native(root, npm_identity | {"name": "unscoped"}, [tarball.name], {"publishConfig": {"access": "restricted"}}, "fixture"))
     assert len(requests) == before
     # The provenance signer receives original source/bytes and protected workflow

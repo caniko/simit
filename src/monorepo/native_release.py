@@ -94,6 +94,7 @@ def context():
     if registry == "npm":
         require("+" not in version, "public native releases cannot have SemVer build metadata")
         config = data.get("publishConfig", {})
+        require(config.get("provenance") is None or isinstance(config["provenance"], bool), "signed npm provenance policy must be boolean")
         require(config.get("registry", "https://registry.npmjs.org/").rstrip("/") == "https://registry.npmjs.org", "custom npm registry requires its own publication backend")
         require(not ("tag" not in config and "-" in version), "npm prereleases require an explicit publishConfig.tag")
         require(valid_npm_dist_tag(config.get("tag", "latest")), "invalid signed npm dist-tag")
@@ -264,6 +265,7 @@ def upload_native(out, identity, files, manifest, token):
         # lifecycle scripts. No candidate hooks execute here; only the signed
         # policy chooses upload endpoints, credentials, dist-tag and access.
         config = manifest.get("publishConfig", {})
+        require(config.get("provenance") is None or isinstance(config["provenance"], bool), "signed npm provenance policy must be boolean")
         require(config.get("registry", "https://registry.npmjs.org/").rstrip("/") == "https://registry.npmjs.org", "unapproved npm registry")
         tag = config.get("tag", "latest")
         require(valid_npm_dist_tag(tag), "invalid signed npm dist-tag")

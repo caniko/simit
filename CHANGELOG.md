@@ -65,6 +65,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and verify each component matrix runner's native Nix system before its gates.
 - Use the effective release-notes policy in reusable prebuild validation, so
   Git or disabled notes do not require a changelog in the called workflow.
+- Require complete unyanked Python registry inventories during verification,
+  validate npm provenance types before enrollment, and reject unsupported
+  monorepo extension publication before workflow reconciliation.
+- Resolve formatter toolchains from active lexical Nix bindings instead of
+  comments or strings, preserving existing crane/overlay toolchains.
 - Admit dependency attributes outside the actual checks namespace, apply CI cache
   policy on preinstalled Forgejo Nix, and explain full reruns for attempt-bound
   transport. Reject Darwin case-hack aliases before import and bind checksum and

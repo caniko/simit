@@ -138,6 +138,53 @@ fn core_changes_select_transitive_consumers_and_prerequisites() {
 }
 
 #[test]
+fn monorepo_rejects_unsupported_extension_publication_before_reconciliation() {
+    for (section, path) in [
+        (
+            "[vscode]\ncodeberg_repo='example/extension'\n",
+            ".forgejo/workflows/publish-vscode-extension.yaml",
+        ),
+        (
+            "[jetbrains]\nplugin_xml_id='example.plugin'\n",
+            ".forgejo/workflows/publish-jetbrains-plugin.yaml",
+        ),
+    ] {
+        let temp = fixture();
+        let root = temp.path();
+        enroll_release_checks(root);
+        let config = format!(
+            "{}\n{section}",
+            fs::read_to_string(root.join("simit.toml")).unwrap()
+        );
+        write(root, "simit.toml", &config);
+        let publisher = format!(
+            "{}\nname: Retained extension publisher\non: [push]\njobs: {{}}\n",
+            simit::render::ci::GENERATED_WORKFLOW_MARKER
+        );
+        write(root, path, &publisher);
+        let output = common::simit()
+            .current_dir(root)
+            .args(["init", "ci"])
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("extension publication"),
+            "{output:?}"
+        );
+        assert_eq!(fs::read_to_string(root.join(path)).unwrap(), publisher);
+        assert_eq!(fs::read_to_string(root.join("simit.toml")).unwrap(), config);
+        let output = common::simit()
+            .current_dir(root)
+            .args(["init", "ci", "--primary-only"])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(fs::read_to_string(root.join(path)).unwrap(), publisher);
+    }
+}
+
+#[test]
 fn cargo_dependencies_include_worker_and_its_other_prerequisites() {
     let temp = fixture();
     let output = plan(temp.path(), &["crates/engine/src/lib.rs"]);

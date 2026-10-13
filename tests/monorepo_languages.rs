@@ -700,6 +700,42 @@ fn python_bump_updates_each_declared_owning_uv_lock() {
 }
 
 #[test]
+fn native_npm_provenance_is_boolean_during_enrollment() {
+    for provenance in [
+        serde_json::json!("true"),
+        serde_json::json!(7),
+        serde_json::json!({}),
+        serde_json::json!([]),
+        serde_json::json!(null),
+        serde_json::json!(false),
+        serde_json::json!(true),
+    ] {
+        let temp = fixture();
+        let root = temp.path();
+        let config = fs::read_to_string(root.join("simit.toml"))
+            .unwrap()
+            .replace("publish = false", "publish = true");
+        write(root, "simit.toml", &config);
+        write(root, "node/package.json", &serde_json::json!({"name":"@example/node-engine","version":"1.3.0","publishConfig":{"provenance":provenance}}).to_string());
+        let output = run(root, &["init", "ci"]);
+        let valid = provenance.is_null() || provenance.is_boolean();
+        assert_eq!(output.status.success(), valid, "{provenance}: {output:?}");
+        let publisher = root.join(".github/workflows/trusted-publish-npm-node-engine.yaml");
+        if valid {
+            let contents = fs::read_to_string(publisher).unwrap();
+            assert_eq!(contents.contains("id-token: write"), provenance == true);
+            assert_eq!(contents.contains("--native-provenance"), provenance == true);
+        } else {
+            assert!(
+                String::from_utf8_lossy(&output.stderr)
+                    .contains("provenance policy must be boolean")
+            );
+            assert!(!publisher.exists());
+        }
+    }
+}
+
+#[test]
 fn registry_names_can_overlap_but_release_namespaces_select_one_owner() {
     let temp = fixture();
     let root = temp.path();
@@ -1015,9 +1051,15 @@ fn native_registry_verification_checks_exact_identity_and_available_files() {
     for (component, body, status, expected) in [
         (
             "python",
-            r#"{"info":{"name":"Py_Engine","version":"0.2.0"},"urls":[{"yanked":false,"digests":{"sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}}]}"#,
+            r#"{"info":{"name":"Py_Engine","version":"0.2.0"},"urls":[{"filename":"py_engine-0.2.0-py3-none-any.whl","packagetype":"bdist_wheel","yanked":false,"digests":{"sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}},{"filename":"py_engine-0.2.0.tar.gz","packagetype":"sdist","yanked":false,"digests":{"sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}}]}"#,
             "200",
             "pass",
+        ),
+        (
+            "python",
+            r#"{"info":{"name":"Py_Engine","version":"0.2.0"},"urls":[{"filename":"py_engine-0.2.0-py3-none-any.whl","packagetype":"bdist_wheel","yanked":false,"digests":{"sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}}]}"#,
+            "200",
+            "fail",
         ),
         (
             "python",

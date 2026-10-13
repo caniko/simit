@@ -40,6 +40,11 @@ pub(crate) fn files(
     {
         bail!("monorepo qualification requires GitHub Actions and runtime nix");
     }
+    if include_publishers && (config.vscode.is_some() || config.jetbrains.is_some()) {
+        bail!(
+            "monorepo extension publication is not supported; manage extension publishers independently and use --primary-only for qualification regeneration"
+        );
+    }
     if config.ci.with_artifacts
         || config.ci.with_pypi_publish
         || config.ci.pages.is_some()

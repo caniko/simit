@@ -116,6 +116,11 @@ impl ManifestRelease {
             if matches!(registry, super::native_registry::Registry::Npm) {
                 let doc: Value = serde_json::from_str(content)?;
                 ensure!(
+                    doc["publishConfig"]["provenance"].is_null()
+                        || doc["publishConfig"]["provenance"].is_boolean(),
+                    "signed npm provenance policy must be boolean"
+                );
+                ensure!(
                     doc["publishConfig"]["access"].is_null()
                         || doc["publishConfig"]["access"] == "public"
                         || (doc["publishConfig"]["access"] == "restricted"

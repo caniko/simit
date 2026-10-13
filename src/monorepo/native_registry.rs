@@ -156,13 +156,30 @@ impl Registry {
                     .is_some_and(|published| self.package_key(published) == self.package_key(name))
                     && body["info"]["version"] == version
                     && body["urls"].as_array().is_some_and(|files| {
-                        files.iter().any(|file| {
-                            file["yanked"] == false
-                                && file["digests"]["sha256"].as_str().is_some_and(|digest| {
-                                    digest.len() == 64
-                                        && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
-                                })
-                        })
+                        let is_type = |file: &Value, kind: &str, suffix: &str| {
+                            file["packagetype"] == kind
+                                && file["filename"]
+                                    .as_str()
+                                    .is_some_and(|name| name.ends_with(suffix))
+                        };
+                        files.len() == 2
+                            && files
+                                .iter()
+                                .filter(|file| is_type(file, "bdist_wheel", ".whl"))
+                                .count()
+                                == 1
+                            && files
+                                .iter()
+                                .filter(|file| is_type(file, "sdist", ".tar.gz"))
+                                .count()
+                                == 1
+                            && files.iter().all(|file| {
+                                file["yanked"] == false
+                                    && file["digests"]["sha256"].as_str().is_some_and(|digest| {
+                                        digest.len() == 64
+                                            && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+                                    })
+                            })
                     })
             }
             // Use the abbreviated packument and its exact version record.
@@ -225,6 +242,42 @@ pub(crate) fn available(package: &Package, version: &Version) -> Result<bool> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn python_verification_requires_one_unyanked_wheel_and_sdist() {
+        let complete = serde_json::json!({"info":{"name":"Py_Engine","version":"1.2.3"},"urls":[
+            {"filename":"py_engine-1.2.3-py3-none-any.whl","packagetype":"bdist_wheel","yanked":false,"digests":{"sha256":"a".repeat(64)}},
+            {"filename":"py_engine-1.2.3.tar.gz","packagetype":"sdist","yanked":false,"digests":{"sha256":"b".repeat(64)}}
+        ]});
+        assert!(Registry::Python.available(&complete, "py-engine", "1.2.3"));
+        for index in 0..2 {
+            let mut partial = complete.clone();
+            partial["urls"].as_array_mut().unwrap().remove(index);
+            assert!(!Registry::Python.available(&partial, "py-engine", "1.2.3"));
+            for (field, invalid) in [
+                ("yanked", serde_json::json!(true)),
+                ("digests", serde_json::json!({"sha256":"bad"})),
+                ("filename", serde_json::json!("unrelated.zip")),
+                ("packagetype", serde_json::json!("bdist_egg")),
+            ] {
+                let mut bad = complete.clone();
+                bad["urls"][index][field] = invalid;
+                assert!(
+                    !Registry::Python.available(&bad, "py-engine", "1.2.3"),
+                    "{field}: {bad}"
+                );
+            }
+        }
+        let mut extra = complete.clone();
+        extra["urls"]
+            .as_array_mut()
+            .unwrap()
+            .push(complete["urls"][0].clone());
+        assert!(!Registry::Python.available(&extra, "py-engine", "1.2.3"));
+        let mut wheels = complete.clone();
+        wheels["urls"][1] = complete["urls"][0].clone();
+        assert!(!Registry::Python.available(&wheels, "py-engine", "1.2.3"));
+    }
+
     #[test]
     fn npm_tags_exclude_semver_ranges_but_keep_named_channels() {
         for tag in [

@@ -631,6 +631,8 @@ fn patches_existing_anchorable_flake() {
     assert!(flake.contains("treefmt-nix.url = \"github:numtide/treefmt-nix\""));
     assert!(flake.contains("git-hooks.url = \"github:cachix/git-hooks.nix\""));
     assert!(flake.contains("treefmtEval = treefmt-nix.lib.evalModule pkgs"));
+    assert!(flake.contains("fmtToolchain = {inherit rustToolchain;};"));
+    assert!(!flake.contains("rs-harbor.lib.mkToolchain"));
     assert!(flake.contains("pre-commit-check = git-hooks.lib.${system}.run"));
     assert!(flake.contains("formatter = treefmtEval.config.build.wrapper"));
     assert!(flake.contains("formatting = treefmtEval.config.build.check self"));

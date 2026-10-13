@@ -207,6 +207,14 @@ for public native releases. All native publication requires `keys/maintainers.gp
 Native namespaces are limited to 64 ASCII bytes at configuration admission.
 Registry metadata retains npm lifecycle scripts for consumers; the protected
 publisher never executes those scripts.
+Public Python verification requires the complete unyanked wheel/sdist pair with
+valid SHA-256 entries. npm provenance policy must be boolean or unset during
+enrollment and credential-free packing.
+
+Configured VS Code and JetBrains extension publishers remain independently
+managed. Full monorepo CI generation rejects those sections before reconciling
+workflows; use `simit init ci --primary-only` to regenerate qualification while
+preserving existing extension publishers.
 
 Component gates use the same `bash -euo pipefail -c` command semantics locally
 and in generated CI, including quoted commands, environment and timeouts. The
