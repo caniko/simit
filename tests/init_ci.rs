@@ -4921,6 +4921,79 @@ fn check_ignores_existing_deny_policy_customization() {
 }
 
 #[test]
+fn forgejo_python_ci_applies_ci_cache_to_the_preinstalled_nix_environment() {
+    let temp = init_python_project();
+    let path = temp.path().join("simit.toml");
+    let config = read(&path);
+    fs::write(&path, format!("{config}\n[ci.cache]\nsubstituters = [\"https://ci-cache.example\"]\ntrusted_public_keys = [\"ci-cache.example:YWJj\"]\n\n[release.artifacts]\nsubstituters = [\"https://release-cache.example\"]\ntrusted_public_keys = [\"release-cache.example:YWJj\"]\n")).unwrap();
+    let output = simit_with_user_config(temp.path())
+        .current_dir(temp.path())
+        .args(["init", "ci", "--platform", "forgejo"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let workflow = read(&temp.path().join(".forgejo/workflows/ci.yaml"));
+    let value: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
+    let step = value["jobs"]["test"]["steps"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .find(|step| step["name"] == "Configure preinstalled Nix caches")
+        .expect("CI cache configuration step");
+    assert_eq!(
+        step["env"]["SIMIT_NIX_CACHE_CONFIG"].as_str().unwrap(),
+        "substituters = https://ci-cache.example\ntrusted-public-keys = ci-cache.example:YWJj\n"
+    );
+    let env_file = temp.path().join("github-env");
+    // The combined probe exceeds pipe capacity; an early-exit grep can make
+    // printf receive SIGPIPE and hide the match under bash's pipefail.
+    let existing = format!(
+        "experimental-features = nix-command flakes\nSIMIT_NIX_CACHE\nsystem-features = kvm\n# \"quoted\" \\literal\n{}",
+        "# x\n".repeat(24 * 1024)
+    );
+    let cache_config = format!(
+        "{}{}",
+        step["env"]["SIMIT_NIX_CACHE_CONFIG"].as_str().unwrap(),
+        "# cache\n".repeat(12 * 1024)
+    );
+    let output = Command::new("bash")
+        .args(["-e", "-o", "pipefail", "-c", step["run"].as_str().unwrap()])
+        .env("GITHUB_ENV", &env_file)
+        .env("NIX_CONFIG", &existing)
+        .env("SIMIT_NIX_CACHE_CONFIG", &cache_config)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let exported = read(&env_file);
+    assert!(exported.contains(&existing));
+    assert!(exported.contains(&cache_config));
+    assert!(exported.contains("substituters = https://ci-cache.example"));
+    assert!(exported.contains("trusted-public-keys = ci-cache.example:YWJj"));
+    assert!(!exported.contains("https://release-cache.example"));
+    let lines: Vec<_> = exported.lines().collect();
+    let delimiter = lines[0].strip_prefix("NIX_CONFIG<<").unwrap();
+    assert_eq!(lines.last().unwrap(), &delimiter);
+    assert!(!lines[1..lines.len() - 1].contains(&delimiter));
+    assert!(!workflow.contains("cachix/install-nix-action"));
+    assert_eq!(
+        simit::config::ProjectConfig::load(temp.path())
+            .unwrap()
+            .release
+            .artifacts
+            .substituters,
+        ["https://release-cache.example"]
+    );
+    assert!(
+        simit_with_user_config(temp.path())
+            .current_dir(temp.path())
+            .args(["init", "ci", "--platform", "forgejo", "--check", "--diff"])
+            .status()
+            .unwrap()
+            .success()
+    );
+}
+
+#[test]
 fn forgejo_python_uv_ci_uses_nix_checks() {
     let temp = init_python_project();
 

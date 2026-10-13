@@ -612,6 +612,9 @@ branch/PR events to qualify installation, source-head reporting and ordering.
 `[ci.cache]` declares public credential-free HTTPS substituters and signing keys
 for CI independently of release publication. An explicit empty table disables
 inherited release-cache settings; omitting the table preserves that inheritance.
+Forgejo Actions applies the selected cache settings to its preinstalled Nix
+environment, retaining existing `NIX_CONFIG`. Release publication continues to
+use its separate release-cache policy.
 Keep using `with_nix_cargo_cache = true` for the existing native Cargo cache.
 
 ```toml
@@ -644,7 +647,9 @@ budget is enforced separately throughout both streams.
 Import admits compressed size, checksum and the complete decompressed byte
 budget before derivation evaluation, which can itself instantiate store objects
 or trigger IFD. The admitted bytes stay in one private, unlinked spool through
-source/graph checks and import.
+source/graph checks and import. Compressed bytes are privately snapshotted too:
+checksum and decompression read the same snapshot, even if the downloaded inode
+changes afterward.
 
 Consumers verify source commit/tree, lock bytes,
 repository, run, attempt, expected derivations/output paths, archive checksum and
@@ -657,6 +662,10 @@ payloads in 64 KiB chunks. NAR depth is less than 64; entry names and symlink
 targets are at most 255 and 4095 bytes, respectively, matching the
 [Nix 2.34.8 importer limits](https://github.com/NixOS/nix/blob/2.34.8/src/libutil/archive.cc).
 These bounds apply to the entire stream before import, including later records.
+Admission conservatively rejects ASCII case aliases within each directory on
+all platforms. Darwin's default case hack can otherwise rewrite an alias into
+an existing `~nix~case~hack~` entry and fail partway through import. Nearby suffix
+names without aliases and names in separate directories remain supported.
 Validation and import use the same unlinked, mode-0600
 spool descriptor. The parser follows [Nix's export framing](https://github.com/NixOS/nix/blob/adbf23e8184bbbe8d786aad1f362443b6542e0a4/src/libstore/export-import.cc)
 and [NAR writer grammar](https://github.com/NixOS/nix/blob/adbf23e8184bbbe8d786aad1f362443b6542e0a4/doc/manual/src/protocols/nix-archive.md).
@@ -664,6 +673,12 @@ Legacy export signatures are rejected; archive integrity is distinct from hosted
 producer authority. An alias of a discovered check or a declared
 qualification output is refused. A failed dependency producer blocks consuming
 groups; its builder and export diagnostics remain available.
+
+Artifacts are bound to the exact run **and attempt**. Use **Re-run all jobs**
+after a consumer failure so the dependency producer also executes in the new
+attempt. GitHub's **Re-run failed jobs** can retain a successful producer from
+the previous attempt; its artifact is intentionally not accepted by retried
+consumers. There is no fallback to prior-attempt or cross-run artifacts.
 
 `kvm = true` enables hosted KVM on both the dependency producer and each consuming
 worker before custom setup or builds. Export and post-import verification also
