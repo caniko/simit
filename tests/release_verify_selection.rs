@@ -210,3 +210,59 @@ fn ci_artifact_gates_validate_full_tag_but_parse_configured_version_prefix() {
         assert!(publisher.contains(&format!("--publisher-tag-prefix '{prefix}'")));
     }
 }
+
+#[test]
+fn forgejo_upload_and_propagation_use_the_same_prefixed_tag_version() {
+    for prefix in ["", "v"] {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        write(
+            root,
+            "Cargo.toml",
+            "[package]\nname = 'selected'\nversion = '1.2.3'\nedition = '2024'\n",
+        );
+        write(root, "src/main.rs", "fn main() {}\n");
+        write(
+            root,
+            "simit.toml",
+            &format!("[release]\ntag_prefix = '{prefix}'\n"),
+        );
+        let generated = common::simit()
+            .current_dir(root)
+            .args([
+                "init",
+                "ci",
+                "--platform",
+                "forgejo",
+                "--runtime",
+                "cargo",
+                "--publish-crates",
+            ])
+            .output()
+            .unwrap();
+        assert!(generated.status.success(), "{generated:?}");
+        let workflow: serde_yaml::Value = serde_yaml::from_str(
+            &fs::read_to_string(root.join(".forgejo/workflows/publish-crate.yaml")).unwrap(),
+        )
+        .unwrap();
+        let steps = workflow["jobs"]["publish"]["steps"].as_sequence().unwrap();
+        for name in ["Publish", "Wait for exact registry resolution"] {
+            let script = steps.iter().find(|step| step["name"] == name).unwrap()["run"]
+                .as_str()
+                .unwrap();
+            let end = script
+                .find("if ! command -v curl")
+                .unwrap_or_else(|| script.find("target_dir=").unwrap());
+            let extraction = format!("{}\nprintf '%s' \"$version\"", &script[..end]);
+            let output = Command::new("bash")
+                .args(["-euo", "pipefail", "-c", &extraction])
+                .env_remove("GITHUB_REF_NAME")
+                .env_remove("GITHUB_REF")
+                .env("FORGE_REF_NAME", format!("{prefix}1.2.3"))
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            assert_eq!(output.stdout, b"1.2.3", "{name} ({prefix})");
+        }
+    }
+}

@@ -760,7 +760,12 @@ fn publish_workspace_workflow(
         w.push_str(" --dry-run\n\n");
         // Single-crate and dependency-ordered publication share conflict and
         // exact-registry readiness checks, including checksum-based resumes.
-        w.push_str(&publish_crate_steps(name, runtime, true));
+        w.push_str(&publish_crate_steps(
+            name,
+            runtime,
+            true,
+            options.tag_prefix,
+        ));
         previous = job.clone();
     }
     // Auditable summary (always runs, never publishes).
@@ -5104,20 +5109,22 @@ fn publish_step(
     if platform == Platform::Github {
         return trusted_publisher::prefixed_archive_steps(&package.name, runtime, tag_prefix);
     }
-    let rendered = publish_crate_steps(&package.name, runtime, package_scoped);
-    if tag_prefix == crate::release_identity::TagPrefix::V {
-        rendered.replace(
-            "          if ! command -v curl",
-            "          version=\"${version#v}\"\n          if ! command -v curl",
-        )
-    } else {
-        rendered
-    }
+    publish_crate_steps(&package.name, runtime, package_scoped, tag_prefix)
 }
 
-fn publish_crate_steps(name: &str, runtime: Runtime, package_scoped: bool) -> String {
+fn publish_crate_steps(
+    name: &str,
+    runtime: Runtime,
+    package_scoped: bool,
+    tag_prefix: crate::release_identity::TagPrefix,
+) -> String {
     let package_name = shell_quote(name);
     let prefix = command_prefix(runtime);
+    let version_prefix = if tag_prefix == crate::release_identity::TagPrefix::V {
+        "          case \"$version\" in v*) version=\"${version#v}\" ;; *) echo 'Tag prefix mismatch' >&2; exit 1 ;; esac\n"
+    } else {
+        ""
+    };
     let package_arg = if package_scoped {
         format!(" -p {}", shell_word(name))
     } else {
@@ -5139,7 +5146,7 @@ fn publish_crate_steps(name: &str, runtime: Runtime, package_scoped: bool) -> St
             echo "Could not determine release version from tag ref" >&2
             exit 1
           fi
-          if ! command -v curl >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1; then
+{version_prefix}          if ! command -v curl >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1; then
             if command -v apt-get >/dev/null 2>&1; then
               if [ "$(id -u)" = 0 ]; then apt=(apt-get); else apt=(sudo apt-get); fi
               "${{apt[@]}}" update
@@ -5195,7 +5202,7 @@ fn publish_crate_steps(name: &str, runtime: Runtime, package_scoped: bool) -> St
             ref="${{GITHUB_REF:-${{FORGE_REF:-${{CODEBERG_REF:-}}}}}}"
             version="${{ref#refs/tags/}}"
           fi
-          target_dir="$({prefix}cargo metadata --locked --no-deps --format-version 1 | jq -er '.target_directory')"
+{version_prefix}          target_dir="$({prefix}cargo metadata --locked --no-deps --format-version 1 | jq -er '.target_directory')"
           local_checksum="$(sha256sum "$target_dir/package/${{crate_name}}-${{version}}.crate" | awk '{{print $1}}')"
           probe="$(mktemp -d)"
           trap 'rm -rf "$probe"' EXIT
