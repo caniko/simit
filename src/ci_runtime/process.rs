@@ -278,12 +278,16 @@ fn capture(
     let mut remaining = maximum;
     let mut buffer = [0; 64 * 1024];
     loop {
+        // Observe cleanup before the read. If cleanup races a WouldBlock read,
+        // retry once after observing it so bytes queued before child exit cannot
+        // be discarded merely because EOF is held open by a descendant.
+        let finished = stopped.load(Ordering::SeqCst);
         let count = match input.read(&mut buffer) {
             Ok(0) => return Ok(()),
             Ok(count) => count,
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                if stopped.load(Ordering::SeqCst) {
+                if finished {
                     return Ok(());
                 }
                 std::thread::sleep(Duration::from_millis(5));
@@ -301,6 +305,46 @@ fn capture(
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cleanup_racing_a_would_block_read_does_not_drop_queued_bytes() {
+        struct ExitRace<'a> {
+            stopped: &'a AtomicBool,
+            reads: usize,
+        }
+        impl Read for ExitRace<'_> {
+            fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+                self.reads += 1;
+                if self.reads == 1 {
+                    self.stopped.store(true, Ordering::SeqCst);
+                    return Err(std::io::ErrorKind::WouldBlock.into());
+                }
+                if self.reads > 2 {
+                    return Ok(0);
+                }
+                bytes[..3].copy_from_slice(b"\xff\0x");
+                Ok(3)
+            }
+        }
+        let stopped = AtomicBool::new(false);
+        let output = tempfile::tempfile().unwrap();
+        let mut retained = output.try_clone().unwrap();
+        capture(
+            ExitRace {
+                stopped: &stopped,
+                reads: 0,
+            },
+            output,
+            3,
+            &stopped,
+        )
+        .unwrap();
+        use std::io::{Seek, SeekFrom};
+        retained.seek(SeekFrom::Start(0)).unwrap();
+        let mut raw = Vec::new();
+        retained.read_to_end(&mut raw).unwrap();
+        assert_eq!(raw, b"\xff\0x");
+    }
 
     #[test]
     fn sustained_concurrent_streams_cancel_and_retain_diagnostics() {

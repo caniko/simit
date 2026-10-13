@@ -16,13 +16,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `SIMIT_CI_ENGINE_REVISION` repository variable before adopting regenerated
   grouped workflows. Retain v1 receipts, shell-only failure diagnostics and
   materialize-plus-rebuild execution for fresh members.
+- CI-scoped public Nix cache configuration and bounded same-run build-input
+  closure transport with exact source/run/attempt/derivation provenance.
+- Explicit fresh qualification installables, retaining runtime execution while
+  restoring only build dependencies.
 - Opt-in shared-store Nix build groups with complete installable assignments,
   discovered-check coverage admission and per-output failure evidence.
 - Independent Rust, full-flake evaluation and optional realization lanes for
   GitHub-hosted Rust/Nix projects, retaining all existing quality steps.
-
-### Added
-
 - Opt-in `[ci.nix_build].push_tags` patterns to retain tag-push qualification
   alongside branch and pull-request gates, with ordered exclusions and stable
   configuration regeneration. Reject exclusion-only filters and keep tag refs
@@ -42,13 +43,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   retain admission diagnostics, and force fresh rebuilds onto the current worker.
   Bootstrap uses public credential-free Nix fetching and portable hashing, with
   unsupported Intel macOS runner admission rejected before generation writes.
+- Bind the full dependency export stream's actual path/reference inventory to the
+  admitted closure before canonical-store import, using a bounded non-extracting
+  NAR parser and one private spool descriptor through validation and import.
+  Align NAR depth, entry-name and symlink-target bounds with the Nix importer
+  so invalid later records reject before any preceding record can be imported.
+- Keep dependency transport's source, provenance, size and qualification-closure
+  fences active under Python optimization; provision the dependency producer's
+  interpreter on custom runners as well as hosted workers.
 - Migrate recognized inline MSRV bindings in existing canonical flakes before
   hook-wiring shortcuts, and detect that required source migration in full checks.
 - Generate MSRV toolchain manifests as source assets so no-build, read-only Nix
   evaluation succeeds on cold stores without changing the declared compiler.
-- Enforce grouped-build admission under Python optimization and preserve each
-  installable's hook context, including shell-only diagnostics after setup or
-  preflight failures. Provision the grouped interpreter and retain unset timeouts.
+- Preserve each grouped installable's hook context, including shell-only
+  diagnostics after setup or preflight failures, and retain unset timeouts.
 - Qualify one immutable PR head across independent lanes and required gates,
   evaluate all flake systems, preserve Cargo tool paths in every lane and reject
   unsupported step-runner overrides before normalization.

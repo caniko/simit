@@ -1081,8 +1081,8 @@ fn infer_expected_primary_ci_files(
                 &runner,
                 &options.nix_builds,
                 &options.extra_setup,
-                &options.nix_substituters,
-                &options.nix_trusted_public_keys,
+                &options.ci_nix_substituters,
+                &options.ci_nix_trusted_public_keys,
                 &config.ci.nix_build,
             )?);
         }
@@ -1138,7 +1138,7 @@ fn infer_expected_primary_ci_files(
             platform,
             &runner,
             &config.ci.nix_system_runners,
-            &config.release.artifacts,
+            &config.ci_cache_artifacts(),
             &config.ci.components,
         )?;
         let mut files = if config.ci.nix_build.only {
@@ -1155,8 +1155,8 @@ fn infer_expected_primary_ci_files(
                 &runner,
                 &config.ci.nix_builds,
                 &config.ci.extra_setup,
-                &config.release.artifacts.substituters,
-                &config.release.artifacts.trusted_public_keys,
+                &config.ci_cache_artifacts().substituters,
+                &config.ci_cache_artifacts().trusted_public_keys,
                 &config.ci.nix_build,
             )?);
         }
@@ -1344,8 +1344,8 @@ fn infer_expected_primary_ci_files(
             &runners.ci,
             &options.nix_builds,
             &options.extra_setup,
-            &options.nix_substituters,
-            &options.nix_trusted_public_keys,
+            &options.ci_nix_substituters,
+            &options.ci_nix_trusted_public_keys,
             &config.ci.nix_build,
         )?);
     }

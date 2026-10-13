@@ -198,7 +198,7 @@ fn generated_group_fixture(hook_size: Option<usize>) {
         None => script.to_owned(),
     };
     let temp = project(&format!(
-        "[ci.nix_build]\nonly = true\ncapture_results = true\ncheck_systems = [\"x86_64-linux\"]\npost_build = [{}]\npost_build_always = [{}]\n[ci.nix_build.groups]\nnetwork = [\".#checks.x86_64-linux.client\", \".#checks.x86_64-linux.recovery\"]",
+        "[ci.nix_build]\nonly = true\ncapture_results = true\ncheck_systems = [\"x86_64-linux\"]\nfresh_installables = [\".#checks.x86_64-linux.client\"]\npost_build = [{}]\npost_build_always = [{}]\n[ci.nix_build.groups]\nnetwork = [\".#checks.x86_64-linux.client\", \".#checks.x86_64-linux.recovery\"]",
         serde_json::to_string(&pad(success)).unwrap(),
         serde_json::to_string(&pad(diagnostic)).unwrap()
     ));

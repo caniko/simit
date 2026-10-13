@@ -57,6 +57,10 @@ pub(super) fn render(
             yaml_json_scalar(&serde_json::to_string(members)?)
         ));
     }
+    if !options.dependency_installables.is_empty() {
+        // The build job consumes only a complete same-run dependency producer.
+        workflow.push_str("    needs: [dependencies]\n");
+    }
     // Producer shell startup files/configuration cannot participate in bootstrap.
     workflow
         .push_str("    env:\n      NIX_CONFIG: \"experimental-features = nix-command flakes\"\n");
@@ -110,6 +114,7 @@ pub(super) fn render(
     push_required_env_step_with_context(&mut workflow, &options.required_env, |w| {
         push_producer_env(w, options)
     });
+    nix_dependencies::import(&mut workflow, runner, options, installables)?;
     let mut limits = Vec::new();
     if let Some(value) = options.max_jobs {
         limits.extend(["--max-jobs".to_owned(), value.to_string()]);
@@ -131,7 +136,7 @@ pub(super) fn render(
             limits: limits.clone(),
             post_build: options.post_build.clone(),
             post_build_always: options.post_build_always.clone(),
-            fresh_installables: Vec::new(),
+            fresh_installables: options.fresh_installables.clone(),
         };
         let quoted = shell_word(&serde_json::to_string(&spec)?);
         workflow.push_str(&format!("            {})\n              (umask 077; set -C; printf '%s' {quoted} > \"$SIMIT_NIX_BUILD_RESULTS/group-spec.json\")\n              ;;\n", shell_word(name)));
@@ -151,6 +156,15 @@ pub(super) fn render(
     for path in &options.artifact_paths {
         workflow.push_str(&format!("            {path}\n"));
     }
+    nix_dependencies::job(
+        &mut workflow,
+        runner,
+        extra_setup,
+        substituters,
+        trusted_public_keys,
+        options,
+        installables,
+    )?;
     Ok(GeneratedFile {
         relative_path: PathBuf::from(".github/workflows/nix-builds.yaml"),
         content: workflow,
@@ -190,7 +204,7 @@ fn push_producer_env(workflow: &mut String, options: &NixBuildConfig) {
     }
 }
 
-fn push_producer_env_lines(workflow: &mut String, options: &NixBuildConfig) {
+pub(super) fn push_producer_env_lines(workflow: &mut String, options: &NixBuildConfig) {
     for (name, value) in &options.extra_env {
         workflow.push_str(&format!(
             "          {name}: \"{}\"\n",

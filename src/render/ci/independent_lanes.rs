@@ -39,8 +39,8 @@ pub(super) fn render(
         push_install_nix_step_with_cache(
             &mut workflow,
             platform,
-            &options.nix_substituters,
-            &options.nix_trusted_public_keys,
+            &options.ci_nix_substituters,
+            &options.ci_nix_trusted_public_keys,
         );
         if lane == "rust" {
             push_nix_cargo_cache_steps(&mut workflow, platform, &runners.ci, &options, lane);
