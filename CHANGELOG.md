@@ -61,6 +61,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Cargo, Python, npm publication workflows or signing inputs.
 - Honor configured COPR Makefile and SRPM staging paths, match the RPM spec's
   source archive basename, and reject missing, empty, or duplicate SRPMs.
+- Give disposable COPR release fixtures a repository-local Git identity so
+  production-package tests also run in identity-free Nix sandboxes.
 - Link managed APT badges to the configured public repository URL.
 - Generate AUR metadata as an unprivileged user on root release runners;
   restore clone ownership on success or failure and preserve prior metadata

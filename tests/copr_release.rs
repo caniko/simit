@@ -26,11 +26,35 @@ fn project(srpm_dir: Option<&str>) -> TempDir {
     fs::write(root.join("simit.toml"), format!("[ci]\nplatform = \"github\"\n[release.github]\nrepo = \"example/demo\"\n[release.artifacts]\nrunner = \"ubuntu-24.04\"\nsign = false\nbuild_commands = [\"true\"]\n[copr]\ndownload_repo = \"example/demo\"\nproject = \"example/demo\"\nspec_path = \"dist/rpm/demo.spec\"\n{staging}")).unwrap();
     checked(common::simit().current_dir(root).args(["init", "copr"]));
     checked(Command::new("git").current_dir(root).args(["init"]));
+    // This disposable repository must also commit in a Nix sandbox, where
+    // there is no operator Git identity to inherit.
+    checked(Command::new("git").current_dir(root).args([
+        "config",
+        "--local",
+        "user.name",
+        "Simit disposable fixture",
+    ]));
+    checked(Command::new("git").current_dir(root).args([
+        "config",
+        "--local",
+        "user.email",
+        "fixture@example.invalid",
+    ]));
     checked(Command::new("git").current_dir(root).args(["add", "."]));
     checked(
         Command::new("git")
             .current_dir(root)
             .args(["commit", "-m", "fixture"]),
+    );
+    let author = checked(Command::new("git").current_dir(root).args([
+        "show",
+        "-s",
+        "--format=%an <%ae>",
+        "HEAD",
+    ]));
+    assert_eq!(
+        String::from_utf8(author.stdout).unwrap().trim(),
+        "Simit disposable fixture <fixture@example.invalid>"
     );
     dir
 }
