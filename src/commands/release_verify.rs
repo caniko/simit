@@ -243,7 +243,9 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
         }
     }
     // Preserve registry verification for legacy crate projects without a hosted target.
-    if config.ci.publish_crates || !hosted {
+    if (config.ci.publish_crates || !hosted)
+        && packages.iter().any(Package::is_publishable_to_crates_io)
+    {
         results.extend(check_crates_io(&packages, &version));
         results.push(CheckResult::blocked(
             "remote secrets",
@@ -551,7 +553,7 @@ fn changelog_has_version_entry(content: &str, version: &Version) -> bool {
 fn check_crates_io(packages: &[Package], version: &Version) -> Vec<CheckResult> {
     packages
         .iter()
-        .filter(|package| package.is_publishable())
+        .filter(|package| package.is_publishable_to_crates_io())
         .map(|package| check_crate_version(package, version))
         .collect()
 }

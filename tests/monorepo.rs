@@ -1029,6 +1029,81 @@ fn independent_verification_uses_adjacent_notes_and_owned_tag() {
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn independent_verification_requires_crates_io_eligibility() {
+    use std::os::unix::fs::PermissionsExt;
+
+    for publish_crates in [false, true] {
+        for (policy, eligible) in [
+            ("publish = false", false),
+            ("publish = [\"internal\"]", false),
+            ("publish = [\"crates-io\"]", true),
+            ("publish = [\"internal\", \"crates-io\"]", true),
+            ("", true),
+        ] {
+            let temp = fixture();
+            let root = temp.path();
+            let manifest = fs::read_to_string(root.join("crates/engine/Cargo.toml")).unwrap();
+            write(
+                root,
+                "crates/engine/Cargo.toml",
+                &manifest.replace(
+                    "edition = \"2024\"",
+                    &format!("edition = \"2024\"\n{policy}"),
+                ),
+            );
+            let config = fs::read_to_string(root.join("simit.toml")).unwrap();
+            write(
+                root,
+                "simit.toml",
+                &config.replace(
+                    "runtime = \"nix\"",
+                    &format!("runtime = \"nix\"\npublish_crates = {publish_crates}"),
+                ),
+            );
+            write(
+                root,
+                "bin/curl",
+                "#!/bin/sh\nprintf queried > \"$FIXTURE_CURL_MARKER\"\nprintf '%s\\n200' '{\"versions\":[{\"num\":\"0.1.0\"}]}'\n",
+            );
+            fs::set_permissions(root.join("bin/curl"), fs::Permissions::from_mode(0o755)).unwrap();
+            let path = std::env::join_paths(
+                std::iter::once(root.join("bin"))
+                    .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+            )
+            .unwrap();
+            let marker = root.join("queried");
+            let output = common::simit()
+                .current_dir(root)
+                .env("PATH", path)
+                .env("FIXTURE_CURL_MARKER", &marker)
+                .args(["release", "verify", "--component", "rust", "--json"])
+                .output()
+                .unwrap();
+            let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+            let results = report["results"].as_array().unwrap();
+            assert_eq!(marker.exists(), eligible, "{policy}: {output:?}");
+            assert_eq!(
+                results
+                    .iter()
+                    .any(|r| r["check"] == "crates.io engine" && r["status"] == "pass"),
+                eligible,
+                "{policy}: {report}"
+            );
+            assert_eq!(
+                results.iter().any(|r| r["check"] == "remote secrets"
+                    && r["message"]
+                        .as_str()
+                        .unwrap()
+                        .contains("CRATES_IO_API_TOKEN")),
+                eligible,
+                "{policy}: {report}"
+            );
+        }
+    }
+}
+
 #[test]
 fn component_release_mutates_only_its_package_and_adjacent_changelog() {
     let temp = fixture();

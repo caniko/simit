@@ -171,10 +171,7 @@ pub(crate) fn files(
             );
         }
         for package in metadata.packages.iter().filter(|p| {
-            metadata.workspace_members.contains(&p.id)
-                && p.publish.as_ref().is_none_or(|registries| {
-                    registries.iter().any(|registry| registry == "crates-io")
-                })
+            metadata.workspace_members.contains(&p.id) && p.is_publishable_to_crates_io()
         }) {
             crate::commands::release_plan::build_release_plan(
                 &metadata,
