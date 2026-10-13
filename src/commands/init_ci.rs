@@ -86,6 +86,7 @@ pub fn run(command: InitCiCommand) -> Result<()> {
         .unwrap_or(Platform::Forgejo);
     let backend = CiBackend::from_parts(provider, platform)?;
     cfg.ci.validate_effective_backend(provider, platform)?;
+    ci::custody::validate_backend(&cfg.ci, provider, platform)?;
     crate::render::workflow_templates::validate_backend(&cfg.ci, provider, platform)?;
     validate_review_policy_backend(&cfg, platform, provider)?;
     if platform == Platform::Gitlab {
@@ -717,6 +718,7 @@ fn run_nix_only_at(command: InitCiCommand, workspace_root: &Path) -> Result<()> 
         .unwrap_or(CiProvider::Actions);
     let _backend = CiBackend::from_parts(provider, platform)?;
     cfg.ci.validate_effective_backend(provider, platform)?;
+    ci::custody::validate_backend(&cfg.ci, provider, platform)?;
     crate::render::workflow_templates::validate_backend(&cfg.ci, provider, platform)?;
     validate_review_policy_backend(&cfg, platform, provider)?;
     if provider != CiProvider::Actions {
@@ -930,6 +932,7 @@ fn run_python(command: InitCiCommand) -> Result<()> {
     }
     let backend = CiBackend::from_parts(provider, platform)?;
     cfg.ci.validate_effective_backend(provider, platform)?;
+    ci::custody::validate_backend(&cfg.ci, provider, platform)?;
     crate::render::workflow_templates::validate_backend(&cfg.ci, provider, platform)?;
     validate_review_policy_backend(&cfg, platform, provider)?;
     if backend.provider() == CiProvider::Crow {
@@ -2093,6 +2096,9 @@ fn reconcile_ci_files(
     if let Some(policy) = config.review_policy.as_ref() {
         files.push(crate::render::review_policy::file(policy)?);
     }
+    if let Some(custody) = config.ci.custody.as_ref() {
+        files.push(ci::custody::file(custody)?);
+    }
     crate::render::workflow_templates::append(workspace_root, &config.ci, &mut files)?;
     let mut obsolete =
         project::obsolete_generated_workflows(workspace_root, &files, is_ci_managed_workflow_name)?;
@@ -2220,6 +2226,7 @@ fn is_ci_managed_workflow_name(name: &std::ffi::OsStr) -> bool {
             | "release-artifacts.yml"
             | "nix-builds.yaml"
             | "nix-builds.yml"
+            | "producer-custody.yaml"
             | "prebuild.yaml"
             | "prebuild.yml"
             | "pages.yaml"
