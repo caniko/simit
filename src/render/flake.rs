@@ -2057,13 +2057,28 @@ fn has_treefmt_shell_package(content: &str) -> bool {
     parsed
         .syntax()
         .descendants()
-        .filter_map(cast_nix_node::<AttrpathValue>)
-        .any(|binding| {
+        .filter_map(|node| {
+            cast_nix_node::<AttrpathValue>(node.clone()).map(|binding| (node, binding))
+        })
+        .any(|(node, binding)| {
             let Some(Attr::Ident(name)) = binding.attrpath().and_then(|path| path.attrs().last())
             else {
                 return false;
             };
             if !matches!(name.to_string().as_str(), "packages" | "extraPackages") {
+                return false;
+            }
+            let in_shell = node.ancestors().any(|node| {
+                cast_nix_node::<AttrpathValue>(node)
+                    .and_then(|parent| parent.attrpath())
+                    .is_some_and(|path| {
+                        let name = path.to_string();
+                        name == "devShells"
+                            || name.starts_with("devShells.")
+                            || matches!(name.as_str(), "devShell" | "mkDevShells")
+                    })
+            });
+            if !in_shell {
                 return false;
             }
             binding.value().is_some_and(includes_wrapper)
@@ -2450,6 +2465,26 @@ mod tests {
 "#;
 
     const NEW_MODULE: &str = "{rustfmtPackage}: {pkgs, ...}: {}";
+
+    #[test]
+    fn treefmt_wrapper_must_belong_to_shell_packages() {
+        for key in ["packages", "extraPackages"] {
+            let decoy = format!(
+                "{{ {key} = [treefmtEval.config.build.wrapper]; devShells.default = {{ packages = []; }}; }}"
+            );
+            assert!(!has_treefmt_shell_package(&decoy));
+            let shell = format!(
+                "{{ devShells.default = pkgs.mkShell {{ {key} = [treefmtEval.config.build.wrapper]; }}; }}"
+            );
+            assert!(has_treefmt_shell_package(&shell));
+        }
+        assert!(has_treefmt_shell_package(
+            "{ devShells = (harbor.lib.rust.mkDevShells { extraPackages = [treefmtEval.config.build.wrapper]; }) // {}; }"
+        ));
+        assert!(has_treefmt_shell_package(
+            "{ devShells.default.packages = [treefmtEval.config.build.wrapper]; }"
+        ));
+    }
 
     #[test]
     fn migrate_treefmt_call_upgrades_bare_call_site() {
