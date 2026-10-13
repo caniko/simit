@@ -613,6 +613,18 @@ adapter's admission checks remain enforced when Python optimization is enabled.
 Grouped jobs have `build (<group>)` contexts. Qualify the new evidence and migrate
 required contexts together before retiring a monolithic flake-check gate.
 
+Simit's `Qualify native grouped execution` workflow exercises the production
+engine on fresh `aarch64-linux` and `aarch64-darwin` hosted workers. Each job
+checks actual hardware before provisioning, builds the exact event-head engine,
+and executes its generated native guard, immutable bootstrap, group invocation
+and diagnostic fallback. The fixture qualifies both cold materialization and
+warm-store rebuilds, requiring current-worker builder markers, ordered v1 member
+receipts, successful hooks and no duplicate fallback collection. Artifacts retain
+the source hashes, production derivation, engine digest, generated workflow and
+per-state evidence. Only successful original-attempt jobs and independently
+verified artifacts establish platform acceptance for that exact source; this
+workflow does not enroll a consumer's engine variable or required contexts.
+
 ### Completion-driven producer custody
 
 `[ci.custody]` generates a trusted default-branch `workflow_run` observer. Enroll
