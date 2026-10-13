@@ -90,7 +90,9 @@ jobs:
           git rev-parse 'HEAD^{tree}' > "$evidence/source-tree"
           printf '%s\n' "$PRIMARY_SCOPE_HEAD" > "$evidence/primary-scope-revision"
           git fetch --no-tags https://github.com/caniko/simit.git "$PRIMARY_SCOPE_HEAD"
-          git cherry-pick --no-commit "$PRIMARY_SCOPE_HEAD"
+          if ! git merge-base --is-ancestor "$PRIMARY_SCOPE_HEAD" HEAD; then
+            git cherry-pick --no-commit "$PRIMARY_SCOPE_HEAD"
+          fi
           python3 tests/fixtures/primary-ci-integration.py
           git diff HEAD > "$evidence/integration.diff"
           git add src/commands/init_ci.rs tests/primary_ci_native_scope.rs

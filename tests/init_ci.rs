@@ -3983,7 +3983,7 @@ fn check_fails_when_workflows_differ() {
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("CI workflows are not up to date"));
     assert!(
-        stderr.contains("run `simit init ci --platform forgejo`"),
+        stderr.contains("run `simit init ci --platform forgejo --ci-provider actions`"),
         "stderr:\n{stderr}"
     );
     assert!(stderr.contains(".forgejo/workflows/ci.yaml differs"));
@@ -4042,7 +4042,7 @@ fn check_failure_hint_includes_transient_generation_flags() {
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(
         stderr.contains(
-            "run `simit init ci --platform forgejo --runtime nix --runner atlas-nix-trusted"
+            "run `simit init ci --platform forgejo --ci-provider actions --runtime nix --runner atlas-nix-trusted"
         ),
         "stderr:\n{stderr}"
     );
