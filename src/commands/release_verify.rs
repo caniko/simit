@@ -258,8 +258,87 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
         &tag,
         command.push_target.as_deref(),
     ));
+    if command.component.is_some() {
+        for package in &packages {
+            let check = format!("tag manifest {}", package.name);
+            results.push(
+                match cargo_tag_manifest_matches(
+                    workspace_root,
+                    package,
+                    &version,
+                    &tag.to_string(),
+                ) {
+                    Ok(()) => CheckResult::pass(
+                        check,
+                        "tagged Cargo name/version matches the selected release",
+                    ),
+                    Err(error) => CheckResult::fail(
+                        check,
+                        error.to_string(),
+                        "repair the package-owned tag to point at its actual release source",
+                    ),
+                },
+            );
+        }
+    }
 
     finish_report(results, command.json)
+}
+
+fn cargo_tag_manifest_matches(
+    root: &Path,
+    package: &Package,
+    version: &Version,
+    tag: &str,
+) -> Result<()> {
+    let relative = package.manifest_path.as_std_path().strip_prefix(root)?;
+    let path = relative.to_string_lossy().replace('\\', "/");
+    let read = |path: &str| -> Result<toml_edit::DocumentMut> {
+        let output = Command::new("git")
+            .current_dir(root)
+            .args(["show", &format!("refs/tags/{tag}:{path}")])
+            .output()?;
+        anyhow::ensure!(
+            output.status.success(),
+            "cannot read tagged Cargo manifest {path}"
+        );
+        Ok(String::from_utf8(output.stdout)?.parse()?)
+    };
+    let manifest = read(&path)?;
+    let tagged_package = manifest
+        .get("package")
+        .context("missing tagged Cargo package")?;
+    anyhow::ensure!(
+        tagged_package.get("name").and_then(toml_edit::Item::as_str) == Some(package.name.as_str()),
+        "tagged Cargo package name differs from the selected package"
+    );
+    let version_item = tagged_package
+        .get("version")
+        .context("missing tagged Cargo version")?;
+    let tagged_version = if version_item
+        .get("workspace")
+        .and_then(toml_edit::Item::as_bool)
+        == Some(true)
+    {
+        let workspace = read("Cargo.toml")?;
+        workspace
+            .get("workspace")
+            .and_then(|item| item.get("package"))
+            .and_then(|item| item.get("version"))
+            .and_then(toml_edit::Item::as_str)
+            .context("missing tagged workspace package version")?
+            .to_owned()
+    } else {
+        version_item
+            .as_str()
+            .context("missing tagged Cargo version")?
+            .to_owned()
+    };
+    anyhow::ensure!(
+        Version::parse(&tagged_version)? == *version,
+        "tagged Cargo version differs from the selected release"
+    );
+    Ok(())
 }
 
 fn finish_report(results: Vec<CheckResult>, json: bool) -> Result<()> {

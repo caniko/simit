@@ -1279,6 +1279,82 @@ fn independent_verification_uses_adjacent_notes_and_owned_tag() {
     }
 }
 
+#[test]
+fn cargo_component_verification_checks_the_tagged_manifest() {
+    for notes in ["none", "changelog"] {
+        for inherited in [false, true] {
+            let temp = fixture();
+            let root = temp.path();
+            let config = fs::read_to_string(root.join("simit.toml")).unwrap();
+            write(
+                root,
+                "simit.toml",
+                &format!("{config}\n[release.notes]\nsource='{notes}'\n"),
+            );
+            let manifest = fs::read_to_string(root.join("crates/engine/Cargo.toml")).unwrap();
+            write(
+                root,
+                "crates/engine/Cargo.toml",
+                &manifest.replace("edition = \"2024\"", "edition = \"2024\"\npublish=false"),
+            );
+            if inherited {
+                let manifest = fs::read_to_string(root.join("crates/engine/Cargo.toml"))
+                    .unwrap()
+                    .replace("version = \"0.1.0\"", "version.workspace = true");
+                write(root, "crates/engine/Cargo.toml", &manifest);
+                let workspace = fs::read_to_string(root.join("Cargo.toml")).unwrap();
+                write(
+                    root,
+                    "Cargo.toml",
+                    &format!("{workspace}\n[workspace.package]\nversion='0.1.0'\n"),
+                );
+            }
+            fixture_git(root, &["init"]);
+            fixture_git(root, &["config", "user.name", "Test"]);
+            fixture_git(root, &["config", "user.email", "test@example.com"]);
+            fixture_git(root, &["add", "."]);
+            fixture_git(root, &["commit", "-m", "old source"]);
+            fixture_git(root, &["tag", "engine/v0.2.0"]);
+            let path = if inherited {
+                "Cargo.toml"
+            } else {
+                "crates/engine/Cargo.toml"
+            };
+            let manifest = fs::read_to_string(root.join(path))
+                .unwrap()
+                .replace("0.1.0", "0.2.0");
+            write(root, path, &manifest);
+            if inherited {
+                let manifest = fs::read_to_string(root.join("crates/engine/Cargo.toml"))
+                    .unwrap()
+                    .replace("version.workspace = true", "version = \"0.2.0\"");
+                write(root, "crates/engine/Cargo.toml", &manifest);
+            }
+            fixture_git(root, &["add", "."]);
+            fixture_git(root, &["commit", "-m", "current source"]);
+            let verify = || {
+                let output = common::simit()
+                    .current_dir(root)
+                    .args(["release", "verify", "--component", "rust", "--json"])
+                    .output()
+                    .unwrap();
+                let report: Value = serde_json::from_slice(&output.stdout)
+                    .unwrap_or_else(|error| panic!("{error}: {output:?}"));
+                report["results"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|result| result["check"] == "tag manifest engine")
+                    .expect("verify tagged Cargo source")
+                    .clone()
+            };
+            assert_eq!(verify()["status"], "fail");
+            fixture_git(root, &["tag", "-f", "engine/v0.2.0"]);
+            assert_eq!(verify()["status"], "pass");
+        }
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn independent_verification_requires_crates_io_eligibility() {

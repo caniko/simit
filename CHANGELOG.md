@@ -53,6 +53,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Verify selected Cargo name/version from the component tag's manifest, including
+  workspace-inherited versions, rather than only checking the tag ref exists.
 - Reject component version bumps excluded by local dependency requirements before
   mutation, including renamed workspace-inherited dependencies.
 - Preserve primary-only scope when inferring monorepo drift with independently
