@@ -115,7 +115,7 @@ impl Config {
                         component.id
                     );
                 }
-                for name in gate.env.keys() {
+                for (name, value) in &gate.env {
                     if name.is_empty()
                         || !name.bytes().enumerate().all(|(i, c)| {
                             c == b'_' || c.is_ascii_alphabetic() || (i > 0 && c.is_ascii_digit())
@@ -123,6 +123,12 @@ impl Config {
                     {
                         bail!("invalid component check environment name {name:?}");
                     }
+                    ensure!(
+                        !value.contains("${{"),
+                        "component {} check {} environment {name:?} cannot contain workflow expressions",
+                        component.id,
+                        gate.id
+                    );
                 }
             }
         }

@@ -384,6 +384,59 @@ fn cycles_duplicate_ownership_and_traversal_are_rejected() {
 }
 
 #[test]
+fn component_gate_environments_reject_workflow_expressions() {
+    for (value, valid) in [
+        ("${{ secrets.TEST_TOKEN }}", false),
+        ("prefix-${{ github.ref }}", false),
+        ("${{\n github.event.pull_request.title\n}}", false),
+        ("literal $TOKEN {{ braces }}\nsecond line", true),
+    ] {
+        let temp = fixture();
+        let root = temp.path();
+        enroll_release_checks(root);
+        let mut config: toml_edit::DocumentMut = fs::read_to_string(root.join("simit.toml"))
+            .unwrap()
+            .parse()
+            .unwrap();
+        let mut env = toml_edit::InlineTable::new();
+        env.insert("TEST_VALUE", value.into());
+        let gate = config["monorepo"]["components"]
+            .as_array_of_tables_mut()
+            .unwrap()
+            .get_mut(0)
+            .unwrap()["checks"]
+            .as_array_mut()
+            .unwrap()
+            .get_mut(0)
+            .unwrap()
+            .as_inline_table_mut()
+            .unwrap();
+        gate.insert("env", env.into());
+        let config = config.to_string();
+        write(root, "simit.toml", &config);
+        for args in [
+            vec!["monorepo", "plan", "--json"],
+            vec!["init", "ci", "--primary-only"],
+        ] {
+            let output = common::simit()
+                .current_dir(root)
+                .args(args)
+                .output()
+                .unwrap();
+            assert_eq!(output.status.success(), valid, "{value:?}: {output:?}");
+            if !valid {
+                assert!(
+                    String::from_utf8_lossy(&output.stderr).contains("workflow expressions"),
+                    "{output:?}"
+                );
+                assert!(!root.join(".github/workflows/ci.yaml").exists());
+            }
+        }
+        assert_eq!(fs::read_to_string(root.join("simit.toml")).unwrap(), config);
+    }
+}
+
+#[test]
 fn git_diff_includes_both_sides_of_renames_and_deleted_paths() {
     let temp = fixture();
     let git = |args: &[&str]| {
@@ -1587,10 +1640,10 @@ fn independent_cargo_sources_refuse_private_workers_and_candidate_authentication
         assert!(!output.status.success(), "accepted {value}: {output:?}");
         let diagnostic = String::from_utf8_lossy(&output.stderr);
         assert!(
-            diagnostic.contains("must not reference GitHub secrets")
-                || diagnostic.contains("must not reference GitHub authentication contexts"),
+            diagnostic.contains("cannot contain workflow expressions"),
             "{output:?}"
         );
+        assert!(!temp.path().join(".github/workflows/ci.yaml").exists());
     }
 }
 

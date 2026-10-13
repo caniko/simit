@@ -53,6 +53,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Reject workflow expressions in component gate environments before planning or
+  generation, preserving literal local/hosted gate parity.
 - Preserve primary-only scope in component CI self-checks so independently
   managed extension publishers do not block qualification.
 - Skip crates.io registry and token verification for Cargo packages whose publish
