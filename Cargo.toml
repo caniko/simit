@@ -61,6 +61,7 @@ CARGO_BUILD_JOBS = "2"
 ".github/workflows/qualify-generator.yaml" = ".simit/workflows/qualify-generator.yaml.in"
 ".github/workflows/custody-fixture.yaml" = ".simit/workflows/custody-fixture.yaml.in"
 ".github/workflows/qualify-nix-transport.yaml" = ".simit/workflows/qualify-nix-transport.yaml.in"
+".github/workflows/qualify-native-groups.yaml" = ".simit/workflows/qualify-native-groups.yaml.in"
 
 [package.metadata.simit.ci.custody]
 repository = "caniko/simit"
