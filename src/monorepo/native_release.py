@@ -25,6 +25,12 @@ def require(condition, message):
         raise RuntimeError(message)
 
 
+def npm_publish_config(manifest):
+    config = manifest.get("publishConfig", {})
+    require(isinstance(config, dict), "npm publishConfig must be an object when present")
+    return config
+
+
 def command(arguments, **kwargs):
     return subprocess.run(arguments, check=True, **kwargs)
 
@@ -104,7 +110,7 @@ def context():
     if registry == "npm":
         require(valid_npm_package_name(package), "invalid npm package name")
         require("+" not in version, "public native releases cannot have SemVer build metadata")
-        config = data.get("publishConfig", {})
+        config = npm_publish_config(data)
         require(config.get("provenance") is None or isinstance(config["provenance"], bool), "signed npm provenance policy must be boolean")
         require(config.get("registry", "https://registry.npmjs.org/").rstrip("/") == "https://registry.npmjs.org", "custom npm registry requires its own publication backend")
         require(not ("tag" not in config and "-" in version), "npm prereleases require an explicit publishConfig.tag")
@@ -140,7 +146,7 @@ def archive_identity(path, identity):
         require(valid_npm_package_name(data["name"]), "invalid npm package name")
         require("private" not in data or isinstance(data["private"], bool), "npm private must be boolean when present")
         require(not data.get("private", False), "packed package is private")
-        require(data.get("publishConfig", {}).get("registry", "https://registry.npmjs.org/").rstrip("/") == "https://registry.npmjs.org", "packed npm registry is not public npm")
+        require(npm_publish_config(data).get("registry", "https://registry.npmjs.org/").rstrip("/") == "https://registry.npmjs.org", "packed npm registry is not public npm")
         name, version = data["name"], data["version"]
     else:
         if path.suffix == ".whl":
@@ -293,7 +299,7 @@ def upload_native(out, identity, files, manifest, token):
         # Package configuration remains registry metadata, including consumer
         # lifecycle scripts. No candidate hooks execute here; only the signed
         # policy chooses upload endpoints, credentials, dist-tag and access.
-        config = manifest.get("publishConfig", {})
+        config = npm_publish_config(manifest)
         require(config.get("provenance") is None or isinstance(config["provenance"], bool), "signed npm provenance policy must be boolean")
         require(config.get("registry", "https://registry.npmjs.org/").rstrip("/") == "https://registry.npmjs.org", "unapproved npm registry")
         tag = config.get("tag", "latest")
@@ -361,7 +367,7 @@ def update_npm_tag(identity, tag, token):
 
 def publish(out, identity, attempt, manifest):
     files = validate_artifacts(out, identity, attempt)
-    tag = manifest.get("publishConfig", {}).get("tag", "latest") if identity["registry"] == "npm" else None
+    tag = npm_publish_config(manifest).get("tag", "latest") if identity["registry"] == "npm" else None
     require(identity["registry"] != "npm" or valid_npm_dist_tag(tag), "invalid signed npm dist-tag")
     pending = missing_files(out, identity, files)
     if not pending and (tag is None or npm_tag_matches(identity, tag)):

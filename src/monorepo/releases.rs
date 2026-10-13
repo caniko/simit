@@ -98,6 +98,10 @@ impl ManifestRelease {
             } else {
                 let doc: Value = serde_json::from_str(content)?;
                 ensure!(
+                    doc.get("publishConfig").is_none_or(Value::is_object),
+                    "npm publishConfig must be an object when present"
+                );
+                ensure!(
                     doc.get("private").is_none_or(Value::is_boolean),
                     "npm private must be boolean when present"
                 );

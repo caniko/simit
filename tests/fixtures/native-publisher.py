@@ -117,6 +117,11 @@ with tempfile.TemporaryDirectory() as temp:
         before = len(requests)
         refuses(lambda: actual.upload_native(root, npm_identity, [tarball.name], {"publishConfig": {"access": invalid}}, "fixture"))
         assert len(requests) == before
+    for invalid in [None, "public", [], False, 7]:
+        before = len(requests)
+        refuses(lambda: actual.npm_publish_config({"publishConfig": invalid}))
+        refuses(lambda: actual.upload_native(root, npm_identity, [tarball.name], {"publishConfig": invalid}, "fixture"))
+        assert len(requests) == before
     refuses(lambda: actual.upload_native(root, npm_identity, [tarball.name], {"publishConfig": {"registry": "https://attacker.invalid"}}, "fixture"))
     before = len(requests)
     for tag in ["v1", "v1.4", "vv1.4", "v1.2.3", "v1.2.3-beta.1", "v1.x", "v1.2.x-beta", "vx.x.x-beta", "x", "X", "X.X.X"]:

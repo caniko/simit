@@ -53,6 +53,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Reject non-object npm publishConfig at enrollment and protected admission.
 - Require custom treefmt imports to participate in the returned evaluated module,
   rejecting unused nested expressions while accepting formatted direct wiring.
 - Reject unsupported independent Cargo publication prereleases before any gate,

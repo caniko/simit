@@ -834,6 +834,40 @@ fn native_npm_provenance_is_boolean_during_enrollment() {
 }
 
 #[test]
+fn native_npm_publish_config_requires_an_object_before_writes() {
+    for value in [
+        serde_json::json!(null),
+        serde_json::json!(false),
+        serde_json::json!(7),
+        serde_json::json!("public"),
+        serde_json::json!([]),
+        serde_json::json!({}),
+    ] {
+        let temp = fixture();
+        let root = temp.path();
+        let config = fs::read_to_string(root.join("simit.toml"))
+            .unwrap()
+            .replace("publish = false", "publish = true");
+        write(root, "simit.toml", &config);
+        write(root, "node/package.json", &serde_json::json!({"name":"@example/node-engine","version":"1.3.0","publishConfig":value}).to_string());
+        let output = run(root, &["init", "ci"]);
+        assert_eq!(
+            output.status.success(),
+            value.is_object(),
+            "{value}: {output:?}"
+        );
+        if !value.is_object() {
+            assert!(
+                String::from_utf8_lossy(&output.stderr)
+                    .contains("npm publishConfig must be an object"),
+                "{output:?}"
+            );
+            assert!(!root.join(".github/workflows/ci.yaml").exists());
+        }
+    }
+}
+
+#[test]
 fn registry_names_can_overlap_but_release_namespaces_select_one_owner() {
     let temp = fixture();
     let root = temp.path();
