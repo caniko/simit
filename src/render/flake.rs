@@ -791,14 +791,34 @@ pub fn flake_passes_rustfmt_package(flake_content: &str) -> bool {
 fn has_treefmt_eval_import(content: &str) -> bool {
     use rnix::ast::Expr;
 
-    fn imports_policy<T: rnix::ast::AstNode>(argument: T) -> bool {
-        argument.syntax().descendants().any(|node| {
-            let Some(import) = cast_nix_node::<rnix::ast::Apply>(node) else {
-                return false;
-            };
-            matches!(import.lambda().and_then(unparen), Some(Expr::Ident(id)) if id.to_string() == "import")
-                && matches!(import.argument().and_then(unparen), Some(Expr::Path(path)) if path.to_string() == "./nix/treefmt.nix")
-        })
+    fn imports_policy(argument: Expr) -> bool {
+        let Some(argument) = unparen(argument) else {
+            return false;
+        };
+        match argument {
+            Expr::Apply(call) => {
+                let Some(function) = call.lambda().and_then(unparen) else {
+                    return false;
+                };
+                if matches!(&function, Expr::Ident(id) if id.to_string() == "import") {
+                    matches!(call.argument().and_then(unparen), Some(Expr::Path(path)) if path.to_string() == "./nix/treefmt.nix")
+                } else {
+                    // Follow an applied import, never an unused call argument.
+                    imports_policy(function)
+                }
+            }
+            Expr::LetIn(binding) => binding.body().is_some_and(imports_policy),
+            Expr::With(scope) => scope.body().is_some_and(imports_policy),
+            Expr::Lambda(function) => function.body().is_some_and(imports_policy),
+            Expr::IfElse(branch) => {
+                branch.body().is_some_and(imports_policy)
+                    && branch.else_body().is_some_and(imports_policy)
+            }
+            Expr::BinOp(merge) if merge.operator() == Some(rnix::ast::BinOpKind::Update) => {
+                merge.lhs().is_some_and(imports_policy) || merge.rhs().is_some_and(imports_policy)
+            }
+            _ => false,
+        }
     }
 
     let parsed = rnix::Root::parse(content);
@@ -2393,6 +2413,34 @@ mod tests {
         assert!(!has_treefmt_eval_import(
             "{ treefmtEval = null; unused = import ./nix/treefmt.nix; }"
         ));
+        for module in [
+            "let unused = import ./nix/treefmt.nix; in {}",
+            "{ unused = import ./nix/treefmt.nix; }",
+            "(_: {}) (import ./nix/treefmt.nix)",
+            "if false then import ./nix/treefmt.nix else {}",
+            "with { unused = import ./nix/treefmt.nix; }; {}",
+        ] {
+            assert!(
+                !has_treefmt_eval_import(&format!(
+                    "{{ treefmtEval = treefmt-nix.lib.evalModule pkgs ({module}); }}"
+                )),
+                "{module}"
+            );
+        }
+        for module in [
+            "import ./nix/treefmt.nix",
+            "let unused = {}; in import ./nix/treefmt.nix",
+            "with {}; import ./nix/treefmt.nix",
+            "{ ... }: import ./nix/treefmt.nix",
+            "if enabled then import ./nix/treefmt.nix else import ./nix/treefmt.nix",
+        ] {
+            assert!(
+                has_treefmt_eval_import(&format!(
+                    "{{ treefmtEval = treefmt-nix.lib.evalModule pkgs ({module}); }}"
+                )),
+                "{module}"
+            );
+        }
     }
 
     #[test]

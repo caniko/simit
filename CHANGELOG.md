@@ -53,6 +53,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Require custom treefmt imports to participate in the returned evaluated module,
+  rejecting unused nested expressions while accepting formatted direct wiring.
 - Reject unsupported independent Cargo publication prereleases before any gate,
   version edit, commit or tag, including bumps from existing prereleases.
 - Propagate configured tag prefixes into VS Code publication triggers and exact
