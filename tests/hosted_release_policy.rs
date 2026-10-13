@@ -85,6 +85,36 @@ fn prefixed_tags_keep_manifest_versions_unprefixed() {
 }
 
 #[test]
+fn reusable_prebuild_uses_the_same_effective_notes_policy() {
+    for (notes, legacy, changelog) in [
+        (None, false, false),
+        (Some("git"), true, false),
+        (Some("none"), true, false),
+        (Some("changelog"), false, true),
+    ] {
+        let notes = notes.map_or_else(String::new, |source| {
+            format!("[release.notes]\nsource='{source}'\n")
+        });
+        let dir = project(&format!(
+            "[release]\ntag_prefix='v'\n{notes}[ci]\nplatform='github'\nprovider='actions'\nruntime='nix'\n[release.github]\nrepo='example/player'\nbody_from_changelog={legacy}\n[release.artifacts]\nrunner='ubuntu-24.04'\nprebuild_binaries=true\nsign=false\n[prebuild]\nrelease_archives=true\npublish_attic=false\nsystem_runners={{x86_64-linux='ubuntu-24.04'}}\n"
+        ));
+        fs::write(dir.path().join("flake.nix"), "{}\n").unwrap();
+        let release = render(dir.path());
+        assert_eq!(release.contains("CHANGELOG.md"), changelog);
+        let output = common::simit()
+            .current_dir(dir.path())
+            .args(["init", "ci", "--prebuild-only"])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let prebuild =
+            fs::read_to_string(dir.path().join(".github/workflows/prebuild.yaml")).unwrap();
+        assert_eq!(prebuild.contains("CHANGELOG.md"), changelog, "{prebuild}");
+        assert!(prebuild.contains("VERSION=\"${TAG#v}\""));
+    }
+}
+
+#[test]
 fn disabling_changelog_body_removes_the_changelog_precondition() {
     let dir = project(&HOSTED.replace(
         "repo = \"example/player\"",

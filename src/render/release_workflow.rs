@@ -889,9 +889,10 @@ fn push_preinstalled_nix_env(w: &mut String, artifacts: &ArtifactsConfig) {
 pub(crate) fn tag_validation_step(
     artifacts: &ArtifactsConfig,
     prefix: crate::release_identity::TagPrefix,
+    notes: ReleaseNotesSource,
 ) -> String {
     let mut step = String::new();
-    push_validate_tag(&mut step, artifacts, prefix, ReleaseNotesSource::Changelog);
+    push_validate_tag(&mut step, artifacts, prefix, notes);
     step
 }
 

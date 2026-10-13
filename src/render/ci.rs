@@ -1030,23 +1030,25 @@ pub fn github_prebuild_file(
     artifacts: &ArtifactsConfig,
     attic: Option<&AtticConfig>,
 ) -> Result<GeneratedFile> {
-    github_prebuild_file_with_prefix(
+    github_prebuild_file_with_policy(
         system_runners,
         nix_builds,
         prebuild,
         artifacts,
         attic,
         crate::release_identity::TagPrefix::None,
+        crate::config::ReleaseNotesSource::Changelog,
     )
 }
 
-pub fn github_prebuild_file_with_prefix(
+pub fn github_prebuild_file_with_policy(
     system_runners: &BTreeMap<String, String>,
     nix_builds: &[String],
     prebuild: &PrebuildConfig,
     artifacts: &ArtifactsConfig,
     attic: Option<&AtticConfig>,
     prefix: crate::release_identity::TagPrefix,
+    notes: crate::config::ReleaseNotesSource,
 ) -> Result<GeneratedFile> {
     if system_runners.is_empty() {
         bail!("GitHub prebuild requires at least one native system runner");
@@ -1097,7 +1099,7 @@ pub fn github_prebuild_file_with_prefix(
     );
     // Reusable release prebuilds also validate their own event checkout before
     // any project-controlled evaluation/build or Attic credential use.
-    let validation = super::release_workflow::tag_validation_step(artifacts, prefix);
+    let validation = super::release_workflow::tag_validation_step(artifacts, prefix, notes);
     workflow.push_str(&validation.replacen(
         "        run: |",
         "        if: ${{ inputs.release }}\n        run: |",

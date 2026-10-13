@@ -63,6 +63,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Carry tag prefixes through reusable prebuild and PyPI workflows, reject
   SemVer-range npm distribution tags, update every owning uv workspace lock,
   and verify each component matrix runner's native Nix system before its gates.
+- Use the effective release-notes policy in reusable prebuild validation, so
+  Git or disabled notes do not require a changelog in the called workflow.
 - Admit dependency attributes outside the actual checks namespace, apply CI cache
   policy on preinstalled Forgejo Nix, and explain full reruns for attempt-bound
   transport. Reject Darwin case-hack aliases before import and bind checksum and
