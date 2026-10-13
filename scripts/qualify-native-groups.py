@@ -98,6 +98,19 @@ def step_script(name):
     return script
 
 
+def apply_engine_handoff(env, environment_file, expected_engine):
+    # This bootstrap exports one single-line assignment. Read its value rather
+    # than seeding the next step, so a missing/corrupt renderer export fails.
+    lines = environment_file.read_text().splitlines()
+    require(len(lines) == 1, 'Bootstrap must export exactly one engine assignment')
+    key, separator, value = lines[0].partition('=')
+    require(key == 'SIMIT_CI_ENGINE' and separator and value == str(expected_engine),
+            'Bootstrap engine export differs from the qualified production engine')
+    require(expected_engine.is_file() and os.access(expected_engine, os.X_OK),
+            'Exported engine is not executable')
+    env[key] = value
+
+
 guard = step_script('Verify native Nix runner')
 bootstrap = step_script('Provision grouped-build Rust engine')
 build = step_script('Build Nix group')
@@ -115,14 +128,21 @@ for state in ['cold', 'warm']:
     evidence = root / state
     evidence.mkdir()
     env = dict(os.environ, SIMIT_NIX_BUILD_RESULTS=str(evidence), SIMIT_NIX_GROUP='native',
-               SIMIT_CI_ENGINE_REVISION=head, SIMIT_CI_ENGINE=str(engine),
+               SIMIT_CI_ENGINE_REVISION=head,
                GITHUB_ENV=str(evidence / 'github-env'), BASH_ENV='', ENV='',
                NIX_USER_CONF_FILES='/dev/null', NIX_PATH='',
-               NIX_CONFIG='experimental-features = nix-command flakes\nmax-jobs = 1\ncores = 2')
+                NIX_CONFIG='experimental-features = nix-command flakes\nmax-jobs = 1\ncores = 2')
+    env.pop('SIMIT_CI_ENGINE', None)
     for name, script in [('guard', guard), ('bootstrap', bootstrap), ('build', build), ('fallback', fallback)]:
         with (evidence / f'{name}.log').open('wb') as log:
             subprocess.run(['bash', '-e', '-o', 'pipefail', '-c', script], cwd=fixture, env=env,
                            stdout=log, stderr=subprocess.STDOUT, check=True)
+        if name == 'bootstrap':
+            apply_engine_handoff(env, evidence / 'github-env', engine)
+            (evidence / 'engine-handoff.json').write_text(json.dumps({
+                'source': 'github-env', 'name': 'SIMIT_CI_ENGINE',
+                'value': env['SIMIT_CI_ENGINE'], 'inheritedEngineCleared': True,
+            }, indent=2) + '\n')
     require((evidence / 'engine-source-revision').read_text().strip() == head, 'Engine pin changed')
     require((evidence / 'engine-executable.sha256').read_text().split()[0] == engine_hash,
             'Generated bootstrap engine differs from production generator')
