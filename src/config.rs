@@ -760,6 +760,11 @@ impl NixBuildConfig {
             )
         };
         let (_, attribute) = installable.split_once('#').ok_or_else(invalid)?;
+        // Output selection is separate from the attribute path; only routing
+        // uses this projection. The rendered installable retains its selector.
+        let attribute = attribute
+            .split_once('^')
+            .map_or(attribute, |(path, _)| path);
         let mut parts = attribute.splitn(3, '.');
         let output = parts.next().ok_or_else(invalid)?;
         let system = parts.next().ok_or_else(invalid)?;

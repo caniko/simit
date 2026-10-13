@@ -1003,8 +1003,13 @@ fn native_exact_matrix_accepts_standard_system_derivation_outputs() {
     for grouped in [false, true] {
         for installable in [
             ".#formatter.aarch64-linux",
+            ".#formatter.aarch64-linux^out",
+            ".#formatter.aarch64-linux^*",
             ".#defaultPackage.aarch64-linux",
+            ".#defaultPackage.aarch64-linux^out,dev",
             ".#devShell.aarch64-linux",
+            ".#devShell.aarch64-linux^out",
+            ".#packages.aarch64-linux.server^out",
         ] {
             let groups = if grouped {
                 format!(

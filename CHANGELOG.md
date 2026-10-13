@@ -40,6 +40,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Select exact-build action versions from mapped workers, support standard
   two-segment system derivation outputs, and recognize unambiguous PowerPC uname
   aliases while preserving independent hardware verification.
+- Preserve explicit Nix output selectors when routing standard system outputs
+  to native workers, extracting only their attribute path for system validation.
 - Grant check-suite read access only to completion-custody collection, bound the
   fully rendered observer to 500,000 bytes before writes, and ignore unenrolled
   workflow paths that reuse producer names without changing custody statuses.

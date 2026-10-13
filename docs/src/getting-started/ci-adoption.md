@@ -293,7 +293,10 @@ KVM setup runs only for `x86_64-linux` rows; ARM rows do not require `/dev/kvm`.
 The existing `[ci].runner` remains the runner for ordinary language CI. Without
 the exact-build map, the installable matrix retains its single-runner behavior.
 Standard `formatter.<system>`, `defaultPackage.<system>` and `devShell.<system>`
-outputs select their system without a trailing name. Node action versions follow
+outputs select their system without a trailing name.
+Output selectors such as `^out`, `^out,dev` and `^*` remain intact in generated
+installables; routing extracts the system from the attribute path alone.
+Node action versions follow
 the mapped workers: if any mapped worker needs the compatible Node 20 baseline,
 all rows use that baseline independently of the ordinary language CI runner.
 Unambiguous PowerPC uname spellings (`ppc`, `ppcle`, `ppc64`, `ppc64le`) normalize
