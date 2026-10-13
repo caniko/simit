@@ -227,12 +227,35 @@ pub(crate) fn validate_backend(
     Ok(())
 }
 
-pub(crate) fn append(root: &Path, ci: &CiConfig, files: &mut Vec<GeneratedFile>) -> Result<()> {
+struct TemplateInputs {
+    canonical_root: PathBuf,
+    builtin_paths: BTreeSet<String>,
+    active_workflows: Vec<PathBuf>,
+}
+
+/// Validate declared ownership and destinations even when templates are out of
+/// scope. Source loading and rendering belong only to full CI generation.
+pub(crate) fn validate_plan(root: &Path, ci: &CiConfig, files: &[GeneratedFile]) -> Result<()> {
+    preflight(root, ci, files)?;
+    for file in files {
+        match fs::read_to_string(root.join(&file.relative_path)) {
+            Ok(content) if is_template_output(ci, &file.relative_path, &content) => {
+                bail!(
+                    "primary CI output {} is template-owned; reconcile its ownership with full generation",
+                    file.relative_path.display()
+                );
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error).context("inspecting primary CI ownership"),
+        }
+    }
+    Ok(())
+}
+
+fn preflight(root: &Path, ci: &CiConfig, files: &[GeneratedFile]) -> Result<TemplateInputs> {
     validate_config(ci)?;
     validate_workflow_directories(root)?;
-    if ci.workflow_templates.is_empty() {
-        return Ok(());
-    }
     let canonical_root = root
         .canonicalize()
         .context("resolving workflow template root")?;
@@ -357,6 +380,19 @@ pub(crate) fn append(root: &Path, ci: &CiConfig, files: &mut Vec<GeneratedFile>)
             bail!("workflow template {output} does not match the selected Actions platform");
         }
     }
+    Ok(TemplateInputs {
+        canonical_root,
+        builtin_paths,
+        active_workflows,
+    })
+}
+
+pub(crate) fn append(root: &Path, ci: &CiConfig, files: &mut Vec<GeneratedFile>) -> Result<()> {
+    let TemplateInputs {
+        canonical_root,
+        builtin_paths,
+        active_workflows,
+    } = preflight(root, ci, files)?;
     let mut templates = Vec::new();
     for (output, source) in &ci.workflow_templates {
         let relative = PathBuf::from(output);

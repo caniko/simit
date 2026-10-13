@@ -870,7 +870,7 @@ fn show_prints_bare_regen_command_when_ci_is_persisted() {
         .unwrap();
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(stdout.contains("regen: simit init ci --platform forgejo\n"));
+    assert!(stdout.contains("regen: simit init ci --platform forgejo --ci-provider actions\n"));
     assert!(!stdout.contains("--runtime nix"));
     assert!(!stdout.contains("--with-deny"));
 }
@@ -915,6 +915,6 @@ fn show_prints_inferred_regen_flags_when_ci_config_is_absent() {
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains(
-        "regen: simit init ci --platform github --runtime nix --runner ubuntu-latest --with-deny --with-artifacts"
+        "regen: simit init ci --platform github --ci-provider actions --runtime nix --runner ubuntu-latest --with-deny --with-artifacts"
     ));
 }
