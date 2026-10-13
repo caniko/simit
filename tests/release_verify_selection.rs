@@ -227,7 +227,13 @@ fn forgejo_upload_and_propagation_use_the_same_prefixed_tag_version() {
             "simit.toml",
             &format!("[release]\ntag_prefix = '{prefix}'\n"),
         );
+        write(
+            root,
+            ".xdg/simit/config.toml",
+            "[ci.runners.fixture]\nplatform='forgejo'\nlabels=['fixture']\nos='linux'\narch='x86_64'\nruntimes=['cargo']\ntrusted=true\n[ci.defaults.forgejo]\ncargo='fixture'\nrelease='fixture'\n",
+        );
         let generated = common::simit()
+            .env("XDG_CONFIG_HOME", root.join(".xdg"))
             .current_dir(root)
             .args([
                 "init",
