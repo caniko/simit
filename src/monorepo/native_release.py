@@ -11,7 +11,6 @@ import re
 import subprocess
 import sys
 import tarfile
-import tempfile
 import time
 import tomllib
 import urllib.error
@@ -70,20 +69,35 @@ def context():
         require(not ("tag" not in config and "-" in version), "npm prereleases require an explicit publishConfig.tag")
     native_version = python_version(version) if registry == "python" else version
     return manifest.parent.resolve(), (Path(os.environ["RUNNER_TEMP"]) / "native-release-dist").resolve(), {
-        "schemaVersion": 1, "registry": registry, "name": package, "version": native_version,
+        "schemaVersion": 2, "registry": registry, "name": package, "version": native_version,
         "namespace": namespace, "tag": tag, "source": source,
+        "repository": os.environ["GITHUB_REPOSITORY"],
+        "workflow": os.environ["GITHUB_WORKFLOW_REF"].split("/", 2)[2].split("@", 1)[0],
+        "runId": int(os.environ["GITHUB_RUN_ID"]),
     }
+
+
+def tar_metadata(path, registry):
+    metadata = []
+    total = 0
+    with tarfile.open(path, "r:gz") as archive:
+        for count, item in enumerate(archive, 1):
+            total += item.size
+            require(count <= 10_000 and total <= 256 * 1024 * 1024, "native archive exceeds expanded inventory limits")
+            selected = item.name == "package/package.json" if registry == "npm" else item.name.count("/") == 1 and item.name.endswith("/PKG-INFO")
+            if selected:
+                require(item.isfile() and item.size <= 1024 * 1024, "invalid native archive metadata")
+                metadata.append(archive.extractfile(item).read())
+    require(len(metadata) == 1, "native archive requires unique package metadata")
+    return metadata[0].decode()
 
 
 def archive_identity(path, identity):
     if identity["registry"] == "npm":
-        with tarfile.open(path, "r:gz") as archive:
-            item = archive.getmember("package/package.json")
-            require(item.isfile() and item.size <= 1024 * 1024, "invalid packed npm manifest")
-            data = json.load(archive.extractfile(item))
-            require(not data.get("private", False), "packed package is private")
-            require(data.get("publishConfig", {}).get("registry", "https://registry.npmjs.org/").rstrip("/") == "https://registry.npmjs.org", "packed npm registry is not public npm")
-            name, version = data["name"], data["version"]
+        data = json.loads(tar_metadata(path, "npm"))
+        require(not data.get("private", False), "packed package is private")
+        require(data.get("publishConfig", {}).get("registry", "https://registry.npmjs.org/").rstrip("/") == "https://registry.npmjs.org", "packed npm registry is not public npm")
+        name, version = data["name"], data["version"]
     else:
         if path.suffix == ".whl":
             with zipfile.ZipFile(path) as archive:
@@ -91,10 +105,7 @@ def archive_identity(path, identity):
                 require(len(entries) == 1 and entries[0].file_size <= 1024 * 1024, "invalid wheel metadata")
                 text = archive.read(entries[0]).decode()
         else:
-            with tarfile.open(path, "r:gz") as archive:
-                entries = [entry for entry in archive.getmembers() if entry.name.count("/") == 1 and entry.name.endswith("/PKG-INFO")]
-                require(len(entries) == 1 and entries[0].isfile() and entries[0].size <= 1024 * 1024, "invalid sdist metadata")
-                text = archive.extractfile(entries[0]).read().decode()
+            text = tar_metadata(path, "python")
         data = email.parser.Parser().parsestr(text)
         name, version = data["Name"], data["Version"]
     require((normalize(name) == normalize(identity["name"]) if identity["registry"] == "python" else name == identity["name"]) and version == identity["version"], "artifact identity/version differs from tagged manifest")
@@ -124,7 +135,7 @@ def pack(directory, out, identity):
     inventory(paths, identity)
     for path in paths:
         archive_identity(path, identity)
-    receipt = identity | {"files": {path.name: digest(path).hex() for path in paths}}
+    receipt = identity | {"runAttempt": int(os.environ["GITHUB_RUN_ATTEMPT"]), "files": {path.name: digest(path).hex() for path in paths}}
     (out / "receipt.json").write_text(json.dumps(receipt, sort_keys=True) + "\n")
 
 
@@ -168,9 +179,10 @@ def missing_files(out, identity, files):
     return [name for name in files if name not in published]
 
 
-def publish(out, identity):
+def validate_artifacts(out, identity, attempt):
     receipt = json.loads((out / "receipt.json").read_text())
     files = receipt.pop("files")
+    require(receipt.pop("runAttempt") == attempt, "receipt does not match original artifact attempt")
     require(receipt == identity and files, "native artifact receipt differs from signed source")
     require(set(path.name for path in out.iterdir()) == set(files) | {"receipt.json"}, "native artifact inventory mismatch")
     for name, checksum in files.items():
@@ -179,41 +191,125 @@ def publish(out, identity):
         require(path.is_file() and not path.is_symlink() and digest(path).hex() == checksum, "native artifact checksum mismatch")
         archive_identity(path, identity)
     inventory([out / name for name in files], identity)
+    return files
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise RuntimeError("registry upload redirect refused")
+
+
+def upload_request(request):
+    # Credentials stay on the fixed registry host, never follow an upload redirect.
+    with urllib.request.build_opener(NoRedirect).open(request, timeout=60) as response:
+        body = response.read(4 * 1024 * 1024 + 1)
+        require(len(body) <= 4 * 1024 * 1024, "upload response exceeds byte limit")
+
+
+def provenance_bundle(identity, archive):
+    # Global npm/sigstore comes from the protected hosted worker, not the signed
+    # candidate or downloaded archive. Neither child receives a registry token.
+    env = {key: os.environ[key] for key in ("PATH", "HOME", "ACTIONS_ID_TOKEN_REQUEST_URL", "ACTIONS_ID_TOKEN_REQUEST_TOKEN")}
+    env["GITHUB_ACTIONS"] = "true"
+    root = subprocess.check_output(["npm", "root", "--global"], env={key: env[key] for key in ("PATH", "HOME")}, text=True).strip()
+    ref = os.environ["GITHUB_WORKFLOW_REF"].split("/", 2)[2]
+    path, branch = ref.split("@", 1)
+    repository = "https://github.com/" + identity["repository"]
+    purl = "pkg:npm/" + urllib.parse.quote(identity["name"], safe="/") + "@" + identity["version"]
+    statement = {"_type": "https://in-toto.io/Statement/v1", "subject": [{"name": purl, "digest": {"sha512": hashlib.sha512(archive).hexdigest()}}], "predicateType": "https://slsa.dev/provenance/v1", "predicate": {"buildDefinition": {"buildType": "https://slsa-framework.github.io/github-actions-buildtypes/workflow/v1", "externalParameters": {"workflow": {"ref": branch, "repository": repository, "path": path}}, "internalParameters": {"github": {"event_name": "workflow_run", "repository_id": os.environ["GITHUB_REPOSITORY_ID"], "repository_owner_id": os.environ["GITHUB_REPOSITORY_OWNER_ID"]}, "simit": {"originalWorkflow": identity["workflow"], "originalRunId": identity["runId"], "signedTag": identity["tag"]}}, "resolvedDependencies": [{"uri": "git+" + repository + "@refs/tags/" + identity["tag"], "digest": {"gitCommit": identity["source"]}}, {"uri": "git+" + repository + "@" + branch, "digest": {"gitCommit": os.environ["GITHUB_WORKFLOW_SHA"]}}]}, "runDetails": {"builder": {"id": "https://github.com/actions/runner/github-hosted"}, "metadata": {"invocationId": repository + "/actions/runs/" + os.environ["GITHUB_RUN_ID"] + "/attempts/" + os.environ["GITHUB_RUN_ATTEMPT"]}}}}
+    result = subprocess.run(["node", str(Path(__file__).with_name("native-provenance.cjs")), root], input=json.dumps(statement), text=True, capture_output=True, check=True, env=env, timeout=120)
+    require(len(result.stdout) <= 1024 * 1024, "provenance bundle exceeds byte limit")
+    bundle = json.loads(result.stdout)
+    require(json.loads(base64.b64decode(bundle["dsseEnvelope"]["payload"])) == statement, "provenance payload mismatch")
+    return bundle
+
+
+def upload_native(out, identity, files, manifest, token):
+    if identity["registry"] == "npm":
+        name = files[0]
+        archive = (out / name).read_bytes()
+        package = json.loads(tar_metadata(out / name, "npm"))
+        # Package configuration is data. It cannot choose endpoints, credentials,
+        # hooks or command-line options; only the signed policy chooses dist-tag/access.
+        config = manifest.get("publishConfig", {})
+        require(config.get("registry", "https://registry.npmjs.org/").rstrip("/") == "https://registry.npmjs.org", "unapproved npm registry")
+        tag = config.get("tag", "latest")
+        require(isinstance(tag, str) and re.fullmatch(r"[a-zA-Z][a-zA-Z0-9_.-]*", tag), "invalid signed npm dist-tag")
+        access = config.get("access", "public")
+        require(access in ("public", "restricted"), "invalid signed npm access")
+        package = {key: value for key, value in package.items() if key in ("name", "version", "description", "license", "dependencies", "optionalDependencies", "peerDependencies", "peerDependenciesMeta", "engines", "bin", "main", "module", "types", "exports", "repository", "homepage", "keywords", "author", "contributors", "os", "cpu")}
+        package["_id"] = identity["name"] + "@" + identity["version"]
+        package["dist"] = {"shasum": hashlib.sha1(archive).hexdigest(), "integrity": "sha512-" + base64.b64encode(hashlib.sha512(archive).digest()).decode(), "tarball": "https://registry.npmjs.org/" + urllib.parse.quote(identity["name"], safe="@/") + "/-/" + name}
+        body = {"_id": identity["name"], "name": identity["name"], "access": access, "dist-tags": {tag: identity["version"]}, "versions": {identity["version"]: package}, "_attachments": {name: {"content_type": "application/octet-stream", "data": base64.b64encode(archive).decode(), "length": len(archive)}}}
+        if config.get("provenance", False):
+            require(access == "public", "npm provenance requires public access")
+            bundle = provenance_bundle(identity, archive)
+            serialized = json.dumps(bundle, separators=(",", ":"))
+            body["_attachments"][identity["name"] + "-" + identity["version"] + ".sigstore"] = {"content_type": bundle["mediaType"], "data": serialized, "length": len(serialized.encode())}
+        request = urllib.request.Request("https://registry.npmjs.org/" + urllib.parse.quote(identity["name"], safe=""), data=json.dumps(body).encode(), method="PUT", headers={"Authorization": "Bearer " + token, "Content-Type": "application/json"})
+        upload_request(request)
+        return
+    for name in files:
+        path = out / name
+        if path.suffix == ".whl":
+            with zipfile.ZipFile(path) as archive:
+                text = archive.read(next(item for item in archive.namelist() if item.endswith(".dist-info/METADATA"))).decode()
+        else:
+            text = tar_metadata(path, "python")
+        metadata = email.parser.Parser().parsestr(text)
+        fields = [(":action", "file_upload"), ("protocol_version", "1"), ("name", identity["name"]), ("version", identity["version"]), ("filetype", "bdist_wheel" if name.endswith(".whl") else "sdist"), ("pyversion", name.rsplit("-", 3)[-3] if name.endswith(".whl") else "source"), ("sha256_digest", digest(path).hex()), ("metadata_version", metadata.get("Metadata-Version", "2.1"))]
+        for key in ("Summary", "Home-page", "Author", "Author-email", "Maintainer", "Maintainer-email", "License", "Keywords", "Platform", "Classifier", "Requires-Python", "Requires-Dist", "Provides-Extra", "Project-URL", "Description-Content-Type"):
+            fields.extend((key.lower().replace("-", "_"), value) for value in metadata.get_all(key, []))
+        fields.append(("description", metadata.get_payload()))
+        boundary = "simit-" + os.urandom(24).hex()
+        body = bytearray()
+        for key, value in fields:
+            body.extend(f'--{boundary}\r\nContent-Disposition: form-data; name="{key}"\r\n\r\n{value}\r\n'.encode())
+        require(re.fullmatch(r"[a-zA-Z0-9_.+-]+", name), "invalid PyPI artifact filename")
+        body.extend(f'--{boundary}\r\nContent-Disposition: form-data; name="content"; filename="{name}"\r\nContent-Type: application/octet-stream\r\n\r\n'.encode())
+        body.extend(path.read_bytes())
+        body.extend(f'\r\n--{boundary}--\r\n'.encode())
+        authorization = base64.b64encode(("__token__:" + token).encode()).decode()
+        upload_request(urllib.request.Request("https://upload.pypi.org/legacy/", data=bytes(body), headers={"Authorization": "Basic " + authorization, "Content-Type": "multipart/form-data; boundary=" + boundary}))
+
+
+def publish(out, identity, attempt, manifest):
+    files = validate_artifacts(out, identity, attempt)
     pending = missing_files(out, identity, files)
     if not pending:
         print("Exact native release already propagated")
         return
     token = "UV_PUBLISH_TOKEN" if identity["registry"] == "python" else "NODE_AUTH_TOKEN"
     require(os.environ.get(token, "").strip(), f"missing {token}")
-    with tempfile.TemporaryDirectory(prefix="simit-native-publish-") as temporary:
-        env = dict(os.environ, HOME=temporary, XDG_CONFIG_HOME=temporary)
-        paths = [str(out / name) for name in pending]
-        if identity["registry"] == "python":
-            args = ["uv", "--no-config", "publish", "--publish-url", "https://upload.pypi.org/legacy/", *paths]
-        else:
-            config = Path(temporary) / "npmrc"
-            config.write_text("//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}\nregistry=https://registry.npmjs.org/\n")
-            config.chmod(0o600)
-            args = ["npm", "publish", "--ignore-scripts", "--userconfig", str(config), "--registry", "https://registry.npmjs.org/", *paths]
-        result = subprocess.run(args, cwd=temporary, env=env)
+    upload_error = None
+    try:
+        upload_native(out, identity, pending, manifest, os.environ[token])
+    except (urllib.error.URLError, RuntimeError) as error:
+        upload_error = error
     # A concurrent exact publication is accepted only after matching checksums.
     for attempt in range(20):
         if not missing_files(out, identity, files):
             print("Exact native release propagated with matching checksums")
             return
-        require(result.returncode == 0, "native publication failed and exact artifacts are absent")
         if attempt < 19:
             time.sleep(30)
-    raise RuntimeError("native registry propagation deadline exceeded")
+    raise RuntimeError("native registry propagation deadline exceeded; retain original archive") from upload_error
 
 
 def main():
-    require(len(sys.argv) == 2 and sys.argv[1] in ("pack", "publish"), "expected pack or publish")
-    directory, out, identity = context()
-    if sys.argv[1] == "pack":
-        pack(directory, out, identity)
+    if len(sys.argv) == 4 and sys.argv[1] == "admitted-publish":
+        admission = json.loads(Path(sys.argv[2]).read_text())
+        identity = admission["identity"]
+        # workflowId is checked by the native provider boundary, not candidate receipts.
+        identity.pop("workflowId")
+        if identity["registry"] == "python":
+            identity["version"] = python_version(identity["version"])
+        require(1 <= admission["artifactAttempt"] <= admission["maxAttempt"], "invalid original-run artifact attempt")
+        publish(Path(sys.argv[3]), identity, admission["artifactAttempt"], admission["manifest"])
     else:
-        publish(out, identity)
+        require(len(sys.argv) == 2 and sys.argv[1] == "pack", "candidate helper only packs; use the protected publisher for upload")
+        directory, out, identity = context()
+        pack(directory, out, identity)
 
 
 if __name__ == "__main__":

@@ -22,7 +22,8 @@ use super::archive::{
 };
 use super::{
     CompletedRunEvent, PublisherContext, PublisherPolicy, ReleaseArtifact, ReleaseRun,
-    bind_independent_release_push, bind_release_push, verify_release_artifact_archive,
+    bind_independent_release_push, bind_native_release_push, bind_prefixed_release_push,
+    verify_release_artifact_archive,
 };
 use crate::cli::{PublisherStage, ReleaseCommand};
 
@@ -114,10 +115,13 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
         "trusted publication selects exactly one --package"
     );
     let name = &command.packages[0];
-    package_name(name)?;
+    let native = command.native_manifest.is_some();
+    if !native {
+        package_name(name)?;
+    }
     let namespace = command.tag_namespace.as_deref();
     ensure!(
-        namespace.is_none_or(|package| package == name),
+        native || namespace.is_none_or(|package| package == name),
         "publisher tag namespace must equal the selected crate"
     );
     let reconstruction = if command.reconstruct_packages.is_empty() {
@@ -129,8 +133,10 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
         reconstruction.contains(name),
         "selected publisher crate is absent from reconstruction set"
     );
-    for package in &reconstruction {
-        package_name(package)?;
+    if !native {
+        for package in &reconstruction {
+            package_name(package)?;
+        }
     }
     let repository = env_value("GITHUB_REPOSITORY")?;
     ensure!(
@@ -141,9 +147,11 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
         serde_json::from_slice(&fs::read(env_value("GITHUB_EVENT_PATH")?)?)?;
     let source_workflow = command
         .source_workflow
+        .clone()
         .context("--source-workflow is required")?;
     let publisher_workflow = command
         .publisher_workflow
+        .clone()
         .context("--publisher-workflow is required")?;
     let context = PublisherContext {
         event_name: env_value("GITHUB_EVENT_NAME")?,
@@ -195,10 +203,23 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
         &token,
         &format!("repos/{repository}/actions/runs/{}", event.workflow_run.id),
     )?)?;
-    let bound = if let Some(package) = namespace {
+    let tag_prefix = if command.publisher_tag_prefix == "v" {
+        crate::release_identity::TagPrefix::V
+    } else {
+        crate::release_identity::TagPrefix::None
+    };
+    let bound = if native {
+        bind_native_release_push(
+            &policy,
+            &context,
+            &event,
+            &provider,
+            namespace.context("native publisher requires namespace")?,
+        )?
+    } else if let Some(package) = namespace {
         bind_independent_release_push(&policy, &context, &event, &provider, package)?
     } else {
-        bind_release_push(&policy, &context, &event, &provider)?
+        bind_prefixed_release_push(&policy, &context, &event, &provider, tag_prefix)?
     };
     let state = TempDir::new()?;
     for directory in ["home", "cargo-home", "gpg"] {
@@ -292,11 +313,12 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
             )),
     )?;
     let enrolled_workflow = fs::read(trusted_root.join(&policy.source_workflow_path))?;
-    if namespace.is_some() {
-        verify_tag_only_source_workflow_with_namespace(
+    if namespace.is_some() || tag_prefix == crate::release_identity::TagPrefix::V {
+        verify_tag_only_source_workflow_with_prefix(
             &signed_workflow.stdout,
             &enrolled_workflow,
             namespace,
+            tag_prefix,
         )?;
     } else {
         verify_tag_only_source_workflow(&signed_workflow.stdout, &enrolled_workflow)?;
@@ -309,9 +331,15 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
             .args(["ls-files", "--stage", "-z"]),
     )?;
     let inert_links = super::source::validate_tree(&source, &tracked.stdout)?;
-    validate_manifest_paths_with_links(&source, &inert_links)?;
-
-    let artifact_prefix = format!("simit-crate-{name}-");
+    let artifact_prefix = if native {
+        format!(
+            "native-release-{}-",
+            namespace.context("native publication requires --tag-namespace")?
+        )
+    } else {
+        validate_manifest_paths_with_links(&source, &inert_links)?;
+        format!("simit-crate-{name}-")
+    };
     let mut artifacts = Vec::new();
     for page in 1..=10 {
         let list = api_json(
@@ -353,6 +381,14 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
         &token,
         &format!("repos/{repository}/actions/artifacts/{}", artifact.id),
     )?)?;
+    ensure!(
+        artifact
+            .name
+            .strip_prefix(&artifact_prefix)
+            .and_then(|attempt| attempt.parse::<u64>().ok())
+            .is_some_and(|attempt| (1..=bound.source_run_attempt).contains(&attempt)),
+        "refetched artifact differs from enrolled original-run identity"
+    );
     let mut bytes = Vec::new();
     client
         .get(format!(
@@ -371,6 +407,17 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
         MAX_PROVIDER_BYTES,
         bytes.as_slice(),
     )?;
+    if native {
+        return super::native::run(
+            &command,
+            &bound,
+            &source,
+            &inert_links,
+            &bytes,
+            &artifact,
+            state.path(),
+        );
+    }
     let root = format!("{name}-{}", bound.release_version);
     let candidate = crate_from_provider_zip(&bytes, &format!("{root}.crate"))?;
     // Cargo configuration is discovered from cwd, not --manifest-path. The cwd
@@ -546,11 +593,20 @@ fn verify_tag_only_source_workflow_with_namespace(
     enrolled: &[u8],
     namespace: Option<&str>,
 ) -> Result<()> {
+    verify_tag_only_source_workflow_with_prefix(signed, enrolled, namespace, Default::default())
+}
+
+fn verify_tag_only_source_workflow_with_prefix(
+    signed: &[u8],
+    enrolled: &[u8],
+    namespace: Option<&str>,
+    prefix: crate::release_identity::TagPrefix,
+) -> Result<()> {
     let tag_pattern = if let Some(package) = namespace {
         package_name(package)?;
         format!("{package}/v[0-9]*")
     } else {
-        "[0-9]*".to_owned()
+        format!("{}[0-9]*", prefix.as_str())
     };
     let workflow: serde_yaml::Value = serde_yaml::from_slice(signed)?;
     let enrollment: serde_yaml::Value = serde_yaml::from_slice(enrolled)?;

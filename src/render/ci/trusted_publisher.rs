@@ -143,8 +143,12 @@ pub(super) fn crate_build_display(name: &str) -> String {
     format!("Build Crate {name}")
 }
 
-pub(super) fn archive_steps(name: &str, runtime: Runtime) -> String {
-    archive_steps_with_packaging(name, runtime, true, None)
+pub(super) fn prefixed_archive_steps(
+    name: &str,
+    runtime: Runtime,
+    prefix: crate::release_identity::TagPrefix,
+) -> String {
+    archive_steps_with_packaging(name, runtime, true, None, prefix)
 }
 
 fn archive_steps_with_packaging(
@@ -152,11 +156,18 @@ fn archive_steps_with_packaging(
     runtime: Runtime,
     package: bool,
     namespace: Option<&str>,
+    tag_prefix: crate::release_identity::TagPrefix,
 ) -> String {
     let prefix = command_prefix(runtime);
     let quoted = shell_word(name);
     let version_expression = namespace.map_or_else(
-        || "${GITHUB_REF_NAME}".to_owned(),
+        || {
+            if tag_prefix == crate::release_identity::TagPrefix::None {
+                "${GITHUB_REF_NAME}".to_owned()
+            } else {
+                format!("${{GITHUB_REF_NAME#{}}}", tag_prefix.as_str())
+            }
+        },
         |package| format!("${{GITHUB_REF_NAME#{package}/v}}"),
     );
     let packaging = if package {
@@ -216,7 +227,7 @@ pub(super) fn source_workflow_with_namespace(
         } else {
             "name: Build Crate\n\n"
         });
-        w.push_str(github_crate_publish_triggers());
+        w.push_str(&github_crate_publish_triggers(options.tag_prefix));
     }
     w.push_str("permissions:\n  contents: read\n\nconcurrency:\n  group: ${{ github.workflow_ref }}-${{ github.ref }}\n  cancel-in-progress: false\n\njobs:\n  build:\n    runs-on: ");
     w.push_str(CANDIDATE_RUNNER);
@@ -234,8 +245,11 @@ pub(super) fn source_workflow_with_namespace(
     } else {
         push_rust_setup_step(&mut w, Platform::Github);
     }
-    w.push_str(&validate_release_tag_step_with_namespace(
-        None, None, namespace,
+    w.push_str(&validate_release_tag_step_with_prefix(
+        None,
+        None,
+        namespace,
+        options.tag_prefix,
     ));
     push_required_env_step(&mut w, &options.required_env);
     push_extra_setup_steps(&mut w, &options.extra_setup);
@@ -289,14 +303,18 @@ pub(super) fn source_workflow_with_namespace(
     w.push_str(&format!("      - name: Package coordinated release set\n        run: {}cargo package --locked --allow-dirty --no-verify{selection} --target-dir \"$RUNNER_TEMP/simit-package-target\"\n", command_prefix(runtime)));
     for name in names {
         w.push_str(&archive_steps_with_packaging(
-            name, runtime, false, namespace,
+            name,
+            runtime,
+            false,
+            namespace,
+            options.tag_prefix,
         ));
     }
     trim_trailing_blank_lines(&mut w);
     w
 }
 
-fn bootstrap(w: &mut String) {
+pub(crate) fn bootstrap(w: &mut String) {
     w.push_str("      - name: Require independently qualified publisher engine\n        env:\n          PUBLISHER_REVISION: ${{ vars.SIMIT_PUBLISHER_REVISION }}\n        run: |\n          set -euo pipefail\n          [[ \"$PUBLISHER_REVISION\" =~ ^[0-9a-f]{40}$ ]] || { echo 'Enroll a qualified immutable Simit publisher revision' >&2; exit 1; }\n");
     w.push_str("      - name: Checkout independent publisher source\n");
     push_action_uses(w, Platform::Github, None, "checkout", "v7.0.1", "v4.3.1");
@@ -343,9 +361,15 @@ pub(super) fn publisher_file_with_namespace(
         .iter()
         .map(|(name, _)| format!(" --reconstruct-package {}", shell_word(name)))
         .collect::<String>();
-    let namespace_argument = namespace.map_or_else(String::new, |package| {
-        format!(" --tag-namespace {}", shell_word(package))
-    });
+    let namespace_argument = namespace.map_or_else(
+        || {
+            format!(
+                " --publisher-tag-prefix {}",
+                shell_quote(options.tag_prefix.as_str())
+            )
+        },
+        |package| format!(" --tag-namespace {}", shell_word(package)),
+    );
     for (name, dependencies) in plan {
         // Cargo names already use GitHub's permitted job-ID alphabet. Keep
         // their spelling: collapsing '-'/'_' or case aliases distinct crates.

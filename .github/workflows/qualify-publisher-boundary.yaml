@@ -48,6 +48,12 @@ jobs:
         run: |
           set -euo pipefail
           nix develop --max-jobs 1 --cores 2 -c cargo test --locked --test trusted_crate_publisher 2>&1 | tee "$RUNNER_TEMP/publisher-boundary/credential-boundary.log"
+      - name: Qualify native data-only uploads and release selection
+        run: |
+          set -euo pipefail
+          nix develop --no-update-lock-file --max-jobs 1 --cores 2 -c cargo test --locked --test native_publication_contract --test native_release --test monorepo_languages --test release_verify_selection 2>&1 | tee "$RUNNER_TEMP/publisher-boundary/native-boundary.log"
+          npm_root=$(npm root --global)
+          node -e 'const path = require("node:path"); const signer = require(path.join(process.argv[1], "npm/node_modules/sigstore")); if (typeof signer.attest !== "function") throw new Error("hosted npm Sigstore signer missing"); console.log("hosted Sigstore signer available; no OIDC or registry credentials requested")' "$npm_root" | tee "$RUNNER_TEMP/publisher-boundary/native-signer.log"
       - name: Retain original qualification, including failed candidates
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -56,3 +62,46 @@ jobs:
           retention-days: 32
           if-no-files-found: error
           path: ${{ runner.temp }}/publisher-boundary/
+  primary-ci-integration:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      NIX_CONFIG: |
+        experimental-features = nix-command flakes
+        max-jobs = 1
+        cores = 2
+      CARGO_BUILD_JOBS: "2"
+      SOURCE_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+      PRIMARY_SCOPE_HEAD: 7e07bb625c90113de28926a585e6c61d76917e10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31
+      - name: Compose pinned primary-only scope and retain the semantic merge
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_HEAD"
+          evidence="$RUNNER_TEMP/primary-ci-integration"
+          mkdir -p "$evidence"
+          git rev-parse HEAD > "$evidence/revision"
+          git rev-parse 'HEAD^{tree}' > "$evidence/source-tree"
+          printf '%s\n' "$PRIMARY_SCOPE_HEAD" > "$evidence/primary-scope-revision"
+          git fetch --no-tags https://github.com/caniko/simit.git "$PRIMARY_SCOPE_HEAD"
+          git cherry-pick --no-commit "$PRIMARY_SCOPE_HEAD"
+          python3 tests/fixtures/primary-ci-integration.py
+          git diff HEAD > "$evidence/integration.diff"
+          git add src/commands/init_ci.rs tests/primary_ci_native_scope.rs
+          git write-tree > "$evidence/integration-tree"
+          git config --global --add url.https://github.com/.insteadOf ssh://git@github.com/
+          git config --global --add url.https://github.com/.insteadOf git@github.com:
+          nix develop --no-update-lock-file --max-jobs 1 --cores 2 -c cargo test --locked --test primary_ci_scope --test primary_ci_native_scope 2>&1 | tee "$evidence/preservation.log"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: primary-ci-integration-${{ github.event.pull_request.head.sha || github.sha }}-${{ github.run_attempt }}
+          retention-days: 32
+          if-no-files-found: error
+          path: ${{ runner.temp }}/primary-ci-integration/

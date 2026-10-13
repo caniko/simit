@@ -29,7 +29,11 @@ pub(super) fn input_transport() -> Value {
     json!({"name": "Configure public input transport", "run": run})
 }
 
-pub(crate) fn files(root: &Path, config: &ProjectConfig) -> Result<Vec<GeneratedFile>> {
+pub(crate) fn files(
+    root: &Path,
+    config: &ProjectConfig,
+    include_publishers: bool,
+) -> Result<Vec<GeneratedFile>> {
     if config.ci.platform != Some(Platform::Github)
         || config.ci.provider.is_some_and(|p| p != CiProvider::Actions)
         || config.ci.runtime.is_some_and(|r| r != Runtime::Nix)
@@ -121,10 +125,10 @@ pub(crate) fn files(root: &Path, config: &ProjectConfig) -> Result<Vec<Generated
         let mut steps = vec![checkout(node24), install_nix(node24), input_transport()];
         steps.push(json!({"name": "Verify generated workflows", "run": "nix develop --print-build-logs .#ci --command simit init ci --check"}));
         for gate in &component.checks {
-            // The project-owned command is one argument to sh, not an interpolated
+            // The project-owned command is one argument to Bash, not an interpolated
             // expression; GitHub event data never enters a shell command.
             let quoted = format!("'{}'", gate.run.replace('\'', "'\\''"));
-            let mut step = json!({"name": gate.id, "timeout-minutes": gate.timeout_minutes, "run": format!("nix develop --print-build-logs .#ci --command sh -ec {quoted}")});
+            let mut step = json!({"name": gate.id, "timeout-minutes": gate.timeout_minutes, "run": format!("nix develop --print-build-logs .#ci --command bash -euo pipefail -c {quoted}")});
             if !gate.env.is_empty() {
                 step["env"] = json!(gate.env);
             }
@@ -145,6 +149,9 @@ pub(crate) fn files(root: &Path, config: &ProjectConfig) -> Result<Vec<Generated
             serde_yaml::to_string(&workflow)?
         ),
     }];
+    if !include_publishers {
+        return Ok(files);
+    }
     let native = super::native_ci::files(root, config, &workflow)?;
     let has_native = !native.is_empty();
     files.extend(native);
@@ -315,4 +322,31 @@ pub(crate) fn resolve_config(root: &Path, command: &InitCiCommand) -> Result<Pro
         config.ci.publish_crates = publish;
     }
     Ok(config)
+}
+
+#[cfg(test)]
+mod scope_tests {
+    use super::*;
+
+    #[test]
+    fn primary_scope_does_not_generate_or_enroll_native_publication() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        std::fs::create_dir(root.join("python")).unwrap();
+        std::fs::write(
+            root.join("python/pyproject.toml"),
+            "[project]\nname = 'python-owner'\nversion = '1.2.3'\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("simit.toml"), "[ci]\nplatform = 'github'\nruntime = 'nix'\n[monorepo]\nschema_version = 1\n[[monorepo.components]]\nid = 'python'\npaths = ['python']\nchecks = [{id = 'test', run = 'true'}]\nreleases = [{manifest = 'python/pyproject.toml', namespace = 'python-owner', publish = true}]\n").unwrap();
+        let config = ProjectConfig::load(root).unwrap();
+        let primary = files(root, &config, false).unwrap();
+        assert_eq!(primary.len(), 1);
+        assert_eq!(
+            primary[0].relative_path,
+            PathBuf::from(".github/workflows/ci.yaml")
+        );
+        assert!(!primary[0].content.contains("secrets."));
+        assert!(!root.join("keys").exists());
+    }
 }

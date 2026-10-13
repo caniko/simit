@@ -100,6 +100,94 @@ fn run(root: &Path, args: &[&str]) -> std::process::Output {
 }
 
 #[test]
+fn native_private_build_capacity_never_receives_publication_credentials() {
+    let temp = fixture();
+    let root = temp.path();
+    let config = fs::read_to_string(root.join("simit.toml")).unwrap();
+    write(
+        root,
+        "simit.toml",
+        &config
+            .replace("[ci]", "[ci]\nrunner = 'private-builder'")
+            .replace("publish = false", "publish = true"),
+    );
+    let generated = run(root, &["init", "ci"]);
+    assert!(generated.status.success(), "{generated:?}");
+    let source =
+        fs::read_to_string(root.join(".github/workflows/publish-python-py-engine.yaml")).unwrap();
+    assert!(!source.contains("secrets."), "{source}");
+    let publisher =
+        fs::read_to_string(root.join(".github/workflows/trusted-publish-python-py-engine.yaml"))
+            .unwrap();
+    let publisher: serde_yaml::Value = serde_yaml::from_str(&publisher).unwrap();
+    assert!(publisher["on"].get("push").is_none());
+    assert_eq!(publisher["jobs"]["publish"]["runs-on"], "ubuntu-24.04");
+    assert_eq!(
+        publisher["jobs"]["publish"]["environment"]["name"],
+        "simit-pypi"
+    );
+}
+
+#[test]
+fn generated_component_gates_match_local_bash_and_pipeline_failure_semantics() {
+    let temp = fixture();
+    let root = temp.path();
+    for (command, success) in [
+        ("[[ $CHECK_VALUE == \"it's bash\" ]]", true),
+        ("false | tee output", false),
+    ] {
+        let mut config: toml_edit::DocumentMut = fs::read_to_string(root.join("simit.toml"))
+            .unwrap()
+            .parse()
+            .unwrap();
+        let checks = config["monorepo"]["components"]
+            .as_array_of_tables_mut()
+            .unwrap()
+            .get_mut(0)
+            .unwrap()["checks"]
+            .as_array_mut()
+            .unwrap();
+        let gate = checks.get_mut(0).unwrap().as_inline_table_mut().unwrap();
+        gate.insert("run", command.into());
+        gate.insert("timeout_minutes", 7.into());
+        let mut env = toml_edit::InlineTable::new();
+        env.insert("CHECK_VALUE", "it's bash".into());
+        gate.insert("env", env.into());
+        write(root, "simit.toml", &config.to_string());
+        let generated = run(root, &["init", "ci"]);
+        assert!(generated.status.success(), "{generated:?}");
+        let workflow: serde_yaml::Value = serde_yaml::from_str(
+            &fs::read_to_string(root.join(".github/workflows/ci.yaml")).unwrap(),
+        )
+        .unwrap();
+        let steps = workflow["jobs"]["component-python"]["steps"]
+            .as_sequence()
+            .unwrap();
+        let gate = steps.iter().find(|step| step["name"] == "test").unwrap();
+        assert_eq!(gate["timeout-minutes"], 7);
+        let script = gate["run"]
+            .as_str()
+            .unwrap()
+            .split_once("--command ")
+            .unwrap()
+            .1;
+        let output = Command::new("bash")
+            .args(["-euo", "pipefail", "-c", script])
+            .current_dir(root)
+            .env("CHECK_VALUE", "it's bash")
+            .output()
+            .unwrap();
+        assert_eq!(output.status.success(), success, "{output:?}");
+        assert!(
+            workflow["jobs"]["qualified"]["steps"][0]["run"]
+                .as_str()
+                .unwrap()
+                .contains("result == \"success\"")
+        );
+    }
+}
+
+#[test]
 fn non_cargo_plan_and_python_bump_preserve_independent_metadata() {
     let temp = fixture();
     let root = temp.path();
@@ -740,7 +828,7 @@ fn eligible_native_publication_qualifies_the_full_graph_and_preserves_private_ow
     let workflow: serde_yaml::Value = serde_yaml::from_str(&source).unwrap();
     assert_eq!(workflow["on"]["push"]["tags"][0], "py-engine/v[0-9]*");
     assert_eq!(workflow["jobs"]["validate"]["needs"][0], "qualified");
-    assert_eq!(workflow["jobs"]["publish"]["needs"][0], "validate");
+    assert!(workflow["jobs"].get("publish").is_none());
     assert_eq!(workflow["permissions"]["contents"], "read");
     for job in workflow["jobs"].as_mapping().unwrap().values() {
         for step in job["steps"].as_sequence().unwrap() {
@@ -754,7 +842,12 @@ fn eligible_native_publication_qualifies_the_full_graph_and_preserves_private_ow
     let plan = plan_steps.iter().find(|step| step["id"] == "plan").unwrap();
     assert_eq!(plan["env"]["BASE_REVISION"], "");
     assert!(source.contains("git verify-tag"));
-    assert!(source.contains("PYPI_API_TOKEN"));
+    assert!(!source.contains("PYPI_API_TOKEN"));
+    let publisher =
+        fs::read_to_string(root.join(".github/workflows/trusted-publish-python-py-engine.yaml"))
+            .unwrap();
+    assert!(publisher.contains("PYPI_API_TOKEN"));
+    assert!(publisher.contains("github.workflow_sha"));
     for (id, job) in workflow["jobs"].as_mapping().unwrap() {
         if id.as_str().unwrap() != "publish" {
             assert!(!serde_yaml::to_string(job).unwrap().contains("secrets."));
@@ -775,12 +868,19 @@ fn eligible_native_publication_qualifies_the_full_graph_and_preserves_private_ow
     assert!(generated.status.success(), "{generated:?}");
     let npm =
         fs::read_to_string(root.join(".github/workflows/publish-npm-node-engine.yaml")).unwrap();
-    assert!(npm.contains("NPM_TOKEN"));
-    let npm_workflow: serde_yaml::Value = serde_yaml::from_str(&npm).unwrap();
+    assert!(!npm.contains("NPM_TOKEN"));
+    let publisher =
+        fs::read_to_string(root.join(".github/workflows/trusted-publish-npm-node-engine.yaml"))
+            .unwrap();
+    assert!(publisher.contains("NPM_TOKEN"));
+    let trusted: serde_yaml::Value = serde_yaml::from_str(&publisher).unwrap();
     assert_eq!(
-        npm_workflow["jobs"]["publish"]["permissions"]["id-token"],
+        trusted["jobs"]["publish"]["permissions"]["id-token"],
         "write"
     );
+    assert!(publisher.contains("--native-provenance"));
+    let npm_workflow: serde_yaml::Value = serde_yaml::from_str(&npm).unwrap();
+    assert!(npm_workflow["jobs"].get("publish").is_none());
     assert!(
         npm_workflow["jobs"]["validate"]
             .get("permissions")

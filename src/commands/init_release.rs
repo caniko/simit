@@ -1,7 +1,6 @@
 use anyhow::{Result, bail};
 
 use crate::cargo;
-use crate::ci_resolution::CiBackend;
 use crate::cli::InitReleaseCommand;
 use crate::cli::{CiProvider, Platform, Runtime};
 use crate::commands::scaffold::{CheckPrintMode, print_next_steps};
@@ -20,24 +19,10 @@ pub fn run(command: InitReleaseCommand) -> Result<()> {
     let package = cargo::representative_package(&metadata, command.package.as_deref())?;
     let cfg = ProjectConfig::load(workspace_root)?;
 
-    let platform = command
-        .platform
-        .or(match (&cfg.release.github, &cfg.release.codeberg) {
-            (Some(_), None) => Some(Platform::Github),
-            (None, Some(_)) => Some(Platform::Forgejo),
-            _ => cfg.ci.platform,
-        })
-        .unwrap_or(Platform::Forgejo);
-    let provider = command.ci_provider.unwrap_or_else(|| {
-        if platform == Platform::Github {
-            CiProvider::Actions
-        } else {
-            cfg.ci.provider.unwrap_or(CiProvider::Actions)
-        }
-    });
-    // Reject Crow + non-Forgejo pairs; Crow release workflows only render for
-    // Forgejo. Actions works on every platform.
-    CiBackend::from_parts(provider, platform)?;
+    let backend =
+        crate::ci_resolution::release_backend(&cfg, command.platform, command.ci_provider)?;
+    let platform = backend.platform();
+    let provider = backend.provider();
     if platform == Platform::Gitlab {
         bail!(
             "release workflows are not supported for GitLab; GitLab CI is nix-only and has no Actions-style release workflow"

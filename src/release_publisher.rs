@@ -11,12 +11,12 @@
 use std::io::Read;
 
 use anyhow::{Context, Result, ensure};
-use semver::Version;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub mod archive;
 pub mod execution;
+mod native;
 mod source;
 
 #[derive(Debug, Clone)]
@@ -295,7 +295,43 @@ pub fn bind_release_push(
     event: &CompletedRunEvent,
     provider_run: &ReleaseRun,
 ) -> Result<BoundReleasePush> {
-    bind_release_push_with_namespace(policy, context, event, provider_run, None)
+    bind_release_push_with_namespace(
+        policy,
+        context,
+        event,
+        provider_run,
+        None,
+        Default::default(),
+        false,
+    )
+}
+
+pub fn bind_prefixed_release_push(
+    policy: &PublisherPolicy,
+    context: &PublisherContext,
+    event: &CompletedRunEvent,
+    provider_run: &ReleaseRun,
+    prefix: crate::release_identity::TagPrefix,
+) -> Result<BoundReleasePush> {
+    bind_release_push_with_namespace(policy, context, event, provider_run, None, prefix, false)
+}
+
+pub fn bind_native_release_push(
+    policy: &PublisherPolicy,
+    context: &PublisherContext,
+    event: &CompletedRunEvent,
+    provider_run: &ReleaseRun,
+    namespace: &str,
+) -> Result<BoundReleasePush> {
+    bind_release_push_with_namespace(
+        policy,
+        context,
+        event,
+        provider_run,
+        Some(namespace),
+        Default::default(),
+        true,
+    )
 }
 
 /// Bind an independently tagged crate while preserving its complete native head label.
@@ -306,7 +342,15 @@ pub fn bind_independent_release_push(
     provider_run: &ReleaseRun,
     package: &str,
 ) -> Result<BoundReleasePush> {
-    bind_release_push_with_namespace(policy, context, event, provider_run, Some(package))
+    bind_release_push_with_namespace(
+        policy,
+        context,
+        event,
+        provider_run,
+        Some(package),
+        Default::default(),
+        false,
+    )
 }
 
 fn bind_release_push_with_namespace(
@@ -315,6 +359,8 @@ fn bind_release_push_with_namespace(
     event: &CompletedRunEvent,
     provider_run: &ReleaseRun,
     namespace: Option<&str>,
+    prefix: crate::release_identity::TagPrefix,
+    native: bool,
 ) -> Result<BoundReleasePush> {
     let components: Vec<_> = policy.repository.split('/').collect();
     ensure!(
@@ -401,12 +447,12 @@ fn bind_release_push_with_namespace(
     let version = if let Some(package) = namespace {
         crate::release_identity::ReleaseTag::parse_for_package(package, &run.head_branch)?.version
     } else {
-        Version::parse(&run.head_branch)?
+        prefix.parse(&run.head_branch)?.version
     };
     ensure!(
-        version.pre.is_empty()
+        (native || version.pre.is_empty())
             && version.build.is_empty()
-            && (namespace.is_some() || version.to_string() == run.head_branch),
+            && (namespace.is_some() || prefix.tag(version.clone()).to_string() == run.head_branch),
         "release push must have an exact numeric semver head label"
     );
     Ok(BoundReleasePush {
@@ -559,6 +605,54 @@ mod tests {
         assert_eq!(retry.source_run_id, original.source_run_id);
         assert_eq!(retry.source_sha, original.source_sha);
         assert_eq!(retry.source_run_attempt, 2);
+    }
+
+    #[test]
+    fn prefixed_and_native_admission_bind_full_signed_label_without_losing_version() {
+        let (policy, context, mut event) = fixture();
+        event.workflow_run.head_branch = "v1.2.3".into();
+        let bound = bind_prefixed_release_push(
+            &policy,
+            &context,
+            &event,
+            &event.workflow_run,
+            crate::release_identity::TagPrefix::V,
+        )
+        .unwrap();
+        assert_eq!(bound.source_head_label(), "v1.2.3");
+        assert_eq!(bound.release_version(), "1.2.3");
+        assert!(bind_release_push(&policy, &context, &event, &event.workflow_run).is_err());
+        event.workflow_run.head_branch = "python-owner/v1.2.3-rc.1".into();
+        let bound = bind_native_release_push(
+            &policy,
+            &context,
+            &event,
+            &event.workflow_run,
+            "python-owner",
+        )
+        .unwrap();
+        assert_eq!(bound.source_head_label(), "python-owner/v1.2.3-rc.1");
+        assert_eq!(bound.release_version(), "1.2.3-rc.1");
+        assert!(
+            bind_native_release_push(
+                &policy,
+                &context,
+                &event,
+                &event.workflow_run,
+                "other-owner"
+            )
+            .is_err()
+        );
+        assert!(
+            bind_independent_release_push(
+                &policy,
+                &context,
+                &event,
+                &event.workflow_run,
+                "python-owner"
+            )
+            .is_err()
+        );
     }
 
     #[test]

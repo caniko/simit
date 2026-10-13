@@ -113,7 +113,7 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
     let changelog_enabled = !command.no_changelog
         && config
             .release
-            .notes_source(config.ci.platform.unwrap_or(crate::cli::Platform::Forgejo))
+            .notes_source(crate::ci_resolution::release_backend(&config, None, None)?.platform())
             == crate::config::ReleaseNotesSource::Changelog;
     let create_tag = !command.no_tag;
     let sign_tag = !command.no_sign;
@@ -243,7 +243,11 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
 }
 
 fn secrets(command: ReleaseCommand) -> Result<()> {
-    if !command.packages.is_empty() {
+    if !command.packages.is_empty()
+        && !(command.packages.len() == 1
+            && (command.secrets_action == Some(ReleaseSecretsAction::Contract)
+                || command.trust_action == Some(ReleaseTrustAction::Contract)))
+    {
         bail!("--package is not valid with `simit release secrets`");
     }
     if command.workspace {

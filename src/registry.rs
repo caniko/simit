@@ -1031,7 +1031,7 @@ fn infer_expected_primary_ci_files(
     let config =
         ProjectConfig::load(workspace_root).context("loading simit project configuration")?;
     if config.monorepo.is_some() {
-        return crate::monorepo::ci::files(workspace_root, &config);
+        return crate::monorepo::ci::files(workspace_root, &config, true);
     }
     let snapshots = workflow_snapshots(marked);
     if backend.provider() == CiProvider::Crow {

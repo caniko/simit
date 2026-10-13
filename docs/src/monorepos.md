@@ -160,27 +160,46 @@ their manifests. A dirty checkout or a failing prerequisite check prevents the
 version commit and tag.
 
 `publish` records registry eligibility (npm `private = true` always disables it).
-Eligible owners generate independent `publish-python-<namespace>.yaml` or
-`publish-npm-<namespace>.yaml` workflows. Each package-qualified signed tag
+Eligible owners generate credential-free `publish-python-<namespace>.yaml` or
+`publish-npm-<namespace>.yaml` source workflows and a corresponding
+`trusted-publish-<registry>-<namespace>.yaml` default-branch publisher.
+Each package-qualified signed tag
 qualifies the complete graph on every declared native runner, then validates
 the tag/event/HEAD identity, builds just that owner's wheel plus sdist or npm
-tarball, and transfers a source-bound checksum receipt to a separate publish
-job. The publish job verifies the signed tag again, rejects metadata/checksum
+tarball, and retains a source-bound checksum receipt in an attempt-qualified,
+immutable provider artifact. The publisher always runs on `ubuntu-24.04`,
+independently of the configured qualification capacity. Its engine, keyring and
+package/namespace enrollment come from its protected workflow revision. Before
+upload it re-admits the full signed tag, source SHA, native provider workflow ID,
+original run/attempt and archive ID/digest. The publisher rejects metadata/checksum
 conflicts, uploads only missing exact artifacts, and waits at most twenty
 registry reads separated by thirty-second waits for checksum-matching
 propagation. Failed uploads are accepted only if exact artifacts already exist.
-Credentials (`PYPI_API_TOKEN` or `NPM_TOKEN`) are confined to the publish step;
-npm packing and publishing disable lifecycle scripts. Native release steps use
+Credentials (`PYPI_API_TOKEN` or `NPM_TOKEN`) belong only to the protected
+`simit-pypi` or `simit-npm` environment, restricted to the default branch.
+The protected helper uploads the admitted bytes directly to the fixed registry
+endpoint. It never runs candidate Nix expressions, scripts, package hooks or
+package configuration with those credentials. Recovery reruns the original
+signed-tag run and reuses its first retained archive, including partial uploads;
+it does not rebuild a replacement archive in the publisher. Native build steps use
 the project's root `ci` shell, which must provide Python 3.11+, GnuPG and `uv`
 or npm. Prepared npm files must already be present after component qualification;
 `publishConfig` access and distribution-tag settings are retained, while custom
 registries require a separate backend. npm prereleases require an explicit
 `publishConfig.tag`. npm `publishConfig.provenance = true` grants OIDC permission
-only to the publication job so npm can retain its provenance setting. Python
+only to the protected publisher. An engine-owned signer uses the hosted worker's
+global npm Sigstore library to attest the admitted tarball digest, signed source
+and protected publisher revision. Its child environment receives OIDC access,
+but no registry token or candidate Node/npm configuration. Python
 owners retain SemVer in source/tags; public Python releases
 support stable versions and `alpha`, `beta`, `rc`, or `dev` numeric prereleases,
 mapped to PyPI's normalized metadata version. SemVer build metadata is unsupported
 for public native releases. All native publication requires `keys/maintainers.gpg`.
+
+Component gates use the same `bash -euo pipefail -c` command semantics locally
+and in generated CI, including quoted commands, environment and timeouts. The
+packaged test suite needs Python's standard library and `actionlint`; these are
+declared in `nix/review-tools.nix`, independently of development-shell tools.
 
 `release verify` checks eligible packages against the public native registry:
 PyPI's exact release metadata must contain a non-yanked file with a SHA-256 digest,

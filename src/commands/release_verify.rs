@@ -149,13 +149,8 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
         Some(version) => version,
         None => common_current_version(&packages)?,
     };
-    let platform = config.ci.platform.unwrap_or_else(|| {
-        if config.release.github.is_some() {
-            crate::cli::Platform::Github
-        } else {
-            crate::cli::Platform::Forgejo
-        }
-    });
+    let backend = crate::ci_resolution::release_backend(&config, command.platform, None)?;
+    let platform = backend.platform();
     let hosted = command.component.is_none()
         && (config.release.codeberg.is_some() || config.release.github.is_some());
     let tag = if command.component.is_some() {
@@ -200,9 +195,15 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
         ),
     ];
     if hosted {
-        results.push(check_hosted_workflow(workspace_root));
-        let package = cargo::representative_package(&metadata, None)?;
-        match super::release_secrets::project_credentials(&config, &package, platform) {
+        let package = packages
+            .first()
+            .context("hosted release verification requires a selected package")?;
+        results.push(check_hosted_workflow(
+            workspace_root,
+            &package.name,
+            backend,
+        ));
+        match super::release_secrets::project_credentials(&config, package, platform) {
             Ok(credentials) => results.push(CheckResult::blocked(
                 "remote secrets",
                 format!(
@@ -647,11 +648,23 @@ fn check_tag(
     }
 }
 
-fn check_hosted_workflow(root: &Path) -> CheckResult {
+fn check_hosted_workflow(
+    root: &Path,
+    package: &str,
+    backend: crate::ci_resolution::CiBackend,
+) -> CheckResult {
     let output = std::env::current_exe().and_then(|exe| {
         Command::new(exe)
             .current_dir(root)
             .args(["init", "release", "--check", "--diff"])
+            .args([
+                "--package",
+                package,
+                "--platform",
+                backend.platform().as_str(),
+                "--ci-provider",
+                backend.provider().as_str(),
+            ])
             .output()
     });
     match output {
