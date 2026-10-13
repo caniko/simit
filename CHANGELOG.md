@@ -53,6 +53,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Bind protected publication to the signed tag object's internal name, rejecting
+  aliases that reuse another component's valid signature at the same version.
 - Isolate hosted release gates from artifact workspaces; release jobs re-checkout
   and revalidate the immutable signed source after prerequisite jobs succeed.
 - Report protected Python/npm publisher credentials as locally unverifiable even

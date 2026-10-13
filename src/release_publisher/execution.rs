@@ -285,23 +285,12 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
     )?;
     // A semver branch label alone is insufficient: require the independently
     // trusted maintainer signature and exact original-run commit before reading source.
-    output(
-        data_command("git", state.path())?
-            .arg("-C")
-            .arg(&source)
-            .args(["verify-tag", &bound.source_head_label]),
+    verify_signed_tag_identity(
+        state.path(),
+        &source,
+        &bound.source_head_label,
+        &bound.source_sha,
     )?;
-    let signed_sha = output(
-        data_command("git", state.path())?
-            .arg("-C")
-            .arg(&source)
-            .args(["rev-parse", "--verify"])
-            .arg(format!("refs/tags/{}^{{commit}}", bound.source_head_label)),
-    )?;
-    ensure!(
-        String::from_utf8(signed_sha.stdout)?.trim() == bound.source_sha,
-        "signed tag differs from original run source"
-    );
     let signed_workflow = output(
         data_command("git", state.path())?
             .arg("-C")
@@ -588,6 +577,52 @@ fn write_verified_member(output: &Path, member: &CrateMember) -> Result<()> {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(output, fs::Permissions::from_mode(member.mode))?;
     }
+    Ok(())
+}
+
+fn verify_signed_tag_identity(
+    state: &Path,
+    source: &Path,
+    label: &str,
+    expected_sha: &str,
+) -> Result<()> {
+    let reference = format!("refs/tags/{label}");
+    output(
+        data_command("git", state)?
+            .arg("-C")
+            .arg(source)
+            .args(["verify-tag", &reference]),
+    )?;
+    let object = output(
+        data_command("git", state)?
+            .arg("-C")
+            .arg(source)
+            .args(["cat-file", "tag", &reference]),
+    )?;
+    let object = String::from_utf8(object.stdout)?;
+    let header = object
+        .split_once("\n\n")
+        .context("signed tag has no header boundary")?
+        .0;
+    let names = header
+        .lines()
+        .filter_map(|line| line.strip_prefix("tag "))
+        .collect::<Vec<_>>();
+    ensure!(
+        names == [label],
+        "signed tag object name differs from provider release label"
+    );
+    let signed_sha = output(
+        data_command("git", state)?
+            .arg("-C")
+            .arg(source)
+            .args(["rev-parse", "--verify"])
+            .arg(format!("{reference}^{{commit}}")),
+    )?;
+    ensure!(
+        String::from_utf8(signed_sha.stdout)?.trim() == expected_sha,
+        "signed tag differs from original run source"
+    );
     Ok(())
 }
 
@@ -2509,4 +2544,73 @@ default=['dep:alias']
         assert_eq!(metadata["deps"][1]["target"], "cfg(unix)");
         assert_eq!(metadata["features"]["default"], json!(["dep:alias"]));
     }
+}
+#[test]
+fn signed_tag_identity_rejects_namespaced_aliases() {
+    let state = tempfile::tempdir().unwrap();
+    for directory in ["home", "cargo-home", "gpg"] {
+        fs::create_dir(state.path().join(directory)).unwrap();
+    }
+    output(data_command("gpg", state.path()).unwrap().args([
+        "--batch",
+        "--pinentry-mode",
+        "loopback",
+        "--passphrase",
+        "",
+        "--quick-generate-key",
+        "Publisher fixture <publisher@example.invalid>",
+        "ed25519",
+        "sign",
+        "0",
+    ]))
+    .unwrap();
+    let source = state.path().join("source");
+    output(
+        data_command("git", state.path())
+            .unwrap()
+            .arg("init")
+            .arg(&source),
+    )
+    .unwrap();
+    let git = |args: &[&str]| {
+        output(
+            data_command("git", state.path())
+                .unwrap()
+                .arg("-C")
+                .arg(&source)
+                .args([
+                    "-c",
+                    "user.name=Publisher fixture",
+                    "-c",
+                    "user.email=publisher@example.invalid",
+                ])
+                .args(args),
+        )
+        .unwrap()
+    };
+    git(&["commit", "--allow-empty", "-m", "fixture"]);
+    let sha = String::from_utf8(git(&["rev-parse", "HEAD"]).stdout).unwrap();
+    git(&[
+        "-c",
+        "user.signingkey=publisher@example.invalid",
+        "tag",
+        "-s",
+        "component-a/v1.2.3",
+        "-m",
+        "signed release",
+    ]);
+    let object =
+        String::from_utf8(git(&["rev-parse", "refs/tags/component-a/v1.2.3"]).stdout).unwrap();
+    git(&["update-ref", "refs/tags/component-b/v1.2.3", object.trim()]);
+    // Git validates the same genuine signature under either ref name.
+    git(&["verify-tag", "refs/tags/component-b/v1.2.3"]);
+    verify_signed_tag_identity(state.path(), &source, "component-a/v1.2.3", sha.trim()).unwrap();
+    assert!(
+        verify_signed_tag_identity(state.path(), &source, "component-b/v1.2.3", sha.trim())
+            .is_err()
+    );
+    assert!(
+        verify_signed_tag_identity(state.path(), &source, "component-a/v1.2.3", &"f".repeat(40))
+            .is_err()
+    );
 }
