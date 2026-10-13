@@ -43,6 +43,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Publish sealed capsule names only after admission succeeds, keeping failed-capture
+  diagnostics separate from reusable capsules.
 - Preserve explicitly selected custody protocols when persisting CI option changes.
 - Honor the documented absolute `XDG_DATA_HOME` project-registry override on
   macOS and Windows as well as Linux, retaining native defaults when unset.

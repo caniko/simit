@@ -490,11 +490,11 @@ def sealed_main():
     write(root / 'receipt.json', expected)
     try:
         if phase == 'capture':
+            sealed_capture(config, payload, root)
             snapshot = expected['snapshot']
             key = capsule_name(config, snapshot, payload['workflow_run']['id'], expected['collector_head'])
             with Path(os.environ['GITHUB_OUTPUT']).open('a') as output:
                 output.write('capsule_name=' + key + '\n')
-            sealed_capture(config, payload, root)
         else:
             sealed_aggregate(config, payload, root)
     except Exception as error:

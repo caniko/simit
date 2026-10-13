@@ -318,6 +318,56 @@ class Sealed(unittest.TestCase):
         manifest = json.loads((root / 'manifest.json').read_bytes())
         self.assertEqual(output.read_text(), 'capsule_name=' + manifest['key'] + '\n')
 
+    def test_failed_capture_uses_diagnostic_name_without_poisoning_later_capsules(self):
+        event = self.folder / 'input-event.json'
+        event.write_text(json.dumps(self.payload))
+        original_write = self.namespace['write']
+        diagnostics = []
+        for index, failure in enumerate(['incomplete_logs', 'manifest_admission']):
+            with self.subTest(failure=failure):
+                observer_id = 902 + index
+                root = self.folder / failure
+                output = self.folder / (failure + '-output')
+                output.write_text('')
+                stream = io.BytesIO()
+                with zipfile.ZipFile(stream, 'w') as archive:
+                    archive.writestr('test/1_Set up job.txt', b'nonempty pruned logs\n')
+                def admit(path, value, budget=None):
+                    if failure == 'manifest_admission' and path.name == 'manifest.json':
+                        raise RuntimeError('manifest admission failed')
+                    return original_write(path, value, budget)
+                with patch.dict(self.zips, {1: stream.getvalue()} if failure == 'incomplete_logs' else {}), \
+                        patch.dict(self.namespace, {'write': admit}), \
+                        patch.dict(os.environ, {'SIMIT_CUSTODY_CONFIG': json.dumps(self.config),
+                            'SIMIT_CUSTODY_PHASE': 'capture', 'SIMIT_CUSTODY_ROOT': str(root),
+                            'GITHUB_EVENT_PATH': str(event), 'GITHUB_OUTPUT': str(output),
+                            'GITHUB_RUN_ID': str(observer_id)}):
+                    with self.assertRaises(RuntimeError):
+                        self.namespace['sealed_main']()
+                self.assertEqual(output.read_text(), '')
+                self.assertEqual(json.loads((root / 'receipt.json').read_bytes())['state'], 'failed')
+                self.assertFalse((root / 'manifest.json').exists())
+                stream = io.BytesIO()
+                with zipfile.ZipFile(stream, 'w') as archive:
+                    for path in root.rglob('*'):
+                        if path.is_file():
+                            archive.writestr(str(path.relative_to(root)), path.read_bytes())
+                raw = stream.getvalue()
+                diagnostics.append(({'id': 86 + index, 'name': f'custody-diagnostic-{observer_id}-1',
+                    'expired': False, 'size_in_bytes': len(raw),
+                    'digest': 'sha256:' + hashlib.sha256(raw).hexdigest(),
+                    'workflow_run': {'id': observer_id, 'head_sha': 'c' * 40}}, raw))
+        capsules = [self.seal_original(1, 88, 900), self.seal_original(2, 89, 901)]
+        self.install_capsule_provider(diagnostics + capsules)
+        for artifact, _ in diagnostics:
+            self.observers[artifact['workflow_run']['id']]['conclusion'] = 'failure'
+        with patch.dict(os.environ, {'SIMIT_CUSTODY_CAPSULE_ID': '88',
+                'SIMIT_CUSTODY_CAPSULE_DIGEST': capsules[0][0]['digest'], 'SIMIT_CUSTODY_SEAL_OUTCOME': 'success'}):
+            receipt = self.aggregate()
+        self.assertEqual(receipt['state'], 'ready')
+        self.assertEqual([row['capsule']['id'] for row in receipt['producers']], [88, 89])
+        self.assertTrue(all(artifact['id'] in self.capsules for artifact, _ in diagnostics))
+
     def test_capsule_key_isolates_policy_installation_ref_event_and_full_snapshot(self):
         snapshot, _ = self.namespace['completion_identity'](self.config, self.payload)
         key = self.namespace['capsule_name']
