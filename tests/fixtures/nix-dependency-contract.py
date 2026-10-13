@@ -66,7 +66,7 @@ class Transport(unittest.TestCase):
     def execute(self, change=None, alias=False, transitive=False, optimized=False,
                 data=None, maximum=1024, mode='import', closure=None, argument_limit=None,
                 extra_environment=None, definition=None, built_definition=None,
-                compressed_size=None):
+                compressed_size=None, mutate_after_checksum=False, observe_decompression=False):
         definition = definition or DEFINITION
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -85,6 +85,23 @@ class Transport(unittest.TestCase):
             effects = []
             self.last_evaluations = []
             original_stat = Path.stat
+            original_digest = hashlib.file_digest
+            original_gzip = gzip.GzipFile
+
+            def decompress(*args, **kwargs):
+                if observe_decompression and 'fileobj' in kwargs:
+                    self.assertFalse(archive.exists(), 'Downloaded archive retained during expansion')
+                    self.decompression_observed = True
+                return original_gzip(*args, **kwargs)
+
+            def checksum(stream, algorithm):
+                result = original_digest(stream, algorithm)
+                if mutate_after_checksum:
+                    # Mutate the downloaded inode after its original digest was
+                    # computed. Admission/import must retain the checked bytes.
+                    archive.write_bytes(gzip.compress(exported(record(node=regular(b'evil!')))))
+                    self.checksum_mutated = True
+                return result
 
             def archive_stat(path, *args, **kwargs):
                 result = original_stat(path, *args, **kwargs)
@@ -146,7 +163,7 @@ class Transport(unittest.TestCase):
             sysconf = os.sysconf
             def observed_limit(name):
                 return argument_limit if argument_limit is not None and name == 'SC_ARG_MAX' else sysconf(name)
-            with patch.dict(os.environ, env), patch('os.sysconf', observed_limit), patch('subprocess.check_output', output), patch('subprocess.run', run), patch('subprocess.Popen', Producer), patch.object(Path, 'stat', archive_stat), patch.object(Path, 'is_file', autospec=True, side_effect=lambda p: False if str(p) == 'flake.lock' else p.exists()):
+            with patch.dict(os.environ, env), patch('gzip.GzipFile', decompress), patch('hashlib.file_digest', checksum), patch('os.sysconf', observed_limit), patch('subprocess.check_output', output), patch('subprocess.run', run), patch('subprocess.Popen', Producer), patch.object(Path, 'stat', archive_stat), patch.object(Path, 'is_file', autospec=True, side_effect=lambda p: False if str(p) == 'flake.lock' else p.exists()):
                 try:
                     exec(compile(PROGRAM, '<generated-dependencies>', 'exec', optimize=2 if optimized else 0), {})
                 except (AssertionError, RuntimeError):
@@ -197,6 +214,37 @@ class Transport(unittest.TestCase):
             self.assertFalse(accepted)
             self.assertEqual(effects, [])
             self.assertEqual(self.last_evaluations, [])
+
+    def test_checksum_and_decompression_use_the_same_private_snapshot(self):
+        for optimized in [False, True]:
+            self.checksum_mutated = False
+            accepted, effects = self.execute(mutate_after_checksum=True, optimized=optimized)
+            self.assertTrue(self.checksum_mutated)
+            self.assertTrue(accepted)
+            self.assertEqual(effects[0], ['nix-store', '--import'])
+
+    def test_verified_download_is_released_before_expanding_private_spool(self):
+        for optimized in [False, True]:
+            self.decompression_observed = False
+            accepted, effects = self.execute(observe_decompression=True, optimized=optimized)
+            self.assertTrue(accepted)
+            self.assertTrue(self.decompression_observed)
+            self.assertEqual(effects[0], ['nix-store', '--import'])
+
+    def test_case_hack_aliases_reject_even_in_later_records_before_import(self):
+        for names in [[b'A', b'A~nix~case~hack~1', b'a'], [b'A', b'a']]:
+            node = directory([(name, regular()) for name in names])
+            self.denied(exported(record(), record(OTHER, node=node)),
+                        ('closure', [OUT, OTHER]), maximum=65536)
+
+    def test_nearby_case_hack_suffixes_and_separate_directories_remain_usable(self):
+        for entries in [[(b'A', regular()), (b'A~nix~case~hack~1', regular()), (b'a1', regular())],
+                        [(b'A~nix~case~hack~1', regular()), (b'a~nix~case~hack~2', regular())],
+                        [(b'first', directory([(b'A', regular())])),
+                         (b'second', directory([(b'a', regular())]))]]:
+            accepted, effects = self.execute(data=exported(record(node=directory(entries))), maximum=65536)
+            self.assertTrue(accepted)
+            self.assertEqual(effects[0], ['nix-store', '--import'])
 
     def test_complete_multi_output_derivation_exports_and_imports_both_roots(self):
         dev = '/nix/store/' + '4' * 32 + '-development'

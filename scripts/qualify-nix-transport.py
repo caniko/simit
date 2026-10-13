@@ -1,4 +1,5 @@
 """Execute the exact executor assets on fresh hosted workers with real Nix."""
+import hashlib
 import json
 import os
 import subprocess
@@ -31,10 +32,16 @@ before = Path(output).exists()
 (root / 'dependency-before-import.json').write_text(json.dumps({'path': output, 'present': before}) + '\n')
 if operation != 'export':
     require(not before, 'Consumer is not a fresh worker with absent transported input')
+    archive = Path(os.environ['SIMIT_DEPENDENCY_ROOT']) / 'closure.nar.gz'
+    with archive.open('rb') as downloaded:
+        download_digest = hashlib.file_digest(downloaded, 'sha256').hexdigest()
+    (root / 'download-before-import.json').write_text(json.dumps({
+        'archive_sha256': download_digest, 'archive_bytes': archive.stat().st_size}) + '\n')
 exec(compile(program, '<exact-dependency-executor>', 'exec'), {'__name__': '__main__'})
 if operation == 'export':
     raise SystemExit(0)
 require(Path(output).is_file(), 'Exact dependency output was not restored')
+require(not archive.exists(), 'Downloaded archive was not released by import')
 if operation == 'warm':
     with (root / 'warm-materialization.log').open('wb') as log:
         subprocess.run(['nix', 'build', '--no-link', '--no-update-lock-file', '--max-jobs', '1', '--cores', '2', *members],
@@ -58,4 +65,4 @@ for index, name in enumerate(['runtime', 'sibling']):
     require(f'SIMIT_FRESH_TRANSPORT_BUILDER {name}' in (root / str(index) / 'fresh-build.log').read_text(), 'Current-worker builder marker is missing')
 (root / 'hosted-proof.json').write_text(json.dumps({'head': receipt['head'], 'run': receipt['run'],
     'attempt': receipt['attempt'], 'state': operation, 'dependency_restored': output,
-    'current_worker_builders': ['runtime', 'sibling']}, indent=2) + '\n')
+    'current_worker_builders': ['runtime', 'sibling'], 'archive_download_removed': True}, indent=2) + '\n')
