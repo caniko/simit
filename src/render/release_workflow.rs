@@ -1116,13 +1116,25 @@ fn push_build_srpm(w: &mut String, copr: &ResolvedCopr) {
     w.push_str("      - name: Build SRPM for COPR\n        run: |\n          set -euo pipefail\n          . ./release-env\n");
     writeln!(
         w,
-        "          git archive --format=tar.gz --prefix={repo}/ -o \"{repo}-${{VERSION}}.tar.gz\" HEAD",
+        "          export SOURCE_ARCHIVE=\"{}-v${{VERSION}}.tar.gz\"",
+        copr.repo
+    )
+    .expect("write");
+    writeln!(
+        w,
+        "          export SRPM_DIR={}",
+        shell_single_quote(&copr.srpm_dir)
+    )
+    .expect("write");
+    writeln!(
+        w,
+        "          git archive --format=tar.gz --prefix={repo}/ -o \"$SOURCE_ARCHIVE\" HEAD",
         repo = copr.repo
     )
     .expect("write");
     w.push_str("          nix shell nixpkgs#rpm nixpkgs#cargo nixpkgs#rustc -c bash <<'SCRIPT'\n");
     w.push_str("          set -euo pipefail\n");
-    writeln!(w, "          tar xf {repo}-*.tar.gz", repo = copr.repo).expect("write");
+    w.push_str("          tar xf \"$SOURCE_ARCHIVE\"\n");
     writeln!(
         w,
         "          ( cd {repo} && cargo vendor vendor > ../cargo-vendor-config.toml )",
@@ -1135,14 +1147,14 @@ fn push_build_srpm(w: &mut String, copr: &ResolvedCopr) {
         repo = copr.repo
     )
     .expect("write");
-    w.push_str("          rm -rf srpms && mkdir -p srpms\n");
+    w.push_str("          rm -rf -- \"$SRPM_DIR\" && mkdir -p -- \"$SRPM_DIR\"\n");
     writeln!(
         w,
-        "          rpmbuild -bs {spec} --define \"_sourcedir $(pwd)\" --define \"_srcrpmdir $(pwd)/srpms\"",
+        "          rpmbuild -bs {spec} --define \"_sourcedir $(pwd)\" --define \"_srcrpmdir $(pwd)/$SRPM_DIR\"",
         spec = copr.spec_path
     )
     .expect("write");
-    w.push_str("          set -- srpms/*.src.rpm; test \"$#\" -eq 1; ls -l \"$1\"\n");
+    w.push_str("          shopt -s nullglob\n          srpms=(\"$SRPM_DIR\"/*.src.rpm); test \"${#srpms[@]}\" -eq 1; test -s \"${srpms[0]}\"; ls -l \"${srpms[0]}\"\n");
     w.push_str("          SCRIPT\n");
 }
 
@@ -1920,6 +1932,13 @@ fn push_publish_copr(w: &mut String, copr: &ResolvedCopr, activated_remote: bool
     )
     .expect("write");
     w.push_str("        run: |\n          set -euo pipefail\n          . ./release-env\n");
+    writeln!(
+        w,
+        "          SRPM_DIR={}",
+        shell_single_quote(&copr.srpm_dir)
+    )
+    .expect("write");
+    w.push_str("          shopt -s nullglob\n          srpms=(\"$SRPM_DIR\"/*.src.rpm)\n");
     let stable_project = copr.project.as_deref().unwrap_or("");
     let testing_project = copr.testing_project.as_deref().unwrap_or(stable_project);
     writeln!(w, "          COPR_PROJECT=\"{stable_project}\"").expect("write");
@@ -1927,16 +1946,17 @@ fn push_publish_copr(w: &mut String, copr: &ResolvedCopr, activated_remote: bool
     if activated_remote {
         push_active_or_skip_prelude(w);
         w.push_str("          if [ -z \"$COPR_LOGIN\" ] || [ -z \"$COPR_USERNAME\" ] || [ -z \"$COPR_TOKEN\" ]; then publisher_missing copr 'COPR credentials unset'; fi\n");
-        w.push_str("          srpms=(srpms/*.src.rpm); if [ ! -e \"${srpms[0]}\" ]; then publisher_missing copr 'no SRPM to publish'; fi\n");
+        w.push_str("          if [ \"${#srpms[@]}\" -eq 0 ]; then publisher_missing copr 'no SRPM to publish'; fi\n");
     } else {
         w.push_str("          if [ -z \"$COPR_LOGIN\" ] || [ -z \"$COPR_USERNAME\" ] || [ -z \"$COPR_TOKEN\" ]; then echo 'COPR credentials are required because COPR publishing is configured.' >&2; exit 1; fi\n");
     }
+    w.push_str("          test \"${#srpms[@]}\" -eq 1; test -s \"${srpms[0]}\"\n");
     w.push_str("          mkdir -p ~/.config\n");
     w.push_str("          cat > ~/.config/copr <<EOF\n          [copr-cli]\n          login = ${COPR_LOGIN}\n          username = ${COPR_USERNAME}\n          token = ${COPR_TOKEN}\n          copr_url = https://copr.fedorainfracloud.org\n          EOF\n");
     w.push_str("          chmod 600 ~/.config/copr\n");
     writeln!(
         w,
-        "          nix run {} -- build --nowait \"${{COPR_PROJECT}}\" srpms/*.src.rpm",
+        "          nix run {} -- build --nowait \"${{COPR_PROJECT}}\" \"${{srpms[@]}}\"",
         copr.nix_tool
     )
     .expect("write");
@@ -2660,6 +2680,7 @@ mod tests {
             binaries: vec!["modde".to_owned()],
             spec_path: "modde.spec".to_owned(),
             makefile_path: ".copr/Makefile".to_owned(),
+            srpm_dir: "srpms".to_owned(),
             project: Some("caniko/rs-modde".to_owned()),
             testing_project: Some("caniko/rs-modde-testing".to_owned()),
             login_secret: "copr_login".to_owned(),
@@ -3019,7 +3040,7 @@ mod tests {
         assert!(workflow.contains("cargo vendor vendor > ../cargo-vendor-config.toml"));
         assert!(
             workflow.contains(
-                "nix run .#copr-cli -- build --nowait \"${COPR_PROJECT}\" srpms/*.src.rpm"
+                "nix run .#copr-cli -- build --nowait \"${COPR_PROJECT}\" \"${srpms[@]}\""
             )
         );
         assert!(workflow.contains("COPR_PROJECT=\"caniko/rs-modde\""));

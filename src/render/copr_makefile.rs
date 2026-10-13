@@ -58,6 +58,7 @@ mod tests {
             binaries: vec!["modde".to_owned()],
             spec_path: "modde.spec".to_owned(),
             makefile_path: ".copr/Makefile".to_owned(),
+            srpm_dir: "srpms".to_owned(),
             project: None,
             testing_project: None,
             login_secret: "copr_login".to_owned(),

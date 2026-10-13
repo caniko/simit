@@ -72,6 +72,8 @@ download_repo = "example/foo"
 project = "example/foo"
 # Optional COPR SCM entrypoint; defaults to ".copr/Makefile".
 makefile_path = "dist/copr/Makefile"
+# Shared release-workflow build/publish directory; defaults to "srpms".
+srpm_dir = "target/release-artifacts/srpms"
 
 [apt]
 repo_url = "ssh://git@codeberg.org/example/foo-apt.git"
@@ -82,6 +84,11 @@ public_url = "https://apt.example.com/"
 Render, init, drift checks, next-step instructions, and the managed COPR badge
 all use that path. The managed apt badge uses `apt.public_url` when declared;
 otherwise it links to `dist/apt/conf/distributions`.
+
+The COPR release workflow creates the `repo-vVERSION.tar.gz` basename expected
+by the generated RPM spec. `copr.srpm_dir` selects the same workspace-relative
+staging directory for the build and publisher. Publication requires exactly
+one nonempty `.src.rpm` there.
 
 For an harbor-rs project whose flake exposes the conventional
 `packages.<system>.release-bundle`, the release artifact section can instead
