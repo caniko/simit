@@ -482,6 +482,12 @@ pub enum BumpKind {
 
 #[derive(Debug, Args)]
 pub struct InitCiCommand {
+    #[arg(
+        long,
+        conflicts_with_all = ["pages_only", "prebuild_only", "review_only"],
+        help = "Generate or verify primary CI and native build workflows, preserving publication workflows and project policy"
+    )]
+    pub primary_only: bool,
     #[arg(long, conflicts_with_all = ["pages_only", "prebuild_only", "runner"], help = "Generate or verify only the opt-in repository review controller/client workflows")]
     pub review_only: bool,
     #[arg(

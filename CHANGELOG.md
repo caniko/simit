@@ -16,6 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `SIMIT_CI_ENGINE_REVISION` repository variable before adopting regenerated
   grouped workflows. Retain v1 receipts, shell-only failure diagnostics and
   materialize-plus-rebuild execution for fresh members.
+- Opt-in completion-driven custody for enrolled original branch/PR producers,
+  with bounded log/artifact capture and idempotent producer-source status reports.
 - CI-scoped public Nix cache configuration and bounded same-run build-input
   closure transport with exact source/run/attempt/derivation provenance.
 - Explicit fresh qualification installables, retaining runtime execution while
@@ -43,6 +45,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   retain admission diagnostics, and force fresh rebuilds onto the current worker.
   Bootstrap uses public credential-free Nix fetching and portable hashing, with
   unsupported Intel macOS runner admission rejected before generation writes.
+- Grant check-suite read access only to completion-custody collection, bound the
+  fully rendered observer to 500,000 bytes before writes, and ignore unenrolled
+  workflow paths that reuse producer names without changing custody statuses.
+- Bind completion-custody workflow hashes to GitHub's native executed-file
+  revision, independently of raw PR heads or producer checkout revisions, with
+  fresh proof revalidation before capture completion and after upload.
+- Bind completion custody to one validated PR/base target and observed snapshots,
+  derive case-safe collection queues from that identity, validate composed status
+  contexts, and reserve bounded upload/report time before publication.
+- Normalize completion-custody repository casing, bind status contexts to the
+  exact branch, and bound aggregate downloads, retained bytes, archive expansion,
+  inventories and capture time before source-head success can be published.
+- Preserve completion-custody source/attempt admission, capture budgets and
+  failure revocation when Python optimization is enabled.
 - Bind the full dependency export stream's actual path/reference inventory to the
   admitted closure before canonical-store import, using a bounded non-extracting
   NAR parser and one private spool descriptor through validation and import.

@@ -100,6 +100,7 @@
           || pkgs.lib.hasInfix "/src/review/assets/" pathString
           || pkgs.lib.hasInfix "/tests/fixtures/" pathString
           || pkgs.lib.hasSuffix "/src/render/ci/nix_dependencies.py" pathString
+          || pkgs.lib.hasSuffix "/src/render/ci/custody.py" pathString
           || pkgs.lib.hasSuffix "ci-actions.json" pathString
           || pkgs.lib.hasSuffix "/.github" pathString
           || pkgs.lib.hasSuffix "/.github/workflows" pathString

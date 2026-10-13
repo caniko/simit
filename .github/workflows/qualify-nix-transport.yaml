@@ -7,6 +7,7 @@ on:
     branches:
       - "feat/ci-dependency-transport-20261012"
       - "feat/rust-ci-runtime-20261012"
+      - "feat/ci-completion-custody-20261012"
       - "trunk"
   pull_request:
 
