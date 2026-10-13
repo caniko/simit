@@ -103,6 +103,10 @@ counts all embedded specs, repeated diagnostic fallbacks, YAML escaping and
 transport steps; generation rejects overflow before writing project files.
 The CLI requires a nonempty `--results` or `SIMIT_NIX_BUILD_RESULTS` evidence
 directory and rejects missing or empty inputs before execution.
+Without `--spec`, the runtime reads fresh members from the retained
+`SIMIT_NIX_FRESH` JSON array. `SIMIT_NIX_FRESH_INSTALLABLES` is also accepted;
+if both keys are set, their decoded lists must agree. Invalid or conflicting
+values reject before dispatch or evidence writes.
 The evidence root must have no prior receipt, inventory, coverage manifest or
 numbered member entries. Interrupted and fallback-only attempts, including
 out-of-range member indices, reject before Git/Nix dispatch or evidence writes;
@@ -861,6 +865,15 @@ producers: the concurrency group then includes the workflow ref and event name,
 so a PR cannot cancel its corresponding push. Newer revisions still supersede
 older runs within each event stream. Retain cancelled predecessors as failures;
 their receipts cannot substitute for either required successful producer.
+
+Aggregate Rust CI also coalesces push and PR events by default. Set
+`[ci].separate_events = true` when both Rust CI originals are required. This
+GitHub Actions opt-in retains workflow, event, source-repository and ref identity
+in the concurrency group, so fork PRs remain isolated and newer runs can
+supersede older runs within each event stream. It is independent of
+`[ci.nix_build].separate_events`; configure both when acceptance requires both
+originals from ordinary Rust CI and the Nix matrix. Nix-only and Python CI reject
+the Rust setting instead of silently ignoring it.
 
 Nix matrices qualify branch pushes by default. Set
 `[ci.nix_build].push_tags = ["**"]` to also qualify every tag push, including when

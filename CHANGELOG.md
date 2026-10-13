@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Opt-in `[ci].separate_events` for GitHub Rust CI, preserving independent push
+  and PR originals in aggregate workspaces while retaining default coalescing.
 - Native dependency export-stream admission with importer-compatible NAR bounds,
   exact closure/reference binding, and one-use private descriptor restoration.
 - Native `simit ci nix-group` and library execution contracts replace embedded
@@ -39,6 +41,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Honor the documented absolute `XDG_DATA_HOME` project-registry override on
   macOS and Windows as well as Linux, retaining native defaults when unset.
+- Preserve `SIMIT_NIX_FRESH` in environment-mode grouped execution, retain
+  `SIMIT_NIX_FRESH_INSTALLABLES` as an alias, and reject conflicting values before
+  execution so freshness requirements cannot silently disappear.
 - Reject all pre-existing numbered member evidence before grouped Git/Nix
   observations or evidence writes, including interrupted/fallback-only attempts,
   out-of-range indices, files and dangling symlinks.
