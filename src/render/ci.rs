@@ -174,6 +174,7 @@ pub struct CiOptions {
     pub ci_nix_substituters: Vec<String>,
     pub ci_nix_trusted_public_keys: Vec<String>,
     pub independent_lanes: bool,
+    pub separate_events: bool,
     pub nix_builds: Vec<String>,
     pub all_features: bool,
     pub unit_tests_only: bool,
@@ -225,6 +226,7 @@ impl Default for CiOptions {
             ci_nix_substituters: Vec::new(),
             ci_nix_trusted_public_keys: Vec::new(),
             independent_lanes: false,
+            separate_events: false,
             nix_builds: Vec::new(),
             all_features: true,
             unit_tests_only: false,
@@ -364,6 +366,11 @@ impl Default for HomebrewPlatformSet {
 }
 
 pub fn files(request: FilesRequest<'_>) -> Result<Vec<GeneratedFile>> {
+    if request.options.separate_events
+        && (request.platform != Platform::Github || request.provider != CiProvider::Actions)
+    {
+        bail!("[ci].separate_events requires GitHub Actions Rust CI");
+    }
     if request.options.independent_lanes
         && (request.platform != Platform::Github
             || request.provider != CiProvider::Actions
@@ -795,6 +802,9 @@ pub fn python_ci_file(
     check_outputs: &[String],
     components: &[CiComponent],
 ) -> Result<GeneratedFile> {
+    if options.separate_events {
+        bail!("[ci].separate_events requires GitHub Actions Rust CI");
+    }
     if options.independent_lanes {
         bail!("[ci].independent_lanes requires GitHub Actions Rust/Nix CI");
     }
@@ -3854,7 +3864,11 @@ fn push_github_concurrency(workflow: &mut String) {
 }
 
 fn push_rust_ci_concurrency(workflow: &mut String, platform: Platform, options: &CiOptions) {
-    if platform == Platform::Github && options.workspace_strategy == WorkspaceStrategy::Aggregate {
+    if platform == Platform::Github && options.separate_events {
+        push_independent_source_concurrency(workflow);
+    } else if platform == Platform::Github
+        && options.workspace_strategy == WorkspaceStrategy::Aggregate
+    {
         // workflow_ref contains the event ref, so it cannot coalesce a branch
         // push with its PR merge ref. Aggregate CI has one stable workflow path.
         // Include the source repository so a fork's same-named branch is distinct.

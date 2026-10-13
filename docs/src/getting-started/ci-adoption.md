@@ -494,6 +494,15 @@ so a PR cannot cancel its corresponding push. Newer revisions still supersede
 older runs within each event stream. Retain cancelled predecessors as failures;
 their receipts cannot substitute for either required successful producer.
 
+Aggregate Rust CI also coalesces push and PR events by default. Set
+`[ci].separate_events = true` when both Rust CI originals are required. This
+GitHub Actions opt-in retains workflow, event, source-repository and ref identity
+in the concurrency group, so fork PRs remain isolated and newer runs can
+supersede older runs within each event stream. It is independent of
+`[ci.nix_build].separate_events`; configure both when acceptance requires both
+originals from ordinary Rust CI and the Nix matrix. Nix-only and Python CI reject
+the Rust setting instead of silently ignoring it.
+
 Nix matrices qualify branch pushes by default. Set
 `[ci.nix_build].push_tags = ["**"]` to also qualify every tag push, including when
 adopting a workflow that previously used an unfiltered `push:` trigger. More

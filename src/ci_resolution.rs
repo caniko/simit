@@ -440,6 +440,7 @@ impl ResolvedCiInputs {
             with_nix_cargo_cache: self.with_nix_cargo_cache,
             nix_flake_check: self.nix_flake_check,
             independent_lanes: cfg.ci.independent_lanes,
+            separate_events: cfg.ci.separate_events,
             with_msrv: self.with_msrv,
             with_audit: self.with_audit,
             with_deny: self.with_deny,
