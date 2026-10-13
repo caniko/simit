@@ -39,6 +39,151 @@ with_msrv = true
 
 ## Generic CI vs Release Publishing
 
+### Native grouped Nix executor
+
+Grouped workflows invoke `simit ci nix-group`. Before adopting regenerated
+workflows, enroll the repository variable `SIMIT_CI_ENGINE_REVISION` with the
+exact 40-character lowercase Git revision of a qualified Simit engine containing
+that command. Provisioning builds `github:caniko/simit/<revision>#default`, not
+the producer checkout, and retains the selected source revision and executable
+SHA-256 in the evidence root. Missing or malformed enrollment and an engine
+without the command fail the job. There is no moving-ref or Python fallback.
+This read-only producer bootstrap is not enrollment for privileged completion
+custody or release publishing; those engines have separate authority contracts.
+Producer `extra_env` bindings apply only to setup, validation, execution and
+diagnostic steps after provisioning. Engine provisioning clears shell startup
+files and uses controlled Nix configuration and public substitution. Bootstrap
+explicitly clears Nix `access-tokens` for its build, including tokens
+installed by a preceding Nix action, and hashes the engine with `nix hash file`.
+The immutable engine supports `x86_64-linux`, `aarch64-linux` and
+`aarch64-darwin`. Known Intel macOS grouped runner labels reject during
+generation; custom runners must pass the system guard before provisioning.
+Grouped configuration cannot override reserved `SIMIT_CI_*`, `SIMIT_NIX_*` or
+`INSTALLABLES` runtime inputs.
+
+The command reads the generated environment lists, or accepts
+`--spec <file> --results <directory>`. The public
+`simit::ci_runtime::group::execute` function uses the same typed contract. A JSON
+spec has schema `simit.nix-group-spec.v1`, with `members`, `plan`, `check_systems`,
+`limits`, `post_build`, `post_build_always` and optional `fresh_installables`.
+Unknown fields, invalid membership and unsupported Nix flags fail before Nix
+execution. The results directory must already exist and contain no earlier
+group receipt or member evidence.
+
+Retained `simit.nix-group.v1` receipts preserve source/tree/run/attempt/event,
+ordered results, hook statuses and numbered member directories. Optional
+`fresh_execution` is present only for fresh members. A fresh member must first
+materialize successfully with valid output JSON, then pass current-worker
+`--rebuild` with an explicit empty `builders` override, preventing configured
+remote builders from replacing current-worker execution. Ordinary materialization
+is never fresh acceptance. Fresh evidence
+retains the transport predecessor's filenames: `build.log` for materialization,
+`materialization-result.json`, `fresh-build.log` for rebuilding, and `result.json`
+for the final result. Malformed successful output and failed builds/hooks fail the group while subsequent
+members still run. Dispatch and process-limit failures are recorded as status
+125; Unix signal termination retains the v1 negative signal status (for example,
+`-9` for SIGKILL). Member stdout/stderr and hook output are retained as separate
+files, and failed admission observations include their actionable stderr in the
+CLI diagnostic.
+Subprocess output is capped before evidence writes to 16 MiB stdout and 64 MiB stderr per command,
+with a six-hour maximum process lifetime; configured workflow timeouts still
+apply. Unix cancellation stops execution and terminates the current process
+group rather than executing later members.
+Accepted hooks up to 1 MiB execute from retained `.script` files, avoiding
+platform per-argument limits. The generated workflow writes a private JSON spec
+using a shell builtin instead of putting hooks into environment strings, and its
+diagnostic fallback uses the same private-file transport. A small Bash wrapper
+preserves `bash -c` argument identity, stdin and trailing script newlines.
+The complete compact JSON spec must fit within 16 MiB, including JSON escapes.
+Generation and library admission enforce the same budget as the CLI reader;
+oversized combinations reject before project writes or runtime effects even
+when every individual hook fits its 1 MiB limit.
+Generated grouped workflows also have GitHub's 500,000-byte file limit. This
+counts all embedded specs, repeated diagnostic fallbacks, YAML escaping and
+transport steps; generation rejects overflow before writing project files.
+The CLI requires a nonempty `--results` or `SIMIT_NIX_BUILD_RESULTS` evidence
+directory and rejects missing or empty inputs before execution.
+Without `--spec`, the runtime reads fresh members from the retained
+`SIMIT_NIX_FRESH` JSON array. `SIMIT_NIX_FRESH_INSTALLABLES` is also accepted;
+if both keys are set, their decoded lists must agree. Invalid or conflicting
+values reject before dispatch or evidence writes.
+The evidence root must have no prior receipt, inventory, coverage manifest or
+numbered member entries. Interrupted and fallback-only attempts, including
+out-of-range member indices, reject before Git/Nix dispatch or evidence writes;
+choose a fresh evidence root rather than mixing attempts.
+Output-reader startup failures return through the
+same dispatch-failure path and clean up any started readers and child processes.
+Embedding applications use `execute_with` with a caller-owned `Cancellation`
+token and `Runner`. The library installs no process-global signal handlers. The
+CLI owns one cancellation flag across its entire command lifetime, including
+the gaps between subprocesses, and checks cancellation before every dispatch.
+
+The shell-only diagnostic fallback remains cancellation-aware and runs after
+setup, provisioning or admission failure. Its completion markers prevent
+duplicate collection. The native integration suite executes the generated
+invocation and this fallback using the actual packaged CLI at controlled Nix
+process boundaries. These checks replace the authored Python group harness;
+other Python fixtures retain their own packaging inputs until migrated.
+
+Execution receipts are local evidence, not forge authority. Historical Python
+v1 receipts remain readable as evidence, but a new Rust source needs its own
+original-attempt hosted qualification. Offline integrity checks do not establish
+current provider acceptance, merge readiness or publication authorization.
+
+### Native dependency stream admission
+
+`simit::ci_runtime::dependencies` ports the reviewed export-stream admission
+boundary from signed Simit source `a9874535107dd6cf335ab7c4bdfd9a9252c0c691`.
+Its `ArchiveAdmission` inputs must come from separately validated source/run
+provenance and fresh dependency/qualification evaluation. They are byte and
+inventory expectations, not qualification authority. The transport workflow's
+provenance/evaluation/export policy adapters remain a separate migration slice.
+
+`admit_archive` checks archive size and checksum while copying the compressed
+bytes into a private descriptor. It decompresses only that checksum-bound
+snapshot into another anonymous descriptor, then parses the **entire** strict
+Nix writer grammar before returning a one-use `VerifiedArchive`. Both descriptors
+are explicitly mode `0600` and unlinked on Unix. Replacing or modifying the
+original archive after admission cannot replace the imported bytes.
+
+The actual record set must exactly equal the admitted closure, include every
+evaluated dependency root, and exclude all qualification outputs. Record paths
+and deriver metadata use canonical `/nix/store` syntax; references must be
+sorted, unique and wholly inside the closure. Legacy signature framing must be
+zero. The terminal marker must be followed immediately by EOF, with no remaining
+declared bytes. Parsing bounds include 100,000 paths, 1,000,000 nodes and
+references, bounded strings and byte budgets, and streamed 64 KiB content reads.
+
+Importer compatibility follows Nix **2.34.8** `src/libutil/archive.cc`: node
+depth is strictly below **64**, directory names are at most **255 bytes**,
+and symlink targets are at most **4095 bytes**. The first invalid value is denied
+even in a second record after a valid first record, before any import effect.
+Directory names are sorted as raw bytes, including non-UTF-8 names.
+ASCII case aliases within a directory are conservatively denied on all platforms
+before import, preventing Darwin's case-hack rewrites from colliding with real entries.
+
+`VerifiedArchive::restore` dispatches one `nix-store --import` with the fully
+rewound validated descriptor, then verifies admitted paths and observes evaluated
+roots. Nonzero import/verification status produces no successful restore receipt.
+All restore command batches are prepared before import against a 96 KiB combined
+argv/environment budget, including string terminators and pointer tables. Path
+batches additionally use at most 60 KiB. Commands inherit the same frozen,
+accounted environment; an oversized environment fails before store mutation.
+The envelope reserves at least 32 KiB beneath supported Linux's 128 KiB exec
+floor and 160 KiB beneath Darwin's 256 KiB limit for platform/interpreter overhead.
+The compressed envelope matches the transport producer's default zlib bound
+(`maximum + (maximum >> 12) + (maximum >> 14) + (maximum >> 25) + 1 MiB`),
+using checked arithmetic. These library checks do not complete the transport or
+custody adapters' source/provider admission and zero-Nix-before-byte-admission gates.
+`consume` supports a caller-owned importer with the same descriptor and one-use
+lifetime. Restoration receipts always state `qualification_execution: false`;
+fresh checks still require their separate current-worker rebuild.
+
+Protocol sources:
+
+- [Nix export/import framing](https://github.com/NixOS/nix/blob/adbf23e8184bbbe8d786aad1f362443b6542e0a4/src/libstore/export-import.cc)
+- [Nix 2.34.8 importer grammar and limits](https://github.com/NixOS/nix/blob/2.34.8/src/libutil/archive.cc)
+
 ### Primary-only regeneration
 
 Use the persisted project policy to regenerate verification and native-build
@@ -445,8 +590,10 @@ Enroll every applicable lane and group context before retiring `test`.
 jobs. Related packages and checks share a fresh hosted runner's Nix store, so
 their common dependencies are built once within that job. Group membership
 must be complete, nonempty and disjoint; `capture_results = true` is required.
-Grouped jobs provision Python 3.12 through a pinned setup action, including on
-custom runners. An omitted `timeout_minutes` retains the runner's default job
+Grouped jobs provision an independently pinned native Rust engine. The separate
+dependency-transport adapter provisions Python 3.12 through a pinned setup action
+for its producer and consumer steps, including on custom runners.
+An omitted `timeout_minutes` retains the runner's default job
 timeout rather than introducing a group-specific limit.
 
 ```toml
@@ -470,11 +617,15 @@ separate result, exit status and builder log for every installable. A failed
 member fails the job while the other members still produce diagnostic evidence.
 Post-build hooks run for each successful member with `INSTALLABLE` and
 `SIMIT_NIX_BUILD_RESULTS` bound to that member's numbered evidence directory.
+Grouped hook bodies cannot contain Actions expressions (`${{ ... }}`): GitHub
+would expand them into retained spec and script files. Bind expressions through
+`extra_env` and reference shell variables in hooks instead. Generated transport
+variables in the `SIMIT_DEPENDENCY_*` namespace cannot be overridden by `extra_env`.
 Diagnostic hooks run for every member, including after failed setup or admission;
-a command-shell fallback collects any member skipped before the Python build
+a command-shell fallback collects any member skipped before the native build
 loop. Completed diagnostic phases are marked to prevent duplicate collection.
-Hook failures fail the group while remaining members still run. Admission checks
-remain enforced when Python optimization is enabled.
+Hook failures fail the group while remaining members still run. The transport
+adapter's admission checks remain enforced when Python optimization is enabled.
 
 Grouped jobs have `build (<group>)` contexts. Qualify the new evidence and migrate
 required contexts together before retiring a monolithic flake-check gate.

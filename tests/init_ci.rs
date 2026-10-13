@@ -4506,18 +4506,25 @@ rust-version = "1.85"
 }
 
 #[test]
-fn ci_command_is_not_available() {
+fn runtime_ci_namespace_cannot_be_used_as_the_old_generation_command() {
     let temp = init_package(false);
-
+    for args in [vec!["ci"], vec!["ci", "--platform", "forgejo"]] {
+        let output = simit_with_user_config(temp.path())
+            .current_dir(temp.path())
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{output:?}");
+        assert!(String::from_utf8_lossy(&output.stderr).contains("Usage: simit ci"));
+        assert!(!temp.path().join(".forgejo/workflows").exists());
+        assert!(!temp.path().join(".github/workflows").exists());
+    }
     let output = simit_with_user_config(temp.path())
-        .current_dir(temp.path())
-        .args(["ci"])
+        .args(["ci", "--help"])
         .output()
         .unwrap();
-
-    assert!(!output.status.success());
-    let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(stderr.contains("unrecognized subcommand 'ci'"));
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("nix-group"));
 }
 
 #[test]

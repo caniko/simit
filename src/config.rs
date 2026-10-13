@@ -817,6 +817,30 @@ impl NixBuildConfig {
         Ok(system)
     }
 
+    /// Generator-owned environment and retained scripts must stay runtime data.
+    pub(crate) fn validate_runtime_inputs(&self) -> Result<()> {
+        for name in self.extra_env.keys() {
+            if name.starts_with("SIMIT_DEPENDENCY_") {
+                bail!(
+                    "simit project config: [ci.nix_build].extra_env cannot override reserved transport variable {name}"
+                );
+            }
+        }
+        if !self.groups.is_empty() {
+            for (name, values) in [
+                ("post_build", &self.post_build),
+                ("post_build_always", &self.post_build_always),
+            ] {
+                if values.iter().any(|script| script.contains("${{")) {
+                    bail!(
+                        "simit project config: grouped [ci.nix_build].{name} cannot contain Actions expressions in retained hook scripts; bind expressions through extra_env and reference shell variables instead"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn validate_push_tags(&self) -> Result<()> {
         if self.push_tags.iter().any(|pattern| {
             pattern.trim().is_empty()
@@ -3805,6 +3829,7 @@ fn validate_nix_build_config(config: &ProjectConfig) -> Result<()> {
         bail!("simit project config: [ci.nix_build].only requires the Nix runtime");
     }
     options.validate_push_tags()?;
+    options.validate_runtime_inputs()?;
     options.validate_system_runners(&ci.nix_builds)?;
     options.validate_groups(&ci.nix_builds)?;
     for (name, number, min, max) in [
@@ -3864,6 +3889,15 @@ fn validate_nix_build_config(config: &ProjectConfig) -> Result<()> {
         if name == "SIMIT_NIX_BUILD_RESULTS" {
             bail!(
                 "simit project config: [ci.nix_build].extra_env cannot override SIMIT_NIX_BUILD_RESULTS"
+            );
+        }
+        if !options.groups.is_empty()
+            && (name.starts_with("SIMIT_CI_")
+                || name.starts_with("SIMIT_NIX_")
+                || name == "INSTALLABLES")
+        {
+            bail!(
+                "simit project config: grouped [ci.nix_build].extra_env cannot override reserved runtime variable {name}"
             );
         }
     }

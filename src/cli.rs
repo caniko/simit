@@ -19,6 +19,8 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Commands {
+    #[command(subcommand, about = "Execute versioned CI runtime contracts")]
+    Ci(crate::ci_runtime::cli::Command),
     #[command(
         subcommand,
         about = "Review exact repository revisions through Nix and GitHub Actions"
