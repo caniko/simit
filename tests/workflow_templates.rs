@@ -501,9 +501,9 @@ fn yaml_nonprintable_characters_in_template_paths_fail_before_any_writes() {
             // noncharacters U+FFFE/U+FFFF with EILSEQ. Every mapping still runs
             // through admission and must fail before any generated-file writes,
             // including when the filesystem cannot represent its source name.
-            let bad_source_created = source_path
-                && (!cfg!(windows) || !separator.is_control())
-                && !(cfg!(target_os = "macos") && matches!(separator, '\u{fffe}' | '\u{ffff}'));
+            let filesystem_rejects_name = cfg!(windows) && separator.is_control()
+                || cfg!(target_os = "macos") && matches!(separator, '\u{fffe}' | '\u{ffff}');
+            let bad_source_created = source_path && !filesystem_rejects_name;
             if bad_source_created {
                 fs::write(temp.path().join(&bad_path), &source_bytes).unwrap();
             }

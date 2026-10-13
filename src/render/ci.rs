@@ -1106,6 +1106,7 @@ pub fn nix_build_matrix_file_with_options(
         bail!("[ci.nix_build] options require GitHub Actions");
     }
     options.validate_push_tags()?;
+    options.validate_runtime_inputs()?;
     options.validate_system_runners(installables)?;
     let native_runners = !options.system_runners.is_empty();
     options.validate_groups(installables)?;

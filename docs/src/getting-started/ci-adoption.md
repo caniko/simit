@@ -98,6 +98,15 @@ The complete compact JSON spec must fit within 16 MiB, including JSON escapes.
 Generation and library admission enforce the same budget as the CLI reader;
 oversized combinations reject before project writes or runtime effects even
 when every individual hook fits its 1 MiB limit.
+Generated grouped workflows also have GitHub's 500,000-byte file limit. This
+counts all embedded specs, repeated diagnostic fallbacks, YAML escaping and
+transport steps; generation rejects overflow before writing project files.
+The CLI requires a nonempty `--results` or `SIMIT_NIX_BUILD_RESULTS` evidence
+directory and rejects missing or empty inputs before execution.
+The evidence root must have no prior receipt, inventory, coverage manifest or
+numbered member entries. Interrupted and fallback-only attempts, including
+out-of-range member indices, reject before Git/Nix dispatch or evidence writes;
+choose a fresh evidence root rather than mixing attempts.
 Output-reader startup failures return through the
 same dispatch-failure path and clean up any started readers and child processes.
 Embedding applications use `execute_with` with a caller-owned `Cancellation`
@@ -604,6 +613,10 @@ separate result, exit status and builder log for every installable. A failed
 member fails the job while the other members still produce diagnostic evidence.
 Post-build hooks run for each successful member with `INSTALLABLE` and
 `SIMIT_NIX_BUILD_RESULTS` bound to that member's numbered evidence directory.
+Grouped hook bodies cannot contain Actions expressions (`${{ ... }}`): GitHub
+would expand them into retained spec and script files. Bind expressions through
+`extra_env` and reference shell variables in hooks instead. Generated transport
+variables in the `SIMIT_DEPENDENCY_*` namespace cannot be overridden by `extra_env`.
 Diagnostic hooks run for every member, including after failed setup or admission;
 a command-shell fallback collects any member skipped before the native build
 loop. Completed diagnostic phases are marked to prevent duplicate collection.

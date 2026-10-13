@@ -39,6 +39,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Honor the documented absolute `XDG_DATA_HOME` project-registry override on
   macOS and Windows as well as Linux, retaining native defaults when unset.
+- Reject all pre-existing numbered member evidence before grouped Git/Nix
+  observations or evidence writes, including interrupted/fallback-only attempts,
+  out-of-range indices, files and dangling symlinks.
+- Bound complete grouped workflow files to GitHub's 500 KB limit before writes,
+  require an explicit nonempty runtime evidence directory, reserve transport
+  environment keys, and reject Actions expressions in retained grouped hooks.
+  Bind secret expressions through `extra_env` and use shell variables in hooks.
 - Reject grouped execution specs above the shared 16 MiB serialized JSON budget
   before generation writes or runtime effects, counting JSON escapes while
   preserving the individual 1 MiB hook limit.

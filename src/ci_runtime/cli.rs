@@ -37,9 +37,14 @@ pub fn run(command: Command) -> Result<()> {
                 Some(path) => super::group::read_json(&path, super::group::MAX_SPEC_BYTES)?,
                 None => super::group::GroupSpec::from_environment()?,
             };
-            let root = args.results.unwrap_or(PathBuf::from(
-                std::env::var_os("SIMIT_NIX_BUILD_RESULTS").unwrap_or_default(),
-            ));
+            let root = args
+                .results
+                .or_else(|| std::env::var_os("SIMIT_NIX_BUILD_RESULTS").map(PathBuf::from));
+            let root = root.filter(|path| !path.as_os_str().is_empty()).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "a nonempty results directory is required via --results or SIMIT_NIX_BUILD_RESULTS"
+                )
+            })?;
             let source = super::group::Source::from_environment()?;
             let receipt = super::group::execute_with(
                 &spec,

@@ -114,6 +114,78 @@ impl Fixture {
 }
 
 #[test]
+fn missing_or_empty_results_input_rejects_before_checkout_or_nix_effects() {
+    for input in ["missing", "empty-env", "empty-argument"] {
+        let f = Fixture::new();
+        fs::write(
+            f.root.path().join("spec.json"),
+            serde_json::to_vec(&f.spec).unwrap(),
+        )
+        .unwrap();
+        let mut command = f.command();
+        command.env("GROUP_CASE", "success");
+        match input {
+            "missing" => {
+                command.env_remove("SIMIT_NIX_BUILD_RESULTS");
+            }
+            "empty-env" => {
+                command.env("SIMIT_NIX_BUILD_RESULTS", "");
+            }
+            _ => {
+                command.args(["--results", ""]);
+            }
+        }
+        let output = command.output().unwrap();
+        assert!(!output.status.success(), "{output:?}");
+        let error = String::from_utf8_lossy(&output.stderr);
+        if input == "empty-argument" {
+            assert!(
+                error.contains("a value is required for '--results"),
+                "{error}"
+            );
+        } else {
+            assert!(
+                error.contains("results directory") && error.contains("SIMIT_NIX_BUILD_RESULTS"),
+                "{error}"
+            );
+        }
+        assert_eq!(f.calls(), "");
+        for name in [
+            "receipt.json",
+            "installables.json",
+            "coverage.json",
+            "0",
+            "1",
+        ] {
+            assert!(
+                !f.root.path().join(name).exists(),
+                "checkout effect: {name}"
+            );
+            assert!(
+                !f.root.path().join("results").join(name).exists(),
+                "evidence effect: {name}"
+            );
+        }
+    }
+    let f = Fixture::new();
+    fs::write(
+        f.root.path().join("spec.json"),
+        serde_json::to_vec(&f.spec).unwrap(),
+    )
+    .unwrap();
+    let output = f
+        .command()
+        .env("SIMIT_NIX_BUILD_RESULTS", "")
+        .env("GROUP_CASE", "success")
+        .arg("--results")
+        .arg(f.root.path().join("results"))
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert!(f.receipt()["success"].as_bool().unwrap());
+}
+
+#[test]
 fn serialized_group_spec_budget_is_shared_with_library_admission() {
     let mut f = Fixture::new();
     let mut spec: simit::ci_runtime::group::GroupSpec =
@@ -407,6 +479,84 @@ fn evidence_reuse_and_dangling_receipt_symlinks_fail_without_overwriting() {
             assert_eq!(fs::read_link(receipt).unwrap(), Path::new("missing"));
         } else {
             assert_eq!(fs::read_to_string(receipt).unwrap(), "preserved evidence");
+        }
+    }
+}
+
+#[test]
+fn stale_numbered_member_evidence_denies_before_any_dispatch_or_write() {
+    use simit::ci_runtime::{cancellation::Cancellation, group, process::Runner};
+
+    #[derive(Default)]
+    struct NoDispatch(usize);
+    impl Runner for NoDispatch {
+        fn run(
+            &mut self,
+            _command: &mut Command,
+            _stdout: &Path,
+            _stderr: &Path,
+            _cancellation: &Cancellation,
+        ) -> anyhow::Result<i32> {
+            self.0 += 1;
+            anyhow::bail!("admission dispatched a command before checking member evidence")
+        }
+    }
+    for name in ["0", "1", "2", "999999999999999999999999", "00"] {
+        for kind in ["directory", "file", "symlink"] {
+            let f = Fixture::new();
+            let root = f.root.path().join("results");
+            fs::write(root.join("revision"), "preparation evidence").unwrap();
+            let prior = root.join(name);
+            match kind {
+                "directory" => {
+                    fs::create_dir(&prior).unwrap();
+                    fs::write(prior.join("fallback-diagnostic-0.script"), "previous hook").unwrap();
+                }
+                "file" => fs::write(&prior, "previous evidence").unwrap(),
+                _ => symlink("missing", &prior).unwrap(),
+            }
+            let spec: group::GroupSpec = serde_json::from_value(f.spec.clone()).unwrap();
+            let source = group::Source {
+                head: f.head.clone(),
+                event: "push".into(),
+                run: "123".into(),
+                attempt: 1,
+            };
+            let mut runner = NoDispatch::default();
+            let error = group::execute_with(
+                &spec,
+                &source,
+                f.root.path(),
+                &root,
+                &mut runner,
+                &Cancellation::default(),
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(
+                error.contains("member evidence") && error.contains(name),
+                "{error}"
+            );
+            assert_eq!(runner.0, 0);
+            let output = f.run("success");
+            assert!(!output.status.success(), "{name}/{kind}: {output:?}");
+            assert!(f.calls().is_empty());
+            assert_eq!(
+                fs::read_to_string(root.join("revision")).unwrap(),
+                "preparation evidence"
+            );
+            for path in ["receipt.json", "coverage.json", "installables.json"] {
+                assert!(!root.join(path).exists(), "unexpected write: {path}");
+            }
+            assert_eq!(fs::read_dir(&root).unwrap().count(), 2);
+            match kind {
+                "directory" => assert_eq!(
+                    fs::read_to_string(prior.join("fallback-diagnostic-0.script")).unwrap(),
+                    "previous hook"
+                ),
+                "file" => assert_eq!(fs::read_to_string(prior).unwrap(), "previous evidence"),
+                _ => assert_eq!(fs::read_link(prior).unwrap(), Path::new("missing")),
+            }
         }
     }
 }

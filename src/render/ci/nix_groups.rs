@@ -164,8 +164,8 @@ pub(super) fn render(
     }
     workflow.push_str("      - name: Build Nix group\n        shell: bash\n        env:\n          SIMIT_NIX_GROUP: ${{ matrix.group }}\n");
     push_producer_env_lines(&mut workflow, options);
-    // GitHub runs this step from a file. Keep the spec (including accepted
-    // megabyte hooks) in that file and use Bash's builtin printf, never argv/env.
+    // GitHub runs this step from a file. Keep accepted specs in that file and
+    // use Bash's builtin printf, never argv/env. The full workflow has its own cap.
     workflow.push_str("        run: |\n          case \"$SIMIT_NIX_GROUP\" in\n");
     for (name, members) in &options.groups {
         let spec = crate::ci_runtime::group::GroupSpec {
@@ -206,6 +206,13 @@ pub(super) fn render(
         options,
         installables,
     )?;
+    // Include every group spec, repeated fallback hook, YAML escape and transport
+    // step in GitHub's decimal 500 KB workflow-file budget before any writes.
+    ensure!(
+        workflow.len() <= 500_000,
+        "grouped Nix build exceeds GitHub's 500000-byte workflow limit (rendered {} bytes)",
+        workflow.len()
+    );
     Ok(GeneratedFile {
         relative_path: PathBuf::from(".github/workflows/nix-builds.yaml"),
         content: workflow,
