@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import shutil
 import subprocess
 import textwrap
 
@@ -48,6 +49,7 @@ require(engine.is_file(), 'Production engine is missing')
 (root / 'production-result.json').write_text(json.dumps(result, indent=2) + '\n')
 engine_hash = hashlib.sha256(engine.read_bytes()).hexdigest()
 (root / 'engine.sha256').write_text(f'{engine_hash}  {engine}\n')
+shutil.copyfile(engine, root / 'simit')
 fixture = source / 'tests/fixtures/native-groups'
 members = [f'.#checks.{system}.{name}' for name in ['runtime', 'sibling']]
 runner = 'macos-15' if system.endswith('darwin') else 'ubuntu-24.04-arm'
@@ -71,10 +73,15 @@ native = {json.dumps(members)}
 [ci.nix_build.system_runners]
 "{system}" = "{runner}"
 '''
-(fixture / 'simit.toml').write_text(policy)
+# Generate outside the parent Cargo workspace, then execute against its tracked fixture.
+generation = root / 'generation'
+generation.mkdir()
+for name in ['flake.nix', 'flake.lock']:
+    shutil.copyfile(fixture / name, generation / name)
+(generation / 'simit.toml').write_text(policy)
 for args in [[], ['--check', '--diff']]:
-    subprocess.run([str(engine), 'init', 'ci', *args], cwd=fixture, check=True)
-workflow = (fixture / '.github/workflows/nix-builds.yaml').read_text()
+    subprocess.run([str(engine), 'init', 'ci', *args], cwd=generation, check=True)
+workflow = (generation / '.github/workflows/nix-builds.yaml').read_text()
 (root / 'generated-workflow.yaml').write_text(workflow)
 
 
