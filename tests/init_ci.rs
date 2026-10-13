@@ -3550,6 +3550,261 @@ fn aggregate_workspace_strategy_generates_one_workspace_workflow() {
 }
 
 #[test]
+fn aggregate_workspace_ci_can_retain_independent_original_events() {
+    for separate_events in [false, true] {
+        let temp = init_workspace_fixture();
+        let setting = if separate_events {
+            "separate_events = true\n"
+        } else {
+            ""
+        };
+        fs::write(
+            temp.path().join("simit.toml"),
+            format!("[ci]\nworkspace = true\nworkspace_strategy = \"aggregate\"\n{setting}"),
+        )
+        .unwrap();
+        let generate = || {
+            simit_with_user_config(temp.path())
+                .current_dir(temp.path())
+                .args(["init", "ci", "--platform", "github", "--runtime", "cargo"])
+                .output()
+                .unwrap()
+        };
+        let result = generate();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let workflow = read(&temp.path().join(".github/workflows/ci.yaml"));
+        let yaml: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
+        let group = yaml["concurrency"]["group"].as_str().unwrap();
+        let resolve = |event: &str, source_repository: &str, branch: &str| {
+            let event_ref = if event == "pull_request" {
+                "refs/pull/9/merge".to_owned()
+            } else {
+                format!("refs/heads/{branch}")
+            };
+            let resolved = group
+                .replace(
+                    "${{ github.workflow_ref }}",
+                    &format!("owner/project/.github/workflows/ci.yaml@{event_ref}"),
+                )
+                .replace("${{ github.event_name }}", event)
+                .replace(
+                    "${{ github.event.pull_request.head.repo.full_name || github.repository }}",
+                    source_repository,
+                )
+                .replace(
+                    "${{ github.event.pull_request.head.ref || github.ref_name }}",
+                    branch,
+                )
+                .replace(
+                    "${{ github.ref_type == 'tag' && github.ref || format('refs/heads/{0}', github.event.pull_request.head.ref || github.ref_name) }}",
+                    &format!("refs/heads/{branch}"),
+                );
+            assert!(!resolved.contains("${{"), "unrecognized group: {resolved}");
+            resolved
+        };
+        let push = resolve("push", "owner/project", "feature");
+        let pr = resolve("pull_request", "owner/project", "feature");
+        assert_eq!(push != pr, separate_events);
+        assert_ne!(pr, resolve("pull_request", "alice/project", "feature"));
+        assert_ne!(pr, resolve("pull_request", "bob/project", "feature"));
+        assert_ne!(push, resolve("push", "owner/project", "other-feature"));
+        assert_eq!(push, resolve("push", "owner/project", "feature"));
+        assert_eq!(yaml["concurrency"]["cancel-in-progress"], true);
+        assert!(workflow.contains("cargo test --workspace --all-features"));
+
+        // Regeneration must preserve the explicit producer policy and remain managed.
+        assert!(generate().status.success());
+        let config = simit::config::ProjectConfig::load(temp.path()).unwrap();
+        assert_eq!(
+            read(&temp.path().join("simit.toml")).contains("separate_events = true"),
+            separate_events
+        );
+        assert_eq!(
+            config.ci.workspace_strategy,
+            simit::cli::WorkspaceStrategy::Aggregate
+        );
+        let check = simit_with_user_config(temp.path())
+            .current_dir(temp.path())
+            .args(["init", "ci", "--platform", "github", "--check", "--diff"])
+            .output()
+            .unwrap();
+        assert!(
+            check.status.success(),
+            "{}",
+            String::from_utf8_lossy(&check.stderr)
+        );
+    }
+}
+
+#[test]
+fn aggregate_separate_events_preserve_completion_custody() {
+    let temp = init_workspace_fixture();
+    fs::write(
+        temp.path().join("simit.toml"),
+        r#"[ci]
+platform = "github"
+provider = "actions"
+runtime = "cargo"
+workspace = true
+workspace_strategy = "aggregate"
+separate_events = true
+[ci.custody]
+repository = "owner/project"
+producer_attempt = 1
+status_context = "simit/producer-custody"
+[ci.custody.producers.CI]
+workflow = ".github/workflows/ci.yaml"
+jobs = ["test"]
+"#,
+    )
+    .unwrap();
+    let generate = || {
+        simit_with_user_config(temp.path())
+            .current_dir(temp.path())
+            .args(["init", "ci"])
+            .output()
+            .unwrap()
+    };
+    let result = generate();
+    assert!(result.status.success(), "{result:?}");
+    let config_path = temp.path().join("simit.toml");
+    let config = simit::config::ProjectConfig::load(temp.path()).unwrap();
+    let observer_path = temp.path().join(".github/workflows/producer-custody.yaml");
+    let observer = read(&observer_path);
+    assert!(config.ci.separate_events);
+    assert_eq!(
+        observer,
+        simit::render::ci::custody::file(config.ci.custody.as_ref().unwrap())
+            .unwrap()
+            .content
+    );
+    assert!(
+        read(&temp.path().join(".github/workflows/ci.yaml")).contains("${{ github.event_name }}")
+    );
+    let persisted_config = read(&config_path);
+    assert!(generate().status.success());
+    assert_eq!(read(&config_path), persisted_config);
+    assert_eq!(read(&observer_path), observer);
+    for args in [
+        vec!["init", "ci", "--primary-only", "--check", "--diff"],
+        vec!["init", "ci", "--primary-only"],
+        vec!["init", "ci", "--primary-only", "--check", "--diff"],
+    ] {
+        let result = simit_with_user_config(temp.path())
+            .current_dir(temp.path())
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(result.status.success(), "{result:?}");
+        assert_eq!(read(&config_path), persisted_config);
+        assert_eq!(read(&observer_path), observer);
+        assert!(
+            read(&temp.path().join(".github/workflows/ci.yaml"))
+                .contains("${{ github.event_name }}")
+        );
+    }
+    assert!(
+        simit_with_user_config(temp.path())
+            .current_dir(temp.path())
+            .args(["init", "ci", "--check", "--diff"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert_eq!(
+        simit::registry::audit_ci(temp.path()).unwrap().status,
+        simit::registry::FeatureStatus::Managed
+    );
+}
+
+#[test]
+fn separate_rust_ci_events_reject_unsupported_backends_without_effects() {
+    for (platform, provider, workflow_path) in [
+        ("forgejo", "actions", ".forgejo/workflows/ci.yaml"),
+        ("forgejo", "crow", ".crow/build.yaml"),
+    ] {
+        let temp = init_package(false);
+        fs::write(
+            temp.path().join("simit.toml"),
+            format!("[ci]\nplatform = '{platform}'\nprovider = '{provider}'\nruntime = 'cargo'\n"),
+        )
+        .unwrap();
+        let generate = || {
+            simit_with_user_config(temp.path())
+                .current_dir(temp.path())
+                .args(["init", "ci"])
+                .output()
+                .unwrap()
+        };
+        assert!(generate().status.success());
+        let workflow = read(&temp.path().join(workflow_path));
+        let config = read(&temp.path().join("simit.toml")).replacen(
+            "[ci]\n",
+            "[ci]\nseparate_events = true\n",
+            1,
+        );
+        fs::write(temp.path().join("simit.toml"), &config).unwrap();
+        let result = generate();
+        assert!(!result.status.success());
+        assert!(String::from_utf8_lossy(&result.stderr).contains("separate_events"));
+        assert_eq!(read(&temp.path().join("simit.toml")), config);
+        assert_eq!(read(&temp.path().join(workflow_path)), workflow);
+        let error = simit::registry::audit_ci(temp.path()).unwrap_err();
+        assert!(format!("{error:#}").contains("separate_events"));
+    }
+}
+
+#[test]
+fn separate_rust_ci_events_reject_non_rust_projects_without_effects() {
+    for python in [false, true] {
+        let temp = TempDir::new().unwrap();
+        fs::write(temp.path().join("flake.nix"), "{ outputs = _: {}; }\n").unwrap();
+        if python {
+            fs::write(
+                temp.path().join("pyproject.toml"),
+                "[project]\nname = 'demo'\nversion = '0.1.0'\nrequires-python = '>=3.12'\n",
+            )
+            .unwrap();
+            fs::write(temp.path().join("uv.lock"), "version = 1\n").unwrap();
+        }
+        fs::write(
+            temp.path().join("simit.toml"),
+            "[ci]\nplatform = 'github'\nprovider = 'actions'\nruntime = 'nix'\n",
+        )
+        .unwrap();
+        let generate = || {
+            simit_with_user_config(temp.path())
+                .current_dir(temp.path())
+                .args(["init", "ci"])
+                .output()
+                .unwrap()
+        };
+        assert!(generate().status.success());
+        let workflow = read(&temp.path().join(".github/workflows/ci.yaml"));
+        let config = read(&temp.path().join("simit.toml")).replacen(
+            "[ci]\n",
+            "[ci]\nseparate_events = true\n",
+            1,
+        );
+        fs::write(temp.path().join("simit.toml"), &config).unwrap();
+        let result = generate();
+        assert!(!result.status.success());
+        assert!(String::from_utf8_lossy(&result.stderr).contains("separate_events"));
+        assert_eq!(read(&temp.path().join("simit.toml")), config);
+        assert_eq!(
+            read(&temp.path().join(".github/workflows/ci.yaml")),
+            workflow
+        );
+        let error = simit::registry::audit_ci(temp.path()).unwrap_err();
+        assert!(format!("{error:#}").contains("separate_events"));
+    }
+}
+
+#[test]
 fn aggregate_workspace_strategy_can_skip_all_feature_checks() {
     let temp = init_workspace_fixture();
     fs::write(temp.path().join("flake.nix"), "{ outputs = _: {}; }\n").unwrap();

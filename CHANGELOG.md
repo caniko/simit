@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Opt-in `[ci].separate_events` for GitHub Rust CI, preserving independent push
+  and PR originals in aggregate workspaces while retaining default coalescing.
 - Native dependency export-stream admission with importer-compatible NAR bounds,
   exact closure/reference binding, and one-use private descriptor restoration.
 - Native `simit ci nix-group` and library execution contracts replace embedded

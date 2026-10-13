@@ -441,6 +441,9 @@ pub struct CiConfig {
     /// Start Rust, flake evaluation and optional realization independently.
     #[serde(default)]
     pub independent_lanes: bool,
+    /// Retain independent GitHub Rust CI push and PR originals, including aggregate CI.
+    #[serde(default)]
+    pub separate_events: bool,
     #[serde(default)]
     pub workspace_strategy: WorkspaceStrategy,
     /// Opt-in coordinated dependency-ordered workspace publication.
@@ -534,6 +537,10 @@ impl CiConfig {
         provider: CiProvider,
         platform: Platform,
     ) -> Result<()> {
+        if self.separate_events && (provider != CiProvider::Actions || platform != Platform::Github)
+        {
+            bail!("[ci].separate_events requires the effective GitHub Actions backend");
+        }
         if (self.independent_lanes || self.nix_build != NixBuildConfig::default())
             && (provider != CiProvider::Actions || platform != Platform::Github)
         {
@@ -550,6 +557,9 @@ impl CiConfig {
     /// Shared by Nix-only generation and drift auditing. Call after CLI overrides
     /// so an explicit false can disable a configured unsupported option.
     pub(crate) fn validate_nix_only_language_options(&self) -> Result<()> {
+        if self.separate_events {
+            bail!("[ci].separate_events requires Rust language CI");
+        }
         if self.independent_lanes {
             bail!("[ci].independent_lanes requires Rust language CI");
         }
@@ -4011,6 +4021,7 @@ fn set_ci_table(table: &mut Table, ci: &CiConfig) {
     set_optional_string(table, "check_command", ci.check_command.as_deref());
     set_optional_bool_default_true(table, "nix_flake_check", ci.nix_flake_check);
     set_bool(table, "independent_lanes", ci.independent_lanes);
+    set_bool(table, "separate_events", ci.separate_events);
     set_optional_string(
         table,
         "workspace_strategy",
