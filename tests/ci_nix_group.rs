@@ -114,6 +114,78 @@ impl Fixture {
 }
 
 #[test]
+fn missing_or_empty_results_input_rejects_before_checkout_or_nix_effects() {
+    for input in ["missing", "empty-env", "empty-argument"] {
+        let f = Fixture::new();
+        fs::write(
+            f.root.path().join("spec.json"),
+            serde_json::to_vec(&f.spec).unwrap(),
+        )
+        .unwrap();
+        let mut command = f.command();
+        command.env("GROUP_CASE", "success");
+        match input {
+            "missing" => {
+                command.env_remove("SIMIT_NIX_BUILD_RESULTS");
+            }
+            "empty-env" => {
+                command.env("SIMIT_NIX_BUILD_RESULTS", "");
+            }
+            _ => {
+                command.args(["--results", ""]);
+            }
+        }
+        let output = command.output().unwrap();
+        assert!(!output.status.success(), "{output:?}");
+        let error = String::from_utf8_lossy(&output.stderr);
+        if input == "empty-argument" {
+            assert!(
+                error.contains("a value is required for '--results"),
+                "{error}"
+            );
+        } else {
+            assert!(
+                error.contains("results directory") && error.contains("SIMIT_NIX_BUILD_RESULTS"),
+                "{error}"
+            );
+        }
+        assert_eq!(f.calls(), "");
+        for name in [
+            "receipt.json",
+            "installables.json",
+            "coverage.json",
+            "0",
+            "1",
+        ] {
+            assert!(
+                !f.root.path().join(name).exists(),
+                "checkout effect: {name}"
+            );
+            assert!(
+                !f.root.path().join("results").join(name).exists(),
+                "evidence effect: {name}"
+            );
+        }
+    }
+    let f = Fixture::new();
+    fs::write(
+        f.root.path().join("spec.json"),
+        serde_json::to_vec(&f.spec).unwrap(),
+    )
+    .unwrap();
+    let output = f
+        .command()
+        .env("SIMIT_NIX_BUILD_RESULTS", "")
+        .env("GROUP_CASE", "success")
+        .arg("--results")
+        .arg(f.root.path().join("results"))
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert!(f.receipt()["success"].as_bool().unwrap());
+}
+
+#[test]
 fn serialized_group_spec_budget_is_shared_with_library_admission() {
     let mut f = Fixture::new();
     let mut spec: simit::ci_runtime::group::GroupSpec =

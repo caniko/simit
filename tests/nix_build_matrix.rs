@@ -380,22 +380,22 @@ fn generated_group_invocation_and_fallback_execute_the_packaged_rust_cli() {
 }
 
 #[cfg(unix)]
-fn generated_group_fixture(hook_size: Option<usize>) {
+fn generated_group_fixture(hook_size: Option<(usize, bool)>) {
     let success = "test -s \"$SIMIT_NIX_BUILD_RESULTS/result.json\" && test -s \"$SIMIT_NIX_BUILD_RESULTS/build.log\" && printf '%s' \"$INSTALLABLE\" > \"$SIMIT_NIX_BUILD_RESULTS/hook-member\"";
     let diagnostic = "printf '%s' \"$INSTALLABLE\" > \"$SIMIT_NIX_BUILD_RESULTS/hook-diagnostic\"";
-    let pad = |script: &str| match hook_size {
-        Some(size) => {
+    let pad = |script: &str, diagnostic: bool| match hook_size {
+        Some((size, phase)) if phase == diagnostic => {
             let body = format!("\ntest \"$0\" = bash; test \"$#\" = 0; {script}");
             let hook = format!("#{}{body}", "x".repeat(size - body.len() - 1));
             assert_eq!(hook.len(), size);
             hook
         }
-        None => script.to_owned(),
+        _ => script.to_owned(),
     };
     let temp = project(&format!(
         "[ci.nix_build]\nonly = true\ncapture_results = true\ncheck_systems = [\"x86_64-linux\"]\nfresh_installables = [\".#checks.x86_64-linux.client\"]\npost_build = [{}]\npost_build_always = [{}]\n[ci.nix_build.groups]\nnetwork = [\".#checks.x86_64-linux.client\", \".#checks.x86_64-linux.recovery\"]",
-        serde_json::to_string(&pad(success)).unwrap(),
-        serde_json::to_string(&pad(diagnostic)).unwrap()
+        serde_json::to_string(&pad(success, false)).unwrap(),
+        serde_json::to_string(&pad(diagnostic, true)).unwrap()
     ));
     assert!(generate(&temp, &[]).status.success());
     let value = workflow(&temp);
@@ -534,8 +534,106 @@ fn generated_group_fixture(hook_size: Option<usize>) {
 #[cfg(unix)]
 #[test]
 fn generated_large_hooks_cross_file_boundaries_in_engine_and_fallback() {
-    for size in [128 * 1024 + 1, 1024 * 1024] {
-        generated_group_fixture(Some(size));
+    // Each phase exceeds Linux's per-argument cap while the complete generated
+    // workflow stays below GitHub's 500 KB limit, including repeated diagnostics.
+    for diagnostic in [false, true] {
+        generated_group_fixture(Some((140_000, diagnostic)));
+    }
+}
+
+#[test]
+fn grouped_rendered_workflow_limit_covers_specs_groups_and_fallback_repetition() {
+    let group = "[ci.nix_build.groups]\nnetwork = [\".#checks.x86_64-linux.client\", \".#checks.x86_64-linux.recovery\"]";
+    for (kind, size, groups) in [
+        ("post_build", 1024 * 1024, group),
+        ("post_build_always", 170_000, group),
+        (
+            "post_build",
+            260_000,
+            "[ci.nix_build.groups]\nclient = [\".#checks.x86_64-linux.client\"]\nrecovery = [\".#checks.x86_64-linux.recovery\"]",
+        ),
+    ] {
+        let temp = project(&format!(
+            "[ci.nix_build]\nonly = true\ncapture_results = true\n{kind} = [{}]\n{groups}",
+            serde_json::to_string(&format!("#{}", "x".repeat(size - 1))).unwrap()
+        ));
+        let path = temp.path().join("simit.toml");
+        let before = fs::read_to_string(&path).unwrap();
+        let output = generate(&temp, &[]);
+        assert!(!output.status.success(), "oversized {kind}: {output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("500000-byte workflow limit"),
+            "{output:?}"
+        );
+        assert_eq!(fs::read_to_string(path).unwrap(), before);
+        assert!(!temp.path().join(".github/workflows").exists());
+    }
+}
+
+#[test]
+fn grouped_rendered_workflow_exact_boundary_preserves_existing_files_on_overflow() {
+    let temp = project(
+        "[ci.nix_build]\nonly = true\ncapture_results = true\npost_build = [\"#\"]\n[ci.nix_build.groups]\nnetwork = [\".#checks.x86_64-linux.client\", \".#checks.x86_64-linux.recovery\"]",
+    );
+    assert!(generate(&temp, &[]).status.success());
+    let workflow = temp.path().join(".github/workflows/nix-builds.yaml");
+    let padding = 500_000 - fs::read(&workflow).unwrap().len();
+    let path = temp.path().join("simit.toml");
+    let mut config = fs::read_to_string(&path)
+        .unwrap()
+        .parse::<toml_edit::DocumentMut>()
+        .unwrap();
+    for extra in [0, 1] {
+        let mut hooks = toml_edit::Array::new();
+        hooks.push(format!("#{}", "x".repeat(padding + extra)));
+        config["ci"]["nix_build"]["post_build"] = toml_edit::value(hooks);
+        let before = config.to_string();
+        fs::write(&path, &before).unwrap();
+        let prior = fs::read(&workflow).unwrap();
+        let output = generate(&temp, &[]);
+        assert_eq!(output.status.success(), extra == 0, "{output:?}");
+        if extra == 0 {
+            assert_eq!(fs::read(&workflow).unwrap().len(), 500_000);
+        } else {
+            assert_eq!(fs::read(&workflow).unwrap(), prior);
+            assert_eq!(fs::read_to_string(&path).unwrap(), before);
+        }
+    }
+}
+
+#[test]
+fn hook_actions_expressions_reject_before_retaining_expanded_secrets() {
+    for kind in ["post_build", "post_build_always"] {
+        for script in [
+            "printf '%s' '${{ secrets.DIAGNOSTIC_TOKEN }}'",
+            "printf '%s' '${{ github.token }}'",
+            "# ${{ inputs.command }}",
+        ] {
+            let temp = project(&format!(
+                "[ci.nix_build]\nonly = true\ncapture_results = true\n{kind} = [{}]\n[ci.nix_build.groups]\nnetwork = [\".#checks.x86_64-linux.client\", \".#checks.x86_64-linux.recovery\"]",
+                serde_json::to_string(script).unwrap()
+            ));
+            let path = temp.path().join("simit.toml");
+            let before = fs::read_to_string(&path).unwrap();
+            let output = generate(&temp, &[]);
+            assert!(!output.status.success(), "{kind}: {output:?}");
+            assert!(
+                String::from_utf8_lossy(&output.stderr).contains("Actions expressions"),
+                "{output:?}"
+            );
+            assert_eq!(fs::read_to_string(path).unwrap(), before);
+            assert!(!temp.path().join(".github/workflows").exists());
+        }
+    }
+    let temp = project(
+        "[ci.nix_build]\nonly = true\ncapture_results = true\nrequired_secrets = [\"DIAGNOSTIC_TOKEN\"]\npost_build_always = [\"test -n \\\"$DIAGNOSTIC_TOKEN\\\"\"]\n[ci.nix_build.extra_env]\nDIAGNOSTIC_TOKEN = '${{ secrets.DIAGNOSTIC_TOKEN }}'\n[ci.nix_build.groups]\nnetwork = [\".#checks.x86_64-linux.client\", \".#checks.x86_64-linux.recovery\"]",
+    );
+    assert!(generate(&temp, &[]).status.success());
+    let value = workflow(&temp);
+    for step in value["jobs"]["build"]["steps"].as_sequence().unwrap() {
+        if let Some(script) = step["run"].as_str() {
+            assert!(!script.contains("${{ secrets.DIAGNOSTIC_TOKEN }}"));
+        }
     }
 }
 
@@ -2130,6 +2228,58 @@ fn exact_matrix_replaces_only_previously_managed_primary_workflows() {
     assert!(!temp.path().join(".github/workflows/ci.yaml").exists());
     assert_eq!(fs::read_to_string(custom).unwrap(), "name: Project owned\n");
     assert!(generate(&temp, &["--check", "--diff"]).status.success());
+}
+
+#[test]
+fn direct_nix_matrix_rendering_enforces_retained_hook_and_transport_boundaries() {
+    use simit::cli::Platform;
+    use simit::config::NixBuildConfig;
+    use simit::render::ci::nix_build_matrix_file_with_options;
+    use simit::user_config::ResolvedRunner;
+
+    let runner = ResolvedRunner {
+        name: None,
+        labels: vec!["ubuntu-24.04".into()],
+    };
+    let installables = vec![".#default".to_owned()];
+    let mut options = NixBuildConfig {
+        capture_results: true,
+        groups: [("default".into(), installables.clone())].into(),
+        ..NixBuildConfig::default()
+    };
+    for phase in ["post_build", "post_build_always", "transport"] {
+        options.post_build.clear();
+        options.post_build_always.clear();
+        options.extra_env.clear();
+        match phase {
+            "post_build" => options.post_build.push("${{ secrets.TOKEN }}".into()),
+            "post_build_always" => options.post_build_always.push("${{ github.token }}".into()),
+            _ => {
+                options
+                    .extra_env
+                    .insert("SIMIT_DEPENDENCY_MODE".into(), "override".into());
+            }
+        }
+        let error = nix_build_matrix_file_with_options(
+            Platform::Github,
+            &runner,
+            &installables,
+            &[],
+            &[],
+            &[],
+            &options,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains(if phase == "transport" {
+                "reserved transport"
+            } else {
+                "Actions expressions"
+            }),
+            "{error}"
+        );
+    }
 }
 
 #[test]
