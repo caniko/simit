@@ -45,9 +45,9 @@ fn native_rust_flake_uses_the_qualified_namespaced_harbor_input() {
     assert!(flake.contains("harbor.lib.rust.mkToolchain"));
     assert!(flake.contains("harbor.lib.rust.mkCross"));
     assert!(flake.contains("crane.follows = \"harbor/crane\""));
-    assert!(flake.contains("toolchainFile = ./nix/rust-toolchain-msrv.toml;"));
+    assert!(flake.contains("toolchainFile = ./rust-toolchain-msrv.toml;"));
     assert!(!flake.contains("builtins.toFile"));
-    let msrv = fs::read_to_string(root.path().join("nix/rust-toolchain-msrv.toml")).unwrap();
+    let msrv = fs::read_to_string(root.path().join("rust-toolchain-msrv.toml")).unwrap();
     assert!(msrv.contains("channel = \"1.85.0\""));
     assert!(msrv.contains("profile = \"minimal\""));
     assert!(

@@ -19,10 +19,11 @@
     # plinth trunk trips both of this flake's `nix flake check` gates: it still
     # declares the retired Codeberg nix-cache-pin mirror (whose trunk orphaned
     # the revision we locked), and its Cargo.lock wants dioxus 0.7.9 while our
-    # Source-owner qualified Dioxus 0.7.10 integration, including the public
-    # GitHub Tartan transport repair; keep the complete upstream lock closure.
+    # nixpkgs ships dioxus-cli 0.7.10. This compatibility successor preserves
+    # fix/dioxus-0.7.10 and its exact tartan revision, using public GitHub Cargo
+    # transport. It still predates the nix-cache-pin input entirely.
     plinth = {
-      url = "git+https://github.com/caniko/plinth.git?ref=trunk&rev=07cea351013d39150f81181e29d6e9a41971a4f2";
+      url = "git+https://github.com/caniko/plinth.git?ref=fix/tartan-github-transport-20261012-ses-ed08&rev=79d5a44310f6a7f620a8ebcf8c6dc78389cf4a36";
       inputs.nixpkgs.follows = "nixpkgs";
     };
     advisory-db = {
@@ -99,6 +100,16 @@
           || pkgs.lib.hasInfix "/src/review/assets/" pathString
           || pkgs.lib.hasSuffix "/src/monorepo/native_release.py" pathString
           || pkgs.lib.hasSuffix "/tests/fixtures/native-release-contract.py" pathString
+          || pkgs.lib.hasSuffix "/tests/fixtures/native-publisher.py" pathString
+          || pkgs.lib.hasSuffix "/tests/fixtures/primary-ci-integration.py" pathString
+          || pkgs.lib.hasSuffix "/src/render/ci/nix_group.py" pathString
+          || pkgs.lib.hasSuffix "/src/render/ci/custody.py" pathString
+          || pkgs.lib.hasSuffix "/tests/fixtures/nix-groups-contract.py" pathString
+          || pkgs.lib.hasSuffix "/tests/fixtures/ci-custody-contract.py" pathString
+          || pkgs.lib.hasSuffix "/src/render/ci/nix_dependencies.py" pathString
+          || pkgs.lib.hasSuffix "/tests/fixtures/nix-dependency-contract.py" pathString
+          || pkgs.lib.hasSuffix "/tests/fixtures/report-jq.sh" pathString
+          || pkgs.lib.hasSuffix "/tests/fixtures/report-cli.sh" pathString
           || pkgs.lib.hasSuffix "ci-actions.json" pathString
           || pkgs.lib.hasSuffix "/.github" pathString
           || pkgs.lib.hasSuffix "/.github/workflows" pathString
@@ -300,7 +311,7 @@
         msrv = let
           msrvToolchain = harbor.lib.rust.mkToolchain {
             inherit pkgs;
-            toolchainFile = ./nix/rust-toolchain-msrv.toml;
+            toolchainFile = ./rust-toolchain-msrv.toml;
             withRustAnalyzer = false;
             crossTargets = [];
             cache.enable = false;
