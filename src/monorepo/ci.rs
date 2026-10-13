@@ -170,11 +170,12 @@ pub(crate) fn files(
                 "independent Cargo publication currently requires the keys/maintainers.gpg trust root"
             );
         }
-        for package in metadata
-            .packages
-            .iter()
-            .filter(|p| metadata.workspace_members.contains(&p.id) && p.is_publishable())
-        {
+        for package in metadata.packages.iter().filter(|p| {
+            metadata.workspace_members.contains(&p.id)
+                && p.publish.as_ref().is_none_or(|registries| {
+                    registries.iter().any(|registry| registry == "crates-io")
+                })
+        }) {
             crate::commands::release_plan::build_release_plan(
                 &metadata,
                 std::slice::from_ref(&package.name),

@@ -1171,6 +1171,59 @@ fn component_native_system_guard_rejects_wrong_architecture_and_eval_failure() {
 }
 
 #[test]
+fn independent_publishers_require_crates_io_allowlist_and_preserve_qualification() {
+    for (policy, publish) in [
+        ("publish = [\"internal\"]", false),
+        ("publish = false", false),
+        ("publish = [\"internal\", \"crates-io\"]", true),
+        ("publish = [\"crates-io\"]", true),
+    ] {
+        let temp = fixture();
+        let root = temp.path();
+        enroll_release_checks(root);
+        let config = fs::read_to_string(root.join("simit.toml"))
+            .unwrap()
+            .replace(
+                "runtime = \"nix\"",
+                "runtime = \"nix\"\npublish_crates = true",
+            );
+        write(root, "simit.toml", &config);
+        let generate = || {
+            common::simit()
+                .current_dir(root)
+                .args(["init", "ci"])
+                .output()
+                .unwrap()
+        };
+        let output = generate();
+        assert!(output.status.success(), "{output:?}");
+        let manifest = fs::read_to_string(root.join("crates/worker/Cargo.toml"))
+            .unwrap()
+            .replace(
+                "edition = \"2024\"",
+                &format!("edition = \"2024\"\n{policy}"),
+            );
+        write(root, "crates/worker/Cargo.toml", &manifest);
+        let output = generate();
+        assert!(output.status.success(), "{policy}: {output:?}");
+        for prefix in ["publish-crate-", "trusted-publish-crate-"] {
+            assert_eq!(
+                root.join(format!(".github/workflows/{prefix}worker.yaml"))
+                    .exists(),
+                publish,
+                "{policy}: {prefix}"
+            );
+            assert!(
+                root.join(format!(".github/workflows/{prefix}engine.yaml"))
+                    .exists()
+            );
+        }
+        let ci = fs::read_to_string(root.join(".github/workflows/ci.yaml")).unwrap();
+        assert!(ci.contains("component-worker:"));
+    }
+}
+
+#[test]
 fn independent_publication_qualifies_native_components_and_keeps_version_drift_stable() {
     let temp = fixture();
     let mut config = fs::read_to_string(temp.path().join("simit.toml")).unwrap();

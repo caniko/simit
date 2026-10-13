@@ -216,6 +216,10 @@ distribution tag and repairs that mapping without rebuilding the archive.
 Undecodable Git byte paths force full component qualification; known UTF-8 paths
 remain in the plan. Cargo metadata paths are normalized to repository-style `/`
 separators on Windows before ownership matching.
+Independent crates.io workflow generation honors Cargo's registry allowlist:
+unpublished and alternate-only members remain qualified but receive no crates.io
+builder or protected publisher. Unrestricted members and allowlists containing
+`crates-io` retain both workflows.
 
 Configured VS Code and JetBrains extension publishers remain independently
 managed. Full monorepo CI generation rejects those sections before reconciling
