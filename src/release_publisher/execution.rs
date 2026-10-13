@@ -314,7 +314,10 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
     )?;
     let enrolled_workflow = fs::read(trusted_root.join(&policy.source_workflow_path))?;
     if native {
-        verify_native_builder(&enrolled_workflow)?;
+        verify_native_builder(
+            &enrolled_workflow,
+            namespace.context("native publisher requires namespace")?,
+        )?;
     }
     if namespace.is_some() || tag_prefix == crate::release_identity::TagPrefix::V {
         verify_tag_only_source_workflow_with_prefix(
@@ -691,6 +694,9 @@ fn select_native_artifact<'a>(
     max_attempt: u64,
     mut attempt_succeeded: impl FnMut(u64) -> Result<bool>,
 ) -> Result<&'a ReleaseArtifact> {
+    // The independently enrolled hosted job must complete its unconditional,
+    // immutable upload of this exact attempt name. A same-name forgery makes
+    // that upload fail; successful job proof plus uniqueness excludes it.
     let mut proofs = BTreeMap::new();
     let mut selected: Option<&ReleaseArtifact> = None;
     let mut names = std::collections::BTreeSet::new();
@@ -765,11 +771,36 @@ fn native_attempt_succeeded(
         && job["labels"] == json!(["ubuntu-24.04"]))
 }
 
-fn verify_native_builder(enrolled: &[u8]) -> Result<()> {
+fn verify_native_builder(enrolled: &[u8], namespace: &str) -> Result<()> {
     let workflow: serde_yaml::Value = serde_yaml::from_slice(enrolled)?;
     ensure!(
         workflow["jobs"]["validate"]["runs-on"].as_str() == Some("ubuntu-24.04"),
         "native archives require the fixed hosted ubuntu-24.04 builder"
+    );
+    let expected_action = crate::render::ci::github_action_ref("actions/upload-artifact", "v7.0.2");
+    let expected_action = expected_action
+        .split(" #")
+        .next()
+        .unwrap_or(expected_action.as_str());
+    let expected_name = format!("native-release-{namespace}-${{{{ github.run_attempt }}}}");
+    let steps = workflow["jobs"]["validate"]["steps"]
+        .as_sequence()
+        .context("native builder has no upload steps")?;
+    let uploads: Vec<_> = steps
+        .iter()
+        .filter(|step| step["with"]["name"].as_str() == Some(&expected_name))
+        .collect();
+    ensure!(
+        uploads.len() == 1,
+        "native builder must upload exactly one attempt-qualified immutable archive"
+    );
+    let upload = uploads[0];
+    ensure!(
+        upload["uses"].as_str() == Some(expected_action)
+            && upload["if"].is_null()
+            && (upload["continue-on-error"].is_null() || upload["continue-on-error"] == false)
+            && (upload["with"]["overwrite"].is_null() || upload["with"]["overwrite"] == false),
+        "native builder requires an unconditional immutable upload whose failure fails the job"
     );
     Ok(())
 }
@@ -1427,18 +1458,43 @@ mod tests {
             "private-builder",
             "${{ inputs.runner }}",
         ] {
-            let workflow = format!("jobs:\n  validate:\n    runs-on: '{runner}'\n");
+            let workflow = json!({"jobs":{"validate":{"runs-on":runner,"steps":[{"uses":crate::render::ci::github_action_ref("actions/upload-artifact", "v7.0.2").split(" #").next().unwrap(),"with":{"name":"native-release-native-${{ github.run_attempt }}"}}]}}});
             assert_eq!(
-                super::verify_native_builder(workflow.as_bytes()).is_ok(),
+                super::verify_native_builder(
+                    &serde_yaml::to_string(&workflow).unwrap().into_bytes(),
+                    "native"
+                )
+                .is_ok(),
                 runner == "ubuntu-24.04"
             );
         }
         assert!(
             super::verify_native_builder(
-                b"jobs: {validate: {runs-on: [self-hosted, ubuntu-24.04]}}"
+                b"jobs: {validate: {runs-on: [self-hosted, ubuntu-24.04]}}",
+                "native"
             )
             .is_err()
         );
+        for (key, value) in [
+            ("if", json!(false)),
+            ("continue-on-error", json!(true)),
+            (
+                "with",
+                json!({"name":"native-release-native-${{ github.run_attempt }}", "overwrite":true}),
+            ),
+        ] {
+            let mut workflow = json!({"jobs":{"validate":{"runs-on":"ubuntu-24.04","steps":[{"uses":crate::render::ci::github_action_ref("actions/upload-artifact", "v7.0.2").split(" #").next().unwrap(),"with":{"name":"native-release-native-${{ github.run_attempt }}"}}]}}});
+            workflow["jobs"]["validate"]["steps"][0][key] = value;
+            let error = super::verify_native_builder(
+                serde_yaml::to_string(&workflow).unwrap().as_bytes(),
+                "native",
+            )
+            .unwrap_err();
+            assert!(
+                error.to_string().contains("unconditional immutable upload"),
+                "{error}"
+            );
+        }
     }
     use super::*;
 
