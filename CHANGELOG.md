@@ -53,6 +53,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Isolate hosted release gates from artifact workspaces; release jobs re-checkout
+  and revalidate the immutable signed source after prerequisite jobs succeed.
 - Report protected Python/npm publisher credentials as locally unverifiable even
   when the selected release is already present in its registry.
 - Preserve unset npm publication access so releasing an existing restricted

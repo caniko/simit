@@ -140,6 +140,48 @@ fn required_gates_block_publication_on_the_validated_revision() {
 }
 
 #[test]
+fn release_artifact_jobs_do_not_reuse_required_gate_workspaces() {
+    for platform in ["github", "codeberg"] {
+        let dir = project(&format!(
+            "[ci]\nrequired_gates = [{{id='mutate',run='echo gate > src/main.rs; touch gate-generated.rs; git commit --allow-empty -m gate',timeout_minutes=9}}]\n[release.{platform}]\nrepo='example/player'\n[release.artifacts]\nrunner='ubuntu-24.04'\nprebuild_binaries=true\nsign=false\n"
+        ));
+        let workflow = render(dir.path());
+        let doc: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
+        assert_eq!(
+            doc["jobs"]["release"]["needs"], "validate",
+            "{platform}: {workflow}"
+        );
+        let gates = doc["jobs"]["validate"]["steps"].as_sequence().unwrap();
+        assert!(
+            gates
+                .iter()
+                .any(|step| step["name"] == "Required gate mutate")
+        );
+        let artifact_steps = doc["jobs"]["release"]["steps"].as_sequence().unwrap();
+        assert!(
+            !artifact_steps
+                .iter()
+                .any(|step| step["name"] == "Required gate mutate")
+        );
+        assert!(
+            artifact_steps
+                .iter()
+                .any(|step| step["with"]["ref"] == "${{ github.sha }}")
+        );
+        assert!(artifact_steps.iter().any(|step| {
+            step["run"]
+                .as_str()
+                .is_some_and(|run| run.contains("git verify-tag") && run.contains("GITHUB_SHA"))
+        }));
+        assert!(
+            !serde_yaml::to_string(&doc["jobs"]["validate"])
+                .unwrap()
+                .contains("secrets.")
+        );
+    }
+}
+
+#[test]
 fn unsafe_tag_prefix_is_rejected() {
     let dir = project(&format!("[release]\ntag_prefix = \"../\"\n\n{HOSTED}"));
     let output = common::simit()

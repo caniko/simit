@@ -504,12 +504,22 @@ pub fn render(inputs: &ReleaseWorkflowInputs<'_>) -> String {
             ReleaseNotesSource::Changelog
         }
     });
-    if inputs.platform == Platform::Github && inputs.prebuild.is_some() {
+    let github_prebuild = inputs.platform == Platform::Github && inputs.prebuild.is_some();
+    let separate_validation = github_prebuild || !inputs.required_gates.is_empty();
+    if separate_validation {
         // No reusable build or Attic credential is admitted before event-bound
         // signed-tag validation. Every job checks out the same immutable SHA.
-        w.push_str(
-            "  validate:\n    permissions:\n      contents: read\n    timeout-minutes: 30\n",
-        );
+        w.push_str("  validate:\n    permissions:\n      contents: read\n");
+        writeln!(
+            w,
+            "    timeout-minutes: {}",
+            if inputs.required_gates.is_empty() {
+                30
+            } else {
+                360
+            }
+        )
+        .expect("write");
         writeln!(w, "    runs-on: {}", inputs.runner).expect("write");
         if inputs.preinstalled_nix {
             push_preinstalled_nix_env(&mut w, inputs.artifacts);
@@ -521,6 +531,8 @@ pub fn render(inputs: &ReleaseWorkflowInputs<'_>) -> String {
         }
         push_validate_tag(&mut w, inputs.artifacts, inputs.tag_prefix, notes_source);
         push_required_gates(&mut w, inputs.required_gates);
+    }
+    if github_prebuild {
         w.push_str("  prebuild:\n    needs: validate\n    uses: ./.github/workflows/prebuild.yaml\n    with:\n      release: true\n");
         if let Some(attic) = inputs.attic.filter(|_| prebuild_publishes_attic(inputs)) {
             let token_secret = attic
@@ -535,8 +547,10 @@ pub fn render(inputs: &ReleaseWorkflowInputs<'_>) -> String {
         }
     }
     w.push_str("  release:\n");
-    if inputs.platform == Platform::Github && inputs.prebuild.is_some() {
+    if github_prebuild {
         w.push_str("    needs: [validate, prebuild]\n");
+    } else if separate_validation {
+        w.push_str("    needs: validate\n");
     }
     writeln!(w, "    runs-on: {}", inputs.runner).expect("write");
     match inputs.platform {
@@ -563,9 +577,6 @@ pub fn render(inputs: &ReleaseWorkflowInputs<'_>) -> String {
     }
     push_validate_tag(&mut w, inputs.artifacts, inputs.tag_prefix, notes_source);
     push_release_notes(&mut w, inputs.tag_prefix, notes_source);
-    if inputs.platform != Platform::Github || inputs.prebuild.is_none() {
-        push_required_gates(&mut w, inputs.required_gates);
-    }
     push_release_credentials_preflight(&mut w, inputs);
     if let Some(copr) = inputs.copr {
         push_rewrite_spec(&mut w, copr);
