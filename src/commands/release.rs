@@ -102,6 +102,17 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
     )?;
     let plans = cargo::plan_versions(packages, &bump)?;
     let new_version = cargo::common_new_version(&plans)?;
+    if command.component.is_some()
+        && config.ci.publish_crates
+        && plans
+            .iter()
+            .any(|plan| plan.package.is_publishable_to_crates_io())
+        && !new_version.pre.is_empty()
+    {
+        bail!(
+            "independent Cargo publication does not support prereleases; choose a stable version before releasing"
+        );
+    }
     let tag = if command.component.is_some() {
         crate::release_identity::ReleaseTag::for_package(
             &plans[0].package.name,

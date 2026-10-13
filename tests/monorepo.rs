@@ -770,6 +770,85 @@ fn component_release_dry_run_uses_package_tag_without_changing_other_versions() 
 }
 
 #[test]
+fn independent_cargo_prereleases_fail_before_release_mutation() {
+    for existing in ["0.1.0", "0.1.0-rc.1"] {
+        let temp = fixture();
+        let root = temp.path();
+        enroll_release_checks(root);
+        let config = fs::read_to_string(root.join("simit.toml"))
+            .unwrap()
+            .replace(
+                "runtime = \"nix\"",
+                "runtime = \"nix\"\npublish_crates = true",
+            );
+        write(root, "simit.toml", &config);
+        let manifest = fs::read_to_string(root.join("crates/worker/Cargo.toml"))
+            .unwrap()
+            .replacen(
+                "version = \"0.1.0\"",
+                &format!("version = \"{existing}\""),
+                1,
+            );
+        write(root, "crates/worker/Cargo.toml", &manifest);
+        write(root, ".gitignore", "target/\n");
+        assert!(
+            Command::new("cargo")
+                .current_dir(root)
+                .arg("generate-lockfile")
+                .status()
+                .unwrap()
+                .success()
+        );
+        fixture_git(root, &["init"]);
+        fixture_git(root, &["add", "."]);
+        fixture_git(
+            root,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "-m",
+                "fixture",
+            ],
+        );
+        let before = fixture_git(root, &["rev-parse", "HEAD"]);
+        let mut args = vec![
+            "release",
+            "patch",
+            "--component",
+            "worker",
+            "--no-sign",
+            "--no-changelog",
+            "-m",
+            "release worker",
+        ];
+        fixture_git(root, &["config", "user.name", "Test"]);
+        fixture_git(root, &["config", "user.email", "test@example.com"]);
+        args.extend(["--pre", "rc"]);
+        let output = common::simit()
+            .current_dir(root)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains("independent Cargo publication does not support prereleases"),
+            "{output:?}"
+        );
+        assert_eq!(fixture_git(root, &["rev-parse", "HEAD"]), before);
+        assert_eq!(
+            fs::read_to_string(root.join("crates/worker/Cargo.toml")).unwrap(),
+            manifest
+        );
+        assert!(fixture_git(root, &["status", "--porcelain"]).is_empty());
+        assert!(fixture_git(root, &["tag", "--list"]).is_empty());
+    }
+}
+
+#[test]
 fn independent_sync_up_uses_owned_package_tag_with_divergent_versions() {
     let temp = fixture();
     let root = temp.path();
