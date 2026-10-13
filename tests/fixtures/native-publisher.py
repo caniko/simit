@@ -148,4 +148,52 @@ with tempfile.TemporaryDirectory() as temp:
     attachments = json.loads(requests[-1].data)["_attachments"]
     assert base64.b64decode(attachments[tarball.name]["data"]) == tarball.read_bytes()
     assert npm_identity["name"] + "-1.2.3.sigstore" in attachments
+    # An existing exact tarball under a different channel is not a propagated
+    # release. Recovery must reconcile only the signed channel, without repack.
+    npm_out = root / "npm-out"
+    npm_out.mkdir()
+    packed = json.dumps({"name": npm_identity["name"], "version": npm_identity["version"]}).encode()
+    with tarfile.open(npm_out / tarball.name, "w:gz") as archive:
+        entry = tarfile.TarInfo("package/package.json")
+        entry.size = len(packed)
+        archive.addfile(entry, io.BytesIO(packed))
+    npm_files = {tarball.name: actual.digest(npm_out / tarball.name).hex()}
+    integrity = "sha512-" + base64.b64encode(actual.digest(npm_out / tarball.name, "sha512")).decode()
+    (npm_out / "receipt.json").write_text(json.dumps(npm_identity | {"runAttempt": 1, "files": npm_files}))
+    refuses(lambda: actual.publish(npm_out, npm_identity, 1, {"publishConfig": {"tag": None}}))
+    for tag in ["latest", "next"]:
+        state = {"name": npm_identity["name"], "versions": {"1.2.3": {"name": npm_identity["name"], "version": "1.2.3", "dist": {"integrity": integrity}}}, "dist-tags": {"other": "1.2.3"}}
+        tag_requests = []
+        def tag_upload(request):
+            assert request.full_url == "https://registry.npmjs.org/-/package/%40example%2Fnative/dist-tags/" + tag
+            assert request.method == "PUT" and json.loads(request.data) == "1.2.3"
+            assert request.get_header("Authorization") == "Bearer fixture-token"
+            state["dist-tags"][tag] = json.loads(request.data)
+            tag_requests.append(request)
+        manifest = {} if tag == "latest" else {"publishConfig": {"tag": tag}}
+        with patch.object(actual, "registry_metadata", side_effect=lambda _: state), patch.object(actual, "upload_request", side_effect=tag_upload), patch.object(actual.time, "sleep"), patch.dict(os.environ, {"NODE_AUTH_TOKEN": "fixture-token"}):
+            actual.publish(npm_out, npm_identity, 1, manifest)
+            assert state["dist-tags"][tag] == "1.2.3" and len(tag_requests) == 1
+            actual.publish(npm_out, npm_identity, 1, manifest)
+            assert len(tag_requests) == 1
+            exact_release = state["versions"].pop("1.2.3")
+            state["dist-tags"].pop(tag)
+            def concurrent_upload(*args):
+                state["versions"]["1.2.3"] = exact_release
+                raise RuntimeError("concurrent exact version publication")
+            with patch.object(actual, "upload_native", side_effect=concurrent_upload):
+                actual.publish(npm_out, npm_identity, 1, manifest)
+            assert state["dist-tags"][tag] == "1.2.3" and len(tag_requests) == 2
+            state["dist-tags"].pop(tag)
+            state["versions"]["1.2.3"]["dist"]["integrity"] = "sha512-conflict"
+            refuses(lambda: actual.publish(npm_out, npm_identity, 1, manifest))
+            assert len(tag_requests) == 2
+            state["versions"]["1.2.3"]["dist"]["integrity"] = integrity
+            with patch.object(actual, "upload_request", return_value=None):
+                refuses(lambda: actual.publish(npm_out, npm_identity, 1, manifest))
+            assert tag not in state["dist-tags"]
+    for invalid in ["bad name", "../evil", "_hidden", "-hidden", "node_modules", "@scope/.hidden", "@scope/pkg/extra", "bad%name"]:
+        assert not actual.valid_npm_package_name(invalid)
+    for valid in ["plain", "@scope/pkg", "LegacyCase", "http", "@scope/_legacy", "legacy!name", "a" * 215]:
+        assert actual.valid_npm_package_name(valid)
 print("native protected publisher contracts passed")

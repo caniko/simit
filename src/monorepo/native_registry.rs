@@ -7,6 +7,38 @@ use serde_json::Value;
 
 use super::releases::Package;
 
+/// Match npm's `validForOldPackages` admission (also used by npm publish),
+/// preserving warning-only legacy names rather than imposing new-package rules.
+/// https://github.com/npm/validate-npm-package-name/blob/v7.0.2/lib/index.js
+pub(crate) fn valid_npm_package_name(name: &str) -> bool {
+    let url_friendly = |part: &str| {
+        !part.is_empty()
+            && part.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric()
+                    || matches!(
+                        byte,
+                        b'-' | b'_' | b'.' | b'!' | b'~' | b'*' | b'\'' | b'(' | b')'
+                    )
+            })
+    };
+    if name.is_empty()
+        || name.starts_with(['.', '_', '-'])
+        || matches!(
+            name.to_ascii_lowercase().as_str(),
+            "node_modules" | "favicon.ico"
+        )
+    {
+        return false;
+    }
+    if let Some(scoped) = name.strip_prefix('@') {
+        scoped.split_once('/').is_some_and(|(scope, package)| {
+            url_friendly(scope) && url_friendly(package) && !package.starts_with('.')
+        })
+    } else {
+        url_friendly(name)
+    }
+}
+
 /// npm tags share a namespace with versions and cannot be SemVer ranges.
 /// Within our ASCII tag grammar, only v-prefixed versions/x-ranges and bare
 /// x-ranges can be ranges; operators, whitespace and build metadata are excluded.

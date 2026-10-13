@@ -114,6 +114,77 @@ fn enroll_release_checks(root: &Path) {
 }
 
 #[test]
+fn cargo_member_paths_normalize_to_repo_contract() {
+    let temp = fixture();
+    let output = plan(temp.path(), &["crates/engine/src/lib.rs"]);
+    assert!(output.status.success(), "{output:?}");
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(
+        value["selected"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("rust"))
+    );
+    assert!(
+        value["reasons"]["rust"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("changed:crates/engine/src/lib.rs"))
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn non_utf8_git_paths_select_full_graph_without_losing_known_paths() {
+    use std::os::unix::ffi::OsStringExt;
+    for tracked in [false, true] {
+        let temp = fixture();
+        let root = temp.path();
+        fixture_git(root, &["init", "-q"]);
+        fixture_git(root, &["config", "user.name", "Simit fixture"]);
+        fixture_git(root, &["config", "user.email", "fixture@example.invalid"]);
+        fixture_git(root, &["add", "."]);
+        fixture_git(
+            root,
+            &[
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "core.hooksPath=/dev/null",
+                "commit",
+                "-qm",
+                "base",
+            ],
+        );
+        let base = fixture_git(root, &["rev-parse", "HEAD"]);
+        let filename = std::ffi::OsString::from_vec(b"python/invalid-\xff.py".to_vec());
+        fs::write(root.join(filename), "changed\n").unwrap();
+        write(root, "python/server.py", "known change\n");
+        if tracked {
+            fixture_git(root, &["add", "."]);
+        }
+        let output = common::simit()
+            .current_dir(root)
+            .args(["monorepo", "plan", "--json", "--base", base.trim()])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{tracked}: {output:?}");
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["full"], true);
+        assert_eq!(
+            value["selected"],
+            serde_json::json!(["core", "python", "rust", "worker"])
+        );
+        assert!(
+            value["changedPaths"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("python/server.py"))
+        );
+    }
+}
+
+#[test]
 fn core_changes_select_transitive_consumers_and_prerequisites() {
     let temp = fixture();
     let output = plan(temp.path(), &["nix/core/default.nix"]);

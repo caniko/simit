@@ -700,6 +700,50 @@ fn python_bump_updates_each_declared_owning_uv_lock() {
 }
 
 #[test]
+fn native_npm_names_are_admitted_before_publication_enrollment() {
+    for (name, valid) in [
+        ("bad name", false),
+        ("../evil", false),
+        ("_hidden", false),
+        ("-hidden", false),
+        ("node_modules", false),
+        ("favicon.ico", false),
+        ("@scope/.hidden", false),
+        ("@scope/", false),
+        ("@scope/pkg/extra", false),
+        ("bad%name", false),
+        ("@scope/pkg", true),
+        ("ordinary.name", true),
+        ("http", true),
+        ("LegacyCase", true),
+        ("@scope/_legacy", true),
+        ("legacy!name", true),
+    ] {
+        let temp = fixture();
+        let root = temp.path();
+        let config = fs::read_to_string(root.join("simit.toml"))
+            .unwrap()
+            .replace("publish = false", "publish = true");
+        write(root, "simit.toml", &config);
+        write(
+            root,
+            "node/package.json",
+            &serde_json::json!({"name":name,"version":"1.3.0"}).to_string(),
+        );
+        let output = run(root, &["init", "ci"]);
+        assert_eq!(output.status.success(), valid, "{name}: {output:?}");
+        if !valid {
+            assert!(String::from_utf8_lossy(&output.stderr).contains("invalid npm package name"));
+            assert!(
+                !root
+                    .join(".github/workflows/trusted-publish-npm-node-engine.yaml")
+                    .exists()
+            );
+        }
+    }
+}
+
+#[test]
 fn native_npm_provenance_is_boolean_during_enrollment() {
     for provenance in [
         serde_json::json!("true"),

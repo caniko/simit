@@ -110,8 +110,15 @@ pub fn select(graph: &Graph, paths: &[String], all: bool) -> Result<Plan> {
     })
 }
 
+/// Representable Git changes and conservative fallback for unknown byte paths.
+pub struct ChangedPaths {
+    pub paths: Vec<String>,
+    /// Git permits byte paths that the component path contract cannot represent.
+    pub full: bool,
+}
+
 /// Disabling rename detection deliberately retains old and new ownership paths.
-pub fn changed_paths(root: &Path, base: &str) -> Result<Vec<String>> {
+pub fn changed_paths(root: &Path, base: &str) -> Result<ChangedPaths> {
     let revision = git(
         root,
         &[
@@ -130,15 +137,17 @@ pub fn changed_paths(root: &Path, base: &str) -> Result<Vec<String>> {
         root,
         &["ls-files", "--others", "--exclude-standard", "-z"],
     )?);
-    paths
-        .split(|b| *b == 0)
-        .filter(|p| !p.is_empty())
-        .map(|p| {
-            Ok(std::str::from_utf8(p)
-                .context("changed path is not UTF-8; full qualification is required")?
-                .to_owned())
-        })
-        .collect()
+    let mut changed = ChangedPaths {
+        paths: Vec::new(),
+        full: false,
+    };
+    for path in paths.split(|b| *b == 0).filter(|p| !p.is_empty()) {
+        match std::str::from_utf8(path) {
+            Ok(path) => changed.paths.push(path.to_owned()),
+            Err(_) => changed.full = true,
+        }
+    }
+    Ok(changed)
 }
 
 fn git(root: &Path, args: &[&str]) -> Result<Vec<u8>> {

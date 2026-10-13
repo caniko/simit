@@ -114,6 +114,10 @@ impl ManifestRelease {
         if self.publish && !private {
             registry.version(&version)?;
             if matches!(registry, super::native_registry::Registry::Npm) {
+                ensure!(
+                    super::native_registry::valid_npm_package_name(&name),
+                    "invalid npm package name {name:?}"
+                );
                 let doc: Value = serde_json::from_str(content)?;
                 ensure!(
                     doc["publishConfig"]["provenance"].is_null()

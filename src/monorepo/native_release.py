@@ -33,6 +33,15 @@ def normalize(name):
     return re.sub(r"[-_.]+", "-", name).lower()
 
 
+def valid_npm_package_name(name):
+    # validate-npm-package-name 7's validForOldPackages permits warning-only
+    # legacy names, matching the hosted npm publisher's admission.
+    if not isinstance(name, str) or not name or name.startswith((".", "_", "-")) or name.lower() in ("node_modules", "favicon.ico"):
+        return False
+    parts = name[1:].split("/") if name.startswith("@") else [name]
+    return (not name.startswith("@") or (len(parts) == 2 and not parts[1].startswith("."))) and all(re.fullmatch(r"[A-Za-z0-9_.!~*'()-]+", part) for part in parts)
+
+
 def python_version(version):
     # Static SemVer owners must also have a version accepted by public PyPI.
     match = re.fullmatch(r"(\d+\.\d+\.\d+)(?:-(alpha|beta|rc|dev)(?:\.(\d+))?)?", version)
@@ -92,6 +101,7 @@ def context():
     require(data["name"] == package and data["version"] == version, "tagged manifest identity/version mismatch")
     require(not data.get("private", False), "private packages cannot be published")
     if registry == "npm":
+        require(valid_npm_package_name(package), "invalid npm package name")
         require("+" not in version, "public native releases cannot have SemVer build metadata")
         config = data.get("publishConfig", {})
         require(config.get("provenance") is None or isinstance(config["provenance"], bool), "signed npm provenance policy must be boolean")
@@ -126,6 +136,7 @@ def tar_metadata(path, registry):
 def archive_identity(path, identity):
     if identity["registry"] == "npm":
         data = json.loads(tar_metadata(path, "npm"))
+        require(valid_npm_package_name(data["name"]), "invalid npm package name")
         require(not data.get("private", False), "packed package is private")
         require(data.get("publishConfig", {}).get("registry", "https://registry.npmjs.org/").rstrip("/") == "https://registry.npmjs.org", "packed npm registry is not public npm")
         name, version = data["name"], data["version"]
@@ -258,6 +269,7 @@ def provenance_bundle(identity, archive):
 
 def upload_native(out, identity, files, manifest, token):
     if identity["registry"] == "npm":
+        require(valid_npm_package_name(identity["name"]), "invalid npm package name")
         name = files[0]
         archive = (out / name).read_bytes()
         package = json.loads(tar_metadata(out / name, "npm"))
@@ -315,24 +327,44 @@ def upload_native(out, identity, files, manifest, token):
         upload_request(urllib.request.Request("https://upload.pypi.org/legacy/", data=bytes(body), headers={"Authorization": "Basic " + authorization, "Content-Type": "multipart/form-data; boundary=" + boundary}))
 
 
+def npm_tag_matches(identity, tag):
+    metadata = registry_metadata(identity)
+    return metadata is not None and metadata.get("dist-tags", {}).get(tag) == identity["version"]
+
+
+def update_npm_tag(identity, tag, token):
+    # Fixed registry endpoint and admitted data only; never invoke candidate npm.
+    url = "https://registry.npmjs.org/-/package/" + urllib.parse.quote(identity["name"], safe="") + "/dist-tags/" + urllib.parse.quote(tag, safe="")
+    upload_request(urllib.request.Request(url, data=json.dumps(identity["version"]).encode(), method="PUT", headers={"Authorization": "Bearer " + token, "Content-Type": "application/json"}))
+
+
 def publish(out, identity, attempt, manifest):
     files = validate_artifacts(out, identity, attempt)
+    tag = manifest.get("publishConfig", {}).get("tag", "latest") if identity["registry"] == "npm" else None
+    require(identity["registry"] != "npm" or valid_npm_dist_tag(tag), "invalid signed npm dist-tag")
     pending = missing_files(out, identity, files)
-    if not pending:
+    if not pending and (tag is None or npm_tag_matches(identity, tag)):
         print("Exact native release already propagated")
         return
     token = "UV_PUBLISH_TOKEN" if identity["registry"] == "python" else "NODE_AUTH_TOKEN"
     require(os.environ.get(token, "").strip(), f"missing {token}")
     upload_error = None
     try:
-        upload_native(out, identity, pending, manifest, os.environ[token])
+        if pending:
+            upload_native(out, identity, pending, manifest, os.environ[token])
     except (urllib.error.URLError, RuntimeError) as error:
         upload_error = error
     # A concurrent exact publication is accepted only after matching checksums.
     for attempt in range(20):
         if not missing_files(out, identity, files):
-            print("Exact native release propagated with matching checksums")
-            return
+            if tag is not None and not npm_tag_matches(identity, tag):
+                try:
+                    update_npm_tag(identity, tag, os.environ[token])
+                except (urllib.error.URLError, RuntimeError) as error:
+                    upload_error = error
+            else:
+                print("Exact native release propagated with matching checksums and signed distribution tag")
+                return
         if attempt < 19:
             time.sleep(30)
     raise RuntimeError("native registry propagation deadline exceeded; retain original archive") from upload_error

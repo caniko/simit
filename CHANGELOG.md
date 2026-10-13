@@ -79,6 +79,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   monorepo extension publication before workflow reconciliation.
 - Resolve formatter toolchains from active lexical Nix bindings instead of
   comments or strings, preserving existing crane/overlay toolchains.
+- Admit npm registry names before enrolling publication, reconcile signed npm
+  distribution tags on archive recovery, qualify every component for undecodable
+  Git paths, and normalize Cargo workspace member paths on Windows.
 - Preserve `SIMIT_NIX_FRESH` in environment-mode grouped execution, retain
   `SIMIT_NIX_FRESH_INSTALLABLES` as an alias, and reject conflicting values before
   execution so freshness requirements cannot silently disappear.

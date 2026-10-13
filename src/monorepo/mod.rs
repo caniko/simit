@@ -14,7 +14,7 @@ use serde::Deserialize;
 
 use crate::config::{ProjectConfig, RequiredGate};
 
-pub use plan::{Plan, changed_paths, select};
+pub use plan::{ChangedPaths, Plan, changed_paths, select};
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -208,8 +208,13 @@ impl Config {
                         );
                         component.paths.push("Cargo.toml".to_owned());
                     } else {
-                        validate_relative_path(directory.as_str())?;
-                        component.paths.push(directory.to_string());
+                        let directory = directory
+                            .components()
+                            .map(|part| part.as_str())
+                            .collect::<Vec<_>>()
+                            .join("/");
+                        validate_relative_path(&directory)?;
+                        component.paths.push(directory);
                     }
                 }
             }
@@ -463,12 +468,15 @@ pub fn run(command: crate::cli::MonorepoCommand) -> Result<()> {
                 .as_ref()
                 .context("missing monorepo config")?
                 .resolve(&root)?;
-            let paths = if let Some(base) = command.base.as_deref() {
+            let changed = if let Some(base) = command.base.as_deref() {
                 changed_paths(&root, base)?
             } else {
-                command.changed_paths
+                ChangedPaths {
+                    full: command.changed_paths.is_empty(),
+                    paths: command.changed_paths,
+                }
             };
-            let plan = select(&graph, &paths, paths.is_empty() && command.base.is_none())?;
+            let plan = select(&graph, &changed.paths, changed.full)?;
             if command.json {
                 println!("{}", serde_json::to_string_pretty(&plan)?);
             } else {

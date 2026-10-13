@@ -210,6 +210,12 @@ publisher never executes those scripts.
 Public Python verification requires the complete unyanked wheel/sdist pair with
 valid SHA-256 entries. npm provenance policy must be boolean or unset during
 enrollment and credential-free packing.
+Public npm name admission follows npm's legacy-compatible publish validation.
+Recovery of an already-published exact npm archive also verifies its signed
+distribution tag and repairs that mapping without rebuilding the archive.
+Undecodable Git byte paths force full component qualification; known UTF-8 paths
+remain in the plan. Cargo metadata paths are normalized to repository-style `/`
+separators on Windows before ownership matching.
 
 Configured VS Code and JetBrains extension publishers remain independently
 managed. Full monorepo CI generation rejects those sections before reconciling

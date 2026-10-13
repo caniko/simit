@@ -80,7 +80,7 @@ class NativeRelease(unittest.TestCase):
         files = self.receipt()
         integrity = "sha512-" + base64.b64encode(hashlib.sha512(path.read_bytes()).digest()).decode()
         release = dict(name=self.identity["name"], version="1.2.3", dist=dict(integrity=integrity))
-        metadata = dict(name=self.identity["name"], versions={"1.2.3": release})
+        metadata = dict(name=self.identity["name"], versions={"1.2.3": release}) | {"dist-tags": {"latest": "1.2.3"}}
         with patch.object(publisher, "registry_metadata", return_value=metadata):
             publisher.publish(self.out, self.identity, 1, {})
             release["dist"]["integrity"] = "sha512-wrong"
