@@ -58,6 +58,14 @@ fn completion_custody_uses_default_branch_code_without_executing_producer_source
     );
     assert_eq!(value["permissions"]["statuses"], "write");
     assert_eq!(value["permissions"]["actions"], "read");
+    assert!(value["permissions"].get("checks").is_none());
+    assert_eq!(
+        value["jobs"]["collect"]["permissions"],
+        serde_yaml::from_str::<Value>(
+            "contents: read\nactions: read\nchecks: read\nstatuses: write\n"
+        )
+        .unwrap()
+    );
     assert!(value.get("concurrency").is_none());
     assert_eq!(
         value["jobs"]["collect"]["concurrency"]["cancel-in-progress"],
@@ -68,10 +76,23 @@ fn completion_custody_uses_default_branch_code_without_executing_producer_source
         "custody-${{ needs.identity.outputs.group }}"
     );
     assert_eq!(value["jobs"]["collect"]["needs"][0], "identity");
+    assert_eq!(
+        value["jobs"]["collect"]["if"],
+        "needs.identity.outputs.eligible == 'true'"
+    );
+    assert_eq!(
+        value["jobs"]["identity"]["outputs"]["eligible"],
+        "${{ steps.identity.outputs.eligible }}"
+    );
     assert_eq!(value["jobs"]["identity"]["permissions"]["contents"], "read");
     assert!(
         value["jobs"]["identity"]["permissions"]
             .get("statuses")
+            .is_none()
+    );
+    assert!(
+        value["jobs"]["identity"]["permissions"]
+            .get("checks")
             .is_none()
     );
     assert_eq!(
@@ -108,6 +129,105 @@ fn completion_custody_uses_default_branch_code_without_executing_producer_source
         simit::registry::audit_ci(temp.path()).unwrap().status,
         simit::registry::FeatureStatus::Managed
     );
+}
+
+#[test]
+fn rendered_custody_workflow_admits_exact_utf8_byte_boundary_with_full_inventory() {
+    for token in ["x", "é", "\"", "\\", "'"] {
+        let temp = project();
+        let mut config = simit::config::ProjectConfig::load(temp.path())
+            .unwrap()
+            .ci
+            .custody
+            .unwrap();
+        let mut producer = config.producers.remove("CI").unwrap();
+        producer.jobs = (0..50).map(|i| format!("job-{i}-{token}")).collect();
+        producer.artifacts = (0..50).map(|i| format!("artifact-{i}-{token}")).collect();
+        config.producers.clear();
+        config.producers.insert(format!("CI {token}"), producer);
+        let baseline = simit::render::ci::custody::file(&config)
+            .unwrap()
+            .content
+            .len();
+        let remaining = 500_000 - baseline;
+        // A name byte is rendered three times, a job byte twice. Together they
+        // allow an exact byte boundary independently of Unicode/escaping width.
+        let name_pad = remaining % 2;
+        let (name, mut producer) = config.producers.pop_first().unwrap();
+        producer.jobs[0].push_str(&"x".repeat((remaining - 3 * name_pad) / 2));
+        config
+            .producers
+            .insert(name + &"x".repeat(name_pad), producer);
+        let rendered = simit::render::ci::custody::file(&config).unwrap();
+        assert_eq!(rendered.content.len(), 500_000, "{token:?}");
+        let value: Value = serde_yaml::from_str(&rendered.content).unwrap();
+        let policy: serde_json::Value = serde_json::from_str(
+            value["jobs"]["collect"]["env"]["SIMIT_CUSTODY_CONFIG"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(policy, serde_json::to_value(&config).unwrap());
+        let (name, mut producer) = config.producers.pop_first().unwrap();
+        producer.jobs[0].pop();
+        config.producers.insert(name + "x", producer);
+        config.validate().unwrap();
+        let error = simit::render::ci::custody::file(&config).unwrap_err();
+        assert!(error.to_string().contains("500001 bytes"), "{error:#}");
+    }
+}
+
+#[test]
+fn oversized_rendered_custody_policy_rejects_without_persistence_or_reconciliation() {
+    for language in ["nix", "rust", "python"] {
+        let temp = project();
+        if language == "rust" {
+            fs::write(
+                temp.path().join("Cargo.toml"),
+                "[package]\nname = \"client\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+            )
+            .unwrap();
+            fs::create_dir(temp.path().join("src")).unwrap();
+            fs::write(temp.path().join("src/lib.rs"), "pub fn client() {}\n").unwrap();
+        } else if language == "python" {
+            fs::write(
+                temp.path().join("pyproject.toml"),
+                "[project]\nname = \"client\"\nversion = \"0.1.0\"\nrequires-python = \">=3.11\"\n",
+            )
+            .unwrap();
+        }
+        let config = temp.path().join("simit.toml");
+        let source = fs::read_to_string(&config).unwrap().replace(
+            "jobs = [\"test\"]",
+            &format!("jobs = [\"{}\"]", "x".repeat(200_000)),
+        );
+        fs::write(&config, &source).unwrap();
+        let workflows = temp.path().join(".github/workflows");
+        fs::create_dir_all(&workflows).unwrap();
+        let prior = "# Generated by simit\nname: prior\non: push\njobs: {}\n";
+        fs::write(workflows.join("ci.yaml"), prior).unwrap();
+        for args in [
+            vec!["init", "ci", "--runner", "ubuntu-latest"],
+            vec!["init", "ci", "--check", "--diff"],
+        ] {
+            let output = common::simit()
+                .current_dir(temp.path())
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(!output.status.success(), "{output:?}");
+            assert!(
+                String::from_utf8_lossy(&output.stderr).contains("500000-byte workflow limit"),
+                "{output:?}"
+            );
+            assert_eq!(fs::read_to_string(&config).unwrap(), source);
+            assert_eq!(
+                fs::read_to_string(workflows.join("ci.yaml")).unwrap(),
+                prior
+            );
+            assert_eq!(fs::read_dir(&workflows).unwrap().count(), 1);
+        }
+    }
 }
 
 #[test]

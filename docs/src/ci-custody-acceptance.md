@@ -20,7 +20,8 @@ Generate `.github/workflows/producer-custody.yaml` with the exact qualified Simi
 binary using `simit init ci`, then `simit init ci --check --diff`. Extract each of
 the three inline Python programs from the generated YAML and compare its bytes
 with `src/render/ci/custody.py`. Inspect the installed workflow: hosted runners,
-contents/actions read and statuses write, contents-read identity job, no checkout,
+collect-scoped contents/actions/checks read and statuses write, contents-read
+identity job with an eligibility gate for unenrolled paths, no checkout,
 no producer code execution, no archive extraction, upload before reporting,
 `always()` upload/report, 25-minute collection and five-minute upload timeout.
 Record all immutable action references. Retain the installation PR and approval.

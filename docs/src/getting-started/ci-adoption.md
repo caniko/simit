@@ -442,6 +442,12 @@ it with candidate producers. The first event may record a pending observation;
 the last completion aggregates every enrolled producer for the same source head,
 branch and event. Duplicate identities, nonoriginal attempts, missing jobs or
 artifacts, failed/skipped required jobs and incomplete custody cannot succeed.
+GitHub filters completions by display name, which is not unique. A positively
+identified workflow file outside every enrolled path is ignored before creating
+a reporting target or collection queue, even if it reuses an enrolled name.
+Capture and report repeat this early fence and never read stale receipts for
+unrelated completions. An enrolled path with a wrong name or ref qualifier still
+fails admission and revokes its established target.
 Admission and bounded-capture checks use explicit errors and remain enforced
 when Python optimization is enabled. Failed revalidation revokes a previously
 successful observation in both ordinary and optimized interpreter modes.
@@ -478,8 +484,13 @@ records under a 16 MiB directory bound, the remaining aggregate member/expansion
 budgets and the original deadline. Forged footer counts cannot bypass that scan.
 Stored and deflated provider archives, including ZIP64, are supported; other
 compression methods fail admission before any member decompression.
-Enrollment accepts at most 100 jobs/artifacts across all producers. Budget
-failures retain the established failure-reporting target.
+Enrollment accepts at most 100 jobs/artifacts across all producers. Generation
+also admits the complete rendered workflow only up to 500,000 UTF-8 bytes under
+GitHub's [500 KB workflow-file limit](https://docs.github.com/en/enterprise-cloud@latest/actions/reference/limits#workflow-file-size),
+including repeated policy/program text and YAML/JSON escaping. Oversized policies
+reject before generated-file reconciliation or configuration persistence; shorten
+enrolled names/inventories to fit. Capture budget failures retain the established
+failure-reporting target.
 
 Capture and upload must both complete before source-head status success. Reporting is
 idempotent and explicitly targets the producer commit, not the observer's default-
@@ -512,7 +523,9 @@ completion target was safely established.
 Same-repository branch/PR custody is supported; signed-tag release
 attempt policy and fork custody require separately qualified enrollment.
 
-The observer has only contents/actions read and statuses write permissions. It
+The collect job has only contents/actions/checks read and statuses write
+permissions. `checks: read` admits the native check-suite proof in private
+repositories; identity remains contents-read and receives no token environment. It
 provides observation custody, not independent execution acceptance. Keep native
 test/build contexts and consumer receipt validation authoritative. Qualify its
 default-branch installation, completion ordering, source-head reporting and

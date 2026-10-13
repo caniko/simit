@@ -312,6 +312,89 @@ class Custody(unittest.TestCase):
                             retained = json.loads((root / str(run['id']) / 'terminal.json').read_text())
                             self.assertEqual(retained['path'], run['path'])
 
+    def test_unenrolled_same_name_completion_has_no_effect_in_either_order(self):
+        parent, enrolled = self.folder, copy.deepcopy(self.payload)
+        unrelated = copy.deepcopy(enrolled)
+        unrelated['workflow_run'].update(id=3, path='.github/workflows/unrelated.yaml@feature')
+        self.runs.append(copy.deepcopy(unrelated['workflow_run']))
+        for order in [('unrelated', 'enrolled'), ('enrolled', 'unrelated')]:
+            with self.subTest(order=order), tempfile.TemporaryDirectory(dir=parent) as directory:
+                self.previous, self.effects, self.calls = [], [], []
+                for completion in order:
+                    self.folder = Path(directory) / completion
+                    self.folder.mkdir()
+                    self.payload = copy.deepcopy(enrolled if completion == 'enrolled' else unrelated)
+                    if completion == 'enrolled':
+                        self.captured()
+                        self.assertEqual(self.report(), 0)
+                        self.previous = [self.effects[-1][1]]
+                        continue
+                    event, output = self.folder / 'input.json', self.folder / 'outputs'
+                    event.write_text(json.dumps(self.payload))
+                    root = self.folder / 'custody'
+                    before_calls, before_effects = list(self.calls), copy.deepcopy(self.effects)
+                    with patch.dict(os.environ, {'SIMIT_CUSTODY_CONFIG': json.dumps(self.config),
+                            'SIMIT_CUSTODY_ROOT': str(root), 'GITHUB_EVENT_PATH': str(event),
+                            'GITHUB_OUTPUT': str(output)}):
+                        for phase in ['identity', 'capture', 'report']:
+                            with patch.dict(os.environ, {'SIMIT_CUSTODY_PHASE': phase}):
+                                with patch('subprocess.run') as post:
+                                    self.assertEqual(self.namespace['main'](), 0)
+                                    post.assert_not_called()
+                    self.assertEqual(output.read_text(), 'eligible=false\n')
+                    self.assertFalse(root.exists())
+                    self.assertIsNone(self.namespace['capture'](self.config, self.payload, self.folder))
+                    self.assertFalse((self.folder / 'receipt.json').exists())
+                    self.assertEqual(self.calls, before_calls)
+                    self.assertEqual(self.effects, before_effects)
+                self.assertEqual(len(self.effects), 1)
+                self.assertEqual(self.previous[0]['state'], 'success')
+                self.assertEqual(self.previous[0]['context'], CONTEXT)
+        self.folder, self.payload = parent, enrolled
+
+    def test_unenrolled_completion_cannot_use_or_mutate_a_stale_reporting_receipt(self):
+        self.captured()
+        receipt = (self.folder / 'receipt.json').read_bytes()
+        self.payload['workflow_run']['path'] = '.github/workflows/unrelated.yaml'
+        before = {str(path): path.read_bytes() for path in self.folder.rglob('*') if path.is_file()}
+        before_calls = list(self.calls)
+        for phase in ['capture', 'report']:
+            with patch.dict(os.environ, {'SIMIT_CUSTODY_PHASE': phase}):
+                event = self.folder / 'input-event.json'
+                event.write_text(json.dumps(self.payload))
+                with patch.dict(os.environ, {'SIMIT_CUSTODY_CONFIG': json.dumps(self.config),
+                        'SIMIT_CUSTODY_ROOT': str(self.folder), 'GITHUB_EVENT_PATH': str(event)}):
+                    with patch('subprocess.run') as post:
+                        self.assertEqual(self.namespace['main'](), 0)
+                        post.assert_not_called()
+        self.assertEqual((self.folder / 'receipt.json').read_bytes(), receipt)
+        self.assertEqual({str(path): path.read_bytes() for path in self.folder.rglob('*')
+                          if path.is_file() and path.name != 'input-event.json'}, before)
+        self.assertEqual(self.calls, before_calls)
+
+    def test_enrolled_path_bad_qualifiers_and_names_still_revoke_success(self):
+        original_runs, original_payload, parent = copy.deepcopy(self.runs), copy.deepcopy(self.payload), self.folder
+        for observation in ['event', 'native', 'name', 'other-enrolled-file']:
+            with self.subTest(observation=observation), tempfile.TemporaryDirectory(dir=parent) as directory:
+                self.folder = Path(directory)
+                self.runs, self.payload = copy.deepcopy(original_runs), copy.deepcopy(original_payload)
+                self.previous = [{'context': CONTEXT, 'state': 'success', 'description': 'prior success'}]
+                if observation == 'event':
+                    self.payload['workflow_run']['path'] += '@other'
+                elif observation == 'native':
+                    self.runs[0]['path'] += '@other'
+                elif observation == 'name':
+                    self.runs[0]['name'] = 'Not enrolled'
+                else:
+                    self.payload['workflow_run']['path'] = self.runs[1]['path']
+                    self.runs[0]['path'] = self.runs[1]['path']
+                with self.assertRaises(RuntimeError):
+                    self.main_capture()
+                self.assertEqual(self.report(), 1)
+                self.assertEqual(self.effects[-1][1]['state'], 'failure')
+                self.assertEqual(self.effects[-1][1]['context'], CONTEXT)
+        self.folder = parent
+
     def test_invalid_workflow_qualifiers_never_capture_complete_custody(self):
         original_runs, original_payload = copy.deepcopy(self.runs), copy.deepcopy(self.payload)
         for value in [None, [], {}, '', '.github/workflows/other.yaml@feature',
@@ -337,7 +420,10 @@ class Custody(unittest.TestCase):
                     self.namespace['api'] = api
                     with tempfile.TemporaryDirectory(dir=self.folder) as directory:
                         root = Path(directory)
-                        if observation == 'discovery':
+                        if observation == 'event' and value == '.github/workflows/other.yaml@feature':
+                            self.assertIsNone(self.namespace['capture'](self.config, self.payload, root))
+                            self.assertFalse((root / 'receipt.json').exists())
+                        elif observation == 'discovery':
                             receipt = self.namespace['capture'](self.config, self.payload, root)
                             self.assertEqual(receipt['state'], 'waiting')
                             self.assertFalse(receipt['capture_complete'])

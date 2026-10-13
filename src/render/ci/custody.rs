@@ -3,6 +3,9 @@ use super::*;
 use crate::config::custody::Config;
 
 pub const PATH: &str = ".github/workflows/producer-custody.yaml";
+// GitHub documents a 500 KB workflow-file limit. Use decimal bytes, including
+// every embedded program, repeated policy, indentation and YAML/JSON escape.
+const MAX_WORKFLOW_BYTES: usize = 500_000;
 
 pub fn validate_backend(
     config: &crate::config::CiConfig,
@@ -27,13 +30,13 @@ pub fn file(config: &Config) -> Result<GeneratedFile> {
     for name in config.producers.keys() {
         workflow.push_str(&format!("      - \"{}\"\n", yaml_double_quote(name)));
     }
-    workflow.push_str("    types: [completed]\n\npermissions:\n  contents: read\n  actions: read\n  statuses: write\n\njobs:\n  identity:\n    runs-on: ubuntu-24.04\n    timeout-minutes: 2\n    permissions:\n      contents: read\n    outputs:\n      group: ${{ steps.identity.outputs.group }}\n    steps:\n      - name: Establish completion target identity\n        id: identity\n        shell: python\n        env:\n          SIMIT_CUSTODY_PHASE: identity\n");
+    workflow.push_str("    types: [completed]\n\npermissions:\n  contents: read\n  actions: read\n  statuses: write\n\njobs:\n  identity:\n    runs-on: ubuntu-24.04\n    timeout-minutes: 2\n    permissions:\n      contents: read\n    outputs:\n      group: ${{ steps.identity.outputs.group }}\n      eligible: ${{ steps.identity.outputs.eligible }}\n    steps:\n      - name: Establish completion target identity\n        id: identity\n        shell: python\n        env:\n          SIMIT_CUSTODY_PHASE: identity\n");
     workflow.push_str(&format!(
         "          SIMIT_CUSTODY_CONFIG: '{}'\n        run: |\n",
         serde_json::to_string(config)?.replace('\'', "''")
     ));
     push_program(&mut workflow);
-    workflow.push_str("  collect:\n    needs: [identity]\n    concurrency:\n      group: custody-${{ needs.identity.outputs.group }}\n      cancel-in-progress: false\n    runs-on: ubuntu-24.04\n    timeout-minutes: 25\n    env:\n      GH_HOST: github.com\n      GH_TOKEN: ${{ github.token }}\n");
+    workflow.push_str("  collect:\n    needs: [identity]\n    if: needs.identity.outputs.eligible == 'true'\n    permissions:\n      contents: read\n      actions: read\n      checks: read\n      statuses: write\n    concurrency:\n      group: custody-${{ needs.identity.outputs.group }}\n      cancel-in-progress: false\n    runs-on: ubuntu-24.04\n    timeout-minutes: 25\n    env:\n      GH_HOST: github.com\n      GH_TOKEN: ${{ github.token }}\n");
     workflow.push_str(&format!(
         "      SIMIT_CUSTODY_CONFIG: '{}'\n    steps:\n",
         serde_json::to_string(config)?.replace('\'', "''")
@@ -62,6 +65,12 @@ pub fn file(config: &Config) -> Result<GeneratedFile> {
         }
         workflow.push_str("        run: |\n");
         push_program(&mut workflow);
+    }
+    if workflow.len() > MAX_WORKFLOW_BYTES {
+        bail!(
+            "[ci.custody] renders {} bytes, exceeding the {MAX_WORKFLOW_BYTES}-byte workflow limit; shorten enrolled names/inventories",
+            workflow.len()
+        );
     }
     Ok(GeneratedFile {
         relative_path: PathBuf::from(PATH),

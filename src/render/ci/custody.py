@@ -340,6 +340,22 @@ def workflow_path_matches(value, expected, snapshot):
     return path == expected and (not separator or reference in references)
 
 
+def unenrolled_completion(config, payload):
+    """Only a positively identified, different file is outside enrollment.
+
+    Names are not unique on GitHub. Keep enrolled files (including wrong names
+    or ref qualifiers) on the normal fail/revoke path; malformed paths cannot
+    establish that a completion is unrelated either.
+    """
+    run = payload.get('workflow_run')
+    value = run.get('path') if isinstance(run, dict) else None
+    if not isinstance(value, str):
+        return False
+    path = value.partition('@')[0]
+    return (re.fullmatch(r'\.github/workflows/[A-Za-z0-9_.-]+\.ya?ml', path) is not None
+            and path not in {producer['workflow'] for producer in config['producers'].values()})
+
+
 def validate_run(run, head, branch, event, name, producer, attempt, repository, snapshot):
     require(type(run['id']) is int and run['id'] > 0, 'Invalid producer run identity')
     require(repository_identity(run['repository']['full_name']) == repository, 'Producer repository differs')
@@ -404,6 +420,8 @@ def workflow_revision(run, workflow, repository, fetch, proof_path=None, budget=
 
 
 def capture(config, payload, root, budget=None):
+    if unenrolled_completion(config, payload):
+        return None
     repository = repository_identity(config['repository'])
     budget = budget or CaptureBudget()
     fetch = budget.request
@@ -613,29 +631,37 @@ def report(config, root):
 
 def main():
     config = json.loads(os.environ['SIMIT_CUSTODY_CONFIG'])
+    phase = os.environ['SIMIT_CUSTODY_PHASE']
+    with Path(os.environ['GITHUB_EVENT_PATH']).open('rb') as event:
+        payload_bytes = event.read(MAX_EVENT_BYTES + 1)
+    require(len(payload_bytes) <= MAX_EVENT_BYTES, 'Completion event exceeds its bound')
+    payload = json.loads(payload_bytes)
+    # Classify before deriving a target, creating a root, retaining any bytes or
+    # reading a prior receipt. Report repeats this fence after upload so an
+    # unrelated completion can never publish through stale local custody.
+    if unenrolled_completion(config, payload):
+        if phase == 'identity':
+            with Path(os.environ['GITHUB_OUTPUT']).open('a') as output:
+                output.write('eligible=false\n')
+        return 0
     if os.environ['SIMIT_CUSTODY_PHASE'] == 'identity':
-        with Path(os.environ['GITHUB_EVENT_PATH']).open('rb') as event:
-            raw = event.read(MAX_EVENT_BYTES + 1)
-        require(len(raw) <= MAX_EVENT_BYTES, 'Completion event exceeds its bound')
-        snapshot, _ = completion_identity(config, json.loads(raw))
+        snapshot, _ = completion_identity(config, payload)
         digest = hashlib.sha256(json.dumps(snapshot['target'], sort_keys=True, separators=(',', ':')).encode()).hexdigest()
         # Hex-only groups preserve case-sensitive refs despite case-insensitive
         # Actions concurrency. Same-target pending replacements are observations
         # of the same producer set; other branches/PRs/bases have distinct queues.
         with Path(os.environ['GITHUB_OUTPUT']).open('a') as output:
             output.write('group=' + snapshot['head'] + '-' + digest + '\n')
+            output.write('eligible=true\n')
         return 0
     root = Path(os.environ['SIMIT_CUSTODY_ROOT'])
     root.mkdir(exist_ok=True)
     if os.environ['SIMIT_CUSTODY_PHASE'] == 'report':
         return report(config, root)
-    with Path(os.environ['GITHUB_EVENT_PATH']).open('rb') as event:
-        payload_bytes = event.read(MAX_EVENT_BYTES + 1)
-    require(len(payload_bytes) <= MAX_EVENT_BYTES, 'Completion event exceeds its bound')
     budget = CaptureBudget()
     budget.retain(root / 'event.json', payload_bytes)
     try:
-        receipt = capture(config, json.loads(payload_bytes), root, budget)
+        receipt = capture(config, payload, root, budget)
         receipt['members'] = {}
         for path in sorted(root.rglob('*')):
             if path.is_file() and path.name != 'receipt.json':

@@ -26,6 +26,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Grant check-suite read access only to completion-custody collection, bound the
+  fully rendered observer to 500,000 bytes before writes, and ignore unenrolled
+  workflow paths that reuse producer names without changing custody statuses.
 - Bind completion-custody workflow hashes to GitHub's native executed-file
   revision, independently of raw PR heads or producer checkout revisions, with
   fresh proof revalidation before capture completion and after upload.
