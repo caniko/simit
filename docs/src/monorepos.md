@@ -82,6 +82,26 @@ declared environment and timeout. `systems` can select native runners using
 flakes retain their existing ownership contract. Language and publication
 overrides must not be used to replace component qualification commands.
 
+### Running a declared check
+
+```console
+simit monorepo check --component core --check evaluate --nix-diagnostics
+```
+
+The native runner resolves the root configuration, validates the component and
+check, and executes its project-owned command with `sh -ec` and the declared
+environment. Unknown checks fail before execution. Generated qualification uses
+this runner inside the project's `ci` shell; GitHub retains the check timeout.
+
+On Linux, `--nix-diagnostics` captures `/proc/meminfo`, memory pressure, Nix
+daemon status, and bounded daemon/kernel journals after a failed check. Journal
+queries start at the check's start time, retain at most 150 entries each, and
+use non-interactive sudo with a 15-second timeout and five-second termination
+grace per command. Missing tools or
+permissions are reported without changing the failed result. The runner does
+not retry the gate or restart the daemon, and does not dump its environment.
+These diagnostics are written to stderr and retained in the provider job log.
+
 ## Independent Cargo releases
 
 ```console

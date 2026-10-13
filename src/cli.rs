@@ -82,6 +82,23 @@ pub struct MonorepoCommand {
 pub enum MonorepoAction {
     #[command(about = "Print affected components in dependency order without writing files")]
     Plan(MonorepoPlanCommand),
+    #[command(
+        about = "Run one declared component check and retain bounded Nix failure diagnostics"
+    )]
+    Check(MonorepoCheckCommand),
+}
+
+#[derive(Debug, Args)]
+pub struct MonorepoCheckCommand {
+    #[arg(long)]
+    pub component: String,
+    #[arg(long)]
+    pub check: String,
+    #[arg(
+        long,
+        help = "Capture Linux kernel and Nix daemon evidence when the check fails"
+    )]
+    pub nix_diagnostics: bool,
 }
 
 #[derive(Debug, Args)]

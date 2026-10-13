@@ -1,5 +1,6 @@
 //! One project-owned component graph shared by local planning and CI generation.
 
+mod check;
 pub(crate) mod ci;
 mod native_ci;
 pub(crate) mod native_registry;
@@ -448,6 +449,7 @@ pub(crate) fn compose_formatter_modules(
 
 pub fn run(command: crate::cli::MonorepoCommand) -> Result<()> {
     match command.action {
+        crate::cli::MonorepoAction::Check(command) => check::run(command),
         crate::cli::MonorepoAction::Plan(command) => {
             let (root, project) = load(&std::env::current_dir()?)?;
             let graph = project
