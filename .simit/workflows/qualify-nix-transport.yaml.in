@@ -2,7 +2,10 @@ name: Qualify fresh-worker dependency transport
 
 on:
   push:
-    branches: ["feat/ci-dependency-transport-20261012", "trunk"]
+    branches:
+      - "feat/ci-dependency-transport-20261012"
+      - "fix/transport-review-followup-20261013"
+      - "trunk"
   pull_request:
 
 permissions:
