@@ -82,6 +82,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Admit npm registry names before enrolling publication, reconcile signed npm
   distribution tags on archive recovery, qualify every component for undecodable
   Git paths, and normalize Cargo workspace member paths on Windows.
+- Honor the documented absolute `XDG_DATA_HOME` project-registry override on
+  macOS and Windows as well as Linux, retaining native defaults when unset.
 - Preserve `SIMIT_NIX_FRESH` in environment-mode grouped execution, retain
   `SIMIT_NIX_FRESH_INSTALLABLES` as an alias, and reject conflicting values before
   execution so freshness requirements cannot silently disappear.
