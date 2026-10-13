@@ -338,11 +338,7 @@ pub(crate) fn bump(selection: &Selection, command: &ReleaseCommand) -> Result<()
     let notes_path = directory.join(changelog::DEFAULT_PATH);
     let notes_enabled = !command.no_changelog
         && selection.project.release.notes_source(
-            selection
-                .project
-                .ci
-                .platform
-                .unwrap_or(crate::cli::Platform::Forgejo),
+            crate::ci_resolution::release_backend(&selection.project, None, None)?.platform(),
         ) == crate::config::ReleaseNotesSource::Changelog;
     if notes_enabled && notes_path.exists() {
         ensure!(
@@ -509,38 +505,57 @@ impl Package {
                 before,
                 after: json_bytes(&doc)?,
             });
-            for name in ["package-lock.json", "npm-shrinkwrap.json"] {
-                let lock = path.parent().context("manifest has no parent")?.join(name);
-                if !lock.exists() {
-                    continue;
-                }
-                ensure!(
-                    !fs::symlink_metadata(&lock)?.file_type().is_symlink(),
-                    "release lock must not be a symlink: {}",
-                    lock.display()
-                );
-                let before = fs::read(&lock)?;
-                let mut doc: Value = serde_json::from_slice(&before)?;
-                ensure!(
-                    doc["name"] == self.name && doc["version"] == self.version.to_string(),
-                    "npm lock identity/version disagrees with manifest"
-                );
-                doc["version"] = json!(version.to_string());
-                if let Some(package) = doc
-                    .get_mut("packages")
-                    .and_then(|packages| packages.get_mut(""))
-                {
+            let package_directory = path.parent().context("manifest has no parent")?;
+            for directory in package_directory
+                .ancestors()
+                .take_while(|dir| dir.starts_with(root))
+            {
+                for name in ["package-lock.json", "npm-shrinkwrap.json"] {
+                    let lock = directory.join(name);
+                    if !lock.exists() {
+                        continue;
+                    }
                     ensure!(
-                        package["version"] == self.version.to_string(),
-                        "npm root lock version disagrees with manifest"
+                        !fs::symlink_metadata(&lock)?.file_type().is_symlink(),
+                        "release lock must not be a symlink: {}",
+                        lock.display()
                     );
-                    package["version"] = json!(version.to_string());
+                    let before = fs::read(&lock)?;
+                    let mut doc: Value = serde_json::from_slice(&before)?;
+                    let relative = package_directory
+                        .strip_prefix(directory)?
+                        .to_str()
+                        .context("non-UTF-8 npm workspace path")?
+                        .replace('\\', "/");
+                    if relative.is_empty() {
+                        ensure!(
+                            doc["name"] == self.name && doc["version"] == self.version.to_string(),
+                            "npm lock identity/version disagrees with manifest"
+                        );
+                        doc["version"] = json!(version.to_string());
+                    }
+                    let workspace = !relative.is_empty();
+                    ensure!(
+                        !workspace || doc["packages"].get(&relative).is_some(),
+                        "npm workspace lock has no package record for {relative}; regenerate the lock before releasing"
+                    );
+                    if let Some(package) = doc
+                        .get_mut("packages")
+                        .and_then(|packages| packages.get_mut(&relative))
+                    {
+                        ensure!(
+                            package["version"] == self.version.to_string()
+                                && package.get("name").is_none_or(|name| name == &self.name),
+                            "npm package lock identity/version disagrees with manifest"
+                        );
+                        package["version"] = json!(version.to_string());
+                    }
+                    updates.push(Update {
+                        path: lock,
+                        before,
+                        after: json_bytes(&doc)?,
+                    });
                 }
-                updates.push(Update {
-                    path: lock,
-                    before,
-                    after: json_bytes(&doc)?,
-                });
             }
         }
         self.config.parse(std::str::from_utf8(&updates[0].after)?)?;

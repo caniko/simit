@@ -4343,6 +4343,11 @@ fn optional_strict_flags_render_expected_steps() {
 #[test]
 fn forgejo_nix_homebrew_step_matches_hardened_shape() {
     let temp = init_package(true);
+    fs::write(
+        temp.path().join("simit.toml"),
+        "[release]\ntag_prefix = 'v'\n",
+    )
+    .unwrap();
 
     let status = simit_with_user_config(temp.path())
         .current_dir(temp.path())
@@ -4404,10 +4409,12 @@ fn forgejo_nix_homebrew_step_matches_hardened_shape() {
     assert!(workflow.contains("--description 'demo binary' \\"));
     assert!(workflow.contains("--homepage 'https://example.com' \\"));
     assert!(workflow.contains("--license MIT \\"));
-    assert!(workflow.contains("--archive \"darwin_arm=https://codeberg.org/foo/demo/releases/download/${VERSION}/demo-${VERSION}-aarch64-darwin.tar.gz,release/demo-${VERSION}-aarch64-darwin.tar.gz\" \\"));
-    assert!(!workflow.contains("--archive \"darwin_intel=https://codeberg.org/foo/demo/releases/download/${VERSION}/demo-${VERSION}-x86_64-darwin.tar.gz,release/demo-${VERSION}-x86_64-darwin.tar.gz\" \\"));
-    assert!(workflow.contains("--archive \"linux_arm=https://codeberg.org/foo/demo/releases/download/${VERSION}/demo-${VERSION}-aarch64-linux.tar.gz,release/demo-${VERSION}-aarch64-linux.tar.gz\" \\"));
-    assert!(workflow.contains("--archive \"linux_intel=https://codeberg.org/foo/demo/releases/download/${VERSION}/demo-${VERSION}-x86_64-linux.tar.gz,release/demo-${VERSION}-x86_64-linux.tar.gz\" \\"));
+    assert!(workflow.contains("RELEASE_TAG=\"$VERSION\""));
+    assert!(workflow.contains("VERSION=\"${VERSION#v}\""));
+    assert!(workflow.contains("--archive \"darwin_arm=https://codeberg.org/foo/demo/releases/download/${RELEASE_TAG}/demo-${VERSION}-aarch64-darwin.tar.gz,release/demo-${VERSION}-aarch64-darwin.tar.gz\" \\"));
+    assert!(!workflow.contains("--archive \"darwin_intel=https://codeberg.org/foo/demo/releases/download/${RELEASE_TAG}/demo-${VERSION}-x86_64-darwin.tar.gz,release/demo-${VERSION}-x86_64-darwin.tar.gz\" \\"));
+    assert!(workflow.contains("--archive \"linux_arm=https://codeberg.org/foo/demo/releases/download/${RELEASE_TAG}/demo-${VERSION}-aarch64-linux.tar.gz,release/demo-${VERSION}-aarch64-linux.tar.gz\" \\"));
+    assert!(workflow.contains("--archive \"linux_intel=https://codeberg.org/foo/demo/releases/download/${RELEASE_TAG}/demo-${VERSION}-x86_64-linux.tar.gz,release/demo-${VERSION}-x86_64-linux.tar.gz\" \\"));
     assert_eq!(workflow.matches("--binary ").count(), 2);
     assert!(workflow.contains("--binary demo \\"));
     assert!(workflow.contains("--binary demo-ui \\"));

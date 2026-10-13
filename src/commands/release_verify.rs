@@ -288,11 +288,8 @@ fn verify_manifest(
         &package.config.namespace,
         version.clone(),
     )?;
-    let platform = selection
-        .project
-        .ci
-        .platform
-        .unwrap_or(crate::cli::Platform::Forgejo);
+    let platform =
+        crate::ci_resolution::release_backend(&selection.project, None, None)?.platform();
     let script = crate::release_notes::component_git_notes_script(
         &package.config.namespace,
         &selection.graph.components[&selection.component].paths,

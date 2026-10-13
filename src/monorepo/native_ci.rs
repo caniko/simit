@@ -52,7 +52,9 @@ pub(super) fn files(
                     .unwrap()
                     .to_owned()
             };
-            let runner = config.ci.runner.as_deref().unwrap_or("ubuntu-latest");
+            // Receipts attest runner-produced bytes, so archive construction is
+            // part of the publication trust boundary, not configurable capacity.
+            let runner = "ubuntu-24.04";
             let node24 = crate::render::ci::github_runner_supports_node24(runner);
             let mut validate_steps = vec![
                 super::ci::checkout(node24),

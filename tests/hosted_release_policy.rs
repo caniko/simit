@@ -34,6 +34,46 @@ fn render(root: &Path) -> String {
 const HOSTED: &str = "[release.codeberg]\nrepo = \"example/player\"\n\n[release.artifacts]\nrunner = \"atlas-nix-trusted\"\nprebuild_binaries = true\nsign = false\n";
 
 #[test]
+fn prebuild_requires_gates_and_uses_effective_legacy_notes_policy() {
+    let dir = project(
+        "[ci]\nrequired_gates = [{id='integration',run='false | tee gate.log',timeout_minutes=7}]\n[release.github]\nrepo='example/player'\nbody_from_changelog=false\n[release.artifacts]\nrunner='ubuntu-24.04'\nprebuild_binaries=true\nsign=false\n[prebuild]\nrelease_archives=true\npublish_attic=true\nattic_app='push-flake-inputs'\nsystem_runners={x86_64-linux='ubuntu-24.04'}\n[release.attic]\nurl='https://cache.example.invalid'\ncache='release'\ntoken_name='release'\ntoken_secret='ATTIC_TOKEN'\n",
+    );
+    let workflow = render(dir.path());
+    let doc: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
+    assert_eq!(doc["jobs"]["prebuild"]["needs"], "validate");
+    assert!(
+        doc["jobs"]["release"]["needs"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .any(|job| job == "validate")
+    );
+    let steps = doc["jobs"]["validate"]["steps"].as_sequence().unwrap();
+    let validation = steps
+        .iter()
+        .position(|step| {
+            step["run"]
+                .as_str()
+                .is_some_and(|run| run.contains("git verify-tag"))
+        })
+        .unwrap();
+    let gate = steps
+        .iter()
+        .position(|step| step["name"] == "Required gate integration")
+        .unwrap();
+    assert!(validation < gate);
+    assert_eq!(steps[gate]["timeout-minutes"], 7);
+    assert!(
+        steps[gate]["run"]
+            .as_str()
+            .unwrap()
+            .contains("false | tee gate.log")
+    );
+    assert!(!workflow.contains("CHANGELOG.md"), "{workflow}");
+    assert_eq!(workflow.matches("Required gate integration").count(), 1);
+}
+
+#[test]
 fn prefixed_tags_keep_manifest_versions_unprefixed() {
     let dir = project(&format!("[release]\ntag_prefix = \"v\"\n\n{HOSTED}"));
     let workflow = render(dir.path());

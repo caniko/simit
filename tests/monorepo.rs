@@ -93,6 +93,26 @@ fn plan(root: &Path, changed: &[&str]) -> std::process::Output {
     command.output().unwrap()
 }
 
+fn enroll_release_checks(root: &Path) {
+    let mut config: toml_edit::DocumentMut = fs::read_to_string(root.join("simit.toml"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    for component in config["monorepo"]["components"]
+        .as_array_of_tables_mut()
+        .unwrap()
+        .iter_mut()
+    {
+        let mut gate = toml_edit::InlineTable::new();
+        gate.insert("id", "test".into());
+        gate.insert("run", "true".into());
+        let mut checks = toml_edit::Array::new();
+        checks.push(gate);
+        component["checks"] = toml_edit::value(checks);
+    }
+    write(root, "simit.toml", &config.to_string());
+}
+
 #[test]
 fn core_changes_select_transitive_consumers_and_prerequisites() {
     let temp = fixture();
@@ -647,6 +667,67 @@ fn cargo_sync_up_refuses_to_move_tags_after_prerequisite_gate_failure() {
         fixture_git(root, &["rev-parse", "refs/tags/worker/v0.1.0"]),
         original
     );
+    let head = fixture_git(root, &["rev-parse", "HEAD"]);
+    let manifest = fs::read(root.join("crates/worker/Cargo.toml")).unwrap();
+    let bump = common::simit()
+        .current_dir(root)
+        .args([
+            "release",
+            "patch",
+            "--component",
+            "worker",
+            "--package",
+            "worker",
+            "--no-sign",
+            "--no-changelog",
+            "-m",
+            "release worker",
+        ])
+        .output()
+        .unwrap();
+    assert!(!bump.status.success(), "{bump:?}");
+    assert!(
+        String::from_utf8_lossy(&bump.stderr).contains("component python check python failed"),
+        "{bump:?}"
+    );
+    assert_eq!(fixture_git(root, &["rev-parse", "HEAD"]), head);
+    assert_eq!(
+        fs::read(root.join("crates/worker/Cargo.toml")).unwrap(),
+        manifest
+    );
+    assert!(fixture_git(root, &["tag", "--list", "worker/v0.1.1"]).is_empty());
+}
+
+#[test]
+fn root_cargo_package_uses_explicit_source_ownership() {
+    let temp = fixture();
+    let root = temp.path();
+    let manifest = fs::read_to_string(root.join("Cargo.toml")).unwrap();
+    write(
+        root,
+        "Cargo.toml",
+        &format!("{manifest}\n[package]\nname='root-package'\nversion='0.1.0'\nedition='2024'\n"),
+    );
+    write(root, "src/lib.rs", "pub fn root() {}\n");
+    let config = fs::read_to_string(root.join("simit.toml")).unwrap();
+    write(
+        root,
+        "simit.toml",
+        &format!(
+            "{config}\n[[monorepo.components]]\nid='root'\ncargo_packages=['root-package']\npaths=['src']\n"
+        ),
+    );
+    for changed in ["src/lib.rs", "Cargo.toml", "python/server.py"] {
+        let output = plan(root, &[changed]);
+        assert!(output.status.success(), "{output:?}");
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        let selected = value["selected"].as_array().unwrap();
+        assert_eq!(
+            selected.contains(&Value::String("root".into())),
+            changed != "python/server.py",
+            "{value}"
+        );
+    }
 }
 
 #[test]
@@ -724,6 +805,7 @@ fn independent_verification_uses_adjacent_notes_and_owned_tag() {
 #[test]
 fn component_release_mutates_only_its_package_and_adjacent_changelog() {
     let temp = fixture();
+    enroll_release_checks(temp.path());
     write(temp.path(), ".gitignore", "target/\n");
     write(temp.path(), "CHANGELOG.md", "# Unrelated root changelog\n");
     write(
@@ -1204,6 +1286,7 @@ fn component_automatic_changelog_drafting_uses_only_owned_history() {
     use std::os::unix::fs::PermissionsExt as _;
     let temp = history_fixture();
     let root = temp.path();
+    enroll_release_checks(root);
     let support = TempDir::new().unwrap();
     let prompt = support.path().join("prompt");
     let script = support.path().join("codex");

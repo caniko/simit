@@ -313,6 +313,9 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
             )),
     )?;
     let enrolled_workflow = fs::read(trusted_root.join(&policy.source_workflow_path))?;
+    if native {
+        verify_native_builder(&enrolled_workflow)?;
+    }
     if namespace.is_some() || tag_prefix == crate::release_identity::TagPrefix::V {
         verify_tag_only_source_workflow_with_prefix(
             &signed_workflow.stdout,
@@ -638,6 +641,15 @@ fn verify_tag_only_source_workflow_with_prefix(
                     |tags| tags.len() == 1 && tags[0].as_str() == Some(tag_pattern.as_str())
                 ),
         "source publication must have only the enrolled semver tag filter"
+    );
+    Ok(())
+}
+
+fn verify_native_builder(enrolled: &[u8]) -> Result<()> {
+    let workflow: serde_yaml::Value = serde_yaml::from_slice(enrolled)?;
+    ensure!(
+        workflow["jobs"]["validate"]["runs-on"].as_str() == Some("ubuntu-24.04"),
+        "native archives require the fixed hosted ubuntu-24.04 builder"
     );
     Ok(())
 }
@@ -1226,6 +1238,27 @@ pub fn wait_for_registry_with(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn native_archive_builder_is_independently_hosted() {
+        for runner in [
+            "ubuntu-24.04",
+            "self-hosted",
+            "private-builder",
+            "${{ inputs.runner }}",
+        ] {
+            let workflow = format!("jobs:\n  validate:\n    runs-on: '{runner}'\n");
+            assert_eq!(
+                super::verify_native_builder(workflow.as_bytes()).is_ok(),
+                runner == "ubuntu-24.04"
+            );
+        }
+        assert!(
+            super::verify_native_builder(
+                b"jobs: {validate: {runs-on: [self-hosted, ubuntu-24.04]}}"
+            )
+            .is_err()
+        );
+    }
     use super::*;
 
     #[test]

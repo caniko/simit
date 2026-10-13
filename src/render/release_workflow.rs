@@ -497,6 +497,13 @@ pub fn render(inputs: &ReleaseWorkflowInputs<'_>) -> String {
     w.push_str("  cancel-in-progress: false\n\n");
 
     w.push_str("jobs:\n");
+    let notes_source = inputs.notes_source.unwrap_or_else(|| {
+        if inputs.release.is_some_and(|r| !r.body_from_changelog) {
+            ReleaseNotesSource::None
+        } else {
+            ReleaseNotesSource::Changelog
+        }
+    });
     if inputs.platform == Platform::Github && inputs.prebuild.is_some() {
         // No reusable build or Attic credential is admitted before event-bound
         // signed-tag validation. Every job checks out the same immutable SHA.
@@ -512,12 +519,8 @@ pub fn render(inputs: &ReleaseWorkflowInputs<'_>) -> String {
         if !inputs.preinstalled_nix {
             push_install_nix(&mut w, inputs.platform, inputs.artifacts);
         }
-        push_validate_tag(
-            &mut w,
-            inputs.artifacts,
-            inputs.tag_prefix,
-            inputs.notes_source.unwrap_or(ReleaseNotesSource::Changelog),
-        );
+        push_validate_tag(&mut w, inputs.artifacts, inputs.tag_prefix, notes_source);
+        push_required_gates(&mut w, inputs.required_gates);
         w.push_str("  prebuild:\n    needs: validate\n    uses: ./.github/workflows/prebuild.yaml\n    with:\n      release: true\n");
         if let Some(attic) = inputs.attic.filter(|_| prebuild_publishes_attic(inputs)) {
             let token_secret = attic
@@ -558,16 +561,11 @@ pub fn render(inputs: &ReleaseWorkflowInputs<'_>) -> String {
     if !inputs.preinstalled_nix {
         push_install_nix(&mut w, inputs.platform, inputs.artifacts);
     }
-    let notes_source = inputs.notes_source.unwrap_or_else(|| {
-        if inputs.release.is_some_and(|r| !r.body_from_changelog) {
-            ReleaseNotesSource::None
-        } else {
-            ReleaseNotesSource::Changelog
-        }
-    });
     push_validate_tag(&mut w, inputs.artifacts, inputs.tag_prefix, notes_source);
     push_release_notes(&mut w, inputs.tag_prefix, notes_source);
-    push_required_gates(&mut w, inputs.required_gates);
+    if inputs.platform != Platform::Github || inputs.prebuild.is_none() {
+        push_required_gates(&mut w, inputs.required_gates);
+    }
     push_release_credentials_preflight(&mut w, inputs);
     if let Some(copr) = inputs.copr {
         push_rewrite_spec(&mut w, copr);

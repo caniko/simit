@@ -3648,6 +3648,7 @@ fn push_homebrew_publish_step(
     workflow.push_str(
         "          VERSION=\"${GITHUB_REF_NAME:-${FORGE_REF_NAME:-${CODEBERG_REF_NAME:-}}}\"\n",
     );
+    workflow.push_str("          RELEASE_TAG=\"$VERSION\"\n");
     push_bash_version_prefix(workflow, prefix);
     workflow.push_str("          for artifact in \\\n");
     for (index, archive) in archives.iter().enumerate() {
@@ -3698,7 +3699,7 @@ fn push_homebrew_publish_step(
         workflow.push_str(platform.web_base_url());
         workflow.push('/');
         workflow.push_str(&opts.download_repo);
-        workflow.push_str("/releases/download/${VERSION}/");
+        workflow.push_str("/releases/download/${RELEASE_TAG}/");
         workflow.push_str(&archive.file_name);
         workflow.push_str(",release/");
         workflow.push_str(&archive.file_name);

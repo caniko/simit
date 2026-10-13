@@ -40,6 +40,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Build native publication archives on a fixed hosted runner and independently
+  require that builder during protected publisher admission.
+- Run component prerequisites before Cargo release mutation and required gates
+  before credentialed prebuild publication; share the effective notes policy.
+- Update nested npm workspace lock records, support explicitly owned root Cargo
+  sources, and resolve native-only repository trust without Cargo metadata.
+- Preserve prefixed Homebrew release URLs and require the treefmt wrapper in
+  dev-shell package bindings rather than unrelated package declarations.
 - Grant check-suite read access only to completion-custody collection, bound the
   fully rendered observer to 500,000 bytes before writes, and ignore unenrolled
   workflow paths that reuse producer names without changing custody statuses.

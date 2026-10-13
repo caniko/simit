@@ -116,6 +116,12 @@ fn native_private_build_capacity_never_receives_publication_credentials() {
     let source =
         fs::read_to_string(root.join(".github/workflows/publish-python-py-engine.yaml")).unwrap();
     assert!(!source.contains("secrets."), "{source}");
+    let source: serde_yaml::Value = serde_yaml::from_str(&source).unwrap();
+    assert_eq!(source["jobs"]["validate"]["runs-on"], "ubuntu-24.04");
+    assert_eq!(
+        source["jobs"]["component-python"]["runs-on"],
+        "private-builder"
+    );
     let publisher =
         fs::read_to_string(root.join(".github/workflows/trusted-publish-python-py-engine.yaml"))
             .unwrap();
@@ -297,6 +303,98 @@ fn scoped_private_npm_bump_updates_only_root_lock_records() {
     );
     assert_eq!(git(root, &["tag", "--list"]), "node-engine/v1.4.0\n");
     assert_eq!(git(root, &["status", "--porcelain"]), "");
+}
+
+#[test]
+fn nested_npm_workspace_bump_updates_both_lock_formats_without_touching_other_members() {
+    let temp = fixture();
+    let root = temp.path();
+    let lock = r#"{"name":"workspace","version":"9.0.0","lockfileVersion":3,"packages":{"":{"name":"workspace","version":"9.0.0"},"node":{"name":"@example/node-engine","version":"1.3.0"},"other":{"version":"3.0.0"},"node_modules/@example/node-engine":{"resolved":"node","link":true}}}"#;
+    for name in ["package-lock.json", "npm-shrinkwrap.json"] {
+        write(root, name, lock);
+    }
+    git(root, &["add", "."]);
+    git(root, &["commit", "-qm", "workspace locks"]);
+    let output = run(
+        root,
+        &[
+            "release",
+            "minor",
+            "--component",
+            "node",
+            "--no-sign",
+            "-m",
+            "release node",
+        ],
+    );
+    assert!(output.status.success(), "{output:?}");
+    for name in ["package-lock.json", "npm-shrinkwrap.json"] {
+        let updated: Value = serde_json::from_slice(&fs::read(root.join(name)).unwrap()).unwrap();
+        assert_eq!(updated["version"], "9.0.0");
+        assert_eq!(updated["packages"][""]["version"], "9.0.0");
+        assert_eq!(updated["packages"]["node"]["version"], "1.4.0");
+        assert_eq!(updated["packages"]["other"]["version"], "3.0.0");
+        assert_eq!(
+            updated["packages"]["node_modules/@example/node-engine"]["link"],
+            true
+        );
+    }
+    assert_eq!(git(root, &["status", "--porcelain"]), "");
+}
+
+#[test]
+fn native_notes_and_repository_trust_resolve_without_cargo_metadata() {
+    let temp = fixture();
+    let root = temp.path();
+    let config = fs::read_to_string(root.join("simit.toml"))
+        .unwrap()
+        .replace("platform = \"github\"\n", "");
+    write(
+        root,
+        "simit.toml",
+        &format!("{config}\n[release.github]\nrepo='example/native'\nbody_from_changelog=false\n"),
+    );
+    write(
+        root,
+        "python/CHANGELOG.md",
+        "# Changelog\n\n## [Unreleased]\n\n",
+    );
+    git(root, &["add", "."]);
+    git(root, &["commit", "-qm", "disable GitHub notes"]);
+    let notes = fs::read(root.join("python/CHANGELOG.md")).unwrap();
+    let output = run(
+        root,
+        &[
+            "release",
+            "patch",
+            "--component",
+            "python",
+            "--no-sign",
+            "-m",
+            "release python",
+        ],
+    );
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(fs::read(root.join("python/CHANGELOG.md")).unwrap(), notes);
+    let verify = run(
+        root,
+        &["release", "verify", "--component", "python", "--json"],
+    );
+    let report: Value = serde_json::from_slice(&verify.stdout).unwrap();
+    assert!(
+        report
+            .to_string()
+            .contains("release notes explicitly disabled"),
+        "{report}"
+    );
+    let status = run(&root.join("node"), &["release", "trust", "status"]);
+    assert!(status.status.success(), "{status:?}");
+    let check = run(&root.join("python"), &["release", "trust", "check"]);
+    assert!(!check.status.success());
+    assert!(
+        String::from_utf8_lossy(&check.stderr).contains("maintainers.gpg"),
+        "{check:?}"
+    );
 }
 
 #[test]

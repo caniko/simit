@@ -9,7 +9,7 @@ pub(crate) mod releases;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component as PathComponent, Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use serde::Deserialize;
 
 use crate::config::{ProjectConfig, RequiredGate};
@@ -201,8 +201,16 @@ impl Config {
                         .context("Cargo manifest has no parent")?
                         .strip_prefix(&metadata.workspace_root)
                         .context("Cargo member is outside the monorepo")?;
-                    validate_relative_path(directory.as_str())?;
-                    component.paths.push(directory.to_string());
+                    if directory.as_str().is_empty() {
+                        ensure!(
+                            !component.paths.is_empty(),
+                            "root Cargo package {name} requires explicit component source paths"
+                        );
+                        component.paths.push("Cargo.toml".to_owned());
+                    } else {
+                        validate_relative_path(directory.as_str())?;
+                        component.paths.push(directory.to_string());
+                    }
                 }
             }
             for name in packages.keys() {

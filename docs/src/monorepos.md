@@ -52,6 +52,10 @@ then every selected component's prerequisites, in deterministic dependency
 order. Cargo metadata supplies member source directories and local dependency
 edges, including optional, build, development, and target-specific dependencies.
 All Cargo members must have exactly one component owner.
+For a package in the root `Cargo.toml`, declare its source paths explicitly
+(for example, `paths = ["src", "tests", "build.rs"]`, retaining only paths that
+exist). Simit adds `Cargo.toml` to that owner's paths without claiming nested
+workspace members.
 
 An unknown source path selects all components. The default shared paths are
 `simit.toml`, `flake.nix`, `flake.lock`, `Cargo.toml`, `Cargo.lock`,
@@ -165,14 +169,16 @@ Eligible owners generate credential-free `publish-python-<namespace>.yaml` or
 `trusted-publish-<registry>-<namespace>.yaml` default-branch publisher.
 Each package-qualified signed tag
 qualifies the complete graph on every declared native runner, then validates
-the tag/event/HEAD identity, builds just that owner's wheel plus sdist or npm
+the tag/event/HEAD identity on a fixed GitHub-hosted `ubuntu-24.04` builder,
+builds just that owner's wheel plus sdist or npm
 tarball, and retains a source-bound checksum receipt in an attempt-qualified,
 immutable provider artifact. The publisher always runs on `ubuntu-24.04`,
 independently of the configured qualification capacity. Its engine, keyring and
 package/namespace enrollment come from its protected workflow revision. Before
 upload it re-admits the full signed tag, source SHA, native provider workflow ID,
 original run/attempt and archive ID/digest. The publisher rejects metadata/checksum
-conflicts, uploads only missing exact artifacts, and waits at most twenty
+conflicts and non-hosted archive-builder enrollment, uploads only missing exact
+artifacts, and waits at most twenty
 registry reads separated by thirty-second waits for checksum-matching
 propagation. Failed uploads are accepted only if exact artifacts already exist.
 Credentials (`PYPI_API_TOKEN` or `NPM_TOKEN`) belong only to the protected

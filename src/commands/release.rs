@@ -155,6 +155,9 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
             );
         }
         println!("would run cargo test and cargo clippy");
+        if let Some(component) = &command.component {
+            println!("would qualify component {component} and its prerequisites");
+        }
         if changelog_enabled && changelog_path.exists() {
             if config.release.changelog.auto_draft {
                 println!("would draft CHANGELOG.md [Unreleased] from git history");
@@ -210,6 +213,9 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
     } else {
         None
     };
+    if let Some(component) = &command.component {
+        crate::monorepo::releases::qualify_component(workspace_root, &config, component)?;
+    }
     git::run_project_checks(workspace_root)?;
     let workspace_version_bumped = command.component.is_none()
         && cargo::update_workspace_version(
@@ -357,8 +363,15 @@ fn trust(command: ReleaseCommand) -> Result<()> {
     let action = command
         .trust_action
         .ok_or_else(|| anyhow!("release trust action is required: status, init, or check"))?;
-    let metadata = cargo::metadata_for_current_dir()?;
-    let workspace_root = metadata.workspace_root.as_std_path();
+    let workspace_root = if let Some(root) = crate::monorepo::find_root(&std::env::current_dir()?)?
+    {
+        root
+    } else {
+        cargo::metadata_for_current_dir()?
+            .workspace_root
+            .into_std_path_buf()
+    };
+    let workspace_root = workspace_root.as_path();
     let config = ProjectConfig::load(workspace_root)?;
     let overrides = TrustOverrides {
         key: command.trust_key,
