@@ -53,6 +53,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Preserve older npm-supported leading-hyphen package names during enrollment,
+  packing and protected upload while retaining separate Git namespace validation.
 - Reject leading-hyphen release namespaces before generating or mutating a
   release, preserving Git-valid underscore and alphanumeric namespaces.
 - Bind protected publication to the signed tag object's internal name, rejecting

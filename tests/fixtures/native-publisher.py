@@ -232,8 +232,8 @@ with tempfile.TemporaryDirectory() as temp:
             with patch.object(actual, "upload_request", return_value=None):
                 refuses(lambda: actual.publish(npm_out, npm_identity, 1, manifest))
             assert tag not in state["dist-tags"]
-    for invalid in ["bad name", "../evil", "_hidden", "-hidden", "node_modules", "@scope/.hidden", "@scope/pkg/extra", "bad%name"]:
+    for invalid in ["bad name", "../evil", "_hidden", "node_modules", "@scope/.hidden", "@scope/pkg/extra", "bad%name"]:
         assert not actual.valid_npm_package_name(invalid)
-    for valid in ["plain", "@scope/pkg", "LegacyCase", "http", "@scope/_legacy", "legacy!name", "a" * 215]:
+    for valid in ["plain", "@scope/pkg", "LegacyCase", "http", "@scope/_legacy", "legacy!name", "a" * 215, "-foo", "-hidden"]:
         assert actual.valid_npm_package_name(valid)
 print("native protected publisher contracts passed")

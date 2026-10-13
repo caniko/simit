@@ -22,9 +22,8 @@ pub(crate) fn valid_python_package_name(name: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 
-/// Match npm's `validForOldPackages` admission (also used by npm publish),
-/// preserving warning-only legacy names rather than imposing new-package rules.
-/// https://github.com/npm/validate-npm-package-name/blob/v7.0.2/lib/index.js
+/// Preserve npm 11.4.2's legacy publication names, including leading hyphens.
+/// https://github.com/npm/validate-npm-package-name/blob/v6.0.0/lib/index.js
 pub(crate) fn valid_npm_package_name(name: &str) -> bool {
     let url_friendly = |part: &str| {
         !part.is_empty()
@@ -37,7 +36,7 @@ pub(crate) fn valid_npm_package_name(name: &str) -> bool {
             })
     };
     if name.is_empty()
-        || name.starts_with(['.', '_', '-'])
+        || name.starts_with(['.', '_'])
         || matches!(
             name.to_ascii_lowercase().as_str(),
             "node_modules" | "favicon.ico"

@@ -34,9 +34,8 @@ def normalize(name):
 
 
 def valid_npm_package_name(name):
-    # validate-npm-package-name 7's validForOldPackages permits warning-only
-    # legacy names, matching the hosted npm publisher's admission.
-    if not isinstance(name, str) or not name or name.startswith((".", "_", "-")) or name.lower() in ("node_modules", "favicon.ico"):
+    # Preserve npm 11.4.2's legacy publication names, including leading hyphens.
+    if not isinstance(name, str) or not name or name.startswith((".", "_")) or name.lower() in ("node_modules", "favicon.ico"):
         return False
     parts = name[1:].split("/") if name.startswith("@") else [name]
     return (not name.startswith("@") or (len(parts) == 2 and not parts[1].startswith("."))) and all(re.fullmatch(r"[A-Za-z0-9_.!~*'()-]+", part) for part in parts)
