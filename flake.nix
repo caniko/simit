@@ -19,10 +19,10 @@
     # plinth trunk trips both of this flake's `nix flake check` gates: it still
     # declares the retired Codeberg nix-cache-pin mirror (whose trunk orphaned
     # the revision we locked), and its Cargo.lock wants dioxus 0.7.9 while our
-    # nixpkgs ships dioxus-cli 0.7.10.  fix/dioxus-0.7.10 is what canix pins for
-    # the same reason, and it predates the nix-cache-pin input entirely.
+    # Source-owner qualified Dioxus 0.7.10 integration, including the public
+    # GitHub Tartan transport repair; keep the complete upstream lock closure.
     plinth = {
-      url = "git+https://github.com/caniko/plinth.git?ref=fix/dioxus-0.7.10&rev=4718cc09d9d1b54cc10e23e60c37b656bf7285a6";
+      url = "git+https://github.com/caniko/plinth.git?ref=trunk&rev=07cea351013d39150f81181e29d6e9a41971a4f2";
       inputs.nixpkgs.follows = "nixpkgs";
     };
     advisory-db = {
