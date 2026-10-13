@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Explicit `sealed-v2` completion custody: immediate per-original capture,
+  native step-log completeness admission, immutable artifact ID/digest verification
+  and independently uploaded aggregation with fresh native revocation checks.
+  Existing policies retain their original protocol.
 - Opt-in completion-driven custody for enrolled original branch/PR producers,
   with bounded log/artifact capture and idempotent producer-source status reports.
 - CI-scoped public Nix cache configuration and bounded same-run build-input
