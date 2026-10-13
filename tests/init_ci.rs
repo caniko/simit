@@ -3641,6 +3641,69 @@ fn aggregate_workspace_ci_can_retain_independent_original_events() {
 }
 
 #[test]
+fn aggregate_separate_events_preserve_completion_custody() {
+    let temp = init_workspace_fixture();
+    fs::write(
+        temp.path().join("simit.toml"),
+        r#"[ci]
+platform = "github"
+provider = "actions"
+runtime = "cargo"
+workspace = true
+workspace_strategy = "aggregate"
+separate_events = true
+[ci.custody]
+repository = "owner/project"
+producer_attempt = 1
+status_context = "simit/producer-custody"
+[ci.custody.producers.CI]
+workflow = ".github/workflows/ci.yaml"
+jobs = ["test"]
+"#,
+    )
+    .unwrap();
+    let generate = || {
+        simit_with_user_config(temp.path())
+            .current_dir(temp.path())
+            .args(["init", "ci"])
+            .output()
+            .unwrap()
+    };
+    let result = generate();
+    assert!(result.status.success(), "{result:?}");
+    let config_path = temp.path().join("simit.toml");
+    let config = simit::config::ProjectConfig::load(temp.path()).unwrap();
+    let observer_path = temp.path().join(".github/workflows/producer-custody.yaml");
+    let observer = read(&observer_path);
+    assert!(config.ci.separate_events);
+    assert_eq!(
+        observer,
+        simit::render::ci::custody::file(config.ci.custody.as_ref().unwrap())
+            .unwrap()
+            .content
+    );
+    assert!(
+        read(&temp.path().join(".github/workflows/ci.yaml")).contains("${{ github.event_name }}")
+    );
+    let persisted_config = read(&config_path);
+    assert!(generate().status.success());
+    assert_eq!(read(&config_path), persisted_config);
+    assert_eq!(read(&observer_path), observer);
+    assert!(
+        simit_with_user_config(temp.path())
+            .current_dir(temp.path())
+            .args(["init", "ci", "--check", "--diff"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert_eq!(
+        simit::registry::audit_ci(temp.path()).unwrap().status,
+        simit::registry::FeatureStatus::Managed
+    );
+}
+
+#[test]
 fn separate_rust_ci_events_reject_unsupported_backends_without_effects() {
     for (platform, provider, workflow_path) in [
         ("forgejo", "actions", ".forgejo/workflows/ci.yaml"),
