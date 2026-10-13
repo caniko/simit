@@ -39,6 +39,34 @@ with_msrv = true
 
 ## Generic CI vs Release Publishing
 
+### Primary-only regeneration
+
+Use the persisted project policy to regenerate verification and native-build
+workflows during a dependency migration:
+
+```sh
+simit init ci --primary-only --check --diff
+simit init ci --primary-only
+simit init ci --primary-only --check --diff
+```
+
+This scope includes ordinary member/aggregate CI (including independent lanes), native Nix matrices and
+prebuild workflows. Publisher, release, Pages and review workflows are preserved
+byte-for-byte, together with `simit.toml`, release trust roots and README badges.
+The check reports drift only in the selected scope. Full generation remains the
+default; run its separate drift gate when intentionally changing publication
+configuration. `--primary-only` cannot be combined with the other scope selectors.
+
+Project templates are a separate owner, regardless of their output basename:
+`ci-release.yaml` and `build-release.yaml` do not become primary CI. Scoped
+generation validates declared template paths and destination protections but
+does not load or render template sources, publisher or review material. Template
+outputs retain their ownership markers after a mapping is removed; only full
+generation retires them. Primary cleanup still removes obsolete marked built-in
+CI workflows and preserves hand-owned files. Policy files such as `deny.toml`
+are not created in this scope. Printed repair commands retain `--primary-only`
+and the effective platform/provider, including Crow format overrides.
+
 ### Project-owned workflow templates
 
 Projects with specialized Actions jobs can render their existing workflow
@@ -272,6 +300,44 @@ simit init ci --platform forgejo --runtime nix
 Declare the exact installables that qualify a feature in `[ci].nix_builds`.
 GitHub Actions projects can configure their matrix independently of ordinary
 checks and release jobs:
+
+For native multi-architecture builds, set `[ci.nix_build.system_runners]`:
+
+```toml
+[ci.nix_build.system_runners]
+"x86_64-linux" = "ubuntu-24.04"
+"aarch64-linux" = "ubuntu-24.04-arm"
+```
+
+Every installable must explicitly select a system, for example
+`.#checks.aarch64-linux.cargo-test`, `.#packages.x86_64-linux.server`, or
+`.#formatter.aarch64-linux`, and
+that system must have a runner entry. The generator emits one job per declared
+installable, rather than running each gate on every architecture. It verifies
+the runner's OS/CPU identity independently of Nix configuration, then checks the
+configured Nix system before project setup or realization. Linux, Darwin and
+FreeBSD kernel names are recognized; unsupported kernels fail closed. With `kvm = true`,
+KVM setup runs only for `x86_64-linux` rows; ARM rows do not require `/dev/kvm`.
+The existing `[ci].runner` remains the runner for ordinary language CI. Without
+the exact-build map, the installable matrix retains its single-runner behavior.
+Standard `formatter.<system>`, `defaultPackage.<system>` and `devShell.<system>`
+outputs select their system without a trailing name.
+Output selectors such as `^out`, `^out,dev` and `^*` remain intact in generated
+installables; routing extracts the system from the attribute path alone.
+Node action versions follow
+the mapped workers: if any mapped worker needs the compatible Node 20 baseline,
+all rows use that baseline independently of the ordinary language CI runner.
+Unambiguous PowerPC uname spellings (`ppc`, `ppcle`, `ppc64`, `ppc64le`) normalize
+to Nix's corresponding `powerpc` names before comparison.
+
+The map also supports `[ci.nix_build.groups]`: every group must contain only
+installables for one system, and the group runs on that system's mapped runner.
+Mixed-system groups reject before configuration or workflow writes. Group jobs
+use the same hardware/Nix guard and x86 Linux-only KVM condition as ungrouped
+rows, while retaining per-member evidence and hooks. Native mappings currently
+cannot combine with `dependency_installables`: the single dependency producer
+does not support native per-system routing, so this combination rejects before
+writes rather than realizing foreign dependencies on one worker.
 
 ```toml
 [ci]
@@ -554,6 +620,9 @@ branch/PR events to qualify installation, source-head reporting and ordering.
 `[ci.cache]` declares public credential-free HTTPS substituters and signing keys
 for CI independently of release publication. An explicit empty table disables
 inherited release-cache settings; omitting the table preserves that inheritance.
+Forgejo Actions applies the selected cache settings to its preinstalled Nix
+environment, retaining existing `NIX_CONFIG`. Release publication continues to
+use its separate release-cache policy.
 Keep using `with_nix_cargo_cache = true` for the existing native Cargo cache.
 
 ```toml
@@ -586,7 +655,9 @@ budget is enforced separately throughout both streams.
 Import admits compressed size, checksum and the complete decompressed byte
 budget before derivation evaluation, which can itself instantiate store objects
 or trigger IFD. The admitted bytes stay in one private, unlinked spool through
-source/graph checks and import.
+source/graph checks and import. Compressed bytes are privately snapshotted too:
+checksum and decompression read the same snapshot, even if the downloaded inode
+changes afterward.
 
 Consumers verify source commit/tree, lock bytes,
 repository, run, attempt, expected derivations/output paths, archive checksum and
@@ -599,6 +670,10 @@ payloads in 64 KiB chunks. NAR depth is less than 64; entry names and symlink
 targets are at most 255 and 4095 bytes, respectively, matching the
 [Nix 2.34.8 importer limits](https://github.com/NixOS/nix/blob/2.34.8/src/libutil/archive.cc).
 These bounds apply to the entire stream before import, including later records.
+Admission conservatively rejects ASCII case aliases within each directory on
+all platforms. Darwin's default case hack can otherwise rewrite an alias into
+an existing `~nix~case~hack~` entry and fail partway through import. Nearby suffix
+names without aliases and names in separate directories remain supported.
 Validation and import use the same unlinked, mode-0600
 spool descriptor. The parser follows [Nix's export framing](https://github.com/NixOS/nix/blob/adbf23e8184bbbe8d786aad1f362443b6542e0a4/src/libstore/export-import.cc)
 and [NAR writer grammar](https://github.com/NixOS/nix/blob/adbf23e8184bbbe8d786aad1f362443b6542e0a4/doc/manual/src/protocols/nix-archive.md).
@@ -606,6 +681,12 @@ Legacy export signatures are rejected; archive integrity is distinct from hosted
 producer authority. An alias of a discovered check or a declared
 qualification output is refused. A failed dependency producer blocks consuming
 groups; its builder and export diagnostics remain available.
+
+Artifacts are bound to the exact run **and attempt**. Use **Re-run all jobs**
+after a consumer failure so the dependency producer also executes in the new
+attempt. GitHub's **Re-run failed jobs** can retain a successful producer from
+the previous attempt; its artifact is intentionally not accepted by retried
+consumers. There is no fallback to prior-attempt or cross-run artifacts.
 
 `kvm = true` enables hosted KVM on both the dependency producer and each consuming
 worker before custom setup or builds. Export and post-import verification also

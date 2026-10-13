@@ -604,6 +604,8 @@ pub struct NixBuildConfig {
     pub max_parallel: Option<u64>,
     pub max_jobs: Option<u64>,
     pub cores: Option<u64>,
+    /// Native runner for each system-qualified exact installable; no cross product.
+    pub system_runners: BTreeMap<String, String>,
     pub kvm: bool,
     /// Retain exact source/installable metadata and Nix's JSON output map.
     pub capture_results: bool,
@@ -621,6 +623,27 @@ pub struct NixBuildConfig {
 }
 
 impl NixBuildConfig {
+    pub(crate) fn validate_system_runners(&self, installables: &[String]) -> Result<()> {
+        validate_system_runner_map(
+            "simit project config: [ci.nix_build].system_runners",
+            &self.system_runners,
+        )?;
+        if !self.system_runners.is_empty() {
+            for installable in installables {
+                self.installable_system(installable)?;
+            }
+            for members in self.groups.values() {
+                self.group_system(members)?;
+            }
+            if !self.dependency_installables.is_empty() {
+                bail!(
+                    "[ci.nix_build].system_runners cannot be combined with dependency transport; native dependency producers are not supported"
+                );
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn validate_groups(&self, installables: &[String]) -> Result<()> {
         if self.groups.is_empty()
             && (!self.dependency_installables.is_empty()
@@ -656,7 +679,9 @@ impl NixBuildConfig {
                 );
             }
             if !member.starts_with(".#")
-                || member.contains("checks.")
+                || member.len() <= 2
+                || member == ".#checks"
+                || member.starts_with(".#checks.")
                 || installables.contains(member)
                 || !dependencies.insert(member)
             {
@@ -728,6 +753,58 @@ impl NixBuildConfig {
             }
         }
         Ok(())
+    }
+
+    pub(crate) fn installable_system<'a>(&self, installable: &'a str) -> Result<&'a str> {
+        let invalid = || {
+            anyhow!(
+                "[ci.nix_build].system_runners requires system-qualified installables such as .#checks.aarch64-linux.test: {installable}"
+            )
+        };
+        let (_, attribute) = installable.split_once('#').ok_or_else(invalid)?;
+        // Output selection is separate from the attribute path; only routing
+        // uses this projection. The rendered installable retains its selector.
+        let attribute = attribute
+            .split_once('^')
+            .map_or(attribute, |(path, _)| path);
+        let mut parts = attribute.splitn(3, '.');
+        let output = parts.next().ok_or_else(invalid)?;
+        let system = parts.next().ok_or_else(invalid)?;
+        let name = parts.next();
+        let valid_output = match output {
+            "checks" | "packages" | "legacyPackages" | "devShells" => {
+                name.is_some_and(|name| !name.is_empty())
+            }
+            "formatter" | "defaultPackage" | "devShell" => name.is_none(),
+            _ => false,
+        };
+        if !valid_output
+            || !system
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        {
+            return Err(invalid());
+        }
+        if !self.system_runners.contains_key(system) {
+            bail!("[ci.nix_build].system_runners has no native runner for {system}: {installable}");
+        }
+        Ok(system)
+    }
+
+    /// A shared-store job can run only members with one declared native system.
+    pub(crate) fn group_system<'a>(&self, members: &'a [String]) -> Result<&'a str> {
+        let first = members
+            .first()
+            .ok_or_else(|| anyhow!("[ci.nix_build].groups requires nonempty groups"))?;
+        let system = self.installable_system(first)?;
+        for member in &members[1..] {
+            if self.installable_system(member)? != system {
+                bail!(
+                    "[ci.nix_build].groups with system_runners must be homogeneous; mixed-system groups cannot share a native runner"
+                );
+            }
+        }
+        Ok(system)
     }
 
     pub(crate) fn validate_push_tags(&self) -> Result<()> {
@@ -3718,6 +3795,7 @@ fn validate_nix_build_config(config: &ProjectConfig) -> Result<()> {
         bail!("simit project config: [ci.nix_build].only requires the Nix runtime");
     }
     options.validate_push_tags()?;
+    options.validate_system_runners(&ci.nix_builds)?;
     options.validate_groups(&ci.nix_builds)?;
     for (name, number, min, max) in [
         ("timeout_minutes", options.timeout_minutes, 1, 360),
@@ -3810,6 +3888,7 @@ fn set_nix_build_table(table: &mut Table, options: &NixBuildConfig) {
     set_bool(&mut build, "only", options.only);
     set_bool(&mut build, "separate_events", options.separate_events);
     set_string_array(&mut build, "push_tags", &options.push_tags);
+    set_string_map(&mut build, "system_runners", &options.system_runners);
     set_string_array(&mut build, "check_systems", &options.check_systems);
     set_string_array(
         &mut build,

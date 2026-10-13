@@ -365,6 +365,15 @@ impl Default for HomebrewPlatformSet {
 }
 
 pub fn files(request: FilesRequest<'_>) -> Result<Vec<GeneratedFile>> {
+    files_for_scope(request, false)
+}
+
+/// Ordinary CI retains its complete policy, but does not plan publication outputs.
+pub fn primary_files(request: FilesRequest<'_>) -> Result<Vec<GeneratedFile>> {
+    files_for_scope(request, true)
+}
+
+fn files_for_scope(request: FilesRequest<'_>, primary_only: bool) -> Result<Vec<GeneratedFile>> {
     if request.options.independent_lanes
         && (request.platform != Platform::Github
             || request.provider != CiProvider::Actions
@@ -377,7 +386,7 @@ pub fn files(request: FilesRequest<'_>) -> Result<Vec<GeneratedFile>> {
         );
     }
     if request.provider == CiProvider::Crow {
-        return crate::render::crow::files(crate::render::crow::FilesRequest {
+        let request = crate::render::crow::FilesRequest {
             format: request.crow.format,
             crow: request.crow,
             runtime: request.runtime,
@@ -387,7 +396,12 @@ pub fn files(request: FilesRequest<'_>) -> Result<Vec<GeneratedFile>> {
             runners: request.runners,
             options: request.options,
             step_runners: request.step_runners,
-        });
+        };
+        return if primary_only {
+            crate::render::crow::primary_files(request)
+        } else {
+            crate::render::crow::files(request)
+        };
     }
     let FilesRequest {
         provider: _,
@@ -423,7 +437,7 @@ pub fn files(request: FilesRequest<'_>) -> Result<Vec<GeneratedFile>> {
         ),
     }];
 
-    if options.publish_crates && package.is_publishable() {
+    if !primary_only && options.publish_crates && package.is_publishable() {
         let content = publish_workflow(
             platform,
             runtime,
@@ -449,7 +463,7 @@ pub fn files(request: FilesRequest<'_>) -> Result<Vec<GeneratedFile>> {
         }
     }
 
-    if options.with_artifacts {
+    if !primary_only && options.with_artifacts {
         files.push(GeneratedFile {
             relative_path: dir.join(artifacts_name),
             content: artifacts_workflow(platform, runtime, package, runners, &options),
@@ -1092,6 +1106,8 @@ pub fn nix_build_matrix_file_with_options(
         bail!("[ci.nix_build] options require GitHub Actions");
     }
     options.validate_push_tags()?;
+    options.validate_system_runners(installables)?;
+    let native_runners = !options.system_runners.is_empty();
     options.validate_groups(installables)?;
     if !options.groups.is_empty() {
         return nix_groups::render(
@@ -1135,19 +1151,38 @@ pub fn nix_build_matrix_file_with_options(
         push_platform_concurrency(&mut workflow, platform);
     }
     workflow.push_str("jobs:\n  build:\n    runs-on: ");
-    workflow.push_str(&runs_on(runner));
+    if native_runners {
+        workflow.push_str("${{ matrix.runner }}\n    name: build (${{ matrix.installable }})");
+    } else {
+        workflow.push_str(&runs_on(runner));
+    }
     workflow.push('\n');
     if let Some(timeout) = options.timeout_minutes {
         workflow.push_str(&format!("    timeout-minutes: {timeout}\n"));
     }
     workflow.push_str(&format!(
-        "    strategy:\n      fail-fast: false\n      max-parallel: {}\n      matrix:\n        installable:\n",
+        "    strategy:\n      fail-fast: false\n      max-parallel: {}\n      matrix:\n",
         options.max_parallel.unwrap_or(2)
     ));
-    for installable in installables {
-        workflow.push_str("          - \"");
-        workflow.push_str(&yaml_double_quote(installable));
-        workflow.push_str("\"\n");
+    if native_runners {
+        workflow.push_str("        include:\n");
+        for installable in installables {
+            let system = options.installable_system(installable)?;
+            let runner = &options.system_runners[system];
+            workflow.push_str(&format!(
+                "          - installable: \"{}\"\n            system: \"{}\"\n            runner: \"{}\"\n",
+                yaml_double_quote(installable),
+                yaml_double_quote(system),
+                yaml_double_quote(runner),
+            ));
+        }
+    } else {
+        workflow.push_str("        installable:\n");
+        for installable in installables {
+            workflow.push_str("          - \"");
+            workflow.push_str(&yaml_double_quote(installable));
+            workflow.push_str("\"\n");
+        }
     }
     workflow.push_str("    env:\n");
     if !options.extra_env.contains_key("NIX_CONFIG") {
@@ -1157,14 +1192,22 @@ pub fn nix_build_matrix_file_with_options(
         workflow.push_str(&format!("      {key}: \"{}\"\n", yaml_double_quote(value)));
     }
     workflow.push_str("    steps:\n");
-    push_checkout_step(&mut workflow, platform, runner);
+    let checkout_version = nix_build_action_version(runner, options, "v7.0.1", "v4.3.1");
+    push_checkout_step_with_version(&mut workflow, platform, checkout_version);
     if options.capture_results {
         workflow.push_str("      - name: Prepare Nix build evidence\n        env:\n          INSTALLABLE: ${{ matrix.installable }}\n        run: |\n          SIMIT_NIX_BUILD_RESULTS=\"$RUNNER_TEMP/simit-nix-build-${{ strategy.job-index }}\"\n          printf '%s\\n' \"SIMIT_NIX_BUILD_RESULTS=$SIMIT_NIX_BUILD_RESULTS\" >> \"$GITHUB_ENV\"\n          mkdir -p \"$SIMIT_NIX_BUILD_RESULTS\"\n          git rev-parse HEAD > \"$SIMIT_NIX_BUILD_RESULTS/revision\"\n          printf '%s\\n' \"$INSTALLABLE\" > \"$SIMIT_NIX_BUILD_RESULTS/installable\"\n");
     }
     push_install_nix_step_with_cache(&mut workflow, platform, substituters, trusted_public_keys);
     push_required_env_step(&mut workflow, &options.required_secrets);
+    if native_runners {
+        push_native_nix_runner_step(&mut workflow);
+    }
     if options.kvm {
-        workflow.push_str("      - name: Enable hosted KVM\n        run: |\n          test \"${RUNNER_ENVIRONMENT:-}\" = github-hosted\n          test -c /dev/kvm\n          sudo chmod a+rw /dev/kvm\n          test -r /dev/kvm && test -w /dev/kvm\n");
+        workflow.push_str("      - name: Enable hosted KVM\n");
+        if native_runners {
+            workflow.push_str("        if: ${{ matrix.system == 'x86_64-linux' }}\n");
+        }
+        workflow.push_str("        run: |\n          test \"${RUNNER_ENVIRONMENT:-}\" = github-hosted\n          test -c /dev/kvm\n          sudo chmod a+rw /dev/kvm\n          test -r /dev/kvm && test -w /dev/kvm\n");
     }
     push_extra_setup_steps(&mut workflow, extra_setup);
     push_extra_setup_steps(&mut workflow, &options.extra_setup);
@@ -1207,9 +1250,9 @@ pub fn nix_build_matrix_file_with_options(
         push_action_uses(
             &mut workflow,
             platform,
-            Some(runner),
+            None,
             "upload-artifact",
-            "v7.0.2",
+            nix_build_action_version(runner, options, "v7.0.2", "v4.6.2"),
             "v4.6.2",
         );
         workflow.push_str(&format!("\n        with:\n          name: nix-build-${{{{ strategy.job-index }}}}\n          retention-days: {}\n          if-no-files-found: warn\n          path: |\n            ${{{{ runner.temp }}}}/simit-nix-build-${{{{ strategy.job-index }}}}\n", options.artifact_retention_days.unwrap_or(14)));
@@ -1224,6 +1267,13 @@ pub fn nix_build_matrix_file_with_options(
         relative_path: PathBuf::from(platform.workflow_dir()).join("nix-builds.yaml"),
         content: workflow,
     })
+}
+
+fn push_native_nix_runner_step(workflow: &mut String) {
+    // Nixpkgs lib.systems.elaborate.uname.processor uses ppc spellings for
+    // the unambiguous PowerPC systems; never infer ambiguous CPU endianness
+    // from Nix's configurable identity.
+    workflow.push_str("      - name: Verify native Nix runner\n        env:\n          EXPECTED_NIX_SYSTEM: ${{ matrix.system }}\n        run: |\n          set -euo pipefail\n          machine=\"$(uname -m)\"\n          case \"$machine\" in\n            arm64) machine=aarch64 ;;\n            amd64) machine=x86_64 ;;\n            i386|i486|i586) machine=i686 ;;\n            ppc) machine=powerpc ;;\n            ppcle) machine=powerpcle ;;\n            ppc64) machine=powerpc64 ;;\n            ppc64le) machine=powerpc64le ;;\n          esac\n          kernel=\"$(uname -s)\"\n          case \"$kernel\" in\n            Linux) os=linux ;;\n            Darwin) os=darwin ;;\n            FreeBSD) os=freebsd ;;\n            *) echo \"Unsupported native Nix runner kernel: $kernel\" >&2; exit 1 ;;\n          esac\n          actual_system=\"$machine-$os\"\n          if [ \"$actual_system\" != \"$EXPECTED_NIX_SYSTEM\" ]; then\n            echo \"Native Nix runner mismatch: expected $EXPECTED_NIX_SYSTEM, got hardware $actual_system\" >&2\n            exit 1\n          fi\n          nix_system=\"$(nix eval --impure --raw --expr builtins.currentSystem)\"\n          if [ \"$nix_system\" != \"$EXPECTED_NIX_SYSTEM\" ]; then\n            echo \"Native Nix runner mismatch: expected $EXPECTED_NIX_SYSTEM, got configured Nix system $nix_system\" >&2\n            exit 1\n          fi\n          printf 'Verified native hardware %s and Nix system %s\\n' \"$actual_system\" \"$nix_system\"\n");
 }
 
 pub fn gitlab_nix_flake_workflow() -> String {
@@ -3981,7 +4031,12 @@ fn push_checkout_step(workflow: &mut String, platform: Platform, runner: &Resolv
 }
 
 fn push_source_head_checkout(workflow: &mut String, runner: &ResolvedRunner) {
-    push_checkout_step(workflow, Platform::Github, runner);
+    let version = github_action_version(Some(runner), "v7.0.1", "v4.3.1");
+    push_source_head_checkout_with_version(workflow, version);
+}
+
+fn push_source_head_checkout_with_version(workflow: &mut String, version: &str) {
+    push_checkout_step_with_version(workflow, Platform::Github, version);
     workflow.push_str("        with:\n          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}\n          ref: ${{ github.event.pull_request.head.sha || github.sha }}\n          persist-credentials: false\n");
 }
 
@@ -4162,6 +4217,19 @@ fn github_matrix_action_version<'a>(
     }
 }
 
+fn nix_build_action_version<'a>(
+    runner: &ResolvedRunner,
+    options: &crate::config::NixBuildConfig,
+    node24: &'a str,
+    legacy: &'a str,
+) -> &'a str {
+    if options.system_runners.is_empty() {
+        github_action_version(Some(runner), node24, legacy)
+    } else {
+        github_matrix_action_version(&options.system_runners, node24, legacy)
+    }
+}
+
 fn push_install_nix_step(workflow: &mut String, platform: Platform) {
     push_install_nix_step_with_cache(workflow, platform, &[], &[]);
 }
@@ -4173,6 +4241,23 @@ fn push_install_nix_step_with_cache(
     trusted_public_keys: &[String],
 ) {
     if platform == Platform::Forgejo {
+        if !substituters.is_empty() || !trusted_public_keys.is_empty() {
+            let mut config = String::new();
+            if !substituters.is_empty() {
+                config.push_str(&format!("substituters = {}\n", substituters.join(" ")));
+            }
+            if !trusted_public_keys.is_empty() {
+                config.push_str(&format!(
+                    "trusted-public-keys = {}\n",
+                    trusted_public_keys.join(" ")
+                ));
+            }
+            workflow.push_str("      - name: Configure preinstalled Nix caches\n        env:\n          SIMIT_NIX_CACHE_CONFIG: |\n");
+            for line in config.lines() {
+                workflow.push_str(&format!("            {line}\n"));
+            }
+            workflow.push_str("        run: |\n          delimiter=SIMIT_NIX_CACHE\n          while printf '%s\\n' \"${NIX_CONFIG:-}\" \"$SIMIT_NIX_CACHE_CONFIG\" | grep -Fx \"$delimiter\" > /dev/null; do\n            delimiter=\"${delimiter}_\"\n          done\n          printf '%s\\n' \"NIX_CONFIG<<$delimiter\" \"${NIX_CONFIG:-}\" \"$SIMIT_NIX_CACHE_CONFIG\" \"$delimiter\" >> \"$GITHUB_ENV\"\n\n");
+        }
         return;
     }
 

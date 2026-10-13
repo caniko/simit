@@ -115,6 +115,14 @@ impl Step {
 }
 
 pub fn files(request: FilesRequest<'_>) -> Result<Vec<GeneratedFile>> {
+    files_for_scope(request, false)
+}
+
+pub(crate) fn primary_files(request: FilesRequest<'_>) -> Result<Vec<GeneratedFile>> {
+    files_for_scope(request, true)
+}
+
+fn files_for_scope(request: FilesRequest<'_>, primary_only: bool) -> Result<Vec<GeneratedFile>> {
     if request.options.independent_lanes {
         bail!("independent_lanes requires GitHub Actions Rust/Nix CI");
     }
@@ -144,7 +152,7 @@ pub fn files(request: FilesRequest<'_>) -> Result<Vec<GeneratedFile>> {
         )?,
     }];
 
-    if request.options.publish_crates && request.package.is_publishable() {
+    if !primary_only && request.options.publish_crates && request.package.is_publishable() {
         files.push(GeneratedFile {
             relative_path: crow_path("publish-crate", suffix, request.format),
             content: render_workflow(
@@ -160,7 +168,7 @@ pub fn files(request: FilesRequest<'_>) -> Result<Vec<GeneratedFile>> {
         });
     }
 
-    if request.options.with_artifacts {
+    if !primary_only && request.options.with_artifacts {
         files.push(GeneratedFile {
             relative_path: crow_path("release-artifacts", suffix, request.format),
             content: render_workflow(
