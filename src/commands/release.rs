@@ -102,6 +102,28 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
     )?;
     let plans = cargo::plan_versions(packages, &bump)?;
     let new_version = cargo::common_new_version(&plans)?;
+    if command.component.is_some() {
+        for package in &metadata.packages {
+            for dependency in &package.dependencies {
+                for plan in &plans {
+                    if dependency.path.as_deref() == plan.package.manifest_path.parent()
+                        && dependency.path.is_some()
+                    {
+                        if let Some(requirement) = &dependency.req {
+                            anyhow::ensure!(
+                                semver::VersionReq::parse(requirement)?.matches(&plan.new_version),
+                                "package {} dependency {} requirement {} excludes component version {}; update the dependency requirement before releasing",
+                                package.name,
+                                dependency.name,
+                                requirement,
+                                plan.new_version
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
     if command.component.is_some()
         && config.ci.publish_crates
         && plans

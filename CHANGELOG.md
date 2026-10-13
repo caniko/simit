@@ -53,6 +53,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Reject component version bumps excluded by local dependency requirements before
+  mutation, including renamed workspace-inherited dependencies.
 - Preserve primary-only scope when inferring monorepo drift with independently
   managed VS Code or JetBrains publishers.
 - Require independent crates.io publishers' complete local dependency closure to

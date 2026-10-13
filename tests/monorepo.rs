@@ -859,6 +859,89 @@ fn independent_cargo_prereleases_fail_before_release_mutation() {
 }
 
 #[test]
+fn component_bumps_reject_incompatible_local_dependency_requirements() {
+    for inherited in [false, true] {
+        let temp = fixture();
+        let root = temp.path();
+        enroll_release_checks(root);
+        write(root, ".gitignore", "target/\n");
+        if inherited {
+            let workspace = fs::read_to_string(root.join("Cargo.toml")).unwrap();
+            write(
+                root,
+                "Cargo.toml",
+                &format!(
+                    "{workspace}\n[workspace.dependencies]\nalias = {{package='engine',path='crates/engine',version='0.1'}}\n"
+                ),
+            );
+            write(
+                root,
+                "crates/worker/Cargo.toml",
+                "[package]\nname='worker'\nversion='0.1.0'\nedition='2024'\n[dependencies]\nalias.workspace = true\n",
+            );
+        }
+        assert!(
+            Command::new("cargo")
+                .current_dir(root)
+                .arg("generate-lockfile")
+                .status()
+                .unwrap()
+                .success()
+        );
+        fixture_git(root, &["init"]);
+        fixture_git(root, &["config", "user.name", "Test"]);
+        fixture_git(root, &["config", "user.email", "test@example.com"]);
+        fixture_git(root, &["add", "."]);
+        fixture_git(root, &["commit", "-m", "fixture"]);
+        let before = fixture_git(root, &["rev-parse", "HEAD"]);
+        let manifest = fs::read(root.join("crates/engine/Cargo.toml")).unwrap();
+        let lock = fs::read(root.join("Cargo.lock")).unwrap();
+        let output = common::simit()
+            .current_dir(root)
+            .args([
+                "release",
+                "minor",
+                "--component",
+                "rust",
+                "--no-sign",
+                "--no-changelog",
+                "-m",
+                "bump engine",
+            ])
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("excludes component version"),
+            "{output:?}"
+        );
+        assert_eq!(fixture_git(root, &["rev-parse", "HEAD"]), before);
+        assert_eq!(
+            fs::read(root.join("crates/engine/Cargo.toml")).unwrap(),
+            manifest
+        );
+        assert_eq!(fs::read(root.join("Cargo.lock")).unwrap(), lock);
+        assert!(fixture_git(root, &["status", "--porcelain"]).is_empty());
+        assert!(fixture_git(root, &["tag", "--list"]).is_empty());
+        // A patch bump remains within the admitted requirement.
+        let output = common::simit()
+            .current_dir(root)
+            .args([
+                "release",
+                "patch",
+                "--component",
+                "rust",
+                "--dry-run",
+                "-m",
+                "bump engine",
+            ])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+    }
+}
+
+#[test]
 fn independent_sync_up_uses_owned_package_tag_with_divergent_versions() {
     let temp = fixture();
     let root = temp.path();
