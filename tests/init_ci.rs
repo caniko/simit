@@ -4941,20 +4941,28 @@ fn forgejo_python_ci_applies_ci_cache_to_the_preinstalled_nix_environment() {
         .find(|step| step["name"] == "Configure preinstalled Nix caches")
         .expect("CI cache configuration step");
     let env_file = temp.path().join("github-env");
-    let existing = "experimental-features = nix-command flakes\nSIMIT_NIX_CACHE\nsystem-features = kvm\n# \"quoted\" \\literal";
+    // The combined probe exceeds pipe capacity; an early-exit grep can make
+    // printf receive SIGPIPE and hide the match under bash's pipefail.
+    let existing = format!(
+        "experimental-features = nix-command flakes\nSIMIT_NIX_CACHE\nsystem-features = kvm\n# \"quoted\" \\literal\n{}",
+        "# x\n".repeat(24 * 1024)
+    );
+    let cache_config = format!(
+        "{}{}",
+        step["env"]["SIMIT_NIX_CACHE_CONFIG"].as_str().unwrap(),
+        "# cache\n".repeat(12 * 1024)
+    );
     let output = Command::new("bash")
         .args(["-e", "-o", "pipefail", "-c", step["run"].as_str().unwrap()])
         .env("GITHUB_ENV", &env_file)
-        .env("NIX_CONFIG", existing)
-        .env(
-            "SIMIT_NIX_CACHE_CONFIG",
-            step["env"]["SIMIT_NIX_CACHE_CONFIG"].as_str().unwrap(),
-        )
+        .env("NIX_CONFIG", &existing)
+        .env("SIMIT_NIX_CACHE_CONFIG", &cache_config)
         .output()
         .unwrap();
     assert!(output.status.success(), "{output:?}");
     let exported = read(&env_file);
-    assert!(exported.contains(existing));
+    assert!(exported.contains(&existing));
+    assert!(exported.contains(&cache_config));
     assert!(exported.contains("substituters = https://ci-cache.example"));
     assert!(exported.contains("trusted-public-keys = ci-cache.example:YWJj"));
     assert!(!exported.contains("https://release-cache.example"));
