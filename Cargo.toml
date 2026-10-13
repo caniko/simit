@@ -54,6 +54,7 @@ CARGO_BUILD_JOBS = "2"
 ".github/workflows/qualify-generator.yaml" = ".simit/workflows/qualify-generator.yaml.in"
 ".github/workflows/custody-fixture.yaml" = ".simit/workflows/custody-fixture.yaml.in"
 ".github/workflows/qualify-nix-transport.yaml" = ".simit/workflows/qualify-nix-transport.yaml.in"
+".github/workflows/qualify-native-groups.yaml" = ".simit/workflows/qualify-native-groups.yaml.in"
 
 [package.metadata.simit.ci.custody]
 repository = "caniko/simit"
@@ -127,6 +128,13 @@ tempfile = "3"
 tar = "0.4"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
+[[example]]
+name = "ci-stream-oracle"
+path = "tests/fixtures/ci-stream-oracle.rs"
+
 [target.'cfg(target_os = "linux")'.dependencies]
-signal-hook = "0.3.18"
 socket2 = "0.6.1"
+
+[target.'cfg(unix)'.dependencies]
+signal-hook = "0.3.18"
+rustix = { version = "1", features = ["fs", "process"] }

@@ -13,6 +13,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   native step-log completeness admission, immutable artifact ID/digest verification
   and independently uploaded aggregation with fresh native revocation checks.
   Existing policies retain their original protocol.
+- Opt-in `[ci].separate_events` for GitHub Rust CI, preserving independent push
+  and PR originals in aggregate workspaces while retaining default coalescing.
+- Native dependency export-stream admission with importer-compatible NAR bounds,
+  exact closure/reference binding, and one-use private descriptor restoration.
+- Native `simit ci nix-group` and library execution contracts replace embedded
+  grouped-build Python and its Python test harness. Enroll an immutable
+  `SIMIT_CI_ENGINE_REVISION` repository variable before adopting regenerated
+  grouped workflows. Retain v1 receipts, shell-only failure diagnostics and
+  materialize-plus-rebuild execution for fresh members.
 - Opt-in `[ci.nix_build.system_runners]` for native exact-installable matrices.
   Route each system-qualified gate to its declared runner, reject missing or
   ambiguous mappings before writes, verify the native Nix architecture, and
@@ -35,6 +44,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Preserve explicitly selected custody protocols when persisting CI option changes.
+- Honor the documented absolute `XDG_DATA_HOME` project-registry override on
+  macOS and Windows as well as Linux, retaining native defaults when unset.
+- Preserve `SIMIT_NIX_FRESH` in environment-mode grouped execution, retain
+  `SIMIT_NIX_FRESH_INSTALLABLES` as an alias, and reject conflicting values before
+  execution so freshness requirements cannot silently disappear.
+- Reject all pre-existing numbered member evidence before grouped Git/Nix
+  observations or evidence writes, including interrupted/fallback-only attempts,
+  out-of-range indices, files and dangling symlinks.
+- Bound complete grouped workflow files to GitHub's 500 KB limit before writes,
+  require an explicit nonempty runtime evidence directory, reserve transport
+  environment keys, and reject Actions expressions in retained grouped hooks.
+  Bind secret expressions through `extra_env` and use shell variables in hooks.
+- Reject grouped execution specs above the shared 16 MiB serialized JSON budget
+  before generation writes or runtime effects, counting JSON escapes while
+  preserving the individual 1 MiB hook limit.
+- Enforce grouped stdout/stderr limits before evidence writes, execute accepted
+  large hooks from retained scripts, and make output-reader startup failure-safe.
+  Deny NAR case-hack aliases before import and budget restore argv/environment
+  bytes before any store mutation for portable closure verification.
+- Keep generated group specs and diagnostic fallback hooks out of argv/environment
+  strings, preserving Bash command semantics for hooks through the 1 MiB limit.
+  Retain inherited-pipe/cancellation diagnostics, platform exec headroom and the
+  transport producer's checked zlib compressed envelope.
+- Preserve Unix cancellation and signal exit statuses across grouped execution,
+  retain admission diagnostics, and force fresh rebuilds onto the current worker.
+  Bootstrap uses public credential-free Nix fetching and portable hashing, with
+  unsupported Intel macOS runner admission rejected before generation writes.
 - Admit dependency attributes outside the actual checks namespace, apply CI cache
   policy on preinstalled Forgejo Nix, and explain full reruns for attempt-bound
   transport. Reject Darwin case-hack aliases before import and bind checksum and
@@ -77,9 +113,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hook-wiring shortcuts, and detect that required source migration in full checks.
 - Generate MSRV toolchain manifests as source assets so no-build, read-only Nix
   evaluation succeeds on cold stores without changing the declared compiler.
-- Enforce grouped-build admission under Python optimization and preserve each
-  installable's hook context, including shell-only diagnostics after setup or
-  preflight failures. Provision the grouped interpreter and retain unset timeouts.
+- Preserve each grouped installable's hook context, including shell-only
+  diagnostics after setup or preflight failures, and retain unset timeouts.
 - Qualify one immutable PR head across independent lanes and required gates,
   evaluate all flake systems, preserve Cargo tool paths in every lane and reject
   unsupported step-runner overrides before normalization.

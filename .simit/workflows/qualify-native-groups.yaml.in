@@ -1,0 +1,65 @@
+name: Qualify native grouped execution
+
+on:
+  push:
+    branches: ["ci/native-group-platforms-20261013", "trunk"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-groups-${{ github.event_name }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event.pull_request.head.ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  native:
+    name: native groups (${{ matrix.system }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include:
+          - system: aarch64-linux
+            runner: ubuntu-24.04-arm
+          - system: aarch64-darwin
+            runner: macos-15
+    env:
+      NIX_CONFIG: "experimental-features = nix-command flakes\nmax-jobs = 1\ncores = 2"
+      EXPECTED_NIX_SYSTEM: ${{ matrix.system }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Observe native hardware before provisioning
+        shell: bash
+        run: |
+          set -euo pipefail
+          machine="$(uname -m)"
+          case "$machine" in arm64) machine=aarch64 ;; esac
+          kernel="$(uname -s)"
+          case "$kernel" in Linux) os=linux ;; Darwin) os=darwin ;; *) exit 1 ;; esac
+          test "$machine-$os" = "$EXPECTED_NIX_SYSTEM"
+          mkdir -p "$RUNNER_TEMP/native-group-qualification"
+          printf '%s\n' "$machine-$os" > "$RUNNER_TEMP/native-group-qualification/hardware-system"
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
+      - name: Build exact production engine and execute generated steps
+        shell: bash
+        env:
+          BASH_ENV: ""
+          ENV: ""
+          NIX_USER_CONF_FILES: /dev/null
+          NIX_PATH: ""
+        run: python3 scripts/qualify-native-groups.py
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: native-groups-${{ matrix.system }}-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 32
+          if-no-files-found: error
+          path: ${{ runner.temp }}/native-group-qualification

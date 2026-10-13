@@ -14,6 +14,7 @@ fn program(
         "Verify and import dependency closure"
     };
     workflow.push_str(&format!("      - name: {name}\n        shell: python\n        env:\n          SIMIT_DEPENDENCY_MODE: {mode}\n          SIMIT_DEPENDENCY_ROOT: ${{{{ runner.temp }}}}/simit-nix-dependencies\n          SIMIT_DEPENDENCY_MAX_BYTES: {}\n", options.dependency_max_mib.unwrap_or(2048) * 1024 * 1024));
+    nix_groups::push_producer_env_lines(workflow, options);
     let mut limits = Vec::new();
     if let Some(value) = options.max_jobs {
         limits.extend(["--max-jobs".to_owned(), value.to_string()]);
@@ -68,7 +69,21 @@ pub(super) fn import(
     );
     workflow.push_str("\n        with:\n          name: simit-nix-dependencies-${{ github.run_id }}-${{ github.run_attempt }}\n          path: ${{ runner.temp }}/simit-nix-dependencies\n");
     workflow.push_str("      - name: Explain missing attempt-bound dependencies\n        if: ${{ failure() && steps.simit-dependency-download.outcome == 'failure' }}\n        run: |\n          echo 'Dependency transport requires a producer from this exact run attempt. Use Re-run all jobs; partial reruns cannot reuse a previous-attempt artifact.' >&2\n          exit 1\n");
+    provision_python(workflow, runner);
     program(workflow, "import", options, plan)
+}
+
+fn provision_python(workflow: &mut String, runner: &ResolvedRunner) {
+    workflow.push_str("      - name: Provision dependency-transport Python\n");
+    push_action_uses(
+        workflow,
+        Platform::Github,
+        Some(runner),
+        "setup-python",
+        "v6.3.0",
+        "v5.6.0",
+    );
+    workflow.push_str("\n        with:\n          python-version: '3.12'\n");
 }
 
 pub(super) fn job(
@@ -102,16 +117,7 @@ pub(super) fn job(
     workflow.push_str("        with:\n          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}\n          ref: ${{ github.event.pull_request.head.sha || github.sha }}\n          persist-credentials: false\n");
     push_install_nix_step_with_cache(workflow, Platform::Github, substituters, keys);
     push_required_env_step(workflow, &options.required_secrets);
-    workflow.push_str("      - name: Provision dependency-transport Python\n");
-    push_action_uses(
-        workflow,
-        Platform::Github,
-        Some(runner),
-        "setup-python",
-        "v6.3.0",
-        "v5.6.0",
-    );
-    workflow.push_str("\n        with:\n          python-version: '3.12'\n");
+    provision_python(workflow, runner);
     if options.kvm {
         workflow.push_str("      - name: Enable hosted KVM\n        run: |\n          test \"${RUNNER_ENVIRONMENT:-}\" = github-hosted\n          test -c /dev/kvm\n          sudo chmod a+rw /dev/kvm\n          test -r /dev/kvm && test -w /dev/kvm\n");
     }
