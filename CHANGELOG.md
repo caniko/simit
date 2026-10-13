@@ -30,6 +30,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Run Chocolatey release publication in the project's declared environment;
+  retain source-bound packed candidates for byte-verified retries, reject
+  conflicting registry content, and keep publication credentials out of
+  packing, lookups, and command output.
 - Generate native Rust, cross Rust and Python flakes against one qualified Harbor
   monorepo revision and its namespaced APIs. Keep MSRV toolchain manifests in
   tracked source, preserve existing Rust library namespaces when patching hooks,

@@ -2385,9 +2385,8 @@ fn push_publish_chocolatey(
     } else {
         writeln!(w, "          if [ -z \"${{{key_env}:-}}\" ]; then echo '{key_env} is required because Chocolatey package publishing is configured.' >&2; exit 1; fi").expect("write");
     }
-    // `nix_tool` provides choco (+ simit). Point it at a fork that ships the
-    // chocolatey package until it lands upstream; the soft-skip above keeps tags
-    // green in the meantime.
+    // Resolve the project's Simit through its declared development shell, then
+    // add the configured Chocolatey tool to that environment.
     if activated_remote {
         writeln!(w, "          ZIP=\"release/{zip}\"; test -s \"$ZIP\" || publisher_missing chocolatey \"missing $ZIP\"").expect("write");
     } else {
@@ -2395,7 +2394,7 @@ fn push_publish_chocolatey(
     }
     writeln!(
         w,
-        "          nix shell {} -c simit dist chocolatey bump \\",
+        "          nix develop -c nix shell {} -c simit dist chocolatey bump \\",
         chocolatey.nix_tool
     )
     .expect("write");

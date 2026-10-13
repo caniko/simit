@@ -95,6 +95,17 @@ Root runners use `setpriv` with an unprivileged UID/GID for `makepkg`, then
 restore the clone's original ownership on success or failure. Metadata is
 replaced only after generation succeeds; failed generation does not publish.
 
+Chocolatey publication runs inside the project's declared Nix development
+environment, with `chocolatey.nix_tool` supplying the external packager. It
+retains the exact packed candidate and its source/content hashes under
+`<package-dir>/.simit-candidates/`; keep that directory when retrying the same
+publication. A retry skips publication only when the registry's downloaded
+package is byte-identical. Different bytes, failed lookups, and unverified
+push failures remain errors. The public Chocolatey push service is checked
+through its community NuGet v2 feed; custom HTTP(S) push sources are treated
+as NuGet v2 base URLs. Packing and registry lookups do not receive the
+configured API-key environment variable.
+
 For an harbor-rs project whose flake exposes the conventional
 `packages.<system>.release-bundle`, the release artifact section can instead
 use the simple opt-in:
