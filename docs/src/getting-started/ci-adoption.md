@@ -448,6 +448,134 @@ remain enforced when Python optimization is enabled.
 Grouped jobs have `build (<group>)` contexts. Qualify the new evidence and migrate
 required contexts together before retiring a monolithic flake-check gate.
 
+### Completion-driven producer custody
+
+`[ci.custody]` generates a trusted default-branch `workflow_run` observer. Enroll
+workflow names, source paths, every required job name and every required artifact
+name. Branch/PR producers must use original attempt 1; the observer never reruns
+producers and never checks out or executes their source or artifacts.
+
+```toml
+[ci.custody]
+repository = "owner/repository"
+producer_attempt = 1
+status_context = "simit/producer-custody"
+
+[ci.custody.producers.CI]
+workflow = ".github/workflows/ci.yaml"
+jobs = ["rust", "evaluation"]
+
+[ci.custody.producers."Nix installable builds"]
+workflow = ".github/workflows/nix-builds.yaml"
+jobs = ["build (network)", "build (pinentry)"]
+artifacts = ["nix-build-0", "nix-build-1"]
+```
+
+GitHub executes `workflow_run` from the default branch and fires it when **any**
+listed workflow completes. Install the observer on that branch before testing
+it with candidate producers. The first event may record a pending observation;
+the last completion aggregates every enrolled producer for the same source head,
+branch and event. Duplicate identities, nonoriginal attempts, missing jobs or
+artifacts, failed/skipped required jobs and incomplete custody cannot succeed.
+GitHub filters completions by display name, which is not unique. A positively
+identified workflow file outside every enrolled path is ignored before creating
+a reporting target or collection queue, even if it reuses an enrolled name.
+Capture and report repeat this early fence and never read stale receipts for
+unrelated completions. An enrolled path with a wrong name or ref qualifier still
+fails admission and revokes its established target.
+Admission and bounded-capture checks use explicit errors and remain enforced
+when Python optimization is enabled. Failed revalidation revokes a previously
+successful observation in both ordinary and optimized interpreter modes.
+
+The observer binds each producer's workflow definition through GitHub's native
+[`WorkflowRun.file` / `WorkflowRunFile`](https://docs.github.com/en/graphql/reference/actions#workflowrunfile)
+record, documented as an executed workflow file. Its repository, path, parent run,
+attempt, event and check-suite repository must match the admitted original. The
+`repositoryFileUrl` must identify an immutable 40-hex commit; custody fetches and
+hashes the enrolled file at that revision, retaining the native response, commit,
+Git blob metadata and workflow bytes. Each producer row records `workflow_revision`,
+`workflow_tree` and `source_workflow_sha256`. The receipt's `head` / `tree` remain
+the source-head identity, which can differ from the workflow-definition revision.
+
+Raw REST `head_sha`, checkout logs, referenced reusable workflows and the current
+PR merge ref are not substitutes for historical executed-file proof. This matters
+when the base introduced or changed a workflow absent or different at the PR head.
+Unavailable file records or mutable file URLs fail closed at the established
+status target. Capture-final and post-upload report requery the native executed-file
+record; revision drift revokes success in the same stable context. A native file
+record at the raw head is admitted as that explicit provider proof, not inferred
+from the source head. Installed-token access to these GraphQL records remains a
+live acceptance gate.
+
+The observer retains original jobs, provider log archives and required artifact
+bytes. Archives are hashed without extraction. Capture and
+API downloads share a 512 MiB wire budget; retained files and total archive
+expansion each have a separate 512 MiB aggregate budget. At most 256 requests,
+256 retained files and 10,000 archive members are admitted within a six-minute
+capture deadline. Downloads and member hashes stream in 64 KiB chunks; oversized
+or stalled provider downloads terminate and reap their own child processes.
+Before constructing the ZIP reader, custody scans actual central-directory
+records under a 16 MiB directory bound, the remaining aggregate member/expansion
+budgets and the original deadline. Forged footer counts cannot bypass that scan.
+Stored and deflated provider archives, including ZIP64, are supported; other
+compression methods fail admission before any member decompression.
+Enrollment accepts at most 100 jobs/artifacts across all producers. Generation
+also admits the complete rendered workflow only up to 500,000 UTF-8 bytes under
+GitHub's [500 KB workflow-file limit](https://docs.github.com/en/enterprise-cloud@latest/actions/reference/limits#workflow-file-size),
+including repeated policy/program text and YAML/JSON escaping. Oversized policies
+reject before generated-file reconciliation or configuration persistence; shorten
+enrolled names/inventories to fit. Capture budget failures retain the established
+failure-reporting target.
+
+Capture and upload must both complete before source-head status success. Reporting is
+idempotent and explicitly targets the producer commit, not the observer's default-
+branch SHA. Status contexts are `<status_context>/<event>/<target-sha256>`, using
+the full SHA-256 of the canonical stable target identity: repository IDs and
+normalized names, event, exact case-sensitive head branch, and, for PRs, PR ID,
+number, base repository ID and exact base ref. The prefix is at most 22 UTF-8
+bytes under Simit's 100-byte composed-context contract. Different PRs or bases
+at the same commit cannot satisfy each other's contexts. Enroll the exact target
+contexts before replacing existing protection. Repository names are compared
+case-insensitively, matching GitHub's owner/repository naming rules.
+
+PR custody requires exactly one valid provider PR association, including matching
+head SHA/ref and repository IDs. Missing, ambiguous or malformed associations fail
+without inventing a branch-only reporting target. Discovery, selected details,
+capture-final and report-time revalidation bind the stable identity and observed
+head/base SHA snapshots. Snapshot equality is conservative admission of observed
+API data, not authenticated historical base-execution provenance. The observed
+base SHA stays out of the status key so later changes can revoke the same target.
+
+A token-free, contents-read identity job derives the full target digest before
+collection. Collection uses that digest plus head SHA in job-level concurrency;
+different branches, PRs, base refs and case-distinct refs have distinct queues.
+Pending replacement within one target observes the same enrolled producer set.
+The collect job reserves 25 minutes for six-minute capture, upload bounded to five
+minutes, six-minute report lookups and a separate 90-second status POST. Reporting
+runs after failed upload and exhausted lookup budgets to publish failure when the
+completion target was safely established.
+
+Same-repository branch/PR custody is supported; signed-tag release
+attempt policy and fork custody require separately qualified enrollment.
+
+The collect job has only contents/actions/checks read and statuses write
+permissions. `checks: read` admits the native check-suite proof in private
+repositories; identity remains contents-read and receives no token environment. It
+provides observation custody, not independent execution acceptance. Keep native
+test/build contexts and consumer receipt validation authoritative. Qualify its
+default-branch installation, completion ordering, source-head reporting and
+all-producer aggregation before replacing an existing waiting collector.
+Use the [installed-observer acceptance procedure](../ci-custody-acceptance.md)
+to retain both completion orders, isolation and live failure/revocation evidence.
+
+Simit's own enrollment observes its native `CI/test` producer and a short,
+source-bound `Custody qualification fixture` producer. The fixture uploads inert
+Python text as archive data; the observer hashes it without executing it. Their
+different completion times exercise pending-to-complete aggregation. Before the
+observer is merged onto the default branch, candidate workflow runs qualify the
+generator and fixture only. Retain the merged-source observer events and subsequent
+branch/PR events to qualify installation, source-head reporting and ordering.
+
 ### CI dependency reuse
 
 `[ci.cache]` declares public credential-free HTTPS substituters and signing keys

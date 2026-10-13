@@ -980,6 +980,7 @@ fn infer_expected_ci_files(
         .filter(|file| {
             !crate::review::generation::is_review_path(&file.relative_path)
                 && file.relative_path != Path::new(crate::render::review_policy::PATH)
+                && file.relative_path != Path::new(crate::render::ci::custody::PATH)
                 && !crate::render::workflow_templates::is_template_output(
                     &config.ci,
                     &file.relative_path,
@@ -1004,6 +1005,9 @@ fn infer_expected_ci_files(
     if let Some(policy) = config.review_policy.as_ref() {
         files.push(crate::render::review_policy::file(policy)?);
     }
+    if let Some(custody) = config.ci.custody.as_ref() {
+        files.push(crate::render::ci::custody::file(custody)?);
+    }
     crate::render::workflow_templates::append(workspace_root, &config.ci, &mut files)?;
     Ok(files)
 }
@@ -1022,6 +1026,11 @@ fn infer_expected_primary_ci_files(
     config
         .ci
         .validate_effective_backend(backend.provider(), backend.platform())?;
+    crate::render::ci::custody::validate_backend(
+        &config.ci,
+        backend.provider(),
+        backend.platform(),
+    )?;
     let snapshots = workflow_snapshots(marked);
     if backend.provider() == CiProvider::Crow {
         return infer_expected_crow_files(workspace_root, marked, &snapshots);
