@@ -1852,11 +1852,29 @@ fn push_publish_aur(w: &mut String, aur: &ResolvedAur, activated_remote: bool) {
         w.push_str("          test -n \"${AUR_SSH_KEY:-}\"\n");
     }
     w.push_str(
-        "          nix shell nixpkgs#git nixpkgs#openssh nixpkgs#pacman -c bash <<'SCRIPT'\n",
+        "          nix shell nixpkgs#git nixpkgs#openssh nixpkgs#pacman nixpkgs#util-linux -c bash <<'SCRIPT'\n",
     );
     w.push_str("          set -euo pipefail\n          . ./release-env\n");
     w.push_str("          AUR_HOST='aur.archlinux.org'; AUR_SSH=\"$HOME/.ssh/aur\"\n");
     w.push_str("          MAKEPKG_CONF=\"$(dirname \"$(dirname \"$(command -v makepkg)\")\")/etc/makepkg.conf\"; test -r \"$MAKEPKG_CONF\"\n");
+    // Use a subshell so cleanup runs on success and on generation failure.
+    // AUR clones are owned uniformly by the runner; do not create host accounts.
+    w.push_str(r#"          print_srcinfo() (
+            set -euo pipefail
+            pkgdir="$1"
+            owner=''
+            trap 'status=$?; rm -f "$pkgdir/.SRCINFO.tmp"; if [ -n "$owner" ]; then chown -R "$owner" "$pkgdir" || exit 1; fi; exit "$status"' EXIT
+            if [ "$(id -u)" -eq 0 ]; then
+              owner="$(stat -c '%u:%g' "$pkgdir")"
+              chown -R 65534:65534 "$pkgdir"
+              setpriv --reuid=65534 --regid=65534 --clear-groups sh -c 'cd "$1" && makepkg --config "$2" --printsrcinfo' sh "$pkgdir" "$MAKEPKG_CONF" > "$pkgdir/.SRCINFO.tmp"
+            else
+              (cd "$pkgdir" && makepkg --config "$MAKEPKG_CONF" --printsrcinfo) > "$pkgdir/.SRCINFO.tmp"
+            fi
+            test -s "$pkgdir/.SRCINFO.tmp"
+            mv "$pkgdir/.SRCINFO.tmp" "$pkgdir/.SRCINFO"
+          )
+"#);
     w.push_str("          checksum_for() { awk -v a=\"$1\" '$2 == a { print $1 }' release/SHA256SUMS.txt; }\n");
     let source_archive = pkgbuild_source_archive(aur);
     let bin_archive = pkgbuild_binary_archive(aur);
@@ -1897,7 +1915,7 @@ fn push_publish_aur(w: &mut String, aur: &ResolvedAur, activated_remote: bool) {
     w.push_str(
         "              *) echo \"unknown AUR package: $pkg\" >&2; exit 1 ;;\n            esac\n",
     );
-    w.push_str("            (cd \"aur-${pkg}\" && makepkg --config \"$MAKEPKG_CONF\" --printsrcinfo > .SRCINFO)\n");
+    w.push_str("            print_srcinfo \"aur-${pkg}\"\n");
     w.push_str("            git -C \"aur-${pkg}\" add PKGBUILD .SRCINFO\n");
     w.push_str("            if git -C \"aur-${pkg}\" diff --cached --quiet; then echo \"AUR ${pkg} already at ${VERSION}\"; return 0; fi\n");
     w.push_str("            git -C \"aur-${pkg}\" -c user.email='ci@localhost' -c user.name='release bot' commit -m \"${VERSION}\"\n");
@@ -3093,7 +3111,8 @@ mod tests {
         assert!(workflow.contains(
             "require_credential 'global/user secret' 'AUR_SSH_KEY' \"${AUR_SSH_KEY:-}\""
         ));
-        assert!(workflow.contains("makepkg --config \"$MAKEPKG_CONF\" --printsrcinfo > .SRCINFO"));
+        assert!(workflow.contains("print_srcinfo \"aur-${pkg}\""));
+        assert!(workflow.contains("setpriv --reuid=65534 --regid=65534 --clear-groups"));
         assert!(
             workflow
                 .contains("for pkg in modde modde-bin modde-git; do publish_pkg \"$pkg\"; done")

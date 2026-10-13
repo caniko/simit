@@ -90,6 +90,11 @@ by the generated RPM spec. `copr.srpm_dir` selects the same workspace-relative
 staging directory for the build and publisher. Publication requires exactly
 one nonempty `.src.rpm` there.
 
+AUR metadata generation works for unprivileged and root release runners.
+Root runners use `setpriv` with an unprivileged UID/GID for `makepkg`, then
+restore the clone's original ownership on success or failure. Metadata is
+replaced only after generation succeeds; failed generation does not publish.
+
 For an harbor-rs project whose flake exposes the conventional
 `packages.<system>.release-bundle`, the release artifact section can instead
 use the simple opt-in:
