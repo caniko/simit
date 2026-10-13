@@ -138,6 +138,7 @@ pub(super) fn render(
             post_build_always: options.post_build_always.clone(),
             fresh_installables: options.fresh_installables.clone(),
         };
+        spec.validate()?;
         let quoted = shell_word(&serde_json::to_string(&spec)?);
         workflow.push_str(&format!("            {})\n              (umask 077; set -C; printf '%s' {quoted} > \"$SIMIT_NIX_BUILD_RESULTS/group-spec.json\")\n              ;;\n", shell_word(name)));
     }

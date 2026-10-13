@@ -94,6 +94,10 @@ platform per-argument limits. The generated workflow writes a private JSON spec
 using a shell builtin instead of putting hooks into environment strings, and its
 diagnostic fallback uses the same private-file transport. A small Bash wrapper
 preserves `bash -c` argument identity, stdin and trailing script newlines.
+The complete compact JSON spec must fit within 16 MiB, including JSON escapes.
+Generation and library admission enforce the same budget as the CLI reader;
+oversized combinations reject before project writes or runtime effects even
+when every individual hook fits its 1 MiB limit.
 Output-reader startup failures return through the
 same dispatch-failure path and clean up any started readers and child processes.
 Embedding applications use `execute_with` with a caller-owned `Cancellation`

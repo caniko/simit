@@ -33,6 +33,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Reject grouped execution specs above the shared 16 MiB serialized JSON budget
+  before generation writes or runtime effects, counting JSON escapes while
+  preserving the individual 1 MiB hook limit.
 - Enforce grouped stdout/stderr limits before evidence writes, execute accepted
   large hooks from retained scripts, and make output-reader startup failure-safe.
   Deny NAR case-hack aliases before import and budget restore argv/environment

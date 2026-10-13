@@ -34,7 +34,7 @@ pub fn run(command: Command) -> Result<()> {
                 signal_hook::flag::register(signal, cancellation.0.clone())?;
             }
             let spec = match args.spec {
-                Some(path) => super::group::read_json(&path, 16 * 1024 * 1024)?,
+                Some(path) => super::group::read_json(&path, super::group::MAX_SPEC_BYTES)?,
                 None => super::group::GroupSpec::from_environment()?,
             };
             let root = args.results.unwrap_or(PathBuf::from(

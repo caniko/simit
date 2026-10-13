@@ -344,6 +344,37 @@ fn generated_large_hooks_cross_file_boundaries_in_engine_and_fallback() {
     }
 }
 
+#[test]
+fn oversized_serialized_group_specs_reject_generation_before_writes() {
+    let temp = project(
+        "[ci.nix_build]\nonly = true\ncapture_results = true\n[ci.nix_build.groups]\nnetwork = [\".#checks.x86_64-linux.client\", \".#checks.x86_64-linux.recovery\"]",
+    );
+    let path = temp.path().join("simit.toml");
+    let mut config = fs::read_to_string(&path)
+        .unwrap()
+        .parse::<toml_edit::DocumentMut>()
+        .unwrap();
+    let mut hooks = toml_edit::Array::new();
+    for _ in 0..9 {
+        hooks.push("x".repeat(1024 * 1024));
+    }
+    config["ci"]["nix_build"]["post_build"] = toml_edit::value(hooks.clone());
+    config["ci"]["nix_build"]["post_build_always"] = toml_edit::value(hooks);
+    let before = config.to_string();
+    fs::write(&path, &before).unwrap();
+    let output = generate(&temp, &[]);
+    assert!(
+        !output.status.success(),
+        "oversized generated specs must reject"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("serialized group spec"),
+        "{output:?}"
+    );
+    assert_eq!(fs::read_to_string(path).unwrap(), before);
+    assert!(!temp.path().join(".github/workflows").exists());
+}
+
 #[cfg(unix)]
 #[test]
 fn engine_bootstrap_never_sources_producer_shell_startup_or_nix_configuration() {

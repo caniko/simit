@@ -114,6 +114,42 @@ impl Fixture {
 }
 
 #[test]
+fn serialized_group_spec_budget_is_shared_with_library_admission() {
+    let mut f = Fixture::new();
+    let mut spec: simit::ci_runtime::group::GroupSpec =
+        serde_json::from_value(f.spec.clone()).unwrap();
+    let maximum = 16 * 1024 * 1024;
+    spec.post_build = vec!["x".repeat(1024 * 1024); 15];
+    spec.post_build.push(String::new());
+    spec.post_build_always.clear();
+    let remaining = maximum - serde_json::to_vec(&spec).unwrap().len();
+    assert!(remaining < 1024 * 1024);
+    *spec.post_build.last_mut().unwrap() = "x".repeat(remaining);
+    assert_eq!(serde_json::to_vec(&spec).unwrap().len(), maximum);
+    assert!(
+        spec.validate().is_ok(),
+        "the exact serialized boundary is valid"
+    );
+    spec.post_build.last_mut().unwrap().push('x');
+    let error = spec.validate().unwrap_err();
+    assert!(
+        format!("{error:#}").contains("serialized group spec"),
+        "{error:#}"
+    );
+
+    // Count JSON escaping, not only decoded script bytes. Each individual hook
+    // remains below its existing one-MiB bound, but their encoded form does not.
+    spec.post_build = vec!["\u{1}".repeat(1024 * 1024); 3];
+    assert!(serde_json::to_vec(&spec).unwrap().len() > maximum);
+    assert!(spec.validate().is_err());
+    f.spec = serde_json::to_value(spec).unwrap();
+    let output = f.run("success");
+    assert!(!output.status.success());
+    assert_eq!(f.calls(), "");
+    assert!(!f.root.path().join("results/receipt.json").exists());
+}
+
+#[test]
 fn accepted_megabyte_hooks_execute_without_an_oversized_argv() {
     use std::os::unix::fs::PermissionsExt;
     for size in [128 * 1024 + 1, 1024 * 1024] {

@@ -19,6 +19,27 @@ use super::{
 // errexit or pipefail semantics. The script itself never occupies argv or env.
 pub(crate) const HOOK_FILE_COMMAND: &str = "IFS= read -r -d '' SIMIT_NIX_HOOK_SCRIPT < \"$SIMIT_NIX_HOOK_FILE\" || :\neval -- \"$SIMIT_NIX_HOOK_SCRIPT\"";
 
+/// Maximum compact JSON spec size, shared by generation, library admission and CLI reads.
+pub const MAX_SPEC_BYTES: u64 = 16 * 1024 * 1024;
+
+struct SpecBudget(u64);
+
+impl Write for SpecBudget {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if bytes.len() as u64 > self.0 {
+            return Err(std::io::Error::other(
+                "serialized group spec exceeds the 16 MiB byte budget",
+            ));
+        }
+        self.0 -= bytes.len() as u64;
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 /// Versioned execution input. This describes execution, not qualification authority.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -141,6 +162,9 @@ impl GroupSpec {
                 "invalid group hooks"
             );
         }
+        // Count encoded bytes (including JSON escapes) without allocating an
+        // oversized serialized copy of otherwise individually valid lists.
+        serde_json::to_writer(SpecBudget(MAX_SPEC_BYTES), self)?;
         Ok(())
     }
 }
