@@ -3689,6 +3689,24 @@ jobs = ["test"]
     assert!(generate().status.success());
     assert_eq!(read(&config_path), persisted_config);
     assert_eq!(read(&observer_path), observer);
+    for args in [
+        vec!["init", "ci", "--primary-only", "--check", "--diff"],
+        vec!["init", "ci", "--primary-only"],
+        vec!["init", "ci", "--primary-only", "--check", "--diff"],
+    ] {
+        let result = simit_with_user_config(temp.path())
+            .current_dir(temp.path())
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(result.status.success(), "{result:?}");
+        assert_eq!(read(&config_path), persisted_config);
+        assert_eq!(read(&observer_path), observer);
+        assert!(
+            read(&temp.path().join(".github/workflows/ci.yaml"))
+                .contains("${{ github.event_name }}")
+        );
+    }
     assert!(
         simit_with_user_config(temp.path())
             .current_dir(temp.path())
@@ -4213,7 +4231,7 @@ fn check_fails_when_workflows_differ() {
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("CI workflows are not up to date"));
     assert!(
-        stderr.contains("run `simit init ci --platform forgejo`"),
+        stderr.contains("run `simit init ci --platform forgejo --ci-provider actions`"),
         "stderr:\n{stderr}"
     );
     assert!(stderr.contains(".forgejo/workflows/ci.yaml differs"));
@@ -4272,7 +4290,7 @@ fn check_failure_hint_includes_transient_generation_flags() {
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(
         stderr.contains(
-            "run `simit init ci --platform forgejo --runtime nix --runner atlas-nix-trusted"
+            "run `simit init ci --platform forgejo --ci-provider actions --runtime nix --runner atlas-nix-trusted"
         ),
         "stderr:\n{stderr}"
     );
