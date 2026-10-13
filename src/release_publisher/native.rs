@@ -125,7 +125,9 @@ pub(super) fn run(
         );
         serde_json::from_slice(&fs::read(source.join(manifest))?)?
     };
-    let identity = json!({"schemaVersion": 2, "registry": registry, "name": package.name, "version": package.version.to_string(), "namespace": namespace, "tag": bound.source_head_label(), "source": bound.source_sha(), "repository": bound.repository(), "workflow": bound.source_workflow_path(), "workflowId": bound.source_workflow_id(), "runId": bound.source_run_id()});
+    let artifact_version = crate::monorepo::native_registry::Registry::for_manifest(manifest)
+        .version(&package.version)?;
+    let identity = json!({"schemaVersion": 2, "registry": registry, "name": package.name, "version": artifact_version, "namespace": namespace, "tag": bound.source_head_label(), "source": bound.source_sha(), "repository": bound.repository(), "workflow": bound.source_workflow_path(), "workflowId": bound.source_workflow_id(), "runId": bound.source_run_id()});
     ensure!(
         data["publishConfig"]["provenance"].is_null()
             || data["publishConfig"]["provenance"].is_boolean(),

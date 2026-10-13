@@ -591,6 +591,65 @@ fn independent_sync_up_uses_owned_package_tag_with_divergent_versions() {
 }
 
 #[test]
+fn cargo_sync_up_refuses_to_move_tags_after_prerequisite_gate_failure() {
+    let temp = fixture();
+    let root = temp.path();
+    let config = fs::read_to_string(root.join("simit.toml"))
+        .unwrap()
+        .replace(
+            "id = \"core\"",
+            "id = \"core\"\nchecks = [{id = 'core', run = 'true'}]",
+        )
+        .replace(
+            "id = \"rust\"",
+            "id = \"rust\"\nchecks = [{id = 'rust', run = 'true'}]",
+        )
+        .replace(
+            "id = \"python\"",
+            "id = \"python\"\nchecks = [{id = 'python', run = 'false | tee /dev/null'}]",
+        )
+        .replace(
+            "id = \"worker\"",
+            "id = \"worker\"\nchecks = [{id = 'worker', run = 'true'}]",
+        );
+    write(root, "simit.toml", &config);
+    fixture_git(root, &["init", "-q"]);
+    fixture_git(root, &["config", "user.name", "Simit fixture"]);
+    fixture_git(root, &["config", "user.email", "fixture@example.invalid"]);
+    fixture_git(root, &["config", "commit.gpgsign", "false"]);
+    fixture_git(root, &["config", "tag.gpgsign", "false"]);
+    fixture_git(root, &["add", "."]);
+    fixture_git(root, &["commit", "-qm", "original source"]);
+    fixture_git(root, &["tag", "worker/v0.1.0"]);
+    let original = fixture_git(root, &["rev-parse", "refs/tags/worker/v0.1.0"]);
+    write(root, "crates/worker/src/lib.rs", "pub fn updated() {}\n");
+    fixture_git(root, &["add", "."]);
+    fixture_git(root, &["commit", "-qm", "updated source"]);
+    let output = common::simit()
+        .current_dir(root)
+        .args([
+            "release",
+            "sync-up",
+            "--component",
+            "worker",
+            "--package",
+            "worker",
+            "--no-sign",
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("component python check python failed"),
+        "{output:?}"
+    );
+    assert_eq!(
+        fixture_git(root, &["rev-parse", "refs/tags/worker/v0.1.0"]),
+        original
+    );
+}
+
+#[test]
 fn independent_verification_uses_adjacent_notes_and_owned_tag() {
     let temp = fixture();
     let root = temp.path();

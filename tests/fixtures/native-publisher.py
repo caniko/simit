@@ -72,6 +72,8 @@ with tempfile.TemporaryDirectory() as temp:
     assert all((root / name).read_bytes() == data for name, data in original.items())
     native.registry_metadata = lambda _: {"info": {"name": "example", "version": "1.2.3"}, "urls": [{"filename": wheel.name, "yanked": False, "digests": {"sha256": "0" * 64}}]}
     refuses(lambda: native.publish(root, identity, 1, {}))
+    native.registry_metadata = lambda _: {"info": {"name": "example", "version": "1.2.3"}, "urls": [{"filename": name, "yanked": False, "digests": {"sha256": checksum}} for name, checksum in files.items()] + [{"filename": "extra-1.2.3.whl", "yanked": False, "digests": {"sha256": "a" * 64}}]}
+    refuses(lambda: native.publish(root, identity, 1, {}))
     # Upload transport parses artifacts only. Candidate config/hooks never run.
     native.subprocess.run = lambda *a, **kw: (_ for _ in ()).throw(AssertionError("candidate execution"))
     for name in ("keys/maintainers.gpg", "flake.nix", "package.json", "scripts/publish.py"):
@@ -109,6 +111,9 @@ with tempfile.TemporaryDirectory() as temp:
     assert base64.b64decode(body["_attachments"][tarball.name]["data"]) == tarball.read_bytes()
     assert body["dist-tags"] == {"stable": "1.2.3"}
     refuses(lambda: actual.upload_native(root, npm_identity, [tarball.name], {"publishConfig": {"registry": "https://attacker.invalid"}}, "fixture"))
+    before = len(requests)
+    refuses(lambda: actual.upload_native(root, npm_identity | {"name": "unscoped"}, [tarball.name], {"publishConfig": {"access": "restricted"}}, "fixture"))
+    assert len(requests) == before
     # The provenance signer receives original source/bytes and protected workflow
     # identity, with OIDC in a separate child that cannot access registry tokens.
     provider = {"PATH": "/trusted/bin", "HOME": temp, "ACTIONS_ID_TOKEN_REQUEST_URL": "https://oidc.example/token", "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "fixture-oidc", "GITHUB_WORKFLOW_REF": "owner/repo/.github/workflows/trusted-publish-npm-node-engine.yaml@refs/heads/trunk", "GITHUB_WORKFLOW_SHA": "a" * 40, "GITHUB_RUN_ID": "99", "GITHUB_RUN_ATTEMPT": "2", "GITHUB_REPOSITORY_ID": "101", "GITHUB_REPOSITORY_OWNER_ID": "102", "NODE_AUTH_TOKEN": "must-not-reach-signer", "NODE_OPTIONS": "--require candidate.js"}

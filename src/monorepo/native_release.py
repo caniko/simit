@@ -173,6 +173,7 @@ def missing_files(out, identity, files):
         return []
     require(normalize(metadata["info"]["name"]) == normalize(identity["name"]) and metadata["info"]["version"] == identity["version"], "PyPI registry release identity mismatch")
     published = {item["filename"]: item for item in metadata["urls"]}
+    require(len(published) == len(metadata["urls"]) and set(published).issubset(files), "PyPI registry artifact inventory conflict")
     for name, checksum in files.items():
         if name in published:
             require(not published[name]["yanked"] and published[name]["digests"]["sha256"] == checksum, "PyPI registry checksum conflict or yanked artifact")
@@ -237,6 +238,7 @@ def upload_native(out, identity, files, manifest, token):
         require(isinstance(tag, str) and re.fullmatch(r"[a-zA-Z][a-zA-Z0-9_.-]*", tag), "invalid signed npm dist-tag")
         access = config.get("access", "public")
         require(access in ("public", "restricted"), "invalid signed npm access")
+        require(access != "restricted" or identity["name"].startswith("@"), "restricted npm access requires a scoped package")
         package = {key: value for key, value in package.items() if key in ("name", "version", "description", "license", "dependencies", "optionalDependencies", "peerDependencies", "peerDependenciesMeta", "engines", "bin", "main", "module", "types", "exports", "repository", "homepage", "keywords", "author", "contributors", "os", "cpu")}
         package["_id"] = identity["name"] + "@" + identity["version"]
         package["dist"] = {"shasum": hashlib.sha1(archive).hexdigest(), "integrity": "sha512-" + base64.b64encode(hashlib.sha512(archive).digest()).decode(), "tarball": "https://registry.npmjs.org/" + urllib.parse.quote(identity["name"], safe="@/") + "/-/" + name}

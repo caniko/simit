@@ -148,7 +148,9 @@ pub fn draft_file(path: &Path, base_ref: Option<&str>, dry_run: bool) -> Result<
         .unwrap_or_else(|| Path::new("."));
     let root = git_output(search_root, &["rev-parse", "--show-toplevel"])?;
     let content = read_file(path)?;
-    let updated = draft_content(&content, Path::new(root.trim()), base_ref)?;
+    let root = Path::new(root.trim());
+    let prefix = crate::config::ProjectConfig::load(root)?.release.tag_prefix;
+    let updated = draft_content_with_prefix(&content, root, base_ref, prefix)?;
     if dry_run {
         print!("{updated}");
         Ok(())
@@ -158,8 +160,17 @@ pub fn draft_file(path: &Path, base_ref: Option<&str>, dry_run: bool) -> Result<
 }
 
 pub fn draft_content(content: &str, repo_root: &Path, base_ref: Option<&str>) -> Result<String> {
+    draft_content_with_prefix(content, repo_root, base_ref, Default::default())
+}
+
+pub(crate) fn draft_content_with_prefix(
+    content: &str,
+    repo_root: &Path,
+    base_ref: Option<&str>,
+    prefix: crate::release_identity::TagPrefix,
+) -> Result<String> {
     check_content(content)?;
-    let range = changelog_range(repo_root, base_ref)?;
+    let range = changelog_range(repo_root, base_ref, prefix)?;
     draft_range(content, repo_root, &range)
 }
 
@@ -175,7 +186,7 @@ pub(crate) fn draft_component_content(
         .lines()
         .find(|tag| crate::release_identity::ReleaseTag::parse_for_package(namespace, tag).is_ok());
     let mut range = if let Some(base) = base {
-        changelog_range(repo_root, Some(base))?
+        changelog_range(repo_root, Some(base), Default::default())?
     } else {
         ChangelogRange {
             git: "HEAD".to_owned(),
@@ -228,7 +239,29 @@ pub fn release_file(
     repo_root: Option<&Path>,
 ) -> Result<()> {
     let content = read_file(path)?;
-    let updated = release_content(&content, version, date, repo_url, path, repo_root)?;
+    let discovered = git_output(
+        path.parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new(".")),
+        &["rev-parse", "--show-toplevel"],
+    )
+    .ok();
+    let root = repo_root.or_else(|| discovered.as_deref().map(|root| Path::new(root.trim())));
+    let prefix = root
+        .map(crate::config::ProjectConfig::load)
+        .transpose()?
+        .unwrap_or_default()
+        .release
+        .tag_prefix;
+    let updated = release_content_with_prefix(
+        &content,
+        version,
+        date,
+        repo_url,
+        path,
+        root,
+        prefix.as_str(),
+    )?;
     write_file(path, &updated)
 }
 
@@ -251,6 +284,21 @@ pub(crate) fn release_content_with_namespace(
     path: &Path,
     repo_root: Option<&Path>,
     namespace: Option<&str>,
+) -> Result<String> {
+    let prefix = namespace
+        .map(|name| format!("{name}/v"))
+        .unwrap_or_default();
+    release_content_with_prefix(content, version, date, repo_url, path, repo_root, &prefix)
+}
+
+pub(crate) fn release_content_with_prefix(
+    content: &str,
+    version: &Version,
+    date: Date,
+    repo_url: Option<&str>,
+    path: &Path,
+    repo_root: Option<&Path>,
+    prefix: &str,
 ) -> Result<String> {
     let mut document = parse_document(content)?;
     let unreleased = unreleased_section(&document)?;
@@ -292,16 +340,7 @@ pub(crate) fn release_content_with_namespace(
         .or_else(|| extract_repo_url_from_footer(content))
         .or_else(|| repo_root.or_else(|| path.parent()).and_then(git_origin_url));
     if let Some(repo) = repo {
-        let prefix = namespace
-            .map(|name| format!("{name}/v"))
-            .unwrap_or_default();
-        update_reference_links(
-            &mut document.lines,
-            &repo,
-            version,
-            latest.as_ref(),
-            &prefix,
-        );
+        update_reference_links(&mut document.lines, &repo, version, latest.as_ref(), prefix);
     }
 
     Ok(render_lines(&document.lines))
@@ -624,7 +663,11 @@ struct ChangelogRange {
     paths: Vec<String>,
 }
 
-fn changelog_range(repo_root: &Path, requested: Option<&str>) -> Result<ChangelogRange> {
+fn changelog_range(
+    repo_root: &Path,
+    requested: Option<&str>,
+    prefix: crate::release_identity::TagPrefix,
+) -> Result<ChangelogRange> {
     if let Some(requested) = requested {
         let requested = requested.trim();
         if requested.is_empty() {
@@ -640,7 +683,7 @@ fn changelog_range(repo_root: &Path, requested: Option<&str>) -> Result<Changelo
     }
 
     let tags = git_output(repo_root, &["tag", "--merged", "HEAD", "--sort=-v:refname"])?;
-    if let Some(tag) = tags.lines().find(|tag| Version::parse(tag.trim()).is_ok()) {
+    if let Some(tag) = tags.lines().find(|tag| prefix.parse(tag.trim()).is_ok()) {
         return Ok(ChangelogRange {
             git: format!("{}..HEAD", tag.trim()),
             label: tag.trim().to_owned(),

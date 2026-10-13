@@ -183,22 +183,29 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
                     paths,
                 )?
             } else {
-                changelog::draft_content(&content, workspace_root, None)?
+                changelog::draft_content_with_prefix(
+                    &content,
+                    workspace_root,
+                    None,
+                    config.release.tag_prefix,
+                )?
             }
         } else {
             content
         };
-        Some(changelog::release_content_with_namespace(
+        let prefix = command
+            .component
+            .as_ref()
+            .map(|_| format!("{}/v", plans[0].package.name))
+            .unwrap_or_else(|| config.release.tag_prefix.as_str().to_owned());
+        Some(changelog::release_content_with_prefix(
             &content,
             &new_version,
             changelog::today_utc()?,
             None,
             &changelog_path,
             Some(workspace_root),
-            command
-                .component
-                .as_ref()
-                .map(|_| plans[0].package.name.as_str()),
+            &prefix,
         )?)
     } else {
         None
@@ -425,6 +432,9 @@ fn sync_up(command: ReleaseCommand) -> Result<()> {
         config.release.tag_prefix.tag(version.clone())
     };
     sync_tag(&command, workspace_root, &version, &tag, || {
+        if let Some(component) = &command.component {
+            crate::monorepo::releases::qualify_component(workspace_root, &config, component)?;
+        }
         git::run_project_checks(workspace_root)
     })
 }

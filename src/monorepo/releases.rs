@@ -112,6 +112,13 @@ impl ManifestRelease {
             if matches!(registry, super::native_registry::Registry::Npm) {
                 let doc: Value = serde_json::from_str(content)?;
                 ensure!(
+                    doc["publishConfig"]["access"].is_null()
+                        || doc["publishConfig"]["access"] == "public"
+                        || (doc["publishConfig"]["access"] == "restricted"
+                            && name.starts_with('@')),
+                    "npm restricted access requires a scoped package; access must be public or restricted"
+                );
+                ensure!(
                     doc["publishConfig"]["registry"].is_null()
                         || doc["publishConfig"]["registry"]
                             .as_str()
@@ -551,8 +558,31 @@ pub(crate) fn qualify(selection: &Selection) -> Result<()> {
         std::slice::from_ref(&selection.package.config.manifest),
         false,
     )?;
-    for id in &plan.selected {
-        let component = &selection.graph.components[id];
+    qualify_selected(&selection.root, &selection.graph, &plan.selected)
+}
+
+pub(crate) fn qualify_component(
+    root: &Path,
+    config: &crate::config::ProjectConfig,
+    component: &str,
+) -> Result<()> {
+    let graph = config
+        .monorepo
+        .as_ref()
+        .context("missing monorepo config")?
+        .resolve(root)?;
+    let paths = &graph
+        .components
+        .get(component)
+        .context("unknown monorepo component")?
+        .paths;
+    let plan = super::select(&graph, paths, false)?;
+    qualify_selected(root, &graph, &plan.selected)
+}
+
+fn qualify_selected(root: &Path, graph: &Graph, selected: &[String]) -> Result<()> {
+    for id in selected {
+        let component = &graph.components[id];
         ensure!(
             !component.checks.is_empty(),
             "component {} requires explicit release checks",
@@ -561,7 +591,7 @@ pub(crate) fn qualify(selection: &Selection) -> Result<()> {
         for gate in &component.checks {
             println!("qualifying component {} check {}", component.id, gate.id);
             let status = Command::new("timeout")
-                .current_dir(&selection.root)
+                .current_dir(root)
                 .envs(&gate.env)
                 .args([
                     "--kill-after=5s",
@@ -583,4 +613,29 @@ pub(crate) fn qualify(selection: &Selection) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn restricted_access_requires_scoped_name_during_signed_manifest_admission() {
+        let owner = ManifestRelease {
+            manifest: "node/package.json".into(),
+            namespace: "node".into(),
+            publish: true,
+        };
+        for (name, access, allowed) in [
+            ("unscoped", "restricted", false),
+            ("@example/scoped", "restricted", true),
+            ("unscoped", "public", true),
+            ("unscoped", "invalid", false),
+        ] {
+            let content =
+                json!({"name": name, "version": "1.2.3", "publishConfig": {"access": access}})
+                    .to_string();
+            assert_eq!(owner.parse(&content).is_ok(), allowed, "{content}");
+        }
+    }
 }
