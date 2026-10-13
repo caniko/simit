@@ -14,6 +14,7 @@ use crate::config::{
 use crate::project::GeneratedFile;
 use crate::user_config::{ResolvedCiRunners, ResolvedRunner};
 
+pub mod custody;
 mod independent_lanes;
 mod nix_dependencies;
 mod nix_groups;
