@@ -136,6 +136,7 @@ class ExportInventory:
             require(target and b'\0' not in target, 'Invalid NAR symlink target')
         elif kind == b'directory':
             previous = b''
+            folded = set()
             while True:
                 field = self.token()
                 if field == b')':
@@ -146,6 +147,11 @@ class ExportInventory:
                 name = self.string(255)
                 require(name > previous and name not in [b'.', b'..'] and b'/' not in name
                         and b'\0' not in name, 'Invalid or unordered NAR entry name')
+                # Match native admission: Darwin's case hack can rewrite aliases
+                # into an existing suffixed entry. Deny ASCII case aliases on
+                # every platform before importing any record in the stream.
+                require(name.lower() not in folded, 'NAR entry names alias under case hacking')
+                folded.add(name.lower())
                 previous = name
                 self.expect(b'node')
                 self.node(depth + 1)
@@ -236,11 +242,24 @@ def preflight_import(manifest_path, archive, identity, maximum, compressed_maxim
     verify_command = store_paths_command('--verify-path', manifest['closure'])
     require(archive.is_file() and not archive.is_symlink() and archive.stat().st_size == manifest['archive_bytes'], 'Invalid dependency archive file or size')
     require(archive.stat().st_size <= compressed_maximum, 'Compressed dependency archive exceeds budget')
-    require(digest(archive) == manifest['archive_sha256'], 'Dependency archive checksum mismatch')
-    # TemporaryFile is unlinked and mode 0600; do not reopen a replaceable path.
-    with tempfile.TemporaryFile(dir=archive.parent) as stream:
+    # Snapshot compressed bytes too: a checksum of a replaceable downloaded
+    # inode must never authorize a later reopen with different NAR contents.
+    # Both TemporaryFiles are unlinked and mode 0600.
+    with tempfile.TemporaryFile(dir=archive.parent) as snapshot, tempfile.TemporaryFile(dir=archive.parent) as stream:
+        copied = 0
+        with archive.open('rb') as downloaded:
+            while chunk := downloaded.read(1024 * 1024):
+                copied += len(chunk)
+                require(copied <= compressed_maximum, 'Compressed dependency archive exceeds budget')
+                snapshot.write(chunk)
+        snapshot.seek(0)
+        require(hashlib.file_digest(snapshot, 'sha256').hexdigest() == manifest['archive_sha256'], 'Dependency archive checksum mismatch')
+        # The verified private snapshot owns the compressed bytes now. Release
+        # the download before expansion so disk use never retains three copies.
+        archive.unlink()
+        snapshot.seek(0)
         size = 0
-        with gzip.open(archive, 'rb') as compressed:
+        with gzip.GzipFile(fileobj=snapshot, mode='rb') as compressed:
             while chunk := compressed.read(1024 * 1024):
                 size += len(chunk)
                 require(size <= maximum, 'Decompressed dependency transport exceeds budget')

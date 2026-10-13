@@ -681,7 +681,9 @@ impl NixBuildConfig {
                 );
             }
             if !member.starts_with(".#")
-                || member.contains("checks.")
+                || member.len() <= 2
+                || member == ".#checks"
+                || member.starts_with(".#checks.")
                 || installables.contains(member)
                 || !dependencies.insert(member)
             {

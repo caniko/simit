@@ -4388,6 +4388,23 @@ fn push_install_nix_step_with_cache(
     trusted_public_keys: &[String],
 ) {
     if platform == Platform::Forgejo {
+        if !substituters.is_empty() || !trusted_public_keys.is_empty() {
+            let mut config = String::new();
+            if !substituters.is_empty() {
+                config.push_str(&format!("substituters = {}\n", substituters.join(" ")));
+            }
+            if !trusted_public_keys.is_empty() {
+                config.push_str(&format!(
+                    "trusted-public-keys = {}\n",
+                    trusted_public_keys.join(" ")
+                ));
+            }
+            workflow.push_str("      - name: Configure preinstalled Nix caches\n        env:\n          SIMIT_NIX_CACHE_CONFIG: |\n");
+            for line in config.lines() {
+                workflow.push_str(&format!("            {line}\n"));
+            }
+            workflow.push_str("        run: |\n          delimiter=SIMIT_NIX_CACHE\n          while printf '%s\\n' \"${NIX_CONFIG:-}\" \"$SIMIT_NIX_CACHE_CONFIG\" | grep -Fx \"$delimiter\" > /dev/null; do\n            delimiter=\"${delimiter}_\"\n          done\n          printf '%s\\n' \"NIX_CONFIG<<$delimiter\" \"${NIX_CONFIG:-}\" \"$SIMIT_NIX_CACHE_CONFIG\" \"$delimiter\" >> \"$GITHUB_ENV\"\n\n");
+        }
         return;
     }
 
