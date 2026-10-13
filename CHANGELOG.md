@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Opt-in `[ci].separate_events` for GitHub Rust CI, preserving independent push
   and PR originals in aggregate workspaces while retaining default coalescing.
+- Opt-in `[ci.nix_build.system_runners]` for native exact-installable matrices.
+  Route each system-qualified gate to its declared runner, reject missing or
+  ambiguous mappings before writes, verify the native Nix architecture, and
+  restrict hosted KVM setup to x86 Linux rows.
 - Opt-in completion-driven custody for enrolled original branch/PR producers,
   with bounded log/artifact capture and idempotent producer-source status reports.
 - CI-scoped public Nix cache configuration and bounded same-run build-input
@@ -28,6 +32,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Admit dependency attributes outside the actual checks namespace, apply CI cache
+  policy on preinstalled Forgejo Nix, and explain full reruns for attempt-bound
+  transport. Reject Darwin case-hack aliases before import and bind checksum and
+  decompression to one private compressed snapshot.
+- Verify native exact-build runners against OS/CPU identity independently of
+  Nix's configurable `eval-system` and `system` settings, preventing a configured
+  system override from admitting the wrong hardware architecture.
+- Preserve native runner mappings alongside shared-store groups: route each
+  homogeneous group to its declared system, retain the hardware guard and scoped
+  KVM setup, and reject mixed-system groups or unsupported native dependency
+  transport before writing configuration or workflows.
+- Select exact-build action versions from mapped workers, support standard
+  two-segment system derivation outputs, and recognize unambiguous PowerPC uname
+  aliases while preserving independent hardware verification.
+- Preserve explicit Nix output selectors when routing standard system outputs
+  to native workers, extracting only their attribute path for system validation.
 - Grant check-suite read access only to completion-custody collection, bound the
   fully rendered observer to 500,000 bytes before writes, and ignore unenrolled
   workflow paths that reuse producer names without changing custody statuses.

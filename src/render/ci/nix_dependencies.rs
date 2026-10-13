@@ -55,7 +55,9 @@ pub(super) fn import(
     if options.dependency_installables.is_empty() {
         return Ok(());
     }
-    workflow.push_str("      - name: Download same-run dependencies\n");
+    workflow.push_str(
+        "      - name: Download same-run dependencies\n        id: simit-dependency-download\n",
+    );
     push_action_uses(
         workflow,
         Platform::Github,
@@ -65,6 +67,7 @@ pub(super) fn import(
         "v4.3.0",
     );
     workflow.push_str("\n        with:\n          name: simit-nix-dependencies-${{ github.run_id }}-${{ github.run_attempt }}\n          path: ${{ runner.temp }}/simit-nix-dependencies\n");
+    workflow.push_str("      - name: Explain missing attempt-bound dependencies\n        if: ${{ failure() && steps.simit-dependency-download.outcome == 'failure' }}\n        run: |\n          echo 'Dependency transport requires a producer from this exact run attempt. Use Re-run all jobs; partial reruns cannot reuse a previous-attempt artifact.' >&2\n          exit 1\n");
     program(workflow, "import", options, plan)
 }
 
