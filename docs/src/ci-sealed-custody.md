@@ -112,7 +112,10 @@ artifact, legacy receipt, name-only lookup, or overwrite replacement is proof.
 Reporting independently verifies the uploaded aggregate bytes against the local
 receipt and re-verifies its exact capsule IDs/digests. It freshly rediscovers the
 originals, checks native execution definitions, job/artifact inventories and
-collector seal provenance, then uses the existing bounded status reporter.
+collector seal provenance, then publishes with the existing bounded status
+semantics. Native checks and status lookup share one six-minute report budget;
+the independent failure POST retains its own 90-second reserve after budget
+exhaustion. Reporting never starts another six-minute lookup cycle.
 Success requires every original and required job to succeed and both capsule and
 aggregate uploads to be independently verified. Missing uploaded current evidence,
 deletion, expiry, overwrite, duplicates, changed digests, native drift, lookup

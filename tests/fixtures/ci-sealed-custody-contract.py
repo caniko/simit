@@ -358,6 +358,30 @@ class Sealed(unittest.TestCase):
                 self.assertEqual(self.effects[-1][1]['state'], 'failure')
                 self.folder = original
 
+    def test_exhausted_post_upload_report_budget_cannot_restart_lookups(self):
+        _, root = self.prepared_report()
+        original_class = self.namespace['CaptureBudget']
+        budgets = []
+        def budget():
+            value = original_class()
+            budgets.append(value)
+            return value
+        self.namespace['CaptureBudget'] = budget
+        original_api = self.namespace['api']
+        aggregate_checks = 0
+        def expires_at_final_artifact(repository, endpoint, **limits):
+            nonlocal aggregate_checks
+            raw = original_api(repository, endpoint, **limits)
+            if endpoint == 'actions/artifacts/90':
+                aggregate_checks += 1
+                if aggregate_checks == 2:
+                    budgets[-1].deadline = self.namespace['time'].monotonic() - 1
+            return raw
+        self.namespace['api'] = expires_at_final_artifact
+        self.assertEqual(self.sealed_report(root), 1)
+        self.assertEqual(self.effects[-1][1]['state'], 'failure')
+        self.assertEqual(self.effects[-1][1]['context'], CONTEXT)
+
     def test_executed_workflow_definition_is_independent_of_raw_head(self):
         self.workflow_files['workflow-node-1']['data']['node']['file']['repositoryFileUrl'] = (
             f"https://github.com/owner/repo/blob/{'e' * 40}/.github/workflows/ci.yaml")

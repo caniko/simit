@@ -413,6 +413,8 @@ def sealed_report(config, payload, root):
                 'Original inventory changed before reporting')
         for row in rows:
             run_id = row['run_id']
+            require(workflow_revision(final[row['name']], row['workflow'], repository, budget.request)
+                    == row['workflow_revision'], 'Native executed workflow changed before reporting')
             require(canonical_hash(pages(repository, f'actions/runs/{run_id}/attempts/1/jobs', 'jobs', budget.request))
                     == row['native_jobs_sha256'], 'Native jobs changed before reporting')
             require(canonical_hash(pages(repository, f'actions/runs/{run_id}/artifacts', 'artifacts', budget.request))
@@ -433,7 +435,35 @@ def sealed_report(config, payload, root):
         receipt = dict(expected, state='failed', report_error=str(error))
         write(root / 'receipt.json', receipt)
         write(root / 'report-failure.json', receipt)
-    return report(config, root)
+    return publish_sealed_status(config, root, receipt, budget)
+
+
+def publish_sealed_status(config, root, receipt, budget):
+    """Reuse the report's lookup budget and reserve an independent failure POST.
+
+    Starting another legacy six-minute report budget here would crowd the
+    25-minute job's publication reserve after aggregation and artifact upload.
+    """
+    repository = repository_identity(config['repository'])
+    context = status_context(config, receipt['snapshot']['target'])
+    require(receipt['status_context'] == context, 'Reporting context differs')
+    state = 'success' if receipt['state'] == 'ready' else 'pending' if receipt['state'] == 'waiting' else 'failure'
+    identity = hashlib.sha256(json.dumps({'policy': config, 'producers': receipt['producers']}, sort_keys=True).encode()).hexdigest()[:16]
+    try:
+        previous = pages(repository, f"commits/{receipt['head']}/status", 'statuses', budget.request)
+    except Exception as error:
+        receipt.update(state='failed', status_lookup_error=str(error))
+        write(root / 'report-failure.json', receipt)
+        state, previous = 'failure', []
+    description = f'Original-producer custody {state}: {identity}'
+    current = next((status for status in previous if status['context'] == context), None)
+    if current is None or current['state'] != state or current['description'] != description:
+        data = {'state': state, 'context': context, 'description': description,
+                'target_url': f"https://github.com/{repository}/actions/runs/{os.environ['GITHUB_RUN_ID']}"}
+        subprocess.run(['gh', 'api', '--hostname', 'github.com', '--method', 'POST',
+                        f"repos/{repository}/statuses/{receipt['head']}", '--input', '-'],
+                       input=json.dumps(data).encode(), check=True, timeout=90)
+    return 1 if state == 'failure' else 0
 
 
 def sealed_main():
