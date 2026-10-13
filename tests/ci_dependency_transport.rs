@@ -229,25 +229,27 @@ fn dependency_producer_enables_kvm_before_setup_and_export_when_requested() {
 
 #[test]
 fn qualification_outputs_cannot_be_enrolled_as_transport_dependencies() {
-    let temp = project();
-    let path = temp.path().join("simit.toml");
-    let before = fs::read_to_string(&path).unwrap().replace(
-        "dependency_installables = [\".#ci-dependency\"]",
-        "dependency_installables = [\".#checks.x86_64-linux.runtime\"]",
-    );
-    fs::write(&path, &before).unwrap();
-    let output = common::simit()
-        .current_dir(temp.path())
-        .args(["init", "ci"])
-        .output()
-        .unwrap();
-    assert!(!output.status.success(), "{output:?}");
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains("dependency_installables"),
-        "{output:?}"
-    );
-    assert_eq!(fs::read_to_string(&path).unwrap(), before);
-    assert!(!temp.path().join(".github/workflows").exists());
+    for installable in [".#checks", ".#checks.x86_64-linux.runtime"] {
+        let temp = project();
+        let path = temp.path().join("simit.toml");
+        let before = fs::read_to_string(&path).unwrap().replace(
+            "dependency_installables = [\".#ci-dependency\"]",
+            &format!("dependency_installables = [\"{installable}\"]"),
+        );
+        fs::write(&path, &before).unwrap();
+        let output = common::simit()
+            .current_dir(temp.path())
+            .args(["init", "ci"])
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("dependency_installables"),
+            "{output:?}"
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), before);
+        assert!(!temp.path().join(".github/workflows").exists());
+    }
 }
 
 #[test]

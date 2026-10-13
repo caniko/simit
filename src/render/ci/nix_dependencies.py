@@ -254,6 +254,9 @@ def preflight_import(manifest_path, archive, identity, maximum, compressed_maxim
                 snapshot.write(chunk)
         snapshot.seek(0)
         require(hashlib.file_digest(snapshot, 'sha256').hexdigest() == manifest['archive_sha256'], 'Dependency archive checksum mismatch')
+        # The verified private snapshot owns the compressed bytes now. Release
+        # the download before expansion so disk use never retains three copies.
+        archive.unlink()
         snapshot.seek(0)
         size = 0
         with gzip.GzipFile(fileobj=snapshot, mode='rb') as compressed:
