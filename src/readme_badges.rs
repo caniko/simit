@@ -179,20 +179,24 @@ fn badges(
             Some("dist/aur".to_owned()),
         ));
     }
-    if config.copr.is_some() {
+    if let Some(copr) = &config.copr {
         badges.push(static_badge(
             "COPR",
             "configured",
             "3f51b5",
-            Some(".copr/Makefile".to_owned()),
+            Some(copr.makefile_path.clone()),
         ));
     }
-    if config.apt.is_some() {
+    if let Some(apt) = &config.apt {
         badges.push(static_badge(
             "apt",
             "configured",
             "a81d33",
-            Some("dist/apt/conf/distributions".to_owned()),
+            Some(
+                apt.public_url
+                    .clone()
+                    .unwrap_or_else(|| "dist/apt/conf/distributions".to_owned()),
+            ),
         ));
     }
     if config.flatpak.is_some() {

@@ -34,6 +34,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Honor configured COPR Makefile and SRPM staging paths, match the RPM spec's
+  source archive basename, and reject missing, empty, or duplicate SRPMs.
+- Link managed APT badges to the configured public repository URL.
+- Generate AUR metadata as an unprivileged user on root release runners;
+  restore clone ownership on success or failure and preserve prior metadata
+  when generation fails.
+- Run Chocolatey release publication in the project's declared environment;
+  retain source-bound packed candidates for byte-verified retries, reject
+  conflicting registry content, and keep publication credentials out of
+  packing, lookups, and command output.
 - Check out signed Git symlinks as inert target-text files during independent
   archive reconstruction, admitting unrelated tooling links without following
   them. Continue rejecting submodules and any Cargo manifest, declared input,

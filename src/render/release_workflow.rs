@@ -1158,13 +1158,25 @@ fn push_build_srpm(w: &mut String, copr: &ResolvedCopr) {
     w.push_str("      - name: Build SRPM for COPR\n        run: |\n          set -euo pipefail\n          . ./release-env\n");
     writeln!(
         w,
-        "          git archive --format=tar.gz --prefix={repo}/ -o \"{repo}-${{VERSION}}.tar.gz\" HEAD",
+        "          export SOURCE_ARCHIVE=\"{}-v${{VERSION}}.tar.gz\"",
+        copr.repo
+    )
+    .expect("write");
+    writeln!(
+        w,
+        "          export SRPM_DIR={}",
+        shell_single_quote(&copr.srpm_dir)
+    )
+    .expect("write");
+    writeln!(
+        w,
+        "          git archive --format=tar.gz --prefix={repo}/ -o \"$SOURCE_ARCHIVE\" HEAD",
         repo = copr.repo
     )
     .expect("write");
     w.push_str("          nix shell nixpkgs#rpm nixpkgs#cargo nixpkgs#rustc -c bash <<'SCRIPT'\n");
     w.push_str("          set -euo pipefail\n");
-    writeln!(w, "          tar xf {repo}-*.tar.gz", repo = copr.repo).expect("write");
+    w.push_str("          tar xf \"$SOURCE_ARCHIVE\"\n");
     writeln!(
         w,
         "          ( cd {repo} && cargo vendor vendor > ../cargo-vendor-config.toml )",
@@ -1177,14 +1189,14 @@ fn push_build_srpm(w: &mut String, copr: &ResolvedCopr) {
         repo = copr.repo
     )
     .expect("write");
-    w.push_str("          rm -rf srpms && mkdir -p srpms\n");
+    w.push_str("          rm -rf -- \"$SRPM_DIR\" && mkdir -p -- \"$SRPM_DIR\"\n");
     writeln!(
         w,
-        "          rpmbuild -bs {spec} --define \"_sourcedir $(pwd)\" --define \"_srcrpmdir $(pwd)/srpms\"",
+        "          rpmbuild -bs {spec} --define \"_sourcedir $(pwd)\" --define \"_srcrpmdir $(pwd)/$SRPM_DIR\"",
         spec = copr.spec_path
     )
     .expect("write");
-    w.push_str("          set -- srpms/*.src.rpm; test \"$#\" -eq 1; ls -l \"$1\"\n");
+    w.push_str("          shopt -s nullglob\n          srpms=(\"$SRPM_DIR\"/*.src.rpm); test \"${#srpms[@]}\" -eq 1; test -s \"${srpms[0]}\"; ls -l \"${srpms[0]}\"\n");
     w.push_str("          SCRIPT\n");
 }
 
@@ -1887,11 +1899,29 @@ fn push_publish_aur(w: &mut String, aur: &ResolvedAur, activated_remote: bool) {
         w.push_str("          test -n \"${AUR_SSH_KEY:-}\"\n");
     }
     w.push_str(
-        "          nix shell nixpkgs#git nixpkgs#openssh nixpkgs#pacman -c bash <<'SCRIPT'\n",
+        "          nix shell nixpkgs#git nixpkgs#openssh nixpkgs#pacman nixpkgs#util-linux -c bash <<'SCRIPT'\n",
     );
     w.push_str("          set -euo pipefail\n          . ./release-env\n");
     w.push_str("          AUR_HOST='aur.archlinux.org'; AUR_SSH=\"$HOME/.ssh/aur\"\n");
     w.push_str("          MAKEPKG_CONF=\"$(dirname \"$(dirname \"$(command -v makepkg)\")\")/etc/makepkg.conf\"; test -r \"$MAKEPKG_CONF\"\n");
+    // Use a subshell so cleanup runs on success and on generation failure.
+    // AUR clones are owned uniformly by the runner; do not create host accounts.
+    w.push_str(r#"          print_srcinfo() (
+            set -euo pipefail
+            pkgdir="$1"
+            owner=''
+            trap 'status=$?; rm -f "$pkgdir/.SRCINFO.tmp"; if [ -n "$owner" ]; then chown -R "$owner" "$pkgdir" || exit 1; fi; exit "$status"' EXIT
+            if [ "$(id -u)" -eq 0 ]; then
+              owner="$(stat -c '%u:%g' "$pkgdir")"
+              chown -R 65534:65534 "$pkgdir"
+              setpriv --reuid=65534 --regid=65534 --clear-groups sh -c 'cd "$1" && makepkg --config "$2" --printsrcinfo' sh "$pkgdir" "$MAKEPKG_CONF" > "$pkgdir/.SRCINFO.tmp"
+            else
+              (cd "$pkgdir" && makepkg --config "$MAKEPKG_CONF" --printsrcinfo) > "$pkgdir/.SRCINFO.tmp"
+            fi
+            test -s "$pkgdir/.SRCINFO.tmp"
+            mv "$pkgdir/.SRCINFO.tmp" "$pkgdir/.SRCINFO"
+          )
+"#);
     w.push_str("          checksum_for() { awk -v a=\"$1\" '$2 == a { print $1 }' release/SHA256SUMS.txt; }\n");
     let source_archive = pkgbuild_source_archive(aur);
     let bin_archive = pkgbuild_binary_archive(aur);
@@ -1932,7 +1962,7 @@ fn push_publish_aur(w: &mut String, aur: &ResolvedAur, activated_remote: bool) {
     w.push_str(
         "              *) echo \"unknown AUR package: $pkg\" >&2; exit 1 ;;\n            esac\n",
     );
-    w.push_str("            (cd \"aur-${pkg}\" && makepkg --config \"$MAKEPKG_CONF\" --printsrcinfo > .SRCINFO)\n");
+    w.push_str("            print_srcinfo \"aur-${pkg}\"\n");
     w.push_str("            git -C \"aur-${pkg}\" add PKGBUILD .SRCINFO\n");
     w.push_str("            if git -C \"aur-${pkg}\" diff --cached --quiet; then echo \"AUR ${pkg} already at ${VERSION}\"; return 0; fi\n");
     w.push_str("            git -C \"aur-${pkg}\" -c user.email='ci@localhost' -c user.name='release bot' commit -m \"${VERSION}\"\n");
@@ -1967,6 +1997,13 @@ fn push_publish_copr(w: &mut String, copr: &ResolvedCopr, activated_remote: bool
     )
     .expect("write");
     w.push_str("        run: |\n          set -euo pipefail\n          . ./release-env\n");
+    writeln!(
+        w,
+        "          SRPM_DIR={}",
+        shell_single_quote(&copr.srpm_dir)
+    )
+    .expect("write");
+    w.push_str("          shopt -s nullglob\n          srpms=(\"$SRPM_DIR\"/*.src.rpm)\n");
     let stable_project = copr.project.as_deref().unwrap_or("");
     let testing_project = copr.testing_project.as_deref().unwrap_or(stable_project);
     writeln!(w, "          COPR_PROJECT=\"{stable_project}\"").expect("write");
@@ -1974,16 +2011,17 @@ fn push_publish_copr(w: &mut String, copr: &ResolvedCopr, activated_remote: bool
     if activated_remote {
         push_active_or_skip_prelude(w);
         w.push_str("          if [ -z \"$COPR_LOGIN\" ] || [ -z \"$COPR_USERNAME\" ] || [ -z \"$COPR_TOKEN\" ]; then publisher_missing copr 'COPR credentials unset'; fi\n");
-        w.push_str("          srpms=(srpms/*.src.rpm); if [ ! -e \"${srpms[0]}\" ]; then publisher_missing copr 'no SRPM to publish'; fi\n");
+        w.push_str("          if [ \"${#srpms[@]}\" -eq 0 ]; then publisher_missing copr 'no SRPM to publish'; fi\n");
     } else {
         w.push_str("          if [ -z \"$COPR_LOGIN\" ] || [ -z \"$COPR_USERNAME\" ] || [ -z \"$COPR_TOKEN\" ]; then echo 'COPR credentials are required because COPR publishing is configured.' >&2; exit 1; fi\n");
     }
+    w.push_str("          test \"${#srpms[@]}\" -eq 1; test -s \"${srpms[0]}\"\n");
     w.push_str("          mkdir -p ~/.config\n");
     w.push_str("          cat > ~/.config/copr <<EOF\n          [copr-cli]\n          login = ${COPR_LOGIN}\n          username = ${COPR_USERNAME}\n          token = ${COPR_TOKEN}\n          copr_url = https://copr.fedorainfracloud.org\n          EOF\n");
     w.push_str("          chmod 600 ~/.config/copr\n");
     writeln!(
         w,
-        "          nix run {} -- build --nowait \"${{COPR_PROJECT}}\" srpms/*.src.rpm",
+        "          nix run {} -- build --nowait \"${{COPR_PROJECT}}\" \"${{srpms[@]}}\"",
         copr.nix_tool
     )
     .expect("write");
@@ -2394,9 +2432,8 @@ fn push_publish_chocolatey(
     } else {
         writeln!(w, "          if [ -z \"${{{key_env}:-}}\" ]; then echo '{key_env} is required because Chocolatey package publishing is configured.' >&2; exit 1; fi").expect("write");
     }
-    // `nix_tool` provides choco (+ simit). Point it at a fork that ships the
-    // chocolatey package until it lands upstream; the soft-skip above keeps tags
-    // green in the meantime.
+    // Resolve the project's Simit through its declared development shell, then
+    // add the configured Chocolatey tool to that environment.
     if activated_remote {
         writeln!(w, "          ZIP=\"release/{zip}\"; test -s \"$ZIP\" || publisher_missing chocolatey \"missing $ZIP\"").expect("write");
     } else {
@@ -2404,7 +2441,7 @@ fn push_publish_chocolatey(
     }
     writeln!(
         w,
-        "          nix shell {} -c simit dist chocolatey bump \\",
+        "          nix develop -c nix shell {} -c simit dist chocolatey bump \\",
         chocolatey.nix_tool
     )
     .expect("write");
@@ -2706,6 +2743,8 @@ mod tests {
             build_requires: vec![],
             binaries: vec!["modde".to_owned()],
             spec_path: "modde.spec".to_owned(),
+            makefile_path: ".copr/Makefile".to_owned(),
+            srpm_dir: "srpms".to_owned(),
             project: Some("caniko/rs-modde".to_owned()),
             testing_project: Some("caniko/rs-modde-testing".to_owned()),
             login_secret: "copr_login".to_owned(),
@@ -3168,7 +3207,7 @@ esac"#,
         assert!(workflow.contains("cargo vendor vendor > ../cargo-vendor-config.toml"));
         assert!(
             workflow.contains(
-                "nix run .#copr-cli -- build --nowait \"${COPR_PROJECT}\" srpms/*.src.rpm"
+                "nix run .#copr-cli -- build --nowait \"${COPR_PROJECT}\" \"${srpms[@]}\""
             )
         );
         assert!(workflow.contains("COPR_PROJECT=\"caniko/rs-modde\""));
@@ -3221,7 +3260,8 @@ esac"#,
         assert!(workflow.contains(
             "require_credential 'global/user secret' 'AUR_SSH_KEY' \"${AUR_SSH_KEY:-}\""
         ));
-        assert!(workflow.contains("makepkg --config \"$MAKEPKG_CONF\" --printsrcinfo > .SRCINFO"));
+        assert!(workflow.contains("print_srcinfo \"aur-${pkg}\""));
+        assert!(workflow.contains("setpriv --reuid=65534 --regid=65534 --clear-groups"));
         assert!(
             workflow
                 .contains("for pkg in modde modde-bin modde-git; do publish_pkg \"$pkg\"; done")
