@@ -74,16 +74,24 @@ impl Fixture {
     }
 
     fn command(&self) -> Command {
+        let mut command = self.environment_command();
+        command.args(["--spec", "spec.json"]);
+        command
+    }
+
+    fn environment_command(&self) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_simit"));
         command
             .current_dir(self.root.path())
-            .args(["ci", "nix-group", "--spec", "spec.json"])
+            .args(["ci", "nix-group"])
             .env("GITHUB_SHA", &self.head)
             .env("GITHUB_EVENT_NAME", "push")
             .env("GITHUB_RUN_ID", "123")
             .env("GITHUB_RUN_ATTEMPT", "1")
             .env("SIMIT_NIX_BUILD_RESULTS", self.root.path().join("results"))
             .env("GROUP_CALLS", self.root.path().join("calls"))
+            .env_remove("SIMIT_NIX_FRESH")
+            .env_remove("SIMIT_NIX_FRESH_INSTALLABLES")
             .env(
                 "PATH",
                 std::env::join_paths(
@@ -110,6 +118,112 @@ impl Fixture {
     }
     fn calls(&self) -> String {
         fs::read_to_string(self.root.path().join("calls")).unwrap_or_default()
+    }
+}
+
+#[test]
+fn environment_fresh_keys_preserve_current_worker_rebuilds() {
+    for keys in [
+        &["SIMIT_NIX_FRESH"][..],
+        &["SIMIT_NIX_FRESH_INSTALLABLES"][..],
+        &["SIMIT_NIX_FRESH", "SIMIT_NIX_FRESH_INSTALLABLES"][..],
+        &[][..],
+    ] {
+        for case in ["success", "fresh-fail"] {
+            let f = Fixture::new();
+            let mut command = f.environment_command();
+            for (key, field) in [
+                ("INSTALLABLES", "members"),
+                ("SIMIT_NIX_PLAN", "plan"),
+                ("SIMIT_NIX_CHECK_SYSTEMS", "check_systems"),
+                ("SIMIT_NIX_LIMITS", "limits"),
+                ("SIMIT_NIX_POST_BUILD", "post_build"),
+                ("SIMIT_NIX_POST_BUILD_ALWAYS", "post_build_always"),
+            ] {
+                command.env(key, f.spec[field].to_string());
+            }
+            for key in keys {
+                command.env(
+                    key,
+                    serde_json::to_string_pretty(&f.spec["members"]).unwrap(),
+                );
+            }
+            let output = command.env("GROUP_CASE", case).output().unwrap();
+            let fresh = !keys.is_empty();
+            assert_eq!(
+                output.status.success(),
+                !fresh || case == "success",
+                "{keys:?}/{case}: {output:?}"
+            );
+            let receipt = f.receipt();
+            assert_eq!(receipt["complete"], true);
+            assert_eq!(receipt["success"], !fresh || case == "success");
+            for row in receipt["results"].as_array().unwrap() {
+                assert_eq!(
+                    row["fresh_execution"],
+                    if fresh {
+                        json!(case == "success")
+                    } else {
+                        Value::Null
+                    }
+                );
+                assert_eq!(
+                    row["exit_status"],
+                    if fresh && case == "fresh-fail" { 9 } else { 0 }
+                );
+            }
+            let calls = f.calls();
+            let rebuilds: Vec<_> = calls
+                .lines()
+                .filter(|line| line.contains("--rebuild"))
+                .collect();
+            assert_eq!(rebuilds.len(), if fresh { 2 } else { 0 });
+            for rebuild in rebuilds {
+                assert!(rebuild.contains("--option builders "), "{rebuild}");
+            }
+        }
+    }
+}
+
+#[test]
+fn conflicting_or_invalid_environment_fresh_keys_reject_before_effects() {
+    for (retained, alias) in [
+        (Some("[\".#checks.x86_64-linux.client\"]"), Some("[]")),
+        (Some("[]"), Some("[\".#checks.x86_64-linux.client\"]")),
+        (Some("not-json"), None),
+        (None, Some("not-json")),
+    ] {
+        let f = Fixture::new();
+        let mut command = f.environment_command();
+        for (key, field) in [
+            ("INSTALLABLES", "members"),
+            ("SIMIT_NIX_PLAN", "plan"),
+            ("SIMIT_NIX_CHECK_SYSTEMS", "check_systems"),
+            ("SIMIT_NIX_LIMITS", "limits"),
+            ("SIMIT_NIX_POST_BUILD", "post_build"),
+            ("SIMIT_NIX_POST_BUILD_ALWAYS", "post_build_always"),
+        ] {
+            command.env(key, f.spec[field].to_string());
+        }
+        for (key, value) in [
+            ("SIMIT_NIX_FRESH", retained),
+            ("SIMIT_NIX_FRESH_INSTALLABLES", alias),
+        ] {
+            if let Some(value) = value {
+                command.env(key, value);
+            }
+        }
+        let output = command.output().unwrap();
+        assert!(!output.status.success(), "{output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("SIMIT_NIX_FRESH"),
+            "{output:?}"
+        );
+        assert!(f.calls().is_empty());
+        assert_eq!(
+            fs::read_dir(f.root.path().join("results")).unwrap().count(),
+            0
+        );
     }
 }
 

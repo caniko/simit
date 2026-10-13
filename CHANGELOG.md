@@ -37,6 +37,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Preserve `SIMIT_NIX_FRESH` in environment-mode grouped execution, retain
+  `SIMIT_NIX_FRESH_INSTALLABLES` as an alias, and reject conflicting values before
+  execution so freshness requirements cannot silently disappear.
 - Reject all pre-existing numbered member evidence before grouped Git/Nix
   observations or evidence writes, including interrupted/fallback-only attempts,
   out-of-range indices, files and dangling symlinks.

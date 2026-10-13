@@ -70,6 +70,23 @@ impl GroupSpec {
             serde_json::from_str(&std::env::var(key).with_context(|| format!("missing {key}"))?)
                 .with_context(|| format!("invalid {key}"))
         }
+        fn optional_list(key: &str) -> Result<Option<Vec<String>>> {
+            match std::env::var(key) {
+                Ok(value) => serde_json::from_str(&value)
+                    .map(Some)
+                    .with_context(|| format!("invalid {key}")),
+                Err(std::env::VarError::NotPresent) => Ok(None),
+                Err(error) => Err(error).with_context(|| format!("invalid {key}")),
+            }
+        }
+        let retained = optional_list("SIMIT_NIX_FRESH")?;
+        let alias = optional_list("SIMIT_NIX_FRESH_INSTALLABLES")?;
+        if let (Some(retained), Some(alias)) = (&retained, &alias) {
+            ensure!(
+                retained == alias,
+                "conflicting SIMIT_NIX_FRESH and SIMIT_NIX_FRESH_INSTALLABLES"
+            );
+        }
         Ok(Self {
             schema: "simit.nix-group-spec.v1".into(),
             members: list("INSTALLABLES")?,
@@ -78,11 +95,7 @@ impl GroupSpec {
             limits: list("SIMIT_NIX_LIMITS")?,
             post_build: list("SIMIT_NIX_POST_BUILD")?,
             post_build_always: list("SIMIT_NIX_POST_BUILD_ALWAYS")?,
-            fresh_installables: match std::env::var("SIMIT_NIX_FRESH_INSTALLABLES") {
-                Ok(value) => serde_json::from_str(&value)?,
-                Err(std::env::VarError::NotPresent) => Vec::new(),
-                Err(error) => return Err(error.into()),
-            },
+            fresh_installables: retained.or(alias).unwrap_or_default(),
         })
     }
 
