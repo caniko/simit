@@ -53,6 +53,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Preserve primary-only scope when inferring monorepo drift with independently
+  managed VS Code or JetBrains publishers.
 - Require independent crates.io publishers' complete local dependency closure to
   allow crates.io, rejecting alternate-only dependencies before workflow writes.
 - Namespace monorepo qualification concurrency by source repository so identically

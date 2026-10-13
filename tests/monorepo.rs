@@ -285,6 +285,12 @@ fn monorepo_rejects_unsupported_extension_publication_before_reconciliation() {
             .output()
             .unwrap();
         assert!(output.status.success(), "{output:?}");
+        let audit = simit::registry::audit_ci(root).unwrap();
+        assert_eq!(
+            audit.status,
+            simit::registry::FeatureStatus::Managed,
+            "{audit:?}"
+        );
         assert_eq!(fs::read_to_string(root.join(path)).unwrap(), publisher);
         let ci: serde_yaml::Value = serde_yaml::from_str(
             &fs::read_to_string(root.join(".github/workflows/ci.yaml")).unwrap(),
