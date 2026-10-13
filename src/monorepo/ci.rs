@@ -28,6 +28,14 @@ pub(super) fn input_transport() -> Value {
 }
 
 pub(crate) fn files(root: &Path, config: &ProjectConfig) -> Result<Vec<GeneratedFile>> {
+    render(root, config, false)
+}
+
+pub(crate) fn primary_files(root: &Path, config: &ProjectConfig) -> Result<Vec<GeneratedFile>> {
+    render(root, config, true)
+}
+
+fn render(root: &Path, config: &ProjectConfig, primary_only: bool) -> Result<Vec<GeneratedFile>> {
     if config.ci.platform != Some(Platform::Github)
         || config.ci.provider.is_some_and(|p| p != CiProvider::Actions)
         || config.ci.runtime.is_some_and(|r| r != Runtime::Nix)
@@ -131,6 +139,9 @@ pub(crate) fn files(root: &Path, config: &ProjectConfig) -> Result<Vec<Generated
             serde_yaml::to_string(&workflow)?
         ),
     }];
+    if primary_only {
+        return Ok(files);
+    }
     let native = super::native_ci::files(root, config, &workflow)?;
     let has_native = !native.is_empty();
     files.extend(native);

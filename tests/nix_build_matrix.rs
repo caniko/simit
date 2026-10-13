@@ -40,6 +40,996 @@ fn workflow(temp: &TempDir) -> Value {
 }
 
 #[test]
+fn grouped_installables_share_a_runner_with_complete_per_output_evidence() {
+    let temp = project(
+        "[ci.nix_build]\nonly = true\ncapture_results = true\nseparate_events = true\nmax_parallel = 4\n[ci.nix_build.groups]\nnetwork = [\".#checks.x86_64-linux.client\", \".#checks.x86_64-linux.recovery\"]",
+    );
+    let result = generate(&temp, &[]);
+    assert!(result.status.success(), "{result:?}");
+    let value = workflow(&temp);
+    let job = &value["jobs"]["build"];
+    assert!(job["timeout-minutes"].is_null());
+    assert_eq!(job["strategy"]["max-parallel"], 4);
+    assert_eq!(job["strategy"]["matrix"]["include"][0]["group"], "network");
+    let steps = job["steps"].as_sequence().unwrap();
+    let checkout = steps.iter().find(|s| s["name"] == "Checkout").unwrap();
+    assert_eq!(
+        checkout["with"]["ref"],
+        "${{ github.event.pull_request.head.sha || github.sha }}"
+    );
+    assert_eq!(
+        checkout["with"]["repository"],
+        "${{ github.event.pull_request.head.repo.full_name || github.repository }}"
+    );
+    assert_eq!(checkout["with"]["persist-credentials"], false);
+    assert!(
+        value["concurrency"]["group"]
+            .as_str()
+            .unwrap()
+            .contains("github.event_name")
+    );
+    assert!(
+        value["concurrency"]["group"]
+            .as_str()
+            .unwrap()
+            .contains("head.repo.full_name")
+    );
+    let build = steps
+        .iter()
+        .find(|s| s["name"] == "Build Nix group")
+        .unwrap();
+    assert_eq!(build["shell"], "bash");
+    let setup = steps
+        .iter()
+        .position(|s| s["name"] == "Provision grouped-build Rust engine")
+        .unwrap();
+    assert_eq!(
+        steps[setup]["env"]["SIMIT_CI_ENGINE_REVISION"],
+        "${{ vars.SIMIT_CI_ENGINE_REVISION }}"
+    );
+    assert!(
+        steps[setup]["run"]
+            .as_str()
+            .unwrap()
+            .contains("github:caniko/simit/$SIMIT_CI_ENGINE_REVISION#default")
+    );
+    assert!(!steps[setup]["run"].as_str().unwrap().contains("cargo run"));
+    assert!(!steps[setup]["run"].as_str().unwrap().contains("sha256sum"));
+    assert!(
+        steps[setup]["run"]
+            .as_str()
+            .unwrap()
+            .contains("nix hash file")
+    );
+    assert!(
+        setup
+            < steps
+                .iter()
+                .position(|s| s["name"] == "Build Nix group")
+                .unwrap()
+    );
+    assert!(
+        build["run"]
+            .as_str()
+            .unwrap()
+            .contains("\"$SIMIT_CI_ENGINE\" ci nix-group")
+    );
+    assert!(generate(&temp, &["--check", "--diff"]).status.success());
+    assert!(generate(&temp, &[]).status.success());
+    assert_eq!(
+        simit::registry::audit_ci(temp.path()).unwrap().status,
+        simit::registry::FeatureStatus::Managed
+    );
+}
+
+#[test]
+fn unsupported_intel_macos_grouped_runners_reject_before_writes() {
+    for runner in [
+        "macos-13",
+        "macos-15-intel",
+        "macos-14-large",
+        "macos-15-large",
+        "macos-26-intel",
+    ] {
+        let temp = project(
+            "[ci.nix_build]\nonly = true\ncapture_results = true\n[ci.nix_build.groups]\nnetwork = [\".#checks.x86_64-linux.client\", \".#checks.x86_64-linux.recovery\"]",
+        );
+        let before = fs::read_to_string(temp.path().join("simit.toml")).unwrap();
+        fs::write(
+            temp.path().join("simit.toml"),
+            before.replace("ubuntu-24.04", runner),
+        )
+        .unwrap();
+        let configured = fs::read(temp.path().join("simit.toml")).unwrap();
+        let output = generate(&temp, &[]);
+        assert!(!output.status.success(), "{runner}: {output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("unsupported grouped engine runner"),
+            "{output:?}"
+        );
+        assert_eq!(
+            fs::read(temp.path().join("simit.toml")).unwrap(),
+            configured
+        );
+        assert!(!temp.path().join(".github").exists());
+    }
+}
+
+#[test]
+fn invalid_group_coverage_rejects_before_any_workflow_or_config_write() {
+    for groups in [
+        "network = [\".#checks.x86_64-linux.client\"]",
+        "network = [\".#checks.x86_64-linux.client\", \".#checks.x86_64-linux.recovery\", \".#unknown\"]",
+        "network = [\".#checks.x86_64-linux.client\", \".#checks.x86_64-linux.recovery\"]\nother = [\".#checks.x86_64-linux.client\"]",
+        "network = []",
+    ] {
+        let temp = project(&format!(
+            "[ci.nix_build]\nonly = true\ncapture_results = true\n[ci.nix_build.groups]\n{groups}"
+        ));
+        let before = fs::read(temp.path().join("simit.toml")).unwrap();
+        let result = generate(&temp, &[]);
+        assert!(!result.status.success(), "{groups}: {result:?}");
+        assert!(
+            String::from_utf8_lossy(&result.stderr).contains("groups"),
+            "{result:?}"
+        );
+        assert_eq!(before, fs::read(temp.path().join("simit.toml")).unwrap());
+        assert!(!temp.path().join(".github/workflows").exists());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn native_exact_matrix_groups_route_homogeneous_members_and_roundtrip() {
+    let temp = project(
+        r#"[ci.nix_build]
+only = true
+capture_results = true
+max_parallel = 2
+max_jobs = 1
+cores = 2
+kvm = true
+extra_setup = ["echo native-setup"]
+[ci.nix_build.groups]
+arm = [".#checks.aarch64-linux.recovery"]
+x86 = [".#checks.x86_64-linux.client"]
+[ci.nix_build.system_runners]
+"aarch64-linux" = "ubuntu-24.04-arm"
+"x86_64-linux" = "ubuntu-24.04"
+"#,
+    );
+    let config_path = temp.path().join("simit.toml");
+    let config = fs::read_to_string(&config_path).unwrap().replacen(
+        ".#checks.x86_64-linux.recovery",
+        ".#checks.aarch64-linux.recovery",
+        1,
+    );
+    fs::write(&config_path, config).unwrap();
+    let result = generate(&temp, &[]);
+    assert!(result.status.success(), "{result:?}");
+    let value = workflow(&temp);
+    let job = &value["jobs"]["build"];
+    assert_eq!(job["runs-on"], "${{ matrix.runner }}");
+    assert_eq!(job["strategy"]["max-parallel"], 2);
+    let rows = job["strategy"]["matrix"]["include"].as_sequence().unwrap();
+    assert_eq!(rows.len(), 2);
+    for (row, system, runner, member) in [
+        (
+            &rows[0],
+            "aarch64-linux",
+            "ubuntu-24.04-arm",
+            ".#checks.aarch64-linux.recovery",
+        ),
+        (
+            &rows[1],
+            "x86_64-linux",
+            "ubuntu-24.04",
+            ".#checks.x86_64-linux.client",
+        ),
+    ] {
+        assert_eq!(row["system"], system);
+        assert_eq!(row["runner"], runner);
+        assert_eq!(
+            serde_json::from_str::<Vec<String>>(row["installables"].as_str().unwrap()).unwrap(),
+            vec![member]
+        );
+    }
+    let steps = job["steps"].as_sequence().unwrap();
+    let position = |name| steps.iter().position(|s| s["name"] == name).unwrap();
+    let verify = position("Verify native Nix runner");
+    assert!(verify < position("Provision grouped-build Rust engine"));
+    assert!(verify < position("Enable hosted KVM"));
+    assert!(verify < position("Project setup"));
+    assert!(verify < position("Build Nix group"));
+    assert_eq!(
+        steps[position("Enable hosted KVM")]["if"],
+        "${{ matrix.system == 'x86_64-linux' }}"
+    );
+    let build = &steps[position("Build Nix group")];
+    assert!(
+        build["run"]
+            .as_str()
+            .unwrap()
+            .contains("\"limits\":[\"--max-jobs\",\"1\",\"--cores\",\"2\"]")
+    );
+    let matrix_guard = {
+        let ungrouped = project(
+            "[ci.nix_build]\nonly = true\n[ci.nix_build.system_runners]\n\"x86_64-linux\" = \"ubuntu-24.04\"",
+        );
+        assert!(generate(&ungrouped, &[]).status.success());
+        workflow(&ungrouped)["jobs"]["build"]["steps"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .find(|s| s["name"] == "Verify native Nix runner")
+            .unwrap()["run"]
+            .clone()
+    };
+    assert_eq!(
+        steps[verify]["run"], matrix_guard,
+        "groups reuse the independently verified hardware guard"
+    );
+    let persisted = fs::read(&config_path).unwrap();
+    let generated = fs::read(temp.path().join(".github/workflows/nix-builds.yaml")).unwrap();
+    assert!(generate(&temp, &["--check", "--diff"]).status.success());
+    assert!(generate(&temp, &[]).status.success());
+    assert_eq!(persisted, fs::read(&config_path).unwrap());
+    assert_eq!(
+        generated,
+        fs::read(temp.path().join(".github/workflows/nix-builds.yaml")).unwrap()
+    );
+    assert_eq!(
+        simit::registry::audit_ci(temp.path()).unwrap().status,
+        simit::registry::FeatureStatus::Managed
+    );
+}
+
+#[test]
+fn native_exact_matrix_rejects_mixed_groups_and_native_transport_before_writes() {
+    for (options, expected) in [
+        (
+            "[ci.nix_build]\nonly = true\ncapture_results = true\n[ci.nix_build.groups]\nnetwork = [\".#checks.x86_64-linux.client\", \".#checks.aarch64-linux.recovery\"]",
+            "homogeneous",
+        ),
+        (
+            "[ci.nix_build]\nonly = true\ncapture_results = true\ncheck_systems = [\"x86_64-linux\", \"aarch64-linux\"]\ndependency_installables = [\".#packages.x86_64-linux.deps\"]\n[ci.nix_build.groups]\nx86 = [\".#checks.x86_64-linux.client\"]\narm = [\".#checks.aarch64-linux.recovery\"]",
+            "dependency transport",
+        ),
+    ] {
+        let temp = project(&format!(
+            "{options}\n[ci.nix_build.system_runners]\n\"x86_64-linux\" = \"ubuntu-24.04\"\n\"aarch64-linux\" = \"ubuntu-24.04-arm\""
+        ));
+        let path = temp.path().join("simit.toml");
+        let before = fs::read_to_string(&path).unwrap().replacen(
+            ".#checks.x86_64-linux.recovery",
+            ".#checks.aarch64-linux.recovery",
+            1,
+        );
+        fs::write(&path, &before).unwrap();
+        for args in [vec![], vec!["--check", "--diff"]] {
+            let result = generate(&temp, &args);
+            assert!(!result.status.success(), "{result:?}");
+            assert!(
+                String::from_utf8_lossy(&result.stderr).contains(expected),
+                "{result:?}"
+            );
+            assert_eq!(before, fs::read_to_string(&path).unwrap());
+            assert!(!temp.path().join(".github/workflows").exists());
+        }
+    }
+}
+
+#[test]
+fn native_groups_admit_mapped_engine_systems_and_bind_guard_configuration() {
+    let options = "[ci.nix_build]\nonly = true\ncapture_results = true\n[ci.nix_build.groups]\nnetwork = [\".#checks.x86_64-linux.client\", \".#checks.x86_64-linux.recovery\"]\n[ci.nix_build.system_runners]\n\"x86_64-linux\" = \"ubuntu-24.04\"\n[ci.nix_build.extra_env]\nNIX_CONFIG = \"eval-system = aarch64-linux\"";
+    let temp = project(options);
+    let path = temp.path().join("simit.toml");
+    // Engine admission follows mapped native systems, not the unrelated ordinary runner.
+    let before = fs::read_to_string(&path)
+        .unwrap()
+        .replace("runner = \"ubuntu-24.04\"", "runner = \"windows-2022\"");
+    fs::write(&path, before).unwrap();
+    let output = generate(&temp, &[]);
+    assert!(output.status.success(), "{output:?}");
+    let value = workflow(&temp);
+    let steps = value["jobs"]["build"]["steps"].as_sequence().unwrap();
+    let guard = steps
+        .iter()
+        .position(|s| s["name"] == "Verify native Nix runner")
+        .unwrap();
+    let engine = steps
+        .iter()
+        .position(|s| s["name"] == "Provision grouped-build Rust engine")
+        .unwrap();
+    assert!(guard < engine);
+    assert!(
+        steps[guard]["env"]["NIX_CONFIG"]
+            .as_str()
+            .unwrap()
+            .contains("eval-system = aarch64-linux")
+    );
+    assert_eq!(steps[guard]["env"]["BASH_ENV"], "");
+    assert_eq!(
+        steps[engine]["env"]["NIX_CONFIG"],
+        "experimental-features = nix-command flakes"
+    );
+    assert!(generate(&temp, &["--check", "--diff"]).status.success());
+    for system in ["powerpc64le-linux", "x86_64-darwin", "i686-linux"] {
+        let temp = project(&options.replace("x86_64-linux", system));
+        let before = fs::read_to_string(temp.path().join("simit.toml"))
+            .unwrap()
+            .replace("x86_64-linux", system);
+        fs::write(temp.path().join("simit.toml"), &before).unwrap();
+        let output = generate(&temp, &[]);
+        assert!(!output.status.success(), "{system}: {output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("unsupported grouped engine runner"),
+            "{output:?}"
+        );
+        assert_eq!(
+            fs::read_to_string(temp.path().join("simit.toml")).unwrap(),
+            before
+        );
+        assert!(!temp.path().join(".github").exists());
+    }
+}
+
+#[test]
+fn generated_group_invocation_and_fallback_execute_the_packaged_rust_cli() {
+    generated_group_fixture(None);
+}
+
+#[cfg(unix)]
+fn generated_group_fixture(hook_size: Option<(usize, bool)>) {
+    let success = "test -s \"$SIMIT_NIX_BUILD_RESULTS/result.json\" && test -s \"$SIMIT_NIX_BUILD_RESULTS/build.log\" && printf '%s' \"$INSTALLABLE\" > \"$SIMIT_NIX_BUILD_RESULTS/hook-member\"";
+    let diagnostic = "printf '%s' \"$INSTALLABLE\" > \"$SIMIT_NIX_BUILD_RESULTS/hook-diagnostic\"";
+    let pad = |script: &str, diagnostic: bool| match hook_size {
+        Some((size, phase)) if phase == diagnostic => {
+            let body = format!("\ntest \"$0\" = bash; test \"$#\" = 0; {script}");
+            let hook = format!("#{}{body}", "x".repeat(size - body.len() - 1));
+            assert_eq!(hook.len(), size);
+            hook
+        }
+        _ => script.to_owned(),
+    };
+    let temp = project(&format!(
+        "[ci.nix_build]\nonly = true\ncapture_results = true\ncheck_systems = [\"x86_64-linux\"]\nfresh_installables = [\".#checks.x86_64-linux.client\"]\npost_build = [{}]\npost_build_always = [{}]\n[ci.nix_build.groups]\nnetwork = [\".#checks.x86_64-linux.client\", \".#checks.x86_64-linux.recovery\"]",
+        serde_json::to_string(&pad(success, false)).unwrap(),
+        serde_json::to_string(&pad(diagnostic, true)).unwrap()
+    ));
+    assert!(generate(&temp, &[]).status.success());
+    let value = workflow(&temp);
+    let steps = value["jobs"]["build"]["steps"].as_sequence().unwrap();
+    let build = steps
+        .iter()
+        .find(|s| s["name"] == "Build Nix group")
+        .unwrap();
+    let source = build["run"].as_str().unwrap();
+    let diagnostics = steps
+        .iter()
+        .find(|s| s["name"] == "Retain uncollected group diagnostics")
+        .unwrap();
+    assert_eq!(diagnostics["if"], "${{ !cancelled() }}");
+    let fallback = diagnostics["run"].as_str().unwrap();
+    let source_file = temp.path().join("build-step.sh");
+    let fallback_file = temp.path().join("fallback-step.sh");
+    fs::write(&source_file, source).unwrap();
+    fs::write(&fallback_file, fallback).unwrap();
+    let bin = temp.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    std::os::unix::fs::symlink(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/group-nix.sh"),
+        bin.join("nix"),
+    )
+    .unwrap();
+    for args in [
+        vec!["init", "-q"],
+        vec!["add", "."],
+        vec![
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-qm",
+            "fixture",
+        ],
+    ] {
+        assert!(
+            Command::new("git")
+                .current_dir(temp.path())
+                .args(args)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    let head = String::from_utf8(
+        Command::new("git")
+            .current_dir(temp.path())
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    for (case, setup_failed) in [
+        ("success", false),
+        ("fail", false),
+        ("missing", false),
+        ("success", true),
+    ] {
+        let root = temp.path().join(format!("results-{case}-{setup_failed}"));
+        fs::create_dir(&root).unwrap();
+        let mut command = Command::new("bash");
+        command
+            .current_dir(temp.path())
+            .args(["-e", "-o", "pipefail"]);
+        if setup_failed {
+            command.args(["-c", "exit 1"]);
+        } else {
+            command.arg(&source_file);
+        }
+        command
+            .env("SIMIT_CI_ENGINE", env!("CARGO_BIN_EXE_simit"))
+            .env(
+                "INSTALLABLES",
+                value["jobs"]["build"]["strategy"]["matrix"]["include"][0]["installables"]
+                    .as_str()
+                    .unwrap(),
+            )
+            .env("SIMIT_NIX_BUILD_RESULTS", &root)
+            .env("SIMIT_NIX_GROUP", "network")
+            .env("GITHUB_SHA", head.trim())
+            .env("GITHUB_EVENT_NAME", "push")
+            .env("GITHUB_RUN_ID", "123")
+            .env("GITHUB_RUN_ATTEMPT", "1")
+            .env("GROUP_CALLS", root.join("calls"))
+            .env("GROUP_CASE", case)
+            .env(
+                "PATH",
+                std::env::join_paths(
+                    std::iter::once(bin.clone())
+                        .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+                )
+                .unwrap(),
+            );
+        for (key, value) in build["env"].as_mapping().unwrap() {
+            if !value.as_str().unwrap().contains("${{") {
+                command.env(key.as_str().unwrap(), value.as_str().unwrap());
+            }
+        }
+        let output = command.output().unwrap();
+        assert_eq!(
+            output.status.success(),
+            case == "success" && !setup_failed,
+            "{output:?}"
+        );
+        for _ in 0..2 {
+            let result = Command::new("bash")
+                .current_dir(temp.path())
+                .args(["-e", "-o", "pipefail"])
+                .arg(&fallback_file)
+                .env("SIMIT_NIX_BUILD_RESULTS", &root)
+                .env("SIMIT_NIX_GROUP", "network")
+                .output()
+                .unwrap();
+            assert!(result.status.success(), "{result:?}");
+        }
+        for index in 0..2 {
+            assert!(root.join(format!("{index}/hook-diagnostic")).exists());
+            assert_eq!(
+                root.join(format!("{index}/fallback-diagnostic-0.status"))
+                    .exists(),
+                setup_failed || case == "missing"
+            );
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn generated_large_hooks_cross_file_boundaries_in_engine_and_fallback() {
+    // Each phase exceeds Linux's per-argument cap while the complete generated
+    // workflow stays below GitHub's 500 KB limit, including repeated diagnostics.
+    for diagnostic in [false, true] {
+        generated_group_fixture(Some((140_000, diagnostic)));
+    }
+}
+
+#[test]
+fn grouped_rendered_workflow_limit_covers_specs_groups_and_fallback_repetition() {
+    let group = "[ci.nix_build.groups]\nnetwork = [\".#checks.x86_64-linux.client\", \".#checks.x86_64-linux.recovery\"]";
+    for (kind, size, groups) in [
+        ("post_build", 1024 * 1024, group),
+        ("post_build_always", 170_000, group),
+        (
+            "post_build",
+            260_000,
+            "[ci.nix_build.groups]\nclient = [\".#checks.x86_64-linux.client\"]\nrecovery = [\".#checks.x86_64-linux.recovery\"]",
+        ),
+    ] {
+        let temp = project(&format!(
+            "[ci.nix_build]\nonly = true\ncapture_results = true\n{kind} = [{}]\n{groups}",
+            serde_json::to_string(&format!("#{}", "x".repeat(size - 1))).unwrap()
+        ));
+        let path = temp.path().join("simit.toml");
+        let before = fs::read_to_string(&path).unwrap();
+        let output = generate(&temp, &[]);
+        assert!(!output.status.success(), "oversized {kind}: {output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("500000-byte workflow limit"),
+            "{output:?}"
+        );
+        assert_eq!(fs::read_to_string(path).unwrap(), before);
+        assert!(!temp.path().join(".github/workflows").exists());
+    }
+}
+
+#[test]
+fn grouped_rendered_workflow_exact_boundary_preserves_existing_files_on_overflow() {
+    let temp = project(
+        "[ci.nix_build]\nonly = true\ncapture_results = true\npost_build = [\"#\"]\n[ci.nix_build.groups]\nnetwork = [\".#checks.x86_64-linux.client\", \".#checks.x86_64-linux.recovery\"]",
+    );
+    assert!(generate(&temp, &[]).status.success());
+    let workflow = temp.path().join(".github/workflows/nix-builds.yaml");
+    let padding = 500_000 - fs::read(&workflow).unwrap().len();
+    let path = temp.path().join("simit.toml");
+    let mut config = fs::read_to_string(&path)
+        .unwrap()
+        .parse::<toml_edit::DocumentMut>()
+        .unwrap();
+    for extra in [0, 1] {
+        let mut hooks = toml_edit::Array::new();
+        hooks.push(format!("#{}", "x".repeat(padding + extra)));
+        config["ci"]["nix_build"]["post_build"] = toml_edit::value(hooks);
+        let before = config.to_string();
+        fs::write(&path, &before).unwrap();
+        let prior = fs::read(&workflow).unwrap();
+        let output = generate(&temp, &[]);
+        assert_eq!(output.status.success(), extra == 0, "{output:?}");
+        if extra == 0 {
+            assert_eq!(fs::read(&workflow).unwrap().len(), 500_000);
+        } else {
+            assert_eq!(fs::read(&workflow).unwrap(), prior);
+            assert_eq!(fs::read_to_string(&path).unwrap(), before);
+        }
+    }
+}
+
+#[test]
+fn hook_actions_expressions_reject_before_retaining_expanded_secrets() {
+    for kind in ["post_build", "post_build_always"] {
+        for script in [
+            "printf '%s' '${{ secrets.DIAGNOSTIC_TOKEN }}'",
+            "printf '%s' '${{ github.token }}'",
+            "# ${{ inputs.command }}",
+        ] {
+            let temp = project(&format!(
+                "[ci.nix_build]\nonly = true\ncapture_results = true\n{kind} = [{}]\n[ci.nix_build.groups]\nnetwork = [\".#checks.x86_64-linux.client\", \".#checks.x86_64-linux.recovery\"]",
+                serde_json::to_string(script).unwrap()
+            ));
+            let path = temp.path().join("simit.toml");
+            let before = fs::read_to_string(&path).unwrap();
+            let output = generate(&temp, &[]);
+            assert!(!output.status.success(), "{kind}: {output:?}");
+            assert!(
+                String::from_utf8_lossy(&output.stderr).contains("Actions expressions"),
+                "{output:?}"
+            );
+            assert_eq!(fs::read_to_string(path).unwrap(), before);
+            assert!(!temp.path().join(".github/workflows").exists());
+        }
+    }
+    let temp = project(
+        "[ci.nix_build]\nonly = true\ncapture_results = true\nrequired_secrets = [\"DIAGNOSTIC_TOKEN\"]\npost_build_always = [\"test -n \\\"$DIAGNOSTIC_TOKEN\\\"\"]\n[ci.nix_build.extra_env]\nDIAGNOSTIC_TOKEN = '${{ secrets.DIAGNOSTIC_TOKEN }}'\n[ci.nix_build.groups]\nnetwork = [\".#checks.x86_64-linux.client\", \".#checks.x86_64-linux.recovery\"]",
+    );
+    assert!(generate(&temp, &[]).status.success());
+    let value = workflow(&temp);
+    for step in value["jobs"]["build"]["steps"].as_sequence().unwrap() {
+        if let Some(script) = step["run"].as_str() {
+            assert!(!script.contains("${{ secrets.DIAGNOSTIC_TOKEN }}"));
+        }
+    }
+}
+
+#[test]
+fn oversized_serialized_group_specs_reject_generation_before_writes() {
+    let temp = project(
+        "[ci.nix_build]\nonly = true\ncapture_results = true\n[ci.nix_build.groups]\nnetwork = [\".#checks.x86_64-linux.client\", \".#checks.x86_64-linux.recovery\"]",
+    );
+    let path = temp.path().join("simit.toml");
+    let mut config = fs::read_to_string(&path)
+        .unwrap()
+        .parse::<toml_edit::DocumentMut>()
+        .unwrap();
+    let mut hooks = toml_edit::Array::new();
+    for _ in 0..9 {
+        hooks.push("x".repeat(1024 * 1024));
+    }
+    config["ci"]["nix_build"]["post_build"] = toml_edit::value(hooks.clone());
+    config["ci"]["nix_build"]["post_build_always"] = toml_edit::value(hooks);
+    let before = config.to_string();
+    fs::write(&path, &before).unwrap();
+    let output = generate(&temp, &[]);
+    assert!(
+        !output.status.success(),
+        "oversized generated specs must reject"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("serialized group spec"),
+        "{output:?}"
+    );
+    assert_eq!(fs::read_to_string(path).unwrap(), before);
+    assert!(!temp.path().join(".github/workflows").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn engine_bootstrap_never_sources_producer_shell_startup_or_nix_configuration() {
+    let temp = project(
+        "[ci.nix_build]\nonly = true\ncapture_results = true\nextra_setup = [\"test -n \\\"$TEST_BINDING\\\"\"]\n[ci.nix_build.groups]\nnetwork = [\".#checks.x86_64-linux.client\", \".#checks.x86_64-linux.recovery\"]\n[ci.nix_build.extra_env]\nBASH_ENV = \"./candidate-startup.sh\"\nENV = \"./candidate-startup.sh\"\nNIX_CONFIG = \"include ./candidate-nix.conf\"\nTEST_BINDING = \"producer-value\"",
+    );
+    assert!(generate(&temp, &[]).status.success());
+    let value = workflow(&temp);
+    let job = &value["jobs"]["build"];
+    assert!(job["env"]["BASH_ENV"].is_null());
+    assert!(job["env"]["TEST_BINDING"].is_null());
+    let steps = job["steps"].as_sequence().unwrap();
+    for name in ["Project setup", "Build Nix group"] {
+        assert_eq!(
+            steps.iter().find(|s| s["name"] == name).unwrap()["env"]["BASH_ENV"],
+            "./candidate-startup.sh"
+        );
+    }
+    let step = steps
+        .iter()
+        .find(|s| s["name"] == "Provision grouped-build Rust engine")
+        .unwrap();
+    let bin = temp.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    std::os::unix::fs::symlink(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/group-nix.sh"),
+        bin.join("nix"),
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/group-startup.sh"),
+        temp.path().join("candidate-startup.sh"),
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/group-platform.sh"),
+        bin.join("uname"),
+    )
+    .unwrap();
+    let marker = temp.path().join("candidate-marker");
+    let observation = temp.path().join("bootstrap-observation");
+    for (pin, os, arch, admitted) in [
+        ("", "Linux", "x86_64", false),
+        ("trunk", "Linux", "x86_64", false),
+        (&*"a".repeat(40), "Linux", "x86_64", true),
+        (&*"a".repeat(40), "Darwin", "arm64", true),
+        (&*"a".repeat(40), "Darwin", "x86_64", false),
+    ] {
+        if observation.exists() {
+            fs::remove_file(&observation).unwrap();
+        }
+        let mut command = Command::new("bash");
+        command
+            .current_dir(temp.path())
+            .args([
+                "--noprofile",
+                "--norc",
+                "-e",
+                "-o",
+                "pipefail",
+                "-c",
+                step["run"].as_str().unwrap(),
+            ])
+            .env("GROUP_CANDIDATE_MARKER", &marker)
+            .env("GROUP_BOOTSTRAP_OBSERVATION", &observation)
+            .env("GROUP_CALLS", temp.path().join("bootstrap-calls"))
+            .env("GROUP_CASE", "bootstrap")
+            .env("GROUP_OS", os)
+            .env("GROUP_ARCH", arch)
+            .env(
+                "PATH",
+                std::env::join_paths(
+                    std::iter::once(bin.clone())
+                        .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+                )
+                .unwrap(),
+            );
+        for (key, entry) in job["env"]
+            .as_mapping()
+            .unwrap()
+            .iter()
+            .chain(step["env"].as_mapping().unwrap())
+        {
+            command.env(key.as_str().unwrap(), entry.as_str().unwrap());
+        }
+        let output = command
+            .env("SIMIT_CI_ENGINE_REVISION", pin)
+            .output()
+            .unwrap();
+        // Controlled Nix intentionally returns an invalid store path; bootstrap cannot enroll it.
+        assert!(!output.status.success(), "{output:?}");
+        assert!(!marker.exists());
+        assert_eq!(observation.exists(), admitted, "{output:?}");
+    }
+}
+
+#[test]
+fn grouped_configuration_cannot_override_engine_or_generated_execution_inputs() {
+    for key in [
+        "SIMIT_CI_ENGINE",
+        "SIMIT_CI_ENGINE_REVISION",
+        "SIMIT_NIX_PLAN",
+        "INSTALLABLES",
+    ] {
+        let temp = project(&format!(
+            "[ci.nix_build]\nonly = true\ncapture_results = true\n[ci.nix_build.groups]\nnetwork = [\".#checks.x86_64-linux.client\", \".#checks.x86_64-linux.recovery\"]\n[ci.nix_build.extra_env]\n{key} = \"hostile\""
+        ));
+        let output = generate(&temp, &[]);
+        assert!(!output.status.success(), "{key}: {output:?}");
+        assert!(String::from_utf8_lossy(&output.stderr).contains("reserved runtime variable"));
+        assert!(!temp.path().join(".github/workflows").exists());
+    }
+}
+
+#[test]
+fn independent_rust_evaluation_and_realization_lanes_preserve_all_steps() {
+    let temp = project(
+        "independent_lanes = true\nwith_docs = true\nall_features = true\nextra_setup = [\"cargo-installed-tool\"]\n[[ci.required_gates]]\nid = \"contract\"\nrun = \"nix develop -c cargo test\"",
+    );
+    fs::write(
+        temp.path().join("Cargo.toml"),
+        "[package]\nname = \"client\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )
+    .unwrap();
+    fs::create_dir(temp.path().join("src")).unwrap();
+    fs::write(temp.path().join("src/lib.rs"), "pub fn client() {}\n").unwrap();
+    let output = generate(&temp, &[]);
+    assert!(output.status.success(), "{output:?}");
+    let value: Value = serde_yaml::from_str(
+        &fs::read_to_string(temp.path().join(".github/workflows/ci.yaml")).unwrap(),
+    )
+    .unwrap();
+    for name in ["rust", "evaluation", "realization"] {
+        assert!(value["jobs"][name]["steps"].is_sequence(), "{value:?}");
+        assert!(value["jobs"][name]["needs"].is_null());
+        let steps = value["jobs"][name]["steps"].as_sequence().unwrap();
+        let cargo_path = steps
+            .iter()
+            .position(|s| s["name"] == "Add cargo bin to PATH")
+            .unwrap();
+        let setup = steps
+            .iter()
+            .position(|s| s["name"] == "Project setup")
+            .unwrap();
+        assert!(cargo_path < setup);
+    }
+    let gate = value["jobs"]["gate-contract"]["steps"]
+        .as_sequence()
+        .unwrap();
+    let checkout = gate.iter().find(|s| s["name"] == "Checkout").unwrap();
+    assert_eq!(
+        checkout["with"]["ref"],
+        "${{ github.event.pull_request.head.sha || github.sha }}"
+    );
+    assert_eq!(checkout["with"]["persist-credentials"], false);
+    assert!(
+        value["jobs"]["evaluation"]["steps"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .any(|s| s["run"] == "nix flake check --no-build --all-systems --no-update-lock-file")
+    );
+    let rust = value["jobs"]["rust"]["steps"].as_sequence().unwrap();
+    assert!(
+        rust.iter()
+            .any(|s| s["run"] == "nix develop -c cargo test --all-features")
+    );
+    assert!(
+        rust.iter()
+            .any(|s| s["run"] == "nix develop .#docs -c cargo doc --no-deps --all-features")
+    );
+    assert!(rust.iter().any(|s| s["name"] == "Clippy all features"));
+    assert!(!rust.iter().any(|s| s["name"] == "Check flake"));
+    assert_eq!(value["on"]["push"]["branches"][0], "**");
+    assert!(
+        value["on"]
+            .as_mapping()
+            .unwrap()
+            .contains_key(Value::String("pull_request".into()))
+    );
+    assert!(generate(&temp, &["--check", "--diff"]).status.success());
+    assert_eq!(
+        simit::registry::audit_ci(temp.path()).unwrap().status,
+        simit::registry::FeatureStatus::Managed
+    );
+}
+
+#[test]
+fn independent_lanes_can_retire_realization_without_retiring_evaluation() {
+    let temp = project(
+        "independent_lanes = true\nnix_flake_check = false\ncheck_command = \"cargo test --locked\"",
+    );
+    fs::write(
+        temp.path().join("Cargo.toml"),
+        "[package]\nname = \"client\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )
+    .unwrap();
+    fs::create_dir(temp.path().join("src")).unwrap();
+    fs::write(temp.path().join("src/lib.rs"), "pub fn client() {}\n").unwrap();
+    assert!(generate(&temp, &[]).status.success());
+    let value: Value = serde_yaml::from_str(
+        &fs::read_to_string(temp.path().join(".github/workflows/ci.yaml")).unwrap(),
+    )
+    .unwrap();
+    assert!(value["jobs"]["realization"].is_null());
+    assert!(value["jobs"]["evaluation"]["steps"].is_sequence());
+    assert!(
+        value["jobs"]["rust"]["steps"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .any(|s| s["run"]
+                .as_str()
+                .is_some_and(|run| run.trim_end() == "nix develop -c sh -c 'cargo test --locked'"))
+    );
+}
+
+#[test]
+fn independent_lanes_reject_configured_step_runners_before_normalization() {
+    let temp = project("independent_lanes = true\nstep_runners = { test = \"ubuntu-24.04\" }");
+    fs::write(
+        temp.path().join("Cargo.toml"),
+        "[package]\nname = \"client\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )
+    .unwrap();
+    fs::create_dir(temp.path().join("src")).unwrap();
+    fs::write(temp.path().join("src/lib.rs"), "pub fn client() {}\n").unwrap();
+    let before = fs::read(temp.path().join("simit.toml")).unwrap();
+    let output = generate(&temp, &[]);
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("step_runners"),
+        "{output:?}"
+    );
+    assert_eq!(fs::read(temp.path().join("simit.toml")).unwrap(), before);
+    assert!(!temp.path().join(".github/workflows").exists());
+}
+
+#[test]
+fn independent_lane_audits_reject_step_runners_without_writes() {
+    let temp = project("independent_lanes = true");
+    fs::write(
+        temp.path().join("Cargo.toml"),
+        "[package]\nname = \"client\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )
+    .unwrap();
+    fs::create_dir(temp.path().join("src")).unwrap();
+    fs::write(temp.path().join("src/lib.rs"), "pub fn client() {}\n").unwrap();
+    let output = generate(&temp, &[]);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        simit::registry::audit_ci(temp.path()).unwrap().status,
+        simit::registry::FeatureStatus::Managed
+    );
+    let workflows = fs::read_dir(temp.path().join(".github/workflows"))
+        .unwrap()
+        .map(|entry| {
+            let path = entry.unwrap().path();
+            let bytes = fs::read(&path).unwrap();
+            (path, bytes)
+        })
+        .collect::<Vec<_>>();
+    let path = temp.path().join("simit.toml");
+    let mut config = fs::read_to_string(&path)
+        .unwrap()
+        .parse::<toml_edit::DocumentMut>()
+        .unwrap();
+    config["ci"]["step_runners"]["test"] = toml_edit::value("ubuntu-24.04");
+    let before = config.to_string();
+    fs::write(&path, &before).unwrap();
+    let error = simit::registry::audit_ci(temp.path()).unwrap_err();
+    assert!(format!("{error:#}").contains("step_runners"), "{error:#}");
+    assert_eq!(
+        simit::registry::detect_feature_status(temp.path())["ci"],
+        simit::registry::FeatureStatus::Drift
+    );
+    assert_eq!(fs::read_to_string(&path).unwrap(), before);
+    for (path, bytes) in workflows {
+        assert_eq!(fs::read(path).unwrap(), bytes);
+    }
+}
+
+#[test]
+fn effective_backend_overrides_cannot_silently_drop_group_admission() {
+    let temp = project(
+        "[ci.nix_build]\ncapture_results = true\ncheck_systems = [\"x86_64-linux\"]\n[ci.nix_build.groups]\nall = [\".#checks.x86_64-linux.client\", \".#checks.x86_64-linux.recovery\"]",
+    );
+    let config = temp.path().join("simit.toml");
+    let before = fs::read_to_string(&config)
+        .unwrap()
+        .replace("platform = \"github\"\n", "")
+        .replace("provider = \"actions\"\n", "");
+    fs::write(&config, &before).unwrap();
+    fs::write(
+        temp.path().join("Cargo.toml"),
+        "[package]\nname = \"client\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )
+    .unwrap();
+    fs::create_dir(temp.path().join("src")).unwrap();
+    fs::write(temp.path().join("src/lib.rs"), "pub fn client() {}\n").unwrap();
+    let output = generate(&temp, &["--platform", "forgejo", "--ci-provider", "crow"]);
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("effective GitHub Actions backend"),
+        "{output:?}"
+    );
+    assert_eq!(fs::read_to_string(&config).unwrap(), before);
+    assert!(!temp.path().join(".crow").exists());
+    assert!(!temp.path().join(".github/workflows").exists());
+}
+
+#[test]
+fn unsupported_lane_backends_reject_generation_and_existing_workflow_audits() {
+    for (platform, provider) in [("forgejo", "crow"), ("gitlab", "actions")] {
+        let temp = project("");
+        fs::write(
+            temp.path().join("Cargo.toml"),
+            "[package]\nname = \"client\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+        )
+        .unwrap();
+        fs::create_dir(temp.path().join("src")).unwrap();
+        fs::write(temp.path().join("src/lib.rs"), "pub fn client() {}\n").unwrap();
+        let config = temp.path().join("simit.toml");
+        let supported = format!(
+            "[ci]\nplatform = \"{platform}\"\nprovider = \"{provider}\"\nruntime = \"nix\"\nrunner = \"codefloe-global\"\n"
+        );
+        fs::write(&config, &supported).unwrap();
+        assert!(generate(&temp, &[]).status.success());
+        let changed = format!("{supported}independent_lanes = true\n");
+        fs::write(&config, &changed).unwrap();
+        let error = simit::registry::audit_ci(temp.path()).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("effective GitHub Actions backend"),
+            "{error:#}"
+        );
+        let output = generate(&temp, &[]);
+        assert!(!output.status.success(), "{output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("independent_lanes"),
+            "{output:?}"
+        );
+        assert_eq!(fs::read_to_string(&config).unwrap(), changed);
+    }
+    let temp = project("independent_lanes = true");
+    fs::write(
+        temp.path().join("pyproject.toml"),
+        "[project]\nname = \"client\"\nversion = \"0.1.0\"\nrequires-python = \">=3.12\"\n",
+    )
+    .unwrap();
+    fs::write(temp.path().join("uv.lock"), "version = 1\n").unwrap();
+    let before = fs::read(temp.path().join("simit.toml")).unwrap();
+    let output = generate(&temp, &["--platform", "forgejo", "--ci-provider", "crow"]);
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("independent_lanes"),
+        "{output:?}"
+    );
+    assert_eq!(fs::read(temp.path().join("simit.toml")).unwrap(), before);
+    assert!(!temp.path().join(".crow").exists());
+}
+
+#[test]
 fn independent_nix_producer_events_survive_regeneration_without_cancelling_each_other() {
     let temp =
         project("[ci.nix_build]\nonly = true\ncapture_results = true\nseparate_events = true");
@@ -219,6 +1209,492 @@ extra_env = { FLAKE_SSH_KEY = "${{ secrets.FLAKE_SSH_KEY }}" }
         simit::registry::FeatureStatus::Managed,
         "{audit:?}"
     );
+}
+
+#[test]
+fn native_exact_matrix_routes_each_gate_once_and_limits_kvm_to_x86_linux() {
+    for rust_project in [false, true] {
+        let temp = project(
+            r#"[ci.nix_build]
+only = true
+timeout_minutes = 90
+max_parallel = 2
+max_jobs = 1
+cores = 2
+kvm = true
+capture_results = true
+
+[ci.nix_build.system_runners]
+"aarch64-linux" = "ubuntu-24.04-arm"
+"x86_64-linux" = "ubuntu-24.04"
+"#,
+        );
+        let config_path = temp.path().join("simit.toml");
+        let original_config = fs::read_to_string(&config_path).unwrap().replace(
+            ".#checks.x86_64-linux.recovery",
+            ".#checks.aarch64-linux.recovery",
+        );
+        fs::write(&config_path, &original_config).unwrap();
+        if rust_project {
+            fs::write(
+                temp.path().join("Cargo.toml"),
+                "[package]\nname = \"native-contract\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+            )
+            .unwrap();
+            fs::create_dir(temp.path().join("src")).unwrap();
+            fs::write(temp.path().join("src/main.rs"), "fn main() {}\n").unwrap();
+        }
+        let output = generate(&temp, &[]);
+        assert!(output.status.success(), "{output:?}");
+        assert!(!temp.path().join(".github/workflows/ci.yaml").exists());
+        let value = workflow(&temp);
+        let job = &value["jobs"]["build"];
+        assert_eq!(job["runs-on"], "${{ matrix.runner }}");
+        assert_eq!(job["name"], "build (${{ matrix.installable }})");
+        assert_eq!(job["timeout-minutes"], 90);
+        assert_eq!(job["strategy"]["max-parallel"], 2);
+        let matrix = &job["strategy"]["matrix"];
+        assert!(matrix["installable"].is_null());
+        let rows = matrix["include"].as_sequence().unwrap();
+        assert_eq!(rows.len(), 2, "no missing or cross-product gates");
+        for (row, installable, system, runner) in [
+            (
+                &rows[0],
+                ".#checks.x86_64-linux.client",
+                "x86_64-linux",
+                "ubuntu-24.04",
+            ),
+            (
+                &rows[1],
+                ".#checks.aarch64-linux.recovery",
+                "aarch64-linux",
+                "ubuntu-24.04-arm",
+            ),
+        ] {
+            assert_eq!(row["installable"], installable);
+            assert_eq!(row["system"], system);
+            assert_eq!(row["runner"], runner);
+        }
+        let steps = job["steps"].as_sequence().unwrap();
+        let verify = steps
+            .iter()
+            .position(|step| step["name"] == "Verify native Nix runner")
+            .unwrap();
+        let kvm = steps
+            .iter()
+            .position(|step| step["name"] == "Enable hosted KVM")
+            .unwrap();
+        let build = steps
+            .iter()
+            .position(|step| step["name"] == "Build ${{ matrix.installable }}")
+            .unwrap();
+        assert!(verify < kvm && kvm < build);
+        assert_eq!(steps[kvm]["if"], "${{ matrix.system == 'x86_64-linux' }}");
+        assert_eq!(
+            steps[verify]["env"]["EXPECTED_NIX_SYSTEM"],
+            "${{ matrix.system }}"
+        );
+        assert!(
+            steps[verify]["run"]
+                .as_str()
+                .unwrap()
+                .contains("builtins.currentSystem")
+        );
+        let runner_bin = temp.path().join("runner-bin");
+        fs::create_dir(&runner_bin).unwrap();
+        let nix = runner_bin.join("nix");
+        fs::write(&nix, "#!/bin/sh\nprintf '%s' \"$FAKE_NATIVE_NIX_SYSTEM\"\n").unwrap();
+        let uname = runner_bin.join("uname");
+        fs::write(&uname, "#!/bin/sh\ncase \"$1\" in -s) printf Linux;; -m) printf '%s' \"${FAKE_NATIVE_NIX_SYSTEM%-linux}\";; *) exit 99;; esac\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&nix, fs::Permissions::from_mode(0o755)).unwrap();
+            fs::set_permissions(&uname, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        for actual in ["aarch64-linux", "x86_64-linux"] {
+            let output = Command::new("bash")
+                .args(["-e", "-c", steps[verify]["run"].as_str().unwrap()])
+                .env(
+                    "PATH",
+                    format!(
+                        "{}:{}",
+                        runner_bin.display(),
+                        std::env::var("PATH").unwrap_or_default()
+                    ),
+                )
+                .env("EXPECTED_NIX_SYSTEM", "aarch64-linux")
+                .env("FAKE_NATIVE_NIX_SYSTEM", actual)
+                .output()
+                .unwrap();
+            assert_eq!(
+                output.status.success(),
+                actual == "aarch64-linux",
+                "{output:?}"
+            );
+            if actual != "aarch64-linux" {
+                assert!(
+                    String::from_utf8_lossy(&output.stderr).contains("Native Nix runner mismatch")
+                );
+            }
+        }
+        assert!(
+            steps[build]["run"]
+                .as_str()
+                .unwrap()
+                .contains("nix build --no-link --no-update-lock-file --max-jobs 1 --cores 2 --print-build-logs --json")
+        );
+        assert!(steps.iter().all(|step| step["continue-on-error"].is_null()));
+        let generated = fs::read(temp.path().join(".github/workflows/nix-builds.yaml")).unwrap();
+        let persisted = fs::read(&config_path).unwrap();
+        assert!(generate(&temp, &["--check", "--diff"]).status.success());
+        assert!(generate(&temp, &[]).status.success());
+        assert_eq!(
+            generated,
+            fs::read(temp.path().join(".github/workflows/nix-builds.yaml")).unwrap()
+        );
+        assert_eq!(persisted, fs::read(&config_path).unwrap());
+        assert_eq!(
+            simit::registry::audit_ci(temp.path()).unwrap().status,
+            simit::registry::FeatureStatus::Managed
+        );
+    }
+}
+
+#[test]
+fn native_exact_matrix_rejects_ambiguous_or_unmapped_systems_before_writes() {
+    for (installable, mapping, expected) in [
+        (
+            ".#checks.aarch64-linux.recovery",
+            "\"x86_64-linux\" = \"ubuntu-24.04\"",
+            "aarch64-linux",
+        ),
+        (
+            ".#recovery",
+            "\"x86_64-linux\" = \"ubuntu-24.04\"",
+            "system-qualified",
+        ),
+        (
+            ".#checks.\"aarch64-linux\".recovery",
+            "\"x86_64-linux\" = \"ubuntu-24.04\"",
+            "system-qualified",
+        ),
+        (
+            ".#formatter.aarch64-linux.extra",
+            "\"aarch64-linux\" = \"ubuntu-24.04-arm\"\n\"x86_64-linux\" = \"ubuntu-24.04\"",
+            "system-qualified",
+        ),
+        (
+            ".#checks.x86_64-linux",
+            "\"x86_64-linux\" = \"ubuntu-24.04\"",
+            "system-qualified",
+        ),
+        (
+            ".#checks.x86_64-linux.recovery",
+            "\"x86_64-linux\" = \"\"",
+            "runner",
+        ),
+    ] {
+        let temp = project(&format!(
+            "[ci.nix_build]\nonly = true\n[ci.nix_build.system_runners]\n{mapping}"
+        ));
+        let config_path = temp.path().join("simit.toml");
+        let config = fs::read_to_string(&config_path).unwrap().replace(
+            ".#checks.x86_64-linux.recovery",
+            &installable.replace('"', "\\\""),
+        );
+        fs::write(&config_path, &config).unwrap();
+        for args in [vec![], vec!["--check", "--diff"]] {
+            let output = generate(&temp, &args);
+            assert!(!output.status.success(), "{output:?}");
+            assert!(
+                String::from_utf8_lossy(&output.stderr).contains(expected),
+                "{output:?}"
+            );
+            assert_eq!(fs::read_to_string(&config_path).unwrap(), config);
+            assert!(!temp.path().join(".github/workflows").exists());
+        }
+    }
+}
+
+#[test]
+fn native_exact_matrix_selects_actions_from_mapped_workers() {
+    for grouped in [false, true] {
+        for (ordinary, mapped, checkout, upload) in [
+            ("ubuntu-24.04", "private-worker", "v4.3.1", "v4.6.2"),
+            ("private-worker", "ubuntu-24.04", "v7.0.1", "v7.0.2"),
+        ] {
+            let groups = if grouped {
+                "[ci.nix_build.groups]\nnetwork = [\".#checks.x86_64-linux.client\", \".#checks.x86_64-linux.recovery\"]\n"
+            } else {
+                ""
+            };
+            let temp = project(&format!(
+                "[ci.nix_build]\nonly = true\ncapture_results = true\n{groups}[ci.nix_build.system_runners]\n\"x86_64-linux\" = \"{mapped}\""
+            ));
+            let path = temp.path().join("simit.toml");
+            let config = fs::read_to_string(&path).unwrap().replace(
+                "runner = \"ubuntu-24.04\"",
+                &format!("runner = \"{ordinary}\""),
+            );
+            fs::write(path, config).unwrap();
+            let output = generate(&temp, &[]);
+            assert!(output.status.success(), "{output:?}");
+            let value = workflow(&temp);
+            let steps = value["jobs"]["build"]["steps"].as_sequence().unwrap();
+            for (name, action, version) in [
+                ("Checkout", "checkout", checkout),
+                ("Upload Nix build evidence", "upload-artifact", upload),
+            ] {
+                let step = steps.iter().find(|s| s["name"] == name).unwrap();
+                let reference =
+                    simit::render::ci::github_action_ref(&format!("actions/{action}"), version);
+                assert_eq!(
+                    step["uses"],
+                    reference.split(" #").next().unwrap(),
+                    "ordinary={ordinary}, mapped={mapped}, grouped={grouped}"
+                );
+            }
+            if grouped {
+                assert!(
+                    steps
+                        .iter()
+                        .any(|s| s["name"] == "Provision grouped-build Rust engine")
+                );
+                assert!(
+                    !steps
+                        .iter()
+                        .any(|s| s["name"] == "Provision grouped-build Python")
+                );
+            }
+            assert!(generate(&temp, &["--check", "--diff"]).status.success());
+        }
+    }
+}
+
+#[test]
+fn native_exact_matrix_accepts_standard_system_derivation_outputs() {
+    for grouped in [false, true] {
+        for installable in [
+            ".#formatter.aarch64-linux",
+            ".#formatter.aarch64-linux^out",
+            ".#formatter.aarch64-linux^*",
+            ".#defaultPackage.aarch64-linux",
+            ".#defaultPackage.aarch64-linux^out,dev",
+            ".#devShell.aarch64-linux",
+            ".#devShell.aarch64-linux^out",
+            ".#packages.aarch64-linux.server^out",
+        ] {
+            let groups = if grouped {
+                format!(
+                    "[ci.nix_build.groups]\nx86 = [\".#checks.x86_64-linux.client\"]\narm = [\"{installable}\"]\n"
+                )
+            } else {
+                String::new()
+            };
+            let temp = project(&format!(
+                "[ci.nix_build]\nonly = true\ncapture_results = true\n{groups}[ci.nix_build.system_runners]\n\"x86_64-linux\" = \"ubuntu-24.04\"\n\"aarch64-linux\" = \"ubuntu-24.04-arm\""
+            ));
+            let path = temp.path().join("simit.toml");
+            let before = fs::read_to_string(&path)
+                .unwrap()
+                .replace(".#checks.x86_64-linux.recovery", installable);
+            fs::write(&path, before).unwrap();
+            let output = generate(&temp, &[]);
+            assert!(
+                output.status.success(),
+                "{installable}, grouped={grouped}: {output:?}"
+            );
+            let value = workflow(&temp);
+            let rows = value["jobs"]["build"]["strategy"]["matrix"]["include"]
+                .as_sequence()
+                .unwrap();
+            let row = rows
+                .iter()
+                .find(|r| r["system"] == "aarch64-linux")
+                .unwrap();
+            assert_eq!(row["runner"], "ubuntu-24.04-arm");
+            if grouped {
+                assert_eq!(
+                    serde_json::from_str::<Vec<String>>(row["installables"].as_str().unwrap())
+                        .unwrap(),
+                    vec![installable]
+                );
+            } else {
+                assert_eq!(row["installable"], installable);
+            }
+            assert!(generate(&temp, &["--check", "--diff"]).status.success());
+            assert_eq!(
+                simit::registry::audit_ci(temp.path()).unwrap().status,
+                simit::registry::FeatureStatus::Managed
+            );
+        }
+    }
+}
+
+#[test]
+fn native_exact_matrix_normalizes_unambiguous_hardware_aliases() {
+    let temp = project(
+        "[ci.nix_build]\nonly = true\n[ci.nix_build.system_runners]\n\"x86_64-linux\" = \"ubuntu-24.04\"",
+    );
+    assert!(generate(&temp, &[]).status.success());
+    let value = workflow(&temp);
+    let script = value["jobs"]["build"]["steps"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"] == "Verify native Nix runner")
+        .unwrap()["run"]
+        .as_str()
+        .unwrap();
+    let bin = temp.path().join("alias-bin");
+    fs::create_dir(&bin).unwrap();
+    for (name, text) in [
+        (
+            "uname",
+            "#!/bin/sh\ncase \"$1\" in -m) printf '%s' \"$FAKE_CPU\";; -s) printf Linux;; *) exit 99;; esac\n",
+        ),
+        ("nix", "#!/bin/sh\nprintf '%s' \"$FAKE_NIX_SYSTEM\"\n"),
+    ] {
+        let path = bin.join(name);
+        fs::write(&path, text).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+    for (cpu, expected) in [
+        ("ppc64le", "powerpc64le-linux"),
+        ("ppc64", "powerpc64-linux"),
+        ("ppcle", "powerpcle-linux"),
+        ("ppc", "powerpc-linux"),
+        ("amd64", "x86_64-linux"),
+        ("arm64", "aarch64-linux"),
+        ("i386", "i686-linux"),
+    ] {
+        let output = Command::new("bash")
+            .args(["-c", script])
+            .env(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    bin.display(),
+                    std::env::var("PATH").unwrap_or_default()
+                ),
+            )
+            .env("FAKE_CPU", cpu)
+            .env("EXPECTED_NIX_SYSTEM", expected)
+            .env("FAKE_NIX_SYSTEM", expected)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{cpu} -> {expected}: {output:?}");
+    }
+}
+
+#[test]
+fn native_exact_matrix_checks_hardware_when_nix_system_is_overridden() {
+    let temp = project(
+        r#"[ci.nix_build]
+only = true
+[ci.nix_build.system_runners]
+"x86_64-linux" = "ubuntu-24.04"
+[ci.nix_build.extra_env]
+NIX_CONFIG = "eval-system = aarch64-linux"
+"#,
+    );
+    let generated = generate(&temp, &[]);
+    assert!(generated.status.success(), "{generated:?}");
+    let value = workflow(&temp);
+    let step = value["jobs"]["build"]["steps"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .find(|step| step["name"] == "Verify native Nix runner")
+        .unwrap();
+    let script = step["run"].as_str().unwrap();
+    let bin = temp.path().join("hardware-bin");
+    fs::create_dir(&bin).unwrap();
+    for (name, content) in [
+        (
+            "nix",
+            "#!/bin/sh\nprintf '%s' \"${FAKE_NIX_SYSTEM:-aarch64-linux}\"\nexit \"${FAKE_NIX_STATUS:-0}\"\n",
+        ),
+        (
+            "uname",
+            "#!/bin/sh\ncase \"$1\" in\n-s) printf '%s' \"$FAKE_KERNEL\"; exit \"${FAKE_KERNEL_STATUS:-0}\";;\n-m) printf '%s' \"$FAKE_CPU\"; exit \"${FAKE_CPU_STATUS:-0}\";;\n*) exit 99;;\nesac\n",
+        ),
+    ] {
+        let path = bin.join(name);
+        fs::write(&path, content).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+    for (kernel, cpu, accepted) in [
+        ("Linux", "aarch64", true),
+        ("Linux", "arm64", true),
+        ("Linux", "x86_64", false),
+        ("Darwin", "arm64", false),
+        ("Linux", "unknown", false),
+        ("Windows_NT", "arm64", false),
+    ] {
+        let output = Command::new("bash")
+            .args(["-e", "-c", script])
+            .env(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    bin.display(),
+                    std::env::var("PATH").unwrap_or_default()
+                ),
+            )
+            .env("EXPECTED_NIX_SYSTEM", "aarch64-linux")
+            .env(
+                "NIX_CONFIG",
+                value["jobs"]["build"]["env"]["NIX_CONFIG"]
+                    .as_str()
+                    .unwrap(),
+            )
+            .env("FAKE_KERNEL", kernel)
+            .env("FAKE_CPU", cpu)
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.success(),
+            accepted,
+            "{kernel}/{cpu}: {output:?}"
+        );
+    }
+    // Even an observation that emits the expected value must fail closed on
+    // command failure; configured Nix identity must also match native hardware.
+    for (name, value) in [
+        ("FAKE_CPU_STATUS", "17"),
+        ("FAKE_KERNEL_STATUS", "18"),
+        ("FAKE_NIX_STATUS", "19"),
+        ("FAKE_NIX_SYSTEM", "x86_64-linux"),
+    ] {
+        let output = Command::new("bash")
+            .args(["-c", script])
+            .env(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    bin.display(),
+                    std::env::var("PATH").unwrap_or_default()
+                ),
+            )
+            .env("EXPECTED_NIX_SYSTEM", "aarch64-linux")
+            .env("FAKE_KERNEL", "Linux")
+            .env("FAKE_CPU", "aarch64")
+            .env("NIX_CONFIG", "eval-system = aarch64-linux")
+            .env(name, value)
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{name}={value}: {output:?}");
+    }
 }
 
 #[test]
@@ -752,6 +2228,58 @@ fn exact_matrix_replaces_only_previously_managed_primary_workflows() {
     assert!(!temp.path().join(".github/workflows/ci.yaml").exists());
     assert_eq!(fs::read_to_string(custom).unwrap(), "name: Project owned\n");
     assert!(generate(&temp, &["--check", "--diff"]).status.success());
+}
+
+#[test]
+fn direct_nix_matrix_rendering_enforces_retained_hook_and_transport_boundaries() {
+    use simit::cli::Platform;
+    use simit::config::NixBuildConfig;
+    use simit::render::ci::nix_build_matrix_file_with_options;
+    use simit::user_config::ResolvedRunner;
+
+    let runner = ResolvedRunner {
+        name: None,
+        labels: vec!["ubuntu-24.04".into()],
+    };
+    let installables = vec![".#default".to_owned()];
+    let mut options = NixBuildConfig {
+        capture_results: true,
+        groups: [("default".into(), installables.clone())].into(),
+        ..NixBuildConfig::default()
+    };
+    for phase in ["post_build", "post_build_always", "transport"] {
+        options.post_build.clear();
+        options.post_build_always.clear();
+        options.extra_env.clear();
+        match phase {
+            "post_build" => options.post_build.push("${{ secrets.TOKEN }}".into()),
+            "post_build_always" => options.post_build_always.push("${{ github.token }}".into()),
+            _ => {
+                options
+                    .extra_env
+                    .insert("SIMIT_DEPENDENCY_MODE".into(), "override".into());
+            }
+        }
+        let error = nix_build_matrix_file_with_options(
+            Platform::Github,
+            &runner,
+            &installables,
+            &[],
+            &[],
+            &[],
+            &options,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains(if phase == "transport" {
+                "reserved transport"
+            } else {
+                "Actions expressions"
+            }),
+            "{error}"
+        );
+    }
 }
 
 #[test]

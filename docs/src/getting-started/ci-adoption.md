@@ -39,6 +39,179 @@ with_msrv = true
 
 ## Generic CI vs Release Publishing
 
+### Native grouped Nix executor
+
+Grouped workflows invoke `simit ci nix-group`. Before adopting regenerated
+workflows, enroll the repository variable `SIMIT_CI_ENGINE_REVISION` with the
+exact 40-character lowercase Git revision of a qualified Simit engine containing
+that command. Provisioning builds `github:caniko/simit/<revision>#default`, not
+the producer checkout, and retains the selected source revision and executable
+SHA-256 in the evidence root. Missing or malformed enrollment and an engine
+without the command fail the job. There is no moving-ref or Python fallback.
+This read-only producer bootstrap is not enrollment for privileged completion
+custody or release publishing; those engines have separate authority contracts.
+Producer `extra_env` bindings apply only to setup, validation, execution and
+diagnostic steps after provisioning. Engine provisioning clears shell startup
+files and uses controlled Nix configuration and public substitution. Bootstrap
+explicitly clears Nix `access-tokens` for its build, including tokens
+installed by a preceding Nix action, and hashes the engine with `nix hash file`.
+The immutable engine supports `x86_64-linux`, `aarch64-linux` and
+`aarch64-darwin`. Known Intel macOS grouped runner labels reject during
+generation; custom runners must pass the system guard before provisioning.
+Grouped configuration cannot override reserved `SIMIT_CI_*`, `SIMIT_NIX_*` or
+`INSTALLABLES` runtime inputs.
+
+The command reads the generated environment lists, or accepts
+`--spec <file> --results <directory>`. The public
+`simit::ci_runtime::group::execute` function uses the same typed contract. A JSON
+spec has schema `simit.nix-group-spec.v1`, with `members`, `plan`, `check_systems`,
+`limits`, `post_build`, `post_build_always` and optional `fresh_installables`.
+Unknown fields, invalid membership and unsupported Nix flags fail before Nix
+execution. The results directory must already exist and contain no earlier
+group receipt or member evidence.
+
+Retained `simit.nix-group.v1` receipts preserve source/tree/run/attempt/event,
+ordered results, hook statuses and numbered member directories. Optional
+`fresh_execution` is present only for fresh members. A fresh member must first
+materialize successfully with valid output JSON, then pass current-worker
+`--rebuild` with an explicit empty `builders` override, preventing configured
+remote builders from replacing current-worker execution. Ordinary materialization
+is never fresh acceptance. Fresh evidence
+retains the transport predecessor's filenames: `build.log` for materialization,
+`materialization-result.json`, `fresh-build.log` for rebuilding, and `result.json`
+for the final result. Malformed successful output and failed builds/hooks fail the group while subsequent
+members still run. Dispatch and process-limit failures are recorded as status
+125; Unix signal termination retains the v1 negative signal status (for example,
+`-9` for SIGKILL). Member stdout/stderr and hook output are retained as separate
+files, and failed admission observations include their actionable stderr in the
+CLI diagnostic.
+Subprocess output is capped before evidence writes to 16 MiB stdout and 64 MiB stderr per command,
+with a six-hour maximum process lifetime; configured workflow timeouts still
+apply. Unix cancellation stops execution and terminates the current process
+group rather than executing later members.
+Accepted hooks up to 1 MiB execute from retained `.script` files, avoiding
+platform per-argument limits. The generated workflow writes a private JSON spec
+using a shell builtin instead of putting hooks into environment strings, and its
+diagnostic fallback uses the same private-file transport. A small Bash wrapper
+preserves `bash -c` argument identity, stdin and trailing script newlines.
+The complete compact JSON spec must fit within 16 MiB, including JSON escapes.
+Generation and library admission enforce the same budget as the CLI reader;
+oversized combinations reject before project writes or runtime effects even
+when every individual hook fits its 1 MiB limit.
+Generated grouped workflows also have GitHub's 500,000-byte file limit. This
+counts all embedded specs, repeated diagnostic fallbacks, YAML escaping and
+transport steps; generation rejects overflow before writing project files.
+The CLI requires a nonempty `--results` or `SIMIT_NIX_BUILD_RESULTS` evidence
+directory and rejects missing or empty inputs before execution.
+Without `--spec`, the runtime reads fresh members from the retained
+`SIMIT_NIX_FRESH` JSON array. `SIMIT_NIX_FRESH_INSTALLABLES` is also accepted;
+if both keys are set, their decoded lists must agree. Invalid or conflicting
+values reject before dispatch or evidence writes.
+The evidence root must have no prior receipt, inventory, coverage manifest or
+numbered member entries. Interrupted and fallback-only attempts, including
+out-of-range member indices, reject before Git/Nix dispatch or evidence writes;
+choose a fresh evidence root rather than mixing attempts.
+Output-reader startup failures return through the
+same dispatch-failure path and clean up any started readers and child processes.
+Embedding applications use `execute_with` with a caller-owned `Cancellation`
+token and `Runner`. The library installs no process-global signal handlers. The
+CLI owns one cancellation flag across its entire command lifetime, including
+the gaps between subprocesses, and checks cancellation before every dispatch.
+
+The shell-only diagnostic fallback remains cancellation-aware and runs after
+setup, provisioning or admission failure. Its completion markers prevent
+duplicate collection. The native integration suite executes the generated
+invocation and this fallback using the actual packaged CLI at controlled Nix
+process boundaries. These checks replace the authored Python group harness;
+other Python fixtures retain their own packaging inputs until migrated.
+
+Execution receipts are local evidence, not forge authority. Historical Python
+v1 receipts remain readable as evidence, but a new Rust source needs its own
+original-attempt hosted qualification. Offline integrity checks do not establish
+current provider acceptance, merge readiness or publication authorization.
+
+### Native dependency stream admission
+
+`simit::ci_runtime::dependencies` ports the reviewed export-stream admission
+boundary from signed Simit source `a9874535107dd6cf335ab7c4bdfd9a9252c0c691`.
+Its `ArchiveAdmission` inputs must come from separately validated source/run
+provenance and fresh dependency/qualification evaluation. They are byte and
+inventory expectations, not qualification authority. The transport workflow's
+provenance/evaluation/export policy adapters remain a separate migration slice.
+
+`admit_archive` checks archive size and checksum while copying the compressed
+bytes into a private descriptor. It decompresses only that checksum-bound
+snapshot into another anonymous descriptor, then parses the **entire** strict
+Nix writer grammar before returning a one-use `VerifiedArchive`. Both descriptors
+are explicitly mode `0600` and unlinked on Unix. Replacing or modifying the
+original archive after admission cannot replace the imported bytes.
+
+The actual record set must exactly equal the admitted closure, include every
+evaluated dependency root, and exclude all qualification outputs. Record paths
+and deriver metadata use canonical `/nix/store` syntax; references must be
+sorted, unique and wholly inside the closure. Legacy signature framing must be
+zero. The terminal marker must be followed immediately by EOF, with no remaining
+declared bytes. Parsing bounds include 100,000 paths, 1,000,000 nodes and
+references, bounded strings and byte budgets, and streamed 64 KiB content reads.
+
+Importer compatibility follows Nix **2.34.8** `src/libutil/archive.cc`: node
+depth is strictly below **64**, directory names are at most **255 bytes**,
+and symlink targets are at most **4095 bytes**. The first invalid value is denied
+even in a second record after a valid first record, before any import effect.
+Directory names are sorted as raw bytes, including non-UTF-8 names.
+ASCII case aliases within a directory are conservatively denied on all platforms
+before import, preventing Darwin's case-hack rewrites from colliding with real entries.
+
+`VerifiedArchive::restore` dispatches one `nix-store --import` with the fully
+rewound validated descriptor, then verifies admitted paths and observes evaluated
+roots. Nonzero import/verification status produces no successful restore receipt.
+All restore command batches are prepared before import against a 96 KiB combined
+argv/environment budget, including string terminators and pointer tables. Path
+batches additionally use at most 60 KiB. Commands inherit the same frozen,
+accounted environment; an oversized environment fails before store mutation.
+The envelope reserves at least 32 KiB beneath supported Linux's 128 KiB exec
+floor and 160 KiB beneath Darwin's 256 KiB limit for platform/interpreter overhead.
+The compressed envelope matches the transport producer's default zlib bound
+(`maximum + (maximum >> 12) + (maximum >> 14) + (maximum >> 25) + 1 MiB`),
+using checked arithmetic. These library checks do not complete the transport or
+custody adapters' source/provider admission and zero-Nix-before-byte-admission gates.
+`consume` supports a caller-owned importer with the same descriptor and one-use
+lifetime. Restoration receipts always state `qualification_execution: false`;
+fresh checks still require their separate current-worker rebuild.
+
+Protocol sources:
+
+- [Nix export/import framing](https://github.com/NixOS/nix/blob/adbf23e8184bbbe8d786aad1f362443b6542e0a4/src/libstore/export-import.cc)
+- [Nix 2.34.8 importer grammar and limits](https://github.com/NixOS/nix/blob/2.34.8/src/libutil/archive.cc)
+
+### Primary-only regeneration
+
+Use the persisted project policy to regenerate verification and native-build
+workflows during a dependency migration:
+
+```sh
+simit init ci --primary-only --check --diff
+simit init ci --primary-only
+simit init ci --primary-only --check --diff
+```
+
+This scope includes ordinary member/aggregate CI (including independent lanes), native Nix matrices and
+prebuild workflows. Publisher, release, Pages and review workflows are preserved
+byte-for-byte, together with `simit.toml`, release trust roots and README badges.
+The check reports drift only in the selected scope. Full generation remains the
+default; run its separate drift gate when intentionally changing publication
+configuration. `--primary-only` cannot be combined with the other scope selectors.
+
+Project templates are a separate owner, regardless of their output basename:
+`ci-release.yaml` and `build-release.yaml` do not become primary CI. Scoped
+generation validates declared template paths and destination protections but
+does not load or render template sources, publisher or review material. Template
+outputs retain their ownership markers after a mapping is removed; only full
+generation retires them. Primary cleanup still removes obsolete marked built-in
+CI workflows and preserves hand-owned files. Policy files such as `deny.toml`
+are not created in this scope. Printed repair commands retain `--primary-only`
+and the effective platform/provider, including Crow format overrides.
+
 ### Project-owned workflow templates
 
 Projects with specialized Actions jobs can render their existing workflow
@@ -184,7 +357,17 @@ gate. Only projects without a flake formatter fall back to shell-provided
 treefmt, then Cargo formatting when treefmt is absent.
 
 New Rust flakes generated by `simit init flake` include the native `msrv` shell
-when Cargo declares a minimum version. Existing/custom flakes must provide the
+when Cargo declares a minimum version. Full canonical generation also manages
+`rust-toolchain-msrv.toml`, containing that normalized compiler version and the
+minimal profile. The shell reads this source asset rather than `builtins.toFile`,
+which does not materialize its result during read-only no-build evaluation.
+Commit the manifest alongside the generated flake; parity checks reject a missing
+or stale version. Hooks-only and custom modes preserve project-owned manifests.
+Full canonical regeneration also migrates the recognized prior generated inline
+MSRV binding before accepting hook wiring. Full checks report that migration as
+drift. Modified or dynamic inline manifests require an explicit project edit;
+Simit does not discard extra toolchain settings to force the migration.
+Existing/custom flakes must provide the
 same shell contract; hooks-only generation leaves their shells project-owned.
 The generated `nix/rust-toolchain-msrv.toml` is source-owned and must be committed
 alongside the flake, so read-only evaluation works in a fresh checkout.
@@ -297,6 +480,44 @@ Declare the exact installables that qualify a feature in `[ci].nix_builds`.
 GitHub Actions projects can configure their matrix independently of ordinary
 checks and release jobs:
 
+For native multi-architecture builds, set `[ci.nix_build.system_runners]`:
+
+```toml
+[ci.nix_build.system_runners]
+"x86_64-linux" = "ubuntu-24.04"
+"aarch64-linux" = "ubuntu-24.04-arm"
+```
+
+Every installable must explicitly select a system, for example
+`.#checks.aarch64-linux.cargo-test`, `.#packages.x86_64-linux.server`, or
+`.#formatter.aarch64-linux`, and
+that system must have a runner entry. The generator emits one job per declared
+installable, rather than running each gate on every architecture. It verifies
+the runner's OS/CPU identity independently of Nix configuration, then checks the
+configured Nix system before project setup or realization. Linux, Darwin and
+FreeBSD kernel names are recognized; unsupported kernels fail closed. With `kvm = true`,
+KVM setup runs only for `x86_64-linux` rows; ARM rows do not require `/dev/kvm`.
+The existing `[ci].runner` remains the runner for ordinary language CI. Without
+the exact-build map, the installable matrix retains its single-runner behavior.
+Standard `formatter.<system>`, `defaultPackage.<system>` and `devShell.<system>`
+outputs select their system without a trailing name.
+Output selectors such as `^out`, `^out,dev` and `^*` remain intact in generated
+installables; routing extracts the system from the attribute path alone.
+Node action versions follow
+the mapped workers: if any mapped worker needs the compatible Node 20 baseline,
+all rows use that baseline independently of the ordinary language CI runner.
+Unambiguous PowerPC uname spellings (`ppc`, `ppcle`, `ppc64`, `ppc64le`) normalize
+to Nix's corresponding `powerpc` names before comparison.
+
+The map also supports `[ci.nix_build.groups]`: every group must contain only
+installables for one system, and the group runs on that system's mapped runner.
+Mixed-system groups reject before configuration or workflow writes. Group jobs
+use the same hardware/Nix guard and x86 Linux-only KVM condition as ungrouped
+rows, while retaining per-member evidence and hooks. Native mappings currently
+cannot combine with `dependency_installables`: the single dependency producer
+does not support native per-system routing, so this combination rejects before
+writes rather than realizing foreign dependencies on one worker.
+
 ```toml
 [ci]
 platform = "github"
@@ -378,12 +599,303 @@ the earlier build failure. Both post-build command lists require
 
 Omitting `[ci.nix_build]` preserves the existing generated matrix defaults.
 
+### Shared-store Nix groups
+
+Rust projects using GitHub Actions with the Nix runtime can opt into
+`[ci].independent_lanes = true`. The `rust` lane retains the existing format,
+test, quality, docs, generator and package steps. The `evaluation` lane evaluates
+the complete flake on all systems without building. Required-gate jobs qualify
+the same immutable PR head as these lanes. Every lane adds Cargo's configured
+binary directory before project setup. With the default `nix_flake_check = true`,
+the `realization` lane also builds all flake checks. These lanes start independently
+and retain the same push and PR triggers. Step-runner overrides and `om_ci` are
+not supported together with this opt-in.
+
+Setting `nix_flake_check = false` omits only the realization lane. Establish
+complete discovered-check and declared-production-output coverage through the
+groups below, qualify their receipts, then migrate required branch contexts
+before removing overlapping full-flake realization.
+
+Native required contexts change from `test` to `rust`, `evaluation` and,
+when enabled, `realization` (with workspace member prefixes where applicable).
+Enroll every applicable lane and group context before retiring `test`.
+
+`[ci.nix_build.groups]` partitions every entry in `ci.nix_builds` into named
+jobs. Related packages and checks share a fresh hosted runner's Nix store, so
+their common dependencies are built once within that job. Group membership
+must be complete, nonempty and disjoint; `capture_results = true` is required.
+Grouped jobs provision an independently pinned native Rust engine. The separate
+dependency-transport adapter provisions Python 3.12 through a pinned setup action
+for its producer and consumer steps, including on custom runners.
+An omitted `timeout_minutes` retains the runner's default job
+timeout rather than introducing a group-specific limit.
+
+```toml
+[ci.nix_build]
+capture_results = true
+max_parallel = 4
+max_jobs = 1
+cores = 2
+check_systems = ["x86_64-linux"]
+
+[ci.nix_build.groups]
+pinentry = [".#pinentry", ".#checks.x86_64-linux.pinentry"]
+network = [".#checks.x86_64-linux.network"]
+```
+
+The example assumes those are all declared installables and all checks on the
+selected system. `check_systems` discovers the actual check derivations before
+realization and refuses an unassigned check. Include checks supplied by imported
+flake modules too. Every group retains a source-bound coverage manifest and a
+separate result, exit status and builder log for every installable. A failed
+member fails the job while the other members still produce diagnostic evidence.
+Post-build hooks run for each successful member with `INSTALLABLE` and
+`SIMIT_NIX_BUILD_RESULTS` bound to that member's numbered evidence directory.
+Grouped hook bodies cannot contain Actions expressions (`${{ ... }}`): GitHub
+would expand them into retained spec and script files. Bind expressions through
+`extra_env` and reference shell variables in hooks instead. Generated transport
+variables in the `SIMIT_DEPENDENCY_*` namespace cannot be overridden by `extra_env`.
+Diagnostic hooks run for every member, including after failed setup or admission;
+a command-shell fallback collects any member skipped before the native build
+loop. Completed diagnostic phases are marked to prevent duplicate collection.
+Hook failures fail the group while remaining members still run. The transport
+adapter's admission checks remain enforced when Python optimization is enabled.
+
+Grouped jobs have `build (<group>)` contexts. Qualify the new evidence and migrate
+required contexts together before retiring a monolithic flake-check gate.
+
+### Completion-driven producer custody
+
+`[ci.custody]` generates a trusted default-branch `workflow_run` observer. Enroll
+workflow names, source paths, every required job name and every required artifact
+name. Branch/PR producers must use original attempt 1; the observer never reruns
+producers and never checks out or executes their source or artifacts.
+
+```toml
+[ci.custody]
+repository = "owner/repository"
+producer_attempt = 1
+status_context = "simit/producer-custody"
+
+[ci.custody.producers.CI]
+workflow = ".github/workflows/ci.yaml"
+jobs = ["rust", "evaluation"]
+
+[ci.custody.producers."Nix installable builds"]
+workflow = ".github/workflows/nix-builds.yaml"
+jobs = ["build (network)", "build (pinentry)"]
+artifacts = ["nix-build-0", "nix-build-1"]
+```
+
+GitHub executes `workflow_run` from the default branch and fires it when **any**
+listed workflow completes. Install the observer on that branch before testing
+it with candidate producers. The first event may record a pending observation;
+the last completion aggregates every enrolled producer for the same source head,
+branch and event. Duplicate identities, nonoriginal attempts, missing jobs or
+artifacts, failed/skipped required jobs and incomplete custody cannot succeed.
+GitHub filters completions by display name, which is not unique. A positively
+identified workflow file outside every enrolled path is ignored before creating
+a reporting target or collection queue, even if it reuses an enrolled name.
+Capture and report repeat this early fence and never read stale receipts for
+unrelated completions. An enrolled path with a wrong name or ref qualifier still
+fails admission and revokes its established target.
+Admission and bounded-capture checks use explicit errors and remain enforced
+when Python optimization is enabled. Failed revalidation revokes a previously
+successful observation in both ordinary and optimized interpreter modes.
+
+The observer binds each producer's workflow definition through GitHub's native
+[`WorkflowRun.file` / `WorkflowRunFile`](https://docs.github.com/en/graphql/reference/actions#workflowrunfile)
+record, documented as an executed workflow file. Its repository, path, parent run,
+attempt, event and check-suite repository must match the admitted original. The
+`repositoryFileUrl` must identify an immutable 40-hex commit; custody fetches and
+hashes the enrolled file at that revision, retaining the native response, commit,
+Git blob metadata and workflow bytes. Each producer row records `workflow_revision`,
+`workflow_tree` and `source_workflow_sha256`. The receipt's `head` / `tree` remain
+the source-head identity, which can differ from the workflow-definition revision.
+
+Raw REST `head_sha`, checkout logs, referenced reusable workflows and the current
+PR merge ref are not substitutes for historical executed-file proof. This matters
+when the base introduced or changed a workflow absent or different at the PR head.
+Unavailable file records or mutable file URLs fail closed at the established
+status target. Capture-final and post-upload report requery the native executed-file
+record; revision drift revokes success in the same stable context. A native file
+record at the raw head is admitted as that explicit provider proof, not inferred
+from the source head. Installed-token access to these GraphQL records remains a
+live acceptance gate.
+
+The observer retains original jobs, provider log archives and required artifact
+bytes. Archives are hashed without extraction. Capture and
+API downloads share a 512 MiB wire budget; retained files and total archive
+expansion each have a separate 512 MiB aggregate budget. At most 256 requests,
+256 retained files and 10,000 archive members are admitted within a six-minute
+capture deadline. Downloads and member hashes stream in 64 KiB chunks; oversized
+or stalled provider downloads terminate and reap their own child processes.
+Before constructing the ZIP reader, custody scans actual central-directory
+records under a 16 MiB directory bound, the remaining aggregate member/expansion
+budgets and the original deadline. Forged footer counts cannot bypass that scan.
+Stored and deflated provider archives, including ZIP64, are supported; other
+compression methods fail admission before any member decompression.
+Enrollment accepts at most 100 jobs/artifacts across all producers. Generation
+also admits the complete rendered workflow only up to 500,000 UTF-8 bytes under
+GitHub's [500 KB workflow-file limit](https://docs.github.com/en/enterprise-cloud@latest/actions/reference/limits#workflow-file-size),
+including repeated policy/program text and YAML/JSON escaping. Oversized policies
+reject before generated-file reconciliation or configuration persistence; shorten
+enrolled names/inventories to fit. Capture budget failures retain the established
+failure-reporting target.
+
+Capture and upload must both complete before source-head status success. Reporting is
+idempotent and explicitly targets the producer commit, not the observer's default-
+branch SHA. Status contexts are `<status_context>/<event>/<target-sha256>`, using
+the full SHA-256 of the canonical stable target identity: repository IDs and
+normalized names, event, exact case-sensitive head branch, and, for PRs, PR ID,
+number, base repository ID and exact base ref. The prefix is at most 22 UTF-8
+bytes under Simit's 100-byte composed-context contract. Different PRs or bases
+at the same commit cannot satisfy each other's contexts. Enroll the exact target
+contexts before replacing existing protection. Repository names are compared
+case-insensitively, matching GitHub's owner/repository naming rules.
+
+PR custody requires exactly one valid provider PR association, including matching
+head SHA/ref and repository IDs. Missing, ambiguous or malformed associations fail
+without inventing a branch-only reporting target. Discovery, selected details,
+capture-final and report-time revalidation bind the stable identity and observed
+head/base SHA snapshots. Snapshot equality is conservative admission of observed
+API data, not authenticated historical base-execution provenance. The observed
+base SHA stays out of the status key so later changes can revoke the same target.
+
+A token-free, contents-read identity job derives the full target digest before
+collection. Collection uses that digest plus head SHA in job-level concurrency;
+different branches, PRs, base refs and case-distinct refs have distinct queues.
+Pending replacement within one target observes the same enrolled producer set.
+The collect job reserves 25 minutes for six-minute capture, upload bounded to five
+minutes, six-minute report lookups and a separate 90-second status POST. Reporting
+runs after failed upload and exhausted lookup budgets to publish failure when the
+completion target was safely established.
+
+Same-repository branch/PR custody is supported; signed-tag release
+attempt policy and fork custody require separately qualified enrollment.
+
+The collect job has only contents/actions/checks read and statuses write
+permissions. `checks: read` admits the native check-suite proof in private
+repositories; identity remains contents-read and receives no token environment. It
+provides observation custody, not independent execution acceptance. Keep native
+test/build contexts and consumer receipt validation authoritative. Qualify its
+default-branch installation, completion ordering, source-head reporting and
+all-producer aggregation before replacing an existing waiting collector.
+Use the [installed-observer acceptance procedure](../ci-custody-acceptance.md)
+to retain both completion orders, isolation and live failure/revocation evidence.
+
+Simit's own enrollment observes its native `CI/test` producer and a short,
+source-bound `Custody qualification fixture` producer. The fixture uploads inert
+Python text as archive data; the observer hashes it without executing it. Their
+different completion times exercise pending-to-complete aggregation. Before the
+observer is merged onto the default branch, candidate workflow runs qualify the
+generator and fixture only. Retain the merged-source observer events and subsequent
+branch/PR events to qualify installation, source-head reporting and ordering.
+
+### CI dependency reuse
+
+`[ci.cache]` declares public credential-free HTTPS substituters and signing keys
+for CI independently of release publication. An explicit empty table disables
+inherited release-cache settings; omitting the table preserves that inheritance.
+Forgejo Actions applies the selected cache settings to its preinstalled Nix
+environment, retaining existing `NIX_CONFIG`. Release publication continues to
+use its separate release-cache policy.
+Keep using `with_nix_cargo_cache = true` for the existing native Cargo cache.
+
+```toml
+[ci.cache]
+substituters = ["https://cache.example.org"]
+trusted_public_keys = ["cache.example.org:PUBLIC_KEY_BASE64"]
+
+[ci.nix_build]
+dependency_installables = [".#ci-patched-zellij"]
+dependency_max_mib = 2048
+fresh_installables = [".#checks.x86_64-linux.pinentry-runtime"]
+```
+
+Dependency transport requires groups and discovered `check_systems`. It builds
+only selected build inputs in a separate fresh worker and exports their complete
+closure to a same-run artifact. Enroll unselected local derivation attributes such
+as `.#ci-patched-zellij`; transport builds every output. Explicit `^out`, `^dev`
+and `^*` selectors are rejected before generation, both in dependency enrollment
+and in qualification plans using dependency transport. Selectors in workflows
+without dependency transport retain their existing behavior.
+Transport-enabled qualification plans also require bare `.#attribute` local
+derivations; remote and path references cannot drift between producer, import
+admission and the group build. Both the dependency producer and consuming groups
+inherit the runner's default timeout when `timeout_minutes` is omitted.
+
+The compressed-size budget includes zlib's default worst-case DEFLATE expansion
+plus gzip framing allowance. Export checks the same bound before marking an
+archive complete that import checks before store effects; the uncompressed
+budget is enforced separately throughout both streams.
+Import admits compressed size, checksum and the complete decompressed byte
+budget before derivation evaluation, which can itself instantiate store objects
+or trigger IFD. The admitted bytes stay in one private, unlinked spool through
+source/graph checks and import. Compressed bytes are privately snapshotted too:
+checksum and decompression read the same snapshot, even if the downloaded inode
+changes afterward.
+
+Consumers verify source commit/tree, lock bytes,
+repository, run, attempt, expected derivations/output paths, archive checksum and
+transport budget before importing. The consumer parses the full Nix export/NAR
+stream without extraction: actual records must exactly match the admitted closure
+and every declared reference stays inside it. Duplicate, missing, extra, malformed,
+truncated or trailing records reject before any canonical-store import. Parsing
+bounds paths, references, tree depth/nodes and control fields, and streams file
+payloads in 64 KiB chunks. NAR depth is less than 64; entry names and symlink
+targets are at most 255 and 4095 bytes, respectively, matching the
+[Nix 2.34.8 importer limits](https://github.com/NixOS/nix/blob/2.34.8/src/libutil/archive.cc).
+These bounds apply to the entire stream before import, including later records.
+Admission conservatively rejects ASCII case aliases within each directory on
+all platforms. Darwin's default case hack can otherwise rewrite an alias into
+an existing `~nix~case~hack~` entry and fail partway through import. Nearby suffix
+names without aliases and names in separate directories remain supported.
+Validation and import use the same unlinked, mode-0600
+spool descriptor. The parser follows [Nix's export framing](https://github.com/NixOS/nix/blob/adbf23e8184bbbe8d786aad1f362443b6542e0a4/src/libstore/export-import.cc)
+and [NAR writer grammar](https://github.com/NixOS/nix/blob/adbf23e8184bbbe8d786aad1f362443b6542e0a4/doc/manual/src/protocols/nix-archive.md).
+Legacy export signatures are rejected; archive integrity is distinct from hosted
+producer authority. An alias of a discovered check or a declared
+qualification output is refused. A failed dependency producer blocks consuming
+groups; its builder and export diagnostics remain available.
+
+Artifacts are bound to the exact run **and attempt**. Use **Re-run all jobs**
+after a consumer failure so the dependency producer also executes in the new
+attempt. GitHub's **Re-run failed jobs** can retain a successful producer from
+the previous attempt; its artifact is intentionally not accepted by retried
+consumers. There is no fallback to prior-attempt or cross-run artifacts.
+
+`kvm = true` enables hosted KVM on both the dependency producer and each consuming
+worker before custom setup or builds. Export and post-import verification also
+admit their complete argument vectors against the current worker's `ARG_MAX`,
+charging inherited environment strings and pointer arrays with platform headroom.
+A byte-budget-valid closure can still exceed this process limit; it is rejected
+before export, or before any import when verification would exceed the consumer's
+limit. Independently terminated export streams are never concatenated.
+
+`fresh_installables` first materializes cold outputs and dependencies normally,
+then requires an explicit `--rebuild` on the current worker. Nix check mode needs
+valid outputs, so an uncached check can execute twice; materialization alone never
+constitutes acceptance. Both direct aliases and transitive qualification outputs
+are rejected from dependency transport before export/import. Keep
+VMs and other runtime checks in this explicit fresh set, and measure export,
+download/import and cache-hit costs alongside end-to-end latency.
+
 Configured matrices normally coalesce a branch push with its pull request. Set
 `[ci.nix_build].separate_events = true` when acceptance requires both original
 producers: the concurrency group then includes the workflow ref and event name,
 so a PR cannot cancel its corresponding push. Newer revisions still supersede
 older runs within each event stream. Retain cancelled predecessors as failures;
 their receipts cannot substitute for either required successful producer.
+
+Aggregate Rust CI also coalesces push and PR events by default. Set
+`[ci].separate_events = true` when both Rust CI originals are required. This
+GitHub Actions opt-in retains workflow, event, source-repository and ref identity
+in the concurrency group, so fork PRs remain isolated and newer runs can
+supersede older runs within each event stream. It is independent of
+`[ci.nix_build].separate_events`; configure both when acceptance requires both
+originals from ordinary Rust CI and the Nix matrix. Nix-only and Python CI reject
+the Rust setting instead of silently ignoring it.
 
 Nix matrices qualify branch pushes by default. Set
 `[ci.nix_build].push_tags = ["**"]` to also qualify every tag push, including when

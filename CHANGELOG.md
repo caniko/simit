@@ -27,6 +27,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Independent signed-tag Python/npm publication with complete native component
   qualification, source-bound artifact receipts, exact registry checksum conflict
   detection, private-package exclusion and bounded propagation verification.
+- Opt-in `[ci].separate_events` for GitHub Rust CI, preserving independent push
+  and PR originals in aggregate workspaces while retaining default coalescing.
+- Native dependency export-stream admission with importer-compatible NAR bounds,
+  exact closure/reference binding, and one-use private descriptor restoration.
+- Native `simit ci nix-group` and library execution contracts replace embedded
+  grouped-build Python and its Python test harness. Enroll an immutable
+  `SIMIT_CI_ENGINE_REVISION` repository variable before adopting regenerated
+  grouped workflows. Retain v1 receipts, shell-only failure diagnostics and
+  materialize-plus-rebuild execution for fresh members.
+- Opt-in `[ci.nix_build.system_runners]` for native exact-installable matrices.
+  Route each system-qualified gate to its declared runner, reject missing or
+  ambiguous mappings before writes, verify the native Nix architecture, and
+  restrict hosted KVM setup to x86 Linux rows.
+- Opt-in completion-driven custody for enrolled original branch/PR producers,
+  with bounded log/artifact capture and idempotent producer-source status reports.
+- CI-scoped public Nix cache configuration and bounded same-run build-input
+  closure transport with exact source/run/attempt/derivation provenance.
+- Explicit fresh qualification installables, retaining runtime execution while
+  restoring only build dependencies.
+- Opt-in shared-store Nix build groups with complete installable assignments,
+  discovered-check coverage admission and per-output failure evidence.
+- Independent Rust, full-flake evaluation and optional realization lanes for
+  GitHub-hosted Rust/Nix projects, retaining all existing quality steps.
 - Opt-in `[ci.nix_build].push_tags` patterns to retain tag-push qualification
   alongside branch and pull-request gates, with ordered exclusions and stable
   configuration regeneration. Reject exclusion-only filters and keep tag refs
@@ -34,6 +57,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Honor `init ci --primary-only` in monorepos without rendering or rewriting
+  Cargo, Python, npm publication workflows or signing inputs.
 - Honor configured COPR Makefile and SRPM staging paths, match the RPM spec's
   source archive basename, and reject missing, empty, or duplicate SRPMs.
 - Link managed APT badges to the configured public repository URL.
@@ -44,6 +69,78 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   retain source-bound packed candidates for byte-verified retries, reject
   conflicting registry content, and keep publication credentials out of
   packing, lookups, and command output.
+- Preserve `SIMIT_NIX_FRESH` in environment-mode grouped execution, retain
+  `SIMIT_NIX_FRESH_INSTALLABLES` as an alias, and reject conflicting values before
+  execution so freshness requirements cannot silently disappear.
+- Reject all pre-existing numbered member evidence before grouped Git/Nix
+  observations or evidence writes, including interrupted/fallback-only attempts,
+  out-of-range indices, files and dangling symlinks.
+- Bound complete grouped workflow files to GitHub's 500 KB limit before writes,
+  require an explicit nonempty runtime evidence directory, reserve transport
+  environment keys, and reject Actions expressions in retained grouped hooks.
+  Bind secret expressions through `extra_env` and use shell variables in hooks.
+- Reject grouped execution specs above the shared 16 MiB serialized JSON budget
+  before generation writes or runtime effects, counting JSON escapes while
+  preserving the individual 1 MiB hook limit.
+- Enforce grouped stdout/stderr limits before evidence writes, execute accepted
+  large hooks from retained scripts, and make output-reader startup failure-safe.
+  Deny NAR case-hack aliases before import and budget restore argv/environment
+  bytes before any store mutation for portable closure verification.
+- Keep generated group specs and diagnostic fallback hooks out of argv/environment
+  strings, preserving Bash command semantics for hooks through the 1 MiB limit.
+  Retain inherited-pipe/cancellation diagnostics, platform exec headroom and the
+  transport producer's checked zlib compressed envelope.
+- Preserve Unix cancellation and signal exit statuses across grouped execution,
+  retain admission diagnostics, and force fresh rebuilds onto the current worker.
+  Bootstrap uses public credential-free Nix fetching and portable hashing, with
+  unsupported Intel macOS runner admission rejected before generation writes.
+- Admit dependency attributes outside the actual checks namespace, apply CI cache
+  policy on preinstalled Forgejo Nix, and explain full reruns for attempt-bound
+  transport. Reject Darwin case-hack aliases before import and bind checksum and
+  decompression to one private compressed snapshot.
+- Verify native exact-build runners against OS/CPU identity independently of
+  Nix's configurable `eval-system` and `system` settings, preventing a configured
+  system override from admitting the wrong hardware architecture.
+- Preserve native runner mappings alongside shared-store groups: route each
+  homogeneous group to its declared system, retain the hardware guard and scoped
+  KVM setup, and reject mixed-system groups or unsupported native dependency
+  transport before writing configuration or workflows.
+- Select exact-build action versions from mapped workers, support standard
+  two-segment system derivation outputs, and recognize unambiguous PowerPC uname
+  aliases while preserving independent hardware verification.
+- Preserve explicit Nix output selectors when routing standard system outputs
+  to native workers, extracting only their attribute path for system validation.
+- Grant check-suite read access only to completion-custody collection, bound the
+  fully rendered observer to 500,000 bytes before writes, and ignore unenrolled
+  workflow paths that reuse producer names without changing custody statuses.
+- Bind completion-custody workflow hashes to GitHub's native executed-file
+  revision, independently of raw PR heads or producer checkout revisions, with
+  fresh proof revalidation before capture completion and after upload.
+- Bind completion custody to one validated PR/base target and observed snapshots,
+  derive case-safe collection queues from that identity, validate composed status
+  contexts, and reserve bounded upload/report time before publication.
+- Normalize completion-custody repository casing, bind status contexts to the
+  exact branch, and bound aggregate downloads, retained bytes, archive expansion,
+  inventories and capture time before source-head success can be published.
+- Preserve completion-custody source/attempt admission, capture budgets and
+  failure revocation when Python optimization is enabled.
+- Bind the full dependency export stream's actual path/reference inventory to the
+  admitted closure before canonical-store import, using a bounded non-extracting
+  NAR parser and one private spool descriptor through validation and import.
+  Align NAR depth, entry-name and symlink-target bounds with the Nix importer
+  so invalid later records reject before any preceding record can be imported.
+- Keep dependency transport's source, provenance, size and qualification-closure
+  fences active under Python optimization; provision the dependency producer's
+  interpreter on custom runners as well as hosted workers.
+- Migrate recognized inline MSRV bindings in existing canonical flakes before
+  hook-wiring shortcuts, and detect that required source migration in full checks.
+- Generate MSRV toolchain manifests as source assets so no-build, read-only Nix
+  evaluation succeeds on cold stores without changing the declared compiler.
+- Preserve each grouped installable's hook context, including shell-only
+  diagnostics after setup or preflight failures, and retain unset timeouts.
+- Qualify one immutable PR head across independent lanes and required gates,
+  evaluate all flake systems, preserve Cargo tool paths in every lane and reject
+  unsupported step-runner overrides before normalization.
 - Check out signed Git symlinks as inert target-text files during independent
   archive reconstruction, admitting unrelated tooling links without following
   them. Continue rejecting submodules and any Cargo manifest, declared input,

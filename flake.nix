@@ -95,6 +95,9 @@
           || pkgs.lib.hasInfix "/src/review/assets/" pathString
           || pkgs.lib.hasSuffix "/src/monorepo/native_release.py" pathString
           || pkgs.lib.hasSuffix "/tests/fixtures/native-release-contract.py" pathString
+          || pkgs.lib.hasInfix "/tests/fixtures/" pathString
+          || pkgs.lib.hasSuffix "/src/render/ci/nix_dependencies.py" pathString
+          || pkgs.lib.hasSuffix "/src/render/ci/custody.py" pathString
           || pkgs.lib.hasSuffix "ci-actions.json" pathString
           || pkgs.lib.hasSuffix "/.github" pathString
           || pkgs.lib.hasSuffix "/.github/workflows" pathString
@@ -296,7 +299,7 @@
         msrv = let
           msrvToolchain = harbor.lib.rust.mkToolchain {
             inherit pkgs;
-            toolchainFile = ./nix/rust-toolchain-msrv.toml;
+            toolchainFile = ./rust-toolchain-msrv.toml;
             withRustAnalyzer = false;
             crossTargets = [];
             cache.enable = false;

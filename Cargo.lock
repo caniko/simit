@@ -1430,6 +1430,7 @@ dependencies = [
  "hex",
  "reqwest",
  "rnix",
+ "rustix",
  "same-file",
  "schemars",
  "semver",

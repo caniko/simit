@@ -19,6 +19,8 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Commands {
+    #[command(subcommand, about = "Execute versioned CI runtime contracts")]
+    Ci(crate::ci_runtime::cli::Command),
     #[command(
         subcommand,
         about = "Review exact repository revisions through Nix and GitHub Actions"
@@ -511,6 +513,12 @@ pub enum BumpKind {
 
 #[derive(Debug, Args)]
 pub struct InitCiCommand {
+    #[arg(
+        long,
+        conflicts_with_all = ["pages_only", "prebuild_only", "review_only"],
+        help = "Generate or verify primary CI and native build workflows, preserving publication workflows and project policy"
+    )]
+    pub primary_only: bool,
     #[arg(long, conflicts_with_all = ["pages_only", "prebuild_only", "runner"], help = "Generate or verify only the opt-in repository review controller/client workflows")]
     pub review_only: bool,
     #[arg(
