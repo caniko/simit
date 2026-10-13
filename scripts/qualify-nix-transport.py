@@ -15,7 +15,6 @@ def require(condition, message):
 
 
 program = (source / 'src/render/ci/nix_dependencies.py').read_text()
-group = (source / 'src/render/ci/nix_group.py').read_text()
 os.chdir(source / 'tests/fixtures/nix-transport')
 require(os.environ['RUNNER_ENVIRONMENT'] == 'github-hosted', 'Transport qualification requires a fresh hosted worker')
 operation = sys.argv[1]
@@ -49,12 +48,16 @@ if operation == 'warm':
                        stdout=log, stderr=subprocess.STDOUT, check=True)
 else:
     require(operation == 'cold', 'Unknown transport qualification operation')
-os.environ.update(SIMIT_NIX_BUILD_RESULTS=str(root), INSTALLABLES=json.dumps(members),
-                  SIMIT_NIX_FRESH=json.dumps(members))
-try:
-    exec(compile(group, '<exact-group-executor>', 'exec'), {'__name__': '__main__'})
-except SystemExit as result:
-    require(result.code == 0, 'Fresh qualification execution failed')
+os.environ.update(SIMIT_NIX_BUILD_RESULTS=str(root))
+spec = root / 'group-spec.json'
+with spec.open('x') as stream:
+    os.chmod(spec, 0o600)
+    json.dump({'schema': 'simit.nix-group-spec.v1', 'members': members, 'plan': members,
+               'check_systems': ['x86_64-linux'], 'limits': ['--max-jobs', '1', '--cores', '2'],
+               'post_build': [], 'post_build_always': [], 'fresh_installables': members}, stream)
+# The hosted workflow provisions this exact immutable native engine independently
+# before producer bindings. The Python transport adapter remains a separate gate.
+subprocess.run([os.environ['SIMIT_CI_ENGINE'], 'ci', 'nix-group', '--spec', str(spec)], check=True)
 receipt = json.loads((root / 'receipt.json').read_text())
 require(receipt['complete'] and receipt['success'], 'Current-worker qualification is incomplete or failed')
 require(len(receipt['results']) == len(members) and all(row['fresh_execution'] for row in receipt['results']), 'Current-worker fresh execution is missing')
