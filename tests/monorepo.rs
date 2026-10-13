@@ -661,6 +661,7 @@ fn qualification_generation_is_complete_and_member_stable() {
     }
     let text = fs::read_to_string(temp.path().join(".github/workflows/ci.yaml")).unwrap();
     let yaml: serde_yaml::Value = serde_yaml::from_str(&text).unwrap();
+    assert_eq!(yaml["concurrency"]["group"], "monorepo-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event.pull_request.head.ref || github.ref_name }}");
     for id in [
         "plan",
         "component-core",

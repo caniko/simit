@@ -154,7 +154,7 @@ pub(crate) fn files(
         "needs": needs, "if": "${{ always() }}", "runs-on": runner, "timeout-minutes": 5,
         "steps": [{"name": "Require every selected component", "env": {"RESULTS": "${{ toJSON(needs) }}", "SELECTED": "${{ needs.plan.outputs.selected }}"}, "run": "printf '%s' \"$RESULTS\" | jq -e --argjson selected \"$SELECTED\" '. as $jobs | $jobs.plan.result == \"success\" and all($selected[]; $jobs[\"component-\" + .].result == \"success\")'"}]
     }));
-    let workflow = json!({"name": "Monorepo qualification", "on": {"push": {"branches": ["**"]}, "pull_request": {}, "workflow_dispatch": {}}, "permissions": {"contents": "read"}, "concurrency": {"group": "monorepo-${{ github.event.pull_request.head.ref || github.ref_name }}", "cancel-in-progress": true}, "jobs": jobs});
+    let workflow = json!({"name": "Monorepo qualification", "on": {"push": {"branches": ["**"]}, "pull_request": {}, "workflow_dispatch": {}}, "permissions": {"contents": "read"}, "concurrency": {"group": "monorepo-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event.pull_request.head.ref || github.ref_name }}", "cancel-in-progress": true}, "jobs": jobs});
     let mut files = vec![GeneratedFile {
         relative_path: PathBuf::from(".github/workflows/ci.yaml"),
         content: format!(
