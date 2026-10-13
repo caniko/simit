@@ -4940,6 +4940,10 @@ fn forgejo_python_ci_applies_ci_cache_to_the_preinstalled_nix_environment() {
         .iter()
         .find(|step| step["name"] == "Configure preinstalled Nix caches")
         .expect("CI cache configuration step");
+    assert_eq!(
+        step["env"]["SIMIT_NIX_CACHE_CONFIG"].as_str().unwrap(),
+        "substituters = https://ci-cache.example\ntrusted-public-keys = ci-cache.example:YWJj\n"
+    );
     let env_file = temp.path().join("github-env");
     // The combined probe exceeds pipe capacity; an early-exit grep can make
     // printf receive SIGPIPE and hide the match under bash's pipefail.

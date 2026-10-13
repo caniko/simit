@@ -4184,7 +4184,11 @@ fn push_install_nix_step_with_cache(
                     trusted_public_keys.join(" ")
                 ));
             }
-            workflow.push_str(&format!("      - name: Configure preinstalled Nix caches\n        env:\n          SIMIT_NIX_CACHE_CONFIG: {}\n        run: |\n          delimiter=SIMIT_NIX_CACHE\n          while printf '%s\\n' \"${{NIX_CONFIG:-}}\" \"$SIMIT_NIX_CACHE_CONFIG\" | grep -Fx \"$delimiter\" > /dev/null; do\n            delimiter=\"${{delimiter}}_\"\n          done\n          printf '%s\\n' \"NIX_CONFIG<<$delimiter\" \"${{NIX_CONFIG:-}}\" \"$SIMIT_NIX_CACHE_CONFIG\" \"$delimiter\" >> \"$GITHUB_ENV\"\n\n", yaml_json_scalar(&config)));
+            workflow.push_str("      - name: Configure preinstalled Nix caches\n        env:\n          SIMIT_NIX_CACHE_CONFIG: |\n");
+            for line in config.lines() {
+                workflow.push_str(&format!("            {line}\n"));
+            }
+            workflow.push_str("        run: |\n          delimiter=SIMIT_NIX_CACHE\n          while printf '%s\\n' \"${NIX_CONFIG:-}\" \"$SIMIT_NIX_CACHE_CONFIG\" | grep -Fx \"$delimiter\" > /dev/null; do\n            delimiter=\"${delimiter}_\"\n          done\n          printf '%s\\n' \"NIX_CONFIG<<$delimiter\" \"${NIX_CONFIG:-}\" \"$SIMIT_NIX_CACHE_CONFIG\" \"$delimiter\" >> \"$GITHUB_ENV\"\n\n");
         }
         return;
     }
