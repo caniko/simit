@@ -499,7 +499,7 @@ pub fn render(inputs: &ReleaseWorkflowInputs<'_>) -> String {
             push_preinstalled_nix_env(&mut w, inputs.artifacts);
         }
         w.push_str("    steps:\n");
-        push_checkout(&mut w, inputs.platform);
+        push_checkout(&mut w, inputs.platform, inputs.runner);
         if !inputs.preinstalled_nix {
             push_install_nix(&mut w, inputs.platform, inputs.artifacts);
         }
@@ -540,7 +540,7 @@ pub fn render(inputs: &ReleaseWorkflowInputs<'_>) -> String {
     }
     w.push_str("    steps:\n");
 
-    push_checkout(&mut w, inputs.platform);
+    push_checkout(&mut w, inputs.platform, inputs.runner);
     if !inputs.preinstalled_nix {
         push_install_nix(&mut w, inputs.platform, inputs.artifacts);
     }
@@ -563,7 +563,7 @@ pub fn render(inputs: &ReleaseWorkflowInputs<'_>) -> String {
         .is_some_and(|prebuild| prebuild.release_archives)
         && inputs.platform == Platform::Github;
     if prebuilt_release_archives {
-        push_download_prebuilt_archives(&mut w);
+        push_download_prebuilt_archives(&mut w, inputs.runner);
     }
     push_build_artifacts(
         &mut w,
@@ -786,12 +786,17 @@ fn push_secrets_header(w: &mut String, inputs: &ReleaseWorkflowInputs<'_>) {
     w.push('\n');
 }
 
-fn push_checkout(w: &mut String, platform: Platform) {
+fn push_checkout(w: &mut String, platform: Platform, runner: &str) {
     w.push_str("      - uses: ");
     if platform == Platform::Forgejo {
         w.push_str(&forgejo_action_ref("checkout", "v4.3.1"));
     } else {
-        w.push_str(&github_action_ref("actions/checkout", "v4.3.1"));
+        let version = if super::ci::github_runner_supports_node24(runner) {
+            "v7.0.1"
+        } else {
+            "v4.3.1"
+        };
+        w.push_str(&github_action_ref("actions/checkout", version));
     }
     w.push('\n');
     w.push_str("        with:\n          fetch-depth: 0\n          ref: ${{ github.sha }}\n          persist-credentials: false\n");
@@ -1101,9 +1106,14 @@ fn push_build_srpm(w: &mut String, copr: &ResolvedCopr) {
     w.push_str("          SCRIPT\n");
 }
 
-fn push_download_prebuilt_archives(w: &mut String) {
+fn push_download_prebuilt_archives(w: &mut String, runner: &str) {
     w.push_str("      - name: Download native release archives\n        uses: ");
-    w.push_str(&github_action_ref("actions/download-artifact", "v4.3.0"));
+    let version = if super::ci::github_runner_supports_node24(runner) {
+        "v8.0.2"
+    } else {
+        "v4.3.0"
+    };
+    w.push_str(&github_action_ref("actions/download-artifact", version));
     w.push_str("\n        with:\n          pattern: release-*\n          path: .simit-prebuilt\n");
     w.push_str("      - name: Collect native release archives\n        run: |\n          set -euo pipefail\n          mkdir -p release\n          count=0\n          while IFS= read -r file; do\n            name=\"$(basename \"$file\")\"\n            test ! -e \"release/$name\" || { echo \"native release asset collision: $name\" >&2; exit 1; }\n            cp \"$file\" \"release/$name\"\n            count=$((count + 1))\n          done < <(find .simit-prebuilt -mindepth 2 -type f -print | LC_ALL=C sort)\n          test \"$count\" -gt 0\n");
 }

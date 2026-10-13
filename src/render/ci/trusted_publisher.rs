@@ -163,7 +163,14 @@ fn archive_steps_with_packaging(name: &str, runtime: Runtime, package: bool) -> 
     w.push_str(&format!(
         "      - name: Retain original-run archive {name}\n"
     ));
-    push_action_uses(&mut w, Platform::Github, "upload-artifact", "v4.6.2");
+    push_action_uses(
+        &mut w,
+        Platform::Github,
+        None,
+        "upload-artifact",
+        "v7.0.2",
+        "v4.6.2",
+    );
     w.push_str(&format!("        with:\n          name: simit-crate-{name}-${{{{ github.run_attempt }}}}\n          path: ${{{{ runner.temp }}}}/simit-crates/{name}/*.crate\n          if-no-files-found: error\n          retention-days: 30\n\n"));
     w
 }
@@ -190,7 +197,7 @@ pub(super) fn source_workflow(
     w.push_str("\n    timeout-minutes: 60\n");
     push_job_env(&mut w, Platform::Github, runtime, &options.extra_env, true);
     w.push_str("    steps:\n");
-    push_event_checkout_step(&mut w, Platform::Github);
+    push_event_checkout_step(&mut w, Platform::Github, None);
     if runtime == Runtime::Nix {
         push_install_nix_step_with_cache(
             &mut w,
@@ -262,9 +269,9 @@ pub(super) fn source_workflow(
 fn bootstrap(w: &mut String) {
     w.push_str("      - name: Require independently qualified publisher engine\n        env:\n          PUBLISHER_REVISION: ${{ vars.SIMIT_PUBLISHER_REVISION }}\n        run: |\n          set -euo pipefail\n          [[ \"$PUBLISHER_REVISION\" =~ ^[0-9a-f]{40}$ ]] || { echo 'Enroll a qualified immutable Simit publisher revision' >&2; exit 1; }\n");
     w.push_str("      - name: Checkout independent publisher source\n");
-    push_action_uses(w, Platform::Github, "checkout", "v4.3.1");
+    push_action_uses(w, Platform::Github, None, "checkout", "v7.0.1", "v4.3.1");
     w.push_str("        with:\n          ref: ${{ github.workflow_sha }}\n          persist-credentials: false\n      - name: Checkout qualified publisher engine\n");
-    push_action_uses(w, Platform::Github, "checkout", "v4.3.1");
+    push_action_uses(w, Platform::Github, None, "checkout", "v7.0.1", "v4.3.1");
     w.push_str("        with:\n          repository: caniko/simit\n          ref: ${{ vars.SIMIT_PUBLISHER_REVISION }}\n          path: .simit-publisher-engine\n          persist-credentials: false\n");
     push_rust_setup_step(w, Platform::Github);
     w.push_str("      - name: Build trusted publisher engine\n        working-directory: .simit-publisher-engine\n        run: cargo build --release --locked\n");
@@ -312,7 +319,7 @@ pub(super) fn publisher_file(
         needs.sort();
         needs.dedup();
         if !needs.is_empty() {
-            w.push_str(&format!("    needs: [{}]\n", needs.join(", ")));
+            push_needs(&mut w, &needs);
         }
         // Path is also checked against its native workflow ID by the engine.
         w.push_str("    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'\n");
@@ -333,7 +340,14 @@ pub(super) fn publisher_file(
         // Publishing always re-admits on a separate hosted runner, never trusts
         // this job's filesystem, exports, output paths or candidate binaries.
         w.push_str("      - name: Checkout original signed source for verification\n");
-        push_action_uses(&mut w, Platform::Github, "checkout", "v4.3.1");
+        push_action_uses(
+            &mut w,
+            Platform::Github,
+            None,
+            "checkout",
+            "v7.0.1",
+            "v4.3.1",
+        );
         w.push_str("        with:\n          ref: ${{ github.event.workflow_run.head_sha }}\n          path: .simit-release-source\n          persist-credentials: false\n");
         let directory = ".simit-release-source";
         let candidate_context = |w: &mut String| {
@@ -365,7 +379,9 @@ pub(super) fn publisher_file(
                 w.push_str(&format!("        run: {}\n", gate.run));
             }
         }
-        w.push_str(&format!("  {publish}:\n    needs: [{verify}]\n    runs-on: ubuntu-24.04\n    timeout-minutes: 60\n    environment:\n      name: simit-crates-io\n    steps:\n"));
+        w.push_str(&format!("  {publish}:\n"));
+        push_needs(&mut w, std::slice::from_ref(&verify));
+        w.push_str("    runs-on: ubuntu-24.04\n    timeout-minutes: 60\n    environment:\n      name: simit-crates-io\n    steps:\n");
         bootstrap(&mut w);
         w.push_str(&format!("      - name: Upload independently verified archive {name}\n        env:\n          GITHUB_TOKEN: ${{{{ github.token }}}}\n          CRATES_IO_API_TOKEN: ${{{{ secrets.CRATES_IO_API_TOKEN }}}}\n        run: .simit-publisher-engine/target/release/simit release publisher --publisher-stage publish --repo \"$GITHUB_REPOSITORY\" --package {} --source-workflow {} --publisher-workflow {}{reconstruction}\n", shell_word(name), shell_word(&source_path.to_string_lossy()), shell_word(&publisher_path.to_string_lossy())));
         previous = Some(publish);
@@ -374,11 +390,26 @@ pub(super) fn publisher_file(
         .iter()
         .map(|(name, _)| format!("publish-{name}"))
         .collect::<Vec<_>>();
-    w.push_str(&format!("  publish-report:\n    needs: [{}]\n    if: always()\n    runs-on: ubuntu-24.04\n    steps:\n      - name: Release result\n        env:\n          RESULTS: ${{{{ toJSON(needs) }}}}\n        run: |\n          printf '%s\\n' \"$RESULTS\"\n          echo 'resume: rerun the original tag-push run; already-published crates with matching checksums exit 0 after exact registry resolution'\n          echo 'see per-crate job statuses for the auditable result'\n", jobs.join(", ")));
+    w.push_str("  publish-report:\n");
+    push_needs(&mut w, &jobs);
+    w.push_str("    if: always()\n    runs-on: ubuntu-24.04\n    steps:\n      - name: Release result\n        env:\n          RESULTS: ${{ toJSON(needs) }}\n        run: |\n          printf '%s\\n' \"$RESULTS\"\n          echo 'resume: rerun the original tag-push run; already-published crates with matching checksums exit 0 after exact registry resolution'\n          echo 'see per-crate job statuses for the auditable result'\n");
     trim_trailing_blank_lines(&mut w);
     GeneratedFile {
         relative_path: publisher_path,
         content: w,
+    }
+}
+
+fn push_needs(w: &mut String, needs: &[String]) {
+    let inline = format!("    needs: [{}]\n", needs.join(", "));
+    if inline.trim_end().len() <= 80 {
+        w.push_str(&inline);
+    } else {
+        // Block sequences retain their representation through YAML formatters.
+        w.push_str("    needs:\n");
+        for job in needs {
+            w.push_str(&format!("      - {job}\n"));
+        }
     }
 }
 

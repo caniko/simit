@@ -437,6 +437,9 @@ pub struct CiConfig {
     /// Run `nix flake check` alongside a project Cargo command in Nix CI.
     #[serde(default)]
     pub nix_flake_check: Option<bool>,
+    /// Start Rust, flake evaluation and optional realization independently.
+    #[serde(default)]
+    pub independent_lanes: bool,
     #[serde(default)]
     pub workspace_strategy: WorkspaceStrategy,
     /// Opt-in coordinated dependency-ordered workspace publication.
@@ -453,6 +456,9 @@ pub struct CiConfig {
     /// Options scoped to the hosted Nix installable matrix, never release jobs.
     #[serde(default)]
     pub nix_build: NixBuildConfig,
+    /// CI-only substituters; omitted configurations retain release-cache defaults.
+    #[serde(default)]
+    pub cache: Option<NixCiCacheConfig>,
     /// Additional required integration gates (e.g. `nix run .#test-gel`).
     /// Rendered as dedicated required jobs; failures block publication.
     #[serde(default)]
@@ -519,9 +525,30 @@ pub struct CiConfig {
 }
 
 impl CiConfig {
+    pub(crate) fn validate_effective_backend(
+        &self,
+        provider: CiProvider,
+        platform: Platform,
+    ) -> Result<()> {
+        if (self.independent_lanes || self.nix_build != NixBuildConfig::default())
+            && (provider != CiProvider::Actions || platform != Platform::Github)
+        {
+            if self.independent_lanes {
+                bail!("independent_lanes requires the effective GitHub Actions backend");
+            }
+            bail!(
+                "[ci.nix_build] options require GitHub Actions (effective GitHub Actions backend)"
+            );
+        }
+        Ok(())
+    }
+
     /// Shared by Nix-only generation and drift auditing. Call after CLI overrides
     /// so an explicit false can disable a configured unsupported option.
     pub(crate) fn validate_nix_only_language_options(&self) -> Result<()> {
+        if self.independent_lanes {
+            bail!("[ci].independent_lanes requires Rust language CI");
+        }
         for (name, enabled) in [
             ("with_nextest", self.with_nextest),
             ("with_nix_cargo_cache", self.with_nix_cargo_cache),
@@ -559,6 +586,16 @@ pub struct NixBuildConfig {
     pub separate_events: bool,
     /// Opt into tag pushes alongside all branch pushes; preserve pattern order.
     pub push_tags: Vec<String>,
+    /// Partition all declared installables into jobs sharing a Nix store.
+    pub groups: BTreeMap<String, Vec<String>>,
+    /// Require every discovered check on these systems to have a group owner.
+    pub check_systems: Vec<String>,
+    /// Unselected local build inputs; transport includes every derivation output.
+    pub dependency_installables: Vec<String>,
+    /// Bound the uncompressed transported closure; defaults to 2048 MiB.
+    pub dependency_max_mib: Option<u64>,
+    /// Always re-execute selected qualification derivations, including cache hits.
+    pub fresh_installables: Vec<String>,
     pub timeout_minutes: Option<u64>,
     pub max_parallel: Option<u64>,
     pub max_jobs: Option<u64>,
@@ -591,6 +628,123 @@ impl NixBuildConfig {
             for installable in installables {
                 self.installable_system(installable)?;
             }
+            for members in self.groups.values() {
+                self.group_system(members)?;
+            }
+            if !self.dependency_installables.is_empty() {
+                bail!(
+                    "[ci.nix_build].system_runners cannot be combined with dependency transport; native dependency producers are not supported"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_groups(&self, installables: &[String]) -> Result<()> {
+        if self.groups.is_empty()
+            && (!self.dependency_installables.is_empty()
+                || !self.fresh_installables.is_empty()
+                || self.dependency_max_mib.is_some())
+        {
+            bail!("[ci.nix_build] dependency transport and fresh_installables require groups");
+        }
+        for member in &self.fresh_installables {
+            if !installables.contains(member) {
+                bail!(
+                    "[ci.nix_build].fresh_installables must select declared qualification outputs"
+                );
+            }
+        }
+        if self
+            .dependency_max_mib
+            .is_some_and(|mib| !(1..=8192).contains(&mib))
+        {
+            bail!("[ci.nix_build].dependency_max_mib must be between 1 and 8192");
+        }
+        if self.dependency_max_mib.is_some() && self.dependency_installables.is_empty() {
+            bail!("[ci.nix_build].dependency_max_mib requires dependency_installables");
+        }
+        if !self.dependency_installables.is_empty() && self.check_systems.is_empty() {
+            bail!("[ci.nix_build].dependency_installables requires discovered check_systems");
+        }
+        let mut dependencies = std::collections::BTreeSet::new();
+        for member in &self.dependency_installables {
+            if member.contains('^') {
+                bail!(
+                    "[ci.nix_build].dependency_installables does not support output selectors; dependency transport builds all outputs of unselected local derivations"
+                );
+            }
+            if !member.starts_with(".#")
+                || member.contains("checks.")
+                || installables.contains(member)
+                || !dependencies.insert(member)
+            {
+                bail!(
+                    "[ci.nix_build].dependency_installables must be unique local build inputs, not qualification outputs"
+                );
+            }
+        }
+        if !self.dependency_installables.is_empty()
+            && installables.iter().any(|member| member.contains('^'))
+        {
+            bail!(
+                "[ci].nix_builds does not support output selectors when dependency transport is enabled; use unselected derivations"
+            );
+        }
+        if !self.dependency_installables.is_empty()
+            && installables
+                .iter()
+                .any(|member| !member.starts_with(".#") || member.len() <= 2)
+        {
+            bail!(
+                "[ci].nix_builds must use source-bound local derivations when dependency transport is enabled"
+            );
+        }
+        if self.groups.is_empty() {
+            if !self.check_systems.is_empty() {
+                bail!("[ci.nix_build].check_systems requires groups");
+            }
+            return Ok(());
+        }
+        if !self.capture_results {
+            bail!("[ci.nix_build].groups requires capture_results");
+        }
+        let declared = installables
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>();
+        if declared.len() != installables.len() {
+            bail!("[ci.nix_build].groups cannot partition duplicate nix_builds");
+        }
+        let mut assigned = std::collections::BTreeSet::new();
+        for (name, members) in &self.groups {
+            if name.is_empty()
+                || name.len() > 64
+                || !name
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+                || members.is_empty()
+            {
+                bail!("[ci.nix_build].groups requires nonempty groups with identifier names");
+            }
+            for member in members {
+                if !declared.contains(member) || !assigned.insert(member) {
+                    bail!(
+                        "[ci.nix_build].groups has an unknown or duplicate installable {member:?}"
+                    );
+                }
+            }
+        }
+        if assigned != declared {
+            bail!("[ci.nix_build].groups must assign every declared installable");
+        }
+        for system in &self.check_systems {
+            if system.is_empty()
+                || !system
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+            {
+                bail!("[ci.nix_build].check_systems has an invalid system");
+            }
         }
         Ok(())
     }
@@ -622,6 +776,22 @@ impl NixBuildConfig {
         Ok(system)
     }
 
+    /// A shared-store job can run only members with one declared native system.
+    pub(crate) fn group_system<'a>(&self, members: &'a [String]) -> Result<&'a str> {
+        let first = members
+            .first()
+            .ok_or_else(|| anyhow!("[ci.nix_build].groups requires nonempty groups"))?;
+        let system = self.installable_system(first)?;
+        for member in &members[1..] {
+            if self.installable_system(member)? != system {
+                bail!(
+                    "[ci.nix_build].groups with system_runners must be homogeneous; mixed-system groups cannot share a native runner"
+                );
+            }
+        }
+        Ok(system)
+    }
+
     pub(crate) fn validate_push_tags(&self) -> Result<()> {
         if self.push_tags.iter().any(|pattern| {
             pattern.trim().is_empty()
@@ -645,6 +815,27 @@ impl NixBuildConfig {
             );
         }
         Ok(())
+    }
+}
+
+/// Public, credential-free CI cache configuration, independent of publication.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct NixCiCacheConfig {
+    pub substituters: Vec<String>,
+    pub trusted_public_keys: Vec<String>,
+}
+
+impl ProjectConfig {
+    pub fn ci_cache_artifacts(&self) -> ArtifactsConfig {
+        let mut artifacts = self.release.artifacts.clone();
+        if let Some(cache) = &self.ci.cache {
+            artifacts.substituters.clone_from(&cache.substituters);
+            artifacts
+                .trusted_public_keys
+                .clone_from(&cache.trusted_public_keys);
+        }
+        artifacts
     }
 }
 
@@ -2018,6 +2209,31 @@ impl ProjectConfig {
         validate_nonempty_strings("simit project config: [ci].packages", &self.ci.packages)?;
         validate_nonempty_strings("simit project config: [ci].nix_builds", &self.ci.nix_builds)?;
         validate_nix_build_config(self)?;
+        if let Some(cache) = &self.ci.cache {
+            for endpoint in &cache.substituters {
+                let parsed =
+                    reqwest::Url::parse(endpoint).context("[ci.cache] invalid substituter URL")?;
+                if parsed.scheme() != "https"
+                    || parsed.host_str().is_none()
+                    || !parsed.username().is_empty()
+                    || parsed.password().is_some()
+                    || parsed.query().is_some()
+                    || parsed.fragment().is_some()
+                    || endpoint.chars().any(char::is_whitespace)
+                {
+                    bail!("[ci.cache] substituters must be credential-free HTTPS endpoints");
+                }
+            }
+            for key in &cache.trusted_public_keys {
+                if !key.contains(':')
+                    || key.chars().any(char::is_whitespace)
+                    || key.starts_with(':')
+                    || key.ends_with(':')
+                {
+                    bail!("[ci.cache] trusted_public_keys must be nonempty Nix cache keys");
+                }
+            }
+        }
         if self
             .ci
             .nix_builds
@@ -3557,6 +3773,7 @@ fn validate_nix_build_config(config: &ProjectConfig) -> Result<()> {
     }
     options.validate_push_tags()?;
     options.validate_system_runners(&ci.nix_builds)?;
+    options.validate_groups(&ci.nix_builds)?;
     for (name, number, min, max) in [
         ("timeout_minutes", options.timeout_minutes, 1, 360),
         ("max_parallel", options.max_parallel, 1, 256),
@@ -3649,11 +3866,30 @@ fn set_nix_build_table(table: &mut Table, options: &NixBuildConfig) {
     set_bool(&mut build, "separate_events", options.separate_events);
     set_string_array(&mut build, "push_tags", &options.push_tags);
     set_string_map(&mut build, "system_runners", &options.system_runners);
+    set_string_array(&mut build, "check_systems", &options.check_systems);
+    set_string_array(
+        &mut build,
+        "dependency_installables",
+        &options.dependency_installables,
+    );
+    set_string_array(
+        &mut build,
+        "fresh_installables",
+        &options.fresh_installables,
+    );
+    if !options.groups.is_empty() {
+        let mut groups = Table::new();
+        for (name, members) in &options.groups {
+            set_string_array(&mut groups, name, members);
+        }
+        build["groups"] = Item::Table(groups);
+    }
     set_bool(&mut build, "kvm", options.kvm);
     set_bool(&mut build, "capture_results", options.capture_results);
     for (name, number) in [
         ("timeout_minutes", options.timeout_minutes),
         ("max_parallel", options.max_parallel),
+        ("dependency_max_mib", options.dependency_max_mib),
         ("max_jobs", options.max_jobs),
         ("cores", options.cores),
         ("artifact_retention_days", options.artifact_retention_days),
@@ -3673,6 +3909,23 @@ fn set_nix_build_table(table: &mut Table, options: &NixBuildConfig) {
 }
 
 fn set_ci_table(table: &mut Table, ci: &CiConfig) {
+    if let Some(cache) = &ci.cache {
+        let mut cache_table = Table::new();
+        // Explicit empty cache tables disable inherited release cache settings.
+        for (name, values) in [
+            ("substituters", &cache.substituters),
+            ("trusted_public_keys", &cache.trusted_public_keys),
+        ] {
+            let mut array = Array::new();
+            for value in values {
+                array.push(value.as_str());
+            }
+            cache_table[name] = Item::Value(Value::Array(array));
+        }
+        table["cache"] = Item::Table(cache_table);
+    } else {
+        table.remove("cache");
+    }
     set_optional_string(table, "provider", ci.provider.map(ci_provider_name));
     set_optional_string(table, "platform", ci.platform.map(Platform::as_str));
     set_optional_string(table, "runtime", ci.runtime.map(runtime_name));
@@ -3682,6 +3935,7 @@ fn set_ci_table(table: &mut Table, ci: &CiConfig) {
     set_bool(table, "workspace", ci.workspace);
     set_optional_string(table, "check_command", ci.check_command.as_deref());
     set_optional_bool_default_true(table, "nix_flake_check", ci.nix_flake_check);
+    set_bool(table, "independent_lanes", ci.independent_lanes);
     set_optional_string(
         table,
         "workspace_strategy",

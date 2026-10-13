@@ -17,6 +17,7 @@ use sha2::{Digest, Sha256};
 
 pub mod archive;
 pub mod execution;
+mod source;
 
 #[derive(Debug, Clone)]
 pub struct PublisherPolicy {
