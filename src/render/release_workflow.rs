@@ -2659,6 +2659,7 @@ mod tests {
             build_requires: vec![],
             binaries: vec!["modde".to_owned()],
             spec_path: "modde.spec".to_owned(),
+            makefile_path: ".copr/Makefile".to_owned(),
             project: Some("caniko/rs-modde".to_owned()),
             testing_project: Some("caniko/rs-modde-testing".to_owned()),
             login_secret: "copr_login".to_owned(),

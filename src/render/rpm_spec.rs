@@ -95,6 +95,7 @@ mod tests {
             build_requires: vec!["rust >= 1.85".to_owned(), "cargo".to_owned()],
             binaries: vec!["modde".to_owned(), "modde-ui".to_owned()],
             spec_path: "modde.spec".to_owned(),
+            makefile_path: ".copr/Makefile".to_owned(),
             project: Some("caniko/rs-modde".to_owned()),
             testing_project: Some("caniko/rs-modde-testing".to_owned()),
             login_secret: "copr_login".to_owned(),

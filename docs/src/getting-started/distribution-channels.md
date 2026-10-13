@@ -70,10 +70,18 @@ download_repo = "example/foo"
 [copr]
 download_repo = "example/foo"
 project = "example/foo"
+# Optional COPR SCM entrypoint; defaults to ".copr/Makefile".
+makefile_path = "dist/copr/Makefile"
 
 [apt]
 repo_url = "ssh://git@codeberg.org/example/foo-apt.git"
+public_url = "https://apt.example.com/"
 ```
+
+`copr.makefile_path` is a workspace-relative path without parent traversal.
+Render, init, drift checks, next-step instructions, and the managed COPR badge
+all use that path. The managed apt badge uses `apt.public_url` when declared;
+otherwise it links to `dist/apt/conf/distributions`.
 
 For an harbor-rs project whose flake exposes the conventional
 `packages.<system>.release-bundle`, the release artifact section can instead
