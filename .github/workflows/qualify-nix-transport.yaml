@@ -7,6 +7,7 @@ on:
     branches:
       - "feat/ci-dependency-transport-20261012"
       - "fix/transport-review-followup-20261013"
+      - "feat/ci-completion-custody-20261012"
       - "trunk"
   pull_request:
 
