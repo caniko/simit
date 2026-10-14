@@ -62,6 +62,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Charge local retention inventory, archive validation and provider reads to one
+  five-minute deadline starting at entry, preserving the hosted step allocation.
+- Reject blocking or substituted event/spec input files during bounded preflight;
+  install CLI cancellation early and retain incomplete preflight diagnostics.
 - Verify source commit, tree and blob object hashes before admitting observer policy.
 - Admit Git-valid Unicode workflow refs and retain an incomplete receipt when
   cancellation arrives during final receipt publication.

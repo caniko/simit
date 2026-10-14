@@ -75,48 +75,98 @@ fn cancellation() -> Result<CliCancellation> {
 
 fn observer_inputs(
     path: &std::path::Path,
+    results: &std::path::Path,
+    cancellation: &super::cancellation::Cancellation,
+    retention: bool,
 ) -> Result<(
     super::observer::Spec,
     super::observer::Identity,
     super::observer::GitHubTransport,
 )> {
-    let raw = super::group::read_bytes(path, super::observer::MAX_SPEC_BYTES)?;
-    let spec: super::observer::Spec = serde_json::from_slice(&raw)?;
-    let identity = super::observer::Identity::from_environment(&spec)?;
-    let merge = if identity.event == "pull_request" {
-        let event: serde_json::Value = serde_json::from_str(&identity.event_json)?;
-        let base = event["pull_request"]["base"]["sha"]
-            .as_str()
-            .context("missing PR base revision")?
-            .to_owned();
-        Some((
-            std::env::var("GITHUB_SHA").context("missing protected PR merge revision")?,
-            base,
-        ))
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let mut name = results
+        .file_name()
+        .context("observer results must have a directory name")?
+        .to_os_string();
+    name.push(if retention {
+        ".retention.preflight-"
     } else {
-        None
-    };
-    let committed = verify_source_spec(
-        path,
-        &raw,
-        &identity.head,
-        merge
-            .as_ref()
-            .map(|(sha, base)| (sha.as_str(), base.as_str())),
+        ".preflight-"
+    });
+    let preflight = tempfile::Builder::new()
+        .prefix(&name)
+        .tempdir_in(
+            results
+                .parent()
+                .filter(|path| !path.as_os_str().is_empty())
+                .unwrap_or(std::path::Path::new(".")),
+        )?
+        .keep();
+    super::observer::preflight_receipt(&preflight, false, None)?;
+    let outcome = (|| {
+        let raw = super::observer::read_preflight(
+            path,
+            super::observer::MAX_SPEC_BYTES,
+            deadline,
+            cancellation,
+        )?;
+        let spec: super::observer::Spec = serde_json::from_slice(&raw)?;
+        let identity =
+            super::observer::Identity::from_environment_before(&spec, deadline, cancellation)?;
+        let merge = if identity.event == "pull_request" {
+            let event: serde_json::Value = serde_json::from_str(&identity.event_json)?;
+            let base = event["pull_request"]["base"]["sha"]
+                .as_str()
+                .context("missing PR base revision")?
+                .to_owned();
+            Some((
+                std::env::var("GITHUB_SHA").context("missing protected PR merge revision")?,
+                base,
+            ))
+        } else {
+            None
+        };
+        let committed = verify_source_spec(
+            path,
+            &raw,
+            &identity.head,
+            merge
+                .as_ref()
+                .map(|(sha, base)| (sha.as_str(), base.as_str())),
+            deadline,
+        )?;
+        // The committed blob is policy, even when configured checkout/clean filters
+        // change its representation. Never deserialize the transformed policy.
+        let spec: super::observer::Spec = serde_json::from_slice(&committed)?;
+        identity.validate(&spec)?;
+        super::observer::preflight_check(deadline, cancellation)?;
+        let token = observer_token(
+            std::env::var("GH_TOKEN").ok(),
+            std::env::var("GITHUB_TOKEN").ok(),
+        )?;
+        Ok((
+            spec,
+            identity,
+            super::observer::GitHubTransport::new(token)?,
+        ))
+    })();
+    let outcome = outcome.and_then(|inputs| {
+        super::observer::preflight_check(deadline, cancellation)?;
+        Ok(inputs)
+    });
+    super::observer::preflight_receipt(
+        &preflight,
+        outcome.is_ok(),
+        outcome.as_ref().err().map(|error| format!("{error:#}")),
     )?;
-    // The committed blob is policy, even when configured checkout/clean filters
-    // change its representation. Never deserialize the transformed policy.
-    let spec: super::observer::Spec = serde_json::from_slice(&committed)?;
-    identity.validate(&spec)?;
-    let token = observer_token(
-        std::env::var("GH_TOKEN").ok(),
-        std::env::var("GITHUB_TOKEN").ok(),
-    )?;
-    Ok((
-        spec,
-        identity,
-        super::observer::GitHubTransport::new(token)?,
-    ))
+    let outcome = outcome.and_then(|inputs| {
+        super::observer::preflight_check(deadline, cancellation)?;
+        Ok(inputs)
+    });
+    if let Err(error) = &outcome {
+        super::observer::preflight_receipt(&preflight, false, Some(format!("{error:#}")))?;
+    }
+    outcome
 }
 
 fn observer_token(primary: Option<String>, fallback: Option<String>) -> Result<String> {
@@ -129,6 +179,35 @@ fn observer_token(primary: Option<String>, fallback: Option<String>) -> Result<S
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn cancellation_before_identity_retains_an_incomplete_preflight_receipt() {
+        for retention in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let spec = root.path().join("spec.json");
+            std::fs::write(&spec, b"{}").unwrap();
+            let cancellation = super::super::cancellation::Cancellation::default();
+            cancellation.cancel();
+            let results = root.path().join("packet");
+            let error = observer_inputs(&spec, &results, &cancellation, retention)
+                .err()
+                .unwrap();
+            assert!(error.to_string().contains("cancelled"));
+            let diagnostic = std::fs::read_dir(root.path())
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .find(|path| path.is_dir())
+                .unwrap();
+            let receipt: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(diagnostic.join("receipt.json")).unwrap())
+                    .unwrap();
+            assert_eq!(receipt["capture_complete"], false);
+            assert_eq!(receipt["qualified"], false);
+            assert_eq!(receipt["preflight_complete"], false);
+            assert!(receipt["error"].as_str().unwrap().contains("cancelled"));
+            assert!(!results.exists());
+        }
+    }
+
     #[test]
     fn empty_primary_token_uses_nonempty_fallback_without_exposing_credentials() {
         assert_eq!(
@@ -203,10 +282,10 @@ fn verify_source_spec(
     raw: &[u8],
     head: &str,
     merge: Option<(&str, &str)>,
+    deadline: std::time::Instant,
 ) -> Result<Vec<u8>> {
     let probe = tempfile::tempdir()?;
     let git = git::executable()?;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     let actual_head = source_probe(
         probe.path(),
         "head",
@@ -324,8 +403,9 @@ pub struct GroupArgs {
 pub fn run(command: Command) -> Result<()> {
     match command {
         Command::ObserveOriginal(args) => {
-            let (spec, identity, mut transport) = observer_inputs(&args.spec)?;
             let cancellation = cancellation()?;
+            let (spec, identity, mut transport) =
+                observer_inputs(&args.spec, &args.results, &cancellation.token, false)?;
             super::observer::observe(
                 &spec,
                 &identity,
@@ -336,8 +416,9 @@ pub fn run(command: Command) -> Result<()> {
             Ok(())
         }
         Command::VerifyOriginalRetention(args) => {
-            let (spec, identity, mut transport) = observer_inputs(&args.spec)?;
             let cancellation = cancellation()?;
+            let (spec, identity, mut transport) =
+                observer_inputs(&args.spec, &args.results, &cancellation.token, true)?;
             let receipt = super::observer::verify_retention(
                 &spec,
                 &identity,

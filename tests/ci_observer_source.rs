@@ -103,6 +103,80 @@ fn invoke(root: &Path, spec: &Path, retention: bool) -> Output {
     observer_command(root, spec, retention).output().unwrap()
 }
 
+#[cfg(unix)]
+#[test]
+fn blocking_event_paths_fail_promptly_with_incomplete_preflight_evidence() {
+    use std::time::{Duration, Instant};
+    for retention in [false, true] {
+        for kind in ["fifo", "symlink", "device"] {
+            let root = fixture();
+            let mut command = observer_command(
+                root.path(),
+                &root.path().join(".github/spec.json"),
+                retention,
+            );
+            let event = root.path().join("event.json");
+            let original = fs::read(&event).unwrap();
+            fs::remove_file(&event).unwrap();
+            match kind {
+                "fifo" => rustix::fs::mknodat(
+                    rustix::fs::CWD,
+                    &event,
+                    rustix::fs::FileType::Fifo,
+                    rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+                    0,
+                )
+                .unwrap(),
+                "symlink" => {
+                    fs::write(root.path().join("real-event.json"), &original).unwrap();
+                    std::os::unix::fs::symlink("real-event.json", &event).unwrap();
+                }
+                _ => std::os::unix::fs::symlink("/dev/zero", &event).unwrap(),
+            }
+            command
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            let mut child = command.spawn().unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let status = loop {
+                if let Some(status) = child.try_wait().unwrap() {
+                    break status;
+                }
+                if Instant::now() >= deadline {
+                    child.kill().unwrap();
+                    child.wait().unwrap();
+                    panic!("{kind} event blocked preflight, retention={retention}");
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            };
+            assert!(!status.success());
+            let prefix = if retention {
+                "packet.retention.preflight-"
+            } else {
+                "packet.preflight-"
+            };
+            let diagnostic = fs::read_dir(root.path())
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .find(|path| {
+                    path.file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .starts_with(prefix)
+                })
+                .unwrap();
+            let receipt: serde_json::Value =
+                serde_json::from_slice(&fs::read(diagnostic.join("receipt.json")).unwrap())
+                    .unwrap();
+            assert_eq!(receipt["qualified"], false);
+            assert_eq!(receipt["capture_complete"], false);
+            assert_eq!(receipt["preflight_complete"], false);
+            assert!(receipt["error"].as_str().unwrap().contains("regular file"));
+            assert!(!root.path().join("packet").exists());
+        }
+    }
+}
+
 fn replace_fixture_object(path: &Path, bytes: &[u8]) {
     // Git creates read-only loose objects. Windows forbids deleting them until
     // that attribute is cleared; these paths belong only to disposable fixtures.

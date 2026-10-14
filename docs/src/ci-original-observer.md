@@ -40,7 +40,16 @@ The actual bounded commit, each tree on the spec path, merge commit and blob byt
 are independently hashed with Git's object framing before use. Loose/packed
 objects with substituted contents under an unchanged object ID fail admission;
 checking a repository earlier does not authorize later unchecked reads.
-These Git probes share one thirty-second deadline. The active
+Event/spec preflight and Git probes share one thirty-second deadline. Input files
+are opened without following the final symlink, with nonblocking Unix opens and
+regular-file checks on the opened handle. Byte limits, deadline checks and
+cancellation apply between read chunks and before event parsing is admitted.
+The CLI installs cancellation handlers before preflight and atomically retains
+an explicit non-accepting `simit.original-preflight.v1` diagnostic in a fresh
+`<results>.preflight-*` sibling (or `<results>.retention.preflight-*` for retention).
+Retain these siblings with diagnostic uploads, including failures before identity
+or source enrollment is available. They never certify a captured packet.
+The active
 observer workflow cannot enroll itself as a producer.
 Source probes resolve Git only from fixed protected platform installation
 directories (including administrator-installed Nix profiles), never the mutable
@@ -120,7 +129,11 @@ from the branch/PR target bound by the run's native identity fields. Ref validat
 checks Git's forbidden ASCII bytes, preserving valid Unicode whitespace and
 non-ASCII control characters. SHA discovery skips identifiable other targets,
 preserving exact-target duplicate rejection and
-continuous identity validation after selection. Log and artifact downloads use
+continuous identity validation after selection. Retention starts its five-minute
+aggregate clock at function entry: local packet inventory, bounded file rereads,
+hashing and producer ZIP expansion consume the same allowance as artifact
+retrieval and provider revalidation. Its thirty-second CLI preflight leaves room
+within the six-minute retention step allocation. Log and artifact downloads use
 the remaining aggregate deadline; metadata GETs retain their ninety-second cap.
 Header and body transfers are interruptible: the native async transport checks
 cancellation at most every 100 milliseconds while waiting, retaining received

@@ -165,6 +165,19 @@ fn oid(value: &str) -> bool {
 impl Identity {
     /// Resolve and validate the hosted observer environment.
     pub fn from_environment(spec: &Spec) -> Result<Self> {
+        Self::from_environment_before(
+            spec,
+            Instant::now() + Duration::from_secs(30),
+            &Cancellation::default(),
+        )
+    }
+
+    pub(crate) fn from_environment_before(
+        spec: &Spec,
+        deadline: Instant,
+        cancellation: &Cancellation,
+    ) -> Result<Self> {
+        preflight_check(deadline, cancellation)?;
         ensure!(
             std::env::var("RUNNER_ENVIRONMENT")? == "github-hosted",
             "hosted observer required"
@@ -173,11 +186,14 @@ impl Identity {
             std::env::var("GITHUB_REPOSITORY")? == spec.repository,
             "observer repository changed"
         );
-        let event_json = String::from_utf8(read_bytes(
+        let event_json = String::from_utf8(read_preflight(
             Path::new(&std::env::var("GITHUB_EVENT_PATH")?),
             JSON_BYTES,
+            deadline,
+            cancellation,
         )?)?;
         let payload: Value = serde_json::from_str(&event_json)?;
+        preflight_check(deadline, cancellation)?;
         let event = std::env::var("GITHUB_EVENT_NAME")?;
         let source_ref = std::env::var("GITHUB_REF")?;
         match event.as_str() {
@@ -373,13 +389,100 @@ pub struct Receipt {
 fn digest(raw: &[u8]) -> String {
     hex::encode(Sha256::digest(raw))
 }
-fn read_bytes(path: &Path, maximum: u64) -> Result<Vec<u8>> {
+fn digest_checked(raw: &[u8], mut check: impl FnMut() -> Result<()>) -> Result<String> {
+    let mut hash = Sha256::new();
+    for chunk in raw.chunks(65536) {
+        check()?;
+        hash.update(chunk);
+    }
+    check()?;
+    Ok(hex::encode(hash.finalize()))
+}
+fn open_regular(path: &Path) -> Result<File> {
+    // Reject known special paths before opening (notably Windows named pipes).
+    // Check the opened handle too: a pathname check alone admits replacements.
+    ensure!(
+        fs::symlink_metadata(path)?.file_type().is_file(),
+        "input is not a regular file"
+    );
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(
+            (rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32,
+        );
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        // FILE_FLAG_OPEN_REPARSE_POINT: inspect a substituted link, never follow it.
+        options.custom_flags(0x00200000);
+    }
+    let file = options.open(path)?;
+    let metadata = file.metadata()?;
+    ensure!(metadata.is_file(), "input descriptor is not a regular file");
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        ensure!(
+            metadata.file_attributes() & 0x400 == 0,
+            "input descriptor is not a regular file (reparse point)"
+        );
+    }
+    Ok(file)
+}
+
+fn read_bytes_checked(
+    path: &Path,
+    maximum: u64,
+    mut check: impl FnMut() -> Result<()>,
+) -> Result<Vec<u8>> {
+    check()?;
+    let mut file = open_regular(path)?.take(maximum + 1);
     let mut bytes = Vec::new();
-    File::open(path)?
-        .take(maximum + 1)
-        .read_to_end(&mut bytes)?;
+    let mut buffer = [0; 65536];
+    loop {
+        check()?;
+        let count = file.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&buffer[..count]);
+    }
+    check()?;
     ensure!(bytes.len() as u64 <= maximum, "file exceeds byte limit");
     Ok(bytes)
+}
+
+pub(crate) fn preflight_check(deadline: Instant, cancellation: &Cancellation) -> Result<()> {
+    cancellation.check()?;
+    ensure!(
+        Instant::now() < deadline,
+        "observer preflight deadline exceeded"
+    );
+    Ok(())
+}
+
+pub(crate) fn read_preflight(
+    path: &Path,
+    maximum: u64,
+    deadline: Instant,
+    cancellation: &Cancellation,
+) -> Result<Vec<u8>> {
+    read_bytes_checked(path, maximum, || preflight_check(deadline, cancellation))
+}
+
+pub(crate) fn preflight_receipt(root: &Path, complete: bool, error: Option<String>) -> Result<()> {
+    save_receipt_with_limit(
+        root,
+        &json!({
+            "schema": "simit.original-preflight.v1", "qualified": false,
+            "capture_complete": false, "preflight_complete": complete, "error": error,
+        }),
+        JSON_BYTES,
+    )
 }
 struct JsonBudget<W> {
     writer: W,
@@ -421,7 +524,7 @@ fn write_json(path: &Path, value: &impl Serialize) -> Result<()> {
 fn save_receipt(root: &Path, receipt: &Receipt) -> Result<()> {
     save_receipt_with_limit(root, receipt, RECEIPT_BYTES)
 }
-fn save_receipt_with_limit(root: &Path, receipt: &Receipt, maximum: u64) -> Result<()> {
+fn save_receipt_with_limit(root: &Path, receipt: &impl Serialize, maximum: u64) -> Result<()> {
     // NamedTempFile owns only this new write. A failed serialization removes its
     // partial temporary file, preserving the prior receipt and allowing the
     // final non-accepting receipt to publish through the same atomic path.
@@ -794,7 +897,9 @@ fn archive_members(
     maximum_files: usize,
     mut check: impl FnMut() -> Result<()>,
 ) -> Result<BTreeMap<String, String>> {
+    check()?;
     let mut archive = zip::ZipArchive::new(Cursor::new(raw))?;
+    check()?;
     ensure!(
         archive.len() <= maximum_files,
         "ZIP member inventory exceeded"
@@ -805,6 +910,7 @@ fn archive_members(
         .windows(4)
         .rposition(|bytes| bytes == b"PK\x05\x06")
         .context("missing ZIP directory footer")?;
+    check()?;
     let footer = raw.get(end..end + 22).context("truncated ZIP footer")?;
     let mut entries = u16::from_le_bytes([footer[10], footer[11]]) as usize;
     if entries == u16::MAX as usize
@@ -1051,12 +1157,21 @@ pub fn observe_with(
 }
 
 fn inventory(root: &Path) -> Result<BTreeMap<String, String>> {
+    inventory_checked(root, || Ok(()))
+}
+
+fn inventory_checked(
+    root: &Path,
+    mut check: impl FnMut() -> Result<()>,
+) -> Result<BTreeMap<String, String>> {
     let start = Instant::now();
     let mut pending = vec![root.to_owned()];
     let mut result = BTreeMap::new();
     let mut total = 0u64;
     while let Some(path) = pending.pop() {
+        check()?;
         for entry in fs::read_dir(path)? {
+            check()?;
             let entry = entry?;
             let path = entry.path();
             let kind = entry.file_type()?;
@@ -1086,10 +1201,11 @@ fn inventory(root: &Path) -> Result<BTreeMap<String, String>> {
                 result.len() < MAX_PACKET_FILES,
                 "evidence file inventory exceeded"
             );
-            let mut file = File::open(path)?;
+            let mut file = open_regular(&path)?;
             let mut hash = Sha256::new();
             let mut buffer = [0; 65536];
             loop {
+                check()?;
                 ensure!(
                     start.elapsed() < Duration::from_secs(120),
                     "finalization deadline exceeded"
@@ -1105,6 +1221,7 @@ fn inventory(root: &Path) -> Result<BTreeMap<String, String>> {
             result.insert(relative, hex::encode(hash.finalize()));
         }
     }
+    check()?;
     Ok(result)
 }
 
@@ -1119,6 +1236,48 @@ pub fn verify_retention(
     transport: &mut dyn Transport,
     cancellation: &Cancellation,
 ) -> Result<Value> {
+    let mut clock = MonotonicClock::default();
+    verify_retention_with(
+        spec,
+        identity,
+        root,
+        (artifact_id, upload_digest),
+        transport,
+        cancellation,
+        &mut clock,
+    )
+}
+
+fn verify_retention_with(
+    spec: &Spec,
+    identity: &Identity,
+    root: &Path,
+    artifact: (u64, &str),
+    transport: &mut dyn Transport,
+    cancellation: &Cancellation,
+    clock: &mut dyn Clock,
+) -> Result<Value> {
+    let (artifact_id, upload_digest) = artifact;
+    // Local revalidation and remote custody share this clock from function entry.
+    let mut verify_spec = spec.clone();
+    verify_spec.timeout_seconds = 300;
+    let mut name = root
+        .file_name()
+        .context("custody packet must have a directory name")?
+        .to_os_string();
+    name.push(".retention");
+    let retained = root.with_file_name(name);
+    let mut observer = Observer {
+        spec: &verify_spec,
+        root: &retained,
+        transport,
+        clock,
+        cancellation,
+        requests: 0,
+        bytes: 0,
+        byte_budget: RETENTION_BYTES,
+    };
+    observer.remaining()?;
     identity.validate(spec)?;
     ensure!(artifact_id > 0, "invalid uploaded artifact id");
     let upload_digest = upload_digest
@@ -1131,7 +1290,9 @@ pub fn verify_retention(
                 .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
         "invalid upload digest"
     );
-    let receipt_bytes = read_bytes(&root.join("receipt.json"), RECEIPT_BYTES)?;
+    let receipt_bytes = read_bytes_checked(&root.join("receipt.json"), RECEIPT_BYTES, || {
+        observer.remaining().map(|_| ())
+    })?;
     let receipt: Receipt = serde_json::from_slice(&receipt_bytes)?;
     ensure!(
         receipt.schema == "simit.original-custody.v1"
@@ -1143,16 +1304,20 @@ pub fn verify_retention(
         "incomplete or substituted custody receipt"
     );
     ensure!(
-        inventory(root)? == receipt.members,
+        inventory_checked(root, || observer.remaining().map(|_| ()))? == receipt.members,
         "custody evidence inventory differs"
     );
     ensure!(
-        read_bytes(&root.join("event.json"), JSON_BYTES)? == identity.event_json.as_bytes(),
+        read_bytes_checked(&root.join("event.json"), JSON_BYTES, || observer
+            .remaining()
+            .map(|_| ()))?
+            == identity.event_json.as_bytes(),
         "event bytes changed"
     );
     let mut enrolled = BTreeSet::new();
     let mut ids = BTreeSet::new();
     for producer in &receipt.producers {
+        observer.remaining()?;
         ensure!(
             spec.workflows.contains_key(&producer.workflow)
                 && enrolled.insert(producer.workflow.clone())
@@ -1168,8 +1333,11 @@ pub fn verify_retention(
         )?;
         successful_run(&producer.terminal)?;
         let folder = root.join(producer.run_id.to_string());
-        let terminal: Value =
-            serde_json::from_slice(&read_bytes(&folder.join("terminal.json"), JSON_BYTES)?)?;
+        let terminal: Value = serde_json::from_slice(&read_bytes_checked(
+            &folder.join("terminal.json"),
+            JSON_BYTES,
+            || observer.remaining().map(|_| ()),
+        )?)?;
         validate_run(
             &terminal,
             spec,
@@ -1178,13 +1346,18 @@ pub fn verify_retention(
             &producer.workflow,
         )?;
         successful_run(&terminal)?;
-        let jobs: Vec<Value> =
-            serde_json::from_slice(&read_bytes(&folder.join("jobs.json"), JSON_BYTES)?)?;
+        let jobs: Vec<Value> = serde_json::from_slice(&read_bytes_checked(
+            &folder.join("jobs.json"),
+            JSON_BYTES,
+            || observer.remaining().map(|_| ()),
+        )?)?;
         validate_jobs(&jobs, spec, identity, producer.run_id, &producer.workflow)?;
-        let raw = read_bytes(&folder.join("provider-logs.zip"), LOG_BYTES)?;
+        let raw = read_bytes_checked(&folder.join("provider-logs.zip"), LOG_BYTES, || {
+            observer.remaining().map(|_| ())
+        })?;
         ensure!(
-            digest(&raw) == producer.raw_logs_sha256
-                && log_members(&raw, || cancellation.check())? == producer.log_members,
+            digest_checked(&raw, || observer.remaining().map(|_| ()))? == producer.raw_logs_sha256
+                && log_members(&raw, || observer.remaining().map(|_| ()))? == producer.log_members,
             "provider archive differs"
         );
     }
@@ -1192,29 +1365,11 @@ pub fn verify_retention(
         enrolled == spec.workflows.keys().cloned().collect(),
         "missing enrolled producers"
     );
-    // Verification uses a fresh, short aggregate read budget and fresh evidence,
+    // Verification uses a short aggregate read budget and fresh evidence,
     // outside the uploaded packet, so no uploaded bytes are silently replaced.
-    let mut name = root
-        .file_name()
-        .context("custody packet must have a directory name")?
-        .to_os_string();
-    name.push(".retention");
-    let retained = root.with_file_name(name);
+    observer.remaining()?;
     fs::create_dir(&retained).context("retention evidence requires a fresh sibling directory")?;
     fs::create_dir(retained.join("requests"))?;
-    let mut verify_spec = spec.clone();
-    verify_spec.timeout_seconds = 300;
-    let mut clock = MonotonicClock::default();
-    let mut observer = Observer {
-        spec: &verify_spec,
-        root: &retained,
-        transport,
-        clock: &mut clock,
-        cancellation,
-        requests: 0,
-        bytes: 0,
-        byte_budget: RETENTION_BYTES,
-    };
     let artifact = observer.json(&format!("actions/artifacts/{artifact_id}"))?;
     validate_artifact(&artifact, identity, artifact_id, upload_digest)?;
     let raw = observer.get(
@@ -1222,11 +1377,14 @@ pub fn verify_retention(
         ARTIFACT_BYTES,
     )?;
     ensure!(
-        digest(&raw) == upload_digest,
+        digest_checked(&raw, || observer.remaining().map(|_| ()))? == upload_digest,
         "uploaded provider ZIP digest differs"
     );
     let mut expected = receipt.members.clone();
-    expected.insert("receipt.json".into(), digest(&receipt_bytes));
+    expected.insert(
+        "receipt.json".into(),
+        digest_checked(&receipt_bytes, || observer.remaining().map(|_| ()))?,
+    );
     ensure!(
         archive_members(&raw, PACKET_BYTES, MAX_PACKET_FILES + 1, || observer
             .remaining()
@@ -1270,6 +1428,7 @@ pub fn verify_retention(
     observer.remaining()?;
     let result = json!({"schema":"simit.original-retention.v1","qualified":false,"capture_complete":true,"artifact":fresh,"head":identity.head,"event":identity.event,"observer_run":identity.run_id,"observer_attempt":1,"producer_count":receipt.producers.len()});
     write_json(&retained.join("retention.json"), &result)?;
+    observer.remaining()?;
     Ok(result)
 }
 
@@ -1307,6 +1466,131 @@ fn validate_artifact(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn retention_packet(root: &Path) -> Receipt {
+        let mut receipt = pending_receipt();
+        receipt.capture_complete = true;
+        let terminal = json!({"id":1,"repository":{"id":1,"full_name":"owner/repo"},"head_repository":{"id":1,"full_name":"owner/repo"},"head_sha":"a".repeat(40),"head_branch":"main","event":"push","run_attempt":1,"path":".github/workflows/ci.yaml","status":"completed","conclusion":"success"});
+        let folder = root.join("1");
+        fs::create_dir(&folder).unwrap();
+        write_json(&folder.join("terminal.json"), &terminal).unwrap();
+        let jobs = json!([{"id":3,"run_id":1,"run_attempt":1,"head_sha":"a".repeat(40),"name":"test","status":"completed","conclusion":"success","steps":[{"number":1,"name":"Test","status":"completed","conclusion":"success"}]}]);
+        write_json(&folder.join("jobs.json"), &jobs).unwrap();
+        let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        zip.start_file("test/1_Test.txt", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(b"original log").unwrap();
+        let raw = zip.finish().unwrap().into_inner();
+        fs::write(folder.join("provider-logs.zip"), &raw).unwrap();
+        fs::write(root.join("event.json"), &receipt.identity.event_json).unwrap();
+        receipt.producers.push(Producer {
+            run_id: 1,
+            workflow: ".github/workflows/ci.yaml".into(),
+            terminal,
+            raw_logs_sha256: digest(&raw),
+            log_members: log_members(&raw, || Ok(())).unwrap(),
+        });
+        receipt.members = inventory(root).unwrap();
+        save_receipt(root, &receipt).unwrap();
+        receipt
+    }
+
+    struct RevalidationClock {
+        elapsed: std::cell::Cell<Duration>,
+        tick: Duration,
+    }
+    impl Clock for RevalidationClock {
+        fn elapsed(&self) -> Duration {
+            let elapsed = self.elapsed.get();
+            self.elapsed.set(elapsed + self.tick);
+            elapsed
+        }
+        fn sleep(&mut self, duration: Duration, cancellation: &Cancellation) -> Result<()> {
+            cancellation.check()?;
+            self.elapsed.set(self.elapsed.get() + duration);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn retention_local_revalidation_spends_the_provider_deadline_without_mutating_capture() {
+        for expire in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().join("packet");
+            fs::create_dir(&root).unwrap();
+            let receipt = retention_packet(&root);
+            let original = fs::read(root.join("receipt.json")).unwrap();
+            let mut transport = MaximumProbe(0, Duration::ZERO);
+            let mut clock = RevalidationClock {
+                elapsed: std::cell::Cell::new(if expire {
+                    Duration::ZERO
+                } else {
+                    Duration::from_secs(250)
+                }),
+                tick: if expire {
+                    Duration::from_secs(30)
+                } else {
+                    Duration::from_millis(1)
+                },
+            };
+            let error = verify_retention_with(
+                &receipt.spec,
+                &receipt.identity,
+                &root,
+                (42, &"a".repeat(64)),
+                &mut transport,
+                &Cancellation::default(),
+                &mut clock,
+            )
+            .unwrap_err();
+            if expire {
+                assert!(error.to_string().contains("deadline"), "{error}");
+                assert_eq!(
+                    transport.0, 0,
+                    "local deadline exhaustion contacted provider"
+                );
+            } else {
+                assert!(
+                    transport.0 > 0,
+                    "valid packet never reached provider: {error}"
+                );
+                assert!(
+                    transport.1 < Duration::from_secs(50),
+                    "local verification reset the provider allowance: {:?}",
+                    transport.1
+                );
+                assert!(!transport.1.is_zero());
+            }
+            assert_eq!(fs::read(root.join("receipt.json")).unwrap(), original);
+            assert_eq!(inventory(&root).unwrap(), receipt.members);
+        }
+    }
+
+    #[test]
+    fn preflight_expiry_and_cancellation_reject_even_a_regular_event_file() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("event.json");
+        fs::write(&path, b"{}").unwrap();
+        let cancellation = Cancellation::default();
+        assert!(
+            read_preflight(&path, JSON_BYTES, Instant::now(), &cancellation)
+                .unwrap_err()
+                .to_string()
+                .contains("deadline")
+        );
+        cancellation.cancel();
+        assert!(
+            read_preflight(
+                &path,
+                JSON_BYTES,
+                Instant::now() + Duration::from_secs(30),
+                &cancellation
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("cancelled")
+        );
+    }
 
     fn pending_receipt() -> Receipt {
         let (spec, identity) = minimal_inputs();
