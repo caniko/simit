@@ -153,7 +153,7 @@ fn bootstraps_release_workflow_for_enabled_channels() {
     assert!(!workflow.contains("inputs.version"));
     assert!(workflow.contains("git worktree add --detach \"$tag_worktree\" \"$validated_sha\""));
     assert!(!workflow.contains("git worktree add --detach \"$tag_worktree\" \"$VERSION\""));
-    let verify = workflow.find("git verify-tag \"$VERSION\"").unwrap();
+    let verify = workflow.find("git verify-tag \"$TAG\"").unwrap();
     let checkout = workflow
         .find("git worktree add --detach \"$tag_worktree\" \"$validated_sha\"")
         .unwrap();
@@ -225,6 +225,7 @@ fn bootstraps_github_release_workflow_with_native_permissions_and_uploads() {
 #[test]
 fn github_release_depends_on_prebuild_and_forwards_attic_secret() {
     let project = init_package("github-native-demo");
+    fs::write(project.path().join("flake.nix"), "{}\n").unwrap();
     let config_path = project.path().join("simit.toml");
     let config = read(&config_path)
         .replace(
@@ -243,7 +244,11 @@ fn github_release_depends_on_prebuild_and_forwards_attic_secret() {
             "[aur]",
             "[release.attic]\ncache = \"demo\"\nurl = \"https://attic.example\"\ntoken_name = \"demo\"\ntoken_secret = \"ATTIC_TOKEN\"\nresult_links = [\"result\"]\n\n[aur]",
         );
-    fs::write(config_path, config).unwrap();
+    fs::write(
+        config_path,
+        format!("[release]\ntag_prefix = 'v'\n{config}"),
+    )
+    .unwrap();
 
     let output = simit()
         .current_dir(project.path())
@@ -290,17 +295,15 @@ fn github_release_depends_on_prebuild_and_forwards_attic_secret() {
             .unwrap();
         assert!(guard.contains("Signed tag commit does not match the immutable event checkout"));
         assert!(guard.find("git verify-tag").unwrap() < guard.find("nix eval").unwrap());
+        assert!(guard.contains("VERSION=\"${TAG#v}\""));
     }
-    let config = simit::config::ProjectConfig::load(project.path()).unwrap();
-    let prebuild = simit::render::ci::github_prebuild_file(
-        &config.ci.nix_system_runners,
-        &config.ci.nix_builds,
-        config.prebuild.as_ref().unwrap(),
-        &config.release.artifacts,
-        config.release.attic.as_ref(),
-    )
-    .unwrap()
-    .content;
+    let output = simit()
+        .current_dir(project.path())
+        .args(["init", "ci", "--prebuild-only"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let prebuild = read(&project.path().join(".github/workflows/prebuild.yaml"));
     let parsed: serde_yaml::Value = serde_yaml::from_str(&prebuild).unwrap();
     let steps = parsed["jobs"]["build"]["steps"]
         .as_sequence()
@@ -312,6 +315,12 @@ fn github_release_depends_on_prebuild_and_forwards_attic_secret() {
     assert_eq!(
         steps[validation]["if"].as_str(),
         Some("${{ inputs.release }}")
+    );
+    assert!(
+        steps[validation]["run"]
+            .as_str()
+            .unwrap()
+            .contains("VERSION=\"${TAG#v}\"")
     );
     assert!(steps[..=validation].iter().all(|step| {
         !serde_yaml::to_string(&step["env"])

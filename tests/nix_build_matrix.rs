@@ -1342,7 +1342,7 @@ capture_results = true
             steps[build]["run"]
                 .as_str()
                 .unwrap()
-                .contains("--no-update-lock-file --max-jobs 1 --cores 2 --json")
+                .contains("--no-update-lock-file --max-jobs 1 --cores 2 --print-build-logs --json")
         );
         assert!(steps.iter().all(|step| step["continue-on-error"].is_null()));
         let generated = fs::read(temp.path().join(".github/workflows/nix-builds.yaml")).unwrap();
@@ -2176,7 +2176,7 @@ fn captured_build_keeps_failure_status_exact_arguments_and_diagnostics() {
     let bin = temp.path().join("bin");
     fs::create_dir(&bin).unwrap();
     let nix = bin.join("nix");
-    fs::write(&nix, "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$SIMIT_NIX_BUILD_RESULTS/arguments\"\nprintf '%s\\n' '[{\"drvPath\":\"/nix/store/fixture.drv\",\"outputs\":{\"out\":\"/nix/store/fixture\"}}]'\nprintf '%s\\n' 'fixture build diagnostic' >&2\nexit \"$BUILD_EXIT_CODE\"\n").unwrap();
+    fs::write(&nix, "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$SIMIT_NIX_BUILD_RESULTS/arguments\"\nprintf '%s\\n' '[{\"drvPath\":\"/nix/store/fixture.drv\",\"outputs\":{\"out\":\"/nix/store/fixture\"}}]'\nprintf '%s\\n' 'fixture build diagnostic' >&2\nfor argument in \"$@\"; do\n  if [ \"$argument\" = --print-build-logs ]; then\n    printf '%s\\n' 'fixture builder phase diagnostic' >&2\n  fi\ndone\nexit \"$BUILD_EXIT_CODE\"\n").unwrap();
     fs::set_permissions(&nix, fs::Permissions::from_mode(0o755)).unwrap();
     let path = std::env::join_paths(
         std::iter::once(bin).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
@@ -2200,7 +2200,7 @@ fn captured_build_keeps_failure_status_exact_arguments_and_diagnostics() {
         assert_eq!(arguments.lines().last(), Some(installable));
         assert_eq!(
             fs::read_to_string(results.join("build.log")).unwrap(),
-            "fixture build diagnostic\n"
+            "fixture build diagnostic\nfixture builder phase diagnostic\n"
         );
         assert_eq!(
             serde_json::from_slice::<serde_json::Value>(

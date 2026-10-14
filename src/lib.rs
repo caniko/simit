@@ -22,6 +22,8 @@ pub mod commands;
 pub mod config;
 /// Git preflight, staging, commit, and tag helpers.
 pub mod git;
+/// Declarative mixed-language repository components and qualification plans.
+pub mod monorepo;
 /// Shared packaging validation + release-version helpers.
 pub mod packaging_common;
 /// Shared Codeberg Pages workflow inference.
@@ -34,6 +36,10 @@ pub mod python;
 pub mod readme_badges;
 /// Per-user registry of projects simit has acted on.
 pub mod registry;
+/// Canonical release tags and their semantic package versions.
+pub mod release_identity;
+/// Deterministic release notes from the exact tagged Git history.
+pub mod release_notes;
 /// Independent default-branch publisher event and provider identity binding.
 pub mod release_publisher;
 /// Release maintainer trust-root discovery and validation.

@@ -143,13 +143,33 @@ pub(super) fn crate_build_display(name: &str) -> String {
     format!("Build Crate {name}")
 }
 
-pub(super) fn archive_steps(name: &str, runtime: Runtime) -> String {
-    archive_steps_with_packaging(name, runtime, true)
+pub(super) fn prefixed_archive_steps(
+    name: &str,
+    runtime: Runtime,
+    prefix: crate::release_identity::TagPrefix,
+) -> String {
+    archive_steps_with_packaging(name, runtime, true, None, prefix)
 }
 
-fn archive_steps_with_packaging(name: &str, runtime: Runtime, package: bool) -> String {
+fn archive_steps_with_packaging(
+    name: &str,
+    runtime: Runtime,
+    package: bool,
+    namespace: Option<&str>,
+    tag_prefix: crate::release_identity::TagPrefix,
+) -> String {
     let prefix = command_prefix(runtime);
     let quoted = shell_word(name);
+    let version_expression = namespace.map_or_else(
+        || {
+            if tag_prefix == crate::release_identity::TagPrefix::None {
+                "${GITHUB_REF_NAME}".to_owned()
+            } else {
+                format!("${{GITHUB_REF_NAME#{}}}", tag_prefix.as_str())
+            }
+        },
+        |package| format!("${{GITHUB_REF_NAME#{package}/v}}"),
+    );
     let packaging = if package {
         format!(
             "          {prefix}cargo package --locked --allow-dirty --no-verify -p {quoted} --target-dir \"$RUNNER_TEMP/simit-package-target\"\n"
@@ -158,7 +178,7 @@ fn archive_steps_with_packaging(name: &str, runtime: Runtime, package: bool) -> 
         String::new()
     };
     let mut w = format!(
-        "      - name: Build immutable archive {name}\n        run: |\n          set -euo pipefail\n          version=\"${{GITHUB_REF_NAME}}\"\n          test \"$({prefix}cargo pkgid --locked -p {quoted} | awk -F'[#@]' 'NF > 1 {{print $NF}}' | tail -n 1)\" = \"$version\"\n{packaging}          mkdir -p \"$RUNNER_TEMP/simit-crates/{name}\"\n          cp \"$RUNNER_TEMP/simit-package-target/package/{name}-$version.crate\" \"$RUNNER_TEMP/simit-crates/{name}/\"\n"
+        "      - name: Build immutable archive {name}\n        run: |\n          set -euo pipefail\n          version=\"{version_expression}\"\n          test \"$({prefix}cargo pkgid --locked -p {quoted} | awk -F'[#@]' 'NF > 1 {{print $NF}}' | tail -n 1)\" = \"$version\"\n{packaging}          mkdir -p \"$RUNNER_TEMP/simit-crates/{name}\"\n          cp \"$RUNNER_TEMP/simit-package-target/package/{name}-$version.crate\" \"$RUNNER_TEMP/simit-crates/{name}/\"\n"
     );
     w.push_str(&format!(
         "      - name: Retain original-run archive {name}\n"
@@ -181,17 +201,34 @@ pub(super) fn source_workflow(
     names: &[String],
     workspace: bool,
 ) -> String {
+    source_workflow_with_namespace(runtime, options, names, workspace, None)
+}
+
+pub(super) fn source_workflow_with_namespace(
+    runtime: Runtime,
+    options: &CiOptions,
+    names: &[String],
+    workspace: bool,
+    namespace: Option<&str>,
+) -> String {
     let mut w = String::new();
     push_generated_workflow_header(&mut w);
     w.push_str(
         "# Credential-free signed-tag build. Rerun the original signed-tag run for recovery.\n",
     );
-    w.push_str(if workspace {
-        "name: Build Workspace Crates\n\n"
+    if let Some(package) = namespace {
+        w.push_str(&format!("name: {}\n\n", crate_build_display(package)));
+        w.push_str(&format!(
+            "on:\n  push:\n    tags:\n      - \"{package}/v[0-9]*\"\n\n"
+        ));
     } else {
-        "name: Build Crate\n\n"
-    });
-    w.push_str(github_crate_publish_triggers());
+        w.push_str(if workspace {
+            "name: Build Workspace Crates\n\n"
+        } else {
+            "name: Build Crate\n\n"
+        });
+        w.push_str(&github_crate_publish_triggers(options.tag_prefix));
+    }
     w.push_str("permissions:\n  contents: read\n\nconcurrency:\n  group: ${{ github.workflow_ref }}-${{ github.ref }}\n  cancel-in-progress: false\n\njobs:\n  build:\n    runs-on: ");
     w.push_str(CANDIDATE_RUNNER);
     w.push_str("\n    timeout-minutes: 60\n");
@@ -208,7 +245,12 @@ pub(super) fn source_workflow(
     } else {
         push_rust_setup_step(&mut w, Platform::Github);
     }
-    w.push_str(&validate_release_tag_step(None, None));
+    w.push_str(&validate_release_tag_step_with_prefix(
+        None,
+        None,
+        namespace,
+        options.tag_prefix,
+    ));
     push_required_env_step(&mut w, &options.required_env);
     push_extra_setup_steps(&mut w, &options.extra_setup);
     if options.om_ci != OmCiMode::Off {
@@ -260,13 +302,19 @@ pub(super) fn source_workflow(
         .collect::<String>();
     w.push_str(&format!("      - name: Package coordinated release set\n        run: {}cargo package --locked --allow-dirty --no-verify{selection} --target-dir \"$RUNNER_TEMP/simit-package-target\"\n", command_prefix(runtime)));
     for name in names {
-        w.push_str(&archive_steps_with_packaging(name, runtime, false));
+        w.push_str(&archive_steps_with_packaging(
+            name,
+            runtime,
+            false,
+            namespace,
+            options.tag_prefix,
+        ));
     }
     trim_trailing_blank_lines(&mut w);
     w
 }
 
-fn bootstrap(w: &mut String) {
+pub(crate) fn bootstrap(w: &mut String) {
     w.push_str("      - name: Require independently qualified publisher engine\n        env:\n          PUBLISHER_REVISION: ${{ vars.SIMIT_PUBLISHER_REVISION }}\n        run: |\n          set -euo pipefail\n          [[ \"$PUBLISHER_REVISION\" =~ ^[0-9a-f]{40}$ ]] || { echo 'Enroll a qualified immutable Simit publisher revision' >&2; exit 1; }\n");
     w.push_str("      - name: Checkout independent publisher source\n");
     push_action_uses(w, Platform::Github, None, "checkout", "v7.0.1", "v4.3.1");
@@ -283,6 +331,17 @@ pub(super) fn publisher_file(
     options: &CiOptions,
     plan: &[(String, Vec<String>)],
     workspace: bool,
+) -> GeneratedFile {
+    publisher_file_with_namespace(source_path, runtime, options, plan, workspace, None)
+}
+
+pub(super) fn publisher_file_with_namespace(
+    source_path: &Path,
+    runtime: Runtime,
+    options: &CiOptions,
+    plan: &[(String, Vec<String>)],
+    workspace: bool,
+    namespace: Option<&str>,
 ) -> GeneratedFile {
     let source_name = source_path.file_name().unwrap().to_str().unwrap();
     let publisher_name = format!("trusted-{source_name}");
@@ -302,6 +361,15 @@ pub(super) fn publisher_file(
         .iter()
         .map(|(name, _)| format!(" --reconstruct-package {}", shell_word(name)))
         .collect::<String>();
+    let namespace_argument = namespace.map_or_else(
+        || {
+            format!(
+                " --publisher-tag-prefix {}",
+                shell_quote(options.tag_prefix.as_str())
+            )
+        },
+        |package| format!(" --tag-namespace {}", shell_word(package)),
+    );
     for (name, dependencies) in plan {
         // Cargo names already use GitHub's permitted job-ID alphabet. Keep
         // their spelling: collapsing '-'/'_' or case aliases distinct crates.
@@ -335,7 +403,7 @@ pub(super) fn publisher_file(
                 &options.nix_trusted_public_keys,
             );
         }
-        w.push_str(&format!("      - name: Admit signed source and provider-bound archive {name}\n        env:\n          GITHUB_TOKEN: ${{{{ github.token }}}}\n        run: |\n          set -euo pipefail\n          .simit-publisher-engine/target/release/simit release publisher --publisher-stage prepare --repo \"$GITHUB_REPOSITORY\" --package {} --source-workflow {} --publisher-workflow {}{reconstruction} --publisher-output \"$RUNNER_TEMP/verified-{id}\" > \"$RUNNER_TEMP/verified-{id}.json\"\n", shell_word(name), shell_word(&source_path.to_string_lossy()), shell_word(&publisher_path.to_string_lossy())));
+        w.push_str(&format!("      - name: Admit signed source and provider-bound archive {name}\n        env:\n          GITHUB_TOKEN: ${{{{ github.token }}}}\n        run: |\n          set -euo pipefail\n          .simit-publisher-engine/target/release/simit release publisher --publisher-stage prepare --repo \"$GITHUB_REPOSITORY\" --package {} --source-workflow {} --publisher-workflow {}{reconstruction}{namespace_argument} --publisher-output \"$RUNNER_TEMP/verified-{id}\" > \"$RUNNER_TEMP/verified-{id}.json\"\n", shell_word(name), shell_word(&source_path.to_string_lossy()), shell_word(&publisher_path.to_string_lossy())));
         // Fresh credential-free runner: candidate build scripts may execute here.
         // Publishing always re-admits on a separate hosted runner, never trusts
         // this job's filesystem, exports, output paths or candidate binaries.
@@ -383,7 +451,7 @@ pub(super) fn publisher_file(
         push_needs(&mut w, std::slice::from_ref(&verify));
         w.push_str("    runs-on: ubuntu-24.04\n    timeout-minutes: 60\n    environment:\n      name: simit-crates-io\n    steps:\n");
         bootstrap(&mut w);
-        w.push_str(&format!("      - name: Upload independently verified archive {name}\n        env:\n          GITHUB_TOKEN: ${{{{ github.token }}}}\n          CRATES_IO_API_TOKEN: ${{{{ secrets.CRATES_IO_API_TOKEN }}}}\n        run: .simit-publisher-engine/target/release/simit release publisher --publisher-stage publish --repo \"$GITHUB_REPOSITORY\" --package {} --source-workflow {} --publisher-workflow {}{reconstruction}\n", shell_word(name), shell_word(&source_path.to_string_lossy()), shell_word(&publisher_path.to_string_lossy())));
+        w.push_str(&format!("      - name: Upload independently verified archive {name}\n        env:\n          GITHUB_TOKEN: ${{{{ github.token }}}}\n          CRATES_IO_API_TOKEN: ${{{{ secrets.CRATES_IO_API_TOKEN }}}}\n        run: .simit-publisher-engine/target/release/simit release publisher --publisher-stage publish --repo \"$GITHUB_REPOSITORY\" --package {} --source-workflow {} --publisher-workflow {}{reconstruction}{namespace_argument}\n", shell_word(name), shell_word(&source_path.to_string_lossy()), shell_word(&publisher_path.to_string_lossy())));
         previous = Some(publish);
     }
     let jobs = plan
