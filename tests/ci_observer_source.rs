@@ -119,14 +119,16 @@ fn blocking_event_paths_fail_promptly_with_incomplete_preflight_evidence() {
             let original = fs::read(&event).unwrap();
             fs::remove_file(&event).unwrap();
             match kind {
-                "fifo" => rustix::fs::mknodat(
-                    rustix::fs::CWD,
-                    &event,
-                    rustix::fs::FileType::Fifo,
-                    rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
-                    0,
-                )
-                .unwrap(),
+                "fifo" => {
+                    assert!(
+                        Command::new("mkfifo")
+                            .args(["-m", "600"])
+                            .arg(&event)
+                            .status()
+                            .unwrap()
+                            .success()
+                    );
+                }
                 "symlink" => {
                     fs::write(root.path().join("real-event.json"), &original).unwrap();
                     std::os::unix::fs::symlink("real-event.json", &event).unwrap();
