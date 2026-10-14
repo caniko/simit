@@ -82,8 +82,7 @@ pub(crate) fn valid_npm_dist_tag(tag: &str) -> bool {
             wildcard = true;
             true
         } else {
-            !wildcard
-                && (*part == "0" || !part.starts_with('0'))
+            (*part == "0" || !part.starts_with('0'))
                 && part.bytes().all(|byte| byte.is_ascii_digit())
                 && part
                     .parse::<u64>()
@@ -153,6 +152,16 @@ impl Registry {
             "public native releases cannot have SemVer build metadata"
         );
         if matches!(self, Self::Npm) {
+            ensure!(
+                version.major <= 9_007_199_254_740_991
+                    && version.minor <= 9_007_199_254_740_991
+                    && version.patch <= 9_007_199_254_740_991,
+                "npm versions require safe-integer core identifiers"
+            );
+            ensure!(
+                version.to_string().len() <= 256,
+                "npm versions cannot exceed 256 bytes"
+            );
             return Ok(version.to_string());
         }
         let base = format!("{}.{}.{}", version.major, version.minor, version.patch);
@@ -341,6 +350,9 @@ mod tests {
             "v1.2.x-beta",
             "vx.x.x-beta",
             "x",
+            "x.1",
+            "x.1.1",
+            "v1.x.1",
             "X",
             "X.X.X",
         ] {
@@ -393,5 +405,27 @@ mod tests {
         ] {
             assert!(registry.version(&Version::parse(version).unwrap()).is_err());
         }
+    }
+
+    #[test]
+    fn npm_versions_respect_javascript_safe_core_identifiers() {
+        for version in [
+            "9007199254740992.0.0",
+            "1.9007199254740992.0",
+            "1.2.9007199254740992",
+        ] {
+            assert!(
+                Registry::Npm
+                    .version(&Version::parse(version).unwrap())
+                    .is_err(),
+                "{version}"
+            );
+        }
+        assert_eq!(
+            Registry::Npm
+                .version(&Version::parse("9007199254740991.2.3").unwrap())
+                .unwrap(),
+            "9007199254740991.2.3"
+        );
     }
 }

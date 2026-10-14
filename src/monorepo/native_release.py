@@ -61,6 +61,20 @@ def digest(path, algorithm="sha256"):
         return hashlib.file_digest(source, algorithm).digest()
 
 
+def valid_npm_version(version):
+    if not isinstance(version, str) or len(version) > 256:
+        return False
+    core, separator, pre = version.partition("-")
+    parts = core.split(".")
+    return len(parts) == 3 and all(
+        re.fullmatch(r"0|[1-9][0-9]*", part) and len(part) <= 16 and int(part) <= 9_007_199_254_740_991
+        for part in parts
+    ) and (not separator or bool(pre) and all(
+        re.fullmatch(r"[0-9A-Za-z-]+", part) and not (part.isdigit() and len(part) > 1 and part.startswith("0"))
+        for part in pre.split(".")
+    ))
+
+
 def valid_npm_dist_tag(tag):
     if not isinstance(tag, str) or not re.fullmatch(r"[a-zA-Z][a-zA-Z0-9_.-]*", tag):
         return False
@@ -78,7 +92,7 @@ def valid_npm_dist_tag(tag):
     for part in parts:
         if part in ("x", "X"):
             wildcard = True
-        elif wildcard or not re.fullmatch(r"0|[1-9][0-9]*", part) or len(part) > 16 or int(part) > 9_007_199_254_740_991:
+        elif not re.fullmatch(r"0|[1-9][0-9]*", part) or len(part) > 16 or int(part) > 9_007_199_254_740_991:
             return True
     if not wildcard and len(parts) == 3 and len(tag) - len(candidate) > 1:
         return True
@@ -109,6 +123,7 @@ def context():
     require(not data.get("private", False), "private packages cannot be published")
     if registry == "npm":
         require(valid_npm_package_name(package), "invalid npm package name")
+        require(valid_npm_version(version), "invalid npm version: requires safe-integer core identifiers")
         require("+" not in version, "public native releases cannot have SemVer build metadata")
         config = npm_publish_config(data)
         require(config.get("provenance") is None or isinstance(config["provenance"], bool), "signed npm provenance policy must be boolean")
@@ -144,6 +159,7 @@ def archive_identity(path, identity):
     if identity["registry"] == "npm":
         data = json.loads(tar_metadata(path, "npm"))
         require(valid_npm_package_name(data["name"]), "invalid npm package name")
+        require(valid_npm_version(data["version"]), "invalid npm archive version")
         require("private" not in data or isinstance(data["private"], bool), "npm private must be boolean when present")
         require(not data.get("private", False), "packed package is private")
         require(npm_publish_config(data).get("registry", "https://registry.npmjs.org/").rstrip("/") == "https://registry.npmjs.org", "packed npm registry is not public npm")
@@ -293,6 +309,7 @@ def provenance_bundle(identity, archive):
 def upload_native(out, identity, files, manifest, token):
     if identity["registry"] == "npm":
         require(valid_npm_package_name(identity["name"]), "invalid npm package name")
+        require(valid_npm_version(identity["version"]), "invalid npm upload version")
         name = files[0]
         archive = (out / name).read_bytes()
         package = json.loads(tar_metadata(out / name, "npm"))

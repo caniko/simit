@@ -124,12 +124,15 @@ with tempfile.TemporaryDirectory() as temp:
         assert len(requests) == before
     refuses(lambda: actual.upload_native(root, npm_identity, [tarball.name], {"publishConfig": {"registry": "https://attacker.invalid"}}, "fixture"))
     before = len(requests)
-    for tag in ["v1", "v1.4", "vv1.4", "v1.2.3", "v1.2.3-beta.1", "v1.x", "v1.2.x-beta", "vx.x.x-beta", "x", "X", "X.X.X"]:
+    for tag in ["v1", "v1.4", "vv1.4", "v1.2.3", "v1.2.3-beta.1", "v1.x", "v1.2.x-beta", "vx.x.x-beta", "x", "X", "X.X.X", "x.1", "x.1.1", "v1.x.1"]:
         assert not actual.valid_npm_dist_tag(tag), tag
         refuses(lambda: actual.upload_native(root, npm_identity, [tarball.name], {"publishConfig": {"tag": tag}}, "fixture"))
     assert len(requests) == before
     for tag in ["latest", "next", "stable", "release-candidate", "vnext", "v1-beta", "v1.4-beta", "V1.4", "v01.4", "v1.2.3-", "v1.2.3-beta_1", "v1.2.3-beta.01", "xfoo", "vv1.2.3", "v9007199254740991", "v0.9007199254740991"]:
         assert actual.valid_npm_dist_tag(tag), tag
+    for version in ["9007199254740992.0.0", "1.9007199254740992.0", "1.2.9007199254740992"]:
+        assert not actual.valid_npm_version(version), version
+    assert actual.valid_npm_version("9007199254740991.2.3")
     before = len(requests)
     for provenance in ["true", 1, {}, []]:
         refuses(lambda: actual.upload_native(root, npm_identity, [tarball.name], {"publishConfig": {"provenance": provenance}}, "fixture"))

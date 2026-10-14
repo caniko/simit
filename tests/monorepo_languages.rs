@@ -194,6 +194,57 @@ fn generated_component_gates_match_local_bash_and_pipeline_failure_semantics() {
 }
 
 #[test]
+fn native_only_member_flakes_resolve_root_formatter_policy() {
+    for python_root in [false, true] {
+        let temp = fixture();
+        let root = temp.path();
+        let config = fs::read_to_string(root.join("simit.toml"))
+            .unwrap()
+            .replace(
+                "schema_version = 1",
+                "schema_version = 1\nformatter_modules=['nix/formatters/shared.nix']",
+            );
+        write(
+            root,
+            "simit.toml",
+            &if python_root {
+                config
+            } else {
+                format!("{config}\n[flake]\nmode='custom'\nbackend='generic'\n")
+            },
+        );
+        write(
+            root,
+            "nix/formatters/shared.nix",
+            "{...}: { programs.ruff-format.enable=true; }\n",
+        );
+        if python_root {
+            write(
+                root,
+                "pyproject.toml",
+                "[project]\nname='root-engine'\nversion='0.1.0'\n",
+            );
+            write(root, "uv.lock", "version=1\n");
+        } else {
+            write(root, "flake.nix", "{}\n");
+        }
+        let printed = run(root, &["init", "flake", "--scope", "full", "--print"]);
+        assert!(printed.status.success(), "{printed:?}");
+        let member = run(
+            &root.join("python"),
+            &["init", "flake", "--scope", "full", "--print"],
+        );
+        assert!(member.status.success(), "{member:?}");
+        assert_eq!(member.stdout, printed.stdout);
+        assert!(String::from_utf8_lossy(&printed.stdout).contains("/nix/formatters/shared.nix"));
+        let written = run(&root.join("python"), &["init", "flake", "--scope", "full"]);
+        assert!(written.status.success(), "{written:?}");
+        assert!(root.join("nix/treefmt.nix").exists());
+        assert!(!root.join("python/flake.nix").exists());
+    }
+}
+
+#[test]
 fn non_cargo_plan_and_python_bump_preserve_independent_metadata() {
     let temp = fixture();
     let root = temp.path();

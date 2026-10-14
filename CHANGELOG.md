@@ -53,6 +53,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Reject npm wildcard ranges followed by numeric components as distribution tags
+  and enforce npm's safe-integer core version limits at enrollment and admission.
 - Respect tagged native publication eligibility during historical verification and
   conservatively qualify the full graph for Git paths outside the component grammar.
 - Verify historical native package names from their namespace-owned tag and reject
