@@ -1,0 +1,1038 @@
+"""Completion order, custody identity and source-head reporting contracts."""
+import base64
+import copy
+import hashlib
+import io
+import json
+import os
+import struct
+import subprocess
+import sys
+import tempfile
+import unittest
+import zipfile
+from urllib.parse import parse_qs, urlsplit
+from pathlib import Path
+from unittest.mock import patch
+
+PROGRAM = Path(sys.argv.pop()).read_text()
+HEAD = 'a' * 40
+TARGET = {'repository': {'id': 7, 'name': 'owner/repo'}, 'event': 'pull_request',
+          'head_repository': {'id': 7, 'name': 'owner/repo'}, 'branch': 'feature',
+          'pull_request': {'id': 70, 'number': 5, 'base_repository_id': 7, 'base_ref': 'trunk'}}
+CONTEXT = 'simit/custody/pull_request/' + hashlib.sha256(json.dumps(TARGET, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+
+
+class Custody(unittest.TestCase):
+    optimization = 0
+
+    def setUp(self):
+        self.root = tempfile.TemporaryDirectory()
+        self.addCleanup(self.root.cleanup)
+        self.folder = Path(self.root.name)
+        self.config = {'repository': 'owner/repo', 'producer_attempt': 1,
+                       'status_context': 'simit/custody', 'producers': {
+                           'CI': {'workflow': '.github/workflows/ci.yaml', 'jobs': ['test'], 'artifacts': []},
+                           'Nix': {'workflow': '.github/workflows/nix-builds.yaml', 'jobs': ['build'], 'artifacts': ['nix-build-0']}}}
+        self.runs = [{'id': index, 'name': name, 'head_sha': HEAD, 'head_branch': 'feature',
+                      'node_id': f'workflow-node-{index}', 'check_suite_id': index * 100,
+                      'path': producer['workflow'], 'run_attempt': 1, 'event': 'pull_request',
+                      'status': 'completed', 'conclusion': 'success',
+                      'repository': {'id': 7, 'full_name': 'owner/repo'}, 'head_repository': {'id': 7, 'full_name': 'owner/repo'},
+                      'pull_requests': [{'id': 70, 'number': 5, 'url': 'https://api.github.com/repos/owner/repo/pulls/5',
+                          'head': {'ref': 'feature', 'sha': HEAD, 'repo': {'id': 7}},
+                          'base': {'ref': 'trunk', 'sha': 'd' * 40, 'repo': {'id': 7}}}]}
+                     for index, (name, producer) in enumerate(self.config['producers'].items(), 1)]
+        self.payload = {'repository': {'id': 7, 'full_name': 'owner/repo'}, 'workflow_run': copy.deepcopy(self.runs[0])}
+        self.previous = []
+        self.effects = []
+        self.calls = []
+        self.job_logs = {10: b'CI provider log\n', 20: b'Nix provider log\n'}
+        blob = b'name: fixture\non: push\n'
+        self.source = {'type': 'file', 'encoding': 'base64', 'content': base64.b64encode(blob).decode(),
+                       'sha': hashlib.sha1(b'blob ' + str(len(blob)).encode() + b'\0' + blob).hexdigest()}
+        self.workflow_files = {run['node_id']: {'data': {'node': {
+            'id': run['node_id'], 'databaseId': run['id'], 'runAttempt': 1, 'event': run['event'],
+            'checkSuite': {'databaseId': run['check_suite_id'],
+                           'repository': {'databaseId': 7, 'nameWithOwner': 'owner/repo'}},
+            'file': {'path': run['path'], 'repositoryName': 'owner/repo',
+                     'repositoryFileUrl': f"https://github.com/owner/repo/blob/{HEAD}/{run['path']}",
+                     'run': {'id': run['node_id'], 'databaseId': run['id'], 'runAttempt': 1}}
+        }}} for run in self.runs}
+        stream = io.BytesIO()
+        with zipfile.ZipFile(stream, 'w') as archive:
+            archive.writestr('retained.txt', 'ordinary untrusted log data')
+        self.zip = stream.getvalue()
+        self.namespace = {'__name__': 'contract'}
+        exec(compile(PROGRAM, '<generated-custody>', 'exec', optimize=self.optimization), self.namespace)
+        self.namespace['api'] = self.api
+        self.environment = patch.dict(os.environ, {'RUNNER_ENVIRONMENT': 'github-hosted',
+            'GITHUB_REPOSITORY': 'owner/repo', 'GITHUB_SHA': 'c' * 40, 'GITHUB_RUN_ID': '900',
+            'GITHUB_RUN_ATTEMPT': '1', 'SIMIT_CUSTODY_UPLOAD_OUTCOME': 'success',
+            'SIMIT_CUSTODY_ARTIFACT_ID': '88'})
+        self.environment.start()
+        self.addCleanup(self.environment.stop)
+
+    def api(self, repository, endpoint, **limits):
+        self.assertEqual(repository, 'owner/repo')
+        self.calls.append(endpoint)
+        if endpoint == 'graphql':
+            node_id = next(node for node in self.workflow_files if json.dumps(node) in limits['query'])
+            return json.dumps(self.workflow_files[node_id]).encode()
+        if endpoint.startswith('actions/runs?'):
+            return json.dumps({'total_count': len(self.runs), 'workflow_runs': self.runs}).encode()
+        if endpoint.startswith('git/commits/'):
+            return json.dumps({'sha': endpoint.split('/')[-1], 'tree': {'sha': 'b' * 40}}).encode()
+        if endpoint.startswith('contents/'):
+            return json.dumps(self.source).encode()
+        if endpoint.startswith('commits/') and '/status?' in endpoint:
+            page = int(parse_qs(urlsplit(endpoint).query)['page'][0])
+            return json.dumps({'total_count': len(self.previous),
+                               'statuses': self.previous[(page-1)*100:page*100]}).encode()
+        if endpoint.startswith('actions/jobs/'):
+            return self.job_logs.get(int(endpoint.split('/')[2]), b'')
+        if endpoint.startswith('actions/artifacts/') or endpoint.endswith('/logs'):
+            return self.zip
+        if '/jobs?' in endpoint:
+            run_id = int(endpoint.split('/')[2])
+            name = 'test' if run_id == 1 else 'build'
+            return json.dumps({'total_count': 1, 'jobs': [{'id': run_id * 10, 'name': name, 'run_id': run_id,
+                'head_sha': HEAD, 'run_attempt': 1, 'status': 'completed', 'conclusion': 'success'}]}).encode()
+        if '/artifacts?' in endpoint:
+            artifacts = [] if '/1/' in endpoint else [{'id': 20, 'name': 'nix-build-0', 'expired': False, 'size_in_bytes': len(self.zip),
+                'workflow_run': {'id': 2, 'head_sha': HEAD}, 'digest': 'sha256:' + hashlib.sha256(self.zip).hexdigest()}]
+            return json.dumps({'total_count': len(artifacts), 'artifacts': artifacts}).encode()
+        if endpoint.startswith('actions/runs/'):
+            return json.dumps(next(run for run in self.runs if run['id'] == int(endpoint.split('/')[2]))).encode()
+        raise AssertionError('Unexpected endpoint: ' + endpoint)
+
+    def captured(self):
+        receipt = self.namespace['capture'](self.config, self.payload, self.folder)
+        self.namespace['write'](self.folder / 'receipt.json', receipt)
+        return receipt
+
+    def main_capture(self):
+        event = self.folder / 'input-event.json'
+        event.write_text(json.dumps(self.payload))
+        with patch.dict(os.environ, {'SIMIT_CUSTODY_CONFIG': json.dumps(self.config),
+                'SIMIT_CUSTODY_ROOT': str(self.folder), 'SIMIT_CUSTODY_PHASE': 'capture',
+                'GITHUB_EVENT_PATH': str(event)}):
+            return self.namespace['main']()
+
+    def report(self):
+        def effect(command, **kwargs):
+            self.effects.append((command, json.loads(kwargs['input'])))
+            return subprocess.CompletedProcess(command, 0)
+        with patch('subprocess.run', effect):
+            return self.namespace['report'](self.config, self.folder)
+
+    def workflow_revision(self, run_id, revision):
+        self.workflow_files[f'workflow-node-{run_id}']['data']['node']['file']['repositoryFileUrl'] = (
+            f"https://github.com/owner/repo/blob/{revision}/{self.runs[run_id - 1]['path'].partition('@')[0]}")
+
+    def test_pr_hashes_native_executed_workflows_missing_from_raw_head(self):
+        revisions = ['e' * 40, 'f' * 40]
+        for run_id, revision in enumerate(revisions, 1):
+            self.workflow_revision(run_id, revision)
+        original_api = self.namespace['api']
+        def absent_on_head(repository, endpoint, **limits):
+            if endpoint.startswith('contents/') and urlsplit(endpoint).query == 'ref=' + HEAD:
+                raise RuntimeError('workflow did not exist at raw PR head')
+            return original_api(repository, endpoint, **limits)
+        self.namespace['api'] = absent_on_head
+        receipt = self.captured()
+        self.assertEqual(receipt['state'], 'ready')
+        self.assertEqual(receipt['head'], HEAD)
+        for row, revision in zip(receipt['producers'], revisions):
+            self.assertEqual(row['workflow_revision']['commit'], revision)
+            self.assertEqual(row['workflow_revision']['run_id'], row['run_id'])
+            self.assertTrue((self.folder / str(row['run_id']) / 'workflow-run-file.json').is_file())
+        self.assertEqual(self.report(), 0)
+        self.assertIn('repos/owner/repo/statuses/' + HEAD, self.effects[-1][0])
+        self.assertFalse(any('refs/pull/' in endpoint for endpoint in self.calls))
+
+    def test_pr_hashes_executed_bytes_instead_of_different_head_workflow(self):
+        revision = 'e' * 40
+        self.workflow_revision(1, revision)
+        original_api = self.namespace['api']
+        raw = b'name: base-introduced workflow\non: pull_request\n'
+        source = {'type': 'file', 'encoding': 'base64', 'content': base64.b64encode(raw).decode(),
+                  'sha': hashlib.sha1(b'blob ' + str(len(raw)).encode() + b'\0' + raw).hexdigest()}
+        def changed_on_base(repository, endpoint, **limits):
+            if endpoint.startswith('contents/') and urlsplit(endpoint).query == 'ref=' + revision:
+                self.calls.append(endpoint)
+                return json.dumps(source).encode()
+            return original_api(repository, endpoint, **limits)
+        self.namespace['api'] = changed_on_base
+        receipt = self.captured()
+        self.assertEqual(receipt['source_workflow_sha256'][self.runs[0]['path']], hashlib.sha256(raw).hexdigest())
+        self.assertEqual((self.folder / '1' / 'workflow.yaml').read_bytes(), raw)
+
+    def test_checkout_and_reusable_workflow_revisions_are_not_definition_proof(self):
+        for run in self.runs:
+            run['referenced_workflows'] = [{'path': 'owner/repo/.github/workflows/reusable.yaml@trunk',
+                                          'sha': 'f' * 40}]
+        self.job_logs[10] = b'git checkout ' + ('e' * 40).encode() + b'\n'
+        receipt = self.captured()
+        self.assertEqual(receipt['producers'][0]['workflow_revision']['commit'], HEAD)
+
+    def test_unavailable_or_mutable_executed_file_proof_revokes_without_guessing(self):
+        original = copy.deepcopy(self.workflow_files)
+        parent = self.folder
+        for value in [None, 'https://github.com/owner/repo/blob/refs/pull/5/merge/.github/workflows/ci.yaml',
+                      'https://github.com/owner/repo/blob/trunk/.github/workflows/ci.yaml']:
+            with self.subTest(value=value), tempfile.TemporaryDirectory(dir=parent) as directory:
+                self.folder = Path(directory)
+                self.calls.clear()
+                self.workflow_files = copy.deepcopy(original)
+                node = self.workflow_files['workflow-node-1']['data']['node']
+                if value is None:
+                    node['file'] = None
+                else:
+                    node['file']['repositoryFileUrl'] = value
+                with self.assertRaises(RuntimeError):
+                    self.main_capture()
+                self.assertEqual(self.report(), 1)
+                self.assertEqual(self.effects[-1][1]['context'], CONTEXT)
+                self.assertFalse(any(endpoint.startswith('contents/') for endpoint in self.calls))
+            self.folder = parent
+
+    def test_native_file_proof_requires_exact_run_attempt_repository_and_path(self):
+        original = copy.deepcopy(self.workflow_files)
+        parent = self.folder
+        changes = [(('id',), 'other-node'), (('databaseId',), 3), (('databaseId',), True), (('runAttempt',), 2),
+                   (('event',), 'push'), (('checkSuite', 'databaseId'), 999),
+                   (('checkSuite', 'repository', 'databaseId'), 8),
+                   (('checkSuite', 'repository', 'nameWithOwner'), 'fork/repo'),
+                   (('file', 'run', 'id'), 'other-node'),
+                   (('file', 'run', 'databaseId'), 2), (('file', 'run', 'runAttempt'), 2),
+                   (('file', 'repositoryName'), 'fork/repo'), (('file', 'path'), '.github/workflows/other.yaml'),
+                   (('file', 'repositoryFileUrl'), f'https://github.com/fork/repo/blob/{HEAD}/.github/workflows/ci.yaml'),
+                   (('file', 'repositoryFileUrl'), f'https://github.com/owner/repo/blob/{HEAD}/.github/workflows/other.yaml')]
+        url = f'https://github.com/owner/repo/blob/{HEAD}/.github/workflows/ci.yaml'
+        changes.extend((('file', 'repositoryFileUrl'), value) for value in
+                       [None, url.replace('https:', 'http:'), url.replace('github.com', 'github.com.evil'),
+                        url.replace('github.com', 'user@github.com'), url + '?ref=trunk', url + '#fragment'])
+        for path, value in changes:
+            with self.subTest(path=path), tempfile.TemporaryDirectory(dir=parent) as directory:
+                self.folder = Path(directory)
+                self.calls.clear()
+                self.workflow_files = copy.deepcopy(original)
+                target = self.workflow_files['workflow-node-1']['data']['node']
+                for key in path[:-1]:
+                    target = target[key]
+                target[path[-1]] = value
+                with self.assertRaises(RuntimeError):
+                    self.main_capture()
+                self.assertEqual(self.report(), 1)
+                self.assertEqual(self.effects[-1][1]['context'], CONTEXT)
+                self.assertFalse(any(endpoint.startswith('contents/') for endpoint in self.calls))
+            self.folder = parent
+
+    def test_partial_errored_null_and_unavailable_native_proof_never_falls_back(self):
+        original_api = self.namespace['api']
+        parent = self.folder
+        partial = copy.deepcopy(self.workflow_files['workflow-node-1'])
+        partial['errors'] = [{'message': 'partial native lookup failed'}]
+        for response in [partial, {'data': None}, {'data': {}}, {'data': {'node': None}}, None]:
+            with self.subTest(response=response), tempfile.TemporaryDirectory(dir=parent) as directory:
+                self.folder = Path(directory)
+                self.calls.clear()
+                def unavailable(repository, endpoint, **limits):
+                    if endpoint == 'graphql':
+                        if response is None:
+                            raise RuntimeError('native workflow-file provider unavailable')
+                        return json.dumps(response).encode()
+                    return original_api(repository, endpoint, **limits)
+                self.namespace['api'] = unavailable
+                with self.assertRaises(RuntimeError):
+                    self.main_capture()
+                self.assertEqual(self.report(), 1)
+                self.assertEqual(self.effects[-1][1]['context'], CONTEXT)
+                self.assertFalse(any(endpoint.startswith('contents/') for endpoint in self.calls))
+            self.folder = parent
+            self.namespace['api'] = original_api
+
+    def test_workflow_definition_drift_at_capture_final_and_report_revokes_same_target(self):
+        original_api = self.namespace['api']
+        for phase in ['capture-final', 'report']:
+            with self.subTest(phase=phase), tempfile.TemporaryDirectory(dir=self.folder) as directory:
+                root, self.folder = self.folder, Path(directory)
+                proof_calls = 0
+                def changed(repository, endpoint, **limits):
+                    nonlocal proof_calls
+                    raw = original_api(repository, endpoint, **limits)
+                    if endpoint == 'graphql' and json.dumps('workflow-node-1') in limits['query']:
+                        proof_calls += 1
+                        if proof_calls == (2 if phase == 'capture-final' else 3):
+                            response = json.loads(raw)
+                            response['data']['node']['file']['repositoryFileUrl'] = (
+                                f'https://github.com/owner/repo/blob/{"e" * 40}/.github/workflows/ci.yaml')
+                            return json.dumps(response).encode()
+                    return raw
+                self.namespace['api'] = changed
+                if phase == 'capture-final':
+                    with self.assertRaises(RuntimeError):
+                        self.main_capture()
+                else:
+                    self.captured()
+                self.assertEqual(self.report(), 1)
+                self.assertEqual(self.effects[-1][1]['context'], CONTEXT)
+                self.folder = root
+                self.namespace['api'] = original_api
+
+    def test_ref_qualified_paths_capture_the_same_enrolled_originals(self):
+        original_runs, original_payload = copy.deepcopy(self.runs), copy.deepcopy(self.payload)
+        for reference in ['feature', 'refs/heads/feature', HEAD, 'refs/pull/5/merge', 'refs/pull/5/head']:
+            for observation in ['event', 'native', 'discovery', 'all']:
+                with self.subTest(reference=reference, observation=observation):
+                    self.runs = copy.deepcopy(original_runs)
+                    self.payload = copy.deepcopy(original_payload)
+                    if observation in ['event', 'all']:
+                        self.payload['workflow_run']['path'] += '@' + reference
+                    if observation in ['native', 'all']:
+                        for run in self.runs:
+                            run['path'] += '@' + reference
+                    discovery = copy.deepcopy(self.runs)
+                    if observation == 'discovery':
+                        for run in discovery:
+                            run['path'] += '@' + reference
+                    def api(repository, endpoint, **limits):
+                        if endpoint.startswith('actions/runs?'):
+                            self.calls.append(endpoint)
+                            return json.dumps({'total_count': len(discovery), 'workflow_runs': discovery}).encode()
+                        return self.api(repository, endpoint, **limits)
+                    self.namespace['api'] = api
+                    with tempfile.TemporaryDirectory(dir=self.folder) as directory:
+                        root = Path(directory)
+                        receipt = self.namespace['capture'](self.config, self.payload, root)
+                        self.assertEqual(receipt['state'], 'ready')
+                        self.assertTrue(receipt['capture_complete'])
+                        for run in self.runs:
+                            retained = json.loads((root / str(run['id']) / 'terminal.json').read_text())
+                            self.assertEqual(retained['path'], run['path'])
+
+    def test_unenrolled_same_name_completion_has_no_effect_in_either_order(self):
+        parent, enrolled = self.folder, copy.deepcopy(self.payload)
+        unrelated = copy.deepcopy(enrolled)
+        unrelated['workflow_run'].update(id=3, path='.github/workflows/unrelated.yaml@feature')
+        self.runs.append(copy.deepcopy(unrelated['workflow_run']))
+        for order in [('unrelated', 'enrolled'), ('enrolled', 'unrelated')]:
+            with self.subTest(order=order), tempfile.TemporaryDirectory(dir=parent) as directory:
+                self.previous, self.effects, self.calls = [], [], []
+                for completion in order:
+                    self.folder = Path(directory) / completion
+                    self.folder.mkdir()
+                    self.payload = copy.deepcopy(enrolled if completion == 'enrolled' else unrelated)
+                    if completion == 'enrolled':
+                        self.captured()
+                        self.assertEqual(self.report(), 0)
+                        self.previous = [self.effects[-1][1]]
+                        continue
+                    event, output = self.folder / 'input.json', self.folder / 'outputs'
+                    event.write_text(json.dumps(self.payload))
+                    root = self.folder / 'custody'
+                    before_calls, before_effects = list(self.calls), copy.deepcopy(self.effects)
+                    with patch.dict(os.environ, {'SIMIT_CUSTODY_CONFIG': json.dumps(self.config),
+                            'SIMIT_CUSTODY_ROOT': str(root), 'GITHUB_EVENT_PATH': str(event),
+                            'GITHUB_OUTPUT': str(output)}):
+                        for phase in ['identity', 'capture', 'report']:
+                            with patch.dict(os.environ, {'SIMIT_CUSTODY_PHASE': phase}):
+                                with patch('subprocess.run') as post:
+                                    self.assertEqual(self.namespace['main'](), 0)
+                                    post.assert_not_called()
+                    self.assertEqual(output.read_text(), 'eligible=false\n')
+                    self.assertFalse(root.exists())
+                    self.assertIsNone(self.namespace['capture'](self.config, self.payload, self.folder))
+                    self.assertFalse((self.folder / 'receipt.json').exists())
+                    self.assertEqual(self.calls, before_calls)
+                    self.assertEqual(self.effects, before_effects)
+                self.assertEqual(len(self.effects), 1)
+                self.assertEqual(self.previous[0]['state'], 'success')
+                self.assertEqual(self.previous[0]['context'], CONTEXT)
+        self.folder, self.payload = parent, enrolled
+
+    def test_unenrolled_completion_cannot_use_or_mutate_a_stale_reporting_receipt(self):
+        self.captured()
+        receipt = (self.folder / 'receipt.json').read_bytes()
+        self.payload['workflow_run']['path'] = '.github/workflows/unrelated.yaml'
+        before = {str(path): path.read_bytes() for path in self.folder.rglob('*') if path.is_file()}
+        before_calls = list(self.calls)
+        for phase in ['capture', 'report']:
+            with patch.dict(os.environ, {'SIMIT_CUSTODY_PHASE': phase}):
+                event = self.folder / 'input-event.json'
+                event.write_text(json.dumps(self.payload))
+                with patch.dict(os.environ, {'SIMIT_CUSTODY_CONFIG': json.dumps(self.config),
+                        'SIMIT_CUSTODY_ROOT': str(self.folder), 'GITHUB_EVENT_PATH': str(event)}):
+                    with patch('subprocess.run') as post:
+                        self.assertEqual(self.namespace['main'](), 0)
+                        post.assert_not_called()
+        self.assertEqual((self.folder / 'receipt.json').read_bytes(), receipt)
+        self.assertEqual({str(path): path.read_bytes() for path in self.folder.rglob('*')
+                          if path.is_file() and path.name != 'input-event.json'}, before)
+        self.assertEqual(self.calls, before_calls)
+
+    def test_enrolled_path_bad_qualifiers_and_names_still_revoke_success(self):
+        original_runs, original_payload, parent = copy.deepcopy(self.runs), copy.deepcopy(self.payload), self.folder
+        for observation in ['event', 'native', 'name', 'other-enrolled-file']:
+            with self.subTest(observation=observation), tempfile.TemporaryDirectory(dir=parent) as directory:
+                self.folder = Path(directory)
+                self.runs, self.payload = copy.deepcopy(original_runs), copy.deepcopy(original_payload)
+                self.previous = [{'context': CONTEXT, 'state': 'success', 'description': 'prior success'}]
+                if observation == 'event':
+                    self.payload['workflow_run']['path'] += '@other'
+                elif observation == 'native':
+                    self.runs[0]['path'] += '@other'
+                elif observation == 'name':
+                    self.runs[0]['name'] = 'Not enrolled'
+                else:
+                    self.payload['workflow_run']['path'] = self.runs[1]['path']
+                    self.runs[0]['path'] = self.runs[1]['path']
+                with self.assertRaises(RuntimeError):
+                    self.main_capture()
+                self.assertEqual(self.report(), 1)
+                self.assertEqual(self.effects[-1][1]['state'], 'failure')
+                self.assertEqual(self.effects[-1][1]['context'], CONTEXT)
+        self.folder = parent
+
+    def test_invalid_workflow_qualifiers_never_capture_complete_custody(self):
+        original_runs, original_payload = copy.deepcopy(self.runs), copy.deepcopy(self.payload)
+        for value in [None, [], {}, '', '.github/workflows/other.yaml@feature',
+                      '.github/workflows/ci.yaml@', '.github/workflows/ci.yaml@other',
+                      '.github/workflows/ci.yaml@feature@other', '.github/workflows/ci.yaml@refs/heads/trunk',
+                      '.github/workflows/ci.yaml@refs/pull/6/merge', '.github/workflows/ci.yaml@refs/pull/6/head']:
+            for observation in ['event', 'native', 'discovery']:
+                with self.subTest(value=value, observation=observation):
+                    self.runs = copy.deepcopy(original_runs)
+                    self.payload = copy.deepcopy(original_payload)
+                    if observation == 'event':
+                        self.payload['workflow_run']['path'] = value
+                    if observation == 'native':
+                        self.runs[0]['path'] = value
+                    discovery = copy.deepcopy(self.runs)
+                    if observation == 'discovery':
+                        discovery[0]['path'] = value
+                    def api(repository, endpoint, **limits):
+                        if endpoint.startswith('actions/runs?'):
+                            self.calls.append(endpoint)
+                            return json.dumps({'total_count': len(discovery), 'workflow_runs': discovery}).encode()
+                        return self.api(repository, endpoint, **limits)
+                    self.namespace['api'] = api
+                    with tempfile.TemporaryDirectory(dir=self.folder) as directory:
+                        root = Path(directory)
+                        if observation == 'event' and value == '.github/workflows/other.yaml@feature':
+                            self.assertIsNone(self.namespace['capture'](self.config, self.payload, root))
+                            self.assertFalse((root / 'receipt.json').exists())
+                        elif observation == 'discovery':
+                            receipt = self.namespace['capture'](self.config, self.payload, root)
+                            self.assertEqual(receipt['state'], 'waiting')
+                            self.assertFalse(receipt['capture_complete'])
+                        else:
+                            with self.assertRaises(RuntimeError):
+                                self.namespace['capture'](self.config, self.payload, root)
+                        self.assertFalse(any(root.glob('*/provider-logs.zip')))
+                        self.assertFalse(self.effects)
+
+    def test_duplicate_originals_cannot_hide_behind_ref_qualified_paths(self):
+        duplicate = copy.deepcopy(self.runs[0])
+        duplicate.update(id=3, path=duplicate['path'] + '@feature')
+        self.runs.append(duplicate)
+        with self.assertRaises(RuntimeError):
+            self.captured()
+        self.assertFalse(any(self.folder.glob('*/provider-logs.zip')))
+        self.assertFalse(self.effects)
+
+    def test_either_completion_stays_pending_until_all_originals_complete(self):
+        self.runs[1]['status'] = 'in_progress'
+        receipt = self.captured()
+        self.assertEqual(receipt['state'], 'waiting')
+        self.assertFalse(receipt['capture_complete'])
+        self.assertFalse(any(endpoint.endswith('/logs') for endpoint in self.calls))
+        self.assertEqual(self.report(), 0)
+        self.assertEqual(self.effects[0][1]['state'], 'pending')
+
+    def test_another_pr_or_base_cannot_fill_the_target_sibling(self):
+        for field, value in [('number', 6), ('base_ref', 'release')]:
+            with self.subTest(field=field):
+                other = copy.deepcopy(self.runs[1])
+                pr = other['pull_requests'][0]
+                if field == 'number':
+                    pr.update(id=71, number=value, url='https://api.github.com/repos/owner/repo/pulls/6')
+                else:
+                    pr['base']['ref'] = value
+                self.runs[1] = other
+                receipt = self.captured()
+                self.assertEqual(receipt['state'], 'waiting')
+                self.assertFalse(receipt['capture_complete'])
+                self.assertEqual(self.report(), 0)
+                self.assertEqual(self.effects[-1][1]['state'], 'pending')
+
+    def test_valid_other_target_is_excluded_before_duplicate_counting(self):
+        other = copy.deepcopy(self.runs[1])
+        other['id'] = 3
+        other['pull_requests'][0]['base']['ref'] = 'release'
+        self.runs.append(other)
+        self.assertEqual(self.captured()['state'], 'ready')
+
+    def test_missing_or_ambiguous_pr_identity_never_gets_a_branch_only_receipt(self):
+        pr = self.runs[0]['pull_requests'][0]
+        for value in [None, [], {}, [pr, pr]]:
+            with self.subTest(value=value):
+                self.payload['workflow_run']['pull_requests'] = value
+                with self.assertRaises((RuntimeError, KeyError)):
+                    self.main_capture()
+                self.assertFalse((self.folder / 'receipt.json').exists())
+        self.payload['workflow_run'].pop('pull_requests')
+        with self.assertRaises((RuntimeError, KeyError)):
+            self.main_capture()
+        self.assertFalse((self.folder / 'receipt.json').exists())
+
+    def test_invalid_pr_snapshots_reject_before_receipt(self):
+        original = copy.deepcopy(self.payload)
+        for path, value in [(('id',), True), (('number',), 0), (('url',), 'https://api.github.com/repos/other/repo/pulls/5'),
+                            (('head', 'sha'), 'e' * 40), (('head', 'ref'), 'other'),
+                            (('head', 'repo', 'id'), 8), (('base', 'repo', 'id'), False),
+                            (('base', 'sha'), 'invalid'), (('base', 'ref'), '')]:
+            with self.subTest(path=path, value=value):
+                self.payload = copy.deepcopy(original)
+                target = self.payload['workflow_run']['pull_requests'][0]
+                for key in path[:-1]:
+                    target = target[key]
+                target[path[-1]] = value
+                with self.assertRaises((RuntimeError, KeyError)):
+                    self.main_capture()
+                self.assertFalse((self.folder / 'receipt.json').exists())
+
+    def test_snapshot_changes_at_trigger_capture_final_and_report_cannot_succeed(self):
+        original_api = self.namespace['api']
+        for phase in ['trigger', 'capture-final', 'report']:
+            with self.subTest(phase=phase):
+                if phase == 'report':
+                    self.captured()
+                details = 0
+                def changed(repository, endpoint, **limits):
+                    nonlocal details
+                    raw = original_api(repository, endpoint, **limits)
+                    if endpoint == 'actions/runs/1':
+                        details += 1
+                        if phase != 'capture-final' or details == 3:
+                            run = json.loads(raw)
+                            run['pull_requests'][0]['base']['sha'] = 'e' * 40
+                            return json.dumps(run).encode()
+                    return raw
+                self.namespace['api'] = changed
+                if phase != 'report':
+                    with self.assertRaises(RuntimeError):
+                        self.main_capture()
+                self.assertEqual(self.report(), 1)
+                self.assertEqual(self.effects[-1][1]['state'], 'failure')
+                self.assertEqual(self.effects[-1][1]['context'], CONTEXT)
+                self.namespace['api'] = original_api
+                for path in self.folder.iterdir():
+                    if path.is_dir():
+                        import shutil
+                        shutil.rmtree(path)
+                    else:
+                        path.unlink()
+
+    def test_sibling_observed_base_sha_mismatch_revokes_the_stable_context(self):
+        self.runs[1]['pull_requests'][0]['base']['sha'] = 'e' * 40
+        with self.assertRaises(RuntimeError):
+            self.main_capture()
+        self.assertEqual(self.report(), 1)
+        self.assertEqual(self.effects[-1][1]['context'], CONTEXT)
+
+    def test_pr_and_base_contexts_are_distinct_but_snapshot_updates_keep_revocation_target(self):
+        snapshot = self.namespace['run_identity'](self.runs[0], 'owner/repo')
+        first = self.namespace['status_context'](self.config, snapshot['target'])
+        for field, value in [('number', 6), ('base_ref', 'release'), ('base_ref', 'TRUNK')]:
+            other = copy.deepcopy(snapshot['target'])
+            other['pull_request'][field] = value
+            self.assertNotEqual(self.namespace['status_context'](self.config, other), first)
+        self.runs[0]['pull_requests'][0]['base']['sha'] = 'e' * 40
+        updated = self.namespace['run_identity'](self.runs[0], 'owner/repo')
+        self.assertNotEqual(snapshot, updated)
+        self.assertEqual(self.namespace['status_context'](self.config, updated['target']), first)
+
+    def test_composed_context_bytes_are_bounded_before_post(self):
+        target = self.namespace['run_identity'](self.runs[0], 'owner/repo')['target']
+        for prefix in ['a' * 22, '\u00e9' * 11]:
+            self.config['status_context'] = prefix
+            self.assertEqual(len(self.namespace['status_context'](self.config, target).encode()), 100)
+        for prefix in ['a' * 23, '\u00e9' * 12]:
+            self.config['status_context'] = prefix
+            with self.assertRaises(RuntimeError):
+                self.namespace['status_context'](self.config, target)
+
+    def test_push_identity_is_not_inferred_from_associated_prs(self):
+        for run in self.runs:
+            run['event'] = 'push'
+            run['pull_requests'] = None
+            self.workflow_files[run['node_id']]['data']['node']['event'] = 'push'
+        self.payload['workflow_run'] = copy.deepcopy(self.runs[0])
+        self.assertEqual(self.captured()['state'], 'ready')
+        self.assertEqual(self.report(), 0)
+        self.assertIn('/push/', self.effects[-1][1]['context'])
+
+    def test_identity_phase_emits_case_sensitive_branch_pr_base_groups_without_api_effects(self):
+        event = self.folder / 'identity-event.json'
+        output = self.folder / 'outputs'
+        def group(payload):
+            event.write_text(json.dumps(payload))
+            output.write_text('')
+            with patch.dict(os.environ, {'SIMIT_CUSTODY_CONFIG': json.dumps(self.config),
+                    'SIMIT_CUSTODY_PHASE': 'identity', 'GITHUB_EVENT_PATH': str(event),
+                    'GITHUB_OUTPUT': str(output)}):
+                self.assertEqual(self.namespace['main'](), 0)
+            return output.read_text()
+        first = group(self.payload)
+        self.assertTrue(first.startswith('group=' + HEAD + '-'))
+        self.assertEqual(first, first.lower())
+        for change in ['head_case', 'base_case', 'base_ref', 'pr']:
+            payload = copy.deepcopy(self.payload)
+            run = payload['workflow_run']
+            pr = run['pull_requests'][0]
+            if change == 'head_case':
+                run['head_branch'] = pr['head']['ref'] = 'FEATURE'
+            elif change == 'base_case':
+                pr['base']['ref'] = 'TRUNK'
+            elif change == 'base_ref':
+                pr['base']['ref'] = 'release'
+            else:
+                pr.update(id=71, number=6, url='https://api.github.com/repos/owner/repo/pulls/6')
+            self.assertNotEqual(group(payload), first)
+        changed_snapshot = copy.deepcopy(self.payload)
+        changed_snapshot['workflow_run']['pull_requests'][0]['base']['sha'] = 'e' * 40
+        self.assertEqual(group(changed_snapshot), first)
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.effects, [])
+        self.assertFalse((self.folder / 'receipt.json').exists())
+
+    def test_identity_phase_rejects_ambiguous_pr_before_emitting_concurrency_output(self):
+        event = self.folder / 'identity-event.json'
+        output = self.folder / 'outputs'
+        self.payload['workflow_run']['pull_requests'] = []
+        event.write_text(json.dumps(self.payload))
+        with patch.dict(os.environ, {'SIMIT_CUSTODY_CONFIG': json.dumps(self.config),
+                'SIMIT_CUSTODY_PHASE': 'identity', 'GITHUB_EVENT_PATH': str(event), 'GITHUB_OUTPUT': str(output)}):
+            with self.assertRaises(RuntimeError):
+                self.namespace['main']()
+        self.assertFalse(output.exists())
+
+    def test_expired_report_budget_still_posts_failure_to_the_admitted_target(self):
+        self.captured()
+        original = self.namespace['CaptureBudget']
+        class Expired(original):
+            def __init__(self):
+                super().__init__()
+                self.deadline = 0
+        self.namespace['CaptureBudget'] = Expired
+        self.assertEqual(self.report(), 1)
+        self.assertEqual(self.effects[-1][1]['state'], 'failure')
+        self.assertEqual(self.effects[-1][1]['context'], CONTEXT)
+
+    def test_malformed_relevant_sibling_association_cannot_establish_success(self):
+        self.runs[1]['pull_requests'] = None
+        with self.assertRaises(RuntimeError):
+            self.main_capture()
+        self.assertEqual(self.report(), 1)
+        self.assertEqual(self.effects[-1][1]['context'], CONTEXT)
+
+    def test_complete_custody_reports_source_head_not_default_branch_and_is_idempotent(self):
+        receipt = self.captured()
+        self.assertEqual(receipt['state'], 'ready')
+        self.assertTrue(receipt['capture_complete'])
+        self.assertFalse(receipt['observation_is_execution'])
+        self.assertFalse(receipt['qualified'])
+        self.assertEqual(self.report(), 0)
+        command, body = self.effects[0]
+        self.assertIn('repos/owner/repo/statuses/' + HEAD, command)
+        self.assertNotIn('repos/owner/repo/statuses/' + 'c' * 40, command)
+        self.assertEqual(body['context'], CONTEXT)
+        self.assertEqual(body['state'], 'success')
+        self.previous = [body]
+        self.assertEqual(self.report(), 0)
+        self.assertEqual(len(self.effects), 1)
+
+    def test_failed_producer_and_failed_custody_upload_cannot_report_success(self):
+        self.runs[1]['conclusion'] = 'failure'
+        self.assertEqual(self.captured()['state'], 'failed')
+        self.assertEqual(self.report(), 1)
+        self.assertEqual(self.effects[0][1]['state'], 'failure')
+
+    def test_upload_is_required_even_after_every_producer_succeeds(self):
+        self.captured()
+        with patch.dict(os.environ, {'SIMIT_CUSTODY_UPLOAD_OUTCOME': 'failure'}):
+            self.assertEqual(self.report(), 1)
+        self.assertEqual(self.effects[0][1]['state'], 'failure')
+
+    def test_duplicate_originals_and_nonoriginal_attempts_reject(self):
+        self.runs.append({**self.runs[1], 'id': 3})
+        with self.assertRaises(RuntimeError):
+            self.captured()
+        self.runs.pop()
+        self.runs[1]['run_attempt'] = 2
+        with self.assertRaises(RuntimeError):
+            self.captured()
+        self.assertEqual(self.effects, [])
+
+    def test_nonoriginal_completion_revokes_an_existing_success_through_main(self):
+        self.previous = [{'context': CONTEXT, 'state': 'success',
+                          'description': 'old admitted observation'}]
+        self.runs[0]['run_attempt'] = 2
+        self.payload['workflow_run'] = copy.deepcopy(self.runs[0])
+        with self.assertRaises(RuntimeError):
+            self.main_capture()
+        self.assertEqual(self.report(), 1)
+        self.assertEqual(self.effects[-1][1]['state'], 'failure')
+
+    def test_rerun_after_capture_and_before_reporting_refuses_stale_success(self):
+        self.captured()
+        self.runs[1]['run_attempt'] = 2
+        self.runs[1]['status'] = 'in_progress'
+        self.assertEqual(self.report(), 1)
+        self.assertEqual(self.effects[-1][1]['state'], 'failure')
+
+    def test_trigger_detail_failure_retains_a_safe_failure_reporting_target(self):
+        original_api = self.namespace['api']
+        def unavailable(repository, endpoint, **limits):
+            if endpoint == 'actions/runs/1':
+                raise RuntimeError('provider detail unavailable')
+            return original_api(repository, endpoint, **limits)
+        self.namespace['api'] = unavailable
+        with self.assertRaises(RuntimeError):
+            self.main_capture()
+        self.assertEqual(self.report(), 1)
+        self.assertEqual(self.effects[-1][1]['state'], 'failure')
+
+    def test_fork_sibling_with_identical_sha_branch_and_workflow_is_rejected(self):
+        self.runs[1]['head_repository'] = {'full_name': 'fork/repo'}
+        with self.assertRaises(RuntimeError):
+            self.main_capture()
+        self.assertEqual(self.report(), 1)
+        self.assertEqual(self.effects[-1][1]['state'], 'failure')
+
+    def test_missing_enrolled_job_log_rejects_even_with_nonempty_run_archive(self):
+        self.job_logs.pop(20)
+        with self.assertRaises(RuntimeError):
+            self.main_capture()
+        self.assertEqual(self.report(), 1)
+        self.assertEqual(self.effects[-1][1]['state'], 'failure')
+
+    def test_status_beyond_page_one_remains_idempotent(self):
+        self.captured()
+        self.assertEqual(self.report(), 0)
+        status = self.effects[-1][1]
+        self.previous = [{'context': f'unrelated-{i}', 'state': 'success', 'description': 'other'}
+                         for i in range(120)] + [status]
+        self.assertEqual(self.report(), 0)
+        self.assertEqual(len(self.effects), 1)
+        self.assertTrue(any('/status?per_page=100&page=2' in endpoint for endpoint in self.calls))
+
+    def test_failure_is_published_when_status_inventory_exceeds_its_bound(self):
+        self.previous = [{'context': CONTEXT, 'state': 'success',
+                          'description': 'old admitted observation'}]
+        self.runs[0]['run_attempt'] = 2
+        self.payload['workflow_run'] = copy.deepcopy(self.runs[0])
+        with self.assertRaises(RuntimeError):
+            self.main_capture()
+        original_api = self.namespace['api']
+        def oversized(repository, endpoint, **limits):
+            if endpoint.startswith('commits/'):
+                return json.dumps({'total_count': 2001, 'statuses': self.previous}).encode()
+            return original_api(repository, endpoint, **limits)
+        self.namespace['api'] = oversized
+        self.assertEqual(self.report(), 1)
+        self.assertEqual(self.effects[-1][1]['state'], 'failure')
+        self.assertTrue((self.folder / 'report-failure.json').is_file())
+
+    def test_unavailable_status_lookup_cannot_suppress_fail_closed_publication(self):
+        self.captured()
+        original_api = self.namespace['api']
+        def unavailable(repository, endpoint, **limits):
+            if endpoint.startswith('commits/'):
+                raise RuntimeError('status inventory unavailable')
+            return original_api(repository, endpoint, **limits)
+        self.namespace['api'] = unavailable
+        self.assertEqual(self.report(), 1)
+        self.assertEqual(self.effects[-1][1]['state'], 'failure')
+        diagnostic = json.loads((self.folder / 'report-failure.json').read_text())
+        self.assertIn('status inventory unavailable', diagnostic['status_lookup_error'])
+
+    def test_duplicate_archive_paths_reject_without_extraction(self):
+        stream = io.BytesIO()
+        with zipfile.ZipFile(stream, 'w') as archive:
+            archive.writestr('same', 'first')
+            archive.writestr('same', 'second')
+        with self.assertRaises(RuntimeError):
+            self.namespace['zip_members'](stream.getvalue())
+        self.assertEqual(list(self.folder.iterdir()), [])
+
+    def test_repository_case_differences_preserve_capture_and_reporting_identity(self):
+        self.config['repository'] = 'Owner/Repo'
+        self.payload['repository']['full_name'] = 'OWNER/Repo'
+        for run in self.runs:
+            run['repository']['full_name'] = 'Owner/REPO'
+            run['head_repository']['full_name'] = 'OWNER/REPO'
+        self.assertEqual(self.captured()['state'], 'ready')
+        self.assertEqual(self.report(), 0)
+        self.assertIn('repos/owner/repo/statuses/' + HEAD, self.effects[-1][0])
+
+    def test_same_sha_event_on_different_branches_has_distinct_status_contexts(self):
+        self.captured()
+        self.report()
+        first = self.effects[-1][1]
+        self.previous = [first]
+        # A later observation has the same source SHA and event, but another branch.
+        for run in self.runs:
+            run['head_branch'] = 'different/branch'
+            run['pull_requests'][0]['head']['ref'] = run['head_branch']
+        self.payload['workflow_run'] = copy.deepcopy(self.runs[0])
+        self.folder = self.folder / 'second-collector'
+        self.folder.mkdir()
+        self.captured()
+        self.report()
+        self.assertEqual(len(self.effects), 2)
+        self.assertNotEqual(first['context'], self.effects[-1][1]['context'])
+
+    def test_total_retained_log_budget_rejects_before_later_downloads_and_reports_failure(self):
+        # Each input fits the old per-item cap; their aggregate does not.
+        self.job_logs[10] = b'x' * 1500
+        self.job_logs[20] = b'y' * 1500
+        self.namespace['MAX_CAPTURE_BYTES'] = 5000
+        with self.assertRaises(RuntimeError):
+            self.main_capture()
+        self.assertEqual(self.report(), 1)
+        self.assertEqual(self.effects[-1][1]['state'], 'failure')
+        self.assertFalse(any(endpoint.startswith('actions/artifacts/') for endpoint in self.calls))
+
+    def test_aggregate_archive_expansion_and_member_count_are_bounded(self):
+        # Reusing a small compressed archive twice must charge both expansions.
+        stream = io.BytesIO()
+        with zipfile.ZipFile(stream, 'w', compression=zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr('retained.txt', b'x' * 3000)
+        self.zip = stream.getvalue()
+        self.namespace['MAX_CAPTURE_BYTES'] = 20000
+        self.namespace['MAX_EXPANDED_BYTES'] = 5000
+        with self.assertRaises(RuntimeError):
+            self.main_capture()
+        self.assertEqual(self.report(), 1)
+        self.assertEqual(self.effects[-1][1]['state'], 'failure')
+
+    def test_capture_request_and_retained_file_counts_are_bounded(self):
+        self.namespace['MAX_CAPTURE_REQUESTS'] = 3
+        with self.assertRaises(RuntimeError):
+            self.main_capture()
+        self.assertEqual(self.report(), 1)
+        self.assertEqual(self.effects[-1][1]['state'], 'failure')
+
+    def test_archive_member_and_retained_file_limits_stop_capture(self):
+        self.namespace['MAX_ARCHIVE_MEMBERS'] = 1
+        with self.assertRaises(RuntimeError):
+            self.main_capture()
+        self.assertEqual(self.report(), 1)
+        self.assertEqual(self.effects[-1][1]['state'], 'failure')
+
+    def test_retained_file_inventory_rejects_before_later_archive_download(self):
+        self.namespace['MAX_CAPTURE_FILES'] = 2
+        with self.assertRaises(RuntimeError):
+            self.main_capture()
+        self.assertEqual(self.report(), 1)
+        self.assertEqual(self.effects[-1][1]['state'], 'failure')
+        self.assertFalse(any(endpoint.endswith('/logs') for endpoint in self.calls))
+
+    def test_capture_deadline_is_shared_across_requests(self):
+        now = [100.0]
+        original_api = self.namespace['api']
+        def slow(repository, endpoint, **limits):
+            raw = original_api(repository, endpoint, **limits)
+            now[0] += 100
+            return raw
+        self.namespace['api'] = slow
+        self.namespace['MAX_CAPTURE_SECONDS'] = 300
+        with patch.object(self.namespace['time'], 'monotonic', lambda: now[0]):
+            with self.assertRaises(RuntimeError):
+                self.main_capture()
+        self.assertEqual(len(self.calls), 3)
+        self.assertEqual(self.report(), 1)
+
+    def test_actual_central_directory_bound_rejects_before_eager_zip_construction(self):
+        stream = io.BytesIO()
+        with zipfile.ZipFile(stream, 'w') as archive:
+            for i in range(4):
+                archive.writestr(str(i), '')
+        raw = bytearray(stream.getvalue())
+        footer = raw.rfind(b'PK\x05\x06')
+        # Python parses every directory record even when the EOCD count lies.
+        raw[footer + 8:footer + 12] = b'\x01\0\x01\0'
+        self.namespace['MAX_ARCHIVE_MEMBERS'] = 2
+        construct = zipfile.ZipFile
+        with patch('zipfile.ZipFile', wraps=construct) as eager:
+            with self.assertRaises(RuntimeError):
+                self.namespace['zip_members'](bytes(raw))
+            eager.assert_not_called()
+
+    def test_expired_archive_deadline_rejects_before_eager_zip_construction(self):
+        budget = self.namespace['CaptureBudget']()
+        budget.deadline = 0
+        construct = zipfile.ZipFile
+        with patch('zipfile.ZipFile', wraps=construct) as eager:
+            with self.assertRaises(RuntimeError):
+                self.namespace['zip_members'](self.zip, budget)
+            eager.assert_not_called()
+
+    def rejected_before_construction(self, raw, budget=None):
+        construct = zipfile.ZipFile
+        with patch('zipfile.ZipFile', wraps=construct) as eager:
+            with self.assertRaises((RuntimeError, zipfile.BadZipFile)):
+                self.namespace['zip_members'](raw, budget)
+            eager.assert_not_called()
+
+    def test_directory_byte_and_expansion_caps_reject_before_construction(self):
+        self.namespace['MAX_DIRECTORY_BYTES'] = 1
+        self.rejected_before_construction(self.zip)
+        self.namespace['MAX_DIRECTORY_BYTES'] = 16 * 1024 * 1024
+        self.namespace['MAX_EXPANDED_BYTES'] = 1
+        self.rejected_before_construction(self.zip)
+
+    def test_previous_archives_charge_member_budget_before_construction(self):
+        budget = self.namespace['CaptureBudget']()
+        self.namespace['MAX_ARCHIVE_MEMBERS'] = 1
+        self.namespace['zip_members'](self.zip, budget)
+        self.rejected_before_construction(self.zip, budget)
+
+    def test_truncated_and_malformed_directory_records_reject_before_construction(self):
+        directory = self.zip.index(b'PK\x01\x02')
+        footer = self.zip.rfind(b'PK\x05\x06')
+        variants = []
+        bad_signature = bytearray(self.zip)
+        bad_signature[directory] = 0
+        variants.append(bytes(bad_signature))
+        bad_field_length = bytearray(self.zip)
+        struct.pack_into('<H', bad_field_length, directory + 28, 65535)
+        variants.append(bytes(bad_field_length))
+        truncated = bytearray(self.zip)
+        struct.pack_into('<I', truncated, footer + 12, 45)
+        struct.pack_into('<I', truncated, footer + 16, footer - 45)
+        variants.append(bytes(truncated))
+        variants.append(self.zip[:footer])
+        for raw in variants:
+            with self.subTest(raw=raw):
+                self.rejected_before_construction(raw)
+
+    def test_directory_scan_obeys_original_deadline_before_construction(self):
+        budget = self.namespace['CaptureBudget']()
+        budget.deadline = 10
+        ticks = iter([0, 1, 11])
+        with patch.object(self.namespace['time'], 'monotonic', lambda: next(ticks)):
+            self.rejected_before_construction(self.zip, budget)
+
+    def test_stored_deflated_comment_and_concatenated_archives_preserve_hashes(self):
+        payload = b'provider log\n' * 10000
+        for method in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED):
+            stream = io.BytesIO()
+            with zipfile.ZipFile(stream, 'w', compression=method) as archive:
+                archive.comment = b'bounded provider comment'
+                archive.writestr('logs/', b'')
+                archive.writestr('logs/job.txt', payload)
+            raw = stream.getvalue()
+            for prefix in (b'', b'provider-prefix'):
+                with self.subTest(method=method, prefix=prefix):
+                    self.assertEqual(self.namespace['zip_members'](prefix + raw),
+                                     {'logs/job.txt': hashlib.sha256(payload).hexdigest()})
+        stream = io.BytesIO()
+        with zipfile.ZipFile(stream, 'w'):
+            pass
+        self.assertEqual(self.namespace['zip_members'](stream.getvalue()), {})
+
+    def test_zip64_directory_and_member_sizes_pass_or_reject_before_construction(self):
+        stream = io.BytesIO()
+        payload = b'ZIP64 provider bytes'
+        # Force real standard-library ZIP64 member extras and end records while
+        # keeping the fixture tiny; restore the interpreter constant immediately.
+        with patch.object(zipfile, 'ZIP64_LIMIT', 1):
+            with zipfile.ZipFile(stream, 'w', compression=zipfile.ZIP_DEFLATED) as archive:
+                archive.writestr('job.txt', payload)
+        raw = stream.getvalue()
+        self.assertIn(b'PK\x06\x06', raw)
+        self.assertEqual(self.namespace['zip_members'](raw),
+                         {'job.txt': hashlib.sha256(payload).hexdigest()})
+        self.assertEqual(self.namespace['zip_members'](b'prefix' + raw),
+                         {'job.txt': hashlib.sha256(payload).hexdigest()})
+        self.namespace['MAX_EXPANDED_BYTES'] = len(payload) - 1
+        self.rejected_before_construction(raw)
+        self.namespace['MAX_EXPANDED_BYTES'] = 512 * 1024 * 1024
+        directory = raw.index(b'PK\x01\x02')
+        extra = directory + 46 + len(b'job.txt')
+        truncated = bytearray(raw)
+        struct.pack_into('<H', truncated, extra + 2, 4)
+        self.rejected_before_construction(bytes(truncated))
+
+    def test_unbounded_compression_methods_reject_before_construction(self):
+        # LZMA's ZIP decoder accepts attacker-controlled dictionary allocation;
+        # custody admits the provider's stored/deflated profile instead.
+        raw = bytearray(self.zip)
+        directory = raw.index(b'PK\x01\x02')
+        struct.pack_into('<H', raw, directory + 10, zipfile.ZIP_LZMA)
+        self.rejected_before_construction(bytes(raw))
+
+
+class Downloads(unittest.TestCase):
+    optimization = 0
+
+    def setUp(self):
+        self.namespace = {'__name__': 'contract'}
+        exec(compile(PROGRAM, '<generated-custody>', 'exec', optimize=self.optimization), self.namespace)
+
+    def download(self, source, maximum, timeout=5, query=None):
+        create = subprocess.Popen
+        children = []
+        def fixture(command, **kwargs):
+            if query is not None:
+                self.assertEqual(command, ['gh', 'api', '--allow-escape-sequences', '--hostname', 'github.com',
+                                           'graphql', '--method', 'POST', '--raw-field', 'query=' + query])
+            child = create([sys.executable, '-c', source], **kwargs)
+            children.append(child)
+            return child
+        try:
+            with patch('subprocess.Popen', fixture):
+                return self.namespace['api']('owner/repo', 'fixture' if query is None else 'graphql',
+                                             maximum=maximum, timeout=timeout, query=query)
+        finally:
+            self.assertEqual(len(children), 1)
+            self.assertIsNotNone(children[0].poll())
+            self.assertFalse(any(thread.name.startswith('custody-download-') and thread.is_alive()
+                                 for thread in self.namespace['threading'].enumerate()))
+
+    def test_download_exact_boundary_passes_and_first_excess_reaps_child(self):
+        source = "import sys; sys.stdout.buffer.write(b'x' * 65537)"
+        self.assertEqual(len(self.download(source, maximum=65537)), 65537)
+        with self.assertRaises(RuntimeError):
+            self.download(source, maximum=65536)
+
+    def test_stalled_download_and_oversized_stderr_reap_child(self):
+        with self.assertRaises(RuntimeError):
+            self.download('import time; time.sleep(60)', maximum=1, timeout=0.05)
+        with self.assertRaises(RuntimeError):
+            self.download("import sys; sys.stderr.buffer.write(b'x' * 65537)", maximum=1)
+
+    def test_failed_provider_download_cannot_return_partial_success(self):
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.download("import sys; sys.stdout.buffer.write(b'x'); sys.exit(1)", maximum=1)
+
+    def test_graphql_proof_uses_post_without_losing_response_bounds(self):
+        query = 'query { node(id: "native-node") { id } }'
+        self.assertEqual(self.download("print('{}', end='')", maximum=2, query=query), b'{}')
+        with self.assertRaises(RuntimeError):
+            self.download("print('{}', end='')", maximum=1, query=query)
+
+
+class OptimizedCustody(Custody):
+    optimization = 2
+
+
+class OptimizedDownloads(Downloads):
+    optimization = 2
+
+
+unittest.main()

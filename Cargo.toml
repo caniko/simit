@@ -28,6 +28,7 @@ include = [
   "/README.md",
   "/src/**/*.rs",
   "/src/monorepo/native_release.py",
+  "/src/render/ci/*.py",
   "/src/review/assets/**",
   "/tests/**/*.rs",
   "/tests/fixtures/**",
@@ -58,6 +59,23 @@ CARGO_BUILD_JOBS = "2"
 
 [package.metadata.simit.ci.workflow_templates]
 ".github/workflows/qualify-generator.yaml" = ".simit/workflows/qualify-generator.yaml.in"
+".github/workflows/custody-fixture.yaml" = ".simit/workflows/custody-fixture.yaml.in"
+".github/workflows/qualify-nix-transport.yaml" = ".simit/workflows/qualify-nix-transport.yaml.in"
+".github/workflows/qualify-native-groups.yaml" = ".simit/workflows/qualify-native-groups.yaml.in"
+
+[package.metadata.simit.ci.custody]
+repository = "caniko/simit"
+producer_attempt = 1
+status_context = "simit/producer-custody"
+
+[package.metadata.simit.ci.custody.producers.CI]
+workflow = ".github/workflows/ci.yaml"
+jobs = ["test"]
+
+[package.metadata.simit.ci.custody.producers."Custody qualification fixture"]
+workflow = ".github/workflows/custody-fixture.yaml"
+jobs = ["fixture"]
+artifacts = ["custody-fixture"]
 
 # The production package runs the complete native test suite. macOS must
 # qualify registry isolation before downstream flakes consume this producer.
@@ -122,6 +140,13 @@ tempfile = "3"
 tar = "0.4"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
+[[example]]
+name = "ci-stream-oracle"
+path = "tests/fixtures/ci-stream-oracle.rs"
+
 [target.'cfg(target_os = "linux")'.dependencies]
-signal-hook = "0.3.18"
 socket2 = "0.6.1"
+
+[target.'cfg(unix)'.dependencies]
+signal-hook = "0.3.18"
+rustix = { version = "1", features = ["fs", "process"] }

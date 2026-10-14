@@ -153,20 +153,19 @@ impl Default for Registry {
 }
 
 pub fn registry_path() -> Result<Utf8PathBuf> {
-    // ProjectDirs applies XDG overrides on Linux only. Honor the documented
-    // override before asking for a native default, including in macOS sandboxes.
-    let path = if let Some(data_home) = env::var_os("XDG_DATA_HOME")
+    // Honor the documented explicit override on every platform. ProjectDirs
+    // reads XDG_DATA_HOME on Linux, but uses native defaults on macOS/Windows.
+    let data_dir = match std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
         .filter(|path| path.is_absolute())
     {
-        data_home.join("simit/projects.toml")
-    } else {
-        ProjectDirs::from("", "", "simit")
+        Some(path) => path.join("simit"),
+        None => ProjectDirs::from("", "", "simit")
             .context("resolving per-user simit data directory")?
             .data_dir()
-            .join("projects.toml")
+            .to_path_buf(),
     };
-    Utf8PathBuf::from_path_buf(path).map_err(|path| {
+    Utf8PathBuf::from_path_buf(data_dir.join("projects.toml")).map_err(|path| {
         anyhow::anyhow!("simit registry path is not valid UTF-8: {}", path.display())
     })
 }
@@ -991,6 +990,7 @@ fn infer_expected_ci_files(
         .filter(|file| {
             !crate::review::generation::is_review_path(&file.relative_path)
                 && file.relative_path != Path::new(crate::render::review_policy::PATH)
+                && file.relative_path != Path::new(crate::render::ci::custody::PATH)
                 && !crate::render::workflow_templates::is_template_output(
                     &config.ci,
                     &file.relative_path,
@@ -1015,6 +1015,9 @@ fn infer_expected_ci_files(
     if let Some(policy) = config.review_policy.as_ref() {
         files.push(crate::render::review_policy::file(policy)?);
     }
+    if let Some(custody) = config.ci.custody.as_ref() {
+        files.push(crate::render::ci::custody::file(custody)?);
+    }
     crate::render::workflow_templates::append(workspace_root, &config.ci, &mut files)?;
     Ok(files)
 }
@@ -1030,6 +1033,14 @@ fn infer_expected_primary_ci_files(
     // file drift. `{:#}` keeps the offending keys in the message.
     let config =
         ProjectConfig::load(workspace_root).context("loading simit project configuration")?;
+    config
+        .ci
+        .validate_effective_backend(backend.provider(), backend.platform())?;
+    crate::render::ci::custody::validate_backend(
+        &config.ci,
+        backend.provider(),
+        backend.platform(),
+    )?;
     if config.monorepo.is_some() {
         return crate::monorepo::ci::files(workspace_root, &config);
     }
@@ -1092,8 +1103,8 @@ fn infer_expected_primary_ci_files(
                 &runner,
                 &options.nix_builds,
                 &options.extra_setup,
-                &options.nix_substituters,
-                &options.nix_trusted_public_keys,
+                &options.ci_nix_substituters,
+                &options.ci_nix_trusted_public_keys,
                 &config.ci.nix_build,
             )?);
         }
@@ -1149,7 +1160,7 @@ fn infer_expected_primary_ci_files(
             platform,
             &runner,
             &config.ci.nix_system_runners,
-            &config.release.artifacts,
+            &config.ci_cache_artifacts(),
             &config.ci.components,
         )?;
         let mut files = if config.ci.nix_build.only {
@@ -1166,8 +1177,8 @@ fn infer_expected_primary_ci_files(
                 &runner,
                 &config.ci.nix_builds,
                 &config.ci.extra_setup,
-                &config.release.artifacts.substituters,
-                &config.release.artifacts.trusted_public_keys,
+                &config.ci_cache_artifacts().substituters,
+                &config.ci_cache_artifacts().trusted_public_keys,
                 &config.ci.nix_build,
             )?);
         }
@@ -1200,6 +1211,10 @@ fn infer_expected_primary_ci_files(
         &cli,
         Some(&inference),
     )?;
+    // Audit the same resolved contract as init before GitHub's runner map reset.
+    if config.ci.independent_lanes && !resolved.step_runners.is_empty() {
+        bail!("[ci].independent_lanes cannot be combined with step_runners");
+    }
     if metadata.workspace_members.len() > 1 && resolved.packages.is_empty() {
         resolved.workspace = true;
     }
@@ -1351,8 +1366,8 @@ fn infer_expected_primary_ci_files(
             &runners.ci,
             &options.nix_builds,
             &options.extra_setup,
-            &options.nix_substituters,
-            &options.nix_trusted_public_keys,
+            &options.ci_nix_substituters,
+            &options.ci_nix_trusted_public_keys,
             &config.ci.nix_build,
         )?);
     }
