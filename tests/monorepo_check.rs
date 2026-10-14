@@ -167,7 +167,7 @@ fn generated_qualification_runs_native_diagnostics_for_every_gate() {
         steps
             .iter()
             .find(|step| step["name"].as_str() == Some("pass"))
-            .unwrap()["env"]["GATE_VALUE"]
+            .unwrap()["env"]["SIMIT_GATE_VALUE_0"]
             .as_str(),
         Some("gate-owned")
     );
@@ -311,8 +311,17 @@ fn generated_gate_with_deadline(
         .env("PATH", path)
         .env_remove("GATE_VALUE");
     // Actions supplies the evaluated step environment, including empty values.
+    if let Some(environment) = step["env"].as_mapping() {
+        for name in environment.keys() {
+            let name = name.as_str().unwrap();
+            caller.env_remove(name);
+            if let Some(value) = value {
+                caller.env(name, value);
+            }
+        }
+    }
     if let Some(value) = value {
-        caller.env("GATE_VALUE", value);
+        caller.env("UNRELATED_SECRET", value);
     }
     caller.output().unwrap()
 }
@@ -637,4 +646,102 @@ fn generated_provisioning_failure_keeps_status_and_collects_diagnostics_once() {
         b"x"
     );
     assert!(!root.path().join("executions").exists());
+}
+
+#[test]
+fn provider_values_survive_bash_special_environment_normalization() {
+    for name in ["IFS", "PWD"] {
+        let root = environment_fixture("${{ secrets.TEST_TOKEN }}");
+        let path = root.path().join("simit.toml");
+        fs::write(
+            &path,
+            fs::read_to_string(&path)
+                .unwrap()
+                .replace("GATE_VALUE", name),
+        )
+        .unwrap();
+        let value = "provider-'\" $(touch injected); & |";
+        let output = generated_gate(&root, "pass", Some(value));
+        assert!(output.status.success(), "{name}: {output:?}");
+        assert_eq!(
+            fs::read(root.path().join("observed")).unwrap(),
+            value.as_bytes(),
+            "{name}"
+        );
+        assert_eq!(fs::read(root.path().join("executions")).unwrap(), b"x");
+        assert!(!root.path().join("injected").exists());
+    }
+}
+
+#[test]
+fn local_literals_survive_bash_special_environment_normalization() {
+    for name in ["IFS", "PWD"] {
+        let value = "literal-'\" $(touch injected); & |";
+        let root = environment_fixture(value);
+        let path = root.path().join("simit.toml");
+        fs::write(
+            &path,
+            fs::read_to_string(&path)
+                .unwrap()
+                .replace("GATE_VALUE", name),
+        )
+        .unwrap();
+        let output = Command::new(env!("CARGO_BIN_EXE_simit"))
+            .current_dir(root.path())
+            .args([
+                "monorepo",
+                "check",
+                "--component",
+                "core",
+                "--check",
+                "pass",
+            ])
+            .env(name, "unrelated-inherited")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{name}: {output:?}");
+        assert_eq!(
+            fs::read(root.path().join("observed")).unwrap(),
+            value.as_bytes(),
+            "{name}"
+        );
+        assert_eq!(fs::read(root.path().join("executions")).unwrap(), b"x");
+        assert!(!root.path().join("injected").exists());
+    }
+}
+
+#[test]
+fn stalled_provisioning_expires_before_the_provider_deadline() {
+    let root = environment_fixture("literal");
+    fs::write(
+        root.path().join("bin/nix"),
+        "#!/bin/sh\nprintf x >> provisioning-executions\n(sleep 5; touch leaked) & wait\n",
+    )
+    .unwrap();
+    let deadline = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 1;
+    let started = std::time::Instant::now();
+    let output = generated_gate_with_deadline(
+        &root,
+        "pass",
+        Some("never-report-this-secret"),
+        Some(deadline),
+    );
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(4),
+        "provisioning ignored the reserved deadline"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Nix failure diagnostics"), "{stderr}");
+    assert!(!stderr.contains("never-report-this-secret"));
+    assert_eq!(
+        fs::read(root.path().join("provisioning-executions")).unwrap(),
+        b"x"
+    );
+    assert!(!root.path().join("executions").exists());
+    assert!(!root.path().join("leaked").exists());
 }

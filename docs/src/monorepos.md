@@ -131,6 +131,14 @@ the native runner starts, the caller collects the same bounded diagnostics and
 returns the provisioning status. A private startup marker avoids collecting
 diagnostics twice after a native gate failure.
 
+Generated checks stage provider values under inert environment names before
+Bash starts, then restore the declared names after provisioning. The native
+runner likewise assigns declared data after Bash startup, preserving values
+such as `IFS` and `PWD` that Bash normally rewrites. A Python 3 standard-library
+supervisor enforces the remaining deadline while Nix is provisioning, stops its
+process group on timeout, and leaves the reserved time for diagnostics. Once
+native startup is marked, the native runner owns the gate deadline and cleanup.
+
 On Linux, `--nix-diagnostics` captures `/proc/meminfo`, memory pressure, Nix
 daemon status, and bounded daemon/kernel journals after a failed check. Journal
 queries start at the check's start time, retain at most 150 entries each, and

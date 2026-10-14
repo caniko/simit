@@ -188,7 +188,10 @@ fn generated_component_gates_match_local_bash_and_pipeline_failure_semantics() {
         let output = Command::new("bash")
             .args(["-euo", "pipefail", "-c", &script])
             .current_dir(root)
-            .env("CHECK_VALUE", gate["env"]["CHECK_VALUE"].as_str().unwrap())
+            .env(
+                "SIMIT_GATE_VALUE_0",
+                gate["env"]["SIMIT_GATE_VALUE_0"].as_str().unwrap(),
+            )
             .output()
             .unwrap();
         assert_eq!(output.status.success(), success, "{output:?}");

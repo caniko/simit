@@ -20,6 +20,10 @@ fn qualification_entrypoints_exist_in_the_candidate_and_packaged_source() {
         files.contains("src/monorepo/nix_diagnostics.sh"),
         "package omits the embedded provisioning/native diagnostics asset"
     );
+    assert!(
+        files.contains("src/monorepo/provision.py"),
+        "package omits the embedded provisioning watchdog"
+    );
     for directory in [".github/workflows", ".simit/workflows"] {
         for entry in fs::read_dir(root.join(directory)).unwrap() {
             let path = entry.unwrap().path();

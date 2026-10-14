@@ -187,7 +187,23 @@ pub(crate) fn files(
                     "env {} ",
                     gate.env
                         .keys()
-                        .map(|name| format!("{name}=\"${name}\""))
+                        .enumerate()
+                        .map(|(index, _)| format!(
+                            "SIMIT_GATE_VALUE_{index}=\"$SIMIT_GATE_VALUE_{index}\""
+                        ))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                )
+            };
+            let restore = if gate.env.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "env {} ",
+                    gate.env
+                        .keys()
+                        .enumerate()
+                        .map(|(index, name)| format!("{name}=\"$SIMIT_GATE_VALUE_{index}\""))
                         .collect::<Vec<_>>()
                         .join(" ")
                 )
@@ -208,13 +224,20 @@ pub(crate) fn files(
             // gate failure, whose runner already collected diagnostics. Positional
             // parameters avoid overwriting any declared provider environment key.
             let diagnostics = super::check::NIX_DIAGNOSTICS;
+            let provision = format!("'{}'", include_str!("provision.py").replace('\'', "'\\''"));
             let run = format!(
-                "set -euo pipefail\nset -- \"$(mktemp -d)\" \"$(date +%s)\" {deadline}\ntest -n \"$1\" && test -d \"$1\"\ntrap 'rm -f -- \"$1/started\" \"$1/launch\" || true; rmdir -- \"$1\" || true' EXIT\ncat > \"$1/launch\" <<'SIMIT_NATIVE_GATE'\nprintf started > \"$1\"\nshift\nexec \"$@\"\nSIMIT_NATIVE_GATE\nif nix develop --print-build-logs .#ci --command {environment}bash -euo pipefail \"$1/launch\" \"$1/started\" simit monorepo check --component {} --check {} --nix-diagnostics --gate-env provider-resolved --deadline \"$3\"; then\n  exit 0\nelse\n  set -- \"$@\" \"$?\"\nfi\nif [ ! -f \"$1/started\" ]; then\n  (\n    set -- \"$2\"\n{diagnostics}\n  ) || true\nfi\nexit \"$4\"\n",
+                "set -euo pipefail\nset -- \"$(mktemp -d)\" \"$(date +%s)\" {deadline}\ntest -n \"$1\" && test -d \"$1\"\ntrap 'rm -f -- \"$1/started\" \"$1/launch\" || true; rmdir -- \"$1\" || true' EXIT\ncat > \"$1/launch\" <<'SIMIT_NATIVE_GATE'\nprintf started > \"$1\"\nshift\nexec {restore}\"$@\"\nSIMIT_NATIVE_GATE\nif python3 -c {provision} \"$1/started\" \"$3\" nix develop --print-build-logs .#ci --command {environment}bash -euo pipefail \"$1/launch\" \"$1/started\" simit monorepo check --component {} --check {} --nix-diagnostics --gate-env provider-resolved --deadline \"$3\"; then\n  exit 0\nelse\n  set -- \"$@\" \"$?\"\nfi\nif [ ! -f \"$1/started\" ]; then\n  (\n    set -- \"$2\"\n{diagnostics}\n  ) || true\nfi\nexit \"$4\"\n",
                 component.id, gate.id
             );
             let mut step = json!({"name": gate.id, "shell": "bash", "timeout-minutes": provider_minutes, "run": run});
             if !gate.env.is_empty() {
-                step["env"] = json!(gate.env);
+                step["env"] = json!(
+                    gate.env
+                        .values()
+                        .enumerate()
+                        .map(|(index, value)| (format!("SIMIT_GATE_VALUE_{index}"), json!(value)))
+                        .collect::<serde_json::Map<_, _>>()
+                );
             }
             steps.push(step);
         }

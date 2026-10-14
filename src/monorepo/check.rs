@@ -51,9 +51,24 @@ pub(super) fn run(command: MonorepoCheckCommand) -> Result<()> {
     // The command comes from the validated project config, never event data.
     // Preserve trunk's Bash errexit, nounset and pipefail contract.
     let mut process = Command::new("bash");
+    // Bash normalizes IFS/PWD on startup and may source BASH_ENV. Stage declared
+    // data under inert names, then assign it after startup without interpolation.
+    let mut prefix = "SIMIT_NATIVE_GATE_VALUE_".to_owned();
+    while environment
+        .iter()
+        .any(|(name, _)| name.starts_with(&prefix))
+    {
+        prefix.push('_');
+    }
+    let mut script = String::new();
+    for (index, (name, value)) in environment.iter().enumerate() {
+        let alias = format!("{prefix}{index}");
+        process.env_remove(name).env(&alias, value);
+        script.push_str(&format!("export {name}=\"${alias}\"\nunset {alias}\n"));
+    }
+    script.push_str(&gate.run);
     process
-        .args(["-euo", "pipefail", "-c", &gate.run])
-        .envs(environment)
+        .args(["-euo", "pipefail", "-c", &script])
         .current_dir(&root);
     #[cfg(unix)]
     {
