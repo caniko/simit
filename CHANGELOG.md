@@ -53,6 +53,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Authenticate fixed-host, nonredirecting npm metadata reads and retry transient
+  propagation failures while preserving immediate checksum-conflict rejection.
+- Preserve preceding changelog tag spelling on prefix adoption, respect disabled
+  component Cargo publication, and reject ambiguous selectors/shared native changelogs.
+- Keep npm wildcard ranges classified when later numeric fields exceed safe integers.
 - Reject npm wildcard ranges followed by numeric components as distribution tags
   and enforce npm's safe-integer core version limits at enrollment and admission.
 - Respect tagged native publication eligibility during historical verification and

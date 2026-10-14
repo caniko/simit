@@ -82,11 +82,12 @@ pub(crate) fn valid_npm_dist_tag(tag: &str) -> bool {
             wildcard = true;
             true
         } else {
-            (*part == "0" || !part.starts_with('0'))
+            (wildcard || *part == "0" || !part.starts_with('0'))
                 && part.bytes().all(|byte| byte.is_ascii_digit())
-                && part
-                    .parse::<u64>()
-                    .is_ok_and(|number| number <= 9_007_199_254_740_991)
+                && (wildcard
+                    || part
+                        .parse::<u64>()
+                        .is_ok_and(|number| number <= 9_007_199_254_740_991))
         }
     });
     if !is_range || (!wildcard && parts.len() == 3 && tag.len() - candidate.len() > 1) {
@@ -353,6 +354,8 @@ mod tests {
             "x.1",
             "x.1.1",
             "v1.x.1",
+            "x.9007199254740992",
+            "v1.x.9007199254740992",
             "X",
             "X.X.X",
         ] {

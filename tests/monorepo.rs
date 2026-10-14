@@ -1211,12 +1211,6 @@ fn cargo_release_rejects_gate_created_changes_and_commits() {
 fn independent_verification_uses_adjacent_notes_and_owned_tag() {
     let temp = fixture();
     let root = temp.path();
-    let engine = fs::read_to_string(root.join("crates/engine/Cargo.toml")).unwrap();
-    write(
-        root,
-        "crates/engine/Cargo.toml",
-        &engine.replace("edition = \"2024\"", "edition = \"2024\"\npublish = false"),
-    );
     write(
         root,
         "CHANGELOG.md",
@@ -1275,6 +1269,10 @@ fn independent_verification_uses_adjacent_notes_and_owned_tag() {
             !results
                 .iter()
                 .any(|r| r["check"].as_str().unwrap().starts_with("crates.io"))
+        );
+        assert!(
+            !results.iter().any(|r| r["check"] == "remote secrets"),
+            "{report}"
         );
     }
 }
@@ -1409,12 +1407,16 @@ fn independent_verification_requires_crates_io_eligibility() {
                 .unwrap();
             let report: Value = serde_json::from_slice(&output.stdout).unwrap();
             let results = report["results"].as_array().unwrap();
-            assert_eq!(marker.exists(), eligible, "{policy}: {output:?}");
+            assert_eq!(
+                marker.exists(),
+                eligible && publish_crates,
+                "{policy}: {output:?}"
+            );
             assert_eq!(
                 results
                     .iter()
                     .any(|r| r["check"] == "crates.io engine" && r["status"] == "pass"),
-                eligible,
+                eligible && publish_crates,
                 "{policy}: {report}"
             );
             assert_eq!(
@@ -1423,7 +1425,7 @@ fn independent_verification_requires_crates_io_eligibility() {
                         .as_str()
                         .unwrap()
                         .contains("CRATES_IO_API_TOKEN")),
-                eligible,
+                eligible && publish_crates,
                 "{policy}: {report}"
             );
         }

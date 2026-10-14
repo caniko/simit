@@ -124,7 +124,7 @@ with tempfile.TemporaryDirectory() as temp:
         assert len(requests) == before
     refuses(lambda: actual.upload_native(root, npm_identity, [tarball.name], {"publishConfig": {"registry": "https://attacker.invalid"}}, "fixture"))
     before = len(requests)
-    for tag in ["v1", "v1.4", "vv1.4", "v1.2.3", "v1.2.3-beta.1", "v1.x", "v1.2.x-beta", "vx.x.x-beta", "x", "X", "X.X.X", "x.1", "x.1.1", "v1.x.1"]:
+    for tag in ["v1", "v1.4", "vv1.4", "v1.2.3", "v1.2.3-beta.1", "v1.x", "v1.2.x-beta", "vx.x.x-beta", "x", "X", "X.X.X", "x.1", "x.1.1", "v1.x.1", "x.9007199254740992", "v1.x.9007199254740992"]:
         assert not actual.valid_npm_dist_tag(tag), tag
         refuses(lambda: actual.upload_native(root, npm_identity, [tarball.name], {"publishConfig": {"tag": tag}}, "fixture"))
     assert len(requests) == before
@@ -208,6 +208,31 @@ with tempfile.TemporaryDirectory() as temp:
     npm_files = {tarball.name: actual.digest(npm_out / tarball.name).hex()}
     integrity = "sha512-" + base64.b64encode(actual.digest(npm_out / tarball.name, "sha512")).decode()
     (npm_out / "receipt.json").write_text(json.dumps(npm_identity | {"runAttempt": 1, "files": npm_files}))
+    with patch.object(actual.urllib.request, "build_opener") as opener, patch.dict(os.environ, {"NODE_AUTH_TOKEN": "restricted-fixture"}):
+        opener.return_value.open.return_value = visibility_response({"name": npm_identity["name"]})
+        actual.registry_metadata(npm_identity)
+        request = opener.return_value.open.call_args.args[0]
+        assert request.get_header("Authorization") == "Bearer restricted-fixture"
+        assert request.full_url == "https://registry.npmjs.org/%40example%2Fnative"
+        assert opener.call_args.args[0] is actual.NoRedirect
+        actual.registry_metadata(identity)
+        assert opener.return_value.open.call_args.args[0].get_header("Authorization") is None
+    propagated = {"name": npm_identity["name"], "versions": {"1.2.3": {"name": npm_identity["name"], "version": "1.2.3", "dist": {"integrity": integrity}}}, "dist-tags": {"latest": "1.2.3"}}
+    transient = actual.urllib.error.HTTPError("https://registry.npmjs.org/fixture", 503, "temporary", {}, None)
+    throttled = actual.urllib.error.HTTPError("https://registry.npmjs.org/fixture", 429, "throttled", {}, None)
+    with patch.object(actual, "registry_metadata", side_effect=[None, transient, TimeoutError("timed out"), throttled, propagated, propagated]), patch.object(actual, "upload_native") as upload, patch.object(actual.time, "sleep") as sleep, patch.dict(os.environ, {"NODE_AUTH_TOKEN": "fixture-token"}):
+        actual.publish(npm_out, npm_identity, 1, {})
+        assert upload.call_count == 1 and sleep.call_count == 3
+    with patch.object(actual, "registry_metadata", side_effect=[None, propagated, transient, propagated, propagated]), patch.object(actual, "upload_native"), patch.object(actual.time, "sleep") as sleep, patch.dict(os.environ, {"NODE_AUTH_TOKEN": "fixture-token"}):
+        actual.publish(npm_out, npm_identity, 1, {})
+        assert sleep.call_count == 1
+    with patch.object(actual, "registry_metadata", side_effect=[None] + [transient] * 20), patch.object(actual, "upload_native"), patch.object(actual.time, "sleep") as sleep, patch.dict(os.environ, {"NODE_AUTH_TOKEN": "fixture-token"}):
+        try:
+            actual.publish(npm_out, npm_identity, 1, {})
+        except RuntimeError as error:
+            assert error.__cause__ is transient and sleep.call_count == 19
+        else:
+            raise AssertionError("propagation deadline ignored")
     refuses(lambda: actual.publish(npm_out, npm_identity, 1, {"publishConfig": {"tag": None}}))
     for tag in ["latest", "next"]:
         state = {"name": npm_identity["name"], "versions": {"1.2.3": {"name": npm_identity["name"], "version": "1.2.3", "dist": {"integrity": integrity}}}, "dist-tags": {"other": "1.2.3"}}

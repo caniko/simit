@@ -245,6 +245,88 @@ fn native_only_member_flakes_resolve_root_formatter_policy() {
 }
 
 #[test]
+fn cargo_and_native_name_collisions_require_explicit_native_namespace() {
+    let temp = fixture();
+    let root = temp.path();
+    write(
+        root,
+        "Cargo.toml",
+        "[workspace]\nresolver='2'\nmembers=['rust']\n",
+    );
+    write(
+        root,
+        "rust/Cargo.toml",
+        "[package]\nname='shared'\nversion='0.1.0'\nedition='2024'\n",
+    );
+    write(root, "rust/src/lib.rs", "pub fn shared() {}\n");
+    let config = fs::read_to_string(root.join("simit.toml"))
+        .unwrap()
+        .replace(
+            "paths = [\"node\"]",
+            "paths = [\"node\", \"rust\"]\ncargo_packages=['shared']",
+        );
+    write(root, "simit.toml", &config);
+    write(
+        root,
+        "node/package.json",
+        "{\"name\":\"shared\",\"version\":\"1.3.0\",\"private\":true}\n",
+    );
+    let output = run(
+        root,
+        &[
+            "release",
+            "plan",
+            "--component",
+            "node",
+            "--package",
+            "shared",
+            "--json",
+        ],
+    );
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("ambiguous package"),
+        "{output:?}"
+    );
+    let output = run(
+        root,
+        &[
+            "release",
+            "plan",
+            "--component",
+            "node",
+            "--package",
+            "node-engine",
+            "--json",
+        ],
+    );
+    assert!(output.status.success(), "{output:?}");
+}
+
+#[test]
+fn colocated_native_owners_cannot_share_a_release_changelog() {
+    let temp = fixture();
+    let root = temp.path();
+    let config = fs::read_to_string(root.join("simit.toml")).unwrap().replace(
+        "releases = [{ manifest = \"node/package.json\", namespace = \"node-engine\", publish = false }]",
+        "releases = [{ manifest = \"node/package.json\", namespace = \"node-engine\", publish = false }, {manifest='node/pyproject.toml',namespace='other-python',publish=false}]",
+    );
+    write(root, "simit.toml", &config);
+    write(
+        root,
+        "node/pyproject.toml",
+        "[project]\nname='other-python'\nversion='0.1.0'\n",
+    );
+    let output = run(root, &["init", "ci"]);
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("release owners share a changelog"),
+        "{output:?}"
+    );
+    assert!(!root.join(".github/workflows/ci.yaml").exists());
+}
+
+#[test]
 fn non_cargo_plan_and_python_bump_preserve_independent_metadata() {
     let temp = fixture();
     let root = temp.path();

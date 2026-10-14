@@ -212,6 +212,7 @@ pub(super) fn validate(root: &Path, graph: &Graph) -> Result<()> {
         .map(|name| ("cargo", name.clone()))
         .collect();
     let mut manifests = BTreeSet::new();
+    let mut changelogs = BTreeSet::new();
     for release in graph.components.values().flat_map(|c| &c.releases) {
         ensure!(
             namespaces.insert(release.namespace.clone()),
@@ -224,6 +225,15 @@ pub(super) fn validate(root: &Path, graph: &Graph) -> Result<()> {
             release.manifest
         );
         let package = release.load(root)?;
+        ensure!(
+            changelogs.insert(
+                Path::new(&release.manifest)
+                    .parent()
+                    .context("release manifest has no parent")?
+                    .join("CHANGELOG.md")
+            ),
+            "release owners share a changelog; place independent release manifests in separate directories"
+        );
         let registry = super::native_registry::Registry::for_manifest(&release.manifest);
         ensure!(
             names.insert((registry.name(), registry.package_key(&package.name))),
@@ -264,11 +274,21 @@ pub(crate) fn select(command: &ReleaseCommand) -> Result<Option<Selection>> {
         command.packages.len() <= 1,
         "independent releases select exactly one package"
     );
+    let packages = component
+        .releases
+        .iter()
+        .map(|release| release.load(&root))
+        .collect::<Result<Vec<_>>>()?;
     if command
         .packages
         .first()
         .is_some_and(|name| component.cargo_packages.contains(name))
     {
+        let requested = &command.packages[0];
+        ensure!(
+            !packages.iter().any(|package| &package.name == requested),
+            "ambiguous package {requested}; select --package <release namespace> for the native owner"
+        );
         return Ok(None);
     }
     if command.packages.is_empty() {
@@ -277,11 +297,6 @@ pub(crate) fn select(command: &ReleaseCommand) -> Result<Option<Selection>> {
             "component {id} has multiple release packages; select --package explicitly"
         );
     }
-    let packages = component
-        .releases
-        .iter()
-        .map(|release| release.load(&root))
-        .collect::<Result<Vec<_>>>()?;
     // An explicit release namespace is authoritative. Native names remain a
     // convenient selector only when they identify one owner in this component.
     let index = if let Some(requested) = command.packages.first() {

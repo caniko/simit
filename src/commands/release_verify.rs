@@ -243,7 +243,7 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
         }
     }
     // Preserve registry verification for legacy crate projects without a hosted target.
-    if (config.ci.publish_crates || !hosted)
+    if (config.ci.publish_crates || (!hosted && command.component.is_none()))
         && packages.iter().any(Package::is_publishable_to_crates_io)
     {
         results.extend(check_crates_io(&packages, &version));

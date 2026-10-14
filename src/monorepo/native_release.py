@@ -92,7 +92,7 @@ def valid_npm_dist_tag(tag):
     for part in parts:
         if part in ("x", "X"):
             wildcard = True
-        elif not re.fullmatch(r"0|[1-9][0-9]*", part) or len(part) > 16 or int(part) > 9_007_199_254_740_991:
+        elif not re.fullmatch(r"[0-9]+" if wildcard else r"0|[1-9][0-9]*", part) or (not wildcard and (len(part) > 16 or int(part) > 9_007_199_254_740_991)):
             return True
     if not wildcard and len(parts) == 3 and len(tag) - len(candidate) > 1:
         return True
@@ -211,9 +211,13 @@ def registry_metadata(identity):
     # https://docs.pypi.org/api/json/#get-a-release
     # https://github.com/npm/registry/blob/main/docs/responses/package-metadata.md
     url = f"https://pypi.org/pypi/{name}/{version}/json" if identity["registry"] == "python" else f"https://registry.npmjs.org/{name}"
-    request = urllib.request.Request(url, headers={"Accept": "application/vnd.npm.install-v1+json, application/json", "User-Agent": "simit native release"})
+    headers = {"Accept": "application/vnd.npm.install-v1+json, application/json", "User-Agent": "simit native release"}
+    token = os.environ.get("NODE_AUTH_TOKEN", "").strip()
+    if identity["registry"] == "npm" and token:
+        headers["Authorization"] = "Bearer " + token
+    request = urllib.request.Request(url, headers=headers)
     try:
-        with urllib.request.urlopen(request, timeout=10) as response:
+        with urllib.request.build_opener(NoRedirect).open(request, timeout=10) as response:
             data = response.read(4 * 1024 * 1024 + 1)
             require(len(data) <= 4 * 1024 * 1024, "native registry metadata exceeds 4 MiB")
             return json.loads(data)
@@ -400,15 +404,20 @@ def publish(out, identity, attempt, manifest):
         upload_error = error
     # A concurrent exact publication is accepted only after matching checksums.
     for attempt in range(20):
-        if not missing_files(out, identity, files):
-            if tag is not None and not npm_tag_matches(identity, tag):
-                try:
-                    update_npm_tag(identity, tag, os.environ[token])
-                except (urllib.error.URLError, RuntimeError) as error:
-                    upload_error = error
-            else:
-                print("Exact native release propagated with matching checksums and signed distribution tag")
-                return
+        try:
+            if not missing_files(out, identity, files):
+                if tag is not None and not npm_tag_matches(identity, tag):
+                    try:
+                        update_npm_tag(identity, tag, os.environ[token])
+                    except (urllib.error.URLError, RuntimeError) as error:
+                        upload_error = error
+                else:
+                    print("Exact native release propagated with matching checksums and signed distribution tag")
+                    return
+        except (urllib.error.URLError, TimeoutError) as error:
+            if isinstance(error, urllib.error.HTTPError) and error.code not in (408, 429) and not 500 <= error.code <= 599:
+                raise
+            upload_error = error
         if attempt < 19:
             time.sleep(30)
     raise RuntimeError("native registry propagation deadline exceeded; retain original archive") from upload_error

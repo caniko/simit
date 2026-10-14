@@ -1030,10 +1030,30 @@ fn update_reference_links(
         version
     );
     let new_version = previous.map(|previous| {
+        let previous_text = previous.to_string();
+        let previous_tag = existing
+            .iter()
+            .filter_map(|line| {
+                let (label, url) = line.split_once("]: ")?;
+                let (_, refs) = url.split_once("/compare/")?;
+                let candidate = if label == "[Unreleased" {
+                    refs.strip_suffix("...HEAD")?
+                } else if label == format!("[{previous}") {
+                    refs.rsplit_once("...")?.1
+                } else {
+                    return None;
+                };
+                (candidate == previous_text
+                    || candidate.strip_prefix('v') == Some(previous_text.as_str())
+                    || candidate.strip_prefix(prefix) == Some(previous_text.as_str()))
+                .then_some(candidate.to_owned())
+            })
+            .next()
+            .unwrap_or_else(|| format!("{prefix}{previous}"));
         format!(
-            "[{version}]: {}/compare/{prefix}{}...{prefix}{}",
+            "[{version}]: {}/compare/{}...{prefix}{}",
             repo_url.trim_end_matches('/'),
-            previous,
+            previous_tag,
             version
         )
     });
@@ -1064,4 +1084,33 @@ fn update_reference_links(
     }
     replacement.extend(footer);
     lines.splice(replace_start..lines.len(), replacement);
+}
+
+#[cfg(test)]
+mod prefix_adoption_tests {
+    #[test]
+    fn comparison_links_preserve_the_preceding_tag_spelling() {
+        for (old, prefix) in [
+            ("1.1.0", "v"),
+            ("v1.1.0", ""),
+            ("engine/v1.1.0", "engine/v"),
+        ] {
+            let mut lines = vec![format!(
+                "[Unreleased]: https://example/repo/compare/{old}...HEAD"
+            )];
+            super::update_reference_links(
+                &mut lines,
+                "https://example/repo",
+                &"1.2.0".parse().unwrap(),
+                Some(&"1.1.0".parse().unwrap()),
+                prefix,
+            );
+            assert!(
+                lines.contains(&format!(
+                    "[1.2.0]: https://example/repo/compare/{old}...{prefix}1.2.0"
+                )),
+                "{lines:?}"
+            );
+        }
+    }
 }
