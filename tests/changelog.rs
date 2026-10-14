@@ -498,6 +498,93 @@ fn release_command_promotes_changelog_and_honors_no_changelog() {
 
 #[cfg(unix)]
 #[test]
+fn prefixed_draft_and_release_preserve_history_boundary_and_compare_refs() {
+    let temp = init_release_repo();
+    let root = temp.path();
+    fs::write(
+        root.join("simit.toml"),
+        "[release]\ntag_prefix = 'v'\n[release.changelog]\nauto_draft = true\n",
+    )
+    .unwrap();
+    run(
+        root,
+        "git",
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://example.com/acme/demo.git",
+        ],
+    );
+    run(root, env!("CARGO_BIN_EXE_simit"), &["changelog", "init"]);
+    run(
+        root,
+        env!("CARGO_BIN_EXE_simit"),
+        &["changelog", "add", "added", "Original release"],
+    );
+    run(
+        root,
+        env!("CARGO_BIN_EXE_simit"),
+        &["changelog", "release", "0.1.0", "--date", "2026-01-01"],
+    );
+    run(root, "git", &["add", "."]);
+    run(
+        root,
+        "git",
+        &[
+            "commit",
+            "-qm",
+            "feat: historical feature must stay outside draft",
+        ],
+    );
+    run(root, "git", &["tag", "v0.1.0"]);
+    fs::write(
+        root.join("src/main.rs"),
+        "fn main() { println!(\"new feature\"); }\n",
+    )
+    .unwrap();
+    run(root, "git", &["add", "."]);
+    run(
+        root,
+        "git",
+        &["commit", "-qm", "fix: current feature belongs in draft"],
+    );
+    let capture = TempDir::new().unwrap();
+    let prompt = capture.path().join("prompt.txt");
+    let bin = fake_codex(root, "### Fixed\n\n- Current feature correction");
+    fs::write(
+        &bin,
+        fs::read_to_string(&bin)
+            .unwrap()
+            .replace("cat >/dev/null", &format!("cat > '{}'", prompt.display())),
+    )
+    .unwrap();
+    for args in [
+        &["changelog", "draft", "--dry-run"][..],
+        &["release", "patch", "--no-sign", "-m", "release patch"][..],
+    ] {
+        let mut command = simit();
+        with_fake_codex(&mut command, &bin);
+        let output = command.current_dir(root).args(args).output().unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let prompt = fs::read_to_string(&prompt).unwrap();
+        assert!(
+            prompt.contains("current feature belongs in draft"),
+            "{prompt}"
+        );
+        assert!(
+            !prompt.contains("historical feature must stay outside draft"),
+            "{prompt}"
+        );
+    }
+    let content = read(&root.join("CHANGELOG.md"));
+    assert!(content.contains("/compare/v0.1.0...v0.1.1"), "{content}");
+    assert!(content.contains("/compare/v0.1.1...HEAD"), "{content}");
+    assert!(output(root, "git", &["tag", "--list"]).contains("v0.1.1"));
+}
+
+#[cfg(unix)]
+#[test]
 fn release_auto_drafts_before_promoting_changelog() {
     let temp = init_release_repo();
     run(

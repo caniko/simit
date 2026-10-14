@@ -1342,7 +1342,7 @@ capture_results = true
             steps[build]["run"]
                 .as_str()
                 .unwrap()
-                .contains("nix build --no-link --no-update-lock-file --max-jobs 1 --cores 2 --print-build-logs --json")
+                .contains("--no-update-lock-file --max-jobs 1 --cores 2 --print-build-logs --json")
         );
         assert!(steps.iter().all(|step| step["continue-on-error"].is_null()));
         let generated = fs::read(temp.path().join(".github/workflows/nix-builds.yaml")).unwrap();

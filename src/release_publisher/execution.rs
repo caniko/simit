@@ -22,7 +22,8 @@ use super::archive::{
 };
 use super::{
     CompletedRunEvent, PublisherContext, PublisherPolicy, ReleaseArtifact, ReleaseRun,
-    bind_release_push, verify_release_artifact_archive,
+    bind_independent_release_push, bind_native_release_push, bind_prefixed_release_push,
+    verify_release_artifact_archive,
 };
 use crate::cli::{PublisherStage, ReleaseCommand};
 
@@ -114,7 +115,15 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
         "trusted publication selects exactly one --package"
     );
     let name = &command.packages[0];
-    package_name(name)?;
+    let native = command.native_manifest.is_some();
+    if !native {
+        package_name(name)?;
+    }
+    let namespace = command.tag_namespace.as_deref();
+    ensure!(
+        native || namespace.is_none_or(|package| package == name),
+        "publisher tag namespace must equal the selected crate"
+    );
     let reconstruction = if command.reconstruct_packages.is_empty() {
         vec![name.clone()]
     } else {
@@ -124,8 +133,10 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
         reconstruction.contains(name),
         "selected publisher crate is absent from reconstruction set"
     );
-    for package in &reconstruction {
-        package_name(package)?;
+    if !native {
+        for package in &reconstruction {
+            package_name(package)?;
+        }
     }
     let repository = env_value("GITHUB_REPOSITORY")?;
     ensure!(
@@ -136,9 +147,11 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
         serde_json::from_slice(&fs::read(env_value("GITHUB_EVENT_PATH")?)?)?;
     let source_workflow = command
         .source_workflow
+        .clone()
         .context("--source-workflow is required")?;
     let publisher_workflow = command
         .publisher_workflow
+        .clone()
         .context("--publisher-workflow is required")?;
     let context = PublisherContext {
         event_name: env_value("GITHUB_EVENT_NAME")?,
@@ -190,7 +203,24 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
         &token,
         &format!("repos/{repository}/actions/runs/{}", event.workflow_run.id),
     )?)?;
-    let bound = bind_release_push(&policy, &context, &event, &provider)?;
+    let tag_prefix = if command.publisher_tag_prefix == "v" {
+        crate::release_identity::TagPrefix::V
+    } else {
+        crate::release_identity::TagPrefix::None
+    };
+    let bound = if native {
+        bind_native_release_push(
+            &policy,
+            &context,
+            &event,
+            &provider,
+            namespace.context("native publisher requires namespace")?,
+        )?
+    } else if let Some(package) = namespace {
+        bind_independent_release_push(&policy, &context, &event, &provider, package)?
+    } else {
+        bind_prefixed_release_push(&policy, &context, &event, &provider, tag_prefix)?
+    };
     let state = TempDir::new()?;
     for directory in ["home", "cargo-home", "gpg"] {
         fs::create_dir(state.path().join(directory))?;
@@ -255,23 +285,12 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
     )?;
     // A semver branch label alone is insufficient: require the independently
     // trusted maintainer signature and exact original-run commit before reading source.
-    output(
-        data_command("git", state.path())?
-            .arg("-C")
-            .arg(&source)
-            .args(["verify-tag", &bound.source_head_label]),
+    verify_signed_tag_identity(
+        state.path(),
+        &source,
+        &bound.source_head_label,
+        &bound.source_sha,
     )?;
-    let signed_sha = output(
-        data_command("git", state.path())?
-            .arg("-C")
-            .arg(&source)
-            .args(["rev-parse", "--verify"])
-            .arg(format!("refs/tags/{}^{{commit}}", bound.source_head_label)),
-    )?;
-    ensure!(
-        String::from_utf8(signed_sha.stdout)?.trim() == bound.source_sha,
-        "signed tag differs from original run source"
-    );
     let signed_workflow = output(
         data_command("git", state.path())?
             .arg("-C")
@@ -282,16 +301,25 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
                 bound.source_sha, policy.source_workflow_path
             )),
     )?;
-    let namespace = verify_tag_only_source_workflow(
-        &signed_workflow.stdout,
-        &fs::read(trusted_root.join(&policy.source_workflow_path))?,
-    )?;
-    let version = enrolled_release_version(
-        namespace.as_deref(),
-        &bound.source_head_label,
-        name,
-        &reconstruction,
-    )?;
+    let enrolled_workflow = fs::read(trusted_root.join(&policy.source_workflow_path))?;
+    let native_upload_name = if native {
+        Some(verify_native_builder(
+            &enrolled_workflow,
+            namespace.context("native publisher requires namespace")?,
+        )?)
+    } else {
+        None
+    };
+    if namespace.is_some() || tag_prefix == crate::release_identity::TagPrefix::V {
+        verify_tag_only_source_workflow_with_prefix(
+            &signed_workflow.stdout,
+            &enrolled_workflow,
+            namespace,
+            tag_prefix,
+        )?;
+    } else {
+        verify_tag_only_source_workflow(&signed_workflow.stdout, &enrolled_workflow)?;
+    }
     checkout_signed_source(state.path(), &source, &bound.source_sha)?;
     let tracked = output(
         data_command("git", state.path())?
@@ -300,9 +328,15 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
             .args(["ls-files", "--stage", "-z"]),
     )?;
     let inert_links = super::source::validate_tree(&source, &tracked.stdout)?;
-    validate_manifest_paths_with_links(&source, &inert_links)?;
-
-    let artifact_prefix = format!("simit-crate-{name}-");
+    let artifact_prefix = if native {
+        format!(
+            "native-release-{}-",
+            namespace.context("native publication requires --tag-namespace")?
+        )
+    } else {
+        validate_manifest_paths_with_links(&source, &inert_links)?;
+        format!("simit-crate-{name}-")
+    };
     let mut artifacts = Vec::new();
     for page in 1..=10 {
         let list = api_json(
@@ -333,17 +367,90 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
         }
         ensure!(page < 10, "original run has too many artifacts");
     }
-    // Keep the first immutable original-run archive for checksum-bound retries.
-    // Artifact names do not attest attempt provenance; signed content is checked below.
+    // Native receipts cannot reconstruct built wheels/tarballs from source.
+    // Only a successful hosted archive-builder attempt can supply reusable bytes.
     artifacts.sort_by_key(|artifact| artifact.id);
-    let artifact = artifacts
-        .first()
-        .context("original run has no live crate artifact")?;
+    let artifact = if native {
+        select_native_artifact(
+            &artifacts,
+            &artifact_prefix,
+            bound.source_run_attempt,
+            |attempt, artifact| {
+                let prior: ReleaseRun = serde_json::from_value(api_json(
+                    &client,
+                    &token,
+                    &format!(
+                        "repos/{repository}/actions/runs/{}/attempts/{attempt}",
+                        bound.source_run_id
+                    ),
+                )?)?;
+                let mut jobs = Vec::new();
+                for page in 1..=10 {
+                    let data = api_json(
+                        &client,
+                        &token,
+                        &format!(
+                            "repos/{repository}/actions/runs/{}/attempts/{attempt}/jobs?per_page=100&page={page}",
+                            bound.source_run_id
+                        ),
+                    )?;
+                    let entries = data["jobs"]
+                        .as_array()
+                        .context("missing original-attempt jobs")?;
+                    jobs.extend(entries.iter().cloned());
+                    if entries.len() < 100 {
+                        break;
+                    }
+                    ensure!(page < 10, "original attempt has too many jobs");
+                }
+                if !native_attempt_succeeded(&provider, &prior, attempt, &jobs)? {
+                    return Ok(false);
+                }
+                // Run success and an attempt-qualified name are insufficient:
+                // another runner can delete/recreate an old artifact. GitHub's
+                // original hosted upload step log independently binds ID/digest.
+                let mut logs = Vec::new();
+                client.get(format!("https://api.github.com/repos/{repository}/actions/runs/{}/attempts/{attempt}/logs", bound.source_run_id))
+                    .bearer_auth(&token).send()?.error_for_status()?
+                    .take(MAX_PROVIDER_BYTES + 1).read_to_end(&mut logs)?;
+                ensure!(
+                    logs.len() as u64 <= MAX_PROVIDER_BYTES,
+                    "native attempt logs exceed byte limit"
+                );
+                let builder = jobs
+                    .iter()
+                    .find(|job| job["name"] == "validate")
+                    .context("missing hosted native builder")?;
+                native_upload_matches_artifact(
+                    artifact,
+                    builder,
+                    &logs,
+                    native_upload_name
+                        .as_deref()
+                        .context("missing enrolled native upload step")?,
+                )
+            },
+        )?
+    } else {
+        artifacts
+            .first()
+            .context("original run has no live crate artifact")?
+    };
+    let selected_id = artifact.id;
+    let selected_name = artifact.name.clone();
+    let selected_digest = artifact.digest.clone();
     let artifact: ReleaseArtifact = serde_json::from_value(api_json(
         &client,
         &token,
         &format!("repos/{repository}/actions/artifacts/{}", artifact.id),
     )?)?;
+    ensure!(
+        artifact.id == selected_id
+            && artifact.name == selected_name
+            && artifact.digest == selected_digest
+            && !artifact.expired,
+        "refetched artifact differs from enrolled original-run identity"
+    );
     let mut bytes = Vec::new();
     client
         .get(format!(
@@ -362,7 +469,18 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
         MAX_PROVIDER_BYTES,
         bytes.as_slice(),
     )?;
-    let root = format!("{name}-{version}");
+    if native {
+        return super::native::run(
+            &command,
+            &bound,
+            &source,
+            &inert_links,
+            &bytes,
+            &artifact,
+            state.path(),
+        );
+    }
+    let root = format!("{name}-{}", bound.release_version);
     let candidate = crate_from_provider_zip(&bytes, &format!("{root}.crate"))?;
     // Cargo configuration is discovered from cwd, not --manifest-path. The cwd
     // and HOME/CARGO_HOME are fresh; env_clear removes wrappers, credential
@@ -388,7 +506,13 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
         .context("crate has no normalized manifest")?;
     let cargo_manifest: toml_edit::DocumentMut =
         std::str::from_utf8(&cargo_manifest.contents)?.parse()?;
-    let metadata = upload_metadata(&cargo_manifest, &members, &root, name, &version)?;
+    let metadata = upload_metadata(
+        &cargo_manifest,
+        &members,
+        &root,
+        name,
+        &bound.release_version,
+    )?;
     match stage {
         PublisherStage::Prepare => {
             ensure!(
@@ -428,7 +552,13 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
                 &candidate,
                 &checksum,
             )?;
-            wait_for_registry(&client, state.path(), name, &version, &checksum)?;
+            wait_for_registry(
+                &client,
+                state.path(),
+                name,
+                &bound.release_version,
+                &checksum,
+            )?;
             println!(
                 "{}",
                 serde_json::to_string(
@@ -447,6 +577,52 @@ fn write_verified_member(output: &Path, member: &CrateMember) -> Result<()> {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(output, fs::Permissions::from_mode(member.mode))?;
     }
+    Ok(())
+}
+
+fn verify_signed_tag_identity(
+    state: &Path,
+    source: &Path,
+    label: &str,
+    expected_sha: &str,
+) -> Result<()> {
+    let reference = format!("refs/tags/{label}");
+    output(
+        data_command("git", state)?
+            .arg("-C")
+            .arg(source)
+            .args(["verify-tag", &reference]),
+    )?;
+    let object = output(
+        data_command("git", state)?
+            .arg("-C")
+            .arg(source)
+            .args(["cat-file", "tag", &reference]),
+    )?;
+    let object = String::from_utf8(object.stdout)?;
+    let header = object
+        .split_once("\n\n")
+        .context("signed tag has no header boundary")?
+        .0;
+    let names = header
+        .lines()
+        .filter_map(|line| line.strip_prefix("tag "))
+        .collect::<Vec<_>>();
+    ensure!(
+        names == [label],
+        "signed tag object name differs from provider release label"
+    );
+    let signed_sha = output(
+        data_command("git", state)?
+            .arg("-C")
+            .arg(source)
+            .args(["rev-parse", "--verify"])
+            .arg(format!("{reference}^{{commit}}")),
+    )?;
+    ensure!(
+        String::from_utf8(signed_sha.stdout)?.trim() == expected_sha,
+        "signed tag differs from original run source"
+    );
     Ok(())
 }
 
@@ -516,7 +692,30 @@ fn string_array(item: Option<&toml_edit::Item>) -> Vec<String> {
 /// source must contain the independently enrolled, exclusively tag-triggered
 /// workflow definition. Binding only triggers would let the signed source add
 /// credential authority, private runners or alternate jobs under those triggers.
-fn verify_tag_only_source_workflow(signed: &[u8], enrolled: &[u8]) -> Result<Option<String>> {
+fn verify_tag_only_source_workflow(signed: &[u8], enrolled: &[u8]) -> Result<()> {
+    verify_tag_only_source_workflow_with_namespace(signed, enrolled, None)
+}
+
+fn verify_tag_only_source_workflow_with_namespace(
+    signed: &[u8],
+    enrolled: &[u8],
+    namespace: Option<&str>,
+) -> Result<()> {
+    verify_tag_only_source_workflow_with_prefix(signed, enrolled, namespace, Default::default())
+}
+
+fn verify_tag_only_source_workflow_with_prefix(
+    signed: &[u8],
+    enrolled: &[u8],
+    namespace: Option<&str>,
+    prefix: crate::release_identity::TagPrefix,
+) -> Result<()> {
+    let tag_pattern = if let Some(package) = namespace {
+        package_name(package)?;
+        format!("{package}/v[0-9]*")
+    } else {
+        format!("{}[0-9]*", prefix.as_str())
+    };
     let workflow: serde_yaml::Value = serde_yaml::from_slice(signed)?;
     let enrollment: serde_yaml::Value = serde_yaml::from_slice(enrolled)?;
     ensure!(
@@ -539,52 +738,202 @@ fn verify_tag_only_source_workflow(signed: &[u8], enrolled: &[u8]) -> Result<Opt
         .and_then(serde_yaml::Value::as_mapping)
         .context("source workflow has no push trigger")?;
     ensure!(
-        push.len() == 1,
-        "source publication must have only a tag filter"
+        push.len() == 1
+            && push
+                .get(serde_yaml::Value::String("tags".into()))
+                .and_then(serde_yaml::Value::as_sequence)
+                .is_some_and(
+                    |tags| tags.len() == 1 && tags[0].as_str() == Some(tag_pattern.as_str())
+                ),
+        "source publication must have only the enrolled semver tag filter"
     );
-    let tags = push
-        .get(serde_yaml::Value::String("tags".into()))
-        .and_then(serde_yaml::Value::as_sequence)
-        .context("source publication requires tag filters")?;
-    ensure!(
-        tags.len() == 1,
-        "source publication requires exactly one enrolled tag filter"
-    );
-    let filter = tags[0]
-        .as_str()
-        .context("enrolled tag filter must be a string")?;
-    if filter == "[0-9]*" {
-        return Ok(None);
-    }
-    let namespace = filter
-        .strip_suffix("/v[0-9]*")
-        .context("unsupported enrolled package tag filter")?;
-    crate::release_identity::ReleaseTag::for_package(namespace, semver::Version::new(0, 0, 0))?;
-    Ok(Some(namespace.to_owned()))
+    Ok(())
 }
 
-fn enrolled_release_version(
-    namespace: Option<&str>,
-    tag: &str,
-    selected: &str,
-    reconstruction: &[String],
-) -> Result<String> {
-    if let Some(namespace) = namespace {
+fn select_native_artifact<'a>(
+    artifacts: &'a [ReleaseArtifact],
+    prefix: &str,
+    max_attempt: u64,
+    mut attempt_attested: impl FnMut(u64, &ReleaseArtifact) -> Result<bool>,
+) -> Result<&'a ReleaseArtifact> {
+    // Independently bind the selected ID and digest to the original successful
+    // hosted upload, not a same-name replacement created by a later attempt.
+    let mut selected: Option<&ReleaseArtifact> = None;
+    let mut names = std::collections::BTreeSet::new();
+    for artifact in artifacts {
+        let Some(attempt) = artifact
+            .name
+            .strip_prefix(prefix)
+            .and_then(|number| number.parse::<u64>().ok())
+        else {
+            continue;
+        };
+        if artifact.expired
+            || !(1..=max_attempt).contains(&attempt)
+            || artifact.name != format!("{prefix}{attempt}")
+        {
+            continue;
+        }
         ensure!(
-            namespace == selected && reconstruction == [selected],
-            "independent publication selects only its enrolled package"
+            names.insert(&artifact.name),
+            "native artifact attempt has ambiguous provider archives"
         );
-        return Ok(
-            crate::release_identity::ReleaseTag::parse_for_package(namespace, tag)?
-                .version
-                .to_string(),
-        );
+        let succeeded = attempt_attested(attempt, artifact)?;
+        if succeeded && selected.is_none_or(|old| artifact.id < old.id) {
+            selected = Some(artifact);
+        }
     }
+    selected.context("original run has no artifact from a successful hosted native builder attempt")
+}
+
+fn native_upload_matches_artifact(
+    artifact: &ReleaseArtifact,
+    builder: &Value,
+    logs: &[u8],
+    name: &str,
+) -> Result<bool> {
+    let steps = builder["steps"]
+        .as_array()
+        .context("hosted builder has no step records")?;
+    let uploads: Vec<_> = steps.iter().filter(|step| step["name"] == name).collect();
     ensure!(
-        !tag.contains('/'),
-        "coordinated publication requires an unnamespaced tag"
+        uploads.len() == 1,
+        "hosted builder requires one native upload step record"
     );
-    Ok(super::head_label_version(tag)?.to_string())
+    let upload = uploads[0];
+    if upload["status"] != "completed" || upload["conclusion"] != "success" {
+        return Ok(false);
+    }
+    let number = upload["number"]
+        .as_u64()
+        .filter(|number| *number > 0)
+        .context("native upload step has no provider number")?;
+    // GitHub's log ZIP separates steps. Qualification and packing output cannot
+    // impersonate the trusted action by echoing its messages into another step.
+    let filename = name.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_");
+    let path = format!("validate/{number}_{filename}.txt");
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(logs))?;
+    ensure!(
+        archive.len() <= 10_000 && archive.file_names().filter(|name| *name == path).count() == 1,
+        "original native upload log is missing or ambiguous"
+    );
+    let mut log = archive.by_name(&path)?;
+    const MAX_LOG_BYTES: u64 = 4 * 1024 * 1024;
+    ensure!(
+        log.size() <= MAX_LOG_BYTES,
+        "native upload log exceeds byte limit"
+    );
+    let mut text = String::new();
+    log.by_ref()
+        .take(MAX_LOG_BYTES + 1)
+        .read_to_string(&mut text)?;
+    ensure!(
+        text.len() as u64 <= MAX_LOG_BYTES,
+        "native upload log exceeds byte limit"
+    );
+    let messages: Vec<_> = text
+        .lines()
+        .filter_map(|line| {
+            let (timestamp, message) = line.split_once(' ')?;
+            chrono::DateTime::parse_from_rfc3339(timestamp).ok()?;
+            Some(message)
+        })
+        .collect();
+    let digests: Vec<_> = messages
+        .iter()
+        .filter_map(|message| message.strip_prefix("SHA256 digest of uploaded artifact is "))
+        .collect();
+    let finalized = format!(
+        "Artifact {} successfully finalized. Artifact ID ",
+        artifact.name
+    );
+    let ids: Vec<_> = messages
+        .iter()
+        .filter_map(|message| message.strip_prefix(&finalized))
+        .collect();
+    ensure!(
+        digests.len() == 1 && ids.len() == 1,
+        "native upload log must bind a unique artifact ID and digest"
+    );
+    Ok(ids[0].parse::<u64>().ok() == Some(artifact.id)
+        && artifact.digest.as_deref() == Some(format!("sha256:{}", digests[0]).as_str()))
+}
+
+fn native_attempt_succeeded(
+    current: &ReleaseRun,
+    prior: &ReleaseRun,
+    attempt: u64,
+    jobs: &[Value],
+) -> Result<bool> {
+    ensure!(
+        prior.id == current.id
+            && prior.run_attempt == attempt
+            && attempt <= current.run_attempt
+            && prior.workflow_id == current.workflow_id
+            && prior.path == current.path
+            && prior.event == "push"
+            && prior.head_branch == current.head_branch
+            && prior.head_sha == current.head_sha
+            && prior.repository == current.repository
+            && prior.head_repository == current.head_repository,
+        "original native attempt identity differs from admitted source run"
+    );
+    if prior.status != "completed" || prior.conclusion.as_deref() != Some("success") {
+        return Ok(false);
+    }
+    let builders: Vec<_> = jobs
+        .iter()
+        .filter(|job| job["name"] == "validate")
+        .collect();
+    ensure!(
+        builders.len() == 1,
+        "native attempt requires exactly one archive builder job"
+    );
+    let job = builders[0];
+    Ok(job["run_id"].as_u64() == Some(prior.id)
+        && job["run_attempt"].as_u64() == Some(attempt)
+        && job["head_sha"].as_str() == Some(prior.head_sha.as_str())
+        && job["status"] == "completed"
+        && job["conclusion"] == "success"
+        && job["runner_group_name"] == "GitHub Actions"
+        && job["labels"] == json!(["ubuntu-24.04"]))
+}
+
+fn verify_native_builder(enrolled: &[u8], namespace: &str) -> Result<String> {
+    let workflow: serde_yaml::Value = serde_yaml::from_slice(enrolled)?;
+    ensure!(
+        workflow["jobs"]["validate"]["runs-on"].as_str() == Some("ubuntu-24.04"),
+        "native archives require the fixed hosted ubuntu-24.04 builder"
+    );
+    let expected_action = crate::render::ci::github_action_ref("actions/upload-artifact", "v7.0.2");
+    let expected_action = expected_action
+        .split(" #")
+        .next()
+        .unwrap_or(expected_action.as_str());
+    let expected_name = format!("native-release-{namespace}-${{{{ github.run_attempt }}}}");
+    let steps = workflow["jobs"]["validate"]["steps"]
+        .as_sequence()
+        .context("native builder has no upload steps")?;
+    let uploads: Vec<_> = steps
+        .iter()
+        .filter(|step| step["with"]["name"].as_str() == Some(&expected_name))
+        .collect();
+    ensure!(
+        uploads.len() == 1,
+        "native builder must upload exactly one attempt-qualified immutable archive"
+    );
+    let upload = uploads[0];
+    ensure!(
+        upload["uses"].as_str() == Some(expected_action)
+            && upload["if"].is_null()
+            && (upload["continue-on-error"].is_null() || upload["continue-on-error"] == false)
+            && (upload["with"]["overwrite"].is_null() || upload["with"]["overwrite"] == false),
+        "native builder requires an unconditional immutable upload whose failure fails the job"
+    );
+    Ok(upload["name"]
+        .as_str()
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("Run {expected_action}")))
 }
 
 fn manifest_string<'a>(table: &'a dyn toml_edit::TableLike, key: &str) -> Option<&'a str> {
@@ -1171,6 +1520,273 @@ pub fn wait_for_registry_with(
 
 #[cfg(test)]
 mod tests {
+    fn native_upload_logs(id: u64, attempt: u64, digest: &str, extra: &str) -> Vec<u8> {
+        use std::io::Write;
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        zip.start_file(
+            "validate/7_Upload native release archive.txt",
+            zip::write::SimpleFileOptions::default(),
+        )
+        .unwrap();
+        let log = format!(
+            "2026-10-13T15:29:40Z SHA256 digest of uploaded artifact is {digest}\n2026-10-13T15:29:41Z Artifact native-release-native-{attempt} successfully finalized. Artifact ID {id}\n{extra}"
+        );
+        zip.write_all(log.as_bytes()).unwrap();
+        zip.finish().unwrap().into_inner()
+    }
+
+    fn native_upload_step() -> Value {
+        json!({"steps":[{"name":"Upload native release archive","number":7,"status":"completed","conclusion":"success"}]})
+    }
+
+    #[test]
+    fn native_retry_rejects_replaced_archive_after_original_success() {
+        let artifact = |id, attempt| {
+            serde_json::from_value::<ReleaseArtifact>(json!({"id":id,"name":format!("native-release-native-{attempt}"),"expired":false,"digest":format!("sha256:{}", "a".repeat(64)),"workflow_run":null})).unwrap()
+        };
+        // Attempt 1 originally uploaded ID 1. A compromised qualification rerun
+        // deletes it and recreates the same name with ID 4 before hosted ID 5.
+        let artifacts = [artifact(4, 1), artifact(5, 2)];
+        let selected = select_native_artifact(
+            &artifacts,
+            "native-release-native-",
+            2,
+            |attempt, artifact| {
+                let logs = native_upload_logs(
+                    if attempt == 1 { 1 } else { 5 },
+                    attempt,
+                    &"a".repeat(64),
+                    "",
+                );
+                native_upload_matches_artifact(
+                    artifact,
+                    &native_upload_step(),
+                    &logs,
+                    "Upload native release archive",
+                )
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            selected.id, 5,
+            "a successful old attempt cannot attest replacement bytes"
+        );
+    }
+
+    #[test]
+    fn native_upload_proof_binds_digest_and_provider_step_not_candidate_echoes() {
+        use std::io::Write;
+        let artifact: ReleaseArtifact = serde_json::from_value(json!({"id":1,"name":"native-release-native-1","expired":false,"digest":format!("sha256:{}", "a".repeat(64)),"workflow_run":null})).unwrap();
+        let job = native_upload_step();
+        assert!(
+            native_upload_matches_artifact(
+                &artifact,
+                &job,
+                &native_upload_logs(1, 1, &"a".repeat(64), ""),
+                "Upload native release archive"
+            )
+            .unwrap()
+        );
+        assert!(
+            !native_upload_matches_artifact(
+                &artifact,
+                &job,
+                &native_upload_logs(9, 1, &"a".repeat(64), ""),
+                "Upload native release archive"
+            )
+            .unwrap()
+        );
+        assert!(
+            !native_upload_matches_artifact(
+                &artifact,
+                &job,
+                &native_upload_logs(1, 1, &"b".repeat(64), ""),
+                "Upload native release archive"
+            )
+            .unwrap()
+        );
+        assert!(native_upload_matches_artifact(&artifact, &job, &native_upload_logs(1, 1, &"a".repeat(64), "2026-10-13T15:29:41Z Artifact native-release-native-1 successfully finalized. Artifact ID 1\n"), "Upload native release archive").is_err());
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        zip.start_file(
+            "component-private/7_Upload native release archive.txt",
+            zip::write::SimpleFileOptions::default(),
+        )
+        .unwrap();
+        zip.write_all(format!("2026-10-13T15:29:40Z SHA256 digest of uploaded artifact is {}\n2026-10-13T15:29:41Z Artifact native-release-native-1 successfully finalized. Artifact ID 1\n", "a".repeat(64)).as_bytes()).unwrap();
+        let forged = zip.finish().unwrap().into_inner();
+        assert!(
+            native_upload_matches_artifact(
+                &artifact,
+                &job,
+                &forged,
+                "Upload native release archive"
+            )
+            .is_err()
+        );
+        let mut wrong_step = job.clone();
+        wrong_step["steps"][0]["number"] = json!(8);
+        assert!(
+            native_upload_matches_artifact(
+                &artifact,
+                &wrong_step,
+                &native_upload_logs(1, 1, &"a".repeat(64), ""),
+                "Upload native release archive"
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn native_upload_proof_reads_the_actual_pinned_action_log_protocol() {
+        use std::io::Write;
+        let artifact: ReleaseArtifact = serde_json::from_value(json!({"id":11826996696_u64,"name":"primary-ci-integration-430a6d5be5027d10c80f34c1d9c47d013b0ce2e5-1","expired":false,"digest":"sha256:15206afe6e8a9dabe1b1e05cfa42a0883b99cad13428c729c498eb340d569fae","workflow_run":null})).unwrap();
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        zip.start_file(
+            "validate/7_Upload native release archive.txt",
+            zip::write::SimpleFileOptions::default(),
+        )
+        .unwrap();
+        zip.write_all(include_bytes!(
+            "../../tests/fixtures/native-upload-step.txt"
+        ))
+        .unwrap();
+        let archive = zip.finish().unwrap().into_inner();
+        assert!(
+            native_upload_matches_artifact(
+                &artifact,
+                &native_upload_step(),
+                &archive,
+                "Upload native release archive"
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn native_retry_reuses_only_successful_hosted_builder_archives() {
+        let current: ReleaseRun = serde_json::from_value(json!({
+            "id": 42, "run_attempt": 3, "workflow_id": 7,
+            "path": ".github/workflows/publish-npm-native.yaml", "event": "push",
+            "status": "completed", "conclusion": "success", "head_branch": "native/v1.2.3", "head_sha": "b".repeat(40),
+            "repository": {"id": 1, "full_name": "owner/repo"}, "head_repository": {"id": 1, "full_name": "owner/repo"}
+        })).unwrap();
+        let job = |attempt| json!({"name":"validate", "run_id":42, "run_attempt":attempt, "head_sha":"b".repeat(40), "status":"completed", "conclusion":"success", "runner_group_name":"GitHub Actions", "labels":["ubuntu-24.04"]});
+        let artifact = |id, suffix: &str| {
+            serde_json::from_value::<ReleaseArtifact>(json!({"id":id,"name":format!("native-release-native-{suffix}"),"expired":false,"digest":"sha256:abc","workflow_run":null})).unwrap()
+        };
+        let artifacts = vec![
+            artifact(1, "1"),
+            artifact(2, "2"),
+            artifact(3, "3"),
+            artifact(4, "01"),
+        ];
+        let mut queried = Vec::new();
+        let selected = select_native_artifact(
+            &artifacts,
+            "native-release-native-",
+            3,
+            |attempt, _artifact| {
+                queried.push(attempt);
+                let mut prior = current.clone();
+                prior.run_attempt = attempt;
+                if attempt == 1 {
+                    prior.conclusion = Some("failure".into());
+                }
+                native_attempt_succeeded(&current, &prior, attempt, &[job(attempt)])
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            selected.id, 2,
+            "failed-attempt forgery must not win over original successful bytes"
+        );
+        assert_eq!(queried, vec![1, 2, 3]);
+        assert!(
+            select_native_artifact(&artifacts, "native-release-native-", 3, |_, _| Ok(false))
+                .is_err()
+        );
+        let duplicates = vec![artifact(2, "2"), artifact(9, "2")];
+        assert!(
+            select_native_artifact(&duplicates, "native-release-native-", 3, |_, _| Ok(true))
+                .is_err()
+        );
+        let mut prior = current.clone();
+        prior.run_attempt = 2;
+        for (key, value) in [
+            ("conclusion", json!("failure")),
+            ("runner_group_name", json!("Private runners")),
+            ("run_attempt", json!(1)),
+            ("head_sha", json!("c".repeat(40))),
+            ("labels", json!(["self-hosted", "ubuntu-24.04"])),
+        ] {
+            let mut bad = job(2);
+            bad[key] = value;
+            assert!(
+                !native_attempt_succeeded(&current, &prior, 2, &[bad]).unwrap(),
+                "{key}"
+            );
+        }
+        prior.head_sha = "c".repeat(40);
+        assert!(native_attempt_succeeded(&current, &prior, 2, &[job(2)]).is_err());
+    }
+
+    #[test]
+    fn native_archive_builder_is_independently_hosted() {
+        let action = crate::render::ci::github_action_ref("actions/upload-artifact", "v7.0.2");
+        let action = action.split(" #").next().unwrap();
+        let unnamed = json!({"jobs":{"validate":{"runs-on":"ubuntu-24.04","steps":[{"uses":action,"with":{"name":"native-release-native-${{ github.run_attempt }}"}}]}}});
+        assert_eq!(
+            super::verify_native_builder(
+                serde_yaml::to_string(&unnamed).unwrap().as_bytes(),
+                "native"
+            )
+            .unwrap(),
+            format!("Run {action}")
+        );
+        for runner in [
+            "ubuntu-24.04",
+            "self-hosted",
+            "private-builder",
+            "${{ inputs.runner }}",
+        ] {
+            let workflow = json!({"jobs":{"validate":{"runs-on":runner,"steps":[{"id":"native-upload","name":"Upload native release archive","uses":crate::render::ci::github_action_ref("actions/upload-artifact", "v7.0.2").split(" #").next().unwrap(),"with":{"name":"native-release-native-${{ github.run_attempt }}"}}]}}});
+            assert_eq!(
+                super::verify_native_builder(
+                    &serde_yaml::to_string(&workflow).unwrap().into_bytes(),
+                    "native"
+                )
+                .is_ok(),
+                runner == "ubuntu-24.04"
+            );
+        }
+        assert!(
+            super::verify_native_builder(
+                b"jobs: {validate: {runs-on: [self-hosted, ubuntu-24.04]}}",
+                "native"
+            )
+            .is_err()
+        );
+        for (key, value) in [
+            ("if", json!(false)),
+            ("continue-on-error", json!(true)),
+            (
+                "with",
+                json!({"name":"native-release-native-${{ github.run_attempt }}", "overwrite":true}),
+            ),
+        ] {
+            let mut workflow = json!({"jobs":{"validate":{"runs-on":"ubuntu-24.04","steps":[{"id":"native-upload","name":"Upload native release archive","uses":crate::render::ci::github_action_ref("actions/upload-artifact", "v7.0.2").split(" #").next().unwrap(),"with":{"name":"native-release-native-${{ github.run_attempt }}"}}]}}});
+            workflow["jobs"]["validate"]["steps"][0][key] = value;
+            let error = super::verify_native_builder(
+                serde_yaml::to_string(&workflow).unwrap().as_bytes(),
+                "native",
+            )
+            .unwrap_err();
+            assert!(
+                error.to_string().contains("unconditional immutable upload"),
+                "{error}"
+            );
+        }
+    }
     use super::*;
 
     #[test]
@@ -1783,69 +2399,6 @@ mod tests {
     }
 
     #[test]
-    fn independently_enrolled_package_trigger_preserves_full_workflow_identity() {
-        let enrolled = b"on:\n  push:\n    tags: ['worker/v[0-9]*']\npermissions: {contents: read}\njobs: {}\n";
-        assert_eq!(
-            verify_tag_only_source_workflow(enrolled, enrolled)
-                .unwrap()
-                .as_deref(),
-            Some("worker")
-        );
-        let foreign =
-            b"on:\n  push:\n    tags: ['other/v[0-9]*']\npermissions: {contents: read}\njobs: {}\n";
-        assert!(verify_tag_only_source_workflow(foreign, enrolled).is_err());
-    }
-
-    #[test]
-    fn enrolled_tag_namespace_binds_selection_and_archive_version() {
-        let selected = vec!["worker".to_owned()];
-        for (tag, version) in [
-            ("worker/v1.2.3", "1.2.3"),
-            ("worker/v1.2.3-rc.1", "1.2.3-rc.1"),
-        ] {
-            assert_eq!(
-                enrolled_release_version(Some("worker"), tag, "worker", &selected).unwrap(),
-                version
-            );
-            assert!(enrolled_release_version(None, tag, "worker", &selected).is_err());
-        }
-        for tag in ["1.2.3", "other/v1.2.3", "worker/1.2.3", "worker/v01.2.3"] {
-            assert!(
-                enrolled_release_version(Some("worker"), tag, "worker", &selected).is_err(),
-                "{tag}"
-            );
-        }
-        assert!(
-            enrolled_release_version(Some("worker"), "worker/v1.2.3", "other", &selected).is_err()
-        );
-        assert!(
-            enrolled_release_version(
-                Some("worker"),
-                "worker/v1.2.3",
-                "worker",
-                &["worker".into(), "engine".into()]
-            )
-            .is_err()
-        );
-        assert_eq!(
-            enrolled_release_version(None, "1.2.3", "worker", &selected).unwrap(),
-            "1.2.3"
-        );
-        for filter in [
-            "*/v[0-9]*",
-            "../v[0-9]*",
-            "worker/v*",
-            "worker/v[0-9]*,other/v[0-9]*",
-        ] {
-            let source = format!("on:\n  push:\n    tags: ['{filter}']\njobs: {{}}\n");
-            assert!(
-                verify_tag_only_source_workflow(source.as_bytes(), source.as_bytes()).is_err(),
-                "{filter}"
-            );
-        }
-    }
-
-    #[test]
     fn signed_workflow_cannot_change_enrolled_authority_with_identical_triggers() {
         let enrolled = b"on:\n  push:\n    tags: ['[0-9]*']\npermissions:\n  contents: read\njobs:\n  build:\n    runs-on: ubuntu-24.04\n    steps:\n      - run: cargo package\n";
         let original: serde_yaml::Value = serde_yaml::from_slice(enrolled).unwrap();
@@ -1889,6 +2442,33 @@ mod tests {
         ] {
             assert!(verify_tag_only_source_workflow(changed, enrolled).is_err());
             assert!(verify_tag_only_source_workflow(changed, changed).is_err());
+        }
+    }
+
+    #[test]
+    fn independent_source_enrollment_keeps_exact_namespace_and_tag_only_authority() {
+        let enrolled = b"on:\n  push:\n    tags: ['harbor-cache/v[0-9]*']\n";
+        verify_tag_only_source_workflow_with_namespace(enrolled, enrolled, Some("harbor-cache"))
+            .unwrap();
+        assert!(verify_tag_only_source_workflow(enrolled, enrolled).is_err());
+        assert!(
+            verify_tag_only_source_workflow_with_namespace(enrolled, enrolled, Some("harbor-sdk"))
+                .is_err()
+        );
+        for changed in [
+            &b"on:\n  push:\n    tags: ['[0-9]*']\n"[..],
+            &b"on:\n  push:\n    branches: ['harbor-cache/v1.2.3']\n"[..],
+            &b"on:\n  push:\n    tags: ['harbor-cache/v[0-9]*']\n  workflow_dispatch:\n"[..],
+            &b"on:\n  push:\n    tags: ['harbor-cache/v[0-9]*', 'harbor-sdk/v[0-9]*']\n"[..],
+        ] {
+            assert!(
+                verify_tag_only_source_workflow_with_namespace(
+                    changed,
+                    changed,
+                    Some("harbor-cache")
+                )
+                .is_err()
+            );
         }
     }
 
@@ -1964,4 +2544,73 @@ default=['dep:alias']
         assert_eq!(metadata["deps"][1]["target"], "cfg(unix)");
         assert_eq!(metadata["features"]["default"], json!(["dep:alias"]));
     }
+}
+#[test]
+fn signed_tag_identity_rejects_namespaced_aliases() {
+    let state = tempfile::tempdir().unwrap();
+    for directory in ["home", "cargo-home", "gpg"] {
+        fs::create_dir(state.path().join(directory)).unwrap();
+    }
+    output(data_command("gpg", state.path()).unwrap().args([
+        "--batch",
+        "--pinentry-mode",
+        "loopback",
+        "--passphrase",
+        "",
+        "--quick-generate-key",
+        "Publisher fixture <publisher@example.invalid>",
+        "ed25519",
+        "sign",
+        "0",
+    ]))
+    .unwrap();
+    let source = state.path().join("source");
+    output(
+        data_command("git", state.path())
+            .unwrap()
+            .arg("init")
+            .arg(&source),
+    )
+    .unwrap();
+    let git = |args: &[&str]| {
+        output(
+            data_command("git", state.path())
+                .unwrap()
+                .arg("-C")
+                .arg(&source)
+                .args([
+                    "-c",
+                    "user.name=Publisher fixture",
+                    "-c",
+                    "user.email=publisher@example.invalid",
+                ])
+                .args(args),
+        )
+        .unwrap()
+    };
+    git(&["commit", "--allow-empty", "-m", "fixture"]);
+    let sha = String::from_utf8(git(&["rev-parse", "HEAD"]).stdout).unwrap();
+    git(&[
+        "-c",
+        "user.signingkey=publisher@example.invalid",
+        "tag",
+        "-s",
+        "component-a/v1.2.3",
+        "-m",
+        "signed release",
+    ]);
+    let object =
+        String::from_utf8(git(&["rev-parse", "refs/tags/component-a/v1.2.3"]).stdout).unwrap();
+    git(&["update-ref", "refs/tags/component-b/v1.2.3", object.trim()]);
+    // Git validates the same genuine signature under either ref name.
+    git(&["verify-tag", "refs/tags/component-b/v1.2.3"]);
+    verify_signed_tag_identity(state.path(), &source, "component-a/v1.2.3", sha.trim()).unwrap();
+    assert!(
+        verify_signed_tag_identity(state.path(), &source, "component-b/v1.2.3", sha.trim())
+            .is_err()
+    );
+    assert!(
+        verify_signed_tag_identity(state.path(), &source, "component-a/v1.2.3", &"f".repeat(40))
+            .is_err()
+    );
 }

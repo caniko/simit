@@ -186,11 +186,107 @@ const PINNED_TREEFMT_CALL: &str =
 const FMT_TOOLCHAIN_BINDING: &str =
     "fmtToolchain = rs-harbor.lib.mkToolchain {inherit pkgs; toolchainProfile = \"nightly\";};";
 
-fn rust_library(content: &str) -> &'static str {
-    ["harbor.lib.rust", "harbor-rs.lib", "rs-harbor.lib"]
-        .into_iter()
-        .find(|library| content.contains(library))
-        .unwrap_or("rs-harbor.lib")
+fn fmt_toolchain_binding(content: &str, anchor: &str) -> Result<String> {
+    use rnix::ast::{AttrpathValue, Expr};
+    fn selector_tokens(function: impl rnix::ast::AstNode) -> String {
+        function
+            .syntax()
+            .descendants_with_tokens()
+            .filter_map(|node| node.into_token())
+            .filter(|token| {
+                !matches!(
+                    token.kind(),
+                    rnix::SyntaxKind::TOKEN_WHITESPACE | rnix::SyntaxKind::TOKEN_COMMENT
+                )
+            })
+            .map(|token| token.text().to_owned())
+            .collect()
+    }
+    let parsed = rnix::Root::parse(content);
+    if !parsed.errors().is_empty() {
+        bail!(patch_error(
+            "Rust library binding",
+            "cannot parse flake.nix to resolve the active Harbor toolchain"
+        ));
+    }
+    let anchors: Vec<_> = parsed
+        .syntax()
+        .descendants()
+        .filter_map(|node| {
+            cast_nix_node::<AttrpathValue>(node.clone())
+                .filter(|binding| {
+                    binding
+                        .attrpath()
+                        .is_some_and(|path| path.to_string() == anchor)
+                })
+                .map(|_| node)
+        })
+        .collect();
+    if anchors.len() != 1 {
+        bail!(patch_error(
+            "Rust library binding",
+            "expected one wiring anchor to resolve the active Harbor toolchain"
+        ));
+    }
+    // Resolve the lexical toolchain binding used beside the wiring anchor.
+    // Comments, strings and differently named migration bindings cannot select it.
+    for scope in anchors[0].ancestors().skip(1).filter(|node| {
+        node.kind() == rnix::SyntaxKind::NODE_LET_IN
+            || cast_nix_node::<rnix::ast::AttrSet>(node.clone())
+                .is_some_and(|set| set.rec_token().is_some())
+    }) {
+        let bindings: Vec<_> = scope
+            .children()
+            .filter_map(cast_nix_node::<AttrpathValue>)
+            .filter(|binding| {
+                binding
+                    .attrpath()
+                    .is_some_and(|path| path.to_string() == "toolchain")
+            })
+            .collect();
+        if bindings.is_empty() {
+            if scope
+                .children()
+                .filter_map(cast_nix_node::<AttrpathValue>)
+                .any(|binding| {
+                    binding
+                        .attrpath()
+                        .is_some_and(|path| path.to_string() == "rustToolchain")
+                })
+            {
+                // Older crane/overlay flakes already pin their own formatter
+                // package. Reuse it rather than inventing a Harbor input.
+                return Ok("fmtToolchain = {inherit rustToolchain;};".to_owned());
+            }
+            continue;
+        }
+        if bindings.len() != 1 {
+            bail!(patch_error(
+                "Rust library binding",
+                "toolchain binding is ambiguous; wire the formatter toolchain explicitly"
+            ));
+        }
+        let function = match bindings[0].value().and_then(unparen) {
+            Some(Expr::Apply(call)) => call.lambda().and_then(unparen),
+            _ => None,
+        };
+        if let Some(Expr::Select(function)) = function {
+            let selector = selector_tokens(function);
+            for library in ["harbor.lib.rust", "harbor-rs.lib", "rs-harbor.lib"] {
+                if selector == format!("{library}.mkToolchain") {
+                    return Ok(FMT_TOOLCHAIN_BINDING.replace("rs-harbor.lib", library));
+                }
+            }
+        }
+        bail!(patch_error(
+            "Rust library binding",
+            "active toolchain is not a supported Harbor mkToolchain call; wire the formatter toolchain explicitly"
+        ));
+    }
+    Err(patch_error(
+        "Rust library binding",
+        "no active Harbor toolchain binding found; wire the formatter toolchain explicitly",
+    ))
 }
 
 /// Migrate an old-shape treefmtEval call site to the pinned rustfmtPackage
@@ -219,7 +315,7 @@ fn migrate_treefmt_call(patched: &mut String) -> Result<()> {
             .chars()
             .take_while(|ch| ch.is_whitespace())
             .collect();
-        let binding = FMT_TOOLCHAIN_BINDING.replace("rs-harbor.lib", rust_library(patched));
+        let binding = fmt_toolchain_binding(patched, "treefmtEval")?;
         let binding = format!("{indent}{binding}\n");
         patched.insert_str(line_start, &binding);
     }
@@ -299,7 +395,10 @@ pub fn patch_existing(
         .lines()
         .any(|line| line.trim_start().starts_with("treefmtEval ="))
     {
-        let hook_bindings = HOOK_BINDINGS.replace("rs-harbor.lib", rust_library(&patched));
+        let hook_bindings = HOOK_BINDINGS.replace(
+            FMT_TOOLCHAIN_BINDING,
+            &fmt_toolchain_binding(&patched, "package")?,
+        );
         ensure_after_statement(
             &mut patched,
             &hook_bindings,
@@ -692,14 +791,34 @@ pub fn flake_passes_rustfmt_package(flake_content: &str) -> bool {
 fn has_treefmt_eval_import(content: &str) -> bool {
     use rnix::ast::Expr;
 
-    fn imports_policy<T: rnix::ast::AstNode>(argument: T) -> bool {
-        argument.syntax().descendants().any(|node| {
-            let Some(import) = cast_nix_node::<rnix::ast::Apply>(node) else {
-                return false;
-            };
-            matches!(import.lambda().and_then(unparen), Some(Expr::Ident(id)) if id.to_string() == "import")
-                && matches!(import.argument().and_then(unparen), Some(Expr::Path(path)) if path.to_string() == "./nix/treefmt.nix")
-        })
+    fn imports_policy(argument: Expr) -> bool {
+        let Some(argument) = unparen(argument) else {
+            return false;
+        };
+        match argument {
+            Expr::Apply(call) => {
+                let Some(function) = call.lambda().and_then(unparen) else {
+                    return false;
+                };
+                if matches!(&function, Expr::Ident(id) if id.to_string() == "import") {
+                    matches!(call.argument().and_then(unparen), Some(Expr::Path(path)) if path.to_string() == "./nix/treefmt.nix")
+                } else {
+                    // Follow an applied import, never an unused call argument.
+                    imports_policy(function)
+                }
+            }
+            Expr::LetIn(binding) => binding.body().is_some_and(imports_policy),
+            Expr::With(scope) => scope.body().is_some_and(imports_policy),
+            Expr::Lambda(function) => function.body().is_some_and(imports_policy),
+            Expr::IfElse(branch) => {
+                branch.body().is_some_and(imports_policy)
+                    && branch.else_body().is_some_and(imports_policy)
+            }
+            Expr::BinOp(merge) if merge.operator() == Some(rnix::ast::BinOpKind::Update) => {
+                merge.lhs().is_some_and(imports_policy) || merge.rhs().is_some_and(imports_policy)
+            }
+            _ => false,
+        }
     }
 
     let parsed = rnix::Root::parse(content);
@@ -2057,13 +2176,28 @@ fn has_treefmt_shell_package(content: &str) -> bool {
     parsed
         .syntax()
         .descendants()
-        .filter_map(cast_nix_node::<AttrpathValue>)
-        .any(|binding| {
+        .filter_map(|node| {
+            cast_nix_node::<AttrpathValue>(node.clone()).map(|binding| (node, binding))
+        })
+        .any(|(node, binding)| {
             let Some(Attr::Ident(name)) = binding.attrpath().and_then(|path| path.attrs().last())
             else {
                 return false;
             };
             if !matches!(name.to_string().as_str(), "packages" | "extraPackages") {
+                return false;
+            }
+            let in_shell = node.ancestors().any(|node| {
+                cast_nix_node::<AttrpathValue>(node)
+                    .and_then(|parent| parent.attrpath())
+                    .is_some_and(|path| {
+                        let name = path.to_string();
+                        name == "devShells"
+                            || name.starts_with("devShells.")
+                            || matches!(name.as_str(), "devShell" | "mkDevShells")
+                    })
+            });
+            if !in_shell {
                 return false;
             }
             binding.value().is_some_and(includes_wrapper)
@@ -2279,6 +2413,34 @@ mod tests {
         assert!(!has_treefmt_eval_import(
             "{ treefmtEval = null; unused = import ./nix/treefmt.nix; }"
         ));
+        for module in [
+            "let unused = import ./nix/treefmt.nix; in {}",
+            "{ unused = import ./nix/treefmt.nix; }",
+            "(_: {}) (import ./nix/treefmt.nix)",
+            "if false then import ./nix/treefmt.nix else {}",
+            "with { unused = import ./nix/treefmt.nix; }; {}",
+        ] {
+            assert!(
+                !has_treefmt_eval_import(&format!(
+                    "{{ treefmtEval = treefmt-nix.lib.evalModule pkgs ({module}); }}"
+                )),
+                "{module}"
+            );
+        }
+        for module in [
+            "import ./nix/treefmt.nix",
+            "let unused = {}; in import ./nix/treefmt.nix",
+            "with {}; import ./nix/treefmt.nix",
+            "{ ... }: import ./nix/treefmt.nix",
+            "if enabled then import ./nix/treefmt.nix else import ./nix/treefmt.nix",
+        ] {
+            assert!(
+                has_treefmt_eval_import(&format!(
+                    "{{ treefmtEval = treefmt-nix.lib.evalModule pkgs ({module}); }}"
+                )),
+                "{module}"
+            );
+        }
     }
 
     #[test]
@@ -2452,6 +2614,26 @@ mod tests {
     const NEW_MODULE: &str = "{rustfmtPackage}: {pkgs, ...}: {}";
 
     #[test]
+    fn treefmt_wrapper_must_belong_to_shell_packages() {
+        for key in ["packages", "extraPackages"] {
+            let decoy = format!(
+                "{{ {key} = [treefmtEval.config.build.wrapper]; devShells.default = {{ packages = []; }}; }}"
+            );
+            assert!(!has_treefmt_shell_package(&decoy));
+            let shell = format!(
+                "{{ devShells.default = pkgs.mkShell {{ {key} = [treefmtEval.config.build.wrapper]; }}; }}"
+            );
+            assert!(has_treefmt_shell_package(&shell));
+        }
+        assert!(has_treefmt_shell_package(
+            "{ devShells = (harbor.lib.rust.mkDevShells { extraPackages = [treefmtEval.config.build.wrapper]; }) // {}; }"
+        ));
+        assert!(has_treefmt_shell_package(
+            "{ devShells.default.packages = [treefmtEval.config.build.wrapper]; }"
+        ));
+    }
+
+    #[test]
     fn migrate_treefmt_call_upgrades_bare_call_site() {
         let mut patched = OLD_WIRED_FLAKE.to_owned();
         migrate_treefmt_call(&mut patched).unwrap();
@@ -2516,6 +2698,36 @@ mod tests {
             assert_eq!(
                 patched,
                 patch_existing(&patched, AuditTools::default(), true).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn rust_library_resolution_ignores_comments_strings_and_unused_bindings() {
+        for library in ["harbor.lib.rust", "harbor-rs.lib", "rs-harbor.lib"] {
+            let original = OLD_WIRED_FLAKE.replace("rs-harbor.lib", library)
+                .replace("pkgs = import nixpkgs { inherit system; };", "# harbor.lib.rust and harbor-rs.lib are migration notes\n        unusedNote = \"harbor.lib.rust\";\n        unusedLibrary = harbor.lib.rust;\n        pkgs = import nixpkgs { inherit system; };");
+            let patched = patch_existing(&original, AuditTools::default(), true).unwrap();
+            assert!(
+                patched.contains(&format!("fmtToolchain = {library}.mkToolchain")),
+                "{patched}"
+            );
+            assert_eq!(
+                patched,
+                patch_existing(&patched, AuditTools::default(), true).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn rust_library_resolution_obeys_nonrecursive_and_recursive_scope() {
+        for (recursive, library) in [("", "rs-harbor.lib"), ("rec", "harbor.lib.rust")] {
+            let source = format!(
+                "let toolchain = rs-harbor.lib.mkToolchain {{}}; in {recursive} {{ toolchain = harbor.lib.rust.mkToolchain {{}}; treefmtEval = null; }}"
+            );
+            assert_eq!(
+                fmt_toolchain_binding(&source, "treefmtEval").unwrap(),
+                FMT_TOOLCHAIN_BINDING.replace("rs-harbor.lib", library)
             );
         }
     }

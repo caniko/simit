@@ -10,26 +10,26 @@ fn executable(path: &std::path::Path, contents: &str) {
 }
 
 #[test]
-fn managed_formatter_failures_never_fall_back_to_cargo_or_ambient_treefmt() {
+fn declared_formatter_failures_never_fall_back_to_cargo_or_ambient_treefmt() {
     let temp = TempDir::new().unwrap();
     let root = temp.path();
     let bin = root.join("bin");
     let wrapper = root.join("wrapper");
     fs::create_dir(&bin).unwrap();
+    let shell = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+        .map(|path| path.join("sh"))
+        .find(|path| path.is_file())
+        .unwrap();
+    std::os::unix::fs::symlink(&shell, bin.join("sh")).unwrap();
     fs::create_dir_all(wrapper.join("bin")).unwrap();
     fs::create_dir(root.join("nix")).unwrap();
     fs::write(root.join("nix/treefmt.nix"), "{}").unwrap();
     executable(
         &bin.join("nix"),
-        "#!/bin/sh\ncase $1 in eval) test \"$MODE\" != eval-failed || exit 7; case \"$*\" in *f.meta.mainProgram*) echo treefmt;; *) test \"$MODE\" = missing || echo /fixture.drv;; esac;; build) echo \"$WRAPPER\";; esac\n",
+        "#!/bin/sh\ncase $1 in eval) test \"$MODE\" != eval-failed || exit 7; if [ \"$MODE\" != missing ]; then case \"$*\" in *f.drvPath*) echo /fixture.drv;; *) echo treefmt;; esac; fi;; build) echo \"$WRAPPER\";; esac\n",
     );
     executable(&bin.join("cargo"), "#!/bin/sh\necho cargo-fallback\n");
     executable(&bin.join("treefmt"), "#!/bin/sh\necho ambient-treefmt\n");
-    let shell = std::env::split_paths(&std::env::var_os("PATH").unwrap())
-        .map(|directory| directory.join("sh"))
-        .find(|path| path.is_file())
-        .unwrap();
-    std::os::unix::fs::symlink(&shell, bin.join("sh")).unwrap();
     let run = |mode: &str| {
         Command::new(&shell)
             .current_dir(root)
@@ -40,7 +40,7 @@ fn managed_formatter_failures_never_fall_back_to_cargo_or_ambient_treefmt() {
             .output()
             .unwrap()
     };
-    for (mode, expected) in [("missing", 1), ("eval-failed", 7), ("no-executable", 1)] {
+    for (mode, expected) in [("eval-failed", 7), ("no-executable", 1)] {
         let output = run(mode);
         assert_eq!(output.status.code(), Some(expected));
         assert!(output.stdout.is_empty());
@@ -58,7 +58,8 @@ fn managed_formatter_failures_never_fall_back_to_cargo_or_ambient_treefmt() {
     assert!(output.status.success());
     assert_eq!(output.stdout, b"project-treefmt\n");
 
-    fs::remove_file(root.join("nix/treefmt.nix")).unwrap();
+    // A source filename alone does not declare a flake formatter. Only a
+    // successful evaluation with no formatter permits the legacy fallback.
     let output = run("missing");
     assert!(output.status.success());
     assert_eq!(output.stdout, b"ambient-treefmt\n");

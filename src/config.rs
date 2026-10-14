@@ -28,9 +28,9 @@ pub mod custody;
 #[serde(deny_unknown_fields)]
 pub struct ProjectConfig {
     #[serde(default)]
-    pub monorepo: Option<crate::monorepo::Config>,
-    #[serde(default)]
     pub review_policy: Option<crate::render::review_policy::Config>,
+    #[serde(default)]
+    pub monorepo: Option<crate::monorepo::Config>,
     #[serde(default)]
     pub review: Option<crate::review::generation::Config>,
     #[serde(default)]
@@ -2289,9 +2289,6 @@ impl ProjectConfig {
     }
 
     fn validate_common(&self) -> Result<()> {
-        if let Some(monorepo) = &self.monorepo {
-            monorepo.validate()?;
-        }
         crate::render::workflow_templates::validate_config(&self.ci)?;
         if let Some(policy) = &self.review_policy {
             policy.validate()?;
@@ -2300,6 +2297,9 @@ impl ProjectConfig {
             {
                 bail!("[review_policy] requires GitHub Actions");
             }
+        }
+        if let Some(monorepo) = &self.monorepo {
+            monorepo.validate()?;
         }
         if let Some(review) = &self.review {
             review.validate()?;
@@ -4418,8 +4418,18 @@ fn load_flake_config(workspace_root: &Path) -> Result<Option<ProjectConfigSource
         );
     }
 
-    let config =
+    let config: ProjectConfig =
         serde_json::from_slice(&output.stdout).context("parsing flake outputs.simitConfig JSON")?;
+    if config.monorepo.as_ref().is_some_and(|monorepo| {
+        monorepo
+            .components
+            .iter()
+            .any(|component| !component.releases.is_empty())
+    }) {
+        bail!(
+            "native release owners require static simit.toml or Cargo metadata policy; flake outputs.simitConfig cannot preserve non-evaluated historical publication policy"
+        );
+    }
     Ok(Some(ProjectConfigSource {
         label: "flake outputs.simitConfig".to_owned(),
         config,

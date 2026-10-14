@@ -9,6 +9,7 @@ on:
       - "feat/rust-ci-runtime-20261012"
       - "fix/transport-review-followup-20261013"
       - "feat/ci-completion-custody-20261012"
+      - "migrate/harbor-monorepo-reconcile-20261012-current"
       - "trunk"
   pull_request:
 

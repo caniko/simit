@@ -1,0 +1,272 @@
+"""No external services, credentials or packages: exercise protected upload logic."""
+import base64
+import hashlib
+import importlib.util
+import io
+import json
+import os
+from pathlib import Path
+import sys
+sys.dont_write_bytecode = True
+import tarfile
+import tempfile
+import subprocess
+from unittest.mock import MagicMock, patch
+import zipfile
+
+spec = importlib.util.spec_from_file_location("native", sys.argv[1])
+native = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(native)
+
+
+def refuses(function):
+    try:
+        function()
+    except (RuntimeError, KeyError):
+        return
+    raise AssertionError("tampering accepted")
+
+
+with tempfile.TemporaryDirectory() as temp:
+    root = Path(temp)
+    identity = {"schemaVersion": 2, "registry": "python", "name": "example", "version": "1.2.3", "namespace": "python-owner", "tag": "python-owner/v1.2.3", "source": "b" * 40, "repository": "owner/repo", "workflow": ".github/workflows/publish-python-python-owner.yaml", "runId": 42}
+    wheel = root / "example-1.2.3-py3-none-any.whl"
+    metadata = b"Metadata-Version: 2.4\nName: example\nVersion: 1.2.3\nSummary: test\nClassifier: Programming Language :: Python\nClassifier: License :: OSI Approved :: MIT License\nProject-URL: Source, https://example.com/source\nLicense-Expression: MIT\nLicense-File: LICENSE\nRequires-Dist: dependency>=1\n\nOriginal source\n"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr("example-1.2.3.dist-info/METADATA", metadata)
+    sdist = root / "example-1.2.3.tar.gz"
+    with tarfile.open(sdist, "w:gz") as archive:
+        info = tarfile.TarInfo("example-1.2.3/PKG-INFO")
+        info.size = len(metadata)
+        archive.addfile(info, io.BytesIO(metadata))
+    files = {p.name: native.digest(p).hex() for p in (wheel, sdist)}
+    receipt = identity | {"runAttempt": 1, "files": files}
+    receipt_path = root / "receipt.json"
+    receipt_path.write_text(json.dumps(receipt))
+    assert native.validate_artifacts(root, identity, 1) == files
+    for key, wrong in [("namespace", "other"), ("tag", "other/v1.2.3"), ("source", "c" * 40), ("repository", "other/repo"), ("workflow", ".github/workflows/other.yaml"), ("runId", 43), ("runAttempt", 2), ("name", "other"), ("version", "1.2.4"), ("files", {wheel.name: "0" * 64, sdist.name: files[sdist.name]})]:
+        receipt_path.write_text(json.dumps(receipt | {key: wrong}))
+        refuses(lambda: native.validate_artifacts(root, identity, 1))
+    receipt_path.write_text(json.dumps(receipt))
+    original = {p.name: p.read_bytes() for p in (wheel, sdist)}
+    # Partial publication: only the original missing wheel is uploaded, then an
+    # uncertain response reconciles matching immutable bytes without a rebuild.
+    published = {sdist.name}
+    def registry(_):
+        return {"info": {"name": "example", "version": "1.2.3"}, "urls": [{"filename": name, "yanked": False, "digests": {"sha256": files[name]}} for name in published]}
+    native.registry_metadata = registry
+    calls = []
+    def upload(out, selected, pending, manifest, token):
+        assert pending == [wheel.name]
+        assert token == "disposable-fixture-token"
+        assert (out / wheel.name).read_bytes() == original[wheel.name]
+        calls.append(pending)
+        published.update(pending)
+        raise RuntimeError("lost upload response")
+    native.upload_native = upload
+    os.environ["UV_PUBLISH_TOKEN"] = "disposable-fixture-token"
+    native.publish(root, identity, 1, {})
+    del os.environ["UV_PUBLISH_TOKEN"]
+    native.publish(root, identity, 1, {})
+    assert len(calls) == 1
+    assert all((root / name).read_bytes() == data for name, data in original.items())
+    native.registry_metadata = lambda _: {"info": {"name": "example", "version": "1.2.3"}, "urls": [{"filename": wheel.name, "yanked": False, "digests": {"sha256": "0" * 64}}]}
+    refuses(lambda: native.publish(root, identity, 1, {}))
+    native.registry_metadata = lambda _: {"info": {"name": "example", "version": "1.2.3"}, "urls": [{"filename": name, "yanked": False, "digests": {"sha256": checksum}} for name, checksum in files.items()] + [{"filename": "extra-1.2.3.whl", "yanked": False, "digests": {"sha256": "a" * 64}}]}
+    refuses(lambda: native.publish(root, identity, 1, {}))
+    # Upload transport parses artifacts only. Candidate config/hooks never run.
+    native.subprocess.run = lambda *a, **kw: (_ for _ in ()).throw(AssertionError("candidate execution"))
+    for name in ("keys/maintainers.gpg", "flake.nix", "package.json", "scripts/publish.py"):
+        path = root / name
+        path.parent.mkdir(exist_ok=True)
+        path.write_text("raise RuntimeError('candidate tampering')")
+    # Restore actual protected uploader, intercept only the HTTP boundary.
+    actual = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(actual)
+    requests = []
+    actual.upload_request = requests.append
+    actual.upload_native(root, identity, [wheel.name], {}, "disposable-fixture-token")
+    assert requests[0].full_url == "https://upload.pypi.org/legacy/"
+    assert original[wheel.name] in requests[0].data
+    assert requests[0].data.count(b'name="classifiers"') == 2
+    assert b'name="classifier"' not in requests[0].data
+    assert b'name="project_urls"' in requests[0].data
+    assert b'name="license_expression"' in requests[0].data
+    assert b'name="license_file"' in requests[0].data
+    assert b'name="requires_dist"' in requests[0].data
+    npm = {"name": "@example/native", "version": "1.2.3", "scripts": {"prepublishOnly": "exit 99", "preinstall": "exit 99", "install": "exit 99", "postinstall": "exit 99"}, "publishConfig": {"registry": "https://attacker.invalid", "provenance": True}}
+    tarball = root / "native-1.2.3.tgz"
+    with tarfile.open(tarball, "w:gz") as archive:
+        data = json.dumps(npm).encode()
+        info = tarfile.TarInfo("package/package.json")
+        info.size = len(data)
+        archive.addfile(info, io.BytesIO(data))
+    npm_identity = identity | {"registry": "npm", "name": npm["name"]}
+    actual.upload_native(root, npm_identity, [tarball.name], {"publishConfig": {"access": "public", "tag": "stable"}}, "disposable-fixture-token")
+    request = requests[-1]
+    assert request.full_url == "https://registry.npmjs.org/%40example%2Fnative"
+    body = json.loads(request.data)
+    assert body["versions"]["1.2.3"]["scripts"] == npm["scripts"]
+    assert body["versions"]["1.2.3"]["publishConfig"] == npm["publishConfig"]
+    assert base64.b64decode(body["_attachments"][tarball.name]["data"]) == tarball.read_bytes()
+    assert body["dist-tags"] == {"stable": "1.2.3"}
+    for config, expected in [({}, None), ({"access": None}, None), ({"access": "public"}, "public"), ({"access": "restricted"}, "restricted")]:
+        actual.upload_native(root, npm_identity, [tarball.name], {"publishConfig": config}, "fixture")
+        assert json.loads(requests[-1].data)["access"] == expected, config
+    for invalid in ["private", False, 42, {}, []]:
+        before = len(requests)
+        refuses(lambda: actual.upload_native(root, npm_identity, [tarball.name], {"publishConfig": {"access": invalid}}, "fixture"))
+        assert len(requests) == before
+    for invalid in [None, "public", [], False, 7]:
+        before = len(requests)
+        refuses(lambda: actual.npm_publish_config({"publishConfig": invalid}))
+        refuses(lambda: actual.upload_native(root, npm_identity, [tarball.name], {"publishConfig": invalid}, "fixture"))
+        assert len(requests) == before
+    refuses(lambda: actual.upload_native(root, npm_identity, [tarball.name], {"publishConfig": {"registry": "https://attacker.invalid"}}, "fixture"))
+    before = len(requests)
+    for tag in ["v1", "v1.4", "vv1.4", "v1.2.3", "v1.2.3-beta.1", "v1.x", "v1.2.x-beta", "vx.x.x-beta", "x", "X", "X.X.X", "x.1", "x.1.1", "v1.x.1", "x.9007199254740992", "v1.x.9007199254740992"]:
+        assert not actual.valid_npm_dist_tag(tag), tag
+        refuses(lambda: actual.upload_native(root, npm_identity, [tarball.name], {"publishConfig": {"tag": tag}}, "fixture"))
+    assert len(requests) == before
+    for tag in ["latest", "next", "stable", "release-candidate", "vnext", "v1-beta", "v1.4-beta", "V1.4", "v01.4", "v1.2.3-", "v1.2.3-beta_1", "v1.2.3-beta.01", "xfoo", "vv1.2.3", "v9007199254740991", "v0.9007199254740991"]:
+        assert actual.valid_npm_dist_tag(tag), tag
+    for version in ["9007199254740992.0.0", "1.9007199254740992.0", "1.2.9007199254740992"]:
+        assert not actual.valid_npm_version(version), version
+    assert actual.valid_npm_version("9007199254740991.2.3")
+    before = len(requests)
+    for provenance in ["true", 1, {}, []]:
+        refuses(lambda: actual.upload_native(root, npm_identity, [tarball.name], {"publishConfig": {"provenance": provenance}}, "fixture"))
+    assert len(requests) == before
+    before = len(requests)
+    refuses(lambda: actual.upload_native(root, npm_identity | {"name": "unscoped"}, [tarball.name], {"publishConfig": {"access": "restricted"}}, "fixture"))
+    assert len(requests) == before
+    # The provenance signer receives original source/bytes and protected workflow
+    # identity, with OIDC in a separate child that cannot access registry tokens.
+    provider = {"PATH": "/trusted/bin", "HOME": temp, "ACTIONS_ID_TOKEN_REQUEST_URL": "https://oidc.example/token", "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "fixture-oidc", "GITHUB_WORKFLOW_REF": "owner/repo/.github/workflows/trusted-publish-npm-node-engine.yaml@refs/heads/trunk", "GITHUB_WORKFLOW_SHA": "a" * 40, "GITHUB_RUN_ID": "99", "GITHUB_RUN_ATTEMPT": "2", "GITHUB_REPOSITORY_ID": "101", "GITHUB_REPOSITORY_OWNER_ID": "102", "NODE_AUTH_TOKEN": "must-not-reach-signer", "NODE_OPTIONS": "--require candidate.js"}
+    def sign(arguments, **kwargs):
+        assert "NODE_AUTH_TOKEN" not in kwargs["env"]
+        assert "NODE_OPTIONS" not in kwargs["env"]
+        assert arguments[0] == "node"
+        assert arguments[1].endswith("native-provenance.cjs")
+        statement = json.loads(kwargs["input"])
+        assert statement["subject"][0]["digest"]["sha512"] == hashlib.sha512(tarball.read_bytes()).hexdigest()
+        dependencies = statement["predicate"]["buildDefinition"]["resolvedDependencies"]
+        assert dependencies[0]["digest"]["gitCommit"] == npm_identity["source"]
+        assert dependencies[0]["uri"].endswith("@refs/tags/" + npm_identity["tag"])
+        assert dependencies[1]["digest"]["gitCommit"] == "a" * 40
+        assert statement["predicate"]["runDetails"]["metadata"]["invocationId"].endswith("/99/attempts/2")
+        bundle = {"mediaType": "application/vnd.dev.sigstore.bundle.v0.3+json", "dsseEnvelope": {"payload": base64.b64encode(kwargs["input"].encode()).decode()}}
+        return subprocess.CompletedProcess(arguments, 0, json.dumps(bundle), "")
+    with patch.dict(os.environ, provider, clear=True), patch.object(actual.subprocess, "check_output", return_value="/trusted/npm\n") as npm_root, patch.object(actual.subprocess, "run", side_effect=sign):
+        actual.upload_native(root, npm_identity, [tarball.name], {"publishConfig": {"access": "public", "provenance": True}}, "fixture")
+        assert "NODE_AUTH_TOKEN" not in npm_root.call_args.kwargs["env"]
+    attachments = json.loads(requests[-1].data)["_attachments"]
+    assert base64.b64decode(attachments[tarball.name]["data"]) == tarball.read_bytes()
+    assert npm_identity["name"] + "-1.2.3.sigstore" in attachments
+    provenance = attachments[npm_identity["name"] + "-1.2.3.sigstore"]
+    assert json.loads(provenance["data"])["mediaType"] == provenance["content_type"]
+    assert len(provenance["data"].encode()) == provenance["length"]
+    # Unset access plus provenance checks visibility without promoting private
+    # packages, redirects or an unavailable/ambiguous registry response.
+    def visibility_response(value):
+        response = MagicMock()
+        response.__enter__.return_value.read.return_value = json.dumps(value).encode()
+        return response
+    with patch.object(actual.urllib.request, "build_opener") as opener, patch.object(actual, "provenance_bundle", return_value={"mediaType": "application/json"}) as signer:
+        opener.return_value.open.return_value = visibility_response({"public": True})
+        actual.upload_native(root, npm_identity, [tarball.name], {"publishConfig": {"provenance": True}}, "fixture")
+        assert json.loads(requests[-1].data)["access"] is None
+        request = opener.return_value.open.call_args.args[0]
+        assert request.full_url == "https://registry.npmjs.org/-/package/%40example%2Fnative/visibility"
+        assert request.get_header("Authorization") == "Bearer fixture"
+        assert opener.call_args.args[0] is actual.NoRedirect
+        signer.reset_mock()
+        before = len(requests)
+        for value in [{"public": False}, {}, {"public": "true"}]:
+            opener.return_value.open.return_value = visibility_response(value)
+            refuses(lambda: actual.upload_native(root, npm_identity, [tarball.name], {"publishConfig": {"provenance": True}}, "fixture"))
+        opener.return_value.open.side_effect = actual.urllib.error.HTTPError(request.full_url, 404, "fixture", {}, None)
+        refuses(lambda: actual.upload_native(root, npm_identity, [tarball.name], {"publishConfig": {"provenance": True}}, "fixture"))
+        opener.return_value.open.side_effect = actual.urllib.error.HTTPError(request.full_url, 500, "fixture", {}, None)
+        try:
+            actual.upload_native(root, npm_identity, [tarball.name], {"publishConfig": {"provenance": True}}, "fixture")
+        except actual.urllib.error.HTTPError as error:
+            assert error.code == 500
+        else:
+            raise AssertionError("visibility provider error accepted")
+        signer.assert_not_called()
+        assert len(requests) == before
+    # An existing exact tarball under a different channel is not a propagated
+    # release. Recovery must reconcile only the signed channel, without repack.
+    npm_out = root / "npm-out"
+    npm_out.mkdir()
+    packed = json.dumps({"name": npm_identity["name"], "version": npm_identity["version"]}).encode()
+    with tarfile.open(npm_out / tarball.name, "w:gz") as archive:
+        entry = tarfile.TarInfo("package/package.json")
+        entry.size = len(packed)
+        archive.addfile(entry, io.BytesIO(packed))
+    npm_files = {tarball.name: actual.digest(npm_out / tarball.name).hex()}
+    integrity = "sha512-" + base64.b64encode(actual.digest(npm_out / tarball.name, "sha512")).decode()
+    (npm_out / "receipt.json").write_text(json.dumps(npm_identity | {"runAttempt": 1, "files": npm_files}))
+    with patch.object(actual.urllib.request, "build_opener") as opener, patch.dict(os.environ, {"NODE_AUTH_TOKEN": "restricted-fixture"}):
+        opener.return_value.open.return_value = visibility_response({"name": npm_identity["name"]})
+        actual.registry_metadata(npm_identity)
+        request = opener.return_value.open.call_args.args[0]
+        assert request.get_header("Authorization") == "Bearer restricted-fixture"
+        assert request.full_url == "https://registry.npmjs.org/%40example%2Fnative"
+        assert opener.call_args.args[0] is actual.NoRedirect
+        actual.registry_metadata(identity)
+        assert opener.return_value.open.call_args.args[0].get_header("Authorization") is None
+    propagated = {"name": npm_identity["name"], "versions": {"1.2.3": {"name": npm_identity["name"], "version": "1.2.3", "dist": {"integrity": integrity}}}, "dist-tags": {"latest": "1.2.3"}}
+    transient = actual.urllib.error.HTTPError("https://registry.npmjs.org/fixture", 503, "temporary", {}, None)
+    throttled = actual.urllib.error.HTTPError("https://registry.npmjs.org/fixture", 429, "throttled", {}, None)
+    with patch.object(actual, "registry_metadata", side_effect=[None, transient, TimeoutError("timed out"), throttled, propagated, propagated]), patch.object(actual, "upload_native") as upload, patch.object(actual.time, "sleep") as sleep, patch.dict(os.environ, {"NODE_AUTH_TOKEN": "fixture-token"}):
+        actual.publish(npm_out, npm_identity, 1, {})
+        assert upload.call_count == 1 and sleep.call_count == 3
+    with patch.object(actual, "registry_metadata", side_effect=[None, propagated, transient, propagated, propagated]), patch.object(actual, "upload_native"), patch.object(actual.time, "sleep") as sleep, patch.dict(os.environ, {"NODE_AUTH_TOKEN": "fixture-token"}):
+        actual.publish(npm_out, npm_identity, 1, {})
+        assert sleep.call_count == 1
+    with patch.object(actual, "registry_metadata", side_effect=[None] + [transient] * 20), patch.object(actual, "upload_native"), patch.object(actual.time, "sleep") as sleep, patch.dict(os.environ, {"NODE_AUTH_TOKEN": "fixture-token"}):
+        try:
+            actual.publish(npm_out, npm_identity, 1, {})
+        except RuntimeError as error:
+            assert error.__cause__ is transient and sleep.call_count == 19
+        else:
+            raise AssertionError("propagation deadline ignored")
+    refuses(lambda: actual.publish(npm_out, npm_identity, 1, {"publishConfig": {"tag": None}}))
+    for tag in ["latest", "next"]:
+        state = {"name": npm_identity["name"], "versions": {"1.2.3": {"name": npm_identity["name"], "version": "1.2.3", "dist": {"integrity": integrity}}}, "dist-tags": {"other": "1.2.3"}}
+        tag_requests = []
+        def tag_upload(request):
+            assert request.full_url == "https://registry.npmjs.org/-/package/%40example%2Fnative/dist-tags/" + tag
+            assert request.method == "PUT" and json.loads(request.data) == "1.2.3"
+            assert request.get_header("Authorization") == "Bearer fixture-token"
+            state["dist-tags"][tag] = json.loads(request.data)
+            tag_requests.append(request)
+        manifest = {} if tag == "latest" else {"publishConfig": {"tag": tag}}
+        with patch.object(actual, "registry_metadata", side_effect=lambda _: state), patch.object(actual, "upload_request", side_effect=tag_upload), patch.object(actual.time, "sleep"), patch.dict(os.environ, {"NODE_AUTH_TOKEN": "fixture-token"}):
+            actual.publish(npm_out, npm_identity, 1, manifest)
+            assert state["dist-tags"][tag] == "1.2.3" and len(tag_requests) == 1
+            actual.publish(npm_out, npm_identity, 1, manifest)
+            assert len(tag_requests) == 1
+            exact_release = state["versions"].pop("1.2.3")
+            state["dist-tags"].pop(tag)
+            def concurrent_upload(*args):
+                state["versions"]["1.2.3"] = exact_release
+                raise RuntimeError("concurrent exact version publication")
+            with patch.object(actual, "upload_native", side_effect=concurrent_upload):
+                actual.publish(npm_out, npm_identity, 1, manifest)
+            assert state["dist-tags"][tag] == "1.2.3" and len(tag_requests) == 2
+            state["dist-tags"].pop(tag)
+            state["versions"]["1.2.3"]["dist"]["integrity"] = "sha512-conflict"
+            refuses(lambda: actual.publish(npm_out, npm_identity, 1, manifest))
+            assert len(tag_requests) == 2
+            state["versions"]["1.2.3"]["dist"]["integrity"] = integrity
+            with patch.object(actual, "upload_request", return_value=None):
+                refuses(lambda: actual.publish(npm_out, npm_identity, 1, manifest))
+            assert tag not in state["dist-tags"]
+    for invalid in ["bad name", "../evil", "_hidden", "node_modules", "@scope/.hidden", "@scope/pkg/extra", "bad%name"]:
+        assert not actual.valid_npm_package_name(invalid)
+    for valid in ["plain", "@scope/pkg", "LegacyCase", "http", "@scope/_legacy", "legacy!name", "a" * 215, "-foo", "-hidden"]:
+        assert actual.valid_npm_package_name(valid)
+print("native protected publisher contracts passed")

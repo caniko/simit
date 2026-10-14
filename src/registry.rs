@@ -1042,7 +1042,8 @@ fn infer_expected_primary_ci_files(
         backend.platform(),
     )?;
     if config.monorepo.is_some() {
-        return crate::monorepo::ci::files(workspace_root, &config);
+        let include_publishers = config.vscode.is_none() && config.jetbrains.is_none();
+        return crate::monorepo::ci::files(workspace_root, &config, include_publishers);
     }
     let snapshots = workflow_snapshots(marked);
     if backend.provider() == CiProvider::Crow {
@@ -1405,12 +1406,14 @@ fn push_prebuild_file(
     let Some(prebuild) = &config.prebuild else {
         return Ok(());
     };
-    files.push(crate::render::ci::github_prebuild_file(
+    files.push(crate::render::ci::github_prebuild_file_with_policy(
         prebuild.effective_system_runners(&config.ci),
         &config.ci.nix_builds,
         prebuild,
         &config.release.artifacts,
         config.release.attic.as_ref(),
+        config.release.tag_prefix,
+        config.release.notes_source(Platform::Github),
     )?);
     Ok(())
 }

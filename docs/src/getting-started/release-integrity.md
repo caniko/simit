@@ -95,12 +95,6 @@ workflow as typed YAML, including permissions, runners, jobs and credential
 contexts. Identical tag triggers alone do not authorize a modified workflow.
 Workflow changes require independent default-branch enrollment before a release;
 comments and YAML key ordering do not change execution authority.
-Independent monorepo Cargo releases enroll a single
-`<package>/v[0-9]*` tag filter. The publisher binds its namespace to the selected
-package and rejects bare or foreign-package tags and multi-package reconstruction.
-The signed tag remains the original-run identity; its plain SemVer version names
-the crate archive and registry record. Coordinated and ordinary single-crate
-workflows retain their unnamespaced numeric SemVer filter.
 Reconstruction explicitly selects crates.io and uses a neutral filesystem-root
 working directory with absolute manifest/target paths and private `HOME` /
 `CARGO_HOME`. Cargo therefore does not inherit a candidate configuration or a

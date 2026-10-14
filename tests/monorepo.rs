@@ -93,6 +93,131 @@ fn plan(root: &Path, changed: &[&str]) -> std::process::Output {
     command.output().unwrap()
 }
 
+fn enroll_release_checks(root: &Path) {
+    let mut config: toml_edit::DocumentMut = fs::read_to_string(root.join("simit.toml"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    for component in config["monorepo"]["components"]
+        .as_array_of_tables_mut()
+        .unwrap()
+        .iter_mut()
+    {
+        let mut gate = toml_edit::InlineTable::new();
+        gate.insert("id", "test".into());
+        gate.insert("run", "true".into());
+        let mut checks = toml_edit::Array::new();
+        checks.push(gate);
+        component["checks"] = toml_edit::value(checks);
+    }
+    write(root, "simit.toml", &config.to_string());
+}
+
+#[test]
+fn cargo_member_paths_normalize_to_repo_contract() {
+    let temp = fixture();
+    let output = plan(temp.path(), &["crates/engine/src/lib.rs"]);
+    assert!(output.status.success(), "{output:?}");
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(
+        value["selected"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("rust"))
+    );
+    assert!(
+        value["reasons"]["rust"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("changed:crates/engine/src/lib.rs"))
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn non_utf8_git_paths_select_full_graph_without_losing_known_paths() {
+    use std::os::unix::ffi::OsStringExt;
+    for tracked in [false, true] {
+        let temp = fixture();
+        let root = temp.path();
+        fixture_git(root, &["init", "-q"]);
+        fixture_git(root, &["config", "user.name", "Simit fixture"]);
+        fixture_git(root, &["config", "user.email", "fixture@example.invalid"]);
+        fixture_git(root, &["add", "."]);
+        fixture_git(
+            root,
+            &[
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "core.hooksPath=/dev/null",
+                "commit",
+                "-qm",
+                "base",
+            ],
+        );
+        let mut base = fixture_git(root, &["rev-parse", "HEAD"]);
+        let filename = std::ffi::OsString::from_vec(b"python/invalid-\xff.py".to_vec());
+        if tracked {
+            // Git objects can contain byte paths that APFS cannot materialize.
+            // Put one in an ancestor tree, then compare its deletion against
+            // our representable working tree without creating an invalid file.
+            let blob = fixture_git(root, &["rev-parse", "HEAD:python/server.py"]);
+            let mut cacheinfo = format!("100644,{},", blob.trim()).into_bytes();
+            cacheinfo.extend_from_slice(filename.as_encoded_bytes());
+            let status = Command::new("git")
+                .current_dir(root)
+                .args(["update-index", "--add", "--cacheinfo"])
+                .arg(std::ffi::OsString::from_vec(cacheinfo))
+                .status()
+                .unwrap();
+            assert!(status.success());
+            let tree = fixture_git(root, &["write-tree"]);
+            base = fixture_git(
+                root,
+                &[
+                    "-c",
+                    "commit.gpgsign=false",
+                    "commit-tree",
+                    tree.trim(),
+                    "-p",
+                    "HEAD",
+                    "-m",
+                    "byte path ancestor",
+                ],
+            );
+            fixture_git(root, &["read-tree", "HEAD"]);
+        } else if let Err(error) = fs::write(root.join(filename), "changed\n") {
+            // No untracked byte path exists if the native filesystem rejects
+            // it. The decoder test still exercises that input on every OS.
+            assert!(
+                cfg!(target_os = "macos") && error.raw_os_error() == Some(92),
+                "{error}"
+            );
+            continue;
+        }
+        write(root, "python/server.py", "known change\n");
+        let output = common::simit()
+            .current_dir(root)
+            .args(["monorepo", "plan", "--json", "--base", base.trim()])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{tracked}: {output:?}");
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["full"], true);
+        assert_eq!(
+            value["selected"],
+            serde_json::json!(["core", "python", "rust", "worker"])
+        );
+        assert!(
+            value["changedPaths"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("python/server.py"))
+        );
+    }
+}
+
 #[test]
 fn core_changes_select_transitive_consumers_and_prerequisites() {
     let temp = fixture();
@@ -115,6 +240,84 @@ fn core_changes_select_transitive_consumers_and_prerequisites() {
             .iter()
             .any(|v| v.as_str().unwrap().starts_with("dependent:"))
     );
+}
+
+#[test]
+fn monorepo_rejects_unsupported_extension_publication_before_reconciliation() {
+    for (section, path) in [
+        (
+            "[vscode]\ncodeberg_repo='example/extension'\n",
+            ".forgejo/workflows/publish-vscode-extension.yaml",
+        ),
+        (
+            "[jetbrains]\nplugin_xml_id='example.plugin'\n",
+            ".forgejo/workflows/publish-jetbrains-plugin.yaml",
+        ),
+    ] {
+        let temp = fixture();
+        let root = temp.path();
+        enroll_release_checks(root);
+        let config = format!(
+            "{}\n{section}",
+            fs::read_to_string(root.join("simit.toml")).unwrap()
+        );
+        write(root, "simit.toml", &config);
+        let publisher = format!(
+            "{}\nname: Retained extension publisher\non: [push]\njobs: {{}}\n",
+            simit::render::ci::GENERATED_WORKFLOW_MARKER
+        );
+        write(root, path, &publisher);
+        let output = common::simit()
+            .current_dir(root)
+            .args(["init", "ci"])
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("extension publication"),
+            "{output:?}"
+        );
+        assert_eq!(fs::read_to_string(root.join(path)).unwrap(), publisher);
+        assert_eq!(fs::read_to_string(root.join("simit.toml")).unwrap(), config);
+        let output = common::simit()
+            .current_dir(root)
+            .args(["init", "ci", "--primary-only"])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let audit = simit::registry::audit_ci(root).unwrap();
+        assert_eq!(
+            audit.status,
+            simit::registry::FeatureStatus::Managed,
+            "{audit:?}"
+        );
+        assert_eq!(fs::read_to_string(root.join(path)).unwrap(), publisher);
+        let ci: serde_yaml::Value = serde_yaml::from_str(
+            &fs::read_to_string(root.join(".github/workflows/ci.yaml")).unwrap(),
+        )
+        .unwrap();
+        for id in ["core", "rust", "python", "worker"] {
+            let step = ci["jobs"][format!("component-{id}")]["steps"]
+                .as_sequence()
+                .unwrap()
+                .iter()
+                .find(|step| step["name"] == "Verify generated workflows")
+                .unwrap();
+            let (_, command) = step["run"]
+                .as_str()
+                .unwrap()
+                .split_once("--command simit ")
+                .unwrap();
+            let output = common::simit()
+                .current_dir(root)
+                .args(command.split_whitespace())
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{id}: {output:?}");
+        }
+        assert_eq!(fs::read_to_string(root.join(path)).unwrap(), publisher);
+        assert_eq!(fs::read_to_string(root.join("simit.toml")).unwrap(), config);
+    }
 }
 
 #[test]
@@ -183,6 +386,59 @@ fn cycles_duplicate_ownership_and_traversal_are_rejected() {
             String::from_utf8_lossy(&output.stderr).contains(expected),
             "{output:?}"
         );
+    }
+}
+
+#[test]
+fn component_gate_environments_reject_workflow_expressions() {
+    for (value, valid) in [
+        ("${{ secrets.TEST_TOKEN }}", false),
+        ("prefix-${{ github.ref }}", false),
+        ("${{\n github.event.pull_request.title\n}}", false),
+        ("literal $TOKEN {{ braces }}\nsecond line", true),
+    ] {
+        let temp = fixture();
+        let root = temp.path();
+        enroll_release_checks(root);
+        let mut config: toml_edit::DocumentMut = fs::read_to_string(root.join("simit.toml"))
+            .unwrap()
+            .parse()
+            .unwrap();
+        let mut env = toml_edit::InlineTable::new();
+        env.insert("TEST_VALUE", value.into());
+        let gate = config["monorepo"]["components"]
+            .as_array_of_tables_mut()
+            .unwrap()
+            .get_mut(0)
+            .unwrap()["checks"]
+            .as_array_mut()
+            .unwrap()
+            .get_mut(0)
+            .unwrap()
+            .as_inline_table_mut()
+            .unwrap();
+        gate.insert("env", env.into());
+        let config = config.to_string();
+        write(root, "simit.toml", &config);
+        for args in [
+            vec!["monorepo", "plan", "--json"],
+            vec!["init", "ci", "--primary-only"],
+        ] {
+            let output = common::simit()
+                .current_dir(root)
+                .args(args)
+                .output()
+                .unwrap();
+            assert_eq!(output.status.success(), valid, "{value:?}: {output:?}");
+            if !valid {
+                assert!(
+                    String::from_utf8_lossy(&output.stderr).contains("workflow expressions"),
+                    "{output:?}"
+                );
+                assert!(!root.join(".github/workflows/ci.yaml").exists());
+            }
+        }
+        assert_eq!(fs::read_to_string(root.join("simit.toml")).unwrap(), config);
     }
 }
 
@@ -411,6 +667,10 @@ fn qualification_generation_is_complete_and_member_stable() {
     }
     let text = fs::read_to_string(temp.path().join(".github/workflows/ci.yaml")).unwrap();
     let yaml: serde_yaml::Value = serde_yaml::from_str(&text).unwrap();
+    assert_eq!(
+        yaml["concurrency"]["group"],
+        "monorepo-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event.pull_request.head.ref || github.ref_name }}"
+    );
     for id in [
         "plan",
         "component-core",
@@ -459,69 +719,210 @@ fn component_release_plan_keeps_independent_versions_and_dependency_order() {
 }
 
 #[test]
-fn primary_only_monorepo_generation_preserves_publishers_and_signing_inputs() {
+fn qualification_concurrency_coalesces_repository_events_but_isolates_forks() {
     let temp = fixture();
-    let mut config = fs::read_to_string(temp.path().join("simit.toml"))
+    enroll_release_checks(temp.path());
+    let output = common::simit()
+        .current_dir(temp.path())
+        .args(["init", "ci"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let workflow: serde_yaml::Value =
+        serde_yaml::from_slice(&fs::read(temp.path().join(".github/workflows/ci.yaml")).unwrap())
+            .unwrap();
+    let group = workflow["concurrency"]["group"].as_str().unwrap();
+    // Evaluate the generated Actions interpolation against distinct event contexts.
+    let evaluate = |context: Value| {
+        let mut remaining = group;
+        let mut result = String::new();
+        while let Some((literal, expression)) = remaining.split_once("${{") {
+            result.push_str(literal);
+            let (expression, rest) = expression.split_once("}}").unwrap();
+            let value = expression
+                .split("||")
+                .find_map(|selector| {
+                    selector
+                        .trim()
+                        .split('.')
+                        .try_fold(&context, |value, key| value.get(key))
+                        .and_then(Value::as_str)
+                        .filter(|value| !value.is_empty())
+                })
+                .expect("concurrency selector must resolve for each event");
+            result.push_str(value);
+            remaining = rest;
+        }
+        result.push_str(remaining);
+        result
+    };
+    let push =
+        |repo: &str| serde_json::json!({"github": {"repository": repo, "ref_name": "repair"}});
+    let pr = |repo: &str| serde_json::json!({"github": {"repository": "caniko/simit", "ref_name": "64/merge", "event": {"pull_request": {"head": {"ref": "repair", "repo": {"full_name": repo}}}}}});
+    assert_eq!(workflow["concurrency"]["cancel-in-progress"], true);
+    assert_eq!(evaluate(push("caniko/simit")), evaluate(pr("caniko/simit")));
+    assert_eq!(evaluate(push("fork-a/simit")), evaluate(pr("fork-a/simit")));
+    assert_ne!(evaluate(pr("fork-a/simit")), evaluate(pr("fork-b/simit")));
+    assert_ne!(evaluate(pr("fork-a/simit")), evaluate(push("caniko/simit")));
+}
+
+#[cfg(unix)]
+#[test]
+fn generated_component_gate_propagates_pipeline_failure() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = fixture();
+    let root = temp.path();
+    enroll_release_checks(root);
+    let config = fs::read_to_string(root.join("simit.toml"))
+        .unwrap()
+        .replace(
+            "run = \"true\"",
+            "run = \"false | tee pipeline-output; touch incorrectly-continued\"",
+        );
+    write(root, "simit.toml", &config);
+    let output = common::simit()
+        .current_dir(root)
+        .args(["init", "ci"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let workflow: serde_yaml::Value =
+        serde_yaml::from_slice(&fs::read(root.join(".github/workflows/ci.yaml")).unwrap()).unwrap();
+    let step = workflow["jobs"]["component-core"]["steps"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .find(|step| step["name"] == "test")
+        .unwrap();
+    write(
+        root,
+        "bin/nix",
+        "#!/bin/sh\nwhile [ \"$1\" != --command ]; do shift; done\nshift\nexec \"$@\"\n",
+    );
+    fs::set_permissions(root.join("bin/nix"), fs::Permissions::from_mode(0o755)).unwrap();
+    let output = Command::new("bash")
+        .current_dir(root)
+        .args(["-euo", "pipefail", "-c", step["run"].as_str().unwrap()])
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                root.join("bin").display(),
+                std::env::var("PATH").unwrap()
+            ),
+        )
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "{output:?}");
+    assert!(root.join("pipeline-output").exists());
+    assert!(!root.join("incorrectly-continued").exists());
+}
+
+#[test]
+fn primary_regeneration_preserves_independent_publishers_and_signing_from_members() {
+    let temp = fixture();
+    let root = temp.path();
+    enroll_release_checks(root);
+    let config = fs::read_to_string(root.join("simit.toml"))
         .unwrap()
         .replace(
             "runtime = \"nix\"",
             "runtime = \"nix\"\npublish_crates = true",
         );
-    for id in ["core", "rust", "python", "worker"] {
-        config = config.replace(
-            &format!("id = \"{id}\""),
-            &format!("id = \"{id}\"\nchecks = [{{ id = \"test\", run = \"true\" }}]"),
+    write(root, "simit.toml", &config);
+    let run = |cwd: &Path, args: &[&str]| {
+        common::simit()
+            .current_dir(cwd)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let output = run(root, &["init", "ci"]);
+    assert!(output.status.success(), "{output:?}");
+    let full_ci = fs::read(root.join(".github/workflows/ci.yaml")).unwrap();
+    for args in [
+        vec!["init", "ci", "--check"],
+        vec!["init", "ci", "--check", "--diff"],
+        vec!["init", "ci"],
+    ] {
+        let output = run(root, &args);
+        assert!(output.status.success(), "{args:?}: {output:?}");
+        assert_eq!(
+            fs::read(root.join(".github/workflows/ci.yaml")).unwrap(),
+            full_ci
         );
     }
-    write(temp.path(), "simit.toml", &config);
-    let retained = [
-        ".github/workflows/publish-crate-engine.yaml",
-        ".github/workflows/trusted-publish-crate-engine.yaml",
-        ".github/workflows/publish-python-demo.yaml",
-        ".github/workflows/publish-npm-demo.yaml",
-    ];
-    let original = "# Generated by simit. Manual edits will be reported as ci=drift.\nname: retained\non: workflow_dispatch\njobs: {}\n";
-    for path in retained {
-        write(temp.path(), path, original);
+    // Drift in independent outputs must not widen a primary-only operation.
+    let publisher = ".github/workflows/trusted-publish-crate-worker.yaml";
+    let original = fs::read_to_string(root.join(publisher)).unwrap();
+    write(
+        root,
+        publisher,
+        &format!("{original}\n# Independently owned publisher change\n"),
+    );
+    write(
+        root,
+        ".github/workflows/publish-npm-independent.yaml",
+        "name: Independent npm publisher\non: [workflow_dispatch]\njobs: {}\n",
+    );
+    let config = fs::read(root.join("simit.toml")).unwrap();
+    let key = fs::read(root.join("keys/maintainers.gpg")).unwrap();
+    let publishers: Vec<_> = fs::read_dir(root.join(".github/workflows"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.file_name().unwrap() != "ci.yaml")
+        .map(|path| {
+            let bytes = fs::read(&path).unwrap();
+            (path, bytes)
+        })
+        .collect();
+    let output = run(root, &["init", "ci", "--check", "--diff"]);
+    assert!(!output.status.success(), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains(publisher));
+    // The first primary regeneration changes CI's self-check scope. Snapshot
+    // that output before checking repeatability from the root and members.
+    let output = run(root, &["init", "ci", "--primary-only"]);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(fs::read(root.join("simit.toml")).unwrap(), config);
+    assert_eq!(fs::read(root.join("keys/maintainers.gpg")).unwrap(), key);
+    for (path, bytes) in &publishers {
+        assert_eq!(&fs::read(path).unwrap(), bytes);
     }
-    for directory in [temp.path().to_path_buf(), temp.path().join("crates/worker")] {
-        for tail in [vec![], vec!["--check", "--diff"]] {
-            let output = common::simit()
-                .env_remove("SIMIT_MAINTAINERS_GPG")
-                .current_dir(&directory)
-                .args(["init", "ci", "--primary-only"])
-                .args(tail)
-                .output()
-                .unwrap();
-            assert!(output.status.success(), "{output:?}");
+    let ci = fs::read(root.join(".github/workflows/ci.yaml")).unwrap();
+    for cwd in [
+        root.to_path_buf(),
+        root.join("crates/worker"),
+        root.join("python"),
+    ] {
+        for args in [
+            vec!["init", "ci", "--primary-only"],
+            vec!["init", "ci", "--primary-only", "--check"],
+            vec!["init", "ci", "--primary-only", "--check", "--diff"],
+            vec!["init", "ci", "--primary-only"],
+        ] {
+            let output = run(&cwd, &args);
+            assert!(output.status.success(), "{args:?}: {output:?}");
+            assert_eq!(
+                fs::read(root.join(".github/workflows/ci.yaml")).unwrap(),
+                ci
+            );
+            assert_eq!(fs::read(root.join("simit.toml")).unwrap(), config);
+            assert_eq!(fs::read(root.join("keys/maintainers.gpg")).unwrap(), key);
+            for (path, bytes) in &publishers {
+                assert_eq!(&fs::read(path).unwrap(), bytes);
+            }
         }
     }
-    let yaml: serde_yaml::Value = serde_yaml::from_str(
-        &fs::read_to_string(temp.path().join(".github/workflows/ci.yaml")).unwrap(),
-    )
-    .unwrap();
-    assert!(yaml["jobs"]["qualified"].is_mapping());
-    for id in ["core", "rust", "python", "worker"] {
-        assert!(yaml["jobs"][format!("component-{id}")].is_mapping());
-    }
-    for path in retained {
-        assert_eq!(
-            fs::read_to_string(temp.path().join(path)).unwrap(),
-            original
-        );
-    }
+    write(root, ".github/workflows/ci.yaml", "primary drift\n");
+    let output = run(root, &["init", "ci", "--primary-only", "--check", "--diff"]);
+    assert!(!output.status.success(), "{output:?}");
     assert_eq!(
-        fs::read_dir(temp.path().join(".github/workflows"))
-            .unwrap()
-            .count(),
-        5
+        fs::read_to_string(root.join(".github/workflows/ci.yaml")).unwrap(),
+        "primary drift\n"
     );
-    assert!(!temp.path().join("keys").exists());
-    let config = fs::read_to_string(temp.path().join("simit.toml"))
-        .unwrap()
-        .parse::<toml_edit::DocumentMut>()
-        .unwrap();
-    assert_eq!(config["ci"]["publish_crates"].as_bool(), Some(true));
+    for (path, bytes) in &publishers {
+        assert_eq!(&fs::read(path).unwrap(), bytes);
+    }
 }
 
 #[test]
@@ -583,6 +984,168 @@ fn component_release_dry_run_uses_package_tag_without_changing_other_versions() 
             .unwrap()
             .contains("version = \"0.1.0\"")
     );
+}
+
+#[test]
+fn independent_cargo_prereleases_fail_before_release_mutation() {
+    for existing in ["0.1.0", "0.1.0-rc.1"] {
+        let temp = fixture();
+        let root = temp.path();
+        enroll_release_checks(root);
+        let config = fs::read_to_string(root.join("simit.toml"))
+            .unwrap()
+            .replace(
+                "runtime = \"nix\"",
+                "runtime = \"nix\"\npublish_crates = true",
+            );
+        write(root, "simit.toml", &config);
+        let manifest = fs::read_to_string(root.join("crates/worker/Cargo.toml"))
+            .unwrap()
+            .replacen(
+                "version = \"0.1.0\"",
+                &format!("version = \"{existing}\""),
+                1,
+            );
+        write(root, "crates/worker/Cargo.toml", &manifest);
+        write(root, ".gitignore", "target/\n");
+        assert!(
+            Command::new("cargo")
+                .current_dir(root)
+                .arg("generate-lockfile")
+                .status()
+                .unwrap()
+                .success()
+        );
+        fixture_git(root, &["init"]);
+        fixture_git(root, &["add", "."]);
+        fixture_git(
+            root,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "-m",
+                "fixture",
+            ],
+        );
+        let before = fixture_git(root, &["rev-parse", "HEAD"]);
+        let mut args = vec![
+            "release",
+            "patch",
+            "--component",
+            "worker",
+            "--no-sign",
+            "--no-changelog",
+            "-m",
+            "release worker",
+        ];
+        fixture_git(root, &["config", "user.name", "Test"]);
+        fixture_git(root, &["config", "user.email", "test@example.com"]);
+        args.extend(["--pre", "rc"]);
+        let output = common::simit()
+            .current_dir(root)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains("independent Cargo publication does not support prereleases"),
+            "{output:?}"
+        );
+        assert_eq!(fixture_git(root, &["rev-parse", "HEAD"]), before);
+        assert_eq!(
+            fs::read_to_string(root.join("crates/worker/Cargo.toml")).unwrap(),
+            manifest
+        );
+        assert!(fixture_git(root, &["status", "--porcelain"]).is_empty());
+        assert!(fixture_git(root, &["tag", "--list"]).is_empty());
+    }
+}
+
+#[test]
+fn component_bumps_reject_incompatible_local_dependency_requirements() {
+    for inherited in [false, true] {
+        let temp = fixture();
+        let root = temp.path();
+        enroll_release_checks(root);
+        write(root, ".gitignore", "target/\n");
+        if inherited {
+            let workspace = fs::read_to_string(root.join("Cargo.toml")).unwrap();
+            write(
+                root,
+                "Cargo.toml",
+                &format!(
+                    "{workspace}\n[workspace.dependencies]\nalias = {{package='engine',path='crates/engine',version='0.1'}}\n"
+                ),
+            );
+            write(
+                root,
+                "crates/worker/Cargo.toml",
+                "[package]\nname='worker'\nversion='0.1.0'\nedition='2024'\n[dependencies]\nalias.workspace = true\n",
+            );
+        }
+        assert!(
+            Command::new("cargo")
+                .current_dir(root)
+                .arg("generate-lockfile")
+                .status()
+                .unwrap()
+                .success()
+        );
+        fixture_git(root, &["init"]);
+        fixture_git(root, &["config", "user.name", "Test"]);
+        fixture_git(root, &["config", "user.email", "test@example.com"]);
+        fixture_git(root, &["add", "."]);
+        fixture_git(root, &["commit", "-m", "fixture"]);
+        let before = fixture_git(root, &["rev-parse", "HEAD"]);
+        let manifest = fs::read(root.join("crates/engine/Cargo.toml")).unwrap();
+        let lock = fs::read(root.join("Cargo.lock")).unwrap();
+        let output = common::simit()
+            .current_dir(root)
+            .args([
+                "release",
+                "minor",
+                "--component",
+                "rust",
+                "--no-sign",
+                "--no-changelog",
+                "-m",
+                "bump engine",
+            ])
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("excludes component version"),
+            "{output:?}"
+        );
+        assert_eq!(fixture_git(root, &["rev-parse", "HEAD"]), before);
+        assert_eq!(
+            fs::read(root.join("crates/engine/Cargo.toml")).unwrap(),
+            manifest
+        );
+        assert_eq!(fs::read(root.join("Cargo.lock")).unwrap(), lock);
+        assert!(fixture_git(root, &["status", "--porcelain"]).is_empty());
+        assert!(fixture_git(root, &["tag", "--list"]).is_empty());
+        // A patch bump remains within the admitted requirement.
+        let output = common::simit()
+            .current_dir(root)
+            .args([
+                "release",
+                "patch",
+                "--component",
+                "rust",
+                "--dry-run",
+                "-m",
+                "bump engine",
+            ])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+    }
 }
 
 #[test]
@@ -657,15 +1220,204 @@ fn independent_sync_up_uses_owned_package_tag_with_divergent_versions() {
 }
 
 #[test]
+fn cargo_sync_up_refuses_to_move_tags_after_prerequisite_gate_failure() {
+    let temp = fixture();
+    let root = temp.path();
+    let config = fs::read_to_string(root.join("simit.toml"))
+        .unwrap()
+        .replace(
+            "id = \"core\"",
+            "id = \"core\"\nchecks = [{id = 'core', run = 'true'}]",
+        )
+        .replace(
+            "id = \"rust\"",
+            "id = \"rust\"\nchecks = [{id = 'rust', run = 'true'}]",
+        )
+        .replace(
+            "id = \"python\"",
+            "id = \"python\"\nchecks = [{id = 'python', run = 'false | tee /dev/null'}]",
+        )
+        .replace(
+            "id = \"worker\"",
+            "id = \"worker\"\nchecks = [{id = 'worker', run = 'true'}]",
+        );
+    write(root, "simit.toml", &config);
+    fixture_git(root, &["init", "-q"]);
+    fixture_git(root, &["config", "user.name", "Simit fixture"]);
+    fixture_git(root, &["config", "user.email", "fixture@example.invalid"]);
+    fixture_git(root, &["config", "commit.gpgsign", "false"]);
+    fixture_git(root, &["config", "tag.gpgsign", "false"]);
+    fixture_git(root, &["add", "."]);
+    fixture_git(root, &["commit", "-qm", "original source"]);
+    fixture_git(root, &["tag", "worker/v0.1.0"]);
+    let original = fixture_git(root, &["rev-parse", "refs/tags/worker/v0.1.0"]);
+    write(root, "crates/worker/src/lib.rs", "pub fn updated() {}\n");
+    fixture_git(root, &["add", "."]);
+    fixture_git(root, &["commit", "-qm", "updated source"]);
+    let output = common::simit()
+        .current_dir(root)
+        .args([
+            "release",
+            "sync-up",
+            "--component",
+            "worker",
+            "--package",
+            "worker",
+            "--no-sign",
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("component python check python failed"),
+        "{output:?}"
+    );
+    assert_eq!(
+        fixture_git(root, &["rev-parse", "refs/tags/worker/v0.1.0"]),
+        original
+    );
+    let head = fixture_git(root, &["rev-parse", "HEAD"]);
+    let manifest = fs::read(root.join("crates/worker/Cargo.toml")).unwrap();
+    let bump = common::simit()
+        .current_dir(root)
+        .args([
+            "release",
+            "patch",
+            "--component",
+            "worker",
+            "--package",
+            "worker",
+            "--no-sign",
+            "--no-changelog",
+            "-m",
+            "release worker",
+        ])
+        .output()
+        .unwrap();
+    assert!(!bump.status.success(), "{bump:?}");
+    assert!(
+        String::from_utf8_lossy(&bump.stderr).contains("component python check python failed"),
+        "{bump:?}"
+    );
+    assert_eq!(fixture_git(root, &["rev-parse", "HEAD"]), head);
+    assert_eq!(
+        fs::read(root.join("crates/worker/Cargo.toml")).unwrap(),
+        manifest
+    );
+    assert!(fixture_git(root, &["tag", "--list", "worker/v0.1.1"]).is_empty());
+}
+
+#[test]
+fn root_cargo_package_uses_explicit_source_ownership() {
+    let temp = fixture();
+    let root = temp.path();
+    let manifest = fs::read_to_string(root.join("Cargo.toml")).unwrap();
+    write(
+        root,
+        "Cargo.toml",
+        &format!("{manifest}\n[package]\nname='root-package'\nversion='0.1.0'\nedition='2024'\n"),
+    );
+    write(root, "src/lib.rs", "pub fn root() {}\n");
+    let config = fs::read_to_string(root.join("simit.toml")).unwrap();
+    write(
+        root,
+        "simit.toml",
+        &format!(
+            "{config}\n[[monorepo.components]]\nid='root'\ncargo_packages=['root-package']\npaths=['src']\n"
+        ),
+    );
+    for changed in ["src/lib.rs", "Cargo.toml", "python/server.py"] {
+        let output = plan(root, &[changed]);
+        assert!(output.status.success(), "{output:?}");
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        let selected = value["selected"].as_array().unwrap();
+        assert_eq!(
+            selected.contains(&Value::String("root".into())),
+            changed != "python/server.py",
+            "{value}"
+        );
+    }
+}
+
+#[test]
+fn cargo_release_rejects_gate_created_changes_and_commits() {
+    for commit in [false, true] {
+        let temp = fixture();
+        let root = temp.path();
+        enroll_release_checks(root);
+        write(root, ".gitignore", "target/\n");
+        let gate = if commit {
+            "printf '\\n' >> crates/worker/src/lib.rs && git add crates/worker/src/lib.rs && git -c core.hooksPath=/dev/null commit -qm gate-change"
+        } else {
+            "printf '\\n' >> crates/worker/src/lib.rs"
+        };
+        let config = fs::read_to_string(root.join("simit.toml")).unwrap();
+        let mut config: toml_edit::DocumentMut = config.parse().unwrap();
+        let components = config["monorepo"]["components"]
+            .as_array_of_tables_mut()
+            .unwrap();
+        let worker = components
+            .iter_mut()
+            .find(|component| component["id"].as_str() == Some("worker"))
+            .unwrap();
+        worker["checks"]
+            .as_array_mut()
+            .unwrap()
+            .get_mut(0)
+            .unwrap()
+            .as_inline_table_mut()
+            .unwrap()
+            .insert("run", gate.into());
+        write(root, "simit.toml", &config.to_string());
+        let lock = Command::new("cargo")
+            .current_dir(root)
+            .args(["generate-lockfile", "--offline"])
+            .output()
+            .unwrap();
+        assert!(lock.status.success(), "{lock:?}");
+        fixture_git(root, &["init", "-q"]);
+        fixture_git(root, &["config", "user.name", "Simit fixture"]);
+        fixture_git(root, &["config", "user.email", "fixture@example.invalid"]);
+        fixture_git(root, &["config", "commit.gpgsign", "false"]);
+        fixture_git(root, &["add", "."]);
+        fixture_git(root, &["commit", "-qm", "original source"]);
+        let before = fs::read(root.join("crates/worker/Cargo.toml")).unwrap();
+        let output = common::simit()
+            .current_dir(root)
+            .args([
+                "release",
+                "patch",
+                "--component",
+                "worker",
+                "--no-sign",
+                "--no-changelog",
+                "-m",
+                "release worker",
+            ])
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{output:?}");
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            error.contains(if commit {
+                "release HEAD changed during qualification"
+            } else {
+                "worktree"
+            }),
+            "{output:?}"
+        );
+        assert_eq!(
+            fs::read(root.join("crates/worker/Cargo.toml")).unwrap(),
+            before
+        );
+        assert!(fixture_git(root, &["tag", "--list"]).is_empty());
+    }
+}
+
+#[test]
 fn independent_verification_uses_adjacent_notes_and_owned_tag() {
     let temp = fixture();
     let root = temp.path();
-    let engine = fs::read_to_string(root.join("crates/engine/Cargo.toml")).unwrap();
-    write(
-        root,
-        "crates/engine/Cargo.toml",
-        &engine.replace("edition = \"2024\"", "edition = \"2024\"\npublish = false"),
-    );
     write(
         root,
         "CHANGELOG.md",
@@ -725,12 +1477,323 @@ fn independent_verification_uses_adjacent_notes_and_owned_tag() {
                 .iter()
                 .any(|r| r["check"].as_str().unwrap().starts_with("crates.io"))
         );
+        assert!(
+            !results.iter().any(|r| r["check"] == "remote secrets"),
+            "{report}"
+        );
+    }
+}
+
+#[test]
+fn cargo_release_rechecks_target_tag_after_qualification_before_mutation() {
+    let temp = fixture();
+    let root = temp.path();
+    enroll_release_checks(root);
+    let config = fs::read_to_string(root.join("simit.toml"))
+        .unwrap()
+        .replacen(
+            "run = \"true\"",
+            "run = \"git -c tag.gpgsign=false tag engine/v0.1.1\"",
+            1,
+        );
+    write(root, "simit.toml", &config);
+    write(root, ".gitignore", "target/\n");
+    assert!(
+        Command::new("cargo")
+            .current_dir(root)
+            .arg("generate-lockfile")
+            .status()
+            .unwrap()
+            .success()
+    );
+    fixture_git(root, &["init"]);
+    fixture_git(root, &["config", "user.name", "Test"]);
+    fixture_git(root, &["config", "user.email", "test@example.invalid"]);
+    fixture_git(root, &["add", "."]);
+    fixture_git(root, &["commit", "-m", "tag-producing gate"]);
+    let head = fixture_git(root, &["rev-parse", "HEAD"]);
+    let manifest = fs::read(root.join("crates/engine/Cargo.toml")).unwrap();
+    let output = common::simit()
+        .current_dir(root)
+        .args([
+            "release",
+            "patch",
+            "--component",
+            "rust",
+            "--no-sign",
+            "--no-changelog",
+            "-m",
+            "release",
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "{output:?}");
+    assert_eq!(fixture_git(root, &["rev-parse", "HEAD"]), head);
+    assert_eq!(
+        fs::read(root.join("crates/engine/Cargo.toml")).unwrap(),
+        manifest
+    );
+    assert_eq!(fixture_git(root, &["status", "--porcelain"]), "");
+}
+
+#[cfg(unix)]
+#[test]
+fn cargo_component_releases_reject_symlinked_changelogs() {
+    let temp = fixture();
+    let external = TempDir::new().unwrap();
+    let root = temp.path();
+    enroll_release_checks(root);
+    write(root, ".gitignore", "target/\n");
+    let original = "# Changelog\n\n## [Unreleased]\n\n### Fixed\n\n- Original note.\n\n## [0.1.0] - 2026-10-01\n\nPrevious release.\n";
+    let target = external.path().join("CHANGELOG.md");
+    fs::write(&target, original).unwrap();
+    std::os::unix::fs::symlink(&target, root.join("crates/engine/CHANGELOG.md")).unwrap();
+    assert!(
+        Command::new("cargo")
+            .current_dir(root)
+            .arg("generate-lockfile")
+            .status()
+            .unwrap()
+            .success()
+    );
+    fixture_git(root, &["init"]);
+    fixture_git(root, &["config", "user.name", "Test"]);
+    fixture_git(root, &["config", "user.email", "test@example.invalid"]);
+    fixture_git(root, &["add", "."]);
+    fixture_git(root, &["commit", "-m", "symlink source"]);
+    let head = fixture_git(root, &["rev-parse", "HEAD"]);
+    let output = common::simit()
+        .current_dir(root)
+        .args([
+            "release",
+            "patch",
+            "--component",
+            "rust",
+            "--no-sign",
+            "-m",
+            "release",
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("release changelog must not be a symlink"),
+        "{output:?}"
+    );
+    assert_eq!(fs::read_to_string(target).unwrap(), original);
+    assert_eq!(fixture_git(root, &["rev-parse", "HEAD"]), head);
+    assert!(fixture_git(root, &["tag", "--list"]).is_empty());
+}
+
+#[test]
+fn historical_cargo_verification_locates_moved_manifest_paths() {
+    let temp = fixture();
+    let root = temp.path();
+    let config = fs::read_to_string(root.join("simit.toml")).unwrap();
+    write(
+        root,
+        "simit.toml",
+        &format!("{config}\n[release.notes]\nsource='none'\n"),
+    );
+    fixture_git(root, &["init"]);
+    fixture_git(root, &["config", "user.name", "Test"]);
+    fixture_git(root, &["config", "user.email", "test@example.invalid"]);
+    fixture_git(root, &["add", "."]);
+    fixture_git(root, &["commit", "-m", "original layout"]);
+    fixture_git(root, &["tag", "engine/v0.1.0"]);
+    fs::rename(root.join("crates/engine"), root.join("crates/moved-engine")).unwrap();
+    for path in ["Cargo.toml", "crates/worker/Cargo.toml"] {
+        let content = fs::read_to_string(root.join(path))
+            .unwrap()
+            .replace("crates/engine", "crates/moved-engine")
+            .replace("../engine", "../moved-engine");
+        write(root, path, &content);
+    }
+    let output = common::simit()
+        .current_dir(root)
+        .args([
+            "release",
+            "verify",
+            "--component",
+            "rust",
+            "--version",
+            "0.1.0",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        report["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["check"] == "tag manifest engine")
+            .unwrap()["status"],
+        "pass",
+        "{report}"
+    );
+}
+
+#[test]
+fn cargo_component_verification_checks_the_tagged_manifest() {
+    for notes in ["none", "changelog"] {
+        for inherited in [false, true] {
+            let temp = fixture();
+            let root = temp.path();
+            let config = fs::read_to_string(root.join("simit.toml")).unwrap();
+            write(
+                root,
+                "simit.toml",
+                &format!("{config}\n[release.notes]\nsource='{notes}'\n"),
+            );
+            let manifest = fs::read_to_string(root.join("crates/engine/Cargo.toml")).unwrap();
+            write(
+                root,
+                "crates/engine/Cargo.toml",
+                &manifest.replace("edition = \"2024\"", "edition = \"2024\"\npublish=false"),
+            );
+            if inherited {
+                let manifest = fs::read_to_string(root.join("crates/engine/Cargo.toml"))
+                    .unwrap()
+                    .replace("version = \"0.1.0\"", "version.workspace = true");
+                write(root, "crates/engine/Cargo.toml", &manifest);
+                let workspace = fs::read_to_string(root.join("Cargo.toml")).unwrap();
+                write(
+                    root,
+                    "Cargo.toml",
+                    &format!("{workspace}\n[workspace.package]\nversion='0.1.0'\n"),
+                );
+            }
+            fixture_git(root, &["init"]);
+            fixture_git(root, &["config", "user.name", "Test"]);
+            fixture_git(root, &["config", "user.email", "test@example.com"]);
+            fixture_git(root, &["add", "."]);
+            fixture_git(root, &["commit", "-m", "old source"]);
+            fixture_git(root, &["tag", "engine/v0.2.0"]);
+            let path = if inherited {
+                "Cargo.toml"
+            } else {
+                "crates/engine/Cargo.toml"
+            };
+            let manifest = fs::read_to_string(root.join(path))
+                .unwrap()
+                .replace("0.1.0", "0.2.0");
+            write(root, path, &manifest);
+            if inherited {
+                let manifest = fs::read_to_string(root.join("crates/engine/Cargo.toml"))
+                    .unwrap()
+                    .replace("version.workspace = true", "version = \"0.2.0\"");
+                write(root, "crates/engine/Cargo.toml", &manifest);
+            }
+            fixture_git(root, &["add", "."]);
+            fixture_git(root, &["commit", "-m", "current source"]);
+            let verify = || {
+                let output = common::simit()
+                    .current_dir(root)
+                    .args(["release", "verify", "--component", "rust", "--json"])
+                    .output()
+                    .unwrap();
+                let report: Value = serde_json::from_slice(&output.stdout)
+                    .unwrap_or_else(|error| panic!("{error}: {output:?}"));
+                report["results"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|result| result["check"] == "tag manifest engine")
+                    .expect("verify tagged Cargo source")
+                    .clone()
+            };
+            assert_eq!(verify()["status"], "fail");
+            fixture_git(root, &["tag", "-f", "engine/v0.2.0"]);
+            assert_eq!(verify()["status"], "pass");
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn independent_verification_requires_crates_io_eligibility() {
+    use std::os::unix::fs::PermissionsExt;
+
+    for publish_crates in [false, true] {
+        for (policy, eligible) in [
+            ("publish = false", false),
+            ("publish = [\"internal\"]", false),
+            ("publish = [\"crates-io\"]", true),
+            ("publish = [\"internal\", \"crates-io\"]", true),
+            ("", true),
+        ] {
+            let temp = fixture();
+            let root = temp.path();
+            let manifest = fs::read_to_string(root.join("crates/engine/Cargo.toml")).unwrap();
+            write(
+                root,
+                "crates/engine/Cargo.toml",
+                &manifest.replace(
+                    "edition = \"2024\"",
+                    &format!("edition = \"2024\"\n{policy}"),
+                ),
+            );
+            let config = fs::read_to_string(root.join("simit.toml")).unwrap();
+            write(
+                root,
+                "simit.toml",
+                &config.replace(
+                    "runtime = \"nix\"",
+                    &format!("runtime = \"nix\"\npublish_crates = {publish_crates}"),
+                ),
+            );
+            write(
+                root,
+                "bin/curl",
+                "#!/bin/sh\nprintf queried > \"$FIXTURE_CURL_MARKER\"\nprintf '%s\\n200' '{\"versions\":[{\"num\":\"0.1.0\"}]}'\n",
+            );
+            fs::set_permissions(root.join("bin/curl"), fs::Permissions::from_mode(0o755)).unwrap();
+            let path = std::env::join_paths(
+                std::iter::once(root.join("bin"))
+                    .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+            )
+            .unwrap();
+            let marker = root.join("queried");
+            let output = common::simit()
+                .current_dir(root)
+                .env("PATH", path)
+                .env("FIXTURE_CURL_MARKER", &marker)
+                .args(["release", "verify", "--component", "rust", "--json"])
+                .output()
+                .unwrap();
+            let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+            let results = report["results"].as_array().unwrap();
+            assert_eq!(
+                marker.exists(),
+                eligible && publish_crates,
+                "{policy}: {output:?}"
+            );
+            assert_eq!(
+                results
+                    .iter()
+                    .any(|r| r["check"] == "crates.io engine" && r["status"] == "pass"),
+                eligible && publish_crates,
+                "{policy}: {report}"
+            );
+            assert_eq!(
+                results.iter().any(|r| r["check"] == "remote secrets"
+                    && r["message"]
+                        .as_str()
+                        .unwrap()
+                        .contains("CRATES_IO_API_TOKEN")),
+                eligible && publish_crates,
+                "{policy}: {report}"
+            );
+        }
     }
 }
 
 #[test]
 fn component_release_mutates_only_its_package_and_adjacent_changelog() {
     let temp = fixture();
+    enroll_release_checks(temp.path());
     write(temp.path(), ".gitignore", "target/\n");
     write(temp.path(), "CHANGELOG.md", "# Unrelated root changelog\n");
     write(
@@ -750,11 +1813,6 @@ fn component_release_mutates_only_its_package_and_adjacent_changelog() {
     git(&["init", "-q"]);
     git(&["config", "user.name", "Simit disposable fixture"]);
     git(&["config", "user.email", "fixture@example.invalid"]);
-    // The fixture owns its hook configuration for both the seed commit and
-    // the release command's subsequent commit; operator hooks are unrelated.
-    fs::create_dir(temp.path().join("fixture-hooks")).unwrap();
-    git(&["config", "core.hooksPath", "fixture-hooks"]);
-    git(&["config", "commit.gpgsign", "false"]);
     let lock = Command::new("cargo")
         .current_dir(temp.path())
         .args(["generate-lockfile", "--offline"])
@@ -838,6 +1896,211 @@ fn unsupported_ci_options_fail_before_writing_and_shared_bumps_are_rejected() {
 }
 
 #[test]
+#[cfg(unix)]
+fn component_native_system_guard_rejects_wrong_architecture_and_eval_failure() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = fixture();
+    let root = temp.path();
+    enroll_release_checks(root);
+    let config = fs::read_to_string(root.join("simit.toml"))
+        .unwrap()
+        .replace(
+            "runtime = \"nix\"",
+            "runtime = \"nix\"\nnix_system_runners = { aarch64-linux = 'ubuntu-24.04' }",
+        )
+        .replace(
+            "id = \"python\"",
+            "id = \"python\"\nsystems = ['aarch64-linux']",
+        );
+    write(root, "simit.toml", &config);
+    let output = common::simit()
+        .current_dir(root)
+        .args(["init", "ci"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let workflow: serde_yaml::Value =
+        serde_yaml::from_str(&fs::read_to_string(root.join(".github/workflows/ci.yaml")).unwrap())
+            .unwrap();
+    let steps = workflow["jobs"]["component-python"]["steps"]
+        .as_sequence()
+        .unwrap();
+    let index = steps
+        .iter()
+        .position(|step| step["name"] == "Verify runner system")
+        .unwrap();
+    assert!(
+        index
+            < steps
+                .iter()
+                .position(|step| step["name"] == "test")
+                .unwrap()
+    );
+    let script = steps[index]["run"].as_str().unwrap();
+    write(
+        root,
+        "bin/nix",
+        "#!/bin/sh\nprintf '%s' \"$FIXTURE_NIX_SYSTEM\"\nexit \"$FIXTURE_NIX_STATUS\"\n",
+    );
+    fs::set_permissions(root.join("bin/nix"), fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!(
+        "{}:{}",
+        root.join("bin").display(),
+        std::env::var("PATH").unwrap()
+    );
+    for (system, status, success) in [
+        ("aarch64-linux", "0", true),
+        ("x86_64-linux", "0", false),
+        ("aarch64-linux", "1", false),
+    ] {
+        let output = Command::new("bash")
+            .args(["-euo", "pipefail", "-c", script])
+            .env("PATH", &path)
+            .env("EXPECTED_NIX_SYSTEM", "aarch64-linux")
+            .env("FIXTURE_NIX_SYSTEM", system)
+            .env("FIXTURE_NIX_STATUS", status)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.success(), success, "{output:?}");
+    }
+}
+
+#[test]
+fn independent_publishers_require_crates_io_allowlist_and_preserve_qualification() {
+    for (policy, publish) in [
+        ("publish = [\"internal\"]", false),
+        ("publish = false", false),
+        ("publish = [\"internal\", \"crates-io\"]", true),
+        ("publish = [\"crates-io\"]", true),
+    ] {
+        let temp = fixture();
+        let root = temp.path();
+        enroll_release_checks(root);
+        let config = fs::read_to_string(root.join("simit.toml"))
+            .unwrap()
+            .replace(
+                "runtime = \"nix\"",
+                "runtime = \"nix\"\npublish_crates = true",
+            );
+        write(root, "simit.toml", &config);
+        let generate = || {
+            common::simit()
+                .current_dir(root)
+                .args(["init", "ci"])
+                .output()
+                .unwrap()
+        };
+        let output = generate();
+        assert!(output.status.success(), "{output:?}");
+        let manifest = fs::read_to_string(root.join("crates/worker/Cargo.toml"))
+            .unwrap()
+            .replace(
+                "edition = \"2024\"",
+                &format!("edition = \"2024\"\n{policy}"),
+            );
+        write(root, "crates/worker/Cargo.toml", &manifest);
+        let output = generate();
+        assert!(output.status.success(), "{policy}: {output:?}");
+        for prefix in ["publish-crate-", "trusted-publish-crate-"] {
+            assert_eq!(
+                root.join(format!(".github/workflows/{prefix}worker.yaml"))
+                    .exists(),
+                publish,
+                "{policy}: {prefix}"
+            );
+            assert!(
+                root.join(format!(".github/workflows/{prefix}engine.yaml"))
+                    .exists()
+            );
+        }
+        let ci = fs::read_to_string(root.join(".github/workflows/ci.yaml")).unwrap();
+        assert!(ci.contains("component-worker:"));
+    }
+}
+
+#[test]
+fn independent_publishers_require_crates_io_dependency_closure() {
+    for transitive in [false, true] {
+        for eligible in [false, true] {
+            let temp = fixture();
+            let root = temp.path();
+            enroll_release_checks(root);
+            let mut config = fs::read_to_string(root.join("simit.toml"))
+                .unwrap()
+                .replace(
+                    "runtime = \"nix\"",
+                    "runtime = \"nix\"\npublish_crates = true",
+                );
+            let dependency = if transitive {
+                let workspace = fs::read_to_string(root.join("Cargo.toml"))
+                    .unwrap()
+                    .replace(
+                        "\"crates/engine\", \"crates/worker\"",
+                        "\"crates/engine\", \"crates/worker\", \"crates/leaf\"",
+                    );
+                write(root, "Cargo.toml", &workspace);
+                write(
+                    root,
+                    "crates/leaf/Cargo.toml",
+                    "[package]\nname='leaf'\nversion='0.1.0'\nedition='2024'\n",
+                );
+                write(root, "crates/leaf/src/lib.rs", "pub fn leaf() {}\n");
+                config = config.replace(
+                    "id = \"core\"",
+                    "id = \"core\"\ncargo_packages = [\"leaf\"]",
+                );
+                let manifest = fs::read_to_string(root.join("crates/engine/Cargo.toml")).unwrap();
+                write(
+                    root,
+                    "crates/engine/Cargo.toml",
+                    &format!("{manifest}leaf = {{path='../leaf',version='0.1.0'}}\n"),
+                );
+                "leaf"
+            } else {
+                "engine"
+            };
+            write(root, "simit.toml", &config);
+            let path = format!("crates/{dependency}/Cargo.toml");
+            let manifest = fs::read_to_string(root.join(&path)).unwrap();
+            let policy = if eligible {
+                "publish = ['internal', 'crates-io']"
+            } else {
+                "publish = ['internal']"
+            };
+            write(
+                root,
+                &path,
+                &manifest.replacen("[package]", &format!("[package]\n{policy}"), 1),
+            );
+            let output = common::simit()
+                .current_dir(root)
+                .args(["init", "ci"])
+                .output()
+                .unwrap();
+            assert_eq!(
+                output.status.success(),
+                eligible,
+                "{transitive}/{eligible}: {output:?}"
+            );
+            if !eligible {
+                let error = String::from_utf8_lossy(&output.stderr);
+                assert!(
+                    error.contains("not authorized for crates.io") && error.contains(dependency),
+                    "{output:?}"
+                );
+                assert!(!root.join(".github/workflows/ci.yaml").exists());
+                let output = common::simit()
+                    .current_dir(root)
+                    .args(["init", "ci", "--primary-only"])
+                    .output()
+                    .unwrap();
+                assert!(output.status.success(), "{output:?}");
+            }
+        }
+    }
+}
+
+#[test]
 fn independent_publication_qualifies_native_components_and_keeps_version_drift_stable() {
     let temp = fixture();
     let mut config = fs::read_to_string(temp.path().join("simit.toml")).unwrap();
@@ -867,24 +2130,8 @@ fn independent_publication_qualifies_native_components_and_keeps_version_drift_s
     assert_eq!(workflow["on"]["push"]["tags"][0], "worker/v[0-9]*");
     assert_eq!(workflow["permissions"]["contents"], "read");
     assert_eq!(workflow["jobs"]["build"]["needs"][0], "qualified");
-    assert_eq!(workflow["jobs"]["plan"]["needs"][0], "verify-source");
-    let verification = &workflow["jobs"]["verify-source"];
-    assert!(verification["if"].is_null());
-    assert!(verification["continue-on-error"].is_null());
-    let verification_text = serde_yaml::to_string(verification).unwrap();
-    assert!(verification_text.contains("git verify-tag"));
-    assert!(verification_text.contains("FETCH_HEAD:keys/maintainers.gpg"));
-    assert!(verification_text.contains("refs/tags/${tag}^{commit}"));
-    assert!(!verification_text.contains("nix develop"));
-    assert!(!verification_text.contains("nix eval"));
-    assert!(!verification_text.contains("cargo "));
-    assert!(!verification_text.contains("secrets."));
-    let branch_workflow: serde_yaml::Value = serde_yaml::from_str(
-        &fs::read_to_string(temp.path().join(".github/workflows/ci.yaml")).unwrap(),
-    )
-    .unwrap();
-    assert!(branch_workflow["jobs"]["verify-source"].is_null());
-    assert!(branch_workflow["jobs"]["plan"]["needs"].is_null());
+    assert!(workflow["on"]["workflow_dispatch"].is_null());
+    assert!(!text.contains("secrets."));
     assert_eq!(
         workflow["jobs"]["plan"]["steps"]
             .as_sequence()
@@ -907,6 +2154,30 @@ fn independent_publication_qualifies_native_components_and_keeps_version_drift_s
         workflow["jobs"]["component-python"]["strategy"]["matrix"]["include"][0]["runner"],
         "macos-14"
     );
+    let steps = workflow["jobs"]["component-python"]["steps"]
+        .as_sequence()
+        .unwrap();
+    let system_guard = steps
+        .iter()
+        .position(|step| step["name"] == "Verify runner system")
+        .unwrap();
+    assert!(
+        system_guard
+            < steps
+                .iter()
+                .position(|step| step["name"] == "Verify generated workflows")
+                .unwrap()
+    );
+    assert_eq!(
+        steps[system_guard]["env"]["EXPECTED_NIX_SYSTEM"],
+        "${{ matrix.system }}"
+    );
+    assert!(
+        steps[system_guard]["run"]
+            .as_str()
+            .unwrap()
+            .contains("builtins.currentSystem")
+    );
     let publishes: Vec<_> = workflow["jobs"]
         .as_mapping()
         .unwrap()
@@ -914,35 +2185,33 @@ fn independent_publication_qualifies_native_components_and_keeps_version_drift_s
         .filter_map(|k| k.as_str())
         .filter(|k| k.starts_with("publish-") && *k != "publish-report")
         .collect();
-    assert!(publishes.is_empty(), "candidate source must never publish");
-    assert!(!text.contains("${{ secrets."));
-    let publisher_text = fs::read_to_string(
-        temp.path()
-            .join(".github/workflows/trusted-publish-crate-worker.yaml"),
-    )
-    .unwrap();
+    assert!(publishes.is_empty());
+    assert!(text.contains("git verify-tag"));
+    assert!(text.contains("git rev-parse --verify \"refs/tags/${tag}^{commit}\""));
+    assert!(text.contains("checkout_sha=\"$(git rev-parse --verify HEAD)\""));
+    assert!(text.contains("ref: ${{ github.sha }}"));
+    assert!(text.contains("version=\"${GITHUB_REF_NAME#worker/v}\""));
+    assert!(text.contains("cargo package --locked --allow-dirty --no-verify -p worker"));
+    let publisher_path = temp
+        .path()
+        .join(".github/workflows/trusted-publish-crate-worker.yaml");
+    let publisher_text = fs::read_to_string(&publisher_path).unwrap();
     let publisher: serde_yaml::Value = serde_yaml::from_str(&publisher_text).unwrap();
     assert_eq!(
         publisher["on"]["workflow_run"]["workflows"][0],
-        workflow["name"]
+        "Build Crate worker"
     );
-    assert_eq!(
-        publisher["jobs"]["publish-worker"]["needs"][0],
-        "verify-worker"
-    );
+    assert!(publisher["on"]["push"].is_null());
     assert_eq!(
         publisher["jobs"]["publish-worker"]["environment"]["name"],
         "simit-crates-io"
     );
-    assert!(publisher["jobs"]["publish-engine"].is_null());
-    assert!(publisher_text.contains(
-        "--package worker --source-workflow .github/workflows/publish-crate-worker.yaml"
-    ));
-    assert!(text.contains("git verify-tag"));
-    assert!(text.contains("refs/tags/${tag}^{commit}"));
-    assert!(text.contains("Signed tag commit does not match the checkout being published"));
-    assert!(text.contains("version=\"${GITHUB_REF_NAME#worker/v}\""));
-    assert!(text.contains("cargo package --locked --allow-dirty --no-verify -p worker"));
+    assert_eq!(
+        publisher["jobs"]["verify-worker"]["runs-on"],
+        "ubuntu-24.04"
+    );
+    assert!(publisher_text.contains("--tag-namespace worker"));
+    assert!(publisher_text.contains("vars.SIMIT_PUBLISHER_REVISION"));
     let manifest = fs::read_to_string(temp.path().join("crates/worker/Cargo.toml")).unwrap();
     write(
         temp.path(),
@@ -956,14 +2225,7 @@ fn independent_publication_qualifies_native_components_and_keeps_version_drift_s
         .unwrap();
     assert!(output.status.success(), "{output:?}");
     assert_eq!(fs::read_to_string(path).unwrap(), text);
-    assert_eq!(
-        fs::read_to_string(
-            temp.path()
-                .join(".github/workflows/trusted-publish-crate-worker.yaml")
-        )
-        .unwrap(),
-        publisher_text
-    );
+    assert_eq!(fs::read_to_string(publisher_path).unwrap(), publisher_text);
     fs::remove_file(
         temp.path()
             .join(".github/workflows/publish-crate-engine.yaml"),
@@ -1007,42 +2269,139 @@ fn assert_public_input_transport(job: &serde_yaml::Value) {
 }
 
 #[test]
-fn independent_publication_rejects_credentials_in_native_component_gates() {
-    let temp = fixture();
-    let mut config = fs::read_to_string(temp.path().join("simit.toml"))
-        .unwrap()
-        .replace(
-            "runtime = \"nix\"",
-            "runtime = \"nix\"\npublish_crates = true",
-        );
-    for id in ["core", "rust", "python", "worker"] {
-        config = config.replace(
-            &format!("id = \"{id}\""),
-            &format!("id = \"{id}\"\nchecks = [{{ id = \"qualify\", run = \"true\" }}]"),
-        );
-    }
-    for expression in [
-        "secrets.CRATES_IO_API_TOKEN",
-        "github.token",
-        "toJSON(github)",
+fn independent_cargo_sources_refuse_private_workers_and_candidate_authentication() {
+    let publication_config = |temp: &TempDir| {
+        let mut config = fs::read_to_string(temp.path().join("simit.toml"))
+            .unwrap()
+            .replace(
+                "runtime = \"nix\"",
+                "runtime = \"nix\"\npublish_crates = true",
+            );
+        for id in ["core", "rust", "python", "worker"] {
+            config = config.replace(
+                &format!("id = \"{id}\""),
+                &format!("id = \"{id}\"\nchecks = [{{ id = \"qualify\", run = \"true\" }}]"),
+            );
+        }
+        config
+    };
+    for mutation in [
+        "runner = \"atlas-nix-trusted\"",
+        "[ci.nix_system_runners]\naarch64-darwin = \"private-macos\"",
     ] {
-        let candidate = config.replacen(
-            "run = \"true\"",
-            &format!("run = \"true\", env = {{ AUTH = \"${{{{ {expression} }}}}\" }}"),
-            1,
+        let temp = fixture();
+        let config = publication_config(&temp).replace(
+            "publish_crates = true",
+            &format!("publish_crates = true\n{mutation}"),
         );
-        write(temp.path(), "simit.toml", &candidate);
+        let config = if mutation.contains("nix_system_runners") {
+            config.replace(
+                "id = \"python\"",
+                "id = \"python\"\nsystems = [\"aarch64-darwin\"]",
+            )
+        } else {
+            config
+        };
+        write(temp.path(), "simit.toml", &config);
         let output = common::simit()
             .current_dir(temp.path())
             .args(["init", "ci"])
             .output()
             .unwrap();
-        assert!(!output.status.success(), "{output:?}");
+        assert!(!output.status.success(), "accepted {mutation}: {output:?}");
         assert!(
-            String::from_utf8_lossy(&output.stderr).contains("must not reference GitHub"),
+            String::from_utf8_lossy(&output.stderr).contains("recognized GitHub-hosted runners"),
             "{output:?}"
         );
-        assert!(!temp.path().join(".github/workflows").exists());
+    }
+    for value in [
+        "${{ github.token }}",
+        "${{ toJSON(github) }}",
+        "${{ secrets.CRATES_IO_API_TOKEN }}",
+    ] {
+        let temp = fixture();
+        let config = publication_config(&temp).replace("id = \"core\"\nchecks = [{ id = \"qualify\", run = \"true\" }]", &format!("id = \"core\"\nchecks = [{{ id = \"qualify\", run = \"true\", env = {{ TOKEN = '{value}' }} }}]"));
+        write(temp.path(), "simit.toml", &config);
+        let output = common::simit()
+            .current_dir(temp.path())
+            .args(["init", "ci"])
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "accepted {value}: {output:?}");
+        let diagnostic = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            diagnostic.contains("cannot contain workflow expressions"),
+            "{output:?}"
+        );
+        assert!(!temp.path().join(".github/workflows/ci.yaml").exists());
+    }
+}
+
+#[test]
+fn qualification_actions_follow_hosted_and_mixed_private_capacity() {
+    for (runner, matrix_runner, hosted_component) in [
+        (Some("ubuntu-24.04"), None, true),
+        (None, Some("ubuntu-24.04-arm"), true),
+        (None, Some("atlas"), false),
+        (Some("atlas"), None, false),
+    ] {
+        let temp = fixture();
+        let runner_config = if let Some(runner) = runner {
+            format!("runner = '{runner}'")
+        } else {
+            format!(
+                "nix_system_runners = {{ x86_64-linux = 'ubuntu-24.04', aarch64-linux = '{}' }}",
+                matrix_runner.unwrap()
+            )
+        };
+        let mut config = fs::read_to_string(temp.path().join("simit.toml"))
+            .unwrap()
+            .replace(
+                "runtime = \"nix\"",
+                &format!("runtime = \"nix\"\n{runner_config}"),
+            );
+        for id in ["core", "rust", "python", "worker"] {
+            config = config.replace(
+                &format!("id = \"{id}\""),
+                &format!("id = \"{id}\"\nchecks = [{{ id = \"qualify\", run = \"true\" }}]"),
+            );
+        }
+        if matrix_runner.is_some() {
+            config = config.replace(
+                "id = \"core\"",
+                "id = \"core\"\nsystems = ['x86_64-linux', 'aarch64-linux']",
+            );
+        }
+        write(temp.path(), "simit.toml", &config);
+        let output = common::simit()
+            .current_dir(temp.path())
+            .args(["init", "ci"])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let text = fs::read_to_string(temp.path().join(".github/workflows/ci.yaml")).unwrap();
+        let workflow: serde_yaml::Value = serde_yaml::from_str(&text).unwrap();
+        for (job, hosted) in [
+            ("plan", runner != Some("atlas")),
+            ("component-core", hosted_component),
+        ] {
+            let expected = simit::render::ci::github_action_ref(
+                "actions/checkout",
+                if hosted { "v7.0.1" } else { "v4.3.1" },
+            );
+            assert_eq!(
+                workflow["jobs"][job]["steps"][0]["uses"].as_str().unwrap(),
+                expected.split(" #").next().unwrap()
+            );
+            let expected = simit::render::ci::github_action_ref(
+                "cachix/install-nix-action",
+                if hosted { "v31.11.1" } else { "v31" },
+            );
+            assert_eq!(
+                workflow["jobs"][job]["steps"][1]["uses"].as_str().unwrap(),
+                expected.split(" #").next().unwrap()
+            );
+        }
     }
 }
 
@@ -1144,6 +2503,13 @@ fn component_automatic_changelog_drafting_uses_only_owned_history() {
     use std::os::unix::fs::PermissionsExt as _;
     let temp = history_fixture();
     let root = temp.path();
+    enroll_release_checks(root);
+    let lock = Command::new("cargo")
+        .current_dir(root)
+        .args(["generate-lockfile", "--offline"])
+        .output()
+        .unwrap();
+    assert!(lock.status.success(), "{lock:?}");
     let support = TempDir::new().unwrap();
     let prompt = support.path().join("prompt");
     let script = support.path().join("codex");

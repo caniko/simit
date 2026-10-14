@@ -68,6 +68,7 @@ impl ReleaseTag {
     /// Package names form independent release namespaces within one repository.
     pub fn for_package(package: &str, version: Version) -> Result<Self> {
         if package.is_empty()
+            || package.starts_with('-')
             || !package
                 .bytes()
                 .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
@@ -116,5 +117,17 @@ mod tests {
         assert_eq!(tag.to_string(), "harbor-cache/v0.1.1");
         assert!(ReleaseTag::parse_for_package("harbor-sdk", &tag.to_string()).is_err());
         assert!(ReleaseTag::for_package("../outside", Version::new(1, 0, 0)).is_err());
+        for namespace in ["-python", "-", "--node"] {
+            assert!(
+                ReleaseTag::for_package(namespace, Version::new(1, 2, 3)).is_err(),
+                "{namespace}"
+            );
+        }
+        for namespace in ["_python", "node-engine", "node-", "42"] {
+            assert!(
+                ReleaseTag::for_package(namespace, Version::new(1, 2, 3)).is_ok(),
+                "{namespace}"
+            );
+        }
     }
 }

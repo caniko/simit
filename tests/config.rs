@@ -417,6 +417,27 @@ fn flake_and_ci_config_load_from_flake_output() {
 }
 
 #[test]
+fn flake_backed_native_owners_require_static_policy() {
+    with_fake_nix(
+        r#"{"monorepo":{"schema_version":1,"components":[{"id":"native","paths":["native"],"releases":[{"manifest":"native/package.json","namespace":"native","publish":true}]}]}}"#,
+        |temp| {
+            fs::write(
+                temp.path().join("flake.nix"),
+                "{ outputs = { self }: { simitConfig = {}; }; }\n",
+            )
+            .unwrap();
+            let error = ProjectConfig::load(temp.path()).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("native release owners require static"),
+                "{error:#}"
+            );
+        },
+    );
+}
+
+#[test]
 fn invalid_flake_mode_is_rejected() {
     load_toml(
         r#"[flake]

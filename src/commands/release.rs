@@ -19,6 +19,7 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
         || command.source_workflow.is_some()
         || command.publisher_workflow.is_some()
         || command.publisher_output.is_some()
+        || command.tag_namespace.is_some()
         || !command.reconstruct_packages.is_empty()
     {
         bail!("publisher arguments require `simit release publisher`");
@@ -101,6 +102,39 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
     )?;
     let plans = cargo::plan_versions(packages, &bump)?;
     let new_version = cargo::common_new_version(&plans)?;
+    if command.component.is_some() {
+        for package in &metadata.packages {
+            for dependency in &package.dependencies {
+                for plan in &plans {
+                    if dependency.path.as_deref() == plan.package.manifest_path.parent()
+                        && dependency.path.is_some()
+                    {
+                        if let Some(requirement) = &dependency.req {
+                            anyhow::ensure!(
+                                semver::VersionReq::parse(requirement)?.matches(&plan.new_version),
+                                "package {} dependency {} requirement {} excludes component version {}; update the dependency requirement before releasing",
+                                package.name,
+                                dependency.name,
+                                requirement,
+                                plan.new_version
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if command.component.is_some()
+        && config.ci.publish_crates
+        && plans
+            .iter()
+            .any(|plan| plan.package.is_publishable_to_crates_io())
+        && !new_version.pre.is_empty()
+    {
+        bail!(
+            "independent Cargo publication does not support prereleases; choose a stable version before releasing"
+        );
+    }
     let tag = if command.component.is_some() {
         crate::release_identity::ReleaseTag::for_package(
             &plans[0].package.name,
@@ -112,7 +146,7 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
     let changelog_enabled = !command.no_changelog
         && config
             .release
-            .notes_source(config.ci.platform.unwrap_or(crate::cli::Platform::Forgejo))
+            .notes_source(crate::ci_resolution::release_backend(&config, None, None)?.platform())
             == crate::config::ReleaseNotesSource::Changelog;
     let create_tag = !command.no_tag;
     let sign_tag = !command.no_sign;
@@ -154,6 +188,9 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
             );
         }
         println!("would run cargo test and cargo clippy");
+        if let Some(component) = &command.component {
+            println!("would qualify component {component} and its prerequisites");
+        }
         if changelog_enabled && changelog_path.exists() {
             if config.release.changelog.auto_draft {
                 println!("would draft CHANGELOG.md [Unreleased] from git history");
@@ -168,10 +205,24 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
     }
 
     git::release_preflight(workspace_root, create_tag, sign_tag, &tag)?;
+    let qualified_head = command
+        .component
+        .as_ref()
+        .map(|_| git::head_commit(workspace_root))
+        .transpose()?;
     if command.component.is_some() {
         git::ensure_worktree_clean(workspace_root)?;
     }
     let changelog_update = if changelog_enabled && changelog_path.exists() {
+        if command.component.is_some() {
+            anyhow::ensure!(
+                !std::fs::symlink_metadata(&changelog_path)?
+                    .file_type()
+                    .is_symlink(),
+                "release changelog must not be a symlink: {}",
+                changelog_path.display()
+            );
+        }
         let content = std::fs::read_to_string(&changelog_path)?;
         let content = if config.release.changelog.auto_draft {
             if let Some(paths) = &component_paths {
@@ -182,27 +233,47 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
                     paths,
                 )?
             } else {
-                changelog::draft_content(&content, workspace_root, None)?
+                changelog::draft_content_with_prefix(
+                    &content,
+                    workspace_root,
+                    None,
+                    config.release.tag_prefix,
+                )?
             }
         } else {
             content
         };
-        Some(changelog::release_content_with_namespace(
+        let prefix = command
+            .component
+            .as_ref()
+            .map(|_| format!("{}/v", plans[0].package.name))
+            .unwrap_or_else(|| config.release.tag_prefix.as_str().to_owned());
+        Some(changelog::release_content_with_prefix(
             &content,
             &new_version,
             changelog::today_utc()?,
             None,
             &changelog_path,
             Some(workspace_root),
-            command
-                .component
-                .as_ref()
-                .map(|_| plans[0].package.name.as_str()),
+            &prefix,
         )?)
     } else {
         None
     };
+    if let Some(component) = &command.component {
+        crate::monorepo::releases::qualify_component(workspace_root, &config, component)?;
+    }
     git::run_project_checks(workspace_root)?;
+    if let Some(head) = qualified_head {
+        git::ensure_worktree_clean(workspace_root)?;
+        anyhow::ensure!(
+            git::head_commit(workspace_root)? == head,
+            "release HEAD changed during qualification"
+        );
+        if create_tag {
+            git::ensure_tag_absent(workspace_root, &tag)?;
+        }
+    }
     let workspace_version_bumped = command.component.is_none()
         && cargo::update_workspace_version(
             workspace_root,
@@ -242,7 +313,11 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
 }
 
 fn secrets(command: ReleaseCommand) -> Result<()> {
-    if !command.packages.is_empty() {
+    if !command.packages.is_empty()
+        && !(command.packages.len() == 1
+            && (command.secrets_action == Some(ReleaseSecretsAction::Contract)
+                || command.trust_action == Some(ReleaseTrustAction::Contract)))
+    {
         bail!("--package is not valid with `simit release secrets`");
     }
     if command.workspace {
@@ -345,8 +420,15 @@ fn trust(command: ReleaseCommand) -> Result<()> {
     let action = command
         .trust_action
         .ok_or_else(|| anyhow!("release trust action is required: status, init, or check"))?;
-    let metadata = cargo::metadata_for_current_dir()?;
-    let workspace_root = metadata.workspace_root.as_std_path();
+    let workspace_root = if let Some(root) = crate::monorepo::find_root(&std::env::current_dir()?)?
+    {
+        root
+    } else {
+        cargo::metadata_for_current_dir()?
+            .workspace_root
+            .into_std_path_buf()
+    };
+    let workspace_root = workspace_root.as_path();
     let config = ProjectConfig::load(workspace_root)?;
     let overrides = TrustOverrides {
         key: command.trust_key,
@@ -420,6 +502,9 @@ fn sync_up(command: ReleaseCommand) -> Result<()> {
         config.release.tag_prefix.tag(version.clone())
     };
     sync_tag(&command, workspace_root, &version, &tag, || {
+        if let Some(component) = &command.component {
+            crate::monorepo::releases::qualify_component(workspace_root, &config, component)?;
+        }
         git::run_project_checks(workspace_root)
     })
 }

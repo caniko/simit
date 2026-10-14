@@ -80,13 +80,11 @@ pub fn check(command: ReleaseCommand) -> Result<()> {
 pub fn contract(command: ReleaseCommand) -> Result<()> {
     let metadata = cargo::metadata_for_current_dir()?;
     let workspace_root = metadata.workspace_root.as_std_path();
-    let package = cargo::representative_package(&metadata, None)?;
+    let package =
+        cargo::representative_package(&metadata, command.packages.first().map(String::as_str))?;
     let cfg = ProjectConfig::load(workspace_root)?;
 
-    let platform = command
-        .platform
-        .or(cfg.ci.platform)
-        .unwrap_or(Platform::Forgejo);
+    let platform = crate::ci_resolution::release_backend(&cfg, command.platform, None)?.platform();
     let credentials = project_credentials(&cfg, &package, platform)?;
     println!("{}", serde_json::to_string_pretty(&credentials)?);
     Ok(())

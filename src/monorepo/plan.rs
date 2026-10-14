@@ -110,8 +110,15 @@ pub fn select(graph: &Graph, paths: &[String], all: bool) -> Result<Plan> {
     })
 }
 
+/// Representable Git changes and conservative fallback for unknown byte paths.
+pub struct ChangedPaths {
+    pub paths: Vec<String>,
+    /// Git permits byte paths that the component path contract cannot represent.
+    pub full: bool,
+}
+
 /// Disabling rename detection deliberately retains old and new ownership paths.
-pub fn changed_paths(root: &Path, base: &str) -> Result<Vec<String>> {
+pub fn changed_paths(root: &Path, base: &str) -> Result<ChangedPaths> {
     let revision = git(
         root,
         &[
@@ -130,15 +137,21 @@ pub fn changed_paths(root: &Path, base: &str) -> Result<Vec<String>> {
         root,
         &["ls-files", "--others", "--exclude-standard", "-z"],
     )?);
-    paths
-        .split(|b| *b == 0)
-        .filter(|p| !p.is_empty())
-        .map(|p| {
-            Ok(std::str::from_utf8(p)
-                .context("changed path is not UTF-8; full qualification is required")?
-                .to_owned())
-        })
-        .collect()
+    Ok(decode_paths(&paths))
+}
+
+fn decode_paths(paths: &[u8]) -> ChangedPaths {
+    let mut changed = ChangedPaths {
+        paths: Vec::new(),
+        full: false,
+    };
+    for path in paths.split(|b| *b == 0).filter(|p| !p.is_empty()) {
+        match std::str::from_utf8(path) {
+            Ok(path) if validate_relative_path(path).is_ok() => changed.paths.push(path.to_owned()),
+            _ => changed.full = true,
+        }
+    }
+    changed
 }
 
 fn git(root: &Path, args: &[&str]) -> Result<Vec<u8>> {
@@ -155,4 +168,29 @@ fn git(root: &Path, args: &[&str]) -> Result<Vec<u8>> {
         );
     }
     Ok(output.stdout)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn byte_path_decoder_preserves_known_paths_and_forces_full_qualification() {
+        let changed = super::decode_paths(b"python/server.py\0python/invalid-\xff.py\0");
+        assert!(changed.full);
+        assert_eq!(changed.paths, ["python/server.py"]);
+        let known = super::decode_paths(b"python/server.py\0");
+        assert!(!known.full);
+        assert_eq!(known.paths, ["python/server.py"]);
+        for unusual in [
+            b"python/back\\slash.py".as_slice(),
+            b"python/new\nline.py",
+            b"python/return\rline.py",
+        ] {
+            let mut paths = b"python/server.py\0".to_vec();
+            paths.extend(unusual);
+            paths.push(0);
+            let changed = super::decode_paths(&paths);
+            assert!(changed.full, "{unusual:?}");
+            assert_eq!(changed.paths, ["python/server.py"]);
+        }
+    }
 }

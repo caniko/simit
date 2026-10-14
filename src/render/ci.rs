@@ -19,7 +19,6 @@ mod independent_lanes;
 mod nix_dependencies;
 mod nix_groups;
 mod trusted_publisher;
-pub(crate) use trusted_publisher::validate_credential_free_source;
 
 pub const OMNIX_REF_DEFAULT: &str = "github:juspay/omnix/v1.3.2";
 pub const GENERATED_WORKFLOW_MARKER: &str =
@@ -85,13 +84,13 @@ pub(crate) fn workflow_preamble_lines(content: &str) -> impl Iterator<Item = &st
 const CARGO_NEXTEST_VERSION: &str = "0.9.100";
 const CARGO_DENY_VERSION: &str = "0.18.3";
 const CARGO_DENY_POLICY_CHECKS: &str = "bans licenses sources";
-#[cfg(all(test, unix))]
-mod formatter_tests;
 // Custom/legacy Nix shells may expose rustfmt without a treefmt wrapper.
 // Prefer the complete project formatter, and never mask its failure. Custom
 // formatters compare their actual input/output, including setup-generated files.
 // An external alternate index snapshots content without staging the real index.
-pub(crate) const NIX_FORMAT_COMMAND: &str = r#"sh -c 'formatter_expr="let root = toString ./.; flake = builtins.getFlake (if builtins.pathExists ./.git then \"git+file://\" + root else root); in if flake ? formatter.\${builtins.currentSystem} then flake.formatter.\${builtins.currentSystem} else null"; formatter=$(nix eval --impure --raw --expr "let f = ($formatter_expr); in if f == null then \"\" else f.drvPath") || exit; if [ -n "$formatter" ]; then formatter_program=$(nix eval --impure --raw --expr "let f = ($formatter_expr); in f.meta.mainProgram or (f.pname or (builtins.parseDrvName f.name).name)") || exit; formatter_path=$(nix build --no-link --print-out-paths "$formatter^out") || exit; formatter_exe="$formatter_path/bin/$formatter_program"; if [ ! -x "$formatter_exe" ]; then echo "Declared flake formatter executable is missing: $formatter_exe" >&2; exit 1; fi; if [ "$formatter_program" = treefmt ]; then exec "$formatter_exe" --ci; fi; repository_root=$(git rev-parse --show-toplevel) || exit; index_tree=$(git -C "$repository_root" write-tree) || exit; snapshot_dir=$(mktemp -d "${TMPDIR:-/tmp}/simit-format.XXXXXXXX") || exit; trap "rm -rf -- \"\$snapshot_dir\"" 0; trap "exit 129" HUP; trap "exit 130" INT; trap "exit 143" TERM; snapshot_dir=$(cd "$snapshot_dir" && pwd -P) || exit; case "$snapshot_dir/" in "$repository_root/"*) echo "Formatter snapshot directory must be outside the repository" >&2; exit 1;; esac; snapshot_worktree() { GIT_INDEX_FILE="$snapshot_dir/index" git -C "$repository_root" read-tree "$index_tree" && GIT_INDEX_FILE="$snapshot_dir/index" git -C "$repository_root" add --all -- . && GIT_INDEX_FILE="$snapshot_dir/index" git -C "$repository_root" write-tree; }; before_tree=$(snapshot_worktree) || exit; "$formatter_exe" || exit; after_tree=$(snapshot_worktree) || exit; current_index=$(git -C "$repository_root" write-tree) || exit; if [ "$before_tree" != "$after_tree" ] || [ "$index_tree" != "$current_index" ]; then echo "Formatter modified repository content or staging" >&2; exit 1; fi; exit 0; fi; if [ -f nix/treefmt.nix ] || [ -f treefmt.toml ] || [ -f .treefmt.toml ]; then echo "treefmt policy requires a flake formatter output; run simit init flake" >&2; exit 1; fi; if command -v treefmt >/dev/null 2>&1; then exec treefmt --ci; else exec cargo fmt --all -- --check; fi'"#;
+pub(crate) const NIX_FORMAT_COMMAND: &str = r#"sh -c 'formatter_expr="let root = toString ./.; flake = builtins.getFlake (if builtins.pathExists ./.git then \"git+file://\" + root else root); in if flake ? formatter.\${builtins.currentSystem} then flake.formatter.\${builtins.currentSystem} else null"; formatter=$(nix eval --impure --raw --expr "let f = ($formatter_expr); in if f == null then \"\" else f.drvPath") || exit; if [ -n "$formatter" ]; then formatter_program=$(nix eval --impure --raw --expr "let f = ($formatter_expr); in f.meta.mainProgram or (f.pname or (builtins.parseDrvName f.name).name)") || exit; formatter_path=$(nix build --no-link --print-out-paths "$formatter^out") || exit; formatter_exe="$formatter_path/bin/$formatter_program"; if [ ! -x "$formatter_exe" ]; then echo "Declared flake formatter executable is missing: $formatter_exe" >&2; exit 1; fi; if [ "$formatter_program" = treefmt ]; then exec "$formatter_exe" --ci; fi; repository_root=$(git rev-parse --show-toplevel) || exit; index_tree=$(git -C "$repository_root" write-tree) || exit; snapshot_dir=$(mktemp -d "${TMPDIR:-/tmp}/simit-format.XXXXXXXX") || exit; trap "rm -rf -- \"\$snapshot_dir\"" 0; trap "exit 129" HUP; trap "exit 130" INT; trap "exit 143" TERM; snapshot_dir=$(cd "$snapshot_dir" && pwd -P) || exit; case "$snapshot_dir/" in "$repository_root/"*) echo "Formatter snapshot directory must be outside the repository" >&2; exit 1;; esac; snapshot_worktree() { GIT_INDEX_FILE="$snapshot_dir/index" git -C "$repository_root" read-tree "$index_tree" && GIT_INDEX_FILE="$snapshot_dir/index" git -C "$repository_root" add --all -- . && GIT_INDEX_FILE="$snapshot_dir/index" git -C "$repository_root" write-tree; }; before_tree=$(snapshot_worktree) || exit; "$formatter_exe" || exit; after_tree=$(snapshot_worktree) || exit; current_index=$(git -C "$repository_root" write-tree) || exit; if [ "$before_tree" != "$after_tree" ] || [ "$index_tree" != "$current_index" ]; then echo "Formatter modified repository content or staging" >&2; exit 1; fi; exit 0; fi; if command -v treefmt >/dev/null 2>&1; then exec treefmt --ci; else exec cargo fmt --all -- --check; fi'"#;
+#[cfg(all(test, unix))]
+mod formatter_tests;
 
 #[derive(Debug, Deserialize)]
 struct ActionPin {
@@ -172,8 +171,15 @@ pub enum OmCiMode {
     Augment,
 }
 
+pub(crate) fn publisher_bootstrap() -> String {
+    let mut steps = String::new();
+    trusted_publisher::bootstrap(&mut steps);
+    steps
+}
+
 #[derive(Debug, Clone)]
 pub struct CiOptions {
+    pub tag_prefix: crate::release_identity::TagPrefix,
     /// CI-only cache policy; publication uses the separate nix_* fields.
     pub ci_nix_substituters: Vec<String>,
     pub ci_nix_trusted_public_keys: Vec<String>,
@@ -227,6 +233,7 @@ pub struct CodebergPagesOptions {
 impl Default for CiOptions {
     fn default() -> Self {
         Self {
+            tag_prefix: Default::default(),
             ci_nix_substituters: Vec::new(),
             ci_nix_trusted_public_keys: Vec::new(),
             independent_lanes: false,
@@ -562,8 +569,11 @@ pub fn publish_workspace_files(
     Ok(vec![source, publisher])
 }
 
-fn github_crate_publish_triggers() -> &'static str {
-    "# GitHub crates.io publishers run only on signed semver tag pushes. Retry the original run rather than dispatching a branch.\non:\n  push:\n    tags:\n      - \"[0-9]*\"\n\n"
+fn github_crate_publish_triggers(prefix: crate::release_identity::TagPrefix) -> String {
+    format!(
+        "# GitHub crates.io publishers run only on signed semver tag pushes. Retry the original run rather than dispatching a branch.\non:\n  push:\n    tags:\n      - \"{}[0-9]*\"\n\n",
+        prefix.as_str()
+    )
 }
 
 fn publish_workspace_workflow(
@@ -584,7 +594,6 @@ fn publish_workspace_workflow(
                 .map(|(name, _)| name.clone())
                 .collect::<Vec<_>>(),
             true,
-            independent_package,
         );
     }
     let mut w = String::new();
@@ -645,6 +654,7 @@ fn publish_workspace_workflow(
     w.push_str(&release_trust_root_steps());
     w.push_str("          git_fetch --force --tags origin \"refs/tags/${tag}:refs/tags/${tag}\"\n");
     w.push_str("          git verify-tag \"$tag\"\n");
+    w.push_str(&signed_tag_name_steps("tag"));
     w.push_str("          validated_sha=\"$(git rev-list -n 1 \"$tag\")\"\n");
     // Every subsequent job checks out the immutable workflow event commit.
     // A refetch must never let a moved tag authorize a different source tree.
@@ -772,7 +782,12 @@ fn publish_workspace_workflow(
         w.push_str(" --dry-run\n\n");
         // Single-crate and dependency-ordered publication share conflict and
         // exact-registry readiness checks, including checksum-based resumes.
-        w.push_str(&publish_crate_steps(name, runtime, true));
+        w.push_str(&publish_crate_steps(
+            name,
+            runtime,
+            true,
+            options.tag_prefix,
+        ));
         previous = job.clone();
     }
     // Auditable summary (always runs, never publishes).
@@ -800,7 +815,6 @@ fn publish_workspace_workflow(
 /// published. Component integration gates run before any credentialed job.
 pub fn publish_independent_files(
     package: &Package,
-    runner: &ResolvedRunner,
     options: &CiOptions,
 ) -> Result<Vec<GeneratedFile>> {
     crate::release_identity::ReleaseTag::for_package(
@@ -813,25 +827,28 @@ pub fn publish_independent_files(
     let source = GeneratedFile {
         relative_path: PathBuf::from(".github/workflows")
             .join(format!("publish-crate-{}.yaml", package.name)),
-        content: publish_workspace_workflow(
-            Platform::Github,
+        content: trusted_publisher::source_workflow_with_namespace(
             Runtime::Nix,
-            runner,
             options,
-            &[(package.name.clone(), Vec::new())],
-            &[(package.name.clone(), package.version.clone())],
+            std::slice::from_ref(&package.name),
+            false,
             Some(&package.name),
         ),
     };
     trusted_publisher::validate_credential_free_source(&source.content, options)?;
-    let publisher = trusted_publisher::publisher_file(
+    let publisher = trusted_publisher::publisher_file_with_namespace(
         &source.relative_path,
         Runtime::Nix,
         options,
         &[(package.name.clone(), Vec::new())],
         false,
+        Some(&package.name),
     );
     Ok(vec![source, publisher])
+}
+
+pub(crate) fn validate_credential_free_workflow(workflow: &str, options: &CiOptions) -> Result<()> {
+    trusted_publisher::validate_credential_free_source(workflow, options)
 }
 
 pub fn codeberg_pages_file(
@@ -855,13 +872,23 @@ pub fn vscode_extension_file(
     runner: &ResolvedRunner,
     vscode: &ResolvedVscode,
 ) -> Result<GeneratedFile> {
+    vscode_extension_file_with_prefix(platform, runtime, runner, vscode, Default::default())
+}
+
+pub fn vscode_extension_file_with_prefix(
+    platform: Platform,
+    runtime: Runtime,
+    runner: &ResolvedRunner,
+    vscode: &ResolvedVscode,
+    prefix: crate::release_identity::TagPrefix,
+) -> Result<GeneratedFile> {
     if runtime != Runtime::Nix {
         bail!("VS Code extension workflow generation requires --runtime nix");
     }
 
     Ok(GeneratedFile {
         relative_path: PathBuf::from(platform.workflow_dir()).join("publish-vscode-extension.yaml"),
-        content: vscode_extension_workflow(platform, runner, vscode),
+        content: vscode_extension_workflow(platform, runner, vscode, prefix),
     })
 }
 
@@ -871,13 +898,29 @@ pub fn jetbrains_plugin_file(
     runner: &ResolvedRunner,
     jetbrains: &ResolvedJetbrains,
 ) -> Result<GeneratedFile> {
+    jetbrains_plugin_file_with_prefix(
+        platform,
+        runtime,
+        runner,
+        jetbrains,
+        crate::release_identity::TagPrefix::None,
+    )
+}
+
+pub fn jetbrains_plugin_file_with_prefix(
+    platform: Platform,
+    runtime: Runtime,
+    runner: &ResolvedRunner,
+    jetbrains: &ResolvedJetbrains,
+    prefix: crate::release_identity::TagPrefix,
+) -> Result<GeneratedFile> {
     if runtime != Runtime::Nix {
         bail!("JetBrains plugin workflow generation requires --runtime nix");
     }
 
     Ok(GeneratedFile {
         relative_path: PathBuf::from(platform.workflow_dir()).join("publish-jetbrains-plugin.yaml"),
-        content: jetbrains_plugin_workflow(platform, runner, jetbrains),
+        content: jetbrains_plugin_workflow(platform, runner, jetbrains, prefix),
     })
 }
 
@@ -1024,6 +1067,26 @@ pub fn github_prebuild_file(
     artifacts: &ArtifactsConfig,
     attic: Option<&AtticConfig>,
 ) -> Result<GeneratedFile> {
+    github_prebuild_file_with_policy(
+        system_runners,
+        nix_builds,
+        prebuild,
+        artifacts,
+        attic,
+        crate::release_identity::TagPrefix::None,
+        crate::config::ReleaseNotesSource::Changelog,
+    )
+}
+
+pub fn github_prebuild_file_with_policy(
+    system_runners: &BTreeMap<String, String>,
+    nix_builds: &[String],
+    prebuild: &PrebuildConfig,
+    artifacts: &ArtifactsConfig,
+    attic: Option<&AtticConfig>,
+    prefix: crate::release_identity::TagPrefix,
+    notes: crate::config::ReleaseNotesSource,
+) -> Result<GeneratedFile> {
     if system_runners.is_empty() {
         bail!("GitHub prebuild requires at least one native system runner");
     }
@@ -1073,7 +1136,7 @@ pub fn github_prebuild_file(
     );
     // Reusable release prebuilds also validate their own event checkout before
     // any project-controlled evaluation/build or Attic credential use.
-    let validation = super::release_workflow::tag_validation_step(artifacts);
+    let validation = super::release_workflow::tag_validation_step(artifacts, prefix, notes);
     workflow.push_str(&validation.replacen(
         "        run: |",
         "        if: ${{ inputs.release }}\n        run: |",
@@ -1484,13 +1547,17 @@ fn vscode_extension_workflow(
     platform: Platform,
     runner: &ResolvedRunner,
     vscode: &ResolvedVscode,
+    prefix: crate::release_identity::TagPrefix,
 ) -> String {
     let mut workflow = String::new();
     push_generated_workflow_header(&mut workflow);
     workflow.push_str("name: Publish VS Code Extension\n\n");
     workflow.push_str("on:\n");
     workflow.push_str("  push:\n");
-    workflow.push_str("    tags: [\"[0-9]*.[0-9]*.[0-9]*\"]\n");
+    workflow.push_str(&format!(
+        "    tags: [\"{}[0-9]*.[0-9]*.[0-9]*\"]\n",
+        prefix.as_str()
+    ));
     workflow.push_str("  workflow_dispatch:\n\n");
     push_platform_concurrency(&mut workflow, platform);
     workflow.push_str("jobs:\n");
@@ -1503,7 +1570,7 @@ fn vscode_extension_workflow(
     workflow.push_str("    steps:\n");
     push_event_checkout_step(&mut workflow, platform, Some(runner));
     push_install_nix_step(&mut workflow, platform);
-    push_vscode_version_validation(&mut workflow, vscode);
+    push_vscode_version_validation(&mut workflow, vscode, prefix);
     push_vscode_credential_preflight(&mut workflow, vscode);
     for (index, command) in vscode.prepublish_commands.iter().enumerate() {
         workflow.push_str("      - name: Prepublish command ");
@@ -1531,6 +1598,7 @@ fn jetbrains_plugin_workflow(
     platform: Platform,
     runner: &ResolvedRunner,
     jetbrains: &ResolvedJetbrains,
+    prefix: crate::release_identity::TagPrefix,
 ) -> String {
     let artifact_label = Path::new(&jetbrains.plugin_dir)
         .file_name()
@@ -1542,7 +1610,10 @@ fn jetbrains_plugin_workflow(
     workflow.push_str("name: Publish JetBrains Plugin\n\n");
     workflow.push_str("on:\n");
     workflow.push_str("  push:\n");
-    workflow.push_str("    tags: [\"[0-9]*.[0-9]*.[0-9]*\", \"v[0-9]*.[0-9]*.[0-9]*\"]\n");
+    workflow.push_str(&format!(
+        "    tags: [\"{}[0-9]*.[0-9]*.[0-9]*\"]\n",
+        prefix.as_str()
+    ));
     workflow.push_str("  workflow_dispatch:\n");
     workflow.push_str("    inputs:\n");
     workflow.push_str("      version:\n");
@@ -1561,7 +1632,7 @@ fn jetbrains_plugin_workflow(
     push_checkout_step(&mut workflow, platform, runner);
     push_install_nix_step(&mut workflow, platform);
     push_jetbrains_credential_preflight(&mut workflow, jetbrains);
-    push_jetbrains_version_validation(&mut workflow, jetbrains);
+    push_jetbrains_version_validation(&mut workflow, jetbrains, prefix);
     for (index, command) in jetbrains.prepublish_commands.iter().enumerate() {
         workflow.push_str("      - name: Prepublish command ");
         workflow.push_str(&(index + 1).to_string());
@@ -1725,18 +1796,27 @@ fn push_jetbrains_credential_preflight(workflow: &mut String, jetbrains: &Resolv
     workflow.push_str("          printf '%s\\n' 'JetBrains publishing credentials validated'\n\n");
 }
 
-fn push_jetbrains_version_validation(workflow: &mut String, jetbrains: &ResolvedJetbrains) {
+fn push_jetbrains_version_validation(
+    workflow: &mut String,
+    jetbrains: &ResolvedJetbrains,
+    prefix: crate::release_identity::TagPrefix,
+) {
     workflow.push_str("      - name: Validate plugin version and metadata\n");
     workflow.push_str("        env:\n");
+    workflow.push_str("          TAG_LABEL: ${{ github.ref_name }}\n          DISPATCH_VERSION: ${{ github.event.inputs.version }}\n");
     workflow.push_str("          PLUGIN_DIR: ");
     workflow.push_str(&shell_word(&jetbrains.plugin_dir));
     workflow.push_str("\n          PLUGIN_XML_ID: ");
     workflow.push_str(&shell_word(&jetbrains.plugin_xml_id));
     workflow.push_str("\n        run: |\n");
     workflow.push_str("          set -euo pipefail\n");
-    workflow
-        .push_str("          VERSION=\"${{ github.event.inputs.version || github.ref_name }}\"\n");
-    workflow.push_str("          VERSION=\"${VERSION#v}\"\n");
+    workflow.push_str("          if [ -n \"$DISPATCH_VERSION\" ]; then\n            VERSION=\"$DISPATCH_VERSION\"\n          else\n");
+    if prefix == crate::release_identity::TagPrefix::V {
+        workflow.push_str("            case \"$TAG_LABEL\" in v*) VERSION=\"${TAG_LABEL#v}\" ;; *) echo 'Tag prefix mismatch' >&2; exit 1 ;; esac\n");
+    } else {
+        workflow.push_str("            VERSION=\"$TAG_LABEL\"\n");
+    }
+    workflow.push_str("          fi\n");
     workflow.push_str("          [[ \"$VERSION\" =~ ^[0-9]+\\.[0-9]+\\.[0-9]+$ ]]\n");
     if let Some(cargo_package) = &jetbrains.cargo_package {
         workflow.push_str("          cargo_metadata=$(nix shell nixpkgs#cargo -c cargo metadata --format-version 1 --no-deps)\n");
@@ -1749,6 +1829,7 @@ fn push_jetbrains_version_validation(workflow: &mut String, jetbrains: &Resolved
     workflow.push_str("          test -f \"$PLUGIN_DIR/src/main/resources/META-INF/plugin.xml\"\n");
     workflow.push_str("          grep -Fq \"<id>$PLUGIN_XML_ID</id>\" \"$PLUGIN_DIR/src/main/resources/META-INF/plugin.xml\"\n\n");
     workflow.push_str("          grep -Eq \"^[[:space:]]*pluginVersion[[:space:]]*=[[:space:]]*$VERSION$\" \"$PLUGIN_DIR/gradle.properties\"\n\n");
+    workflow.push_str("          printf 'VERSION=%s\\n' \"$VERSION\" >> \"$GITHUB_ENV\"\n\n");
 }
 
 fn push_jetbrains_sign_and_publish(workflow: &mut String, jetbrains: &ResolvedJetbrains) {
@@ -1759,9 +1840,6 @@ fn push_jetbrains_sign_and_publish(workflow: &mut String, jetbrains: &ResolvedJe
     workflow.push('\n');
     workflow.push_str("        run: |\n");
     workflow.push_str("          set -euo pipefail\n");
-    workflow
-        .push_str("          VERSION=\"${{ github.event.inputs.version || github.ref_name }}\"\n");
-    workflow.push_str("          VERSION=\"${VERSION#v}\"\n");
     workflow.push_str("          cd \"$PLUGIN_DIR\"\n");
     workflow.push_str("          mkdir -p build/distributions\n");
     workflow
@@ -1879,16 +1957,25 @@ fn push_vscode_credential_preflight(workflow: &mut String, vscode: &ResolvedVsco
     workflow.push_str("          resolve_pat ovsx >/dev/null\n\n");
 }
 
-fn push_vscode_version_validation(workflow: &mut String, vscode: &ResolvedVscode) {
+fn push_vscode_version_validation(
+    workflow: &mut String,
+    vscode: &ResolvedVscode,
+    prefix: crate::release_identity::TagPrefix,
+) {
     workflow.push_str("      - name: Validate release tag and extension version\n");
     workflow.push_str("        env:\n          GITHUB_TOKEN: ${{ github.token }}\n");
     workflow.push_str("        run: |\n");
     workflow.push_str("          set -euo pipefail\n");
-    workflow.push_str("          VERSION=\"${GITHUB_REF_NAME#v}\"\n");
+    if prefix == crate::release_identity::TagPrefix::V {
+        workflow.push_str("          case \"$GITHUB_REF_NAME\" in v*) VERSION=\"${GITHUB_REF_NAME#v}\" ;; *) echo 'Tag prefix mismatch' >&2; exit 1 ;; esac\n");
+    } else {
+        workflow.push_str("          VERSION=\"$GITHUB_REF_NAME\"\n");
+    }
     workflow.push_str("          printf '%s\\n' \"$VERSION\" | grep -Eq '^[0-9]+\\.[0-9]+\\.[0-9]+$' || { echo \"release tag must be an exact semver version\"; exit 1; }\n");
     workflow.push_str(&release_trust_root_steps());
     workflow.push_str("          git_fetch --force --tags origin \"refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}\"\n");
     workflow.push_str("          git verify-tag \"$GITHUB_REF_NAME\"\n");
+    workflow.push_str(&signed_tag_name_steps("GITHUB_REF_NAME"));
     workflow.push_str("          validated_sha=\"$(git rev-parse --verify \"refs/tags/${GITHUB_REF_NAME}^{commit}\")\"\n");
     workflow.push_str("          test \"$validated_sha\" = \"$(git rev-parse --verify HEAD)\" || { echo \"Signed tag commit does not match the checkout being published\" >&2; exit 1; }\n");
     if let Some(cargo_package) = &vscode.cargo_package {
@@ -2365,7 +2452,10 @@ fn python_publish_workflow(
     workflow.push_str("name: Publish to PyPI\n\n");
     workflow.push_str("on:\n");
     workflow.push_str("  push:\n");
-    workflow.push_str("    tags: [\"[0-9]*\"]\n\n");
+    workflow.push_str(&format!(
+        "    tags: [\"{}[0-9]*\"]\n\n",
+        options.tag_prefix.as_str()
+    ));
     push_provider_concurrency(&mut workflow, platform);
     workflow.push_str("jobs:\n");
     workflow.push_str("  publish:\n");
@@ -2389,7 +2479,7 @@ fn python_publish_workflow(
     push_checkout_step(&mut workflow, platform, runner);
     push_required_env_step(&mut workflow, &options.required_env);
     push_install_nix_step(&mut workflow, platform);
-    push_validate_pypi_tag_step(&mut workflow);
+    push_validate_pypi_tag_step(&mut workflow, options.tag_prefix);
     push_extra_setup_steps(&mut workflow, &options.extra_setup);
     workflow.push_str("      - name: Build Nix package\n");
     workflow.push_str("        run: nix build .# --no-link\n\n");
@@ -2442,7 +2532,10 @@ fn maturin_publish_workflow(
     workflow.push_str("name: Publish to PyPI\n\n");
     workflow.push_str("on:\n");
     workflow.push_str("  push:\n");
-    workflow.push_str("    tags: [\"[0-9]*\"]\n\n");
+    workflow.push_str(&format!(
+        "    tags: [\"{}[0-9]*\"]\n\n",
+        options.tag_prefix.as_str()
+    ));
     push_provider_concurrency(&mut workflow, platform);
     workflow.push_str("jobs:\n");
     workflow.push_str("  publish:\n");
@@ -2460,7 +2553,7 @@ fn maturin_publish_workflow(
     push_checkout_step(&mut workflow, platform, runner);
     push_required_env_step(&mut workflow, &options.required_env);
     push_install_nix_step(&mut workflow, platform);
-    push_validate_pypi_tag_step(&mut workflow);
+    push_validate_pypi_tag_step(&mut workflow, options.tag_prefix);
     push_extra_setup_steps(&mut workflow, &options.extra_setup);
     workflow.push_str("      - name: Build and publish to PyPI\n");
     workflow.push_str("        env:\n");
@@ -3042,7 +3135,7 @@ fn publish_workflow(
         workflow.push_str("name: Publish Crate\n\n");
     }
     if platform == Platform::Github {
-        workflow.push_str(github_crate_publish_triggers());
+        workflow.push_str(&github_crate_publish_triggers(options.tag_prefix));
     } else {
         // Codeberg rejects nested dispatch inputs.
         workflow.push_str("on:\n  workflow_dispatch:\n\n");
@@ -3079,7 +3172,12 @@ fn publish_workflow(
         Runtime::Nix => {
             push_install_nix_step(&mut workflow, platform);
             push_nix_cargo_bin_path_step(&mut workflow);
-            workflow.push_str(&validate_tag_step(command_prefix(runtime), &package.name));
+            workflow.push_str(&validate_release_tag_step_with_prefix(
+                Some(command_prefix(runtime)),
+                Some(&package.name),
+                None,
+                options.tag_prefix,
+            ));
             push_extra_setup_steps(&mut workflow, &options.extra_setup);
             match options.om_ci {
                 OmCiMode::Off => {
@@ -3098,6 +3196,7 @@ fn publish_workflow(
                         package,
                         runtime,
                         options.package_scoped,
+                        options.tag_prefix,
                     ));
                 }
                 OmCiMode::Augment => {
@@ -3109,7 +3208,12 @@ fn publish_workflow(
         Runtime::Cargo => {
             push_rust_setup_step(&mut workflow, platform);
             push_rust_cache_steps(&mut workflow, platform, runner);
-            workflow.push_str(&validate_tag_step(command_prefix(runtime), &package.name));
+            workflow.push_str(&validate_release_tag_step_with_prefix(
+                Some(command_prefix(runtime)),
+                Some(&package.name),
+                None,
+                options.tag_prefix,
+            ));
             push_extra_setup_steps(&mut workflow, &options.extra_setup);
             push_test_steps(&mut workflow, runtime, package, &options);
             push_quality_tool_install_steps(&mut workflow, runtime, &options);
@@ -3124,6 +3228,7 @@ fn publish_workflow(
                 package,
                 runtime,
                 options.package_scoped,
+                options.tag_prefix,
             ));
             push_sccache_stats_step(&mut workflow, platform, runtime);
         }
@@ -3164,7 +3269,12 @@ fn artifacts_workflow(
         workflow.push_str(&runs_on(&runners.release));
         workflow.push_str("\n    steps:\n");
         push_event_checkout_step(&mut workflow, platform, Some(&runners.release));
-        workflow.push_str(&validate_release_tag_step(None, None, None));
+        workflow.push_str(&validate_release_tag_step_with_prefix(
+            None,
+            None,
+            None,
+            options.tag_prefix,
+        ));
     }
     workflow.push_str("  ");
     workflow.push_str(linux_job_name);
@@ -3181,7 +3291,12 @@ fn artifacts_workflow(
     workflow.push_str("    steps:\n");
     push_event_checkout_step(&mut workflow, platform, Some(&runners.release));
     push_required_env_step(&mut workflow, &options.required_env);
-    workflow.push_str(&validate_release_tag_step(None, None, None));
+    workflow.push_str(&validate_release_tag_step_with_prefix(
+        None,
+        None,
+        None,
+        options.tag_prefix,
+    ));
     match runtime {
         Runtime::Nix => {
             push_install_nix_step(&mut workflow, platform);
@@ -3211,10 +3326,10 @@ fn artifacts_workflow(
     }
     push_release_integrity_steps(&mut workflow, platform);
     if let Some(command) = options.release_smoke_command.as_deref() {
-        push_release_smoke_step(&mut workflow, command);
+        push_release_smoke_step(&mut workflow, command, options.tag_prefix);
     }
     if let Some(homebrew) = &options.homebrew {
-        push_homebrew_publish_step(&mut workflow, platform, homebrew);
+        push_homebrew_publish_step(&mut workflow, platform, homebrew, options.tag_prefix);
     }
     if has_windows_packagers {
         let windows_runner = runners
@@ -3307,10 +3422,10 @@ fn push_windows_publish_job(
     workflow.push_str("        run: cargo install --locked simit\n\n");
 
     if let Some(chocolatey) = &options.chocolatey {
-        push_chocolatey_publish_step(workflow, chocolatey);
+        push_chocolatey_publish_step(workflow, chocolatey, options.tag_prefix);
     }
     if let Some(scoop) = &options.scoop {
-        push_scoop_publish_step(workflow, scoop);
+        push_scoop_publish_step(workflow, scoop, options.tag_prefix);
     }
 }
 
@@ -3370,6 +3485,7 @@ fn push_windows_archive_step(workflow: &mut String, package: &Package, options: 
     workflow.push_str("          if (-not $version -and $env:GITHUB_REF) { $version = $env:GITHUB_REF -replace '^refs/tags/', '' }\n");
     workflow.push_str("          if (-not $version -and $env:FORGE_REF) { $version = $env:FORGE_REF -replace '^refs/tags/', '' }\n");
     workflow.push_str("          if (-not $version) { throw 'Release tag name is unavailable' }\n");
+    push_windows_version_prefix(workflow, options.tag_prefix);
     workflow.push_str("          New-Item -ItemType Directory -Force release | Out-Null\n");
     workflow.push_str("          $binary = \"target/${{ matrix.target }}/release/");
     workflow.push_str(&package.name);
@@ -3440,7 +3556,11 @@ fn resolve_windows_archive(pattern: &str, name: &str, arch: &str) -> String {
         .replace("{arch}", arch)
 }
 
-fn push_chocolatey_publish_step(workflow: &mut String, opts: &ChocolateyOptions) {
+fn push_chocolatey_publish_step(
+    workflow: &mut String,
+    opts: &ChocolateyOptions,
+    prefix: crate::release_identity::TagPrefix,
+) {
     let archive = resolve_windows_archive(&opts.archive_pattern, &opts.name, "x86_64");
     workflow.push_str("      - name: Install Chocolatey\n");
     workflow.push_str("        shell: pwsh\n");
@@ -3461,6 +3581,7 @@ fn push_chocolatey_publish_step(workflow: &mut String, opts: &ChocolateyOptions)
     workflow.push_str("        run: |\n");
     workflow.push_str("          if (-not $env:CHOCOLATEY_API_KEY) { Write-Error 'CHOCOLATEY_API_KEY is required because Chocolatey package publishing is configured.'; exit 1 }\n");
     push_windows_version_lines(workflow);
+    push_windows_version_prefix(workflow, prefix);
     workflow.push_str("          simit dist chocolatey bump `\n");
     workflow.push_str("            --version $version `\n");
     workflow.push_str("            --package-dir chocolatey-package `\n");
@@ -3475,7 +3596,11 @@ fn push_chocolatey_publish_step(workflow: &mut String, opts: &ChocolateyOptions)
     workflow.push_str("            --api-key-env CHOCOLATEY_API_KEY\n\n");
 }
 
-fn push_scoop_publish_step(workflow: &mut String, opts: &ScoopOptions) {
+fn push_scoop_publish_step(
+    workflow: &mut String,
+    opts: &ScoopOptions,
+    prefix: crate::release_identity::TagPrefix,
+) {
     workflow.push_str("      - name: Publish Scoop bucket\n");
     workflow.push_str("        env:\n");
     workflow.push_str("          SCOOP_BUCKET_TOKEN: ${{ secrets.");
@@ -3488,6 +3613,7 @@ fn push_scoop_publish_step(workflow: &mut String, opts: &ScoopOptions) {
     workflow.push_str("        run: |\n");
     workflow.push_str("          if (-not $env:SCOOP_BUCKET_TOKEN) { Write-Error 'SCOOP_BUCKET_TOKEN is required because Scoop bucket publishing is configured.'; exit 1 }\n");
     push_windows_version_lines(workflow);
+    push_windows_version_prefix(workflow, prefix);
     workflow.push_str("          $credentialHelper = '!f() { echo username=caniko; echo \"password=$SCOOP_BUCKET_TOKEN\"; }; f'\n");
     workflow.push_str("          if (Test-Path bucket) { Remove-Item -Recurse -Force bucket }\n");
     workflow.push_str("          git -c credential.helper=\"$credentialHelper\" clone \"$env:SCOOP_BUCKET_URL\" bucket\n");
@@ -3520,6 +3646,12 @@ fn push_windows_version_lines(workflow: &mut String) {
     workflow.push_str("          if (-not $version -and $env:GITHUB_REF) { $version = $env:GITHUB_REF -replace '^refs/tags/', '' }\n");
     workflow.push_str("          if (-not $version -and $env:FORGE_REF) { $version = $env:FORGE_REF -replace '^refs/tags/', '' }\n");
     workflow.push_str("          if (-not $version) { throw 'Release tag name is unavailable' }\n");
+}
+
+fn push_windows_version_prefix(workflow: &mut String, prefix: crate::release_identity::TagPrefix) {
+    if prefix == crate::release_identity::TagPrefix::V {
+        workflow.push_str("          if (-not $version.StartsWith('v')) { throw 'Release tag prefix mismatch' }\n          $version = $version.Substring(1)\n");
+    }
 }
 
 fn push_chocolatey_cli_flags(workflow: &mut String, opts: &ChocolateyOptions) {
@@ -3613,7 +3745,12 @@ fn push_ps_arg(workflow: &mut String, flag: &str, value: &str) {
     workflow.push_str(" `\n");
 }
 
-fn push_homebrew_publish_step(workflow: &mut String, platform: Platform, opts: &HomebrewOptions) {
+fn push_homebrew_publish_step(
+    workflow: &mut String,
+    platform: Platform,
+    opts: &HomebrewOptions,
+    prefix: crate::release_identity::TagPrefix,
+) {
     let tap_repo = homebrew_tap_repo(&opts.tap_url);
     let archives = homebrew_archives(opts);
     let binaries = if opts.binaries.is_empty() {
@@ -3644,6 +3781,8 @@ fn push_homebrew_publish_step(workflow: &mut String, platform: Platform, opts: &
     workflow.push_str(
         "          VERSION=\"${GITHUB_REF_NAME:-${FORGE_REF_NAME:-${CODEBERG_REF_NAME:-}}}\"\n",
     );
+    workflow.push_str("          RELEASE_TAG=\"$VERSION\"\n");
+    push_bash_version_prefix(workflow, prefix);
     workflow.push_str("          for artifact in \\\n");
     for (index, archive) in archives.iter().enumerate() {
         workflow.push_str("            \"release/");
@@ -3693,7 +3832,7 @@ fn push_homebrew_publish_step(workflow: &mut String, platform: Platform, opts: &
         workflow.push_str(platform.web_base_url());
         workflow.push('/');
         workflow.push_str(&opts.download_repo);
-        workflow.push_str("/releases/download/${VERSION}/");
+        workflow.push_str("/releases/download/${RELEASE_TAG}/");
         workflow.push_str(&archive.file_name);
         workflow.push_str(",release/");
         workflow.push_str(&archive.file_name);
@@ -3902,7 +4041,11 @@ fn push_release_integrity_steps(workflow: &mut String, platform: Platform) {
     workflow.push_str("          SCRIPT\n\n");
 }
 
-fn push_release_smoke_step(workflow: &mut String, command: &str) {
+fn push_release_smoke_step(
+    workflow: &mut String,
+    command: &str,
+    prefix: crate::release_identity::TagPrefix,
+) {
     workflow.push_str("      - name: Run release smoke checks\n");
     workflow.push_str("        run: |\n");
     workflow.push_str("          set -euo pipefail\n");
@@ -3912,9 +4055,16 @@ fn push_release_smoke_step(workflow: &mut String, command: &str) {
     );
     workflow.push_str("          if [ -z \"$VERSION\" ]; then ref=\"${GITHUB_REF:-${FORGE_REF:-${CODEBERG_REF:-}}}\"; VERSION=\"${ref#refs/tags/}\"; fi\n");
     workflow.push_str("          test -n \"$VERSION\"\n");
+    push_bash_version_prefix(workflow, prefix);
     workflow.push_str("          ");
     workflow.push_str(command);
     workflow.push_str(" \"$VERSION\" release\n\n");
+}
+
+fn push_bash_version_prefix(workflow: &mut String, prefix: crate::release_identity::TagPrefix) {
+    if prefix == crate::release_identity::TagPrefix::V {
+        workflow.push_str("          case \"$VERSION\" in v*) VERSION=\"${VERSION#v}\" ;; *) echo 'Release tag prefix mismatch' >&2; exit 1 ;; esac\n");
+    }
 }
 
 fn shell_quote(value: &str) -> String {
@@ -4282,7 +4432,7 @@ fn github_action_version<'a>(
     }
 }
 
-pub(super) fn github_runner_supports_node24(label: &str) -> bool {
+pub(crate) fn github_runner_supports_node24(label: &str) -> bool {
     matches!(
         label,
         "ubuntu-latest"
@@ -4509,6 +4659,7 @@ fn push_nix_publish_legacy_steps(
         package,
         Runtime::Nix,
         options.package_scoped,
+        options.tag_prefix,
     ));
 }
 
@@ -5006,18 +5157,24 @@ fn runs_on(runner: &ResolvedRunner) -> String {
     format!("[{labels}]")
 }
 
-fn push_validate_pypi_tag_step(workflow: &mut String) {
+fn push_validate_pypi_tag_step(workflow: &mut String, prefix: crate::release_identity::TagPrefix) {
     workflow.push_str(
         r#"      - name: Validate release tag
         run: |
           set -euo pipefail
           tag="${GITHUB_REF_NAME:-${FORGE_REF_NAME:-${CODEBERG_REF_NAME:-}}}"
-          if ! printf '%s\n' "$tag" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+          release_version="$tag"
+"#,
+    );
+    if prefix == crate::release_identity::TagPrefix::V {
+        workflow.push_str("          case \"$tag\" in v*) release_version=\"${tag#v}\" ;; *) echo 'Tag prefix mismatch' >&2; exit 1 ;; esac\n");
+    }
+    workflow.push_str(r#"          if ! printf '%s\n' "$release_version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
             echo "Tag must be an exact semver version like 0.1.1, got '$tag'" >&2
             exit 1
           fi
           version="$(nix eval --raw --impure --expr 'let metadata = builtins.fromTOML (builtins.readFile ./pyproject.toml); in if metadata ? project.version then metadata.project.version else if metadata ? project && builtins.elem "version" (metadata.project.dynamic or []) && metadata ? tool.poetry.version then metadata.tool.poetry.version else if !(metadata ? project) && metadata ? tool.poetry.version then metadata.tool.poetry.version else throw "No supported Python project version provider"')"
-          if [ "$tag" != "$version" ]; then
+          if [ "$release_version" != "$version" ]; then
             echo "Tag $tag does not match project version $version" >&2
             exit 1
           fi
@@ -5038,6 +5195,12 @@ pub(crate) fn authenticated_git_fetch_steps() -> &'static str {
 "#
 }
 
+pub(crate) fn signed_tag_name_steps(variable: &str) -> String {
+    format!(
+        "          signed_tag_name=\"$(git cat-file tag \"refs/tags/${variable}\" | sed -n '1,/^$/s/^tag //p')\"\n          test \"$signed_tag_name\" = \"${variable}\" || {{ echo 'Signed tag object name differs from the release label' >&2; exit 1; }}\n"
+    )
+}
+
 fn release_trust_root_steps() -> String {
     let fetch = authenticated_git_fetch_steps();
     format!(
@@ -5056,11 +5219,24 @@ fn release_trust_root_steps() -> String {
     )
 }
 
-pub(crate) fn validate_release_tag_step(
+fn validate_release_tag_step_with_prefix(
     cargo_command_prefix: Option<&str>,
     package_name: Option<&str>,
-    independent: Option<&str>,
+    namespace: Option<&str>,
+    prefix: crate::release_identity::TagPrefix,
 ) -> String {
+    let signed_tag_name = signed_tag_name_steps("tag");
+    let expected_tag = namespace.map_or_else(
+        || format!("{}$version", prefix.as_str()),
+        |package| format!("{package}/v$version"),
+    );
+    let namespace_check = namespace.map_or_else(|| if prefix == crate::release_identity::TagPrefix::V { "          case \"$tag\" in v*) release_version=\"${tag#v}\" ;; *) echo 'Tag prefix mismatch' >&2; exit 1 ;; esac\n".into() } else { String::new() }, |package| format!("          case \"$tag\" in {package}/v*) release_version=\"${{tag#{package}/v}}\" ;; *) echo 'Tag does not belong to this package' >&2; exit 1 ;; esac\n"));
+    let version_subject = if namespace.is_some() || prefix == crate::release_identity::TagPrefix::V
+    {
+        "$release_version"
+    } else {
+        "$tag"
+    };
     let version_check = if let (Some(cargo_command_prefix), Some(package_name)) =
         (cargo_command_prefix, package_name)
     {
@@ -5073,7 +5249,7 @@ pub(crate) fn validate_release_tag_step(
             echo "Could not read package version from cargo pkgid" >&2
             exit 1
           fi
-          if [ "$tag" != "$version" ]; then
+          if [ "$tag" != "{expected_tag}" ]; then
             echo "Tag $tag does not match Cargo.toml package version $version" >&2
             exit 1
           fi
@@ -5083,13 +5259,6 @@ pub(crate) fn validate_release_tag_step(
         String::new()
     };
     let trust_root = release_trust_root_steps();
-    let tag_check = if let Some(package) = independent {
-        format!(
-            "          case \"$tag\" in {package}/v*) version=\"${{tag#{package}/v}}\" ;; *) echo 'Tag does not belong to this package' >&2; exit 1 ;; esac\n          if ! printf '%s\\n' \"$version\" | grep -Eq '^[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z.-]+)?(\\+[0-9A-Za-z.-]+)?$'; then echo 'Invalid package release version' >&2; exit 1; fi\n"
-        )
-    } else {
-        "          if ! printf '%s\\n' \"$tag\" | grep -Eq '^[0-9]+\\.[0-9]+\\.[0-9]+$'; then\n            echo \"Tag must be an exact semver version like 0.1.1, got '$tag'\" >&2\n            exit 1\n          fi\n".to_owned()
-    };
 
     format!(
         r#"      - name: Validate signed release tag
@@ -5103,7 +5272,10 @@ pub(crate) fn validate_release_tag_step(
             tag="${{ref#refs/tags/}}"
           fi
 
-{tag_check}
+{namespace_check}          if ! printf '%s\n' "{version_subject}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "Tag must be an exact semver version like 0.1.1, got '$tag'" >&2
+            exit 1
+          fi
           if ! command -v gpg >/dev/null 2>&1; then
             if command -v apt-get >/dev/null 2>&1; then
               apt-get update
@@ -5116,7 +5288,7 @@ pub(crate) fn validate_release_tag_step(
 {trust_root}
           git_fetch --force --tags origin "refs/tags/${{tag}}:refs/tags/${{tag}}"
           git verify-tag "$tag"
-          validated_sha="$(git rev-parse --verify "refs/tags/${{tag}}^{{commit}}")"
+{signed_tag_name}          validated_sha="$(git rev-parse --verify "refs/tags/${{tag}}^{{commit}}")"
           checkout_sha="$(git rev-parse --verify HEAD)"
           if [ "$validated_sha" != "$checkout_sha" ]; then
             echo "Signed tag commit does not match the checkout being published" >&2
@@ -5127,25 +5299,32 @@ pub(crate) fn validate_release_tag_step(
     )
 }
 
-fn validate_tag_step(cargo_command_prefix: &str, package_name: &str) -> String {
-    validate_release_tag_step(Some(cargo_command_prefix), Some(package_name), None)
-}
-
 fn publish_step(
     platform: Platform,
     package: &Package,
     runtime: Runtime,
     package_scoped: bool,
+    tag_prefix: crate::release_identity::TagPrefix,
 ) -> String {
     if platform == Platform::Github {
-        return trusted_publisher::archive_steps(&package.name, runtime);
+        return trusted_publisher::prefixed_archive_steps(&package.name, runtime, tag_prefix);
     }
-    publish_crate_steps(&package.name, runtime, package_scoped)
+    publish_crate_steps(&package.name, runtime, package_scoped, tag_prefix)
 }
 
-fn publish_crate_steps(name: &str, runtime: Runtime, package_scoped: bool) -> String {
+fn publish_crate_steps(
+    name: &str,
+    runtime: Runtime,
+    package_scoped: bool,
+    tag_prefix: crate::release_identity::TagPrefix,
+) -> String {
     let package_name = shell_quote(name);
     let prefix = command_prefix(runtime);
+    let version_prefix = if tag_prefix == crate::release_identity::TagPrefix::V {
+        "          case \"$version\" in v*) version=\"${version#v}\" ;; *) echo 'Tag prefix mismatch' >&2; exit 1 ;; esac\n"
+    } else {
+        ""
+    };
     let package_arg = if package_scoped {
         format!(" -p {}", shell_word(name))
     } else {
@@ -5167,7 +5346,7 @@ fn publish_crate_steps(name: &str, runtime: Runtime, package_scoped: bool) -> St
             echo "Could not determine release version from tag ref" >&2
             exit 1
           fi
-          if ! command -v curl >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1; then
+{version_prefix}          if ! command -v curl >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1; then
             if command -v apt-get >/dev/null 2>&1; then
               if [ "$(id -u)" = 0 ]; then apt=(apt-get); else apt=(sudo apt-get); fi
               "${{apt[@]}}" update
@@ -5223,7 +5402,7 @@ fn publish_crate_steps(name: &str, runtime: Runtime, package_scoped: bool) -> St
             ref="${{GITHUB_REF:-${{FORGE_REF:-${{CODEBERG_REF:-}}}}}}"
             version="${{ref#refs/tags/}}"
           fi
-          target_dir="$({prefix}cargo metadata --locked --no-deps --format-version 1 | jq -er '.target_directory')"
+{version_prefix}          target_dir="$({prefix}cargo metadata --locked --no-deps --format-version 1 | jq -er '.target_directory')"
           local_checksum="$(sha256sum "$target_dir/package/${{crate_name}}-${{version}}.crate" | awk '{{print $1}}')"
           probe="$(mktemp -d)"
           trap 'rm -rf "$probe"' EXIT
