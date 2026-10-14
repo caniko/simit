@@ -333,6 +333,57 @@ fn headerless_secondary_429_waits_at_least_a_minute_with_bounded_backoff() {
 }
 
 #[test]
+fn request_protocol_errors_retry_but_locally_invalid_requests_remain_permanent() {
+    struct RequestFailure {
+        provider: Provider,
+        first: bool,
+        kind: &'static str,
+    }
+    impl Transport for RequestFailure {
+        fn get(
+            &mut self,
+            endpoint: &str,
+            maximum: u64,
+            timeout: Duration,
+            cancellation: &Cancellation,
+        ) -> anyhow::Result<Response> {
+            if self.first {
+                self.first = false;
+                return Ok(Response {
+                    status: 0,
+                    body: vec![],
+                    retry_after: None,
+                    transport_error: Some(self.kind.into()),
+                });
+            }
+            self.provider.get(endpoint, maximum, timeout, cancellation)
+        }
+    }
+    for kind in ["request", "permanent-request"] {
+        let (spec, identity, provider) = fixture();
+        let mut provider = RequestFailure {
+            provider,
+            first: true,
+            kind,
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let packet = temp.path().join("packet");
+        let mut clock = FakeClock::default();
+        let result = observe_with(
+            &spec,
+            &identity,
+            &packet,
+            &mut provider,
+            &mut clock,
+            &Cancellation::default(),
+        );
+        assert_eq!(result.is_ok(), kind == "request");
+        assert_eq!(clock.elapsed().as_secs(), u64::from(kind == "request"));
+        assert_eq!(receipt(&packet)["capture_complete"], kind == "request");
+    }
+}
+
+#[test]
 fn capped_transient_error_bodies_retry_but_success_and_authorization_limits_fail_closed() {
     for status in [408, 429, 500, 502, 503, 504, 403, 200, 401] {
         let (spec, identity, mut provider) = fixture();

@@ -555,7 +555,7 @@ impl Observer<'_> {
                 || (response.status == 403 && response.retry_after.is_some());
             let transient = match response.transport_error.as_deref() {
                 None | Some("byte-limit") => transient_status,
-                Some("timeout" | "connect" | "body-read") => {
+                Some("timeout" | "connect" | "body-read" | "request") => {
                     transient_status || matches!(response.status, 0 | 200)
                 }
                 _ => false,

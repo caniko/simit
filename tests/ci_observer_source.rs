@@ -104,6 +104,71 @@ fn invoke(root: &Path, spec: &Path, retention: bool) -> Output {
 }
 
 #[test]
+fn protected_pr_merge_revision_rejects_a_replayed_head_and_admits_its_actual_parent() {
+    let root = fixture();
+    let old = String::from_utf8(git(root.path(), &["rev-parse", "HEAD"]).stdout)
+        .unwrap()
+        .trim()
+        .to_owned();
+    fs::write(root.path().join("current-head"), "current").unwrap();
+    git(root.path(), &["add", "current-head"]);
+    git(root.path(), &["commit", "-m", "current PR head"]);
+    let current = String::from_utf8(git(root.path(), &["rev-parse", "HEAD"]).stdout)
+        .unwrap()
+        .trim()
+        .to_owned();
+    let merge = String::from_utf8(
+        git(
+            root.path(),
+            &[
+                "commit-tree",
+                "HEAD^{tree}",
+                "-p",
+                &old,
+                "-p",
+                &current,
+                "-m",
+                "protected runner merge",
+            ],
+        )
+        .stdout,
+    )
+    .unwrap()
+    .trim()
+    .to_owned();
+    for retention in [false, true] {
+        for (head, base, admitted) in [
+            (&old, &old, false),
+            (&current, &old, true),
+            (&current, &current, false),
+        ] {
+            git(root.path(), &["checkout", "--detach", head]);
+            let mut command = observer_command(
+                root.path(),
+                &root.path().join(".github/spec.json"),
+                retention,
+            );
+            let mut event: serde_json::Value =
+                serde_json::from_slice(&fs::read(root.path().join("event.json")).unwrap()).unwrap();
+            event["pull_request"] = json!({"number":71,"head":{"sha":head},"base":{"sha":base}});
+            fs::write(root.path().join("event.json"), event.to_string()).unwrap();
+            command
+                .env("GITHUB_EVENT_NAME", "pull_request")
+                .env("GITHUB_REF", "refs/pull/71/merge")
+                .env("GITHUB_SHA", &merge);
+            let output = command.output().unwrap();
+            let error = String::from_utf8_lossy(&output.stderr);
+            if admitted {
+                assert!(error.contains("token environment variable"), "{error}");
+            } else {
+                assert!(error.contains("protected merge revision"), "{error}");
+            }
+            assert!(!root.path().join("packet").exists());
+        }
+    }
+}
+
+#[test]
 fn substituted_event_branch_and_pr_number_cannot_change_the_native_runner_target() {
     for retention in [false, true] {
         for pull_request in [false, true] {

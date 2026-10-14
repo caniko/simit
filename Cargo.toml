@@ -143,3 +143,6 @@ rustix = { version = "1", features = ["fs", "process"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_System_Console"] }
+
+[target.'cfg(all(unix, not(target_os = "macos")))'.dev-dependencies]
+openssl = "0.10"

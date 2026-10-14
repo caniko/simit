@@ -16,7 +16,7 @@ impl GitHubTransport {
     pub fn new(token: String) -> Result<Self> {
         ensure!(!token.is_empty(), "missing GitHub token");
         Ok(Self {
-            client: reqwest::Client::builder()
+            client: trusted_client()?
                 .redirect(reqwest::redirect::Policy::none())
                 .connect_timeout(Duration::from_secs(15))
                 .user_agent("simit-original-observer")
@@ -24,6 +24,48 @@ impl GitHubTransport {
             token,
         })
     }
+}
+
+fn trusted_client() -> Result<reqwest::ClientBuilder> {
+    let builder = reqwest::Client::builder().no_proxy();
+    // Native Windows/macOS TLS uses OS trust stores, not SSL_CERT_* paths.
+    // OpenSSL platforms instead install an explicit protected bundle after
+    // disabling all default roots (including environment-selected roots).
+    if let Some(bundle) = option_env!("SIMIT_TRUSTED_CA_BUNDLE") {
+        let path = std::path::Path::new(bundle);
+        ensure!(path.is_absolute(), "packaged CA bundle must be absolute");
+        if path.is_file() {
+            return client_with_bundle(builder, path);
+        }
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        for bundle in ["/etc/ssl/certs/ca-certificates.crt", "/etc/ssl/cert.pem"] {
+            let path = std::path::Path::new(bundle);
+            if super::super::trusted_platform::protected_file(path) {
+                return client_with_bundle(builder, path);
+            }
+        }
+        anyhow::bail!("trusted platform CA bundle unavailable for observer transport");
+    }
+    #[cfg(not(all(unix, not(target_os = "macos"))))]
+    Ok(builder)
+}
+
+fn client_with_bundle(
+    mut builder: reqwest::ClientBuilder,
+    path: &std::path::Path,
+) -> Result<reqwest::ClientBuilder> {
+    ensure!(path.is_absolute(), "trusted CA bundle must be absolute");
+    let path = std::fs::canonicalize(path)?;
+    let pem = super::super::group::read_bytes(&path, 2 * 1024 * 1024)?;
+    let roots = reqwest::Certificate::from_pem_bundle(&pem)?;
+    ensure!(!roots.is_empty(), "trusted CA bundle is empty");
+    builder = builder.tls_built_in_root_certs(false);
+    for root in roots {
+        builder = builder.add_root_certificate(root);
+    }
+    Ok(builder)
 }
 fn approved_log_url(url: &url::Url) -> bool {
     url.scheme() == "https"
@@ -141,7 +183,8 @@ impl GitHubTransport {
                         Err(reason) => reason,
                         Ok(Err(error)) if error.is_timeout() => "timeout",
                         Ok(Err(error)) if error.is_connect() => "connect",
-                        _ => "request",
+                        Ok(Err(error)) if error.is_request() && !error.is_builder() => "request",
+                        _ => "permanent-request",
                     };
                     return Ok(Response {
                         status: 0,
@@ -256,6 +299,223 @@ fn retry_delay(status: u16, headers: &reqwest::header::HeaderMap, now: u64) -> O
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn connection_reset_before_headers_is_a_transient_request_failure() {
+        use std::{io::Read, net::TcpListener, thread};
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url =
+            url::Url::parse(&format!("http://{}/logs", listener.local_addr().unwrap())).unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let mut request = [0; 4096];
+            assert!(stream.read(&mut request).unwrap() > 0);
+            // Drop without headers, matching request/protocol failures rather
+            // than a connection-establishment or successful-body failure.
+        });
+        let response = GitHubTransport::new("inert-test-token".into())
+            .unwrap()
+            .get_from_url(
+                "repos/owner/repo/actions/runs/1/logs",
+                url,
+                1024,
+                Duration::from_secs(3),
+                &Cancellation::default(),
+            )
+            .unwrap();
+        server.join().unwrap();
+        assert_eq!(response.status, 0);
+        assert_eq!(response.transport_error.as_deref(), Some("request"));
+    }
+
+    #[test]
+    fn job_proxy_and_ca_environment_cannot_change_observer_transport_trust() {
+        use std::{
+            io::{Read, Write},
+            net::TcpListener,
+            process::Command,
+            thread,
+        };
+        const NAME: &str = "ci_runtime::observer::transport::tests::job_proxy_and_ca_environment_cannot_change_observer_transport_trust";
+        if let Ok(mode) = std::env::var("SIMIT_TRANSPORT_TEST_CHILD") {
+            let url = url::Url::parse(&std::env::var("SIMIT_TRANSPORT_TEST_URL").unwrap()).unwrap();
+            let response = GitHubTransport::new("inert-test-token".into())
+                .unwrap()
+                .get_from_url(
+                    "repos/owner/repo/actions/runs/1/logs",
+                    url,
+                    1024,
+                    Duration::from_secs(3),
+                    &Cancellation::default(),
+                )
+                .unwrap();
+            if mode == "proxy" {
+                assert_eq!(response.status, 200);
+                assert_eq!(response.body, b"origin");
+            } else {
+                assert_ne!(response.status, 200, "job-selected CA was trusted");
+            }
+            return;
+        }
+        fn accept(listener: TcpListener) -> Option<std::net::TcpStream> {
+            listener.set_nonblocking(true).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        stream
+                            .set_read_timeout(Some(Duration::from_secs(3)))
+                            .unwrap();
+                        return Some(stream);
+                    }
+                    Err(error)
+                        if error.kind() == std::io::ErrorKind::WouldBlock
+                            && Instant::now() < deadline =>
+                    {
+                        thread::sleep(Duration::from_millis(10))
+                    }
+                    _ => return None,
+                }
+            }
+        }
+        fn child(mode: &str, url: &str) -> Command {
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command
+                .args(["--exact", NAME, "--nocapture"])
+                .env("SIMIT_TRANSPORT_TEST_CHILD", mode)
+                .env("SIMIT_TRANSPORT_TEST_URL", url);
+            for name in [
+                "HTTP_PROXY",
+                "HTTPS_PROXY",
+                "ALL_PROXY",
+                "http_proxy",
+                "https_proxy",
+                "all_proxy",
+                "NO_PROXY",
+                "no_proxy",
+            ] {
+                command.env_remove(name);
+            }
+            command
+        }
+        let origin = TcpListener::bind("127.0.0.1:0").unwrap();
+        let proxy = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/logs", origin.local_addr().unwrap());
+        let proxy_url = format!("http://{}", proxy.local_addr().unwrap());
+        let origin = thread::spawn(move || {
+            if let Some(mut stream) = accept(origin) {
+                let mut request = [0; 4096];
+                let _ = stream.read(&mut request);
+                let _ = stream.write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\norigin",
+                );
+            }
+        });
+        let proxy = thread::spawn(move || {
+            if let Some(mut stream) = accept(proxy) {
+                let mut request = [0; 4096];
+                let _ = stream.read(&mut request);
+                let _ = stream.write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nproxy",
+                );
+                return true;
+            }
+            false
+        });
+        let mut command = child("proxy", &url);
+        for name in [
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "all_proxy",
+        ] {
+            command.env(name, &proxy_url);
+        }
+        let output = command.output().unwrap();
+        origin.join().unwrap();
+        assert!(
+            !proxy.join().unwrap(),
+            "job-selected proxy received a request"
+        );
+        assert!(output.status.success(), "{output:?}");
+
+        #[cfg(all(unix, not(target_os = "macos")))]
+        {
+            use openssl::{
+                asn1::Asn1Time,
+                bn::BigNum,
+                hash::MessageDigest,
+                pkey::PKey,
+                rsa::Rsa,
+                ssl::{SslAcceptor, SslMethod},
+                x509::{
+                    X509, X509NameBuilder,
+                    extension::{BasicConstraints, SubjectAlternativeName},
+                },
+            };
+            let key = PKey::from_rsa(Rsa::generate(2048).unwrap()).unwrap();
+            let mut name = X509NameBuilder::new().unwrap();
+            name.append_entry_by_text("CN", "localhost").unwrap();
+            let name = name.build();
+            let mut certificate = X509::builder().unwrap();
+            certificate.set_version(2).unwrap();
+            certificate
+                .set_serial_number(&BigNum::from_u32(1).unwrap().to_asn1_integer().unwrap())
+                .unwrap();
+            certificate.set_subject_name(&name).unwrap();
+            certificate.set_issuer_name(&name).unwrap();
+            certificate.set_pubkey(&key).unwrap();
+            certificate
+                .set_not_before(&Asn1Time::days_from_now(0).unwrap())
+                .unwrap();
+            certificate
+                .set_not_after(&Asn1Time::days_from_now(1).unwrap())
+                .unwrap();
+            certificate
+                .append_extension(BasicConstraints::new().critical().ca().build().unwrap())
+                .unwrap();
+            let san = SubjectAlternativeName::new()
+                .dns("localhost")
+                .build(&certificate.x509v3_context(None, None))
+                .unwrap();
+            certificate.append_extension(san).unwrap();
+            certificate.sign(&key, MessageDigest::sha256()).unwrap();
+            let certificate = certificate.build();
+            let temp = tempfile::tempdir().unwrap();
+            let ca = temp.path().join("job-ca.pem");
+            std::fs::write(&ca, certificate.to_pem().unwrap()).unwrap();
+            let mut acceptor = SslAcceptor::mozilla_intermediate(SslMethod::tls()).unwrap();
+            acceptor.set_private_key(&key).unwrap();
+            acceptor.set_certificate(&certificate).unwrap();
+            let acceptor = acceptor.build();
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let url = format!(
+                "https://localhost:{}/logs",
+                listener.local_addr().unwrap().port()
+            );
+            let server = thread::spawn(move || {
+                if let Some(stream) = accept(listener) {
+                    if let Ok(mut stream) = acceptor.accept(stream) {
+                        let mut request = [0; 4096];
+                        let _ = stream.read(&mut request);
+                        let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\norigin");
+                    }
+                }
+            });
+            let output = child("ca", &url)
+                .env("SSL_CERT_FILE", &ca)
+                .env("SSL_CERT_DIR", temp.path())
+                .output()
+                .unwrap();
+            server.join().unwrap();
+            assert!(output.status.success(), "{output:?}");
+        }
+    }
 
     #[test]
     fn primary_reset_and_secondary_limits_supply_provider_bounded_waits() {

@@ -1,37 +1,19 @@
 //! Read-only source probes use protected platform Git, never the job's PATH.
 use anyhow::{Result, bail};
-#[cfg(unix)]
-use std::path::Path;
 use std::path::PathBuf;
 
-#[cfg(unix)]
-fn protected(path: &Path) -> bool {
-    use std::os::unix::fs::MetadataExt;
-    let Ok(canonical) = std::fs::canonicalize(path) else {
-        return false;
-    };
-    let Ok(executable) = std::fs::metadata(&canonical) else {
-        return false;
-    };
-    if !executable.is_file() || executable.mode() & 0o111 == 0 {
-        return false;
-    }
-    // Check both the installed profile/symlink chain and its resolved binary.
-    // A job-owned executable or writable parent cannot become source authority.
-    [path, canonical.as_path()].into_iter().all(|path| {
-        path.ancestors().all(|ancestor| {
-            std::fs::symlink_metadata(ancestor).is_ok_and(|metadata| {
-                metadata.uid() == 0
-                    && (metadata.file_type().is_symlink() || metadata.mode() & 0o022 == 0
-                // Nix's root-owned sticky store directory can be group-writable;
-                // the root-owned descendants checked here cannot be replaced.
-                || (metadata.is_dir() && metadata.mode() & 0o1000 != 0))
-            })
-        })
-    })
-}
-
 pub(super) fn executable() -> Result<PathBuf> {
+    // This is baked into the artifact by its packaging derivation, never read
+    // from the job environment. Nix sandboxes have no system Git installation.
+    if let Some(path) = option_env!("SIMIT_TRUSTED_GIT") {
+        let path = PathBuf::from(path);
+        anyhow::ensure!(path.is_absolute(), "packaged trusted Git must be absolute");
+        if path.is_file() {
+            return Ok(path);
+        }
+        // Standalone release binaries can run outside their build's Nix store;
+        // only the protected platform locations below can provide a fallback.
+    }
     #[cfg(unix)]
     {
         let mut candidates = [
@@ -54,7 +36,7 @@ pub(super) fn executable() -> Result<PathBuf> {
             candidates.extend(profiles);
         }
         for candidate in candidates {
-            if protected(&candidate) {
+            if super::super::trusted_platform::protected_file(&candidate) {
                 return Ok(std::fs::canonicalize(candidate)?);
             }
         }

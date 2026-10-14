@@ -1428,6 +1428,7 @@ dependencies = [
  "fs2",
  "glob",
  "hex",
+ "openssl",
  "reqwest",
  "rnix",
  "rustix",

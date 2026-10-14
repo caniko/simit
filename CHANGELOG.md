@@ -62,6 +62,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Keep protected source probes usable inside Nix sandboxes, bind PR heads to the
+  protected merge revision, isolate observer TLS/proxies from job environment,
+  and retry bounded transient request/protocol failures.
 - Honor reset-only GitHub rate limits, bind observer event targets to the native
   runner ref, and resolve source probes through protected platform Git paths.
 - Keep observer source probes free of external clean filters and observer

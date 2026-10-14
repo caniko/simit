@@ -114,6 +114,10 @@
 
       commonArgs = {
         inherit src;
+        # Compile-time trust anchors work in the sandbox and become runtime
+        # closure references. Job PATH/SSL_CERT_* cannot replace these inputs.
+        SIMIT_TRUSTED_GIT = "${pkgs.git}/bin/git";
+        SIMIT_TRUSTED_CA_BUNDLE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
         strictDeps = true;
         cargoExtraArgs = "--all-features";
         # The publisher's license-compatible TLS backend builds OpenSSL from

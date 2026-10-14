@@ -43,14 +43,28 @@ directories (including administrator-installed Nix profiles), never the mutable
 job `PATH`. Unsupported installations fail before provider access. On Unix the
 installed path, symlinks and resolved binary must remain root-owned and protected
 against replacement; Windows uses the hosted image's fixed Program Files Git.
+Nix packages bind Git and the CA bundle from their declared derivation inputs at
+compile time, retaining these immutable store references in the runtime closure.
+The corresponding job environment variables cannot override those bindings.
 The original event/identity snapshot that authorized the blob is also the one
 validated against its policy and returned to capture; the event file is not
 reloaded after the probes.
 The initial event target must also match protected `GITHUB_REF`: the exact branch
 ref for push and `refs/pull/<number>/merge` for supported PR observations. Editing
 the event file cannot redirect discovery to another same-SHA branch or PR.
+PR enrollment also requires the protected `GITHUB_SHA` merge commit to be
+available locally; its parents must equal the event's base and enrolled source
+head. When
+checking out the PR head directly, retain/fetch the protected merge commit as
+well. A missing merge object fails source admission, and an old checkout plus
+rewritten event cannot certify historical runs from the same PR.
 The native transport authenticates only fixed-origin GitHub GETs; approved HTTPS
 log/artifact redirects are bounded and receive no GitHub credential.
+Authenticated requests disable environment proxies. On OpenSSL platforms,
+default roots are disabled and an explicit packaged or root-protected platform
+CA bundle supplies trust independently of `SSL_CERT_FILE`/`SSL_CERT_DIR`.
+Windows and macOS use their native OS trust stores. Job-selected proxy and CA
+settings cannot change this observer transport's trust.
 Each synchronous transfer owns and joins a scoped worker runtime, so library
 callers can use the transport inside Tokio tasks without nesting runtimes or
 leaving detached transfer work.
@@ -87,6 +101,8 @@ fail closed. Received response bytes and sanitized metadata remain in numbered
 request files. Neither credentials nor signed download URLs are recorded.
 Capping an error body preserves its transient HTTP status for bounded retry;
 oversized successful responses and cancellation remain permanent failures.
+Request-layer/protocol failures before headers also retry within this budget;
+locally malformed request construction remains permanent.
 
 Admission checks the complete timeout/poll/workflow combination against the
 65,536-GET ceiling, including bounded pagination, capture and all transient retry

@@ -81,7 +81,27 @@ fn observer_inputs(
     let raw = super::group::read_bytes(path, super::observer::MAX_SPEC_BYTES)?;
     let spec: super::observer::Spec = serde_json::from_slice(&raw)?;
     let identity = super::observer::Identity::from_environment(&spec)?;
-    let committed = verify_source_spec(path, &raw, &identity.head)?;
+    let merge = if identity.event == "pull_request" {
+        let event: serde_json::Value = serde_json::from_str(&identity.event_json)?;
+        let base = event["pull_request"]["base"]["sha"]
+            .as_str()
+            .context("missing PR base revision")?
+            .to_owned();
+        Some((
+            std::env::var("GITHUB_SHA").context("missing protected PR merge revision")?,
+            base,
+        ))
+    } else {
+        None
+    };
+    let committed = verify_source_spec(
+        path,
+        &raw,
+        &identity.head,
+        merge
+            .as_ref()
+            .map(|(sha, base)| (sha.as_str(), base.as_str())),
+    )?;
     // The committed blob is policy, even when configured checkout/clean filters
     // change its representation. Never deserialize the transformed policy.
     let spec: super::observer::Spec = serde_json::from_slice(&committed)?;
@@ -176,7 +196,12 @@ fn source_probe_bytes(
     super::group::read_bytes(&output, maximum)
 }
 
-fn verify_source_spec(path: &std::path::Path, raw: &[u8], head: &str) -> Result<Vec<u8>> {
+fn verify_source_spec(
+    path: &std::path::Path,
+    raw: &[u8],
+    head: &str,
+    merge: Option<(&str, &str)>,
+) -> Result<Vec<u8>> {
     let probe = tempfile::tempdir()?;
     let git = git::executable()?;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
@@ -192,6 +217,36 @@ fn verify_source_spec(path: &std::path::Path, raw: &[u8], head: &str) -> Result<
         actual_head == head,
         "observer checkout differs from exact source head"
     );
+    if let Some((merge_sha, base)) = merge {
+        ensure!(
+            merge_sha.len() == 40
+                && merge_sha
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+            "invalid protected PR merge revision"
+        );
+        let merge = source_probe_bytes(
+            probe.path(),
+            "merge",
+            std::process::Command::new(&git)
+                .arg("--no-replace-objects")
+                .args(["cat-file", "commit", merge_sha]),
+            deadline,
+            65536,
+        )?;
+        let merge = std::str::from_utf8(&merge)?;
+        let parents = merge
+            .split("\n\n")
+            .next()
+            .unwrap_or("")
+            .lines()
+            .filter_map(|line| line.strip_prefix("parent "))
+            .collect::<Vec<_>>();
+        ensure!(
+            parents.len() == 2 && parents[1] == head && parents[0] == base,
+            "PR source head/base differs from protected merge revision"
+        );
+    }
     let repository = source_probe(
         probe.path(),
         "root",
