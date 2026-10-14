@@ -1,7 +1,10 @@
 //! Execute the same project-owned gate locally and in generated qualification.
 use std::{
-    fs,
     process::{Child, Command},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -64,17 +67,43 @@ pub(super) fn run(command: MonorepoCheckCommand) -> Result<()> {
                 .saturating_sub(since)
                 .min(gate.timeout_minutes * 60)
         });
+    let cancelled = Arc::new(AtomicBool::new(false));
+    // This CLI exits after one command. As with the native CI CLI, retain the
+    // process-global handlers for its lifetime; Drop is not run on default
+    // signal termination and Bash lives in a separate process group.
+    #[cfg(unix)]
+    for signal in [
+        signal_hook::consts::SIGINT,
+        signal_hook::consts::SIGTERM,
+        signal_hook::consts::SIGHUP,
+    ] {
+        signal_hook::flag::register(signal, cancelled.clone())?;
+    }
     let status = if seconds == 0 {
         None
     } else {
         let deadline = Instant::now() + Duration::from_secs(seconds);
-        let mut child = GateProcess(process.spawn().context("run declared component check")?);
+        if cancelled.load(Ordering::SeqCst) {
+            bail!("component check cancelled before execution");
+        }
+        let mut child = GateProcess {
+            child: process.spawn().context("run declared component check")?,
+            cleanup: true,
+        };
         let status = loop {
+            if cancelled.load(Ordering::SeqCst) {
+                break None;
+            }
             if let Some(status) = child
-                .0
+                .child
                 .try_wait()
                 .context("wait for declared component check")?
             {
+                // Successful setup gates may leave services for later steps.
+                // Bash is already reaped by try_wait; preserve its descendants.
+                if status.success() {
+                    child.cleanup = false;
+                }
                 break Some(status);
             }
             if Instant::now() >= deadline {
@@ -92,6 +121,13 @@ pub(super) fn run(command: MonorepoCheckCommand) -> Result<()> {
     if command.nix_diagnostics {
         diagnostics(since);
     }
+    if cancelled.load(Ordering::SeqCst) {
+        bail!(
+            "component {} check {} cancelled",
+            command.component,
+            command.check
+        );
+    }
     let Some(status) = status else {
         bail!(
             "component {} check {} timed out (configured limit: {} minutes)",
@@ -107,84 +143,41 @@ pub(super) fn run(command: MonorepoCheckCommand) -> Result<()> {
     )
 }
 
-struct GateProcess(Child);
+struct GateProcess {
+    child: Child,
+    cleanup: bool,
+}
 
 impl Drop for GateProcess {
     fn drop(&mut self) {
+        if !self.cleanup {
+            return;
+        }
         #[cfg(unix)]
-        if let Some(pid) = rustix::process::Pid::from_raw(self.0.id() as i32) {
+        if let Some(pid) = rustix::process::Pid::from_raw(self.child.id() as i32) {
             let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
         }
-        let _ = self.0.kill();
-        let _ = self.0.wait();
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 }
 
+pub(super) const NIX_DIAGNOSTICS: &str = include_str!("nix_diagnostics.sh");
+
 fn diagnostics(since: u64) {
-    eprintln!("=== Nix failure diagnostics (check start @{since}) ===");
-    if !cfg!(target_os = "linux") {
-        eprintln!("Linux kernel/systemd diagnostics unavailable on this platform");
-        return;
-    }
-    // Fixed paths and bounded, non-interactive commands; never print the
-    // inherited environment, restart services, or retry a failed check.
-    for path in ["/proc/meminfo", "/proc/pressure/memory"] {
-        match fs::read_to_string(path) {
-            Ok(text) => eprintln!("--- {path} ---\n{text}"),
-            Err(error) => eprintln!("{path}: {error}"),
-        }
-    }
-    let since = format!("@{since}");
-    for (label, arguments) in [
-        (
-            "Nix daemon status",
-            vec![
-                "systemctl",
-                "show",
-                "nix-daemon.service",
-                "--property=ActiveState,SubState,Result,ExecMainCode,ExecMainStatus,MemoryCurrent,MemoryPeak,OOMPolicy",
-            ],
-        ),
-        (
-            "Nix daemon journal",
-            vec![
-                "journalctl",
-                "--unit=nix-daemon.service",
-                "--since",
-                &since,
-                "--lines=150",
-                "--no-pager",
-                "--output=short-iso",
-            ],
-        ),
-        (
-            "Kernel journal",
-            vec![
-                "journalctl",
-                "--dmesg",
-                "--since",
-                &since,
-                "--lines=150",
-                "--no-pager",
-                "--output=short-iso",
-            ],
-        ),
-    ] {
-        eprintln!("--- {label} ---");
-        match Command::new("timeout")
-            .args(["--kill-after=5s", "15s", "sudo", "-n"])
-            .args(arguments)
-            .output()
-        {
-            Ok(output) => {
-                eprintln!(
-                    "status: {}\n{}{}",
-                    output.status,
-                    String::from_utf8_lossy(&output.stdout),
-                    String::from_utf8_lossy(&output.stderr)
-                );
-            }
-            Err(error) => eprintln!("diagnostics unavailable: {error}"),
-        }
+    // The caller uses this same bounded script if provisioning fails before
+    // native Simit starts. Neither path needs another Nix evaluation.
+    if let Err(error) = Command::new("bash")
+        .args([
+            "-euo",
+            "pipefail",
+            "-c",
+            NIX_DIAGNOSTICS,
+            "simit-diagnostics",
+            &since.to_string(),
+        ])
+        .status()
+    {
+        eprintln!("diagnostics unavailable: {error}");
     }
 }

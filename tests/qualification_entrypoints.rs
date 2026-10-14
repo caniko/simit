@@ -16,6 +16,10 @@ fn qualification_entrypoints_exist_in_the_candidate_and_packaged_source() {
         .map(|line| line.replace(std::path::MAIN_SEPARATOR, "/"))
         .collect();
     let mut entrypoints = BTreeSet::new();
+    assert!(
+        files.contains("src/monorepo/nix_diagnostics.sh"),
+        "package omits the embedded provisioning/native diagnostics asset"
+    );
     for directory in [".github/workflows", ".simit/workflows"] {
         for entry in fs::read_dir(root.join(directory)).unwrap() {
             let path = entry.unwrap().path();

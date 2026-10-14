@@ -124,6 +124,13 @@ at that maximum receives up to 358 minutes in CI. Local invocations without the
 generated `--deadline` retain the full configured timeout. An expired CI budget
 collects diagnostics without starting the gate.
 
+Successful setup gates may retain background services for later gates. Failed,
+timed-out or cancelled gates stop their process group before diagnostics; the
+local CLI handles SIGINT, SIGTERM and SIGHUP. If Nix provisioning fails before
+the native runner starts, the caller collects the same bounded diagnostics and
+returns the provisioning status. A private startup marker avoids collecting
+diagnostics twice after a native gate failure.
+
 On Linux, `--nix-diagnostics` captures `/proc/meminfo`, memory pressure, Nix
 daemon status, and bounded daemon/kernel journals after a failed check. Journal
 queries start at the check's start time, retain at most 150 entries each, and

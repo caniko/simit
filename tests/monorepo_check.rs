@@ -256,7 +256,9 @@ fn generated_gate_with_deadline(
     // Nix provisioning is the external boundary. Execute the unmodified generated
     // caller, forwarding its exact argv to the real candidate Simit executable.
     let bin = root.path().join("bin");
-    fs::write(bin.join("nix"), "#!/bin/sh\nset -eu\ntest \"$1 $2 $3 $4\" = 'develop --print-build-logs .#ci --command'\nshift 4\nexport GATE_VALUE=devShell-override\nexec \"$@\"\n").unwrap();
+    if !bin.join("nix").exists() {
+        fs::write(bin.join("nix"), "#!/bin/sh\nset -eu\ntest \"$1 $2 $3 $4\" = 'develop --print-build-logs .#ci --command'\nshift 4\nexport GATE_VALUE=devShell-override\nexec \"$@\"\n").unwrap();
+    }
     if deadline.is_some() {
         let shim = fs::read_to_string(bin.join("nix"))
             .unwrap()
@@ -450,6 +452,7 @@ fn generated_failures_keep_status_and_do_not_dump_resolved_secrets() {
     assert!(stderr.contains("exit status: 7"));
     assert!(stderr.contains("Nix failure diagnostics"));
     assert!(!stderr.contains("never-report-this-secret"));
+    assert_eq!(stderr.matches("Nix failure diagnostics").count(), 1);
 }
 
 #[test]
@@ -539,4 +542,99 @@ fn local_timeout_stops_the_gate_and_descendants_without_retrying() {
     assert!(!stderr.contains("must-not-be-reported"));
     assert_eq!(fs::read(root.path().join("executions")).unwrap(), b"x");
     assert!(!root.path().join("leaked").exists());
+}
+
+#[test]
+fn successful_setup_gate_retains_its_background_service_for_the_next_gate() {
+    let root = fixture();
+    let path = root.path().join("simit.toml");
+    let config = fs::read_to_string(&path).unwrap().replace(
+        "printf original-failure >&2; exit 7",
+        "(sleep 0.1; touch service-ready; sleep 30) </dev/null >/dev/null 2>&1 & echo $$ > service-pid",
+    ).replace("printf '%s' \\\"$GATE_VALUE\\\"", "sleep 0.3; test -f service-ready");
+    fs::write(&path, config).unwrap();
+    let setup = check(&root, "fail");
+    assert!(setup.status.success(), "{setup:?}");
+    let pid = fs::read_to_string(root.path().join("service-pid")).unwrap();
+    let next = check(&root, "pass");
+    let pid = rustix::process::Pid::from_raw(pid.trim().parse().unwrap()).unwrap();
+    let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+    assert!(
+        next.status.success(),
+        "successful setup lost its service: {next:?}"
+    );
+}
+
+#[test]
+fn cancellation_stops_the_isolated_gate_and_descendants() {
+    for signal in [rustix::process::Signal::INT, rustix::process::Signal::TERM] {
+        let root = fixture();
+        let path = root.path().join("simit.toml");
+        let config = fs::read_to_string(&path).unwrap().replace(
+            "printf original-failure >&2; exit 7",
+            "echo $$ > gate-pid; (sleep 3; touch leaked) & echo ready > ready; wait",
+        );
+        fs::write(path, config).unwrap();
+        let mut child = Command::new(env!("CARGO_BIN_EXE_simit"))
+            .current_dir(root.path())
+            .args([
+                "monorepo",
+                "check",
+                "--component",
+                "core",
+                "--check",
+                "fail",
+            ])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !root.path().join("ready").exists() {
+            assert!(std::time::Instant::now() < deadline, "gate did not start");
+            assert!(child.try_wait().unwrap().is_none());
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let started = std::time::Instant::now();
+        rustix::process::kill_process(
+            rustix::process::Pid::from_raw(child.id() as i32).unwrap(),
+            signal,
+        )
+        .unwrap();
+        let output = child.wait_with_output().unwrap();
+        let elapsed = started.elapsed();
+        let gate_pid = fs::read_to_string(root.path().join("gate-pid")).unwrap();
+        let _ = rustix::process::kill_process_group(
+            rustix::process::Pid::from_raw(gate_pid.trim().parse().unwrap()).unwrap(),
+            rustix::process::Signal::KILL,
+        );
+        assert!(!output.status.success(), "{output:?}");
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "descendants held pipes after cancellation: {elapsed:?}"
+        );
+        assert!(!root.path().join("leaked").exists());
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("cancelled"),
+            "{output:?}"
+        );
+    }
+}
+
+#[test]
+fn generated_provisioning_failure_keeps_status_and_collects_diagnostics_once() {
+    let root = environment_fixture("${{ secrets.TEST_TOKEN }}");
+    fs::write(root.path().join("bin/nix"), "#!/bin/sh\nprintf x >> provisioning-executions\nprintf provisioning-failure >&2\nexit 23\n").unwrap();
+    let output = generated_gate(&root, "pass", Some("never-report-this-secret"));
+    assert_eq!(output.status.code(), Some(23), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("provisioning-failure"));
+    assert!(stderr.contains("Nix failure diagnostics"), "{stderr}");
+    assert_eq!(stderr.matches("Nix failure diagnostics").count(), 1);
+    assert!(!stderr.contains("never-report-this-secret"));
+    assert_eq!(
+        fs::read(root.path().join("provisioning-executions")).unwrap(),
+        b"x"
+    );
+    assert!(!root.path().join("executions").exists());
 }
