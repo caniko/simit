@@ -21,10 +21,14 @@ const JSON_BYTES: u64 = 16 * 1024 * 1024;
 pub const MAX_SPEC_BYTES: u64 = JSON_BYTES;
 const LOG_BYTES: u64 = 512 * 1024 * 1024;
 const TOTAL_BYTES: u64 = 1536 * 1024 * 1024;
+const RECEIPT_BYTES: u64 = 64 * 1024 * 1024;
+// Final inventory excludes the receipt to avoid a self-referential hash, but
+// the upload contains it. Expansion and download admission include that file.
+const PACKET_BYTES: u64 = 2 * TOTAL_BYTES + RECEIPT_BYTES;
 // Uploaded packets include request bodies and their captured archive copies.
 // Keep an independent allowance for outer ZIP headers/deflate framing, and a
 // separate request budget so metadata cannot truncate the admitted download.
-const ARTIFACT_BYTES: u64 = 2 * TOTAL_BYTES + 128 * 1024 * 1024;
+const ARTIFACT_BYTES: u64 = PACKET_BYTES + 128 * 1024 * 1024;
 const RETENTION_BYTES: u64 = ARTIFACT_BYTES + 256 * 1024 * 1024;
 const MAX_REQUESTS: usize = 65536;
 const MAX_PACKET_FILES: usize = 3 * MAX_REQUESTS + 10000;
@@ -198,6 +202,16 @@ impl Identity {
                 && self.workflow_ref.len() <= 2048
                 && !self.workflow_ref.chars().any(char::is_control),
             "invalid observer workflow ref"
+        );
+        let observer_path = self
+            .workflow_ref
+            .strip_prefix(&format!("{}/", spec.repository))
+            .and_then(|reference| reference.split_once('@'))
+            .context("invalid observer workflow ref")?
+            .0;
+        ensure!(
+            !spec.workflows.contains_key(observer_path),
+            "active observer workflow cannot be enrolled as a producer"
         );
         ensure!(
             self.event_json.len() as u64 <= JSON_BYTES,
@@ -379,7 +393,7 @@ fn save_receipt(root: &Path, receipt: &Receipt) -> Result<()> {
     let mut temporary = tempfile::Builder::new()
         .prefix(".receipt-next-")
         .tempfile_in(root)?;
-    write_json_to(temporary.as_file_mut(), receipt, 64 * 1024 * 1024)?;
+    write_json_to(temporary.as_file_mut(), receipt, RECEIPT_BYTES)?;
     temporary.persist(root.join("receipt.json"))?;
     Ok(())
 }
@@ -931,9 +945,17 @@ fn inventory(root: &Path) -> Result<BTreeMap<String, String>> {
             ensure!(kind.is_file(), "special evidence file rejected");
             let relative = path
                 .strip_prefix(root)?
-                .to_str()
-                .context("non-UTF8 evidence path")?
-                .to_owned();
+                .components()
+                .map(|component| {
+                    let name = component
+                        .as_os_str()
+                        .to_str()
+                        .context("non-UTF8 evidence path")?;
+                    ensure!(!name.contains('\\'), "nonportable evidence path rejected");
+                    Ok(name)
+                })
+                .collect::<Result<Vec<_>>>()?
+                .join("/");
             if relative == "receipt.json" {
                 continue;
             }
@@ -989,7 +1011,7 @@ pub fn verify_retention(
                 .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
         "invalid upload digest"
     );
-    let receipt_bytes = read_bytes(&root.join("receipt.json"), 64 * 1024 * 1024)?;
+    let receipt_bytes = read_bytes(&root.join("receipt.json"), RECEIPT_BYTES)?;
     let receipt: Receipt = serde_json::from_slice(&receipt_bytes)?;
     ensure!(
         receipt.schema == "simit.original-custody.v1"
@@ -1081,7 +1103,7 @@ pub fn verify_retention(
     let mut expected = receipt.members.clone();
     expected.insert("receipt.json".into(), digest(&receipt_bytes));
     ensure!(
-        archive_members(&raw, 2 * TOTAL_BYTES, MAX_PACKET_FILES, || observer
+        archive_members(&raw, PACKET_BYTES, MAX_PACKET_FILES + 1, || observer
             .remaining()
             .map(|_| ()))?
             == expected,
@@ -1143,6 +1165,14 @@ fn validate_artifact(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn inventory_rejects_names_that_cannot_be_portable_zip_members() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("bad\\name"), b"evidence").unwrap();
+        assert!(inventory(root.path()).is_err());
+    }
 
     struct MaximumProbe(u64);
     impl Transport for MaximumProbe {

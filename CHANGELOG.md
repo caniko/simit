@@ -58,6 +58,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Bind original-observer enrollment bytes to the source commit, reject enrollment
+  of the active observer, and use portable artifact member paths on Windows.
 - Require static native release policy for historical verification, reject Cargo
   changelog symlinks, locate historical Cargo manifests after directory moves, and
   bound Git notes by arbitrary admitted SemVer prerelease tags.

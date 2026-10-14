@@ -139,6 +139,47 @@ fn receipt(root: &std::path::Path) -> Value {
 }
 
 #[test]
+fn active_observer_enrollment_fails_before_packet_or_provider_effects() {
+    for event in ["push", "pull_request"] {
+        let (mut spec, mut identity, mut provider) = fixture();
+        spec.workflows.insert(
+            ".github/workflows/custody.yaml".into(),
+            vec!["retain".into()],
+        );
+        identity.event = event.into();
+        if event == "pull_request" {
+            identity.workflow_ref =
+                "owner/repo/.github/workflows/custody.yaml@refs/pull/66/merge".into();
+            identity.event_json = json!({"repository":{"id":101,"full_name":"owner/repo"},
+                "pull_request":{"head":{"sha":identity.head}}})
+            .to_string();
+        }
+        provider.failures.push_back(401);
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("packet");
+        let error = observe_with(
+            &spec,
+            &identity,
+            &root,
+            &mut provider,
+            &mut FakeClock::default(),
+            &Cancellation::default(),
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("active observer workflow"),
+            "{error}"
+        );
+        assert!(!root.exists(), "invalid enrollment created a packet");
+        assert_eq!(
+            provider.failures.len(),
+            1,
+            "invalid enrollment contacted provider"
+        );
+    }
+}
+
+#[test]
 fn transient_500_and_502_are_retained_then_terminal_polling_completes() {
     let (spec, identity, mut provider) = fixture();
     provider.failures.extend([500, 502]);
@@ -649,7 +690,12 @@ fn uploaded(root: &std::path::Path) -> (Uploaded, String) {
                 continue;
             }
             zip.start_file(
-                path.strip_prefix(root).unwrap().to_str().unwrap(),
+                path.strip_prefix(root)
+                    .unwrap()
+                    .components()
+                    .map(|component| component.as_os_str().to_str().unwrap())
+                    .collect::<Vec<_>>()
+                    .join("/"),
                 zip::write::SimpleFileOptions::default(),
             )
             .unwrap();
@@ -679,6 +725,14 @@ fn native_retention_binds_actual_provider_zip_to_local_members_and_independent_s
     )
     .unwrap();
     let original = std::fs::read(root.join("receipt.json")).unwrap();
+    let captured = receipt(&root);
+    assert!(
+        captured["members"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .all(|name| !name.contains('\\'))
+    );
     let (mut upload, digest) = uploaded(&root);
     let admitted = verify_retention(
         &spec,

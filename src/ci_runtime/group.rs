@@ -689,6 +689,10 @@ fn oid(value: &str) -> bool {
 }
 
 pub(super) fn read_json<T: serde::de::DeserializeOwned>(path: &Path, maximum: u64) -> Result<T> {
+    Ok(serde_json::from_slice(&read_bytes(path, maximum)?)?)
+}
+
+pub(super) fn read_bytes(path: &Path, maximum: u64) -> Result<Vec<u8>> {
     ensure!(
         fs::symlink_metadata(path)?.file_type().is_file(),
         "input must be a regular file"
@@ -698,7 +702,7 @@ pub(super) fn read_json<T: serde::de::DeserializeOwned>(path: &Path, maximum: u6
         .take(maximum + 1)
         .read_to_end(&mut raw)?;
     ensure!(raw.len() as u64 <= maximum, "JSON input exceeds budget");
-    Ok(serde_json::from_slice(&raw)?)
+    Ok(raw)
 }
 
 fn save(path: &Path, value: &impl Serialize) -> Result<()> {

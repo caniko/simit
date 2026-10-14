@@ -120,6 +120,8 @@ jobs:
         run: cargo +1.85.0 test --locked --test workflow_templates
       - name: Verify native Cargo member path normalization on MSRV
         run: cargo +1.85.0 test --locked --test monorepo cargo_member_paths_normalize_to_repo_contract
+      - name: Verify native original custody and source enrollment on MSRV
+        run: cargo +1.85.0 test --locked --test ci_original_observer --test ci_original_observer_resilience --test ci_observer_source
       - name: Verify packaged runtime assets
         shell: bash
         run: |

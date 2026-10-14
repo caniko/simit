@@ -88,14 +88,19 @@ pub(super) fn run_probe(
     stdout: &Path,
     stderr: &Path,
     cancellation: &Cancellation,
+    timeout: Duration,
 ) -> Result<i32> {
+    ensure!(
+        timeout <= Duration::from_secs(30),
+        "probe timeout exceeds bound"
+    );
     run_bounded(
         command,
         stdout,
         stderr,
         cancellation,
         Limits {
-            timeout: Duration::from_secs(30),
+            timeout,
             stdout: 1024 * 1024,
             stderr: 65536,
         },

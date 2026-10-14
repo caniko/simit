@@ -1,5 +1,5 @@
 //! Thin CLI adapters for versioned CI runtime contracts.
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use clap::{Args, Subcommand};
 use std::path::PathBuf;
 
@@ -58,28 +58,110 @@ fn observer_inputs(
     super::observer::Identity,
     super::observer::GitHubTransport,
 )> {
-    let spec: super::observer::Spec =
-        super::group::read_json(path, super::observer::MAX_SPEC_BYTES)?;
+    let raw = super::group::read_bytes(path, super::observer::MAX_SPEC_BYTES)?;
+    let spec: super::observer::Spec = serde_json::from_slice(&raw)?;
     let identity = super::observer::Identity::from_environment(&spec)?;
-    let probe = tempfile::tempdir()?;
-    let output = probe.path().join("head");
-    let errors = probe.path().join("errors");
-    let status = super::process::run_probe(
-        std::process::Command::new("git").args(["rev-parse", "HEAD"]),
-        &output,
-        &errors,
-        &super::cancellation::Cancellation::default(),
-    )?;
-    ensure!(
-        status == 0 && std::fs::read_to_string(output)?.trim() == identity.head,
-        "observer checkout differs from exact source head"
-    );
+    verify_source_spec(path, &raw, &identity.head)?;
     let token = std::env::var("GH_TOKEN").or_else(|_| std::env::var("GITHUB_TOKEN"))?;
     Ok((
         spec,
         identity,
         super::observer::GitHubTransport::new(token)?,
     ))
+}
+
+fn source_probe(
+    root: &std::path::Path,
+    name: &str,
+    command: &mut std::process::Command,
+    deadline: std::time::Instant,
+) -> Result<String> {
+    let output = root.join(name);
+    let errors = root.join(format!("{name}.errors"));
+    let remaining = deadline
+        .checked_duration_since(std::time::Instant::now())
+        .context("source-owned observer spec probe deadline expired")?;
+    let status = super::process::run_probe(
+        command,
+        &output,
+        &errors,
+        &super::cancellation::Cancellation::default(),
+        remaining,
+    )?;
+    ensure!(
+        status == 0,
+        "source-owned observer spec Git probe failed ({name})"
+    );
+    Ok(std::fs::read_to_string(output)?
+        .trim_end_matches(['\r', '\n'])
+        .to_owned())
+}
+
+fn verify_source_spec(path: &std::path::Path, raw: &[u8], head: &str) -> Result<()> {
+    let probe = tempfile::tempdir()?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let actual_head = source_probe(
+        probe.path(),
+        "head",
+        std::process::Command::new("git")
+            .arg("--no-replace-objects")
+            .args(["rev-parse", "HEAD"]),
+        deadline,
+    )?;
+    ensure!(
+        actual_head == head,
+        "observer checkout differs from exact source head"
+    );
+    let repository = source_probe(
+        probe.path(),
+        "root",
+        std::process::Command::new("git")
+            .arg("--no-replace-objects")
+            .args(["rev-parse", "--show-toplevel"]),
+        deadline,
+    )?;
+    let repository = std::fs::canonicalize(repository)?;
+    let path = std::fs::canonicalize(path)?;
+    let relative = path
+        .strip_prefix(&repository)
+        .context("source-owned observer spec must be inside the checkout")?;
+    let relative = relative
+        .components()
+        .map(|part| {
+            part.as_os_str()
+                .to_str()
+                .context("source-owned observer spec path must be UTF-8")
+        })
+        .collect::<Result<Vec<_>>>()?
+        .join("/");
+    let committed = source_probe(
+        probe.path(),
+        "committed",
+        std::process::Command::new("git")
+            .arg("--no-replace-objects")
+            .current_dir(&repository)
+            .args(["rev-parse", "--verify", &format!("{head}:{relative}")]),
+        deadline,
+    )?;
+    // Hash the same immutable byte buffer used for deserialization. Re-reading
+    // the worktree or checking its dirtiness could miss a changed-back input.
+    let snapshot = probe.path().join("spec-bytes");
+    std::fs::write(&snapshot, raw)?;
+    let loaded = source_probe(
+        probe.path(),
+        "loaded",
+        std::process::Command::new("git")
+            .arg("--no-replace-objects")
+            .current_dir(&repository)
+            .args(["hash-object", "--no-filters", "--"])
+            .arg(snapshot),
+        deadline,
+    )?;
+    ensure!(
+        loaded == committed,
+        "source-owned observer spec differs from committed blob"
+    );
+    Ok(())
 }
 
 /// Group execution input locations.

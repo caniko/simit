@@ -27,6 +27,12 @@ simit ci verify-original-retention --spec .github/original-producers.json \
 The CLI requires a GitHub-hosted branch-push/PR original attempt, the native
 event/environment identity and `GH_TOKEN` (or `GITHUB_TOKEN`). Library callers
 supply identity, a transport and cancellation without global signal handlers.
+The CLI binds the exact loaded spec bytes to the tracked blob at the observed
+source commit before credential or provider access. Modified, staged, untracked
+and outside-checkout substitutions fail; local Git replacement objects cannot
+substitute the source blob. Unrelated worktree edits do not affect enrollment.
+These Git probes share one thirty-second deadline. The active
+observer workflow cannot enroll itself as a producer.
 The native transport authenticates only fixed-origin GitHub GETs; approved HTTPS
 log/artifact redirects are bounded and receive no GitHub credential.
 
@@ -64,13 +70,16 @@ must all be terminal and successful. Provider log ZIPs retain their exact bytes;
 member admission is CRC-checked, byte-bounded and rejects duplicates, symlinks,
 unsafe names, multidisk and unsupported ZIP directories. No archive is extracted
 and no producer-controlled content is executed.
+Evidence member names use `/`-joined path components on every host, including
+Windows, so local inventories match the uploaded artifact's ZIP names exactly.
 
 Receipt producer rows retain compact validated identity while full provider
 snapshots remain in the packet. Atomic receipt publication owns and cleans its
 temporary file on failed serialization; an interrupted write cannot block the
 final incomplete receipt. Uploaded packet downloads have a separate aggregate
-byte budget: the doubled captured-byte allowance plus outer ZIP framing and
-metadata reserves. Bounded single-disk ZIP64 directories support the full admitted
+byte budget: the doubled captured-byte allowance, the final receipt, outer ZIP
+framing and metadata reserves. Expanded ZIP admission includes the receipt's
+byte and file-count allowances as well. Bounded single-disk ZIP64 directories support the full admitted
 packet file inventory, retaining central-directory duplicate and CRC checks.
 
 Source targeting also binds case-sensitive branch refs. A PR must have exactly
