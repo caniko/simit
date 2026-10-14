@@ -2291,10 +2291,10 @@ prepublish_commands = ["nix flake check --no-build"]
     assert!(workflow.contains("name: Publish JetBrains Plugin"));
     assert!(workflow.contains("runs-on: atlas-nix-trusted"));
     assert!(workflow.contains("INSTALLABLE: .#jetbrains-plugin"));
-    assert!(workflow.contains("tags: [\"[0-9]*.[0-9]*.[0-9]*\", \"v[0-9]*.[0-9]*.[0-9]*\"]"));
+    assert!(workflow.contains("tags: [\"[0-9]*.[0-9]*.[0-9]*\"]"));
     assert!(workflow.contains("  workflow_dispatch:\n    inputs:\n      version:"));
-    assert!(workflow.contains("VERSION=\"${{ github.event.inputs.version || github.ref_name }}\""));
-    assert!(workflow.contains("VERSION=\"${VERSION#v}\""));
+    assert!(workflow.contains("VERSION=\"$DISPATCH_VERSION\""));
+    assert!(workflow.contains("VERSION=\"$TAG_LABEL\""));
     assert!(workflow.contains("<id>$PLUGIN_XML_ID</id>"));
     assert!(workflow.contains("CERTIFICATE_CHAIN_FILE=\"$RUNNER_TEMP/certificate-chain.pem\""));
     assert!(workflow.contains(
