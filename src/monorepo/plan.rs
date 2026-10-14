@@ -147,8 +147,8 @@ fn decode_paths(paths: &[u8]) -> ChangedPaths {
     };
     for path in paths.split(|b| *b == 0).filter(|p| !p.is_empty()) {
         match std::str::from_utf8(path) {
-            Ok(path) => changed.paths.push(path.to_owned()),
-            Err(_) => changed.full = true,
+            Ok(path) if validate_relative_path(path).is_ok() => changed.paths.push(path.to_owned()),
+            _ => changed.full = true,
         }
     }
     changed
@@ -180,5 +180,17 @@ mod tests {
         let known = super::decode_paths(b"python/server.py\0");
         assert!(!known.full);
         assert_eq!(known.paths, ["python/server.py"]);
+        for unusual in [
+            b"python/back\\slash.py".as_slice(),
+            b"python/new\nline.py",
+            b"python/return\rline.py",
+        ] {
+            let mut paths = b"python/server.py\0".to_vec();
+            paths.extend(unusual);
+            paths.push(0);
+            let changed = super::decode_paths(&paths);
+            assert!(changed.full, "{unusual:?}");
+            assert_eq!(changed.paths, ["python/server.py"]);
+        }
     }
 }

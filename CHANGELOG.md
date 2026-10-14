@@ -53,6 +53,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Respect tagged native publication eligibility during historical verification and
+  conservatively qualify the full graph for Git paths outside the component grammar.
 - Verify historical native package names from their namespace-owned tag and reject
   unsupported private Python version labels before lock handling or mutation.
 - Enforce configured JetBrains release tag prefixes and validate manual versions

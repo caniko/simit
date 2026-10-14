@@ -429,7 +429,7 @@ fn verify_manifest(
             "create or fetch the selected release tag",
         ),
     });
-    if package.publish {
+    if admitted.is_some_and(|tagged| tagged.publish) {
         let credential = if matches!(
             crate::monorepo::native_registry::Registry::for_manifest(&package.config.manifest),
             crate::monorepo::native_registry::Registry::Python

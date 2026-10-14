@@ -1349,7 +1349,7 @@ fn npm_registry_verification_requires_the_admitted_dist_tag() {
         git(root, &["add", "."]);
         git(root, &["commit", "-m", "original channel"]);
         git(root, &["tag", "node-engine/v1.3.0"]);
-        write(root, "node/package.json", &serde_json::json!({"name":"@example/renamed-engine","version":"1.4.0","publishConfig":{"tag":"latest"}}).to_string());
+        write(root, "node/package.json", &serde_json::json!({"name":"@example/renamed-engine","version":"1.4.0","private":true,"publishConfig":{"tag":"latest"}}).to_string());
         let body = serde_json::json!({"name":"@example/node-engine","versions":{"1.3.0":{"name":"@example/node-engine","version":"1.3.0","dist":{"integrity":"sha512-abc"}}},"dist-tags":tags});
         write(
             root,
@@ -1407,6 +1407,61 @@ fn python_registry_normalization_rejects_duplicate_version_owners() {
     assert!(
         String::from_utf8_lossy(&output.stderr).contains("duplicate python release package name"),
         "{output:?}"
+    );
+}
+
+#[test]
+fn historical_private_npm_releases_do_not_require_registry_publication() {
+    let temp = fixture();
+    let root = temp.path();
+    let config = fs::read_to_string(root.join("simit.toml"))
+        .unwrap()
+        .replace("publish = false", "publish = true");
+    write(root, "simit.toml", &config);
+    write(
+        root,
+        "node/package.json",
+        &serde_json::json!({"name":"@example/node-engine","version":"1.3.0","private":true})
+            .to_string(),
+    );
+    git(root, &["add", "."]);
+    git(root, &["commit", "-m", "private release"]);
+    git(root, &["tag", "node-engine/v1.3.0"]);
+    write(
+        root,
+        "node/package.json",
+        &serde_json::json!({"name":"@example/node-engine","version":"1.4.0","private":false})
+            .to_string(),
+    );
+    let output = run(
+        root,
+        &[
+            "release",
+            "verify",
+            "--component",
+            "node",
+            "--version",
+            "1.3.0",
+            "--json",
+        ],
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(
+        report["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r["check"] != "registry publication" && r["check"] != "remote secrets"),
+        "{report}"
+    );
+    assert_eq!(
+        report["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["check"] == "tagged package identity")
+            .unwrap()["status"],
+        "pass"
     );
 }
 
