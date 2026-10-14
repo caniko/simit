@@ -124,6 +124,12 @@ impl Config {
                     {
                         bail!("invalid component check environment name {name:?}");
                     }
+                    if matches!(
+                        name.as_str(),
+                        "UID" | "EUID" | "PPID" | "BASHOPTS" | "SHELLOPTS" | "BASH_VERSINFO"
+                    ) {
+                        bail!("unsupported read-only Bash environment name {name}");
+                    }
                 }
             }
         }

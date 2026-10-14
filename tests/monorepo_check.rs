@@ -745,3 +745,125 @@ fn stalled_provisioning_expires_before_the_provider_deadline() {
     assert!(!root.path().join("executions").exists());
     assert!(!root.path().join("leaked").exists());
 }
+
+#[test]
+fn generated_gate_path_does_not_hide_the_native_runner() {
+    let root = environment_fixture("${{ secrets.TEST_TOKEN }}");
+    let path = root.path().join("simit.toml");
+    fs::write(
+        &path,
+        fs::read_to_string(&path)
+            .unwrap()
+            .replace("GATE_VALUE", "PATH"),
+    )
+    .unwrap();
+    let output = generated_gate(&root, "pass", Some("/usr/bin:/bin"));
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        fs::read(root.path().join("observed")).unwrap(),
+        b"/usr/bin:/bin"
+    );
+    assert_eq!(fs::read(root.path().join("executions")).unwrap(), b"x");
+}
+
+#[test]
+fn readonly_bash_environment_names_reject_before_execution() {
+    for name in [
+        "UID",
+        "EUID",
+        "PPID",
+        "BASHOPTS",
+        "SHELLOPTS",
+        "BASH_VERSINFO",
+    ] {
+        let root = environment_fixture("never-report-this-secret");
+        let path = root.path().join("simit.toml");
+        fs::write(
+            &path,
+            fs::read_to_string(&path)
+                .unwrap()
+                .replace("GATE_VALUE", name),
+        )
+        .unwrap();
+        for args in [
+            vec![
+                "monorepo",
+                "check",
+                "--component",
+                "core",
+                "--check",
+                "pass",
+            ],
+            vec!["init", "ci"],
+        ] {
+            let output = Command::new(env!("CARGO_BIN_EXE_simit"))
+                .current_dir(root.path())
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(!output.status.success(), "{name}: {output:?}");
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                stderr.contains("unsupported read-only Bash environment name"),
+                "{stderr}"
+            );
+            assert!(!stderr.contains("never-report-this-secret"));
+        }
+        assert!(!root.path().join("executions").exists());
+        assert!(!root.path().join(".github").exists());
+    }
+}
+
+#[test]
+fn native_initialization_remains_supervised_until_deadline_ownership() {
+    let root = environment_fixture("literal");
+    let config = root.path().join("simit.toml");
+    fs::write(
+        &config,
+        fs::read_to_string(&config).unwrap().replace(
+            "paths = [\"core\"]",
+            "paths = [\"core\"]\ncargo_packages = [\"initialization-delay\"]",
+        ),
+    )
+    .unwrap();
+    fs::write(root.path().join("Cargo.toml"), "[package]\nname='initialization-delay'\nversion='0.1.0'\nedition='2024'\n[lib]\npath='core/lib.rs'\n").unwrap();
+    fs::create_dir(root.path().join("core")).unwrap();
+    fs::write(root.path().join("core/lib.rs"), "").unwrap();
+    fs::write(
+        root.path().join("bin/cargo"),
+        "#!/bin/sh\nprintf x >> metadata-executions\n(sleep 5; touch leaked) & wait\nexit 7\n",
+    )
+    .unwrap();
+    fs::set_permissions(
+        root.path().join("bin/cargo"),
+        fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    let deadline = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 3;
+    let started = std::time::Instant::now();
+    let output = generated_gate_with_deadline(
+        &root,
+        "pass",
+        Some("never-report-this-secret"),
+        Some(deadline),
+    );
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "native initialization escaped supervision"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Nix failure diagnostics"), "{stderr}");
+    assert_eq!(stderr.matches("Nix failure diagnostics").count(), 1);
+    assert!(!stderr.contains("never-report-this-secret"));
+    assert_eq!(
+        fs::read(root.path().join("metadata-executions")).unwrap(),
+        b"x"
+    );
+    assert!(!root.path().join("executions").exists());
+    assert!(!root.path().join("leaked").exists());
+}

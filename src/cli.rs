@@ -113,12 +113,16 @@ pub struct MonorepoCheckCommand {
         help = "Absolute Unix deadline supplied by generated CI, including provisioning time and leaving provider diagnostic grace"
     )]
     pub deadline: Option<u64>,
+    #[arg(long, hide = true, requires = "deadline")]
+    pub supervisor_ready: Option<Utf8PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum MonorepoGateEnv {
     Local,
     ProviderResolved,
+    /// Generated callers pass inert aliases until the gate shell is launched.
+    ProviderStaged,
 }
 
 #[derive(Debug, Args)]

@@ -1,4 +1,4 @@
-"""Bound Nix provisioning before native startup, without another Nix call."""
+"""Bound provisioning and initialization until native deadline ownership."""
 import os
 from pathlib import Path
 import signal
@@ -6,7 +6,7 @@ import subprocess
 import sys
 import time
 
-started = Path(sys.argv[1])
+ready = Path(sys.argv[1])
 remaining = max(0, int(sys.argv[2]) - time.time())
 deadline = time.monotonic() + remaining
 cancelled = 0
@@ -31,16 +31,16 @@ with subprocess.Popen(sys.argv[3:], start_new_session=True) as process:
             status = process.poll()
             if status is not None:
                 break
-            if cancelled or (not started.exists() and time.monotonic() >= deadline):
+            if cancelled or (not ready.exists() and time.monotonic() >= deadline):
                 print("Nix provisioning cancelled" if cancelled else "Nix provisioning timed out", file=sys.stderr)
                 try:
                     os.killpg(process.pid, signal.SIGTERM)
                 except ProcessLookupError:
                     pass
                 # Native Simit owns its isolated gate and bounded diagnostics
-                # after the marker. Give cancellation cleanup its reserved time.
+                # after the ownership marker. Allow its bounded cancellation cleanup.
                 try:
-                    process.wait(timeout=90 if started.exists() else 5)
+                    process.wait(timeout=90 if ready.exists() else 5)
                 except subprocess.TimeoutExpired:
                     pass
                 status = 128 + cancelled if cancelled else 124

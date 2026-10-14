@@ -57,6 +57,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Preserve configured monorepo gate environment data across Bash and Nix startup,
+  reject read-only Bash names before execution, and bound provisioning and native
+  initialization so failed or timed-out checks retain their diagnostic reserve.
 - Reject traversal in COPR spec output paths and enter AUR clones before dropping
   root privileges, preserving private workspace permissions and clone ownership.
 - Persist and verify source-bound Chocolatey candidates before Actions

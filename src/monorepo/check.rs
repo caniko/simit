@@ -31,7 +31,7 @@ pub(super) fn run(command: MonorepoCheckCommand) -> Result<()> {
     // Only generated CI opts into provider resolution. Local literals retain
     // precedence over unrelated inherited values; never echo either value.
     let mut environment = Vec::new();
-    for (name, value) in &gate.env {
+    for (index, (name, value)) in gate.env.iter().enumerate() {
         let value = match command.gate_env {
             MonorepoGateEnv::Local => {
                 if value.contains("${{") {
@@ -44,6 +44,11 @@ pub(super) fn run(command: MonorepoCheckCommand) -> Result<()> {
             MonorepoGateEnv::ProviderResolved => std::env::var_os(name).with_context(|| {
                 format!("missing provider-resolved gate environment variable {name}")
             })?,
+            MonorepoGateEnv::ProviderStaged => {
+                std::env::var_os(format!("SIMIT_GATE_VALUE_{index}")).with_context(|| {
+                    format!("missing provider-resolved gate environment variable {name}")
+                })?
+            }
         };
         environment.push((name, value));
     }
@@ -94,13 +99,19 @@ pub(super) fn run(command: MonorepoCheckCommand) -> Result<()> {
     ] {
         signal_hook::flag::register(signal, cancelled.clone())?;
     }
-    let status = if seconds == 0 {
+    let deadline = Instant::now() + Duration::from_secs(seconds);
+    // Initialization may block in Cargo metadata. Only hand deadline ownership
+    // to this runner after validation, environment capture and signal setup.
+    if let Some(marker) = &command.supervisor_ready {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(marker)
+            .context("claim native gate deadline ownership")?;
+    }
+    let status = if seconds == 0 || cancelled.load(Ordering::SeqCst) {
         None
     } else {
-        let deadline = Instant::now() + Duration::from_secs(seconds);
-        if cancelled.load(Ordering::SeqCst) {
-            bail!("component check cancelled before execution");
-        }
         let mut child = GateProcess {
             child: process.spawn().context("run declared component check")?,
             cleanup: true,
