@@ -304,7 +304,8 @@ fn generated_gate_with_deadline(
     );
     caller
         .current_dir(root.path())
-        .args(["-euo", "pipefail", "-c", &script])
+        // GitHub's explicit Bash shell supplies errexit/pipefail, not nounset.
+        .args(["-e", "-o", "pipefail", "-c", &script])
         .env("PATH", path)
         .env_remove("GATE_VALUE");
     // Actions supplies the evaluated step environment, including empty values.

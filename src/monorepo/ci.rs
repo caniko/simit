@@ -204,7 +204,7 @@ pub(crate) fn files(
             let deadline = format!(
                 "\"$(( $(date +%s) + {gate_seconds} < {job_deadline} ? $(date +%s) + {gate_seconds} : {job_deadline} ))\""
             );
-            let mut step = json!({"name": gate.id, "timeout-minutes": provider_minutes, "run": format!("nix develop --print-build-logs .#ci --command {environment}simit monorepo check --component {} --check {} --nix-diagnostics --gate-env provider-resolved --deadline {deadline}", component.id, gate.id)});
+            let mut step = json!({"name": gate.id, "shell": "bash", "timeout-minutes": provider_minutes, "run": format!("set -euo pipefail\nnix develop --print-build-logs .#ci --command {environment}simit monorepo check --component {} --check {} --nix-diagnostics --gate-env provider-resolved --deadline {deadline}", component.id, gate.id)});
             if !gate.env.is_empty() {
                 step["env"] = json!(gate.env);
             }
