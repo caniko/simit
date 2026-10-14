@@ -317,6 +317,37 @@ fn pre_cancelled_capture_preserves_a_nonaccepting_receipt_and_existing_packets()
 }
 
 #[test]
+fn unsuccessful_original_retains_provider_archive_and_jobs_before_rejection() {
+    for conclusion in ["cancelled", "failure", "skipped"] {
+        let (spec, identity, mut provider) = fixture();
+        let mut failed = run();
+        failed["conclusion"] = json!(conclusion);
+        provider.runs.push_back(failed);
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("packet");
+        assert!(
+            observe_with(
+                &spec,
+                &identity,
+                &root,
+                &mut provider,
+                &mut FakeClock::default(),
+                &Cancellation::default()
+            )
+            .is_err()
+        );
+        assert_eq!(receipt(&root)["capture_complete"], false);
+        assert_eq!(
+            std::fs::read(root.join("12/provider-logs.zip")).unwrap(),
+            provider.logs
+        );
+        let jobs: Vec<Value> =
+            serde_json::from_slice(&std::fs::read(root.join("12/jobs.json")).unwrap()).unwrap();
+        assert_eq!(jobs.len(), 1);
+    }
+}
+
+#[test]
 fn missing_native_steps_duplicate_runs_and_duplicate_zip_names_are_rejected() {
     for kind in ["steps", "runs", "zip", "crc"] {
         let (spec, identity, mut provider) = fixture();

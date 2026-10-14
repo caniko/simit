@@ -673,14 +673,16 @@ pub fn observe_with(
                 let folder = root.join(id.to_string());
                 fs::create_dir(&folder)?;
                 write_json(&folder.join("terminal.json"), &run)?;
-                successful_run(&run)?;
                 let jobs = observer.pages(&format!("actions/runs/{id}/attempts/1/jobs"), "jobs")?;
                 write_json(&folder.join("jobs.json"), &jobs)?;
-                validate_jobs(&jobs, spec, identity, id, &workflow)?;
                 let raw = observer.get(&format!("actions/runs/{id}/attempts/1/logs"), LOG_BYTES)?;
                 fs::write(folder.join("provider-logs.zip"), &raw)?;
+                // Retain failed/cancelled originals too; unsuccessful producer
+                // execution must not erase its raw diagnostic archive.
                 let members = log_members(&raw, || observer.remaining().map(|_| ()))?;
                 write_json(&folder.join("provider-log-members.json"), &members)?;
+                successful_run(&run)?;
+                validate_jobs(&jobs, spec, identity, id, &workflow)?;
                 let after = observer.json(&format!("actions/runs/{id}"))?;
                 validate_run(&after, spec, identity, id, &workflow)?;
                 successful_run(&after)?;
