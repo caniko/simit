@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Bounded runtime admission through a reusable library and `simit runtime admit`:
+  explicit retryable statuses, cancellable backoff, per-probe/overall deadlines,
+  aggregate byte budgets and fresh observation receipts. CI and admission reuse
+  the same process/cancellation implementation; existing CI interfaces remain
+  compatible. Systemd adapters and escaped-descendant cgroup containment remain
+  consumer-owned qualification requirements.
 - Explicit `sealed-v2` completion custody: immediate per-original capture,
   native step-log completeness admission, immutable artifact ID/digest verification
   and independently uploaded aggregation with fresh native revocation checks.
