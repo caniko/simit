@@ -54,12 +54,19 @@ expiry during that wait remains failure. Other authorization failures,
 malformed successful responses, duplicate producer selections and identity drift
 fail closed. Received response bytes and sanitized metadata remain in numbered
 request files. Neither credentials nor signed download URLs are recorded.
+Capping an error body preserves its transient HTTP status for bounded retry;
+oversized successful responses and cancellation remain permanent failures.
 
 Admission checks the complete timeout/poll/workflow combination against the
 65,536-GET ceiling, including bounded pagination, capture and all transient retry
 attempts. Unsupported polling configurations fail before creating a packet.
 Provider workflow paths may carry a validated ref suffix; enrollment still binds
-the exact source-owned YAML path and original event target. `@` inside a valid
+the exact source-owned YAML path. The suffix is validated as a Git ref, separately
+from the branch/PR target bound by the run's native identity fields. SHA discovery
+skips identifiable other targets, preserving exact-target duplicate rejection and
+continuous identity validation after selection. Log and artifact downloads use
+the remaining aggregate deadline; metadata GETs retain their ninety-second cap.
+`@` inside a valid
 matching branch ref remains supported. CLI JSON inputs admit the same 16 MiB
 envelope that covers every accepted job-name inventory. Serialized aggregate job metadata is bounded by
 the same 16 MiB ceiling at capture and retention, including pretty-print overhead.
@@ -72,13 +79,17 @@ unsafe names, multidisk and unsupported ZIP directories. No archive is extracted
 and no producer-controlled content is executed.
 Evidence member names use `/`-joined path components on every host, including
 Windows, so local inventories match the uploaded artifact's ZIP names exactly.
+Finalization reserves bounded space for event/spec JSON, per-workflow snapshots
+and request metadata in addition to the provider body/copy allowance. Request
+metadata is capped at 4 KiB per GET; the same generated-evidence reserve is carried
+through expanded ZIP admission and raw artifact download.
 
 Receipt producer rows retain compact validated identity while full provider
 snapshots remain in the packet. Atomic receipt publication owns and cleans its
 temporary file on failed serialization; an interrupted write cannot block the
 final incomplete receipt. Uploaded packet downloads have a separate aggregate
-byte budget: the doubled captured-byte allowance, the final receipt, outer ZIP
-framing and metadata reserves. Expanded ZIP admission includes the receipt's
+byte budget: the doubled captured-byte allowance, bounded generated evidence,
+the final receipt, outer ZIP framing and metadata reserves. Expanded ZIP admission includes the receipt's
 byte and file-count allowances as well. Bounded single-disk ZIP64 directories support the full admitted
 packet file inventory, retaining central-directory duplicate and CRC checks.
 
@@ -88,7 +99,9 @@ and base ref/repository/SHA. Missing or ambiguous associations and base-snapshot
 drift reject custody, including during retention revalidation. An identical head
 on another branch or PR cannot supply the enrolled original execution.
 
-After the ordinary immutable artifact upload, native retention verification checks
+After the ordinary immutable artifact upload, native retention verification writes
+to a sibling diagnostics directory, appending `.retention` to the complete packet
+name so `packet.v1` and `packet.v2` keep independent diagnostics. It checks
 the independently supplied enrollment and event, all local evidence hashes, the
 actual provider ZIP digest and members, the upload's original observer identity,
 at least thirty days of retention, fresh producer success and fresh artifact

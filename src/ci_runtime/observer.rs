@@ -21,10 +21,18 @@ const JSON_BYTES: u64 = 16 * 1024 * 1024;
 pub const MAX_SPEC_BYTES: u64 = JSON_BYTES;
 const LOG_BYTES: u64 = 512 * 1024 * 1024;
 const TOTAL_BYTES: u64 = 1536 * 1024 * 1024;
+const MAX_WORKFLOWS: usize = 10;
+const REQUEST_METADATA_BYTES: u64 = 4096;
+// Provider responses/copies use the doubled body budget. Generated evidence is
+// separately bounded: event/spec, three JSON snapshots per enrolled workflow,
+// and one small diagnostic JSON file per admitted request.
+const GENERATED_BYTES: u64 =
+    (2 + 3 * MAX_WORKFLOWS as u64) * JSON_BYTES + MAX_REQUESTS as u64 * REQUEST_METADATA_BYTES;
+const EVIDENCE_BYTES: u64 = 2 * TOTAL_BYTES + GENERATED_BYTES;
 const RECEIPT_BYTES: u64 = 64 * 1024 * 1024;
 // Final inventory excludes the receipt to avoid a self-referential hash, but
 // the upload contains it. Expansion and download admission include that file.
-const PACKET_BYTES: u64 = 2 * TOTAL_BYTES + RECEIPT_BYTES;
+const PACKET_BYTES: u64 = EVIDENCE_BYTES + RECEIPT_BYTES;
 // Uploaded packets include request bodies and their captured archive copies.
 // Keep an independent allowance for outer ZIP headers/deflate framing, and a
 // separate request budget so metadata cannot truncate the admitted download.
@@ -68,7 +76,7 @@ impl Spec {
             "invalid repository"
         );
         ensure!(
-            (1..=10).contains(&self.workflows.len()),
+            (1..=MAX_WORKFLOWS).contains(&self.workflows.len()),
             "invalid workflow inventory"
         );
         for (path, jobs) in &self.workflows {
@@ -428,7 +436,12 @@ impl Observer<'_> {
     }
     fn get(&mut self, suffix: &str, maximum: u64) -> Result<Vec<u8>> {
         for attempt in 0..MAX_ATTEMPTS {
-            let timeout = self.remaining()?.min(Duration::from_secs(90));
+            let remaining = self.remaining()?;
+            let timeout = if suffix.ends_with("/logs") || suffix.ends_with("/zip") {
+                remaining
+            } else {
+                remaining.min(Duration::from_secs(90))
+            };
             self.requests += 1;
             ensure!(
                 self.requests <= MAX_REQUESTS,
@@ -447,19 +460,23 @@ impl Observer<'_> {
             self.bytes += response.body.len() as u64;
             let name = format!("requests/{:04}", self.requests);
             fs::write(self.root.join(format!("{name}.body")), &response.body)?;
-            write_json(
+            write_json_bounded(
                 &self.root.join(format!("{name}.json")),
                 &json!({"endpoint":endpoint,"status":response.status,"transport_error":response.transport_error,"retry_after":response.retry_after,"attempt":attempt+1}),
+                REQUEST_METADATA_BYTES,
             )?;
             self.remaining()?;
             if response.status == 200 && response.transport_error.is_none() {
                 return Ok(response.body);
             }
-            let transient = if let Some(error) = &response.transport_error {
-                matches!(error.as_str(), "timeout" | "connect" | "body-read")
-            } else {
-                matches!(response.status, 408 | 429 | 500 | 502 | 503 | 504)
-                    || (response.status == 403 && response.retry_after.is_some())
+            let transient_status = matches!(response.status, 408 | 429 | 500 | 502 | 503 | 504)
+                || (response.status == 403 && response.retry_after.is_some());
+            let transient = match response.transport_error.as_deref() {
+                None | Some("byte-limit") => transient_status,
+                Some("timeout" | "connect" | "body-read") => {
+                    transient_status || matches!(response.status, 0 | 200)
+                }
+                _ => false,
             };
             ensure!(
                 transient && attempt + 1 < MAX_ATTEMPTS,
@@ -539,17 +556,39 @@ fn provider_workflow(run: &Value) -> Result<&str> {
         .context("missing producer workflow path")?;
     if let Some((path, reference)) = path.split_once('@') {
         ensure!(
-            !reference.is_empty()
-                && reference.len() <= 2048
-                && !reference
-                    .chars()
-                    .any(|c| c.is_control() || c.is_whitespace()),
+            target::workflow_reference(reference),
             "invalid producer workflow ref suffix"
         );
         Ok(path)
     } else {
         Ok(path)
     }
+}
+
+fn select_runs(
+    runs: Vec<Value>,
+    spec: &Spec,
+    identity: &Identity,
+) -> Result<BTreeMap<String, u64>> {
+    let mut selected = BTreeMap::new();
+    let mut ids = BTreeSet::new();
+    for run in runs {
+        // Inspect only the path portion for enrollment. Suffix syntax and all
+        // other producer admission apply after target filtering.
+        let path = run["path"]
+            .as_str()
+            .context("missing producer workflow path")?;
+        let workflow = path.split_once('@').map_or(path, |(path, _)| path);
+        if spec.workflows.contains_key(workflow) && target::matches(&run, identity)? {
+            let id = run["id"].as_u64().context("missing producer run id")?;
+            validate_run(&run, spec, identity, id, workflow)?;
+            ensure!(
+                selected.insert(workflow.to_owned(), id).is_none() && ids.insert(id),
+                "duplicate original producer"
+            );
+        }
+    }
+    Ok(selected)
 }
 
 fn compact_run(run: &Value) -> Value {
@@ -805,19 +844,7 @@ pub fn observe_with(
                 ),
                 "workflow_runs",
             )?;
-            let mut selected = BTreeMap::new();
-            let mut ids = BTreeSet::new();
-            for run in runs {
-                let workflow = provider_workflow(&run)?;
-                if spec.workflows.contains_key(workflow) {
-                    let id = run["id"].as_u64().context("missing producer run id")?;
-                    validate_run(&run, spec, identity, id, workflow)?;
-                    ensure!(
-                        selected.insert(workflow.to_owned(), id).is_none() && ids.insert(id),
-                        "duplicate original producer"
-                    );
-                }
-            }
+            let selected = select_runs(runs, spec, identity)?;
             if selected.len() == spec.workflows.len() {
                 break selected;
             }
@@ -881,18 +908,7 @@ pub fn observe_with(
             ),
             "workflow_runs",
         )?;
-        let mut fresh_selected = BTreeMap::new();
-        for run in fresh {
-            let workflow = provider_workflow(&run)?;
-            if spec.workflows.contains_key(workflow) {
-                let id = run["id"].as_u64().context("missing producer run id")?;
-                validate_run(&run, spec, identity, id, workflow)?;
-                ensure!(
-                    fresh_selected.insert(workflow.to_owned(), id).is_none(),
-                    "duplicate original producer"
-                );
-            }
-        }
+        let fresh_selected = select_runs(fresh, spec, identity)?;
         ensure!(
             fresh_selected == selected,
             "original producer selection changed"
@@ -976,10 +992,7 @@ fn inventory(root: &Path) -> Result<BTreeMap<String, String>> {
                     break;
                 }
                 total += count as u64;
-                ensure!(
-                    total <= 2 * TOTAL_BYTES,
-                    "finalization byte budget exceeded"
-                );
+                ensure!(total <= EVIDENCE_BYTES, "finalization byte budget exceeded");
                 hash.update(&buffer[..count]);
             }
             result.insert(relative, hex::encode(hash.finalize()));
@@ -1074,7 +1087,12 @@ pub fn verify_retention(
     );
     // Verification uses a fresh, short aggregate read budget and fresh evidence,
     // outside the uploaded packet, so no uploaded bytes are silently replaced.
-    let retained = root.with_extension("retention");
+    let mut name = root
+        .file_name()
+        .context("custody packet must have a directory name")?
+        .to_os_string();
+    name.push(".retention");
+    let retained = root.with_file_name(name);
     fs::create_dir(&retained).context("retention evidence requires a fresh sibling directory")?;
     fs::create_dir(retained.join("requests"))?;
     let mut verify_spec = spec.clone();
@@ -1174,16 +1192,17 @@ mod tests {
         assert!(inventory(root.path()).is_err());
     }
 
-    struct MaximumProbe(u64);
+    struct MaximumProbe(u64, Duration);
     impl Transport for MaximumProbe {
         fn get(
             &mut self,
             _endpoint: &str,
             maximum: u64,
-            _timeout: Duration,
+            timeout: Duration,
             _cancellation: &Cancellation,
         ) -> Result<Response> {
             self.0 = maximum;
+            self.1 = timeout;
             Ok(Response {
                 status: 200,
                 body: Vec::new(),
@@ -1198,7 +1217,7 @@ mod tests {
         let (spec, _) = minimal_inputs();
         let root = tempfile::tempdir().unwrap();
         fs::create_dir(root.path().join("requests")).unwrap();
-        let mut transport = MaximumProbe(0);
+        let mut transport = MaximumProbe(0, Duration::ZERO);
         let mut clock = MonotonicClock::default();
         let cancellation = Cancellation::default();
         let mut observer = Observer {
@@ -1216,6 +1235,12 @@ mod tests {
             .unwrap();
         assert_eq!(transport.0, ARTIFACT_BYTES);
         assert!(transport.0 > 2 * TOTAL_BYTES);
+        // The wire download must fit full provider-body/copy custody plus every
+        // bounded generated file (event/spec, three snapshots per workflow,
+        // all request diagnostics), and the final receipt.
+        let generated = (2 + 3 * 10) * JSON_BYTES + MAX_REQUESTS as u64 * 4096;
+        assert!(transport.0 >= 2 * TOTAL_BYTES + generated + RECEIPT_BYTES);
+        assert!(transport.1 > Duration::from_secs(90));
     }
 
     #[test]

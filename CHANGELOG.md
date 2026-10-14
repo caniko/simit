@@ -60,6 +60,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Bind original-observer enrollment bytes to the source commit, reject enrollment
   of the active observer, and use portable artifact member paths on Windows.
+- Filter same-SHA producer discovery by branch/PR target, validate provider
+  workflow refs independently, and allow large downloads the remaining deadline.
+- Reserve generated custody evidence, retry capped transient HTTP error bodies,
+  and preserve packet directory extensions in independent retention diagnostics.
 - Require static native release policy for historical verification, reject Cargo
   changelog symlinks, locate historical Cargo manifests after directory moves, and
   bound Git notes by arbitrary admitted SemVer prerelease tags.

@@ -75,32 +75,57 @@ pub(super) fn validate(run: &Value, spec: &Spec, identity: &Identity) -> Result<
         }
         _ => bail!("unsupported observer event"),
     }
-    if let Some((_, suffix)) = run["path"]
-        .as_str()
-        .context("missing producer workflow path")?
-        .split_once('@')
-    {
-        // Ref-qualified paths must describe the same event target as the run.
-        // Normalization must not hide a contradictory executed-workflow ref.
-        let branch = reference(&run["head_branch"])?;
-        let mut allowed = vec![
-            branch.to_owned(),
-            format!("refs/heads/{branch}"),
-            identity.head.clone(),
-        ];
-        if identity.event == "pull_request" {
-            let number = event["pull_request"]["number"]
-                .as_u64()
-                .context("missing source PR number")?;
-            allowed.extend([
-                format!("refs/pull/{number}/head"),
-                format!("refs/pull/{number}/merge"),
-            ]);
-        }
-        ensure!(
-            allowed.iter().any(|reference| reference == suffix),
-            "producer workflow reference target changed"
-        );
-    }
     Ok(())
+}
+
+/// Repository-wide SHA discovery can include other branches and PRs. Skip only
+/// identifiable other targets; selected originals still undergo full validation
+/// here and on every later read, including ambiguous associations and drift.
+pub(super) fn matches(run: &Value, identity: &Identity) -> Result<bool> {
+    let event: Value = serde_json::from_str(&identity.event_json)?;
+    match identity.event.as_str() {
+        "push" => {
+            let expected = reference(&event["ref"])?
+                .strip_prefix("refs/heads/")
+                .context("missing source branch")?;
+            Ok(reference(&run["head_branch"])? == expected)
+        }
+        "pull_request" => {
+            let expected = event["pull_request"]["number"]
+                .as_u64()
+                .filter(|number| *number > 0)
+                .context("missing source PR number")?;
+            let associations = run["pull_requests"]
+                .as_array()
+                .context("missing producer PR association")?;
+            ensure!(!associations.is_empty(), "missing producer PR association");
+            let mut selected = false;
+            for association in associations {
+                let number = association["number"]
+                    .as_u64()
+                    .filter(|number| *number > 0)
+                    .context("invalid producer PR number")?;
+                selected |= number == expected;
+            }
+            Ok(selected)
+        }
+        _ => bail!("unsupported observer event"),
+    }
+}
+
+/// Git ref syntax with one-level names admitted. A provider workflow ref may
+/// differ from the event target; branch/PR identity is bound by run fields above.
+pub(super) fn workflow_reference(reference: &str) -> bool {
+    !reference.is_empty()
+        && reference.len() <= 2048
+        && reference != "@"
+        && !reference.contains("..")
+        && !reference.contains("@{")
+        && !reference
+            .chars()
+            .any(|c| c.is_control() || c.is_whitespace() || "~^:?*[\\".contains(c))
+        && !reference.ends_with('.')
+        && reference.split('/').all(|component| {
+            !component.is_empty() && !component.starts_with('.') && !component.ends_with(".lock")
+        })
 }

@@ -38,6 +38,8 @@ struct Provider {
     workflow_reference: Option<String>,
     jobs: Option<Vec<Value>>,
     logs: Vec<u8>,
+    other_runs: Vec<Value>,
+    download_seconds: u64,
 }
 
 impl Provider {
@@ -93,9 +95,11 @@ impl Transport for Provider {
             }
         }
         let body = if endpoint.contains("actions/runs?") {
+            let mut runs = self.other_runs.clone();
+            runs.extend((0..self.ready_after.len()).map(|i| self.run(i)));
             serde_json::to_vec(&json!({
-                "total_count": self.ready_after.len(),
-                "workflow_runs": (0..self.ready_after.len()).map(|i| self.run(i)).collect::<Vec<_>>()
+                "total_count": runs.len(),
+                "workflow_runs": runs
             }))?
         } else {
             let id: u64 = endpoint
@@ -122,6 +126,12 @@ impl Transport for Provider {
                 let end = (start + 100).min(jobs.len());
                 serde_json::to_vec(&json!({"total_count": jobs.len(), "jobs": &jobs[start..end]}))?
             } else if endpoint.ends_with("/logs") {
+                anyhow::ensure!(
+                    timeout > Duration::from_secs(self.download_seconds),
+                    "download request timeout too short"
+                );
+                self.elapsed
+                    .set(self.elapsed.get() + Duration::from_secs(self.download_seconds));
                 self.logs.clone()
             } else {
                 let reads = self.run_reads.entry(id).or_default();
@@ -187,6 +197,8 @@ fn fixture(ready_after: Vec<u64>, timeout_seconds: u64) -> (Spec, Identity, Prov
         workflow_reference: None,
         jobs: None,
         logs: archive.finish().unwrap().into_inner(),
+        other_runs: Vec::new(),
+        download_seconds: 0,
     };
     (spec, identity, provider, TestClock(elapsed))
 }
@@ -496,9 +508,9 @@ fn paginated_jobs_must_fit_the_aggregate_retention_limit_before_capture_complete
 }
 
 #[test]
-fn workflow_reference_must_match_the_exact_push_or_pr_target() {
+fn workflow_reference_syntax_is_independent_of_the_bound_event_target() {
     for pull_request in [false, true] {
-        let accepted = if pull_request {
+        let mut accepted = if pull_request {
             vec![
                 "feature",
                 "refs/heads/feature",
@@ -508,6 +520,13 @@ fn workflow_reference_must_match_the_exact_push_or_pr_target() {
         } else {
             vec!["feature", "refs/heads/feature"]
         };
+        accepted.extend([
+            "main",
+            "refs/heads/other-feature",
+            "refs/pull/29/merge",
+            "feature@foo",
+            "refs/tags/v1",
+        ]);
         for reference in accepted {
             let (spec, identity, mut provider, mut clock) = if pull_request {
                 pr_fixture()
@@ -527,10 +546,15 @@ fn workflow_reference_must_match_the_exact_push_or_pr_target() {
             .unwrap();
         }
         for reference in [
-            "other-feature",
-            "refs/heads/other-feature",
-            "refs/pull/29/merge",
-            "refs/pull/29/head",
+            "",
+            "refs/heads/bad..ref",
+            "refs//main",
+            "refs/heads/.hidden",
+            "refs/heads/main.lock",
+            "refs/heads/bad ref",
+            "refs/heads/main@{1}",
+            "refs/heads/trailing.",
+            "@",
         ] {
             let (spec, identity, mut provider, mut clock) = if pull_request {
                 pr_fixture()
@@ -550,9 +574,79 @@ fn workflow_reference_must_match_the_exact_push_or_pr_target() {
             );
             assert!(
                 result.is_err(),
-                "wrong workflow reference {reference} was admitted (PR={pull_request})"
+                "malformed workflow reference {reference} was admitted (PR={pull_request})"
             );
             assert_eq!(retained(&root)["capture_complete"], false);
         }
     }
+}
+
+#[test]
+fn same_sha_other_targets_do_not_hide_the_exact_original_or_its_duplicates() {
+    for pull_request in [false, true] {
+        for duplicate in [false, true] {
+            let (spec, identity, mut provider, mut clock) = if pull_request {
+                pr_fixture()
+            } else {
+                fixture(vec![0], 120)
+            };
+            let mut other = provider.run(0);
+            other["id"] = json!(20);
+            // Even an irrelevant workflow suffix must not abort exact-target discovery.
+            other["path"] = json!(".github/workflows/ci.yaml@bad..ref");
+            if pull_request {
+                other["pull_requests"][0]["number"] = json!(72);
+            } else {
+                other["head_branch"] = json!("other-feature");
+            }
+            provider.other_runs.push(other);
+            if duplicate {
+                let mut exact_duplicate = provider.run(0);
+                exact_duplicate["id"] = json!(21);
+                provider.other_runs.push(exact_duplicate);
+            }
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().join("packet");
+            let outcome = observe_with(
+                &spec,
+                &identity,
+                &root,
+                &mut provider,
+                &mut clock,
+                &Cancellation::default(),
+            );
+            if duplicate {
+                assert!(
+                    outcome
+                        .unwrap_err()
+                        .to_string()
+                        .contains("duplicate original producer")
+                );
+                assert_eq!(retained(&root)["capture_complete"], false);
+            } else {
+                let receipt = outcome.unwrap();
+                assert!(receipt.capture_complete);
+                assert_eq!(receipt.producers[0].run_id, 12);
+                assert!(!provider.run_reads.contains_key(&20));
+            }
+        }
+    }
+}
+
+#[test]
+fn slow_healthy_log_download_can_use_the_remaining_aggregate_deadline() {
+    let (spec, identity, mut provider, mut clock) = fixture(vec![0], 300);
+    provider.download_seconds = 120;
+    let temp = tempfile::tempdir().unwrap();
+    let receipt = observe_with(
+        &spec,
+        &identity,
+        &temp.path().join("packet"),
+        &mut provider,
+        &mut clock,
+        &Cancellation::default(),
+    )
+    .unwrap();
+    assert!(receipt.capture_complete);
+    assert_eq!(clock.elapsed(), Duration::from_secs(120));
 }

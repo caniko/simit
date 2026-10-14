@@ -27,6 +27,7 @@ struct Provider {
     discovery: Option<Value>,
     workflow_path: Option<String>,
     rate_limited: bool,
+    capped_error_body: bool,
 }
 fn run() -> Value {
     json!({"id":12,"repository":{"id":101,"full_name":"owner/repo"},"head_sha":"a".repeat(40),
@@ -53,7 +54,7 @@ impl Transport for Provider {
                 } else {
                     None
                 },
-                transport_error: None,
+                transport_error: self.capped_error_body.then(|| "byte-limit".into()),
             });
         }
         let body = if endpoint.contains("/jobs?") {
@@ -110,6 +111,7 @@ fn fixture() -> (Spec, Identity, Provider) {
         discovery: None,
         workflow_path: None,
         rate_limited: false,
+        capped_error_body: false,
     };
     let spec = Spec {
         schema: "simit.original-observer-spec.v1".into(),
@@ -283,6 +285,39 @@ fn secondary_rate_limited_403_retries_inside_the_existing_deadline() {
         serde_json::from_slice(&std::fs::read(root.join("requests/0001.json")).unwrap()).unwrap();
     assert_eq!(retained["status"], 403);
     assert_eq!(retained["retry_after"], 3);
+}
+
+#[test]
+fn capped_transient_error_bodies_retry_but_success_and_authorization_limits_fail_closed() {
+    for status in [408, 429, 500, 502, 503, 504, 403, 200, 401] {
+        let (spec, identity, mut provider) = fixture();
+        provider.capped_error_body = true;
+        provider.rate_limited = true;
+        provider.failures.push_back(status);
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("packet");
+        let outcome = observe_with(
+            &spec,
+            &identity,
+            &root,
+            &mut provider,
+            &mut FakeClock::default(),
+            &Cancellation::default(),
+        );
+        assert_eq!(
+            outcome.is_ok(),
+            !matches!(status, 200 | 401),
+            "status={status}: {outcome:?}"
+        );
+        assert_eq!(
+            std::fs::read(root.join("requests/0001.body")).unwrap(),
+            b"original interrupted response"
+        );
+        assert_eq!(
+            receipt(&root)["capture_complete"],
+            !matches!(status, 200 | 401)
+        );
+    }
 }
 
 #[test]
@@ -478,6 +513,7 @@ fn ref_qualified_workflow_paths_are_admitted_and_malformed_suffixes_rejected() {
         "@",
         "@refs/heads/feature\n",
         "@feature@other",
+        "@refs/heads/bad..ref",
     ] {
         let (spec, identity, mut provider) = fixture();
         let path = format!(".github/workflows/ci.yaml{suffix}");
@@ -497,7 +533,10 @@ fn ref_qualified_workflow_paths_are_admitted_and_malformed_suffixes_rejected() {
         );
         assert_eq!(
             result.is_ok(),
-            matches!(suffix, "@feature" | "@refs/heads/feature"),
+            matches!(
+                suffix,
+                "@feature" | "@refs/heads/feature" | "@feature@other"
+            ),
             "{suffix}"
         );
     }
@@ -712,46 +751,56 @@ fn uploaded(root: &std::path::Path) -> (Uploaded, String) {
 
 #[test]
 fn native_retention_binds_actual_provider_zip_to_local_members_and_independent_source() {
-    let (spec, identity, mut provider) = fixture();
     let temp = tempfile::tempdir().unwrap();
-    let root = temp.path().join("packet");
-    observe_with(
-        &spec,
-        &identity,
-        &root,
-        &mut provider,
-        &mut FakeClock::default(),
-        &Cancellation::default(),
-    )
-    .unwrap();
-    let original = std::fs::read(root.join("receipt.json")).unwrap();
-    let captured = receipt(&root);
-    assert!(
-        captured["members"]
-            .as_object()
-            .unwrap()
-            .keys()
-            .all(|name| !name.contains('\\'))
-    );
-    let (mut upload, digest) = uploaded(&root);
-    let admitted = verify_retention(
-        &spec,
-        &identity,
-        &root,
-        42,
-        &digest,
-        &mut upload,
-        &Cancellation::default(),
-    )
-    .unwrap();
-    assert_eq!(admitted["capture_complete"], true);
-    assert_eq!(admitted["qualified"], false);
-    assert!(
-        root.with_extension("retention")
-            .join("retention.json")
-            .is_file()
-    );
-    assert_eq!(std::fs::read(root.join("receipt.json")).unwrap(), original);
+    let foreign = temp.path().join("packet.retention");
+    std::fs::create_dir(&foreign).unwrap();
+    std::fs::write(foreign.join("sentinel"), b"unrelated diagnostics").unwrap();
+    for packet in ["packet.v1", "packet.v2"] {
+        let (spec, identity, mut provider) = fixture();
+        let root = temp.path().join(packet);
+        observe_with(
+            &spec,
+            &identity,
+            &root,
+            &mut provider,
+            &mut FakeClock::default(),
+            &Cancellation::default(),
+        )
+        .unwrap();
+        let original = std::fs::read(root.join("receipt.json")).unwrap();
+        let captured = receipt(&root);
+        assert!(
+            captured["members"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .all(|name| !name.contains('\\'))
+        );
+        let (mut upload, digest) = uploaded(&root);
+        let admitted = verify_retention(
+            &spec,
+            &identity,
+            &root,
+            42,
+            &digest,
+            &mut upload,
+            &Cancellation::default(),
+        )
+        .unwrap();
+        assert_eq!(admitted["capture_complete"], true);
+        assert_eq!(admitted["qualified"], false);
+        assert!(
+            temp.path()
+                .join(format!("{packet}.retention"))
+                .join("retention.json")
+                .is_file()
+        );
+        assert_eq!(std::fs::read(root.join("receipt.json")).unwrap(), original);
+        assert_eq!(
+            std::fs::read(foreign.join("sentinel")).unwrap(),
+            b"unrelated diagnostics"
+        );
+    }
 }
 
 #[test]
