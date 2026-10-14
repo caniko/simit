@@ -52,6 +52,10 @@ then every selected component's prerequisites, in deterministic dependency
 order. Cargo metadata supplies member source directories and local dependency
 edges, including optional, build, development, and target-specific dependencies.
 All Cargo members must have exactly one component owner.
+For a package in the root `Cargo.toml`, declare its source paths explicitly
+(for example, `paths = ["src", "tests", "build.rs"]`, retaining only paths that
+exist). Simit adds `Cargo.toml` to that owner's paths without claiming nested
+workspace members.
 
 An unknown source path selects all components. The default shared paths are
 `simit.toml`, `flake.nix`, `flake.lock`, `Cargo.toml`, `Cargo.lock`,
@@ -106,7 +110,11 @@ never retry the check or replace its failure status.
 The native runner resolves the root configuration, validates the component and
 check, and executes its project-owned command with `bash -euo pipefail` and the declared
 environment. Unknown checks fail before execution. Generated qualification uses
-this runner inside the project's `ci` shell; GitHub retains the check timeout.
+this runner inside the project's `ci` shell. Both local and generated checks enforce
+the declared timeout; on expiry the runner stops the gate process group before
+collecting diagnostics. Evaluated step values are passed through the Nix shell
+even if its devShell defines the same variable. Local release qualification rejects
+unresolved provider expressions before running any selected gate.
 
 On Linux, `--nix-diagnostics` captures `/proc/meminfo`, memory pressure, Nix
 daemon status, and bounded daemon/kernel journals after a failed check. Journal
@@ -134,25 +142,17 @@ drafting uses only component-owned paths since the latest reachable package tag.
 Changelog compare links use the same package namespace. Component release mutation
 requires a clean checkout.
 
-Set `[ci].publish_crates = true` to generate a paired source-build and trusted
-publication workflow for each publishable Cargo member. The credential-free
-`publish-crate-<package>.yaml` first verifies the signed `<package>/v<version>`
-tag and exact checkout against the default-branch `keys/maintainers.gpg` in a
-credential-free job. Planning and component qualification depend on that job,
-so no tag-controlled Nix or Cargo code runs before signature verification.
-It then qualifies the entire component graph on its declared native runners
-before checking the plain SemVer package version and building the selected archive.
-
-The `trusted-publish-crate-<package>.yaml` companion runs from the independently
-enrolled default branch after successful source qualification. It rechecks the
-signature, source SHA, complete enrolled workflow and provider-bound archive,
-then publishes only the tagged package. Its enrolled tag filter binds that
-package namespace; bare or foreign-package tags cannot authorize publication.
-Package/archive checksum conflicts and bounded registry propagation checks are
-retained, and local dependencies must already be published. Registry credentials
-belong only to the protected `simit-crates-io` upload environment. Enroll the
-qualified engine and credential boundary as described in
-[Release Integrity](getting-started/release-integrity.md) before releasing.
+Set `[ci].publish_crates = true` to generate one independently tagged publication
+workflow per publishable Cargo member. Each `<package>/v<version>` release first
+qualifies the entire component graph on its declared native runners, verifies the
+signed tag against `keys/maintainers.gpg`, and checks its exact checkout and package
+version. It publishes only the tagged package, retains the package/archive checksum
+and registry propagation checks, and requires local dependencies to be published
+already. Each credential-free, tag-only builder has a separate default-branch
+publisher enrolled through `SIMIT_PUBLISHER_REVISION`. The trusted publisher binds
+the complete native tag, package namespace, original provider run and archive
+checksum before upload. Registry credentials come only from the protected
+`simit-crates-io` environment, restricted to the exact default branch.
 
 `simit release verify --component <id> --package <name>` checks the package's
 adjacent changelog and namespaced tag. `simit release sync-up` accepts the same
@@ -203,28 +203,78 @@ their manifests. A dirty checkout or a failing prerequisite check prevents the
 version commit and tag.
 
 `publish` records registry eligibility (npm `private = true` always disables it).
-Eligible owners generate independent `publish-python-<namespace>.yaml` or
-`publish-npm-<namespace>.yaml` workflows. Each package-qualified signed tag is
-verified before planning or evaluating the release source. It then qualifies
-the complete graph on every declared native runner and validates
-the tag/event/HEAD identity, builds just that owner's wheel plus sdist or npm
-tarball, and transfers a source-bound checksum receipt to a separate publish
-job. The publish job verifies the signed tag again, rejects metadata/checksum
-conflicts, uploads only missing exact artifacts, and waits at most twenty
+Eligible owners generate credential-free `publish-python-<namespace>.yaml` or
+`publish-npm-<namespace>.yaml` source workflows and a corresponding
+`trusted-publish-<registry>-<namespace>.yaml` default-branch publisher.
+Each package-qualified signed tag
+qualifies the complete graph on every declared native runner, then validates
+the tag/event/HEAD identity on a fixed GitHub-hosted `ubuntu-24.04` builder,
+builds just that owner's wheel plus sdist or npm
+tarball, and retains a source-bound checksum receipt in an attempt-qualified,
+immutable provider artifact. The publisher always runs on `ubuntu-24.04`,
+independently of the configured qualification capacity. Its engine, keyring and
+package/namespace enrollment come from its protected workflow revision. Before
+upload it re-admits the full signed tag, source SHA, native provider workflow ID,
+original run/attempt and archive ID/digest. The publisher rejects metadata/checksum
+conflicts and non-hosted archive-builder enrollment, uploads only missing exact
+artifacts, and waits at most twenty
 registry reads separated by thirty-second waits for checksum-matching
 propagation. Failed uploads are accepted only if exact artifacts already exist.
-Credentials (`PYPI_API_TOKEN` or `NPM_TOKEN`) are confined to the publish step;
-npm packing and publishing disable lifecycle scripts. Native release steps use
+Credentials (`PYPI_API_TOKEN` or `NPM_TOKEN`) belong only to the protected
+`simit-pypi` or `simit-npm` environment, restricted to the default branch.
+The protected helper uploads the admitted bytes directly to the fixed registry
+endpoint. It never runs candidate Nix expressions, scripts, package hooks or
+package configuration with those credentials. Recovery reruns the original
+signed-tag run and reuses its first retained archive, including partial uploads;
+only archives from successful original attempts with a successful hosted
+`validate` builder job are eligible. Failed attempts cannot contribute retry
+bytes, and duplicate attempt artifact names are rejected. It does not rebuild
+a replacement archive in the publisher. Native build steps use
 the project's root `ci` shell, which must provide Python 3.11+, GnuPG and `uv`
 or npm. Prepared npm files must already be present after component qualification;
 `publishConfig` access and distribution-tag settings are retained, while custom
 registries require a separate backend. npm prereleases require an explicit
 `publishConfig.tag`. npm `publishConfig.provenance = true` grants OIDC permission
-only to the publication job so npm can retain its provenance setting. Python
+only to the protected publisher. An engine-owned signer uses the hosted worker's
+global npm Sigstore library to attest the admitted tarball digest, signed source
+and protected publisher revision. Its child environment receives OIDC access,
+but no registry token or candidate Node/npm configuration. Python
 owners retain SemVer in source/tags; public Python releases
 support stable versions and `alpha`, `beta`, `rc`, or `dev` numeric prereleases,
 mapped to PyPI's normalized metadata version. SemVer build metadata is unsupported
 for public native releases. All native publication requires `keys/maintainers.gpg`.
+Native namespaces are limited to 64 ASCII bytes at configuration admission.
+Registry metadata retains npm lifecycle scripts for consumers; the protected
+publisher never executes those scripts.
+Public Python verification requires the complete unyanked wheel/sdist pair with
+valid SHA-256 entries. npm provenance policy must be boolean or unset during
+enrollment and credential-free packing.
+Public npm name admission follows npm's legacy-compatible publish validation.
+Recovery of an already-published exact npm archive also verifies its signed
+distribution tag and repairs that mapping without rebuilding the archive.
+Undecodable Git byte paths force full component qualification; known UTF-8 paths
+remain in the plan. Cargo metadata paths are normalized to repository-style `/`
+separators on Windows before ownership matching.
+Independent crates.io workflow generation honors Cargo's registry allowlist:
+unpublished and alternate-only members remain qualified but receive no crates.io
+builder or protected publisher. Unrestricted members and allowlists containing
+`crates-io` retain both workflows.
+Native archive retries require the original hosted upload step's artifact ID and
+digest from GitHub's attempt-specific step logs. A later same-name replacement
+does not inherit the original attempt's success. Missing or ambiguous upload
+logs fail admission. The protected Python uploader consumes the engine's
+already-normalized registry version, including prereleases. Public Python names
+follow the Core Metadata grammar; npm `private` must be absent or boolean.
+
+Configured VS Code and JetBrains extension publishers remain independently
+managed. Full monorepo CI generation rejects those sections before reconciling
+workflows; use `simit init ci --primary-only` to regenerate qualification while
+preserving existing extension publishers.
+
+Component gates use the same `bash -euo pipefail -c` command semantics locally
+and in generated CI, including quoted commands, environment and timeouts. The
+packaged test suite needs Python's standard library and `actionlint`; these are
+declared in `nix/review-tools.nix`, independently of development-shell tools.
 
 `release verify` checks eligible packages against the public native registry:
 PyPI's exact release metadata must contain a non-yanked file with a SHA-256 digest,

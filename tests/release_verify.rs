@@ -101,11 +101,7 @@ fn release_verify_json_reports_all_checks_and_exit_code() {
             .iter()
             .any(|item| item["check"] == "worktree clean" && item["status"] == "fail")
     );
-    assert!(
-        results
-            .iter()
-            .any(|item| item["check"] == "remote secrets" && item["status"] == "blocked")
-    );
+    assert!(!results.iter().any(|item| item["check"] == "remote secrets"));
 }
 
 #[test]

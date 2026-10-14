@@ -6,7 +6,6 @@ import io
 import json
 import os
 from pathlib import Path
-import subprocess
 import sys
 import tarfile
 import tempfile
@@ -20,11 +19,21 @@ spec.loader.exec_module(publisher)
 
 
 class NativeRelease(unittest.TestCase):
+    def test_protected_python_prerelease_identity_is_already_normalized(self):
+        for version in ["1.2.3a1", "1.2.3b0", "1.2.3rc1", "1.2.3.dev2"]:
+            with self.subTest(version=version):
+                admission = {"identity": self.identity | {"version": version, "workflowId": 7}, "artifactAttempt": 1, "maxAttempt": 2, "manifest": {}}
+                path = self.out / "admission.json"
+                path.write_text(json.dumps(admission))
+                with patch.object(sys, "argv", ["publisher.py", "admitted-publish", str(path), str(self.out)]), patch.object(publisher, "publish") as upload:
+                    publisher.main()
+                    self.assertEqual(upload.call_args.args[1]["version"], version)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.out = Path(self.temp.name)
-        self.identity = dict(schemaVersion=1, registry="python", name="engine", version="1.2.3", namespace="engine-python", tag="engine-python/v1.2.3", source="f" * 40)
+        self.identity = dict(schemaVersion=2, registry="python", name="engine", version="1.2.3", namespace="engine-python", tag="engine-python/v1.2.3", source="f" * 40, repository="example/repository", workflow=".github/workflows/publish-python-engine-python.yaml", runId=42)
 
     def tar(self, name, member, content):
         path = self.out / name
@@ -43,7 +52,7 @@ class NativeRelease(unittest.TestCase):
 
     def receipt(self):
         files = {path.name: publisher.digest(path).hex() for path in self.out.iterdir() if path.name != "receipt.json"}
-        (self.out / "receipt.json").write_text(json.dumps(self.identity | {"files": files}))
+        (self.out / "receipt.json").write_text(json.dumps(self.identity | {"files": files, "runAttempt": 1}))
         return files
 
     def test_python_exact_files_partial_upload_and_checksum_conflicts(self):
@@ -68,11 +77,11 @@ class NativeRelease(unittest.TestCase):
         with patch.object(publisher, "registry_metadata", side_effect=AssertionError("must not query")):
             identity = self.identity | {"source": "0" * 40}
             with self.assertRaisesRegex(RuntimeError, "signed source"):
-                publisher.publish(self.out, identity)
+                publisher.publish(self.out, identity, 1, {})
             with (self.out / "engine-1.2.3.tar.gz").open("ab") as output:
                 output.write(b"tampered")
             with self.assertRaisesRegex(RuntimeError, "checksum mismatch"):
-                publisher.publish(self.out, self.identity)
+                publisher.publish(self.out, self.identity, 1, {})
 
     def test_npm_scoped_archive_and_registered_integrity(self):
         self.identity.update(registry="npm", name="@example/engine", namespace="engine-node", tag="engine-node/v1.2.3")
@@ -81,9 +90,9 @@ class NativeRelease(unittest.TestCase):
         files = self.receipt()
         integrity = "sha512-" + base64.b64encode(hashlib.sha512(path.read_bytes()).digest()).decode()
         release = dict(name=self.identity["name"], version="1.2.3", dist=dict(integrity=integrity))
-        metadata = dict(name=self.identity["name"], versions={"1.2.3": release})
+        metadata = dict(name=self.identity["name"], versions={"1.2.3": release}) | {"dist-tags": {"latest": "1.2.3"}}
         with patch.object(publisher, "registry_metadata", return_value=metadata):
-            publisher.publish(self.out, self.identity)
+            publisher.publish(self.out, self.identity, 1, {})
             release["dist"]["integrity"] = "sha512-wrong"
             with self.assertRaisesRegex(RuntimeError, "checksum conflict"):
                 publisher.missing_files(self.out, self.identity, files)
@@ -92,20 +101,21 @@ class NativeRelease(unittest.TestCase):
         self.python_artifacts()
         with patch.object(publisher, "registry_metadata", return_value=None), patch.dict(os.environ, {}, clear=True):
             with self.assertRaisesRegex(RuntimeError, "missing UV_PUBLISH_TOKEN"):
-                publisher.publish(self.out, self.identity)
-            with patch.dict(os.environ, {"UV_PUBLISH_TOKEN": "fixture-token"}), patch.object(publisher.subprocess, "run", return_value=subprocess.CompletedProcess([], 1)):
-                with self.assertRaisesRegex(RuntimeError, "publication failed"):
-                    publisher.publish(self.out, self.identity)
+                publisher.publish(self.out, self.identity, 1, {})
+            with patch.dict(os.environ, {"UV_PUBLISH_TOKEN": "fixture-token"}), patch.object(publisher, "upload_native", side_effect=RuntimeError("upload failed")), patch.object(publisher.time, "sleep"):
+                with self.assertRaisesRegex(RuntimeError, "deadline exceeded"):
+                    publisher.publish(self.out, self.identity, 1, {})
 
     def test_propagation_wait_is_bounded_and_rechecks_exact_artifacts(self):
         self.python_artifacts()
-        with patch.dict(os.environ, {"UV_PUBLISH_TOKEN": "fixture-token"}), patch.object(publisher.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)), patch.object(publisher.time, "sleep") as sleep:
+        with patch.dict(os.environ, {"UV_PUBLISH_TOKEN": "fixture-token"}), patch.object(publisher, "upload_native") as upload, patch.object(publisher.time, "sleep") as sleep:
             with patch.object(publisher, "missing_files", side_effect=[["engine-1.2.3.tar.gz"], ["engine-1.2.3.tar.gz"], []]):
-                publisher.publish(self.out, self.identity)
+                publisher.publish(self.out, self.identity, 1, {})
+            self.assertEqual(upload.call_count, 1)
             self.assertEqual(sleep.call_count, 1)
             with patch.object(publisher, "missing_files", return_value=["engine-1.2.3.tar.gz"]):
                 with self.assertRaisesRegex(RuntimeError, "deadline exceeded"):
-                    publisher.publish(self.out, self.identity)
+                    publisher.publish(self.out, self.identity, 1, {})
             self.assertEqual(sleep.call_count, 20)
 
     def test_python_semver_prerelease_matches_native_metadata(self):
@@ -137,7 +147,7 @@ class NativeRelease(unittest.TestCase):
                 entry.size = len(metadata)
                 archive.addfile(entry, io.BytesIO(metadata))
 
-        with patch.dict(os.environ, {"UV_PUBLISH_TOKEN": "fixture-token", "NODE_AUTH_TOKEN": "fixture-token"}), patch.object(publisher.subprocess, "check_output", return_value="123\n"), patch.object(publisher, "command", side_effect=build):
+        with patch.dict(os.environ, {"UV_PUBLISH_TOKEN": "fixture-token", "NODE_AUTH_TOKEN": "fixture-token", "GITHUB_RUN_ATTEMPT": "1"}), patch.object(publisher.subprocess, "check_output", return_value="123\n"), patch.object(publisher, "command", side_effect=build):
             publisher.pack(self.out, out, self.identity)
         receipt = json.loads((out / "receipt.json").read_text())
         self.assertEqual(receipt["source"], self.identity["source"])

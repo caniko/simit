@@ -181,7 +181,7 @@ fn resolve(
             zip_archive,
             token_secret,
         },
-        cfg.ci.platform.unwrap_or(Platform::Forgejo),
+        crate::ci_resolution::release_backend(&cfg, None, None)?.platform(),
         cfg.release.tag_prefix,
     ))
 }

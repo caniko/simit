@@ -34,7 +34,8 @@ jobs:
       - name: Checkout immutable execution source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.sha }}
+          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
       - name: Install Nix
         uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31
@@ -62,6 +63,9 @@ jobs:
           sha256sum "$RUNNER_TEMP/release-generator/simit" > "$RUNNER_TEMP/release-generator/simit.sha256"
           "$generator" init ci --platform github --runtime nix --runner ubuntu-latest --with-docs --publish-crates
           "$generator" init ci --platform github --runtime nix --runner ubuntu-latest --with-docs --publish-crates --check --diff
+          "$generator" init release --platform github
+          "$generator" init release --platform github --check --diff
+          "$generator" init flake --check --diff
           git diff --check
           git diff > "$RUNNER_TEMP/release-generator/regenerated.diff"
           git status --porcelain --untracked-files=all > "$RUNNER_TEMP/release-generator/regenerated.status"

@@ -9,14 +9,16 @@ use crate::config::ProjectConfig;
 use crate::project::GeneratedFile;
 use crate::render::ci::{GENERATED_WORKFLOW_MARKER, github_action_ref, immutable_action_ref};
 
-pub(super) fn checkout() -> Value {
-    json!({"uses": github_action_ref("actions/checkout", "v7.0.1").split(" #").next().unwrap(), "with": {"fetch-depth": 0, "persist-credentials": false}})
+pub(super) fn checkout(node24: bool) -> Value {
+    let version = if node24 { "v7.0.1" } else { "v4.3.1" };
+    json!({"uses": github_action_ref("actions/checkout", version).split(" #").next().unwrap(), "with": {"fetch-depth": 0, "persist-credentials": false}})
 }
 
-pub(super) fn install_nix() -> Value {
+pub(super) fn install_nix(node24: bool) -> Value {
     // 2.35.2 contains the lost build-slot wakeup fix (NixOS/nix fba3f6e).
     // The action's default 2.35.1 can abort Worker::run during qualification.
-    json!({"uses": immutable_action_ref("https://github.com/cachix/install-nix-action", "v31").trim_start_matches("https://github.com/").split(" #").next().unwrap(), "with": {"install_url": "https://releases.nixos.org/nix/nix-2.35.2/install"}})
+    let version = if node24 { "v31.11.1" } else { "v31" };
+    json!({"uses": immutable_action_ref("https://github.com/cachix/install-nix-action", version).trim_start_matches("https://github.com/").split(" #").next().unwrap(), "with": {"install_url": "https://releases.nixos.org/nix/nix-2.35.2/install"}})
 }
 
 pub(super) fn input_transport() -> Value {
@@ -29,20 +31,21 @@ pub(super) fn input_transport() -> Value {
     json!({"name": "Configure public input transport", "run": run})
 }
 
-pub(crate) fn files(root: &Path, config: &ProjectConfig) -> Result<Vec<GeneratedFile>> {
-    render(root, config, false)
-}
-
-pub(crate) fn primary_files(root: &Path, config: &ProjectConfig) -> Result<Vec<GeneratedFile>> {
-    render(root, config, true)
-}
-
-fn render(root: &Path, config: &ProjectConfig, primary_only: bool) -> Result<Vec<GeneratedFile>> {
+pub(crate) fn files(
+    root: &Path,
+    config: &ProjectConfig,
+    include_publishers: bool,
+) -> Result<Vec<GeneratedFile>> {
     if config.ci.platform != Some(Platform::Github)
         || config.ci.provider.is_some_and(|p| p != CiProvider::Actions)
         || config.ci.runtime.is_some_and(|r| r != Runtime::Nix)
     {
         bail!("monorepo qualification requires GitHub Actions and runtime nix");
+    }
+    if include_publishers && (config.vscode.is_some() || config.jetbrains.is_some()) {
+        bail!(
+            "monorepo extension publication is not supported; manage extension publishers independently and use --primary-only for qualification regeneration"
+        );
     }
     if config.ci.with_artifacts
         || config.ci.with_pypi_publish
@@ -70,15 +73,38 @@ fn render(root: &Path, config: &ProjectConfig, primary_only: bool) -> Result<Vec
         .as_ref()
         .context("missing monorepo config")?
         .resolve(root)?;
+    if include_publishers
+        && (config.ci.publish_crates
+            || graph
+                .components
+                .values()
+                .any(|component| component.releases.iter().any(|release| release.publish)))
+    {
+        // Publication sources keep their static, credential-free contract.
+        for component in graph.components.values() {
+            for gate in &component.checks {
+                for (name, value) in &gate.env {
+                    if value.contains("${{") {
+                        bail!(
+                            "component {} check {} environment {name:?} cannot contain workflow expressions in publication workflows",
+                            component.id,
+                            gate.id
+                        );
+                    }
+                }
+            }
+        }
+    }
     let runner = config.ci.runner.as_deref().unwrap_or("ubuntu-latest");
     crate::user_config::validate_runner_label(runner)?;
+    let node24 = crate::render::ci::github_runner_supports_node24(runner);
     let mut jobs = serde_json::Map::new();
     jobs.insert("plan".into(), json!({
         "runs-on": runner,
         "timeout-minutes": 20,
         "env": {"NIX_CONFIG": "experimental-features = nix-command flakes"},
         "outputs": {"selected": "${{ steps.plan.outputs.selected }}"},
-        "steps": [checkout(), install_nix(), input_transport(), {
+        "steps": [checkout(node24), install_nix(node24), input_transport(), {
             "id": "plan", "name": "Select affected components", "shell": "bash",
             "env": {"BASE_REVISION": "${{ github.event.pull_request.base.sha || github.event.before }}"},
             "run": "set -euo pipefail\nif [ -n \"$BASE_REVISION\" ] && git cat-file -e \"$BASE_REVISION^{commit}\" 2>/dev/null; then\n  nix develop --print-build-logs .#ci --command simit monorepo plan --base \"$BASE_REVISION\" --json > plan.json\nelse\n  nix develop --print-build-logs .#ci --command simit monorepo plan --json > plan.json\nfi\nselected=$(jq -c '.selected' plan.json)\nprintf 'selected=%s\\n' \"$selected\" >> \"$GITHUB_OUTPUT\"\ncat plan.json\n"
@@ -114,12 +140,45 @@ fn render(root: &Path, config: &ProjectConfig, primary_only: bool) -> Result<Vec
                 json!({"fail-fast": false, "max-parallel": 2, "matrix": {"include": rows}});
             job["runs-on"] = json!("${{ matrix.runner }}");
         }
-        let mut steps = vec![checkout(), install_nix(), input_transport()];
-        steps.push(json!({"name": "Verify generated workflows", "run": "nix develop --print-build-logs .#ci --command simit init ci --check"}));
+        let node24 = if component.systems.is_empty() {
+            node24
+        } else {
+            component.systems.iter().all(|system| {
+                config
+                    .ci
+                    .nix_system_runners
+                    .get(system)
+                    .is_some_and(|runner| crate::render::ci::github_runner_supports_node24(runner))
+            })
+        };
+        let mut steps = vec![checkout(node24), install_nix(node24), input_transport()];
+        if !component.systems.is_empty() {
+            steps.push(json!({"name": "Verify runner system", "shell":"bash", "env":{"EXPECTED_NIX_SYSTEM":"${{ matrix.system }}"}, "run":"set -euo pipefail\nactual_system=$(nix eval --impure --raw --expr builtins.currentSystem)\nif [ \"$actual_system\" != \"$EXPECTED_NIX_SYSTEM\" ]; then\n  echo \"Native Nix runner mismatch: expected $EXPECTED_NIX_SYSTEM, got $actual_system\" >&2\n  exit 1\nfi\n"}));
+        }
+        let scope = if include_publishers {
+            ""
+        } else {
+            " --primary-only"
+        };
+        steps.push(json!({"name": "Verify generated workflows", "run": format!("nix develop --print-build-logs .#ci --command simit init ci --check{scope}")}));
         for gate in &component.checks {
             // Run the validated config through native Simit, already alive when
             // a Nix daemon dies, so failure evidence does not need another eval.
-            let mut step = json!({"name": gate.id, "timeout-minutes": gate.timeout_minutes, "run": format!("nix develop --print-build-logs .#ci --command simit monorepo check --component {} --check {} --nix-diagnostics --gate-env provider-resolved", component.id, gate.id)});
+            // Capture evaluated step values before nix develop can override them
+            // with devShell variables. Names are validated shell identifiers.
+            let environment = if gate.env.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "env {} ",
+                    gate.env
+                        .keys()
+                        .map(|name| format!("{name}=\"${name}\""))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                )
+            };
+            let mut step = json!({"name": gate.id, "timeout-minutes": gate.timeout_minutes, "run": format!("nix develop --print-build-logs .#ci --command {environment}simit monorepo check --component {} --check {} --nix-diagnostics --gate-env provider-resolved", component.id, gate.id)});
             if !gate.env.is_empty() {
                 step["env"] = json!(gate.env);
             }
@@ -132,7 +191,7 @@ fn render(root: &Path, config: &ProjectConfig, primary_only: bool) -> Result<Vec
         "needs": needs, "if": "${{ always() }}", "runs-on": runner, "timeout-minutes": 5,
         "steps": [{"name": "Require every selected component", "env": {"RESULTS": "${{ toJSON(needs) }}", "SELECTED": "${{ needs.plan.outputs.selected }}"}, "run": "printf '%s' \"$RESULTS\" | jq -e --argjson selected \"$SELECTED\" '. as $jobs | $jobs.plan.result == \"success\" and all($selected[]; $jobs[\"component-\" + .].result == \"success\")'"}]
     }));
-    let workflow = json!({"name": "Monorepo qualification", "on": {"push": {"branches": ["**"]}, "pull_request": {}, "workflow_dispatch": {}}, "permissions": {"contents": "read"}, "concurrency": {"group": "monorepo-${{ github.event.pull_request.head.ref || github.ref_name }}", "cancel-in-progress": true}, "jobs": jobs});
+    let workflow = json!({"name": "Monorepo qualification", "on": {"push": {"branches": ["**"]}, "pull_request": {}, "workflow_dispatch": {}}, "permissions": {"contents": "read"}, "concurrency": {"group": "monorepo-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event.pull_request.head.ref || github.ref_name }}", "cancel-in-progress": true}, "jobs": jobs});
     let mut files = vec![GeneratedFile {
         relative_path: PathBuf::from(".github/workflows/ci.yaml"),
         content: format!(
@@ -140,7 +199,7 @@ fn render(root: &Path, config: &ProjectConfig, primary_only: bool) -> Result<Vec
             serde_yaml::to_string(&workflow)?
         ),
     }];
-    if primary_only {
+    if !include_publishers {
         return Ok(files);
     }
     let native = super::native_ci::files(root, config, &workflow)?;
@@ -153,34 +212,38 @@ fn render(root: &Path, config: &ProjectConfig, primary_only: bool) -> Result<Vec
                 "independent Cargo publication currently requires the keys/maintainers.gpg trust root"
             );
         }
-        let publication_runner = crate::user_config::ResolvedRunner {
-            name: None,
-            labels: vec![runner.to_owned()],
-        };
-        for package in metadata
-            .packages
-            .iter()
-            .filter(|p| metadata.workspace_members.contains(&p.id) && p.is_publishable())
-        {
-            crate::commands::release_plan::build_release_plan(
+        for package in metadata.packages.iter().filter(|p| {
+            metadata.workspace_members.contains(&p.id) && p.is_publishable_to_crates_io()
+        }) {
+            let plan = crate::commands::release_plan::build_release_plan(
                 &metadata,
                 std::slice::from_ref(&package.name),
             )?;
+            if let Some(dependency) = plan
+                .entries
+                .iter()
+                .find(|entry| !entry.package.is_publishable_to_crates_io())
+            {
+                bail!(
+                    "package {} has a local dependency {} not authorized for crates.io",
+                    package.name,
+                    dependency.package.name
+                );
+            }
             let options = crate::render::ci::CiOptions {
                 publish_crates: true,
                 ..Default::default()
             };
-            let mut publication = crate::render::ci::publish_independent_files(
-                package,
-                &publication_runner,
-                &options,
-            )?;
-            let file = &mut publication[0];
+            let mut generated = crate::render::ci::publish_independent_files(package, &options)?;
+            let file = generated
+                .first_mut()
+                .context("independent publication requires a source workflow")?;
             let mut release: Value = serde_yaml::from_str(&file.content)?;
             release["permissions"] = json!({"contents": "read"});
-            // A release always qualifies the entire graph on its native runners,
-            // including non-Cargo checks, before the credentialed publish job.
-            let qualification = full_qualification(&workflow, &package.name, runner)?;
+            // Qualify the entire graph, including non-Cargo checks, before
+            // constructing the archive for the independent publisher.
+            let qualification = full_qualification(&workflow)?;
+            require_hosted_qualification(&qualification)?;
             release["jobs"]
                 .as_object_mut()
                 .context("release jobs must be a mapping")?
@@ -195,18 +258,19 @@ fn render(root: &Path, config: &ProjectConfig, primary_only: bool) -> Result<Vec
                 "{GENERATED_WORKFLOW_MARKER}\n{}",
                 serde_yaml::to_string(&release)?
             );
-            // Native gates remain on their declared runners. Validate their
-            // candidate bindings without rerunning the graph on the publisher.
-            let candidate_policy = crate::render::ci::CiOptions {
+            let validation_options = crate::render::ci::CiOptions {
                 required_gates: graph
                     .components
                     .values()
-                    .flat_map(|component| component.checks.clone())
+                    .flat_map(|component| component.checks.iter().cloned())
                     .collect(),
-                ..options.clone()
+                ..Default::default()
             };
-            crate::render::ci::validate_credential_free_source(&file.content, &candidate_policy)?;
-            files.extend(publication);
+            crate::render::ci::validate_credential_free_workflow(
+                &file.content,
+                &validation_options,
+            )?;
+            files.extend(generated);
         }
     }
     if config.ci.publish_crates || has_native {
@@ -220,23 +284,8 @@ fn render(root: &Path, config: &ProjectConfig, primary_only: bool) -> Result<Vec
     Ok(files)
 }
 
-pub(super) fn full_qualification(workflow: &Value, namespace: &str, runner: &str) -> Result<Value> {
+pub(super) fn full_qualification(workflow: &Value) -> Result<Value> {
     let mut jobs = workflow["jobs"].clone();
-    // Component planning itself evaluates the tag's Nix source. Verify its
-    // signature with the default-branch trust root before admitting that graph.
-    // Reuse the canonical shell-only verifier without any Cargo version lookup.
-    let tag_steps: Vec<Value> = serde_yaml::from_str(
-        &crate::render::ci::validate_release_tag_step(None, None, Some(namespace)),
-    )?;
-    let mut verification_steps = vec![checkout(), input_transport()];
-    verification_steps.extend(tag_steps);
-    jobs["verify-source"] = json!({
-        "runs-on": runner,
-        "timeout-minutes": 15,
-        "permissions": {"contents": "read"},
-        "steps": verification_steps,
-    });
-    jobs["plan"]["needs"] = json!(["verify-source"]);
     let plan = jobs["plan"]["steps"]
         .as_array_mut()
         .context("qualification plan requires steps")?
@@ -245,6 +294,35 @@ pub(super) fn full_qualification(workflow: &Value, namespace: &str, runner: &str
         .context("qualification plan step is missing")?;
     plan["env"]["BASE_REVISION"] = json!("");
     Ok(jobs)
+}
+
+fn require_hosted_qualification(jobs: &Value) -> Result<()> {
+    for job in jobs
+        .as_object()
+        .context("qualification jobs must be a mapping")?
+        .values()
+    {
+        let runner = job["runs-on"].as_str().context(
+            "release qualification requires a literal hosted runner or fixed runner matrix",
+        )?;
+        if runner == "${{ matrix.runner }}" {
+            let matrix = job["strategy"]["matrix"]["include"]
+                .as_array()
+                .context("release qualification requires an explicit runner matrix")?;
+            if matrix.is_empty()
+                || !matrix.iter().all(|entry| {
+                    entry["runner"]
+                        .as_str()
+                        .is_some_and(crate::render::ci::github_runner_supports_node24)
+                })
+            {
+                bail!("release qualification requires recognized GitHub-hosted runners");
+            }
+        } else if !crate::render::ci::github_runner_supports_node24(runner) {
+            bail!("release qualification requires recognized GitHub-hosted runners");
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn resolve_config(root: &Path, command: &InitCiCommand) -> Result<ProjectConfig> {
@@ -303,4 +381,31 @@ pub(crate) fn resolve_config(root: &Path, command: &InitCiCommand) -> Result<Pro
         config.ci.publish_crates = publish;
     }
     Ok(config)
+}
+
+#[cfg(test)]
+mod scope_tests {
+    use super::*;
+
+    #[test]
+    fn primary_scope_does_not_generate_or_enroll_native_publication() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        std::fs::create_dir(root.join("python")).unwrap();
+        std::fs::write(
+            root.join("python/pyproject.toml"),
+            "[project]\nname = 'python-owner'\nversion = '1.2.3'\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("simit.toml"), "[ci]\nplatform = 'github'\nruntime = 'nix'\n[monorepo]\nschema_version = 1\n[[monorepo.components]]\nid = 'python'\npaths = ['python']\nchecks = [{id = 'test', run = 'true'}]\nreleases = [{manifest = 'python/pyproject.toml', namespace = 'python-owner', publish = true}]\n").unwrap();
+        let config = ProjectConfig::load(root).unwrap();
+        let primary = files(root, &config, false).unwrap();
+        assert_eq!(primary.len(), 1);
+        assert_eq!(
+            primary[0].relative_path,
+            PathBuf::from(".github/workflows/ci.yaml")
+        );
+        assert!(!primary[0].content.contains("secrets."));
+        assert!(!root.join("keys").exists());
+    }
 }

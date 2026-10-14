@@ -37,18 +37,14 @@ pub fn run(command: InitCiCommand) -> Result<()> {
     if let Some(root) = crate::monorepo::find_root(&std::env::current_dir()?)? {
         if !command.review_only && !command.prebuild_only && !command.pages_only {
             let config = crate::monorepo::ci::resolve_config(&root, &command)?;
-            let files = if command.primary_only {
-                crate::monorepo::ci::primary_files(&root, &config)?
-            } else {
-                crate::monorepo::ci::files(&root, &config)?
-            };
+            let files = crate::monorepo::ci::files(&root, &config, !command.primary_only)?;
             reconcile_ci_files(
                 &root,
                 files,
                 "Monorepo CI drift; run simit init ci",
                 &command,
             )?;
-            if !command.check && ProjectConfig::can_persist_ci(&root)? {
+            if !command.check && !command.primary_only && ProjectConfig::can_persist_ci(&root)? {
                 ProjectConfig::write_ci(&root, &config.ci)?;
             }
             return Ok(());
@@ -403,21 +399,23 @@ pub fn run(command: InitCiCommand) -> Result<()> {
     if !command.primary_only && wants_vscode {
         let vscode = vscode_options(&cfg)?;
         let vscode_runner = vscode_runner(&vscode, &runners.release)?;
-        files.push(ci::vscode_extension_file(
+        files.push(ci::vscode_extension_file_with_prefix(
             platform,
             resolved.runtime,
             &vscode_runner,
             &vscode,
+            cfg.release.tag_prefix,
         )?);
     }
     if !command.primary_only && wants_jetbrains {
         let jetbrains = jetbrains_options(&cfg)?;
         let jetbrains_runner = jetbrains_runner(&jetbrains, &runners.release)?;
-        files.push(ci::jetbrains_plugin_file(
+        files.push(ci::jetbrains_plugin_file_with_prefix(
             platform,
             resolved.runtime,
             &jetbrains_runner,
             &jetbrains,
+            cfg.release.tag_prefix,
         )?);
     }
     let persisted_ci = resolved.persisted_ci(
@@ -898,12 +896,14 @@ fn github_prebuild_file(cfg: &ProjectConfig) -> Result<Option<project::Generated
     let Some(prebuild) = &cfg.prebuild else {
         return Ok(None);
     };
-    Ok(Some(ci::github_prebuild_file(
+    Ok(Some(ci::github_prebuild_file_with_policy(
         prebuild.effective_system_runners(&cfg.ci),
         &cfg.ci.nix_builds,
         prebuild,
         &cfg.release.artifacts,
         cfg.release.attic.as_ref(),
+        cfg.release.tag_prefix,
+        cfg.release.notes_source(Platform::Github),
     )?))
 }
 
@@ -2266,6 +2266,8 @@ fn is_ci_managed_workflow_name(name: &std::ffi::OsStr) -> bool {
         || name.starts_with("publish-pypi-")
         || name.starts_with("publish-python-")
         || name.starts_with("publish-npm-")
+        || name.starts_with("trusted-publish-python-")
+        || name.starts_with("trusted-publish-npm-")
         || name.starts_with("release-artifacts-")
 }
 

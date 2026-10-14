@@ -15,6 +15,7 @@ use crate::cli::ReleaseCommand;
 use crate::config::ProjectConfig;
 use crate::git;
 use crate::registry::{self, FeatureStatus};
+use crate::release_identity::ReleaseTag;
 use crate::release_trust::{self, TrustOverrides};
 
 const CRATES_IO_BASE_URL: &str = "https://crates.io/api/v1";
@@ -149,13 +150,8 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
         Some(version) => version,
         None => common_current_version(&packages)?,
     };
-    let platform = config.ci.platform.unwrap_or_else(|| {
-        if config.release.github.is_some() {
-            crate::cli::Platform::Github
-        } else {
-            crate::cli::Platform::Forgejo
-        }
-    });
+    let backend = crate::ci_resolution::release_backend(&config, command.platform, None)?;
+    let platform = backend.platform();
     let hosted = command.component.is_none()
         && (config.release.codeberg.is_some() || config.release.github.is_some());
     let tag = if command.component.is_some() {
@@ -200,9 +196,15 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
         ),
     ];
     if hosted {
-        results.push(check_hosted_workflow(workspace_root));
-        let package = cargo::representative_package(&metadata, None)?;
-        match super::release_secrets::project_credentials(&config, &package, platform) {
+        let package = packages
+            .first()
+            .context("hosted release verification requires a selected package")?;
+        results.push(check_hosted_workflow(
+            workspace_root,
+            &package.name,
+            backend,
+        ));
+        match super::release_secrets::project_credentials(&config, package, platform) {
             Ok(credentials) => results.push(CheckResult::blocked(
                 "remote secrets",
                 format!(
@@ -242,7 +244,9 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
         }
     }
     // Preserve registry verification for legacy crate projects without a hosted target.
-    if config.ci.publish_crates || !hosted {
+    if (config.ci.publish_crates || (!hosted && command.component.is_none()))
+        && packages.iter().any(Package::is_publishable_to_crates_io)
+    {
         results.extend(check_crates_io(&packages, &version));
         results.push(CheckResult::blocked(
             "remote secrets",
@@ -255,8 +259,129 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
         &tag,
         command.push_target.as_deref(),
     ));
+    if command.component.is_some() {
+        for package in &packages {
+            let check = format!("tag manifest {}", package.name);
+            results.push(
+                match cargo_tag_manifest_matches(
+                    workspace_root,
+                    package,
+                    &version,
+                    &tag.to_string(),
+                ) {
+                    Ok(()) => CheckResult::pass(
+                        check,
+                        "tagged Cargo name/version matches the selected release",
+                    ),
+                    Err(error) => CheckResult::fail(
+                        check,
+                        error.to_string(),
+                        "repair the package-owned tag to point at its actual release source",
+                    ),
+                },
+            );
+        }
+    }
 
     finish_report(results, command.json)
+}
+
+fn cargo_tag_manifest_matches(
+    root: &Path,
+    package: &Package,
+    version: &Version,
+    tag: &str,
+) -> Result<()> {
+    let read = |path: &str| -> Result<toml_edit::DocumentMut> {
+        let output = Command::new("git")
+            .current_dir(root)
+            .args(["show", &format!("refs/tags/{tag}:{path}")])
+            .output()?;
+        anyhow::ensure!(
+            output.status.success(),
+            "cannot read tagged Cargo manifest {path}"
+        );
+        Ok(String::from_utf8(output.stdout)?.parse()?)
+    };
+    let output = Command::new("git")
+        .current_dir(root)
+        .args([
+            "ls-tree",
+            "-r",
+            "-z",
+            "--name-only",
+            &format!("refs/tags/{tag}"),
+        ])
+        .output()?;
+    anyhow::ensure!(
+        output.status.success(),
+        "cannot inspect tagged Cargo source tree"
+    );
+    let mut manifests = Vec::new();
+    for path in output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+    {
+        let path =
+            std::str::from_utf8(path).context("tagged Cargo tree has an unrepresentable path")?;
+        if Path::new(path)
+            .file_name()
+            .is_some_and(|name| name == "Cargo.toml")
+        {
+            if let Ok(manifest) = read(path) {
+                if manifest
+                    .get("package")
+                    .and_then(|item| item.get("name"))
+                    .and_then(toml_edit::Item::as_str)
+                    == Some(package.name.as_str())
+                {
+                    manifests.push(manifest);
+                }
+            }
+        }
+    }
+    anyhow::ensure!(
+        manifests.len() == 1,
+        "tagged Cargo package {} requires one unambiguous manifest, found {}",
+        package.name,
+        manifests.len()
+    );
+    let manifest = manifests.pop().context("missing tagged Cargo package")?;
+    let tagged_package = manifest
+        .get("package")
+        .context("missing tagged Cargo package")?;
+    anyhow::ensure!(
+        tagged_package.get("name").and_then(toml_edit::Item::as_str) == Some(package.name.as_str()),
+        "tagged Cargo package name differs from the selected package"
+    );
+    let version_item = tagged_package
+        .get("version")
+        .context("missing tagged Cargo version")?;
+    let tagged_version = if version_item
+        .get("workspace")
+        .and_then(toml_edit::Item::as_bool)
+        == Some(true)
+    {
+        let workspace = read("Cargo.toml")?;
+        workspace
+            .get("workspace")
+            .and_then(|item| item.get("package"))
+            .and_then(|item| item.get("version"))
+            .and_then(toml_edit::Item::as_str)
+            .context("missing tagged workspace package version")?
+            .to_owned()
+    } else {
+        version_item
+            .as_str()
+            .context("missing tagged Cargo version")?
+            .to_owned()
+    };
+    anyhow::ensure!(
+        Version::parse(&tagged_version)? == *version,
+        "tagged Cargo version differs from the selected release"
+    );
+    Ok(())
 }
 
 fn finish_report(results: Vec<CheckResult>, json: bool) -> Result<()> {
@@ -287,11 +412,9 @@ fn verify_manifest(
         &package.config.namespace,
         version.clone(),
     )?;
-    let platform = selection
-        .project
-        .ci
-        .platform
-        .unwrap_or(crate::cli::Platform::Forgejo);
+    let platform =
+        crate::ci_resolution::release_backend(&selection.project, command.platform, None)?
+            .platform();
     let script = crate::release_notes::component_git_notes_script(
         &package.config.namespace,
         &selection.graph.components[&selection.component].paths,
@@ -312,30 +435,16 @@ fn verify_manifest(
         ),
         check_tag(&selection.root, &tag, command.push_target.as_deref()),
     ];
-    let tagged = Command::new("git")
-        .current_dir(&selection.root)
-        .args([
-            "show",
-            &format!("refs/tags/{tag}:{}", package.config.manifest),
-        ])
-        .output();
-    let identity = match tagged {
-        Ok(output) if output.status.success() => String::from_utf8(output.stdout)
-            .map_err(anyhow::Error::from)
-            .and_then(|content| package.config.parse(&content)),
-        Ok(output) => Err(anyhow::anyhow!(
-            "could not read tagged manifest: {}",
-            String::from_utf8_lossy(&output.stderr)
-        )),
-        Err(error) => Err(error.into()),
-    };
-    results.push(match identity {
-        Ok(tagged) if tagged.name == package.name && &tagged.version == version => {
-            CheckResult::pass(
-                "tagged package identity",
-                format!("{} {version} resolves at {tag}", package.name),
-            )
-        }
+    let identity = tagged_native_package(&selection.root, &tag, &package.config.namespace);
+    let admitted = identity
+        .as_ref()
+        .ok()
+        .filter(|tagged| &tagged.version == version);
+    results.push(match &identity {
+        Ok(tagged) if &tagged.version == version => CheckResult::pass(
+            "tagged package identity",
+            format!("{} {version} resolves at {tag}", tagged.name),
+        ),
         Ok(_) => CheckResult::fail(
             "tagged package identity",
             "tagged manifest name/version disagrees with the selected release",
@@ -347,9 +456,25 @@ fn verify_manifest(
             "create or fetch the selected release tag",
         ),
     });
-    if package.publish {
+    if admitted.is_some_and(|tagged| tagged.publish) {
+        let credential = if matches!(
+            crate::monorepo::native_registry::Registry::for_manifest(&package.config.manifest),
+            crate::monorepo::native_registry::Registry::Python
+        ) {
+            "PYPI_API_TOKEN"
+        } else {
+            "NPM_TOKEN"
+        };
+        results.push(CheckResult::blocked(
+            "remote secrets",
+            format!("remote credentials: {credential} presence not verifiable locally"),
+            "check the protected publisher environment and repository Actions settings",
+        ));
         results.push(
-            match crate::monorepo::native_registry::available(package, version) {
+            match admitted
+                .context("registry verification requires a matching tagged manifest")
+                .and_then(|tagged| crate::monorepo::native_registry::available(tagged, version))
+            {
                 Ok(true) => CheckResult::pass(
                     "registry publication",
                     format!(
@@ -406,6 +531,39 @@ fn reject_non_verify_flags(command: &ReleaseCommand) -> Result<()> {
         bail!("release trust arguments are only valid with `simit release trust`");
     }
     Ok(())
+}
+
+fn tagged_native_package(
+    root: &Path,
+    tag: &ReleaseTag,
+    namespace: &str,
+) -> Result<crate::monorepo::releases::Package> {
+    let read = |path: &str| -> Result<Option<Vec<u8>>> {
+        let output = Command::new("git")
+            .current_dir(root)
+            .args(["show", &format!("refs/tags/{tag}:{path}")])
+            .output()?;
+        Ok(output.status.success().then_some(output.stdout))
+    };
+    // Recover static policy from the selected revision without evaluating its code.
+    let snapshot = tempfile::tempdir()?;
+    for path in ["simit.toml", "Cargo.toml"] {
+        if let Some(bytes) = read(path)? {
+            std::fs::write(snapshot.path().join(path), bytes)?;
+        }
+    }
+    let config = ProjectConfig::load(snapshot.path())?;
+    let owner = config
+        .monorepo
+        .as_ref()
+        .context("tagged native policy requires static simit.toml or Cargo metadata configuration")?
+        .components
+        .iter()
+        .flat_map(|component| &component.releases)
+        .find(|owner| owner.namespace == namespace)
+        .context("tagged configuration has no matching release namespace")?;
+    let bytes = read(&owner.manifest)?.context("could not read tagged native manifest")?;
+    owner.parse(std::str::from_utf8(&bytes)?)
 }
 
 fn check_worktree_clean(workspace_root: &Path) -> CheckResult {
@@ -552,7 +710,7 @@ fn changelog_has_version_entry(content: &str, version: &Version) -> bool {
 fn check_crates_io(packages: &[Package], version: &Version) -> Vec<CheckResult> {
     packages
         .iter()
-        .filter(|package| package.is_publishable())
+        .filter(|package| package.is_publishable_to_crates_io())
         .map(|package| check_crate_version(package, version))
         .collect()
 }
@@ -647,11 +805,23 @@ fn check_tag(
     }
 }
 
-fn check_hosted_workflow(root: &Path) -> CheckResult {
+fn check_hosted_workflow(
+    root: &Path,
+    package: &str,
+    backend: crate::ci_resolution::CiBackend,
+) -> CheckResult {
     let output = std::env::current_exe().and_then(|exe| {
         Command::new(exe)
             .current_dir(root)
             .args(["init", "release", "--check", "--diff"])
+            .args([
+                "--package",
+                package,
+                "--platform",
+                backend.platform().as_str(),
+                "--ci-provider",
+                backend.provider().as_str(),
+            ])
             .output()
     });
     match output {

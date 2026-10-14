@@ -40,6 +40,14 @@ fn project(srpm_dir: Option<&str>) -> TempDir {
         "user.email",
         "fixture@example.invalid",
     ]));
+    // Operator hooks and signing policy do not apply to this disposable fixture.
+    for (key, value) in [("core.hooksPath", "/dev/null"), ("commit.gpgsign", "false")] {
+        checked(
+            Command::new("git")
+                .current_dir(root)
+                .args(["config", "--local", key, value]),
+        );
+    }
     checked(Command::new("git").current_dir(root).args(["add", "."]));
     checked(
         Command::new("git")

@@ -185,7 +185,7 @@ fn generated_gate(root: &TempDir, id: &str, value: Option<&str>) -> std::process
     // Nix provisioning is the external boundary. Execute the unmodified generated
     // caller, forwarding its exact argv to the real candidate Simit executable.
     let bin = root.path().join("bin");
-    fs::write(bin.join("nix"), "#!/bin/sh\nset -eu\ntest \"$1 $2 $3 $4\" = 'develop --print-build-logs .#ci --command'\nshift 4\nexec \"$@\"\n").unwrap();
+    fs::write(bin.join("nix"), "#!/bin/sh\nset -eu\ntest \"$1 $2 $3 $4\" = 'develop --print-build-logs .#ci --command'\nshift 4\nexport GATE_VALUE=devShell-override\nexec \"$@\"\n").unwrap();
     fs::set_permissions(bin.join("nix"), fs::Permissions::from_mode(0o755)).unwrap();
     std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_simit"), bin.join("simit")).unwrap();
     let generated = Command::new(env!("CARGO_BIN_EXE_simit"))
@@ -260,11 +260,36 @@ fn provider_mode_requires_present_values_even_for_configured_literals() {
         assert!(!output.status.success());
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
-            stderr.contains("missing provider-resolved gate environment variable GATE_VALUE"),
+            stderr.contains("GATE_VALUE")
+                && (stderr.contains("unbound variable")
+                    || stderr.contains("missing provider-resolved gate environment variable")),
             "{stderr}"
         );
         assert!(!stderr.contains(configured));
         assert!(!stderr.contains("Nix failure diagnostics"));
+        assert!(!root.path().join("executions").exists());
+        let direct = Command::new(env!("CARGO_BIN_EXE_simit"))
+            .current_dir(root.path())
+            .args([
+                "monorepo",
+                "check",
+                "--component",
+                "core",
+                "--check",
+                "pass",
+                "--gate-env",
+                "provider-resolved",
+            ])
+            .env_remove("GATE_VALUE")
+            .output()
+            .unwrap();
+        assert!(!direct.status.success());
+        let error = String::from_utf8_lossy(&direct.stderr);
+        assert!(
+            error.contains("missing provider-resolved gate environment variable GATE_VALUE"),
+            "{error}"
+        );
+        assert!(!error.contains(configured));
         assert!(!root.path().join("executions").exists());
     }
 }

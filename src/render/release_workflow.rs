@@ -479,13 +479,6 @@ pub fn render(inputs: &ReleaseWorkflowInputs<'_>) -> String {
     w.push('\n');
     push_secrets_header(&mut w, inputs);
     w.push_str("name: release\n\n");
-    let notes_source = inputs.notes_source.unwrap_or_else(|| {
-        if inputs.release.is_some_and(|r| !r.body_from_changelog) {
-            ReleaseNotesSource::None
-        } else {
-            ReleaseNotesSource::Changelog
-        }
-    });
 
     w.push_str("on:\n");
     writeln!(
@@ -504,12 +497,29 @@ pub fn render(inputs: &ReleaseWorkflowInputs<'_>) -> String {
     w.push_str("  cancel-in-progress: false\n\n");
 
     w.push_str("jobs:\n");
-    if inputs.platform == Platform::Github && inputs.prebuild.is_some() {
+    let notes_source = inputs.notes_source.unwrap_or_else(|| {
+        if inputs.release.is_some_and(|r| !r.body_from_changelog) {
+            ReleaseNotesSource::None
+        } else {
+            ReleaseNotesSource::Changelog
+        }
+    });
+    let github_prebuild = inputs.platform == Platform::Github && inputs.prebuild.is_some();
+    let separate_validation = github_prebuild || !inputs.required_gates.is_empty();
+    if separate_validation {
         // No reusable build or Attic credential is admitted before event-bound
         // signed-tag validation. Every job checks out the same immutable SHA.
-        w.push_str(
-            "  validate:\n    permissions:\n      contents: read\n    timeout-minutes: 30\n",
-        );
+        w.push_str("  validate:\n    permissions:\n      contents: read\n");
+        writeln!(
+            w,
+            "    timeout-minutes: {}",
+            if inputs.required_gates.is_empty() {
+                30
+            } else {
+                360
+            }
+        )
+        .expect("write");
         writeln!(w, "    runs-on: {}", inputs.runner).expect("write");
         if inputs.preinstalled_nix {
             push_preinstalled_nix_env(&mut w, inputs.artifacts);
@@ -520,6 +530,9 @@ pub fn render(inputs: &ReleaseWorkflowInputs<'_>) -> String {
             push_install_nix(&mut w, inputs.platform, inputs.artifacts);
         }
         push_validate_tag(&mut w, inputs.artifacts, inputs.tag_prefix, notes_source);
+        push_required_gates(&mut w, inputs.required_gates);
+    }
+    if github_prebuild {
         w.push_str("  prebuild:\n    needs: validate\n    uses: ./.github/workflows/prebuild.yaml\n    with:\n      release: true\n");
         if let Some(attic) = inputs.attic.filter(|_| prebuild_publishes_attic(inputs)) {
             let token_secret = attic
@@ -534,8 +547,10 @@ pub fn render(inputs: &ReleaseWorkflowInputs<'_>) -> String {
         }
     }
     w.push_str("  release:\n");
-    if inputs.platform == Platform::Github && inputs.prebuild.is_some() {
+    if github_prebuild {
         w.push_str("    needs: [validate, prebuild]\n");
+    } else if separate_validation {
+        w.push_str("    needs: validate\n");
     }
     writeln!(w, "    runs-on: {}", inputs.runner).expect("write");
     match inputs.platform {
@@ -562,7 +577,6 @@ pub fn render(inputs: &ReleaseWorkflowInputs<'_>) -> String {
     }
     push_validate_tag(&mut w, inputs.artifacts, inputs.tag_prefix, notes_source);
     push_release_notes(&mut w, inputs.tag_prefix, notes_source);
-    push_required_gates(&mut w, inputs.required_gates);
     push_release_credentials_preflight(&mut w, inputs);
     if let Some(copr) = inputs.copr {
         push_rewrite_spec(&mut w, copr);
@@ -883,14 +897,13 @@ fn push_preinstalled_nix_env(w: &mut String, artifacts: &ArtifactsConfig) {
     w.push_str("      XDG_CACHE_HOME: \"/tmp/.cache\"\n");
 }
 
-pub(crate) fn tag_validation_step(artifacts: &ArtifactsConfig) -> String {
+pub(crate) fn tag_validation_step(
+    artifacts: &ArtifactsConfig,
+    prefix: crate::release_identity::TagPrefix,
+    notes: ReleaseNotesSource,
+) -> String {
     let mut step = String::new();
-    push_validate_tag(
-        &mut step,
-        artifacts,
-        crate::release_identity::TagPrefix::None,
-        ReleaseNotesSource::Changelog,
-    );
+    push_validate_tag(&mut step, artifacts, prefix, notes);
     step
 }
 
@@ -926,6 +939,7 @@ fn push_validate_tag(
     w.push_str("          test -s \"$GNUPGHOME/maintainers.gpg\"\n");
     w.push_str("          gpg --batch --import \"$GNUPGHOME/maintainers.gpg\"\n");
     w.push_str("          git verify-tag \"$TAG\"\n");
+    w.push_str(&super::ci::signed_tag_name_steps("TAG"));
     w.push_str(
         "          validated_sha=\"$(git rev-parse --verify \"refs/tags/${TAG}^{commit}\")\"\n",
     );
@@ -1904,8 +1918,7 @@ fn push_publish_aur(w: &mut String, aur: &ResolvedAur, activated_remote: bool) {
     w.push_str("          set -euo pipefail\n          . ./release-env\n");
     w.push_str("          AUR_HOST='aur.archlinux.org'; AUR_SSH=\"$HOME/.ssh/aur\"\n");
     w.push_str("          MAKEPKG_CONF=\"$(dirname \"$(dirname \"$(command -v makepkg)\")\")/etc/makepkg.conf\"; test -r \"$MAKEPKG_CONF\"\n");
-    // Use a subshell so cleanup runs on success and on generation failure.
-    // AUR clones are owned uniformly by the runner; do not create host accounts.
+    // Restore clone ownership on success and failure without creating host accounts.
     w.push_str(r#"          print_srcinfo() (
             set -euo pipefail
             pkgdir="$1"
@@ -2432,8 +2445,7 @@ fn push_publish_chocolatey(
     } else {
         writeln!(w, "          if [ -z \"${{{key_env}:-}}\" ]; then echo '{key_env} is required because Chocolatey package publishing is configured.' >&2; exit 1; fi").expect("write");
     }
-    // Resolve the project's Simit through its declared development shell, then
-    // add the configured Chocolatey tool to that environment.
+    // Resolve Simit through the project's declared shell and add its Chocolatey tool.
     if activated_remote {
         writeln!(w, "          ZIP=\"release/{zip}\"; test -s \"$ZIP\" || publisher_missing chocolatey \"missing $ZIP\"").expect("write");
     } else {
@@ -3046,6 +3058,7 @@ case "$1" in
 fetch) [ "$authenticated" = 1 ] || exit 95; case "$*" in *refs/tags/0.1.0:refs/tags/0.1.0*) touch tag-fetched;; esac;;
 show) [ "$2" = 'FETCH_HEAD:keys/maintainers.gpg' ] && [ "$TEST_KEY_AVAILABLE" = 1 ] || exit 90; printf default-branch-key;;
 verify-tag) [ -f tag-fetched ] && [ "$TEST_TAG_ACCEPTED" = 1 ] || exit 91; touch verified;;
+cat-file) [ -f verified ] || exit 91; printf 'tag 0.1.0\n\n';;
 rev-parse) case "$3" in
   'refs/tags/0.1.0^{commit}') printf verified-tag-commit;;
   HEAD) printf '%s' "$TEST_CHECKOUT_SHA";;
@@ -3079,7 +3092,13 @@ esac"#,
         .unwrap();
         let mut config = artifacts();
         config.version_attr = Some("demo".to_owned());
-        let step = tag_validation_step(&config);
+        let mut step = String::new();
+        push_validate_tag(
+            &mut step,
+            &config,
+            crate::release_identity::TagPrefix::None,
+            ReleaseNotesSource::Changelog,
+        );
         let script = step
             .split_once("        run: |\n")
             .unwrap()

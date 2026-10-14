@@ -7,19 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Changed
-
-- Generate GitHub CI, publication and Pages workflows with immutable Node 24
-  checkout, cache and artifact actions. Action updates are owned by the shared
-  Simit registry; Forgejo action versions retain their separate compatibility
-  contract.
-
 ### Added
 
 - A mixed-language monorepo component graph for changed-path qualification,
   member discovery, shared formatter composition, and native GitHub CI.
 - Independent Cargo release planning, package-scoped version bumps, verification,
   tag sync, and publication through signed `<package>/v<version>` tags.
+- Separate credential-free component builders and protected default-branch
+  Cargo publishers, binding the complete signed native tag, an independently
+  enrolled package namespace, original provider run, and archive checksum.
 - Component-scoped Git release notes and automatic changelog drafting, with
   package-qualified compare links and history bounded by owned paths.
 - Independent static Python/npm version owners, package-qualified tags, scoped
@@ -57,8 +53,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Honor `init ci --primary-only` in monorepos without rendering or rewriting
-  Cargo, Python, npm publication workflows or signing inputs.
 - Honor configured COPR Makefile and SRPM staging paths, match the RPM spec's
   source archive basename, and reject missing, empty, or duplicate SRPMs.
 - Give disposable COPR release fixtures a repository-local Git identity so
@@ -71,6 +65,106 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   retain source-bound packed candidates for byte-verified retries, reject
   conflicting registry content, and keep publication credentials out of
   packing, lookups, and command output.
+- Require static native release policy for historical verification, reject Cargo
+  changelog symlinks, locate historical Cargo manifests after directory moves, and
+  bound Git notes by arbitrary admitted SemVer prerelease tags.
+- Recover historical native publication policy from tagged configuration, include
+  Cargo owners in changelog collision checks, resolve implicit Cargo paths before
+  native ownership validation, and recheck release tags after qualification.
+- Authenticate fixed-host, nonredirecting npm metadata reads and retry transient
+  propagation failures while preserving immediate checksum-conflict rejection.
+- Preserve preceding changelog tag spelling on prefix adoption, respect disabled
+  component Cargo publication, and reject ambiguous selectors/shared native changelogs.
+- Keep npm wildcard ranges classified when later numeric fields exceed safe integers.
+- Reject npm wildcard ranges followed by numeric components as distribution tags
+  and enforce npm's safe-integer core version limits at enrollment and admission.
+- Respect tagged native publication eligibility during historical verification and
+  conservatively qualify the full graph for Git paths outside the component grammar.
+- Verify historical native package names from their namespace-owned tag and reject
+  unsupported private Python version labels before lock handling or mutation.
+- Enforce configured JetBrains release tag prefixes and validate manual versions
+  through environment values rather than interpolating them into shell source.
+- Verify historical native releases using their tagged registry channel and apply
+  explicit component gate variables after entering the Nix development shell.
+- Share exact signed-tag-name admission across Actions release validators,
+  including comprehensive releases; reject unsupported Crow note/prefix modes.
+- Bind direct VS Code publication to the signed tag object's internal name before
+  marketplace credentials are loaded, rejecting cross-component signature aliases.
+- Reject Crow release workflows with required gates before generation rather than
+  silently omitting prerequisite checks during publication.
+- Require the admitted npm distribution tag to resolve to the selected version
+  during registry verification, including the default latest channel.
+- Verify selected Cargo name/version from the component tag's manifest, including
+  workspace-inherited versions, rather than only checking the tag ref exists.
+- Reject component version bumps excluded by local dependency requirements before
+  mutation, including renamed workspace-inherited dependencies.
+- Preserve primary-only scope when inferring monorepo drift with independently
+  managed VS Code or JetBrains publishers.
+- Require independent crates.io publishers' complete local dependency closure to
+  allow crates.io, rejecting alternate-only dependencies before workflow writes.
+- Namespace monorepo qualification concurrency by source repository so identically
+  named fork branches do not cancel one another's runs.
+- Reject non-object npm publishConfig at enrollment and protected admission.
+- Require custom treefmt imports to participate in the returned evaluated module,
+  rejecting unused nested expressions while accepting formatted direct wiring.
+- Reject unsupported independent Cargo publication prereleases before any gate,
+  version edit, commit or tag, including bumps from existing prereleases.
+- Propagate configured tag prefixes into VS Code publication triggers and exact
+  version validation on GitHub and Forgejo.
+- Preserve older npm-supported leading-hyphen package names during enrollment,
+  packing and protected upload while retaining separate Git namespace validation.
+- Reject leading-hyphen release namespaces before generating or mutating a
+  release, preserving Git-valid underscore and alphanumeric namespaces.
+- Bind protected publication to the signed tag object's internal name, rejecting
+  aliases that reuse another component's valid signature at the same version.
+- Isolate hosted release gates from artifact workspaces; release jobs re-checkout
+  and revalidate the immutable signed source after prerequisite jobs succeed.
+- Report protected Python/npm publisher credentials as locally unverifiable even
+  when the selected release is already present in its registry.
+- Preserve unset npm publication access so releasing an existing restricted
+  package does not change its visibility; provenance checks existing visibility.
+- Reject workflow expressions in component gate environments before planning or
+  generation, preserving literal local/hosted gate parity.
+- Preserve primary-only scope in component CI self-checks so independently
+  managed extension publishers do not block qualification.
+- Skip crates.io registry and token verification for Cargo packages whose publish
+  policy excludes crates.io, using the same eligibility as publisher generation.
+- Build native publication archives on a fixed hosted runner and independently
+  require that builder during protected publisher admission.
+- Reuse native retry archives only from successful original hosted-builder
+  attempts, rejecting failed-attempt forgeries and ambiguous artifact names.
+- Run component prerequisites before Cargo release mutation and required gates
+  before credentialed prebuild publication; share the effective notes policy.
+- Update nested npm workspace lock records, support explicitly owned root Cargo
+  sources, and resolve native-only repository trust without Cargo metadata.
+- Preserve prefixed Homebrew release URLs and require the treefmt wrapper in
+  dev-shell package bindings rather than unrelated package declarations.
+- Honor explicit native verification backends and supported prerelease Git-note
+  ranges; skip unrelated ancestor npm locks and reject invalid dist tags during
+  publication enrollment.
+- Revalidate Cargo component source identity after qualification, skip unrelated
+  ancestor uv locks, validate namespace length during admission, and preserve
+  consumer npm lifecycle metadata without executing it in the publisher.
+- Carry tag prefixes through reusable prebuild and PyPI workflows, reject
+  SemVer-range npm distribution tags, update every owning uv workspace lock,
+  and verify each component matrix runner's native Nix system before its gates.
+- Use the effective release-notes policy in reusable prebuild validation, so
+  Git or disabled notes do not require a changelog in the called workflow.
+- Require complete unyanked Python registry inventories during verification,
+  validate npm provenance types before enrollment, and reject unsupported
+  monorepo extension publication before workflow reconciliation.
+- Resolve formatter toolchains from active lexical Nix bindings instead of
+  comments or strings, preserving existing crane/overlay toolchains.
+- Admit npm registry names before enrolling publication, reconcile signed npm
+  distribution tags on archive recovery, qualify every component for undecodable
+  Git paths, and normalize Cargo workspace member paths on Windows.
+- Omit independent crates.io publishers for alternate-only or unpublished Cargo
+  members while retaining their component qualification.
+- Bind native retry archives to the original hosted upload step's provider ID and
+  digest, rejecting same-name replacements made by later qualification attempts.
+- Preserve already-normalized Python prerelease identities at protected upload,
+  validate public distribution names and npm private flag types before enrollment,
+  and qualify byte-path planning without materializing invalid APFS filenames.
 - Honor the documented absolute `XDG_DATA_HOME` project-registry override on
   macOS and Windows as well as Linux, retaining native defaults when unset.
 - Preserve `SIMIT_NIX_FRESH` in environment-mode grouped execution, retain
@@ -154,30 +248,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Retain single-crate resolution and independent regression fixtures.
 - Render long trusted-publisher dependency lists as formatter-stable block
   sequences, preserving dependency order and short inline arrays.
-- Keep independent Cargo package tags, full native component qualification and
-  plain archive versions when using the credential-free source/trusted-publisher
-  boundary. Enrolled workflows bind publication to exactly one package namespace.
-- Generate native Rust, cross Rust and Python flakes against one qualified Harbor
-  monorepo revision and its namespaced APIs. Keep MSRV toolchain manifests in
-  tracked source, preserve existing Rust library namespaces when patching hooks,
-  and recognize treefmt-normalized inherited hook bindings.
-- Normalize Python registry names and prerelease versions, keep local uv lock
-  records aligned, and reject unsupported public version/publication settings
-  before version mutation. Omit empty component-step environment mappings so
-  generated qualification and native-publication workflows pass Actions linting.
-- Honor an absolute `XDG_DATA_HOME` registry override on macOS and other native
-  platforms, keeping project fixtures isolated from the platform default home.
-- Bound native Nix prebuilds to one build job, two cores, and three hours while
-  streaming builder logs for package-test diagnostics.
-- Stream Nix builder logs while bootstrapping monorepo qualification and
-  publication shells so native package-test failures retain their diagnostics.
-- Resolve public GitHub and Codeberg SSH inputs over HTTPS before monorepo
-  qualification, including the full native graph used for package publication.
-
 - Use immutable Node 24 action revisions on recognized GitHub-hosted runners
   and credential-free release workers. Preserve the Node 20 action baseline
   for private runner labels and Forgejo, together with signed-tag admission,
   independent trust roots, and archive custody verification.
+- Select the compatible action runtime for every monorepo component's native
+  runner matrix; require recognized hosted workers and reject candidate
+  authentication contexts before generating independent Cargo builders.
 
 ## [0.20.0] - 2026-10-11
 
@@ -215,8 +292,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Include Nix builder-phase output in captured build artifacts so hosted
-  cancellations retain build diagnostics alongside client messages and results.
 - Isolate multi-system Nix flake-check concurrency by source repository so forks
   with matching branch names cannot cancel each other's qualification, while
   retaining same-repository push/PR coalescing.
@@ -252,6 +327,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   starting dependent jobs. Fetch and verify lockfile evidence for library and
   binary-only crates, with bounded retries and individual calls; crates.io web
   API readiness alone no longer advances the publication plan.
+- Generate native Rust, cross Rust and Python flakes against one qualified Harbor
+  monorepo revision and its namespaced APIs. Keep MSRV toolchain manifests in
+  tracked source, preserve existing Rust library namespaces when patching hooks,
+  and recognize treefmt-normalized inherited hook bindings.
+- Normalize Python registry names and prerelease versions, keep local uv lock
+  records aligned, and reject unsupported public version/publication settings
+  before version mutation. Omit empty component-step environment mappings so
+  generated qualification and native-publication workflows pass Actions linting.
+- Honor an absolute `XDG_DATA_HOME` registry override on macOS and other native
+  platforms, keeping project fixtures isolated from the platform default home.
+- Bound native Nix prebuilds to one build job, two cores, and three hours while
+  streaming builder logs for package-test diagnostics.
+- Stream Nix builder logs while bootstrapping monorepo qualification and
+  publication shells so native package-test failures retain their diagnostics.
+- Resolve public GitHub and Codeberg SSH inputs over HTTPS before monorepo
+  qualification, including the full native graph used for package publication.
+
+- Include Nix builder-phase output in captured build artifacts so hosted
+  cancellations retain build diagnostics alongside client messages and results.
 - Give native GitHub Nix flake matrices read-only permissions, coalesced push/PR
   concurrency, bounded parallelism and timeouts, and explicit build-resource limits.
 - Resolve and check out fork PR heads from their source repository while keeping

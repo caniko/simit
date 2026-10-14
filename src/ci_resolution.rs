@@ -58,6 +58,29 @@ impl CiBackend {
     }
 }
 
+/// Release consumers share the generator's sole-target / CI / Forgejo fallback.
+pub fn release_backend(
+    cfg: &ProjectConfig,
+    platform: Option<Platform>,
+    provider: Option<CiProvider>,
+) -> Result<CiBackend> {
+    let platform = platform
+        .or(match (&cfg.release.github, &cfg.release.codeberg) {
+            (Some(_), None) => Some(Platform::Github),
+            (None, Some(_)) => Some(Platform::Forgejo),
+            _ => cfg.ci.platform,
+        })
+        .unwrap_or(Platform::Forgejo);
+    let provider = provider.unwrap_or_else(|| {
+        if platform == Platform::Github {
+            CiProvider::Actions
+        } else {
+            cfg.ci.provider.unwrap_or(CiProvider::Actions)
+        }
+    });
+    CiBackend::from_parts(provider, platform)
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct CiCliOverrides {
     pub runtime: Option<RuntimeChoice>,
@@ -429,6 +452,7 @@ impl ResolvedCiInputs {
         omnix_ref: String,
     ) -> CiOptions {
         CiOptions {
+            tag_prefix: cfg.release.tag_prefix,
             nix_builds: cfg.ci.nix_builds.clone(),
             all_features: self.all_features,
             unit_tests_only: self.unit_tests_only,

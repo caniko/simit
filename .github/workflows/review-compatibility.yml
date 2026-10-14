@@ -125,6 +125,8 @@ jobs:
         run: cargo +1.85.0 test --locked --test review_cli --test review_engine --test review_generation --test review_contracts
       - name: Verify portable workflow templates on MSRV
         run: cargo +1.85.0 test --locked --test workflow_templates
+      - name: Verify native Cargo member path normalization on MSRV
+        run: cargo +1.85.0 test --locked --test monorepo cargo_member_paths_normalize_to_repo_contract
       - name: Verify packaged runtime assets
         shell: bash
         run: |

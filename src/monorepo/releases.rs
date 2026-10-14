@@ -10,7 +10,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use toml_edit::{DocumentMut, value};
 
-use super::{Component, Graph};
+use super::Graph;
 use crate::cli::ReleaseCommand;
 use crate::{cargo, changelog, git, release_identity::ReleaseTag};
 
@@ -24,9 +24,13 @@ pub struct ManifestRelease {
 }
 
 impl ManifestRelease {
-    pub(super) fn validate(&self, component: &Component) -> Result<()> {
+    pub(super) fn validate(&self) -> Result<()> {
         super::validate_relative_path(&self.manifest)?;
         ReleaseTag::for_package(&self.namespace, Version::new(0, 0, 0))?;
+        ensure!(
+            self.namespace.len() <= 64,
+            "native release namespace must be at most 64 bytes"
+        );
         ensure!(
             matches!(
                 Path::new(&self.manifest)
@@ -35,15 +39,6 @@ impl ManifestRelease {
                 Some("pyproject.toml" | "package.json")
             ),
             "non-Cargo releases require pyproject.toml or package.json"
-        );
-        ensure!(
-            component
-                .paths
-                .iter()
-                .any(|path| Path::new(&self.manifest).starts_with(path)),
-            "release manifest {} must be owned by component {}",
-            self.manifest,
-            component.id
         );
         Ok(())
     }
@@ -64,7 +59,7 @@ impl ManifestRelease {
 
     pub(crate) fn parse(&self, content: &str) -> Result<Package> {
         let registry = super::native_registry::Registry::for_manifest(&self.manifest);
-        let (name, version, private) =
+        let (name, version, private, dist_tag) =
             if matches!(registry, super::native_registry::Registry::Python) {
                 let doc: DocumentMut = content.parse()?;
                 let project = doc
@@ -90,9 +85,18 @@ impl ManifestRelease {
                         .context("Python releases require static project.version")?
                         .to_owned(),
                     false,
+                    None,
                 )
             } else {
                 let doc: Value = serde_json::from_str(content)?;
+                ensure!(
+                    doc.get("publishConfig").is_none_or(Value::is_object),
+                    "npm publishConfig must be an object when present"
+                );
+                ensure!(
+                    doc.get("private").is_none_or(Value::is_boolean),
+                    "npm private must be boolean when present"
+                );
                 (
                     doc["name"]
                         .as_str()
@@ -103,14 +107,45 @@ impl ManifestRelease {
                         .context("npm releases require a static version")?
                         .to_owned(),
                     doc["private"].as_bool().unwrap_or(false),
+                    Some(
+                        doc["publishConfig"]["tag"]
+                            .as_str()
+                            .unwrap_or("latest")
+                            .to_owned(),
+                    ),
                 )
             };
         ensure!(!name.is_empty(), "release package name cannot be empty");
         let version = Version::parse(&version)?;
+        if matches!(registry, super::native_registry::Registry::Python) {
+            registry.version(&version)?;
+        }
         if self.publish && !private {
             registry.version(&version)?;
+            if matches!(registry, super::native_registry::Registry::Python) {
+                ensure!(
+                    super::native_registry::valid_python_package_name(&name),
+                    "invalid Python package name {name:?}"
+                );
+            }
             if matches!(registry, super::native_registry::Registry::Npm) {
+                ensure!(
+                    super::native_registry::valid_npm_package_name(&name),
+                    "invalid npm package name {name:?}"
+                );
                 let doc: Value = serde_json::from_str(content)?;
+                ensure!(
+                    doc["publishConfig"]["provenance"].is_null()
+                        || doc["publishConfig"]["provenance"].is_boolean(),
+                    "signed npm provenance policy must be boolean"
+                );
+                ensure!(
+                    doc["publishConfig"]["access"].is_null()
+                        || doc["publishConfig"]["access"] == "public"
+                        || (doc["publishConfig"]["access"] == "restricted"
+                            && name.starts_with('@')),
+                    "npm restricted access requires a scoped package; access must be public or restricted"
+                );
                 ensure!(
                     doc["publishConfig"]["registry"].is_null()
                         || doc["publishConfig"]["registry"]
@@ -127,6 +162,13 @@ impl ManifestRelease {
                             .is_some_and(|tag| !tag.is_empty()),
                     "npm prereleases require an explicit publishConfig.tag"
                 );
+                if let Some(tag) = doc["publishConfig"].get("tag") {
+                    ensure!(
+                        tag.as_str()
+                            .is_some_and(super::native_registry::valid_npm_dist_tag),
+                        "invalid signed npm dist-tag"
+                    );
+                }
             }
         }
         Ok(Package {
@@ -134,6 +176,7 @@ impl ManifestRelease {
             name,
             version,
             publish: self.publish && !private,
+            dist_tag,
         })
     }
 }
@@ -144,9 +187,14 @@ pub(crate) struct Package {
     pub name: String,
     pub version: Version,
     pub publish: bool,
+    pub dist_tag: Option<String>,
 }
 
-pub(super) fn validate(root: &Path, graph: &Graph) -> Result<()> {
+pub(super) fn validate(
+    root: &Path,
+    graph: &Graph,
+    metadata: Option<&crate::cargo::Metadata>,
+) -> Result<()> {
     let mut namespaces: BTreeSet<_> = graph
         .components
         .values()
@@ -159,7 +207,38 @@ pub(super) fn validate(root: &Path, graph: &Graph) -> Result<()> {
         .map(|name| ("cargo", name.clone()))
         .collect();
     let mut manifests = BTreeSet::new();
-    for release in graph.components.values().flat_map(|c| &c.releases) {
+    let mut changelogs = BTreeSet::new();
+    if let Some(metadata) = metadata {
+        for package in &metadata.packages {
+            if metadata.workspace_members.contains(&package.id) {
+                ensure!(
+                    changelogs.insert(
+                        package
+                            .manifest_path
+                            .as_std_path()
+                            .parent()
+                            .context("Cargo manifest has no parent")?
+                            .join("CHANGELOG.md")
+                    ),
+                    "release owners share a changelog; place independent release manifests in separate directories"
+                );
+            }
+        }
+    }
+    for (component, release) in graph
+        .components
+        .values()
+        .flat_map(|c| c.releases.iter().map(move |r| (c, r)))
+    {
+        ensure!(
+            component
+                .paths
+                .iter()
+                .any(|path| Path::new(&release.manifest).starts_with(path)),
+            "release manifest {} must be owned by component {}",
+            release.manifest,
+            component.id
+        );
         ensure!(
             namespaces.insert(release.namespace.clone()),
             "duplicate release namespace {}",
@@ -171,6 +250,15 @@ pub(super) fn validate(root: &Path, graph: &Graph) -> Result<()> {
             release.manifest
         );
         let package = release.load(root)?;
+        ensure!(
+            changelogs.insert(
+                root.join(&release.manifest)
+                    .parent()
+                    .context("release manifest has no parent")?
+                    .join("CHANGELOG.md")
+            ),
+            "release owners share a changelog; place independent release manifests in separate directories"
+        );
         let registry = super::native_registry::Registry::for_manifest(&release.manifest);
         ensure!(
             names.insert((registry.name(), registry.package_key(&package.name))),
@@ -211,11 +299,21 @@ pub(crate) fn select(command: &ReleaseCommand) -> Result<Option<Selection>> {
         command.packages.len() <= 1,
         "independent releases select exactly one package"
     );
+    let packages = component
+        .releases
+        .iter()
+        .map(|release| release.load(&root))
+        .collect::<Result<Vec<_>>>()?;
     if command
         .packages
         .first()
         .is_some_and(|name| component.cargo_packages.contains(name))
     {
+        let requested = &command.packages[0];
+        ensure!(
+            !packages.iter().any(|package| &package.name == requested),
+            "ambiguous package {requested}; select --package <release namespace> for the native owner"
+        );
         return Ok(None);
     }
     if command.packages.is_empty() {
@@ -224,11 +322,6 @@ pub(crate) fn select(command: &ReleaseCommand) -> Result<Option<Selection>> {
             "component {id} has multiple release packages; select --package explicitly"
         );
     }
-    let packages = component
-        .releases
-        .iter()
-        .map(|release| release.load(&root))
-        .collect::<Result<Vec<_>>>()?;
     // An explicit release namespace is authoritative. Native names remain a
     // convenient selector only when they identify one owner in this component.
     let index = if let Some(requested) = command.packages.first() {
@@ -331,11 +424,7 @@ pub(crate) fn bump(selection: &Selection, command: &ReleaseCommand) -> Result<()
     let notes_path = directory.join(changelog::DEFAULT_PATH);
     let notes_enabled = !command.no_changelog
         && selection.project.release.notes_source(
-            selection
-                .project
-                .ci
-                .platform
-                .unwrap_or(crate::cli::Platform::Forgejo),
+            crate::ci_resolution::release_backend(&selection.project, None, None)?.platform(),
         ) == crate::config::ReleaseNotesSource::Changelog;
     if notes_enabled && notes_path.exists() {
         ensure!(
@@ -374,6 +463,9 @@ pub(crate) fn bump(selection: &Selection, command: &ReleaseCommand) -> Result<()
         git::head_commit(&selection.root)? == head,
         "release HEAD changed during qualification"
     );
+    if !command.no_tag {
+        git::ensure_tag_absent(&selection.root, &tag)?;
+    }
     for update in &updates {
         ensure!(
             fs::read(&update.path)? == update.before,
@@ -426,9 +518,8 @@ impl Package {
                 before,
                 after: doc.to_string().into_bytes(),
             });
-            for directory in path
-                .parent()
-                .context("manifest has no parent")?
+            let package_directory = path.parent().context("manifest has no parent")?;
+            for directory in package_directory
                 .ancestors()
                 .take_while(|directory| directory.starts_with(root))
             {
@@ -443,6 +534,15 @@ impl Package {
                 );
                 let before = fs::read(&lock)?;
                 let mut doc: DocumentMut = std::str::from_utf8(&before)?.parse()?;
+                let relative = package_directory
+                    .strip_prefix(directory)?
+                    .to_str()
+                    .context("non-UTF-8 Python workspace path")?
+                    .replace('\\', "/");
+                let local_source = if relative.is_empty() { "." } else { &relative };
+                if !relative.is_empty() && !declares_uv_workspace(directory, &relative)? {
+                    continue;
+                }
                 let mut found = false;
                 if let Some(packages) = doc
                     .get_mut("package")
@@ -457,12 +557,13 @@ impl Package {
                                 registry.package_key(name) == registry.package_key(&self.name)
                             })
                             && package.get("source").is_some_and(|source| {
-                                source.get("editable").is_some() || source.get("virtual").is_some()
+                                ["editable", "virtual"].iter().any(|key| {
+                                    source.get(key).and_then(toml_edit::Item::as_str)
+                                        == Some(local_source)
+                                })
                             })
                         {
-                            let current = registry
-                                .version(&self.version)
-                                .unwrap_or_else(|_| self.version.to_string());
+                            let current = registry.version(&self.version)?;
                             ensure!(
                                 package
                                     .get("version")
@@ -471,11 +572,7 @@ impl Package {
                                         || version == self.version.to_string()),
                                 "uv.lock package version disagrees with manifest"
                             );
-                            package["version"] = value(
-                                registry
-                                    .version(version)
-                                    .unwrap_or_else(|_| version.to_string()),
-                            );
+                            package["version"] = value(registry.version(version)?);
                             found = true;
                         }
                     }
@@ -491,7 +588,6 @@ impl Package {
                         before,
                         after: doc.to_string().into_bytes(),
                     });
-                    break;
                 }
             }
         } else {
@@ -502,38 +598,63 @@ impl Package {
                 before,
                 after: json_bytes(&doc)?,
             });
-            for name in ["package-lock.json", "npm-shrinkwrap.json"] {
-                let lock = path.parent().context("manifest has no parent")?.join(name);
-                if !lock.exists() {
-                    continue;
-                }
-                ensure!(
-                    !fs::symlink_metadata(&lock)?.file_type().is_symlink(),
-                    "release lock must not be a symlink: {}",
-                    lock.display()
-                );
-                let before = fs::read(&lock)?;
-                let mut doc: Value = serde_json::from_slice(&before)?;
-                ensure!(
-                    doc["name"] == self.name && doc["version"] == self.version.to_string(),
-                    "npm lock identity/version disagrees with manifest"
-                );
-                doc["version"] = json!(version.to_string());
-                if let Some(package) = doc
-                    .get_mut("packages")
-                    .and_then(|packages| packages.get_mut(""))
-                {
+            let package_directory = path.parent().context("manifest has no parent")?;
+            for directory in package_directory
+                .ancestors()
+                .take_while(|dir| dir.starts_with(root))
+            {
+                for name in ["package-lock.json", "npm-shrinkwrap.json"] {
+                    let lock = directory.join(name);
+                    if !lock.exists() {
+                        continue;
+                    }
                     ensure!(
-                        package["version"] == self.version.to_string(),
-                        "npm root lock version disagrees with manifest"
+                        !fs::symlink_metadata(&lock)?.file_type().is_symlink(),
+                        "release lock must not be a symlink: {}",
+                        lock.display()
                     );
-                    package["version"] = json!(version.to_string());
+                    let before = fs::read(&lock)?;
+                    let mut doc: Value = serde_json::from_slice(&before)?;
+                    let relative = package_directory
+                        .strip_prefix(directory)?
+                        .to_str()
+                        .context("non-UTF-8 npm workspace path")?
+                        .replace('\\', "/");
+                    if relative.is_empty() {
+                        ensure!(
+                            doc["name"] == self.name && doc["version"] == self.version.to_string(),
+                            "npm lock identity/version disagrees with manifest"
+                        );
+                        doc["version"] = json!(version.to_string());
+                    }
+                    let workspace = !relative.is_empty();
+                    if workspace
+                        && doc["packages"].get(&relative).is_none()
+                        && !declares_npm_workspace(directory, &relative)?
+                    {
+                        continue;
+                    }
+                    ensure!(
+                        !workspace || doc["packages"].get(&relative).is_some(),
+                        "npm workspace lock has no package record for {relative}; regenerate the lock before releasing"
+                    );
+                    if let Some(package) = doc
+                        .get_mut("packages")
+                        .and_then(|packages| packages.get_mut(&relative))
+                    {
+                        ensure!(
+                            package["version"] == self.version.to_string()
+                                && package.get("name").is_none_or(|name| name == &self.name),
+                            "npm package lock identity/version disagrees with manifest"
+                        );
+                        package["version"] = json!(version.to_string());
+                    }
+                    updates.push(Update {
+                        path: lock,
+                        before,
+                        after: json_bytes(&doc)?,
+                    });
                 }
-                updates.push(Update {
-                    path: lock,
-                    before,
-                    after: json_bytes(&doc)?,
-                });
             }
         }
         self.config.parse(std::str::from_utf8(&updates[0].after)?)?;
@@ -545,14 +666,128 @@ fn json_bytes(doc: &Value) -> Result<Vec<u8>> {
     Ok(format!("{}\n", serde_json::to_string_pretty(doc)?).into_bytes())
 }
 
+fn declares_npm_workspace(directory: &Path, relative: &str) -> Result<bool> {
+    let manifest = directory.join("package.json");
+    if !manifest.is_file() {
+        return Ok(false);
+    }
+    ensure!(
+        !fs::symlink_metadata(&manifest)?.file_type().is_symlink(),
+        "npm workspace manifest must not be a symlink"
+    );
+    let doc: Value = serde_json::from_slice(&fs::read(manifest)?)?;
+    let workspaces = &doc["workspaces"];
+    let patterns = workspaces
+        .as_array()
+        .or_else(|| workspaces["packages"].as_array());
+    let Some(patterns) = patterns else {
+        return Ok(false);
+    };
+    let options = glob::MatchOptions {
+        require_literal_separator: true,
+        ..Default::default()
+    };
+    let mut included = false;
+    for pattern in patterns {
+        let pattern = pattern
+            .as_str()
+            .context("npm workspace patterns must be strings")?;
+        let (negative, pattern) = pattern
+            .strip_prefix('!')
+            .map_or((false, pattern), |pattern| (true, pattern));
+        if glob::Pattern::new(pattern)?.matches_with(relative, options) {
+            included = !negative;
+        }
+    }
+    Ok(included)
+}
+
+fn declares_uv_workspace(directory: &Path, relative: &str) -> Result<bool> {
+    let manifest = directory.join("pyproject.toml");
+    if !manifest.is_file() {
+        return Ok(false);
+    }
+    ensure!(
+        !fs::symlink_metadata(&manifest)?.file_type().is_symlink(),
+        "uv workspace manifest must not be a symlink"
+    );
+    let doc: DocumentMut = fs::read_to_string(manifest)?.parse()?;
+    let workspace = doc
+        .get("tool")
+        .and_then(|tool| tool.get("uv"))
+        .and_then(|uv| uv.get("workspace"));
+    let Some(workspace) = workspace else {
+        return Ok(false);
+    };
+    let matches = |key: &str| -> Result<bool> {
+        let Some(patterns) = workspace.get(key).and_then(toml_edit::Item::as_array) else {
+            return Ok(false);
+        };
+        for pattern in patterns {
+            if glob::Pattern::new(
+                pattern
+                    .as_str()
+                    .context("uv workspace patterns must be strings")?,
+            )?
+            .matches_with(
+                relative,
+                glob::MatchOptions {
+                    require_literal_separator: true,
+                    ..Default::default()
+                },
+            ) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    };
+    Ok(matches("members")? && !matches("exclude")?)
+}
+
 pub(crate) fn qualify(selection: &Selection) -> Result<()> {
     let plan = super::select(
         &selection.graph,
         std::slice::from_ref(&selection.package.config.manifest),
         false,
     )?;
-    for id in &plan.selected {
-        let component = &selection.graph.components[id];
+    qualify_selected(&selection.root, &selection.graph, &plan.selected)
+}
+
+pub(crate) fn qualify_component(
+    root: &Path,
+    config: &crate::config::ProjectConfig,
+    component: &str,
+) -> Result<()> {
+    let graph = config
+        .monorepo
+        .as_ref()
+        .context("missing monorepo config")?
+        .resolve(root)?;
+    let paths = &graph
+        .components
+        .get(component)
+        .context("unknown monorepo component")?
+        .paths;
+    let plan = super::select(&graph, paths, false)?;
+    qualify_selected(root, &graph, &plan.selected)
+}
+
+fn qualify_selected(root: &Path, graph: &Graph, selected: &[String]) -> Result<()> {
+    // Local release qualification has no provider to evaluate these values.
+    // Validate the entire selection before running any prerequisite gate.
+    for id in selected {
+        for gate in &graph.components[id].checks {
+            for (name, value) in &gate.env {
+                ensure!(
+                    !value.contains("${{"),
+                    "component {id} check {} environment {name:?} cannot contain workflow expressions during local release qualification",
+                    gate.id
+                );
+            }
+        }
+    }
+    for id in selected {
+        let component = &graph.components[id];
         ensure!(
             !component.checks.is_empty(),
             "component {} requires explicit release checks",
@@ -561,7 +796,7 @@ pub(crate) fn qualify(selection: &Selection) -> Result<()> {
         for gate in &component.checks {
             println!("qualifying component {} check {}", component.id, gate.id);
             let status = Command::new("timeout")
-                .current_dir(&selection.root)
+                .current_dir(root)
                 .envs(&gate.env)
                 .args([
                     "--kill-after=5s",
@@ -583,4 +818,55 @@ pub(crate) fn qualify(selection: &Selection) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn local_release_rejects_provider_values_before_any_gate_runs() {
+        let root = tempfile::TempDir::new().unwrap();
+        let config: super::super::Config = toml_edit::de::from_str(
+            r#"
+schema_version = 1
+[[components]]
+id = "first"
+paths = ["first"]
+checks = [{ id = "test", run = "touch executed" }]
+[[components]]
+id = "second"
+paths = ["second"]
+checks = [{ id = "test", run = "true", env = { TOKEN = "${{ secrets.NEVER_REPORT }}" } }]
+"#,
+        )
+        .unwrap();
+        let graph = config.graph(None).unwrap();
+        let error = qualify_selected(root.path(), &graph, &["first".into(), "second".into()])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("workflow expressions during local release qualification"));
+        assert!(!error.contains("NEVER_REPORT"));
+        assert!(!root.path().join("executed").exists());
+    }
+
+    #[test]
+    fn restricted_access_requires_scoped_name_during_signed_manifest_admission() {
+        let owner = ManifestRelease {
+            manifest: "node/package.json".into(),
+            namespace: "node".into(),
+            publish: true,
+        };
+        for (name, access, allowed) in [
+            ("unscoped", "restricted", false),
+            ("@example/scoped", "restricted", true),
+            ("unscoped", "public", true),
+            ("unscoped", "invalid", false),
+        ] {
+            let content =
+                json!({"name": name, "version": "1.2.3", "publishConfig": {"access": access}})
+                    .to_string();
+            assert_eq!(owner.parse(&content).is_ok(), allowed, "{content}");
+        }
+    }
 }

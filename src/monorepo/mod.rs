@@ -10,12 +10,12 @@ pub(crate) mod releases;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component as PathComponent, Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use serde::Deserialize;
 
 use crate::config::{ProjectConfig, RequiredGate};
 
-pub use plan::{Plan, changed_paths, select};
+pub use plan::{ChangedPaths, Plan, changed_paths, select};
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -92,7 +92,7 @@ impl Config {
                 validate_relative_path(path)?;
             }
             for release in &component.releases {
-                release.validate(component)?;
+                release.validate()?;
             }
             let mut gates = BTreeSet::new();
             for gate in &component.checks {
@@ -150,7 +150,7 @@ impl Config {
         };
         let graph = self.graph(metadata.as_ref())?;
         graph.validate_ownership()?;
-        releases::validate(root, &graph)?;
+        releases::validate(root, &graph, metadata.as_ref())?;
         for path in graph
             .components
             .values()
@@ -202,8 +202,21 @@ impl Config {
                         .context("Cargo manifest has no parent")?
                         .strip_prefix(&metadata.workspace_root)
                         .context("Cargo member is outside the monorepo")?;
-                    validate_relative_path(directory.as_str())?;
-                    component.paths.push(directory.to_string());
+                    if directory.as_str().is_empty() {
+                        ensure!(
+                            !component.paths.is_empty(),
+                            "root Cargo package {name} requires explicit component source paths"
+                        );
+                        component.paths.push("Cargo.toml".to_owned());
+                    } else {
+                        let directory = directory
+                            .components()
+                            .map(|part| part.as_str())
+                            .collect::<Vec<_>>()
+                            .join("/");
+                        validate_relative_path(&directory)?;
+                        component.paths.push(directory);
+                    }
                 }
             }
             for name in packages.keys() {
@@ -457,12 +470,15 @@ pub fn run(command: crate::cli::MonorepoCommand) -> Result<()> {
                 .as_ref()
                 .context("missing monorepo config")?
                 .resolve(&root)?;
-            let paths = if let Some(base) = command.base.as_deref() {
+            let changed = if let Some(base) = command.base.as_deref() {
                 changed_paths(&root, base)?
             } else {
-                command.changed_paths
+                ChangedPaths {
+                    full: command.changed_paths.is_empty(),
+                    paths: command.changed_paths,
+                }
             };
-            let plan = select(&graph, &paths, paths.is_empty() && command.base.is_none())?;
+            let plan = select(&graph, &changed.paths, changed.full)?;
             if command.json {
                 println!("{}", serde_json::to_string_pretty(&plan)?);
             } else {

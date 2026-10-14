@@ -429,6 +429,24 @@ pub struct ReleaseCommand {
     #[arg(long, help = "New directory for credential-free archive verification")]
     pub publisher_output: Option<Utf8PathBuf>,
     #[arg(
+        long,
+        help = "Trusted package namespace for an independent <package>/v<version> tag"
+    )]
+    pub tag_namespace: Option<String>,
+
+    /// Protected native publication enrollment; never read from candidate CLI/config.
+    #[arg(long, hide = true, requires = "native_registry")]
+    pub native_manifest: Option<String>,
+
+    #[arg(long, hide = true, value_parser = ["python", "npm"], requires = "native_manifest")]
+    pub native_registry: Option<String>,
+
+    #[arg(long, hide = true, requires = "native_registry")]
+    pub native_provenance: bool,
+
+    #[arg(long, hide = true, default_value = "", value_parser = ["", "v"])]
+    pub publisher_tag_prefix: String,
+    #[arg(
         long = "reconstruct-package",
         help = "Trusted workspace release members to package together for dependency resolution"
     )]

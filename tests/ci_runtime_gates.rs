@@ -167,7 +167,7 @@ fn nix_format_gate_supports_legacy_shells_and_propagates_formatter_failures() {
         let root = directory.path();
         let gate = commands(root, "ci")
             .into_iter()
-            .find(|run| run.contains("formatter_exe"))
+            .find(|run| run.contains("formatter_expr="))
             .unwrap();
         let bin = root.join("bin");
         fs::create_dir(&bin).unwrap();

@@ -148,7 +148,9 @@ pub fn draft_file(path: &Path, base_ref: Option<&str>, dry_run: bool) -> Result<
         .unwrap_or_else(|| Path::new("."));
     let root = git_output(search_root, &["rev-parse", "--show-toplevel"])?;
     let content = read_file(path)?;
-    let updated = draft_content(&content, Path::new(root.trim()), base_ref)?;
+    let root = Path::new(root.trim());
+    let prefix = crate::config::ProjectConfig::load(root)?.release.tag_prefix;
+    let updated = draft_content_with_prefix(&content, root, base_ref, prefix)?;
     if dry_run {
         print!("{updated}");
         Ok(())
@@ -158,8 +160,17 @@ pub fn draft_file(path: &Path, base_ref: Option<&str>, dry_run: bool) -> Result<
 }
 
 pub fn draft_content(content: &str, repo_root: &Path, base_ref: Option<&str>) -> Result<String> {
+    draft_content_with_prefix(content, repo_root, base_ref, Default::default())
+}
+
+pub(crate) fn draft_content_with_prefix(
+    content: &str,
+    repo_root: &Path,
+    base_ref: Option<&str>,
+    prefix: crate::release_identity::TagPrefix,
+) -> Result<String> {
     check_content(content)?;
-    let range = changelog_range(repo_root, base_ref)?;
+    let range = changelog_range(repo_root, base_ref, prefix)?;
     draft_range(content, repo_root, &range)
 }
 
@@ -175,7 +186,7 @@ pub(crate) fn draft_component_content(
         .lines()
         .find(|tag| crate::release_identity::ReleaseTag::parse_for_package(namespace, tag).is_ok());
     let mut range = if let Some(base) = base {
-        changelog_range(repo_root, Some(base))?
+        changelog_range(repo_root, Some(base), Default::default())?
     } else {
         ChangelogRange {
             git: "HEAD".to_owned(),
@@ -228,7 +239,29 @@ pub fn release_file(
     repo_root: Option<&Path>,
 ) -> Result<()> {
     let content = read_file(path)?;
-    let updated = release_content(&content, version, date, repo_url, path, repo_root)?;
+    let discovered = git_output(
+        path.parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new(".")),
+        &["rev-parse", "--show-toplevel"],
+    )
+    .ok();
+    let root = repo_root.or_else(|| discovered.as_deref().map(|root| Path::new(root.trim())));
+    let prefix = root
+        .map(crate::config::ProjectConfig::load)
+        .transpose()?
+        .unwrap_or_default()
+        .release
+        .tag_prefix;
+    let updated = release_content_with_prefix(
+        &content,
+        version,
+        date,
+        repo_url,
+        path,
+        root,
+        prefix.as_str(),
+    )?;
     write_file(path, &updated)
 }
 
@@ -251,6 +284,21 @@ pub(crate) fn release_content_with_namespace(
     path: &Path,
     repo_root: Option<&Path>,
     namespace: Option<&str>,
+) -> Result<String> {
+    let prefix = namespace
+        .map(|name| format!("{name}/v"))
+        .unwrap_or_default();
+    release_content_with_prefix(content, version, date, repo_url, path, repo_root, &prefix)
+}
+
+pub(crate) fn release_content_with_prefix(
+    content: &str,
+    version: &Version,
+    date: Date,
+    repo_url: Option<&str>,
+    path: &Path,
+    repo_root: Option<&Path>,
+    prefix: &str,
 ) -> Result<String> {
     let mut document = parse_document(content)?;
     let unreleased = unreleased_section(&document)?;
@@ -292,16 +340,7 @@ pub(crate) fn release_content_with_namespace(
         .or_else(|| extract_repo_url_from_footer(content))
         .or_else(|| repo_root.or_else(|| path.parent()).and_then(git_origin_url));
     if let Some(repo) = repo {
-        let prefix = namespace
-            .map(|name| format!("{name}/v"))
-            .unwrap_or_default();
-        update_reference_links(
-            &mut document.lines,
-            &repo,
-            version,
-            latest.as_ref(),
-            &prefix,
-        );
+        update_reference_links(&mut document.lines, &repo, version, latest.as_ref(), prefix);
     }
 
     Ok(render_lines(&document.lines))
@@ -624,7 +663,11 @@ struct ChangelogRange {
     paths: Vec<String>,
 }
 
-fn changelog_range(repo_root: &Path, requested: Option<&str>) -> Result<ChangelogRange> {
+fn changelog_range(
+    repo_root: &Path,
+    requested: Option<&str>,
+    prefix: crate::release_identity::TagPrefix,
+) -> Result<ChangelogRange> {
     if let Some(requested) = requested {
         let requested = requested.trim();
         if requested.is_empty() {
@@ -640,7 +683,7 @@ fn changelog_range(repo_root: &Path, requested: Option<&str>) -> Result<Changelo
     }
 
     let tags = git_output(repo_root, &["tag", "--merged", "HEAD", "--sort=-v:refname"])?;
-    if let Some(tag) = tags.lines().find(|tag| Version::parse(tag.trim()).is_ok()) {
+    if let Some(tag) = tags.lines().find(|tag| prefix.parse(tag.trim()).is_ok()) {
         return Ok(ChangelogRange {
             git: format!("{}..HEAD", tag.trim()),
             label: tag.trim().to_owned(),
@@ -987,10 +1030,30 @@ fn update_reference_links(
         version
     );
     let new_version = previous.map(|previous| {
+        let previous_text = previous.to_string();
+        let previous_tag = existing
+            .iter()
+            .filter_map(|line| {
+                let (label, url) = line.split_once("]: ")?;
+                let (_, refs) = url.split_once("/compare/")?;
+                let candidate = if label == "[Unreleased" {
+                    refs.strip_suffix("...HEAD")?
+                } else if label == format!("[{previous}") {
+                    refs.rsplit_once("...")?.1
+                } else {
+                    return None;
+                };
+                (candidate == previous_text
+                    || candidate.strip_prefix('v') == Some(previous_text.as_str())
+                    || candidate.strip_prefix(prefix) == Some(previous_text.as_str()))
+                .then_some(candidate.to_owned())
+            })
+            .next()
+            .unwrap_or_else(|| format!("{prefix}{previous}"));
         format!(
-            "[{version}]: {}/compare/{prefix}{}...{prefix}{}",
+            "[{version}]: {}/compare/{}...{prefix}{}",
             repo_url.trim_end_matches('/'),
-            previous,
+            previous_tag,
             version
         )
     });
@@ -1021,4 +1084,33 @@ fn update_reference_links(
     }
     replacement.extend(footer);
     lines.splice(replace_start..lines.len(), replacement);
+}
+
+#[cfg(test)]
+mod prefix_adoption_tests {
+    #[test]
+    fn comparison_links_preserve_the_preceding_tag_spelling() {
+        for (old, prefix) in [
+            ("1.1.0", "v"),
+            ("v1.1.0", ""),
+            ("engine/v1.1.0", "engine/v"),
+        ] {
+            let mut lines = vec![format!(
+                "[Unreleased]: https://example/repo/compare/{old}...HEAD"
+            )];
+            super::update_reference_links(
+                &mut lines,
+                "https://example/repo",
+                &"1.2.0".parse().unwrap(),
+                Some(&"1.1.0".parse().unwrap()),
+                prefix,
+            );
+            assert!(
+                lines.contains(&format!(
+                    "[1.2.0]: https://example/repo/compare/{old}...{prefix}1.2.0"
+                )),
+                "{lines:?}"
+            );
+        }
+    }
 }
