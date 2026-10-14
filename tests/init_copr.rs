@@ -266,3 +266,32 @@ fn colliding_resolved_copr_outputs_fail_before_writing() {
         }
     }
 }
+
+#[test]
+fn traversing_spec_path_cannot_overwrite_makefile() {
+    let project = init_package("demo");
+    let root = project.path();
+    let config = read(&root.join("simit.toml"));
+    fs::write(
+        root.join("simit.toml"),
+        format!(
+            "{config}spec_path = \"dist/copr/../Makefile\"\nmakefile_path = \"dist/Makefile\"\n"
+        ),
+    )
+    .unwrap();
+    fs::create_dir_all(root.join("dist/copr")).unwrap();
+    fs::write(root.join("dist/Makefile"), "existing packaging\n").unwrap();
+    for args in [
+        vec!["init", "copr"],
+        vec!["init", "copr", "--check", "--diff"],
+        vec!["dist", "copr", "render"],
+    ] {
+        let output = simit().current_dir(root).args(args).output().unwrap();
+        assert!(!output.status.success(), "{output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("spec_path"),
+            "{output:?}"
+        );
+        assert_eq!(read(&root.join("dist/Makefile")), "existing packaging\n");
+    }
+}

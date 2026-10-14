@@ -3385,6 +3385,22 @@ impl ProjectConfig {
         let spec_path = cfg
             .and_then(|copr| copr.spec_path.clone())
             .unwrap_or_else(|| format!("{name}.spec"));
+        let spec_components = Path::new(&spec_path).components();
+        if spec_path.contains(['\n', '\r', '\0'])
+            || !spec_components
+                .clone()
+                .any(|part| matches!(part, std::path::Component::Normal(_)))
+            || spec_components.into_iter().any(|part| {
+                !matches!(
+                    part,
+                    std::path::Component::Normal(_) | std::path::Component::CurDir
+                )
+            })
+        {
+            bail!(
+                "simit project config: [copr].spec_path must be a non-empty workspace-relative path without traversal"
+            );
+        }
         let makefile_path = cfg.map_or_else(default_copr_makefile_path, |copr| {
             copr.makefile_path.clone()
         });
