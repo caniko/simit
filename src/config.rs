@@ -4028,6 +4028,9 @@ fn set_nix_build_table(table: &mut Table, options: &NixBuildConfig) {
 fn set_ci_table(table: &mut Table, ci: &CiConfig) {
     if let Some(config) = &ci.custody {
         let mut custody = Table::new();
+        if config.protocol == custody::Protocol::SealedV2 {
+            custody["protocol"] = value("sealed-v2");
+        }
         custody["repository"] = value(&config.repository);
         custody["status_context"] = value(&config.status_context);
         custody["producer_attempt"] = value(config.producer_attempt as i64);
