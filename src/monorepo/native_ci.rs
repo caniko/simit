@@ -37,6 +37,10 @@ pub(super) fn files(
                 "export GNUPGHOME=$(mktemp -d)",
                 "GNUPGHOME=$(mktemp -d)\nexport GNUPGHOME",
             );
+            let script = format!(
+                "{script}{}",
+                crate::render::ci::signed_tag_name_steps("tag")
+            );
             tag_check["run"] = json!(format!(
                 "nix develop --no-update-lock-file --max-jobs 1 --cores 2 --print-build-logs .#ci --command bash -euo pipefail <<'SIMIT_TAG_CHECK'\n{script}SIMIT_TAG_CHECK\n"
             ));

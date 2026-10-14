@@ -53,6 +53,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Share exact signed-tag-name admission across Actions release validators,
+  including comprehensive releases; reject unsupported Crow note/prefix modes.
 - Bind direct VS Code publication to the signed tag object's internal name before
   marketplace credentials are loaded, rejecting cross-component signature aliases.
 - Reject Crow release workflows with required gates before generation rather than

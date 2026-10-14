@@ -939,6 +939,7 @@ fn push_validate_tag(
     w.push_str("          test -s \"$GNUPGHOME/maintainers.gpg\"\n");
     w.push_str("          gpg --batch --import \"$GNUPGHOME/maintainers.gpg\"\n");
     w.push_str("          git verify-tag \"$TAG\"\n");
+    w.push_str(&super::ci::signed_tag_name_steps("TAG"));
     w.push_str(
         "          validated_sha=\"$(git rev-parse --verify \"refs/tags/${TAG}^{commit}\")\"\n",
     );
@@ -3020,6 +3021,7 @@ case "$1" in
 fetch) [ "$authenticated" = 1 ] || exit 95; case "$*" in *refs/tags/0.1.0:refs/tags/0.1.0*) touch tag-fetched;; esac;;
 show) [ "$2" = 'FETCH_HEAD:keys/maintainers.gpg' ] && [ "$TEST_KEY_AVAILABLE" = 1 ] || exit 90; printf default-branch-key;;
 verify-tag) [ -f tag-fetched ] && [ "$TEST_TAG_ACCEPTED" = 1 ] || exit 91; touch verified;;
+cat-file) [ -f verified ] || exit 91; printf 'tag 0.1.0\n\n';;
 rev-parse) case "$3" in
   'refs/tags/0.1.0^{commit}') printf verified-tag-commit;;
   HEAD) printf '%s' "$TEST_CHECKOUT_SHA";;

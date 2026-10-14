@@ -867,6 +867,19 @@ pub fn release_file(
             "Crow release workflows do not support required gates; use an Actions release provider to enforce them"
         );
     }
+    if inputs.tag_prefix != crate::release_identity::TagPrefix::None {
+        bail!(
+            "Crow release workflows do not support prefixed tags; use an Actions release provider to enforce the configured prefix"
+        );
+    }
+    if matches!(
+        inputs.notes_source,
+        Some(crate::config::ReleaseNotesSource::Git | crate::config::ReleaseNotesSource::Changelog)
+    ) {
+        bail!(
+            "Crow release workflows do not support release notes; use an Actions release provider or explicitly select notes source none"
+        );
+    }
     let image = nix_image(config)?;
     let mut build = Step::new("release", &image)
         .command("test -n \"$${CI_COMMIT_TAG:-}\"".to_owned())

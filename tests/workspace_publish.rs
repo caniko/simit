@@ -542,7 +542,7 @@ fn coordinated_tag_prefixes_validate_source_and_archive_versions() {
             ("gpg", "exit 0"),
             (
                 "git",
-                "case \"$1\" in\nfetch|verify-tag) exit 0;;\nshow) printf 'fixture trust root';;\nrev-parse) case \"$3\" in HEAD) printf '%s\\n' \"$GITHUB_SHA\";; *) printf '%s\\n' \"$TEST_TAG_SHA\";; esac;;\ncheckout) touch checkout-ran;;\n*) exit 99;;\nesac",
+                "case \"$1\" in\nfetch|verify-tag) exit 0;;\nshow) printf 'fixture trust root';;\ncat-file) printf 'tag %s\\n\\n' \"$GITHUB_REF_NAME\";;\nrev-parse) case \"$3\" in HEAD) printf '%s\\n' \"$GITHUB_SHA\";; *) printf '%s\\n' \"$TEST_TAG_SHA\";; esac;;\ncheckout) touch checkout-ran;;\n*) exit 99;;\nesac",
             ),
             ("cargo", "printf 'fixture@%s\\n' \"${TEST_VERSION:-0.1.0}\""),
         ] {

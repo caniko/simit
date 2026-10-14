@@ -201,6 +201,135 @@ fn crow_required_release_gates_are_not_silently_omitted() {
 }
 
 #[test]
+fn crow_rejects_unsupported_release_notes_and_prefix() {
+    for (policy, diagnostic) in [
+        (
+            "[release.notes]\nsource='git'\n",
+            "Crow release workflows do not support release notes",
+        ),
+        (
+            "[release.notes]\nsource='changelog'\n",
+            "Crow release workflows do not support release notes",
+        ),
+        (
+            "[release]\ntag_prefix='v'\n",
+            "Crow release workflows do not support prefixed tags",
+        ),
+    ] {
+        let dir = project(&format!(
+            "{policy}[ci]\nprovider='crow'\nplatform='forgejo'\n[release.codeberg]\nrepo='example/player'\n[release.artifacts]\nrunner='crow-default'\nbuild_commands=['mkdir -p release']\nsign=false\n"
+        ));
+        let output = common::simit()
+            .current_dir(dir.path())
+            .args(["init", "release"])
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(diagnostic),
+            "{output:?}"
+        );
+        assert!(!dir.path().join(".crow/release.yaml").exists());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn comprehensive_release_signed_tag_names_reject_aliases() {
+    let key = TempDir::new().unwrap();
+    let output = Command::new("gpg")
+        .env("GNUPGHOME", key.path())
+        .args([
+            "--batch",
+            "--pinentry-mode",
+            "loopback",
+            "--passphrase",
+            "",
+            "--quick-generate-key",
+            "Release fixture <release@example.invalid>",
+            "ed25519",
+            "sign",
+            "0",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let public_key = Command::new("gpg")
+        .env("GNUPGHOME", key.path())
+        .args(["--export", "release@example.invalid"])
+        .output()
+        .unwrap();
+    assert!(public_key.status.success());
+    for platform in ["github", "codeberg"] {
+        for prefix in ["", "v"] {
+            let dir = project(&format!(
+                "[release]\ntag_prefix='{prefix}'\n[release.notes]\nsource='none'\n[release.{platform}]\nrepo='example/player'\n[release.artifacts]\nrunner='ubuntu-24.04'\nprebuild_binaries=true\nsign=false\n"
+            ));
+            let root = dir.path();
+            fs::create_dir(root.join("keys")).unwrap();
+            fs::write(root.join("keys/maintainers.gpg"), &public_key.stdout).unwrap();
+            let git = |args: &[&str]| {
+                let output = Command::new("git")
+                    .current_dir(root)
+                    .env("GNUPGHOME", key.path())
+                    .args([
+                        "-c",
+                        "user.name=Release fixture",
+                        "-c",
+                        "user.email=release@example.invalid",
+                        "-c",
+                        "user.signingkey=release@example.invalid",
+                    ])
+                    .args(args)
+                    .output()
+                    .unwrap();
+                assert!(output.status.success(), "{output:?}");
+                output
+            };
+            git(&["init"]);
+            git(&["add", "."]);
+            git(&["commit", "-m", "fixture"]);
+            git(&["remote", "add", "origin", "."]);
+            let head = String::from_utf8(git(&["rev-parse", "HEAD"]).stdout).unwrap();
+            git(&["tag", "-s", "component/v0.2.0", "-m", "component release"]);
+            let object =
+                String::from_utf8(git(&["rev-parse", "refs/tags/component/v0.2.0"]).stdout)
+                    .unwrap();
+            let tag = format!("{prefix}0.2.0");
+            git(&["update-ref", &format!("refs/tags/{tag}"), object.trim()]);
+            git(&["verify-tag", &format!("refs/tags/{tag}")]);
+            let workflow = render(root);
+            let doc: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
+            let script = doc["jobs"]["release"]["steps"]
+                .as_sequence()
+                .unwrap()
+                .iter()
+                .find(|step| step["name"] == "Validate tag")
+                .unwrap()["run"]
+                .as_str()
+                .unwrap();
+            let validate = || {
+                Command::new("bash")
+                    .current_dir(root)
+                    .env("GITHUB_REF_NAME", &tag)
+                    .env("GITHUB_SHA", head.trim())
+                    .env("GITHUB_ENV", root.join("environment"))
+                    .args(["-c", &format!("{script}\nprintf validated > admitted")])
+                    .output()
+                    .unwrap()
+            };
+            let output = validate();
+            assert!(!output.status.success(), "{platform}/{prefix}: {output:?}");
+            assert!(!root.join("admitted").exists());
+            git(&["tag", "-s", "-f", &tag, "-m", "correct release"]);
+            let output = validate();
+            assert!(output.status.success(), "{output:?}");
+            assert!(root.join("admitted").exists());
+        }
+    }
+}
+
+#[test]
 fn unsafe_tag_prefix_is_rejected() {
     let dir = project(&format!("[release]\ntag_prefix = \"../\"\n\n{HOSTED}"));
     let output = common::simit()

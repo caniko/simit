@@ -654,6 +654,7 @@ fn publish_workspace_workflow(
     w.push_str(&release_trust_root_steps());
     w.push_str("          git_fetch --force --tags origin \"refs/tags/${tag}:refs/tags/${tag}\"\n");
     w.push_str("          git verify-tag \"$tag\"\n");
+    w.push_str(&signed_tag_name_steps("tag"));
     w.push_str("          validated_sha=\"$(git rev-list -n 1 \"$tag\")\"\n");
     // Every subsequent job checks out the immutable workflow event commit.
     // A refetch must never let a moved tag authorize a different source tree.
@@ -1947,8 +1948,7 @@ fn push_vscode_version_validation(
     workflow.push_str(&release_trust_root_steps());
     workflow.push_str("          git_fetch --force --tags origin \"refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}\"\n");
     workflow.push_str("          git verify-tag \"$GITHUB_REF_NAME\"\n");
-    workflow.push_str("          signed_tag_name=\"$(git cat-file tag \"refs/tags/$GITHUB_REF_NAME\" | sed -n '1,/^$/s/^tag //p')\"\n");
-    workflow.push_str("          test \"$signed_tag_name\" = \"$GITHUB_REF_NAME\" || { echo 'Signed tag object name differs from the release label' >&2; exit 1; }\n");
+    workflow.push_str(&signed_tag_name_steps("GITHUB_REF_NAME"));
     workflow.push_str("          validated_sha=\"$(git rev-parse --verify \"refs/tags/${GITHUB_REF_NAME}^{commit}\")\"\n");
     workflow.push_str("          test \"$validated_sha\" = \"$(git rev-parse --verify HEAD)\" || { echo \"Signed tag commit does not match the checkout being published\" >&2; exit 1; }\n");
     if let Some(cargo_package) = &vscode.cargo_package {
@@ -5168,6 +5168,12 @@ pub(crate) fn authenticated_git_fetch_steps() -> &'static str {
 "#
 }
 
+pub(crate) fn signed_tag_name_steps(variable: &str) -> String {
+    format!(
+        "          signed_tag_name=\"$(git cat-file tag \"refs/tags/${variable}\" | sed -n '1,/^$/s/^tag //p')\"\n          test \"$signed_tag_name\" = \"${variable}\" || {{ echo 'Signed tag object name differs from the release label' >&2; exit 1; }}\n"
+    )
+}
+
 fn release_trust_root_steps() -> String {
     let fetch = authenticated_git_fetch_steps();
     format!(
@@ -5192,6 +5198,7 @@ fn validate_release_tag_step_with_prefix(
     namespace: Option<&str>,
     prefix: crate::release_identity::TagPrefix,
 ) -> String {
+    let signed_tag_name = signed_tag_name_steps("tag");
     let expected_tag = namespace.map_or_else(
         || format!("{}$version", prefix.as_str()),
         |package| format!("{package}/v$version"),
@@ -5254,7 +5261,7 @@ fn validate_release_tag_step_with_prefix(
 {trust_root}
           git_fetch --force --tags origin "refs/tags/${{tag}}:refs/tags/${{tag}}"
           git verify-tag "$tag"
-          validated_sha="$(git rev-parse --verify "refs/tags/${{tag}}^{{commit}}")"
+{signed_tag_name}          validated_sha="$(git rev-parse --verify "refs/tags/${{tag}}^{{commit}}")"
           checkout_sha="$(git rev-parse --verify HEAD)"
           if [ "$validated_sha" != "$checkout_sha" ]; then
             echo "Signed tag commit does not match the checkout being published" >&2
