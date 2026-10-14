@@ -2,6 +2,8 @@
 use anyhow::{Context, Result, ensure};
 use clap::{Args, Subcommand};
 use std::path::PathBuf;
+#[path = "cli_git.rs"]
+mod git;
 
 /// CI execution commands. Receipts are evidence, never standalone acceptance.
 #[derive(Debug, Subcommand)]
@@ -154,6 +156,11 @@ fn source_probe_bytes(
         .env_remove("GH_TOKEN")
         .env_remove("GITHUB_TOKEN")
         .env("GIT_NO_LAZY_FETCH", "1");
+    command
+        .env_remove("GIT_EXEC_PATH")
+        .env_remove("DEVELOPER_DIR")
+        .env_remove("SDKROOT")
+        .env_remove("TOOLCHAINS");
     let status = super::process::run_probe(
         command,
         &output,
@@ -171,11 +178,12 @@ fn source_probe_bytes(
 
 fn verify_source_spec(path: &std::path::Path, raw: &[u8], head: &str) -> Result<Vec<u8>> {
     let probe = tempfile::tempdir()?;
+    let git = git::executable()?;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     let actual_head = source_probe(
         probe.path(),
         "head",
-        std::process::Command::new("git")
+        std::process::Command::new(&git)
             .arg("--no-replace-objects")
             .args(["rev-parse", "HEAD"]),
         deadline,
@@ -187,7 +195,7 @@ fn verify_source_spec(path: &std::path::Path, raw: &[u8], head: &str) -> Result<
     let repository = source_probe(
         probe.path(),
         "root",
-        std::process::Command::new("git")
+        std::process::Command::new(&git)
             .arg("--no-replace-objects")
             .args(["rev-parse", "--show-toplevel"]),
         deadline,
@@ -209,7 +217,7 @@ fn verify_source_spec(path: &std::path::Path, raw: &[u8], head: &str) -> Result<
     let committed = source_probe(
         probe.path(),
         "committed",
-        std::process::Command::new("git")
+        std::process::Command::new(&git)
             .arg("--no-replace-objects")
             .current_dir(&repository)
             .args(["rev-parse", "--verify", &format!("{head}:{relative}")]),
@@ -218,7 +226,7 @@ fn verify_source_spec(path: &std::path::Path, raw: &[u8], head: &str) -> Result<
     let blob = source_probe_bytes(
         probe.path(),
         "blob",
-        std::process::Command::new("git")
+        std::process::Command::new(&git)
             .arg("--no-replace-objects")
             .current_dir(&repository)
             .args(["cat-file", "blob", &committed]),

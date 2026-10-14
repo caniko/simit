@@ -38,9 +38,17 @@ and outside-checkout substitutions fail; local Git replacement objects cannot
 substitute the source blob. Unrelated worktree edits do not affect enrollment.
 These Git probes share one thirty-second deadline. The active
 observer workflow cannot enroll itself as a producer.
+Source probes resolve Git only from fixed protected platform installation
+directories (including administrator-installed Nix profiles), never the mutable
+job `PATH`. Unsupported installations fail before provider access. On Unix the
+installed path, symlinks and resolved binary must remain root-owned and protected
+against replacement; Windows uses the hosted image's fixed Program Files Git.
 The original event/identity snapshot that authorized the blob is also the one
 validated against its policy and returned to capture; the event file is not
 reloaded after the probes.
+The initial event target must also match protected `GITHUB_REF`: the exact branch
+ref for push and `refs/pull/<number>/merge` for supported PR observations. Editing
+the event file cannot redirect discovery to another same-SHA branch or PR.
 The native transport authenticates only fixed-origin GitHub GETs; approved HTTPS
 log/artifact redirects are bounded and receive no GitHub credential.
 Each synchronous transfer owns and joins a scoped worker runtime, so library
@@ -66,9 +74,14 @@ termination can still interrupt finalization. Library callers retain ownership
 of cancellation and install no process-global handlers.
 
 Only bounded transient responses (408, 429, 500, 502, 503, 504, rate-limited 403
-with `Retry-After`, and temporary transport failures) retry, at most five attempts
-per GET. Provider retry windows are honored inside the aggregate deadline;
-expiry during that wait remains failure. Other authorization failures,
+identified by provider headers or a secondary-limit message, and temporary
+transport failures) retry, at most five attempts per GET. Provider retry windows
+are honored inside the aggregate deadline;
+exhausted primary quota uses `x-ratelimit-reset` when Retry-After is absent.
+Secondary limits without that header wait at least one minute; headerless 429
+responses use bounded exponential fallback. Derived waits remain in the request
+diagnostics and never extend the aggregate deadline. Expiry during that wait
+remains failure. Other authorization failures,
 malformed successful responses, duplicate producer selections and identity drift
 fail closed. Received response bytes and sanitized metadata remain in numbered
 request files. Neither credentials nor signed download URLs are recorded.

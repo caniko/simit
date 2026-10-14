@@ -62,6 +62,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Honor reset-only GitHub rate limits, bind observer event targets to the native
+  runner ref, and resolve source probes through protected platform Git paths.
 - Keep observer source probes free of external clean filters and observer
   credentials, and support synchronous transport calls from Tokio tasks.
 - Repeat original-producer selection during retention, preserve the event snapshot

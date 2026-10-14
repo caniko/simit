@@ -313,6 +313,26 @@ fn secondary_rate_limited_403_retries_inside_the_existing_deadline() {
 }
 
 #[test]
+fn headerless_secondary_429_waits_at_least_a_minute_with_bounded_backoff() {
+    let (mut spec, identity, mut provider) = fixture();
+    spec.timeout_seconds = 300;
+    provider.failures.extend([429, 429]);
+    let temp = tempfile::tempdir().unwrap();
+    let mut clock = FakeClock::default();
+    let receipt = observe_with(
+        &spec,
+        &identity,
+        &temp.path().join("packet"),
+        &mut provider,
+        &mut clock,
+        &Cancellation::default(),
+    )
+    .unwrap();
+    assert!(receipt.capture_complete);
+    assert_eq!(clock.elapsed(), Duration::from_secs(180));
+}
+
+#[test]
 fn capped_transient_error_bodies_retry_but_success_and_authorization_limits_fail_closed() {
     for status in [408, 429, 500, 502, 503, 504, 403, 200, 401] {
         let (spec, identity, mut provider) = fixture();

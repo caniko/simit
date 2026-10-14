@@ -167,15 +167,10 @@ impl GitHubTransport {
                 continue;
             }
             let status = response.status().as_u16();
-            let retry_after = response
-                .headers()
-                .get("retry-after")
-                .and_then(|h| h.to_str().ok())
-                .and_then(|s| s.parse().ok());
             let mut result = Response {
                 status,
                 body: Vec::new(),
-                retry_after,
+                retry_after: None,
                 transport_error: None,
             };
             let limit = if status == 200 {
@@ -208,15 +203,146 @@ impl GitHubTransport {
                     }
                 }
             }
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_secs();
+            result.retry_after = retry_delay(status, response.headers(), now);
+            if status == 403
+                && result.retry_after.is_none()
+                && serde_json::from_slice::<serde_json::Value>(&result.body)
+                    .ok()
+                    .and_then(|body| {
+                        body["message"].as_str().map(|message| {
+                            message
+                                .to_ascii_lowercase()
+                                .contains("secondary rate limit")
+                        })
+                    })
+                    == Some(true)
+            {
+                result.retry_after = Some(60);
+            }
             return Ok(result);
         }
         unreachable!("redirect loop always returns or rejects")
     }
 }
 
+fn retry_delay(status: u16, headers: &reqwest::header::HeaderMap, now: u64) -> Option<u64> {
+    if let Some(wait) = headers
+        .get("retry-after")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+    {
+        return Some(wait.max(1));
+    }
+    if matches!(status, 403 | 429)
+        && headers
+            .get("x-ratelimit-remaining")
+            .and_then(|value| value.to_str().ok())
+            == Some("0")
+    {
+        return Some(
+            headers
+                .get("x-ratelimit-reset")
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.parse::<u64>().ok())
+                .map_or(60, |reset| reset.saturating_sub(now).saturating_add(1)),
+        );
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn primary_reset_and_secondary_limits_supply_provider_bounded_waits() {
+        use std::{
+            io::{Read, Write},
+            net::TcpListener,
+            thread,
+            time::SystemTime,
+        };
+        for (status, remaining, reset, retry_after, message, expected) in [
+            (403, Some("0"), true, None, "quota", Some(120)),
+            // No provider window: observer orchestration owns minute-scale
+            // exponential fallback and retains the selected delay.
+            (429, None, false, None, "rate limit", None),
+            (
+                403,
+                None,
+                false,
+                None,
+                "You have exceeded a secondary rate limit",
+                Some(60),
+            ),
+            (403, Some("0"), true, Some("7"), "quota", Some(7)),
+            (403, None, false, None, "Forbidden", None),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let url = url::Url::parse(&format!("http://{}/logs", listener.local_addr().unwrap()))
+                .unwrap();
+            let server = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(3)))
+                    .unwrap();
+                let mut request = [0; 4096];
+                assert!(stream.read(&mut request).unwrap() > 0);
+                let body = serde_json::json!({"message":message}).to_string();
+                let mut headers = format!(
+                    "HTTP/1.1 {status} Error\r\nContent-Length: {}\r\nConnection: close\r\n",
+                    body.len()
+                );
+                if let Some(remaining) = remaining {
+                    headers.push_str(&format!("x-ratelimit-remaining: {remaining}\r\n"));
+                }
+                if reset {
+                    headers.push_str(&format!(
+                        "x-ratelimit-reset: {}\r\n",
+                        SystemTime::now()
+                            .duration_since(SystemTime::UNIX_EPOCH)
+                            .unwrap()
+                            .as_secs()
+                            + 120
+                    ));
+                }
+                if let Some(wait) = retry_after {
+                    headers.push_str(&format!("Retry-After: {wait}\r\n"));
+                }
+                stream
+                    .write_all(format!("{headers}\r\n{body}").as_bytes())
+                    .unwrap();
+            });
+            let response = GitHubTransport::new("inert-test-token".into())
+                .unwrap()
+                .get_from_url(
+                    "repos/owner/repo/actions/runs/1/logs",
+                    url,
+                    1024,
+                    Duration::from_secs(3),
+                    &Cancellation::default(),
+                )
+                .unwrap();
+            server.join().unwrap();
+            if expected == Some(120) {
+                assert!(
+                    response
+                        .retry_after
+                        .is_some_and(|wait| (119..=121).contains(&wait)),
+                    "reset-only primary limit lost its wait: {:?}",
+                    response.retry_after
+                );
+            } else {
+                assert_eq!(
+                    response.retry_after, expected,
+                    "status={status}, message={message}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn synchronous_transfer_is_usable_from_a_tokio_task() {

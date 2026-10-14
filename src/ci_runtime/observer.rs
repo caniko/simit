@@ -179,6 +179,24 @@ impl Identity {
         )?)?;
         let payload: Value = serde_json::from_str(&event_json)?;
         let event = std::env::var("GITHUB_EVENT_NAME")?;
+        let source_ref = std::env::var("GITHUB_REF")?;
+        match event.as_str() {
+            "push" => ensure!(
+                payload["ref"] == source_ref,
+                "push runner target differs from event payload"
+            ),
+            "pull_request" => {
+                let number = payload["pull_request"]["number"]
+                    .as_u64()
+                    .filter(|number| *number > 0)
+                    .context("missing source PR number")?;
+                ensure!(
+                    source_ref == format!("refs/pull/{number}/merge"),
+                    "PR runner target differs from event payload"
+                );
+            }
+            _ => bail!("unsupported observer event"),
+        }
         let head = if event == "pull_request" {
             payload["pull_request"]["head"]["sha"]
                 .as_str()
@@ -511,9 +529,12 @@ impl Observer<'_> {
             let maximum = maximum.min(self.byte_budget.saturating_sub(self.bytes));
             ensure!(maximum > 0, "observer byte budget exhausted");
             let endpoint = format!("repos/{}/{suffix}", self.spec.repository);
-            let response = self
-                .transport
-                .get(&endpoint, maximum, timeout, self.cancellation)?;
+            let mut response =
+                self.transport
+                    .get(&endpoint, maximum, timeout, self.cancellation)?;
+            if response.status == 429 && response.retry_after.is_none() {
+                response.retry_after = Some(60 * (1 << attempt));
+            }
             ensure!(
                 response.body.len() as u64 <= maximum,
                 "provider exceeded byte limit"

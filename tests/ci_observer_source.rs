@@ -48,7 +48,7 @@ fn fixture() -> tempfile::TempDir {
     root
 }
 
-fn invoke(root: &Path, spec: &Path, retention: bool) -> Output {
+fn observer_command(root: &Path, spec: &Path, retention: bool) -> Command {
     let head = String::from_utf8(git(root, &["rev-parse", "HEAD"]).stdout)
         .unwrap()
         .trim()
@@ -80,6 +80,7 @@ fn invoke(root: &Path, spec: &Path, retention: bool) -> Output {
         .env("GITHUB_REPOSITORY", "owner/repo")
         .env("GITHUB_EVENT_PATH", event)
         .env("GITHUB_EVENT_NAME", "push")
+        .env("GITHUB_REF", "refs/heads/feature")
         .env("GITHUB_SHA", &head)
         .env("GITHUB_RUN_ID", "99")
         .env("GITHUB_RUN_ATTEMPT", "1")
@@ -95,7 +96,75 @@ fn invoke(root: &Path, spec: &Path, retention: bool) -> Output {
     if retention {
         command.args(["--artifact-id", "42", "--artifact-digest", &"a".repeat(64)]);
     }
-    command.output().unwrap()
+    command
+}
+
+fn invoke(root: &Path, spec: &Path, retention: bool) -> Output {
+    observer_command(root, spec, retention).output().unwrap()
+}
+
+#[test]
+fn substituted_event_branch_and_pr_number_cannot_change_the_native_runner_target() {
+    for retention in [false, true] {
+        for pull_request in [false, true] {
+            let root = fixture();
+            let spec = root.path().join(".github/spec.json");
+            let mut command = observer_command(root.path(), &spec, retention);
+            let mut event: serde_json::Value =
+                serde_json::from_slice(&fs::read(root.path().join("event.json")).unwrap()).unwrap();
+            if pull_request {
+                event["pull_request"] = json!({"number":72,"head":{"sha":event["after"]}});
+                command
+                    .env("GITHUB_EVENT_NAME", "pull_request")
+                    .env("GITHUB_REF", "refs/pull/71/merge");
+            } else {
+                event["ref"] = json!("refs/heads/other-feature");
+            }
+            fs::write(root.path().join("event.json"), event.to_string()).unwrap();
+            let output = command.output().unwrap();
+            assert!(
+                String::from_utf8_lossy(&output.stderr).contains("runner target"),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(!root.path().join("packet").exists());
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn workspace_git_prepended_to_path_cannot_forge_the_committed_policy() {
+    use std::os::unix::fs::PermissionsExt;
+    for retention in [false, true] {
+        let root = fixture();
+        let spec = root.path().join(".github/spec.json");
+        let mut command = observer_command(root.path(), &spec, retention);
+        let mut policy: serde_json::Value =
+            serde_json::from_slice(&fs::read(&spec).unwrap()).unwrap();
+        policy["workflows"][".github/workflows/ci.yaml"] = json!(["weaker-job"]);
+        fs::write(&spec, policy.to_string()).unwrap();
+        let head = String::from_utf8(git(root.path(), &["rev-parse", "HEAD"]).stdout).unwrap();
+        let bin = root.path().join("fake-bin");
+        fs::create_dir(&bin).unwrap();
+        let fake = bin.join("git");
+        fs::write(&fake, format!("#!/bin/sh\nprintf 'executed' >fake-git-executed\ncase \"$*\" in\n*'rev-parse HEAD'*) printf '%s\\n' '{}' ;;\n*'--show-toplevel'*) printf '%s\\n' '{}' ;;\n*'cat-file blob'*) cat .github/spec.json ;;\n*) printf '%s\\n' '{}' ;;\nesac\n", head.trim(), root.path().display(), "a".repeat(40))).unwrap();
+        fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
+        let mut entries = vec![bin];
+        entries.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
+        command.env("PATH", std::env::join_paths(entries).unwrap());
+        let output = command.output().unwrap();
+        assert!(
+            !root.path().join("fake-git-executed").exists(),
+            "source admission executed mutable PATH Git"
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("source-owned observer spec"),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!root.path().join("packet").exists());
+    }
 }
 
 #[test]
