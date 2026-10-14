@@ -53,6 +53,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Bind direct VS Code publication to the signed tag object's internal name before
+  marketplace credentials are loaded, rejecting cross-component signature aliases.
 - Reject Crow release workflows with required gates before generation rather than
   silently omitting prerequisite checks during publication.
 - Require the admitted npm distribution tag to resolve to the selected version

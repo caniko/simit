@@ -1947,6 +1947,8 @@ fn push_vscode_version_validation(
     workflow.push_str(&release_trust_root_steps());
     workflow.push_str("          git_fetch --force --tags origin \"refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}\"\n");
     workflow.push_str("          git verify-tag \"$GITHUB_REF_NAME\"\n");
+    workflow.push_str("          signed_tag_name=\"$(git cat-file tag \"refs/tags/$GITHUB_REF_NAME\" | sed -n '1,/^$/s/^tag //p')\"\n");
+    workflow.push_str("          test \"$signed_tag_name\" = \"$GITHUB_REF_NAME\" || { echo 'Signed tag object name differs from the release label' >&2; exit 1; }\n");
     workflow.push_str("          validated_sha=\"$(git rev-parse --verify \"refs/tags/${GITHUB_REF_NAME}^{commit}\")\"\n");
     workflow.push_str("          test \"$validated_sha\" = \"$(git rev-parse --verify HEAD)\" || { echo \"Signed tag commit does not match the checkout being published\" >&2; exit 1; }\n");
     if let Some(cargo_package) = &vscode.cargo_package {

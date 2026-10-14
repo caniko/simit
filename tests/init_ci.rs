@@ -2120,6 +2120,124 @@ fn vscode_publishers_use_configured_release_tag_prefix() {
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn vscode_signed_tag_names_reject_component_aliases_before_credentials() {
+    let key = TempDir::new().unwrap();
+    let output = Command::new("gpg")
+        .env("GNUPGHOME", key.path())
+        .args([
+            "--batch",
+            "--pinentry-mode",
+            "loopback",
+            "--passphrase",
+            "",
+            "--quick-generate-key",
+            "Extension fixture <extension@example.invalid>",
+            "ed25519",
+            "sign",
+            "0",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    for platform in ["github", "forgejo"] {
+        for prefix in ["", "v"] {
+            let temp = init_package(true);
+            let root = temp.path();
+            fs::write(root.join("simit.toml"), format!("[ci]\nruntime='nix'\n[release]\ntag_prefix='{prefix}'\n[vscode]\ncodeberg_repo='example/extension'\n")).unwrap();
+            let output = simit_with_user_config(root)
+                .current_dir(root)
+                .args([
+                    "init",
+                    "ci",
+                    "--platform",
+                    platform,
+                    "--runtime",
+                    "nix",
+                    "--with-vscode",
+                ])
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            let dir = if platform == "github" {
+                ".github"
+            } else {
+                ".forgejo"
+            };
+            let doc: serde_yaml::Value = serde_yaml::from_str(&read(
+                &root.join(format!("{dir}/workflows/publish-vscode-extension.yaml")),
+            ))
+            .unwrap();
+            let steps = doc["jobs"]["publish"]["steps"].as_sequence().unwrap();
+            let validation = steps
+                .iter()
+                .position(|step| step["name"] == "Validate release tag and extension version")
+                .unwrap();
+            let credentials = steps
+                .iter()
+                .position(|step| step["name"] == "Validate publish credentials")
+                .unwrap();
+            assert!(validation < credentials);
+            let script = steps[validation]["run"].as_str().unwrap();
+            let (_, signature_boundary) = script.split_once("git verify-tag").unwrap();
+            let signature_boundary = signature_boundary
+                .split("extension_version=")
+                .next()
+                .unwrap();
+            let git = |args: &[&str]| {
+                let output = Command::new("git")
+                    .current_dir(root)
+                    .env("GNUPGHOME", key.path())
+                    .args([
+                        "-c",
+                        "user.name=Extension fixture",
+                        "-c",
+                        "user.email=extension@example.invalid",
+                        "-c",
+                        "user.signingkey=extension@example.invalid",
+                    ])
+                    .args(args)
+                    .output()
+                    .unwrap();
+                assert!(output.status.success(), "{output:?}");
+                output
+            };
+            git(&["init"]);
+            git(&["add", "src", "Cargo.toml", "flake.nix", "simit.toml"]);
+            git(&["commit", "-m", "fixture"]);
+            git(&["tag", "-s", "component-a/v0.1.0", "-m", "component release"]);
+            let object =
+                String::from_utf8(git(&["rev-parse", "refs/tags/component-a/v0.1.0"]).stdout)
+                    .unwrap();
+            let tag = format!("{prefix}0.1.0");
+            git(&["update-ref", &format!("refs/tags/{tag}"), object.trim()]);
+            git(&["verify-tag", &format!("refs/tags/{tag}")]);
+            let validate = || {
+                Command::new("bash")
+                    .current_dir(root)
+                    .env("GNUPGHOME", key.path())
+                    .env("GITHUB_REF_NAME", &tag)
+                    .args([
+                        "-euo",
+                        "pipefail",
+                        "-c",
+                        &format!("git verify-tag{signature_boundary}\nprintf validated > admitted"),
+                    ])
+                    .output()
+                    .unwrap()
+            };
+            let output = validate();
+            assert!(!output.status.success(), "{platform}/{prefix}: {output:?}");
+            assert!(!root.join("admitted").exists());
+            git(&["tag", "-s", "-f", &tag, "-m", "correct release"]);
+            let output = validate();
+            assert!(output.status.success(), "{output:?}");
+            assert!(root.join("admitted").exists());
+        }
+    }
+}
+
 #[test]
 fn forgejo_nix_can_generate_jetbrains_publish_workflow() {
     let temp = init_package(true);
