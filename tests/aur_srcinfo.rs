@@ -61,7 +61,7 @@ fn exercise(root_runner: bool, fail: bool) {
     );
     executable(
         &bin.join("setpriv"),
-        "#!/bin/sh\nset -eu\ntest \"$1\" = --reuid=65534\ntest \"$2\" = --regid=65534\ntest \"$3\" = --clear-groups\nshift 3\nexport TEST_UID=65534\nexec \"$@\"\n",
+        "#!/bin/sh\nset -eu\ntest -f PKGBUILD\ntest \"$1\" = --reuid=65534\ntest \"$2\" = --regid=65534\ntest \"$3\" = --clear-groups\nshift 3\nexport TEST_UID=65534\nexec \"$@\"\n",
     );
     executable(
         &bin.join("makepkg"),
@@ -127,13 +127,16 @@ fn srcinfo_failure_restores_ownership_without_replacing_previous_metadata() {
 fn real_srcinfo_execution_preserves_owner_on_success_and_failure() {
     use std::os::unix::fs::MetadataExt;
 
-    for fail in [false, true] {
+    for (fail, mode) in [(false, 0o755), (true, 0o755), (false, 0o700), (true, 0o700)] {
         let temp = TempDir::new().unwrap();
         let root = temp.path();
-        fs::set_permissions(root, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(root, fs::Permissions::from_mode(mode)).unwrap();
         let rendered = helper(root);
-        let bin = root.join("test-bin");
-        fs::create_dir(&bin).unwrap();
+        // The tool is public, like makepkg in the Nix store; the workspace
+        // deliberately need not be traversable by the dropped UID.
+        let tools = TempDir::new().unwrap();
+        let bin = tools.path();
+        fs::set_permissions(bin, fs::Permissions::from_mode(0o755)).unwrap();
         executable(
             &bin.join("makepkg"),
             "#!/bin/sh\nset -eu\ntest \"$(id -u)\" != 0\nprintf 'pkgname=demo\\n'\nexit \"$TEST_FAIL\"\n",

@@ -57,6 +57,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Reject traversal in COPR spec output paths and enter AUR clones before dropping
+  root privileges, preserving private workspace permissions and clone ownership.
 - Persist and verify source-bound Chocolatey candidates before Actions
   publication, retain normalized package filenames, isolate prebuild concurrency
   by fork repository, and reject colliding COPR spec/Makefile outputs.

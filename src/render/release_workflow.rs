@@ -1927,7 +1927,7 @@ fn push_publish_aur(w: &mut String, aur: &ResolvedAur, activated_remote: bool) {
             if [ "$(id -u)" -eq 0 ]; then
               owner="$(stat -c '%u:%g' "$pkgdir")"
               chown -R 65534:65534 "$pkgdir"
-              setpriv --reuid=65534 --regid=65534 --clear-groups sh -c 'cd "$1" && makepkg --config "$2" --printsrcinfo' sh "$pkgdir" "$MAKEPKG_CONF" > "$pkgdir/.SRCINFO.tmp"
+              (cd "$pkgdir" && setpriv --reuid=65534 --regid=65534 --clear-groups makepkg --config "$MAKEPKG_CONF" --printsrcinfo) > "$pkgdir/.SRCINFO.tmp"
             else
               (cd "$pkgdir" && makepkg --config "$MAKEPKG_CONF" --printsrcinfo) > "$pkgdir/.SRCINFO.tmp"
             fi
