@@ -29,6 +29,7 @@ include = [
   "/src/**/*.rs",
   "/src/monorepo/native_release.py",
   "/src/render/ci/*.py",
+  "/scripts/qualify-*.py",
   "/src/review/assets/**",
   "/tests/**/*.rs",
   "/tests/fixtures/**",
