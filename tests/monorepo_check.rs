@@ -398,3 +398,26 @@ fn member_invocations_run_from_the_project_root() {
         root.path().canonicalize().unwrap().to_str().unwrap()
     );
 }
+
+#[test]
+fn local_timeout_stops_the_gate_and_descendants_without_retrying() {
+    let root = fixture();
+    let path = root.path().join("simit.toml");
+    let config = fs::read_to_string(&path).unwrap().replace(
+        "{ id = \"fail\", run = \"printf original-failure >&2; exit 7\" }",
+        "{ id = \"fail\", timeout_minutes = 1, run = \"printf x >> executions; (sleep 65; touch leaked) & wait\" }",
+    );
+    fs::write(path, config).unwrap();
+    let started = std::time::Instant::now();
+    // output() also waits for inherited pipes held by the descendant: killing
+    // only Bash would still block until sleep finishes and the marker is made.
+    let output = check(&root, "fail");
+    assert!(!output.status.success(), "{output:?}");
+    assert!(started.elapsed() < std::time::Duration::from_secs(64));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("timed out after 1 minutes"), "{stderr}");
+    assert!(stderr.contains("Nix failure diagnostics"));
+    assert!(!stderr.contains("must-not-be-reported"));
+    assert_eq!(fs::read(root.path().join("executions")).unwrap(), b"x");
+    assert!(!root.path().join("leaked").exists());
+}

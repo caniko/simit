@@ -1,8 +1,8 @@
 //! Execute the same project-owned gate locally and in generated qualification.
 use std::{
     fs,
-    process::Command,
-    time::{SystemTime, UNIX_EPOCH},
+    process::{Child, Command},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, bail};
@@ -47,23 +47,65 @@ pub(super) fn run(command: MonorepoCheckCommand) -> Result<()> {
     let since = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     // The command comes from the validated project config, never event data.
     // Preserve trunk's Bash errexit, nounset and pipefail contract.
-    let status = Command::new("bash")
+    let mut process = Command::new("bash");
+    process
         .args(["-euo", "pipefail", "-c", &gate.run])
         .envs(environment)
-        .current_dir(&root)
-        .status()
-        .context("run declared component check")?;
-    if status.success() {
+        .current_dir(&root);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        process.process_group(0);
+    }
+    let deadline = Instant::now() + Duration::from_secs(gate.timeout_minutes * 60);
+    let mut child = GateProcess(process.spawn().context("run declared component check")?);
+    let status = loop {
+        if let Some(status) = child
+            .0
+            .try_wait()
+            .context("wait for declared component check")?
+        {
+            break Some(status);
+        }
+        if Instant::now() >= deadline {
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    // Reap Bash and stop its descendants before collecting failure evidence.
+    drop(child);
+    if status.is_some_and(|status| status.success()) {
         return Ok(());
     }
     if command.nix_diagnostics {
         diagnostics(since);
     }
+    let Some(status) = status else {
+        bail!(
+            "component {} check {} timed out after {} minutes",
+            command.component,
+            command.check,
+            gate.timeout_minutes
+        );
+    };
     bail!(
         "component {} check {} failed: {status}",
         command.component,
         command.check
     )
+}
+
+struct GateProcess(Child);
+
+impl Drop for GateProcess {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        if let Some(pid) = rustix::process::Pid::from_raw(self.0.id() as i32) {
+            let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+        }
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
 }
 
 fn diagnostics(since: u64) {
