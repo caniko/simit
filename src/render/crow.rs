@@ -862,6 +862,11 @@ pub fn release_file(
     config: &CrowCiConfig,
     inputs: &ReleaseWorkflowInputs<'_>,
 ) -> Result<GeneratedFile> {
+    if !inputs.required_gates.is_empty() {
+        bail!(
+            "Crow release workflows do not support required gates; use an Actions release provider to enforce them"
+        );
+    }
     let image = nix_image(config)?;
     let mut build = Step::new("release", &image)
         .command("test -n \"$${CI_COMMIT_TAG:-}\"".to_owned())

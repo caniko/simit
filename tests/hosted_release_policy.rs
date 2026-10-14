@@ -182,6 +182,25 @@ fn release_artifact_jobs_do_not_reuse_required_gate_workspaces() {
 }
 
 #[test]
+fn crow_required_release_gates_are_not_silently_omitted() {
+    let dir = project(
+        "[ci]\nprovider='crow'\nplatform='forgejo'\nrequired_gates=[{id='required',run='exit 99',timeout_minutes=7}]\n[release.codeberg]\nrepo='example/player'\n[release.artifacts]\nrunner='crow-default'\nbuild_commands=['mkdir -p release']\nsign=false\n",
+    );
+    let output = common::simit()
+        .current_dir(dir.path())
+        .args(["init", "release"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("Crow release workflows do not support required gates"),
+        "{output:?}"
+    );
+    assert!(!dir.path().join(".crow/release.yaml").exists());
+}
+
+#[test]
 fn unsafe_tag_prefix_is_rejected() {
     let dir = project(&format!("[release]\ntag_prefix = \"../\"\n\n{HOSTED}"));
     let output = common::simit()
