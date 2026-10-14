@@ -55,10 +55,16 @@ fn invoke_with(root: &Path, mode: &str, version: &str, pack_only: bool) -> std::
                 if version == "1.001.2" {
                     "1.1.2"
                 } else {
-                    version
+                    version.split('+').next().unwrap()
                 }
             ),
         );
+    if root.join("expected-lookup").exists() {
+        command.env(
+            "TEST_LOOKUP_URL",
+            fs::read_to_string(root.join("expected-lookup")).unwrap(),
+        );
+    }
     if pack_only {
         command.env_remove("PUBLICATION_FIXTURE_KEY");
     }
@@ -96,6 +102,154 @@ esac
         fs::read_to_string(root.join("pushes")).unwrap(),
         "push\npush\n"
     );
+}
+
+#[test]
+fn packed_filename_and_registry_lookup_omit_build_metadata() {
+    for (version, filename) in [
+        ("1.0.0+githash", "demo.1.0.0.nupkg"),
+        ("1.0.0-alpha+githash", "demo.1.0.0-alpha.nupkg"),
+    ] {
+        let temp = exercise("absent", true, 1);
+        let root = temp.path();
+        executable(
+            &root.join("test-bin/choco"),
+            &format!(
+                r#"#!/bin/sh
+set -eu
+case "$1" in
+ pack)
+   test -z "${{PUBLICATION_FIXTURE_KEY:-}}"
+   printf 'pack\n' >> "$TEST_ROOT/packs"
+   while [ "$1" != --output-directory ]; do shift; done
+   printf 'candidate package\n' > "$2/{filename}" ;;
+ push) test "$(basename "$2")" = {filename}; printf 'push\n' >> "$TEST_ROOT/pushes" ;;
+ *) exit 99 ;;
+esac
+"#
+            ),
+        );
+        for mode in ["absent", "identical"] {
+            let output = invoke_with(root, mode, version, false);
+            assert!(output.status.success(), "{version}: {output:?}");
+        }
+        assert_eq!(
+            fs::read_to_string(root.join("packs")).unwrap(),
+            "pack\npack\n"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("pushes")).unwrap(),
+            "push\npush\n"
+        );
+    }
+}
+
+fn v3_fixture() -> TempDir {
+    let temp = exercise("absent", true, 1);
+    let root = temp.path();
+    let config = fs::read_to_string(root.join("simit.toml"))
+        .unwrap()
+        .replace(
+            "https://packages.example.com/api/v2/",
+            "https://packages.example.com/custom-feed",
+        );
+    fs::write(root.join("simit.toml"), config).unwrap();
+    fs::write(root.join("service-index.json"), r#"{"version":"3.0.0","resources":[{"@type":"PackageBaseAddress/3.0.0","@id":"https://content.example.com/flat/"}]}"#).unwrap();
+    fs::write(
+        root.join("expected-lookup"),
+        "https://content.example.com/flat/demo/0.1.0/demo.0.1.0.nupkg",
+    )
+    .unwrap();
+    temp
+}
+
+#[test]
+fn v3_service_discovery_verifies_exact_bytes_before_push_and_resume() {
+    for mode in [
+        "absent",
+        "identical",
+        "race",
+        "conflict",
+        "http-failure",
+        "index-unauthorized",
+        "index-unavailable",
+    ] {
+        let temp = v3_fixture();
+        let root = temp.path();
+        let output = invoke(root, mode);
+        assert_eq!(
+            output.status.success(),
+            matches!(mode, "absent" | "identical" | "race"),
+            "{mode}: {output:?}"
+        );
+        assert_eq!(fs::read_to_string(root.join("packs")).unwrap(), "pack\n");
+        assert_eq!(
+            fs::read_to_string(root.join("pushes")).unwrap(),
+            if mode == "absent" {
+                "push\npush\n"
+            } else {
+                "push\n"
+            }
+        );
+    }
+}
+
+#[test]
+fn v2_json_service_documents_keep_the_v2_package_route() {
+    let temp = exercise("absent", true, 1);
+    let root = temp.path();
+    fs::write(root.join("v2-json"), r#"{"d":{"EntitySets":["Packages"]}}"#).unwrap();
+    let output = invoke(root, "identical");
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(fs::read_to_string(root.join("pushes")).unwrap(), "push\n");
+}
+
+#[test]
+fn v3_content_urls_lowercase_ids_and_normalized_prereleases() {
+    let temp = v3_fixture();
+    let root = temp.path();
+    fs::remove_file(root.join("pkg/demo.nuspec")).unwrap();
+    let config = fs::read_to_string(root.join("simit.toml"))
+        .unwrap()
+        .replace("id = \"demo\"", "id = \"Demo.Tools\"");
+    fs::write(root.join("simit.toml"), config).unwrap();
+    fs::write(
+        root.join("expected-lookup"),
+        "https://content.example.com/flat/demo.tools/1.0.0-alpha/demo.tools.1.0.0-alpha.nupkg",
+    )
+    .unwrap();
+    executable(
+        &root.join("test-bin/choco"),
+        r#"#!/bin/sh
+set -eu
+test "$1" = pack
+test -z "${PUBLICATION_FIXTURE_KEY:-}"
+while [ "$1" != --output-directory ]; do shift; done
+printf 'candidate package\n' > "$2/Demo.Tools.1.0.0-AlPhA.nupkg"
+"#,
+    );
+    let output = invoke_with(root, "identical", "01.0.0.0-AlPhA+build", false);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(fs::read_to_string(root.join("pushes")).unwrap(), "push\n");
+}
+
+#[test]
+fn unusable_service_indexes_do_not_admit_a_missing_package_or_upload() {
+    for index in [
+        r#"{"version":"3.0.0","resources":[]}"#,
+        r#"{"version":"2.0.0","resources":[]}"#,
+        r#"{"version":"3.0.0","resources":[{"@type":"PackageBaseAddress/3.0.0","@id":"file:///private"}]}"#,
+        r#"{"version":"3.0.0","resources":[{"@type":"PackageBaseAddress/3.0.0","@id":"https://user:secret@content.example.com/flat/"}]}"#,
+        "{malformed",
+    ] {
+        let temp = v3_fixture();
+        let root = temp.path();
+        fs::write(root.join("service-index.json"), index).unwrap();
+        let output = invoke(root, "absent");
+        assert!(!output.status.success(), "{index}: {output:?}");
+        assert_eq!(fs::read_to_string(root.join("pushes")).unwrap(), "push\n");
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("fixture-secret-value"));
+    }
 }
 
 #[test]
@@ -187,6 +341,18 @@ test -z "${PUBLICATION_FIXTURE_KEY:-}"
 while [ "$1" != --output ]; do shift; done
 file=$2
 while [ "$1" != --url ]; do shift; done
+case "$2" in
+ https://packages.example.com/api/v2|https://community.chocolatey.org/api/v2)
+   if [ -f "$TEST_ROOT/v2-json" ]; then cat "$TEST_ROOT/v2-json" > "$file"
+   else printf '<service />' > "$file"; fi
+   printf 200; exit ;;
+ https://packages.example.com/custom-feed)
+   case "$TEST_MODE" in
+     index-unauthorized) printf 401; exit ;;
+     index-unavailable) printf 503; exit ;;
+   esac
+   cat "$TEST_ROOT/service-index.json" > "$file"; printf 200; exit ;;
+esac
 test "$2" = "$TEST_LOOKUP_URL"
 case "$TEST_MODE" in
  identical) printf 'candidate package\n' > "$file"; printf 200 ;;

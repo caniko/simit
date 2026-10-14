@@ -115,6 +115,13 @@ and generated payload hashes. Packing discovers the single nonempty package
 and retains its actual filename, including Chocolatey CLI 2.x version
 normalization.
 
+Registry byte verification discovers NuGet v3 `PackageBaseAddress/3.0.0`
+resources from the configured service index and uses normalized, lowercase
+package IDs/versions for content URLs. NuGet v2 feeds retain their package
+download route. Build metadata is omitted from normalized filenames and lookup
+versions. Discovery and downloads keep publication credentials out of their
+environment; unavailable or malformed service indexes fail verification.
+
 For an harbor-rs project whose flake exposes the conventional
 `packages.<system>.release-bundle`, the release artifact section can instead
 use the simple opt-in:

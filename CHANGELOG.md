@@ -57,6 +57,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Discover NuGet v3 package-content resources for Chocolatey byte verification
+  and omit SemVer build metadata from normalized package filenames and lookups.
 - Reject traversal in COPR spec output paths and enter AUR clones before dropping
   root privileges, preserving private workspace permissions and clone ownership.
 - Persist and verify source-bound Chocolatey candidates before Actions

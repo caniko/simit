@@ -353,8 +353,9 @@ fn packed_package(directory: &Path, id: &str, version: &str) -> Result<PathBuf> 
     Ok(package.clone())
 }
 
-// Chocolatey CLI 2.x normalizes numeric parts and removes a zero fourth part.
+// NuGet normalization removes build metadata, leading zeroes and a zero fourth part.
 fn normalized_version(version: &str) -> String {
+    let version = version.split('+').next().unwrap_or(version);
     let (core, suffix) = version.split_once('-').unwrap_or((version, ""));
     let mut parts = core
         .split('.')
@@ -389,16 +390,7 @@ fn remote_package_matches(
     candidate_sha256: &str,
     api_key_env: &str,
 ) -> Result<bool> {
-    let source = url::Url::parse(&resolved.push.source)
-        .map_err(|_| anyhow::anyhow!("invalid Chocolatey registry URL"))?;
-    if !matches!(source.scheme(), "https" | "http")
-        || source.query().is_some()
-        || source.fragment().is_some()
-    {
-        bail!(
-            "Chocolatey registry lookup requires an HTTP(S) NuGet v2 base URL without query or fragment"
-        );
-    }
+    let source = registry_url(&resolved.push.source)?;
     // The public service separates its push endpoint from its NuGet v2 feed.
     let lookup_source = if source.host_str() == Some("push.chocolatey.org") && source.path() == "/"
     {
@@ -406,33 +398,10 @@ fn remote_package_matches(
     } else {
         source.as_str().trim_end_matches('/')
     };
-    let url = format!(
-        "{}/package/{}/{}",
-        lookup_source,
-        percent_encode(&resolved.id),
-        percent_encode(&normalized_version(version))
-    );
+    let url = package_lookup_url(lookup_source, &resolved.id, version, api_key_env)?;
     let downloaded = tempfile::NamedTempFile::new().context("creating Chocolatey lookup output")?;
-    let output = Command::new("curl")
-        .args([
-            "--silent",
-            "--show-error",
-            "--location",
-            "--connect-timeout",
-            "10",
-            "--max-time",
-            "60",
-        ])
-        .arg("--output")
-        .arg(downloaded.path())
-        .args(["--write-out", "%{http_code}", "--url", &url])
-        .env_remove(api_key_env)
-        .output()
-        .context("running Chocolatey registry lookup")?;
-    if !output.status.success() {
-        bail!("Chocolatey registry lookup failed");
-    }
-    match output.stdout.as_slice() {
+    let status = registry_lookup(&url, downloaded.path(), api_key_env)?;
+    match status.as_slice() {
         b"404" => Ok(false),
         b"200" if sha256::sha256_of_file(downloaded.path())? == candidate_sha256 => Ok(true),
         b"200" => bail!(
@@ -441,6 +410,107 @@ fn remote_package_matches(
         ),
         _ => bail!("Chocolatey registry lookup returned an unexpected HTTP status"),
     }
+}
+
+fn registry_url(value: &str) -> Result<url::Url> {
+    let url =
+        url::Url::parse(value).map_err(|_| anyhow::anyhow!("invalid Chocolatey registry URL"))?;
+    if !matches!(url.scheme(), "https" | "http")
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        bail!(
+            "Chocolatey registry lookup requires an HTTP(S) URL without credentials, query or fragment"
+        );
+    }
+    Ok(url)
+}
+
+fn package_lookup_url(source: &str, id: &str, version: &str, api_key_env: &str) -> Result<String> {
+    let index = tempfile::NamedTempFile::new().context("creating NuGet discovery output")?;
+    let status = registry_lookup(source, index.path(), api_key_env)?;
+    let body = fs::read(index.path())?;
+    let explicit_index = registry_url(source)?.path().ends_with(".json");
+    let json =
+        if body.iter().find(|byte| !byte.is_ascii_whitespace()) == Some(&b'{') || explicit_index {
+            Some(
+                serde_json::from_slice::<serde_json::Value>(&body)
+                    .context("reading Chocolatey NuGet service index")?,
+            )
+        } else {
+            None
+        };
+    // NuGet v2 OData service documents can also be JSON; only v3 has this schema.
+    let json_index = explicit_index
+        || json.as_ref().is_some_and(|index| {
+            index.get("version").is_some() || index.get("resources").is_some()
+        });
+    if json_index {
+        if status != b"200" {
+            bail!("Chocolatey NuGet service index lookup returned an unexpected HTTP status");
+        }
+        let index = json.context("NuGet service index is not JSON")?;
+        if index["version"]
+            .as_str()
+            .and_then(|version| semver::Version::parse(version).ok())
+            .is_none_or(|version| version.major != 3)
+        {
+            bail!("Chocolatey NuGet service index must use schema version 3");
+        }
+        let resources = index["resources"]
+            .as_array()
+            .context("NuGet service index has no resources")?;
+        let base = resources
+            .iter()
+            .find(|resource| resource["@type"] == "PackageBaseAddress/3.0.0")
+            .and_then(|resource| resource["@id"].as_str())
+            .context("NuGet service index has no PackageBaseAddress/3.0.0 resource")?;
+        let base = registry_url(base)?;
+        let id = percent_encode(&id.to_lowercase());
+        let version = percent_encode(&normalized_version(version).to_lowercase());
+        return Ok(format!(
+            "{}/{id}/{version}/{id}.{version}.nupkg",
+            base.as_str().trim_end_matches('/')
+        ));
+    }
+    if status != b"200" && status != b"404" {
+        bail!("Chocolatey registry discovery returned an unexpected HTTP status");
+    }
+    Ok(format!(
+        "{}/package/{}/{}",
+        source.trim_end_matches('/'),
+        percent_encode(id),
+        percent_encode(&normalized_version(version))
+    ))
+}
+
+fn registry_lookup(url: &str, destination: &Path, api_key_env: &str) -> Result<Vec<u8>> {
+    let output = Command::new("curl")
+        .args([
+            "--silent",
+            "--show-error",
+            "--location",
+            "--proto",
+            "=http,https",
+            "--proto-redir",
+            "=http,https",
+            "--connect-timeout",
+            "10",
+            "--max-time",
+            "60",
+        ])
+        .arg("--output")
+        .arg(destination)
+        .args(["--write-out", "%{http_code}", "--url", url])
+        .env_remove(api_key_env)
+        .output()
+        .context("running Chocolatey registry lookup")?;
+    if !output.status.success() {
+        bail!("Chocolatey registry lookup failed");
+    }
+    Ok(output.stdout)
 }
 
 fn redacted_output(output: &std::process::Output, api_key: &str) -> String {
