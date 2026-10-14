@@ -38,6 +38,181 @@ artifacts = ["nix-build-0"]
 }
 
 #[test]
+fn sealed_custody_is_explicit_and_uploads_capsules_before_aggregate_reporting() {
+    let temp = project();
+    let config = temp.path().join("simit.toml");
+    fs::write(
+        &config,
+        fs::read_to_string(&config)
+            .unwrap()
+            .replace("[ci.custody]\n", "[ci.custody]\nprotocol = \"sealed-v2\"\n"),
+    )
+    .unwrap();
+    let output = common::simit()
+        .current_dir(temp.path())
+        .args(["init", "ci"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let value: Value = serde_yaml::from_str(
+        &fs::read_to_string(temp.path().join(".github/workflows/producer-custody.yaml")).unwrap(),
+    )
+    .unwrap();
+    let seal = &value["jobs"]["seal"];
+    let aggregate = &value["jobs"]["aggregate"];
+    let expected = format!(
+        "{}{}",
+        include_str!("../src/render/ci/custody.py")
+            .split("if __name__ ==")
+            .next()
+            .unwrap(),
+        include_str!("../src/render/ci/custody_sealed.py")
+    );
+    let mut programs = 0;
+    for job in ["identity", "seal", "aggregate"] {
+        for step in value["jobs"][job]["steps"].as_sequence().unwrap() {
+            if let Some(program) = step["run"].as_str() {
+                assert_eq!(program, expected);
+                programs += 1;
+            }
+        }
+    }
+    assert_eq!(programs, 4);
+    assert_eq!(seal["permissions"]["checks"], "read");
+    assert!(seal["permissions"].get("statuses").is_none());
+    assert!(
+        seal["concurrency"]["group"]
+            .as_str()
+            .unwrap()
+            .contains("workflow_run.id")
+    );
+    assert_eq!(seal["concurrency"]["cancel-in-progress"], false);
+    assert_eq!(aggregate["permissions"]["statuses"], "write");
+    let phases: Vec<_> = aggregate["steps"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .filter_map(|s| s["env"]["SIMIT_CUSTODY_PHASE"].as_str())
+        .collect();
+    assert_eq!(phases, ["aggregate", "report"]);
+    let script = temp.path().join("sealed.py");
+    fs::write(&script, seal["steps"][0]["run"].as_str().unwrap()).unwrap();
+    let output = Command::new("python3")
+        .arg("-c")
+        .arg(include_str!("fixtures/ci-sealed-custody-contract.py"))
+        .arg(&script)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+}
+
+#[test]
+fn custody_protocol_survives_ci_option_updates_and_regeneration() {
+    use simit::config::ProjectConfig;
+    use simit::config::custody::Protocol;
+
+    for rust_project in [false, true] {
+        for (protocol, expected) in [
+            ("strict-v1", Protocol::StrictV1),
+            ("sealed-v2", Protocol::SealedV2),
+        ] {
+            let temp = project();
+            if rust_project {
+                fs::write(
+                    temp.path().join("Cargo.toml"),
+                    "[package]\nname = \"custody-fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+                )
+                .unwrap();
+                fs::create_dir(temp.path().join("src")).unwrap();
+                fs::write(temp.path().join("src/main.rs"), "fn main() {}\n").unwrap();
+            }
+            let path = temp.path().join("simit.toml");
+            fs::write(
+                &path,
+                fs::read_to_string(&path).unwrap().replace(
+                    "[ci.custody]\n",
+                    &format!("[ci.custody]\nprotocol = \"{protocol}\"\n"),
+                ),
+            )
+            .unwrap();
+            let before = ProjectConfig::load(temp.path()).unwrap().ci.custody;
+            let workflow = temp.path().join(".github/workflows/producer-custody.yaml");
+            let initial = common::simit()
+                .current_dir(temp.path())
+                .args(["init", "ci"])
+                .output()
+                .unwrap();
+            assert!(initial.status.success(), "{protocol}: {initial:?}");
+            let observer = fs::read(&workflow).unwrap();
+
+            let update = common::simit()
+                .current_dir(temp.path())
+                .args(["init", "ci", "--runner", "ubuntu-latest"])
+                .output()
+                .unwrap();
+            assert!(update.status.success(), "{protocol}: {update:?}");
+            let reloaded = ProjectConfig::load(temp.path()).unwrap();
+            assert_eq!(reloaded.ci.runner.as_deref(), Some("ubuntu-latest"));
+            assert_eq!(reloaded.ci.custody, before);
+            assert_eq!(reloaded.ci.custody.as_ref().unwrap().protocol, expected);
+            assert_eq!(fs::read(&workflow).unwrap(), observer);
+            if expected == Protocol::StrictV1 {
+                assert!(!fs::read_to_string(&path).unwrap().contains("protocol ="));
+            }
+            for args in [
+                vec!["init", "ci", "--check", "--diff"],
+                vec!["init", "ci"],
+                vec!["init", "ci", "--check", "--diff"],
+            ] {
+                let output = common::simit()
+                    .current_dir(temp.path())
+                    .args(args)
+                    .output()
+                    .unwrap();
+                assert!(output.status.success(), "{protocol}: {output:?}");
+                assert_eq!(fs::read(&workflow).unwrap(), observer);
+                assert_eq!(ProjectConfig::load(temp.path()).unwrap().ci.custody, before);
+            }
+        }
+    }
+}
+
+#[test]
+fn custody_protocol_is_versioned_without_changing_default_generation() {
+    use simit::config::custody::Protocol;
+    let temp = project();
+    let default = simit::config::ProjectConfig::load(temp.path())
+        .unwrap()
+        .ci
+        .custody
+        .unwrap();
+    assert_eq!(default.protocol, Protocol::StrictV1);
+    let explicit: simit::config::custody::Config = serde_json::from_value({
+        let mut value = serde_json::to_value(&default).unwrap();
+        value["protocol"] = serde_json::json!("strict-v1");
+        value
+    })
+    .unwrap();
+    assert_eq!(
+        simit::render::ci::custody::file(&default).unwrap().content,
+        simit::render::ci::custody::file(&explicit).unwrap().content
+    );
+    let config = temp.path().join("simit.toml");
+    let before = fs::read_to_string(&config)
+        .unwrap()
+        .replace("[ci.custody]\n", "[ci.custody]\nprotocol = \"sealed-v3\"\n");
+    fs::write(&config, &before).unwrap();
+    let output = common::simit()
+        .current_dir(temp.path())
+        .args(["init", "ci"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "{output:?}");
+    assert_eq!(fs::read_to_string(&config).unwrap(), before);
+    assert!(!temp.path().join(".github/workflows").exists());
+}
+
+#[test]
 fn completion_custody_uses_default_branch_code_without_executing_producer_sources() {
     let temp = project();
     let output = common::simit()
@@ -133,53 +308,67 @@ fn completion_custody_uses_default_branch_code_without_executing_producer_source
 
 #[test]
 fn rendered_custody_workflow_admits_exact_utf8_byte_boundary_with_full_inventory() {
-    for token in ["x", "é", "\"", "\\", "'"] {
-        let temp = project();
-        let mut config = simit::config::ProjectConfig::load(temp.path())
-            .unwrap()
-            .ci
-            .custody
+    use simit::config::custody::Protocol;
+    for (protocol, copies, job) in [
+        (Protocol::StrictV1, 2, "collect"),
+        (Protocol::SealedV2, 3, "aggregate"),
+    ] {
+        for token in ["x", "é", "\"", "\\", "'"] {
+            let temp = project();
+            let mut config = simit::config::ProjectConfig::load(temp.path())
+                .unwrap()
+                .ci
+                .custody
+                .unwrap();
+            config.protocol = protocol;
+            let mut producer = config.producers.remove("CI").unwrap();
+            producer.jobs = (0..50).map(|i| format!("job-{i}-{token}")).collect();
+            producer.artifacts = (0..50).map(|i| format!("artifact-{i}-{token}")).collect();
+            config.producers.clear();
+            config.producers.insert(format!("CI {token}"), producer);
+            let baseline = simit::render::ci::custody::file(&config)
+                .unwrap()
+                .content
+                .len();
+            let remaining = 500_000 - baseline;
+            // Names have one trigger copy in addition to the repeated policies.
+            // Consecutive weights admit an exact boundary under either protocol.
+            let name_pad = remaining % copies;
+            let (name, mut producer) = config.producers.pop_first().unwrap();
+            producer.jobs[0].push_str(&"x".repeat((remaining - (copies + 1) * name_pad) / copies));
+            config
+                .producers
+                .insert(name + &"x".repeat(name_pad), producer);
+            let rendered = simit::render::ci::custody::file(&config).unwrap();
+            assert_eq!(rendered.content.len(), 500_000, "{token:?}");
+            let value: Value = serde_yaml::from_str(&rendered.content).unwrap();
+            let policy: serde_json::Value = serde_json::from_str(
+                value["jobs"][job]["env"]["SIMIT_CUSTODY_CONFIG"]
+                    .as_str()
+                    .unwrap(),
+            )
             .unwrap();
-        let mut producer = config.producers.remove("CI").unwrap();
-        producer.jobs = (0..50).map(|i| format!("job-{i}-{token}")).collect();
-        producer.artifacts = (0..50).map(|i| format!("artifact-{i}-{token}")).collect();
-        config.producers.clear();
-        config.producers.insert(format!("CI {token}"), producer);
-        let baseline = simit::render::ci::custody::file(&config)
-            .unwrap()
-            .content
-            .len();
-        let remaining = 500_000 - baseline;
-        // A name byte is rendered three times, a job byte twice. Together they
-        // allow an exact byte boundary independently of Unicode/escaping width.
-        let name_pad = remaining % 2;
-        let (name, mut producer) = config.producers.pop_first().unwrap();
-        producer.jobs[0].push_str(&"x".repeat((remaining - 3 * name_pad) / 2));
-        config
-            .producers
-            .insert(name + &"x".repeat(name_pad), producer);
-        let rendered = simit::render::ci::custody::file(&config).unwrap();
-        assert_eq!(rendered.content.len(), 500_000, "{token:?}");
-        let value: Value = serde_yaml::from_str(&rendered.content).unwrap();
-        let policy: serde_json::Value = serde_json::from_str(
-            value["jobs"]["collect"]["env"]["SIMIT_CUSTODY_CONFIG"]
-                .as_str()
-                .unwrap(),
-        )
-        .unwrap();
-        assert_eq!(policy, serde_json::to_value(&config).unwrap());
-        let (name, mut producer) = config.producers.pop_first().unwrap();
-        producer.jobs[0].pop();
-        config.producers.insert(name + "x", producer);
-        config.validate().unwrap();
-        let error = simit::render::ci::custody::file(&config).unwrap_err();
-        assert!(error.to_string().contains("500001 bytes"), "{error:#}");
+            assert_eq!(policy, serde_json::to_value(&config).unwrap());
+            let (name, mut producer) = config.producers.pop_first().unwrap();
+            producer.jobs[0].pop();
+            config.producers.insert(name + "x", producer);
+            config.validate().unwrap();
+            let error = simit::render::ci::custody::file(&config).unwrap_err();
+            assert!(error.to_string().contains("500001 bytes"), "{error:#}");
+        }
     }
 }
 
 #[test]
 fn oversized_rendered_custody_policy_rejects_without_persistence_or_reconciliation() {
-    for language in ["nix", "rust", "python"] {
+    for (language, protocol) in [
+        ("nix", "strict-v1"),
+        ("rust", "strict-v1"),
+        ("python", "strict-v1"),
+        ("nix", "sealed-v2"),
+        ("rust", "sealed-v2"),
+        ("python", "sealed-v2"),
+    ] {
         let temp = project();
         if language == "rust" {
             fs::write(
@@ -197,10 +386,16 @@ fn oversized_rendered_custody_policy_rejects_without_persistence_or_reconciliati
             .unwrap();
         }
         let config = temp.path().join("simit.toml");
-        let source = fs::read_to_string(&config).unwrap().replace(
-            "jobs = [\"test\"]",
-            &format!("jobs = [\"{}\"]", "x".repeat(200_000)),
-        );
+        let source = fs::read_to_string(&config)
+            .unwrap()
+            .replace(
+                "[ci.custody]\n",
+                &format!("[ci.custody]\nprotocol = \"{protocol}\"\n"),
+            )
+            .replace(
+                "jobs = [\"test\"]",
+                &format!("jobs = [\"{}\"]", "x".repeat(200_000)),
+            );
         fs::write(&config, &source).unwrap();
         let workflows = temp.path().join(".github/workflows");
         fs::create_dir_all(&workflows).unwrap();
