@@ -168,3 +168,208 @@ fn generated_qualification_runs_native_diagnostics_for_every_gate() {
         Some("gate-owned")
     );
 }
+
+fn environment_fixture(value: &str) -> TempDir {
+    let root = fixture();
+    let config = fs::read_to_string(root.path().join("simit.toml")).unwrap();
+    let config = config.replace("\"gate-owned\"", &toml_edit::Value::from(value).to_string());
+    let config = config.replace(
+        "printf '%s' \\\"$GATE_VALUE\\\"",
+        "printf x >> executions; printf '%s' \\\"$GATE_VALUE\\\" > observed; pwd > working-directory",
+    );
+    fs::write(root.path().join("simit.toml"), config).unwrap();
+    root
+}
+
+fn generated_gate(root: &TempDir, id: &str, value: Option<&str>) -> std::process::Output {
+    // Nix provisioning is the external boundary. Execute the unmodified generated
+    // caller, forwarding its exact argv to the real candidate Simit executable.
+    let bin = root.path().join("bin");
+    fs::write(bin.join("nix"), "#!/bin/sh\nset -eu\ntest \"$1 $2 $3 $4\" = 'develop --print-build-logs .#ci --command'\nshift 4\nexec \"$@\"\n").unwrap();
+    fs::set_permissions(bin.join("nix"), fs::Permissions::from_mode(0o755)).unwrap();
+    std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_simit"), bin.join("simit")).unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_simit"))
+        .current_dir(root.path())
+        .args(["init", "ci"])
+        .output()
+        .unwrap();
+    assert!(generated.status.success(), "{generated:?}");
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        &fs::read_to_string(root.path().join(".github/workflows/ci.yaml")).unwrap(),
+    )
+    .unwrap();
+    let step = yaml["jobs"]["component-core"]["steps"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .find(|step| step["name"].as_str() == Some(id))
+        .unwrap();
+    let path = std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    )))
+    .unwrap();
+    let mut caller = Command::new("bash");
+    caller
+        .current_dir(root.path())
+        .args(["-euo", "pipefail", "-c", step["run"].as_str().unwrap()])
+        .env("PATH", path)
+        .env_remove("GATE_VALUE");
+    // Actions supplies the evaluated step environment, including empty values.
+    if let Some(value) = value {
+        caller.env("GATE_VALUE", value);
+    }
+    caller.output().unwrap()
+}
+
+#[test]
+fn generated_caller_preserves_provider_values_as_data_exactly_once_at_project_root() {
+    for (configured, value) in [
+        ("${{ secrets.TEST_TOKEN }}", ""),
+        ("${{ secrets.TEST_TOKEN }}", "provider-secret"),
+        (
+            "${{ secrets.TEST_TOKEN }}",
+            "'\" $(touch injected); `touch injected` & | $HOME",
+        ),
+        ("configured-literal", "evaluated-step-value"),
+    ] {
+        let root = environment_fixture(configured);
+        let output = generated_gate(&root, "pass", Some(value));
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(
+            fs::read(root.path().join("observed")).unwrap(),
+            value.as_bytes()
+        );
+        assert_eq!(fs::read(root.path().join("executions")).unwrap(), b"x");
+        assert_eq!(
+            fs::read_to_string(root.path().join("working-directory"))
+                .unwrap()
+                .trim(),
+            root.path().canonicalize().unwrap().to_str().unwrap()
+        );
+        assert!(!root.path().join("injected").exists());
+        assert!(output.stdout.is_empty());
+        assert!(output.stderr.is_empty());
+    }
+}
+
+#[test]
+fn provider_mode_requires_present_values_even_for_configured_literals() {
+    for configured in ["literal", "${{ secrets.TEST_TOKEN }}"] {
+        let root = environment_fixture(configured);
+        let output = generated_gate(&root, "pass", None);
+        assert!(!output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("missing provider-resolved gate environment variable GATE_VALUE"),
+            "{stderr}"
+        );
+        assert!(!stderr.contains(configured));
+        assert!(!stderr.contains("Nix failure diagnostics"));
+        assert!(!root.path().join("executions").exists());
+    }
+}
+
+#[test]
+fn local_literals_override_inherited_values_without_shell_interpretation() {
+    for value in ["", "'\" $(touch injected); `touch injected` & | $HOME"] {
+        let root = environment_fixture(value);
+        let output = check(&root, "pass");
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(
+            fs::read(root.path().join("observed")).unwrap(),
+            value.as_bytes()
+        );
+        assert_eq!(fs::read(root.path().join("executions")).unwrap(), b"x");
+        assert!(!root.path().join("injected").exists());
+    }
+}
+
+#[test]
+fn local_provider_expressions_fail_before_execution_without_exposing_values() {
+    let root = environment_fixture("prefix-${{ secrets.DO_NOT_REPORT }}");
+    let output = check(&root, "pass");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("provider expression requires --gate-env provider-resolved"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("DO_NOT_REPORT"));
+    assert!(!stderr.contains("inherited"));
+    assert!(!root.path().join("executions").exists());
+}
+
+#[test]
+fn generated_failures_keep_status_and_do_not_dump_resolved_secrets() {
+    let root = environment_fixture("${{ secrets.TEST_TOKEN }}");
+    let output = generated_gate(&root, "fail", Some("never-report-this-secret"));
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("original-failure"));
+    assert!(stderr.contains("exit status: 7"));
+    assert!(stderr.contains("Nix failure diagnostics"));
+    assert!(!stderr.contains("never-report-this-secret"));
+}
+
+#[test]
+fn generated_gate_preserves_bash_pipeline_and_unset_variable_failures() {
+    for command in [
+        "false | true",
+        "printf '%s' \"$SIMIT_MISSING_GATE_VARIABLE\"",
+    ] {
+        let root = environment_fixture("literal");
+        let path = root.path().join("simit.toml");
+        let config = fs::read_to_string(&path).unwrap();
+        let config = config.replace(
+            "printf x >> executions; printf '%s' \\\"$GATE_VALUE\\\" > observed; pwd > working-directory",
+            &format!("printf x >> executions; {}; touch after-failure", command.replace('"', "\\\"")),
+        );
+        fs::write(path, config).unwrap();
+        let output = generated_gate(&root, "pass", Some("never-report-this-secret"));
+        assert!(!output.status.success(), "{output:?}");
+        assert_eq!(fs::read(root.path().join("executions")).unwrap(), b"x");
+        assert!(!root.path().join("after-failure").exists());
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("never-report-this-secret"));
+    }
+}
+
+#[test]
+fn validates_the_complete_graph_before_running_a_gate() {
+    let root = environment_fixture("literal");
+    let path = root.path().join("simit.toml");
+    let config = fs::read_to_string(&path)
+        .unwrap()
+        .replace("id = \"fail\"", "id = \"pass\"");
+    fs::write(path, config).unwrap();
+    let output = check(&root, "pass");
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("duplicate check"));
+    assert!(!root.path().join("executions").exists());
+}
+
+#[test]
+fn member_invocations_run_from_the_project_root() {
+    let root = environment_fixture("literal");
+    let member = root.path().join("core/nested");
+    fs::create_dir_all(&member).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_simit"))
+        .current_dir(member)
+        .args([
+            "monorepo",
+            "check",
+            "--component",
+            "core",
+            "--check",
+            "pass",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(fs::read(root.path().join("executions")).unwrap(), b"x");
+    assert_eq!(
+        fs::read_to_string(root.path().join("working-directory"))
+            .unwrap()
+            .trim(),
+        root.path().canonicalize().unwrap().to_str().unwrap()
+    );
+}

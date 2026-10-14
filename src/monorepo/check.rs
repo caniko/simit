@@ -7,7 +7,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 
-use crate::cli::MonorepoCheckCommand;
+use crate::cli::{MonorepoCheckCommand, MonorepoGateEnv};
 
 pub(super) fn run(command: MonorepoCheckCommand) -> Result<()> {
     let (root, project) = super::load(&std::env::current_dir()?)?;
@@ -25,12 +25,31 @@ pub(super) fn run(command: MonorepoCheckCommand) -> Result<()> {
         .iter()
         .find(|gate| gate.id == command.check)
         .with_context(|| format!("unknown check {} in {}", command.check, command.component))?;
+    // Only generated CI opts into provider resolution. Local literals retain
+    // precedence over unrelated inherited values; never echo either value.
+    let mut environment = Vec::new();
+    for (name, value) in &gate.env {
+        let value = match command.gate_env {
+            MonorepoGateEnv::Local => {
+                if value.contains("${{") {
+                    bail!(
+                        "gate environment variable {name}: provider expression requires --gate-env provider-resolved"
+                    );
+                }
+                value.into()
+            }
+            MonorepoGateEnv::ProviderResolved => std::env::var_os(name).with_context(|| {
+                format!("missing provider-resolved gate environment variable {name}")
+            })?,
+        };
+        environment.push((name, value));
+    }
     let since = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     // The command comes from the validated project config, never event data.
-    // Match the existing generated sh -ec contract and component environment.
-    let status = Command::new("sh")
-        .args(["-ec", &gate.run])
-        .envs(&gate.env)
+    // Preserve trunk's Bash errexit, nounset and pipefail contract.
+    let status = Command::new("bash")
+        .args(["-euo", "pipefail", "-c", &gate.run])
+        .envs(environment)
         .current_dir(&root)
         .status()
         .context("run declared component check")?;

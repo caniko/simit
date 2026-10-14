@@ -119,7 +119,7 @@ fn render(root: &Path, config: &ProjectConfig, primary_only: bool) -> Result<Vec
         for gate in &component.checks {
             // Run the validated config through native Simit, already alive when
             // a Nix daemon dies, so failure evidence does not need another eval.
-            let mut step = json!({"name": gate.id, "timeout-minutes": gate.timeout_minutes, "run": format!("nix develop --print-build-logs .#ci --command simit monorepo check --component {} --check {} --nix-diagnostics", component.id, gate.id)});
+            let mut step = json!({"name": gate.id, "timeout-minutes": gate.timeout_minutes, "run": format!("nix develop --print-build-logs .#ci --command simit monorepo check --component {} --check {} --nix-diagnostics --gate-env provider-resolved", component.id, gate.id)});
             if !gate.env.is_empty() {
                 step["env"] = json!(gate.env);
             }

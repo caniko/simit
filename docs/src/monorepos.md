@@ -94,8 +94,17 @@ overrides must not be used to replace component qualification commands.
 simit monorepo check --component core --check evaluate --nix-diagnostics
 ```
 
+Local checks use configured environment literals even when the calling shell
+already defines those variables. Provider expressions (`${{ ... }}`) cannot be
+evaluated locally and are rejected before execution without printing their values.
+Generated Actions callers use `--gate-env provider-resolved`: every configured
+gate variable must be present in the evaluated step environment (an empty value
+is valid), and its bytes are passed directly to the gate without shell expansion.
+Checks run once from the project root with Bash `-euo pipefail`; failure diagnostics
+never retry the check or replace its failure status.
+
 The native runner resolves the root configuration, validates the component and
-check, and executes its project-owned command with `sh -ec` and the declared
+check, and executes its project-owned command with `bash -euo pipefail` and the declared
 environment. Unknown checks fail before execution. Generated qualification uses
 this runner inside the project's `ci` shell; GitHub retains the check timeout.
 

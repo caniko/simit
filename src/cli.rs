@@ -101,6 +101,19 @@ pub struct MonorepoCheckCommand {
         help = "Capture Linux kernel and Nix daemon evidence when the check fails"
     )]
     pub nix_diagnostics: bool,
+    #[arg(
+        long,
+        value_enum,
+        default_value = "local",
+        help = "Use configured literals locally, or require every gate variable from the evaluated CI step environment"
+    )]
+    pub gate_env: MonorepoGateEnv,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum MonorepoGateEnv {
+    Local,
+    ProviderResolved,
 }
 
 #[derive(Debug, Args)]
