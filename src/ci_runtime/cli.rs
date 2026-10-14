@@ -4,6 +4,8 @@ use clap::{Args, Subcommand};
 use std::path::PathBuf;
 #[path = "cli_git.rs"]
 mod git;
+#[path = "cli_objects.rs"]
+mod objects;
 
 /// CI execution commands. Receipts are evidence, never standalone acceptance.
 #[derive(Debug, Subcommand)]
@@ -217,6 +219,15 @@ fn verify_source_spec(
         actual_head == head,
         "observer checkout differs from exact source head"
     );
+    let commit = objects::object(
+        probe.path(),
+        &git,
+        "commit",
+        head,
+        "source-commit",
+        deadline,
+        1024 * 1024,
+    )?;
     if let Some((merge_sha, base)) = merge {
         ensure!(
             merge_sha.len() == 40
@@ -225,12 +236,12 @@ fn verify_source_spec(
                     .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
             "invalid protected PR merge revision"
         );
-        let merge = source_probe_bytes(
+        let merge = objects::object(
             probe.path(),
+            &git,
+            "commit",
+            merge_sha,
             "merge",
-            std::process::Command::new(&git)
-                .arg("--no-replace-objects")
-                .args(["cat-file", "commit", merge_sha]),
             deadline,
             65536,
         )?;
@@ -269,22 +280,13 @@ fn verify_source_spec(
         })
         .collect::<Result<Vec<_>>>()?
         .join("/");
-    let committed = source_probe(
+    let committed = objects::blob_id(probe.path(), &git, &commit, &relative, deadline)?;
+    let blob = objects::object(
         probe.path(),
-        "committed",
-        std::process::Command::new(&git)
-            .arg("--no-replace-objects")
-            .current_dir(&repository)
-            .args(["rev-parse", "--verify", &format!("{head}:{relative}")]),
-        deadline,
-    )?;
-    let blob = source_probe_bytes(
-        probe.path(),
+        &git,
         "blob",
-        std::process::Command::new(&git)
-            .arg("--no-replace-objects")
-            .current_dir(&repository)
-            .args(["cat-file", "blob", &committed]),
+        &committed,
+        "blob",
         deadline,
         super::observer::MAX_SPEC_BYTES,
     )?;

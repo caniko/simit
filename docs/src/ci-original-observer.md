@@ -36,6 +36,10 @@ missing objects. The bounded committed blob is the policy deserialized by the
 observer. Modified, staged, untracked
 and outside-checkout substitutions fail; local Git replacement objects cannot
 substitute the source blob. Unrelated worktree edits do not affect enrollment.
+The actual bounded commit, each tree on the spec path, merge commit and blob bytes
+are independently hashed with Git's object framing before use. Loose/packed
+objects with substituted contents under an unchanged object ID fail admission;
+checking a repository earlier does not authorize later unchecked reads.
 These Git probes share one thirty-second deadline. The active
 observer workflow cannot enroll itself as a producer.
 Source probes resolve Git only from fixed protected platform installation

@@ -104,6 +104,159 @@ fn invoke(root: &Path, spec: &Path, retention: bool) -> Output {
 }
 
 #[test]
+fn forged_loose_blob_tree_and_commit_objects_cannot_authorize_weaker_policy() {
+    use std::io::Write;
+    for retention in [false, true] {
+        for kind in ["blob", "tree", "commit"] {
+            let root = fixture();
+            let spec = root.path().join(".github/spec.json");
+            let mut command = observer_command(root.path(), &spec, retention);
+            command.env_remove("GH_TOKEN");
+            let oid = |reference: &str| {
+                String::from_utf8(git(root.path(), &["rev-parse", reference]).stdout)
+                    .unwrap()
+                    .trim()
+                    .to_owned()
+            };
+            let old_blob = oid("HEAD:.github/spec.json");
+            let old_tree = oid("HEAD:.github");
+            let head = oid("HEAD");
+            let old_commit = git(root.path(), &["cat-file", "commit", &head]).stdout;
+            let tree = git(root.path(), &["cat-file", "tree", &old_tree]).stdout;
+            let mut policy: serde_json::Value =
+                serde_json::from_slice(&fs::read(&spec).unwrap()).unwrap();
+            policy["workflows"][".github/workflows/ci.yaml"] = json!(["weaker-job"]);
+            let weak = serde_json::to_vec(&policy).unwrap();
+            fs::write(&spec, &weak).unwrap();
+            git(root.path(), &["add", ".github/spec.json"]);
+            let new_tree = String::from_utf8(git(root.path(), &["write-tree"]).stdout)
+                .unwrap()
+                .trim()
+                .to_owned();
+            let new_blob = oid(":.github/spec.json");
+            let (target, substituted) = match kind {
+                "blob" => (old_blob.clone(), weak),
+                "tree" => {
+                    let original = hex::decode(&old_blob).unwrap();
+                    let replacement = hex::decode(&new_blob).unwrap();
+                    let mut forged = tree;
+                    let index = forged
+                        .windows(20)
+                        .position(|bytes| bytes == original)
+                        .unwrap();
+                    forged[index..index + 20].copy_from_slice(&replacement);
+                    (old_tree, forged)
+                }
+                _ => {
+                    let old = String::from_utf8(old_commit).unwrap();
+                    let first = old.lines().next().unwrap();
+                    (
+                        head,
+                        old.replacen(first, &format!("tree {new_tree}"), 1)
+                            .into_bytes(),
+                    )
+                }
+            };
+            let object = root
+                .path()
+                .join(".git/objects")
+                .join(&target[..2])
+                .join(&target[2..]);
+            let mut compressed =
+                flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+            compressed
+                .write_all(format!("{kind} {}\0", substituted.len()).as_bytes())
+                .unwrap();
+            compressed.write_all(&substituted).unwrap();
+            fs::remove_file(&object).unwrap();
+            fs::write(object, compressed.finish().unwrap()).unwrap();
+            let output = command.output().unwrap();
+            let error = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                error.contains("source object integrity mismatch"),
+                "{kind}/{retention}: {error}"
+            );
+            assert!(!root.path().join("packet").exists());
+        }
+    }
+}
+
+#[test]
+fn forged_protected_merge_object_cannot_substitute_its_parents() {
+    use std::io::Write;
+    for retention in [false, true] {
+        let root = fixture();
+        let old = String::from_utf8(git(root.path(), &["rev-parse", "HEAD"]).stdout)
+            .unwrap()
+            .trim()
+            .to_owned();
+        fs::write(root.path().join("new-head"), "current PR head").unwrap();
+        git(root.path(), &["add", "new-head"]);
+        git(root.path(), &["commit", "-m", "current head"]);
+        let current = String::from_utf8(git(root.path(), &["rev-parse", "HEAD"]).stdout)
+            .unwrap()
+            .trim()
+            .to_owned();
+        let merge = String::from_utf8(
+            git(
+                root.path(),
+                &[
+                    "commit-tree",
+                    "HEAD^{tree}",
+                    "-p",
+                    &old,
+                    "-p",
+                    &current,
+                    "-m",
+                    "protected merge",
+                ],
+            )
+            .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_owned();
+        let raw =
+            String::from_utf8(git(root.path(), &["cat-file", "commit", &merge]).stdout).unwrap();
+        let forged = raw.replace(&format!("parent {current}\n"), &format!("parent {old}\n"));
+        let mut compressed =
+            flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        compressed
+            .write_all(format!("commit {}\0", forged.len()).as_bytes())
+            .unwrap();
+        compressed.write_all(forged.as_bytes()).unwrap();
+        let object = root
+            .path()
+            .join(".git/objects")
+            .join(&merge[..2])
+            .join(&merge[2..]);
+        fs::remove_file(&object).unwrap();
+        fs::write(object, compressed.finish().unwrap()).unwrap();
+        git(root.path(), &["checkout", "--detach", &old]);
+        let mut command = observer_command(
+            root.path(),
+            &root.path().join(".github/spec.json"),
+            retention,
+        );
+        let mut event: serde_json::Value =
+            serde_json::from_slice(&fs::read(root.path().join("event.json")).unwrap()).unwrap();
+        event["pull_request"] = json!({"number":71,"head":{"sha":old},"base":{"sha":old}});
+        fs::write(root.path().join("event.json"), event.to_string()).unwrap();
+        command
+            .env("GITHUB_EVENT_NAME", "pull_request")
+            .env("GITHUB_REF", "refs/pull/71/merge")
+            .env("GITHUB_SHA", &merge);
+        let output = command.output().unwrap();
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            error.contains("source object integrity mismatch"),
+            "{error}"
+        );
+        assert!(!root.path().join("packet").exists());
+    }
+}
+
+#[test]
 fn protected_pr_merge_revision_rejects_a_replayed_head_and_admits_its_actual_parent() {
     let root = fixture();
     let old = String::from_utf8(git(root.path(), &["rev-parse", "HEAD"]).stdout)

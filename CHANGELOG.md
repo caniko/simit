@@ -62,6 +62,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Verify source commit, tree and blob object hashes before admitting observer policy.
 - Admit Git-valid Unicode workflow refs and retain an incomplete receipt when
   cancellation arrives during final receipt publication.
 - Keep protected source probes usable inside Nix sandboxes, bind PR heads to the
