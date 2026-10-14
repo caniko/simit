@@ -207,7 +207,12 @@ fn ci_artifact_gates_validate_full_tag_but_parse_configured_version_prefix() {
         assert!(source.contains(&format!("\"{prefix}[0-9]*\"")));
         let publisher =
             fs::read_to_string(root.join(".github/workflows/trusted-publish-crate.yaml")).unwrap();
-        assert!(publisher.contains(&format!("--publisher-tag-prefix '{prefix}'")));
+        if prefix.is_empty() {
+            // The original enrolled publisher predates this optional argument.
+            assert!(!publisher.contains("--publisher-tag-prefix"));
+        } else {
+            assert!(publisher.contains(&format!("--publisher-tag-prefix '{prefix}'")));
+        }
     }
 }
 

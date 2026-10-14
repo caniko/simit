@@ -363,6 +363,10 @@ pub(super) fn publisher_file_with_namespace(
         .collect::<String>();
     let namespace_argument = namespace.map_or_else(
         || {
+            // Unprefixed tags are also the original enrolled engine's default.
+            if options.tag_prefix.as_str().is_empty() {
+                return String::new();
+            }
             format!(
                 " --publisher-tag-prefix {}",
                 shell_quote(options.tag_prefix.as_str())

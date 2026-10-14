@@ -69,7 +69,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          .simit-publisher-engine/target/release/simit release publisher --publisher-stage prepare --repo "$GITHUB_REPOSITORY" --package simit --source-workflow .github/workflows/publish-crate.yaml --publisher-workflow .github/workflows/trusted-publish-crate.yaml --reconstruct-package simit --publisher-tag-prefix '' --publisher-output "$RUNNER_TEMP/verified-simit" > "$RUNNER_TEMP/verified-simit.json"
+          .simit-publisher-engine/target/release/simit release publisher --publisher-stage prepare --repo "$GITHUB_REPOSITORY" --package simit --source-workflow .github/workflows/publish-crate.yaml --publisher-workflow .github/workflows/trusted-publish-crate.yaml --reconstruct-package simit --publisher-output "$RUNNER_TEMP/verified-simit" > "$RUNNER_TEMP/verified-simit.json"
       - name: Checkout original signed source for verification
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -131,7 +131,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
           CRATES_IO_API_TOKEN: ${{ secrets.CRATES_IO_API_TOKEN }}
-        run: .simit-publisher-engine/target/release/simit release publisher --publisher-stage publish --repo "$GITHUB_REPOSITORY" --package simit --source-workflow .github/workflows/publish-crate.yaml --publisher-workflow .github/workflows/trusted-publish-crate.yaml --reconstruct-package simit --publisher-tag-prefix ''
+        run: .simit-publisher-engine/target/release/simit release publisher --publisher-stage publish --repo "$GITHUB_REPOSITORY" --package simit --source-workflow .github/workflows/publish-crate.yaml --publisher-workflow .github/workflows/trusted-publish-crate.yaml --reconstruct-package simit
   publish-report:
     needs: [publish-simit]
     if: always()
