@@ -445,6 +445,41 @@ fn exact_branch_with_at_sign_remains_a_valid_ref_qualified_workflow_target() {
 }
 
 #[test]
+fn git_valid_unicode_whitespace_and_non_ascii_controls_remain_valid_ref_targets() {
+    for separator in ['\u{a0}', '\u{2003}', '\u{85}'] {
+        let branch = format!("feature{separator}foo");
+        let reference = format!("refs/heads/{branch}");
+        assert!(
+            std::process::Command::new("git")
+                .args(["check-ref-format", &reference])
+                .status()
+                .unwrap()
+                .success()
+        );
+        let (spec, mut identity, mut provider) = fixture();
+        let mut event: Value = serde_json::from_str(&identity.event_json).unwrap();
+        event["ref"] = json!(reference);
+        identity.event_json = event.to_string();
+        let mut snapshot = run();
+        snapshot["head_branch"] = json!(branch);
+        provider.runs = VecDeque::from(vec![snapshot.clone(); 32]);
+        provider.discovery = Some(json!({"total_count":1,"workflow_runs":[snapshot]}));
+        provider.workflow_path = Some(format!(".github/workflows/ci.yaml@{reference}"));
+        let root = tempfile::tempdir().unwrap();
+        let receipt = observe_with(
+            &spec,
+            &identity,
+            &root.path().join("packet"),
+            &mut provider,
+            &mut FakeClock::default(),
+            &Cancellation::default(),
+        )
+        .unwrap();
+        assert!(receipt.capture_complete);
+    }
+}
+
+#[test]
 fn cli_reads_every_maximal_enrolled_job_inventory_before_environment_admission() {
     let (mut spec, _, _) = fixture();
     for i in 0..10 {

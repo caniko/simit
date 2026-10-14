@@ -101,6 +101,9 @@ fail closed. Received response bytes and sanitized metadata remain in numbered
 request files. Neither credentials nor signed download URLs are recorded.
 Capping an error body preserves its transient HTTP status for bounded retry;
 oversized successful responses and cancellation remain permanent failures.
+Cancellation is rechecked after atomic final receipt publication. If it arrived
+during serialization/persistence, the observer republishes an explicit incomplete
+receipt and returns a cancellation error while preserving captured files.
 Request-layer/protocol failures before headers also retry within this budget;
 locally malformed request construction remains permanent.
 
@@ -109,8 +112,10 @@ Admission checks the complete timeout/poll/workflow combination against the
 attempts. Unsupported polling configurations fail before creating a packet.
 Provider workflow paths may carry a validated ref suffix; enrollment still binds
 the exact source-owned YAML path. The suffix is validated as a Git ref, separately
-from the branch/PR target bound by the run's native identity fields. SHA discovery
-skips identifiable other targets, preserving exact-target duplicate rejection and
+from the branch/PR target bound by the run's native identity fields. Ref validation
+checks Git's forbidden ASCII bytes, preserving valid Unicode whitespace and
+non-ASCII control characters. SHA discovery skips identifiable other targets,
+preserving exact-target duplicate rejection and
 continuous identity validation after selection. Log and artifact downloads use
 the remaining aggregate deadline; metadata GETs retain their ninety-second cap.
 Header and body transfers are interruptible: the native async transport checks

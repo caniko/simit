@@ -485,6 +485,27 @@ fn publish_final_receipt(root: &Path, receipt: &mut Receipt, maximum: u64) -> Re
     Ok(())
 }
 
+fn publish_completion_receipt(
+    root: &Path,
+    receipt: &mut Receipt,
+    cancellation: &Cancellation,
+    mut publish: impl FnMut(&Path, &mut Receipt, u64) -> Result<()>,
+) -> Result<()> {
+    publish(root, receipt, RECEIPT_BYTES)?;
+    // Serialization/persistence can outlast the preceding cancellation check.
+    // Revoke the published completion before returning an interrupted result.
+    if let Err(error) = cancellation.check() {
+        receipt.capture_complete = false;
+        receipt.qualified = false;
+        receipt
+            .error
+            .get_or_insert_with(|| "observer cancelled during final receipt publication".into());
+        publish(root, receipt, RECEIPT_BYTES)?;
+        return Err(error.context("observer cancelled during final receipt publication"));
+    }
+    Ok(())
+}
+
 struct Observer<'a> {
     spec: &'a Spec,
     root: &'a Path,
@@ -1019,7 +1040,7 @@ pub fn observe_with(
     if !receipt.capture_complete && receipt.error.is_none() {
         receipt.error = Some("observer cancelled before publication".into());
     }
-    publish_final_receipt(root, &mut receipt, RECEIPT_BYTES)?;
+    publish_completion_receipt(root, &mut receipt, cancellation, publish_final_receipt)?;
     outcome?;
     finalized?;
     ensure!(
@@ -1513,5 +1534,51 @@ mod tests {
         };
         let identity=Identity {repository_id:1,head:"a".repeat(40),event:"push".into(),run_id:2,run_attempt:1,workflow_ref:"owner/repo/.github/workflows/retain.yaml@refs/heads/main".into(),workflow_sha:"a".repeat(40),event_json:json!({"after":"a".repeat(40),"ref":"refs/heads/main","deleted":false,"repository":{"id":1,"full_name":"owner/repo"}}).to_string()};
         (spec, identity)
+    }
+
+    #[test]
+    fn cancellation_during_final_publication_replaces_the_success_receipt() {
+        let root = tempfile::tempdir().unwrap();
+        let (spec, identity) = minimal_inputs();
+        let original = b"original captured evidence";
+        fs::write(root.path().join("original.bytes"), original).unwrap();
+        let mut receipt = Receipt {
+            schema: "simit.original-custody.v1".into(),
+            qualified: false,
+            capture_complete: true,
+            spec,
+            identity,
+            producers: Vec::new(),
+            error: None,
+            members: BTreeMap::new(),
+        };
+        let cancellation = Cancellation::default();
+        let mut publications = 0;
+        let result = publish_completion_receipt(
+            root.path(),
+            &mut receipt,
+            &cancellation,
+            |root, receipt, maximum| {
+                publish_final_receipt(root, receipt, maximum)?;
+                publications += 1;
+                if publications == 1 {
+                    cancellation.cancel();
+                }
+                Ok(())
+            },
+        );
+        assert!(
+            result.is_err(),
+            "cancellation during persistence returned success"
+        );
+        assert_eq!(publications, 2);
+        let retained: Receipt =
+            serde_json::from_slice(&fs::read(root.path().join("receipt.json")).unwrap()).unwrap();
+        assert!(!retained.capture_complete && !retained.qualified);
+        assert!(retained.error.unwrap().contains("cancelled"));
+        assert_eq!(
+            fs::read(root.path().join("original.bytes")).unwrap(),
+            original
+        );
     }
 }

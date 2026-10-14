@@ -8,7 +8,7 @@ fn reference(value: &Value) -> Result<&str> {
     ensure!(
         !reference.is_empty()
             && reference.len() <= 2048
-            && !reference.chars().any(char::is_control),
+            && !reference.bytes().any(|byte| byte.is_ascii_control()),
         "invalid source reference"
     );
     Ok(reference)
@@ -122,8 +122,8 @@ pub(super) fn workflow_reference(reference: &str) -> bool {
         && !reference.contains("..")
         && !reference.contains("@{")
         && !reference
-            .chars()
-            .any(|c| c.is_control() || c.is_whitespace() || "~^:?*[\\".contains(c))
+            .bytes()
+            .any(|byte| byte <= b' ' || byte == 0x7f || b"~^:?*[\\".contains(&byte))
         && !reference.ends_with('.')
         && reference.split('/').all(|component| {
             !component.is_empty() && !component.starts_with('.') && !component.ends_with(".lock")

@@ -62,6 +62,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Admit Git-valid Unicode workflow refs and retain an incomplete receipt when
+  cancellation arrives during final receipt publication.
 - Keep protected source probes usable inside Nix sandboxes, bind PR heads to the
   protected merge revision, isolate observer TLS/proxies from job environment,
   and retry bounded transient request/protocol failures.
