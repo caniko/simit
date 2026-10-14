@@ -395,14 +395,69 @@ fn write_json(path: &Path, value: &impl Serialize) -> Result<()> {
     write_json_bounded(path, value, JSON_BYTES)
 }
 fn save_receipt(root: &Path, receipt: &Receipt) -> Result<()> {
+    save_receipt_with_limit(root, receipt, RECEIPT_BYTES)
+}
+fn save_receipt_with_limit(root: &Path, receipt: &Receipt, maximum: u64) -> Result<()> {
     // NamedTempFile owns only this new write. A failed serialization removes its
     // partial temporary file, preserving the prior receipt and allowing the
     // final non-accepting receipt to publish through the same atomic path.
     let mut temporary = tempfile::Builder::new()
         .prefix(".receipt-next-")
         .tempfile_in(root)?;
-    write_json_to(temporary.as_file_mut(), receipt, RECEIPT_BYTES)?;
+    write_json_to(temporary.as_file_mut(), receipt, maximum)?;
     temporary.persist(root.join("receipt.json"))?;
+    Ok(())
+}
+
+fn append_producer(
+    root: &Path,
+    receipt: &mut Receipt,
+    producer: Producer,
+    maximum: u64,
+) -> Result<()> {
+    receipt.producers.push(producer);
+    if let Err(error) = save_receipt_with_limit(root, receipt, maximum) {
+        // Full archives and maps have already been retained outside the receipt.
+        // Roll back only this duplicated row so failure publication can proceed.
+        receipt.producers.pop();
+        return Err(error.context(
+            "aggregate producer receipt could not be published; original capture files retained",
+        ));
+    }
+    Ok(())
+}
+
+fn publish_final_receipt(root: &Path, receipt: &mut Receipt, maximum: u64) -> Result<()> {
+    if let Err(error) = save_receipt_with_limit(root, receipt, maximum) {
+        // Final inventory/failure text can grow beyond a previously admitted
+        // partial receipt. Publish an explicit non-accepting recovery record,
+        // never leave its older pending version looking like the final outcome.
+        receipt.capture_complete = false;
+        receipt.qualified = false;
+        let earlier = receipt
+            .error
+            .as_deref()
+            .unwrap_or("capture had no prior error")
+            .chars()
+            .take(2048)
+            .collect::<String>();
+        let detail = error.to_string().chars().take(2048).collect::<String>();
+        receipt.error = Some(format!(
+            "final receipt publication failed: {detail}; {earlier}; full captured evidence retained outside this incomplete receipt"
+        ));
+        for producer in &mut receipt.producers {
+            producer.log_members.clear();
+        }
+        if save_receipt_with_limit(root, receipt, maximum).is_err() {
+            // The complete inventory is still present in the original packet;
+            // an incomplete receipt cannot certify it through a partial map.
+            receipt.members.clear();
+            save_receipt_with_limit(root, receipt, maximum)?;
+        }
+        return Err(error.context(
+            "final receipt exceeded its publication envelope; explicit failure receipt retained",
+        ));
+    }
     Ok(())
 }
 
@@ -882,14 +937,18 @@ pub fn observe_with(
                 let after = observer.json(&format!("actions/runs/{id}"))?;
                 validate_run(&after, spec, identity, id, &workflow)?;
                 successful_run(&after)?;
-                receipt.producers.push(Producer {
-                    run_id: id,
-                    workflow: workflow.clone(),
-                    terminal: compact_run(&after),
-                    raw_logs_sha256: digest(&raw),
-                    log_members: members,
-                });
-                save_receipt(root, &receipt)?;
+                append_producer(
+                    root,
+                    &mut receipt,
+                    Producer {
+                        run_id: id,
+                        workflow: workflow.clone(),
+                        terminal: compact_run(&after),
+                        raw_logs_sha256: digest(&raw),
+                        log_members: members,
+                    },
+                    RECEIPT_BYTES,
+                )?;
                 pending.remove(&workflow);
             }
             if !pending.is_empty() {
@@ -933,7 +992,7 @@ pub fn observe_with(
     if !receipt.capture_complete && receipt.error.is_none() {
         receipt.error = Some("observer cancelled before publication".into());
     }
-    save_receipt(root, &receipt)?;
+    publish_final_receipt(root, &mut receipt, RECEIPT_BYTES)?;
     outcome?;
     finalized?;
     ensure!(
@@ -1183,6 +1242,110 @@ fn validate_artifact(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pending_receipt() -> Receipt {
+        let (spec, identity) = minimal_inputs();
+        Receipt {
+            schema: "simit.original-custody.v1".into(),
+            qualified: false,
+            capture_complete: false,
+            spec,
+            identity,
+            producers: Vec::new(),
+            error: None,
+            members: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn aggregate_member_maps_cannot_poison_the_later_incomplete_receipt() {
+        const LIMIT: u64 = 8192;
+        let root = tempfile::tempdir().unwrap();
+        let mut receipt = pending_receipt();
+        save_receipt_with_limit(root.path(), &receipt, LIMIT).unwrap();
+        fs::write(
+            root.path().join("original-provider.zip"),
+            b"unchanged original archive bytes",
+        )
+        .unwrap();
+        let mut admitted = 0;
+        let failure = loop {
+            let producer = Producer {
+                run_id: 12 + admitted,
+                workflow: ".github/workflows/ci.yaml".into(),
+                terminal: json!({"status":"completed","conclusion":"success"}),
+                raw_logs_sha256: "a".repeat(64),
+                log_members: [(
+                    format!("logs/{admitted}/{}", "x".repeat(2000)),
+                    "b".repeat(64),
+                )]
+                .into(),
+            };
+            match append_producer(root.path(), &mut receipt, producer, LIMIT) {
+                Ok(()) => admitted += 1,
+                Err(error) => break error,
+            }
+        };
+        assert!(admitted > 0);
+        assert_eq!(
+            receipt.producers.len(),
+            admitted as usize,
+            "overflowing producer must not remain duplicated into the receipt"
+        );
+        receipt.error = Some(failure.to_string());
+        receipt.members.insert(
+            "original-provider.zip".into(),
+            digest(b"unchanged original archive bytes"),
+        );
+        assert!(publish_final_receipt(root.path(), &mut receipt, LIMIT).is_err());
+        let retained: Receipt =
+            serde_json::from_slice(&fs::read(root.path().join("receipt.json")).unwrap()).unwrap();
+        assert!(retained.error.is_some());
+        assert!(
+            retained
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("aggregate producer receipt")
+        );
+        assert!(!retained.capture_complete);
+        assert!(!retained.qualified);
+        assert_eq!(retained.producers.len(), admitted as usize);
+        assert_eq!(
+            fs::read(root.path().join("original-provider.zip")).unwrap(),
+            b"unchanged original archive bytes"
+        );
+    }
+
+    #[test]
+    fn final_receipt_growth_publishes_an_explicit_failure_instead_of_stale_pending_state() {
+        const LIMIT: u64 = 8192;
+        let root = tempfile::tempdir().unwrap();
+        let mut receipt = pending_receipt();
+        save_receipt_with_limit(root.path(), &receipt, LIMIT).unwrap();
+        fs::write(
+            root.path().join("original-response.body"),
+            b"original interrupted provider response",
+        )
+        .unwrap();
+        receipt.capture_complete = true;
+        for index in 0..100 {
+            receipt.members.insert(
+                format!("requests/{index}/{}", "x".repeat(100)),
+                "a".repeat(64),
+            );
+        }
+        assert!(publish_final_receipt(root.path(), &mut receipt, LIMIT).is_err());
+        let retained: Receipt =
+            serde_json::from_slice(&fs::read(root.path().join("receipt.json")).unwrap()).unwrap();
+        assert!(!retained.capture_complete);
+        assert!(retained.error.is_some());
+        assert!(!retained.qualified);
+        assert_eq!(
+            fs::read(root.path().join("original-response.body")).unwrap(),
+            b"original interrupted provider response"
+        );
+    }
 
     #[cfg(unix)]
     #[test]

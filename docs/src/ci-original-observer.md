@@ -87,7 +87,15 @@ through expanded ZIP admission and raw artifact download.
 Receipt producer rows retain compact validated identity while full provider
 snapshots remain in the packet. Atomic receipt publication owns and cleans its
 temporary file on failed serialization; an interrupted write cannot block the
-final incomplete receipt. Uploaded packet downloads have a separate aggregate
+final incomplete receipt.
+Producer append is transactional against the cumulative receipt envelope. A map
+that cannot fit is retained in its original capture files while its duplicated
+receipt row is rolled back. If final inventory growth exceeds that envelope,
+publication writes an explicit incomplete failure record, omitting duplicated map
+data as necessary. Original archives, map files and response bytes stay intact;
+partial receipt inventories cannot establish retention or merge acceptance.
+
+Uploaded packet downloads have a separate aggregate
 byte budget: the doubled captured-byte allowance, bounded generated evidence,
 the final receipt, outer ZIP framing and metadata reserves. Expanded ZIP admission includes the receipt's
 byte and file-count allowances as well. Bounded single-disk ZIP64 directories support the full admitted
