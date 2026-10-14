@@ -106,6 +106,15 @@ through its community NuGet v2 feed; custom HTTP(S) push sources are treated
 as NuGet v2 base URLs. Packing and registry lookups do not receive the
 configured API-key environment variable.
 
+Use `simit dist chocolatey bump --pack` with the same package/archive options
+to retain a candidate without registry access or an API key. Actions release
+workflows restore and explicitly save that source-bound candidate before
+publication, then require a successful restore so a fresh hosted retry uses
+the original package bytes. The cache key includes repository, ref, commit,
+and generated payload hashes. Packing discovers the single nonempty package
+and retains its actual filename, including Chocolatey CLI 2.x version
+normalization.
+
 For an harbor-rs project whose flake exposes the conventional
 `packages.<system>.release-bundle`, the release artifact section can instead
 use the simple opt-in:

@@ -3385,6 +3385,18 @@ impl ProjectConfig {
         let spec_path = cfg
             .and_then(|copr| copr.spec_path.clone())
             .unwrap_or_else(|| format!("{name}.spec"));
+        let makefile_path = cfg.map_or_else(default_copr_makefile_path, |copr| {
+            copr.makefile_path.clone()
+        });
+        let output_components = |path: &str| {
+            Path::new(path)
+                .components()
+                .filter(|part| *part != std::path::Component::CurDir)
+                .collect::<std::path::PathBuf>()
+        };
+        if output_components(&spec_path) == output_components(&makefile_path) {
+            bail!("COPR spec_path and makefile_path must resolve to distinct output paths");
+        }
         let project = overrides
             .project
             .map(str::to_owned)
@@ -3410,9 +3422,7 @@ impl ProjectConfig {
                 .unwrap_or_default(),
             binaries,
             spec_path,
-            makefile_path: cfg.map_or_else(default_copr_makefile_path, |copr| {
-                copr.makefile_path.clone()
-            }),
+            makefile_path,
             srpm_dir: cfg.map_or_else(default_copr_srpm_dir, |copr| copr.srpm_dir.clone()),
             project,
             testing_project,

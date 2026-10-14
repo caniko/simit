@@ -1060,7 +1060,7 @@ token_secret = "ATTIC_TOKEN"
     assert_eq!(
         yaml["concurrency"]["group"].as_str(),
         Some(
-            "${{ github.workflow_ref }}-${{ github.event_name }}-${{ github.head_ref || github.ref_name }}-prebuild"
+            "${{ github.workflow_ref }}-${{ github.event_name }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.head_ref || github.ref_name }}-prebuild"
         )
     );
     assert_eq!(

@@ -1552,6 +1552,12 @@ pub struct ChocolateyBumpArgs {
     pub push: bool,
     #[arg(
         long,
+        conflicts_with = "push",
+        help = "Retain a packed candidate without registry access or publication credentials"
+    )]
+    pub pack: bool,
+    #[arg(
+        long,
         value_name = "URL",
         help = "Chocolatey push source URL (defaults to config or community feed)"
     )]

@@ -57,6 +57,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Persist and verify source-bound Chocolatey candidates before Actions
+  publication, retain normalized package filenames, isolate prebuild concurrency
+  by fork repository, and reject colliding COPR spec/Makefile outputs.
 - Honor configured COPR Makefile and SRPM staging paths, match the RPM spec's
   source archive basename, and reject missing, empty, or duplicate SRPMs.
 - Give disposable COPR release fixtures a repository-local Git identity so

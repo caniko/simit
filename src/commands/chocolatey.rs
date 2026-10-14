@@ -75,6 +75,13 @@ pub(crate) fn bump(args: ChocolateyBumpArgs) -> Result<()> {
     }
     write_package(package_dir, &package)?;
 
+    if args.pack {
+        let key_env = args.api_key_env.as_deref().unwrap_or(&resolved.api_key_env);
+        let key = std::env::var(key_env).unwrap_or_default();
+        let directory = package_dir.canonicalize()?;
+        packed_candidate(&directory, &resolved, &args.version, key_env, &key)?;
+    }
+
     if args.push {
         let api_key_env = args
             .api_key_env
@@ -243,6 +250,8 @@ fn pack_and_push(
 struct PackedCandidate {
     source_sha256: String,
     package_sha256: String,
+    #[serde(default)]
+    package_filename: Option<String>,
 }
 
 fn packed_candidate(
@@ -264,13 +273,15 @@ fn packed_candidate(
     let source_sha256 = hex::encode(source.finalize());
     let cache = package_dir.join(".simit-candidates");
     let retained = cache.join(&source_sha256);
-    let basename = format!("{}.{version}.nupkg", resolved.id);
-    let retained_nupkg = retained.join(&basename);
     if retained.exists() {
         let receipt: PackedCandidate =
             serde_json::from_slice(&fs::read(retained.join("receipt.json"))?)
                 .context("reading retained Chocolatey candidate identity")?;
+        let retained_nupkg = packed_package(&retained, &resolved.id, version)?;
         if receipt.source_sha256 != source_sha256
+            || receipt.package_filename.as_deref().is_some_and(|name| {
+                Some(name) != retained_nupkg.file_name().and_then(|name| name.to_str())
+            })
             || receipt.package_sha256 != sha256::sha256_of_file(&retained_nupkg)?
         {
             bail!("retained Chocolatey candidate identity changed");
@@ -294,21 +305,82 @@ fn packed_candidate(
         bail!("choco pack failed: {}", redacted_output(&pack, api_key));
     }
 
-    let nupkg = packed.path().join(&basename);
-    if !nupkg.is_file() || fs::metadata(&nupkg)?.len() == 0 {
-        bail!("choco pack did not create the expected nonempty package");
-    }
+    let nupkg = packed_package(packed.path(), &resolved.id, version)?;
+    let basename = nupkg
+        .file_name()
+        .context("packed package has no filename")?;
+    let retained_nupkg = retained.join(basename);
     let candidate_sha256 = sha256::sha256_of_file(&nupkg)?;
     fs::write(
         packed.path().join("receipt.json"),
         serde_json::to_vec(&PackedCandidate {
             source_sha256,
             package_sha256: candidate_sha256.clone(),
+            package_filename: Some(basename.to_string_lossy().into_owned()),
         })?,
     )?;
     fs::create_dir_all(cache)?;
     fs::rename(packed.path(), &retained).context("retaining exact Chocolatey candidate")?;
     Ok((retained_nupkg, candidate_sha256))
+}
+
+fn packed_package(directory: &Path, id: &str, version: &str) -> Result<PathBuf> {
+    let packages = fs::read_dir(directory)?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<std::io::Result<Vec<_>>>()?
+        .into_iter()
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "nupkg")
+        })
+        .collect::<Vec<_>>();
+    let [package] = packages.as_slice() else {
+        bail!("choco pack must create exactly one .nupkg");
+    };
+    let metadata = fs::symlink_metadata(package)?;
+    let filename = package
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    let original = format!("{id}.{version}.nupkg");
+    let normalized = format!("{id}.{}.nupkg", normalized_version(version));
+    if !metadata.is_file()
+        || metadata.len() == 0
+        || !(filename.eq_ignore_ascii_case(&original) || filename.eq_ignore_ascii_case(&normalized))
+    {
+        bail!("choco pack did not create the expected nonempty package identity");
+    }
+    Ok(package.clone())
+}
+
+// Chocolatey CLI 2.x normalizes numeric parts and removes a zero fourth part.
+fn normalized_version(version: &str) -> String {
+    let (core, suffix) = version.split_once('-').unwrap_or((version, ""));
+    let mut parts = core
+        .split('.')
+        .map(|part| {
+            let trimmed = part.trim_start_matches('0');
+            if trimmed.is_empty() { "0" } else { trimmed }
+        })
+        .collect::<Vec<_>>();
+    if !core
+        .split('.')
+        .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        return version.to_owned();
+    }
+    while parts.len() < 3 {
+        parts.push("0");
+    }
+    if parts.len() == 4 && parts[3] == "0" {
+        parts.pop();
+    }
+    let normalized = parts.join(".");
+    if suffix.is_empty() {
+        normalized
+    } else {
+        format!("{normalized}-{suffix}")
+    }
 }
 
 fn remote_package_matches(
@@ -338,7 +410,7 @@ fn remote_package_matches(
         "{}/package/{}/{}",
         lookup_source,
         percent_encode(&resolved.id),
-        percent_encode(version)
+        percent_encode(&normalized_version(version))
     );
     let downloaded = tempfile::NamedTempFile::new().context("creating Chocolatey lookup output")?;
     let output = Command::new("curl")
@@ -372,12 +444,16 @@ fn remote_package_matches(
 }
 
 fn redacted_output(output: &std::process::Output, api_key: &str) -> String {
-    format!(
+    let text = format!(
         "{}{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
-    )
-    .replace(api_key, "[REDACTED]")
+    );
+    if api_key.is_empty() {
+        text
+    } else {
+        text.replace(api_key, "[REDACTED]")
+    }
 }
 
 fn percent_encode(value: &str) -> String {

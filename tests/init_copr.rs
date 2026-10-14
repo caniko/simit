@@ -235,3 +235,34 @@ fn custom_makefile_path_rejects_empty_absolute_and_traversing_paths() {
         assert!(!root.join("demo.spec").exists());
     }
 }
+
+#[test]
+fn colliding_resolved_copr_outputs_fail_before_writing() {
+    for spec in [None, Some("demo.spec"), Some("./demo.spec")] {
+        let project = init_package("demo");
+        let root = project.path();
+        let config = read(&root.join("simit.toml"));
+        let spec_setting = spec
+            .map(|path| format!("spec_path = {path:?}\n"))
+            .unwrap_or_default();
+        fs::write(
+            root.join("simit.toml"),
+            format!("{config}{spec_setting}makefile_path = \"demo.spec\"\n"),
+        )
+        .unwrap();
+        fs::write(root.join("demo.spec"), "existing packaging\n").unwrap();
+        for args in [
+            vec!["init", "copr"],
+            vec!["init", "copr", "--check", "--diff"],
+            vec!["dist", "copr", "render"],
+        ] {
+            let output = simit().current_dir(root).args(args).output().unwrap();
+            assert!(!output.status.success(), "{output:?}");
+            assert!(
+                String::from_utf8_lossy(&output.stderr).contains("distinct"),
+                "{output:?}"
+            );
+            assert_eq!(read(&root.join("demo.spec")), "existing packaging\n");
+        }
+    }
+}
