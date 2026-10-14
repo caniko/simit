@@ -91,7 +91,7 @@ impl Config {
                 validate_relative_path(path)?;
             }
             for release in &component.releases {
-                release.validate(component)?;
+                release.validate()?;
             }
             let mut gates = BTreeSet::new();
             for gate in &component.checks {
@@ -155,7 +155,7 @@ impl Config {
         };
         let graph = self.graph(metadata.as_ref())?;
         graph.validate_ownership()?;
-        releases::validate(root, &graph)?;
+        releases::validate(root, &graph, metadata.as_ref())?;
         for path in graph
             .components
             .values()

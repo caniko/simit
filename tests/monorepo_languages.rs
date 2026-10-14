@@ -327,6 +327,156 @@ fn colocated_native_owners_cannot_share_a_release_changelog() {
 }
 
 #[test]
+fn cargo_and_native_changelog_ownership_and_implicit_paths_are_resolved() {
+    for colocated in [false, true] {
+        let temp = fixture();
+        let root = temp.path();
+        write(
+            root,
+            "Cargo.toml",
+            "[workspace]\nresolver='2'\nmembers=['rust']\n",
+        );
+        write(
+            root,
+            "rust/Cargo.toml",
+            "[package]\nname='cargo-owner'\nversion='0.1.0'\nedition='2024'\n",
+        );
+        write(root, "rust/src/lib.rs", "pub fn owner() {}\n");
+        let manifest = if colocated {
+            "rust/package.json"
+        } else {
+            "rust/native/package.json"
+        };
+        write(
+            root,
+            manifest,
+            "{\"name\":\"native-owner\",\"version\":\"0.1.0\",\"private\":true}\n",
+        );
+        let config = fs::read_to_string(root.join("simit.toml")).unwrap();
+        write(
+            root,
+            "simit.toml",
+            &format!(
+                "{config}\n[[monorepo.components]]\nid='mixed'\ncargo_packages=['cargo-owner']\nreleases=[{{manifest='{manifest}',namespace='native-owner',publish=false}}]\nchecks=[{{id='test',run='true'}}]\n"
+            ),
+        );
+        let output = run(root, &["init", "ci"]);
+        assert_eq!(output.status.success(), !colocated, "{output:?}");
+        if colocated {
+            assert!(
+                String::from_utf8_lossy(&output.stderr)
+                    .contains("release owners share a changelog"),
+                "{output:?}"
+            );
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn native_verification_recovers_tagged_configuration_publication_policy() {
+    use std::os::unix::fs::PermissionsExt;
+    for component in ["python", "node"] {
+        for old_publish in [false, true] {
+            let temp = fixture();
+            let root = temp.path();
+            let config = fs::read_to_string(root.join("simit.toml")).unwrap();
+            write(
+                root,
+                "simit.toml",
+                &config.replace("publish = false", &format!("publish = {old_publish}")),
+            );
+            write(
+                root,
+                "node/package.json",
+                "{\"name\":\"@example/node-engine\",\"version\":\"1.3.0\",\"private\":false}\n",
+            );
+            git(root, &["add", "."]);
+            git(root, &["commit", "-qm", "historical policy"]);
+            git(
+                root,
+                &[
+                    "tag",
+                    if component == "python" {
+                        "py-engine/v0.2.0"
+                    } else {
+                        "node-engine/v1.3.0"
+                    },
+                ],
+            );
+            write(
+                root,
+                "simit.toml",
+                &config.replace("publish = false", &format!("publish = {}", !old_publish)),
+            );
+            write(root, "bin/curl", "#!/bin/sh\nprintf '\\n404'\n");
+            fs::set_permissions(root.join("bin/curl"), fs::Permissions::from_mode(0o755)).unwrap();
+            let path = std::env::join_paths(
+                std::iter::once(root.join("bin"))
+                    .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+            )
+            .unwrap();
+            let output = common::simit()
+                .current_dir(root)
+                .env("PATH", path)
+                .args(["release", "verify", "--component", component, "--json"])
+                .output()
+                .unwrap();
+            let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+            let results = report["results"].as_array().unwrap();
+            assert_eq!(
+                results.iter().any(|r| r["check"] == "registry publication"),
+                old_publish,
+                "{report}"
+            );
+            assert_eq!(
+                results.iter().any(|r| r["check"] == "remote secrets"),
+                old_publish,
+                "{report}"
+            );
+        }
+    }
+}
+
+#[test]
+fn native_release_rechecks_target_tag_after_qualification_before_mutation() {
+    let temp = fixture();
+    let root = temp.path();
+    let config = fs::read_to_string(root.join("simit.toml"))
+        .unwrap()
+        .replacen(
+            "run = \"true\"",
+            "run = \"git -c tag.gpgsign=false tag py-engine/v0.2.1\"",
+            1,
+        );
+    write(root, "simit.toml", &config);
+    git(root, &["add", "."]);
+    git(root, &["commit", "-qm", "tag-producing gate"]);
+    let head = git(root, &["rev-parse", "HEAD"]);
+    let manifest = fs::read(root.join("python/pyproject.toml")).unwrap();
+    let output = run(
+        root,
+        &[
+            "release",
+            "patch",
+            "--component",
+            "python",
+            "--no-sign",
+            "--no-changelog",
+            "-m",
+            "release",
+        ],
+    );
+    assert!(!output.status.success(), "{output:?}");
+    assert_eq!(git(root, &["rev-parse", "HEAD"]), head);
+    assert_eq!(
+        fs::read(root.join("python/pyproject.toml")).unwrap(),
+        manifest
+    );
+    assert_eq!(git(root, &["status", "--porcelain"]), "");
+}
+
+#[test]
 fn non_cargo_plan_and_python_bump_preserve_independent_metadata() {
     let temp = fixture();
     let root = temp.path();

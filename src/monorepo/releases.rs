@@ -10,7 +10,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use toml_edit::{DocumentMut, value};
 
-use super::{Component, Graph};
+use super::Graph;
 use crate::cli::ReleaseCommand;
 use crate::{cargo, changelog, git, release_identity::ReleaseTag};
 
@@ -24,7 +24,7 @@ pub struct ManifestRelease {
 }
 
 impl ManifestRelease {
-    pub(super) fn validate(&self, component: &Component) -> Result<()> {
+    pub(super) fn validate(&self) -> Result<()> {
         super::validate_relative_path(&self.manifest)?;
         ReleaseTag::for_package(&self.namespace, Version::new(0, 0, 0))?;
         ensure!(
@@ -39,15 +39,6 @@ impl ManifestRelease {
                 Some("pyproject.toml" | "package.json")
             ),
             "non-Cargo releases require pyproject.toml or package.json"
-        );
-        ensure!(
-            component
-                .paths
-                .iter()
-                .any(|path| Path::new(&self.manifest).starts_with(path)),
-            "release manifest {} must be owned by component {}",
-            self.manifest,
-            component.id
         );
         Ok(())
     }
@@ -199,7 +190,11 @@ pub(crate) struct Package {
     pub dist_tag: Option<String>,
 }
 
-pub(super) fn validate(root: &Path, graph: &Graph) -> Result<()> {
+pub(super) fn validate(
+    root: &Path,
+    graph: &Graph,
+    metadata: Option<&crate::cargo::Metadata>,
+) -> Result<()> {
     let mut namespaces: BTreeSet<_> = graph
         .components
         .values()
@@ -213,7 +208,37 @@ pub(super) fn validate(root: &Path, graph: &Graph) -> Result<()> {
         .collect();
     let mut manifests = BTreeSet::new();
     let mut changelogs = BTreeSet::new();
-    for release in graph.components.values().flat_map(|c| &c.releases) {
+    if let Some(metadata) = metadata {
+        for package in &metadata.packages {
+            if metadata.workspace_members.contains(&package.id) {
+                ensure!(
+                    changelogs.insert(
+                        package
+                            .manifest_path
+                            .as_std_path()
+                            .parent()
+                            .context("Cargo manifest has no parent")?
+                            .join("CHANGELOG.md")
+                    ),
+                    "release owners share a changelog; place independent release manifests in separate directories"
+                );
+            }
+        }
+    }
+    for (component, release) in graph
+        .components
+        .values()
+        .flat_map(|c| c.releases.iter().map(move |r| (c, r)))
+    {
+        ensure!(
+            component
+                .paths
+                .iter()
+                .any(|path| Path::new(&release.manifest).starts_with(path)),
+            "release manifest {} must be owned by component {}",
+            release.manifest,
+            component.id
+        );
         ensure!(
             namespaces.insert(release.namespace.clone()),
             "duplicate release namespace {}",
@@ -227,7 +252,7 @@ pub(super) fn validate(root: &Path, graph: &Graph) -> Result<()> {
         let package = release.load(root)?;
         ensure!(
             changelogs.insert(
-                Path::new(&release.manifest)
+                root.join(&release.manifest)
                     .parent()
                     .context("release manifest has no parent")?
                     .join("CHANGELOG.md")
@@ -438,6 +463,9 @@ pub(crate) fn bump(selection: &Selection, command: &ReleaseCommand) -> Result<()
         git::head_commit(&selection.root)? == head,
         "release HEAD changed during qualification"
     );
+    if !command.no_tag {
+        git::ensure_tag_absent(&selection.root, &tag)?;
+    }
     for update in &updates {
         ensure!(
             fs::read(&update.path)? == update.before,

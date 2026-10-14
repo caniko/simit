@@ -53,6 +53,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Recover historical native publication policy from tagged configuration, include
+  Cargo owners in changelog collision checks, resolve implicit Cargo paths before
+  native ownership validation, and recheck release tags after qualification.
 - Authenticate fixed-host, nonredirecting npm metadata reads and retry transient
   propagation failures while preserving immediate checksum-conflict rejection.
 - Preserve preceding changelog tag spelling on prefix adoption, respect disabled

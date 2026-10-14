@@ -261,6 +261,9 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
             git::head_commit(workspace_root)? == head,
             "release HEAD changed during qualification"
         );
+        if create_tag {
+            git::ensure_tag_absent(workspace_root, &tag)?;
+        }
     }
     let workspace_version_bumped = command.component.is_none()
         && cargo::update_workspace_version(

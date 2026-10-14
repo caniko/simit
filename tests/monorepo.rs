@@ -1278,6 +1278,58 @@ fn independent_verification_uses_adjacent_notes_and_owned_tag() {
 }
 
 #[test]
+fn cargo_release_rechecks_target_tag_after_qualification_before_mutation() {
+    let temp = fixture();
+    let root = temp.path();
+    enroll_release_checks(root);
+    let config = fs::read_to_string(root.join("simit.toml"))
+        .unwrap()
+        .replacen(
+            "run = \"true\"",
+            "run = \"git -c tag.gpgsign=false tag engine/v0.1.1\"",
+            1,
+        );
+    write(root, "simit.toml", &config);
+    write(root, ".gitignore", "target/\n");
+    assert!(
+        Command::new("cargo")
+            .current_dir(root)
+            .arg("generate-lockfile")
+            .status()
+            .unwrap()
+            .success()
+    );
+    fixture_git(root, &["init"]);
+    fixture_git(root, &["config", "user.name", "Test"]);
+    fixture_git(root, &["config", "user.email", "test@example.invalid"]);
+    fixture_git(root, &["add", "."]);
+    fixture_git(root, &["commit", "-m", "tag-producing gate"]);
+    let head = fixture_git(root, &["rev-parse", "HEAD"]);
+    let manifest = fs::read(root.join("crates/engine/Cargo.toml")).unwrap();
+    let output = common::simit()
+        .current_dir(root)
+        .args([
+            "release",
+            "patch",
+            "--component",
+            "rust",
+            "--no-sign",
+            "--no-changelog",
+            "-m",
+            "release",
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "{output:?}");
+    assert_eq!(fixture_git(root, &["rev-parse", "HEAD"]), head);
+    assert_eq!(
+        fs::read(root.join("crates/engine/Cargo.toml")).unwrap(),
+        manifest
+    );
+    assert_eq!(fixture_git(root, &["status", "--porcelain"]), "");
+}
+
+#[test]
 fn cargo_component_verification_checks_the_tagged_manifest() {
     for notes in ["none", "changelog"] {
         for inherited in [false, true] {
