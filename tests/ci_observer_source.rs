@@ -103,6 +103,19 @@ fn invoke(root: &Path, spec: &Path, retention: bool) -> Output {
     observer_command(root, spec, retention).output().unwrap()
 }
 
+fn replace_fixture_object(path: &Path, bytes: &[u8]) {
+    // Git creates read-only loose objects. Windows forbids deleting them until
+    // that attribute is cleared; these paths belong only to disposable fixtures.
+    #[cfg(windows)]
+    {
+        let mut permissions = fs::metadata(path).unwrap().permissions();
+        permissions.set_readonly(false);
+        fs::set_permissions(path, permissions).unwrap();
+    }
+    fs::remove_file(path).unwrap();
+    fs::write(path, bytes).unwrap();
+}
+
 #[test]
 fn forged_loose_blob_tree_and_commit_objects_cannot_authorize_weaker_policy() {
     use std::io::Write;
@@ -168,8 +181,7 @@ fn forged_loose_blob_tree_and_commit_objects_cannot_authorize_weaker_policy() {
                 .write_all(format!("{kind} {}\0", substituted.len()).as_bytes())
                 .unwrap();
             compressed.write_all(&substituted).unwrap();
-            fs::remove_file(&object).unwrap();
-            fs::write(object, compressed.finish().unwrap()).unwrap();
+            replace_fixture_object(&object, &compressed.finish().unwrap());
             let output = command.output().unwrap();
             let error = String::from_utf8_lossy(&output.stderr);
             assert!(
@@ -230,8 +242,7 @@ fn forged_protected_merge_object_cannot_substitute_its_parents() {
             .join(".git/objects")
             .join(&merge[..2])
             .join(&merge[2..]);
-        fs::remove_file(&object).unwrap();
-        fs::write(object, compressed.finish().unwrap()).unwrap();
+        replace_fixture_object(&object, &compressed.finish().unwrap());
         git(root.path(), &["checkout", "--detach", &old]);
         let mut command = observer_command(
             root.path(),
