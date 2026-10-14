@@ -1248,6 +1248,14 @@ fn native_registry_verification_checks_exact_identity_and_available_files() {
             "node-engine/v1.3.0"
         };
         git(root, &["tag", tag]);
+        if component == "python" {
+            let manifest = fs::read_to_string(root.join("python/pyproject.toml"))
+                .unwrap()
+                .replace("py-engine", "renamed-engine");
+            write(root, "python/pyproject.toml", &manifest);
+            git(root, &["add", "."]);
+            git(root, &["commit", "-qm", "Rename current Python package"]);
+        }
         let tools = TempDir::new().unwrap();
         let curl = tools.path().join("curl");
         let request = tools.path().join("request");
@@ -1341,7 +1349,7 @@ fn npm_registry_verification_requires_the_admitted_dist_tag() {
         git(root, &["add", "."]);
         git(root, &["commit", "-m", "original channel"]);
         git(root, &["tag", "node-engine/v1.3.0"]);
-        write(root, "node/package.json", &serde_json::json!({"name":"@example/node-engine","version":"1.4.0","publishConfig":{"tag":"latest"}}).to_string());
+        write(root, "node/package.json", &serde_json::json!({"name":"@example/renamed-engine","version":"1.4.0","publishConfig":{"tag":"latest"}}).to_string());
         let body = serde_json::json!({"name":"@example/node-engine","versions":{"1.3.0":{"name":"@example/node-engine","version":"1.3.0","dist":{"integrity":"sha512-abc"}}},"dist-tags":tags});
         write(
             root,
@@ -1466,6 +1474,48 @@ fn unsupported_public_native_versions_fail_before_mutation_and_uv_tracks_normali
     assert_eq!(
         git(root, &["tag", "--list"]).trim(),
         "py-engine/v0.3.0-rc.4"
+    );
+}
+
+#[test]
+fn private_python_versions_require_supported_lock_normalization() {
+    let temp = fixture();
+    let root = temp.path();
+    write(
+        root,
+        "python/pyproject.toml",
+        "[project]\nname='py-engine'\nversion='0.3.0-preview.1'\n",
+    );
+    write(
+        root,
+        "python/uv.lock",
+        "version=1\n[[package]]\nname='py-engine'\nversion='0.3.0rc1'\nsource={editable='.'}\n",
+    );
+    git(root, &["add", "."]);
+    git(root, &["commit", "-m", "private preview source"]);
+    let output = run(
+        root,
+        &[
+            "release",
+            "patch",
+            "--component",
+            "python",
+            "--no-sign",
+            "--no-changelog",
+            "-m",
+            "unsupported private version",
+        ],
+    );
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("Python publication requires alpha, beta, rc or dev prereleases"),
+        "{output:?}"
+    );
+    assert!(
+        fs::read_to_string(root.join("python/uv.lock"))
+            .unwrap()
+            .contains("0.3.0rc1")
     );
 }
 

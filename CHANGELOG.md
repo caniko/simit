@@ -53,6 +53,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Verify historical native package names from their namespace-owned tag and reject
+  unsupported private Python version labels before lock handling or mutation.
 - Enforce configured JetBrains release tag prefixes and validate manual versions
   through environment values rather than interpolating them into shell source.
 - Verify historical native releases using their tagged registry channel and apply

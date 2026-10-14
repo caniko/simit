@@ -126,6 +126,9 @@ impl ManifestRelease {
             };
         ensure!(!name.is_empty(), "release package name cannot be empty");
         let version = Version::parse(&version)?;
+        if matches!(registry, super::native_registry::Registry::Python) {
+            registry.version(&version)?;
+        }
         if self.publish && !private {
             registry.version(&version)?;
             if matches!(registry, super::native_registry::Registry::Python) {
@@ -517,9 +520,7 @@ impl Package {
                                 })
                             })
                         {
-                            let current = registry
-                                .version(&self.version)
-                                .unwrap_or_else(|_| self.version.to_string());
+                            let current = registry.version(&self.version)?;
                             ensure!(
                                 package
                                     .get("version")
@@ -528,11 +529,7 @@ impl Package {
                                         || version == self.version.to_string()),
                                 "uv.lock package version disagrees with manifest"
                             );
-                            package["version"] = value(
-                                registry
-                                    .version(version)
-                                    .unwrap_or_else(|_| version.to_string()),
-                            );
+                            package["version"] = value(registry.version(version)?);
                             found = true;
                         }
                     }

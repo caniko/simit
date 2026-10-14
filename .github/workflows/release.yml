@@ -75,6 +75,8 @@ jobs:
           test -s "$GNUPGHOME/maintainers.gpg"
           gpg --batch --import "$GNUPGHOME/maintainers.gpg"
           git verify-tag "$TAG"
+          signed_tag_name="$(git cat-file tag "refs/tags/$TAG" | sed -n '1,/^$/s/^tag //p')"
+          test "$signed_tag_name" = "$TAG" || { echo 'Signed tag object name differs from the release label' >&2; exit 1; }
           validated_sha="$(git rev-parse --verify "refs/tags/${TAG}^{commit}")"
           checkout_sha="$(git rev-parse --verify HEAD)"
           event_sha="${GITHUB_SHA:-${FORGE_SHA:-${FORGEJO_SHA:-}}}"

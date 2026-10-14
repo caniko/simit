@@ -412,14 +412,12 @@ fn verify_manifest(
     let admitted = identity
         .as_ref()
         .ok()
-        .filter(|tagged| tagged.name == package.name && &tagged.version == version);
+        .filter(|tagged| &tagged.version == version);
     results.push(match &identity {
-        Ok(tagged) if tagged.name == package.name && &tagged.version == version => {
-            CheckResult::pass(
-                "tagged package identity",
-                format!("{} {version} resolves at {tag}", package.name),
-            )
-        }
+        Ok(tagged) if &tagged.version == version => CheckResult::pass(
+            "tagged package identity",
+            format!("{} {version} resolves at {tag}", tagged.name),
+        ),
         Ok(_) => CheckResult::fail(
             "tagged package identity",
             "tagged manifest name/version disagrees with the selected release",
