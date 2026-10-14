@@ -6,7 +6,9 @@ use serde_json::Value;
 fn reference(value: &Value) -> Result<&str> {
     let reference = value.as_str().context("missing source reference")?;
     ensure!(
-        !reference.is_empty() && !reference.chars().any(char::is_control),
+        !reference.is_empty()
+            && reference.len() <= 2048
+            && !reference.chars().any(char::is_control),
         "invalid source reference"
     );
     Ok(reference)

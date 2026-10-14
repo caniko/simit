@@ -26,6 +26,7 @@ struct Provider {
     jobs: Option<Value>,
     discovery: Option<Value>,
     workflow_path: Option<String>,
+    rate_limited: bool,
 }
 fn run() -> Value {
     json!({"id":12,"repository":{"id":101,"full_name":"owner/repo"},"head_sha":"a".repeat(40),
@@ -47,7 +48,11 @@ impl Transport for Provider {
             return Ok(Response {
                 status,
                 body: b"original interrupted response".to_vec(),
-                retry_after: None,
+                retry_after: if self.rate_limited && status == 403 {
+                    Some(3)
+                } else {
+                    None
+                },
                 transport_error: None,
             });
         }
@@ -104,6 +109,7 @@ fn fixture() -> (Spec, Identity, Provider) {
         jobs: None,
         discovery: None,
         workflow_path: None,
+        rate_limited: false,
     };
     let spec = Spec {
         schema: "simit.original-observer-spec.v1".into(),
@@ -212,6 +218,92 @@ fn authorization_failure_is_not_retried_or_promoted() {
     );
     assert_eq!(provider.failures.len(), 1);
     assert_eq!(receipt(&root)["capture_complete"], false);
+}
+
+#[test]
+fn secondary_rate_limited_403_retries_inside_the_existing_deadline() {
+    let (spec, identity, mut provider) = fixture();
+    provider.rate_limited = true;
+    provider.failures.push_back(403);
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("packet");
+    let mut clock = FakeClock::default();
+    observe_with(
+        &spec,
+        &identity,
+        &root,
+        &mut provider,
+        &mut clock,
+        &Cancellation::default(),
+    )
+    .unwrap();
+    assert_eq!(clock.elapsed(), Duration::from_secs(3));
+    let retained: Value =
+        serde_json::from_slice(&std::fs::read(root.join("requests/0001.json")).unwrap()).unwrap();
+    assert_eq!(retained["status"], 403);
+    assert_eq!(retained["retry_after"], 3);
+}
+
+#[test]
+fn exact_branch_with_at_sign_remains_a_valid_ref_qualified_workflow_target() {
+    let (spec, mut identity, mut provider) = fixture();
+    let mut event: Value = serde_json::from_str(&identity.event_json).unwrap();
+    event["ref"] = json!("refs/heads/feature@foo");
+    identity.event_json = event.to_string();
+    identity.workflow_ref =
+        "owner/repo/.github/workflows/custody.yaml@refs/heads/feature@foo".into();
+    let mut exact = run();
+    exact["head_branch"] = json!("feature@foo");
+    exact["path"] = json!(".github/workflows/ci.yaml@refs/heads/feature@foo");
+    provider.discovery = Some(json!({"total_count":1,"workflow_runs":[exact]}));
+    provider.runs.extend(std::iter::repeat_n(exact, 3));
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("packet");
+    assert!(
+        observe_with(
+            &spec,
+            &identity,
+            &root,
+            &mut provider,
+            &mut FakeClock::default(),
+            &Cancellation::default()
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn cli_reads_every_maximal_enrolled_job_inventory_before_environment_admission() {
+    let (mut spec, _, _) = fixture();
+    for i in 0..10 {
+        spec.workflows.insert(
+            format!(".github/workflows/workflow-{i}.yaml"),
+            (0..256)
+                .map(|job| format!("{job:03}{}", "x".repeat(509)))
+                .collect(),
+        );
+    }
+    spec.workflows.remove(".github/workflows/ci.yaml");
+    spec.timeout_seconds = 20700;
+    spec.poll_seconds = 60;
+    spec.validate().unwrap();
+    let raw = serde_json::to_vec_pretty(&spec).unwrap();
+    assert!(raw.len() > 1024 * 1024);
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("spec.json");
+    std::fs::write(&path, raw).unwrap();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_simit"))
+        .args(["ci", "observe-original", "--spec"])
+        .arg(path)
+        .arg("--results")
+        .arg(temp.path().join("packet"))
+        .env_remove("RUNNER_ENVIRONMENT")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains("environment variable"), "{error}");
+    assert!(!error.contains("byte limit"), "{error}");
 }
 
 #[test]

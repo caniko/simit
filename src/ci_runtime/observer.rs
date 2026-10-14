@@ -17,9 +17,17 @@ use std::{
 pub use transport::GitHubTransport;
 
 const JSON_BYTES: u64 = 16 * 1024 * 1024;
+/// Maximum JSON spec input, covering every admitted workflow/job-name inventory.
+pub const MAX_SPEC_BYTES: u64 = JSON_BYTES;
 const LOG_BYTES: u64 = 512 * 1024 * 1024;
 const TOTAL_BYTES: u64 = 1536 * 1024 * 1024;
+// Uploaded packets include request bodies and their captured archive copies.
+// Keep an independent allowance for outer ZIP headers/deflate framing, and a
+// separate request budget so metadata cannot truncate the admitted download.
+const ARTIFACT_BYTES: u64 = 2 * TOTAL_BYTES + 128 * 1024 * 1024;
+const RETENTION_BYTES: u64 = ARTIFACT_BYTES + 256 * 1024 * 1024;
 const MAX_REQUESTS: usize = 65536;
+const MAX_PACKET_FILES: usize = 3 * MAX_REQUESTS + 10000;
 const MAX_PAGES: u64 = 20;
 const MAX_ATTEMPTS: u64 = 5;
 
@@ -344,8 +352,7 @@ impl<W: Write> Write for JsonBudget<W> {
         self.writer.flush()
     }
 }
-fn write_json_bounded(path: &Path, value: &impl Serialize, maximum: u64) -> Result<()> {
-    let file = OpenOptions::new().write(true).create_new(true).open(path)?;
+fn write_json_to(file: impl Write, value: &impl Serialize, maximum: u64) -> Result<()> {
     let mut writer = JsonBudget {
         writer: std::io::BufWriter::new(file),
         remaining: maximum,
@@ -355,13 +362,25 @@ fn write_json_bounded(path: &Path, value: &impl Serialize, maximum: u64) -> Resu
     writer.flush()?;
     Ok(())
 }
+fn write_json_bounded(path: &Path, value: &impl Serialize, maximum: u64) -> Result<()> {
+    write_json_to(
+        OpenOptions::new().write(true).create_new(true).open(path)?,
+        value,
+        maximum,
+    )
+}
 fn write_json(path: &Path, value: &impl Serialize) -> Result<()> {
     write_json_bounded(path, value, JSON_BYTES)
 }
 fn save_receipt(root: &Path, receipt: &Receipt) -> Result<()> {
-    let temporary = root.join("receipt.json.next");
-    write_json_bounded(&temporary, receipt, 64 * 1024 * 1024)?;
-    fs::rename(temporary, root.join("receipt.json"))?;
+    // NamedTempFile owns only this new write. A failed serialization removes its
+    // partial temporary file, preserving the prior receipt and allowing the
+    // final non-accepting receipt to publish through the same atomic path.
+    let mut temporary = tempfile::Builder::new()
+        .prefix(".receipt-next-")
+        .tempfile_in(root)?;
+    write_json_to(temporary.as_file_mut(), receipt, 64 * 1024 * 1024)?;
+    temporary.persist(root.join("receipt.json"))?;
     Ok(())
 }
 
@@ -373,6 +392,7 @@ struct Observer<'a> {
     cancellation: &'a Cancellation,
     requests: usize,
     bytes: u64,
+    byte_budget: u64,
 }
 impl Observer<'_> {
     fn remaining(&self) -> Result<Duration> {
@@ -400,7 +420,7 @@ impl Observer<'_> {
                 self.requests <= MAX_REQUESTS,
                 "observer request inventory exceeded"
             );
-            let maximum = maximum.min(TOTAL_BYTES.saturating_sub(self.bytes));
+            let maximum = maximum.min(self.byte_budget.saturating_sub(self.bytes));
             ensure!(maximum > 0, "observer byte budget exhausted");
             let endpoint = format!("repos/{}/{suffix}", self.spec.repository);
             let response = self
@@ -425,6 +445,7 @@ impl Observer<'_> {
                 matches!(error.as_str(), "timeout" | "connect" | "body-read")
             } else {
                 matches!(response.status, 408 | 429 | 500 | 502 | 503 | 504)
+                    || (response.status == 403 && response.retry_after.is_some())
             };
             ensure!(
                 transient && attempt + 1 < MAX_ATTEMPTS,
@@ -432,7 +453,9 @@ impl Observer<'_> {
                 response.status,
                 response.transport_error.as_deref().unwrap_or("HTTP")
             );
-            self.sleep(response.retry_after.unwrap_or(1 << attempt).clamp(1, 60))?;
+            // Never retry before the provider's rate-limit window. The shared
+            // deadline bounds even an unusually large Retry-After value.
+            self.sleep(response.retry_after.unwrap_or(1 << attempt).max(1))?;
         }
         unreachable!("retry loop always returns or rejects")
     }
@@ -504,7 +527,6 @@ fn provider_workflow(run: &Value) -> Result<&str> {
         ensure!(
             !reference.is_empty()
                 && reference.len() <= 2048
-                && !reference.contains('@')
                 && !reference
                     .chars()
                     .any(|c| c.is_control() || c.is_whitespace()),
@@ -514,6 +536,41 @@ fn provider_workflow(run: &Value) -> Result<&str> {
     } else {
         Ok(path)
     }
+}
+
+fn compact_run(run: &Value) -> Value {
+    // Keep the validated wire identity in the receipt, not arbitrary ignored
+    // provider JSON. Full snapshots remain byte-bound in the retained packet.
+    let mut value = serde_json::Map::new();
+    for key in [
+        "id",
+        "head_sha",
+        "event",
+        "run_attempt",
+        "path",
+        "status",
+        "conclusion",
+        "head_branch",
+    ] {
+        value.insert(key.into(), run[key].clone());
+    }
+    value.insert(
+        "repository".into(),
+        json!({"id":run["repository"]["id"],"full_name":run["repository"]["full_name"]}),
+    );
+    value.insert("head_repository".into(),if run["event"]=="push" {
+        json!({"id":run["head_repository"]["id"],"full_name":run["head_repository"]["full_name"]})
+    } else {json!({"id":run["head_repository"]["id"]})});
+    if let Some(associations) = run["pull_requests"]
+        .as_array()
+        .filter(|_| run["event"] == "pull_request")
+    {
+        value.insert("pull_requests".into(),json!(associations.iter().map(|pr|json!({"number":pr["number"],
+            "head":{"ref":pr["head"]["ref"],"sha":pr["head"]["sha"],"repo":{"id":pr["head"]["repo"]["id"]}},
+            "base":{"ref":pr["base"]["ref"],"sha":pr["base"]["sha"],"repo":{"id":pr["base"]["repo"]["id"]}}
+        })).collect::<Vec<_>>()));
+    }
+    Value::Object(value)
 }
 fn successful_run(run: &Value) -> Result<()> {
     ensure!(
@@ -573,15 +630,19 @@ fn log_members(
     raw: &[u8],
     mut check: impl FnMut() -> Result<()>,
 ) -> Result<BTreeMap<String, String>> {
-    archive_members(raw, LOG_BYTES, &mut check)
+    archive_members(raw, LOG_BYTES, 10000, &mut check)
 }
 fn archive_members(
     raw: &[u8],
     maximum: u64,
+    maximum_files: usize,
     mut check: impl FnMut() -> Result<()>,
 ) -> Result<BTreeMap<String, String>> {
     let mut archive = zip::ZipArchive::new(Cursor::new(raw))?;
-    ensure!(archive.len() <= 10000, "log ZIP member inventory exceeded");
+    ensure!(
+        archive.len() <= maximum_files,
+        "ZIP member inventory exceeded"
+    );
     // zip's filename index can hide duplicate central-directory names. Compare
     // against the original EOCD inventory before trusting indexed enumeration.
     let end = raw
@@ -589,7 +650,38 @@ fn archive_members(
         .rposition(|bytes| bytes == b"PK\x05\x06")
         .context("missing ZIP directory footer")?;
     let footer = raw.get(end..end + 22).context("truncated ZIP footer")?;
-    let entries = u16::from_le_bytes([footer[10], footer[11]]) as usize;
+    let mut entries = u16::from_le_bytes([footer[10], footer[11]]) as usize;
+    if entries == u16::MAX as usize
+        && end
+            .checked_sub(20)
+            .and_then(|offset| raw.get(offset..offset + 4))
+            == Some(b"PK\x06\x07")
+    {
+        let locator_offset = end
+            .checked_sub(20)
+            .context("missing ZIP64 directory locator")?;
+        let locator = &raw[locator_offset..end];
+        ensure!(
+            locator[..4] == *b"PK\x06\x07"
+                && locator[4..8] == [0; 4]
+                && locator[16..20] == [1, 0, 0, 0],
+            "unsupported ZIP64 disks"
+        );
+        let offset = usize::try_from(u64::from_le_bytes(locator[8..16].try_into()?))?;
+        let directory = raw
+            .get(offset..offset.checked_add(56).context("ZIP64 directory overflow")?)
+            .context("truncated ZIP64 directory")?;
+        let size = usize::try_from(u64::from_le_bytes(directory[4..12].try_into()?))?;
+        ensure!(
+            directory[..4] == *b"PK\x06\x06"
+                && size >= 44
+                && offset.checked_add(12).and_then(|n| n.checked_add(size)) == Some(locator_offset)
+                && directory[16..24] == [0; 8]
+                && directory[24..32] == directory[32..40],
+            "unsupported ZIP64 directory"
+        );
+        entries = usize::try_from(u64::from_le_bytes(directory[32..40].try_into()?))?;
+    }
     let comment = u16::from_le_bytes([footer[20], footer[21]]) as usize;
     ensure!(
         end + 22 + comment == raw.len()
@@ -686,6 +778,7 @@ pub fn observe_with(
         cancellation,
         requests: 0,
         bytes: 0,
+        byte_budget: TOTAL_BYTES,
     };
     let outcome = (|| {
         fs::write(root.join("event.json"), identity.event_json.as_bytes())?;
@@ -751,7 +844,7 @@ pub fn observe_with(
                 receipt.producers.push(Producer {
                     run_id: id,
                     workflow: workflow.clone(),
-                    terminal: after,
+                    terminal: compact_run(&after),
                     raw_logs_sha256: digest(&raw),
                     log_members: members,
                 });
@@ -845,7 +938,7 @@ fn inventory(root: &Path) -> Result<BTreeMap<String, String>> {
                 continue;
             }
             ensure!(
-                result.len() < 3 * MAX_REQUESTS + 10000,
+                result.len() < MAX_PACKET_FILES,
                 "evidence file inventory exceeded"
             );
             let mut file = File::open(path)?;
@@ -973,10 +1066,14 @@ pub fn verify_retention(
         cancellation,
         requests: 0,
         bytes: 0,
+        byte_budget: RETENTION_BYTES,
     };
     let artifact = observer.json(&format!("actions/artifacts/{artifact_id}"))?;
     validate_artifact(&artifact, identity, artifact_id, upload_digest)?;
-    let raw = observer.get(&format!("actions/artifacts/{artifact_id}/zip"), TOTAL_BYTES)?;
+    let raw = observer.get(
+        &format!("actions/artifacts/{artifact_id}/zip"),
+        ARTIFACT_BYTES,
+    )?;
     ensure!(
         digest(&raw) == upload_digest,
         "uploaded provider ZIP digest differs"
@@ -984,7 +1081,10 @@ pub fn verify_retention(
     let mut expected = receipt.members.clone();
     expected.insert("receipt.json".into(), digest(&receipt_bytes));
     ensure!(
-        archive_members(&raw, 2 * TOTAL_BYTES, || observer.remaining().map(|_| ()))? == expected,
+        archive_members(&raw, 2 * TOTAL_BYTES, MAX_PACKET_FILES, || observer
+            .remaining()
+            .map(|_| ()))?
+            == expected,
         "uploaded provider ZIP members differ"
     );
     for producer in &receipt.producers {
@@ -1038,4 +1138,118 @@ fn validate_artifact(
         "uploaded artifact retention is insufficient"
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct MaximumProbe(u64);
+    impl Transport for MaximumProbe {
+        fn get(
+            &mut self,
+            _endpoint: &str,
+            maximum: u64,
+            _timeout: Duration,
+            _cancellation: &Cancellation,
+        ) -> Result<Response> {
+            self.0 = maximum;
+            Ok(Response {
+                status: 200,
+                body: Vec::new(),
+                retry_after: None,
+                transport_error: None,
+            })
+        }
+    }
+
+    #[test]
+    fn retention_metadata_cannot_truncate_the_largest_admitted_packet_download() {
+        let (spec, _) = minimal_inputs();
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("requests")).unwrap();
+        let mut transport = MaximumProbe(0);
+        let mut clock = MonotonicClock::default();
+        let cancellation = Cancellation::default();
+        let mut observer = Observer {
+            spec: &spec,
+            root: root.path(),
+            transport: &mut transport,
+            clock: &mut clock,
+            cancellation: &cancellation,
+            requests: 0,
+            bytes: 2 * JSON_BYTES,
+            byte_budget: RETENTION_BYTES,
+        };
+        observer
+            .get("actions/artifacts/1/zip", ARTIFACT_BYTES)
+            .unwrap();
+        assert_eq!(transport.0, ARTIFACT_BYTES);
+        assert!(transport.0 > 2 * TOTAL_BYTES);
+    }
+
+    #[test]
+    fn uploaded_zip64_can_cover_the_admitted_packet_inventory() {
+        let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        for index in 0..=u16::MAX as usize {
+            writer
+                .start_file(
+                    format!("requests/{index:06}.body"),
+                    zip::write::SimpleFileOptions::default()
+                        .compression_method(zip::CompressionMethod::Stored),
+                )
+                .unwrap();
+            writer.write_all(b"original bytes").unwrap();
+        }
+        let raw = writer.finish().unwrap().into_inner();
+        let admitted = archive_members(&raw, 2 * TOTAL_BYTES, MAX_PACKET_FILES, || Ok(())).unwrap();
+        assert_eq!(admitted.len(), u16::MAX as usize + 1);
+        assert!(log_members(&raw, || Ok(())).is_err());
+    }
+
+    #[test]
+    fn receipts_bind_validated_identity_without_copying_ignored_provider_payloads() {
+        let run = json!({"id":1,"repository":{"id":1,"full_name":"owner/repo","ignored":"x".repeat(1024*1024)},"head_repository":{"id":1,"full_name":"owner/repo"},"head_sha":"a".repeat(40),"head_branch":"main","event":"push","run_attempt":1,"path":".github/workflows/ci.yaml","status":"completed","conclusion":"success","ignored":"x".repeat(1024*1024)});
+        let (spec, identity) = minimal_inputs();
+        let compact = compact_run(&run);
+        validate_run(&compact, &spec, &identity, 1, ".github/workflows/ci.yaml").unwrap();
+        assert!(serde_json::to_vec(&compact).unwrap().len() < 1024);
+    }
+
+    #[test]
+    fn failed_receipt_serialization_cannot_block_a_subsequent_failure_receipt() {
+        let root = tempfile::tempdir().unwrap();
+        let (spec, identity) = minimal_inputs();
+        let mut receipt = Receipt {
+            schema: "simit.original-custody.v1".into(),
+            qualified: false,
+            capture_complete: false,
+            spec,
+            identity,
+            producers: Vec::new(),
+            error: None,
+            members: BTreeMap::new(),
+        };
+        save_receipt(root.path(), &receipt).unwrap();
+        receipt.error = Some("x".repeat(64 * 1024 * 1024));
+        assert!(save_receipt(root.path(), &receipt).is_err());
+        receipt.error = Some("explicit interrupted receipt serialization".into());
+        save_receipt(root.path(), &receipt).unwrap();
+        let retained: Receipt =
+            serde_json::from_slice(&fs::read(root.path().join("receipt.json")).unwrap()).unwrap();
+        assert_eq!(retained.error, receipt.error);
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
+    }
+
+    fn minimal_inputs() -> (Spec, Identity) {
+        let spec = Spec {
+            schema: "simit.original-observer-spec.v1".into(),
+            repository: "owner/repo".into(),
+            workflows: [(".github/workflows/ci.yaml".into(), vec!["test".into()])].into(),
+            timeout_seconds: 120,
+            poll_seconds: 10,
+        };
+        let identity=Identity {repository_id:1,head:"a".repeat(40),event:"push".into(),run_id:2,run_attempt:1,workflow_ref:"owner/repo/.github/workflows/retain.yaml@refs/heads/main".into(),workflow_sha:"a".repeat(40),event_json:json!({"after":"a".repeat(40),"ref":"refs/heads/main","deleted":false,"repository":{"id":1,"full_name":"owner/repo"}}).to_string()};
+        (spec, identity)
+    }
 }

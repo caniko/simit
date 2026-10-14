@@ -58,7 +58,8 @@ fn observer_inputs(
     super::observer::Identity,
     super::observer::GitHubTransport,
 )> {
-    let spec: super::observer::Spec = super::group::read_json(path, 1024 * 1024)?;
+    let spec: super::observer::Spec =
+        super::group::read_json(path, super::observer::MAX_SPEC_BYTES)?;
     let identity = super::observer::Identity::from_environment(&spec)?;
     let probe = tempfile::tempdir()?;
     let output = probe.path().join("head");

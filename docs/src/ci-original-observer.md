@@ -41,9 +41,10 @@ and cooperative cancellation retain an explicit incomplete receipt. Upload it
 with `if: always()`; a failed, cancelled, skipped or incomplete capture never
 establishes acceptance. Pre-existing evidence directories are rejected.
 
-Only bounded transient responses (408, 429, 500, 502, 503, 504 and temporary
-transport failures) retry, at most five attempts per GET, with a bounded
-retry-after/backoff inside the aggregate deadline. Authorization failures,
+Only bounded transient responses (408, 429, 500, 502, 503, 504, rate-limited 403
+with `Retry-After`, and temporary transport failures) retry, at most five attempts
+per GET. Provider retry windows are honored inside the aggregate deadline;
+expiry during that wait remains failure. Other authorization failures,
 malformed successful responses, duplicate producer selections and identity drift
 fail closed. Received response bytes and sanitized metadata remain in numbered
 request files. Neither credentials nor signed download URLs are recorded.
@@ -52,7 +53,9 @@ Admission checks the complete timeout/poll/workflow combination against the
 65,536-GET ceiling, including bounded pagination, capture and all transient retry
 attempts. Unsupported polling configurations fail before creating a packet.
 Provider workflow paths may carry a validated ref suffix; enrollment still binds
-the exact source-owned YAML path. Serialized aggregate job metadata is bounded by
+the exact source-owned YAML path and original event target. `@` inside a valid
+matching branch ref remains supported. CLI JSON inputs admit the same 16 MiB
+envelope that covers every accepted job-name inventory. Serialized aggregate job metadata is bounded by
 the same 16 MiB ceiling at capture and retention, including pretty-print overhead.
 
 Every completed producer binds repository, run id, head, workflow, event and
@@ -61,6 +64,14 @@ must all be terminal and successful. Provider log ZIPs retain their exact bytes;
 member admission is CRC-checked, byte-bounded and rejects duplicates, symlinks,
 unsafe names, multidisk and unsupported ZIP directories. No archive is extracted
 and no producer-controlled content is executed.
+
+Receipt producer rows retain compact validated identity while full provider
+snapshots remain in the packet. Atomic receipt publication owns and cleans its
+temporary file on failed serialization; an interrupted write cannot block the
+final incomplete receipt. Uploaded packet downloads have a separate aggregate
+byte budget: the doubled captured-byte allowance plus outer ZIP framing and
+metadata reserves. Bounded single-disk ZIP64 directories support the full admitted
+packet file inventory, retaining central-directory duplicate and CRC checks.
 
 Source targeting also binds case-sensitive branch refs. A PR must have exactly
 one native association matching the event's PR number, head ref/repository/SHA
