@@ -353,7 +353,11 @@ mod tests {
                 )
                 .unwrap();
             if mode == "proxy" {
-                assert_eq!(response.status, 200);
+                assert_eq!(
+                    response.status, 200,
+                    "transport={:?}, body={:?}",
+                    response.transport_error, response.body
+                );
                 assert_eq!(response.body, b"origin");
             } else {
                 assert_ne!(response.status, 200, "job-selected CA was trusted");
@@ -379,6 +383,18 @@ mod tests {
                     }
                     _ => return None,
                 }
+            }
+        }
+        fn read_request(stream: &mut impl Read) {
+            let mut request = Vec::new();
+            let mut chunk = [0; 4096];
+            while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                let read = stream.read(&mut chunk).unwrap();
+                assert!(
+                    read > 0 && request.len() + read <= 65536,
+                    "incomplete test request headers"
+                );
+                request.extend_from_slice(&chunk[..read]);
             }
         }
         fn child(mode: &str, url: &str) -> Command {
@@ -407,8 +423,7 @@ mod tests {
         let proxy_url = format!("http://{}", proxy.local_addr().unwrap());
         let origin = thread::spawn(move || {
             if let Some(mut stream) = accept(origin) {
-                let mut request = [0; 4096];
-                let _ = stream.read(&mut request);
+                read_request(&mut stream);
                 let _ = stream.write_all(
                     b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\norigin",
                 );
@@ -416,8 +431,7 @@ mod tests {
         });
         let proxy = thread::spawn(move || {
             if let Some(mut stream) = accept(proxy) {
-                let mut request = [0; 4096];
-                let _ = stream.read(&mut request);
+                read_request(&mut stream);
                 let _ = stream.write_all(
                     b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nproxy",
                 );
@@ -501,8 +515,7 @@ mod tests {
             let server = thread::spawn(move || {
                 if let Some(stream) = accept(listener) {
                     if let Ok(mut stream) = acceptor.accept(stream) {
-                        let mut request = [0; 4096];
-                        let _ = stream.read(&mut request);
+                        read_request(&mut stream);
                         let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\norigin");
                     }
                 }
