@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Explicit `sealed-v2` completion custody: immediate per-original capture,
+  native step-log completeness admission, immutable artifact ID/digest verification
+  and independently uploaded aggregation with fresh native revocation checks.
+  Existing policies retain their original protocol.
 - A mixed-language monorepo component graph for changed-path qualification,
   member discovery, shared formatter composition, and native GitHub CI.
 - Independent Cargo release planning, package-scoped version bumps, verification,
@@ -65,6 +69,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   retain source-bound packed candidates for byte-verified retries, reject
   conflicting registry content, and keep publication credentials out of
   packing, lookups, and command output.
+- Publish sealed capsule names only after admission succeeds, keeping failed-capture
+  diagnostics separate from reusable capsules.
+- Preserve explicitly selected custody protocols when persisting CI option changes.
 - Require static native release policy for historical verification, reject Cargo
   changelog symlinks, locate historical Cargo manifests after directory moves, and
   bound Git notes by arbitrary admitted SemVer prerelease tags.
