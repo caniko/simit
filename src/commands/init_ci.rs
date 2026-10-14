@@ -410,11 +410,12 @@ pub fn run(command: InitCiCommand) -> Result<()> {
     if !command.primary_only && wants_jetbrains {
         let jetbrains = jetbrains_options(&cfg)?;
         let jetbrains_runner = jetbrains_runner(&jetbrains, &runners.release)?;
-        files.push(ci::jetbrains_plugin_file(
+        files.push(ci::jetbrains_plugin_file_with_prefix(
             platform,
             resolved.runtime,
             &jetbrains_runner,
             &jetbrains,
+            cfg.release.tag_prefix,
         )?);
     }
     let persisted_ci = resolved.persisted_ci(

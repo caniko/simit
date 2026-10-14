@@ -2324,6 +2324,88 @@ prepublish_commands = ["nix flake check --no-build"]
 }
 
 #[cfg(unix)]
+#[test]
+fn jetbrains_publishers_enforce_configured_release_prefix() {
+    for platform in ["github", "forgejo"] {
+        for prefix in ["", "v"] {
+            let temp = init_package(true);
+            let root = temp.path();
+            fs::create_dir_all(root.join("plugin/src/main/resources/META-INF")).unwrap();
+            fs::write(
+                root.join("plugin/src/main/resources/META-INF/plugin.xml"),
+                "<idea-plugin><id>com.example.demo</id></idea-plugin>",
+            )
+            .unwrap();
+            fs::write(
+                root.join("plugin/gradle.properties"),
+                "pluginVersion=0.1.0\n",
+            )
+            .unwrap();
+            fs::write(root.join("simit.toml"), format!("[ci]\nruntime='nix'\n[release]\ntag_prefix='{prefix}'\n[jetbrains]\nplugin_dir='plugin'\nplugin_xml_id='com.example.demo'\npackage_installable='.#plugin'\n")).unwrap();
+            let output = simit_with_user_config(root)
+                .current_dir(root)
+                .args([
+                    "init",
+                    "ci",
+                    "--platform",
+                    platform,
+                    "--runtime",
+                    "nix",
+                    "--with-jetbrains",
+                ])
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            let dir = if platform == "github" {
+                ".github"
+            } else {
+                ".forgejo"
+            };
+            let workflow: serde_yaml::Value = serde_yaml::from_str(&read(
+                &root.join(format!("{dir}/workflows/publish-jetbrains-plugin.yaml")),
+            ))
+            .unwrap();
+            assert_eq!(
+                workflow["on"]["push"]["tags"],
+                serde_yaml::to_value(vec![format!("{prefix}[0-9]*.[0-9]*.[0-9]*")]).unwrap()
+            );
+            let steps = workflow["jobs"]["publish"]["steps"].as_sequence().unwrap();
+            let script = steps
+                .iter()
+                .find(|s| s["name"] == "Validate plugin version and metadata")
+                .unwrap()["run"]
+                .as_str()
+                .unwrap();
+            for (label, dispatch, success) in [
+                (format!("{prefix}0.1.0"), "", true),
+                (
+                    if prefix.is_empty() { "v0.1.0" } else { "0.1.0" }.to_owned(),
+                    "",
+                    false,
+                ),
+                ("trunk".to_owned(), "0.1.0", true),
+            ] {
+                let output = Command::new("bash")
+                    .current_dir(root)
+                    .env("TAG_LABEL", &label)
+                    .env("DISPATCH_VERSION", dispatch)
+                    .env("PLUGIN_DIR", "plugin")
+                    .env("PLUGIN_XML_ID", "com.example.demo")
+                    .env("GITHUB_ENV", root.join("environment"))
+                    .args(["-c", script])
+                    .output()
+                    .unwrap();
+                assert_eq!(
+                    output.status.success(),
+                    success,
+                    "{platform}/{prefix}/{label}: {output:?}"
+                );
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
 fn verify_editor_publish_package_arguments(root: &Path, yaml: &serde_yaml::Value) {
     use std::os::unix::fs::PermissionsExt;
 

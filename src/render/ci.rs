@@ -898,13 +898,29 @@ pub fn jetbrains_plugin_file(
     runner: &ResolvedRunner,
     jetbrains: &ResolvedJetbrains,
 ) -> Result<GeneratedFile> {
+    jetbrains_plugin_file_with_prefix(
+        platform,
+        runtime,
+        runner,
+        jetbrains,
+        crate::release_identity::TagPrefix::None,
+    )
+}
+
+pub fn jetbrains_plugin_file_with_prefix(
+    platform: Platform,
+    runtime: Runtime,
+    runner: &ResolvedRunner,
+    jetbrains: &ResolvedJetbrains,
+    prefix: crate::release_identity::TagPrefix,
+) -> Result<GeneratedFile> {
     if runtime != Runtime::Nix {
         bail!("JetBrains plugin workflow generation requires --runtime nix");
     }
 
     Ok(GeneratedFile {
         relative_path: PathBuf::from(platform.workflow_dir()).join("publish-jetbrains-plugin.yaml"),
-        content: jetbrains_plugin_workflow(platform, runner, jetbrains),
+        content: jetbrains_plugin_workflow(platform, runner, jetbrains, prefix),
     })
 }
 
@@ -1582,6 +1598,7 @@ fn jetbrains_plugin_workflow(
     platform: Platform,
     runner: &ResolvedRunner,
     jetbrains: &ResolvedJetbrains,
+    prefix: crate::release_identity::TagPrefix,
 ) -> String {
     let artifact_label = Path::new(&jetbrains.plugin_dir)
         .file_name()
@@ -1593,7 +1610,10 @@ fn jetbrains_plugin_workflow(
     workflow.push_str("name: Publish JetBrains Plugin\n\n");
     workflow.push_str("on:\n");
     workflow.push_str("  push:\n");
-    workflow.push_str("    tags: [\"[0-9]*.[0-9]*.[0-9]*\", \"v[0-9]*.[0-9]*.[0-9]*\"]\n");
+    workflow.push_str(&format!(
+        "    tags: [\"{}[0-9]*.[0-9]*.[0-9]*\"]\n",
+        prefix.as_str()
+    ));
     workflow.push_str("  workflow_dispatch:\n");
     workflow.push_str("    inputs:\n");
     workflow.push_str("      version:\n");
@@ -1612,7 +1632,7 @@ fn jetbrains_plugin_workflow(
     push_checkout_step(&mut workflow, platform, runner);
     push_install_nix_step(&mut workflow, platform);
     push_jetbrains_credential_preflight(&mut workflow, jetbrains);
-    push_jetbrains_version_validation(&mut workflow, jetbrains);
+    push_jetbrains_version_validation(&mut workflow, jetbrains, prefix);
     for (index, command) in jetbrains.prepublish_commands.iter().enumerate() {
         workflow.push_str("      - name: Prepublish command ");
         workflow.push_str(&(index + 1).to_string());
@@ -1776,18 +1796,27 @@ fn push_jetbrains_credential_preflight(workflow: &mut String, jetbrains: &Resolv
     workflow.push_str("          printf '%s\\n' 'JetBrains publishing credentials validated'\n\n");
 }
 
-fn push_jetbrains_version_validation(workflow: &mut String, jetbrains: &ResolvedJetbrains) {
+fn push_jetbrains_version_validation(
+    workflow: &mut String,
+    jetbrains: &ResolvedJetbrains,
+    prefix: crate::release_identity::TagPrefix,
+) {
     workflow.push_str("      - name: Validate plugin version and metadata\n");
     workflow.push_str("        env:\n");
+    workflow.push_str("          TAG_LABEL: ${{ github.ref_name }}\n          DISPATCH_VERSION: ${{ github.event.inputs.version }}\n");
     workflow.push_str("          PLUGIN_DIR: ");
     workflow.push_str(&shell_word(&jetbrains.plugin_dir));
     workflow.push_str("\n          PLUGIN_XML_ID: ");
     workflow.push_str(&shell_word(&jetbrains.plugin_xml_id));
     workflow.push_str("\n        run: |\n");
     workflow.push_str("          set -euo pipefail\n");
-    workflow
-        .push_str("          VERSION=\"${{ github.event.inputs.version || github.ref_name }}\"\n");
-    workflow.push_str("          VERSION=\"${VERSION#v}\"\n");
+    workflow.push_str("          if [ -n \"$DISPATCH_VERSION\" ]; then\n            VERSION=\"$DISPATCH_VERSION\"\n          else\n");
+    if prefix == crate::release_identity::TagPrefix::V {
+        workflow.push_str("            case \"$TAG_LABEL\" in v*) VERSION=\"${TAG_LABEL#v}\" ;; *) echo 'Tag prefix mismatch' >&2; exit 1 ;; esac\n");
+    } else {
+        workflow.push_str("            VERSION=\"$TAG_LABEL\"\n");
+    }
+    workflow.push_str("          fi\n");
     workflow.push_str("          [[ \"$VERSION\" =~ ^[0-9]+\\.[0-9]+\\.[0-9]+$ ]]\n");
     if let Some(cargo_package) = &jetbrains.cargo_package {
         workflow.push_str("          cargo_metadata=$(nix shell nixpkgs#cargo -c cargo metadata --format-version 1 --no-deps)\n");
@@ -1800,6 +1829,7 @@ fn push_jetbrains_version_validation(workflow: &mut String, jetbrains: &Resolved
     workflow.push_str("          test -f \"$PLUGIN_DIR/src/main/resources/META-INF/plugin.xml\"\n");
     workflow.push_str("          grep -Fq \"<id>$PLUGIN_XML_ID</id>\" \"$PLUGIN_DIR/src/main/resources/META-INF/plugin.xml\"\n\n");
     workflow.push_str("          grep -Eq \"^[[:space:]]*pluginVersion[[:space:]]*=[[:space:]]*$VERSION$\" \"$PLUGIN_DIR/gradle.properties\"\n\n");
+    workflow.push_str("          printf 'VERSION=%s\\n' \"$VERSION\" >> \"$GITHUB_ENV\"\n\n");
 }
 
 fn push_jetbrains_sign_and_publish(workflow: &mut String, jetbrains: &ResolvedJetbrains) {
@@ -1810,9 +1840,6 @@ fn push_jetbrains_sign_and_publish(workflow: &mut String, jetbrains: &ResolvedJe
     workflow.push('\n');
     workflow.push_str("        run: |\n");
     workflow.push_str("          set -euo pipefail\n");
-    workflow
-        .push_str("          VERSION=\"${{ github.event.inputs.version || github.ref_name }}\"\n");
-    workflow.push_str("          VERSION=\"${VERSION#v}\"\n");
     workflow.push_str("          cd \"$PLUGIN_DIR\"\n");
     workflow.push_str("          mkdir -p build/distributions\n");
     workflow

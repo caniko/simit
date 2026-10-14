@@ -53,6 +53,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Enforce configured JetBrains release tag prefixes and validate manual versions
+  through environment values rather than interpolating them into shell source.
 - Verify historical native releases using their tagged registry channel and apply
   explicit component gate variables after entering the Nix development shell.
 - Share exact signed-tag-name admission across Actions release validators,
