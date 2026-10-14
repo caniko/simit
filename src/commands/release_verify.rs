@@ -409,7 +409,11 @@ fn verify_manifest(
         )),
         Err(error) => Err(error.into()),
     };
-    results.push(match identity {
+    let admitted = identity
+        .as_ref()
+        .ok()
+        .filter(|tagged| tagged.name == package.name && &tagged.version == version);
+    results.push(match &identity {
         Ok(tagged) if tagged.name == package.name && &tagged.version == version => {
             CheckResult::pass(
                 "tagged package identity",
@@ -442,7 +446,10 @@ fn verify_manifest(
             "check the protected publisher environment and repository Actions settings",
         ));
         results.push(
-            match crate::monorepo::native_registry::available(package, version) {
+            match admitted
+                .context("registry verification requires a matching tagged manifest")
+                .and_then(|tagged| crate::monorepo::native_registry::available(tagged, version))
+            {
                 Ok(true) => CheckResult::pass(
                     "registry publication",
                     format!(

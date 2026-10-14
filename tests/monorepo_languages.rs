@@ -180,7 +180,7 @@ fn generated_component_gates_match_local_bash_and_pipeline_failure_semantics() {
         let output = Command::new("bash")
             .args(["-euo", "pipefail", "-c", script])
             .current_dir(root)
-            .env("CHECK_VALUE", "it's bash")
+            .env("CHECK_VALUE", "devShell override")
             .output()
             .unwrap();
         assert_eq!(output.status.success(), success, "{output:?}");
@@ -1335,6 +1335,13 @@ fn npm_registry_verification_requires_the_admitted_dist_tag() {
             manifest["publishConfig"] = serde_json::json!({"tag":tag});
         }
         write(root, "node/package.json", &manifest.to_string());
+        git(root, &["init"]);
+        git(root, &["config", "user.name", "Test"]);
+        git(root, &["config", "user.email", "test@example.invalid"]);
+        git(root, &["add", "."]);
+        git(root, &["commit", "-m", "original channel"]);
+        git(root, &["tag", "node-engine/v1.3.0"]);
+        write(root, "node/package.json", &serde_json::json!({"name":"@example/node-engine","version":"1.4.0","publishConfig":{"tag":"latest"}}).to_string());
         let body = serde_json::json!({"name":"@example/node-engine","versions":{"1.3.0":{"name":"@example/node-engine","version":"1.3.0","dist":{"integrity":"sha512-abc"}}},"dist-tags":tags});
         write(
             root,
@@ -1350,7 +1357,15 @@ fn npm_registry_verification_requires_the_admitted_dist_tag() {
         let output = Command::new(env!("CARGO_BIN_EXE_simit"))
             .current_dir(root)
             .env("PATH", path)
-            .args(["release", "verify", "--component", "node", "--json"])
+            .args([
+                "release",
+                "verify",
+                "--component",
+                "node",
+                "--version",
+                "1.3.0",
+                "--json",
+            ])
             .output()
             .unwrap();
         let report: Value = serde_json::from_slice(&output.stdout).unwrap();

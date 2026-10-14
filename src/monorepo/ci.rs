@@ -141,7 +141,20 @@ pub(crate) fn files(
             // The project-owned command is one argument to Bash, not an interpolated
             // expression; GitHub event data never enters a shell command.
             let quoted = format!("'{}'", gate.run.replace('\'', "'\\''"));
-            let mut step = json!({"name": gate.id, "timeout-minutes": gate.timeout_minutes, "run": format!("nix develop --print-build-logs .#ci --command bash -euo pipefail -c {quoted}")});
+            let assignments = gate
+                .env
+                .iter()
+                .map(|(key, value)| {
+                    format!("'{}'", format!("{key}={value}").replace('\'', "'\\''"))
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            let env = if assignments.is_empty() {
+                String::new()
+            } else {
+                format!("env {assignments} ")
+            };
+            let mut step = json!({"name": gate.id, "timeout-minutes": gate.timeout_minutes, "run": format!("nix develop --print-build-logs .#ci --command {env}bash -euo pipefail -c {quoted}")});
             if !gate.env.is_empty() {
                 step["env"] = json!(gate.env);
             }

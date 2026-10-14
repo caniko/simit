@@ -53,6 +53,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Verify historical native releases using their tagged registry channel and apply
+  explicit component gate variables after entering the Nix development shell.
 - Share exact signed-tag-name admission across Actions release validators,
   including comprehensive releases; reject unsupported Crow note/prefix modes.
 - Bind direct VS Code publication to the signed tag object's internal name before
