@@ -108,6 +108,11 @@ pub struct MonorepoCheckCommand {
         help = "Use configured literals locally, or require every gate variable from the evaluated CI step environment"
     )]
     pub gate_env: MonorepoGateEnv,
+    #[arg(
+        long,
+        help = "Absolute Unix deadline supplied by generated CI, including provisioning time and leaving provider diagnostic grace"
+    )]
+    pub deadline: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]

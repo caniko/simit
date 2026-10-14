@@ -9,6 +9,15 @@ use crate::config::ProjectConfig;
 use crate::project::GeneratedFile;
 use crate::render::ci::{GENERATED_WORKFLOW_MARKER, github_action_ref, immutable_action_ref};
 
+// GitHub caps both steps and hosted jobs at 360 minutes. Diagnostics are bounded
+// to at most three 20-second subprocesses; reserve two minutes at both boundaries.
+const DIAGNOSTIC_GRACE_MINUTES: u64 = 2;
+const HOSTED_JOB_MINUTES: u64 = 360;
+
+fn gate_budget() -> Value {
+    json!({"id": "simit-gate-budget", "name": "Reserve timeout diagnostic grace", "shell": "bash", "run": format!("printf 'deadline=%s\\n' \"$(( $(date +%s) + {} ))\" >> \"$GITHUB_OUTPUT\"", (HOSTED_JOB_MINUTES - DIAGNOSTIC_GRACE_MINUTES) * 60)})
+}
+
 pub(super) fn checkout(node24: bool) -> Value {
     let version = if node24 { "v7.0.1" } else { "v4.3.1" };
     json!({"uses": github_action_ref("actions/checkout", version).split(" #").next().unwrap(), "with": {"fetch-depth": 0, "persist-credentials": false}})
@@ -151,7 +160,12 @@ pub(crate) fn files(
                     .is_some_and(|runner| crate::render::ci::github_runner_supports_node24(runner))
             })
         };
-        let mut steps = vec![checkout(node24), install_nix(node24), input_transport()];
+        let mut steps = vec![
+            gate_budget(),
+            checkout(node24),
+            install_nix(node24),
+            input_transport(),
+        ];
         if !component.systems.is_empty() {
             steps.push(json!({"name": "Verify runner system", "shell":"bash", "env":{"EXPECTED_NIX_SYSTEM":"${{ matrix.system }}"}, "run":"set -euo pipefail\nactual_system=$(nix eval --impure --raw --expr builtins.currentSystem)\nif [ \"$actual_system\" != \"$EXPECTED_NIX_SYSTEM\" ]; then\n  echo \"Native Nix runner mismatch: expected $EXPECTED_NIX_SYSTEM, got $actual_system\" >&2\n  exit 1\nfi\n"}));
         }
@@ -178,7 +192,19 @@ pub(crate) fn files(
                         .join(" ")
                 )
             };
-            let mut step = json!({"name": gate.id, "timeout-minutes": gate.timeout_minutes, "run": format!("nix develop --print-build-logs .#ci --command {environment}simit monorepo check --component {} --check {} --nix-diagnostics --gate-env provider-resolved", component.id, gate.id)});
+            let provider_minutes =
+                (gate.timeout_minutes + DIAGNOSTIC_GRACE_MINUTES).min(HOSTED_JOB_MINUTES);
+            let gate_seconds = gate
+                .timeout_minutes
+                .min(HOSTED_JOB_MINUTES - DIAGNOSTIC_GRACE_MINUTES)
+                * 60;
+            let job_deadline = "${{ steps.simit-gate-budget.outputs.deadline }}";
+            // Compute before nix develop so provisioning consumes this budget.
+            // Use no shell variables that could overwrite declared gate values.
+            let deadline = format!(
+                "\"$(( $(date +%s) + {gate_seconds} < {job_deadline} ? $(date +%s) + {gate_seconds} : {job_deadline} ))\""
+            );
+            let mut step = json!({"name": gate.id, "timeout-minutes": provider_minutes, "run": format!("nix develop --print-build-logs .#ci --command {environment}simit monorepo check --component {} --check {} --nix-diagnostics --gate-env provider-resolved --deadline {deadline}", component.id, gate.id)});
             if !gate.env.is_empty() {
                 step["env"] = json!(gate.env);
             }

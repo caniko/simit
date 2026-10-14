@@ -116,6 +116,14 @@ collecting diagnostics. Evaluated step values are passed through the Nix shell
 even if its devShell defines the same variable. Local release qualification rejects
 unresolved provider expressions before running any selected gate.
 
+Generated checks reserve two minutes for bounded diagnostics after the gate's
+deadline. The deadline is captured before `nix develop`, so provisioning counts
+toward the step budget, and is capped by a job deadline captured before checkout
+and installation. GitHub steps and jobs retain their 360-minute maximum; a gate
+at that maximum receives up to 358 minutes in CI. Local invocations without the
+generated `--deadline` retain the full configured timeout. An expired CI budget
+collects diagnostics without starting the gate.
+
 On Linux, `--nix-diagnostics` captures `/proc/meminfo`, memory pressure, Nix
 daemon status, and bounded daemon/kernel journals after a failed check. Journal
 queries start at the check's start time, retain at most 150 entries each, and

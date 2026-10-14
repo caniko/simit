@@ -4,6 +4,9 @@ use std::{fs, os::unix::fs::PermissionsExt, process::Command};
 
 use tempfile::TempDir;
 
+#[path = "common/monorepo_caller.rs"]
+mod monorepo_caller;
+
 fn fixture() -> TempDir {
     let temp = TempDir::new().unwrap();
     let bin = temp.path().join("bin");
@@ -157,7 +160,8 @@ fn generated_qualification_runs_native_diagnostics_for_every_gate() {
         assert!(step["run"].as_str().unwrap().contains(&format!(
             "simit monorepo check --component core --check {id} --nix-diagnostics"
         )));
-        assert_eq!(step["timeout-minutes"].as_u64(), Some(30));
+        assert_eq!(step["timeout-minutes"].as_u64(), Some(32));
+        assert!(step["run"].as_str().unwrap().contains("--deadline"));
     }
     assert_eq!(
         steps
@@ -166,6 +170,64 @@ fn generated_qualification_runs_native_diagnostics_for_every_gate() {
             .unwrap()["env"]["GATE_VALUE"]
             .as_str(),
         Some("gate-owned")
+    );
+}
+
+#[test]
+fn expired_provider_deadline_retains_diagnostics_without_starting_the_gate() {
+    let root = environment_fixture("literal");
+    let output = Command::new(env!("CARGO_BIN_EXE_simit"))
+        .current_dir(root.path())
+        .args([
+            "monorepo",
+            "check",
+            "--component",
+            "core",
+            "--check",
+            "pass",
+            "--deadline",
+            "1",
+            "--nix-diagnostics",
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("timed out"), "{stderr}");
+    assert!(stderr.contains("Nix failure diagnostics"), "{stderr}");
+    assert!(!root.path().join("executions").exists());
+}
+
+#[test]
+fn maximum_gate_timeout_reserves_provider_and_job_diagnostic_grace() {
+    let root = fixture();
+    let config = fs::read_to_string(root.path().join("simit.toml"))
+        .unwrap()
+        .replace("id = \"fail\",", "id = \"fail\", timeout_minutes = 360,");
+    fs::write(root.path().join("simit.toml"), config).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_simit"))
+        .current_dir(root.path())
+        .args(["init", "ci"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        &fs::read_to_string(root.path().join(".github/workflows/ci.yaml")).unwrap(),
+    )
+    .unwrap();
+    let job = &yaml["jobs"]["component-core"];
+    assert_eq!(job["timeout-minutes"], 360);
+    let steps = job["steps"].as_sequence().unwrap();
+    assert_eq!(steps[0]["id"], "simit-gate-budget");
+    assert!(steps[0]["run"].as_str().unwrap().contains("21480"));
+    let gate = steps.iter().find(|step| step["name"] == "fail").unwrap();
+    assert_eq!(gate["timeout-minutes"], 360);
+    assert!(gate["run"].as_str().unwrap().contains("21480"));
+    assert!(
+        gate["run"]
+            .as_str()
+            .unwrap()
+            .contains("steps.simit-gate-budget.outputs.deadline")
     );
 }
 
@@ -182,10 +244,25 @@ fn environment_fixture(value: &str) -> TempDir {
 }
 
 fn generated_gate(root: &TempDir, id: &str, value: Option<&str>) -> std::process::Output {
+    generated_gate_with_deadline(root, id, value, None)
+}
+
+fn generated_gate_with_deadline(
+    root: &TempDir,
+    id: &str,
+    value: Option<&str>,
+    deadline: Option<u64>,
+) -> std::process::Output {
     // Nix provisioning is the external boundary. Execute the unmodified generated
     // caller, forwarding its exact argv to the real candidate Simit executable.
     let bin = root.path().join("bin");
     fs::write(bin.join("nix"), "#!/bin/sh\nset -eu\ntest \"$1 $2 $3 $4\" = 'develop --print-build-logs .#ci --command'\nshift 4\nexport GATE_VALUE=devShell-override\nexec \"$@\"\n").unwrap();
+    if deadline.is_some() {
+        let shim = fs::read_to_string(bin.join("nix"))
+            .unwrap()
+            .replace("exec \"$@\"", "sleep 2\nexec \"$@\"");
+        fs::write(bin.join("nix"), shim).unwrap();
+    }
     fs::set_permissions(bin.join("nix"), fs::Permissions::from_mode(0o755)).unwrap();
     std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_simit"), bin.join("simit")).unwrap();
     let generated = Command::new(env!("CARGO_BIN_EXE_simit"))
@@ -209,9 +286,25 @@ fn generated_gate(root: &TempDir, id: &str, value: Option<&str>) -> std::process
     )))
     .unwrap();
     let mut caller = Command::new("bash");
+    let script = deadline.map_or_else(
+        || {
+            monorepo_caller::script(
+                root.path(),
+                &yaml,
+                "component-core",
+                step["run"].as_str().unwrap(),
+            )
+        },
+        |deadline| {
+            step["run"].as_str().unwrap().replace(
+                "${{ steps.simit-gate-budget.outputs.deadline }}",
+                &deadline.to_string(),
+            )
+        },
+    );
     caller
         .current_dir(root.path())
-        .args(["-euo", "pipefail", "-c", step["run"].as_str().unwrap()])
+        .args(["-euo", "pipefail", "-c", &script])
         .env("PATH", path)
         .env_remove("GATE_VALUE");
     // Actions supplies the evaluated step environment, including empty values.
@@ -219,6 +312,28 @@ fn generated_gate(root: &TempDir, id: &str, value: Option<&str>) -> std::process
         caller.env("GATE_VALUE", value);
     }
     caller.output().unwrap()
+}
+
+#[test]
+fn generated_caller_counts_provisioning_against_the_remaining_job_budget() {
+    let root = environment_fixture("literal");
+    let deadline = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 1;
+    let output = generated_gate_with_deadline(
+        &root,
+        "pass",
+        Some("never-report-this-secret"),
+        Some(deadline),
+    );
+    assert!(!output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("timed out"), "{stderr}");
+    assert!(stderr.contains("Nix failure diagnostics"), "{stderr}");
+    assert!(!stderr.contains("never-report-this-secret"));
+    assert!(!root.path().join("executions").exists());
 }
 
 #[test]
@@ -415,7 +530,10 @@ fn local_timeout_stops_the_gate_and_descendants_without_retrying() {
     assert!(!output.status.success(), "{output:?}");
     assert!(started.elapsed() < std::time::Duration::from_secs(64));
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("timed out after 1 minutes"), "{stderr}");
+    assert!(
+        stderr.contains("timed out (configured limit: 1 minutes)"),
+        "{stderr}"
+    );
     assert!(stderr.contains("Nix failure diagnostics"));
     assert!(!stderr.contains("must-not-be-reported"));
     assert_eq!(fs::read(root.path().join("executions")).unwrap(), b"x");

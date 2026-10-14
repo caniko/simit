@@ -57,23 +57,35 @@ pub(super) fn run(command: MonorepoCheckCommand) -> Result<()> {
         use std::os::unix::process::CommandExt;
         process.process_group(0);
     }
-    let deadline = Instant::now() + Duration::from_secs(gate.timeout_minutes * 60);
-    let mut child = GateProcess(process.spawn().context("run declared component check")?);
-    let status = loop {
-        if let Some(status) = child
-            .0
-            .try_wait()
-            .context("wait for declared component check")?
-        {
-            break Some(status);
-        }
-        if Instant::now() >= deadline {
-            break None;
-        }
-        std::thread::sleep(Duration::from_millis(50));
+    let seconds = command
+        .deadline
+        .map_or(gate.timeout_minutes * 60, |deadline| {
+            deadline
+                .saturating_sub(since)
+                .min(gate.timeout_minutes * 60)
+        });
+    let status = if seconds == 0 {
+        None
+    } else {
+        let deadline = Instant::now() + Duration::from_secs(seconds);
+        let mut child = GateProcess(process.spawn().context("run declared component check")?);
+        let status = loop {
+            if let Some(status) = child
+                .0
+                .try_wait()
+                .context("wait for declared component check")?
+            {
+                break Some(status);
+            }
+            if Instant::now() >= deadline {
+                break None;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        // Reap Bash and stop its descendants before collecting failure evidence.
+        drop(child);
+        status
     };
-    // Reap Bash and stop its descendants before collecting failure evidence.
-    drop(child);
     if status.is_some_and(|status| status.success()) {
         return Ok(());
     }
@@ -82,7 +94,7 @@ pub(super) fn run(command: MonorepoCheckCommand) -> Result<()> {
     }
     let Some(status) = status else {
         bail!(
-            "component {} check {} timed out after {} minutes",
+            "component {} check {} timed out (configured limit: {} minutes)",
             command.component,
             command.check,
             gate.timeout_minutes

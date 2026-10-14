@@ -6,6 +6,9 @@ use serde_json::Value;
 use tempfile::TempDir;
 
 mod common;
+#[cfg(unix)]
+#[path = "common/monorepo_caller.rs"]
+mod monorepo_caller;
 
 fn write(root: &Path, path: &str, content: &str) {
     let path = root.join(path);
@@ -814,9 +817,15 @@ fn generated_component_gate_propagates_pipeline_failure() {
     );
     fs::set_permissions(root.join("bin/nix"), fs::Permissions::from_mode(0o755)).unwrap();
     std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_simit"), root.join("bin/simit")).unwrap();
+    let script = monorepo_caller::script(
+        root,
+        &workflow,
+        "component-core",
+        step["run"].as_str().unwrap(),
+    );
     let output = Command::new("bash")
         .current_dir(root)
-        .args(["-euo", "pipefail", "-c", step["run"].as_str().unwrap()])
+        .args(["-euo", "pipefail", "-c", &script])
         .env(
             "PATH",
             format!(
@@ -2399,22 +2408,22 @@ fn qualification_actions_follow_hosted_and_mixed_private_capacity() {
             ("plan", runner != Some("atlas")),
             ("component-core", hosted_component),
         ] {
+            let actions = workflow["jobs"][job]["steps"]
+                .as_sequence()
+                .unwrap()
+                .iter()
+                .filter_map(|step| step["uses"].as_str())
+                .collect::<Vec<_>>();
             let expected = simit::render::ci::github_action_ref(
                 "actions/checkout",
                 if hosted { "v7.0.1" } else { "v4.3.1" },
             );
-            assert_eq!(
-                workflow["jobs"][job]["steps"][0]["uses"].as_str().unwrap(),
-                expected.split(" #").next().unwrap()
-            );
+            assert_eq!(actions[0], expected.split(" #").next().unwrap());
             let expected = simit::render::ci::github_action_ref(
                 "cachix/install-nix-action",
                 if hosted { "v31.11.1" } else { "v31" },
             );
-            assert_eq!(
-                workflow["jobs"][job]["steps"][1]["uses"].as_str().unwrap(),
-                expected.split(" #").next().unwrap()
-            );
+            assert_eq!(actions[1], expected.split(" #").next().unwrap());
         }
     }
 }
