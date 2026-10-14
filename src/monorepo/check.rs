@@ -88,7 +88,7 @@ fn diagnostics(since: u64) {
             "Kernel journal",
             vec![
                 "journalctl",
-                "--kernel",
+                "--dmesg",
                 "--since",
                 &since,
                 "--lines=150",

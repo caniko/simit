@@ -14,7 +14,9 @@ pub(super) fn checkout() -> Value {
 }
 
 pub(super) fn install_nix() -> Value {
-    json!({"uses": immutable_action_ref("https://github.com/cachix/install-nix-action", "v31").trim_start_matches("https://github.com/").split(" #").next().unwrap()})
+    // 2.35.2 contains the lost build-slot wakeup fix (NixOS/nix fba3f6e).
+    // The action's default 2.35.1 can abort Worker::run during qualification.
+    json!({"uses": immutable_action_ref("https://github.com/cachix/install-nix-action", "v31").trim_start_matches("https://github.com/").split(" #").next().unwrap(), "with": {"install_url": "https://releases.nixos.org/nix/nix-2.35.2/install"}})
 }
 
 pub(super) fn input_transport() -> Value {
