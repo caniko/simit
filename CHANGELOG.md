@@ -74,6 +74,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   retain source-bound packed candidates for byte-verified retries, reject
   conflicting registry content, and keep publication credentials out of
   packing, lookups, and command output.
+- Omit the default empty tag-prefix argument from trusted Cargo publisher workflows,
+  preserving compatibility with enrolled engines that predate prefixed releases.
 - Publish sealed capsule names only after admission succeeds, keeping failed-capture
   diagnostics separate from reusable capsules.
 - Preserve explicitly selected custody protocols when persisting CI option changes.
