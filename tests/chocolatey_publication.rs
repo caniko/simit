@@ -12,22 +12,26 @@ fn executable(path: &Path, contents: &str) {
 }
 
 fn invoke(root: &Path, mode: &str) -> std::process::Output {
-    common::simit()
-        .current_dir(root)
-        .args([
-            "dist",
-            "chocolatey",
-            "bump",
-            "--version",
-            "0.1.0",
-            "--package-dir",
-            "pkg",
-            "--archive",
-            "x64=x64.zip",
-            "--push",
-            "--api-key-env",
-            "PUBLICATION_FIXTURE_KEY",
-        ])
+    invoke_with(root, mode, "0.1.0", false)
+}
+
+fn invoke_with(root: &Path, mode: &str, version: &str, pack_only: bool) -> std::process::Output {
+    let mut command = common::simit();
+    command.current_dir(root).args([
+        "dist",
+        "chocolatey",
+        "bump",
+        "--version",
+        version,
+        "--package-dir",
+        "pkg",
+        "--archive",
+        "x64=x64.zip",
+        "--api-key-env",
+        "PUBLICATION_FIXTURE_KEY",
+    ]);
+    command.arg(if pack_only { "--pack" } else { "--push" });
+    command
         .env(
             "PATH",
             format!(
@@ -41,14 +45,109 @@ fn invoke(root: &Path, mode: &str) -> std::process::Output {
         .env("PUBLICATION_FIXTURE_KEY", "fixture-secret-value")
         .env(
             "TEST_LOOKUP_URL",
-            if root.join("official-source").exists() {
-                "https://community.chocolatey.org/api/v2/package/demo/0.1.0"
-            } else {
-                "https://packages.example.com/api/v2/package/demo/0.1.0"
-            },
-        )
-        .output()
-        .unwrap()
+            format!(
+                "{}/package/demo/{}",
+                if root.join("official-source").exists() {
+                    "https://community.chocolatey.org/api/v2"
+                } else {
+                    "https://packages.example.com/api/v2"
+                },
+                if version == "1.001.2" {
+                    "1.1.2"
+                } else {
+                    version
+                }
+            ),
+        );
+    if pack_only {
+        command.env_remove("PUBLICATION_FIXTURE_KEY");
+    }
+    command.output().unwrap()
+}
+
+#[test]
+fn normalized_packed_filename_is_retained_and_reused() {
+    let temp = exercise("absent", true, 1);
+    let root = temp.path();
+    executable(
+        &root.join("test-bin/choco"),
+        r#"#!/bin/sh
+set -eu
+case "$1" in
+ pack)
+   test -z "${PUBLICATION_FIXTURE_KEY:-}"
+   printf 'pack\n' >> "$TEST_ROOT/packs"
+   while [ "$1" != --output-directory ]; do shift; done
+   printf 'candidate package\n' > "$2/demo.1.1.2.nupkg" ;;
+ push) test "$(basename "$2")" = demo.1.1.2.nupkg; printf 'push\n' >> "$TEST_ROOT/pushes" ;;
+ *) exit 99 ;;
+esac
+"#,
+    );
+    for mode in ["absent", "identical"] {
+        let output = invoke_with(root, mode, "1.001.2", false);
+        assert!(output.status.success(), "{output:?}");
+    }
+    assert_eq!(
+        fs::read_to_string(root.join("packs")).unwrap(),
+        "pack\npack\n"
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("pushes")).unwrap(),
+        "push\npush\n"
+    );
+}
+
+#[test]
+fn packing_rejects_missing_ambiguous_or_wrong_package_identity() {
+    for body in [
+        "true",
+        "printf payload > \"$2/wrong.2.0.0.nupkg\"",
+        "touch \"$2/demo.2.0.0.nupkg\"",
+        "printf payload > \"$2/demo.2.0.0.nupkg\"; printf payload > \"$2/extra.2.0.0.nupkg\"",
+    ] {
+        let temp = exercise("absent", true, 1);
+        let root = temp.path();
+        executable(
+            &root.join("test-bin/choco"),
+            &format!(
+                "#!/bin/sh\nset -eu\ntest \"$1\" = pack\nwhile [ \"$1\" != --output-directory ]; do shift; done\n{body}\n"
+            ),
+        );
+        let output = invoke_with(root, "absent", "2.0.0", true);
+        assert!(!output.status.success(), "{body}: {output:?}");
+        assert_eq!(fs::read_to_string(root.join("pushes")).unwrap(), "push\n");
+        assert_eq!(
+            fs::read_dir(root.join("pkg/.simit-candidates"))
+                .unwrap()
+                .count(),
+            1
+        );
+    }
+}
+
+#[test]
+fn restored_candidate_survives_fresh_workspace_without_credentials_or_repacking() {
+    let temp = exercise("absent", true, 1);
+    let root = temp.path();
+    fs::rename(
+        root.join("pkg/.simit-candidates"),
+        root.join("retained-artifact"),
+    )
+    .unwrap();
+    fs::remove_dir_all(root.join("pkg")).unwrap();
+    fs::create_dir(root.join("pkg")).unwrap();
+    fs::rename(
+        root.join("retained-artifact"),
+        root.join("pkg/.simit-candidates"),
+    )
+    .unwrap();
+    let output = invoke_with(root, "pack-failure", "0.1.0", true);
+    assert!(output.status.success(), "{output:?}");
+    let output = invoke(root, "identical");
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(fs::read_to_string(root.join("packs")).unwrap(), "pack\n");
+    assert_eq!(fs::read_to_string(root.join("pushes")).unwrap(), "push\n");
 }
 
 fn exercise(mode: &str, success: bool, pushes: usize) -> TempDir {
@@ -276,6 +375,40 @@ fn generated_publisher_enters_the_project_environment_before_resolving_tools() {
         String::from_utf8_lossy(&output.stderr)
     );
     let yaml: serde_yaml::Value = serde_yaml::from_slice(&output.stdout).unwrap();
+    let steps = yaml["jobs"]
+        .as_mapping()
+        .unwrap()
+        .values()
+        .filter_map(|job| job["steps"].as_sequence())
+        .flatten()
+        .collect::<Vec<_>>();
+    let index = |name| steps.iter().position(|step| step["name"] == name).unwrap();
+    let prepare = index("Prepare Chocolatey package");
+    let restore = index("Restore exact Chocolatey candidate");
+    let pack = index("Pack Chocolatey candidate without publication credentials");
+    let save = index("Persist Chocolatey candidate before publication");
+    let verify = index("Require persisted Chocolatey candidate");
+    let publish = index("Publish Chocolatey package");
+    assert!(
+        prepare < restore && restore < pack && pack < save && save < verify && verify < publish
+    );
+    assert_eq!(steps[verify]["with"]["fail-on-cache-miss"], true);
+    assert_eq!(steps[restore]["with"]["key"], steps[save]["with"]["key"]);
+    assert_eq!(steps[restore]["with"]["key"], steps[verify]["with"]["key"]);
+    assert!(
+        steps[restore]["with"]["key"]
+            .as_str()
+            .unwrap()
+            .contains("hashFiles(")
+    );
+    assert!(steps[pack]["env"].is_null());
+    assert!(
+        steps[pack]["run"]
+            .as_str()
+            .unwrap()
+            .contains("--pack --api-key-env")
+    );
+    assert!(!steps[pack]["run"].as_str().unwrap().contains("--push"));
     let body = yaml["jobs"]
         .as_mapping()
         .unwrap()
@@ -319,7 +452,8 @@ esac
         "payload\n",
     )
     .unwrap();
-    let output = std::process::Command::new("bash")
+    let mut publisher = std::process::Command::new("bash");
+    publisher
         .current_dir(root)
         .args(["-c", body])
         .env(
@@ -332,6 +466,15 @@ esac
         )
         .env("CHOCOLATEY_API_KEY", "fixture-key")
         .env("CHOCO_PUSH_SOURCE", "https://packages.example.com/api/v2/")
+        .env_remove("CHOCO_CANDIDATE_CACHE_HIT");
+    let missing_cache = publisher.output().unwrap();
+    assert!(!missing_cache.status.success());
+    assert!(
+        String::from_utf8_lossy(&missing_cache.stderr).contains("persistence was not verified")
+    );
+    assert!(!root.join("publisher-argv").exists());
+    let output = publisher
+        .env("CHOCO_CANDIDATE_CACHE_HIT", "true")
         .output()
         .unwrap();
     assert!(

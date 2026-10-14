@@ -99,6 +99,7 @@
           || pkgs.lib.hasSuffix "/src/render/ci/custody.py" pathString
           || pkgs.lib.hasSuffix "/scripts" pathString
           || pkgs.lib.hasInfix "/scripts/qualify-" pathString
+          || pkgs.lib.hasSuffix "/src/render/ci/custody_sealed.py" pathString
           || pkgs.lib.hasSuffix "ci-actions.json" pathString
           || pkgs.lib.hasSuffix "/.github" pathString
           || pkgs.lib.hasSuffix "/.github/workflows" pathString
@@ -223,6 +224,21 @@
         inherit src;
       };
 
+      custodySourceCheck = pkgs.runCommand "check-simit-custody-filtered-source" {} ''
+        mkdir -p "$out"
+        for relative in \
+          src/render/ci/custody.py \
+          src/render/ci/custody_sealed.py \
+          tests/fixtures/ci-custody-contract.py \
+          tests/fixtures/ci-sealed-custody-contract.py; do
+          test -s "${src}/$relative"
+          cmp "${src}/$relative" "${./.}/$relative"
+          checksum=$(sha256sum "${src}/$relative")
+          printf '%s  %s\n' "''${checksum%% *}" "$relative" >> "$out/source.sha256"
+        done
+        cat "$out/source.sha256"
+      '';
+
       docs = pkgs.stdenv.mkDerivation {
         pname = "simit-docs";
         inherit (package) version;
@@ -278,6 +294,7 @@
         simit-doc = docCheck;
         simit-audit = auditCheck;
         simit-deny = denyCheck;
+        simit-custody-source = custodySourceCheck;
 
         clippy = clippyCheck;
         nextest = nextestCheck;

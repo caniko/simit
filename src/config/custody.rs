@@ -6,10 +6,27 @@ use std::collections::BTreeMap;
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
+    #[serde(default, skip_serializing_if = "Protocol::is_legacy")]
+    pub protocol: Protocol,
     pub repository: String,
     pub producer_attempt: u64,
     pub status_context: String,
     pub producers: BTreeMap<String, Producer>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub enum Protocol {
+    #[default]
+    #[serde(rename = "strict-v1")]
+    StrictV1,
+    #[serde(rename = "sealed-v2")]
+    SealedV2,
+}
+
+impl Protocol {
+    fn is_legacy(&self) -> bool {
+        *self == Self::StrictV1
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]

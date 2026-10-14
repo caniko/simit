@@ -658,7 +658,7 @@ pub fn render(inputs: &ReleaseWorkflowInputs<'_>) -> String {
         push_publish_copr(&mut w, copr, activated_remote);
     }
     if let Some(chocolatey) = inputs.chocolatey {
-        push_publish_chocolatey(&mut w, chocolatey, activated_remote);
+        push_publish_chocolatey(&mut w, chocolatey, activated_remote, inputs.platform);
     }
 
     w
@@ -2418,6 +2418,7 @@ fn push_publish_chocolatey(
     w: &mut String,
     chocolatey: &ResolvedChocolatey,
     activated_remote: bool,
+    platform: Platform,
 ) {
     let zip = chocolatey
         .archive_pattern
@@ -2425,7 +2426,43 @@ fn push_publish_chocolatey(
         .replace("{version}", "${VERSION}")
         .replace("{arch}", "x86_64");
     let key_env = &chocolatey.api_key_env;
+    if platform != Platform::Gitlab {
+        w.push_str("      - name: Prepare Chocolatey package\n        id: chocolatey-source\n        run: |\n          set -euo pipefail\n");
+        push_stable_guard(w, "Chocolatey package preparation");
+        if activated_remote {
+            push_active_or_skip_prelude(w);
+        }
+        if activated_remote {
+            writeln!(w, "          ZIP=\"release/{zip}\"; test -s \"$ZIP\" || publisher_missing chocolatey \"missing $ZIP\"").expect("write");
+        } else {
+            writeln!(w, "          ZIP=\"release/{zip}\"; test -s \"$ZIP\"").expect("write");
+        }
+        push_chocolatey_command(w, chocolatey);
+        w.push_str("            --api-key-env ");
+        w.push_str(key_env);
+        w.push('\n');
+        w.push_str("          printf 'prepared=true\\n' >> \"$GITHUB_OUTPUT\"\n");
+        let cache = match platform {
+            Platform::Github => github_action_ref("actions/cache", "v6.1.0"),
+            _ => forgejo_action_ref("cache", "v4.3.0"),
+        };
+        let restore = cache.replacen('@', "/restore@", 1);
+        let save = cache.replacen('@', "/save@", 1);
+        let key = "chocolatey-${{ github.repository }}-${{ github.ref }}-${{ github.sha }}-${{ hashFiles('chocolatey-package/*.nuspec', 'chocolatey-package/tools/*.ps1') }}";
+        writeln!(w, "      - name: Restore exact Chocolatey candidate\n        if: steps.chocolatey-source.outputs.prepared == 'true'\n        id: chocolatey-cache\n        uses: {restore}\n        with:\n          path: chocolatey-package/.simit-candidates\n          key: {key}").expect("write");
+        w.push_str("      - name: Pack Chocolatey candidate without publication credentials\n        if: steps.chocolatey-source.outputs.prepared == 'true'\n        run: |\n          set -euo pipefail\n          . ./release-env\n");
+        writeln!(w, "          ZIP=\"release/{zip}\"").expect("write");
+        push_chocolatey_command(w, chocolatey);
+        writeln!(w, "            --pack --api-key-env {key_env}").expect("write");
+        writeln!(w, "      - name: Persist Chocolatey candidate before publication\n        if: steps.chocolatey-source.outputs.prepared == 'true' && steps.chocolatey-cache.outputs.cache-hit != 'true'\n        uses: {save}\n        with:\n          path: chocolatey-package/.simit-candidates\n          key: {key}").expect("write");
+        // Saving is best-effort in the cache action. Restore the persisted bytes
+        // and require a hit before allowing an irreversible registry upload.
+        writeln!(w, "      - name: Require persisted Chocolatey candidate\n        id: chocolatey-persisted\n        if: steps.chocolatey-source.outputs.prepared == 'true'\n        uses: {restore}\n        with:\n          path: chocolatey-package/.simit-candidates\n          key: {key}\n          fail-on-cache-miss: true").expect("write");
+    }
     w.push_str("      - name: Publish Chocolatey package\n        env:\n");
+    if platform != Platform::Gitlab {
+        w.push_str("          CHOCO_CANDIDATE_CACHE_HIT: ${{ steps.chocolatey-persisted.outputs.cache-hit }}\n");
+    }
     // Source the key from an Actions secret, unless the runner already provides
     // it in the job environment (e.g. a Forgejo runner credential).
     if !chocolatey.api_key_from_runner {
@@ -2451,6 +2488,14 @@ fn push_publish_chocolatey(
     } else {
         writeln!(w, "          ZIP=\"release/{zip}\"; test -s \"$ZIP\"").expect("write");
     }
+    if platform != Platform::Gitlab {
+        w.push_str("          if [ \"${CHOCO_CANDIDATE_CACHE_HIT:-}\" != true ]; then echo 'Chocolatey candidate persistence was not verified.' >&2; exit 1; fi\n");
+    }
+    push_chocolatey_command(w, chocolatey);
+    writeln!(w, "            --push \\\n            --push-source \"$CHOCO_PUSH_SOURCE\" \\\n            --api-key-env {key_env}").expect("write");
+}
+
+fn push_chocolatey_command(w: &mut String, chocolatey: &ResolvedChocolatey) {
     writeln!(
         w,
         "          nix develop -c nix shell {} -c simit dist chocolatey bump \\",
@@ -2498,7 +2543,6 @@ fn push_publish_chocolatey(
     }
     push_choco_flag(w, "--choco-download-repo", &chocolatey.download_repo);
     push_choco_flag(w, "--choco-archive-pattern", &chocolatey.archive_pattern);
-    writeln!(w, "            --push \\\n            --push-source \"$CHOCO_PUSH_SOURCE\" \\\n            --api-key-env {key_env}").expect("write");
 }
 
 fn push_choco_flag(w: &mut String, flag: &str, value: &str) {

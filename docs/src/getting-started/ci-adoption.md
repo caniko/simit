@@ -699,6 +699,14 @@ jobs = ["build (network)", "build (pinentry)"]
 artifacts = ["nix-build-0", "nix-build-1"]
 ```
 
+Existing policies retain the `strict-v1` protocol by default. Set
+`protocol = "sealed-v2"` in `[ci.custody]` to select the prospective
+[sealed-original custody contract](../ci-sealed-custody.md): capture each
+completion immediately, seal complete evidence as an immutable artifact, and
+independently verify exact capsules before aggregation and source-head reporting.
+The following describes the default observer; v2's jobs, completeness admission
+and installation-specific capsule lifecycle are documented separately.
+
 GitHub executes `workflow_run` from the default branch and fires it when **any**
 listed workflow completes. Install the observer on that branch before testing
 it with candidate producers. The first event may record a pending observation;
