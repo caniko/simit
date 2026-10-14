@@ -148,6 +148,93 @@ fn both_cli_routes_reject_substituted_source_owned_spec_bytes() {
 }
 
 #[test]
+fn clean_crlf_checkout_is_bound_to_committed_policy_on_both_routes() {
+    let root = fixture();
+    fs::write(
+        root.path().join(".gitattributes"),
+        b"*.json text eol=crlf\n",
+    )
+    .unwrap();
+    git(root.path(), &["add", ".gitattributes"]);
+    git(root.path(), &["commit", "-m", "CRLF checkout attribute"]);
+    let path = root.path().join(".github/spec.json");
+    let raw = fs::read_to_string(&path).unwrap();
+    fs::write(&path, raw.replace('\n', "\r\n")).unwrap();
+    for retention in [false, true] {
+        let output = invoke(root.path(), &path, retention);
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(error.contains("environment variable"), "{error}");
+        assert!(!error.contains("source-owned observer spec"), "{error}");
+    }
+    // A real policy edit must still fail even under the admitted conversion.
+    fs::write(
+        &path,
+        raw.replace("test", "weaker-job").replace('\n', "\r\n"),
+    )
+    .unwrap();
+    for retention in [false, true] {
+        let output = invoke(root.path(), &path, retention);
+        assert!(String::from_utf8_lossy(&output.stderr).contains("source-owned observer spec"));
+    }
+}
+
+#[test]
+fn configured_clean_filter_cannot_replace_the_committed_policy_that_is_parsed() {
+    let root = fixture();
+    let path = root.path().join(".github/spec.json");
+    let valid_checkout = fs::read(&path).unwrap();
+    let mut committed: serde_json::Value = serde_json::from_slice(&valid_checkout).unwrap();
+    committed["schema"] = json!("unadmitted-policy");
+    fs::write(&path, committed.to_string()).unwrap();
+    fs::write(
+        root.path().join(".gitattributes"),
+        b"*.json filter=policy\n",
+    )
+    .unwrap();
+    git(root.path(), &["add", ".gitattributes", ".github/spec.json"]);
+    git(
+        root.path(),
+        &["commit", "-m", "unadmitted canonical policy"],
+    );
+    git(
+        root.path(),
+        &[
+            "config",
+            "filter.policy.clean",
+            "git --no-replace-objects cat-file blob HEAD:.github/spec.json",
+        ],
+    );
+    fs::write(&path, valid_checkout).unwrap();
+    for retention in [false, true] {
+        let output = invoke(root.path(), &path, retention);
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(error.contains("unknown observer schema"), "{error}");
+        assert!(!root.path().join("packet").exists());
+    }
+}
+
+#[test]
+fn committed_blob_probe_admits_the_full_cli_policy_envelope() {
+    let root = fixture();
+    let spec = json!({"schema":"simit.original-observer-spec.v1","repository":"owner/repo",
+        "timeout_seconds":20700,"poll_seconds":60,
+        "workflows":(0..10).map(|i| (format!(".github/workflows/workflow-{i}.yaml"),
+            json!((0..256).map(|job| format!("{job:03}{}","x".repeat(509))).collect::<Vec<_>>()))).collect::<serde_json::Map<_,_>>()});
+    let raw = serde_json::to_vec_pretty(&spec).unwrap();
+    assert!(raw.len() > 1024 * 1024);
+    let path = root.path().join(".github/spec.json");
+    fs::write(&path, raw).unwrap();
+    git(root.path(), &["add", ".github/spec.json"]);
+    git(root.path(), &["commit", "-m", "maximum admitted policy"]);
+    for retention in [false, true] {
+        let output = invoke(root.path(), &path, retention);
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(error.contains("environment variable"), "{error}");
+        assert!(!root.path().join("packet").exists());
+    }
+}
+
+#[test]
 fn committed_spec_is_admitted_even_when_unrelated_source_is_dirty() {
     let root = fixture();
     fs::write(root.path().join("unrelated"), b"local work").unwrap();

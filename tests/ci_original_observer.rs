@@ -141,6 +141,31 @@ fn receipt(root: &std::path::Path) -> Value {
 }
 
 #[test]
+fn attempt_scoped_jobs_admit_absent_attempt_but_reject_explicit_wrong_or_null_attempt() {
+    for attempt in [None, Some(json!(1)), Some(json!(2)), Some(Value::Null)] {
+        let (spec, identity, mut provider) = fixture();
+        let mut job = json!({"id":22,"run_id":12,"head_sha":"a".repeat(40),"name":"test","status":"completed","conclusion":"success","steps":[{"number":1,"name":"Test","status":"completed","conclusion":"success"}]});
+        if let Some(value) = &attempt {
+            job["run_attempt"] = value.clone();
+        }
+        provider.jobs = Some(json!({"total_count":1,"jobs":[job]}));
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("packet");
+        let result = observe_with(
+            &spec,
+            &identity,
+            &root,
+            &mut provider,
+            &mut FakeClock::default(),
+            &Cancellation::default(),
+        );
+        let admitted = attempt.is_none() || attempt == Some(json!(1));
+        assert_eq!(result.is_ok(), admitted, "attempt={attempt:?}: {result:?}");
+        assert_eq!(receipt(&root)["capture_complete"], admitted);
+    }
+}
+
+#[test]
 fn active_observer_enrollment_fails_before_packet_or_provider_effects() {
     for event in ["push", "pull_request"] {
         let (mut spec, mut identity, mut provider) = fixture();

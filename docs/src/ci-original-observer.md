@@ -27,14 +27,19 @@ simit ci verify-original-retention --spec .github/original-producers.json \
 The CLI requires a GitHub-hosted branch-push/PR original attempt, the native
 event/environment identity and `GH_TOKEN` (or `GITHUB_TOKEN`). Library callers
 supply identity, a transport and cancellation without global signal handlers.
-The CLI binds the exact loaded spec bytes to the tracked blob at the observed
-source commit before credential or provider access. Modified, staged, untracked
+The CLI binds an immutable checkout snapshot through its Git path's clean filters
+to the tracked blob at the observed source commit before credential or provider
+access. This admits legitimate CRLF checkouts. The bounded committed blob is the
+policy deserialized by the observer; configured filters cannot substitute a
+different policy. Modified, staged, untracked
 and outside-checkout substitutions fail; local Git replacement objects cannot
 substitute the source blob. Unrelated worktree edits do not affect enrollment.
 These Git probes share one thirty-second deadline. The active
 observer workflow cannot enroll itself as a producer.
 The native transport authenticates only fixed-origin GitHub GETs; approved HTTPS
 log/artifact redirects are bounded and receive no GitHub credential.
+Repository-name periods, including consecutive periods within a name, remain
+valid; actual traversal path segments and escaped separators are rejected.
 
 Use a 360-minute hosted workflow timeout with the example's 328-minute observer
 budget. Bound setup as well as observation: for example, checkout (2 minutes),
@@ -66,13 +71,18 @@ from the branch/PR target bound by the run's native identity fields. SHA discove
 skips identifiable other targets, preserving exact-target duplicate rejection and
 continuous identity validation after selection. Log and artifact downloads use
 the remaining aggregate deadline; metadata GETs retain their ninety-second cap.
+Header and body transfers are interruptible: the native async transport checks
+cancellation at most every 100 milliseconds while waiting, retaining received
+partial bytes and dropping the in-flight transfer on cancellation or expiry.
 `@` inside a valid
 matching branch ref remains supported. CLI JSON inputs admit the same 16 MiB
 envelope that covers every accepted job-name inventory. Serialized aggregate job metadata is bounded by
 the same 16 MiB ceiling at capture and retention, including pretty-print overhead.
 
 Every completed producer binds repository, run id, head, workflow, event and
-attempt one before and after capture. Exact required jobs and their native steps
+attempt one before and after capture. Jobs are fetched from the attempt-one API
+endpoint; their optional `run_attempt` field must equal one when present.
+Exact required jobs and their native steps
 must all be terminal and successful. Provider log ZIPs retain their exact bytes;
 member admission is CRC-checked, byte-bounded and rejects duplicates, symlinks,
 unsafe names, multidisk and unsupported ZIP directories. No archive is extracted

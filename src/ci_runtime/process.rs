@@ -89,6 +89,7 @@ pub(super) fn run_probe(
     stderr: &Path,
     cancellation: &Cancellation,
     timeout: Duration,
+    maximum: u64,
 ) -> Result<i32> {
     ensure!(
         timeout <= Duration::from_secs(30),
@@ -101,7 +102,7 @@ pub(super) fn run_probe(
         cancellation,
         Limits {
             timeout,
-            stdout: 1024 * 1024,
+            stdout: maximum,
             stderr: 65536,
         },
         None,

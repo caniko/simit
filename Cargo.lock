@@ -1442,6 +1442,7 @@ dependencies = [
  "socket2",
  "tar",
  "tempfile",
+ "tokio",
  "toml_edit",
  "unicode-normalization",
  "url",

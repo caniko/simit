@@ -58,6 +58,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Original-producer custody can interrupt stalled header/body transfers while
+  preserving partial bytes, admit repository-name period pairs and optional
+  attempt-scoped job fields, and bind clean-filtered checkouts to the authoritative
+  committed enrollment policy, including CRLF and maximal CLI spec inventories.
+
 - Bind original-observer enrollment bytes to the source commit, reject enrollment
   of the active observer, and use portable artifact member paths on Windows.
 - Filter same-SHA producer discovery by branch/PR target, validate provider

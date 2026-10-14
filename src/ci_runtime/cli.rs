@@ -61,7 +61,11 @@ fn observer_inputs(
     let raw = super::group::read_bytes(path, super::observer::MAX_SPEC_BYTES)?;
     let spec: super::observer::Spec = serde_json::from_slice(&raw)?;
     let identity = super::observer::Identity::from_environment(&spec)?;
-    verify_source_spec(path, &raw, &identity.head)?;
+    let committed = verify_source_spec(path, &raw, &identity.head)?;
+    // The committed blob is policy, even when configured checkout/clean filters
+    // change its representation. Never deserialize the transformed policy.
+    let spec: super::observer::Spec = serde_json::from_slice(&committed)?;
+    let identity = super::observer::Identity::from_environment(&spec)?;
     let token = std::env::var("GH_TOKEN").or_else(|_| std::env::var("GITHUB_TOKEN"))?;
     Ok((
         spec,
@@ -76,6 +80,24 @@ fn source_probe(
     command: &mut std::process::Command,
     deadline: std::time::Instant,
 ) -> Result<String> {
+    Ok(String::from_utf8(source_probe_bytes(
+        root,
+        name,
+        command,
+        deadline,
+        1024 * 1024,
+    )?)?
+    .trim_end_matches(['\r', '\n'])
+    .to_owned())
+}
+
+fn source_probe_bytes(
+    root: &std::path::Path,
+    name: &str,
+    command: &mut std::process::Command,
+    deadline: std::time::Instant,
+    maximum: u64,
+) -> Result<Vec<u8>> {
     let output = root.join(name);
     let errors = root.join(format!("{name}.errors"));
     let remaining = deadline
@@ -87,17 +109,16 @@ fn source_probe(
         &errors,
         &super::cancellation::Cancellation::default(),
         remaining,
+        maximum,
     )?;
     ensure!(
         status == 0,
         "source-owned observer spec Git probe failed ({name})"
     );
-    Ok(std::fs::read_to_string(output)?
-        .trim_end_matches(['\r', '\n'])
-        .to_owned())
+    super::group::read_bytes(&output, maximum)
 }
 
-fn verify_source_spec(path: &std::path::Path, raw: &[u8], head: &str) -> Result<()> {
+fn verify_source_spec(path: &std::path::Path, raw: &[u8], head: &str) -> Result<Vec<u8>> {
     let probe = tempfile::tempdir()?;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     let actual_head = source_probe(
@@ -143,8 +164,9 @@ fn verify_source_spec(path: &std::path::Path, raw: &[u8], head: &str) -> Result<
             .args(["rev-parse", "--verify", &format!("{head}:{relative}")]),
         deadline,
     )?;
-    // Hash the same immutable byte buffer used for deserialization. Re-reading
-    // the worktree or checking its dirtiness could miss a changed-back input.
+    // Hash the immutable checkout snapshot through its path's clean filters.
+    // Re-reading the worktree could miss a changed-back input. Deserialization
+    // uses the bounded committed blob below, never filter-transformed policy.
     let snapshot = probe.path().join("spec-bytes");
     std::fs::write(&snapshot, raw)?;
     let loaded = source_probe(
@@ -153,7 +175,7 @@ fn verify_source_spec(path: &std::path::Path, raw: &[u8], head: &str) -> Result<
         std::process::Command::new("git")
             .arg("--no-replace-objects")
             .current_dir(&repository)
-            .args(["hash-object", "--no-filters", "--"])
+            .args(["hash-object", "--path", &relative, "--"])
             .arg(snapshot),
         deadline,
     )?;
@@ -161,7 +183,16 @@ fn verify_source_spec(path: &std::path::Path, raw: &[u8], head: &str) -> Result<
         loaded == committed,
         "source-owned observer spec differs from committed blob"
     );
-    Ok(())
+    source_probe_bytes(
+        probe.path(),
+        "blob",
+        std::process::Command::new("git")
+            .arg("--no-replace-objects")
+            .current_dir(&repository)
+            .args(["cat-file", "blob", &committed]),
+        deadline,
+        super::observer::MAX_SPEC_BYTES,
+    )
 }
 
 /// Group execution input locations.

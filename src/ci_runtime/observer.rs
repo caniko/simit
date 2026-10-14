@@ -70,6 +70,7 @@ impl Spec {
         ensure!(
             parts.len() == 2
                 && parts.iter().all(|s| !s.is_empty()
+                    && !matches!(*s, "." | "..")
                     && s.len() <= 100
                     && s.bytes()
                         .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))),
@@ -702,7 +703,7 @@ fn validate_jobs(
             job_id > 0
                 && ids.insert(job_id)
                 && job["run_id"] == id
-                && job["run_attempt"] == 1
+                && job.get("run_attempt").is_none_or(|attempt| *attempt == 1)
                 && job["head_sha"] == identity.head,
             "job identity changed or duplicated"
         );
