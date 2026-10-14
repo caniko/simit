@@ -62,6 +62,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Repeat original-producer selection during retention, preserve the event snapshot
+  that authorized source enrollment, fall back from empty primary tokens, and
+  register native Windows console cancellation for the observer CLI.
+
 - Original-producer custody can interrupt stalled header/body transfers while
   preserving partial bytes, admit repository-name period pairs and optional
   attempt-scoped job fields, and bind clean-filtered checkouts to the authoritative

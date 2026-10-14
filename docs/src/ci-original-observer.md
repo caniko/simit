@@ -25,7 +25,8 @@ simit ci verify-original-retention --spec .github/original-producers.json \
 ```
 
 The CLI requires a GitHub-hosted branch-push/PR original attempt, the native
-event/environment identity and `GH_TOKEN` (or `GITHUB_TOKEN`). Library callers
+event/environment identity and a nonempty `GH_TOKEN` (or nonempty `GITHUB_TOKEN`
+fallback). Library callers
 supply identity, a transport and cancellation without global signal handlers.
 The CLI binds an immutable checkout snapshot through its Git path's clean filters
 to the tracked blob at the observed source commit before credential or provider
@@ -36,6 +37,9 @@ and outside-checkout substitutions fail; local Git replacement objects cannot
 substitute the source blob. Unrelated worktree edits do not affect enrollment.
 These Git probes share one thirty-second deadline. The active
 observer workflow cannot enroll itself as a producer.
+The original event/identity snapshot that authorized the blob is also the one
+validated against its policy and returned to capture; the event file is not
+reloaded after the probes.
 The native transport authenticates only fixed-origin GitHub GETs; approved HTTPS
 log/artifact redirects are bounded and receive no GitHub credential.
 Repository-name periods, including consecutive periods within a name, remain
@@ -51,6 +55,11 @@ and its queue must fit inside the finite observation budget. Deadline exhaustion
 and cooperative cancellation retain an explicit incomplete receipt. Upload it
 with `if: always()`; a failed, cancelled, skipped or incomplete capture never
 establishes acceptance. Pre-existing evidence directories are rejected.
+Windows CLI commands register a native console handler for Ctrl+C/Break and
+console close/logoff/shutdown events. Close-type callbacks wait for command cleanup
+for up to four seconds inside the normal Windows termination budget; forced OS
+termination can still interrupt finalization. Library callers retain ownership
+of cancellation and install no process-global handlers.
 
 Only bounded transient responses (408, 429, 500, 502, 503, 504, rate-limited 403
 with `Retry-After`, and temporary transport failures) retry, at most five attempts
@@ -125,6 +134,11 @@ actual provider ZIP digest and members, the upload's original observer identity,
 at least thirty days of retention, fresh producer success and fresh artifact
 metadata. Verification retains its GET evidence in a fresh sibling
 `producer-evidence.retention` directory. Preserve that diagnostic directory too.
+Retention repeats the complete head/event/target selection and requires exactly
+the receipt's workflow-to-original-run mapping. New exact-target duplicates,
+missing originals and replacements fail; identifiable other targets stay excluded.
+Its independent metadata allowance includes all selection pages and bounded
+transient retries without reducing the admitted raw upload download allowance.
 
 The receipt's `qualified` field stays false. These contracts establish capture,
 content and retention evidence; repository-specific coverage, source signatures,

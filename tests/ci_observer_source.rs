@@ -235,6 +235,41 @@ fn committed_blob_probe_admits_the_full_cli_policy_envelope() {
 }
 
 #[test]
+fn event_snapshot_is_not_reloaded_after_source_blob_authorization() {
+    let root = fixture();
+    let path = root.path().join(".github/spec.json");
+    fs::write(
+        root.path().join(".gitattributes"),
+        b"*.json filter=event-race\n",
+    )
+    .unwrap();
+    fs::write(
+        root.path().join(".github/clean.sh"),
+        b"printf '{}' >event.json\ncat\n",
+    )
+    .unwrap();
+    git(root.path(), &["add", ".gitattributes", ".github/clean.sh"]);
+    git(
+        root.path(),
+        &["commit", "-m", "fixture source probe event drift"],
+    );
+    git(
+        root.path(),
+        &["config", "filter.event-race.clean", "sh .github/clean.sh"],
+    );
+    for retention in [false, true] {
+        let output = invoke(root.path(), &path, retention);
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(fs::read(root.path().join("event.json")).unwrap(), b"{}");
+        assert!(
+            error.contains("environment variable"),
+            "event reloaded after authorization: {error}"
+        );
+        assert!(!root.path().join("packet").exists());
+    }
+}
+
+#[test]
 fn committed_spec_is_admitted_even_when_unrelated_source_is_dirty() {
     let root = fixture();
     fs::write(root.path().join("unrelated"), b"local work").unwrap();

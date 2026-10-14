@@ -1446,6 +1446,7 @@ dependencies = [
  "toml_edit",
  "unicode-normalization",
  "url",
+ "windows-sys",
  "zip",
 ]
 

@@ -42,13 +42,31 @@ pub struct RetentionArgs {
     pub artifact_digest: String,
 }
 
-fn cancellation() -> Result<super::cancellation::Cancellation> {
+#[cfg(windows)]
+#[path = "cli_windows.rs"]
+mod windows;
+
+struct CliCancellation {
+    token: super::cancellation::Cancellation,
+}
+#[cfg(windows)]
+impl Drop for CliCancellation {
+    fn drop(&mut self) {
+        windows::finished();
+    }
+}
+
+fn cancellation() -> Result<CliCancellation> {
     let cancellation = super::cancellation::Cancellation::default();
     #[cfg(unix)]
     for signal in [signal_hook::consts::SIGINT, signal_hook::consts::SIGTERM] {
         signal_hook::flag::register(signal, cancellation.0.clone())?;
     }
-    Ok(cancellation)
+    #[cfg(windows)]
+    windows::register(cancellation.clone())?;
+    Ok(CliCancellation {
+        token: cancellation,
+    })
 }
 
 fn observer_inputs(
@@ -65,13 +83,41 @@ fn observer_inputs(
     // The committed blob is policy, even when configured checkout/clean filters
     // change its representation. Never deserialize the transformed policy.
     let spec: super::observer::Spec = serde_json::from_slice(&committed)?;
-    let identity = super::observer::Identity::from_environment(&spec)?;
-    let token = std::env::var("GH_TOKEN").or_else(|_| std::env::var("GITHUB_TOKEN"))?;
+    identity.validate(&spec)?;
+    let token = observer_token(
+        std::env::var("GH_TOKEN").ok(),
+        std::env::var("GITHUB_TOKEN").ok(),
+    )?;
     Ok((
         spec,
         identity,
         super::observer::GitHubTransport::new(token)?,
     ))
+}
+
+fn observer_token(primary: Option<String>, fallback: Option<String>) -> Result<String> {
+    primary
+        .filter(|token| !token.is_empty())
+        .or_else(|| fallback.filter(|token| !token.is_empty()))
+        .context("missing GitHub token environment variable")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn empty_primary_token_uses_nonempty_fallback_without_exposing_credentials() {
+        assert_eq!(
+            observer_token(Some(String::new()), Some("inert-fallback".into())).unwrap(),
+            "inert-fallback"
+        );
+        assert_eq!(
+            observer_token(Some("inert-primary".into()), Some("inert-fallback".into())).unwrap(),
+            "inert-primary"
+        );
+        assert!(observer_token(Some(String::new()), Some(String::new())).is_err());
+        assert!(observer_token(None, None).is_err());
+    }
 }
 
 fn source_probe(
@@ -211,17 +257,19 @@ pub fn run(command: Command) -> Result<()> {
     match command {
         Command::ObserveOriginal(args) => {
             let (spec, identity, mut transport) = observer_inputs(&args.spec)?;
+            let cancellation = cancellation()?;
             super::observer::observe(
                 &spec,
                 &identity,
                 &args.results,
                 &mut transport,
-                &cancellation()?,
+                &cancellation.token,
             )?;
             Ok(())
         }
         Command::VerifyOriginalRetention(args) => {
             let (spec, identity, mut transport) = observer_inputs(&args.spec)?;
+            let cancellation = cancellation()?;
             let receipt = super::observer::verify_retention(
                 &spec,
                 &identity,
@@ -229,7 +277,7 @@ pub fn run(command: Command) -> Result<()> {
                 args.artifact_id,
                 &args.artifact_digest,
                 &mut transport,
-                &cancellation()?,
+                &cancellation.token,
             )?;
             println!("{}", serde_json::to_string_pretty(&receipt)?);
             Ok(())

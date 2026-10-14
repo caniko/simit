@@ -37,7 +37,12 @@ const PACKET_BYTES: u64 = EVIDENCE_BYTES + RECEIPT_BYTES;
 // Keep an independent allowance for outer ZIP headers/deflate framing, and a
 // separate request budget so metadata cannot truncate the admitted download.
 const ARTIFACT_BYTES: u64 = PACKET_BYTES + 128 * 1024 * 1024;
-const RETENTION_BYTES: u64 = ARTIFACT_BYTES + 256 * 1024 * 1024;
+// Artifact metadata, fresh producers/observer and repository-wide selection
+// pagination must fit independently of the largest admitted upload. Include
+// bounded native transient error bodies for every possible request retry.
+const RETENTION_METADATA_BYTES: u64 =
+    (MAX_PAGES + MAX_WORKFLOWS as u64 + 4) * (JSON_BYTES + (MAX_ATTEMPTS - 1) * 65536);
+const RETENTION_BYTES: u64 = ARTIFACT_BYTES + RETENTION_METADATA_BYTES;
 const MAX_REQUESTS: usize = 65536;
 const MAX_PACKET_FILES: usize = 3 * MAX_REQUESTS + 10000;
 const MAX_PAGES: u64 = 20;
@@ -1192,6 +1197,23 @@ pub fn verify_retention(
         validate_run(&fresh, spec, identity, producer.run_id, &producer.workflow)?;
         successful_run(&fresh)?;
     }
+    let fresh = observer.pages(
+        &format!(
+            "actions/runs?head_sha={}&event={}",
+            identity.head, identity.event
+        ),
+        "workflow_runs",
+    )?;
+    let selected = select_runs(fresh, spec, identity)?;
+    let captured = receipt
+        .producers
+        .iter()
+        .map(|producer| (producer.workflow.clone(), producer.run_id))
+        .collect::<BTreeMap<_, _>>();
+    ensure!(
+        selected == captured,
+        "original producer selection changed during retention"
+    );
     let fresh_observer = observer.json(&format!("actions/runs/{}", identity.run_id))?;
     let workflow = identity
         .workflow_ref
@@ -1391,7 +1413,7 @@ mod tests {
             clock: &mut clock,
             cancellation: &cancellation,
             requests: 0,
-            bytes: 2 * JSON_BYTES,
+            bytes: RETENTION_METADATA_BYTES,
             byte_budget: RETENTION_BYTES,
         };
         observer

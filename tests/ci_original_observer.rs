@@ -712,6 +712,7 @@ fn missing_native_steps_duplicate_runs_and_duplicate_zip_names_are_rejected() {
 struct Uploaded {
     archive: Vec<u8>,
     metadata: Value,
+    discovery: Option<Value>,
 }
 impl Transport for Uploaded {
     fn get(
@@ -724,6 +725,13 @@ impl Transport for Uploaded {
         cancellation.check()?;
         let body = if endpoint.ends_with("/zip") {
             self.archive.clone()
+        } else if endpoint.contains("actions/runs?") {
+            serde_json::to_vec(
+                &self
+                    .discovery
+                    .clone()
+                    .unwrap_or_else(|| json!({"total_count":1,"workflow_runs":[run()]})),
+            )?
         } else if endpoint.contains("/artifacts/") {
             serde_json::to_vec(&self.metadata)?
         } else if endpoint.ends_with("/99") {
@@ -771,7 +779,58 @@ fn uploaded(root: &std::path::Path) -> (Uploaded, String) {
     let created = chrono::Utc::now();
     let expires = created + chrono::Duration::days(32);
     let metadata = json!({"id":42,"expired":false,"digest":format!("sha256:{digest}"),"workflow_run":{"id":99,"head_sha":"a".repeat(40)},"created_at":created.to_rfc3339(),"expires_at":expires.to_rfc3339()});
-    (Uploaded { archive, metadata }, digest)
+    (
+        Uploaded {
+            archive,
+            metadata,
+            discovery: None,
+        },
+        digest,
+    )
+}
+
+#[test]
+fn retention_reselects_originals_and_rejects_new_exact_target_duplicates() {
+    for kind in ["duplicate", "missing", "replacement", "other-target"] {
+        let (spec, identity, mut provider) = fixture();
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("packet");
+        observe_with(
+            &spec,
+            &identity,
+            &root,
+            &mut provider,
+            &mut FakeClock::default(),
+            &Cancellation::default(),
+        )
+        .unwrap();
+        let original = std::fs::read(root.join("receipt.json")).unwrap();
+        let (mut upload, digest) = uploaded(&root);
+        let mut extra = run();
+        extra["id"] = json!(13);
+        let runs = match kind {
+            "duplicate" => vec![run(), extra],
+            "missing" => vec![],
+            "replacement" => vec![extra],
+            "other-target" => {
+                extra["head_branch"] = json!("other-branch");
+                vec![run(), extra]
+            }
+            _ => unreachable!(),
+        };
+        upload.discovery = Some(json!({"total_count":runs.len(),"workflow_runs":runs}));
+        let result = verify_retention(
+            &spec,
+            &identity,
+            &root,
+            42,
+            &digest,
+            &mut upload,
+            &Cancellation::default(),
+        );
+        assert_eq!(result.is_ok(), kind == "other-target", "{kind}: {result:?}");
+        assert_eq!(std::fs::read(root.join("receipt.json")).unwrap(), original);
+    }
 }
 
 #[test]
