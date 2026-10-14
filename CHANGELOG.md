@@ -53,6 +53,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Require static native release policy for historical verification, reject Cargo
+  changelog symlinks, locate historical Cargo manifests after directory moves, and
+  bound Git notes by arbitrary admitted SemVer prerelease tags.
 - Recover historical native publication policy from tagged configuration, include
   Cargo owners in changelog collision checks, resolve implicit Cargo paths before
   native ownership validation, and recheck release tags after qualification.

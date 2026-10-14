@@ -1329,6 +1329,105 @@ fn cargo_release_rechecks_target_tag_after_qualification_before_mutation() {
     assert_eq!(fixture_git(root, &["status", "--porcelain"]), "");
 }
 
+#[cfg(unix)]
+#[test]
+fn cargo_component_releases_reject_symlinked_changelogs() {
+    let temp = fixture();
+    let external = TempDir::new().unwrap();
+    let root = temp.path();
+    enroll_release_checks(root);
+    write(root, ".gitignore", "target/\n");
+    let original = "# Changelog\n\n## [Unreleased]\n\n### Fixed\n\n- Original note.\n\n## [0.1.0] - 2026-10-01\n\nPrevious release.\n";
+    let target = external.path().join("CHANGELOG.md");
+    fs::write(&target, original).unwrap();
+    std::os::unix::fs::symlink(&target, root.join("crates/engine/CHANGELOG.md")).unwrap();
+    assert!(
+        Command::new("cargo")
+            .current_dir(root)
+            .arg("generate-lockfile")
+            .status()
+            .unwrap()
+            .success()
+    );
+    fixture_git(root, &["init"]);
+    fixture_git(root, &["config", "user.name", "Test"]);
+    fixture_git(root, &["config", "user.email", "test@example.invalid"]);
+    fixture_git(root, &["add", "."]);
+    fixture_git(root, &["commit", "-m", "symlink source"]);
+    let head = fixture_git(root, &["rev-parse", "HEAD"]);
+    let output = common::simit()
+        .current_dir(root)
+        .args([
+            "release",
+            "patch",
+            "--component",
+            "rust",
+            "--no-sign",
+            "-m",
+            "release",
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("release changelog must not be a symlink"),
+        "{output:?}"
+    );
+    assert_eq!(fs::read_to_string(target).unwrap(), original);
+    assert_eq!(fixture_git(root, &["rev-parse", "HEAD"]), head);
+    assert!(fixture_git(root, &["tag", "--list"]).is_empty());
+}
+
+#[test]
+fn historical_cargo_verification_locates_moved_manifest_paths() {
+    let temp = fixture();
+    let root = temp.path();
+    let config = fs::read_to_string(root.join("simit.toml")).unwrap();
+    write(
+        root,
+        "simit.toml",
+        &format!("{config}\n[release.notes]\nsource='none'\n"),
+    );
+    fixture_git(root, &["init"]);
+    fixture_git(root, &["config", "user.name", "Test"]);
+    fixture_git(root, &["config", "user.email", "test@example.invalid"]);
+    fixture_git(root, &["add", "."]);
+    fixture_git(root, &["commit", "-m", "original layout"]);
+    fixture_git(root, &["tag", "engine/v0.1.0"]);
+    fs::rename(root.join("crates/engine"), root.join("crates/moved-engine")).unwrap();
+    for path in ["Cargo.toml", "crates/worker/Cargo.toml"] {
+        let content = fs::read_to_string(root.join(path))
+            .unwrap()
+            .replace("crates/engine", "crates/moved-engine")
+            .replace("../engine", "../moved-engine");
+        write(root, path, &content);
+    }
+    let output = common::simit()
+        .current_dir(root)
+        .args([
+            "release",
+            "verify",
+            "--component",
+            "rust",
+            "--version",
+            "0.1.0",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        report["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["check"] == "tag manifest engine")
+            .unwrap()["status"],
+        "pass",
+        "{report}"
+    );
+}
+
 #[test]
 fn cargo_component_verification_checks_the_tagged_manifest() {
     for notes in ["none", "changelog"] {

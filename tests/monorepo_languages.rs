@@ -477,6 +477,34 @@ fn native_release_rechecks_target_tag_after_qualification_before_mutation() {
 }
 
 #[test]
+fn git_notes_are_bounded_by_arbitrary_native_semver_prereleases() {
+    let temp = fixture();
+    let root = temp.path();
+    write(root, "node/canary.txt", "first\n");
+    git(root, &["add", "."]);
+    git(root, &["commit", "-qm", "first canary"]);
+    git(root, &["tag", "node-engine/v1.2.3-canary.1"]);
+    write(root, "node/canary.txt", "second\n");
+    git(root, &["add", "."]);
+    git(root, &["commit", "-qm", "second canary"]);
+    git(root, &["tag", "node-engine/v1.2.3-canary.2"]);
+    let script =
+        simit::release_notes::component_git_notes_script("node-engine", &["node".into()]).unwrap();
+    let output = Command::new("bash")
+        .current_dir(root)
+        .env("TAG", "node-engine/v1.2.3-canary.2")
+        .args(["-c", &script])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let notes = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        notes.contains("second canary") && !notes.contains("first canary"),
+        "{notes}"
+    );
+}
+
+#[test]
 fn non_cargo_plan_and_python_bump_preserve_independent_metadata() {
     let temp = fixture();
     let root = temp.path();

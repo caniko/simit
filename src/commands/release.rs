@@ -214,6 +214,15 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
         git::ensure_worktree_clean(workspace_root)?;
     }
     let changelog_update = if changelog_enabled && changelog_path.exists() {
+        if command.component.is_some() {
+            anyhow::ensure!(
+                !std::fs::symlink_metadata(&changelog_path)?
+                    .file_type()
+                    .is_symlink(),
+                "release changelog must not be a symlink: {}",
+                changelog_path.display()
+            );
+        }
         let content = std::fs::read_to_string(&changelog_path)?;
         let content = if config.release.changelog.auto_draft {
             if let Some(paths) = &component_paths {

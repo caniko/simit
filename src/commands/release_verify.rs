@@ -292,8 +292,6 @@ fn cargo_tag_manifest_matches(
     version: &Version,
     tag: &str,
 ) -> Result<()> {
-    let relative = package.manifest_path.as_std_path().strip_prefix(root)?;
-    let path = relative.to_string_lossy().replace('\\', "/");
     let read = |path: &str| -> Result<toml_edit::DocumentMut> {
         let output = Command::new("git")
             .current_dir(root)
@@ -305,7 +303,51 @@ fn cargo_tag_manifest_matches(
         );
         Ok(String::from_utf8(output.stdout)?.parse()?)
     };
-    let manifest = read(&path)?;
+    let output = Command::new("git")
+        .current_dir(root)
+        .args([
+            "ls-tree",
+            "-r",
+            "-z",
+            "--name-only",
+            &format!("refs/tags/{tag}"),
+        ])
+        .output()?;
+    anyhow::ensure!(
+        output.status.success(),
+        "cannot inspect tagged Cargo source tree"
+    );
+    let mut manifests = Vec::new();
+    for path in output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+    {
+        let path =
+            std::str::from_utf8(path).context("tagged Cargo tree has an unrepresentable path")?;
+        if Path::new(path)
+            .file_name()
+            .is_some_and(|name| name == "Cargo.toml")
+        {
+            if let Ok(manifest) = read(path) {
+                if manifest
+                    .get("package")
+                    .and_then(|item| item.get("name"))
+                    .and_then(toml_edit::Item::as_str)
+                    == Some(package.name.as_str())
+                {
+                    manifests.push(manifest);
+                }
+            }
+        }
+    }
+    anyhow::ensure!(
+        manifests.len() == 1,
+        "tagged Cargo package {} requires one unambiguous manifest, found {}",
+        package.name,
+        manifests.len()
+    );
+    let manifest = manifests.pop().context("missing tagged Cargo package")?;
     let tagged_package = manifest
         .get("package")
         .context("missing tagged Cargo package")?;

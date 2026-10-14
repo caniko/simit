@@ -27,7 +27,8 @@ previous=''
 best_distance=''
 while IFS= read -r candidate; do
   [ "$candidate" != "$TAG" ] || continue
-  printf '%s\n' "$candidate" | grep -Eq '^PREFIX[0-9]+\.[0-9]+\.[0-9]+(-(rc|beta|alpha|dev)(\.[0-9]+)?)?$' || continue
+  case "$candidate" in PREFIX*) suffix="${candidate#PREFIX}" ;; *) continue ;; esac
+  printf '%s\n' "$suffix" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$' || continue
   distance=$(git rev-list --count "$candidate..$TAG")
   [ "$distance" -gt 0 ] || continue
   if [ -z "$best_distance" ] || [ "$distance" -lt "$best_distance" ]; then
@@ -38,7 +39,7 @@ done < <(git for-each-ref --merged "refs/tags/$TAG" --format='%(refname:strip=2)
 if [ -n "$previous" ]; then range="$previous..$TAG"; else range="refs/tags/$TAG"; fi
 git log --reverse --format='- %s (%h)' "$range" --
 "#
-    .replace("PREFIX", prefix);
+    .replace("PREFIX", &crate::commands::scaffold::shell_word(prefix));
     let pathspecs = paths
         .iter()
         .map(|path| crate::commands::scaffold::shell_word(&format!(":(top,literal){path}")))

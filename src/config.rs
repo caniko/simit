@@ -4383,8 +4383,18 @@ fn load_flake_config(workspace_root: &Path) -> Result<Option<ProjectConfigSource
         );
     }
 
-    let config =
+    let config: ProjectConfig =
         serde_json::from_slice(&output.stdout).context("parsing flake outputs.simitConfig JSON")?;
+    if config.monorepo.as_ref().is_some_and(|monorepo| {
+        monorepo
+            .components
+            .iter()
+            .any(|component| !component.releases.is_empty())
+    }) {
+        bail!(
+            "native release owners require static simit.toml or Cargo metadata policy; flake outputs.simitConfig cannot preserve non-evaluated historical publication policy"
+        );
+    }
     Ok(Some(ProjectConfigSource {
         label: "flake outputs.simitConfig".to_owned(),
         config,
