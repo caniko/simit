@@ -62,6 +62,7 @@ pub fn run(command: InitFlakeCommand) -> Result<()> {
         audit_tools,
         &cfg.flake.components,
     );
+    crate::monorepo::compose_formatter_modules(&cfg, workspace_root, &mut all_files)?;
     // The MSRV manifest belongs to the generated shell, not to hook policy.
     // A custom flake owns its toolchain selection and any existing manifest.
     if cfg.flake.mode == FlakeMode::Custom {
@@ -151,7 +152,8 @@ pub fn run_python(command: InitFlakeCommand) -> Result<()> {
     let mut languages = project::detect_languages(workspace_root)?;
     languages.nix = true;
     languages.uv_python = true;
-    let all_files = flake::python_files(&languages, &project, &cfg.flake.components);
+    let mut all_files = flake::python_files(&languages, &project, &cfg.flake.components);
+    crate::monorepo::compose_formatter_modules(&cfg, workspace_root, &mut all_files)?;
     let scope = resolve_python_scope(command.scope, &cfg, workspace_root);
     let files = scoped_files(&all_files, scope);
 
@@ -222,7 +224,8 @@ pub fn run_generic(command: InitFlakeCommand) -> Result<()> {
 
     let mut languages = project::detect_languages(&workspace_root)?;
     languages.nix = true;
-    let all_files = flake::generic_files(&languages, &cfg.flake.components);
+    let mut all_files = flake::generic_files(&languages, &cfg.flake.components);
+    crate::monorepo::compose_formatter_modules(&cfg, &workspace_root, &mut all_files)?;
     let scope = resolve_python_scope(command.scope, &cfg, &workspace_root);
     let files = scoped_files(&all_files, scope);
 
@@ -447,10 +450,12 @@ fn has_existing_full_scope_adoption(workspace_root: &Path, cfg: &ProjectConfig) 
     workspace_root.join("nix/treefmt.nix").exists()
         && (content.contains("crane.url = \"github:ipetkov/crane\"")
             || content.contains("crane.follows = \"rs-harbor/crane\"")
-            || content.contains("crane.follows = \"harbor-rs/crane\""))
+            || content.contains("crane.follows = \"harbor-rs/crane\"")
+            || content.contains("crane.follows = \"harbor/crane\""))
         && (content.contains("rustToolchain = pkgs.rust-bin.stable.latest.default.override")
             || content.contains("rs-harbor.lib.mkToolchain")
-            || content.contains("harbor-rs.lib.mkToolchain"))
+            || content.contains("harbor-rs.lib.mkToolchain")
+            || content.contains("harbor.lib.rust.mkToolchain"))
         && (content.contains("package = craneLib.buildPackage")
             || content.contains("package = buildCache.withRustCache"))
 }
@@ -577,7 +582,11 @@ fn check_files(
             }
             Ok(actual) if file.relative_path == Path::new("nix/treefmt.nix") => {
                 if actual == file.content
-                    || flake::is_generated_treefmt(&actual, languages, rust_edition)
+                    || (cfg
+                        .monorepo
+                        .as_ref()
+                        .is_none_or(|m| m.formatter_modules.is_empty())
+                        && flake::is_generated_treefmt(&actual, languages, rust_edition))
                 {
                     continue;
                 }

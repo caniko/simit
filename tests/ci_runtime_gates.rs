@@ -167,7 +167,7 @@ fn nix_format_gate_supports_legacy_shells_and_propagates_formatter_failures() {
         let root = directory.path();
         let gate = commands(root, "ci")
             .into_iter()
-            .find(|run| run.contains("treefmt --ci"))
+            .find(|run| run.contains("formatter_expr="))
             .unwrap();
         let bin = root.join("bin");
         fs::create_dir(&bin).unwrap();
@@ -208,6 +208,7 @@ fn nix_format_gate_supports_legacy_shells_and_propagates_formatter_failures() {
             }
             let log = root.join("format.log");
             let output = Command::new("sh")
+                .current_dir(root)
                 .args(["-c", &gate])
                 .env("PATH", &bin)
                 .env("FORMAT_BIN", &bin)
@@ -234,6 +235,7 @@ fn nix_format_gate_supports_legacy_shells_and_propagates_formatter_failures() {
         }
         let log = root.join("eval-failure.log");
         let output = Command::new("sh")
+            .current_dir(root)
             .args(["-c", &gate])
             .env("PATH", &bin)
             .env("FORMAT_BIN", &bin)

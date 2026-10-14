@@ -104,6 +104,49 @@ The public distribution and release sections are `[aur]`, `[copr]`, `[apt]`,
 
 ## Release Secrets
 
+### Binary-only releases and tag conventions
+
+Keep package versions unprefixed and configure Git tag identity separately:
+
+```toml
+[ci]
+publish_crates = false
+required_gates = [
+  { id = "player-tests", run = "nix develop -c scripts/ci.sh", timeout_minutes = 150, env = { WOW_DATA = "" } },
+]
+
+[release]
+tag_prefix = "v" # "" (the default) or "v"
+
+[release.notes]
+source = "git" # "changelog" (default), "git", or "none"
+
+[release.codeberg]
+repo = "example/player"
+
+[release.artifacts]
+prebuild_binaries = true
+```
+
+`simit release` creates `v0.2.0` for package version `0.2.0`; `sync-up`
+and `verify` use the same convention. Hosted release URLs use the tag,
+while archive names and artifact manifests use the semantic version.
+Required gates run after signature validation and checkout of the tagged
+revision, before artifact publication.
+
+Git notes list commit subjects in chronological order from the closest
+reachable matching release tag through the exact release tag. Tags on the
+same commit and unreachable tags are excluded. The first release lists
+all reachable history. This policy needs no `CHANGELOG.md`. Explicit notes
+configuration overrides the legacy hosted `body_from_changelog` setting;
+without an explicit source, `body_from_changelog = false` disables notes
+and the changelog precondition.
+
+For hosted-only projects, `simit release verify` checks the release workflow,
+artifact producer, configured credentials, trust root and tag without
+checking crates.io publication. Credential presence remains a remote check;
+inspect the contract with `simit release secrets contract --json`.
+
 Generated release workflows name required or optional secrets in the workflow
 header. These names are configurable:
 

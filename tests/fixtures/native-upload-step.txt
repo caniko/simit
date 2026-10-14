@@ -1,0 +1,5 @@
+# Original GitHub upload-artifact v7.0.2 step output, run 38418647062 attempt 1.
+# Source: primary-ci-integration/5_Run actions_upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9.txt
+2026-10-13T15:29:40.4651595Z SHA256 digest of uploaded artifact is 15206afe6e8a9dabe1b1e05cfa42a0883b99cad13428c729c498eb340d569fae
+2026-10-13T15:29:40.9031142Z Artifact primary-ci-integration-430a6d5be5027d10c80f34c1d9c47d013b0ce2e5-1 successfully finalized. Artifact ID 11826996696
+2026-10-13T15:29:40.9035584Z Artifact download URL: https://github.com/caniko/simit/actions/runs/38418647062/artifacts/11826996696

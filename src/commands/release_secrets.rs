@@ -80,18 +80,29 @@ pub fn check(command: ReleaseCommand) -> Result<()> {
 pub fn contract(command: ReleaseCommand) -> Result<()> {
     let metadata = cargo::metadata_for_current_dir()?;
     let workspace_root = metadata.workspace_root.as_std_path();
-    let package = cargo::representative_package(&metadata, None)?;
+    let package =
+        cargo::representative_package(&metadata, command.packages.first().map(String::as_str))?;
     let cfg = ProjectConfig::load(workspace_root)?;
 
-    let platform = command
-        .platform
-        .or(cfg.ci.platform)
-        .unwrap_or(Platform::Forgejo);
+    let platform = crate::ci_resolution::release_backend(&cfg, command.platform, None)?.platform();
+    let credentials = project_credentials(&cfg, &package, platform)?;
+    println!("{}", serde_json::to_string_pretty(&credentials)?);
+    Ok(())
+}
+
+pub(crate) fn project_credentials(
+    cfg: &ProjectConfig,
+    package: &crate::cargo::Package,
+    platform: Platform,
+) -> Result<Vec<release_workflow::ReleaseCredential>> {
     let release = cfg.resolve_release_target(platform)?;
     let targets =
-        crate::packaging_common::resolve_release_platform_targets(&cfg, &package, platform)?;
+        crate::packaging_common::resolve_release_platform_targets(cfg, package, platform)?;
     let inputs = ReleaseWorkflowInputs {
         platform,
+        tag_prefix: cfg.release.tag_prefix,
+        notes_source: cfg.release.notes.source,
+        required_gates: &cfg.ci.required_gates,
         runner: "",
         preinstalled_nix: false,
         publish_enforcement: cfg.release.publish.enforcement,
@@ -112,9 +123,7 @@ pub fn contract(command: ReleaseCommand) -> Result<()> {
         winget: cfg.winget.as_ref(),
         announce: cfg.release.announce.as_ref(),
     };
-    let credentials = release_workflow::credential_contract(&inputs);
-    println!("{}", serde_json::to_string_pretty(&credentials)?);
-    Ok(())
+    Ok(release_workflow::credential_contract(&inputs))
 }
 
 pub fn inspect_minisign_input(command: ReleaseCommand) -> Result<()> {

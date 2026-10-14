@@ -45,6 +45,12 @@ pub struct Package {
 }
 
 impl Package {
+    pub fn is_publishable_to_crates_io(&self) -> bool {
+        self.publish
+            .as_ref()
+            .is_none_or(|registries| registries.iter().any(|registry| registry == "crates-io"))
+    }
+
     pub fn is_publishable(&self) -> bool {
         self.publish
             .as_ref()
