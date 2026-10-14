@@ -35,6 +35,7 @@ struct Provider {
     event: String,
     head_repository_id: u64,
     pull_requests: Vec<Value>,
+    workflow_reference: Option<String>,
     jobs: Option<Vec<Value>>,
     logs: Vec<u8>,
 }
@@ -58,7 +59,9 @@ impl Provider {
             "run_attempt": 1,
             "event": self.event,
             "pull_requests": self.pull_requests,
-            "path": Self::workflow(index),
+            "path": self.workflow_reference.as_ref().map_or_else(
+                || Self::workflow(index).to_owned(),
+                |reference| format!("{}@{reference}", Self::workflow(index))),
             "status": if completed { "completed" } else { "in_progress" },
             "conclusion": if completed { Some("success") } else { None },
             "html_url": format!("https://github.com/owner/repo/actions/runs/{}", 12 + index),
@@ -181,6 +184,7 @@ fn fixture(ready_after: Vec<u64>, timeout_seconds: u64) -> (Spec, Identity, Prov
         event: "push".into(),
         head_repository_id: 100,
         pull_requests: Vec::new(),
+        workflow_reference: None,
         jobs: None,
         logs: archive.finish().unwrap().into_inner(),
     };
@@ -489,4 +493,66 @@ fn paginated_jobs_must_fit_the_aggregate_retention_limit_before_capture_complete
         .filter(|metadata| metadata["endpoint"].as_str().unwrap().contains("/jobs?"))
         .count();
     assert_eq!(retained_job_pages, 2);
+}
+
+#[test]
+fn workflow_reference_must_match_the_exact_push_or_pr_target() {
+    for pull_request in [false, true] {
+        let accepted = if pull_request {
+            vec![
+                "feature",
+                "refs/heads/feature",
+                "refs/pull/71/head",
+                "refs/pull/71/merge",
+            ]
+        } else {
+            vec!["feature", "refs/heads/feature"]
+        };
+        for reference in accepted {
+            let (spec, identity, mut provider, mut clock) = if pull_request {
+                pr_fixture()
+            } else {
+                fixture(vec![0], 120)
+            };
+            provider.workflow_reference = Some(reference.into());
+            let temp = tempfile::tempdir().unwrap();
+            observe_with(
+                &spec,
+                &identity,
+                &temp.path().join("packet"),
+                &mut provider,
+                &mut clock,
+                &Cancellation::default(),
+            )
+            .unwrap();
+        }
+        for reference in [
+            "other-feature",
+            "refs/heads/other-feature",
+            "refs/pull/29/merge",
+            "refs/pull/29/head",
+        ] {
+            let (spec, identity, mut provider, mut clock) = if pull_request {
+                pr_fixture()
+            } else {
+                fixture(vec![0], 120)
+            };
+            provider.workflow_reference = Some(reference.into());
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().join("packet");
+            let result = observe_with(
+                &spec,
+                &identity,
+                &root,
+                &mut provider,
+                &mut clock,
+                &Cancellation::default(),
+            );
+            assert!(
+                result.is_err(),
+                "wrong workflow reference {reference} was admitted (PR={pull_request})"
+            );
+            assert_eq!(retained(&root)["capture_complete"], false);
+        }
+    }
 }

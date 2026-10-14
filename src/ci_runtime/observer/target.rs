@@ -73,5 +73,32 @@ pub(super) fn validate(run: &Value, spec: &Spec, identity: &Identity) -> Result<
         }
         _ => bail!("unsupported observer event"),
     }
+    if let Some((_, suffix)) = run["path"]
+        .as_str()
+        .context("missing producer workflow path")?
+        .split_once('@')
+    {
+        // Ref-qualified paths must describe the same event target as the run.
+        // Normalization must not hide a contradictory executed-workflow ref.
+        let branch = reference(&run["head_branch"])?;
+        let mut allowed = vec![
+            branch.to_owned(),
+            format!("refs/heads/{branch}"),
+            identity.head.clone(),
+        ];
+        if identity.event == "pull_request" {
+            let number = event["pull_request"]["number"]
+                .as_u64()
+                .context("missing source PR number")?;
+            allowed.extend([
+                format!("refs/pull/{number}/head"),
+                format!("refs/pull/{number}/merge"),
+            ]);
+        }
+        ensure!(
+            allowed.iter().any(|reference| reference == suffix),
+            "producer workflow reference target changed"
+        );
+    }
     Ok(())
 }
