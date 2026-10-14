@@ -35,6 +35,7 @@ struct Provider {
     event: String,
     head_repository_id: u64,
     pull_requests: Vec<Value>,
+    jobs: Option<Vec<Value>>,
     logs: Vec<u8>,
 }
 
@@ -103,7 +104,7 @@ impl Transport for Provider {
                 .unwrap()
                 .parse()?;
             if endpoint.contains("/jobs?") {
-                serde_json::to_vec(&json!({"total_count": 1, "jobs": [{
+                let jobs = self.jobs.clone().unwrap_or_else(|| vec![json!({
                     "id": id + 100,
                     "run_id": id,
                     "run_attempt": 1,
@@ -112,7 +113,11 @@ impl Transport for Provider {
                     "status": "completed",
                     "conclusion": "success",
                     "steps": [{"number": 1, "name": "Test", "status": "completed", "conclusion": "success"}]
-                }]}))?
+                })]);
+                let page: usize = endpoint.split("&page=").nth(1).unwrap().parse()?;
+                let start = (page - 1) * 100;
+                let end = (start + 100).min(jobs.len());
+                serde_json::to_vec(&json!({"total_count": jobs.len(), "jobs": &jobs[start..end]}))?
             } else if endpoint.ends_with("/logs") {
                 self.logs.clone()
             } else {
@@ -176,6 +181,7 @@ fn fixture(ready_after: Vec<u64>, timeout_seconds: u64) -> (Spec, Identity, Prov
         event: "push".into(),
         head_repository_id: 100,
         pull_requests: Vec::new(),
+        jobs: None,
         logs: archive.finish().unwrap().into_inner(),
     };
     (spec, identity, provider, TestClock(elapsed))
@@ -404,4 +410,83 @@ fn missing_or_ambiguous_pr_association_cannot_become_branch_only_success() {
         );
         assert_eq!(retained(&root)["capture_complete"], false);
     }
+}
+
+#[test]
+fn paginated_jobs_must_fit_the_aggregate_retention_limit_before_capture_completes() {
+    const JSON_LIMIT: usize = 16 * 1024 * 1024;
+    let (mut spec, identity, mut provider, mut clock) = fixture(vec![0], 120);
+    let steps: Vec<Value> = (1..=120)
+        .map(|number| {
+            json!({
+                "number": number,
+                "name": "x".repeat(700),
+                "status": "completed",
+                "conclusion": "success"
+            })
+        })
+        .collect();
+    let jobs: Vec<Value> = (0..200)
+        .map(|index| {
+            json!({
+                "id": 1000 + index,
+                "run_id": 12,
+                "run_attempt": 1,
+                "head_sha": "a".repeat(40),
+                "name": format!("matrix-{index}"),
+                "status": "completed",
+                "conclusion": "success",
+                "steps": steps
+            })
+        })
+        .collect();
+    for page in jobs.chunks(100) {
+        assert!(
+            serde_json::to_vec(&json!({"total_count": 200, "jobs": page}))
+                .unwrap()
+                .len()
+                <= JSON_LIMIT
+        );
+    }
+    assert!(serde_json::to_vec(&jobs).unwrap().len() > JSON_LIMIT);
+    spec.workflows.insert(
+        ".github/workflows/ci.yaml".into(),
+        (0..200).map(|index| format!("matrix-{index}")).collect(),
+    );
+    provider.jobs = Some(jobs);
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("packet");
+    let result = observe_with(
+        &spec,
+        &identity,
+        &root,
+        &mut provider,
+        &mut clock,
+        &Cancellation::default(),
+    );
+    assert!(
+        result.is_err(),
+        "unverifiable aggregated jobs were admitted"
+    );
+    let receipt = retained(&root);
+    assert_eq!(receipt["capture_complete"], false);
+    assert!(
+        receipt["error"]
+            .as_str()
+            .unwrap()
+            .contains("aggregate jobs")
+    );
+    let partial_bytes = std::fs::metadata(root.join("12/jobs.json")).unwrap().len();
+    assert!(partial_bytes > 0 && partial_bytes <= JSON_LIMIT as u64);
+    let retained_job_pages = std::fs::read_dir(root.join("requests"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "json")
+        })
+        .map(|path| serde_json::from_slice::<Value>(&std::fs::read(path).unwrap()).unwrap())
+        .filter(|metadata| metadata["endpoint"].as_str().unwrap().contains("/jobs?"))
+        .count();
+    assert_eq!(retained_job_pages, 2);
 }

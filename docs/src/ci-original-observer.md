@@ -48,6 +48,13 @@ malformed successful responses, duplicate producer selections and identity drift
 fail closed. Received response bytes and sanitized metadata remain in numbered
 request files. Neither credentials nor signed download URLs are recorded.
 
+Admission checks the complete timeout/poll/workflow combination against the
+65,536-GET ceiling, including bounded pagination, capture and all transient retry
+attempts. Unsupported polling configurations fail before creating a packet.
+Provider workflow paths may carry a validated ref suffix; enrollment still binds
+the exact source-owned YAML path. Serialized aggregate job metadata is bounded by
+the same 16 MiB ceiling at capture and retention, including pretty-print overhead.
+
 Every completed producer binds repository, run id, head, workflow, event and
 attempt one before and after capture. Exact required jobs and their native steps
 must all be terminal and successful. Provider log ZIPs retain their exact bytes;

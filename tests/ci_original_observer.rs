@@ -25,6 +25,7 @@ struct Provider {
     logs: Vec<u8>,
     jobs: Option<Value>,
     discovery: Option<Value>,
+    workflow_path: Option<String>,
 }
 fn run() -> Value {
     json!({"id":12,"repository":{"id":101,"full_name":"owner/repo"},"head_sha":"a".repeat(40),
@@ -51,7 +52,22 @@ impl Transport for Provider {
             });
         }
         let body = if endpoint.contains("/jobs?") {
-            serde_json::to_vec(&self.jobs.clone().unwrap_or_else(||json!({"total_count":1,"jobs":[{"id":22,"run_id":12,"run_attempt":1,"head_sha":"a".repeat(40),"name":"test","status":"completed","conclusion":"success","steps":[{"number":1,"name":"Test","status":"completed","conclusion":"success"}]}]})))?
+            let mut jobs=self.jobs.clone().unwrap_or_else(||json!({"total_count":1,"jobs":[{"id":22,"run_id":12,"run_attempt":1,"head_sha":"a".repeat(40),"name":"test","status":"completed","conclusion":"success","steps":[{"number":1,"name":"Test","status":"completed","conclusion":"success"}]}]}));
+            let page = endpoint
+                .rsplit("&page=")
+                .next()
+                .unwrap()
+                .parse::<usize>()
+                .unwrap();
+            let all = jobs["jobs"].as_array().unwrap();
+            jobs["jobs"] = json!(
+                all.iter()
+                    .skip((page - 1) * 100)
+                    .take(100)
+                    .cloned()
+                    .collect::<Vec<_>>()
+            );
+            serde_json::to_vec(&jobs)?
         } else if endpoint.ends_with("/logs") {
             self.logs.clone()
         } else if endpoint.contains("actions/runs?") {
@@ -62,7 +78,11 @@ impl Transport for Provider {
                     .unwrap_or_else(|| json!({"total_count":1,"workflow_runs":[run()]})),
             )?
         } else {
-            serde_json::to_vec(&self.runs.pop_front().unwrap_or_else(run))?
+            let mut snapshot = self.runs.pop_front().unwrap_or_else(run);
+            if let Some(path) = &self.workflow_path {
+                snapshot["path"] = json!(path);
+            }
+            serde_json::to_vec(&snapshot)?
         };
         Ok(Response {
             status: 200,
@@ -83,6 +103,7 @@ fn fixture() -> (Spec, Identity, Provider) {
         logs: zip.finish().unwrap().into_inner(),
         jobs: None,
         discovery: None,
+        workflow_path: None,
     };
     let spec = Spec {
         schema: "simit.original-observer-spec.v1".into(),
@@ -314,6 +335,91 @@ fn pre_cancelled_capture_preserves_a_nonaccepting_receipt_and_existing_packets()
         .is_err()
     );
     assert_eq!(std::fs::read(root.join("receipt.json")).unwrap(), bytes);
+}
+
+#[test]
+fn ref_qualified_workflow_paths_are_admitted_and_malformed_suffixes_rejected() {
+    for suffix in [
+        "@feature",
+        "@refs/heads/feature",
+        "@",
+        "@refs/heads/feature\n",
+        "@feature@other",
+    ] {
+        let (spec, identity, mut provider) = fixture();
+        let path = format!(".github/workflows/ci.yaml{suffix}");
+        let mut discovered = run();
+        discovered["path"] = json!(path);
+        provider.discovery = Some(json!({"total_count":1,"workflow_runs":[discovered]}));
+        provider.workflow_path = Some(path);
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("packet");
+        let result = observe_with(
+            &spec,
+            &identity,
+            &root,
+            &mut provider,
+            &mut FakeClock::default(),
+            &Cancellation::default(),
+        );
+        assert_eq!(
+            result.is_ok(),
+            matches!(suffix, "@feature" | "@refs/heads/feature"),
+            "{suffix}"
+        );
+    }
+}
+
+#[test]
+fn polling_inventory_must_fit_the_aggregate_request_allowance() {
+    let (mut spec, _, _) = fixture();
+    spec.timeout_seconds = 20700;
+    spec.poll_seconds = 1;
+    assert!(spec.validate().is_err());
+    spec.poll_seconds = 60;
+    assert!(spec.validate().is_ok());
+    for n in 1..=10 {
+        let mut candidate = spec.clone();
+        for i in 1..n {
+            candidate
+                .workflows
+                .insert(format!(".github/workflows/{i}.yaml"), vec!["test".into()]);
+        }
+        assert!(candidate.validate().is_ok());
+        candidate.poll_seconds = 1;
+        assert!(candidate.validate().is_err());
+    }
+}
+
+#[test]
+fn oversized_aggregate_jobs_cannot_publish_a_complete_packet() {
+    let (mut spec, identity, mut provider) = fixture();
+    let mut steps = Vec::new();
+    for number in 1..=900 {
+        steps.push(
+            json!({"number":number,"name":"Test","status":"completed","conclusion":"success"}),
+        );
+    }
+    let jobs=(1..=180).map(|id|json!({"id":id,"run_id":12,"run_attempt":1,"head_sha":"a".repeat(40),"name":format!("job-{id}"),"status":"completed","conclusion":"success","steps":steps})).collect::<Vec<_>>();
+    spec.workflows.insert(
+        ".github/workflows/ci.yaml".into(),
+        (1..=180).map(|id| format!("job-{id}")).collect(),
+    );
+    provider.jobs = Some(json!({"total_count":180,"jobs":jobs}));
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("packet");
+    assert!(
+        observe_with(
+            &spec,
+            &identity,
+            &root,
+            &mut provider,
+            &mut FakeClock::default(),
+            &Cancellation::default()
+        )
+        .is_err()
+    );
+    assert_eq!(receipt(&root)["capture_complete"], false);
 }
 
 #[test]

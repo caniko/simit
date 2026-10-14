@@ -19,7 +19,9 @@ pub use transport::GitHubTransport;
 const JSON_BYTES: u64 = 16 * 1024 * 1024;
 const LOG_BYTES: u64 = 512 * 1024 * 1024;
 const TOTAL_BYTES: u64 = 1536 * 1024 * 1024;
-const MAX_REQUESTS: usize = 4096;
+const MAX_REQUESTS: usize = 65536;
+const MAX_PAGES: u64 = 20;
+const MAX_ATTEMPTS: u64 = 5;
 
 /// Enrollment supplied by repository policy, never inferred from captured receipts.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -84,6 +86,22 @@ impl Spec {
         ensure!(
             (1..=20700).contains(&self.timeout_seconds) && (1..=300).contains(&self.poll_seconds),
             "invalid observer time budget"
+        );
+        // Cover the entire accepted schedule, including maximum discovery pages,
+        // every pending workflow, capture pages and all transient retry attempts.
+        // Discovery and polling share the deadline; counting both per interval
+        // deliberately overestimates their combined upper bound.
+        let rounds = self.timeout_seconds.div_ceil(self.poll_seconds) + 1;
+        let capture = self
+            .workflows
+            .values()
+            .map(|jobs| (jobs.len() as u64).div_ceil(100) + 4)
+            .sum::<u64>();
+        let required = MAX_ATTEMPTS
+            * (rounds * (MAX_PAGES + self.workflows.len() as u64) + capture + MAX_PAGES);
+        ensure!(
+            required <= MAX_REQUESTS as u64,
+            "polling configuration exceeds aggregate request allowance"
         );
         Ok(())
     }
@@ -309,15 +327,40 @@ fn read_bytes(path: &Path, maximum: u64) -> Result<Vec<u8>> {
     ensure!(bytes.len() as u64 <= maximum, "file exceeds byte limit");
     Ok(bytes)
 }
-fn write_json(path: &Path, value: &impl Serialize) -> Result<()> {
-    let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
-    serde_json::to_writer_pretty(&mut file, value)?;
-    file.write_all(b"\n")?;
+struct JsonBudget<W> {
+    writer: W,
+    remaining: u64,
+}
+impl<W: Write> Write for JsonBudget<W> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if bytes.len() as u64 > self.remaining {
+            return Err(std::io::Error::other("serialized JSON exceeds byte limit"));
+        }
+        let count = self.writer.write(bytes)?;
+        self.remaining -= count as u64;
+        Ok(count)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.writer.flush()
+    }
+}
+fn write_json_bounded(path: &Path, value: &impl Serialize, maximum: u64) -> Result<()> {
+    let file = OpenOptions::new().write(true).create_new(true).open(path)?;
+    let mut writer = JsonBudget {
+        writer: std::io::BufWriter::new(file),
+        remaining: maximum,
+    };
+    serde_json::to_writer_pretty(&mut writer, value)?;
+    writer.write_all(b"\n")?;
+    writer.flush()?;
     Ok(())
+}
+fn write_json(path: &Path, value: &impl Serialize) -> Result<()> {
+    write_json_bounded(path, value, JSON_BYTES)
 }
 fn save_receipt(root: &Path, receipt: &Receipt) -> Result<()> {
     let temporary = root.join("receipt.json.next");
-    write_json(&temporary, receipt)?;
+    write_json_bounded(&temporary, receipt, 64 * 1024 * 1024)?;
     fs::rename(temporary, root.join("receipt.json"))?;
     Ok(())
 }
@@ -350,7 +393,7 @@ impl Observer<'_> {
         Ok(())
     }
     fn get(&mut self, suffix: &str, maximum: u64) -> Result<Vec<u8>> {
-        for attempt in 0..5 {
+        for attempt in 0..MAX_ATTEMPTS {
             let timeout = self.remaining()?.min(Duration::from_secs(90));
             self.requests += 1;
             ensure!(
@@ -384,7 +427,7 @@ impl Observer<'_> {
                 matches!(response.status, 408 | 429 | 500 | 502 | 503 | 504)
             };
             ensure!(
-                transient && attempt < 4,
+                transient && attempt + 1 < MAX_ATTEMPTS,
                 "provider GET failed: status {} ({})",
                 response.status,
                 response.transport_error.as_deref().unwrap_or("HTTP")
@@ -399,7 +442,7 @@ impl Observer<'_> {
     fn pages(&mut self, suffix: &str, key: &str) -> Result<Vec<Value>> {
         let mut rows = Vec::new();
         let mut total = None;
-        for page in 1..=20 {
+        for page in 1..=MAX_PAGES {
             let separator = if suffix.contains('?') { '&' } else { '?' };
             let response = self.json(&format!("{suffix}{separator}per_page=100&page={page}"))?;
             let count = response["total_count"]
@@ -441,7 +484,7 @@ fn validate_run(
             && run["head_sha"] == identity.head
             && run["event"] == identity.event
             && run["run_attempt"] == 1
-            && run["path"] == workflow
+            && provider_workflow(run)? == workflow
             && run["repository"]["full_name"] == spec.repository,
         "producer identity changed"
     );
@@ -451,6 +494,26 @@ fn validate_run(
     );
     target::validate(run, spec, identity)?;
     Ok(())
+}
+
+fn provider_workflow(run: &Value) -> Result<&str> {
+    let path = run["path"]
+        .as_str()
+        .context("missing producer workflow path")?;
+    if let Some((path, reference)) = path.split_once('@') {
+        ensure!(
+            !reference.is_empty()
+                && reference.len() <= 2048
+                && !reference.contains('@')
+                && !reference
+                    .chars()
+                    .any(|c| c.is_control() || c.is_whitespace()),
+            "invalid producer workflow ref suffix"
+        );
+        Ok(path)
+    } else {
+        Ok(path)
+    }
 }
 fn successful_run(run: &Value) -> Result<()> {
     ensure!(
@@ -638,10 +701,8 @@ pub fn observe_with(
             let mut selected = BTreeMap::new();
             let mut ids = BTreeSet::new();
             for run in runs {
-                if let Some(workflow) = run["path"]
-                    .as_str()
-                    .filter(|p| spec.workflows.contains_key(*p))
-                {
+                let workflow = provider_workflow(&run)?;
+                if spec.workflows.contains_key(workflow) {
                     let id = run["id"].as_u64().context("missing producer run id")?;
                     validate_run(&run, spec, identity, id, workflow)?;
                     ensure!(
@@ -674,7 +735,8 @@ pub fn observe_with(
                 fs::create_dir(&folder)?;
                 write_json(&folder.join("terminal.json"), &run)?;
                 let jobs = observer.pages(&format!("actions/runs/{id}/attempts/1/jobs"), "jobs")?;
-                write_json(&folder.join("jobs.json"), &jobs)?;
+                write_json(&folder.join("jobs.json"), &jobs)
+                    .context("aggregate jobs exceed the retention byte limit")?;
                 let raw = observer.get(&format!("actions/runs/{id}/attempts/1/logs"), LOG_BYTES)?;
                 fs::write(folder.join("provider-logs.zip"), &raw)?;
                 // Retain failed/cancelled originals too; unsuccessful producer
@@ -714,10 +776,8 @@ pub fn observe_with(
         )?;
         let mut fresh_selected = BTreeMap::new();
         for run in fresh {
-            if let Some(workflow) = run["path"]
-                .as_str()
-                .filter(|p| spec.workflows.contains_key(*p))
-            {
+            let workflow = provider_workflow(&run)?;
+            if spec.workflows.contains_key(workflow) {
                 let id = run["id"].as_u64().context("missing producer run id")?;
                 validate_run(&run, spec, identity, id, workflow)?;
                 ensure!(
