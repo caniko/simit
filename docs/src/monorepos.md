@@ -66,6 +66,12 @@ are rejected. A component may contain multiple paths and Cargo packages.
 
 ## Generated qualification CI
 
+Monorepo workflows install Nix **2.35.2** explicitly, including their native
+prebuild and crate archive prerequisites. This release contains the upstream
+[lost build-slot wakeup fix](https://github.com/NixOS/nix/commit/fba3f6e49bea5f6b7b5b75ab794e32afaabd5d26)
+for the `!awake.empty()` assertion abort observed with the install action's
+2.35.1 default. The installer remains pinned when regenerating workflows.
+
 `simit init ci` and `simit init ci --check` operate on the complete root workflow
 set from both root and member directories. GitHub Actions runs the planner at the
 checked-out revision and qualifies the selected components. Missing push-base

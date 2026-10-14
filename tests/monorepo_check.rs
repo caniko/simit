@@ -107,7 +107,7 @@ fn successful_diagnostics_cannot_turn_the_failed_gate_green() {
     assert!(
         stderr.contains("captured: --kill-after=5s 15s sudo -n systemctl show nix-daemon.service")
     );
-    assert!(stderr.contains("journalctl --kernel --since @"));
+    assert!(stderr.contains("journalctl --dmesg --since @"));
     assert!(stderr.contains("--lines=150 --no-pager"));
     assert!(!stderr.contains("must-not-be-reported"));
 }
@@ -132,6 +132,23 @@ fn generated_qualification_runs_native_diagnostics_for_every_gate() {
     let steps = yaml["jobs"]["component-core"]["steps"]
         .as_sequence()
         .unwrap();
+    // Exercise the installed daemon fix, not the action's moving default.
+    for job in ["plan", "component-core"] {
+        let installer = yaml["jobs"][job]["steps"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .find(|step| {
+                step["uses"]
+                    .as_str()
+                    .is_some_and(|action| action.starts_with("cachix/install-nix-action@"))
+            })
+            .unwrap();
+        assert_eq!(
+            installer["with"]["install_url"].as_str(),
+            Some("https://releases.nixos.org/nix/nix-2.35.2/install")
+        );
+    }
     for id in ["pass", "fail"] {
         let step = steps
             .iter()
