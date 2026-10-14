@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Native `simit ci observe-original` and `verify-original-retention` capture
+  enrolled original GitHub producers with bounded transient GET retries, one
+  aggregate deadline, continuous identity binding, explicit incomplete receipts,
+  complete required job/step admission, and independent uploaded ZIP/retention
+  revalidation. No producer execution or rerun API is exposed.
 - A mixed-language monorepo component graph for changed-path qualification,
   member discovery, shared formatter composition, and native GitHub CI.
 - Independent Cargo release planning, package-scoped version bumps, verification,

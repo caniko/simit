@@ -13,6 +13,7 @@
 - [Review Migration Verification](review-migration-verification.md)
 - [CI Adoption Notes](getting-started/ci-adoption.md)
 - [Installed Custody Acceptance](ci-custody-acceptance.md)
+- [Native Original-Producer Custody](ci-original-observer.md)
 - [Distribution Channels](getting-started/distribution-channels.md)
 - [Windows Packaging](getting-started/windows-packaging.md)
 - [Omnix CI](getting-started/om-ci.md)

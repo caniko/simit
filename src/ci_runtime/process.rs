@@ -82,6 +82,26 @@ pub(super) fn run_with_input(
         Some(input),
     )
 }
+
+pub(super) fn run_probe(
+    command: &mut Command,
+    stdout: &Path,
+    stderr: &Path,
+    cancellation: &Cancellation,
+) -> Result<i32> {
+    run_bounded(
+        command,
+        stdout,
+        stderr,
+        cancellation,
+        Limits {
+            timeout: Duration::from_secs(30),
+            stdout: 1024 * 1024,
+            stderr: 65536,
+        },
+        None,
+    )
+}
 impl Default for Limits {
     fn default() -> Self {
         Self {
