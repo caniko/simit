@@ -62,6 +62,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Keep observer source probes free of external clean filters and observer
+  credentials, and support synchronous transport calls from Tokio tasks.
 - Repeat original-producer selection during retention, preserve the event snapshot
   that authorized source enrollment, fall back from empty primary tokens, and
   register native Windows console cancellation for the observer CLI.

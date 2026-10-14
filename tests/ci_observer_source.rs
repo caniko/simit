@@ -179,7 +179,7 @@ fn clean_crlf_checkout_is_bound_to_committed_policy_on_both_routes() {
 }
 
 #[test]
-fn configured_clean_filter_cannot_replace_the_committed_policy_that_is_parsed() {
+fn configured_clean_filter_is_never_executed_for_source_policy_admission() {
     let root = fixture();
     let path = root.path().join(".github/spec.json");
     let valid_checkout = fs::read(&path).unwrap();
@@ -201,14 +201,18 @@ fn configured_clean_filter_cannot_replace_the_committed_policy_that_is_parsed() 
         &[
             "config",
             "filter.policy.clean",
-            "git --no-replace-objects cat-file blob HEAD:.github/spec.json",
+            "printf 'filter executed' >filter-executed; git --no-replace-objects cat-file blob HEAD:.github/spec.json",
         ],
     );
     fs::write(&path, valid_checkout).unwrap();
     for retention in [false, true] {
         let output = invoke(root.path(), &path, retention);
         let error = String::from_utf8_lossy(&output.stderr);
-        assert!(error.contains("unknown observer schema"), "{error}");
+        assert!(
+            !root.path().join("filter-executed").exists(),
+            "source admission executed an external clean filter"
+        );
+        assert!(error.contains("source-owned observer spec"), "{error}");
         assert!(!root.path().join("packet").exists());
     }
 }
@@ -235,7 +239,7 @@ fn committed_blob_probe_admits_the_full_cli_policy_envelope() {
 }
 
 #[test]
-fn event_snapshot_is_not_reloaded_after_source_blob_authorization() {
+fn external_filter_cannot_mutate_the_authorizing_event_snapshot() {
     let root = fixture();
     let path = root.path().join(".github/spec.json");
     fs::write(
@@ -260,7 +264,12 @@ fn event_snapshot_is_not_reloaded_after_source_blob_authorization() {
     for retention in [false, true] {
         let output = invoke(root.path(), &path, retention);
         let error = String::from_utf8_lossy(&output.stderr);
-        assert_eq!(fs::read(root.path().join("event.json")).unwrap(), b"{}");
+        let event: serde_json::Value =
+            serde_json::from_slice(&fs::read(root.path().join("event.json")).unwrap()).unwrap();
+        assert_eq!(
+            event["repository"]["full_name"], "owner/repo",
+            "source admission ran the event-mutating clean filter"
+        );
         assert!(
             error.contains("environment variable"),
             "event reloaded after authorization: {error}"

@@ -124,6 +124,8 @@ jobs:
         run: cargo +1.85.0 test --locked --test ci_original_observer --test ci_original_observer_resilience --test ci_observer_source
       - name: Verify native CLI token and platform cancellation on MSRV
         run: cargo +1.85.0 test --locked --lib ci_runtime::cli
+      - name: Verify native observer transport and receipt bounds on MSRV
+        run: cargo +1.85.0 test --locked --lib ci_runtime::observer
       - name: Verify packaged runtime assets
         shell: bash
         run: |

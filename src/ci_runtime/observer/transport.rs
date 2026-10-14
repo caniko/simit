@@ -9,7 +9,6 @@ use std::{
 /// Native authenticated GitHub GETs; log redirects are HTTPS, bounded and credential-free.
 pub struct GitHubTransport {
     client: reqwest::Client,
-    runtime: tokio::runtime::Runtime,
     token: String,
 }
 impl GitHubTransport {
@@ -21,9 +20,6 @@ impl GitHubTransport {
                 .redirect(reqwest::redirect::Policy::none())
                 .connect_timeout(Duration::from_secs(15))
                 .user_agent("simit-original-observer")
-                .build()?,
-            runtime: tokio::runtime::Builder::new_current_thread()
-                .enable_all()
                 .build()?,
             token,
         })
@@ -100,8 +96,20 @@ impl GitHubTransport {
         timeout: Duration,
         cancellation: &Cancellation,
     ) -> Result<Response> {
-        self.runtime
-            .block_on(self.transfer(endpoint, url, maximum, timeout, cancellation))
+        // Own the runtime on a scoped worker so synchronous consumers can call
+        // this boundary from a Tokio task. Joining owns all transfer work;
+        // neither a nested runtime nor a detached request survives the call.
+        std::thread::scope(|scope| {
+            scope
+                .spawn(move || {
+                    let runtime = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()?;
+                    runtime.block_on(self.transfer(endpoint, url, maximum, timeout, cancellation))
+                })
+                .join()
+                .map_err(|_| anyhow::anyhow!("provider transfer worker panicked"))?
+        })
     }
     async fn transfer(
         &self,
@@ -209,6 +217,68 @@ impl GitHubTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn synchronous_transfer_is_usable_from_a_tokio_task() {
+        use std::{
+            io::{Read, Write},
+            net::TcpListener,
+            thread,
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let url =
+            url::Url::parse(&format!("http://{}/logs", listener.local_addr().unwrap())).unwrap();
+        let server = thread::spawn(move || {
+            let start = Instant::now();
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error)
+                        if error.kind() == std::io::ErrorKind::WouldBlock
+                            && start.elapsed() < Duration::from_secs(3) =>
+                    {
+                        thread::sleep(Duration::from_millis(10))
+                    }
+                    Err(error) => panic!("test server accept: {error}"),
+                }
+            };
+            stream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let mut request = [0; 4096];
+            assert!(stream.read(&mut request).unwrap() > 0);
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\nevidence",
+                )
+                .unwrap();
+        });
+        let transport = GitHubTransport::new("inert-test-token".into()).unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let response = runtime.block_on(async {
+            transport
+                .get_from_url(
+                    "repos/owner/repo/actions/runs/1/logs",
+                    url,
+                    1024,
+                    Duration::from_secs(3),
+                    &Cancellation::default(),
+                )
+                .unwrap()
+        });
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, b"evidence");
+        assert!(response.transport_error.is_none());
+        server.join().unwrap();
+        // Creation and destruction must also work inside the caller's runtime.
+        runtime.block_on(async {
+            drop(GitHubTransport::new("inert-test-token".into()).unwrap());
+        });
+    }
     #[test]
     fn period_pairs_in_repository_names_are_not_path_traversal() {
         assert_eq!(

@@ -149,6 +149,11 @@ fn source_probe_bytes(
     let remaining = deadline
         .checked_duration_since(std::time::Instant::now())
         .context("source-owned observer spec probe deadline expired")?;
+    // Source probes never need the observer credential or a network fetch.
+    command
+        .env_remove("GH_TOKEN")
+        .env_remove("GITHUB_TOKEN")
+        .env("GIT_NO_LAZY_FETCH", "1");
     let status = super::process::run_probe(
         command,
         &output,
@@ -210,26 +215,7 @@ fn verify_source_spec(path: &std::path::Path, raw: &[u8], head: &str) -> Result<
             .args(["rev-parse", "--verify", &format!("{head}:{relative}")]),
         deadline,
     )?;
-    // Hash the immutable checkout snapshot through its path's clean filters.
-    // Re-reading the worktree could miss a changed-back input. Deserialization
-    // uses the bounded committed blob below, never filter-transformed policy.
-    let snapshot = probe.path().join("spec-bytes");
-    std::fs::write(&snapshot, raw)?;
-    let loaded = source_probe(
-        probe.path(),
-        "loaded",
-        std::process::Command::new("git")
-            .arg("--no-replace-objects")
-            .current_dir(&repository)
-            .args(["hash-object", "--path", &relative, "--"])
-            .arg(snapshot),
-        deadline,
-    )?;
-    ensure!(
-        loaded == committed,
-        "source-owned observer spec differs from committed blob"
-    );
-    source_probe_bytes(
+    let blob = source_probe_bytes(
         probe.path(),
         "blob",
         std::process::Command::new("git")
@@ -238,7 +224,24 @@ fn verify_source_spec(path: &std::path::Path, raw: &[u8], head: &str) -> Result<
             .args(["cat-file", "blob", &committed]),
         deadline,
         super::observer::MAX_SPEC_BYTES,
-    )
+    )?;
+    // Compare the immutable loaded bytes without executing repository-defined
+    // clean filters. Only built-in CRLF/LF equivalence is admitted; policy is
+    // always parsed from the bounded committed blob, never converted input.
+    ensure!(
+        raw == blob || json_newlines(raw) == json_newlines(&blob),
+        "source-owned observer spec differs from committed blob"
+    );
+    Ok(blob)
+}
+
+fn json_newlines(raw: &[u8]) -> Vec<u8> {
+    raw.iter()
+        .enumerate()
+        .filter_map(|(index, &byte)| {
+            (byte != b'\r' || raw.get(index + 1) != Some(&b'\n')).then_some(byte)
+        })
+        .collect()
 }
 
 /// Group execution input locations.

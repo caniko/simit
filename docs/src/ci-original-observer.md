@@ -28,11 +28,12 @@ The CLI requires a GitHub-hosted branch-push/PR original attempt, the native
 event/environment identity and a nonempty `GH_TOKEN` (or nonempty `GITHUB_TOKEN`
 fallback). Library callers
 supply identity, a transport and cancellation without global signal handlers.
-The CLI binds an immutable checkout snapshot through its Git path's clean filters
-to the tracked blob at the observed source commit before credential or provider
-access. This admits legitimate CRLF checkouts. The bounded committed blob is the
-policy deserialized by the observer; configured filters cannot substitute a
-different policy. Modified, staged, untracked
+The CLI compares the immutable checkout snapshot to the tracked blob at the
+observed source commit before credential or provider access. Only built-in
+CRLF/LF equivalence is admitted; repository-defined clean filters are never
+executed. Git probes receive neither observer token and cannot lazily fetch
+missing objects. The bounded committed blob is the policy deserialized by the
+observer. Modified, staged, untracked
 and outside-checkout substitutions fail; local Git replacement objects cannot
 substitute the source blob. Unrelated worktree edits do not affect enrollment.
 These Git probes share one thirty-second deadline. The active
@@ -42,6 +43,9 @@ validated against its policy and returned to capture; the event file is not
 reloaded after the probes.
 The native transport authenticates only fixed-origin GitHub GETs; approved HTTPS
 log/artifact redirects are bounded and receive no GitHub credential.
+Each synchronous transfer owns and joins a scoped worker runtime, so library
+callers can use the transport inside Tokio tasks without nesting runtimes or
+leaving detached transfer work.
 Repository-name periods, including consecutive periods within a name, remain
 valid; actual traversal path segments and escaped separators are rejected.
 
