@@ -26,6 +26,10 @@
       version = (builtins.fromTOML (builtins.readFile "${source}/Cargo.toml")).package.version;
       src = pkgs.lib.cleanSource source;
       cargoLock.lockFile = "${source}/Cargo.lock";
+      # This standalone builder has no system Git/CA paths inside its sandbox.
+      # Bind the immutable inputs at compilation, as in the public flake package.
+      SIMIT_TRUSTED_GIT = "${pkgs.git}/bin/git";
+      SIMIT_TRUSTED_CA_BUNDLE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
       nativeBuildInputs = [pkgs.makeWrapper pkgs.perl];
       # The full Simit suite invokes release preflight in temporary Cargo
       # projects, so its nested quality commands need the matching toolchain.
