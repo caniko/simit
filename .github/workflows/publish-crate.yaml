@@ -116,11 +116,17 @@ jobs:
       - name: Test all features
         run: nix develop -c cargo test --all-features
 
+      - name: Test no default features
+        run: nix develop -c cargo test --no-default-features
+
       - name: Build docs
         run: nix develop .#docs -c cargo doc --no-deps --all-features
 
       - name: Clippy all features
         run: nix develop -c cargo clippy --all-targets --all-features -- --deny warnings
+
+      - name: Clippy no default features
+        run: nix develop -c cargo clippy --all-targets --no-default-features -- --deny warnings
 
       - name: Dry-run publish
         run: nix develop -c cargo publish --dry-run

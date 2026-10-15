@@ -36,6 +36,8 @@ fn run() -> Result<()> {
         }
     }
     match cli.command {
+        #[cfg(feature = "runtime-admission-cli")]
+        Commands::Runtime(command) => simit::runtime_admission::cli::run(command),
         Commands::Ci(command) => simit::ci_runtime::cli::run(command),
         Commands::Review(command) => simit::review::cli::finish(command),
         Commands::Commit(command) => commands::commit::run(command),

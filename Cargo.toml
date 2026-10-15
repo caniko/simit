@@ -95,7 +95,12 @@ checksum_globs = ["*.tar.gz"]
 minisign_pub = "keys/minisign.pub"
 sign = true
 
+[features]
+default = ["runtime-admission-cli"]
+runtime-admission-cli = []
+
 [dependencies]
+thiserror = "2"
 anyhow = "1"
 base64 = "0.22"
 camino = { version = "1", features = ["serde1"] }
