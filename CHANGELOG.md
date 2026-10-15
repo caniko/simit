@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-10-15
+
 ### Added
 
 - Bounded runtime admission through a reusable library and `simit runtime admit`:
@@ -859,7 +861,8 @@ ci`, including the `~/.cargo/bin` key, rust-cache settings, and why Nix
 
 - Prepare the first public crates.io release.
 
-[Unreleased]: https://github.com/caniko/simit/compare/0.20.0...HEAD
+[Unreleased]: https://github.com/caniko/simit/compare/0.21.0...HEAD
+[0.21.0]: https://github.com/caniko/simit/compare/0.20.0...0.21.0
 [0.20.0]: https://github.com/caniko/simit/compare/0.19.0...0.20.0
 [0.19.0]: https://github.com/caniko/simit/compare/0.18.1...0.19.0
 [0.18.1]: https://github.com/caniko/simit/compare/0.18.0...0.18.1
