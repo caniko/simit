@@ -1,0 +1,7 @@
+{
+  "schema": "simit.original-observer-spec.v1",
+  "repository": "caniko/simit",
+  "workflows": { ".github/workflows/ci.yaml": ["test"] },
+  "timeout_seconds": 10,
+  "poll_seconds": 5
+}

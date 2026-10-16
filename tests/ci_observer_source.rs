@@ -179,6 +179,102 @@ fn blocking_event_paths_fail_promptly_with_incomplete_preflight_evidence() {
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn cli_signal_cancels_a_blocked_real_git_probe_and_retains_preflight_failure() {
+    use std::{
+        os::unix::fs::OpenOptionsExt,
+        time::{Duration, Instant},
+    };
+    for retention in [false, true] {
+        let root = fixture();
+        let mut command = observer_command(
+            root.path(),
+            &root.path().join(".github/spec.json"),
+            retention,
+        );
+        let head = String::from_utf8(git(root.path(), &["rev-parse", "HEAD"]).stdout).unwrap();
+        let head = head.trim();
+        let object = root
+            .path()
+            .join(".git/objects")
+            .join(&head[..2])
+            .join(&head[2..]);
+        fs::remove_file(&object).unwrap();
+        assert!(
+            Command::new("mkfifo")
+                .args(["-m", "600"])
+                .arg(&object)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let mut child = command
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        // Connecting a nonblocking writer proves Git opened this exact object;
+        // keeping it empty and open holds the real probe inside a blocking read.
+        let writer = loop {
+            if let Ok(file) = fs::OpenOptions::new()
+                .write(true)
+                .custom_flags(rustix::fs::OFlags::NONBLOCK.bits() as i32)
+                .open(&object)
+            {
+                break file;
+            }
+            if Instant::now() >= deadline {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("Git never entered the blocking source probe, retention={retention}");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        let start = Instant::now();
+        rustix::process::kill_process(
+            rustix::process::Pid::from_raw(child.id() as i32).unwrap(),
+            rustix::process::Signal::TERM,
+        )
+        .unwrap();
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if start.elapsed() >= Duration::from_secs(3) {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("CLI cancellation ignored the running Git probe, retention={retention}");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        drop(writer);
+        assert!(!status.success());
+        let prefix = if retention {
+            "packet.retention.preflight-"
+        } else {
+            "packet.preflight-"
+        };
+        let diagnostic = fs::read_dir(root.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with(prefix)
+            })
+            .unwrap();
+        let receipt: serde_json::Value =
+            serde_json::from_slice(&fs::read(diagnostic.join("receipt.json")).unwrap()).unwrap();
+        assert_eq!(receipt["preflight_complete"], false);
+        assert_eq!(receipt["capture_complete"], false);
+        assert!(receipt["error"].as_str().unwrap().contains("cancelled"));
+        assert!(!root.path().join("packet").exists());
+    }
+}
+
 fn replace_fixture_object(path: &Path, bytes: &[u8]) {
     // Git creates read-only loose objects. Windows forbids deleting them until
     // that attribute is cleared; these paths belong only to disposable fixtures.

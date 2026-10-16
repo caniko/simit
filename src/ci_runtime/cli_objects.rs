@@ -1,7 +1,7 @@
 //! Hash the actual commit/tree/blob bytes used for source authorization.
 use anyhow::{Context, Result, ensure};
 use sha1::{Digest, Sha1};
-use std::{path::Path, time::Instant};
+use std::path::Path;
 
 pub(super) fn object(
     probe: &Path,
@@ -9,7 +9,7 @@ pub(super) fn object(
     kind: &str,
     oid: &str,
     name: &str,
-    deadline: Instant,
+    control: &super::SourceControl<'_>,
     maximum: u64,
 ) -> Result<Vec<u8>> {
     ensure!(
@@ -25,7 +25,7 @@ pub(super) fn object(
         std::process::Command::new(git)
             .arg("--no-replace-objects")
             .args(["cat-file", kind, oid]),
-        deadline,
+        control,
         maximum,
     )?;
     let mut hash = Sha1::new();
@@ -43,7 +43,7 @@ pub(super) fn blob_id(
     git: &Path,
     commit: &[u8],
     path: &str,
-    deadline: Instant,
+    control: &super::SourceControl<'_>,
 ) -> Result<String> {
     // Only the structural header is ASCII; Git permits non-UTF8 author/message
     // bytes, which have already been hashed as their exact original contents.
@@ -65,7 +65,7 @@ pub(super) fn blob_id(
             "tree",
             &tree,
             &format!("tree-{index}"),
-            deadline,
+            control,
             16 * 1024 * 1024,
         )?;
         let mut entries = raw.as_slice();

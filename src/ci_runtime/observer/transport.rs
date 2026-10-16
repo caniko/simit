@@ -27,7 +27,12 @@ impl GitHubTransport {
 }
 
 fn trusted_client() -> Result<reqwest::ClientBuilder> {
-    let builder = reqwest::Client::builder().no_proxy();
+    // Unlike getaddrinfo's blocking pool, lookup futures and their resolver
+    // belong to this transfer's runtime and cannot hold up runtime shutdown.
+    // https://docs.rs/reqwest/0.12.28/reqwest/struct.ClientBuilder.html#method.dns_resolver
+    let builder = reqwest::Client::builder()
+        .no_proxy()
+        .dns_resolver(std::sync::Arc::new(super::dns::OwnedResolver::default()));
     // Native Windows/macOS TLS uses OS trust stores, not SSL_CERT_* paths.
     // OpenSSL platforms instead install an explicit protected bundle after
     // disabling all default roots (including environment-selected roots).
@@ -299,6 +304,146 @@ fn retry_delay(status: u16, headers: &reqwest::header::HeaderMap, now: u64) -> O
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stalled_async_dns_is_owned_across_reused_client_runtimes_and_interruptible() {
+        use hickory_resolver::config::{NameServerConfig, ResolverConfig};
+        use reqwest::dns::Resolve;
+        use std::{
+            net::UdpSocket,
+            sync::{
+                Arc,
+                atomic::{AtomicUsize, Ordering},
+                mpsc,
+            },
+            thread,
+        };
+        struct Counted {
+            resolver: super::super::dns::OwnedResolver,
+            active: Arc<AtomicUsize>,
+        }
+        struct Active(Arc<AtomicUsize>);
+        impl Drop for Active {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+        impl Resolve for Counted {
+            fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+                let future = self.resolver.resolve(name);
+                let active = self.active.clone();
+                Box::pin(async move {
+                    active.fetch_add(1, Ordering::SeqCst);
+                    let _active = Active(active);
+                    future.await
+                })
+            }
+        }
+        let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_millis(50)))
+            .unwrap();
+        let address = socket.local_addr().unwrap();
+        let mut nameserver = NameServerConfig::udp(address.ip());
+        nameserver.connections[0].port = address.port();
+        let config = ResolverConfig::from_parts(None, Vec::new(), vec![nameserver]);
+        let active = Arc::new(AtomicUsize::new(0));
+        let resolver = Arc::new(Counted {
+            resolver: super::super::dns::OwnedResolver {
+                config: Some(config),
+            },
+            active: active.clone(),
+        });
+        let transport = GitHubTransport {
+            client: trusted_client()
+                .unwrap()
+                .dns_resolver(resolver)
+                .build()
+                .unwrap(),
+            token: "inert-test-token".into(),
+        };
+        let (seen, received) = mpsc::channel();
+        let (release, released) = mpsc::channel();
+        let server = thread::spawn(move || {
+            let mut query = [0; 4096];
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while Instant::now() < deadline {
+                match released.try_recv() {
+                    Ok(()) | Err(mpsc::TryRecvError::Disconnected) => break,
+                    Err(mpsc::TryRecvError::Empty) => {}
+                }
+                match socket.recv_from(&mut query) {
+                    Ok((length, _)) => {
+                        let _ = seen.send(
+                            query[..length]
+                                .windows(6)
+                                .any(|name| name.eq_ignore_ascii_case(b"second")),
+                        );
+                    }
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                        ) => {}
+                    Err(error) => panic!("DNS fixture: {error}"),
+                }
+            }
+        });
+        for (name, cancel) in [("first", true), ("second", false)] {
+            let cancellation = Cancellation::default();
+            let start = Instant::now();
+            let response = thread::scope(|scope| {
+                let worker = scope.spawn(|| {
+                    transport.get_from_url(
+                        "repos/owner/repo/actions/runs/1/logs",
+                        url::Url::parse(&format!("http://{name}.example.com/logs")).unwrap(),
+                        1024,
+                        if cancel {
+                            Duration::from_secs(30)
+                        } else {
+                            Duration::from_millis(300)
+                        },
+                        &cancellation,
+                    )
+                });
+                let wait_until = Instant::now() + Duration::from_secs(3);
+                let mut observed = false;
+                while let Ok(second) =
+                    received.recv_timeout(wait_until.saturating_duration_since(Instant::now()))
+                {
+                    if second == (name == "second") {
+                        observed = true;
+                        break;
+                    }
+                }
+                if cancel || !observed {
+                    cancellation.cancel();
+                }
+                let response = worker.join().unwrap().unwrap();
+                assert!(
+                    observed,
+                    "DNS query not observed for {name}: status={}, error={:?}",
+                    response.status, response.transport_error
+                );
+                response
+            });
+            assert!(
+                start.elapsed() < Duration::from_secs(2),
+                "DNS runtime join exceeded bound"
+            );
+            assert_eq!(
+                active.load(Ordering::SeqCst),
+                0,
+                "DNS future survived transfer shutdown"
+            );
+            assert_eq!(
+                response.transport_error.as_deref(),
+                Some(if cancel { "cancelled" } else { "timeout" })
+            );
+        }
+        release.send(()).unwrap();
+        server.join().unwrap();
+    }
 
     #[test]
     fn connection_reset_before_headers_is_a_transient_request_failure() {

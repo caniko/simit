@@ -207,6 +207,78 @@ fn active_observer_enrollment_fails_before_packet_or_provider_effects() {
 }
 
 #[test]
+fn observer_filename_and_branch_ref_may_both_contain_at_signs() {
+    for reference in ["refs/heads/feature", "refs/heads/feature@topic"] {
+        let (mut spec, mut identity, _) = fixture();
+        let workflow = ".github/workflows/ci.yaml@observer.yaml";
+        identity.workflow_ref = format!("owner/repo/{workflow}@{reference}");
+        identity.validate(&spec).unwrap();
+        spec.workflows
+            .insert(workflow.into(), vec!["retain".into()]);
+        assert!(
+            identity
+                .validate(&spec)
+                .unwrap_err()
+                .to_string()
+                .contains("active observer"),
+            "the complete observer filename must still reject self-enrollment"
+        );
+    }
+}
+
+#[test]
+fn producer_filenames_with_at_signs_keep_bare_and_ref_qualified_paths() {
+    for suffix in ["", "@refs/heads/feature@topic"] {
+        let (mut spec, identity, mut provider) = fixture();
+        let workflow = ".github/workflows/ci.yaml@producer.yaml";
+        spec.workflows = [(workflow.into(), vec!["test".into()])].into();
+        let path = format!("{workflow}{suffix}");
+        let mut snapshot = run();
+        snapshot["path"] = json!(path);
+        provider.discovery = Some(json!({"total_count":1,"workflow_runs":[snapshot]}));
+        provider.workflow_path = Some(path);
+        let temp = tempfile::tempdir().unwrap();
+        let result = observe_with(
+            &spec,
+            &identity,
+            &temp.path().join("packet"),
+            &mut provider,
+            &mut FakeClock::default(),
+            &Cancellation::default(),
+        )
+        .unwrap();
+        assert!(result.capture_complete);
+        assert_eq!(result.producers[0].workflow, workflow);
+    }
+}
+
+#[test]
+fn ambiguous_enrolled_filename_and_ref_interpretations_fail_closed() {
+    let (mut spec, identity, mut provider) = fixture();
+    let workflow = ".github/workflows/ci.yaml@producer.yaml";
+    spec.workflows.insert(workflow.into(), vec!["test".into()]);
+    let mut snapshot = run();
+    snapshot["path"] = json!(workflow);
+    provider.discovery = Some(json!({"total_count":1,"workflow_runs":[snapshot]}));
+    let temp = tempfile::tempdir().unwrap();
+    let error = observe_with(
+        &spec,
+        &identity,
+        &temp.path().join("packet"),
+        &mut provider,
+        &mut FakeClock::default(),
+        &Cancellation::default(),
+    )
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("ambiguous producer workflow path"),
+        "{error:#}"
+    );
+}
+
+#[test]
 fn transient_500_and_502_are_retained_then_terminal_polling_completes() {
     let (spec, identity, mut provider) = fixture();
     provider.failures.extend([500, 502]);
@@ -819,6 +891,7 @@ struct Uploaded {
     archive: Vec<u8>,
     metadata: Value,
     discovery: Option<Value>,
+    provider: Provider,
 }
 impl Transport for Uploaded {
     fn get(
@@ -831,6 +904,10 @@ impl Transport for Uploaded {
         cancellation.check()?;
         let body = if endpoint.ends_with("/zip") {
             self.archive.clone()
+        } else if endpoint.contains("/attempts/1/jobs?") || endpoint.ends_with("/attempts/1/logs") {
+            return self
+                .provider
+                .get(endpoint, _maximum, _timeout, cancellation);
         } else if endpoint.contains("actions/runs?") {
             serde_json::to_vec(
                 &self
@@ -890,6 +967,7 @@ fn uploaded(root: &std::path::Path) -> (Uploaded, String) {
             archive,
             metadata,
             discovery: None,
+            provider: fixture().2,
         },
         digest,
     )
@@ -1031,4 +1109,117 @@ fn native_retention_rejects_substituted_upload_identity_digest_expiry_and_local_
             "{kind}"
         );
     }
+}
+
+#[test]
+fn unsigned_recaptured_jobs_and_logs_cannot_gain_authority_from_the_artifact_digest() {
+    use sha2::{Digest, Sha256};
+    for kind in ["jobs", "logs"] {
+        let (spec, identity, mut provider) = fixture();
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("packet");
+        let mut captured = observe_with(
+            &spec,
+            &identity,
+            &root,
+            &mut provider,
+            &mut FakeClock::default(),
+            &Cancellation::default(),
+        )
+        .unwrap();
+        if kind == "jobs" {
+            let path = root.join("12/jobs.json");
+            let mut jobs: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            jobs[0]["steps"][0]["name"] = json!("Forged successful step");
+            std::fs::write(path, serde_json::to_vec_pretty(&jobs).unwrap()).unwrap();
+        } else {
+            let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+            zip.start_file("test/1_Test.txt", zip::write::SimpleFileOptions::default())
+                .unwrap();
+            zip.write_all(b"forged successful log\n").unwrap();
+            let raw = zip.finish().unwrap().into_inner();
+            std::fs::write(root.join("12/provider-logs.zip"), &raw).unwrap();
+            let producer = &mut captured.producers[0];
+            producer.raw_logs_sha256 = hex::encode(Sha256::digest(&raw));
+            producer.log_members = [(
+                "test/1_Test.txt".into(),
+                hex::encode(Sha256::digest(b"forged successful log\n")),
+            )]
+            .into();
+            std::fs::write(
+                root.join("12/provider-log-members.json"),
+                serde_json::to_vec_pretty(&producer.log_members).unwrap(),
+            )
+            .unwrap();
+        }
+        for (path, digest) in &mut captured.members {
+            *digest = hex::encode(Sha256::digest(std::fs::read(root.join(path)).unwrap()));
+        }
+        let forged = serde_json::to_vec_pretty(&captured).unwrap();
+        std::fs::write(root.join("receipt.json"), &forged).unwrap();
+        let (mut upload, digest) = uploaded(&root);
+        let error = verify_retention(
+            &spec,
+            &identity,
+            &root,
+            42,
+            &digest,
+            &mut upload,
+            &Cancellation::default(),
+        )
+        .expect_err("a self-consistent forgery is not provider evidence");
+        assert!(
+            error.to_string().contains("authoritative"),
+            "{kind}: {error:#}"
+        );
+        assert!(
+            !root
+                .with_file_name("packet.retention")
+                .join("retention.json")
+                .exists()
+        );
+        assert_eq!(std::fs::read(root.join("receipt.json")).unwrap(), forged);
+    }
+}
+
+#[test]
+fn fresh_provider_zip_container_metadata_is_not_log_content_authority() {
+    let (spec, identity, mut provider) = fixture();
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("packet");
+    observe_with(
+        &spec,
+        &identity,
+        &root,
+        &mut provider,
+        &mut FakeClock::default(),
+        &Cancellation::default(),
+    )
+    .unwrap();
+    let (mut upload, digest) = uploaded(&root);
+    let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    zip.start_file(
+        "test/1_Test.txt",
+        zip::write::SimpleFileOptions::default()
+            .last_modified_time(zip::DateTime::from_date_and_time(2020, 1, 2, 3, 4, 6).unwrap()),
+    )
+    .unwrap();
+    zip.write_all(b"original execution log\n").unwrap();
+    upload.provider.logs = zip.finish().unwrap().into_inner();
+    assert_ne!(provider.logs, upload.provider.logs);
+    let result = verify_retention(
+        &spec,
+        &identity,
+        &root,
+        42,
+        &digest,
+        &mut upload,
+        &Cancellation::default(),
+    )
+    .unwrap();
+    assert_eq!(result["capture_complete"], true);
+    assert_eq!(
+        std::fs::read(root.join("12/provider-logs.zip")).unwrap(),
+        provider.logs
+    );
 }

@@ -134,6 +134,7 @@ fn observer_inputs(
                 .as_ref()
                 .map(|(sha, base)| (sha.as_str(), base.as_str())),
             deadline,
+            cancellation,
         )?;
         // The committed blob is policy, even when configured checkout/clean filters
         // change its representation. Never deserialize the transformed policy.
@@ -179,6 +180,97 @@ fn observer_token(primary: Option<String>, fallback: Option<String>) -> Result<S
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn source_probe_cancellation_interrupts_a_running_child_and_retains_its_output() {
+        use std::time::{Duration, Instant};
+        let root = tempfile::tempdir().unwrap();
+        let cancellation = super::super::cancellation::Cancellation::default();
+        let token = cancellation.clone();
+        let output = root.path().join("slow-git");
+        let cancel = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !std::fs::metadata(&output).is_ok_and(|metadata| metadata.len() > 0)
+                && Instant::now() < deadline
+            {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            token.cancel();
+            Instant::now()
+        });
+        let start = Instant::now();
+        #[cfg(unix)]
+        let mut command = {
+            let mut command = std::process::Command::new("/bin/sh");
+            command.args(["-c", "printf 'probe started\\n'; while :; do :; done"]);
+            command
+        };
+        #[cfg(windows)]
+        let mut command = {
+            let mut command = std::process::Command::new(
+                r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+            );
+            command.args([
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "[Console]::WriteLine('probe started'); while ($true) {}",
+            ]);
+            command
+        };
+        let result = source_probe_bytes(
+            root.path(),
+            "slow-git",
+            &mut command,
+            &SourceControl {
+                deadline: start + Duration::from_secs(15),
+                cancellation: &cancellation,
+            },
+            1024,
+        );
+        let cancelled_at = cancel.join().unwrap();
+        assert!(result.unwrap_err().to_string().contains("cancelled"));
+        assert!(cancelled_at.elapsed() < Duration::from_secs(3));
+        assert_eq!(
+            String::from_utf8(std::fs::read(root.path().join("slow-git")).unwrap())
+                .unwrap()
+                .replace("\r\n", "\n"),
+            "probe started\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn source_probe_clears_loader_shell_and_credential_environment_before_launch() {
+        let root = tempfile::tempdir().unwrap();
+        let hook = root.path().join("startup");
+        let marker = root.path().join("injected");
+        std::fs::write(&hook, format!("printf injected > '{}'", marker.display())).unwrap();
+        let cancellation = super::super::cancellation::Cancellation::default();
+        let raw = source_probe_bytes(
+            root.path(),
+            "environment",
+            std::process::Command::new("/bin/sh")
+                .args(["-c", "test -z \"$BASH_ENV$ENV$LD_PRELOAD$LD_LIBRARY_PATH$DYLD_INSERT_LIBRARIES$GH_TOKEN$GITHUB_TOKEN\" && printf clean"])
+                .env("BASH_ENV", &hook)
+                .env("ENV", &hook)
+                .env("LD_PRELOAD", "inert-fixture-library")
+                .env("LD_LIBRARY_PATH", root.path())
+                .env("DYLD_INSERT_LIBRARIES", "inert-fixture-library")
+                .env("GH_TOKEN", "fixture-token")
+                .env("GITHUB_TOKEN", "fixture-token"),
+            &SourceControl {
+                deadline: std::time::Instant::now() + std::time::Duration::from_secs(5),
+                cancellation: &cancellation,
+            },
+            1024,
+        )
+        .unwrap();
+        assert_eq!(raw, b"clean");
+        assert!(!marker.exists());
+    }
+
     #[test]
     fn cancellation_before_identity_retains_an_incomplete_preflight_receipt() {
         for retention in [false, true] {
@@ -223,17 +315,22 @@ mod tests {
     }
 }
 
+struct SourceControl<'a> {
+    deadline: std::time::Instant,
+    cancellation: &'a super::cancellation::Cancellation,
+}
+
 fn source_probe(
     root: &std::path::Path,
     name: &str,
     command: &mut std::process::Command,
-    deadline: std::time::Instant,
+    control: &SourceControl<'_>,
 ) -> Result<String> {
     Ok(String::from_utf8(source_probe_bytes(
         root,
         name,
         command,
-        deadline,
+        control,
         1024 * 1024,
     )?)?
     .trim_end_matches(['\r', '\n'])
@@ -244,29 +341,37 @@ fn source_probe_bytes(
     root: &std::path::Path,
     name: &str,
     command: &mut std::process::Command,
-    deadline: std::time::Instant,
+    control: &SourceControl<'_>,
     maximum: u64,
 ) -> Result<Vec<u8>> {
     let output = root.join(name);
     let errors = root.join(format!("{name}.errors"));
-    let remaining = deadline
+    super::observer::preflight_check(control.deadline, control.cancellation)?;
+    let remaining = control
+        .deadline
         .checked_duration_since(std::time::Instant::now())
         .context("source-owned observer spec probe deadline expired")?;
-    // Source probes never need the observer credential or a network fetch.
+    // An absolute protected Git executable still needs a clean child launch:
+    // inherited loader/shell variables run before any Git argument is checked.
+    command.env_clear();
+    #[cfg(windows)]
     command
-        .env_remove("GH_TOKEN")
-        .env_remove("GITHUB_TOKEN")
-        .env("GIT_NO_LAZY_FETCH", "1");
+        .env("SystemRoot", r"C:\Windows")
+        .env("WINDIR", r"C:\Windows");
     command
-        .env_remove("GIT_EXEC_PATH")
-        .env_remove("DEVELOPER_DIR")
-        .env_remove("SDKROOT")
-        .env_remove("TOOLCHAINS");
+        .env("GIT_NO_LAZY_FETCH", "1")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_ATTR_NOSYSTEM", "1")
+        .env(
+            "GIT_CONFIG_GLOBAL",
+            if cfg!(windows) { "NUL" } else { "/dev/null" },
+        );
     let status = super::process::run_probe(
         command,
         &output,
         &errors,
-        &super::cancellation::Cancellation::default(),
+        control.cancellation,
         remaining,
         maximum,
     )?;
@@ -274,7 +379,7 @@ fn source_probe_bytes(
         status == 0,
         "source-owned observer spec Git probe failed ({name})"
     );
-    super::group::read_bytes(&output, maximum)
+    super::observer::read_preflight(&output, maximum, control.deadline, control.cancellation)
 }
 
 fn verify_source_spec(
@@ -283,7 +388,13 @@ fn verify_source_spec(
     head: &str,
     merge: Option<(&str, &str)>,
     deadline: std::time::Instant,
+    cancellation: &super::cancellation::Cancellation,
 ) -> Result<Vec<u8>> {
+    let control = SourceControl {
+        deadline,
+        cancellation,
+    };
+    super::observer::preflight_check(deadline, cancellation)?;
     let probe = tempfile::tempdir()?;
     let git = git::executable()?;
     let actual_head = source_probe(
@@ -292,7 +403,7 @@ fn verify_source_spec(
         std::process::Command::new(&git)
             .arg("--no-replace-objects")
             .args(["rev-parse", "HEAD"]),
-        deadline,
+        &control,
     )?;
     ensure!(
         actual_head == head,
@@ -304,7 +415,7 @@ fn verify_source_spec(
         "commit",
         head,
         "source-commit",
-        deadline,
+        &control,
         1024 * 1024,
     )?;
     if let Some((merge_sha, base)) = merge {
@@ -321,7 +432,7 @@ fn verify_source_spec(
             "commit",
             merge_sha,
             "merge",
-            deadline,
+            &control,
             65536,
         )?;
         let merge = std::str::from_utf8(&merge)?;
@@ -343,7 +454,7 @@ fn verify_source_spec(
         std::process::Command::new(&git)
             .arg("--no-replace-objects")
             .args(["rev-parse", "--show-toplevel"]),
-        deadline,
+        &control,
     )?;
     let repository = std::fs::canonicalize(repository)?;
     let path = std::fs::canonicalize(path)?;
@@ -359,14 +470,14 @@ fn verify_source_spec(
         })
         .collect::<Result<Vec<_>>>()?
         .join("/");
-    let committed = objects::blob_id(probe.path(), &git, &commit, &relative, deadline)?;
+    let committed = objects::blob_id(probe.path(), &git, &commit, &relative, &control)?;
     let blob = objects::object(
         probe.path(),
         &git,
         "blob",
         &committed,
         "blob",
-        deadline,
+        &control,
         super::observer::MAX_SPEC_BYTES,
     )?;
     // Compare the immutable loaded bytes without executing repository-defined

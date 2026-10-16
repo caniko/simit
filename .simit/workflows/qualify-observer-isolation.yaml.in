@@ -1,0 +1,115 @@
+name: Qualify clean observer launch
+
+on:
+  pull_request:
+  push:
+    branches: [trunk]
+
+permissions: {}
+
+jobs:
+  producer-environment:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    steps:
+      - name: Persist an inert loader injection in the producer job
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/loader.c" <<'C'
+          #include <stdio.h>
+          #include <stdlib.h>
+          __attribute__((constructor)) static void fixture(void) {
+            const char *token = getenv("GH_TOKEN"), *path = getenv("ISOLATION_MARKER");
+            if (token && path) {
+              FILE *file = fopen(path, "w");
+              if (file) { fputs(token, file); fclose(file); }
+            }
+          }
+          C
+          cc -shared -fPIC "$RUNNER_TEMP/loader.c" -o "$RUNNER_TEMP/loader.so"
+          printf 'LD_PRELOAD=%s\nSIMIT_PRODUCER_ENV=poisoned\n' "$RUNNER_TEMP/loader.so" >> "$GITHUB_ENV"
+      - name: Prove injection executes before producer process code
+        shell: python
+        env:
+          GH_TOKEN: isolation-fixture-only
+          ISOLATION_MARKER: ${{ runner.temp }}/injected-token
+        run: |
+          import os
+          from pathlib import Path
+          assert os.environ['SIMIT_PRODUCER_ENV'] == 'poisoned'
+          assert Path(os.environ['ISOLATION_MARKER']).read_text() == 'isolation-fixture-only'
+
+  clean-observer:
+    needs: producer-environment
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      CARGO_BUILD_JOBS: "2"
+      PR_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - name: Verify a fresh observer launch before provisioning
+        shell: python
+        env:
+          GH_TOKEN: isolation-fixture-only
+        run: |
+          import json, os
+          from pathlib import Path
+          names = ('LD_PRELOAD', 'LD_LIBRARY_PATH', 'LD_AUDIT', 'BASH_ENV', 'ENV',
+                   'DYLD_INSERT_LIBRARIES', 'DYLD_LIBRARY_PATH', 'SIMIT_PRODUCER_ENV')
+          assert not any(os.environ.get(name) for name in names), 'producer environment crossed job boundary'
+          root = Path(os.environ['RUNNER_TEMP'])
+          assert not (root / 'injected-token').exists(), 'producer filesystem crossed job boundary'
+          assert os.environ['GH_TOKEN'] == 'isolation-fixture-only'
+          assert os.environ['GITHUB_RUN_ATTEMPT'] == '1', 'qualification requires an original attempt'
+          evidence = root / 'observer-isolation'
+          evidence.mkdir()
+          (evidence / 'launch.json').write_text(json.dumps({
+              'head': os.environ.get('PR_HEAD') or os.environ['GITHUB_SHA'],
+              'workflow': os.environ['GITHUB_WORKFLOW_REF'], 'run': os.environ['GITHUB_RUN_ID'],
+              'attempt': 1, 'clean_launch': True, 'qualified': False}, indent=2) + '\n')
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Install declared MSRV
+        run: rustup toolchain install 1.88.0 --profile minimal
+      - name: Exercise the candidate observer launch with inert credentials only
+        env:
+          GH_TOKEN: isolation-fixture-only
+          ISOLATION_MARKER: ${{ runner.temp }}/observer-isolation/injected-token
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/observer-isolation"
+          git rev-parse HEAD > "$evidence/source"
+          cargo +1.88.0 test --locked --test ci_observer_source 2>&1 | tee "$evidence/source-tests.log"
+          cargo +1.88.0 test --locked --lib ci_runtime::cli 2>&1 | tee "$evidence/cli-tests.log"
+          cargo +1.88.0 build --locked
+          target/debug/simit --version | tee "$evidence/engine-version.txt"
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            git fetch --no-tags "https://github.com/$GITHUB_REPOSITORY.git" "$GITHUB_SHA"
+          fi
+          if target/debug/simit ci observe-original --spec .simit/workflows/observer-isolation.json --results "$evidence/capture" > "$evidence/capture.log" 2>&1; then
+            echo 'The inert credential must not produce accepting custody' >&2
+            exit 1
+          fi
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          receipt = json.loads((Path(os.environ['RUNNER_TEMP']) / 'observer-isolation/capture/receipt.json').read_text())
+          assert receipt['schema'] == 'simit.original-custody.v1', 'actual capture was not launched'
+          assert receipt['capture_complete'] is False and receipt['qualified'] is False
+          assert receipt['identity']['head'] == os.environ['PR_HEAD'], 'wrong engine source'
+          PY
+          test ! -e "$ISOLATION_MARKER"
+      - name: Retain original launch-boundary evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: observer-isolation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/observer-isolation
+          retention-days: 32
+          if-no-files-found: error

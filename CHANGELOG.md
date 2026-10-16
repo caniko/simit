@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Raise Simit's minimum Rust version to 1.88 to use the security-patched Hickory
+  DNS resolver; generated projects keep their independently declared minimums.
+
 ### Added
 
 - Native `simit ci observe-original` and `verify-original-retention` capture
@@ -14,6 +19,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   aggregate deadline, continuous identity binding, explicit incomplete receipts,
   complete required job/step admission, and independent uploaded ZIP/retention
   revalidation. No producer execution or rerun API is exposed.
+
+### Fixed
+
+- Carry CLI cancellation through every source Git probe and launch probe children
+  with a clean environment; document the required isolated observer-job boundary.
+- Revalidate captured attempt-one jobs and log contents against GitHub during
+  retention; an artifact digest cannot authenticate a recomputed forged receipt.
+- Reserve full partial-download retry bodies independently of fresh metadata and
+  log revalidation, without resetting the retention deadline.
+- Preserve `@` in workflow filenames and refs, rejecting ambiguous producer paths.
+- Keep DNS resolution asynchronous and owned by each transfer runtime, including
+  cancellation, deadline expiry and subsequent calls through a reused client.
+- Charge local retention inventory, archive validation and provider reads to one
+  five-minute deadline starting at entry, preserving the hosted step allocation.
+- Reject blocking or substituted event/spec input files during bounded preflight;
+  install CLI cancellation early and retain incomplete preflight diagnostics.
+- Verify source commit, tree and blob object hashes before admitting observer policy.
+- Admit Git-valid Unicode workflow refs and retain an incomplete receipt when
+  cancellation arrives during final receipt publication.
+- Keep protected source probes usable inside Nix sandboxes, bind PR heads to the
+  protected merge revision, isolate observer TLS/proxies from job environment,
+  and retry bounded transient request/protocol failures.
+- Honor reset-only GitHub rate limits, bind observer event targets to the native
+  runner ref, and resolve source probes through protected platform Git paths.
+- Keep observer source probes free of external clean filters and observer
+  credentials, and support synchronous transport calls from Tokio tasks.
+- Repeat original-producer selection during retention, preserve the event snapshot
+  that authorized source enrollment, fall back from empty primary tokens, and
+  register native Windows console cancellation for the observer CLI.
+- Original-producer custody can interrupt stalled header/body transfers while
+  preserving partial bytes, admit repository-name period pairs and optional
+  attempt-scoped job fields, and bind clean-filtered checkouts to the authoritative
+  committed enrollment policy, including CRLF and maximal CLI spec inventories.
+- Bind original-observer enrollment bytes to the source commit, reject enrollment
+  of the active observer, and use portable artifact member paths on Windows.
+- Filter same-SHA producer discovery by branch/PR target, validate provider
+  workflow refs independently, and allow large downloads the remaining deadline.
+- Reserve generated custody evidence, retry capped transient HTTP error bodies,
+  and preserve packet directory extensions in independent retention diagnostics.
+
+## [0.21.0] - 2026-10-15
+
+### Added
+
+- Bounded runtime admission through a reusable library and `simit runtime admit`:
+  explicit retryable statuses, cancellable backoff, per-probe/overall deadlines,
+  aggregate byte budgets and fresh observation receipts. CI and admission reuse
+  the same process/cancellation implementation; existing CI interfaces remain
+  compatible. Systemd adapters and escaped-descendant cgroup containment remain
+  consumer-owned qualification requirements.
 - Explicit `sealed-v2` completion custody: immediate per-original capture,
   native step-log completeness admission, immutable artifact ID/digest verification
   and independently uploaded aggregation with fresh native revocation checks.
@@ -62,35 +117,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Charge local retention inventory, archive validation and provider reads to one
-  five-minute deadline starting at entry, preserving the hosted step allocation.
-- Reject blocking or substituted event/spec input files during bounded preflight;
-  install CLI cancellation early and retain incomplete preflight diagnostics.
-- Verify source commit, tree and blob object hashes before admitting observer policy.
-- Admit Git-valid Unicode workflow refs and retain an incomplete receipt when
-  cancellation arrives during final receipt publication.
-- Keep protected source probes usable inside Nix sandboxes, bind PR heads to the
-  protected merge revision, isolate observer TLS/proxies from job environment,
-  and retry bounded transient request/protocol failures.
-- Honor reset-only GitHub rate limits, bind observer event targets to the native
-  runner ref, and resolve source probes through protected platform Git paths.
-- Keep observer source probes free of external clean filters and observer
-  credentials, and support synchronous transport calls from Tokio tasks.
-- Repeat original-producer selection during retention, preserve the event snapshot
-  that authorized source enrollment, fall back from empty primary tokens, and
-  register native Windows console cancellation for the observer CLI.
-
-- Original-producer custody can interrupt stalled header/body transfers while
-  preserving partial bytes, admit repository-name period pairs and optional
-  attempt-scoped job fields, and bind clean-filtered checkouts to the authoritative
-  committed enrollment policy, including CRLF and maximal CLI spec inventories.
-
-- Bind original-observer enrollment bytes to the source commit, reject enrollment
-  of the active observer, and use portable artifact member paths on Windows.
-- Filter same-SHA producer discovery by branch/PR target, validate provider
-  workflow refs independently, and allow large downloads the remaining deadline.
-- Reserve generated custody evidence, retry capped transient HTTP error bodies,
-  and preserve packet directory extensions in independent retention diagnostics.
 - Omit the default empty tag-prefix argument from trusted Cargo publisher workflows,
   preserving compatibility with enrolled engines that predate prefixed releases.
 - Publish sealed capsule names only after admission succeeds, keeping failed-capture
@@ -887,7 +913,8 @@ ci`, including the `~/.cargo/bin` key, rust-cache settings, and why Nix
 
 - Prepare the first public crates.io release.
 
-[Unreleased]: https://github.com/caniko/simit/compare/0.20.0...HEAD
+[Unreleased]: https://github.com/caniko/simit/compare/0.21.0...HEAD
+[0.21.0]: https://github.com/caniko/simit/compare/0.20.0...0.21.0
 [0.20.0]: https://github.com/caniko/simit/compare/0.19.0...0.20.0
 [0.19.0]: https://github.com/caniko/simit/compare/0.18.1...0.19.0
 [0.18.1]: https://github.com/caniko/simit/compare/0.18.0...0.18.1

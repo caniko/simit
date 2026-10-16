@@ -1,4 +1,5 @@
 //! Read-only custody of exact original GitHub producers. Capture is not merge authority.
+mod dns;
 mod target;
 
 use super::cancellation::Cancellation;
@@ -37,12 +38,13 @@ const PACKET_BYTES: u64 = EVIDENCE_BYTES + RECEIPT_BYTES;
 // Keep an independent allowance for outer ZIP headers/deflate framing, and a
 // separate request budget so metadata cannot truncate the admitted download.
 const ARTIFACT_BYTES: u64 = PACKET_BYTES + 128 * 1024 * 1024;
-// Artifact metadata, fresh producers/observer and repository-wide selection
-// pagination must fit independently of the largest admitted upload. Include
-// bounded native transient error bodies for every possible request retry.
+// Fresh attempt-one jobs, producers/observer, artifact metadata and selection
+// pagination fit independently of log/artifact downloads. Partial successful
+// responses may consume the full per-response allowance on every retry.
 const RETENTION_METADATA_BYTES: u64 =
-    (MAX_PAGES + MAX_WORKFLOWS as u64 + 4) * (JSON_BYTES + (MAX_ATTEMPTS - 1) * 65536);
-const RETENTION_BYTES: u64 = ARTIFACT_BYTES + RETENTION_METADATA_BYTES;
+    (MAX_PAGES + MAX_WORKFLOWS as u64 * (MAX_PAGES + 1) + 4) * MAX_ATTEMPTS * JSON_BYTES;
+const RETENTION_BYTES: u64 =
+    MAX_ATTEMPTS * (ARTIFACT_BYTES + MAX_WORKFLOWS as u64 * LOG_BYTES) + RETENTION_METADATA_BYTES;
 const MAX_REQUESTS: usize = 65536;
 const MAX_PACKET_FILES: usize = 3 * MAX_REQUESTS + 10000;
 const MAX_PAGES: u64 = 20;
@@ -95,7 +97,7 @@ impl Spec {
                     && !name.starts_with('.')
                     && name
                         .bytes()
-                        .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))
+                        .all(|b| b.is_ascii_alphanumeric() || b"_.-@".contains(&b))
                     && (name.ends_with(".yaml") || name.ends_with(".yml")),
                 "invalid workflow path"
             );
@@ -251,12 +253,7 @@ impl Identity {
                 && !self.workflow_ref.chars().any(char::is_control),
             "invalid observer workflow ref"
         );
-        let observer_path = self
-            .workflow_ref
-            .strip_prefix(&format!("{}/", spec.repository))
-            .and_then(|reference| reference.split_once('@'))
-            .context("invalid observer workflow ref")?
-            .0;
+        let observer_path = self.workflow(spec)?;
         ensure!(
             !spec.workflows.contains_key(observer_path),
             "active observer workflow cannot be enrolled as a producer"
@@ -289,6 +286,24 @@ impl Identity {
             _ => bail!("unsupported observer event"),
         }
         Ok(())
+    }
+
+    fn workflow(&self, spec: &Spec) -> Result<&str> {
+        // GITHUB_WORKFLOW_REF uses a full refs/... suffix. A workflow filename
+        // cannot contain '/', so its @refs/ boundary precedes any @ in the ref.
+        let (path, reference) = self
+            .workflow_ref
+            .strip_prefix(&format!("{}/", spec.repository))
+            .and_then(|value| value.split_once("@refs/"))
+            .context("invalid observer workflow ref")?;
+        ensure!(
+            path.strip_prefix(".github/workflows/")
+                .is_some_and(|name| !name.contains('/')
+                    && (name.ends_with(".yml") || name.ends_with(".yaml")))
+                && target::workflow_reference(reference),
+            "invalid observer workflow ref"
+        );
+        Ok(path)
     }
 }
 
@@ -738,13 +753,18 @@ fn validate_run(
     id: u64,
     workflow: &str,
 ) -> Result<()> {
+    validate_workflow_path(
+        run["path"]
+            .as_str()
+            .context("missing producer workflow path")?,
+        workflow,
+    )?;
     ensure!(
         run["id"].as_u64() == Some(id)
             && id > 0
             && run["head_sha"] == identity.head
             && run["event"] == identity.event
             && run["run_attempt"] == 1
-            && provider_workflow(run)? == workflow
             && run["repository"]["full_name"] == spec.repository,
         "producer identity changed"
     );
@@ -756,19 +776,18 @@ fn validate_run(
     Ok(())
 }
 
-fn provider_workflow(run: &Value) -> Result<&str> {
-    let path = run["path"]
-        .as_str()
-        .context("missing producer workflow path")?;
-    if let Some((path, reference)) = path.split_once('@') {
-        ensure!(
-            target::workflow_reference(reference),
-            "invalid producer workflow ref suffix"
-        );
-        Ok(path)
-    } else {
-        Ok(path)
-    }
+fn validate_workflow_path(path: &str, workflow: &str) -> Result<()> {
+    let suffix = path
+        .strip_prefix(workflow)
+        .context("producer workflow path changed")?;
+    ensure!(
+        suffix.is_empty()
+            || suffix
+                .strip_prefix('@')
+                .is_some_and(target::workflow_reference),
+        "invalid producer workflow ref suffix"
+    );
+    Ok(())
 }
 
 fn select_runs(
@@ -784,8 +803,17 @@ fn select_runs(
         let path = run["path"]
             .as_str()
             .context("missing producer workflow path")?;
-        let workflow = path.split_once('@').map_or(path, |(path, _)| path);
-        if spec.workflows.contains_key(workflow) && target::matches(&run, identity)? {
+        let candidates = spec
+            .workflows
+            .keys()
+            .filter(|workflow| {
+                path.strip_prefix(workflow.as_str())
+                    .is_some_and(|suffix| suffix.is_empty() || suffix.starts_with('@'))
+            })
+            .collect::<Vec<_>>();
+        if !candidates.is_empty() && target::matches(&run, identity)? {
+            ensure!(candidates.len() == 1, "ambiguous producer workflow path");
+            let workflow = candidates[0];
             let id = run["id"].as_u64().context("missing producer run id")?;
             validate_run(&run, spec, identity, id, workflow)?;
             ensure!(
@@ -1316,6 +1344,7 @@ fn verify_retention_with(
     );
     let mut enrolled = BTreeSet::new();
     let mut ids = BTreeSet::new();
+    let mut captured_jobs = BTreeMap::new();
     for producer in &receipt.producers {
         observer.remaining()?;
         ensure!(
@@ -1346,17 +1375,31 @@ fn verify_retention_with(
             &producer.workflow,
         )?;
         successful_run(&terminal)?;
-        let jobs: Vec<Value> = serde_json::from_slice(&read_bytes_checked(
-            &folder.join("jobs.json"),
-            JSON_BYTES,
-            || observer.remaining().map(|_| ()),
-        )?)?;
+        let jobs_raw = read_bytes_checked(&folder.join("jobs.json"), JSON_BYTES, || {
+            observer.remaining().map(|_| ())
+        })?;
+        ensure!(
+            receipt
+                .members
+                .get(&format!("{}/jobs.json", producer.run_id))
+                == Some(&digest_checked(&jobs_raw, || observer
+                    .remaining()
+                    .map(|_| ()))?),
+            "captured jobs differ from uploaded inventory"
+        );
+        let mut jobs: Vec<Value> = serde_json::from_slice(&jobs_raw)?;
         validate_jobs(&jobs, spec, identity, producer.run_id, &producer.workflow)?;
+        jobs.sort_by_key(|job| job["id"].as_u64());
+        captured_jobs.insert(producer.run_id, jobs);
         let raw = read_bytes_checked(&folder.join("provider-logs.zip"), LOG_BYTES, || {
             observer.remaining().map(|_| ())
         })?;
         ensure!(
             digest_checked(&raw, || observer.remaining().map(|_| ()))? == producer.raw_logs_sha256
+                && receipt
+                    .members
+                    .get(&format!("{}/provider-logs.zip", producer.run_id))
+                    == Some(&producer.raw_logs_sha256)
                 && log_members(&raw, || observer.remaining().map(|_| ()))? == producer.log_members,
             "provider archive differs"
         );
@@ -1396,6 +1439,26 @@ fn verify_retention_with(
         let fresh = observer.json(&format!("actions/runs/{}", producer.run_id))?;
         validate_run(&fresh, spec, identity, producer.run_id, &producer.workflow)?;
         successful_run(&fresh)?;
+        let mut jobs = observer.pages(
+            &format!("actions/runs/{}/attempts/1/jobs", producer.run_id),
+            "jobs",
+        )?;
+        validate_jobs(&jobs, spec, identity, producer.run_id, &producer.workflow)?;
+        jobs.sort_by_key(|job| job["id"].as_u64());
+        ensure!(
+            captured_jobs.get(&producer.run_id) == Some(&jobs),
+            "authoritative attempt-one jobs differ from captured jobs"
+        );
+        let raw = observer.get(
+            &format!("actions/runs/{}/attempts/1/logs", producer.run_id),
+            LOG_BYTES,
+        )?;
+        // GitHub may regenerate a ZIP container. Compare every admitted log
+        // member's content, retaining both raw archives without substitution.
+        ensure!(
+            log_members(&raw, || observer.remaining().map(|_| ()))? == producer.log_members,
+            "authoritative attempt-one logs differ from captured log content"
+        );
     }
     let fresh = observer.pages(
         &format!(
@@ -1415,13 +1478,7 @@ fn verify_retention_with(
         "original producer selection changed during retention"
     );
     let fresh_observer = observer.json(&format!("actions/runs/{}", identity.run_id))?;
-    let workflow = identity
-        .workflow_ref
-        .split('@')
-        .next()
-        .context("missing observer workflow path")?
-        .strip_prefix(&format!("{}/", spec.repository))
-        .context("observer workflow repository changed")?;
+    let workflow = identity.workflow(spec)?;
     validate_run(&fresh_observer, spec, identity, identity.run_id, workflow)?;
     let fresh = observer.json(&format!("actions/artifacts/{artifact_id}"))?;
     validate_artifact(&fresh, identity, artifact_id, upload_digest)?;
@@ -1753,6 +1810,30 @@ mod tests {
         let generated = (2 + 3 * 10) * JSON_BYTES + MAX_REQUESTS as u64 * 4096;
         assert!(transport.0 >= 2 * TOTAL_BYTES + generated + RECEIPT_BYTES);
         assert!(transport.1 > Duration::from_secs(90));
+    }
+
+    #[test]
+    fn retention_reserves_full_bodies_for_partial_artifact_retries() {
+        let (spec, _) = minimal_inputs();
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("requests")).unwrap();
+        let mut transport = MaximumProbe(0, Duration::ZERO);
+        let mut clock = MonotonicClock::default();
+        let cancellation = Cancellation::default();
+        let mut observer = Observer {
+            spec: &spec,
+            root: root.path(),
+            transport: &mut transport,
+            clock: &mut clock,
+            cancellation: &cancellation,
+            requests: 0,
+            bytes: RETENTION_METADATA_BYTES + (MAX_ATTEMPTS - 1) * (ARTIFACT_BYTES - 1),
+            byte_budget: RETENTION_BYTES,
+        };
+        observer
+            .get("actions/artifacts/1/zip", ARTIFACT_BYTES)
+            .unwrap();
+        assert_eq!(transport.0, ARTIFACT_BYTES);
     }
 
     #[test]

@@ -230,7 +230,7 @@ failed checks, incomplete closure export, and failed retrieval cannot pass.
 Consumer retrieval enforces signatures for exact output paths without building
 or editing consumer configuration. Generic reviews never approve or merge PRs.
 
-The crate retains Rust 1.85. Windows supports contract and client operations;
+The crate requires Rust 1.88. Windows supports contract and client operations;
 Nix execution requires a supported Nix host, and Attic publication explicitly
 requires Unix. Compatibility is tested on Linux and Windows. Actual Nix builds,
 adapter behavior, closure transfer, cache misses, and signatures run in the
