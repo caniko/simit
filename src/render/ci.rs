@@ -4824,7 +4824,7 @@ fn push_rust_cache_steps(workflow: &mut String, platform: Platform, runner: &Res
         Platform::Gitlab => ".gitlab-ci.yml",
     };
     workflow.push_str(&format!(
-        "          key: cargo-bin-${{{{ runner.os }}}}-${{{{ hashFiles('{workflow_glob}') }}}}\n\n",
+        "          key: cargo-bin-${{{{ runner.os }}}}-${{{{ runner.arch }}}}-${{{{ hashFiles('{workflow_glob}') }}}}\n\n",
     ));
     if platform == Platform::Forgejo {
         workflow.push_str("      - name: Verify compiler cache\n");
@@ -4845,7 +4845,7 @@ fn push_rust_cache_steps(workflow: &mut String, platform: Platform, runner: &Res
     workflow.push_str("        with:\n");
     workflow.push_str("          cache-all-crates: \"true\"\n");
     workflow.push_str("          cache-on-failure: \"true\"\n");
-    workflow.push_str("          save-if: ${{ github.ref == 'refs/heads/trunk' }}\n\n");
+    workflow.push_str("          save-if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}\n\n");
 }
 
 fn push_sccache_stats_step(workflow: &mut String, platform: Platform, runtime: Runtime) {
