@@ -457,6 +457,7 @@ impl ResolvedCiInputs {
             components: cfg.ci.components.clone(),
             repository_checks: true,
             workspace_has_doctests: false,
+            workspace_has_features: false,
             all_features: self.all_features,
             unit_tests_only: self.unit_tests_only,
             nix_substituters: cfg.release.artifacts.substituters.clone(),

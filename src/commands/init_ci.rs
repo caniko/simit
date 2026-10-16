@@ -288,6 +288,9 @@ pub fn run(command: InitCiCommand) -> Result<()> {
             workspace_has_doctests: resolved.workspace_strategy
                 == crate::cli::WorkspaceStrategy::Aggregate
                 && packages.iter().any(cargo::Package::has_doctests),
+            workspace_has_features: resolved.workspace_strategy
+                == crate::cli::WorkspaceStrategy::Aggregate
+                && packages.iter().any(|package| !package.features.is_empty()),
             homebrew,
             chocolatey,
             scoop,

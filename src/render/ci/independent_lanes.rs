@@ -19,7 +19,12 @@ pub(super) fn render(
     push_independent_source_concurrency(&mut workflow);
     workflow.push_str("jobs:\n");
     let mut lanes = vec!["rust"];
-    if options.repository_checks {
+    // In independent mode nix_flake_check retires realization only.
+    if options.repository_checks
+        && (options.components.is_empty()
+            || options.components.contains(&CiComponent::FlakeEvaluation)
+            || options.components.contains(&CiComponent::Checks))
+    {
         lanes.push("evaluation");
     }
     if options.flake_check_command() == Some("nix flake check") {

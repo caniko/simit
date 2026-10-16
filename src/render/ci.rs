@@ -192,6 +192,7 @@ pub struct CiOptions {
     pub repository_checks: bool,
     /// An aggregate selector can include libraries beyond its representative package.
     pub workspace_has_doctests: bool,
+    pub workspace_has_features: bool,
     pub all_features: bool,
     pub unit_tests_only: bool,
     pub nix_substituters: Vec<String>,
@@ -249,6 +250,7 @@ impl Default for CiOptions {
             components: Vec::new(),
             repository_checks: true,
             workspace_has_doctests: false,
+            workspace_has_features: false,
             all_features: true,
             unit_tests_only: false,
             nix_substituters: Vec::new(),
@@ -1029,6 +1031,7 @@ pub(crate) fn nix_flake_ci_file_with_events(
     workflow.push_str("name: Nix flake check\n\non:\n  push:\n");
     if !push_branches.is_empty() {
         push_ci_branches(&mut workflow, push_branches);
+        workflow.push_str("    tags: [\"**\"]\n");
     }
     workflow.push_str("  pull_request:\n\n");
     push_github_read_permissions(&mut workflow, platform);
@@ -2710,13 +2713,14 @@ fn ci_workflow_single_job(
                     );
                 }
                 OmCiMode::Replace => {
+                    push_nix_check_steps(&mut workflow, &options);
                     if options.repository_checks {
                         push_om_ci_step(&mut workflow, &options);
                     }
                     if let Some(command) = options.check_command.as_deref() {
                         workflow.push_str(&project_check_step_yaml(runtime, command));
                     } else {
-                        push_quality_tool_install_steps(&mut workflow, runtime, &options);
+                        push_quality_ci_steps(&mut workflow, runtime, &options);
                         push_optional_ci_steps(&mut workflow, runtime, package, &options);
                     }
                     if self_check.enabled {
@@ -2756,7 +2760,7 @@ fn ci_workflow_single_job(
                     );
                 }
                 push_test_steps(&mut workflow, runtime, package, &options);
-                push_quality_tool_install_steps(&mut workflow, runtime, &options);
+                push_quality_ci_steps(&mut workflow, runtime, &options);
                 push_optional_ci_steps(&mut workflow, runtime, package, &options);
                 if self_check.enabled {
                     push_self_check_steps(&mut workflow, platform, runtime, self_check, &options);
@@ -2838,7 +2842,7 @@ fn ci_workflow_multi_job(
         });
     };
 
-    if runtime == Runtime::Nix && options.om_ci != OmCiMode::Replace {
+    if runtime == Runtime::Nix {
         let mut checks = String::new();
         push_nix_check_steps(&mut checks, &options);
         if !checks.is_empty() {
@@ -2863,7 +2867,7 @@ fn ci_workflow_multi_job(
             capture(STEP_FLAKE_CHECK, &om);
         }
         let mut optional = String::new();
-        push_quality_tool_install_steps(&mut optional, runtime, &options);
+        push_quality_ci_steps(&mut optional, runtime, &options);
         push_optional_ci_steps(&mut optional, runtime, package, &options);
         if !optional.is_empty() {
             capture(STEP_CARGO_DOC, &optional);
@@ -2895,12 +2899,7 @@ fn ci_workflow_multi_job(
                 capture(STEP_CARGO_TEST, &test);
 
                 let mut q = String::new();
-                if options.repository_checks && options.with_audit {
-                    q.push_str("      - name: Check cargo-audit tool\n        run: nix develop -c cargo-audit --version\n\n");
-                }
-                if options.repository_checks && options.with_deny {
-                    q.push_str("      - name: Check cargo-deny tool\n        run: nix develop -c cargo-deny --version\n\n");
-                }
+                push_quality_ci_steps(&mut q, runtime, &options);
                 if !q.is_empty() {
                     capture(STEP_QUALITY_TOOLS, &q);
                 }
@@ -2948,12 +2947,7 @@ fn ci_workflow_multi_job(
                 capture(STEP_CARGO_TEST, &test);
 
                 let mut q = String::new();
-                if options.repository_checks && options.with_audit {
-                    q.push_str("      - name: Install cargo-audit\n        run: command -v cargo-audit >/dev/null 2>&1 || cargo install cargo-audit --locked\n\n");
-                }
-                if options.repository_checks && options.with_deny {
-                    q.push_str(&format!("      - name: Install cargo-deny\n        run: command -v cargo-deny >/dev/null 2>&1 || cargo install cargo-deny --locked --version {CARGO_DENY_VERSION}\n\n"));
-                }
+                push_quality_ci_steps(&mut q, runtime, &options);
                 if !q.is_empty() {
                     capture(STEP_QUALITY_TOOLS, &q);
                 }
@@ -4706,7 +4700,7 @@ fn push_nix_ci_legacy_steps(
         return;
     }
     push_test_steps(workflow, Runtime::Nix, package, options);
-    push_quality_tool_install_steps(workflow, Runtime::Nix, options);
+    push_quality_ci_steps(workflow, Runtime::Nix, options);
     push_optional_ci_steps(workflow, Runtime::Nix, package, options);
     if self_check.enabled {
         push_self_check_steps(workflow, platform, Runtime::Nix, self_check, options);
@@ -4719,7 +4713,9 @@ fn push_nix_check_steps(workflow: &mut String, options: &CiOptions) {
     if options.repository_checks && options.components.contains(&CiComponent::FlakeWiring) {
         workflow.push_str("      - name: Check generated flake wiring\n        run: nix run --no-write-lock-file git+https://github.com/caniko/simit.git -- init flake --check --diff\n\n");
     }
-    if let Some(command) = options.flake_check_command() {
+    if options.om_ci != OmCiMode::Replace
+        && let Some(command) = options.flake_check_command()
+    {
         workflow.push_str("      - name: Check flake\n        run: ");
         workflow.push_str(command);
         workflow.push_str("\n\n");
@@ -4909,7 +4905,7 @@ fn push_test_steps(
         }
         workflow.push_str("\n\n");
     }
-    if has_features(package) {
+    if has_features(package, options) {
         workflow.push_str("      - name: Test no default features\n");
         workflow.push_str("        run: ");
         workflow.push_str(prefix);
@@ -4936,7 +4932,7 @@ fn push_test_steps(
                 ""
             },
         )];
-        if has_features(package) {
+        if has_features(package, options) {
             modes.push(("Doctests no default features", " --no-default-features"));
         }
         for (name, features) in modes {
@@ -4971,7 +4967,7 @@ fn push_clippy_steps(
         workflow.push_str(" --all-features");
     }
     workflow.push_str(" -- --deny warnings\n\n");
-    if has_features(package) {
+    if has_features(package, options) {
         workflow.push_str("      - name: Clippy no default features\n");
         workflow.push_str("        run: ");
         workflow.push_str(prefix);
@@ -5071,15 +5067,7 @@ fn push_optional_ci_steps(
     package: &Package,
     options: &CiOptions,
 ) {
-    let prefix = command_prefix(runtime);
     push_msrv_step(workflow, runtime, package, options);
-    if options.repository_checks && options.with_audit {
-        push_audit_database_step(workflow);
-        push_audit_step(workflow, runtime);
-    }
-    if options.repository_checks && options.with_deny {
-        push_deny_step(workflow, prefix);
-    }
     if options.with_docs {
         workflow.push_str("      - name: Build docs\n");
         workflow.push_str("        run: ");
@@ -5087,6 +5075,17 @@ fn push_optional_ci_steps(
         workflow.push_str("cargo doc");
         push_package_selector(workflow, package, options);
         workflow.push_str(" --no-deps --all-features\n\n");
+    }
+}
+
+fn push_quality_ci_steps(workflow: &mut String, runtime: Runtime, options: &CiOptions) {
+    push_quality_tool_install_steps(workflow, runtime, options);
+    if options.repository_checks && options.with_audit {
+        push_audit_database_step(workflow);
+        push_audit_step(workflow, runtime);
+    }
+    if options.repository_checks && options.with_deny {
+        push_deny_step(workflow, command_prefix(runtime));
     }
 }
 
@@ -5165,8 +5164,8 @@ fn trim_trailing_blank_lines(workflow: &mut String) {
     }
 }
 
-fn has_features(package: &Package) -> bool {
-    !package.features.is_empty()
+fn has_features(package: &Package, options: &CiOptions) -> bool {
+    !package.features.is_empty() || options.workspace_has_features
 }
 
 fn push_self_check_steps(

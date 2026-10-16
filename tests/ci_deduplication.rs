@@ -89,6 +89,78 @@ fn rust_component_selection_is_consistent_across_providers_and_layouts() {
 }
 
 #[test]
+fn independent_lanes_respect_flake_component_selection() {
+    for (components, evaluation, realization) in [
+        ("[\"flake-wiring\"]", false, false),
+        ("[\"flake-evaluation\"]", true, false),
+        ("[\"checks\"]", true, true),
+        ("[]", true, true),
+    ] {
+        let temp = TempDir::new().unwrap();
+        project(temp.path(), "demo");
+        fs::write(temp.path().join("flake.nix"), "{}\n").unwrap();
+        fs::write(temp.path().join("simit.toml"), format!("[ci]\nplatform = \"github\"\nruntime = \"nix\"\nindependent_lanes = true\ncomponents = {components}\n")).unwrap();
+        generate(temp.path(), false);
+        let workflow = fs::read_to_string(temp.path().join(".github/workflows/ci.yaml")).unwrap();
+        let yaml: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
+        assert_eq!(
+            !yaml["jobs"]["evaluation"].is_null(),
+            evaluation,
+            "{components}: {workflow}"
+        );
+        assert_eq!(!yaml["jobs"]["realization"].is_null(), realization);
+        assert_eq!(
+            workflow.contains("init flake --check --diff"),
+            components.contains("flake-wiring")
+        );
+        generate(temp.path(), true);
+    }
+}
+
+#[test]
+fn omnix_replacement_preserves_selected_flake_wiring_across_layouts() {
+    for extra in ["", "step_runners = { nix-check = \"other\" }\n"] {
+        let temp = TempDir::new().unwrap();
+        project(temp.path(), "demo");
+        fs::write(temp.path().join("flake.nix"), "{}\n").unwrap();
+        fs::write(temp.path().join("simit.toml"), format!("[ci]\nplatform = \"forgejo\"\nruntime = \"nix\"\nrunner = \"atlas\"\nom_ci = true\ncomponents = [\"flake-wiring\"]\n{extra}")).unwrap();
+        generate(temp.path(), false);
+        let workflow = fs::read_to_string(temp.path().join(".forgejo/workflows/ci.yaml")).unwrap();
+        assert_eq!(
+            workflow.matches("init flake --check --diff").count(),
+            1,
+            "{extra}: {workflow}"
+        );
+        assert!(workflow.contains(" ci run"));
+        assert!(!workflow.contains("nix flake check"));
+        generate(temp.path(), true);
+    }
+}
+
+#[test]
+fn split_quality_tools_are_installed_and_run_in_their_selected_job() {
+    let temp = TempDir::new().unwrap();
+    project(temp.path(), "demo");
+    fs::write(temp.path().join("simit.toml"), "[ci]\nplatform = \"forgejo\"\nruntime = \"cargo\"\nrunner = \"atlas\"\nwith_audit = true\nwith_deny = true\nwith_docs = true\nstep_runners = { quality-tools = \"quality\", cargo-doc = \"docs\" }\n").unwrap();
+    generate(temp.path(), false);
+    let workflow = fs::read_to_string(temp.path().join(".forgejo/workflows/ci.yaml")).unwrap();
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
+    let quality = serde_yaml::to_string(&yaml["jobs"]["quality"]).unwrap();
+    let docs = serde_yaml::to_string(&yaml["jobs"]["docs"]).unwrap();
+    for command in [
+        "cargo install cargo-audit",
+        "cargo audit --",
+        "cargo install cargo-deny",
+        "cargo deny check",
+    ] {
+        assert!(quality.contains(command), "{quality}");
+        assert!(!docs.contains(command), "{docs}");
+    }
+    assert!(docs.contains("cargo doc"));
+    generate(temp.path(), true);
+}
+
+#[test]
 fn member_workflows_run_repository_gates_once() {
     for (platform, runtime, extra) in [
         ("github", "nix", ""),
@@ -349,6 +421,11 @@ fn aggregate_nextest_includes_library_doctests_when_the_first_member_is_a_binary
     fs::remove_file(temp.path().join("aaa-bin/src/lib.rs")).unwrap();
     fs::write(temp.path().join("aaa-bin/src/main.rs"), "fn main() {}\n").unwrap();
     fs::write(
+        temp.path().join("aaa-bin/Cargo.toml"),
+        "[package]\nname = \"aaa-bin\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )
+    .unwrap();
+    fs::write(
         temp.path().join("Cargo.toml"),
         "[workspace]\nmembers = [\"aaa-bin\", \"zzz-lib\"]\nresolver = \"3\"\n",
     )
@@ -357,6 +434,14 @@ fn aggregate_nextest_includes_library_doctests_when_the_first_member_is_a_binary
     generate(temp.path(), false);
     let workflow = fs::read_to_string(temp.path().join(".github/workflows/ci.yaml")).unwrap();
     assert!(workflow.contains("cargo test --doc --workspace --all-features"));
+    for command in ["cargo nextest run", "cargo test --doc", "cargo clippy"] {
+        assert!(
+            workflow.lines().any(|line| line.contains(command)
+                && line.contains("--workspace")
+                && line.contains("--no-default-features")),
+            "{workflow}"
+        );
+    }
     generate(temp.path(), true);
 }
 
@@ -407,6 +492,12 @@ fn flake_and_python_primary_filters_preserve_pr_qualification_and_scope() {
             yaml["on"]["push"]["branches"],
             serde_yaml::to_value(["trunk"]).unwrap()
         );
+        if !python {
+            assert_eq!(
+                yaml["on"]["push"]["tags"],
+                serde_yaml::to_value(["**"]).unwrap()
+            );
+        }
         assert!(
             yaml["on"]
                 .as_mapping()
