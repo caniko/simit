@@ -76,6 +76,12 @@ checked-out revision and qualifies the selected components. Missing push-base
 objects trigger full qualification. Every component requires explicit checks;
 failed or cancelled selected jobs fail the aggregate `qualified` gate.
 
+Static policy from `simit.toml` or Cargo metadata verifies generated workflows
+once in the prerequisite `plan` job, before component selection. Flake-evaluated
+`outputs.simitConfig` retains verification on each component worker. Native
+runner-system guards and component checks remain on their selected workers.
+Release qualification retains the same verification ownership.
+
 The root `devShells.<system>.ci` must supply Simit with this component support,
 Cargo, and the tools used by checks. Each command runs in that shell with its
 declared environment and timeout. `systems` can select native runners using

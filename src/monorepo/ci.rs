@@ -74,18 +74,36 @@ pub(crate) fn files(
     let runner = config.ci.runner.as_deref().unwrap_or("ubuntu-latest");
     crate::user_config::validate_runner_label(runner)?;
     let node24 = crate::render::ci::github_runner_supports_node24(runner);
-    let mut jobs = serde_json::Map::new();
-    jobs.insert("plan".into(), json!({
-        "runs-on": runner,
-        "timeout-minutes": 20,
-        "env": {"NIX_CONFIG": "experimental-features = nix-command flakes"},
-        "outputs": {"selected": "${{ steps.plan.outputs.selected }}"},
-        "steps": [checkout(node24), install_nix(node24), input_transport(), {
-            "id": "plan", "name": "Select affected components", "shell": "bash",
-            "env": {"BASE_REVISION": "${{ github.event.pull_request.base.sha || github.event.before }}"},
-            "run": "set -euo pipefail\nif [ -n \"$BASE_REVISION\" ] && git cat-file -e \"$BASE_REVISION^{commit}\" 2>/dev/null; then\n  nix develop --print-build-logs .#ci --command simit monorepo plan --base \"$BASE_REVISION\" --json > plan.json\nelse\n  nix develop --print-build-logs .#ci --command simit monorepo plan --json > plan.json\nfi\nselected=$(jq -c '.selected' plan.json)\nprintf 'selected=%s\\n' \"$selected\" >> \"$GITHUB_OUTPUT\"\ncat plan.json\n"
-        }]
+    let scope = if include_publishers {
+        ""
+    } else {
+        " --primary-only"
+    };
+    let drift_check = json!({"name": "Verify generated workflows", "run": format!("nix develop --print-build-logs .#ci --command simit init ci --check{scope}")});
+    let flake_path = root.join("flake.nix");
+    // Evaluated policy retains native worker validation; static policy has one owner.
+    let evaluated_policy =
+        flake_path.is_file() && crate::config::flake_declares_simit_config(&flake_path)?;
+    let mut plan_steps = vec![checkout(node24), install_nix(node24), input_transport()];
+    if !evaluated_policy {
+        plan_steps.push(drift_check.clone());
+    }
+    plan_steps.push(json!({
+        "id": "plan", "name": "Select affected components", "shell": "bash",
+        "env": {"BASE_REVISION": "${{ github.event.pull_request.base.sha || github.event.before }}"},
+        "run": "set -euo pipefail\nif [ -n \"$BASE_REVISION\" ] && git cat-file -e \"$BASE_REVISION^{commit}\" 2>/dev/null; then\n  nix develop --print-build-logs .#ci --command simit monorepo plan --base \"$BASE_REVISION\" --json > plan.json\nelse\n  nix develop --print-build-logs .#ci --command simit monorepo plan --json > plan.json\nfi\nselected=$(jq -c '.selected' plan.json)\nprintf 'selected=%s\\n' \"$selected\" >> \"$GITHUB_OUTPUT\"\ncat plan.json\n"
     }));
+    let mut jobs = serde_json::Map::new();
+    jobs.insert(
+        "plan".into(),
+        json!({
+            "runs-on": runner,
+            "timeout-minutes": 20,
+            "env": {"NIX_CONFIG": "experimental-features = nix-command flakes"},
+            "outputs": {"selected": "${{ steps.plan.outputs.selected }}"},
+            "steps": plan_steps
+        }),
+    );
     let mut needs = vec!["plan".to_owned()];
     for component in graph.components.values() {
         if component.checks.is_empty() {
@@ -131,12 +149,9 @@ pub(crate) fn files(
         if !component.systems.is_empty() {
             steps.push(json!({"name": "Verify runner system", "shell":"bash", "env":{"EXPECTED_NIX_SYSTEM":"${{ matrix.system }}"}, "run":"set -euo pipefail\nactual_system=$(nix eval --impure --raw --expr builtins.currentSystem)\nif [ \"$actual_system\" != \"$EXPECTED_NIX_SYSTEM\" ]; then\n  echo \"Native Nix runner mismatch: expected $EXPECTED_NIX_SYSTEM, got $actual_system\" >&2\n  exit 1\nfi\n"}));
         }
-        let scope = if include_publishers {
-            ""
-        } else {
-            " --primary-only"
-        };
-        steps.push(json!({"name": "Verify generated workflows", "run": format!("nix develop --print-build-logs .#ci --command simit init ci --check{scope}")}));
+        if evaluated_policy {
+            steps.push(drift_check.clone());
+        }
         for gate in &component.checks {
             // The project-owned command is one argument to Bash, not an interpolated
             // expression; GitHub event data never enters a shell command.

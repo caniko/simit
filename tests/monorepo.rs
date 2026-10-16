@@ -296,25 +296,23 @@ fn monorepo_rejects_unsupported_extension_publication_before_reconciliation() {
             &fs::read_to_string(root.join(".github/workflows/ci.yaml")).unwrap(),
         )
         .unwrap();
-        for id in ["core", "rust", "python", "worker"] {
-            let step = ci["jobs"][format!("component-{id}")]["steps"]
-                .as_sequence()
-                .unwrap()
-                .iter()
-                .find(|step| step["name"] == "Verify generated workflows")
-                .unwrap();
-            let (_, command) = step["run"]
-                .as_str()
-                .unwrap()
-                .split_once("--command simit ")
-                .unwrap();
-            let output = common::simit()
-                .current_dir(root)
-                .args(command.split_whitespace())
-                .output()
-                .unwrap();
-            assert!(output.status.success(), "{id}: {output:?}");
-        }
+        let step = ci["jobs"]["plan"]["steps"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .find(|step| step["name"] == "Verify generated workflows")
+            .unwrap();
+        let (_, command) = step["run"]
+            .as_str()
+            .unwrap()
+            .split_once("--command simit ")
+            .unwrap();
+        let output = common::simit()
+            .current_dir(root)
+            .args(command.split_whitespace())
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
         assert_eq!(fs::read_to_string(root.join(path)).unwrap(), publisher);
         assert_eq!(fs::read_to_string(root.join("simit.toml")).unwrap(), config);
     }
@@ -605,6 +603,17 @@ fn flake_configuration_resolves_from_non_cargo_members_and_stops_at_git_boundari
     assert!(output.status.success(), "{output:?}");
     assert!(temp.path().join(".github/workflows/ci.yaml").is_file());
     assert!(!temp.path().join("python/.github").exists());
+    let workflow = fs::read_to_string(temp.path().join(".github/workflows/ci.yaml")).unwrap();
+    assert_eq!(
+        workflow.matches("name: Verify generated workflows").count(),
+        2
+    );
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
+    assert!(
+        !serde_yaml::to_string(&yaml["jobs"]["plan"])
+            .unwrap()
+            .contains("init ci --check")
+    );
     fs::create_dir(temp.path().join("python/.git")).unwrap();
     let output = common::simit()
         .current_dir(temp.path().join("python"))
@@ -667,6 +676,23 @@ fn qualification_generation_is_complete_and_member_stable() {
     }
     let text = fs::read_to_string(temp.path().join(".github/workflows/ci.yaml")).unwrap();
     let yaml: serde_yaml::Value = serde_yaml::from_str(&text).unwrap();
+    assert_eq!(text.matches("name: Verify generated workflows").count(), 1);
+    let plan_steps = yaml["jobs"]["plan"]["steps"].as_sequence().unwrap();
+    let drift = plan_steps
+        .iter()
+        .position(|step| step["name"] == "Verify generated workflows")
+        .unwrap();
+    let selection = plan_steps
+        .iter()
+        .position(|step| step["id"] == "plan")
+        .unwrap();
+    assert!(drift < selection);
+    assert!(
+        yaml["jobs"]["qualified"]["needs"]
+            .as_sequence()
+            .unwrap()
+            .contains(&serde_yaml::Value::from("plan"))
+    );
     assert_eq!(
         yaml["concurrency"]["group"],
         "monorepo-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event.pull_request.head.ref || github.ref_name }}"
@@ -1923,6 +1949,14 @@ fn independent_publication_qualifies_native_components_and_keeps_version_drift_s
     assert_eq!(workflow["on"]["push"]["tags"][0], "worker/v[0-9]*");
     assert_eq!(workflow["permissions"]["contents"], "read");
     assert_eq!(workflow["jobs"]["build"]["needs"][0], "qualified");
+    assert_eq!(text.matches("name: Verify generated workflows").count(), 1);
+    assert!(
+        workflow["jobs"]["plan"]["steps"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .any(|step| step["name"] == "Verify generated workflows")
+    );
     assert!(workflow["on"]["workflow_dispatch"].is_null());
     assert!(!text.contains("secrets."));
     assert_eq!(
@@ -1958,7 +1992,7 @@ fn independent_publication_qualifies_native_components_and_keeps_version_drift_s
         system_guard
             < steps
                 .iter()
-                .position(|step| step["name"] == "Verify generated workflows")
+                .position(|step| step["name"] == "qualify")
                 .unwrap()
     );
     assert_eq!(
