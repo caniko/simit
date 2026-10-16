@@ -15,6 +15,7 @@ use serde::Deserialize;
 
 use crate::config::{ProjectConfig, RequiredGate};
 
+pub use check::GateExit;
 pub use plan::{ChangedPaths, Plan, changed_paths, select};
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]

@@ -57,6 +57,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Provision Python for generated monorepo gate supervision, retain diagnostics
+  on gate spawn failure and propagate gate exit codes. Keep the tool PATH while
+  locating Bash in Nix sandboxes before restoring the gate's configured PATH.
 - Preserve configured monorepo gate environment data across Bash and Nix startup,
   reject read-only Bash names before execution, and bound provisioning and native
   initialization so failed or timed-out checks retain their diagnostic reserve.

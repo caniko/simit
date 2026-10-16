@@ -6,6 +6,10 @@ use simit::commands;
 
 fn main() {
     if let Err(err) = run() {
+        if let Some(gate_exit) = err.downcast_ref::<simit::monorepo::GateExit>() {
+            eprintln!("simit: {gate_exit}");
+            std::process::exit(gate_exit.code());
+        }
         if let Some(test_exit) = err.downcast_ref::<simit::commands::test::TestExit>() {
             std::process::exit(test_exit.code());
         }

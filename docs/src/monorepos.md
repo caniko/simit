@@ -101,9 +101,10 @@ simit monorepo check --component core --check evaluate --nix-diagnostics
 Local checks use configured environment literals even when the calling shell
 already defines those variables. Provider expressions (`${{ ... }}`) cannot be
 evaluated locally and are rejected before execution without printing their values.
-Generated Actions callers use `--gate-env provider-resolved`: every configured
-gate variable must be present in the evaluated step environment (an empty value
+Generated Actions callers use `--gate-env provider-staged`: every configured
+gate variable must be present under its inert evaluated step alias (an empty value
 is valid), and its bytes are passed directly to the gate without shell expansion.
+Direct `--gate-env provider-resolved` invocations read the declared variable names.
 Checks run once from the project root with Bash `-euo pipefail`; failure diagnostics
 never retry the check or replace its failure status.
 
@@ -135,14 +136,20 @@ Generated checks stage provider values under inert environment names before
 Bash starts and use `--gate-env provider-staged` to pass them through native
 initialization. The native runner assigns declared data after gate Bash startup,
 preserving values such as `IFS` and `PWD` that Bash normally rewrites. A gate's
-`PATH` applies only to the gate, preserving the tool paths needed to start Simit.
+`PATH` applies only to the gate, preserving the tool paths needed to start Simit
+and Bash even in Nix sandboxes without `/bin/bash`.
 Read-only Bash names (`UID`, `EUID`, `PPID`, `BASHOPTS`, `SHELLOPTS`, and
 `BASH_VERSINFO`) are rejected during graph validation, before execution or writes.
+A pinned `actions/setup-python` step provisions Python 3.12 before component gates,
+including on custom runners; it follows the job's Node 20/24 action selection.
 A Python 3 standard-library supervisor enforces the remaining deadline during
 Nix provisioning and native initialization (including Cargo metadata), stops its
 process group on timeout, and leaves the reserved time for diagnostics. Only
 after validation, environment capture, timer creation and cancellation setup
 does native Simit mark its ownership of the gate deadline and cleanup.
+Spawn failures still attempt diagnostics after that handoff. Failed gates return
+their original exit code (or `128 + signal` for signal termination) through the
+CLI and generated supervisor, independently of diagnostic success.
 
 On Linux, `--nix-diagnostics` captures `/proc/meminfo`, memory pressure, Nix
 daemon status, and bounded daemon/kernel journals after a failed check. Journal

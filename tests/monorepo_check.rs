@@ -77,7 +77,7 @@ fn runs_the_declared_gate_and_its_environment() {
 #[test]
 fn failure_keeps_original_status_when_diagnostics_are_unavailable() {
     let output = check(&fixture(), "fail");
-    assert!(!output.status.success());
+    assert_eq!(output.status.code(), Some(7));
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("original-failure"));
     assert!(stderr.contains("exit status: 7"));
@@ -163,6 +163,22 @@ fn generated_qualification_runs_native_diagnostics_for_every_gate() {
         assert_eq!(step["timeout-minutes"].as_u64(), Some(32));
         assert!(step["run"].as_str().unwrap().contains("--deadline"));
     }
+    let python = steps
+        .iter()
+        .position(|step| step["name"] == "Provision gate supervisor Python")
+        .unwrap();
+    let gate = steps
+        .iter()
+        .position(|step| step["name"] == "pass")
+        .unwrap();
+    assert!(python < gate);
+    assert!(
+        steps[python]["uses"]
+            .as_str()
+            .unwrap()
+            .starts_with("actions/setup-python@")
+    );
+    assert_eq!(steps[python]["with"]["python-version"], "3.12");
     assert_eq!(
         steps
             .iter()
@@ -170,6 +186,98 @@ fn generated_qualification_runs_native_diagnostics_for_every_gate() {
             .unwrap()["env"]["SIMIT_GATE_VALUE_0"]
             .as_str(),
         Some("gate-owned")
+    );
+}
+
+#[test]
+fn gate_path_does_not_replace_the_bash_lookup_path() {
+    let root = environment_fixture("/no/gate/tools");
+    let config = root.path().join("simit.toml");
+    fs::write(
+        &config,
+        fs::read_to_string(&config)
+            .unwrap()
+            .replace("GATE_VALUE", "PATH"),
+    )
+    .unwrap();
+    let bash = Command::new("bash")
+        .args(["-c", "command -v bash"])
+        .output()
+        .unwrap();
+    assert!(bash.status.success());
+    fs::write(
+        root.path().join("bin/bash"),
+        format!(
+            "#!/bin/sh\nprintf x >> bash-startups\nexec {} \"$@\"\n",
+            String::from_utf8(bash.stdout).unwrap().trim()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(
+        root.path().join("bin/bash"),
+        fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_simit"))
+        .current_dir(root.path())
+        .args([
+            "monorepo",
+            "check",
+            "--component",
+            "core",
+            "--check",
+            "pass",
+        ])
+        .env("PATH", root.path().join("bin"))
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        fs::read(root.path().join("observed")).unwrap(),
+        b"/no/gate/tools"
+    );
+    assert_eq!(fs::read(root.path().join("executions")).unwrap(), b"x");
+    assert_eq!(fs::read(root.path().join("bash-startups")).unwrap(), b"x");
+}
+
+#[test]
+fn spawn_failure_attempts_diagnostics_after_claiming_ownership() {
+    let root = fixture();
+    let marker = root.path().join("ready");
+    let output = Command::new(env!("CARGO_BIN_EXE_simit"))
+        .current_dir(root.path())
+        .args([
+            "monorepo",
+            "check",
+            "--component",
+            "core",
+            "--check",
+            "fail",
+            "--nix-diagnostics",
+            "--deadline",
+            "9999999999",
+            "--supervisor-ready",
+        ])
+        .arg(&marker)
+        .env("PATH", root.path().join("bin"))
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(marker.exists());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("diagnostics unavailable"), "{stderr}");
+    assert!(stderr.contains("run declared component check"), "{stderr}");
+}
+
+#[test]
+fn generated_gate_keeps_the_original_exit_code() {
+    let output = generated_gate(&fixture(), "fail", None);
+    assert_eq!(output.status.code(), Some(7), "{output:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr)
+            .matches("Nix failure diagnostics")
+            .count(),
+        1
     );
 }
 
@@ -251,19 +359,13 @@ fn generated_gate_with_deadline(
     root: &TempDir,
     id: &str,
     value: Option<&str>,
-    deadline: Option<u64>,
+    budget_seconds: Option<u64>,
 ) -> std::process::Output {
     // Nix provisioning is the external boundary. Execute the unmodified generated
     // caller, forwarding its exact argv to the real candidate Simit executable.
     let bin = root.path().join("bin");
     if !bin.join("nix").exists() {
         fs::write(bin.join("nix"), "#!/bin/sh\nset -eu\ntest \"$1 $2 $3 $4\" = 'develop --print-build-logs .#ci --command'\nshift 4\nexport GATE_VALUE=devShell-override\nexec \"$@\"\n").unwrap();
-    }
-    if deadline.is_some() {
-        let shim = fs::read_to_string(bin.join("nix"))
-            .unwrap()
-            .replace("exec \"$@\"", "sleep 2\nexec \"$@\"");
-        fs::write(bin.join("nix"), shim).unwrap();
     }
     fs::set_permissions(bin.join("nix"), fs::Permissions::from_mode(0o755)).unwrap();
     std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_simit"), bin.join("simit")).unwrap();
@@ -288,7 +390,9 @@ fn generated_gate_with_deadline(
     )))
     .unwrap();
     let mut caller = Command::new("bash");
-    let script = deadline.map_or_else(
+    // Start the exercised caller's budget after fixture generation, not before
+    // starting a separate Cargo metadata/generation process on a slow worker.
+    let script = budget_seconds.map_or_else(
         || {
             monorepo_caller::script(
                 root.path(),
@@ -297,7 +401,12 @@ fn generated_gate_with_deadline(
                 step["run"].as_str().unwrap(),
             )
         },
-        |deadline| {
+        |seconds| {
+            let deadline = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+                + seconds;
             step["run"].as_str().unwrap().replace(
                 "${{ steps.simit-gate-budget.outputs.deadline }}",
                 &deadline.to_string(),
@@ -329,17 +438,13 @@ fn generated_gate_with_deadline(
 #[test]
 fn generated_caller_counts_provisioning_against_the_remaining_job_budget() {
     let root = environment_fixture("literal");
-    let deadline = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
-        + 1;
-    let output = generated_gate_with_deadline(
-        &root,
-        "pass",
-        Some("never-report-this-secret"),
-        Some(deadline),
-    );
+    fs::write(
+        root.path().join("bin/nix"),
+        "#!/bin/sh\nsleep 5\nshift 4\nexec \"$@\"\n",
+    )
+    .unwrap();
+    let output =
+        generated_gate_with_deadline(&root, "pass", Some("never-report-this-secret"), Some(2));
     assert!(!output.status.success(), "{output:?}");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("timed out"), "{stderr}");
@@ -718,18 +823,9 @@ fn stalled_provisioning_expires_before_the_provider_deadline() {
         "#!/bin/sh\nprintf x >> provisioning-executions\n(sleep 5; touch leaked) & wait\n",
     )
     .unwrap();
-    let deadline = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
-        + 1;
     let started = std::time::Instant::now();
-    let output = generated_gate_with_deadline(
-        &root,
-        "pass",
-        Some("never-report-this-secret"),
-        Some(deadline),
-    );
+    let output =
+        generated_gate_with_deadline(&root, "pass", Some("never-report-this-secret"), Some(2));
     assert!(!output.status.success(), "{output:?}");
     assert!(
         started.elapsed() < std::time::Duration::from_secs(4),
@@ -839,18 +935,9 @@ fn native_initialization_remains_supervised_until_deadline_ownership() {
         fs::Permissions::from_mode(0o755),
     )
     .unwrap();
-    let deadline = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
-        + 3;
     let started = std::time::Instant::now();
-    let output = generated_gate_with_deadline(
-        &root,
-        "pass",
-        Some("never-report-this-secret"),
-        Some(deadline),
-    );
+    let output =
+        generated_gate_with_deadline(&root, "pass", Some("never-report-this-secret"), Some(3));
     assert!(!output.status.success(), "{output:?}");
     assert!(
         started.elapsed() < std::time::Duration::from_secs(5),

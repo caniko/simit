@@ -12,6 +12,26 @@ use anyhow::{Context, Result, bail};
 
 use crate::cli::{MonorepoCheckCommand, MonorepoGateEnv};
 
+#[derive(Debug)]
+pub struct GateExit {
+    code: i32,
+    message: String,
+}
+
+impl GateExit {
+    pub fn code(&self) -> i32 {
+        self.code
+    }
+}
+
+impl std::fmt::Display for GateExit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for GateExit {}
+
 pub(super) fn run(command: MonorepoCheckCommand) -> Result<()> {
     let (root, project) = super::load(&std::env::current_dir()?)?;
     let graph = project
@@ -68,7 +88,12 @@ pub(super) fn run(command: MonorepoCheckCommand) -> Result<()> {
     let mut script = String::new();
     for (index, (name, value)) in environment.iter().enumerate() {
         let alias = format!("{prefix}{index}");
-        process.env_remove(name).env(&alias, value);
+        // Keep the tool PATH for locating Bash, especially in Nix sandboxes
+        // without /bin/bash. Only the running gate shell receives gate PATH.
+        if *name != "PATH" {
+            process.env_remove(name);
+        }
+        process.env(&alias, value);
         script.push_str(&format!("export {name}=\"${alias}\"\nunset {alias}\n"));
     }
     script.push_str(&gate.run);
@@ -113,7 +138,14 @@ pub(super) fn run(command: MonorepoCheckCommand) -> Result<()> {
         None
     } else {
         let mut child = GateProcess {
-            child: process.spawn().context("run declared component check")?,
+            child: process
+                .spawn()
+                .inspect_err(|_| {
+                    if command.nix_diagnostics {
+                        diagnostics(since);
+                    }
+                })
+                .context("run declared component check")?,
             cleanup: true,
         };
         let status = loop {
@@ -162,11 +194,21 @@ pub(super) fn run(command: MonorepoCheckCommand) -> Result<()> {
             gate.timeout_minutes
         );
     };
-    bail!(
-        "component {} check {} failed: {status}",
-        command.component,
-        command.check
-    )
+    #[cfg(unix)]
+    let signal_code = {
+        use std::os::unix::process::ExitStatusExt;
+        status.signal().map(|signal| 128 + signal)
+    };
+    #[cfg(not(unix))]
+    let signal_code = None;
+    Err(GateExit {
+        code: status.code().or(signal_code).unwrap_or(1),
+        message: format!(
+            "component {} check {} failed: {status}",
+            command.component, command.check
+        ),
+    }
+    .into())
 }
 
 struct GateProcess {

@@ -175,6 +175,10 @@ pub(crate) fn files(
             " --primary-only"
         };
         steps.push(json!({"name": "Verify generated workflows", "run": format!("nix develop --print-build-logs .#ci --command simit init ci --check{scope}")}));
+        if !component.checks.is_empty() {
+            let version = if node24 { "v6.3.0" } else { "v5.6.0" };
+            steps.push(json!({"name": "Provision gate supervisor Python", "uses": github_action_ref("actions/setup-python", version).split(" #").next().unwrap(), "with": {"python-version": "3.12"}}));
+        }
         for gate in &component.checks {
             // Run the validated config through native Simit, already alive when
             // a Nix daemon dies, so failure evidence does not need another eval.
