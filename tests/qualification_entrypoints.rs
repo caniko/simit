@@ -27,6 +27,14 @@ fn qualification_entrypoints_exist_in_the_candidate_and_packaged_source() {
     for directory in [".github/workflows", ".simit/workflows"] {
         for entry in fs::read_dir(root.join(directory)).unwrap() {
             let path = entry.unwrap().path();
+            // Observer enrollment JSON lives beside templates, but is data,
+            // not a workflow with executable job steps to inventory.
+            if ![".yaml", ".yml", ".yaml.in", ".yml.in"]
+                .iter()
+                .any(|suffix| path.to_string_lossy().ends_with(suffix))
+            {
+                continue;
+            }
             let text = fs::read_to_string(&path).unwrap();
             let yaml: serde_yaml::Value = serde_yaml::from_str(&text).unwrap();
             for (_, job) in yaml["jobs"].as_mapping().unwrap() {
