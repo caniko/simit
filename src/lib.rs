@@ -6,6 +6,10 @@
 //! file generation, release preflight checks, and rendering for generated CI,
 //! flake, and Homebrew files.
 
+/// Shared bounded execution for CI and runtime admission.
+pub mod bounded_process;
+/// Caller-owned cancellation shared by CI and runtime execution.
+pub mod cancellation;
 /// Cargo metadata parsing and version bump planning.
 pub mod cargo;
 /// Keep a Changelog file helpers.
@@ -48,6 +52,8 @@ pub mod release_trust;
 pub mod render;
 /// Exact-revision repository review, closure promotion, and retrieval.
 pub mod review;
+/// Bounded runtime readiness observations with explicit retry policy.
+pub mod runtime_admission;
 /// SHA-256 helpers for release artifacts.
 pub mod sha256;
 /// User-scoped configuration for local infrastructure defaults.

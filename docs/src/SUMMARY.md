@@ -18,4 +18,5 @@
 - [Windows Packaging](getting-started/windows-packaging.md)
 - [Omnix CI](getting-started/om-ci.md)
 - [Public API](public-api.md)
+- [Runtime Admission](runtime-admission.md)
 - [Release Maintenance](release-maintenance.md)
