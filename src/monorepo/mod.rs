@@ -131,6 +131,40 @@ impl Config {
                     ) {
                         bail!("unsupported read-only Bash environment name {name}");
                     }
+                    // Bash's integer, computed, control and internal-array variables are
+                    // not scalar data: assignment may evaluate arithmetic, be
+                    // ignored, or be replaced by the next command. Reject them
+                    // before either native execution or generated CI writes.
+                    if matches!(
+                        name.as_str(),
+                        "RANDOM"
+                            | "SRANDOM"
+                            | "OPTIND"
+                            | "HISTCMD"
+                            | "SECONDS"
+                            | "LINENO"
+                            | "BASHPID"
+                            | "EPOCHSECONDS"
+                            | "EPOCHREALTIME"
+                            | "BASH_MONOSECONDS"
+                            | "BASH_SUBSHELL"
+                            | "BASH_COMPAT"
+                            | "BASH_XTRACEFD"
+                            | "BASH_ALIASES"
+                            | "BASH_ARGC"
+                            | "BASH_ARGV"
+                            | "BASH_CMDS"
+                            | "BASH_COMMAND"
+                            | "BASH_LINENO"
+                            | "BASH_SOURCE"
+                            | "DIRSTACK"
+                            | "FUNCNAME"
+                            | "GROUPS"
+                            | "PIPESTATUS"
+                            | "_"
+                    ) {
+                        bail!("unsupported managed Bash environment name {name}");
+                    }
                 }
             }
         }

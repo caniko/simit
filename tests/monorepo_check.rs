@@ -863,7 +863,7 @@ fn generated_gate_path_does_not_hide_the_native_runner() {
 }
 
 #[test]
-fn readonly_bash_environment_names_reject_before_execution() {
+fn readonly_and_managed_bash_environment_names_reject_before_execution() {
     for name in [
         "UID",
         "EUID",
@@ -871,6 +871,31 @@ fn readonly_bash_environment_names_reject_before_execution() {
         "BASHOPTS",
         "SHELLOPTS",
         "BASH_VERSINFO",
+        "OPTIND",
+        "RANDOM",
+        "SRANDOM",
+        "HISTCMD",
+        "SECONDS",
+        "LINENO",
+        "BASHPID",
+        "EPOCHSECONDS",
+        "EPOCHREALTIME",
+        "BASH_MONOSECONDS",
+        "BASH_SUBSHELL",
+        "BASH_COMPAT",
+        "BASH_XTRACEFD",
+        "BASH_ALIASES",
+        "BASH_ARGC",
+        "BASH_ARGV",
+        "BASH_CMDS",
+        "BASH_COMMAND",
+        "BASH_LINENO",
+        "BASH_SOURCE",
+        "DIRSTACK",
+        "FUNCNAME",
+        "GROUPS",
+        "PIPESTATUS",
+        "_",
     ] {
         let root = environment_fixture("never-report-this-secret");
         let path = root.path().join("simit.toml");
@@ -900,7 +925,8 @@ fn readonly_bash_environment_names_reject_before_execution() {
             assert!(!output.status.success(), "{name}: {output:?}");
             let stderr = String::from_utf8_lossy(&output.stderr);
             assert!(
-                stderr.contains("unsupported read-only Bash environment name"),
+                stderr.contains("unsupported ")
+                    && stderr.contains(&format!("Bash environment name {name}")),
                 "{stderr}"
             );
             assert!(!stderr.contains("never-report-this-secret"));

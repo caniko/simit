@@ -26,7 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on gate spawn failure and propagate gate exit codes. Keep the tool PATH while
   locating Bash in Nix sandboxes before restoring the gate's configured PATH.
 - Preserve configured monorepo gate environment data across Bash and Nix startup,
-  reject read-only Bash names before execution, and bound provisioning and native
+  reject read-only and dynamically managed Bash names before execution, and bound provisioning and native
   initialization so failed or timed-out checks retain their diagnostic reserve.
 - Clarify NuGet v2/v3 Chocolatey source configuration and reject authenticated
   registry reads explicitly without exposing publication credentials.

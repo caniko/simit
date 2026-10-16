@@ -138,8 +138,12 @@ initialization. The native runner assigns declared data after gate Bash startup,
 preserving values such as `IFS` and `PWD` that Bash normally rewrites. A gate's
 `PATH` applies only to the gate, preserving the tool paths needed to start Simit
 and Bash even in Nix sandboxes without `/bin/bash`.
-Read-only Bash names (`UID`, `EUID`, `PPID`, `BASHOPTS`, `SHELLOPTS`, and
-`BASH_VERSINFO`) are rejected during graph validation, before execution or writes.
+Read-only and dynamically managed Bash names are rejected during graph validation,
+before execution or writes. This includes integer/computed names such as `RANDOM`,
+`SRANDOM`, `OPTIND`, `HISTCMD`, `SECONDS` and `LINENO`, as well as Bash's internal
+arrays: they cannot preserve arbitrary scalar environment data. Mutable scalar
+names such as `IFS` and `PWD` remain supported. See the
+[Bash variable reference](https://www.gnu.org/software/bash/manual/html_node/Bash-Variables.html).
 A pinned `actions/setup-python` step provisions Python 3.12 before component gates,
 including on custom runners; it follows the job's Node 20/24 action selection.
 A Python 3 standard-library supervisor enforces the remaining deadline during
