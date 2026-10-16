@@ -130,27 +130,31 @@ timed-out or cancelled gates stop their process group before diagnostics; the
 local CLI handles SIGINT, SIGTERM and SIGHUP. If Nix provisioning fails before
 the native runner starts, the caller collects the same bounded diagnostics and
 returns the provisioning status. A private startup marker avoids collecting
-diagnostics twice after a native gate failure.
+diagnostics twice after a native gate failure. If its private directory cannot
+be created, the caller stops before provisioning or installing cleanup traps.
 
 Generated checks stage provider values under inert environment names before
 Bash starts and use `--gate-env provider-staged` to pass them through native
-initialization. The native runner assigns declared data after gate Bash startup,
+initialization. Consumed staging aliases are removed from the gate environment.
+The native runner assigns declared data after gate Bash startup,
 preserving values such as `IFS` and `PWD` that Bash normally rewrites. A gate's
 `PATH` applies only to the gate, preserving the tool paths needed to start Simit
 and Bash even in Nix sandboxes without `/bin/bash`.
 Read-only and dynamically managed Bash names are rejected during graph validation,
 before execution or writes. This includes integer/computed names such as `RANDOM`,
-`SRANDOM`, `OPTIND`, `HISTCMD`, `SECONDS` and `LINENO`, as well as Bash's internal
-arrays: they cannot preserve arbitrary scalar environment data. Mutable scalar
+`SRANDOM`, `OPTIND`, `HISTCMD`, `SECONDS`, `LINENO` and `BASH_ARGV0`, as well as
+Bash's internal arrays: they cannot preserve arbitrary scalar environment data. Mutable scalar
 names such as `IFS` and `PWD` remain supported. See the
 [Bash variable reference](https://www.gnu.org/software/bash/manual/html_node/Bash-Variables.html).
 A pinned `actions/setup-python` step provisions Python 3.12 before component gates,
 including on custom runners; it follows the job's Node 20/24 action selection.
 A Python 3 standard-library supervisor enforces the remaining deadline during
-Nix provisioning and native initialization (including Cargo metadata), stops its
-process group on timeout, and leaves the reserved time for diagnostics. Only
-after validation, environment capture, timer creation and cancellation setup
-does native Simit mark its ownership of the gate deadline and cleanup.
+Nix provisioning, native initialization (including Cargo metadata) and gate
+process creation, stops its process group on timeout, and leaves the reserved time
+for diagnostics. Only
+after validation, environment capture, timer creation, cancellation setup and
+completion of the spawn attempt does native Simit mark its ownership of the gate
+deadline and cleanup.
 Spawn failures still attempt diagnostics after that handoff. Failed gates return
 their original exit code (or `128 + signal` for signal termination) through the
 CLI and generated supervisor, independently of diagnostic success.

@@ -212,12 +212,12 @@ pub(crate) fn files(
                 "\"$(( $(date +%s) + {gate_seconds} < {job_deadline} ? $(date +%s) + {gate_seconds} : {job_deadline} ))\""
             );
             // Native writes the private marker only after it has initialized its
-            // timer and cancellation handlers. Until then the outer supervisor
-            // owns the deadline and caller fallback diagnostics.
+            // timer and cancellation handlers and process creation returns.
+            // Until then the outer supervisor owns the deadline and diagnostics.
             let diagnostics = super::check::NIX_DIAGNOSTICS;
             let provision = format!("'{}'", include_str!("provision.py").replace('\'', "'\\''"));
             let run = format!(
-                "set -euo pipefail\nset -- \"$(mktemp -d)\" \"$(date +%s)\" {deadline}\ntest -n \"$1\" && test -d \"$1\"\ntrap 'rm -f -- \"$1/ready\" || true; rmdir -- \"$1\" || true' EXIT\nif python3 -c {provision} \"$1/ready\" \"$3\" nix develop --print-build-logs .#ci --command {environment}simit monorepo check --component {} --check {} --nix-diagnostics --gate-env provider-staged --deadline \"$3\" --supervisor-ready \"$1/ready\"; then\n  exit 0\nelse\n  set -- \"$@\" \"$?\"\nfi\nif [ ! -f \"$1/ready\" ]; then\n  (\n    set -- \"$2\"\n{diagnostics}\n  ) || true\nfi\nexit \"$4\"\n",
+                "set -euo pipefail\nSIMIT_GATE_DIRECTORY=$(mktemp -d)\nset -- \"$SIMIT_GATE_DIRECTORY\" \"$(date +%s)\" {deadline}\nunset SIMIT_GATE_DIRECTORY\ntest -n \"$1\"\ntest -d \"$1\"\ntrap 'rm -f -- \"$1/ready\" || true; rmdir -- \"$1\" || true' EXIT\nif python3 -c {provision} \"$1/ready\" \"$3\" nix develop --print-build-logs .#ci --command {environment}simit monorepo check --component {} --check {} --nix-diagnostics --gate-env provider-staged --deadline \"$3\" --supervisor-ready \"$1/ready\"; then\n  exit 0\nelse\n  set -- \"$@\" \"$?\"\nfi\nif [ ! -f \"$1/ready\" ]; then\n  (\n    set -- \"$2\"\n{diagnostics}\n  ) || true\nfi\nexit \"$4\"\n",
                 component.id, gate.id
             );
             let mut step = json!({"name": gate.id, "shell": "bash", "timeout-minutes": provider_minutes, "run": run});

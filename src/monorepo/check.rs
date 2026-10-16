@@ -87,6 +87,9 @@ pub(super) fn run(command: MonorepoCheckCommand) -> Result<()> {
     }
     let mut script = String::new();
     for (index, (name, value)) in environment.iter().enumerate() {
+        if matches!(command.gate_env, MonorepoGateEnv::ProviderStaged) {
+            process.env_remove(format!("SIMIT_GATE_VALUE_{index}"));
+        }
         let alias = format!("{prefix}{index}");
         // Keep the tool PATH for locating Bash, especially in Nix sandboxes
         // without /bin/bash. Only the running gate shell receives gate PATH.
@@ -125,8 +128,17 @@ pub(super) fn run(command: MonorepoCheckCommand) -> Result<()> {
         signal_hook::flag::register(signal, cancelled.clone())?;
     }
     let deadline = Instant::now() + Duration::from_secs(seconds);
-    // Initialization may block in Cargo metadata. Only hand deadline ownership
-    // to this runner after validation, environment capture and signal setup.
+    let child = if seconds == 0 || cancelled.load(Ordering::SeqCst) {
+        None
+    } else {
+        Some(process.spawn().map(|child| GateProcess {
+            child,
+            cleanup: true,
+        }))
+    };
+    // Initialization and process creation can block. Keep outer supervision
+    // until spawn returns; even spawn errors claim the single diagnostic attempt.
+    // A successfully spawned child is already guarded if claiming ownership fails.
     if let Some(marker) = &command.supervisor_ready {
         std::fs::OpenOptions::new()
             .write(true)
@@ -134,20 +146,14 @@ pub(super) fn run(command: MonorepoCheckCommand) -> Result<()> {
             .open(marker)
             .context("claim native gate deadline ownership")?;
     }
-    let status = if seconds == 0 || cancelled.load(Ordering::SeqCst) {
-        None
-    } else {
-        let mut child = GateProcess {
-            child: process
-                .spawn()
-                .inspect_err(|_| {
-                    if command.nix_diagnostics {
-                        diagnostics(since);
-                    }
-                })
-                .context("run declared component check")?,
-            cleanup: true,
-        };
+    let status = if let Some(child) = child {
+        let mut child = child
+            .inspect_err(|_| {
+                if command.nix_diagnostics {
+                    diagnostics(since);
+                }
+            })
+            .context("run declared component check")?;
         let status = loop {
             if cancelled.load(Ordering::SeqCst) {
                 break None;
@@ -172,6 +178,8 @@ pub(super) fn run(command: MonorepoCheckCommand) -> Result<()> {
         // Reap Bash and stop its descendants before collecting failure evidence.
         drop(child);
         status
+    } else {
+        None
     };
     if status.is_some_and(|status| status.success()) {
         return Ok(());

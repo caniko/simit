@@ -153,6 +153,7 @@ impl Config {
                             | "BASH_ALIASES"
                             | "BASH_ARGC"
                             | "BASH_ARGV"
+                            | "BASH_ARGV0"
                             | "BASH_CMDS"
                             | "BASH_COMMAND"
                             | "BASH_LINENO"

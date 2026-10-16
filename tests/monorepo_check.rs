@@ -485,6 +485,89 @@ fn generated_caller_preserves_provider_values_as_data_exactly_once_at_project_ro
 }
 
 #[test]
+fn provider_staging_aliases_do_not_reach_gate_subprocesses() {
+    for generated in [false, true] {
+        let root = environment_fixture("${{ secrets.TEST_TOKEN }}");
+        let path = root.path().join("simit.toml");
+        fs::write(
+            &path,
+            fs::read_to_string(&path)
+                .unwrap()
+                .replace(
+                    "pwd > working-directory",
+                    "env -u GATE_VALUE -u SECOND_VALUE > child-environment",
+                )
+                .replace(
+                    "env = { GATE_VALUE =",
+                    "env = { SECOND_VALUE = 'provider-data', GATE_VALUE =",
+                ),
+        )
+        .unwrap();
+        let value = "never-report-this-secret";
+        let output = if generated {
+            generated_gate(&root, "pass", Some(value))
+        } else {
+            Command::new(env!("CARGO_BIN_EXE_simit"))
+                .current_dir(root.path())
+                .args([
+                    "monorepo",
+                    "check",
+                    "--component",
+                    "core",
+                    "--check",
+                    "pass",
+                    "--gate-env",
+                    "provider-staged",
+                ])
+                .env("SIMIT_GATE_VALUE_0", value)
+                .env("SIMIT_GATE_VALUE_1", value)
+                .output()
+                .unwrap()
+        };
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(
+            fs::read(root.path().join("observed")).unwrap(),
+            value.as_bytes()
+        );
+        let environment = fs::read_to_string(root.path().join("child-environment")).unwrap();
+        assert!(
+            !environment.contains("SIMIT_GATE_VALUE_"),
+            "staging alias leaked"
+        );
+        assert!(
+            !environment.contains("SIMIT_NATIVE_GATE_VALUE_"),
+            "native alias leaked"
+        );
+        assert!(output.stdout.is_empty());
+        assert!(output.stderr.is_empty());
+    }
+}
+
+#[test]
+fn generated_caller_requires_a_private_supervisor_directory_before_provisioning() {
+    for script in ["exit 23", "exit 0", "printf missing-directory"] {
+        let root = environment_fixture("literal");
+        let bin = root.path().join("bin");
+        for (name, body) in [
+            ("mktemp", script),
+            ("nix", "printf x >> provisioning-executions; exit 0"),
+            // A broken caller must not remove a shared /ready during reproduction.
+            ("rm", "printf x >> cleanup-executions"),
+            ("rmdir", "printf x >> cleanup-executions"),
+        ] {
+            fs::write(bin.join(name), format!("#!/bin/sh\n{body}\n")).unwrap();
+            fs::set_permissions(bin.join(name), fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let output = generated_gate(&root, "pass", Some("never-report-this-secret"));
+        assert!(!output.status.success(), "{script}: {output:?}");
+        assert!(!root.path().join("provisioning-executions").exists());
+        assert!(!root.path().join("executions").exists());
+        assert!(!root.path().join("cleanup-executions").exists());
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("never-report-this-secret"));
+    }
+}
+
+#[test]
 fn provider_mode_requires_present_values_even_for_configured_literals() {
     for configured in ["literal", "${{ secrets.TEST_TOKEN }}"] {
         let root = environment_fixture(configured);
@@ -754,8 +837,14 @@ fn generated_provisioning_failure_keeps_status_and_collects_diagnostics_once() {
 }
 
 #[test]
-fn provider_values_survive_bash_special_environment_normalization() {
-    for name in ["IFS", "PWD"] {
+fn provider_values_survive_startup_and_internal_name_collisions() {
+    for name in [
+        "IFS",
+        "PWD",
+        "SIMIT_GATE_VALUE_0",
+        "SIMIT_NATIVE_GATE_VALUE_0",
+        "SIMIT_GATE_DIRECTORY",
+    ] {
         let root = environment_fixture("${{ secrets.TEST_TOKEN }}");
         let path = root.path().join("simit.toml");
         fs::write(
@@ -887,6 +976,7 @@ fn readonly_and_managed_bash_environment_names_reject_before_execution() {
         "BASH_ALIASES",
         "BASH_ARGC",
         "BASH_ARGV",
+        "BASH_ARGV0",
         "BASH_CMDS",
         "BASH_COMMAND",
         "BASH_LINENO",
@@ -979,4 +1069,70 @@ fn native_initialization_remains_supervised_until_deadline_ownership() {
     );
     assert!(!root.path().join("executions").exists());
     assert!(!root.path().join("leaked").exists());
+}
+
+#[test]
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn stalled_gate_process_creation_remains_under_the_outer_deadline() {
+    let root = environment_fixture("literal");
+    // Block glibc process creation in native Simit, before any Bash child exists.
+    // The generated caller and its Python supervisor do not load this shim.
+    let source = root.path().join("spawn.c");
+    let library = root.path().join("spawn.so");
+    fs::write(
+        &source,
+        r#"
+#include <dlfcn.h>
+#include <spawn.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+int posix_spawnp(pid_t *pid, const char *file,
+                 const posix_spawn_file_actions_t *actions,
+                 const posix_spawnattr_t *attr, char *const argv[], char *const envp[]) {
+    if (strcmp(file, "bash") == 0) {
+        FILE *probe = fopen("spawn-blocked", "w");
+        if (!probe) _exit(125);
+        fclose(probe);
+        for (;;) pause();
+    }
+    int (*next)(pid_t *, const char *, const posix_spawn_file_actions_t *,
+                const posix_spawnattr_t *, char *const [], char *const []) =
+        dlsym(RTLD_NEXT, "posix_spawnp");
+    return next(pid, file, actions, attr, argv, envp);
+}
+"#,
+    )
+    .unwrap();
+    let compiled = Command::new("cc")
+        .args(["-shared", "-fPIC"])
+        .arg(&source)
+        .arg("-o")
+        .arg(&library)
+        .arg("-ldl")
+        .output()
+        .unwrap();
+    assert!(compiled.status.success(), "{compiled:?}");
+    // Keep the failing reproduction bounded even if native claims ownership early.
+    // The watchdog shares native's group and is cleaned up by the outer supervisor.
+    let nix = root.path().join("bin/nix");
+    fs::write(&nix, format!("#!/bin/sh\nshift 4\nexport LD_PRELOAD='{}'\n(sleep 10; kill -KILL $$) </dev/null >/dev/null 2>&1 &\nexec \"$@\"\n", library.display())).unwrap();
+    let started = std::time::Instant::now();
+    let output =
+        generated_gate_with_deadline(&root, "pass", Some("never-report-this-secret"), Some(2));
+    assert!(
+        root.path().join("spawn-blocked").exists(),
+        "spawn was not blocked: {output:?}"
+    );
+    assert_eq!(output.status.code(), Some(124), "{output:?}");
+    assert!(started.elapsed() < std::time::Duration::from_secs(9));
+    assert!(!root.path().join("executions").exists());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        stderr.matches("Nix failure diagnostics").count(),
+        1,
+        "{stderr}"
+    );
+    assert!(!stderr.contains("never-report-this-secret"));
 }
