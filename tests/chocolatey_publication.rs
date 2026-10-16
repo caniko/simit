@@ -195,6 +195,36 @@ fn v3_service_discovery_verifies_exact_bytes_before_push_and_resume() {
 }
 
 #[test]
+fn authenticated_registry_reads_are_explicitly_rejected_before_upload() {
+    for (mode, status) in [
+        ("index-unauthorized", "401"),
+        ("index-forbidden", "403"),
+        ("content-unauthorized", "401"),
+        ("content-forbidden", "403"),
+    ] {
+        let temp = v3_fixture();
+        let root = temp.path();
+        let config = fs::read_to_string(root.join("simit.toml"))
+            .unwrap()
+            .replace("/custom-feed", "/index.json");
+        fs::write(root.join("simit.toml"), config).unwrap();
+        let output = invoke(root, mode);
+        assert!(!output.status.success(), "{mode}: {output:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains(&format!(
+                "authenticated registry reads are not supported (HTTP {status})"
+            )),
+            "{mode}: {stderr}"
+        );
+        assert!(!stderr.contains("fixture-secret-value"));
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("fixture-secret-value"));
+        assert_eq!(fs::read_to_string(root.join("packs")).unwrap(), "pack\n");
+        assert_eq!(fs::read_to_string(root.join("pushes")).unwrap(), "push\n");
+    }
+}
+
+#[test]
 fn v2_json_service_documents_keep_the_v2_package_route() {
     let temp = exercise("absent", true, 1);
     let root = temp.path();
@@ -346,15 +376,18 @@ case "$2" in
    if [ -f "$TEST_ROOT/v2-json" ]; then cat "$TEST_ROOT/v2-json" > "$file"
    else printf '<service />' > "$file"; fi
    printf 200; exit ;;
- https://packages.example.com/custom-feed)
+ https://packages.example.com/custom-feed|https://packages.example.com/index.json)
    case "$TEST_MODE" in
-     index-unauthorized) printf 401; exit ;;
+     index-unauthorized) printf 'private fixture-secret-value' > "$file"; printf 401; exit ;;
+     index-forbidden) printf 'private fixture-secret-value' > "$file"; printf 403; exit ;;
      index-unavailable) printf 503; exit ;;
    esac
    cat "$TEST_ROOT/service-index.json" > "$file"; printf 200; exit ;;
 esac
 test "$2" = "$TEST_LOOKUP_URL"
 case "$TEST_MODE" in
+ content-unauthorized) printf 'private fixture-secret-value' > "$file"; printf 401 ;;
+ content-forbidden) printf 'private fixture-secret-value' > "$file"; printf 403 ;;
  identical) printf 'candidate package\n' > "$file"; printf 200 ;;
  conflict) printf 'different package\n' > "$file"; printf 200 ;;
  lookup-failure) exit 6 ;;

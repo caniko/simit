@@ -510,6 +510,12 @@ fn registry_lookup(url: &str, destination: &Path, api_key_env: &str) -> Result<V
     if !output.status.success() {
         bail!("Chocolatey registry lookup failed");
     }
+    if matches!(output.stdout.as_slice(), b"401" | b"403") {
+        bail!(
+            "Chocolatey authenticated registry reads are not supported (HTTP {}); use a feed with anonymous discovery and package downloads",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
     Ok(output.stdout)
 }
 

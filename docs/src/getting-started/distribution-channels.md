@@ -102,9 +102,9 @@ retains the exact packed candidate and its source/content hashes under
 publication. A retry skips publication only when the registry's downloaded
 package is byte-identical. Different bytes, failed lookups, and unverified
 push failures remain errors. The public Chocolatey push service is checked
-through its community NuGet v2 feed; custom HTTP(S) push sources are treated
-as NuGet v2 base URLs. Packing and registry lookups do not receive the
-configured API-key environment variable.
+through its community NuGet v2 feed. For custom HTTP(S) push sources, provide
+the NuGet v2 base URL or a NuGet v3 service index. Packing and registry lookups
+do not receive the configured API-key environment variable.
 
 Use `simit dist chocolatey bump --pack` with the same package/archive options
 to retain a candidate without registry access or an API key. Actions release
@@ -121,6 +121,10 @@ package IDs/versions for content URLs. NuGet v2 feeds retain their package
 download route. Build metadata is omitted from normalized filenames and lookup
 versions. Discovery and downloads keep publication credentials out of their
 environment; unavailable or malformed service indexes fail verification.
+Service discovery and package downloads must allow anonymous reads, even when
+publication requires an API key. Feeds requiring authenticated reads are not
+supported: HTTP 401/403 from discovery or download is rejected before upload,
+without retrying with publication credentials or forwarding them through redirects.
 
 For an harbor-rs project whose flake exposes the conventional
 `packages.<system>.release-bundle`, the release artifact section can instead
