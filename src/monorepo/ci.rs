@@ -175,10 +175,6 @@ pub(crate) fn files(
             " --primary-only"
         };
         steps.push(json!({"name": "Verify generated workflows", "run": format!("nix develop --print-build-logs .#ci --command simit init ci --check{scope}")}));
-        if !component.checks.is_empty() {
-            let version = if node24 { "v6.3.0" } else { "v5.6.0" };
-            steps.push(json!({"name": "Provision gate supervisor Python", "uses": github_action_ref("actions/setup-python", version).split(" #").next().unwrap(), "with": {"python-version": "3.12"}}));
-        }
         for gate in &component.checks {
             // Run the validated config through native Simit, already alive when
             // a Nix daemon dies, so failure evidence does not need another eval.
@@ -215,9 +211,9 @@ pub(crate) fn files(
             // timer and cancellation handlers and process creation returns.
             // Until then the outer supervisor owns the deadline and diagnostics.
             let diagnostics = super::check::NIX_DIAGNOSTICS;
-            let provision = format!("'{}'", include_str!("provision.py").replace('\'', "'\\''"));
+            let provision = include_str!("provision.sh");
             let run = format!(
-                "set -euo pipefail\nSIMIT_GATE_DIRECTORY=$(mktemp -d)\nset -- \"$SIMIT_GATE_DIRECTORY\" \"$(date +%s)\" {deadline}\nunset SIMIT_GATE_DIRECTORY\ntest -n \"$1\"\ntest -d \"$1\"\ntrap 'rm -f -- \"$1/ready\" || true; rmdir -- \"$1\" || true' EXIT\nif python3 -c {provision} \"$1/ready\" \"$3\" nix develop --print-build-logs .#ci --command {environment}simit monorepo check --component {} --check {} --nix-diagnostics --gate-env provider-staged --deadline \"$3\" --supervisor-ready \"$1/ready\"; then\n  exit 0\nelse\n  set -- \"$@\" \"$?\"\nfi\nif [ ! -f \"$1/ready\" ]; then\n  (\n    set -- \"$2\"\n{diagnostics}\n  ) || true\nfi\nexit \"$4\"\n",
+                "set -euo pipefail\nSIMIT_GATE_DIRECTORY=$(mktemp -d)\nset -- \"$SIMIT_GATE_DIRECTORY\" \"$(date +%s)\" {deadline}\nunset SIMIT_GATE_DIRECTORY\ntest -n \"$1\"\ntest -d \"$1\"\ntrap 'rm -f -- \"$1/ready\" \"$1/ready.diagnostics-complete\" || true; rmdir -- \"$1\" || true' EXIT\nset -- \"$@\" nix develop --print-build-logs .#ci --command {environment}simit monorepo check --component {} --check {} --nix-diagnostics --gate-env provider-staged --deadline \"$3\" --supervisor-ready \"$1/ready\"\nif (\n  set -- \"$1/ready\" \"$3\" \"${{@:4}}\"\n{provision}\n); then\n  exit 0\nelse\n  set -- \"$1\" \"$2\" \"$3\" \"$?\"\nfi\nif [ ! -f \"$1/ready.diagnostics-complete\" ]; then\n  (\n    set -- \"$2\"\n{diagnostics}\n  ) || true\nfi\nexit \"$4\"\n",
                 component.id, gate.id
             );
             let mut step = json!({"name": gate.id, "shell": "bash", "timeout-minutes": provider_minutes, "run": run});

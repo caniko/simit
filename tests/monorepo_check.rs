@@ -163,22 +163,11 @@ fn generated_qualification_runs_native_diagnostics_for_every_gate() {
         assert_eq!(step["timeout-minutes"].as_u64(), Some(32));
         assert!(step["run"].as_str().unwrap().contains("--deadline"));
     }
-    let python = steps
-        .iter()
-        .position(|step| step["name"] == "Provision gate supervisor Python")
-        .unwrap();
-    let gate = steps
-        .iter()
-        .position(|step| step["name"] == "pass")
-        .unwrap();
-    assert!(python < gate);
     assert!(
-        steps[python]["uses"]
-            .as_str()
-            .unwrap()
-            .starts_with("actions/setup-python@")
+        !steps
+            .iter()
+            .any(|step| step["name"] == "Provision gate supervisor Python")
     );
-    assert_eq!(steps[python]["with"]["python-version"], "3.12");
     assert_eq!(
         steps
             .iter()
@@ -419,6 +408,10 @@ fn generated_gate_with_deadline(
         .args(["-e", "-o", "pipefail", "-c", &script])
         .env("PATH", path)
         .env_remove("GATE_VALUE");
+    let preload = root.path().join("provision-spawn.so");
+    if preload.exists() {
+        caller.env("LD_PRELOAD", preload);
+    }
     // Actions supplies the evaluated step environment, including empty values.
     if let Some(environment) = step["env"].as_mapping() {
         for name in environment.keys() {
@@ -977,6 +970,7 @@ fn readonly_and_managed_bash_environment_names_reject_before_execution() {
         "BASH_ARGC",
         "BASH_ARGV",
         "BASH_ARGV0",
+        "BASH_ENV",
         "BASH_CMDS",
         "BASH_COMMAND",
         "BASH_LINENO",
@@ -1076,7 +1070,7 @@ fn native_initialization_remains_supervised_until_deadline_ownership() {
 fn stalled_gate_process_creation_remains_under_the_outer_deadline() {
     let root = environment_fixture("literal");
     // Block glibc process creation in native Simit, before any Bash child exists.
-    // The generated caller and its Python supervisor do not load this shim.
+    // The generated caller and its outer supervisor do not load this shim.
     let source = root.path().join("spawn.c");
     let library = root.path().join("spawn.so");
     fs::write(
@@ -1135,4 +1129,171 @@ int posix_spawnp(pid_t *pid, const char *file,
         "{stderr}"
     );
     assert!(!stderr.contains("never-report-this-secret"));
+}
+
+#[test]
+fn abrupt_native_termination_after_handoff_retains_fallback_diagnostics() {
+    let root = environment_fixture("literal");
+    let config = root.path().join("simit.toml");
+    fs::write(&config, fs::read_to_string(&config).unwrap().replace(
+        "\"printf original-failure >&2; exit 7\"",
+        &toml_edit::Value::from("while [ ! -s \"$GATE_SUPERVISOR_READY\" ]; do sleep 0.01; done; printf x >> executions; (sleep 5; touch leaked) & kill -KILL \"$PPID\"; wait").to_string(),
+    )).unwrap();
+    fs::write(root.path().join("bin/nix"), "#!/bin/sh\nprevious=\nfor word do\n  if [ \"$previous\" = --supervisor-ready ]; then export GATE_SUPERVISOR_READY=$word; fi\n  previous=$word\ndone\nshift 4\nexec \"$@\"\n").unwrap();
+    let started = std::time::Instant::now();
+    let output = generated_gate(&root, "fail", Some("never-report-this-secret"));
+    assert_eq!(output.status.code(), Some(137), "{output:?}");
+    assert!(started.elapsed() < std::time::Duration::from_secs(3));
+    assert!(!root.path().join("leaked").exists());
+    assert_eq!(fs::read(root.path().join("executions")).unwrap(), b"x");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        stderr.matches("Nix failure diagnostics").count(),
+        1,
+        "{stderr}"
+    );
+    assert!(!stderr.contains("never-report-this-secret"));
+}
+
+#[test]
+fn custom_nixos_runner_supervision_works_without_host_python() {
+    let root = environment_fixture("literal");
+    let config = root.path().join("simit.toml");
+    fs::write(
+        &config,
+        fs::read_to_string(&config).unwrap().replace(
+            "runtime = \"nix\"",
+            "runtime = \"nix\"\nrunner = \"self-hosted-nixos\"",
+        ),
+    )
+    .unwrap();
+    let python = root.path().join("bin/python3");
+    fs::write(
+        &python,
+        "#!/bin/sh\nprintf host-python-unavailable >&2\nexit 127\n",
+    )
+    .unwrap();
+    fs::set_permissions(&python, fs::Permissions::from_mode(0o755)).unwrap();
+    let output = generated_gate(&root, "pass", Some("provider-data"));
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        fs::read(root.path().join("observed")).unwrap(),
+        b"provider-data"
+    );
+    let workflow = fs::read_to_string(root.path().join(".github/workflows/ci.yaml")).unwrap();
+    assert!(workflow.contains("self-hosted-nixos"));
+    assert!(!workflow.contains("actions/setup-python@"));
+}
+
+#[test]
+fn provisioning_supervisor_cancellation_stops_its_process_group() {
+    for (signal, code) in [
+        (rustix::process::Signal::INT, 130),
+        (rustix::process::Signal::TERM, 143),
+        (rustix::process::Signal::HUP, 129),
+    ] {
+        let root = fixture();
+        let mut child = Command::new("bash")
+            .current_dir(root.path())
+            .args([
+                "-euo",
+                "pipefail",
+                "-c",
+                include_str!("../src/monorepo/provision.sh"),
+                "simit-supervisor",
+            ])
+            .arg(root.path().join("ready"))
+            .arg("9999999999")
+            .args([
+                "bash",
+                "-c",
+                "printf x > provisioning-ready; (sleep 3; touch leaked) & wait",
+            ])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !root.path().join("provisioning-ready").exists() {
+            assert!(std::time::Instant::now() < deadline);
+            assert!(child.try_wait().unwrap().is_none());
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let started = std::time::Instant::now();
+        rustix::process::kill_process(
+            rustix::process::Pid::from_raw(child.id() as i32).unwrap(),
+            signal,
+        )
+        .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert_eq!(output.status.code(), Some(code), "{output:?}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        assert!(!root.path().join("leaked").exists());
+    }
+}
+
+#[test]
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn stalled_nix_exec_remains_under_the_outer_deadline() {
+    let root = environment_fixture("literal");
+    // Delay exec itself in the child, before nix has started or closed the
+    // subprocess error pipe. The finite delay keeps the failing reproduction bounded.
+    let source = root.path().join("exec.c");
+    let library = root.path().join("provision-spawn.so");
+    fs::write(
+        &source,
+        r#"
+#include <dlfcn.h>
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+static void delay(const char *file) {
+    const char *name = strrchr(file, '/');
+    if (strcmp(name ? name + 1 : file, "nix") == 0) {
+        FILE *probe = fopen("exec-blocked", "w");
+        if (!probe) _exit(125);
+        fclose(probe);
+        sleep(5);
+    }
+}
+int execv(const char *file, char *const argv[]) {
+    delay(file);
+    int (*next)(const char *, char *const []) = dlsym(RTLD_NEXT, "execv");
+    return next(file, argv);
+}
+int execve(const char *file, char *const argv[], char *const envp[]) {
+    delay(file);
+    int (*next)(const char *, char *const [], char *const []) = dlsym(RTLD_NEXT, "execve");
+    return next(file, argv, envp);
+}
+"#,
+    )
+    .unwrap();
+    let compiled = Command::new("cc")
+        .args(["-shared", "-fPIC"])
+        .arg(source)
+        .arg("-o")
+        .arg(library)
+        .arg("-ldl")
+        .output()
+        .unwrap();
+    assert!(compiled.status.success(), "{compiled:?}");
+    let started = std::time::Instant::now();
+    let output =
+        generated_gate_with_deadline(&root, "pass", Some("never-report-this-secret"), Some(2));
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(4),
+        "nix exec escaped supervision"
+    );
+    assert!(root.path().join("exec-blocked").exists(), "{output:?}");
+    assert_eq!(output.status.code(), Some(124), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Nix provisioning timed out"), "{stderr}");
+    assert_eq!(
+        stderr.matches("Nix failure diagnostics").count(),
+        1,
+        "{stderr}"
+    );
+    assert!(!stderr.contains("never-report-this-secret"));
+    assert!(!root.path().join("executions").exists());
 }

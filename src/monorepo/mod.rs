@@ -131,7 +131,7 @@ impl Config {
                     ) {
                         bail!("unsupported read-only Bash environment name {name}");
                     }
-                    // Bash's integer, computed, control and internal-array variables are
+                    // Bash's integer, computed, startup/control and internal-array variables are
                     // not scalar data: assignment may evaluate arithmetic, be
                     // ignored, or be replaced by the next command. Reject them
                     // before either native execution or generated CI writes.
@@ -154,6 +154,7 @@ impl Config {
                             | "BASH_ARGC"
                             | "BASH_ARGV"
                             | "BASH_ARGV0"
+                            | "BASH_ENV"
                             | "BASH_CMDS"
                             | "BASH_COMMAND"
                             | "BASH_LINENO"

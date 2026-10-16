@@ -21,7 +21,7 @@ fn qualification_entrypoints_exist_in_the_candidate_and_packaged_source() {
         "package omits the embedded provisioning/native diagnostics asset"
     );
     assert!(
-        files.contains("src/monorepo/provision.py"),
+        files.contains("src/monorepo/provision.sh"),
         "package omits the embedded provisioning watchdog"
     );
     for directory in [".github/workflows", ".simit/workflows"] {

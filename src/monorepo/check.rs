@@ -140,17 +140,21 @@ pub(super) fn run(command: MonorepoCheckCommand) -> Result<()> {
     // until spawn returns; even spawn errors claim the single diagnostic attempt.
     // A successfully spawned child is already guarded if claiming ownership fails.
     if let Some(marker) = &command.supervisor_ready {
-        std::fs::OpenOptions::new()
+        let mut file = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(marker)
             .context("claim native gate deadline ownership")?;
+        if let Some(Ok(child)) = &child {
+            use std::io::Write;
+            writeln!(file, "{}", child.child.id()).context("record native gate process group")?;
+        }
     }
     let status = if let Some(child) = child {
         let mut child = child
             .inspect_err(|_| {
                 if command.nix_diagnostics {
-                    diagnostics(since);
+                    diagnostics(since, command.supervisor_ready.as_deref());
                 }
             })
             .context("run declared component check")?;
@@ -185,7 +189,7 @@ pub(super) fn run(command: MonorepoCheckCommand) -> Result<()> {
         return Ok(());
     }
     if command.nix_diagnostics {
-        diagnostics(since);
+        diagnostics(since, command.supervisor_ready.as_deref());
     }
     if cancelled.load(Ordering::SeqCst) {
         bail!(
@@ -240,10 +244,10 @@ impl Drop for GateProcess {
 
 pub(super) const NIX_DIAGNOSTICS: &str = include_str!("nix_diagnostics.sh");
 
-fn diagnostics(since: u64) {
+fn diagnostics(since: u64, marker: Option<&camino::Utf8Path>) {
     // The caller uses this same bounded script if provisioning fails before
     // native Simit starts. Neither path needs another Nix evaluation.
-    if let Err(error) = Command::new("bash")
+    match Command::new("bash")
         .args([
             "-euo",
             "pipefail",
@@ -254,6 +258,15 @@ fn diagnostics(since: u64) {
         ])
         .status()
     {
-        eprintln!("diagnostics unavailable: {error}");
+        Ok(status) if status.success() => {
+            if let Some(marker) = marker
+                && let Err(error) =
+                    std::fs::write(marker.with_extension("diagnostics-complete"), "")
+            {
+                eprintln!("record diagnostic completion: {error}");
+            }
+        }
+        Ok(status) => eprintln!("diagnostics incomplete: {status}"),
+        Err(error) => eprintln!("diagnostics unavailable: {error}"),
     }
 }
