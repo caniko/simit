@@ -141,6 +141,35 @@ pub(crate) fn run_with_input(
         Some(input),
     )
 }
+
+// Source authorization keeps the existing portable CI runner, not the public
+// Unix-only runtime-admission contract. Its caller owns the shared preflight clock.
+pub(crate) fn run_probe(
+    command: &mut Command,
+    stdout: &Path,
+    stderr: &Path,
+    cancellation: &Cancellation,
+    timeout: Duration,
+    maximum: u64,
+) -> Result<i32> {
+    ensure!(
+        timeout <= Duration::from_secs(30),
+        "probe timeout exceeds bound"
+    );
+    run_bounded(
+        command,
+        stdout,
+        stderr,
+        cancellation,
+        Limits {
+            timeout,
+            stdout: maximum,
+            stderr: 65536,
+        },
+        None,
+    )
+}
+
 impl Default for Limits {
     fn default() -> Self {
         Self {

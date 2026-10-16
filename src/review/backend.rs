@@ -420,20 +420,20 @@ pub fn build_with_cache_opt_in(
         Ok(())
     })();
     #[cfg(target_os = "linux")]
-    if let Some(cache) = &mut cache {
-        if result.compiler_cache_cleanup != Some(Outcome::Passed) {
-            match cache.stop() {
-                Ok(receipt) => {
-                    write_json(&out.join("compiler-cache-cleanup.json"), &receipt)?;
-                    result.compiler_cache_cleanup = Some(Outcome::Passed);
-                }
-                Err(error) => {
-                    result.compiler_cache_cleanup = Some(Outcome::Failed);
-                    write_json(
-                        &out.join("compiler-cache-cleanup.json"),
-                        &serde_json::json!({"stopped": false, "error": error.to_string()}),
-                    )?;
-                }
+    if let Some(cache) = &mut cache
+        && result.compiler_cache_cleanup != Some(Outcome::Passed)
+    {
+        match cache.stop() {
+            Ok(receipt) => {
+                write_json(&out.join("compiler-cache-cleanup.json"), &receipt)?;
+                result.compiler_cache_cleanup = Some(Outcome::Passed);
+            }
+            Err(error) => {
+                result.compiler_cache_cleanup = Some(Outcome::Failed);
+                write_json(
+                    &out.join("compiler-cache-cleanup.json"),
+                    &serde_json::json!({"stopped": false, "error": error.to_string()}),
+                )?;
             }
         }
     }

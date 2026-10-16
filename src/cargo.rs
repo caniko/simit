@@ -416,11 +416,10 @@ pub fn update_workspace_version(
         .get_mut("package")
         .and_then(|item| item.as_table_mut())
         .and_then(|package| package.get_mut("version"))
+        && version_item.as_str() != Some(new_version.as_str())
     {
-        if version_item.as_str() != Some(new_version.as_str()) {
-            *version_item = toml_edit::value(new_version.clone());
-            changed = true;
-        }
+        *version_item = toml_edit::value(new_version.clone());
+        changed = true;
     }
 
     if let Some(dependencies) = workspace

@@ -152,11 +152,11 @@ impl GroupSpec {
             "invalid check system"
         );
         ensure!(
-            self.limits.len() <= 4 && self.limits.len() % 2 == 0,
+            self.limits.len() <= 4 && self.limits.len().is_multiple_of(2),
             "invalid Nix limits"
         );
         let mut flags = BTreeSet::new();
-        for pair in self.limits.chunks_exact(2) {
+        for pair in self.limits.as_chunks::<2>().0 {
             ensure!(
                 matches!(pair[0].as_str(), "--max-jobs" | "--cores")
                     && flags.insert(&pair[0])
@@ -689,6 +689,10 @@ fn oid(value: &str) -> bool {
 }
 
 pub(super) fn read_json<T: serde::de::DeserializeOwned>(path: &Path, maximum: u64) -> Result<T> {
+    Ok(serde_json::from_slice(&read_bytes(path, maximum)?)?)
+}
+
+pub(super) fn read_bytes(path: &Path, maximum: u64) -> Result<Vec<u8>> {
     ensure!(
         fs::symlink_metadata(path)?.file_type().is_file(),
         "input must be a regular file"
@@ -698,7 +702,7 @@ pub(super) fn read_json<T: serde::de::DeserializeOwned>(path: &Path, maximum: u6
         .take(maximum + 1)
         .read_to_end(&mut raw)?;
     ensure!(raw.len() as u64 <= maximum, "JSON input exceeds budget");
-    Ok(serde_json::from_slice(&raw)?)
+    Ok(raw)
 }
 
 fn save(path: &Path, value: &impl Serialize) -> Result<()> {

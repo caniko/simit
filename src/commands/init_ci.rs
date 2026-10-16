@@ -34,21 +34,23 @@ use crate::render::ci::{
 use crate::user_config::{ResolvedRunner, UserConfig, validate_runner_label};
 
 pub fn run(command: InitCiCommand) -> Result<()> {
-    if let Some(root) = crate::monorepo::find_root(&std::env::current_dir()?)? {
-        if !command.review_only && !command.prebuild_only && !command.pages_only {
-            let config = crate::monorepo::ci::resolve_config(&root, &command)?;
-            let files = crate::monorepo::ci::files(&root, &config, !command.primary_only)?;
-            reconcile_ci_files(
-                &root,
-                files,
-                "Monorepo CI drift; run simit init ci",
-                &command,
-            )?;
-            if !command.check && !command.primary_only && ProjectConfig::can_persist_ci(&root)? {
-                ProjectConfig::write_ci(&root, &config.ci)?;
-            }
-            return Ok(());
+    if let Some(root) = crate::monorepo::find_root(&std::env::current_dir()?)?
+        && !command.review_only
+        && !command.prebuild_only
+        && !command.pages_only
+    {
+        let config = crate::monorepo::ci::resolve_config(&root, &command)?;
+        let files = crate::monorepo::ci::files(&root, &config, !command.primary_only)?;
+        reconcile_ci_files(
+            &root,
+            files,
+            "Monorepo CI drift; run simit init ci",
+            &command,
+        )?;
+        if !command.check && !command.primary_only && ProjectConfig::can_persist_ci(&root)? {
+            ProjectConfig::write_ci(&root, &config.ci)?;
         }
+        return Ok(());
     }
     if command.review_only {
         if command.platform.is_some_and(|p| p != Platform::Github)
@@ -1524,12 +1526,12 @@ fn generated_workflow_marker_present(content: &str) -> bool {
 }
 
 pub(crate) fn project_regeneration_command(workspace_root: &Path) -> Result<Option<String>> {
-    if let Ok(content) = fs::read_to_string(workspace_root.join(".gitlab-ci.yml")) {
-        if generated_workflow_marker_present(&content) {
-            return Ok(Some(
-                "simit init ci --platform gitlab --runtime nix".to_owned(),
-            ));
-        }
+    if let Ok(content) = fs::read_to_string(workspace_root.join(".gitlab-ci.yml"))
+        && generated_workflow_marker_present(&content)
+    {
+        return Ok(Some(
+            "simit init ci --platform gitlab --runtime nix".to_owned(),
+        ));
     }
     if !workspace_root.join("Cargo.toml").is_file() && workspace_root.join("flake.nix").is_file() {
         for platform in [Platform::Forgejo, Platform::Github] {

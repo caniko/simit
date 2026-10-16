@@ -154,12 +154,10 @@ fn prepare_bucket(args: &ScoopBumpArgs, resolved: &ResolvedScoop) -> Result<Utf8
             "--short",
             "refs/remotes/origin/HEAD",
         ],
-    ) {
-        if let Some(branch) = default_branch.trim().strip_prefix("origin/") {
-            if !branch.is_empty() {
-                run_git(bucket.as_std_path(), &["checkout", branch])?;
-            }
-        }
+    ) && let Some(branch) = default_branch.trim().strip_prefix("origin/")
+        && !branch.is_empty()
+    {
+        run_git(bucket.as_std_path(), &["checkout", branch])?;
     }
     Ok(bucket)
 }

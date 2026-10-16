@@ -365,10 +365,10 @@ pub fn publish(
         a.extend(artifact::roots(r));
         let mut cmd = super::process::command("cachix", &a, None);
         cmd.env("CACHIX_AUTH_TOKEN", token);
-        if let Ok(k) = std::env::var("CACHIX_SIGNING_KEY") {
-            if !k.is_empty() {
-                cmd.env("CACHIX_SIGNING_KEY", k);
-            }
+        if let Ok(k) = std::env::var("CACHIX_SIGNING_KEY")
+            && !k.is_empty()
+        {
+            cmd.env("CACHIX_SIGNING_KEY", k);
         }
         run_command(cmd, None)?;
     }

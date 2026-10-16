@@ -992,13 +992,13 @@ fn validate_manifest_paths_with_links(
                 if key == "metadata" && matches!(section, Some("package" | "workspace")) {
                     continue;
                 }
-                if ["path", "readme", "license-file", "build", "workspace"].contains(&key) {
-                    if let Some(path) = value.as_str() {
-                        ensure!(
-                            path_is_inside(source, parent, path, links),
-                            "Cargo manifest path escapes signed source or depends on a Git symlink"
-                        );
-                    }
+                if ["path", "readme", "license-file", "build", "workspace"].contains(&key)
+                    && let Some(path) = value.as_str()
+                {
+                    ensure!(
+                        path_is_inside(source, parent, path, links),
+                        "Cargo manifest path escapes signed source or depends on a Git symlink"
+                    );
                 }
                 if key == "members" || key == "exclude" || key == "include" {
                     for path in string_array(Some(value)) {
@@ -1115,10 +1115,9 @@ fn validate_manifest_paths_with_links(
         if let Some(package) = manifest
             .get("package")
             .and_then(toml_edit::Item::as_table_like)
+            && let Some(workspace) = manifest_string(package, "workspace")
         {
-            if let Some(workspace) = manifest_string(package, "workspace") {
-                pending.push(parent.join(workspace).join("Cargo.toml"));
-            }
+            pending.push(parent.join(workspace).join("Cargo.toml"));
         }
         if let Some(workspace) = manifest
             .get("workspace")
