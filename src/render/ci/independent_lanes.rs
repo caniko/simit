@@ -12,14 +12,17 @@ pub(super) fn render(
     push_generated_workflow_header(&mut workflow);
     push_required_secrets_header(&mut workflow, &options.required_secrets);
     push_ci_workflow_name(&mut workflow, package, &options);
-    workflow.push_str(
-        "on:\n  push:\n    branches: [\"**\"]\n    tags-ignore: [\"**\"]\n  pull_request:\n\n",
-    );
+    workflow.push_str("on:\n  push:\n");
+    push_ci_branches(&mut workflow, &options.push_branches);
+    workflow.push_str("    tags-ignore: [\"**\"]\n  pull_request:\n\n");
     push_github_read_permissions(&mut workflow, platform);
     push_independent_source_concurrency(&mut workflow);
     workflow.push_str("jobs:\n");
-    let mut lanes = vec!["rust", "evaluation"];
-    if options.nix_flake_check {
+    let mut lanes = vec!["rust"];
+    if options.repository_checks {
+        lanes.push("evaluation");
+    }
+    if options.flake_check_command() == Some("nix flake check") {
         lanes.push("realization");
     }
     for lane in lanes {
@@ -53,7 +56,7 @@ pub(super) fn render(
             _ => {
                 let mut rust_options = options.clone();
                 rust_options.nix_flake_check = false;
-                if options.check_command.is_none() {
+                if options.repository_checks && options.check_command.is_none() {
                     workflow.push_str(&format!("      - name: Format check\n        run: |\n          nix develop -c {NIX_FORMAT_COMMAND}\n\n"));
                 }
                 push_nix_ci_legacy_steps(&mut workflow, platform, package, self_check, &rust_options);

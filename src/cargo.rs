@@ -41,10 +41,22 @@ pub struct Package {
     pub features: BTreeMap<String, Vec<String>>,
     #[serde(default)]
     pub dependencies: Vec<Dependency>,
+    #[serde(default)]
+    pub targets: Vec<Target>,
     pub manifest_path: Utf8PathBuf,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct Target {
+    #[serde(default)]
+    pub doctest: bool,
+}
+
 impl Package {
+    pub fn has_doctests(&self) -> bool {
+        self.targets.iter().any(|target| target.doctest)
+    }
+
     pub fn is_publishable_to_crates_io(&self) -> bool {
         self.publish
             .as_ref()

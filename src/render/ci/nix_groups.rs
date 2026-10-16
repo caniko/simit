@@ -39,7 +39,8 @@ pub(super) fn render(
     let mut workflow = String::new();
     push_generated_workflow_header(&mut workflow);
     push_required_secrets_header(&mut workflow, &options.required_secrets);
-    workflow.push_str("name: Nix installable builds\n\non:\n  push:\n    branches: [\"**\"]\n");
+    workflow.push_str("name: Nix installable builds\n\non:\n  push:\n");
+    push_ci_branches(&mut workflow, &options.push_branches);
     if !options.push_tags.is_empty() {
         workflow.push_str("    tags:\n");
         for pattern in &options.push_tags {
@@ -48,7 +49,7 @@ pub(super) fn render(
     }
     workflow
         .push_str("  pull_request:\n  workflow_dispatch:\n\npermissions:\n  contents: read\n\n");
-    if options.separate_events {
+    if options.separate_events || !options.push_branches.is_empty() {
         push_independent_source_concurrency(&mut workflow);
     } else {
         workflow.push_str("concurrency:\n  group: nix-groups-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.ref_type == 'tag' && github.ref || format('refs/heads/{0}', github.event.pull_request.head.ref || github.ref_name) }}\n  cancel-in-progress: true\n\n");

@@ -454,6 +454,9 @@ impl ResolvedCiInputs {
         CiOptions {
             tag_prefix: cfg.release.tag_prefix,
             nix_builds: cfg.ci.nix_builds.clone(),
+            components: cfg.ci.components.clone(),
+            repository_checks: true,
+            workspace_has_doctests: false,
             all_features: self.all_features,
             unit_tests_only: self.unit_tests_only,
             nix_substituters: cfg.release.artifacts.substituters.clone(),
@@ -465,6 +468,7 @@ impl ResolvedCiInputs {
             nix_flake_check: self.nix_flake_check,
             independent_lanes: cfg.ci.independent_lanes,
             separate_events: cfg.ci.separate_events,
+            push_branches: cfg.ci.push_branches.clone(),
             with_msrv: self.with_msrv,
             with_audit: self.with_audit,
             with_deny: self.with_deny,

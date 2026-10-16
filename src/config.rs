@@ -446,6 +446,9 @@ pub struct CiConfig {
     /// Retain independent GitHub Rust CI push and PR originals, including aggregate CI.
     #[serde(default)]
     pub separate_events: bool,
+    /// Branch push filters for language CI; empty preserves all branch pushes.
+    #[serde(default)]
+    pub push_branches: Vec<String>,
     #[serde(default)]
     pub workspace_strategy: WorkspaceStrategy,
     /// Opt-in coordinated dependency-ordered workspace publication.
@@ -525,7 +528,8 @@ pub struct CiConfig {
     pub pages: Option<CodebergPagesConfig>,
     #[serde(default)]
     pub step_runners: BTreeMap<String, String>,
-    /// Workflow components. Currently used by Python/Nix CI; an empty list
+    /// Workflow components. Rust/Nix CI uses these to select flake validation;
+    /// Cargo checks retain their feature and package selectors. An empty list
     /// selects the complete project-appropriate default set.
     #[serde(default)]
     pub components: Vec<CiComponent>,
@@ -539,6 +543,11 @@ impl CiConfig {
         provider: CiProvider,
         platform: Platform,
     ) -> Result<()> {
+        if !self.push_branches.is_empty()
+            && (provider != CiProvider::Actions || platform != Platform::Github)
+        {
+            bail!("[ci].push_branches requires the effective GitHub Actions backend");
+        }
         if self.separate_events && (provider != CiProvider::Actions || platform != Platform::Github)
         {
             bail!("[ci].separate_events requires the effective GitHub Actions backend");
@@ -600,6 +609,8 @@ pub struct NixBuildConfig {
     pub only: bool,
     /// Preserve independent push and PR producers instead of coalescing their runs.
     pub separate_events: bool,
+    /// Branch push filters for this matrix; empty preserves all branch pushes.
+    pub push_branches: Vec<String>,
     /// Opt into tag pushes alongside all branch pushes; preserve pattern order.
     pub push_tags: Vec<String>,
     /// Partition all declared installables into jobs sharing a Nix store.
@@ -844,29 +855,27 @@ impl NixBuildConfig {
     }
 
     pub(crate) fn validate_push_tags(&self) -> Result<()> {
-        if self.push_tags.iter().any(|pattern| {
-            pattern.trim().is_empty()
-                || pattern.chars().any(|character| {
-                    character.is_control()
-                        || matches!(character, '\u{2028}' | '\u{2029}' | '\u{fffe}' | '\u{ffff}')
-                })
-        }) {
-            bail!(
-                "simit project config: [ci.nix_build].push_tags requires nonempty patterns without controls, Unicode line separators, or YAML-forbidden characters"
-            );
-        }
-        if !self.push_tags.is_empty()
-            && self
-                .push_tags
-                .iter()
-                .all(|pattern| pattern.starts_with('!'))
-        {
-            bail!(
-                "simit project config: [ci.nix_build].push_tags requires at least one positive pattern"
-            );
-        }
-        Ok(())
+        validate_event_patterns("[ci.nix_build].push_branches", &self.push_branches)?;
+        validate_event_patterns("[ci.nix_build].push_tags", &self.push_tags)
     }
+}
+
+fn validate_event_patterns(name: &str, patterns: &[String]) -> Result<()> {
+    if patterns.iter().any(|pattern| {
+        pattern.trim().is_empty()
+            || pattern.chars().any(|character| {
+                character.is_control()
+                    || matches!(character, '\u{2028}' | '\u{2029}' | '\u{fffe}' | '\u{ffff}')
+            })
+    }) {
+        bail!(
+            "simit project config: {name} requires nonempty patterns without controls, Unicode line separators, or YAML-forbidden characters"
+        );
+    }
+    if !patterns.is_empty() && patterns.iter().all(|pattern| pattern.starts_with('!')) {
+        bail!("simit project config: {name} requires at least one positive pattern");
+    }
+    Ok(())
 }
 
 /// Public, credential-free CI cache configuration, independent of publication.
@@ -2303,6 +2312,7 @@ impl ProjectConfig {
         }
         validate_nonempty_strings("simit project config: [ci].packages", &self.ci.packages)?;
         validate_nonempty_strings("simit project config: [ci].nix_builds", &self.ci.nix_builds)?;
+        validate_event_patterns("[ci].push_branches", &self.ci.push_branches)?;
         validate_nix_build_config(self)?;
         if let Some(custody) = &self.ci.custody {
             custody.validate()?;
@@ -3979,6 +3989,7 @@ fn set_nix_build_table(table: &mut Table, options: &NixBuildConfig) {
     build.set_implicit(false);
     set_bool(&mut build, "only", options.only);
     set_bool(&mut build, "separate_events", options.separate_events);
+    set_string_array(&mut build, "push_branches", &options.push_branches);
     set_string_array(&mut build, "push_tags", &options.push_tags);
     set_string_map(&mut build, "system_runners", &options.system_runners);
     set_string_array(&mut build, "check_systems", &options.check_systems);
@@ -4073,6 +4084,7 @@ fn set_ci_table(table: &mut Table, ci: &CiConfig) {
     set_optional_bool_default_true(table, "nix_flake_check", ci.nix_flake_check);
     set_bool(table, "independent_lanes", ci.independent_lanes);
     set_bool(table, "separate_events", ci.separate_events);
+    set_string_array(table, "push_branches", &ci.push_branches);
     set_optional_string(
         table,
         "workspace_strategy",

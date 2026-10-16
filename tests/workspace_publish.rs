@@ -339,7 +339,15 @@ fn member_workflows_have_unique_check_names_for_single_split_and_gate_jobs() {
                 Some(format!("CI ({member})").as_str())
             );
             let jobs = workflow["jobs"].as_mapping().unwrap();
-            assert_eq!(jobs.len(), if split { 4 } else { 2 });
+            assert_eq!(
+                jobs.len(),
+                match (member, split) {
+                    ("a", true) => 4,
+                    ("a", false) => 2,
+                    (_, true) => 3,
+                    (_, false) => 1,
+                }
+            );
             for (id, job) in jobs {
                 let name = job["name"]
                     .as_str()
@@ -351,7 +359,12 @@ fn member_workflows_have_unique_check_names_for_single_split_and_gate_jobs() {
                 );
             }
             assert!(!text.contains("--all-features"));
-            assert!(text.contains("cargo test --no-default-features"));
+            assert!(text.contains(&format!("cargo test -p {member}")));
+            assert_eq!(
+                text.matches("run: cargo test --no-default-features")
+                    .count(),
+                usize::from(member == "a")
+            );
         }
         let check = simit()
             .current_dir(temp.path())
@@ -398,7 +411,10 @@ fn coordinated_publication_preserves_five_member_ci_policies_and_dependency_orde
         let content = read(&ci);
         assert!(content.contains(&format!("cargo test -p {name} --all-features")));
         assert!(content.contains("cargo doc"));
-        assert!(content.contains("member-contract"));
+        assert_eq!(
+            content.matches("gate-member-contract:").count(),
+            usize::from(name == "a")
+        );
         member_ci.insert(ci, content);
     }
     // Only publication switches to a dependency-ordered carrier. CI policy,

@@ -81,7 +81,7 @@ pub(crate) fn workflow_preamble_lines(content: &str) -> impl Iterator<Item = &st
         }
     })
 }
-const CARGO_NEXTEST_VERSION: &str = "0.9.100";
+pub(super) const CARGO_NEXTEST_VERSION: &str = "0.9.100";
 const CARGO_DENY_VERSION: &str = "0.18.3";
 const CARGO_DENY_POLICY_CHECKS: &str = "bans licenses sources";
 // Custom/legacy Nix shells may expose rustfmt without a treefmt wrapper.
@@ -185,7 +185,13 @@ pub struct CiOptions {
     pub ci_nix_trusted_public_keys: Vec<String>,
     pub independent_lanes: bool,
     pub separate_events: bool,
+    pub push_branches: Vec<String>,
     pub nix_builds: Vec<String>,
+    pub components: Vec<CiComponent>,
+    /// Only one member CI workflow owns repository-wide validation.
+    pub repository_checks: bool,
+    /// An aggregate selector can include libraries beyond its representative package.
+    pub workspace_has_doctests: bool,
     pub all_features: bool,
     pub unit_tests_only: bool,
     pub nix_substituters: Vec<String>,
@@ -238,7 +244,11 @@ impl Default for CiOptions {
             ci_nix_trusted_public_keys: Vec::new(),
             independent_lanes: false,
             separate_events: false,
+            push_branches: Vec::new(),
             nix_builds: Vec::new(),
+            components: Vec::new(),
+            repository_checks: true,
+            workspace_has_doctests: false,
             all_features: true,
             unit_tests_only: false,
             nix_substituters: Vec::new(),
@@ -269,6 +279,20 @@ impl Default for CiOptions {
             homebrew: None,
             chocolatey: None,
             scoop: None,
+        }
+    }
+}
+
+impl CiOptions {
+    pub(crate) fn flake_check_command(&self) -> Option<&'static str> {
+        if !self.repository_checks || !self.nix_flake_check {
+            None
+        } else if self.components.is_empty() || self.components.contains(&CiComponent::Checks) {
+            Some("nix flake check")
+        } else if self.components.contains(&CiComponent::FlakeEvaluation) {
+            Some("nix flake check --no-build")
+        } else {
+            None
         }
     }
 }
@@ -429,7 +453,7 @@ fn files_for_scope(request: FilesRequest<'_>, primary_only: bool) -> Result<Vec<
         file_suffix,
         self_check,
         runners,
-        options,
+        mut options,
         step_runners,
     } = request;
 
@@ -441,18 +465,28 @@ fn files_for_scope(request: FilesRequest<'_>, primary_only: bool) -> Result<Vec<
     let ci_name = workflow_file_name("ci", file_suffix);
     let publish_name = workflow_file_name("publish-crate", file_suffix);
     let artifacts_name = workflow_file_name("release-artifacts", file_suffix);
-    let mut files = vec![GeneratedFile {
-        relative_path: dir.join(ci_name),
-        content: ci_workflow(
-            platform,
-            runtime,
-            package,
-            self_check,
-            runners,
-            options.clone(),
-            step_runners,
-        ),
-    }];
+    let mut files = if !options.repository_checks
+        && (options.check_command.is_some()
+            || (options.om_ci == OmCiMode::Replace && !options.with_docs && !options.with_msrv))
+    {
+        Vec::new()
+    } else {
+        vec![GeneratedFile {
+            relative_path: dir.join(ci_name),
+            content: ci_workflow(
+                platform,
+                runtime,
+                package,
+                self_check,
+                runners,
+                options.clone(),
+                step_runners,
+            ),
+        }]
+    };
+
+    // Each release independently establishes its publication preconditions.
+    options.repository_checks = true;
 
     if !primary_only && options.publish_crates && package.is_publishable() {
         let content = publish_workflow(
@@ -976,14 +1010,31 @@ pub fn nix_flake_ci_file_with_system_runners(
     artifacts: &ArtifactsConfig,
     components: &[CiComponent],
 ) -> Result<GeneratedFile> {
+    nix_flake_ci_file_with_events(platform, runner, system_runners, artifacts, components, &[])
+}
+
+pub(crate) fn nix_flake_ci_file_with_events(
+    platform: Platform,
+    runner: &ResolvedRunner,
+    system_runners: &BTreeMap<String, String>,
+    artifacts: &ArtifactsConfig,
+    components: &[CiComponent],
+    push_branches: &[String],
+) -> Result<GeneratedFile> {
     if platform == Platform::Gitlab {
         bail!("GitLab flake CI uses .gitlab-ci.yml");
     }
     let mut workflow = String::new();
     push_generated_workflow_header(&mut workflow);
-    workflow.push_str("name: Nix flake check\n\non:\n  push:\n  pull_request:\n\n");
+    workflow.push_str("name: Nix flake check\n\non:\n  push:\n");
+    if !push_branches.is_empty() {
+        push_ci_branches(&mut workflow, push_branches);
+    }
+    workflow.push_str("  pull_request:\n\n");
     push_github_read_permissions(&mut workflow, platform);
-    if platform == Platform::Github && !system_runners.is_empty() {
+    if platform == Platform::Github && !push_branches.is_empty() {
+        push_github_concurrency(&mut workflow);
+    } else if platform == Platform::Github && !system_runners.is_empty() {
         // Coalesce one repository's push/PR branch while isolating same-named
         // branches from unrelated forks.
         workflow.push_str("concurrency:\n  group: ${{ github.workflow }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event.pull_request.head.ref || github.ref_name }}\n  cancel-in-progress: true\n\n");
@@ -1037,7 +1088,7 @@ pub fn nix_flake_ci_file_with_system_runners(
         if selected(CiComponent::FlakeWiring) {
             workflow.push_str("      - name: Check generated flake wiring\n        run: nix run --no-write-lock-file git+https://github.com/caniko/simit.git -- init flake --check --diff\n");
         }
-        if selected(CiComponent::FlakeEvaluation) {
+        if selected(CiComponent::FlakeEvaluation) && !selected(CiComponent::Checks) {
             workflow.push_str(
                 "      - name: Check flake evaluation\n        run: nix flake check --no-build",
             );
@@ -1269,7 +1320,8 @@ pub fn nix_build_matrix_file_with_options(
     let mut workflow = String::new();
     push_generated_workflow_header(&mut workflow);
     push_required_secrets_header(&mut workflow, &options.required_secrets);
-    workflow.push_str("name: Nix installable builds\n\non:\n  push:\n    branches: [\"**\"]\n");
+    workflow.push_str("name: Nix installable builds\n\non:\n  push:\n");
+    push_ci_branches(&mut workflow, &options.push_branches);
     if !options.push_tags.is_empty() {
         workflow.push_str("    tags:\n");
         for pattern in &options.push_tags {
@@ -1280,7 +1332,9 @@ pub fn nix_build_matrix_file_with_options(
     if platform == Platform::Github {
         workflow.push_str("permissions:\n  contents: read\n\n");
     }
-    if platform == Platform::Github && options.separate_events {
+    if platform == Platform::Github
+        && (options.separate_events || !options.push_branches.is_empty())
+    {
         push_github_concurrency(&mut workflow);
     } else if platform == Platform::Github && *options != crate::config::NixBuildConfig::default() {
         // Coalesce one repository's push/PR branch without canceling unrelated
@@ -2357,7 +2411,7 @@ fn python_ci_workflow(
     workflow.push_str("name: CI\n\n");
     workflow.push_str("on:\n");
     workflow.push_str("  push:\n");
-    workflow.push_str("    branches: [\"**\"]\n");
+    push_ci_branches(&mut workflow, &options.push_branches);
     workflow.push_str("    tags-ignore: [\"**\"]\n");
     if platform != Platform::Forgejo {
         workflow.push_str("  pull_request:\n");
@@ -2609,7 +2663,7 @@ fn ci_workflow_single_job(
     push_ci_workflow_name(&mut workflow, package, &options);
     workflow.push_str("on:\n");
     workflow.push_str("  push:\n");
-    workflow.push_str("    branches: [\"**\"]\n");
+    push_ci_branches(&mut workflow, &options.push_branches);
     workflow.push_str("    tags-ignore: [\"**\"]\n");
     if !(platform == Platform::Forgejo && runtime == Runtime::Nix) {
         workflow.push_str("  pull_request:\n");
@@ -2640,7 +2694,7 @@ fn ci_workflow_single_job(
             push_nix_cargo_cache_steps(&mut workflow, platform, &runners.ci, &options, "test");
             push_nix_cargo_bin_path_step(&mut workflow);
             push_extra_setup_steps(&mut workflow, &options.extra_setup);
-            if options.check_command.is_none() {
+            if options.repository_checks && options.check_command.is_none() {
                 workflow.push_str(&format!(
                 "      - name: Format check\n        run: |\n          # Expand formatter variables inside the Nix shell.\n          # shellcheck disable=SC2016\n          nix develop -c {NIX_FORMAT_COMMAND}\n\n",
             ));
@@ -2656,7 +2710,9 @@ fn ci_workflow_single_job(
                     );
                 }
                 OmCiMode::Replace => {
-                    push_om_ci_step(&mut workflow, &options);
+                    if options.repository_checks {
+                        push_om_ci_step(&mut workflow, &options);
+                    }
                     if let Some(command) = options.check_command.as_deref() {
                         workflow.push_str(&project_check_step_yaml(runtime, command));
                     } else {
@@ -2674,7 +2730,9 @@ fn ci_workflow_single_job(
                     }
                 }
                 OmCiMode::Augment => {
-                    push_om_ci_step(&mut workflow, &options);
+                    if options.repository_checks {
+                        push_om_ci_step(&mut workflow, &options);
+                    }
                     push_nix_ci_legacy_steps(
                         &mut workflow,
                         platform,
@@ -2692,9 +2750,11 @@ fn ci_workflow_single_job(
             if let Some(command) = options.check_command.as_deref() {
                 workflow.push_str(&project_check_step_yaml(runtime, command));
             } else {
-                workflow.push_str(
-                    "      - name: Format check\n        run: cargo fmt --all -- --check\n\n",
-                );
+                if options.repository_checks {
+                    workflow.push_str(
+                        "      - name: Format check\n        run: cargo fmt --all -- --check\n\n",
+                    );
+                }
                 push_test_steps(&mut workflow, runtime, package, &options);
                 push_quality_tool_install_steps(&mut workflow, runtime, &options);
                 push_optional_ci_steps(&mut workflow, runtime, package, &options);
@@ -2754,8 +2814,11 @@ fn ci_workflow_multi_job(
     push_ci_workflow_name(&mut workflow, package, &options);
     workflow.push_str("on:\n");
     workflow.push_str("  push:\n");
-    workflow.push_str("    branches: [\"**\"]\n");
+    push_ci_branches(&mut workflow, &options.push_branches);
     workflow.push_str("    tags-ignore: [\"**\"]\n");
+    if !(platform == Platform::Forgejo && runtime == Runtime::Nix) {
+        workflow.push_str("  pull_request:\n");
+    }
     workflow.push('\n');
     push_github_read_permissions(&mut workflow, platform);
     push_rust_ci_concurrency(&mut workflow, platform, &options);
@@ -2775,11 +2838,12 @@ fn ci_workflow_multi_job(
         });
     };
 
-    if runtime == Runtime::Nix && options.nix_flake_check {
-        capture(
-            STEP_FLAKE_CHECK,
-            "      - name: Check flake\n        run: nix flake check\n\n",
-        );
+    if runtime == Runtime::Nix && options.om_ci != OmCiMode::Replace {
+        let mut checks = String::new();
+        push_nix_check_steps(&mut checks, &options);
+        if !checks.is_empty() {
+            capture(STEP_FLAKE_CHECK, &checks);
+        }
     }
     if let Some(command) = options.check_command.as_deref() {
         capture(
@@ -2791,25 +2855,50 @@ fn ci_workflow_multi_job(
             push_self_check_steps(&mut sc, platform, runtime, self_check, &options);
             capture(STEP_SELF_CHECK, &sc);
         }
+    } else if runtime == Runtime::Nix && options.om_ci == OmCiMode::Replace {
+        if options.repository_checks {
+            let mut om = String::new();
+            om.push_str(&format!("      - name: Format check\n        run: |\n          nix develop -c {NIX_FORMAT_COMMAND}\n\n"));
+            push_om_ci_step(&mut om, &options);
+            capture(STEP_FLAKE_CHECK, &om);
+        }
+        let mut optional = String::new();
+        push_quality_tool_install_steps(&mut optional, runtime, &options);
+        push_optional_ci_steps(&mut optional, runtime, package, &options);
+        if !optional.is_empty() {
+            capture(STEP_CARGO_DOC, &optional);
+        }
+        if self_check.enabled {
+            let mut sc = String::new();
+            push_self_check_steps(&mut sc, platform, runtime, self_check, &options);
+            capture(STEP_SELF_CHECK, &sc);
+        }
     } else {
         match runtime {
             Runtime::Nix => {
-                capture(
-                    STEP_FORMAT,
-                    &format!(
-                        "      - name: Format check\n        run: |\n          # Expand formatter variables inside the Nix shell.\n          # shellcheck disable=SC2016\n          nix develop -c {NIX_FORMAT_COMMAND}\n\n"
-                    ),
-                );
+                if options.repository_checks && options.om_ci == OmCiMode::Augment {
+                    let mut om = String::new();
+                    push_om_ci_step(&mut om, &options);
+                    capture(STEP_FLAKE_CHECK, &om);
+                }
+                if options.repository_checks {
+                    capture(
+                        STEP_FORMAT,
+                        &format!(
+                            "      - name: Format check\n        run: |\n          # Expand formatter variables inside the Nix shell.\n          # shellcheck disable=SC2016\n          nix develop -c {NIX_FORMAT_COMMAND}\n\n"
+                        ),
+                    );
+                }
 
                 let mut test = String::new();
                 push_test_steps(&mut test, runtime, package, &options);
                 capture(STEP_CARGO_TEST, &test);
 
                 let mut q = String::new();
-                if options.with_audit {
+                if options.repository_checks && options.with_audit {
                     q.push_str("      - name: Check cargo-audit tool\n        run: nix develop -c cargo-audit --version\n\n");
                 }
-                if options.with_deny {
+                if options.repository_checks && options.with_deny {
                     q.push_str("      - name: Check cargo-deny tool\n        run: nix develop -c cargo-deny --version\n\n");
                 }
                 if !q.is_empty() {
@@ -2817,16 +2906,7 @@ fn ci_workflow_multi_job(
                 }
 
                 let mut opt = String::new();
-                push_msrv_step(&mut opt, runtime, package, &options);
-                if options.with_docs {
-                    opt.push_str(
-                        "      - name: Build docs\n        run: nix develop -c cargo doc --no-deps",
-                    );
-                    if options.all_features {
-                        opt.push_str(" --all-features");
-                    }
-                    opt.push_str("\n\n");
-                }
+                push_optional_ci_steps(&mut opt, runtime, package, &options);
                 if !opt.is_empty() {
                     capture(STEP_CARGO_DOC, &opt);
                 }
@@ -2856,20 +2936,22 @@ fn ci_workflow_multi_job(
                 }
             }
             Runtime::Cargo => {
-                capture(
-                    STEP_CARGO_FMT,
-                    "      - name: Format check\n        run: cargo fmt --all -- --check\n\n",
-                );
+                if options.repository_checks {
+                    capture(
+                        STEP_CARGO_FMT,
+                        "      - name: Format check\n        run: cargo fmt --all -- --check\n\n",
+                    );
+                }
 
                 let mut test = String::new();
                 push_test_steps(&mut test, runtime, package, &options);
                 capture(STEP_CARGO_TEST, &test);
 
                 let mut q = String::new();
-                if options.with_audit {
+                if options.repository_checks && options.with_audit {
                     q.push_str("      - name: Install cargo-audit\n        run: command -v cargo-audit >/dev/null 2>&1 || cargo install cargo-audit --locked\n\n");
                 }
-                if options.with_deny {
+                if options.repository_checks && options.with_deny {
                     q.push_str(&format!("      - name: Install cargo-deny\n        run: command -v cargo-deny >/dev/null 2>&1 || cargo install cargo-deny --locked --version {CARGO_DENY_VERSION}\n\n"));
                 }
                 if !q.is_empty() {
@@ -2877,14 +2959,7 @@ fn ci_workflow_multi_job(
                 }
 
                 let mut opt = String::new();
-                push_msrv_step(&mut opt, runtime, package, &options);
-                if options.with_docs {
-                    opt.push_str("      - name: Build docs\n        run: cargo doc --no-deps");
-                    if options.all_features {
-                        opt.push_str(" --all-features");
-                    }
-                    opt.push_str("\n\n");
-                }
+                push_optional_ci_steps(&mut opt, runtime, package, &options);
                 if !opt.is_empty() {
                     capture(STEP_CARGO_DOC, &opt);
                 }
@@ -3039,6 +3114,9 @@ fn push_required_gate_jobs(
     runners: &ResolvedCiRunners,
     options: &CiOptions,
 ) {
+    if !options.repository_checks {
+        return;
+    }
     for gate in &options.required_gates {
         let job = format!("gate-{}", sanitize_gate_id(&gate.id));
         trim_trailing_blank_lines(workflow);
@@ -4149,7 +4227,9 @@ fn push_github_concurrency(workflow: &mut String) {
 }
 
 fn push_rust_ci_concurrency(workflow: &mut String, platform: Platform, options: &CiOptions) {
-    if platform == Platform::Github && options.separate_events {
+    if platform == Platform::Github
+        && (options.separate_events || !options.push_branches.is_empty())
+    {
         push_independent_source_concurrency(workflow);
     } else if platform == Platform::Github
         && options.workspace_strategy == WorkspaceStrategy::Aggregate
@@ -4160,6 +4240,17 @@ fn push_rust_ci_concurrency(workflow: &mut String, platform: Platform, options: 
         workflow.push_str("concurrency:\n  group: .github/workflows/ci.yaml-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event.pull_request.head.ref || github.ref_name }}\n  cancel-in-progress: true\n\n");
     } else {
         push_provider_concurrency(workflow, platform);
+    }
+}
+
+fn push_ci_branches(workflow: &mut String, branches: &[String]) {
+    if branches.is_empty() {
+        workflow.push_str("    branches: [\"**\"]\n");
+    } else {
+        workflow.push_str("    branches:\n");
+        for branch in branches {
+            workflow.push_str(&format!("      - \"{}\"\n", yaml_double_quote(branch)));
+        }
     }
 }
 
@@ -4606,10 +4697,7 @@ fn push_nix_ci_legacy_steps(
     self_check: SelfCheckOptions<'_>,
     options: &CiOptions,
 ) {
-    if options.nix_flake_check {
-        workflow.push_str("      - name: Check flake\n");
-        workflow.push_str("        run: nix flake check\n\n");
-    }
+    push_nix_check_steps(workflow, options);
     if let Some(command) = options.check_command.as_deref() {
         workflow.push_str(&project_check_step_yaml(Runtime::Nix, command));
         if self_check.enabled {
@@ -4625,6 +4713,17 @@ fn push_nix_ci_legacy_steps(
     }
     push_clippy_steps(workflow, Runtime::Nix, package, options);
     push_nix_package_crate_step(workflow, package, options);
+}
+
+fn push_nix_check_steps(workflow: &mut String, options: &CiOptions) {
+    if options.repository_checks && options.components.contains(&CiComponent::FlakeWiring) {
+        workflow.push_str("      - name: Check generated flake wiring\n        run: nix run --no-write-lock-file git+https://github.com/caniko/simit.git -- init flake --check --diff\n\n");
+    }
+    if let Some(command) = options.flake_check_command() {
+        workflow.push_str("      - name: Check flake\n        run: ");
+        workflow.push_str(command);
+        workflow.push_str("\n\n");
+    }
 }
 
 fn push_nix_package_crate_step(workflow: &mut String, package: &Package, options: &CiOptions) {
@@ -4825,6 +4924,30 @@ fn push_test_steps(
         }
         workflow.push_str(" --no-default-features\n\n");
     }
+    if options.with_nextest
+        && !options.unit_tests_only
+        && (package.has_doctests() || options.workspace_has_doctests)
+    {
+        let mut modes = vec![(
+            "Doctests",
+            if options.all_features {
+                " --all-features"
+            } else {
+                ""
+            },
+        )];
+        if has_features(package) {
+            modes.push(("Doctests no default features", " --no-default-features"));
+        }
+        for (name, features) in modes {
+            workflow.push_str(&format!(
+                "      - name: {name}\n        run: {prefix}cargo test --doc"
+            ));
+            push_package_selector(workflow, package, options);
+            workflow.push_str(features);
+            workflow.push_str("\n\n");
+        }
+    }
 }
 
 fn push_clippy_steps(
@@ -4870,6 +4993,9 @@ fn push_package_crate_step(workflow: &mut String, package: &Package, options: &C
 }
 
 fn push_quality_tool_install_steps(workflow: &mut String, runtime: Runtime, options: &CiOptions) {
+    if !options.repository_checks {
+        return;
+    }
     let prefix = command_prefix(runtime);
     if options.with_audit {
         if runtime == Runtime::Cargo {
@@ -4947,11 +5073,11 @@ fn push_optional_ci_steps(
 ) {
     let prefix = command_prefix(runtime);
     push_msrv_step(workflow, runtime, package, options);
-    if options.with_audit {
+    if options.repository_checks && options.with_audit {
         push_audit_database_step(workflow);
         push_audit_step(workflow, runtime);
     }
-    if options.with_deny {
+    if options.repository_checks && options.with_deny {
         push_deny_step(workflow, prefix);
     }
     if options.with_docs {

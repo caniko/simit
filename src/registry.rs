@@ -1157,12 +1157,13 @@ fn infer_expected_primary_ci_files(
             })
             .unwrap_or("ubuntu-latest");
         let runner = ResolvedRunner::literal(runner)?;
-        let generated = crate::render::ci::nix_flake_ci_file_with_system_runners(
+        let generated = crate::render::ci::nix_flake_ci_file_with_events(
             platform,
             &runner,
             &config.ci.nix_system_runners,
             &config.ci_cache_artifacts(),
             &config.ci.components,
+            &config.ci.push_branches,
         )?;
         let mut files = if config.ci.nix_build.only {
             Vec::new()
@@ -1287,8 +1288,12 @@ fn infer_expected_primary_ci_files(
             packages.iter().collect::<Vec<_>>()
         };
     let mut files = Vec::new();
-    for package in generation_packages {
+    for (index, package) in generation_packages.into_iter().enumerate() {
         let package_options = ci::CiOptions {
+            repository_checks: index == 0,
+            workspace_has_doctests: resolved.workspace_strategy
+                == crate::cli::WorkspaceStrategy::Aggregate
+                && packages.iter().any(cargo::Package::has_doctests),
             package_scoped,
             publish_crates: options.publish_crates
                 && resolved.publish_strategy != crate::config::PublishStrategy::Coordinated,
@@ -1304,7 +1309,10 @@ fn infer_expected_primary_ci_files(
             runtime: resolved.runtime,
             package,
             file_suffix: package_scoped.then_some(package.name.as_str()),
-            self_check,
+            self_check: ci::SelfCheckOptions {
+                enabled: self_check.enabled && index == 0,
+                ..self_check
+            },
             runners: &runners,
             options: package_options,
             step_runners: &step_runners,
@@ -1590,7 +1598,7 @@ fn infer_expected_crow_files(
         .iter()
         .any(|package| package.name == "simit");
     let mut files = Vec::new();
-    for package in &packages {
+    for (index, package) in packages.iter().enumerate() {
         files.extend(crate::render::crow::files(
             crate::render::crow::FilesRequest {
                 format,
@@ -1599,7 +1607,7 @@ fn infer_expected_crow_files(
                 package,
                 file_suffix: package_scoped.then_some(package.name.as_str()),
                 self_check: ci::SelfCheckOptions {
-                    enabled: self_check,
+                    enabled: self_check && index == 0,
                     release: config.release.github.is_some() || config.release.codeberg.is_some(),
                     runner_override: None,
                     windows_runner_override: None,
@@ -1608,6 +1616,7 @@ fn infer_expected_crow_files(
                 },
                 runners: &runners,
                 options: ci::CiOptions {
+                    repository_checks: index == 0,
                     package_scoped,
                     ..options.clone()
                 },
@@ -2888,6 +2897,7 @@ jobs:
             publish: None,
             features: BTreeMap::new(),
             dependencies: Vec::new(),
+            targets: Vec::new(),
             manifest_path: Utf8PathBuf::from("/workspace/crates/modde-cli/Cargo.toml"),
         };
         let marked = vec![WorkflowFile {

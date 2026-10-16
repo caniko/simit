@@ -612,6 +612,7 @@ mod tests {
             rust_version: None,
             publish: if publishable { None } else { Some(Vec::new()) },
             features: BTreeMap::new(),
+            targets: Vec::new(),
             dependencies: dependencies
                 .iter()
                 .map(|(dependency, kind)| Dependency {
