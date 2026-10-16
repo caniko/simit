@@ -19,6 +19,7 @@ fn generate(root: &Path, check: bool) {
     command
         .current_dir(root)
         .env("SIMIT_NO_REGISTRY", "1")
+        .env("XDG_CONFIG_HOME", root.join(".config"))
         .args(["init", "ci"]);
     if check {
         command.args(["--check", "--diff"]);
@@ -114,7 +115,7 @@ fn member_workflows_run_repository_gates_once() {
         )
         .unwrap();
         fs::write(temp.path().join("flake.nix"), "{}\n").unwrap();
-        fs::write(temp.path().join("simit.toml"), format!("[ci]\nplatform = \"{platform}\"\nruntime = \"{runtime}\"\nworkspace = true\nworkspace_strategy = \"members\"\nwith_audit = true\nwith_deny = true\nwith_docs = true\n{extra}required_gates = [{{ id = \"shared\", run = \"nix run .#shared-contract\" }}]\n")).unwrap();
+        fs::write(temp.path().join("simit.toml"), format!("[ci]\nplatform = \"{platform}\"\nruntime = \"{runtime}\"\nrunner = \"atlas\"\nworkspace = true\nworkspace_strategy = \"members\"\nwith_audit = true\nwith_deny = true\nwith_docs = true\n{extra}required_gates = [{{ id = \"shared\", run = \"nix run .#shared-contract\" }}]\n")).unwrap();
         generate(temp.path(), false);
         let workflows = ["first", "second"].map(|name| {
             fs::read_to_string(
