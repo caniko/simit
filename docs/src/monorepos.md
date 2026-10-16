@@ -75,6 +75,8 @@ set from both root and member directories. GitHub Actions runs the planner at th
 checked-out revision and qualifies the selected components. Missing push-base
 objects trigger full qualification. Every component requires explicit checks;
 failed or cancelled selected jobs fail the aggregate `qualified` gate.
+`[ci].push_branches` filters branch pushes while retaining pull-request and
+manual qualification; an empty list preserves all branch pushes.
 
 Static policy from `simit.toml` or Cargo metadata verifies generated workflows
 once in the prerequisite `plan` job, before component selection. Flake-evaluated

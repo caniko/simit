@@ -60,6 +60,8 @@ it qualifies; a list of successful selected builds alone does not prove it.
 Nextest replaces the ordinary test harness and retains separate Cargo doctests
 for doctest-enabled library targets, including each feature mode. Binary-only
 packages and `unit_tests_only` do not get invalid or out-of-scope doctest commands.
+`unit_tests_only` selects library tests, or binary unit tests when the selected
+packages have no library target; aggregate CI considers every selected member.
 Omnix replacement suppresses generic Cargo tests and Clippy across Actions,
 split-runner and Crow layouts. Omnix augmentation retains both by design.
 
@@ -75,7 +77,8 @@ push_branches = ["trunk"]
 ```
 
 These are trigger filters, not successful job-level skips. Empty lists preserve
-all branch pushes. The primary filter supports GitHub Actions Rust/Python/flake CI;
+all branch pushes. The primary filter supports GitHub Actions Rust/Python/flake
+and monorepo qualification CI;
 the matrix filter supports GitHub Actions matrices, including grouped builds.
 Projects requiring independent push/PR originals retain their existing
 `separate_events` policies until their custody enrollment and required contexts
