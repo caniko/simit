@@ -30,10 +30,9 @@ fn main() {
 fn run() -> Result<()> {
     let cli = Cli::parse();
     if matches!(&cli.command, Commands::Init(command) if matches!(command.action, InitAction::Ci(_) | InitAction::Flake(_)))
+        && let Some(root) = simit::monorepo::find_root(&std::env::current_dir()?)?
     {
-        if let Some(root) = simit::monorepo::find_root(&std::env::current_dir()?)? {
-            std::env::set_current_dir(root)?;
-        }
+        std::env::set_current_dir(root)?;
     }
     match cli.command {
         #[cfg(feature = "runtime-admission-cli")]

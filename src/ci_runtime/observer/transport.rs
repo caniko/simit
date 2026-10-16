@@ -658,11 +658,13 @@ mod tests {
                 listener.local_addr().unwrap().port()
             );
             let server = thread::spawn(move || {
-                if let Some(stream) = accept(listener) {
-                    if let Ok(mut stream) = acceptor.accept(stream) {
-                        read_request(&mut stream);
-                        let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\norigin");
-                    }
+                if let Some(stream) = accept(listener)
+                    && let Ok(mut stream) = acceptor.accept(stream)
+                {
+                    read_request(&mut stream);
+                    let _ = stream.write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\norigin",
+                    );
                 }
             });
             let output = child("ca", &url)

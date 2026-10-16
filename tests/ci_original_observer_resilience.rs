@@ -83,15 +83,15 @@ impl Transport for Provider {
         assert!(!timeout.is_zero());
         assert!(!endpoint.contains("rerun"));
         for (suffix, statuses) in &mut self.faults {
-            if endpoint.contains(suffix.as_str()) {
-                if let Some(status) = statuses.pop_front() {
-                    return Ok(Response {
-                        status,
-                        body: b"retained transient provider response".to_vec(),
-                        retry_after: Some(2),
-                        transport_error: None,
-                    });
-                }
+            if endpoint.contains(suffix.as_str())
+                && let Some(status) = statuses.pop_front()
+            {
+                return Ok(Response {
+                    status,
+                    body: b"retained transient provider response".to_vec(),
+                    retry_after: Some(2),
+                    transport_error: None,
+                });
             }
         }
         let body = if endpoint.contains("actions/runs?") {

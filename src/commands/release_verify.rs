@@ -328,17 +328,14 @@ fn cargo_tag_manifest_matches(
         if Path::new(path)
             .file_name()
             .is_some_and(|name| name == "Cargo.toml")
+            && let Ok(manifest) = read(path)
+            && manifest
+                .get("package")
+                .and_then(|item| item.get("name"))
+                .and_then(toml_edit::Item::as_str)
+                == Some(package.name.as_str())
         {
-            if let Ok(manifest) = read(path) {
-                if manifest
-                    .get("package")
-                    .and_then(|item| item.get("name"))
-                    .and_then(toml_edit::Item::as_str)
-                    == Some(package.name.as_str())
-                {
-                    manifests.push(manifest);
-                }
-            }
+            manifests.push(manifest);
         }
     }
     anyhow::ensure!(

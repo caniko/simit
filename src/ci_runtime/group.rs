@@ -152,11 +152,11 @@ impl GroupSpec {
             "invalid check system"
         );
         ensure!(
-            self.limits.len() <= 4 && self.limits.len() % 2 == 0,
+            self.limits.len() <= 4 && self.limits.len().is_multiple_of(2),
             "invalid Nix limits"
         );
         let mut flags = BTreeSet::new();
-        for pair in self.limits.chunks_exact(2) {
+        for pair in self.limits.as_chunks::<2>().0 {
             ensure!(
                 matches!(pair[0].as_str(), "--max-jobs" | "--cores")
                     && flags.insert(&pair[0])
