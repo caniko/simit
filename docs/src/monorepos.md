@@ -127,7 +127,10 @@ collects diagnostics without starting the gate.
 
 Successful setup gates may retain background services for later gates. Failed,
 timed-out or cancelled gates stop their process group before diagnostics; the
-local CLI handles SIGINT, SIGTERM and SIGHUP. If Nix provisioning fails before
+local CLI handles SIGINT, SIGTERM and SIGHUP. During synchronous local process
+creation, those signals retain their default termination behavior until a child
+exists and native cleanup can run. Generated callers supervise that startup
+window with their outer deadline. If Nix provisioning fails before
 the native runner starts, the caller collects the same bounded diagnostics and
 returns the provisioning status. Separate private startup and diagnostic-completion
 markers allow fallback evidence after abrupt native termination while avoiding

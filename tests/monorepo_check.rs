@@ -1067,7 +1067,7 @@ fn native_initialization_remains_supervised_until_deadline_ownership() {
 
 #[test]
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
-fn stalled_gate_process_creation_remains_under_the_outer_deadline() {
+fn stalled_gate_process_creation_preserves_hosted_deadlines_and_local_interrupts() {
     let root = environment_fixture("literal");
     // Block glibc process creation in native Simit, before any Bash child exists.
     // The generated caller and its outer supervisor do not load this shim.
@@ -1129,6 +1129,53 @@ int posix_spawnp(pid_t *pid, const char *file,
         "{stderr}"
     );
     assert!(!stderr.contains("never-report-this-secret"));
+    // Local execution has no outer watcher. A blocked spawn must retain the
+    // default signal path instead of merely setting an unobserved atomic flag.
+    use std::os::unix::process::ExitStatusExt;
+    for (signal, expected) in [
+        (rustix::process::Signal::INT, signal_hook::consts::SIGINT),
+        (rustix::process::Signal::TERM, signal_hook::consts::SIGTERM),
+        (rustix::process::Signal::HUP, signal_hook::consts::SIGHUP),
+    ] {
+        fs::remove_file(root.path().join("spawn-blocked")).unwrap();
+        let mut child = Command::new(env!("CARGO_BIN_EXE_simit"))
+            .current_dir(root.path())
+            .args([
+                "monorepo",
+                "check",
+                "--component",
+                "core",
+                "--check",
+                "pass",
+            ])
+            .env("LD_PRELOAD", &library)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let ready = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !root.path().join("spawn-blocked").exists() {
+            assert!(std::time::Instant::now() < ready);
+            assert!(child.try_wait().unwrap().is_none());
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        rustix::process::kill_process(
+            rustix::process::Pid::from_raw(child.id() as i32).unwrap(),
+            signal,
+        )
+        .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while child.try_wait().unwrap().is_none() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        // Bound the failing reproduction without leaving its paused native process.
+        if child.try_wait().unwrap().is_none() {
+            child.kill().unwrap();
+        }
+        let output = child.wait_with_output().unwrap();
+        assert_eq!(output.status.signal(), Some(expected), "{output:?}");
+        assert!(!root.path().join("executions").exists());
+    }
 }
 
 #[test]

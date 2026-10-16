@@ -116,6 +116,8 @@ pub(super) fn run(command: MonorepoCheckCommand) -> Result<()> {
                 .min(gate.timeout_minutes * 60)
         });
     let cancelled = Arc::new(AtomicBool::new(false));
+    #[cfg(unix)]
+    let startup_interruptible = Arc::new(AtomicBool::new(command.supervisor_ready.is_none()));
     // This CLI exits after one command. As with the native CI CLI, retain the
     // process-global handlers for its lifetime; Drop is not run on default
     // signal termination and Bash lives in a separate process group.
@@ -125,6 +127,9 @@ pub(super) fn run(command: MonorepoCheckCommand) -> Result<()> {
         signal_hook::consts::SIGTERM,
         signal_hook::consts::SIGHUP,
     ] {
+        // ponytail: local spawn has no outer timer. Retain default termination
+        // until it returns; deadline-bound lookup needs an isolated launcher.
+        signal_hook::flag::register_conditional_default(signal, startup_interruptible.clone())?;
         signal_hook::flag::register(signal, cancelled.clone())?;
     }
     let deadline = Instant::now() + Duration::from_secs(seconds);
@@ -136,6 +141,8 @@ pub(super) fn run(command: MonorepoCheckCommand) -> Result<()> {
             cleanup: true,
         }))
     };
+    #[cfg(unix)]
+    startup_interruptible.store(false, Ordering::SeqCst);
     // Initialization and process creation can block. Keep outer supervision
     // until spawn returns; even spawn errors claim the single diagnostic attempt.
     // A successfully spawned child is already guarded if claiming ownership fails.

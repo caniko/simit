@@ -22,6 +22,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Keep local monorepo gate process creation interruptible by normal termination
+  signals until native child cleanup can take ownership.
 - Use job Bash for generated monorepo gate supervision on hosted and custom runners,
   retain diagnostics on gate spawn failure or abrupt native termination and
   propagate gate exit codes. Keep the tool PATH while
