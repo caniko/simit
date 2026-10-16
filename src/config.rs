@@ -543,6 +543,11 @@ impl CiConfig {
         provider: CiProvider,
         platform: Platform,
     ) -> Result<()> {
+        if self.separate_events && !self.push_branches.is_empty() {
+            bail!(
+                "[ci].push_branches cannot filter explicitly retained separate_events producers; migrate event evidence and policy together"
+            );
+        }
         if !self.push_branches.is_empty()
             && (provider != CiProvider::Actions || platform != Platform::Github)
         {
@@ -855,6 +860,11 @@ impl NixBuildConfig {
     }
 
     pub(crate) fn validate_push_tags(&self) -> Result<()> {
+        if self.separate_events && !self.push_branches.is_empty() {
+            bail!(
+                "[ci.nix_build].push_branches cannot filter explicitly retained separate_events producers; migrate event evidence and policy together"
+            );
+        }
         validate_event_patterns("[ci.nix_build].push_branches", &self.push_branches)?;
         validate_event_patterns("[ci.nix_build].push_tags", &self.push_tags)
     }

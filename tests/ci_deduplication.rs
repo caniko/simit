@@ -281,6 +281,33 @@ fn explicitly_separate_github_events_keep_both_producers() {
 }
 
 #[test]
+fn branch_filters_cannot_silently_retire_explicit_dual_event_producers() {
+    for matrix in [false, true] {
+        let temp = TempDir::new().unwrap();
+        project(temp.path(), "demo");
+        fs::write(temp.path().join("flake.nix"), "{}\n").unwrap();
+        let table = if matrix {
+            "nix_builds = [\".#default\"]\n[ci.nix_build]\n"
+        } else {
+            ""
+        };
+        fs::write(temp.path().join("simit.toml"), format!("[ci]\nplatform = \"github\"\nruntime = \"nix\"\n{table}separate_events = true\npush_branches = [\"trunk\"]\n")).unwrap();
+        let output = common::simit()
+            .current_dir(temp.path())
+            .args(["init", "ci"])
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            error.contains("push_branches") && error.contains("separate_events"),
+            "{error}"
+        );
+        assert!(!temp.path().join(".github/workflows").exists());
+    }
+}
+
+#[test]
 fn nextest_does_not_add_invalid_binary_or_disabled_library_doctests() {
     for (platform, provider, path) in [
         ("github", "actions", ".github/workflows/ci.yaml"),

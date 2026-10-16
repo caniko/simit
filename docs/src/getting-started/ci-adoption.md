@@ -79,7 +79,8 @@ all branch pushes. The primary filter supports GitHub Actions Rust/Python/flake 
 the matrix filter supports GitHub Actions matrices, including grouped builds.
 Projects requiring independent push/PR originals retain their existing
 `separate_events` policies until their custody enrollment and required contexts
-have migrated together. Release/tag triggers retain their separate policy.
+have migrated together. Combining branch filters with explicit `separate_events`
+is rejected before generation. Release/tag triggers retain their separate policy.
 Distinct MSRV, feature, platform, extracted-package, all-system evaluation and
 fresh-execution checks are separate acceptance cases, not duplicate work.
 
