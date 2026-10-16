@@ -7,8 +7,95 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Raise Simit's minimum Rust version to 1.88 to use the security-patched Hickory
+  DNS resolver; generated projects keep their independently declared minimums.
+
 ### Added
 
+- Native `simit ci observe-original` and `verify-original-retention` capture
+  enrolled original GitHub producers with bounded transient GET retries, one
+  aggregate deadline, continuous identity binding, explicit incomplete receipts,
+  complete required job/step admission, and independent uploaded ZIP/retention
+  revalidation. No producer execution or rerun API is exposed.
+
+### Fixed
+
+- Provision Python for generated monorepo gate supervision, retain diagnostics
+  on gate spawn failure and propagate gate exit codes. Keep the tool PATH while
+  locating Bash in Nix sandboxes before restoring the gate's configured PATH.
+- Preserve configured monorepo gate environment data across Bash and Nix startup,
+  reject read-only Bash names before execution, and bound provisioning and native
+  initialization so failed or timed-out checks retain their diagnostic reserve.
+- Clarify NuGet v2/v3 Chocolatey source configuration and reject authenticated
+  registry reads explicitly without exposing publication credentials.
+- Discover NuGet v3 package-content resources for Chocolatey byte verification
+  and omit SemVer build metadata from normalized package filenames and lookups.
+- Reject traversal in COPR spec output paths and enter AUR clones before dropping
+  root privileges, preserving private workspace permissions and clone ownership.
+- Persist and verify source-bound Chocolatey candidates before Actions
+  publication, retain normalized package filenames, isolate prebuild concurrency
+  by fork repository, and reject colliding COPR spec/Makefile outputs.
+- Honor configured COPR Makefile and SRPM staging paths, match the RPM spec's
+  source archive basename, and reject missing, empty, or duplicate SRPMs.
+- Give disposable COPR release fixtures a repository-local Git identity so
+  production-package tests also run in identity-free Nix sandboxes.
+- Link managed APT badges to the configured public repository URL.
+- Generate AUR metadata as an unprivileged user on root release runners;
+  restore clone ownership on success or failure and preserve prior metadata
+  when generation fails.
+- Run Chocolatey release publication in the project's declared environment;
+  retain source-bound packed candidates for byte-verified retries, reject
+  conflicting registry content, and keep publication credentials out of
+  packing, lookups, and command output.
+- Carry CLI cancellation through every source Git probe and launch probe children
+  with a clean environment; document the required isolated observer-job boundary.
+- Revalidate captured attempt-one jobs and log contents against GitHub during
+  retention; an artifact digest cannot authenticate a recomputed forged receipt.
+- Reserve full partial-download retry bodies independently of fresh metadata and
+  log revalidation, without resetting the retention deadline.
+- Preserve `@` in workflow filenames and refs, rejecting ambiguous producer paths.
+- Keep DNS resolution asynchronous and owned by each transfer runtime, including
+  cancellation, deadline expiry and subsequent calls through a reused client.
+- Charge local retention inventory, archive validation and provider reads to one
+  five-minute deadline starting at entry, preserving the hosted step allocation.
+- Reject blocking or substituted event/spec input files during bounded preflight;
+  install CLI cancellation early and retain incomplete preflight diagnostics.
+- Verify source commit, tree and blob object hashes before admitting observer policy.
+- Admit Git-valid Unicode workflow refs and retain an incomplete receipt when
+  cancellation arrives during final receipt publication.
+- Keep protected source probes usable inside Nix sandboxes, bind PR heads to the
+  protected merge revision, isolate observer TLS/proxies from job environment,
+  and retry bounded transient request/protocol failures.
+- Honor reset-only GitHub rate limits, bind observer event targets to the native
+  runner ref, and resolve source probes through protected platform Git paths.
+- Keep observer source probes free of external clean filters and observer
+  credentials, and support synchronous transport calls from Tokio tasks.
+- Repeat original-producer selection during retention, preserve the event snapshot
+  that authorized source enrollment, fall back from empty primary tokens, and
+  register native Windows console cancellation for the observer CLI.
+- Original-producer custody can interrupt stalled header/body transfers while
+  preserving partial bytes, admit repository-name period pairs and optional
+  attempt-scoped job fields, and bind clean-filtered checkouts to the authoritative
+  committed enrollment policy, including CRLF and maximal CLI spec inventories.
+- Bind original-observer enrollment bytes to the source commit, reject enrollment
+  of the active observer, and use portable artifact member paths on Windows.
+- Filter same-SHA producer discovery by branch/PR target, validate provider
+  workflow refs independently, and allow large downloads the remaining deadline.
+- Reserve generated custody evidence, retry capped transient HTTP error bodies,
+  and preserve packet directory extensions in independent retention diagnostics.
+
+## [0.21.0] - 2026-10-15
+
+### Added
+
+- Bounded runtime admission through a reusable library and `simit runtime admit`:
+  explicit retryable statuses, cancellable backoff, per-probe/overall deadlines,
+  aggregate byte budgets and fresh observation receipts. CI and admission reuse
+  the same process/cancellation implementation; existing CI interfaces remain
+  compatible. Systemd adapters and escaped-descendant cgroup containment remain
+  consumer-owned qualification requirements.
 - Explicit `sealed-v2` completion custody: immediate per-original capture,
   native step-log completeness admission, immutable artifact ID/digest verification
   and independently uploaded aggregation with fresh native revocation checks.
@@ -57,29 +144,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Provision Python for generated monorepo gate supervision, retain diagnostics
-  on gate spawn failure and propagate gate exit codes. Keep the tool PATH while
-  locating Bash in Nix sandboxes before restoring the gate's configured PATH.
-- Preserve configured monorepo gate environment data across Bash and Nix startup,
-  reject read-only Bash names before execution, and bound provisioning and native
-  initialization so failed or timed-out checks retain their diagnostic reserve.
-- Reject traversal in COPR spec output paths and enter AUR clones before dropping
-  root privileges, preserving private workspace permissions and clone ownership.
-- Persist and verify source-bound Chocolatey candidates before Actions
-  publication, retain normalized package filenames, isolate prebuild concurrency
-  by fork repository, and reject colliding COPR spec/Makefile outputs.
-- Honor configured COPR Makefile and SRPM staging paths, match the RPM spec's
-  source archive basename, and reject missing, empty, or duplicate SRPMs.
-- Give disposable COPR release fixtures a repository-local Git identity so
-  production-package tests also run in identity-free Nix sandboxes.
-- Link managed APT badges to the configured public repository URL.
-- Generate AUR metadata as an unprivileged user on root release runners;
-  restore clone ownership on success or failure and preserve prior metadata
-  when generation fails.
-- Run Chocolatey release publication in the project's declared environment;
-  retain source-bound packed candidates for byte-verified retries, reject
-  conflicting registry content, and keep publication credentials out of
-  packing, lookups, and command output.
 - Omit the default empty tag-prefix argument from trusted Cargo publisher workflows,
   preserving compatibility with enrolled engines that predate prefixed releases.
 - Publish sealed capsule names only after admission succeeds, keeping failed-capture
@@ -876,7 +940,8 @@ ci`, including the `~/.cargo/bin` key, rust-cache settings, and why Nix
 
 - Prepare the first public crates.io release.
 
-[Unreleased]: https://github.com/caniko/simit/compare/0.20.0...HEAD
+[Unreleased]: https://github.com/caniko/simit/compare/0.21.0...HEAD
+[0.21.0]: https://github.com/caniko/simit/compare/0.20.0...0.21.0
 [0.20.0]: https://github.com/caniko/simit/compare/0.19.0...0.20.0
 [0.19.0]: https://github.com/caniko/simit/compare/0.18.1...0.19.0
 [0.18.1]: https://github.com/caniko/simit/compare/0.18.0...0.18.1

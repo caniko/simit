@@ -8,6 +8,9 @@
 
 `simit` is a semver-aware commit helper for Rust projects.
 
+Building Simit requires Rust 1.88 or newer. Generated projects retain their own
+declared compiler requirements.
+
 ```sh
 simit commit patch -m "fix admission edge case"
 simit commit minor -m "add weighted provider API"

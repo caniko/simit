@@ -189,13 +189,13 @@ pub fn validate_process_identity(
 ) -> Result<()> {
     let mut ids = BTreeMap::new();
     for line in status.lines() {
-        if let Some((key, values)) = line.split_once(':') {
-            if key == "Uid" || key == "Gid" {
-                ensure!(
-                    ids.insert(key, values).is_none(),
-                    "duplicate process identity observation"
-                );
-            }
+        if let Some((key, values)) = line.split_once(':')
+            && (key == "Uid" || key == "Gid")
+        {
+            ensure!(
+                ids.insert(key, values).is_none(),
+                "duplicate process identity observation"
+            );
         }
     }
     for (key, expected) in [("Uid", identity.uid), ("Gid", identity.gid)] {

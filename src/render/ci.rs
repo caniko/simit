@@ -733,10 +733,10 @@ fn publish_workspace_workflow(
         let job = job_names.get(name).unwrap();
         let mut needs: Vec<String> = vec![previous.clone()];
         for dep in depends_on {
-            if let Some(dep_job) = job_names.get(dep) {
-                if dep_job != job {
-                    needs.push(dep_job.clone());
-                }
+            if let Some(dep_job) = job_names.get(dep)
+                && dep_job != job
+            {
+                needs.push(dep_job.clone());
             }
         }
         needs.sort();

@@ -2307,22 +2307,21 @@ fn pre_commit_nix(
     if selected(
         FlakeComponent::CargoMsrv,
         languages.rust && rust_version.is_some(),
-    ) {
-        if let Some(rust_version) = rust_version {
-            let toolchain_version = rust_overlay_version(rust_version);
-            content.push_str("\n  cargo-msrv = {\n");
-            content.push_str("    enable = true;\n");
-            content.push_str("    name = \"cargo check MSRV\";\n");
-            content.push_str(&format!(
+    ) && let Some(rust_version) = rust_version
+    {
+        let toolchain_version = rust_overlay_version(rust_version);
+        content.push_str("\n  cargo-msrv = {\n");
+        content.push_str("    enable = true;\n");
+        content.push_str("    name = \"cargo check MSRV\";\n");
+        content.push_str(&format!(
                 "    entry = \"${{pkgs.rust-bin.stable.\"{toolchain_version}\".default}}/bin/cargo check --workspace --all-features\";\n"
             ));
-            content.push_str(&format!(
-                "    extraPackages = [pkgs.rust-bin.stable.\"{toolchain_version}\".default];\n"
-            ));
-            content.push_str("    pass_filenames = false;\n");
-            content.push_str("    stages = [\"pre-push\" \"manual\"];\n");
-            content.push_str("  };\n");
-        }
+        content.push_str(&format!(
+            "    extraPackages = [pkgs.rust-bin.stable.\"{toolchain_version}\".default];\n"
+        ));
+        content.push_str("    pass_filenames = false;\n");
+        content.push_str("    stages = [\"pre-push\" \"manual\"];\n");
+        content.push_str("  };\n");
     }
     if selected(FlakeComponent::CargoAudit, languages.rust) {
         content.push_str("\n  cargo-audit = {\n");

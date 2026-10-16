@@ -19,6 +19,10 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Commands {
+    /// Bounded runtime readiness observations.
+    #[cfg(feature = "runtime-admission-cli")]
+    #[command(subcommand)]
+    Runtime(crate::runtime_admission::cli::Command),
     #[command(subcommand, about = "Execute versioned CI runtime contracts")]
     Ci(crate::ci_runtime::cli::Command),
     #[command(

@@ -554,10 +554,10 @@ impl HostService {
 
 impl Drop for HostService {
     fn drop(&mut self) {
-        if !self.finished {
-            if let Err(error) = self.stop() {
-                eprintln!("owned Kvrocks cleanup failed: {error:#}");
-            }
+        if !self.finished
+            && let Err(error) = self.stop()
+        {
+            eprintln!("owned Kvrocks cleanup failed: {error:#}");
         }
     }
 }

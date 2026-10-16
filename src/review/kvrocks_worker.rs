@@ -326,10 +326,10 @@ impl Supervisor {
 
 impl Drop for Supervisor {
     fn drop(&mut self) {
-        if !self.stopped {
-            if let Err(error) = self.stop() {
-                eprintln!("owned cache worker cleanup failed: {error:#}");
-            }
+        if !self.stopped
+            && let Err(error) = self.stop()
+        {
+            eprintln!("owned cache worker cleanup failed: {error:#}");
         }
     }
 }

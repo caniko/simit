@@ -2307,12 +2307,12 @@ impl ProjectConfig {
         if self.ci.workspace && !self.ci.packages.is_empty() {
             bail!("simit project config: [ci].workspace cannot be true when [ci].packages is set");
         }
-        if let Some(command) = &self.ci.check_command {
-            if command.trim().is_empty() || command.contains(['\n', '\r']) {
-                bail!(
-                    "simit project config: [ci].check_command must be a non-empty single-line command"
-                );
-            }
+        if let Some(command) = &self.ci.check_command
+            && (command.trim().is_empty() || command.contains(['\n', '\r']))
+        {
+            bail!(
+                "simit project config: [ci].check_command must be a non-empty single-line command"
+            );
         }
         if self.ci.with_nix_cargo_cache && self.ci.runtime == Some(Runtime::Cargo) {
             bail!("simit project config: [ci].with_nix_cargo_cache requires runtime = \"nix\"");
@@ -2783,17 +2783,15 @@ impl ProjectConfig {
         if homebrew.download_repo.is_empty() {
             bail!("simit project config: [homebrew].download_repo is required");
         }
-        if let Some(desc) = &homebrew.description {
-            if desc.chars().count() > 80 {
-                bail!(
-                    "simit project config: [homebrew].description must be 80 characters or fewer"
-                );
-            }
+        if let Some(desc) = &homebrew.description
+            && desc.chars().count() > 80
+        {
+            bail!("simit project config: [homebrew].description must be 80 characters or fewer");
         }
-        if let Some(home) = &homebrew.homepage {
-            if !home.starts_with("https://") {
-                bail!("simit project config: [homebrew].homepage must start with https://");
-            }
+        if let Some(home) = &homebrew.homepage
+            && !home.starts_with("https://")
+        {
+            bail!("simit project config: [homebrew].homepage must start with https://");
         }
         if !homebrew.platforms.any_enabled() {
             bail!("simit project config: [homebrew].platforms has all platforms disabled");
@@ -2811,17 +2809,17 @@ impl ProjectConfig {
         if chocolatey.download_repo.is_empty() {
             bail!("simit project config: [chocolatey].download_repo is required");
         }
-        if let Some(desc) = &chocolatey.description {
-            if desc.chars().count() > 4000 {
-                bail!(
-                    "simit project config: [chocolatey].description must be 4000 characters or fewer"
-                );
-            }
+        if let Some(desc) = &chocolatey.description
+            && desc.chars().count() > 4000
+        {
+            bail!(
+                "simit project config: [chocolatey].description must be 4000 characters or fewer"
+            );
         }
-        if let Some(tags) = &chocolatey.tags {
-            if tags.chars().count() > 4000 {
-                bail!("simit project config: [chocolatey].tags must be 4000 characters or fewer");
-            }
+        if let Some(tags) = &chocolatey.tags
+            && tags.chars().count() > 4000
+        {
+            bail!("simit project config: [chocolatey].tags must be 4000 characters or fewer");
         }
         reject_basic_auth_url(
             "simit project config: [chocolatey].push.source",
@@ -3019,10 +3017,10 @@ impl ProjectConfig {
             .tags
             .map(str::to_owned)
             .or_else(|| cfg.and_then(|chocolatey| chocolatey.tags.clone()));
-        if let Some(tags) = &tags {
-            if tags.chars().count() > 4000 {
-                bail!("chocolatey.tags must be 4000 characters or fewer");
-            }
+        if let Some(tags) = &tags
+            && tags.chars().count() > 4000
+        {
+            bail!("chocolatey.tags must be 4000 characters or fewer");
         }
         let release_notes_url = overrides
             .release_notes_url
@@ -3206,10 +3204,10 @@ impl ProjectConfig {
         // The apt repo_url is an SSH git remote (e.g. ssh://git@host/...), where a
         // `user@` userinfo is expected; only reject an embedded `:password@`.
         reject_password_url("simit project config: [apt].repo_url", &apt.repo_url)?;
-        if let Some(public_url) = &apt.public_url {
-            if !public_url.starts_with("https://") {
-                bail!("simit project config: [apt].public_url must start with https://");
-            }
+        if let Some(public_url) = &apt.public_url
+            && !public_url.starts_with("https://")
+        {
+            bail!("simit project config: [apt].public_url must start with https://");
         }
         if apt.pages.provider != "codeberg-git-pages" {
             bail!("simit project config: [apt].pages.provider must be codeberg-git-pages");
@@ -3684,10 +3682,10 @@ fn reject_password_url(name: &str, value: &str) -> Result<()> {
         .find(['/', '?', '#'])
         .map_or(value.len(), |offset| authority_start + offset);
     let authority = &value[authority_start..authority_end];
-    if let Some((userinfo, _host)) = authority.rsplit_once('@') {
-        if userinfo.contains(':') {
-            bail!("{name} must not include an embedded password");
-        }
+    if let Some((userinfo, _host)) = authority.rsplit_once('@')
+        && userinfo.contains(':')
+    {
+        bail!("{name} must not include an embedded password");
     }
     Ok(())
 }
