@@ -30,6 +30,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Bash names before execution. Require private supervisor directories and bound
   provisioning, native initialization and gate process creation so failed or
   timed-out checks retain their diagnostic reserve.
+- Limit COPR staging cleanup to generated source RPMs, preserving project files
+  when the staging directory also contains specs or sources.
 - Clarify NuGet v2/v3 Chocolatey source configuration and reject authenticated
   registry reads explicitly without exposing publication credentials.
 - Discover NuGet v3 package-content resources for Chocolatey byte verification

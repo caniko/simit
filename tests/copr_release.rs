@@ -98,6 +98,10 @@ fn executable(path: &Path, contents: &str) {
 fn exercise(srpm_dir: Option<&str>) {
     let dir = project(srpm_dir);
     let root = dir.path();
+    let staging = root.join(srpm_dir.unwrap_or("srpms"));
+    fs::create_dir_all(&staging).unwrap();
+    fs::write(staging.join("keep.txt"), "project input\n").unwrap();
+    fs::write(staging.join("stale.src.rpm"), "stale RPM\n").unwrap();
     let bin = root.join("test-bin");
     fs::create_dir(&bin).unwrap();
     executable(
@@ -141,6 +145,12 @@ fn exercise(srpm_dir: Option<&str>) {
         fs::read_to_string(root.join(&expected)).unwrap(),
         "srpm fixture\n"
     );
+    assert_eq!(
+        fs::read_to_string(staging.join("keep.txt")).unwrap(),
+        "project input\n"
+    );
+    assert!(root.join("src/main.rs").is_file());
+    assert!(!staging.join("stale.src.rpm").exists());
     let publish = run("Push SRPM to COPR");
     assert!(
         publish.status.success(),
@@ -176,4 +186,11 @@ fn default_copr_archive_matches_spec_and_published_srpm() {
 #[test]
 fn custom_copr_staging_is_shared_by_build_and_publication() {
     exercise(Some("target/release-artifacts/srpms"));
+}
+
+#[cfg(unix)]
+#[test]
+fn copr_staging_cleanup_preserves_workspace_inputs() {
+    exercise(Some("dist"));
+    exercise(Some("src"));
 }
