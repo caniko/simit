@@ -614,62 +614,117 @@ fn aggregate_claims_and_bundle_digests_cannot_be_forged() {
 fn export_failure_exits_unsuccessfully_and_retains_build_facts() {
     use std::os::unix::fs::PermissionsExt;
     use std::process::Command;
-    let temp = tempfile::tempdir().unwrap();
-    let mut p = plan();
-    p.tool_lock = json!({"version":7,"root":"root","nodes":{"root":{"inputs":{"simit":"simit","nixpkgs":"nixpkgs"}},"simit":{"locked":{"type":"github","owner":"caniko","repo":"simit","rev":HEAD}},"nixpkgs":{"locked":{"type":"github","owner":"NixOS","repo":"nixpkgs","rev":HEAD}}}});
-    p.tool_lock_digest = canonical_digest(&p.tool_lock).unwrap();
-    p.seal().unwrap();
-    let manifest = temp.path().join("engine.json");
-    repo_review::write_json(&manifest, &json!({"schema_version":1,"repository":"caniko/simit","revision":HEAD,"nixpkgs_revision":HEAD})).unwrap();
-    let plan_path = temp.path().join("plan.json");
-    repo_review::write_json(&plan_path, &p).unwrap();
-    let tools = temp.path().join("tools");
-    std::fs::create_dir(&tools).unwrap();
-    let lock = json!({"version":7,"root":"root","nodes":{"root":{}}});
-    let metadata = json!({"locked":{"rev":HEAD,"narHash":"sha256-test"},"locks":lock});
-    let drv = format!("{ROOT}.drv");
-    let derivations = json!({&drv:{"system":"x86_64-linux","outputs":{"out":{"path":ROOT}}}});
-    let closure = json!({ROOT:{"narHash":"sha256-test","narSize":1,"references":[]}});
-    for (name, script) in [
-        (
-            "git",
-            format!(
-                "#!/bin/sh\ncase \"$1\" in\ninit) printf '{{}}' > flake.nix;;\nrev-parse) printf '%s' '{HEAD}';;\nesac\n"
+    for (with_recipe, declared_flake) in [(false, false), (true, false), (true, true)] {
+        let temp = tempfile::tempdir().unwrap();
+        let mut p = plan();
+        if with_recipe {
+            p.request.backend = Backend::ExternalFlake;
+            p.request.recipe = Some(Recipe {
+                repository: "trusted/recipe".into(),
+                commit: BASE.into(),
+                directory: ".".into(),
+                source_input: "source".into(),
+            });
+            p.recipe = Some(Identity {
+                id: 3,
+                repository: "trusted/recipe".into(),
+                commit: BASE.into(),
+                tree: BASE.into(),
+            });
+            p.request_id = canonical_digest(&p.request).unwrap();
+        }
+        p.tool_lock = json!({"version":7,"root":"root","nodes":{"root":{"inputs":{"simit":"simit","nixpkgs":"nixpkgs"}},"simit":{"locked":{"type":"github","owner":"caniko","repo":"simit","rev":HEAD}},"nixpkgs":{"locked":{"type":"github","owner":"NixOS","repo":"nixpkgs","rev":HEAD}}}});
+        p.tool_lock_digest = canonical_digest(&p.tool_lock).unwrap();
+        p.seal().unwrap();
+        let manifest = temp.path().join("engine.json");
+        repo_review::write_json(&manifest, &json!({"schema_version":1,"repository":"caniko/simit","revision":HEAD,"nixpkgs_revision":HEAD})).unwrap();
+        let plan_path = temp.path().join("plan.json");
+        repo_review::write_json(&plan_path, &p).unwrap();
+        let tools = temp.path().join("tools");
+        std::fs::create_dir(&tools).unwrap();
+        let lock = if with_recipe {
+            json!({"version":7,"root":"root","nodes":{"root":{"inputs":{"source":"source"}},"source":{"flake":false,"locked":{"type":"github","owner":"contributor","repo":"project","rev":HEAD,"narHash":"sha256-test"}}}})
+        } else {
+            json!({"version":7,"root":"root","nodes":{"root":{}}})
+        };
+        let revision = if with_recipe { BASE } else { HEAD };
+        let metadata = json!({"locked":{"rev":revision,"narHash":"sha256-test"},"locks":lock});
+        let mut initial = metadata.clone();
+        if with_recipe {
+            initial["locks"]["nodes"]["source"]["flake"] = json!(declared_flake);
+            initial["locks"]["nodes"]["source"]["locked"]["rev"] = json!(MERGE);
+        }
+        let metadata_calls = temp.path().join("metadata-calls.log");
+        let drv = format!("{ROOT}.drv");
+        let derivations = json!({&drv:{"system":"x86_64-linux","outputs":{"out":{"path":ROOT}}}});
+        let closure = json!({ROOT:{"narHash":"sha256-test","narSize":1,"references":[]}});
+        for (name, script) in [
+            (
+                "git",
+                format!(
+                    "#!/bin/sh\ncase \"$1\" in\ninit) printf '{{}}' > flake.nix;;\nrev-parse) case \"$PWD\" in\n*/recipe) printf '%s' '{BASE}';;\n*) printf '%s' '{HEAD}';;\nesac;;\nesac\n"
+                ),
             ),
-        ),
-        ("uname", "#!/bin/sh\nprintf x86_64".into()),
-        (
-            "nix",
-            format!(
-                "#!/bin/sh\ncase \"$1 $2 $3 $4\" in\n'config show system '*) printf x86_64-linux;;\n'config show sandbox '*) printf true;;\n--version*) printf 'Nix fixture';;\n'flake metadata '*) printf '%s' '{metadata}';;\neval*) printf '%s' '{drv}';;\n'derivation show '*) printf '%s' '{derivations}';;\nbuild*) printf '[]';;\n'path-info '*) printf '%s' '{closure}';;\ncopy*) printf 'intentional export failure' >&2; exit 1;;\n*) exit 9;;\nesac\n"
+            ("uname", "#!/bin/sh\nprintf x86_64".into()),
+            (
+                "nix",
+                format!(
+                    "#!/bin/sh\ncase \"$1 $2 $3 $4\" in\n'config show system '*) printf x86_64-linux;;\n'config show sandbox '*) printf true;;\n--version*) printf 'Nix fixture';;\n'flake metadata '*)\nprintf 'metadata diagnostic\\n' >&2\nprintf '%s\\n' \"$*\" >> \"$METADATA_CALLS\"\ncase \" $* \" in\n*' --override-input source github:contributor/project/{HEAD} '*) printf '%s' '{metadata}';;\n*) printf '%s' '{initial}';;\nesac;;\neval*) printf '%s' '{drv}';;\n'derivation show '*) printf '%s' '{derivations}';;\nbuild*) printf '[]';;\n'path-info '*) printf '%s' '{closure}';;\ncopy*) printf 'intentional export failure' >&2; exit 1;;\n*) exit 9;;\nesac\n"
+                ),
             ),
-        ),
-    ] {
-        let path = tools.join(name);
-        std::fs::write(&path, script).unwrap();
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        ] {
+            let path = tools.join(name);
+            std::fs::write(&path, script).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let out = temp.path().join("bundle");
+        let result = Command::new(env!("CARGO_BIN_EXE_repo-review"))
+            .args(["build", "--plan"])
+            .arg(&plan_path)
+            .args(["--system", "x86_64-linux", "--output"])
+            .arg(&out)
+            .env("PATH", &tools)
+            .env("METADATA_CALLS", &metadata_calls)
+            .env("SIMIT_REVIEW_ENGINE_MANIFEST", &manifest)
+            .output()
+            .unwrap();
+        let r: PlatformResult = repo_review::read_json(&out.join("review-result.json")).unwrap();
+        let calls = std::fs::read_to_string(&metadata_calls).unwrap();
+        assert_eq!(
+            calls.lines().count(),
+            if with_recipe && !declared_flake { 2 } else { 1 }
+        );
+        if declared_flake {
+            assert_eq!(r.build, Outcome::Blocked);
+            assert_eq!(r.tests, Outcome::NotRun);
+            assert!(
+                r.error
+                    .as_deref()
+                    .is_some_and(|error| error.contains("recipe input must have flake=false"))
+            );
+            assert!(!result.status.success());
+            continue;
+        }
+        assert_eq!(r.build, Outcome::Passed, "{:?}", r.error);
+        assert_eq!(r.tests, Outcome::Passed);
+        assert_eq!(r.closure_export, Outcome::Failed);
+        assert!(r.error.as_deref().is_some_and(|s| s.contains("nix failed")));
+        assert!(
+            !result.status.success(),
+            "export failure must not return exit code zero"
+        );
+        validate_bundle(&p, &r, &out).unwrap();
+        assert_eq!(r.effective.lock, Some(lock));
+        assert!(r.files.contains_key("metadata.log"));
+        assert!(r.files.contains_key("lock.log"));
+        for log in ["metadata.log", "lock.log"] {
+            assert_eq!(
+                std::fs::read_to_string(out.join(log)).unwrap(),
+                "metadata diagnostic\n"
+            );
+        }
+        assert!(!aggregate(&p, vec![r]).unwrap().successful());
     }
-    let out = temp.path().join("bundle");
-    let result = Command::new(env!("CARGO_BIN_EXE_repo-review"))
-        .args(["build", "--plan"])
-        .arg(&plan_path)
-        .args(["--system", "x86_64-linux", "--output"])
-        .arg(&out)
-        .env("PATH", &tools)
-        .env("SIMIT_REVIEW_ENGINE_MANIFEST", &manifest)
-        .output()
-        .unwrap();
-    let r: PlatformResult = repo_review::read_json(&out.join("review-result.json")).unwrap();
-    assert_eq!(r.build, Outcome::Passed, "{:?}", r.error);
-    assert_eq!(r.tests, Outcome::Passed);
-    assert_eq!(r.closure_export, Outcome::Failed);
-    assert!(r.error.as_deref().is_some_and(|s| s.contains("nix failed")));
-    assert!(
-        !result.status.success(),
-        "export failure must not return exit code zero"
-    );
-    validate_bundle(&p, &r, &out).unwrap();
-    assert!(!aggregate(&p, vec![r]).unwrap().successful());
 }
 #[test]
 fn local_no_changes_requires_complete_nixpkgs_evidence() {
