@@ -138,7 +138,9 @@ fn files_for_scope(request: FilesRequest<'_>, primary_only: bool) -> Result<Vec<
     let mut files = if !request.options.repository_checks
         && (request.options.check_command.is_some()
             || request.crow.check_command.is_some()
-            || (request.options.om_ci == OmCiMode::Replace && !request.options.with_docs))
+            || (request.options.om_ci == OmCiMode::Replace
+                && !request.options.with_docs
+                && !request.options.with_msrv))
     {
         Vec::new()
     } else {
@@ -359,6 +361,13 @@ fn build_workflow(
                     "{prefix}cargo doc{} --no-deps --all-features",
                     package_selector(package, options)
                 ),
+            ));
+        }
+        if options.with_msrv {
+            steps.push(step(
+                "cargo-msrv",
+                image,
+                ci::msrv_check_command(runtime, package, options).replace('$', "$$"),
             ));
         }
         if options.repository_checks && options.with_audit {

@@ -2866,8 +2866,12 @@ fn ci_workflow_multi_job(
             push_om_ci_step(&mut om, &options);
             capture(STEP_FLAKE_CHECK, &om);
         }
+        let mut quality = String::new();
+        push_quality_ci_steps(&mut quality, runtime, &options);
+        if !quality.is_empty() {
+            capture(STEP_QUALITY_TOOLS, &quality);
+        }
         let mut optional = String::new();
-        push_quality_ci_steps(&mut optional, runtime, &options);
         push_optional_ci_steps(&mut optional, runtime, package, &options);
         if !optional.is_empty() {
             capture(STEP_CARGO_DOC, &optional);
@@ -5037,28 +5041,41 @@ fn push_msrv_step(workflow: &mut String, runtime: Runtime, package: &Package, op
     if !options.with_msrv {
         return;
     }
+    workflow.push_str("      - name: Check MSRV\n        run: |\n");
+    for line in msrv_check_command(runtime, package, options).lines() {
+        workflow.push_str("          ");
+        workflow.push_str(line);
+        workflow.push('\n');
+    }
+    workflow.push('\n');
+}
+
+pub(super) fn msrv_check_command(
+    runtime: Runtime,
+    package: &Package,
+    options: &CiOptions,
+) -> String {
     let version = package.rust_version.as_deref().expect("validated MSRV");
-    workflow.push_str("      - name: Check MSRV\n");
+    let mut command = String::from("set -eu\n");
     if runtime == Runtime::Nix {
         // A shell named `msrv` is not sufficient evidence of the actual compiler.
         // Fail closed if a custom flake accidentally aliases its default shell.
         let exact_version = crate::render::flake::rust_overlay_version(version);
-        workflow.push_str("        run: |\n          set -eu\n");
-        workflow.push_str(&format!(
-            "          test \"$(nix develop .#msrv -c rustc --version | cut -d ' ' -f 2)\" = '{exact_version}'\n"
+        command.push_str(&format!(
+            "test \"$(nix develop .#msrv -c rustc --version | cut -d ' ' -f 2)\" = '{exact_version}'\n"
         ));
-        workflow.push_str("          nix develop .#msrv -c cargo check");
+        command.push_str("nix develop .#msrv -c cargo check");
     } else {
-        workflow.push_str(&format!(
-            "        run: |\n          set -eu\n          rustup toolchain install {version} --profile minimal\n          cargo +{version} check"
+        command.push_str(&format!(
+            "rustup toolchain install {version} --profile minimal\ncargo +{version} check"
         ));
     }
-    push_package_selector(workflow, package, options);
-    workflow.push_str(" --all-targets");
+    push_package_selector(&mut command, package, options);
+    command.push_str(" --all-targets");
     if options.all_features {
-        workflow.push_str(" --all-features");
+        command.push_str(" --all-features");
     }
-    workflow.push_str("\n\n");
+    command
 }
 
 fn push_optional_ci_steps(

@@ -139,25 +139,36 @@ fn omnix_replacement_preserves_selected_flake_wiring_across_layouts() {
 
 #[test]
 fn split_quality_tools_are_installed_and_run_in_their_selected_job() {
-    let temp = TempDir::new().unwrap();
-    project(temp.path(), "demo");
-    fs::write(temp.path().join("simit.toml"), "[ci]\nplatform = \"forgejo\"\nruntime = \"cargo\"\nrunner = \"atlas\"\nwith_audit = true\nwith_deny = true\nwith_docs = true\nstep_runners = { quality-tools = \"quality\", cargo-doc = \"docs\" }\n").unwrap();
-    generate(temp.path(), false);
-    let workflow = fs::read_to_string(temp.path().join(".forgejo/workflows/ci.yaml")).unwrap();
-    let yaml: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
-    let quality = serde_yaml::to_string(&yaml["jobs"]["quality"]).unwrap();
-    let docs = serde_yaml::to_string(&yaml["jobs"]["docs"]).unwrap();
-    for command in [
-        "cargo install cargo-audit",
-        "cargo audit --",
-        "cargo install cargo-deny",
-        "cargo deny check",
-    ] {
-        assert!(quality.contains(command), "{quality}");
-        assert!(!docs.contains(command), "{docs}");
+    for (runtime, extra) in [("cargo", ""), ("nix", "om_ci = true\n")] {
+        let temp = TempDir::new().unwrap();
+        project(temp.path(), "demo");
+        fs::write(temp.path().join("flake.nix"), "{}\n").unwrap();
+        fs::write(temp.path().join("simit.toml"), format!("[ci]\nplatform = \"forgejo\"\nruntime = \"{runtime}\"\nrunner = \"atlas\"\nwith_audit = true\nwith_deny = true\nwith_docs = true\n{extra}step_runners = {{ quality-tools = \"quality\", cargo-doc = \"docs\" }}\n")).unwrap();
+        generate(temp.path(), false);
+        let workflow = fs::read_to_string(temp.path().join(".forgejo/workflows/ci.yaml")).unwrap();
+        let yaml: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
+        let quality = serde_yaml::to_string(&yaml["jobs"]["quality"]).unwrap();
+        let docs = serde_yaml::to_string(&yaml["jobs"]["docs"]).unwrap();
+        for command in [
+            if runtime == "cargo" {
+                "cargo install cargo-audit"
+            } else {
+                "cargo-audit --version"
+            },
+            "cargo audit --",
+            if runtime == "cargo" {
+                "cargo install cargo-deny"
+            } else {
+                "cargo-deny --version"
+            },
+            "cargo deny check",
+        ] {
+            assert!(quality.contains(command), "{runtime}: {quality}");
+            assert!(!docs.contains(command), "{runtime}: {docs}");
+        }
+        assert!(docs.contains("cargo doc"));
+        generate(temp.path(), true);
     }
-    assert!(docs.contains("cargo doc"));
-    generate(temp.path(), true);
 }
 
 #[test]
@@ -581,6 +592,67 @@ fn omnix_workspace_replacement_runs_once_and_preserves_member_documentation() {
         assert_eq!(joined.matches(" ci run").count(), 1, "{joined}");
         assert!(!joined.contains("cargo test"));
         assert!(!joined.contains("cargo clippy"));
+        generate(temp.path(), true);
+    }
+}
+
+#[test]
+fn crow_preserves_each_members_msrv_including_omnix_replacement() {
+    for (runtime, omnix) in [("cargo", false), ("nix", false), ("nix", true)] {
+        let temp = TempDir::new().unwrap();
+        for (name, version) in [("first", "1.88"), ("second", "1.89")] {
+            let root = temp.path().join(name);
+            project(&root, name);
+            let manifest = root.join("Cargo.toml");
+            fs::write(
+                &manifest,
+                fs::read_to_string(&manifest).unwrap().replace(
+                    "edition = \"2024\"",
+                    &format!("edition = \"2024\"\nrust-version = \"{version}\""),
+                ),
+            )
+            .unwrap();
+        }
+        fs::write(
+            temp.path().join("Cargo.toml"),
+            "[workspace]\nmembers = [\"first\", \"second\"]\nresolver = \"3\"\n",
+        )
+        .unwrap();
+        fs::write(temp.path().join("flake.nix"), "{}\n").unwrap();
+        fs::write(temp.path().join("simit.toml"), format!("[ci]\nplatform = \"forgejo\"\nprovider = \"crow\"\nruntime = \"{runtime}\"\nrunner = \"atlas\"\nworkspace = true\nom_ci = {omnix}\nwith_msrv = true\n")).unwrap();
+        generate(temp.path(), false);
+        for (name, version) in [("first", "1.88"), ("second", "1.89")] {
+            let workflow =
+                fs::read_to_string(temp.path().join(format!(".crow/build-{name}.yaml"))).unwrap();
+            let yaml: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
+            let step = yaml["steps"]
+                .as_sequence()
+                .unwrap()
+                .iter()
+                .find(|step| step["name"] == "cargo-msrv")
+                .expect("every member must retain its MSRV check");
+            let command = serde_yaml::to_string(&step["commands"]).unwrap();
+            assert!(command.contains(&format!("-p {name}")), "{command}");
+            assert!(
+                command.contains("--all-targets --all-features"),
+                "{command}"
+            );
+            if runtime == "cargo" {
+                assert!(
+                    command.contains(&format!("rustup toolchain install {version}")),
+                    "{command}"
+                );
+                assert!(
+                    command.contains(&format!("cargo +{version} check")),
+                    "{command}"
+                );
+            } else {
+                assert!(
+                    command.contains("nix develop .#msrv -c cargo check"),
+                    "{command}"
+                );
+            }
+        }
         generate(temp.path(), true);
     }
 }
