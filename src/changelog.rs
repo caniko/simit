@@ -306,13 +306,13 @@ pub(crate) fn release_content_with_prefix(
     let unreleased_end = unreleased.end;
 
     let latest = latest_released_version(&document)?;
-    if let Some(latest) = latest.as_ref() {
-        if version <= latest {
-            bail!(
-                "release version {version} must be greater than the latest changelog release {}",
-                latest
-            );
-        }
+    if let Some(latest) = latest.as_ref()
+        && version <= latest
+    {
+        bail!(
+            "release version {version} must be greater than the latest changelog release {}",
+            latest
+        );
     }
 
     let body = trimmed_body_lines(&document.lines[unreleased_start + 1..unreleased_end]);
@@ -375,12 +375,12 @@ pub fn check_content(content: &str) -> Result<()> {
         if let SectionKind::Version(version) = &section.kind {
             let heading = &document.lines[section.start];
             parse_version_heading(heading)?;
-            if let Some(previous) = previous {
-                if version >= previous {
-                    bail!(
-                        "release sections must be in descending semver order; found {version} after {previous}"
-                    );
-                }
+            if let Some(previous) = previous
+                && version >= previous
+            {
+                bail!(
+                    "release sections must be in descending semver order; found {version} after {previous}"
+                );
             }
             previous = Some(version);
         }

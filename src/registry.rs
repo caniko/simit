@@ -1618,50 +1618,47 @@ fn infer_expected_crow_files(
     if marked
         .iter()
         .any(|workflow| workflow_name(&workflow.relative_path) == Some("pages"))
+        && let Some(pages) = config.resolve_codeberg_pages()?
     {
-        if let Some(pages) = config.resolve_codeberg_pages()? {
-            files.push(crate::render::crow::codeberg_pages_file(
-                format,
-                &crow,
-                &runners.ci,
-                &ci::CodebergPagesOptions {
-                    repo: pages.repo,
-                    owner: pages.owner,
-                    canonical_domain: pages.canonical_domain,
-                    site_output: pages.site_output,
-                    token_secret: pages.token_secret,
-                    source_branch: pages.source_branch,
-                    deploy_app: pages.deploy_app,
-                    extra_setup: config.ci.extra_setup.clone(),
-                },
-            )?);
-        }
+        files.push(crate::render::crow::codeberg_pages_file(
+            format,
+            &crow,
+            &runners.ci,
+            &ci::CodebergPagesOptions {
+                repo: pages.repo,
+                owner: pages.owner,
+                canonical_domain: pages.canonical_domain,
+                site_output: pages.site_output,
+                token_secret: pages.token_secret,
+                source_branch: pages.source_branch,
+                deploy_app: pages.deploy_app,
+                extra_setup: config.ci.extra_setup.clone(),
+            },
+        )?);
     }
     if marked
         .iter()
         .any(|workflow| workflow_name(&workflow.relative_path) == Some("publish-vscode-extension"))
+        && let Some(vscode) = config.resolve_vscode()?
     {
-        if let Some(vscode) = config.resolve_vscode()? {
-            files.push(crate::render::crow::vscode_extension_file(
-                format,
-                &crow,
-                &runners.release,
-                &vscode,
-            )?);
-        }
+        files.push(crate::render::crow::vscode_extension_file(
+            format,
+            &crow,
+            &runners.release,
+            &vscode,
+        )?);
     }
     if marked
         .iter()
         .any(|workflow| workflow_name(&workflow.relative_path) == Some("publish-jetbrains-plugin"))
+        && let Some(jetbrains) = config.resolve_jetbrains()?
     {
-        if let Some(jetbrains) = config.resolve_jetbrains()? {
-            files.push(crate::render::crow::jetbrains_plugin_file(
-                format,
-                &crow,
-                &runners.release,
-                &jetbrains,
-            )?);
-        }
+        files.push(crate::render::crow::jetbrains_plugin_file(
+            format,
+            &crow,
+            &runners.release,
+            &jetbrains,
+        )?);
     }
     if marked
         .iter()
@@ -2317,10 +2314,10 @@ fn expand_home(path: &str) -> String {
     if path == "~" {
         return env::var("HOME").unwrap_or_else(|_| path.to_owned());
     }
-    if let Some(rest) = path.strip_prefix("~/") {
-        if let Ok(home) = env::var("HOME") {
-            return format!("{home}/{rest}");
-        }
+    if let Some(rest) = path.strip_prefix("~/")
+        && let Ok(home) = env::var("HOME")
+    {
+        return format!("{home}/{rest}");
     }
     path.to_owned()
 }

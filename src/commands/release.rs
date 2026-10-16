@@ -108,17 +108,16 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
                 for plan in &plans {
                     if dependency.path.as_deref() == plan.package.manifest_path.parent()
                         && dependency.path.is_some()
+                        && let Some(requirement) = &dependency.req
                     {
-                        if let Some(requirement) = &dependency.req {
-                            anyhow::ensure!(
-                                semver::VersionReq::parse(requirement)?.matches(&plan.new_version),
-                                "package {} dependency {} requirement {} excludes component version {}; update the dependency requirement before releasing",
-                                package.name,
-                                dependency.name,
-                                requirement,
-                                plan.new_version
-                            );
-                        }
+                        anyhow::ensure!(
+                            semver::VersionReq::parse(requirement)?.matches(&plan.new_version),
+                            "package {} dependency {} requirement {} excludes component version {}; update the dependency requirement before releasing",
+                            package.name,
+                            dependency.name,
+                            requirement,
+                            plan.new_version
+                        );
                     }
                 }
             }

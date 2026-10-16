@@ -822,10 +822,10 @@ fn infer_self_check_packages(content: &str) -> Vec<String> {
             let mut packages = Vec::new();
             let mut parts = line.split_whitespace();
             while let Some(part) = parts.next() {
-                if part == "--package" {
-                    if let Some(package) = parts.next() {
-                        packages.push(shell_unquote(package));
-                    }
+                if part == "--package"
+                    && let Some(package) = parts.next()
+                {
+                    packages.push(shell_unquote(package));
                 }
             }
             packages

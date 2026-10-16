@@ -722,25 +722,25 @@ fn push_secrets_header(w: &mut String, inputs: &ReleaseWorkflowInputs<'_>) {
         )
         .expect("write");
     }
-    if let Some(homebrew) = inputs.homebrew {
-        if homebrew.tap_token_secret != "homebrew_tap_token" {
-            writeln!(
-                w,
-                "# - {}: optional Homebrew tap push token.",
-                homebrew.tap_token_secret
-            )
-            .expect("write");
-        }
+    if let Some(homebrew) = inputs.homebrew
+        && homebrew.tap_token_secret != "homebrew_tap_token"
+    {
+        writeln!(
+            w,
+            "# - {}: optional Homebrew tap push token.",
+            homebrew.tap_token_secret
+        )
+        .expect("write");
     }
-    if let Some(scoop) = inputs.scoop.filter(|_| channel_enabled(inputs, "scoop")) {
-        if scoop.bucket_token_secret != "SCOOP_BUCKET_TOKEN" {
-            writeln!(
-                w,
-                "# - {}: optional Scoop bucket push token.",
-                scoop.bucket_token_secret
-            )
-            .expect("write");
-        }
+    if let Some(scoop) = inputs.scoop.filter(|_| channel_enabled(inputs, "scoop"))
+        && scoop.bucket_token_secret != "SCOOP_BUCKET_TOKEN"
+    {
+        writeln!(
+            w,
+            "# - {}: optional Scoop bucket push token.",
+            scoop.bucket_token_secret
+        )
+        .expect("write");
     }
     if let Some(windows) = inputs.windows_signing {
         writeln!(

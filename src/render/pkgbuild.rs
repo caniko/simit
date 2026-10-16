@@ -112,12 +112,12 @@ pub fn render_flavor(aur: &ResolvedAur, version: &str, flavor: Flavor) -> Render
 
 fn depends_for(aur: &ResolvedAur, flavor: Flavor) -> Vec<String> {
     let mut depends = aur.depends.clone();
-    if flavor == Flavor::Bin {
-        if let Some(min) = &aur.bin_glibc_min {
-            for entry in &mut depends {
-                if entry == "glibc" {
-                    *entry = format!("glibc>={min}");
-                }
+    if flavor == Flavor::Bin
+        && let Some(min) = &aur.bin_glibc_min
+    {
+        for entry in &mut depends {
+            if entry == "glibc" {
+                *entry = format!("glibc>={min}");
             }
         }
     }

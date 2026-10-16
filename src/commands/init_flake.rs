@@ -521,14 +521,13 @@ fn check_files(
                         .any(|file| file.relative_path == Path::new("nix/treefmt.nix"));
                     if manages_treefmt_module {
                         let module_path = workspace_root.join("nix/treefmt.nix");
-                        if let Ok(module_actual) = fs::read_to_string(&module_path) {
-                            if let Some(mismatch) =
+                        if let Ok(module_actual) = fs::read_to_string(&module_path)
+                            && let Some(mismatch) =
                                 flake::treefmt_call_module_mismatch(&actual, &module_actual)
-                            {
-                                mismatches.push(format!(
-                                    "nix/treefmt.nix disagrees with custom flake.nix: {mismatch}"
-                                ));
-                            }
+                        {
+                            mismatches.push(format!(
+                                "nix/treefmt.nix disagrees with custom flake.nix: {mismatch}"
+                            ));
                         }
                     }
                     if mismatches.is_empty() {
@@ -640,14 +639,12 @@ fn check_files(
         if let (Ok(flake_actual), Ok(module_actual)) = (
             fs::read_to_string(&flake_disk),
             fs::read_to_string(&module_disk),
-        ) {
-            if let Some(mismatch) =
-                flake::treefmt_call_module_mismatch(&flake_actual, &module_actual)
-            {
-                mismatches.push(format!(
-                    "nix/treefmt.nix disagrees with flake.nix call site: {mismatch}"
-                ));
-            }
+        ) && let Some(mismatch) =
+            flake::treefmt_call_module_mismatch(&flake_actual, &module_actual)
+        {
+            mismatches.push(format!(
+                "nix/treefmt.nix disagrees with flake.nix call site: {mismatch}"
+            ));
         }
     }
 

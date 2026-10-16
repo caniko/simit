@@ -12,7 +12,7 @@ engine/tool lock tamper rejection, controller/client generation and drift, and
 Clippy with `-D warnings`. All four generated v1 schemas match the controller
 schemas. Real Nix builds and closure operations run only in GitHub CI.
 
-CI retains the existing Simit gates and adds Linux/Windows Rust 1.85 checks,
+CI retains the existing Simit gates and adds Linux/Windows Rust 1.88 checks,
 packaged runtime-asset checks, and pinned controller-package/adapter checks.
 The controller CI covers conventional, external and failing checks, complete
 closure transfer, real cache misses, unsigned/wrong-key rejection, and signed

@@ -8,7 +8,7 @@ name = "simit"
 default-run = "simit"
 version = "0.21.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 license = "MIT"
 description = "Semver-aware git commit helper for Rust projects"
 repository = "https://github.com/caniko/simit"
@@ -62,6 +62,7 @@ CARGO_BUILD_JOBS = "2"
 ".github/workflows/custody-fixture.yaml" = ".simit/workflows/custody-fixture.yaml.in"
 ".github/workflows/qualify-nix-transport.yaml" = ".simit/workflows/qualify-nix-transport.yaml.in"
 ".github/workflows/qualify-native-groups.yaml" = ".simit/workflows/qualify-native-groups.yaml.in"
+".github/workflows/qualify-observer-isolation.yaml" = ".simit/workflows/qualify-observer-isolation.yaml.in"
 
 [package.metadata.simit.ci.custody]
 repository = "caniko/simit"
@@ -125,6 +126,7 @@ fs2 = "0.4"
 flate2 = "1"
 glob = "0.3"
 hex = "0.4"
+hickory-resolver = "0.26.1"
 reqwest = { version = "0.12", default-features = false, features = [
   "blocking",
   "json",
@@ -137,11 +139,13 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
 sha2 = "0.10"
+sha1 = "0.10"
 schemars = "1"
 url = "2"
 unicode-normalization = "0.1.25"
 toml_edit = { version = "0.25", features = ["serde"] }
 tempfile = "3"
+tokio = { version = "1", features = ["rt", "time"] }
 tar = "0.4"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
@@ -155,3 +159,9 @@ socket2 = "0.6.1"
 [target.'cfg(unix)'.dependencies]
 signal-hook = "0.3.18"
 rustix = { version = "1", features = ["fs", "process"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_Console"] }
+
+[target.'cfg(all(unix, not(target_os = "macos")))'.dev-dependencies]
+openssl = "0.10"
