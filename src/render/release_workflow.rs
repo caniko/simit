@@ -1203,7 +1203,7 @@ fn push_build_srpm(w: &mut String, copr: &ResolvedCopr) {
         repo = copr.repo
     )
     .expect("write");
-    w.push_str("          rm -rf -- \"$SRPM_DIR\" && mkdir -p -- \"$SRPM_DIR\"\n");
+    w.push_str("          mkdir -p -- \"$SRPM_DIR\"\n          rm -f -- \"$SRPM_DIR\"/*.src.rpm\n");
     writeln!(
         w,
         "          rpmbuild -bs {spec} --define \"_sourcedir $(pwd)\" --define \"_srcrpmdir $(pwd)/$SRPM_DIR\"",
