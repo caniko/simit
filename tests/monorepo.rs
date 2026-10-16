@@ -722,6 +722,79 @@ fn qualification_generation_is_complete_and_member_stable() {
 }
 
 #[test]
+fn monorepo_branch_filters_preserve_order_prs_and_primary_scope() {
+    for (literal, branches) in [
+        ("[]", vec!["**"]),
+        ("[\"trunk\"]", vec!["trunk"]),
+        (
+            "[\"trunk\", \"release/**\", \"!release/archive/**\"]",
+            vec!["trunk", "release/**", "!release/archive/**"],
+        ),
+    ] {
+        let temp = TempDir::new().unwrap();
+        write(
+            temp.path(),
+            "simit.toml",
+            &format!(
+                "[ci]\nplatform = \"github\"\nruntime = \"nix\"\nrunner = \"ubuntu-24.04\"\npush_branches = {literal}\n[monorepo]\nschema_version = 1\n[[monorepo.components]]\nid = \"python\"\npaths = [\"python\"]\nchecks = [{{id = \"test\", run = \"true\"}}]\n"
+            ),
+        );
+        write(temp.path(), "python/example.py", "pass\n");
+        write(temp.path(), "flake.nix", "{}\n");
+        for primary in [false, true] {
+            for check in [false, true] {
+                let mut command = common::simit();
+                command.current_dir(temp.path()).args(["init", "ci"]);
+                if primary {
+                    command.arg("--primary-only");
+                }
+                if check {
+                    command.args(["--check", "--diff"]);
+                }
+                let output = command.output().unwrap();
+                assert!(output.status.success(), "{output:?}");
+            }
+            let text = fs::read_to_string(temp.path().join(".github/workflows/ci.yaml")).unwrap();
+            let yaml: serde_yaml::Value = serde_yaml::from_str(&text).unwrap();
+            assert_eq!(
+                yaml["on"]["push"]["branches"],
+                serde_yaml::to_value(&branches).unwrap()
+            );
+            assert!(yaml["on"]["pull_request"].is_mapping());
+            assert!(yaml["on"]["workflow_dispatch"].is_mapping());
+            assert!(yaml["on"]["push"]["tags"].is_null());
+        }
+    }
+}
+
+#[test]
+fn monorepo_branch_filters_reject_explicit_dual_event_producers() {
+    let temp = fixture();
+    let path = temp.path().join("simit.toml");
+    let config = fs::read_to_string(&path).unwrap().replacen(
+        "runtime = \"nix\"",
+        "runtime = \"nix\"\npush_branches = [\"trunk\"]\nseparate_events = true",
+        1,
+    );
+    fs::write(path, config).unwrap();
+    for primary in [false, true] {
+        let mut command = common::simit();
+        command.current_dir(temp.path()).args(["init", "ci"]);
+        if primary {
+            command.arg("--primary-only");
+        }
+        let output = command.output().unwrap();
+        assert!(!output.status.success());
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            error.contains("push_branches") && error.contains("separate_events"),
+            "{error}"
+        );
+        assert!(!temp.path().join(".github/workflows").exists());
+    }
+}
+
+#[test]
 fn component_release_plan_keeps_independent_versions_and_dependency_order() {
     let temp = fixture();
     let manifest = fs::read_to_string(temp.path().join("crates/worker/Cargo.toml")).unwrap();
