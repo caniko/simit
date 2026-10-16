@@ -193,6 +193,8 @@ pub struct CiOptions {
     /// An aggregate selector can include libraries beyond its representative package.
     pub workspace_has_doctests: bool,
     pub workspace_has_features: bool,
+    pub workspace_has_library: bool,
+    pub workspace_has_binary: bool,
     pub all_features: bool,
     pub unit_tests_only: bool,
     pub nix_substituters: Vec<String>,
@@ -251,6 +253,8 @@ impl Default for CiOptions {
             repository_checks: true,
             workspace_has_doctests: false,
             workspace_has_features: false,
+            workspace_has_library: false,
+            workspace_has_binary: false,
             all_features: true,
             unit_tests_only: false,
             nix_substituters: Vec::new(),
@@ -4857,6 +4861,18 @@ fn push_sccache_stats_step(workflow: &mut String, platform: Platform, runtime: R
     workflow.push_str("        run: /usr/local/bin/sccache --show-adv-stats || true\n\n");
 }
 
+pub(super) fn unit_test_target_args(package: &Package, options: &CiOptions) -> &'static str {
+    if !options.unit_tests_only {
+        ""
+    } else if !(package.has_library_target() || options.workspace_has_library)
+        && (package.has_binary_target() || options.workspace_has_binary)
+    {
+        " --bins"
+    } else {
+        " --lib"
+    }
+}
+
 fn push_test_steps(
     workflow: &mut String,
     runtime: Runtime,
@@ -4864,6 +4880,7 @@ fn push_test_steps(
     options: &CiOptions,
 ) {
     let prefix = command_prefix(runtime);
+    let targets = unit_test_target_args(package, options);
     if options.with_nextest {
         workflow.push_str("      - name: Check nextest tool\n");
         workflow.push_str("        run: ");
@@ -4884,9 +4901,7 @@ fn push_test_steps(
         workflow.push_str(prefix);
         workflow.push_str("cargo nextest run");
         push_package_selector(workflow, package, options);
-        if options.unit_tests_only {
-            workflow.push_str(" --lib");
-        }
+        workflow.push_str(targets);
         if options.all_features {
             workflow.push_str(" --all-features");
         }
@@ -4901,9 +4916,7 @@ fn push_test_steps(
         workflow.push_str(prefix);
         workflow.push_str("cargo test");
         push_package_selector(workflow, package, options);
-        if options.unit_tests_only {
-            workflow.push_str(" --lib");
-        }
+        workflow.push_str(targets);
         if options.all_features {
             workflow.push_str(" --all-features");
         }
@@ -4919,9 +4932,7 @@ fn push_test_steps(
             "cargo test"
         });
         push_package_selector(workflow, package, options);
-        if options.unit_tests_only {
-            workflow.push_str(" --lib");
-        }
+        workflow.push_str(targets);
         workflow.push_str(" --no-default-features\n\n");
     }
     if options.with_nextest

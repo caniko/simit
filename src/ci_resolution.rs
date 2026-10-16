@@ -190,11 +190,10 @@ impl CiInference {
             workspace_strategy,
             packages,
             all_features: Some(all_content.contains("--all-features")),
-            unit_tests_only: Some(
-                all_content
-                    .lines()
-                    .any(|line| line.contains("cargo test") && line.contains(" --lib")),
-            ),
+            unit_tests_only: Some(all_content.lines().any(|line| {
+                (line.contains("cargo test") || line.contains("cargo nextest run"))
+                    && (line.contains(" --lib") || line.contains(" --bins"))
+            })),
             // Keep these markers in sync with the emitting sites in
             // src/render/ci.rs: optional tool steps, om-ci, and artifact files.
             with_nextest: Some(all_content.contains("cargo nextest run")),
@@ -458,6 +457,8 @@ impl ResolvedCiInputs {
             repository_checks: true,
             workspace_has_doctests: false,
             workspace_has_features: false,
+            workspace_has_library: false,
+            workspace_has_binary: false,
             all_features: self.all_features,
             unit_tests_only: self.unit_tests_only,
             nix_substituters: cfg.release.artifacts.substituters.clone(),

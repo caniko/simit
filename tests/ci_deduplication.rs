@@ -656,3 +656,122 @@ fn crow_preserves_each_members_msrv_including_omnix_replacement() {
         generate(temp.path(), true);
     }
 }
+
+#[test]
+fn unit_only_tests_select_valid_targets_across_providers_and_harnesses() {
+    for (platform, provider, path) in [
+        ("github", "actions", ".github/workflows/ci.yaml"),
+        ("forgejo", "actions", ".forgejo/workflows/ci.yaml"),
+        ("forgejo", "crow", ".crow/build.yaml"),
+    ] {
+        for nextest in [false, true] {
+            for kind in ["binary", "library", "disabled-doctests"] {
+                let temp = TempDir::new().unwrap();
+                project(temp.path(), "demo");
+                if kind == "binary" {
+                    fs::remove_file(temp.path().join("src/lib.rs")).unwrap();
+                    fs::write(
+                        temp.path().join("src/main.rs"),
+                        "fn main() {}\n#[test]\nfn binary_unit() { assert_eq!(2 + 2, 4); }\n",
+                    )
+                    .unwrap();
+                } else if kind == "disabled-doctests" {
+                    let manifest = temp.path().join("Cargo.toml");
+                    fs::write(
+                        &manifest,
+                        fs::read_to_string(&manifest).unwrap() + "\n[lib]\ndoctest = false\n",
+                    )
+                    .unwrap();
+                }
+                fs::write(temp.path().join("simit.toml"), format!("[ci]\nplatform = \"{platform}\"\nprovider = \"{provider}\"\nruntime = \"cargo\"\nrunner = \"atlas\"\nwith_nextest = {nextest}\nunit_tests_only = true\n")).unwrap();
+                generate(temp.path(), false);
+                generate(temp.path(), true);
+                let workflow = fs::read_to_string(temp.path().join(path)).unwrap();
+                let commands: Vec<_> = workflow
+                    .lines()
+                    .filter(|line| {
+                        line.contains("cargo test") || line.contains("cargo nextest run")
+                    })
+                    .collect();
+                assert_eq!(commands.len(), 2, "{workflow}");
+                for command in commands {
+                    let expected = if kind == "binary" {
+                        " --bins"
+                    } else {
+                        " --lib"
+                    };
+                    assert!(
+                        command.contains(expected),
+                        "{platform}/{provider}/{kind}/{nextest}: {command}"
+                    );
+                    assert!(!command.contains(" --doc"), "{command}");
+                }
+                if platform == "github" && kind == "binary" && !nextest {
+                    let yaml: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
+                    let command = yaml["jobs"]["test"]["steps"]
+                        .as_sequence()
+                        .unwrap()
+                        .iter()
+                        .filter_map(|step| step["run"].as_str())
+                        .find(|run| run.starts_with("cargo test") && run.contains("--all-features"))
+                        .unwrap();
+                    let output = std::process::Command::new("cargo")
+                        .current_dir(temp.path())
+                        .args(command.split_whitespace().skip(1))
+                        .output()
+                        .unwrap();
+                    assert!(output.status.success(), "{output:?}");
+                    assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+                }
+                if platform == "github" {
+                    fs::write(
+                        temp.path().join("simit.toml"),
+                        "[ci]\nplatform = \"github\"\n",
+                    )
+                    .unwrap();
+                    generate(temp.path(), true);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn aggregate_unit_test_selection_uses_all_selected_members() {
+    for second_has_library in [false, true] {
+        let temp = TempDir::new().unwrap();
+        for name in ["first", "second"] {
+            let root = temp.path().join(name);
+            project(&root, name);
+            if name == "first" || !second_has_library {
+                fs::remove_file(root.join("src/lib.rs")).unwrap();
+                fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
+            } else {
+                let manifest = root.join("Cargo.toml");
+                fs::write(
+                    &manifest,
+                    fs::read_to_string(&manifest).unwrap() + "\n[lib]\ndoctest = false\n",
+                )
+                .unwrap();
+            }
+        }
+        fs::write(
+            temp.path().join("Cargo.toml"),
+            "[workspace]\nmembers = [\"first\", \"second\"]\nresolver = \"3\"\n",
+        )
+        .unwrap();
+        fs::write(temp.path().join("simit.toml"), "[ci]\nplatform = \"github\"\nruntime = \"cargo\"\nworkspace = true\nworkspace_strategy = \"aggregate\"\nunit_tests_only = true\nwith_nextest = true\n").unwrap();
+        generate(temp.path(), false);
+        generate(temp.path(), true);
+        let workflow = fs::read_to_string(temp.path().join(".github/workflows/ci.yaml")).unwrap();
+        let target = if second_has_library {
+            "--lib"
+        } else {
+            "--bins"
+        };
+        assert!(
+            workflow.contains(&format!("cargo nextest run --workspace {target}")),
+            "{workflow}"
+        );
+    }
+}

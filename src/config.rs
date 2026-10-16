@@ -478,7 +478,7 @@ pub struct CiConfig {
     /// Whether generated Rust checks should pass `--all-features`.
     #[serde(default)]
     pub all_features: Option<bool>,
-    /// Whether generated Rust tests should limit Cargo to library targets.
+    /// Limit Rust tests to libraries, or binary unit tests when no library is selected.
     #[serde(default)]
     pub unit_tests_only: bool,
     #[serde(default)]

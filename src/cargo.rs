@@ -50,11 +50,30 @@ pub struct Package {
 pub struct Target {
     #[serde(default)]
     pub doctest: bool,
+    #[serde(default)]
+    pub kind: Vec<String>,
 }
 
 impl Package {
     pub fn has_doctests(&self) -> bool {
         self.targets.iter().any(|target| target.doctest)
+    }
+
+    pub fn has_library_target(&self) -> bool {
+        self.targets.iter().any(|target| {
+            target.kind.iter().any(|kind| {
+                matches!(
+                    kind.as_str(),
+                    "lib" | "rlib" | "dylib" | "cdylib" | "staticlib" | "proc-macro"
+                )
+            })
+        })
+    }
+
+    pub fn has_binary_target(&self) -> bool {
+        self.targets
+            .iter()
+            .any(|target| target.kind.iter().any(|kind| kind == "bin"))
     }
 
     pub fn is_publishable_to_crates_io(&self) -> bool {
