@@ -205,7 +205,9 @@ pub fn protect<T>(
             }
             for (relative, entry) in entries.iter().rev() {
                 if !matches!(entry.kind, Kind::Symlink(..)) {
-                    fs::set_permissions(root.join(relative), entry.permissions.clone())?;
+                    let path = root.join(relative);
+                    fs::set_permissions(&path, entry.permissions.clone())?;
+                    File::open(path)?.sync_all()?;
                 }
             }
             ensure!(
@@ -223,7 +225,10 @@ pub fn protect<T>(
     }
     check_lock()?;
     fs::remove_file(marker)?;
+    // A durable marker must never point at a deleted recovery snapshot.
+    File::open(root)?.sync_all()?;
     fs::remove_dir_all(backup)?;
+    File::open(root)?.sync_all()?;
     ensure!(
         unchanged,
         "read-only command modified persistent updater state; checkpoint restored"

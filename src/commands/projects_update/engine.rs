@@ -447,12 +447,26 @@ fn verified_executable(
             .split(|byte| *byte == b'\n')
             .next()
             .unwrap_or_default();
-        let interpreter = std::str::from_utf8(line)?
-            .split_whitespace()
-            .next()
-            .context("missing script interpreter")?;
+        let mut fields = std::str::from_utf8(line)?.split_whitespace();
+        let interpreter = fields.next().context("missing script interpreter")?;
         current = store_file(Path::new(interpreter), Path::new("/nix/store"))
             .context("script interpreter must be an immutable Nix-store file; env-selected and mutable runtimes are not enrolled")?;
+        let arguments = fields.collect::<Vec<_>>();
+        let name = current
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
+        let python = name.strip_prefix("python").is_some_and(|version| {
+            version
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || byte == b'.')
+        });
+        ensure!(
+            arguments.is_empty()
+                || (python && arguments == ["-I"])
+                || (matches!(name, "sh" | "bash" | "dash") && arguments == ["-e"]),
+            "script shebang arguments can select unenrolled code"
+        );
     }
 }
 
@@ -743,10 +757,17 @@ pub fn update(
             ],
         )?;
         ensure!(
-            git(
+            !git(
                 &checkout,
-                &["merge-base", &retained.candidate, &observed.revision]
-            )? != retained.candidate,
+                &[
+                    "rev-list",
+                    "--max-count=1",
+                    &retained.candidate,
+                    "--not",
+                    &observed.revision
+                ]
+            )?
+            .is_empty(),
             "remote advanced beyond the landed candidate; adoption reconciliation is required"
         );
         // Archive before replacing the checkout, so interruption cannot leave an
@@ -1656,6 +1677,45 @@ if os.fork() == 0:
         }
         let f = Fixture::new();
         let generator = &f.config.profiles["fleet"].generator;
+        let python = fs::read_to_string(&generator.executable).unwrap();
+        let python = python
+            .lines()
+            .next()
+            .unwrap()
+            .strip_prefix("#!")
+            .unwrap()
+            .split_whitespace()
+            .next()
+            .unwrap();
+        let shell = super::super::sandbox::tool("sh").unwrap();
+        for shebang in [
+            format!("#!{} /mutable/loader", shell.display()),
+            format!("#!{} -c", shell.display()),
+            format!("#!{python} /mutable/loader"),
+            format!("#!{python} -I -c"),
+        ] {
+            fs::write(&script, format!("{shebang}\nprint('unqualified')\n")).unwrap();
+            assert!(
+                verified_executable(
+                    &script,
+                    Some(&digest(&fs::read(&script).unwrap())),
+                    &snapshots,
+                    "fixture"
+                )
+                .is_err(),
+                "{shebang}"
+            );
+        }
+        fs::write(&script, format!("#!{} -e\nexit 0\n", shell.display())).unwrap();
+        assert!(
+            verified_executable(
+                &script,
+                Some(&digest(&fs::read(&script).unwrap())),
+                &snapshots,
+                "fixture"
+            )
+            .is_ok()
+        );
         assert!(
             verified_executable(
                 &generator.executable,
@@ -1786,6 +1846,58 @@ if os.fork() == 0:
                 )
                 .unwrap(),
                 "concurrent application change"
+            );
+        }
+    }
+
+    #[test]
+    fn namespace_unrelated_target_history_invalidates_unlanded_candidates() {
+        for phase in ["prepared", "candidate", "landing"] {
+            let f = Fixture::new();
+            f.control(json!({"candidate":"pending"}));
+            let mut pending = f.update(true).unwrap();
+            pending.phase = phase.into();
+            save(&f.root().join("receipt.json"), &pending).unwrap();
+            git(&f.source, &["checkout", "--orphan", "replacement"]).unwrap();
+            fs::write(f.source.join("application.txt"), "unrelated replacement\n").unwrap();
+            git(&f.source, &["add", "--all"]).unwrap();
+            git(
+                &f.source,
+                &["commit", "--quiet", "-m", "unrelated replacement"],
+            )
+            .unwrap();
+            git(
+                &f.source,
+                &[
+                    "push",
+                    "--force",
+                    f.remote.to_str().unwrap(),
+                    "HEAD:refs/heads/trunk",
+                ],
+            )
+            .unwrap();
+            let source = f.remote_head();
+            f.control(json!({}));
+            let adopted = f.update(true).unwrap();
+            assert_eq!(adopted.phase, "qualified");
+            assert_eq!(adopted.source, source);
+            assert_ne!(adopted.candidate, pending.candidate);
+            let archived: Receipt = crate::review::read_json(&f.root().join(format!(
+                "invalidated-{}.json",
+                canonical_digest(&pending).unwrap()
+            )))
+            .unwrap();
+            assert_eq!(
+                serde_json::to_value(archived).unwrap(),
+                serde_json::to_value(pending).unwrap()
+            );
+            assert_eq!(
+                git(
+                    &f.remote,
+                    &["show", &format!("{}:application.txt", adopted.candidate)]
+                )
+                .unwrap(),
+                "unrelated replacement"
             );
         }
     }
