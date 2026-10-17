@@ -107,6 +107,8 @@ regular Nix-store policy file directly; `/etc/simit/updates.json` remains its
 operator-facing link. Provision that user's Git
 identity, signing configuration, transport and credential-file access.
 Each service can write only the state directory of its profile's workspace.
+Profiles sharing a workspace wait on its exclusive updater lock before discovery
+or transaction work; the acquired lock's file identity is verified after waiting.
 Workspace state directories must be disjoint, including after runtime symlink
 resolution. Enrollment digests use exactly 64 lowercase hexadecimal characters.
 Generator source revisions require full 40-character lowercase commit SHAs.
@@ -293,8 +295,10 @@ against the resolved workspace roots, and rejects overlaps before creating files
 
 Forge adapters require a store-backed executable or `adapterSha256`. File-valued
 configured arguments must be absolute store paths or enrolled in `adapterInputs`
-as path-to-SHA-256 entries. Digest-enrolled files are executed or read from private
-verified snapshots; store inputs must resolve to files inside the store. Adapters
+as path-to-SHA-256 entries. Digest-enrolled mutable files are executed or read from
+fresh private snapshots for each verification, retaining prior verified bytes
+even when the same input is re-enrolled or supplied more than once. Store inputs
+must resolve to files inside the store. Adapters
 and generators retain their resolved store installation paths even when a digest
 is supplied, preserving wrapper resources and installation-relative loaders.
 Non-store snapshots remain isolated from their mutable original locations. Adapters
@@ -337,6 +341,11 @@ This source check applies to generator and consumer qualification, and to
 pre-push admission of committed candidate bytes.
 Required checks from other applications, unbound contexts, active rulesets,
 locked target branches and PR-required protections are rejected during admission.
+Admission carries the merged repository, profile and project required checks.
+Each consumer requirement must match a literal non-matrix job name (or job ID
+when unnamed) in an owned push workflow. Requirements produced only by
+hand-maintained workflows or dynamic/matrix contexts require a supporting
+adapter and are rejected before publishing a receipt or maintenance ref.
 Ruleset admission queries each exact maintenance/adoption branch, including a
 maintenance ref that has not been created, before publishing a prepared receipt.
 It does not migrate protection contexts, CI engine variables, or PR-only custody contracts. Those

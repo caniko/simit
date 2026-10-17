@@ -38,6 +38,8 @@ response = dict(
     requirements=[dict(name="test", authority="777")], status=status, checks=checks,
 )
 if request["operation"] == "admit":
+    if "expectedAdmissionChecks" in control:
+        assert request["requiredChecks"] == control["expectedAdmissionChecks"]
     if "expectedAdmissionBlobs" in control:
         assert {f["relative_path"]: f["content"] for f in request["plan"]["files"]} == control["expectedAdmissionBlobs"]
     response["status"] = control.get("admission", "success")

@@ -258,6 +258,56 @@ fn requested_workflows(
     Ok(workflows)
 }
 
+fn admit_workflows(request: &AdapterRequest) -> Result<()> {
+    let plan = request.plan.as_ref().context("missing admission plan")?;
+    let paths = requested_workflows(&request.workflows, request.branch.as_deref(), |path| {
+        let file = plan
+            .files
+            .iter()
+            .find(|file| file.relative_path == std::path::Path::new(path))
+            .context("workflow is absent from candidate plan")?;
+        Ok(
+            serde_json::json!({"path": path, "type": "file", "encoding": "base64", "content": base64::engine::general_purpose::STANDARD.encode(&file.content)}),
+        )
+    })?;
+    ensure!(
+        !paths.is_empty(),
+        "candidate has no owned push workflow for qualification"
+    );
+    let mut names = BTreeSet::new();
+    for file in &plan.files {
+        if !paths.contains(
+            file.relative_path
+                .to_str()
+                .context("non-UTF-8 workflow path")?,
+        ) {
+            continue;
+        }
+        let yaml: serde_yaml::Value = serde_yaml::from_str(&file.content)?;
+        let jobs = yaml["jobs"].as_mapping().context("missing workflow jobs")?;
+        for (id, job) in jobs {
+            // Matrix expansion and expression-derived names need a source-aware
+            // adapter. A literal non-matrix name is the exact Actions context.
+            if job.get("strategy").and_then(|s| s.get("matrix")).is_some() {
+                continue;
+            }
+            if let Some(name) = job.get("name").unwrap_or(id).as_str()
+                && !name.contains("${{")
+            {
+                names.insert(name.to_owned());
+            }
+        }
+    }
+    for check in &request.required_checks {
+        ensure!(
+            names.contains(&check.name),
+            "required check {} is not provably produced by an owned push workflow; external or dynamic contexts require a supporting adapter",
+            check.name
+        );
+    }
+    Ok(())
+}
+
 fn generator_workflow_paths(
     runs: &[Value],
     branch: &str,
@@ -411,21 +461,7 @@ pub fn execute(request: &AdapterRequest) -> Result<AdapterResponse> {
         return Ok(response);
     }
     if request.operation == "admit" {
-        let plan = request.plan.as_ref().context("missing admission plan")?;
-        let paths = requested_workflows(&request.workflows, request.branch.as_deref(), |path| {
-            let file = plan
-                .files
-                .iter()
-                .find(|file| file.relative_path == std::path::Path::new(path))
-                .context("workflow is absent from candidate plan")?;
-            Ok(
-                serde_json::json!({"path": path, "type": "file", "encoding": "base64", "content": base64::engine::general_purpose::STANDARD.encode(&file.content)}),
-            )
-        })?;
-        ensure!(
-            !paths.is_empty(),
-            "candidate has no owned push workflow for qualification"
-        );
+        admit_workflows(request)?;
         response.checks.push(Check {
             name: "admission".into(),
             authority: request.authority.clone(),
@@ -846,6 +882,63 @@ mod tests {
             assert!(push_workflow(&paths[2], &file, Some("trunk")).unwrap());
         }
         assert!(requested_workflows(&paths, None, |_| Ok(Value::Null)).is_err());
+    }
+
+    #[test]
+    fn admission_rejects_required_contexts_outside_owned_literal_jobs() {
+        let path = ".github/workflows/ci.yaml";
+        let mut request: AdapterRequest = serde_json::from_value(json!({
+            "schemaVersion":1,"operation":"admit","coordinate":"forge.example/team/demo",
+            "apiUrl":"https://forge.example/api","credentialFile":null,"authority":"777",
+            "revision":"a".repeat(40),"branch":"maintenance/candidate","workflows":[path],
+            "requiredChecks":[{"name":"test","authority":"777"}],
+            "plan":{"schema":"simit.ci-update-plan.v1","files":[],"obsolete":[]}
+        }))
+        .unwrap();
+        for (event, job, accepted) in [
+            ("push", "runs-on: ubuntu-latest", true),
+            ("push", "name: test\n    runs-on: ubuntu-latest", true),
+            (
+                "push",
+                "name: hand-maintained-check\n    runs-on: ubuntu-latest",
+                false,
+            ),
+            (
+                "push",
+                "name: '${{ github.job }}'\n    runs-on: ubuntu-latest",
+                false,
+            ),
+            (
+                "push",
+                "strategy:\n      matrix:\n        os: [ubuntu-latest]\n    runs-on: '${{ matrix.os }}'",
+                false,
+            ),
+            ("workflow_dispatch", "runs-on: ubuntu-latest", false),
+        ] {
+            request.plan.as_mut().unwrap().files = vec![crate::project::GeneratedFile {
+                relative_path: path.into(),
+                content: format!(
+                    "on: {event}\njobs:\n  test:\n    {job}\n    steps:\n      - run: exit 0\n"
+                ),
+            }];
+            request.validate().unwrap();
+            let result = admit_workflows(&request);
+            assert_eq!(result.is_ok(), accepted, "{event}: {job}: {result:?}");
+        }
+        let plan = request.plan.as_mut().unwrap();
+        plan.files[0].content = "on: push\njobs:\n  owned:\n    runs-on: ubuntu-latest\n    steps:\n      - run: exit 0\n".into();
+        plan.files.push(crate::project::GeneratedFile {
+            relative_path: ".github/workflows/unrequested.yaml".into(),
+            content: "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: exit 0\n".into(),
+        });
+        assert!(
+            admit_workflows(&request)
+                .unwrap_err()
+                .to_string()
+                .contains("required check test is not provably produced")
+        );
+        request.required_checks[0].name = "owned".into();
+        admit_workflows(&request).unwrap();
     }
 
     #[test]
