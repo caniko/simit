@@ -2864,7 +2864,9 @@ else:
         assert_eq!(environment["PATH"], std::env::var("PATH").unwrap());
         assert_eq!(environment["HOME"], std::env::var("HOME").unwrap());
         assert_eq!(environment["GIT_TERMINAL_PROMPT"], "0");
-        assert_eq!(environment["PYTHONNOUSERSITE"], "1");
+        // Nix Python wrappers may normalize "1" to "true"; Python treats
+        // every nonempty value as disabling user-site packages.
+        assert!(!environment["PYTHONNOUSERSITE"].is_empty());
     }
 
     #[test]

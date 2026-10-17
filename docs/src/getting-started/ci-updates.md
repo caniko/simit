@@ -22,7 +22,7 @@ policy for standalone installations.
 
     # Git is the only default runtime tool. Choose additional tools according
     # to the generator, adapters, transport and signing policy in this profile.
-    runtimePackages = with pkgs; [git cargo nix gnupg];
+    runtimePackages = with pkgs; [git openssh cargo nix sqlite gnupg];
     sandboxPackage = pkgs.bubblewrap;
 
     workspaces.projects = {
@@ -207,8 +207,10 @@ report retains inventory and policy digests and explicitly marks qualification
 `not-run`. It performs protected inventory discovery under the workspace lock,
 without invoking forge adapters, reading forge credentials, verifying a generator,
 cloning repositories or creating candidates or rollout progress. Empty selections
-are reportable. Duplicate eligible canonical identities and invalid CLI/canary
-selection remain errors. `--plan` cannot be combined with execution/status modes
+are reportable, including a configured canary rejected by lifecycle or other
+selection filters. Execution still requires every canary to be eligible and
+included in CLI narrowing. Duplicate eligible canonical identities, unlisted
+canaries and invalid CLI selection remain errors. `--plan` cannot be combined with execution/status modes
 or a batch limit; it reports the full selection before batching.
 
 Use `--config PATH` outside NixOS. `--repo HOST/OWNER/REPO` narrows selection;

@@ -185,6 +185,18 @@ pub fn run(args: Args) -> Result<()> {
             }
             return Ok(());
         }
+        for canary in &profile.rollout.canaries {
+            ensure!(
+                args.repo.is_empty() || args.repo.contains(canary),
+                "CLI narrowing must include configured canaries"
+            );
+            ensure!(
+                selection
+                    .iter()
+                    .any(|project| &project.coordinate == canary),
+                "configured canary is outside eligible selection: {canary}"
+            );
+        }
         ensure!(
             !selection.is_empty(),
             "profile selects no eligible repositories"
@@ -325,16 +337,6 @@ fn select(
         ensure!(
             selected.contains_key(coordinate),
             "repository is outside this profile's eligible selection: {coordinate}"
-        );
-    }
-    for canary in &profile.rollout.canaries {
-        ensure!(
-            selected.contains_key(canary),
-            "configured canary is outside eligible selection: {canary}"
-        );
-        ensure!(
-            narrowed.is_empty() || narrowed.contains(canary),
-            "CLI narrowing must include configured canaries"
         );
     }
     let mut projects = selected
