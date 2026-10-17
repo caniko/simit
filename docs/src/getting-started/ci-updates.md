@@ -312,6 +312,9 @@ must resolve to files inside the store. Adapters
 and generators retain their resolved store installation paths even when a digest
 is supplied, preserving wrapper resources and installation-relative loaders.
 Every `adapterInputs` entry is checked, including helpers not named on argv.
+The adapter executable must not also be listed in `adapterInputs`; enroll its
+digest through `adapterSha256`. Rust and Nix reject duplicate entrypoint paths
+before dispatch, including equivalent paths with repeated separators.
 Verified mutable inputs are mounted at their enrolled absolute paths so scripts
 can import declared siblings; other mutable helpers are inaccessible. These
 checks also apply to store interpreters executing a configured script argument.
@@ -355,7 +358,9 @@ retaining one whose normal skip outcomes cannot qualify.
 This source check applies to generator and consumer qualification, and to
 pre-push admission of committed candidate bytes.
 Required checks from other applications, unbound contexts, active rulesets,
-locked target branches and PR-required protections are rejected during admission.
+locked or push-restricted target branches and PR-required protections are rejected
+during admission. The API credential is not evidence of the separate Git
+transport actor's membership in a push allowlist.
 Admission carries the merged repository, profile and project required checks.
 Each consumer requirement must match a literal non-matrix job name (or job ID
 when unnamed) in an owned push workflow. Requirements produced only by
@@ -363,6 +368,12 @@ hand-maintained workflows or dynamic/matrix contexts require a supporting
 adapter and are rejected before publishing a receipt or maintenance ref.
 Ruleset admission queries each exact maintenance/adoption branch, including a
 maintenance ref that has not been created, before publishing a prepared receipt.
+Classic protection rules are also paginated through the configured forge's
+GraphQL API before either admission. Any matching push/creation restriction is
+rejected, including wildcard rules for uncreated maintenance refs. Rule bypasses
+and priority require an actor-aware adapter. Missing permissions, partial GraphQL
+errors and incomplete rule inventories fail admission. GitHub Enterprise Server
+uses `/api/graphql` alongside its configured REST `/api/v3` root.
 It does not migrate protection contexts, CI engine variables, or PR-only custody contracts. Those
 transitions require a later protocol with explicit ordered migration support.
 Other forge/CI backends can enroll an absolute adapter command implementing the

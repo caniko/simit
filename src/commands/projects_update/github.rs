@@ -34,9 +34,10 @@ impl Api {
         })
     }
     fn get(&self, path: &str) -> Result<Value> {
-        let mut request = self
-            .client
-            .get(self.base.join(path)?)
+        self.send(self.client.get(self.base.join(path)?))
+    }
+    fn send(&self, request: reqwest::blocking::RequestBuilder) -> Result<Value> {
+        let mut request = request
             .header("User-Agent", "simit-updater")
             .header("Accept", "application/vnd.github+json");
         if let Some(token) = &self.token {
@@ -57,6 +58,24 @@ impl Api {
             "GitHub response too large"
         );
         Ok(serde_json::from_slice(&bytes)?)
+    }
+    fn admit_classic(&self, repository: &str, branch: &str) -> Result<()> {
+        let (owner, name) = repository
+            .split_once('/')
+            .context("missing repository owner")?;
+        // GitHub Enterprise Server puts GraphQL at /api/graphql, beside REST
+        // /api/v3; other configured API roots use the relative /graphql route.
+        let endpoint = self.base.join(if self.base.path().ends_with("/v3/") {
+            "../graphql"
+        } else {
+            "graphql"
+        })?;
+        admit_classic_rules(branch, |cursor| {
+            self.send(self.client.post(endpoint.clone()).json(&serde_json::json!({
+            "query":"query($owner:String!,$name:String!,$cursor:String){repository(owner:$owner,name:$name){branchProtectionRules(first:100,after:$cursor){totalCount nodes{id pattern restrictsPushes blocksCreations} pageInfo{hasNextPage endCursor}}}}",
+            "variables":{"owner":owner,"name":name,"cursor":cursor}
+        })))
+        })
     }
     fn list(&self, path: &str, key: &str) -> Result<Value> {
         collection(key, |page| {
@@ -337,6 +356,10 @@ fn admit_rules(
 
 fn protection_requirements(protection: &Value, authority: u64) -> Result<Vec<Requirement>> {
     ensure!(
+        protection["restrictions"].is_null(),
+        "push-restricted target requires an adapter that binds the Git transport actor"
+    );
+    ensure!(
         protection
             .pointer("/lock_branch/enabled")
             .is_none_or(|value| value.as_bool() == Some(false)),
@@ -377,6 +400,74 @@ fn protection_requirements(protection: &Value, authority: u64) -> Result<Vec<Req
     Ok(requirements)
 }
 
+fn admit_classic_rules(
+    branch: &str,
+    mut page: impl FnMut(Option<&str>) -> Result<Value>,
+) -> Result<()> {
+    let mut cursor = None;
+    let mut total = None;
+    let mut seen = BTreeSet::new();
+    for _ in 0..20 {
+        let response = page(cursor.as_deref())?;
+        ensure!(
+            response["errors"].is_null(),
+            "classic protection inventory has GraphQL errors"
+        );
+        let rules = response
+            .pointer("/data/repository/branchProtectionRules")
+            .context("missing classic protection inventory")?;
+        let count = number(rules, "/totalCount")?;
+        ensure!(
+            total.is_none_or(|previous| previous == count),
+            "classic protection inventory changed during pagination"
+        );
+        total = Some(count);
+        let nodes = rules["nodes"]
+            .as_array()
+            .context("missing classic protection rules")?;
+        ensure!(nodes.len() <= 100, "oversized classic protection page");
+        for rule in nodes {
+            ensure!(
+                seen.insert(text(rule, "/id")?),
+                "duplicate classic protection rule"
+            );
+            let pattern = text(rule, "/pattern")?;
+            let pushes = rule["restrictsPushes"]
+                .as_bool()
+                .context("missing classic push restriction")?;
+            let creations = rule["blocksCreations"]
+                .as_bool()
+                .context("missing classic creation restriction")?;
+            if pushes || creations {
+                // ponytail: reject any matching restricted rule, irrespective
+                // of bypasses/priority, until an adapter binds the Git actor.
+                ensure!(
+                    !branch_pattern(&pattern, branch)?,
+                    "restricted classic protection covers qualification branch {branch}"
+                );
+            }
+        }
+        let more = rules
+            .pointer("/pageInfo/hasNextPage")
+            .and_then(Value::as_bool)
+            .context("missing classic protection pagination")?;
+        if !more {
+            ensure!(
+                count == seen.len() as u64,
+                "incomplete classic protection inventory"
+            );
+            return Ok(());
+        }
+        let next = text(rules, "/pageInfo/endCursor")?;
+        ensure!(
+            !nodes.is_empty() && !next.is_empty() && cursor.as_ref() != Some(&next),
+            "classic protection pagination did not advance"
+        );
+        cursor = Some(next);
+    }
+    anyhow::bail!("classic protection exceeds adapter pagination ceiling")
+}
+
 pub fn execute(request: &AdapterRequest) -> Result<AdapterResponse> {
     request.validate()?;
     let authority: u64 = request
@@ -412,6 +503,9 @@ pub fn execute(request: &AdapterRequest) -> Result<AdapterResponse> {
         // Rules can govern a maintenance ref before it exists. Query that exact
         // name without requiring a branch object or substituting the default.
         admit_rules(&endpoint, branch, |path| api.list(path, ""))?;
+        if request.operation == "admit" {
+            api.admit_classic(repository, branch)?;
+        }
     }
     let info = if request.operation == "admit" {
         Value::Null
@@ -699,6 +793,32 @@ mod tests {
     }
 
     #[test]
+    fn inspection_rejects_push_restrictions_before_status_check_admission() {
+        for status in [
+            Value::Null,
+            json!({"contexts":["test"],"checks":[{"context":"test","app_id":777}]}),
+        ] {
+            for restrictions in [
+                json!({"users":[],"teams":[],"apps":[]}),
+                json!({"users":[{"login":"operator"}]}),
+                json!({"teams":[{"slug":"maintainers"}]}),
+                json!({"apps":[{"id":777}]}),
+            ] {
+                let mut protection =
+                    json!({"restrictions":restrictions,"required_status_checks":status});
+                assert!(
+                    protection_requirements(&protection, 777)
+                        .unwrap_err()
+                        .to_string()
+                        .contains("push-restricted target")
+                );
+                protection["restrictions"] = Value::Null;
+                protection_requirements(&protection, 777).unwrap();
+            }
+        }
+    }
+
+    #[test]
     fn inspection_rejects_locked_targets_with_or_without_required_checks() {
         for status in [
             Value::Null,
@@ -717,6 +837,119 @@ mod tests {
             protection["lock_branch"]["enabled"] = json!("false");
             assert!(protection_requirements(&protection, 777).is_err());
         }
+    }
+
+    #[test]
+    fn classic_protection_admission_covers_uncreated_refs_and_all_pages() {
+        let page = |nodes: Value, more: bool, cursor: Value, total: u64| {
+            json!({
+                "data":{"repository":{"branchProtectionRules":{
+                    "totalCount":total,"nodes":nodes,
+                    "pageInfo":{"hasNextPage":more,"endCursor":cursor}
+                }}}
+            })
+        };
+        let rule = |pattern: &str, pushes: bool, creations: bool| {
+            json!({
+                "id":"rule-1", "pattern":pattern, "restrictsPushes":pushes, "blocksCreations":creations
+            })
+        };
+        for (pushes, creations) in [(true, true), (true, false), (false, true)] {
+            for pattern in [
+                "maintenance/*",
+                "maintenance/**",
+                "maintenance/0123456789abcdef",
+            ] {
+                assert!(
+                    admit_classic_rules("maintenance/0123456789abcdef", |_| Ok(page(
+                        json!([rule(pattern, pushes, creations)]),
+                        false,
+                        Value::Null,
+                        1
+                    )))
+                    .unwrap_err()
+                    .to_string()
+                    .contains("restricted classic protection")
+                );
+            }
+        }
+        admit_classic_rules("maintenance/uncreated", |_| {
+            Ok(page(
+                json!([rule("trunk", true, true)]),
+                false,
+                Value::Null,
+                1,
+            ))
+        })
+        .unwrap();
+        admit_classic_rules("maintenance/uncreated", |_| {
+            Ok(page(
+                json!([rule("maintenance/*", false, false)]),
+                false,
+                Value::Null,
+                1,
+            ))
+        })
+        .unwrap();
+        admit_classic_rules("maintenance/uncreated", |_| {
+            Ok(page(json!([]), false, Value::Null, 0))
+        })
+        .unwrap();
+        let first = (0..100).map(|id| json!({"id":format!("rule-{id}"),"pattern":format!("other-{id}"),"restrictsPushes":true,"blocksCreations":true})).collect::<Vec<_>>();
+        assert!(
+            admit_classic_rules("maintenance/uncreated", |cursor| Ok(if cursor.is_none() {
+                page(json!(first), true, json!("next"), 101)
+            } else {
+                assert_eq!(cursor, Some("next"));
+                let mut last = rule("maintenance/*", true, true);
+                last["id"] = json!("last");
+                page(json!([last]), false, Value::Null, 101)
+            }))
+            .is_err()
+        );
+        admit_classic_rules("maintenance/uncreated", |cursor| {
+            Ok(if cursor.is_none() {
+                page(json!(first), true, json!("next"), 101)
+            } else {
+                let mut last = rule("other/*", true, true);
+                last["id"] = json!("last");
+                page(json!([last]), false, Value::Null, 101)
+            })
+        })
+        .unwrap();
+        for invalid in [
+            Value::Null,
+            json!({"data":{"repository":null}}),
+            json!({"errors":[{"message":"unavailable"}]}),
+            page(json!([]), false, Value::Null, 1),
+            page(json!([rule("other", true, true)]), true, Value::Null, 2),
+            page(
+                json!([rule("other", true, true), rule("other", true, true)]),
+                false,
+                Value::Null,
+                2,
+            ),
+            page(
+                json!([{"id":"bad","pattern":"maintenance/*","restrictsPushes":null,"blocksCreations":false}]),
+                false,
+                Value::Null,
+                1,
+            ),
+            page(
+                json!([rule("maintenance/[ab]", true, true)]),
+                false,
+                Value::Null,
+                1,
+            ),
+        ] {
+            assert!(admit_classic_rules("maintenance/uncreated", |_| Ok(invalid.clone())).is_err());
+        }
+        assert!(
+            admit_classic_rules("maintenance/uncreated", |_| anyhow::bail!(
+                "classic inventory unavailable"
+            ))
+            .is_err()
+        );
     }
 
     #[test]
