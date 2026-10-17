@@ -95,6 +95,7 @@ pub fn run_command_with_limits(
     let mut child = c
         .spawn()
         .with_context(|| format!("cannot start {program}"))?;
+    let mut poll_interval = Duration::from_millis(1);
     let status = loop {
         if let Some(status) = child.try_wait()? {
             break status;
@@ -107,7 +108,8 @@ pub fn run_command_with_limits(
             let _ = child.wait();
             anyhow::bail!("{program} exceeded time/output limits");
         }
-        std::thread::sleep(Duration::from_millis(100));
+        std::thread::sleep(poll_interval.min(deadline.saturating_duration_since(Instant::now())));
+        poll_interval = (poll_interval * 2).min(Duration::from_millis(100));
     };
     // Tool stderr can contain target-controlled strings or credentials: never echo it in a privileged job.
     ensure!(

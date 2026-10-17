@@ -118,6 +118,7 @@ fn package() -> Package {
         publish: None,
         features: BTreeMap::new(),
         dependencies: Vec::new(),
+        targets: Vec::new(),
         manifest_path: Utf8PathBuf::from("/demo/Cargo.toml"),
     }
 }
