@@ -104,10 +104,10 @@ with tempfile.TemporaryDirectory(prefix="simit-packaged-updater-") as temporary,
                 "root": {"inputs": {"cached": "cached"}},
                 "cached": {"locked": {"type": "github", "owner": "fixture", "repo": "offline", "rev": "a" * 40, "narHash": nar_hash},
                            "original": {"type": "github", "owner": "fixture", "repo": "offline"}}}})
-            (source / "flake.nix").write_text('{ inputs.cached.url = "github:fixture/offline"; outputs = { cached, ... }: { simitConfig.ci.extra_setup = [ cached.marker ]; }; }\n')
+            (source / "flake.nix").write_text('{ inputs.cached.url = "github:fixture/offline"; outputs = { cached, ... }: { simitConfig.ci = { platform = "github"; provider = "actions"; runtime = "nix"; extra_setup = [ cached.marker ]; }; }; }\n')
             marker = "locked-input-marker"
         else:
-            (source / "flake.nix").write_text('{ outputs = _: { simitConfig.ci.extra_setup = [ "no-input-marker" ]; }; }\n')
+            (source / "flake.nix").write_text('{ outputs = _: { simitConfig.ci = { platform = "github"; provider = "actions"; runtime = "nix"; extra_setup = [ "no-input-marker" ]; }; }; }\n')
         run("git", "init", "--quiet", "--initial-branch=trunk", cwd=source, env=env)
         run("git", "add", "--all", cwd=source, env=env)
         run("git", "commit", "--quiet", "-m", "disposable fixture", cwd=source, env=env)
@@ -152,5 +152,6 @@ with tempfile.TemporaryDirectory(prefix="simit-packaged-updater-") as temporary,
         reports = json.loads(output)
         assert len(reports) == 1 and reports[0]["phase"] == "preview", output
         assert marker in reports[0]["diff"], output
+        assert ".github/workflows/ci.yaml" in reports[0]["managed"], output
         assert run("git", "rev-parse", "trunk", cwd=remote, env=env) == run("git", "rev-parse", "HEAD", cwd=source, env=env)
         print(f"PASS {mode}: packaged updater -> verified generator -> sandbox -> offline plan", flush=True)

@@ -369,6 +369,10 @@ impl Config {
                     !path.starts_with("/nix/store"),
                     "forge credentials must be runtime files outside the Nix store"
                 );
+                ensure!(
+                    path != &forge.adapter.program && !forge.adapter_inputs.contains_key(path),
+                    "adapter credential overlaps code inputs"
+                );
             }
         }
         for profile in self.profiles.values() {
@@ -544,6 +548,34 @@ mod tests {
             .adapter_inputs
             .insert("/runtime/adapter.py".into(), "a".repeat(64));
         cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn credentials_cannot_overlap_adapter_code_including_path_aliases() {
+        for credential in [
+            "/runtime/adapter",
+            "/runtime//adapter",
+            "/runtime/helper.py",
+            "/runtime//helper.py",
+        ] {
+            let mut cfg = config();
+            let forge = cfg.forges.get_mut("example").unwrap();
+            forge.adapter.program = "/runtime/adapter".into();
+            forge.adapter_sha256 = Some("a".repeat(64));
+            forge
+                .adapter_inputs
+                .insert("/runtime/helper.py".into(), "b".repeat(64));
+            forge.credential_file = Some(credential.into());
+            assert!(
+                cfg.validate()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("credential overlaps code")
+            );
+            cfg.forges.get_mut("example").unwrap().credential_file =
+                Some("/run/credentials/forge".into());
+            cfg.validate().unwrap();
+        }
     }
 
     #[test]
@@ -1002,6 +1034,39 @@ pub fn sha256(value: &str) -> Result<()> {
         "invalid SHA-256"
     );
     Ok(())
+}
+
+/// Read the verified opened object, not a path that can be redirected after a
+/// canonicalization check. Adapter execution already requires Linux namespaces.
+pub(super) fn credential_bytes(path: &Path) -> Result<Vec<u8>> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::{io::Read, os::fd::AsRawFd};
+        absolute(path)?;
+        let file = std::fs::File::open(path)?;
+        ensure!(
+            file.metadata()?.is_file(),
+            "credential must be a regular runtime file"
+        );
+        let resolved = std::fs::read_link(format!("/proc/self/fd/{}", file.as_raw_fd()))?;
+        ensure!(
+            resolved.is_absolute() && !resolved.starts_with("/nix/store"),
+            "forge credentials must resolve outside the Nix store"
+        );
+        let mut bytes = Vec::new();
+        file.take(crate::review::MAX_JSON_BYTES + 1)
+            .read_to_end(&mut bytes)?;
+        ensure!(
+            bytes.len() as u64 <= crate::review::MAX_JSON_BYTES,
+            "credential file is too large"
+        );
+        Ok(bytes)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = path;
+        anyhow::bail!("updater credentials require Linux file-identity verification")
+    }
 }
 fn requirements(values: &[Requirement]) -> Result<()> {
     let mut seen = BTreeSet::new();

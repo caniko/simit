@@ -163,6 +163,17 @@ in
     adapter.program = "/runtime/adapter";
     adapterInputs."/runtime//adapter" = lib.concatStrings (lib.replicate 64 "f");
   }));
+  assert lib.all (credentialFile:
+    !(accepts (withForge {
+      inherit credentialFile;
+      adapter.program = "/runtime/adapter";
+      adapterInputs."/runtime/helper.py" = lib.concatStrings (lib.replicate 64 "f");
+    }))) ["/runtime/adapter" "/runtime//adapter" "/runtime/helper.py" "/runtime//helper.py"];
+  assert accepts (withForge {
+    credentialFile = "/run/credentials/not-present";
+    adapter.program = "/runtime/adapter";
+    adapterInputs."/runtime/helper.py" = lib.concatStrings (lib.replicate 64 "f");
+  });
   assert accepts (withForge {
     adapter = {
       program = "/nix/store/fixture/bin/python3";
