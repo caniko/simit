@@ -110,7 +110,7 @@ in
   assert !(builtins.tryEval (builtins.deepSeq (mkConfig (example // {forges.enterprise = example.forges.enterprise // {adapterSha256 = null;};})) true)).success;
   assert system.config.systemd.timers.simit-updater-fleet.timerConfig.OnCalendar == "hourly";
   assert lib.hasInfix "--profile" service.serviceConfig.ExecStart;
-  assert lib.hasInfix "--config ${system.config.environment.etc."simit/updates.json".source}" service.serviceConfig.ExecStart;
+  assert lib.hasPrefix "${system.config.environment.etc."simit/updates.json".source} --profile " (lib.last (lib.splitString "--config " service.serviceConfig.ExecStart));
   assert map lib.getName system.config.services.simit-updater.runtimePackages == ["git"];
   assert map lib.getName customSystem.config.services.simit-updater.runtimePackages == ["git" "cargo"]; {
     inherit rendered;
