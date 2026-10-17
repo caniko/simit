@@ -773,6 +773,19 @@ pub(crate) fn qualify_component(
 }
 
 fn qualify_selected(root: &Path, graph: &Graph, selected: &[String]) -> Result<()> {
+    // Local release qualification has no provider to evaluate these values.
+    // Validate the entire selection before running any prerequisite gate.
+    for id in selected {
+        for gate in &graph.components[id].checks {
+            for (name, value) in &gate.env {
+                ensure!(
+                    !value.contains("${{"),
+                    "component {id} check {} environment {name:?} cannot contain workflow expressions during local release qualification",
+                    gate.id
+                );
+            }
+        }
+    }
     for id in selected {
         let component = &graph.components[id];
         ensure!(
@@ -810,6 +823,32 @@ fn qualify_selected(root: &Path, graph: &Graph, selected: &[String]) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_release_rejects_provider_values_before_any_gate_runs() {
+        let root = tempfile::TempDir::new().unwrap();
+        let config: super::super::Config = toml_edit::de::from_str(
+            r#"
+schema_version = 1
+[[components]]
+id = "first"
+paths = ["first"]
+checks = [{ id = "test", run = "touch executed" }]
+[[components]]
+id = "second"
+paths = ["second"]
+checks = [{ id = "test", run = "true", env = { TOKEN = "${{ secrets.NEVER_REPORT }}" } }]
+"#,
+        )
+        .unwrap();
+        let graph = config.graph(None).unwrap();
+        let error = qualify_selected(root.path(), &graph, &["first".into(), "second".into()])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("workflow expressions during local release qualification"));
+        assert!(!error.contains("NEVER_REPORT"));
+        assert!(!root.path().join("executed").exists());
+    }
 
     #[test]
     fn restricted_access_requires_scoped_name_during_signed_manifest_admission() {

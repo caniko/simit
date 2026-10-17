@@ -2,7 +2,7 @@ use anyhow::Result;
 
 use crate::cargo;
 use crate::cli::InitCoprCommand;
-use crate::commands::copr::{self, MAKEFILE_PATH};
+use crate::commands::copr;
 use crate::commands::scaffold::{ArtifactCheck, CheckPrintMode, print_next_steps, shell_word};
 use crate::commands::upgrade;
 use crate::config::ProjectConfig;
@@ -22,7 +22,7 @@ pub fn run(command: InitCoprCommand) -> Result<()> {
         CheckPrintMode::Print => {
             println!("==> {}", resolved.spec_path);
             print!("{}", rendered.spec);
-            println!("==> {MAKEFILE_PATH}");
+            println!("==> {}", resolved.makefile_path);
             print!("{}", rendered.makefile);
             return Ok(());
         }
@@ -37,7 +37,7 @@ pub fn run(command: InitCoprCommand) -> Result<()> {
             .verify(diff)?;
             ArtifactCheck {
                 label: "COPR Makefile",
-                path: &workspace_root.join(MAKEFILE_PATH),
+                path: &workspace_root.join(&resolved.makefile_path),
                 expected: &rendered.makefile,
                 remediation,
             }
@@ -55,8 +55,9 @@ pub fn run(command: InitCoprCommand) -> Result<()> {
         "Initialised COPR packaging",
         &[
             format!(
-                "git add {} {MAKEFILE_PATH}",
-                shell_word(&resolved.spec_path)
+                "git add {} {}",
+                shell_word(&resolved.spec_path),
+                shell_word(&resolved.makefile_path)
             ),
             "copr-cli build <owner>/<project> <srpm>".to_owned(),
         ],

@@ -1,5 +1,6 @@
 //! One project-owned component graph shared by local planning and CI generation.
 
+mod check;
 pub(crate) mod ci;
 mod native_ci;
 pub(crate) mod native_registry;
@@ -14,6 +15,7 @@ use serde::Deserialize;
 
 use crate::config::{ProjectConfig, RequiredGate};
 
+pub use check::GateExit;
 pub use plan::{ChangedPaths, Plan, changed_paths, select};
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -115,7 +117,7 @@ impl Config {
                         component.id
                     );
                 }
-                for (name, value) in &gate.env {
+                for name in gate.env.keys() {
                     if name.is_empty()
                         || !name.bytes().enumerate().all(|(i, c)| {
                             c == b'_' || c.is_ascii_alphabetic() || (i > 0 && c.is_ascii_digit())
@@ -123,12 +125,48 @@ impl Config {
                     {
                         bail!("invalid component check environment name {name:?}");
                     }
-                    ensure!(
-                        !value.contains("${{"),
-                        "component {} check {} environment {name:?} cannot contain workflow expressions",
-                        component.id,
-                        gate.id
-                    );
+                    if matches!(
+                        name.as_str(),
+                        "UID" | "EUID" | "PPID" | "BASHOPTS" | "SHELLOPTS" | "BASH_VERSINFO"
+                    ) {
+                        bail!("unsupported read-only Bash environment name {name}");
+                    }
+                    // Bash's integer, computed, startup/control and internal-array variables are
+                    // not scalar data: assignment may evaluate arithmetic, be
+                    // ignored, or be replaced by the next command. Reject them
+                    // before either native execution or generated CI writes.
+                    if matches!(
+                        name.as_str(),
+                        "RANDOM"
+                            | "SRANDOM"
+                            | "OPTIND"
+                            | "HISTCMD"
+                            | "SECONDS"
+                            | "LINENO"
+                            | "BASHPID"
+                            | "EPOCHSECONDS"
+                            | "EPOCHREALTIME"
+                            | "BASH_MONOSECONDS"
+                            | "BASH_SUBSHELL"
+                            | "BASH_COMPAT"
+                            | "BASH_XTRACEFD"
+                            | "BASH_ALIASES"
+                            | "BASH_ARGC"
+                            | "BASH_ARGV"
+                            | "BASH_ARGV0"
+                            | "BASH_ENV"
+                            | "BASH_CMDS"
+                            | "BASH_COMMAND"
+                            | "BASH_LINENO"
+                            | "BASH_SOURCE"
+                            | "DIRSTACK"
+                            | "FUNCNAME"
+                            | "GROUPS"
+                            | "PIPESTATUS"
+                            | "_"
+                    ) {
+                        bail!("unsupported managed Bash environment name {name}");
+                    }
                 }
             }
         }
@@ -467,6 +505,7 @@ pub(crate) fn compose_formatter_modules(
 
 pub fn run(command: crate::cli::MonorepoCommand) -> Result<()> {
     match command.action {
+        crate::cli::MonorepoAction::Check(command) => check::run(command),
         crate::cli::MonorepoAction::Plan(command) => {
             let (root, project) = load(&std::env::current_dir()?)?;
             let graph = project

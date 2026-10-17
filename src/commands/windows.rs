@@ -46,6 +46,7 @@ fn publish(args: WindowsPublishArgs) -> Result<()> {
             package_dir,
             archive: vec![format!("x64={x64}")],
             push: !args.dry_run,
+            pack: false,
             push_source: args.choco_push_source.clone(),
             api_key_env: None,
             force_resubmit: args.force_resubmit,

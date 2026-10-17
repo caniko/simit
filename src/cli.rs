@@ -88,6 +88,45 @@ pub struct MonorepoCommand {
 pub enum MonorepoAction {
     #[command(about = "Print affected components in dependency order without writing files")]
     Plan(MonorepoPlanCommand),
+    #[command(
+        about = "Run one declared component check and retain bounded Nix failure diagnostics"
+    )]
+    Check(MonorepoCheckCommand),
+}
+
+#[derive(Debug, Args)]
+pub struct MonorepoCheckCommand {
+    #[arg(long)]
+    pub component: String,
+    #[arg(long)]
+    pub check: String,
+    #[arg(
+        long,
+        help = "Capture Linux kernel and Nix daemon evidence when the check fails"
+    )]
+    pub nix_diagnostics: bool,
+    #[arg(
+        long,
+        value_enum,
+        default_value = "local",
+        help = "Use configured literals locally, or require every gate variable from the evaluated CI step environment"
+    )]
+    pub gate_env: MonorepoGateEnv,
+    #[arg(
+        long,
+        help = "Absolute Unix deadline supplied by generated CI, including provisioning time and leaving provider diagnostic grace"
+    )]
+    pub deadline: Option<u64>,
+    #[arg(long, hide = true, requires = "deadline")]
+    pub supervisor_ready: Option<Utf8PathBuf>,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum MonorepoGateEnv {
+    Local,
+    ProviderResolved,
+    /// Generated callers pass inert aliases until the gate shell is launched.
+    ProviderStaged,
 }
 
 #[derive(Debug, Args)]
@@ -1554,6 +1593,12 @@ pub struct ChocolateyBumpArgs {
     pub archive: Vec<String>,
     #[arg(long, help = "After writing, run choco pack and choco push")]
     pub push: bool,
+    #[arg(
+        long,
+        conflicts_with = "push",
+        help = "Retain a packed candidate without registry access or publication credentials"
+    )]
+    pub pack: bool,
     #[arg(
         long,
         value_name = "URL",

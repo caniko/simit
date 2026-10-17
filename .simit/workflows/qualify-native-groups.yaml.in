@@ -2,7 +2,12 @@ name: Qualify native grouped execution
 
 on:
   push:
-    branches: ["ci/native-group-platforms-20261013", "trunk"]
+    branches:
+      [
+        "ci/native-group-platforms-20261013",
+        "migrate/harbor-monorepo-reconcile-20261012-current",
+        "trunk",
+      ]
   pull_request:
   workflow_dispatch:
 
