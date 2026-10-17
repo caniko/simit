@@ -94,9 +94,13 @@
           || builtins.elem pathString (map (name: "${toString ./.}/${name}") ["README.md" "LICENSE" "CHANGELOG.md"])
           || pkgs.lib.hasInfix "/src/review/assets/" pathString
           || pkgs.lib.hasSuffix "/src/monorepo/native_release.py" pathString
+          || pkgs.lib.hasSuffix "/src/monorepo/nix_diagnostics.sh" pathString
+          || pkgs.lib.hasSuffix "/src/monorepo/provision.sh" pathString
           || pkgs.lib.hasInfix "/tests/fixtures/" pathString
           || pkgs.lib.hasSuffix "/src/render/ci/nix_dependencies.py" pathString
           || pkgs.lib.hasSuffix "/src/render/ci/custody.py" pathString
+          || pkgs.lib.hasSuffix "/scripts" pathString
+          || pkgs.lib.hasInfix "/scripts/qualify-" pathString
           || pkgs.lib.hasSuffix "/src/render/ci/custody_sealed.py" pathString
           || pkgs.lib.hasSuffix "ci-actions.json" pathString
           || pkgs.lib.hasSuffix "/.github" pathString

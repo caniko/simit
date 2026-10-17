@@ -22,6 +22,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Keep local monorepo gate process creation interruptible by normal termination
+  signals until native child cleanup can take ownership.
+- Use job Bash for generated monorepo gate supervision on hosted and custom runners,
+  retain diagnostics on gate spawn failure or abrupt native termination and
+  propagate gate exit codes. Keep the tool PATH while
+  locating Bash in Nix sandboxes before restoring the gate's configured PATH.
+- Preserve configured monorepo gate environment data across Bash and Nix startup,
+  remove consumed provider aliases and reject read-only and dynamically managed
+  Bash names and startup-sensitive `BASH_ENV` before execution. Require private
+  supervisor directories and bound provisioning (including executable startup),
+  native initialization and gate process creation so failed or
+  timed-out checks retain their diagnostic reserve.
 - Limit COPR staging cleanup to generated source RPMs, preserving project files
   when the staging directory also contains specs or sources.
 - Clarify NuGet v2/v3 Chocolatey source configuration and reject authenticated
