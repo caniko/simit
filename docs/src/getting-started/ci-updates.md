@@ -98,6 +98,10 @@ worktrees, query forges or read credential contents. Git transport authenticatio
 is supplied by the execution user's existing Git configuration; `credentialFile`
 authenticates API reads only. The execution user's Git identity, signing and
 hooks are honored when creating candidate commits.
+The sandbox has no personal Simit configuration. Projects must declare their CI
+platform and any private runner labels through project policy; GitHub can use
+its built-in hosted-runner defaults. An undeclared platform retains Simit's
+Forgejo default and cannot borrow runner configuration from the operator's home.
 
 The module creates `simit-updater-<profile>.service` and, when scheduled, its
 timer. State is private and writable; workspace source and user configuration
@@ -113,8 +117,10 @@ Workspace state directories must be disjoint, including after runtime symlink
 resolution. Enrollment digests use exactly 64 lowercase hexadecimal characters.
 Generator source revisions require full 40-character lowercase commit SHAs.
 Inventory paths, command executables and credential files are absolute runtime
-paths; credentials cannot reside in the Nix store. These constraints are checked
-while rendering the workstation policy as well as at runtime.
+paths. Rust and Nix reject store credential paths and credential/code overlaps
+without reading the filesystem. At runtime credentials must also resolve outside
+the store: reads verify the opened regular file's identity through Linux procfs
+and snapshot bytes from that same descriptor.
 
 ## Selection and inventory
 
@@ -220,9 +226,10 @@ For each repository:
    commit, and retain its diff and identity. Every present managed path must stay
    in the plan or be explicitly listed as obsolete; omission cannot drop ownership.
 5. Admit the exact generated plan for both maintenance and adoption branches,
-   then push a maintenance ref and require exact-candidate original push qualification.
+   including when resuming a retained candidate, then push a maintenance ref and
+   require exact-candidate original push qualification.
 6. Reinspect source and policy, then conditionally advance the target branch to
-   the same candidate using an explicit Git lease.
+   the same candidate using an explicit Git lease after repeating target admission.
 7. Verify exact-source default/target-branch adoption and record a new baseline.
 
 Managed identities include the canonical Git mode and blob from the staged/committed
@@ -309,12 +316,16 @@ as path-to-SHA-256 entries. Digest-enrolled mutable files are executed or read f
 fresh private snapshots for each verification, retaining prior verified bytes
 even when the same input is re-enrolled or supplied more than once. Store inputs
 must resolve to files inside the store. Adapters
-and generators retain their resolved store installation paths even when a digest
+and generators retain their enrolled store installation paths even when a digest
 is supplied, preserving wrapper resources and installation-relative loaders.
+Containment verification resolves symlinks without replacing the executable's
+invocation name, which can select a multicall applet.
 Every `adapterInputs` entry is checked, including helpers not named on argv.
 The adapter executable must not also be listed in `adapterInputs`; enroll its
 digest through `adapterSha256`. Rust and Nix reject duplicate entrypoint paths
 before dispatch, including equivalent paths with repeated separators.
+The credential path must also differ from the executable and every declared
+input; Rust and Nix reject those overlaps before dispatch.
 Verified mutable inputs are mounted at their enrolled absolute paths so scripts
 can import declared siblings; other mutable helpers are inaccessible. These
 checks also apply to store interpreters executing a configured script argument.
@@ -332,6 +343,9 @@ settings. Forge/package-registry credentials and unlisted variables are excluded
 adapters receive their configured `credentialFile` through request JSON and a
 read-only file mount. The updater's separate Git transport commands retain
 operator Git identity, signing and transport configuration.
+Repository-routing variables such as `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`,
+object directories and ref namespaces are removed from every updater Git command
+so an inherited environment cannot redirect operations outside the disposable clone.
 HTTPS clone URLs must not contain a username or password; SSH usernames remain
 supported through operator Git authentication. Clone URLs must use the protocol's
 default port, because enrollment identifies the service by hostname. Override
@@ -361,6 +375,10 @@ Required checks from other applications, unbound contexts, active rulesets,
 locked or push-restricted target branches and PR-required protections are rejected
 during admission. The API credential is not evidence of the separate Git
 transport actor's membership in a push allowlist.
+Signature-required protection is queried through its separate REST endpoint and
+included in the observed policy digest. V1 rejects it before publication; proving
+a forge-accepted candidate signature requires a supporting adapter. Classic
+signature and pull-request requirements also reject matching uncreated maintenance refs.
 Admission carries the merged repository, profile and project required checks.
 Each consumer requirement must match a literal non-matrix job name (or job ID
 when unnamed) in an owned push workflow. Requirements produced only by
@@ -374,6 +392,21 @@ rejected, including wildcard rules for uncreated maintenance refs. Rule bypasses
 and priority require an actor-aware adapter. Missing permissions, partial GraphQL
 errors and incomplete rule inventories fail admission. GitHub Enterprise Server
 uses `/api/graphql` alongside its configured REST `/api/v3` root.
+The workflow registry is completely paginated before admission and qualification.
+Existing selected workflows must be active; disabled, incomplete or duplicate
+observations fail. A path absent from a complete registry may be introduced by
+the candidate, but still needs a genuine original push run to qualify.
+Concurrency is admitted only when absent or in the supported path/ref-scoped
+forms below, with an absent or literal boolean `cancel-in-progress`:
+
+- `${{ github.workflow_ref }}`
+- `${{ github.workflow_ref }}-${{ github.ref }}`
+- `${{ github.workflow_ref }}-${{ github.event_name }}-${{ github.head_ref || github.ref_name }}`
+
+Other expressions and job-level concurrency require a supporting adapter.
+Workflow display names do not establish uniqueness. Even with cancellation
+disabled, a shared group can replace pending originals. Case-colliding selected
+workflow paths are rejected as well.
 It does not migrate protection contexts, CI engine variables, or PR-only custody contracts. Those
 transitions require a later protocol with explicit ordered migration support.
 Other forge/CI backends can enroll an absolute adapter command implementing the
@@ -394,8 +427,9 @@ branches, including ordered exclusions and tag-only triggers. Literal branch
 names and `*` / `**` globs are supported; richer pattern syntax fails closed.
 Path-filtered push workflows are rejected before publication; supporting them
 requires an adapter that can evaluate GitHub's exact-change trigger semantics.
-Admission failures leave no published candidate receipt or maintenance ref and
-can be retried after correcting policy or templates.
+Initial admission failures leave no published candidate receipt or maintenance
+ref and can be retried after correcting policy or templates. A failed resume
+admission preserves the prior receipt and cannot push or advance either ref.
 
 ## Dependencies and verification
 
@@ -425,3 +459,10 @@ nextest derivations exclude only engine tests named `namespace_*`; the other
 engine checks remain in package qualification. The hosted native
 `cargo test --all-features` and `cargo test --no-default-features` steps run the
 complete group, including credential isolation and locked offline inputs.
+Hosted CI runs the updater group independently in both feature modes before the
+full Nix and runtime gates, so a broad check cannot hide either focused result.
+The packaged-generator qualification runs store-wrapper, digest-enrolled wrapper,
+no-input and locked-input cases independently, retaining nested tool diagnostics
+for every failure. These are preview checks. The built-in adapter's connected
+API replay checks inspection, both branch admissions and original qualification;
+live GitHub publication still requires separate controlled-repository evidence.
