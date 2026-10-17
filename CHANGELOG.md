@@ -14,6 +14,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Workstation-owned updater profiles through `simit projects update`,
+  `lib.mkUpdateConfig` and `nixosModules.updater`, with isolated primary-CI
+  candidates, exact-source qualification, conditional landing and resumable
+  adoption receipts. Runtime tools are configurable and default to Git.
+- A lightweight `devShells.<system>.test` for native tests without the default
+  documentation, website and pre-commit provisioning.
 - Native `simit ci observe-original` and `verify-original-retention` capture
   enrolled original GitHub producers with bounded transient GET retries, one
   aggregate deadline, continuous identity binding, explicit incomplete receipts,

@@ -36,6 +36,45 @@ license = "MIT"
 }
 
 #[test]
+fn primary_plan_is_versioned_read_only_and_preserves_other_owners() {
+    let temp = init_package(false);
+    fs::write(
+        temp.path().join("simit.toml"),
+        "[ci]\nplatform = 'github'\nprovider = 'actions'\nruntime = 'cargo'\n",
+    )
+    .unwrap();
+    fs::create_dir_all(temp.path().join(".github/workflows")).unwrap();
+    let publisher = temp.path().join(".github/workflows/publish-crate.yaml");
+    fs::write(&publisher, "project-owned publisher\n").unwrap();
+    let before = fs::read(temp.path().join("simit.toml")).unwrap();
+    let output = simit()
+        .current_dir(temp.path())
+        .args(["init", "ci", "--primary-only", "--plan-json"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let plan: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(plan["schema"], "simit.ci-update-plan.v1");
+    assert!(
+        plan["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["relative_path"] == ".github/workflows/ci.yaml")
+    );
+    assert!(!temp.path().join(".github/workflows/ci.yaml").exists());
+    assert_eq!(fs::read(temp.path().join("simit.toml")).unwrap(), before);
+    assert_eq!(
+        fs::read_to_string(publisher).unwrap(),
+        "project-owned publisher\n"
+    );
+}
+
+#[test]
 fn nix_format_jobs_are_uncached_across_providers_and_job_layouts() {
     for (platform, provider, path, step_runners) in [
         ("github", "actions", ".github/workflows/ci.yaml", ""),

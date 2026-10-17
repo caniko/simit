@@ -535,6 +535,8 @@ pub enum BumpKind {
 
 #[derive(Debug, Args)]
 pub struct InitCiCommand {
+    #[arg(long, requires = "primary_only", conflicts_with_all = ["check", "diff"], help = "Print the versioned primary-CI ownership plan without writing files")]
+    pub plan_json: bool,
     #[arg(
         long,
         conflicts_with_all = ["pages_only", "prebuild_only", "review_only"],
@@ -2236,6 +2238,10 @@ pub enum ProjectsAction {
     Audit(ProjectsAuditArgs),
     #[command(about = "Regenerate selected generated CI and release workflows")]
     Regenerate(ProjectsRegenerateArgs),
+    #[command(about = "Qualify and deploy generated primary CI updates without pull requests")]
+    Update(crate::commands::projects_update::Args),
+    #[command(about = "Run the GitHub Actions updater adapter protocol")]
+    UpdateGithubAdapter(crate::commands::projects_update::AdapterArgs),
     #[command(about = "Discover Rust workspaces under a filesystem subtree")]
     Discover(ProjectsDiscoverArgs),
     #[command(about = "Forget one registered project")]

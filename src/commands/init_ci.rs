@@ -1664,6 +1664,7 @@ pub(crate) fn project_regeneration_command(workspace_root: &Path) -> Result<Opti
         resolved.publish_crates || with_artifacts || with_homebrew || windows_packagers;
     let inferred_pages = infer_codeberg_pages_from_workflows(&snapshots)?;
     let command = InitCiCommand {
+        plan_json: false,
         primary_only: false,
         pages_only: false,
         prebuild_only: false,
@@ -2117,6 +2118,17 @@ fn reconcile_ci_files(
             if !crate::render::workflow_templates::is_template_output(&config.ci, &path, &content) {
                 primary_obsolete.push(path);
             }
+        }
+        if command.plan_json {
+            println!(
+                "{}",
+                serde_json::to_string(&project::CiUpdatePlan {
+                    schema: "simit.ci-update-plan.v1".into(),
+                    files,
+                    obsolete: primary_obsolete,
+                })?
+            );
+            return Ok(());
         }
         return project::reconcile_generated_files(
             workspace_root,

@@ -321,6 +321,9 @@
           rust-analyzer
         ];
       in {
+        test = publicCraneLib.devShell {
+          packages = with pkgs; [git gnupg nodejs jq python3 actionlint perl];
+        };
         msrv = let
           msrvToolchain = harbor.lib.rust.mkToolchain {
             inherit pkgs;
@@ -378,6 +381,15 @@
         mkReviewTools = args: import ./nix/review-tools.nix ({source = self;} // args);
         simitModule = import ./nix/simit-module.nix {lib = nixpkgs.lib;};
         mkSimitConfig = import ./nix/simit-config.nix {lib = nixpkgs.lib;};
+        mkUpdateConfig = import ./nix/update-config.nix {lib = nixpkgs.lib;};
+      };
+      nixosModules.updater = {
+        lib,
+        pkgs,
+        ...
+      }: {
+        imports = [./nix/updater.nix];
+        services.simit-updater.package = lib.mkDefault self.packages.${pkgs.stdenv.hostPlatform.system}.default;
       };
     };
 }
