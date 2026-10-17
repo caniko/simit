@@ -106,6 +106,8 @@
   };
 in
   assert rendered.schemaVersion == 1;
+  assert !(accepts (example // {profiles.fleet = example.profiles.fleet // {rollout.canaries = ["git.example.org/team/typo"];};}));
+  assert accepts (example // {profiles.fleet = example.profiles.fleet // {rollout.canaries = example.profiles.fleet.select.coordinates;};});
   assert lib.all (sourceRevision: !(accepts (withGenerator {inherit sourceRevision;}))) ["trunk" "abc123" (lib.concatStrings (lib.replicate 40 "A"))];
   assert lib.all (path:
     !(accepts (withInventory {file = path;}))

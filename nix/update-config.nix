@@ -53,6 +53,7 @@
     && lib.hasPrefix "${cfg.forges.${profile.generator.forge}.host}/" profile.generator.sourceCoordinate
     && profile.scopes == ["ci"]
     && profile.select.coordinates != []
+    && lib.all (canary: lib.elem canary profile.select.coordinates) profile.rollout.canaries
     && profile.generator.requiredChecks != []
     && requirements profile.generator.requiredChecks
     && requirements profile.requiredChecks

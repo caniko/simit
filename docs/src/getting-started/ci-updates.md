@@ -147,6 +147,18 @@ Every profile requires a non-empty `select.coordinates` list declared by the
 workstation operator. Inventory observations cannot add to that enrollment;
 their `policyDigest` records provenance, not deployment authority. Exact
 coordinates are rechecked when processing frozen selections as well.
+Configured canaries must be a subset of that coordinate enrollment; both Nix
+and runtime validation reject an unlisted canary before discovery.
+
+Inventory commands run in read-only Linux filesystem, network and PID namespaces,
+with a private writable temporary directory. The host `/run` socket tree and Nix
+daemon socket are hidden, and descendants cannot outlive discovery. The same persistent-state
+checkpoint used for generation also surrounds discovery, with no state subtree
+excluded. Unexpected writes are detected and restored before inventory output can
+reach a repository transaction, including on failure.
+The operator-facing policy path may be a symlink, as with NixOS's
+`/etc/simit/updates.json`; its resolved target must pass the regular-file JSON
+reader. State and evidence readers retain their strict regular-file checks.
 
 The timestamp must be fresh at rollout start. Metadata selectors are combined
 with AND, path exclusions win, and exact coordinates disambiguate short names.
@@ -194,7 +206,8 @@ For each repository:
 4. Compare managed files with the adopted baseline, prepare a scoped candidate
    commit, and retain its diff and identity. Every present managed path must stay
    in the plan or be explicitly listed as obsolete; omission cannot drop ownership.
-5. Push a maintenance ref and require exact-candidate original push qualification.
+5. Admit the exact generated plan for both maintenance and adoption branches,
+   then push a maintenance ref and require exact-candidate original push qualification.
 6. Reinspect source and policy, then conditionally advance the target branch to
    the same candidate using an explicit Git lease.
 7. Verify exact-source default/target-branch adoption and record a new baseline.
@@ -250,7 +263,7 @@ fresh candidate from the newly observed source, preserving the adopted baseline.
 A candidate already awaiting adoption, or one found in the new source's ancestry,
 requires explicit adoption reconciliation instead of silently restarting.
 
-Interrupted generation or an unsuccessful checkpoint restoration leaves
+Interrupted generation, inventory discovery or an unsuccessful checkpoint restoration leaves
 `generation-checkpoint.json` in the workspace state root, naming the retained
 recovery snapshot in that same durable state directory. Recovery bytes are synced
 before the marker is published; service-private temporary storage is used only
@@ -298,6 +311,19 @@ same versioned inspect/qualify contract and its source-binding requirements.
 The request's `workflows` list carries all owned generated paths. Each adapter
 selects its own workflow formats and trigger semantics. The GitHub adapter reads
 owned Actions YAML at the exact requested revision to identify push triggers.
+Before publishing a candidate receipt or maintenance ref, the adapter must support
+the `admit` operation. Its request includes the exact generation `plan`, candidate
+revision, branch and owned paths. Success includes one `admission` check under
+the enrolled authority, bound to that revision and to the SHA-256 of the complete
+request's recursively key-sorted compact UTF-8 JSON in `run`, with `attempt = 1`
+and `status = "success"`. This prevents older adapters from silently treating
+admission as qualification. The plan field is omitted from other operations.
+
+The GitHub adapter checks branch trigger filters against both qualification
+branches, including ordered exclusions and tag-only triggers. Literal branch
+names and `*` / `**` globs are supported; richer pattern syntax fails closed.
+Admission failures leave no published candidate receipt or maintenance ref and
+can be retried after correcting policy or templates.
 
 ## Dependencies and verification
 

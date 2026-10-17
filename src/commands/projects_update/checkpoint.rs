@@ -1,4 +1,4 @@
-//! Checkpoint updater state across read-only generation, including failed tools.
+//! Checkpoint updater state across read-only tools, including failed commands.
 use super::engine::{save, verify_lock};
 use crate::review::digest;
 use anyhow::{Context, Result, bail, ensure};
@@ -226,7 +226,7 @@ pub fn protect<T>(
     fs::remove_dir_all(backup)?;
     ensure!(
         unchanged,
-        "read-only generator modified persistent updater state; checkpoint restored"
+        "read-only command modified persistent updater state; checkpoint restored"
     );
     output
 }

@@ -1,6 +1,97 @@
 //! Candidate configuration can execute tools: expose no updater authority to it.
 use anyhow::{Context, Result, ensure};
-use std::{path::Path, process::Command};
+use std::{
+    path::{Path, PathBuf},
+    process::Command,
+};
+
+fn directories() -> Vec<PathBuf> {
+    std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+        .filter_map(|path| path.canonicalize().ok())
+        .filter(|path| path.starts_with("/nix/store") && path.is_dir())
+        .collect()
+}
+
+fn tool(name: &str) -> Result<PathBuf> {
+    directories()
+        .iter()
+        .find_map(|directory| {
+            let path = directory.join(name);
+            let resolved = path.canonicalize().ok()?;
+            (resolved.starts_with("/nix/store") && resolved.is_file()).then_some(path)
+        })
+        .with_context(|| format!("sandbox requires an immutable Nix-store {name} on PATH"))
+}
+
+pub fn inventory(command: &super::schema::Command) -> Result<Vec<u8>> {
+    ensure!(
+        cfg!(target_os = "linux"),
+        "updater discovery requires Linux namespaces"
+    );
+    let temporary = tempfile::Builder::new()
+        .prefix("simit-inventory-")
+        .tempdir()?;
+    let temporary_path = temporary
+        .path()
+        .to_str()
+        .context("non-UTF-8 inventory temporary path")?;
+    let mut arguments = [
+        "--unshare-all",
+        "--unshare-user",
+        "--die-with-parent",
+        "--new-session",
+        "--as-pid-1",
+        "--cap-drop",
+        "ALL",
+        "--disable-userns",
+        "--ro-bind",
+        "/",
+        "/",
+        "--proc",
+        "/proc",
+        "--dev",
+        "/dev",
+        "--tmpfs",
+        "/run",
+    ]
+    .map(str::to_owned)
+    .to_vec();
+    if Path::new("/run/current-system").is_dir() {
+        arguments
+            .extend(["--ro-bind", "/run/current-system", "/run/current-system"].map(str::to_owned));
+    }
+    if Path::new("/nix/var/nix/daemon-socket").is_dir() {
+        arguments.extend(["--tmpfs", "/nix/var/nix/daemon-socket"].map(str::to_owned));
+    }
+    arguments.extend(
+        [
+            "--tmpfs",
+            temporary_path,
+            "--setenv",
+            "TMPDIR",
+            temporary_path,
+            "--",
+        ]
+        .map(str::to_owned),
+    );
+    arguments.push(
+        command
+            .program
+            .to_str()
+            .context("non-UTF-8 inventory executable")?
+            .into(),
+    );
+    arguments.extend(command.arguments.iter().cloned());
+    super::engine::command_output(
+        &super::schema::Command {
+            program: tool("bwrap")?,
+            arguments,
+            timeout_seconds: command.timeout_seconds,
+        },
+        &[],
+        None,
+    )
+}
 
 pub fn generation(executable: &Path, checkout: &Path, nix_state: &Path) -> Result<Command> {
     ensure!(
@@ -9,19 +100,7 @@ pub fn generation(executable: &Path, checkout: &Path, nix_state: &Path) -> Resul
     );
     // Only operator-provisioned immutable tools enter the child PATH. In
     // particular, never expose system/profile directories or a user home.
-    let directories = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
-        .filter_map(|path| path.canonicalize().ok())
-        .filter(|path| path.starts_with("/nix/store") && path.is_dir())
-        .collect::<Vec<_>>();
-    let tool = |name: &str| -> Result<std::path::PathBuf> {
-        directories
-            .iter()
-            .find_map(|directory| {
-                let path = directory.join(name).canonicalize().ok()?;
-                (path.starts_with("/nix/store") && path.is_file()).then_some(path)
-            })
-            .with_context(|| format!("generation requires an immutable Nix-store {name} on PATH"))
-    };
+    let directories = directories();
     let flake = checkout.join("flake.nix");
     if flake.is_file() && crate::config::flake_declares_simit_config(&flake)? {
         // SQLite's online snapshot includes committed WAL content without

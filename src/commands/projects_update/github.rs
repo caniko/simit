@@ -117,7 +117,71 @@ fn encoded(value: &str) -> String {
     url::form_urlencoded::byte_serialize(value.as_bytes()).collect()
 }
 
-fn push_workflow(path: &str, file: &Value) -> Result<bool> {
+fn branch_pattern(pattern: &str, branch: &str) -> Result<bool> {
+    // ponytail: only literal names and * / ** patterns are admitted. Reject
+    // richer GitHub syntax until it has an exact, provider-native evaluator.
+    ensure!(
+        !pattern.is_empty()
+            && !pattern.contains(['!', '?', '+', '[', ']', '{', '}', '(', ')', '\\']),
+        "unsupported GitHub branch filter pattern"
+    );
+    Ok(glob::Pattern::new(pattern)?.matches_with(
+        branch,
+        glob::MatchOptions {
+            case_sensitive: true,
+            require_literal_separator: true,
+            require_literal_leading_dot: false,
+        },
+    ))
+}
+
+fn admit_branch(trigger: &serde_yaml::Value, branch: &str) -> Result<()> {
+    ensure!(
+        trigger.is_null() || trigger.is_mapping(),
+        "invalid push trigger configuration"
+    );
+    let branches = trigger.get("branches");
+    let ignored = trigger.get("branches-ignore");
+    ensure!(
+        branches.is_none() || ignored.is_none(),
+        "workflow combines incompatible branch filters"
+    );
+    ensure!(
+        branches.is_some()
+            || ignored.is_some()
+            || (trigger.get("tags").is_none() && trigger.get("tags-ignore").is_none()),
+        "tag-only workflow cannot qualify a branch update"
+    );
+    let mut admitted = branches.is_none();
+    if let Some(patterns) = branches {
+        for value in patterns.as_sequence().context("invalid branches filter")? {
+            let pattern = value.as_str().context("non-string branch filter")?;
+            let (negated, pattern) = pattern
+                .strip_prefix('!')
+                .map_or((false, pattern), |p| (true, p));
+            if branch_pattern(pattern, branch)? {
+                admitted = !negated;
+            }
+        }
+    }
+    if let Some(patterns) = ignored {
+        for value in patterns
+            .as_sequence()
+            .context("invalid branches-ignore filter")?
+        {
+            if branch_pattern(value.as_str().context("non-string branch filter")?, branch)? {
+                admitted = false;
+            }
+        }
+    }
+    ensure!(
+        admitted,
+        "owned workflow excludes qualification branch {branch}"
+    );
+    Ok(())
+}
+
+fn push_workflow(path: &str, file: &Value, branch: Option<&str>) -> Result<bool> {
     ensure!(
         file["path"] == path && file["type"] == "file" && file["encoding"] == "base64",
         "workflow source inventory is incomplete"
@@ -126,27 +190,34 @@ fn push_workflow(path: &str, file: &Value) -> Result<bool> {
     let content =
         base64::engine::general_purpose::STANDARD.decode(content.replace(['\r', '\n'], ""))?;
     let yaml: serde_yaml::Value = serde_yaml::from_slice(&content)?;
-    Ok(match yaml.get("on") {
-        Some(serde_yaml::Value::String(event)) => event == "push",
-        Some(serde_yaml::Value::Sequence(events)) => {
-            events.iter().any(|e| e.as_str() == Some("push"))
-        }
+    let unfiltered = serde_yaml::Value::Null;
+    let trigger = match yaml.get("on") {
+        Some(serde_yaml::Value::String(event)) => (event == "push").then_some(&unfiltered),
+        Some(serde_yaml::Value::Sequence(events)) => events
+            .iter()
+            .any(|e| e.as_str() == Some("push"))
+            .then_some(&unfiltered),
         Some(serde_yaml::Value::Mapping(events)) => {
-            events.contains_key(serde_yaml::Value::String("push".into()))
+            events.get(serde_yaml::Value::String("push".into()))
         }
-        _ => false,
-    })
+        _ => None,
+    };
+    if let (Some(trigger), Some(branch)) = (trigger, branch) {
+        admit_branch(trigger, branch)?;
+    }
+    Ok(trigger.is_some())
 }
 
 fn requested_workflows(
     paths: &[String],
+    branch: Option<&str>,
     mut source: impl FnMut(&str) -> Result<Value>,
 ) -> Result<BTreeSet<String>> {
     let mut workflows = BTreeSet::new();
     for path in paths {
         if std::path::Path::new(path).parent() == Some(std::path::Path::new(".github/workflows"))
             && (path.ends_with(".yaml") || path.ends_with(".yml"))
-            && push_workflow(path, &source(path)?)?
+            && push_workflow(path, &source(path)?, branch)?
         {
             workflows.insert(path.clone());
         }
@@ -233,9 +304,13 @@ pub fn execute(request: &AdapterRequest) -> Result<AdapterResponse> {
     );
     let id = number(&repo, "/id")?;
     let default_branch = text(&repo, "/default_branch")?;
-    let branch = request.branch.as_deref().unwrap_or(&default_branch);
+    let branch = if request.operation == "admit" {
+        default_branch.as_str()
+    } else {
+        request.branch.as_deref().unwrap_or(&default_branch)
+    };
     let info = api.get(&format!("{endpoint}/branches/{}", encoded(branch)))?;
-    let revision = if request.operation == "qualify" {
+    let revision = if matches!(request.operation.as_str(), "qualify" | "admit") {
         request
             .revision
             .clone()
@@ -285,6 +360,33 @@ pub fn execute(request: &AdapterRequest) -> Result<AdapterResponse> {
     if request.operation == "inspect" {
         return Ok(response);
     }
+    if request.operation == "admit" {
+        let plan = request.plan.as_ref().context("missing admission plan")?;
+        let paths = requested_workflows(&request.workflows, request.branch.as_deref(), |path| {
+            let file = plan
+                .files
+                .iter()
+                .find(|file| file.relative_path == std::path::Path::new(path))
+                .context("workflow is absent from candidate plan")?;
+            Ok(
+                serde_json::json!({"path": path, "type": "file", "encoding": "base64", "content": base64::engine::general_purpose::STANDARD.encode(&file.content)}),
+            )
+        })?;
+        ensure!(
+            !paths.is_empty(),
+            "candidate has no owned push workflow for qualification"
+        );
+        response.checks.push(Check {
+            name: "admission".into(),
+            authority: request.authority.clone(),
+            revision,
+            run: crate::review::canonical_digest(request)?,
+            attempt: 1,
+            status: "success".into(),
+        });
+        response.validate(request)?;
+        return Ok(response);
+    }
     // Only original push runs can qualify the exact candidate/default-branch bytes.
     let mut query = format!("{endpoint}/actions/runs?head_sha={revision}&event=push");
     if let Some(branch) = &request.branch {
@@ -319,7 +421,7 @@ pub fn execute(request: &AdapterRequest) -> Result<AdapterResponse> {
             Ok(required)
         })?
     } else {
-        requested_workflows(&request.workflows, |path| {
+        requested_workflows(&request.workflows, request.branch.as_deref(), |path| {
             let path = path.split('/').map(encoded).collect::<Vec<_>>().join("/");
             api.get(&format!("{endpoint}/contents/{path}?ref={revision}"))
         })?
@@ -607,7 +709,7 @@ mod tests {
             ".github/workflows/manual.yml",
         ]
         .map(str::to_owned);
-        let selected = requested_workflows(&paths, |path| Ok(json!({"path":path,"type":"file","encoding":"base64","content":base64::engine::general_purpose::STANDARD.encode(if path.ends_with("manual.yml") {"on: workflow_dispatch\n"} else {"on: [push, pull_request]\n"})}))).unwrap();
+        let selected = requested_workflows(&paths, None, |path| Ok(json!({"path":path,"type":"file","encoding":"base64","content":base64::engine::general_purpose::STANDARD.encode(if path.ends_with("manual.yml") {"on: workflow_dispatch\n"} else {"on: [push, pull_request]\n"})}))).unwrap();
         assert_eq!(
             selected,
             BTreeSet::from([".github/workflows/ci.yaml".into()])
@@ -618,9 +720,34 @@ mod tests {
             "\n  push:\n    branches: [trunk]",
         ] {
             let file = json!({"path":paths[2],"type":"file","encoding":"base64","content":base64::engine::general_purpose::STANDARD.encode(format!("on: {trigger}\n"))});
-            assert!(push_workflow(&paths[2], &file).unwrap());
+            assert!(push_workflow(&paths[2], &file, Some("trunk")).unwrap());
         }
-        assert!(requested_workflows(&paths, |_| Ok(Value::Null)).is_err());
+        assert!(requested_workflows(&paths, None, |_| Ok(Value::Null)).is_err());
+    }
+
+    #[test]
+    fn workflow_admission_rejects_excluded_maintenance_refs_before_push() {
+        let path = ".github/workflows/ci.yaml";
+        let branch = "maintenance/0123456789abcdef";
+        for (filters, admitted) in [
+            ("branches: [trunk]", false),
+            ("branches: ['**']", true),
+            ("branches: ['*']", false),
+            ("branches: ['maintenance/**']", true),
+            ("branches: ['**', '!maintenance/**']", false),
+            ("branches: ['**', '!maintenance/**', 'maintenance/*']", true),
+            ("branches-ignore: ['maintenance/**']", false),
+            ("branches-ignore: [docs]", true),
+            ("tags: ['v*']", false),
+            ("branches: ['maintenance/?*']", false),
+        ] {
+            let file = json!({"path":path,"type":"file","encoding":"base64","content":base64::engine::general_purpose::STANDARD.encode(format!("on:\n  push:\n    {filters}\n"))});
+            assert_eq!(
+                push_workflow(path, &file, Some(branch)).is_ok(),
+                admitted,
+                "{filters}"
+            );
+        }
     }
     #[test]
     fn original_admission_requires_exact_source_app_attempt_and_complete_jobs() {

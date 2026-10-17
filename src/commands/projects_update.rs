@@ -50,7 +50,12 @@ pub fn adapter(args: AdapterArgs) -> Result<()> {
 }
 
 pub fn run(args: Args) -> Result<()> {
-    let config: Config = crate::review::read_json(&args.config)?;
+    let config: Config = crate::review::read_json(
+        &args
+            .config
+            .canonicalize()
+            .context("resolve updater policy file")?,
+    )?;
     config.validate()?;
     let profile = config
         .profiles
@@ -78,7 +83,11 @@ pub fn run(args: Args) -> Result<()> {
         prior
     } else {
         let inventory: Inventory = if let Some(command) = &workspace.inventory.command {
-            serde_json::from_slice(&engine::command_output(command, &[], None)?)?
+            let output = checkpoint::protect(&state_directory, &workspace.root, || {
+                sandbox::inventory(command)
+            })
+            .context("read-only inventory discovery failed")?;
+            serde_json::from_slice(&output)?
         } else {
             crate::review::read_json(
                 workspace

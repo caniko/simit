@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Local-only updater protocol oracle; never contacts a hosted forge."""
 import json
+import hashlib
 import pathlib
 import subprocess
 import sys
@@ -36,6 +37,15 @@ response = dict(
     remote=control.get("remote", pathlib.Path(remote).as_uri()), policyDigest=control.get("policy", "b" * 64),
     requirements=[dict(name="test", authority="777")], status=status, checks=checks,
 )
+if request["operation"] == "admit":
+    if "expectedAdmissionBlobs" in control:
+        assert {f["relative_path"]: f["content"] for f in request["plan"]["files"]} == control["expectedAdmissionBlobs"]
+    response["status"] = control.get("admission", "success")
+    response["checks"] = [dict(
+        name="admission", authority=request["authority"], revision=revision,
+        run=hashlib.sha256(json.dumps(request, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest(),
+        attempt=1, status="success",
+    )] if response["status"] == "success" else []
 if request["operation"] == "inspect":
     control["inspections"] = control.get("inspections", 0) + 1
     if control.get("raceAtInspection") == control["inspections"]:

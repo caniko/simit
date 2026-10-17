@@ -95,7 +95,7 @@ in {
       requiredChecks = option requirements [];
       rollout = option (types.submodule {
         options = {
-          canaries = option strings [];
+          canaries = option (types.listOf coordinate) [];
           batchSize = option types.ints.positive 1;
           maxConcurrent = option types.ints.positive 1;
           stopOnFailure = option types.bool true;

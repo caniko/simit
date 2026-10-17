@@ -18,7 +18,7 @@ pub struct GeneratedFile {
 }
 
 /// Versioned primary-CI ownership boundary consumed by workstation updaters.
-#[derive(Debug, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CiUpdatePlan {
     pub schema: String,
