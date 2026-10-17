@@ -82,6 +82,7 @@
     absolute forge.adapter.program
     && (forge.adapterSha256 != null || lib.hasPrefix "/nix/store/" forge.adapter.program)
     && lib.all absolute (builtins.attrNames forge.adapterInputs)
+    && lib.all (path: normalized path != normalized forge.adapter.program) (builtins.attrNames forge.adapterInputs)
     && lib.all (validArgument forge) forge.adapter.arguments;
 in
   if

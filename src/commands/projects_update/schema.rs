@@ -336,6 +336,10 @@ impl Config {
             for (path, hash) in &forge.adapter_inputs {
                 absolute(path)?;
                 sha256(hash)?;
+                ensure!(
+                    path != &forge.adapter.program,
+                    "adapter input overlaps its executable"
+                );
             }
             for argument in &forge.adapter.arguments {
                 let value = if argument.starts_with('-') {
@@ -501,6 +505,45 @@ mod tests {
                 .to_string()
                 .contains("operator-owned coordinate enrollment")
         );
+    }
+
+    #[test]
+    fn adapter_executable_cannot_also_be_a_declared_input() {
+        for program in [
+            "/runtime/adapter",
+            "/runtime//adapter",
+            "/nix/store/fixture/bin/adapter",
+        ] {
+            let mut cfg = config();
+            let forge = cfg.forges.get_mut("example").unwrap();
+            forge.adapter.program = program.into();
+            forge.adapter_sha256 = Some("a".repeat(64));
+            forge
+                .adapter_inputs
+                .insert(PathBuf::from(program), "a".repeat(64));
+            assert!(
+                cfg.validate()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("adapter input overlaps its executable")
+            );
+        }
+        let mut cfg = config();
+        let forge = cfg.forges.get_mut("example").unwrap();
+        forge.adapter.program = "/runtime/adapter".into();
+        forge.adapter_sha256 = Some("a".repeat(64));
+        forge
+            .adapter_inputs
+            .insert("/runtime//adapter".into(), "a".repeat(64));
+        assert!(cfg.validate().is_err());
+        let mut cfg = config();
+        let forge = cfg.forges.get_mut("example").unwrap();
+        forge.adapter.program = "/nix/store/fixture/bin/python3".into();
+        forge.adapter.arguments = vec!["-I".into(), "/runtime/adapter.py".into()];
+        forge
+            .adapter_inputs
+            .insert("/runtime/adapter.py".into(), "a".repeat(64));
+        cfg.validate().unwrap();
     }
 
     #[test]

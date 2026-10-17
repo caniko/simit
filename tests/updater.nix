@@ -154,6 +154,22 @@ in
   assert lib.all (apiUrl: accepts (withForge {inherit apiUrl;})) ["https://git.example.org/api" "https://git.example.org:443/api" "https://git.example.org:8443/api/v3" "https://git.example.org:00443/api" "https://git.example.org:65535/api"];
   assert lib.all (host: !(accepts (withForge {inherit host;}))) ["" "git.example.org:443" "git.example.org/api"];
   assert !(accepts (withForge {adapterInputs."relative.py" = lib.concatStrings (lib.replicate 64 "f");}));
+  assert lib.all (program:
+    !(accepts (withForge {
+      adapter = example.forges.enterprise.adapter // {inherit program;};
+      adapterInputs.${program} = lib.concatStrings (lib.replicate 64 "f");
+    }))) ["/runtime/adapter" "/runtime//adapter" "/nix/store/fixture/bin/adapter"];
+  assert !(accepts (withForge {
+    adapter.program = "/runtime/adapter";
+    adapterInputs."/runtime//adapter" = lib.concatStrings (lib.replicate 64 "f");
+  }));
+  assert accepts (withForge {
+    adapter = {
+      program = "/nix/store/fixture/bin/python3";
+      arguments = ["-I" "/runtime/adapter.py"];
+    };
+    adapterInputs."/runtime/adapter.py" = lib.concatStrings (lib.replicate 64 "f");
+  });
   assert lib.all (arguments: !(accepts (withForge {adapter = example.forges.enterprise.adapter // {inherit arguments;};}))) [["relative/script.py"] ["--file=/mutable/script.py"]];
   assert lib.all (sourceCoordinate: !(accepts (withGenerator {inherit sourceCoordinate;}))) ["git.example.org/team" "git.example.org/team/../simit" "git.example.org/team/a b"];
   assert lib.all (maintenanceRefPrefix: !(accepts (example // {profiles.fleet = example.profiles.fleet // {rollout = {inherit maintenanceRefPrefix;};};}))) ["maintenance" "bad..ref/" "bad.lock/" "bad//ref/" "bad@{ref/" "bad ref/"];
