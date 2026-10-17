@@ -48,7 +48,7 @@ fn qualification_entrypoints_exist_in_the_candidate_and_packaged_source() {
                     // These are literal repository entrypoints, not generated
                     // temporary paths or remote engine/store paths.
                     for word in run.split_whitespace() {
-                        let word = word.trim_matches(['\'', '"']);
+                        let word = word.trim_end_matches(';').trim_matches(['\'', '"']);
                         if !word.ends_with('/')
                             && ["scripts/", "tests/fixtures/", "src/"]
                                 .iter()
@@ -74,6 +74,8 @@ fn qualification_entrypoints_exist_in_the_candidate_and_packaged_source() {
     for required in [
         "scripts/qualify-nix-transport.py",
         "scripts/qualify-native-groups.py",
+        "scripts/qualify-updater-sandbox-host.sh",
+        "scripts/qualify-updater-generator.py",
     ] {
         assert!(
             entrypoints.contains(required),
