@@ -32,6 +32,7 @@ include = [
   "/src/monorepo/provision.sh",
   "/src/render/ci/*.py",
   "/scripts/qualify-*.py",
+  "/scripts/qualify-*.sh",
   "/src/review/assets/**",
   "/tests/**/*.rs",
   "/tests/fixtures/**",
@@ -55,6 +56,7 @@ nix_builds = [".#default"]
 
 extra_setup = [
   "printf '%s\\n' 'NIX_CONFIG<<SIMIT_NIX_LIMITS' 'experimental-features = nix-command flakes' 'max-jobs = 1' 'cores = 2' 'SIMIT_NIX_LIMITS' >> \"$GITHUB_ENV\"",
+  "if [ \"$GITHUB_WORKFLOW\" = CI ] && [ \"$GITHUB_JOB\" = test ]; then nix develop -c bash scripts/qualify-updater-tests.sh; fi",
 ]
 
 [package.metadata.simit.ci.extra_env]

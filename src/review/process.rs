@@ -8,6 +8,21 @@ use std::{
     time::{Duration, Instant},
 };
 
+pub(crate) const UNTRUSTED_TOOL_ENV: &[&str] = &[
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "GITHUB_OAUTH_TOKEN",
+    "GITHUB_TOKEN_CMD",
+    "CODEBERG_TOKEN",
+    "CODEFLOE_TOKEN",
+    "ATTIC_TOKEN",
+    "CACHIX_AUTH_TOKEN",
+    "CACHIX_SIGNING_KEY",
+    "NIX_CONFIG",
+    "NIX_PATH",
+    "NIX_USER_CONF_FILES",
+];
+
 pub fn command(program: &str, args: &[String], cwd: Option<&Path>) -> Command {
     let mut c = Command::new(program);
     c.args(args).stdin(Stdio::null());
@@ -15,18 +30,7 @@ pub fn command(program: &str, args: &[String], cwd: Option<&Path>) -> Command {
         c.current_dir(p);
     }
     if program != "gh" {
-        for key in [
-            "GH_TOKEN",
-            "GITHUB_TOKEN",
-            "GITHUB_OAUTH_TOKEN",
-            "GITHUB_TOKEN_CMD",
-            "ATTIC_TOKEN",
-            "CACHIX_AUTH_TOKEN",
-            "CACHIX_SIGNING_KEY",
-            "NIX_CONFIG",
-            "NIX_PATH",
-            "NIX_USER_CONF_FILES",
-        ] {
+        for key in UNTRUSTED_TOOL_ENV {
             c.env_remove(key);
         }
     }

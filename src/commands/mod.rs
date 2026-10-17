@@ -21,6 +21,7 @@ pub mod init_release;
 pub mod init_scoop_bucket;
 pub mod man;
 pub mod projects;
+pub mod projects_update;
 pub mod release;
 pub mod release_plan;
 pub mod release_secrets;

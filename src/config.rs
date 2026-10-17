@@ -4442,7 +4442,7 @@ fn load_flake_config(workspace_root: &Path) -> Result<Option<ProjectConfigSource
         return Ok(None);
     }
 
-    let command_text = "nix --extra-experimental-features 'nix-command flakes' eval --json --no-write-lock-file .#simitConfig";
+    let command_text = "nix --extra-experimental-features 'nix-command flakes' eval --json --no-update-lock-file --no-write-lock-file --option accept-flake-config false --option allow-import-from-derivation false .#simitConfig";
     let output = Command::new("nix")
         .current_dir(workspace_root)
         .args([
@@ -4450,7 +4450,14 @@ fn load_flake_config(workspace_root: &Path) -> Result<Option<ProjectConfigSource
             "nix-command flakes",
             "eval",
             "--json",
+            "--no-update-lock-file",
             "--no-write-lock-file",
+            "--option",
+            "accept-flake-config",
+            "false",
+            "--option",
+            "allow-import-from-derivation",
+            "false",
             ".#simitConfig",
         ])
         .output()

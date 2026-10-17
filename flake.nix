@@ -134,7 +134,10 @@
         // {
           inherit cargoArtifacts;
           nativeBuildInputs = commonArgs.nativeBuildInputs ++ [preCommitBin];
-          nativeCheckInputs = [pkgs.git pkgs.gnupg pkgs.nodejs pkgs.jq pkgs.python3 pkgs.actionlint];
+          nativeCheckInputs = [pkgs.git pkgs.gnupg pkgs.nodejs pkgs.jq pkgs.python3 pkgs.actionlint] ++ pkgs.lib.optionals pkgs.stdenv.isLinux [pkgs.bubblewrap pkgs.nix pkgs.sqlite];
+          # Namespace integration runs in both hosted runtime feature modes.
+          # Keep the engine's non-namespace checks in package qualification.
+          cargoTestExtraArgs = "-- --skip commands::projects_update::engine::tests::namespace_";
         });
 
       publicCargoArtifacts = publicCraneLib.buildDepsOnly commonArgs;
@@ -142,7 +145,8 @@
         // {
           cargoArtifacts = publicCargoArtifacts;
           nativeBuildInputs = commonArgs.nativeBuildInputs ++ [preCommitBin];
-          nativeCheckInputs = [pkgs.git pkgs.gnupg pkgs.nodejs pkgs.jq pkgs.python3 pkgs.actionlint];
+          nativeCheckInputs = [pkgs.git pkgs.gnupg pkgs.nodejs pkgs.jq pkgs.python3 pkgs.actionlint] ++ pkgs.lib.optionals pkgs.stdenv.isLinux [pkgs.bubblewrap pkgs.nix pkgs.sqlite];
+          cargoTestExtraArgs = "-- --skip commands::projects_update::engine::tests::namespace_";
         });
 
       actionlintCheck =
@@ -213,7 +217,8 @@
       nextestCheck = publicCraneLib.cargoNextest (commonArgs
         // {
           cargoArtifacts = publicCargoArtifacts;
-          nativeCheckInputs = [pkgs.git pkgs.gnupg pkgs.nodejs pkgs.jq pkgs.python3 pkgs.actionlint];
+          nativeCheckInputs = [pkgs.git pkgs.gnupg pkgs.nodejs pkgs.jq pkgs.python3 pkgs.actionlint] ++ pkgs.lib.optionals pkgs.stdenv.isLinux [pkgs.bubblewrap pkgs.nix pkgs.sqlite];
+          cargoNextestExtraArgs = "-E 'not test(commands::projects_update::engine::tests::namespace_)'";
         });
 
       docCheck = publicCraneLib.cargoDoc (commonArgs
@@ -301,6 +306,11 @@
         simit-audit = auditCheck;
         simit-deny = denyCheck;
         simit-custody-source = custodySourceCheck;
+        simit-updater-config = let
+          checked = import ./tests/updater.nix {inherit nixpkgs;};
+        in
+          assert checked.serviceVerified;
+            pkgs.writeText "simit-updater-config.json" (builtins.toJSON checked.rendered);
 
         clippy = clippyCheck;
         nextest = nextestCheck;
@@ -320,6 +330,9 @@
           rust-analyzer
         ];
       in {
+        test = publicCraneLib.devShell {
+          packages = with pkgs; [git gnupg nodejs jq python3 actionlint perl] ++ lib.optionals stdenv.isLinux [bubblewrap nix sqlite];
+        };
         msrv = let
           msrvToolchain = harbor.lib.rust.mkToolchain {
             inherit pkgs;
@@ -361,6 +374,7 @@
               rust-analyzer
               taplo
             ]
+            ++ pkgs.lib.optionals pkgs.stdenv.isLinux [pkgs.bubblewrap pkgs.nix pkgs.sqlite]
             ++ pre-commit-check.enabledPackages;
           shellHook = pre-commit-check.shellHook;
         };
@@ -377,6 +391,15 @@
         mkReviewTools = args: import ./nix/review-tools.nix ({source = self;} // args);
         simitModule = import ./nix/simit-module.nix {lib = nixpkgs.lib;};
         mkSimitConfig = import ./nix/simit-config.nix {lib = nixpkgs.lib;};
+        mkUpdateConfig = import ./nix/update-config.nix {lib = nixpkgs.lib;};
+      };
+      nixosModules.updater = {
+        lib,
+        pkgs,
+        ...
+      }: {
+        imports = [./nix/updater.nix];
+        services.simit-updater.package = lib.mkDefault self.packages.${pkgs.stdenv.hostPlatform.system}.default;
       };
     };
 }

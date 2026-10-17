@@ -12,6 +12,7 @@
 - [Repository Review](repository-review.md)
 - [Review Migration Verification](review-migration-verification.md)
 - [CI Adoption Notes](getting-started/ci-adoption.md)
+- [Workstation CI Updates](getting-started/ci-updates.md)
 - [Installed Custody Acceptance](ci-custody-acceptance.md)
 - [Native Original-Producer Custody](ci-original-observer.md)
 - [Sealed Original Custody](ci-sealed-custody.md)
