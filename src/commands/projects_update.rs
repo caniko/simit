@@ -72,7 +72,7 @@ pub fn run(args: Args) -> Result<()> {
         prior
     } else {
         let inventory: Inventory = if let Some(command) = &workspace.inventory.command {
-            serde_json::from_slice(&engine::command_output(command, &[], None, false)?)?
+            serde_json::from_slice(&engine::command_output(command, &[], None)?)?
         } else {
             crate::review::read_json(
                 workspace

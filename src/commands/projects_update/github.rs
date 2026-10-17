@@ -1,6 +1,7 @@
 //! GitHub Actions adapter. Provider identifiers and API location come from policy.
 use super::schema::*;
 use anyhow::{Context, Result, ensure};
+use base64::Engine;
 use serde_json::Value;
 use std::{collections::BTreeSet, io::Read, time::Duration};
 
@@ -92,6 +93,43 @@ fn number(value: &Value, key: &str) -> Result<u64> {
 }
 fn encoded(value: &str) -> String {
     url::form_urlencoded::byte_serialize(value.as_bytes()).collect()
+}
+
+fn push_workflow(path: &str, file: &Value) -> Result<bool> {
+    ensure!(
+        file["path"] == path && file["type"] == "file" && file["encoding"] == "base64",
+        "workflow source inventory is incomplete"
+    );
+    let content = text(file, "/content")?;
+    let content =
+        base64::engine::general_purpose::STANDARD.decode(content.replace(['\r', '\n'], ""))?;
+    let yaml: serde_yaml::Value = serde_yaml::from_slice(&content)?;
+    Ok(match yaml.get("on") {
+        Some(serde_yaml::Value::String(event)) => event == "push",
+        Some(serde_yaml::Value::Sequence(events)) => {
+            events.iter().any(|e| e.as_str() == Some("push"))
+        }
+        Some(serde_yaml::Value::Mapping(events)) => {
+            events.contains_key(serde_yaml::Value::String("push".into()))
+        }
+        _ => false,
+    })
+}
+
+fn requested_workflows(
+    paths: &[String],
+    mut source: impl FnMut(&str) -> Result<Value>,
+) -> Result<BTreeSet<String>> {
+    let mut workflows = BTreeSet::new();
+    for path in paths {
+        if std::path::Path::new(path).parent() == Some(std::path::Path::new(".github/workflows"))
+            && (path.ends_with(".yaml") || path.ends_with(".yml"))
+            && push_workflow(path, &source(path)?)?
+        {
+            workflows.insert(path.clone());
+        }
+    }
+    Ok(workflows)
 }
 
 pub fn execute(request: &AdapterRequest) -> Result<AdapterResponse> {
@@ -193,7 +231,10 @@ pub fn execute(request: &AdapterRequest) -> Result<AdapterResponse> {
             .map(|r| text(r, "/path"))
             .collect::<Result<BTreeSet<_>>>()?
     } else {
-        request.workflows.iter().cloned().collect()
+        requested_workflows(&request.workflows, |path| {
+            let path = path.split('/').map(encoded).collect::<Vec<_>>().join("/");
+            api.get(&format!("{endpoint}/contents/{path}?ref={revision}"))
+        })?
     };
     if paths.is_empty() {
         response.status = "pending".into();
@@ -317,14 +358,14 @@ fn admit_run(
                 && seen.insert(number(job, "/id")?),
             "job is missing, duplicated, rerun or non-success"
         );
-        if let Some(steps) = job["steps"].as_array() {
-            ensure!(
-                steps
+        let steps = job["steps"].as_array().context("missing step inventory")?;
+        ensure!(
+            !steps.is_empty()
+                && steps
                     .iter()
                     .all(|s| s["status"] == "completed" && s["conclusion"] == "success"),
-                "job has a non-success step"
-            );
-        }
+            "job has a non-success step"
+        );
     }
     Ok(true)
 }
@@ -334,11 +375,35 @@ mod tests {
     use super::*;
     use serde_json::json;
     #[test]
+    fn actions_adapter_selects_push_triggers_from_owned_source_inventory() {
+        let paths = [
+            "deny.toml",
+            ".crow/build.yaml",
+            ".github/workflows/ci.yaml",
+            ".github/workflows/manual.yml",
+        ]
+        .map(str::to_owned);
+        let selected = requested_workflows(&paths, |path| Ok(json!({"path":path,"type":"file","encoding":"base64","content":base64::engine::general_purpose::STANDARD.encode(if path.ends_with("manual.yml") {"on: workflow_dispatch\n"} else {"on: [push, pull_request]\n"})}))).unwrap();
+        assert_eq!(
+            selected,
+            BTreeSet::from([".github/workflows/ci.yaml".into()])
+        );
+        for trigger in [
+            "push",
+            "[push, pull_request]",
+            "\n  push:\n    branches: [trunk]",
+        ] {
+            let file = json!({"path":paths[2],"type":"file","encoding":"base64","content":base64::engine::general_purpose::STANDARD.encode(format!("on: {trigger}\n"))});
+            assert!(push_workflow(&paths[2], &file).unwrap());
+        }
+        assert!(requested_workflows(&paths, |_| Ok(Value::Null)).is_err());
+    }
+    #[test]
     fn original_admission_requires_exact_source_app_attempt_and_complete_jobs() {
         let revision = "a".repeat(40);
         let run = json!({"id":42,"repository":{"id":2},"head_repository":{"id":2},"event":"push","head_sha":revision,"head_branch":"maintenance/test","path":".github/workflows/ci.yaml","run_attempt":1,"check_suite_id":5,"status":"completed","conclusion":"success"});
         let suite = json!({"id":5,"app":{"id":777},"head_sha":revision});
-        let jobs = json!({"total_count":1,"jobs":[{"id":8,"run_id":42,"run_attempt":1,"head_sha":revision,"name":"test","status":"completed","conclusion":"success"}]});
+        let jobs = json!({"total_count":1,"jobs":[{"id":8,"run_id":42,"run_attempt":1,"head_sha":revision,"name":"test","status":"completed","conclusion":"success","steps":[{"number":1,"status":"completed","conclusion":"success"}]}]});
         let admit = |r: &Value, j: &Value, s: &Value| {
             admit_run(
                 (2, 777),
@@ -351,6 +416,19 @@ mod tests {
             )
         };
         assert!(admit(&run, &jobs, &suite).unwrap());
+        for steps in [Value::Null, json!({}), json!([])] {
+            let mut changed = jobs.clone();
+            changed["jobs"][0]["steps"] = steps;
+            assert!(admit(&run, &changed, &suite).is_err());
+        }
+        let mut changed = jobs.clone();
+        changed["jobs"][0].as_object_mut().unwrap().remove("steps");
+        assert!(admit(&run, &changed, &suite).is_err());
+        for conclusion in ["skipped", "cancelled", "failure", "neutral"] {
+            let mut changed = jobs.clone();
+            changed["jobs"][0]["steps"][0]["conclusion"] = json!(conclusion);
+            assert!(admit(&run, &changed, &suite).is_err());
+        }
         for (key, value) in [
             ("head_sha", json!("b".repeat(40))),
             ("run_attempt", json!(2)),

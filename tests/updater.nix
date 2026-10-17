@@ -38,6 +38,11 @@
     };
   };
   rendered = mkConfig example;
+  workspaceWithState = stateDirectory:
+    example
+    // {
+      workspaces.projects = example.workspaces.projects // {inherit stateDirectory;};
+    };
   system = lib.nixosSystem {
     system = "x86_64-linux";
     modules = [
@@ -71,6 +76,22 @@ in
   assert rendered.schemaVersion == 1;
   assert rendered.profiles.fleet.select.includePaths == ["**"];
   assert rendered.forges.enterprise.credentialFile == "/run/credentials/not-present-during-evaluation";
+  assert lib.all (state: !(builtins.tryEval (builtins.deepSeq (mkConfig (workspaceWithState state)) true)).success) ["/" "/work" "/work/" "/work//custom-layout" "/work/custom-layout/state"];
+  assert !(builtins.tryEval (builtins.deepSeq (mkConfig (example
+    // {
+      workspaces =
+        example.workspaces
+        // {
+          other = {
+            root = "/state/custom-updater/source";
+            stateDirectory = "/other-state";
+            inventory.file = "/other-inventory.json";
+          };
+        };
+    }))
+  true)).success;
+  assert !(builtins.tryEval (builtins.deepSeq (mkConfig (example // {profiles.fleet = example.profiles.fleet // {generator = example.profiles.fleet.generator // {executable = "/nix/store/../../tmp/generator";};};})) true)).success;
+  assert !(builtins.tryEval (builtins.deepSeq (mkConfig (example // {profiles.fleet = example.profiles.fleet // {generator = example.profiles.fleet.generator // {sourceCoordinate = "other.example/team/simit";};};})) true)).success;
   assert !(builtins.tryEval (builtins.deepSeq (mkConfig (example // {unknownOption = true;})) true)).success;
   assert !(builtins.tryEval (builtins.deepSeq (mkConfig (example // {profiles.fleet.workspace = "missing";})) true)).success;
   assert service.serviceConfig.User == "operator";

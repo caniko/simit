@@ -260,8 +260,11 @@ impl Config {
             absolute(&workspace.root)?;
             absolute(&workspace.state_directory)?;
             ensure!(
-                !workspace.state_directory.starts_with(&workspace.root),
-                "update state must be outside source workspace"
+                self.workspaces.values().all(|source| !workspace
+                    .state_directory
+                    .starts_with(&source.root)
+                    && !source.root.starts_with(&workspace.state_directory)),
+                "update state and all source workspace trees must be disjoint"
             );
             ensure!(
                 workspace.inventory.file.is_some() != workspace.inventory.command.is_some(),
@@ -317,11 +320,15 @@ impl Config {
                 "unknown generator forge"
             );
             coordinate(&profile.generator.source_coordinate)?;
-            crate::review::contract::sha(&profile.generator.source_revision)?;
             ensure!(
-                profile.generator.executable.is_absolute(),
-                "generator executable must be absolute"
+                profile
+                    .generator
+                    .source_coordinate
+                    .starts_with(&format!("{}/", self.forges[&profile.generator.forge].host)),
+                "generator coordinate differs from selected forge host"
             );
+            crate::review::contract::sha(&profile.generator.source_revision)?;
+            absolute(&profile.generator.executable)?;
             if let Some(digest) = &profile.generator.executable_sha256 {
                 sha256(digest)?;
             }
@@ -373,6 +380,57 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn config() -> Config {
+        serde_json::from_value(serde_json::json!({
+            "schemaVersion":1,
+            "workspaces":{"projects":{"root":"/work/projects","stateDirectory":"/state/updater","inventory":{"file":"/work/inventory.json"}}},
+            "forges":{"example":{"host":"forge.example","apiUrl":"https://forge.example/api","adapter":{"program":"/bin/adapter"},"checkAuthority":"777"}},
+            "profiles":{"fleet":{"workspace":"projects","scopes":["ci"],"generator":{"executable":"/nix/store/fixture/bin/simit","sourceRevision":"a".repeat(40),"sourceCoordinate":"forge.example/team/generator","forge":"example","requiredChecks":[{"name":"test","authority":"777"}]}}}
+        })).unwrap()
+    }
+
+    #[test]
+    fn rejects_generator_traversal_and_mismatched_forge_before_execution() {
+        let mut cfg = config();
+        cfg.validate().unwrap();
+        cfg.profiles.get_mut("fleet").unwrap().generator.executable =
+            "/nix/store/../../tmp/generator".into();
+        assert!(cfg.validate().is_err());
+        cfg.profiles.get_mut("fleet").unwrap().generator.executable =
+            "/nix/store/fixture/bin/simit".into();
+        cfg.profiles
+            .get_mut("fleet")
+            .unwrap()
+            .generator
+            .source_coordinate = "other.example/team/generator".into();
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn all_workspace_roots_and_state_trees_must_be_disjoint() {
+        for state in ["/", "/work", "/work/projects", "/work/projects/state"] {
+            let mut cfg = config();
+            cfg.workspaces.get_mut("projects").unwrap().state_directory = state.into();
+            assert!(cfg.validate().is_err(), "{state}");
+        }
+        let mut cfg = config();
+        cfg.workspaces.insert(
+            "other".into(),
+            Workspace {
+                root: "/state/updater/checkouts".into(),
+                state_directory: "/other/state".into(),
+                inventory: InventorySource {
+                    file: Some("/work/other.json".into()),
+                    command: None,
+                    max_age_seconds: 300,
+                },
+            },
+        );
+        assert!(cfg.validate().is_err());
+        cfg.workspaces.get_mut("other").unwrap().root = "/work/other".into();
+        cfg.validate().unwrap();
+    }
+
     #[test]
     fn selection_is_layout_independent_and_exclusions_win() {
         let selection: Selection = serde_json::from_str("{}").unwrap();
@@ -555,6 +613,7 @@ pub struct AdapterRequest {
     pub authority: String,
     pub revision: Option<String>,
     pub branch: Option<String>,
+    /// All generated output paths. Each adapter discovers its own workflows and triggers.
     pub workflows: Vec<String>,
     pub required_checks: Vec<Requirement>,
 }

@@ -18,6 +18,8 @@ branch = request["branch"] or "trunk"
 revision = request["revision"] or git("rev-parse", f"refs/heads/{branch}")
 status = "success"
 if request["operation"] == "qualify" and request["branch"]:
+    if "expectedWorkflows" in control:
+        assert request["workflows"] == control["expectedWorkflows"]
     phase = "candidate" if branch.startswith("maintenance/") else "adoption"
     status = control.get(phase, "success")
 checks = [

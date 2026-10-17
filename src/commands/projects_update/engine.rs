@@ -13,12 +13,15 @@ use std::{
     time::{Duration, Instant},
 };
 
-pub fn command_output(
+pub fn command_output(command: &Command, extra: &[String], cwd: Option<&Path>) -> Result<Vec<u8>> {
+    Ok(run_tool(tool_command(command, extra, cwd)?, command.timeout_seconds)?.into_bytes())
+}
+
+fn tool_command(
     command: &Command,
     extra: &[String],
     cwd: Option<&Path>,
-    credentials: bool,
-) -> Result<Vec<u8>> {
+) -> Result<std::process::Command> {
     command.validate()?;
     let mut argv = command.arguments.clone();
     argv.extend_from_slice(extra);
@@ -30,19 +33,10 @@ pub fn command_output(
     if let Some(path) = cwd {
         child.current_dir(path);
     }
-    if !credentials {
-        for key in [
-            "GH_TOKEN",
-            "GITHUB_TOKEN",
-            "CODEBERG_TOKEN",
-            "CODEFLOE_TOKEN",
-            "ATTIC_TOKEN",
-            "CACHIX_AUTH_TOKEN",
-        ] {
-            child.env_remove(key);
-        }
+    for key in process::UNTRUSTED_TOOL_ENV {
+        child.env_remove(key);
     }
-    Ok(run_tool(child, command.timeout_seconds)?.into_bytes())
+    Ok(child)
 }
 
 fn run_tool(command: std::process::Command, timeout_seconds: u64) -> Result<String> {
@@ -202,7 +196,6 @@ fn adapter(forge: &Forge, request: &AdapterRequest, root: &Path) -> Result<Adapt
         &forge.adapter,
         &["--request".into(), path.to_string_lossy().into_owned()],
         None,
-        false,
     )?)?;
     response.validate(request)?;
     save(
@@ -292,11 +285,7 @@ fn inspect(
 fn workflows(plan: &CiUpdatePlan) -> Vec<String> {
     plan.files
         .iter()
-        .filter_map(|f| {
-            let yaml: serde_yaml::Value = serde_yaml::from_str(&f.content).ok()?;
-            yaml.get("on")?.get("push")?;
-            f.relative_path.to_str().map(str::to_owned)
-        })
+        .map(|f| f.relative_path.to_string_lossy().into_owned())
         .collect()
 }
 
@@ -312,7 +301,7 @@ fn generate(profile: &Profile, checkout: &Path) -> Result<CiUpdatePlan> {
         timeout_seconds: 900,
     };
     let plan: CiUpdatePlan =
-        serde_json::from_slice(&command_output(&command, &[], Some(checkout), false)?)?;
+        serde_json::from_slice(&command_output(&command, &[], Some(checkout))?)?;
     ensure!(
         git(checkout, &["status", "--porcelain"])?.is_empty(),
         "read-only generator plan modified candidate sources"
@@ -534,7 +523,7 @@ pub fn update(
         let workflow_paths = workflows(&plan);
         ensure!(
             !workflow_paths.is_empty(),
-            "candidate has no push-triggered qualification workflows"
+            "candidate has no owned qualification paths"
         );
         save(&root.join("workflows.json"), &workflow_paths)?;
         crate::project::reconcile_generated_files(
@@ -848,6 +837,87 @@ pub fn update(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn uncredentialed_tools_strip_secrets_and_keep_operator_git_configuration() {
+        let command = Command {
+            program: "/bin/tool".into(),
+            arguments: vec![],
+            timeout_seconds: 1,
+        };
+        let child = tool_command(&command, &[], None).unwrap();
+        let environment = child.get_envs().collect::<BTreeMap<_, _>>();
+        for key in [
+            "GH_TOKEN",
+            "GITHUB_TOKEN",
+            "GITHUB_OAUTH_TOKEN",
+            "GITHUB_TOKEN_CMD",
+            "CODEBERG_TOKEN",
+            "CODEFLOE_TOKEN",
+            "ATTIC_TOKEN",
+            "CACHIX_AUTH_TOKEN",
+            "CACHIX_SIGNING_KEY",
+            "NIX_CONFIG",
+            "NIX_PATH",
+            "NIX_USER_CONF_FILES",
+        ] {
+            assert_eq!(
+                environment.get(std::ffi::OsStr::new(key)),
+                Some(&None),
+                "{key}"
+            );
+        }
+        assert!(!environment.contains_key(std::ffi::OsStr::new("GIT_CONFIG_GLOBAL")));
+        assert!(!environment.contains_key(std::ffi::OsStr::new("GIT_CONFIG_NOSYSTEM")));
+    }
+
+    #[test]
+    fn workflow_inventory_does_not_assume_actions_trigger_syntax() {
+        for path in [
+            ".crow/build.yaml",
+            ".gitlab-ci.yml",
+            ".github/workflows/ci.yaml",
+        ] {
+            let plan = CiUpdatePlan {
+                schema: "simit.ci-update-plan.v1".into(),
+                files: vec![crate::project::GeneratedFile {
+                    relative_path: path.into(),
+                    content: "backend-specific configuration\n".into(),
+                }],
+                obsolete: vec![],
+            };
+            assert_eq!(workflows(&plan), vec![path]);
+        }
+    }
+
+    #[test]
+    fn custom_adapter_qualifies_non_actions_plan_through_adoption() {
+        let f = Fixture::new();
+        fs::write(f.source.join("fixture-backend"), ".crow/build.yaml\n").unwrap();
+        git(&f.source, &["add", "fixture-backend"]).unwrap();
+        git(
+            &f.source,
+            &["commit", "--quiet", "-m", "enroll fixture backend"],
+        )
+        .unwrap();
+        git(
+            &f.source,
+            &["push", f.remote.to_str().unwrap(), "HEAD:refs/heads/trunk"],
+        )
+        .unwrap();
+        f.control(json!({"expectedWorkflows":[".crow/build.yaml","new-managed.txt"]}));
+        let receipt = f.update(true).unwrap();
+        assert_eq!(receipt.phase, "qualified");
+        assert_eq!(f.remote_head(), receipt.candidate);
+        assert!(
+            git(
+                &f.remote,
+                &["show", &format!("{}:.crow/build.yaml", receipt.candidate)]
+            )
+            .unwrap()
+            .contains("name: CI")
+        );
+    }
 
     struct Fixture {
         _temporary: tempfile::TempDir,

@@ -188,6 +188,9 @@ protection contexts, CI engine variables, or PR-only custody contracts. Those
 transitions require a later protocol with explicit ordered migration support.
 Other forge/CI backends can enroll an absolute adapter command implementing the
 same versioned inspect/qualify contract and its source-binding requirements.
+The request's `workflows` list carries all owned generated paths. Each adapter
+selects its own workflow formats and trigger semantics. The GitHub adapter reads
+owned Actions YAML at the exact requested revision to identify push triggers.
 
 ## Dependencies and verification
 

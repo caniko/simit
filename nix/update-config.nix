@@ -6,15 +6,21 @@
     ];
   };
   cfg = evaluated.config;
+  normalized = path: "/" + lib.concatStringsSep "/" (lib.filter (part: part != "") (lib.splitString "/" path));
+  absolute = path: lib.hasPrefix "/" path && lib.all (part: part != "." && part != "..") (lib.splitString "/" path);
+  contains = parent: child: parent == "/" || parent == child || lib.hasPrefix "${parent}/" child;
   validWorkspace = workspace:
-    lib.hasPrefix "/" workspace.root
-    && lib.hasPrefix "/" workspace.stateDirectory
-    && workspace.root != workspace.stateDirectory
-    && !(lib.hasPrefix "${workspace.root}/" workspace.stateDirectory)
+    absolute workspace.root
+    && absolute workspace.stateDirectory
+    && lib.all (source:
+      !(contains (normalized source.root) (normalized workspace.stateDirectory))
+      && !(contains (normalized workspace.stateDirectory) (normalized source.root))) (builtins.attrValues cfg.workspaces)
     && ((workspace.inventory.file == null) != (workspace.inventory.command == null));
   validProfile = profile:
     builtins.hasAttr profile.workspace cfg.workspaces
     && builtins.hasAttr profile.generator.forge cfg.forges
+    && absolute profile.generator.executable
+    && lib.hasPrefix "${cfg.forges.${profile.generator.forge}.host}/" profile.generator.sourceCoordinate
     && profile.scopes == ["ci"]
     && profile.generator.requiredChecks != [];
 in
