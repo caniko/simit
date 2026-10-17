@@ -452,7 +452,9 @@ fn verified_executable(
         current = store_file(Path::new(interpreter), Path::new("/nix/store"))
             .context("script interpreter must be an immutable Nix-store file; env-selected and mutable runtimes are not enrolled")?;
         let arguments = fields.collect::<Vec<_>>();
-        let name = current
+        // The kernel invokes the shebang path, including a multicall program's
+        // symlink name (for example BusyBox's sh), not its canonical basename.
+        let name = Path::new(interpreter)
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or_default();
@@ -1812,15 +1814,13 @@ if os.fork() == 0:
             );
         }
         fs::write(&script, format!("#!{} -e\nexit 0\n", shell.display())).unwrap();
-        assert!(
-            verified_executable(
-                &script,
-                Some(&digest(&fs::read(&script).unwrap())),
-                &snapshots,
-                "fixture"
-            )
-            .is_ok()
-        );
+        verified_executable(
+            &script,
+            Some(&digest(&fs::read(&script).unwrap())),
+            &snapshots,
+            "fixture",
+        )
+        .expect("an immutable shell invocation must admit the single -e argument");
         assert!(
             verified_executable(
                 &generator.executable,
