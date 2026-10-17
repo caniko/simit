@@ -2,7 +2,7 @@
   description = "Semver-aware git commit helper for Rust projects";
 
   inputs = {
-    harbor.url = "git+https://github.com/caniko/harbor.git?ref=feat/harbor-monorepo-components&rev=7d99eb50c52d0a941e2996b97c469b32a7657ef4";
+    harbor.url = "git+https://github.com/caniko/harbor.git?ref=feat/harbor-monorepo-components&rev=e8b1996580e4ecd51dd402edf4a16d9df88e3a1b";
 
     nixpkgs.follows = "harbor/nixpkgs";
     rust-overlay.follows = "harbor/rust-overlay";
@@ -16,14 +16,9 @@
       url = "github:cachix/git-hooks.nix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
-    # plinth trunk trips both of this flake's `nix flake check` gates: it still
-    # declares the retired Codeberg nix-cache-pin mirror (whose trunk orphaned
-    # the revision we locked), and its Cargo.lock wants dioxus 0.7.9 while our
-    # nixpkgs ships dioxus-cli 0.7.10. This compatibility successor preserves
-    # fix/dioxus-0.7.10 and its exact tartan revision, using public GitHub Cargo
-    # transport. It still predates the nix-cache-pin input entirely.
+    # Consume the exact locally and hosted-qualified static-site/library repair.
     plinth = {
-      url = "git+https://github.com/caniko/plinth.git?ref=fix/tartan-github-transport-20261012-ses-ed08&rev=79d5a44310f6a7f620a8ebcf8c6dc78389cf4a36";
+      url = "git+https://github.com/caniko/plinth.git?ref=migrate/harbor-combined-20261012-features&rev=534dfa6dd6217db97b7ccd313501120a3c34d912";
       inputs.nixpkgs.follows = "nixpkgs";
     };
     advisory-db = {
@@ -99,9 +94,13 @@
           || builtins.elem pathString (map (name: "${toString ./.}/${name}") ["README.md" "LICENSE" "CHANGELOG.md"])
           || pkgs.lib.hasInfix "/src/review/assets/" pathString
           || pkgs.lib.hasSuffix "/src/monorepo/native_release.py" pathString
+          || pkgs.lib.hasSuffix "/src/monorepo/nix_diagnostics.sh" pathString
+          || pkgs.lib.hasSuffix "/src/monorepo/provision.sh" pathString
           || pkgs.lib.hasInfix "/tests/fixtures/" pathString
           || pkgs.lib.hasSuffix "/src/render/ci/nix_dependencies.py" pathString
           || pkgs.lib.hasSuffix "/src/render/ci/custody.py" pathString
+          || pkgs.lib.hasSuffix "/scripts" pathString
+          || pkgs.lib.hasInfix "/scripts/qualify-" pathString
           || pkgs.lib.hasSuffix "/src/render/ci/custody_sealed.py" pathString
           || pkgs.lib.hasSuffix "ci-actions.json" pathString
           || pkgs.lib.hasSuffix "/.github" pathString

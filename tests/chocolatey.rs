@@ -287,17 +287,20 @@ fn bump_push_requires_default_api_key_env() {
 }
 
 #[test]
-fn bump_push_skips_existing_chocolatey_version_by_default() {
+fn bump_push_skips_a_byte_identical_chocolatey_version_by_default() {
     let temp = init_package("0.9.0");
     let bin = temp.path().join("bin");
     fs::create_dir(&bin).unwrap();
     let curl = bin.join("curl");
     fs::write(
         &curl,
-        "#!/bin/sh\nprintf '<feed><entry><title>demo-app</title></entry></feed>'\n",
+        "#!/bin/sh\nset -eu\nwhile [ \"$1\" != --output ]; do shift; done\nprintf 'identical package\\n' > \"$2\"\nprintf 200\n",
     )
     .unwrap();
     make_executable(&curl);
+    let choco = bin.join("choco");
+    fs::write(&choco, "#!/bin/sh\nset -eu\ntest \"$1\" = pack\nwhile [ \"$1\" != --output-directory ]; do shift; done\nprintf 'identical package\\n' > \"$2/demo-app.0.1.0.nupkg\"\n").unwrap();
+    make_executable(&choco);
     let package_dir = temp.path().join("pkg");
     let x64 = archive(temp.path(), "x64.zip", b"x64 archive\n");
     let mut command = simit();

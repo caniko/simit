@@ -1,0 +1,279 @@
+//! Execute the same project-owned gate locally and in generated qualification.
+use std::{
+    process::{Child, Command},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+};
+
+use anyhow::{Context, Result, bail};
+
+use crate::cli::{MonorepoCheckCommand, MonorepoGateEnv};
+
+#[derive(Debug)]
+pub struct GateExit {
+    code: i32,
+    message: String,
+}
+
+impl GateExit {
+    pub fn code(&self) -> i32 {
+        self.code
+    }
+}
+
+impl std::fmt::Display for GateExit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for GateExit {}
+
+pub(super) fn run(command: MonorepoCheckCommand) -> Result<()> {
+    let (root, project) = super::load(&std::env::current_dir()?)?;
+    let graph = project
+        .monorepo
+        .as_ref()
+        .context("missing monorepo config")?
+        .resolve(&root)?;
+    let component = graph
+        .components
+        .get(&command.component)
+        .with_context(|| format!("unknown component {}", command.component))?;
+    let gate = component
+        .checks
+        .iter()
+        .find(|gate| gate.id == command.check)
+        .with_context(|| format!("unknown check {} in {}", command.check, command.component))?;
+    // Only generated CI opts into provider resolution. Local literals retain
+    // precedence over unrelated inherited values; never echo either value.
+    let mut environment = Vec::new();
+    for (index, (name, value)) in gate.env.iter().enumerate() {
+        let value = match command.gate_env {
+            MonorepoGateEnv::Local => {
+                if value.contains("${{") {
+                    bail!(
+                        "gate environment variable {name}: provider expression requires --gate-env provider-resolved"
+                    );
+                }
+                value.into()
+            }
+            MonorepoGateEnv::ProviderResolved => std::env::var_os(name).with_context(|| {
+                format!("missing provider-resolved gate environment variable {name}")
+            })?,
+            MonorepoGateEnv::ProviderStaged => {
+                std::env::var_os(format!("SIMIT_GATE_VALUE_{index}")).with_context(|| {
+                    format!("missing provider-resolved gate environment variable {name}")
+                })?
+            }
+        };
+        environment.push((name, value));
+    }
+    let since = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+    // The command comes from the validated project config, never event data.
+    // Preserve trunk's Bash errexit, nounset and pipefail contract.
+    let mut process = Command::new("bash");
+    // Bash normalizes IFS/PWD on startup and may source BASH_ENV. Stage declared
+    // data under inert names, then assign it after startup without interpolation.
+    let mut prefix = "SIMIT_NATIVE_GATE_VALUE_".to_owned();
+    while environment
+        .iter()
+        .any(|(name, _)| name.starts_with(&prefix))
+    {
+        prefix.push('_');
+    }
+    let mut script = String::new();
+    for (index, (name, value)) in environment.iter().enumerate() {
+        if matches!(command.gate_env, MonorepoGateEnv::ProviderStaged) {
+            process.env_remove(format!("SIMIT_GATE_VALUE_{index}"));
+        }
+        let alias = format!("{prefix}{index}");
+        // Keep the tool PATH for locating Bash, especially in Nix sandboxes
+        // without /bin/bash. Only the running gate shell receives gate PATH.
+        if *name != "PATH" {
+            process.env_remove(name);
+        }
+        process.env(&alias, value);
+        script.push_str(&format!("export {name}=\"${alias}\"\nunset {alias}\n"));
+    }
+    script.push_str(&gate.run);
+    process
+        .args(["-euo", "pipefail", "-c", &script])
+        .current_dir(&root);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        process.process_group(0);
+    }
+    let seconds = command
+        .deadline
+        .map_or(gate.timeout_minutes * 60, |deadline| {
+            deadline
+                .saturating_sub(since)
+                .min(gate.timeout_minutes * 60)
+        });
+    let cancelled = Arc::new(AtomicBool::new(false));
+    #[cfg(unix)]
+    let startup_interruptible = Arc::new(AtomicBool::new(command.supervisor_ready.is_none()));
+    // This CLI exits after one command. As with the native CI CLI, retain the
+    // process-global handlers for its lifetime; Drop is not run on default
+    // signal termination and Bash lives in a separate process group.
+    #[cfg(unix)]
+    for signal in [
+        signal_hook::consts::SIGINT,
+        signal_hook::consts::SIGTERM,
+        signal_hook::consts::SIGHUP,
+    ] {
+        // ponytail: local spawn has no outer timer. Retain default termination
+        // until it returns; deadline-bound lookup needs an isolated launcher.
+        signal_hook::flag::register_conditional_default(signal, startup_interruptible.clone())?;
+        signal_hook::flag::register(signal, cancelled.clone())?;
+    }
+    let deadline = Instant::now() + Duration::from_secs(seconds);
+    let child = if seconds == 0 || cancelled.load(Ordering::SeqCst) {
+        None
+    } else {
+        Some(process.spawn().map(|child| GateProcess {
+            child,
+            cleanup: true,
+        }))
+    };
+    #[cfg(unix)]
+    startup_interruptible.store(false, Ordering::SeqCst);
+    // Initialization and process creation can block. Keep outer supervision
+    // until spawn returns; even spawn errors claim the single diagnostic attempt.
+    // A successfully spawned child is already guarded if claiming ownership fails.
+    if let Some(marker) = &command.supervisor_ready {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(marker)
+            .context("claim native gate deadline ownership")?;
+        if let Some(Ok(child)) = &child {
+            use std::io::Write;
+            writeln!(file, "{}", child.child.id()).context("record native gate process group")?;
+        }
+    }
+    let status = if let Some(child) = child {
+        let mut child = child
+            .inspect_err(|_| {
+                if command.nix_diagnostics {
+                    diagnostics(since, command.supervisor_ready.as_deref());
+                }
+            })
+            .context("run declared component check")?;
+        let status = loop {
+            if cancelled.load(Ordering::SeqCst) {
+                break None;
+            }
+            if let Some(status) = child
+                .child
+                .try_wait()
+                .context("wait for declared component check")?
+            {
+                // Successful setup gates may leave services for later steps.
+                // Bash is already reaped by try_wait; preserve its descendants.
+                if status.success() {
+                    child.cleanup = false;
+                }
+                break Some(status);
+            }
+            if Instant::now() >= deadline {
+                break None;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        // Reap Bash and stop its descendants before collecting failure evidence.
+        drop(child);
+        status
+    } else {
+        None
+    };
+    if status.is_some_and(|status| status.success()) {
+        return Ok(());
+    }
+    if command.nix_diagnostics {
+        diagnostics(since, command.supervisor_ready.as_deref());
+    }
+    if cancelled.load(Ordering::SeqCst) {
+        bail!(
+            "component {} check {} cancelled",
+            command.component,
+            command.check
+        );
+    }
+    let Some(status) = status else {
+        bail!(
+            "component {} check {} timed out (configured limit: {} minutes)",
+            command.component,
+            command.check,
+            gate.timeout_minutes
+        );
+    };
+    #[cfg(unix)]
+    let signal_code = {
+        use std::os::unix::process::ExitStatusExt;
+        status.signal().map(|signal| 128 + signal)
+    };
+    #[cfg(not(unix))]
+    let signal_code = None;
+    Err(GateExit {
+        code: status.code().or(signal_code).unwrap_or(1),
+        message: format!(
+            "component {} check {} failed: {status}",
+            command.component, command.check
+        ),
+    }
+    .into())
+}
+
+struct GateProcess {
+    child: Child,
+    cleanup: bool,
+}
+
+impl Drop for GateProcess {
+    fn drop(&mut self) {
+        if !self.cleanup {
+            return;
+        }
+        #[cfg(unix)]
+        if let Some(pid) = rustix::process::Pid::from_raw(self.child.id() as i32) {
+            let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+        }
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+pub(super) const NIX_DIAGNOSTICS: &str = include_str!("nix_diagnostics.sh");
+
+fn diagnostics(since: u64, marker: Option<&camino::Utf8Path>) {
+    // The caller uses this same bounded script if provisioning fails before
+    // native Simit starts. Neither path needs another Nix evaluation.
+    match Command::new("bash")
+        .args([
+            "-euo",
+            "pipefail",
+            "-c",
+            NIX_DIAGNOSTICS,
+            "simit-diagnostics",
+            &since.to_string(),
+        ])
+        .status()
+    {
+        Ok(status) if status.success() => {
+            if let Some(marker) = marker
+                && let Err(error) =
+                    std::fs::write(marker.with_extension("diagnostics-complete"), "")
+            {
+                eprintln!("record diagnostic completion: {error}");
+            }
+        }
+        Ok(status) => eprintln!("diagnostics incomplete: {status}"),
+        Err(error) => eprintln!("diagnostics unavailable: {error}"),
+    }
+}

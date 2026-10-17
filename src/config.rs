@@ -1930,6 +1930,12 @@ pub struct CoprConfig {
     /// Spec path relative to the workspace root; defaults to `<name>.spec`.
     #[serde(default = "default_copr_spec_path")]
     pub spec_path: Option<String>,
+    /// COPR SCM Makefile relative to the workspace root.
+    #[serde(default = "default_copr_makefile_path")]
+    pub makefile_path: String,
+    /// Shared SRPM staging directory relative to the workspace root.
+    #[serde(default = "default_copr_srpm_dir")]
+    pub srpm_dir: String,
     /// COPR project for stable releases, e.g. `owner/project`.
     pub project: Option<String>,
     /// COPR project for prereleases; defaults to `<project>-testing`.
@@ -1947,6 +1953,14 @@ pub struct CoprConfig {
 
 fn default_copr_login_secret() -> String {
     "copr_login".to_owned()
+}
+
+fn default_copr_makefile_path() -> String {
+    ".copr/Makefile".to_owned()
+}
+
+fn default_copr_srpm_dir() -> String {
+    "srpms".to_owned()
 }
 
 fn default_copr_username_secret() -> String {
@@ -2222,6 +2236,8 @@ pub struct ResolvedCopr {
     pub build_requires: Vec<String>,
     pub binaries: Vec<String>,
     pub spec_path: String,
+    pub makefile_path: String,
+    pub srpm_dir: String,
     pub project: Option<String>,
     pub testing_project: Option<String>,
     pub login_secret: String,
@@ -3179,6 +3195,21 @@ impl ProjectConfig {
             "simit project config: [copr].download_repo",
             &copr.download_repo,
         )?;
+        for (name, path) in [
+            ("makefile_path", &copr.makefile_path),
+            ("srpm_dir", &copr.srpm_dir),
+        ] {
+            if path.is_empty()
+                || path.contains(['\n', '\r', '\0'])
+                || Path::new(path)
+                    .components()
+                    .any(|part| !matches!(part, std::path::Component::Normal(_)))
+            {
+                bail!(
+                    "simit project config: [copr].{name} must be a non-empty workspace-relative path without traversal"
+                );
+            }
+        }
         Ok(())
     }
 
@@ -3372,6 +3403,34 @@ impl ProjectConfig {
         let spec_path = cfg
             .and_then(|copr| copr.spec_path.clone())
             .unwrap_or_else(|| format!("{name}.spec"));
+        let spec_components = Path::new(&spec_path).components();
+        if spec_path.contains(['\n', '\r', '\0'])
+            || !spec_components
+                .clone()
+                .any(|part| matches!(part, std::path::Component::Normal(_)))
+            || spec_components.into_iter().any(|part| {
+                !matches!(
+                    part,
+                    std::path::Component::Normal(_) | std::path::Component::CurDir
+                )
+            })
+        {
+            bail!(
+                "simit project config: [copr].spec_path must be a non-empty workspace-relative path without traversal"
+            );
+        }
+        let makefile_path = cfg.map_or_else(default_copr_makefile_path, |copr| {
+            copr.makefile_path.clone()
+        });
+        let output_components = |path: &str| {
+            Path::new(path)
+                .components()
+                .filter(|part| *part != std::path::Component::CurDir)
+                .collect::<std::path::PathBuf>()
+        };
+        if output_components(&spec_path) == output_components(&makefile_path) {
+            bail!("COPR spec_path and makefile_path must resolve to distinct output paths");
+        }
         let project = overrides
             .project
             .map(str::to_owned)
@@ -3397,6 +3456,8 @@ impl ProjectConfig {
                 .unwrap_or_default(),
             binaries,
             spec_path,
+            makefile_path,
+            srpm_dir: cfg.map_or_else(default_copr_srpm_dir, |copr| copr.srpm_dir.clone()),
             project,
             testing_project,
             login_secret: cfg

@@ -28,7 +28,10 @@ include = [
   "/README.md",
   "/src/**/*.rs",
   "/src/monorepo/native_release.py",
+  "/src/monorepo/nix_diagnostics.sh",
+  "/src/monorepo/provision.sh",
   "/src/render/ci/*.py",
+  "/scripts/qualify-*.py",
   "/src/review/assets/**",
   "/tests/**/*.rs",
   "/tests/fixtures/**",
@@ -44,6 +47,12 @@ scope = "full"
 [package.metadata.simit.ci]
 platform = "github"
 provider = "actions"
+runtime = "nix"
+runner = "ubuntu-latest"
+with_docs = true
+publish_crates = true
+nix_builds = [".#default"]
+
 extra_setup = [
   "printf '%s\\n' 'NIX_CONFIG<<SIMIT_NIX_LIMITS' 'experimental-features = nix-command flakes' 'max-jobs = 1' 'cores = 2' 'SIMIT_NIX_LIMITS' >> \"$GITHUB_ENV\"",
 ]
@@ -71,6 +80,11 @@ jobs = ["test"]
 workflow = ".github/workflows/custody-fixture.yaml"
 jobs = ["fixture"]
 artifacts = ["custody-fixture"]
+
+# The production package runs the complete native test suite. macOS must
+# qualify registry isolation before downstream flakes consume this producer.
+[package.metadata.simit.prebuild.system_runners]
+aarch64-darwin = "macos-15"
 
 [package.metadata.simit.ci.pages]
 repo = "caniko/simit"

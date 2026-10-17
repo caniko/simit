@@ -1171,7 +1171,7 @@ pub fn github_prebuild_file_with_policy(
         workflow.push_str("    secrets:\n      attic_token:\n        required: true\n");
     }
     workflow.push_str("\npermissions:\n  contents: read\n\n");
-    workflow.push_str("concurrency:\n  group: ${{ github.workflow_ref }}-${{ github.event_name }}-${{ github.head_ref || github.ref_name }}-prebuild\n  cancel-in-progress: ${{ !inputs.release && (github.event_name == 'push' || github.event_name == 'pull_request') }}\n\n");
+    workflow.push_str("concurrency:\n  group: ${{ github.workflow_ref }}-${{ github.event_name }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.head_ref || github.ref_name }}-prebuild\n  cancel-in-progress: ${{ !inputs.release && (github.event_name == 'push' || github.event_name == 'pull_request') }}\n\n");
     workflow.push_str(
         "jobs:\n  build:\n    strategy:\n      fail-fast: false\n      matrix:\n        include:\n",
     );

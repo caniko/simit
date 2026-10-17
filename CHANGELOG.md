@@ -28,6 +28,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Keep local monorepo gate process creation interruptible by normal termination
+  signals until native child cleanup can take ownership.
+- Use job Bash for generated monorepo gate supervision on hosted and custom runners,
+  retain diagnostics on gate spawn failure or abrupt native termination and
+  propagate gate exit codes. Keep the tool PATH while
+  locating Bash in Nix sandboxes before restoring the gate's configured PATH.
+- Preserve configured monorepo gate environment data across Bash and Nix startup,
+  remove consumed provider aliases and reject read-only and dynamically managed
+  Bash names and startup-sensitive `BASH_ENV` before execution. Require private
+  supervisor directories and bound provisioning (including executable startup),
+  native initialization and gate process creation so failed or
+  timed-out checks retain their diagnostic reserve.
+- Limit COPR staging cleanup to generated source RPMs, preserving project files
+  when the staging directory also contains specs or sources.
+- Clarify NuGet v2/v3 Chocolatey source configuration and reject authenticated
+  registry reads explicitly without exposing publication credentials.
+- Discover NuGet v3 package-content resources for Chocolatey byte verification
+  and omit SemVer build metadata from normalized package filenames and lookups.
+- Reject traversal in COPR spec output paths and enter AUR clones before dropping
+  root privileges, preserving private workspace permissions and clone ownership.
+- Persist and verify source-bound Chocolatey candidates before Actions
+  publication, retain normalized package filenames, isolate prebuild concurrency
+  by fork repository, and reject colliding COPR spec/Makefile outputs.
+- Honor configured COPR Makefile and SRPM staging paths, match the RPM spec's
+  source archive basename, and reject missing, empty, or duplicate SRPMs.
+- Give disposable COPR release fixtures a repository-local Git identity so
+  production-package tests also run in identity-free Nix sandboxes.
+- Link managed APT badges to the configured public repository URL.
+- Generate AUR metadata as an unprivileged user on root release runners;
+  restore clone ownership on success or failure and preserve prior metadata
+  when generation fails.
+- Run Chocolatey release publication in the project's declared environment;
+  retain source-bound packed candidates for byte-verified retries, reject
+  conflicting registry content, and keep publication credentials out of
+  packing, lookups, and command output.
 - Honor monorepo push-branch filters and select binary unit tests when a Rust
   CI selection has no library, including aggregate and Nextest workflows.
 - Preserve per-member Crow MSRV checks under Omnix replacement and run split
