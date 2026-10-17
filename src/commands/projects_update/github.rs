@@ -227,6 +227,10 @@ fn push_workflow(path: &str, file: &Value, branch: Option<&str>) -> Result<bool>
             ensure!(!steps.is_empty(), "empty workflow step inventory");
             for node in std::iter::once(job).chain(steps) {
                 ensure!(
+                    node.get("if").is_none(),
+                    "conditional jobs or steps require an adapter with skipped-outcome admission"
+                );
+                ensure!(
                     node.get("continue-on-error")
                         .is_none_or(|value| value.as_bool() == Some(false)),
                     "workflow can mask failed job or step outcomes"
@@ -282,6 +286,12 @@ fn admit_rules(
 }
 
 fn protection_requirements(protection: &Value, authority: u64) -> Result<Vec<Requirement>> {
+    ensure!(
+        protection
+            .pointer("/lock_branch/enabled")
+            .is_none_or(|value| value.as_bool() == Some(false)),
+        "target branch is locked; direct updater landing is unsupported"
+    );
     let status = &protection["required_status_checks"];
     if status.is_null() {
         return Ok(vec![]);
@@ -653,6 +663,27 @@ mod tests {
     }
 
     #[test]
+    fn inspection_rejects_locked_targets_with_or_without_required_checks() {
+        for status in [
+            Value::Null,
+            json!({"contexts":["test"],"checks":[{"context":"test","app_id":777}]}),
+        ] {
+            let mut protection =
+                json!({"lock_branch":{"enabled":true},"required_status_checks":status});
+            assert!(
+                protection_requirements(&protection, 777)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("target branch is locked")
+            );
+            protection["lock_branch"]["enabled"] = json!(false);
+            protection_requirements(&protection, 777).unwrap();
+            protection["lock_branch"]["enabled"] = json!("false");
+            assert!(protection_requirements(&protection, 777).is_err());
+        }
+    }
+
+    #[test]
     fn ruleset_admission_checks_the_exact_uncreated_maintenance_branch() {
         let endpoint = "repos/team/demo";
         let rules = |path: &str| -> Result<Value> {
@@ -873,6 +904,27 @@ mod tests {
             assert_eq!(
                 push_workflow(path, &file, Some("trunk")).is_ok(),
                 admitted,
+                "{job}"
+            );
+        }
+    }
+
+    #[test]
+    fn workflow_admission_rejects_conditional_jobs_and_steps() {
+        let path = ".github/workflows/ci.yaml";
+        for job in [
+            "if: false\n    runs-on: ubuntu-latest\n    steps:\n      - run: exit 0",
+            "if: github.ref == 'refs/heads/trunk'\n    runs-on: ubuntu-latest\n    steps:\n      - run: exit 0",
+            "runs-on: ubuntu-latest\n    steps:\n      - run: exit 0\n        if: false",
+            "runs-on: ubuntu-latest\n    steps:\n      - run: exit 0\n        if: matrix.system == 'x86_64-linux'",
+            "runs-on: ubuntu-latest\n    steps:\n      - run: exit 0\n        if: true",
+        ] {
+            let file = json!({"path":path,"type":"file","encoding":"base64","content":base64::engine::general_purpose::STANDARD.encode(format!("on: push\njobs:\n  test:\n    {job}\n"))});
+            assert!(
+                push_workflow(path, &file, Some("maintenance/candidate"))
+                    .unwrap_err()
+                    .to_string()
+                    .contains("conditional jobs or steps"),
                 "{job}"
             );
         }

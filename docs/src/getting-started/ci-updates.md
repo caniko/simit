@@ -323,10 +323,14 @@ authority, complete job/step success and app-bound legacy protection contexts.
 Workflow source must expose its jobs and steps directly: `continue-on-error` is
 accepted only when absent or the literal `false`. Expressions and reusable
 workflow calls require an adapter that can establish the underlying outcomes.
+Explicit job/step `if` conditions also require a supporting adapter, including
+literal conditions: v1 requires complete success and cannot admit skipped steps.
+Conditional workflows are rejected before publishing a candidate, rather than
+retaining one whose normal skip outcomes cannot qualify.
 This source check applies to generator and consumer qualification, and to
 pre-push admission of committed candidate bytes.
-Required checks from other applications, unbound contexts, active rulesets and
-PR-required protections are rejected during admission.
+Required checks from other applications, unbound contexts, active rulesets,
+locked target branches and PR-required protections are rejected during admission.
 Ruleset admission queries each exact maintenance/adoption branch, including a
 maintenance ref that has not been created, before publishing a prepared receipt.
 It does not migrate protection contexts, CI engine variables, or PR-only custody contracts. Those
