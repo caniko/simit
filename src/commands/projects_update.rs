@@ -26,6 +26,9 @@ pub struct Args {
     pub push: bool,
     #[arg(long)]
     pub status: bool,
+    /// Explain every enrolled coordinate without forge requests or candidate generation.
+    #[arg(long, conflicts_with_all = ["push", "status", "dry_run", "limit"])]
+    pub plan: bool,
     #[arg(long, default_value_t = 900, value_parser = clap::value_parser!(u64).range(0..=21600))]
     pub wait_seconds: u64,
     #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
@@ -98,6 +101,90 @@ pub fn run(args: Args) -> Result<()> {
             )?
         };
         let selection = select(&config, profile, workspace, &inventory, &args.repo)?;
+        if args.plan {
+            // ponytail: scan enrollment × observations; index by coordinate if
+            // large inventories make selection planning materially expensive.
+            let enrollment = profile
+                .select
+                .coordinates
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .map(|coordinate| {
+                    let observations = inventory
+                        .projects
+                        .iter()
+                        .filter(|project| &project.coordinate == coordinate)
+                        .map(|project| -> Result<_> {
+                            let reason = if config.forges.contains_key(&project.forge) {
+                                profile.select.exclusion_reason(project)?
+                            } else {
+                                Some("unknown-forge")
+                            };
+                            Ok(serde_json::json!({"project": project, "reason": reason}))
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+                    let disabled = profile
+                        .project_overrides
+                        .get(coordinate)
+                        .filter(|override_| !override_.enable);
+                    let status = if disabled.is_some() {
+                        "disabled"
+                    } else if selection
+                        .iter()
+                        .any(|project| &project.coordinate == coordinate)
+                    {
+                        "selected"
+                    } else if observations.is_empty() {
+                        "missing"
+                    } else if !args.repo.is_empty() && !args.repo.contains(coordinate) {
+                        "narrowed"
+                    } else {
+                        "filtered"
+                    };
+                    Ok(serde_json::json!({
+                        "coordinate": coordinate, "status": status,
+                        "reason": disabled.and_then(|override_| override_.reason.as_deref()),
+                        "observations": observations,
+                    }))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            if args.json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "schema": "simit.updater-selection-plan.v1",
+                        "profile": args.profile, "workspace": profile.workspace,
+                        "root": workspace.root, "qualification": "not-run",
+                        "inventoryDigest": crate::review::canonical_digest(&inventory)?,
+                        "policyDigest": selection_policy, "selected": selection,
+                        "enrollment": enrollment,
+                    }))?
+                );
+            } else {
+                for entry in &enrollment {
+                    println!(
+                        "{}: {}",
+                        entry["coordinate"].as_str().unwrap_or("?"),
+                        entry["status"].as_str().unwrap_or("?")
+                    );
+                    for observation in entry["observations"].as_array().into_iter().flatten() {
+                        if let Some(reason) = observation["reason"].as_str() {
+                            println!(
+                                "  {}: {reason}",
+                                observation["project"]["relativePath"]
+                                    .as_str()
+                                    .unwrap_or("?")
+                            );
+                        }
+                    }
+                    if let Some(reason) = entry["reason"].as_str() {
+                        println!("  {reason}");
+                    }
+                }
+            }
+            return Ok(());
+        }
         ensure!(
             !selection.is_empty(),
             "profile selects no eligible repositories"
