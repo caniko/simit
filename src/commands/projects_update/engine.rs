@@ -2481,6 +2481,7 @@ else:
         let mut cfg = serde_json::to_value(&f.config).unwrap();
         cfg["profiles"]["unused"] = cfg["profiles"]["fleet"].clone();
         cfg["forges"]["unused"] = cfg["forges"]["fixture"].clone();
+        cfg["forges"]["unused"]["host"] = json!("unused.example");
         cfg["forges"]["unused"]["apiUrl"] = json!("https://unused.example/api");
         cfg["workspaces"]["unused"] = cfg["workspaces"]["projects"].clone();
         cfg["workspaces"]["unused"]["root"] = json!(f.source.with_file_name("unused-projects"));

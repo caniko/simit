@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -15,7 +16,21 @@ from contextlib import ExitStack
 def run(*args, **kwargs):
     result = subprocess.run(args, text=True, capture_output=True, **kwargs)
     if result.returncode:
-        raise AssertionError(f"{args}: {result.stdout}\n{result.stderr}")
+        diagnostics = f"{result.stdout}\n{result.stderr}"
+        # Tool logs belong to this synthetic case's private TMPDIR. Include them
+        # before TemporaryDirectory removes the only useful failure evidence.
+        temporary = Path(kwargs.get("env", {}).get("TMPDIR", tempfile.gettempdir())).resolve()
+        seen = set()
+        for _ in range(16):
+            paths = set(re.findall(r"tool stderr retained at ([^\s\"']+)", diagnostics)) - seen
+            if not paths:
+                break
+            for value in paths:
+                seen.add(value)
+                path = Path(value.rstrip(":"))
+                if path.resolve().is_relative_to(temporary) and path.is_file():
+                    diagnostics += f"\n--- {path.name} ---\n" + path.read_text(errors="replace")
+        raise AssertionError(f"{args}: {diagnostics}")
     return result.stdout.strip()
 
 
@@ -32,6 +47,18 @@ def stop_oracle(process):
         process.wait()
 
 
+modes = ["store-wrapper", "digested-store-wrapper", "no-input", "locked-input"]
+if len(sys.argv) == 2:
+    failed = []
+    for mode in modes:
+        print(f"BEGIN {mode}", flush=True)
+        result = subprocess.run([sys.executable, __file__, sys.argv[1], mode])
+        if result.returncode:
+            failed.append(mode)
+    print(f"Packaged updater qualification: {len(modes) - len(failed)}/{len(modes)} passed; failed: {failed}", flush=True)
+    raise SystemExit(bool(failed))
+
+assert len(sys.argv) == 3 and sys.argv[2] in modes
 generator = Path(sys.argv[1]).resolve(strict=True)
 assert str(generator).startswith("/nix/store/")
 repository = Path(__file__).resolve().parents[1]
@@ -51,7 +78,7 @@ with tempfile.TemporaryDirectory(prefix="simit-packaged-updater-") as temporary,
                       f"os.execv({str(generator)!r}, [{str(generator)!r}, *sys.argv[1:]])\n")
     script.chmod(0o500)
     stored_wrapper = Path(run("nix-store", "--add", str(wrapper))) / "generator"
-    for mode in ["store-wrapper", "digested-store-wrapper", "no-input", "locked-input"]:
+    for mode in [sys.argv[2]]:
         case = root / mode
         case.mkdir()
         source = case / "source"
@@ -60,7 +87,9 @@ with tempfile.TemporaryDirectory(prefix="simit-packaged-updater-") as temporary,
         fixture_git.write_text('[user]\n name = Updater qualification fixture\n email = updater@example.invalid\n'
                                '[commit]\n gpgsign = false\n'
                                f'[url "{(case / "remote.git").as_uri()}"]\n insteadOf = https://fixture.example/team/demo.git\n')
-        env = dict(os.environ, GIT_CONFIG_GLOBAL=str(fixture_git), GIT_CONFIG_NOSYSTEM="1")
+        tool_logs = case / "tool-logs"
+        tool_logs.mkdir()
+        env = dict(os.environ, GIT_CONFIG_GLOBAL=str(fixture_git), GIT_CONFIG_NOSYSTEM="1", TMPDIR=str(tool_logs))
         (source / "Cargo.toml").write_text('[package]\nname = "updater-fixture"\nversion = "0.1.0"\nedition = "2024"\n')
         (source / "src").mkdir()
         (source / "src/main.rs").write_text("fn main() {}\n")

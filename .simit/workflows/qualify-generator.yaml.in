@@ -57,7 +57,7 @@ jobs:
           set -euo pipefail
           nix develop -c bash scripts/qualify-updater-sandbox-host.sh
           generator=$(python3 -c 'import json,os; print(os.path.join(json.load(open(os.path.join(os.environ["RUNNER_TEMP"], "generator-qualification/result.json")))[0]["outputs"]["out"], "bin/simit"))')
-          nix develop -c python3 scripts/qualify-updater-generator.py "$generator" | tee "$RUNNER_TEMP/generator-qualification/updater-sandbox.log"
+          nix develop -c python3 scripts/qualify-updater-generator.py "$generator" 2>&1 | tee "$RUNNER_TEMP/generator-qualification/updater-sandbox.log"
       - name: Regenerate through this exact Simit source
         run: |
           set -euo pipefail
