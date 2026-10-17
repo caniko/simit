@@ -163,7 +163,9 @@ reader. State and evidence readers retain their strict regular-file checks.
 The timestamp must be fresh at rollout start. Metadata selectors are combined
 with AND, path exclusions win, and exact coordinates disambiguate short names.
 Relative path globs use component boundaries: `*` does not cross `/`, while
-`**` may. Worktrees and mirrors are observations, not separate default targets.
+`**` may. The Nix renderer admits literal components, `?`, `*` and complete `**`
+components; malformed recursive globs and bracket classes are rejected before
+policy generation. Worktrees and mirrors are observations, not separate default targets.
 Duplicate selected canonical identities are errors. `custom` and `excluded` CI
 policies are excluded. Forge connections and the profile's eligible selection
 jointly determine deployment authority; inventory alone does not enroll a repo.
@@ -185,6 +187,8 @@ simit projects update --profile fleet --status
 Use `--config PATH` outside NixOS. `--repo HOST/OWNER/REPO` narrows selection;
 configured canaries must remain included. `--limit N` further bounds the profile's
 batch size. Repeating `--push` resumes the recorded rollout and candidate commit.
+`batchSize` and `maxConcurrent` are bounded to `1..4294967295` in Nix, matching
+the runtime's unsigned 32-bit representation.
 
 The executor freezes the selected identities, then processes canaries before
 ordinary repositories. A failed or incomplete canary stops that batch even if
@@ -289,8 +293,10 @@ and generators retain their resolved store installation paths even when a digest
 is supplied, preserving wrapper resources and installation-relative loaders.
 Non-store snapshots remain isolated from their mutable original locations. Adapters
 run from a private directory, with runtime values supplied through request JSON.
-Script interpreter chains must also resolve entirely inside the store. Tool
-execution clears runtime-injection environment variables and disables Python
+Script interpreter chains must also resolve entirely inside the store. Shebang
+arguments are restricted to no arguments, Python's isolated `-I`, or
+shell `-e`; arguments that can select another script or loader are rejected.
+Tool execution clears runtime-injection environment variables and disables Python
 user-site imports; Python scripts should use an isolated (`-I`) store interpreter.
 HTTPS clone URLs must not contain a username or password; SSH usernames remain
 supported through operator Git authentication. Clone URLs must use the protocol's
@@ -299,7 +305,10 @@ target branches are validated as complete Git branch refs before discovery; the
 Nix policy renderer enforces the same branch grammar.
 
 Generator qualification selects push workflows containing the configured required
-check names under their enrolled application authority. Unrelated docs or release
+check names under their enrolled application authority on the generator repository's
+current default branch. The API query and admitted original runs both bind that
+branch, so a maintenance push of the same source SHA is a distinct observation.
+Unrelated docs or release
 workflows do not become implicit generator requirements. Consumer qualification
 continues to admit every owned push workflow independently.
 
@@ -330,6 +339,8 @@ admission as qualification. The plan field is omitted from other operations.
 The GitHub adapter checks branch trigger filters against both qualification
 branches, including ordered exclusions and tag-only triggers. Literal branch
 names and `*` / `**` globs are supported; richer pattern syntax fails closed.
+Path-filtered push workflows are rejected before publication; supporting them
+requires an adapter that can evaluate GitHub's exact-change trigger semantics.
 Admission failures leave no published candidate receipt or maintenance ref and
 can be retried after correcting policy or templates.
 

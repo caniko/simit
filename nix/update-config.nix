@@ -28,6 +28,14 @@
     && lib.all (char: !(lib.hasInfix char branch)) ["~" "^" ":" "?" "*" "[" "\\"]
     && lib.all (part: part != "" && !(lib.hasPrefix "." part) && !(lib.hasSuffix ".lock" part)) (lib.splitString "/" branch);
   validPrefix = prefix: lib.hasSuffix "/" prefix && validBranch "${prefix}0000000000000000";
+  # ponytail: support literals, ? and component * / ** selectors. Bracket
+  # classes need a glob parser shared with the runtime before Nix can admit them.
+  validGlob = pattern:
+    !(lib.hasPrefix "/" pattern)
+    && !(lib.elem ".." (lib.splitString "/" pattern))
+    && !(lib.hasInfix "[" pattern)
+    && !(lib.hasInfix "]" pattern)
+    && lib.all (part: !(lib.hasInfix "**" part) || part == "**") (lib.splitString "/" pattern);
   validArgument = forge: argument: let
     parts = lib.splitString "=" argument;
     value =
@@ -61,7 +69,7 @@
     && requirements profile.generator.requiredChecks
     && requirements profile.requiredChecks
     && validPrefix profile.rollout.maintenanceRefPrefix
-    && lib.all (pattern: !(lib.hasPrefix "/" pattern) && !(lib.elem ".." (lib.splitString "/" pattern))) (profile.select.includePaths ++ profile.select.excludePaths)
+    && lib.all validGlob (profile.select.includePaths ++ profile.select.excludePaths)
     && lib.all lib.id (lib.mapAttrsToList (key: override:
       coordinate key
       && requirements override.requiredChecks

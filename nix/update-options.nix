@@ -96,8 +96,8 @@ in {
       rollout = option (types.submodule {
         options = {
           canaries = option (types.listOf coordinate) [];
-          batchSize = option types.ints.positive 1;
-          maxConcurrent = option types.ints.positive 1;
+          batchSize = option (types.ints.between 1 4294967295) 1;
+          maxConcurrent = option (types.ints.between 1 4294967295) 1;
           stopOnFailure = option types.bool true;
           maintenanceRefPrefix = option types.str "simit/update/";
         };

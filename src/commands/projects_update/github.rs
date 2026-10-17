@@ -140,6 +140,10 @@ fn admit_branch(trigger: &serde_yaml::Value, branch: &str) -> Result<()> {
         trigger.is_null() || trigger.is_mapping(),
         "invalid push trigger configuration"
     );
+    ensure!(
+        trigger.get("paths").is_none() && trigger.get("paths-ignore").is_none(),
+        "path-filtered push workflows require an adapter with exact-change trigger admission"
+    );
     let branches = trigger.get("branches");
     let ignored = trigger.get("branches-ignore");
     ensure!(
@@ -252,10 +256,11 @@ fn requested_workflows(
 
 fn generator_workflow_paths(
     runs: &[Value],
+    branch: &str,
     mut required: impl FnMut(&Value) -> Result<bool>,
 ) -> Result<BTreeSet<String>> {
     let mut paths = BTreeSet::new();
-    for run in runs {
+    for run in runs.iter().filter(|run| run["head_branch"] == branch) {
         if required(run)? {
             paths.insert(text(run, "/path")?);
         }
@@ -413,10 +418,10 @@ pub fn execute(request: &AdapterRequest) -> Result<AdapterResponse> {
         return Ok(response);
     }
     // Only original push runs can qualify the exact candidate/default-branch bytes.
-    let mut query = format!("{endpoint}/actions/runs?head_sha={revision}&event=push");
-    if let Some(branch) = &request.branch {
-        query.push_str(&format!("&branch={}", encoded(branch)));
-    }
+    let query = format!(
+        "{endpoint}/actions/runs?head_sha={revision}&event=push&branch={}",
+        encoded(branch)
+    );
     let runs = api.list(&query, "workflow_runs")?;
     let runs = runs["workflow_runs"]
         .as_array()
@@ -427,7 +432,7 @@ pub fn execute(request: &AdapterRequest) -> Result<AdapterResponse> {
         api.get(&format!("{endpoint}/contents/{path}?ref={revision}"))
     };
     let paths = if request.workflows.is_empty() {
-        generator_workflow_paths(runs, |run| {
+        generator_workflow_paths(runs, branch, |run| {
             let run_id = number(run, "/id")?;
             let jobs = api.list(
                 &format!("{endpoint}/actions/runs/{run_id}/attempts/1/jobs"),
@@ -450,7 +455,7 @@ pub fn execute(request: &AdapterRequest) -> Result<AdapterResponse> {
             Ok(required)
         })?
     } else {
-        requested_workflows(&request.workflows, request.branch.as_deref(), source)?
+        requested_workflows(&request.workflows, Some(branch), source)?
     };
     if paths.is_empty() {
         response.status = "pending".into();
@@ -464,13 +469,13 @@ pub fn execute(request: &AdapterRequest) -> Result<AdapterResponse> {
         );
         if request.workflows.is_empty() {
             ensure!(
-                push_workflow(&path, &source(&path)?, request.branch.as_deref())?,
+                push_workflow(&path, &source(&path)?, Some(branch))?,
                 "generator qualification requires a push workflow"
             );
         }
         let matching = runs
             .iter()
-            .filter(|r| r["path"] == path)
+            .filter(|r| r["path"] == path && r["head_branch"] == branch)
             .collect::<Vec<_>>();
         ensure!(
             matching.len() <= 1,
@@ -498,7 +503,7 @@ pub fn execute(request: &AdapterRequest) -> Result<AdapterResponse> {
         if !admit_run(
             (id, authority),
             &revision,
-            request.branch.as_deref(),
+            Some(branch),
             &path,
             run,
             &jobs,
@@ -665,14 +670,19 @@ mod tests {
     #[test]
     fn unrelated_failed_or_ambiguous_workflows_do_not_gate_generator_checks() {
         let runs = [
-            json!({"id":1,"path":".github/workflows/ci.yaml"}),
-            json!({"id":2,"path":".github/workflows/docs.yaml","conclusion":"failure"}),
-            json!({"id":3,"path":".github/workflows/docs.yaml","conclusion":"failure"}),
+            json!({"id":1,"head_branch":"custom-default","path":".github/workflows/ci.yaml"}),
+            json!({"id":2,"head_branch":"maintenance/candidate","path":".github/workflows/ci.yaml","conclusion":"failure"}),
+            json!({"id":3,"head_branch":"custom-default","path":".github/workflows/docs.yaml","conclusion":"failure"}),
+            json!({"id":4,"head_branch":"custom-default","path":".github/workflows/docs.yaml","conclusion":"failure"}),
         ];
-        let paths = generator_workflow_paths(&runs, |run| Ok(run["id"] == 1)).unwrap();
+        let paths = generator_workflow_paths(&runs, "custom-default", |run| {
+            assert_ne!(run["id"], 2, "unrelated branch entered qualification");
+            Ok(run["id"] == 1)
+        })
+        .unwrap();
         assert_eq!(paths, BTreeSet::from([".github/workflows/ci.yaml".into()]));
         assert!(
-            generator_workflow_paths(&runs, |_| Ok(false))
+            generator_workflow_paths(&runs, "custom-default", |_| Ok(false))
                 .unwrap()
                 .is_empty()
         );
@@ -771,6 +781,8 @@ mod tests {
             ("branches-ignore: ['maintenance/**']", false),
             ("branches-ignore: [docs]", true),
             ("tags: ['v*']", false),
+            ("paths: ['src/**']", false),
+            ("paths-ignore: ['.github/**']", false),
             ("branches: ['maintenance/?*']", false),
         ] {
             let file = json!({"path":path,"type":"file","encoding":"base64","content":base64::engine::general_purpose::STANDARD.encode(format!("on:\n  push:\n    {filters}\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: exit 0\n"))});

@@ -106,6 +106,20 @@
   };
 in
   assert rendered.schemaVersion == 1;
+  assert lib.all (count: !(accepts (example // {profiles.fleet = example.profiles.fleet // {rollout.batchSize = count;};})) && !(accepts (example // {profiles.fleet = example.profiles.fleet // {rollout.maxConcurrent = count;};}))) [0 4294967296];
+  assert accepts (example
+    // {
+      profiles.fleet =
+        example.profiles.fleet
+        // {
+          rollout = {
+            batchSize = 4294967295;
+            maxConcurrent = 4294967295;
+          };
+        };
+    });
+  assert lib.all (pattern: !(accepts (example // {profiles.fleet = example.profiles.fleet // {select = example.profiles.fleet.select // {includePaths = [pattern];};};})) && !(accepts (example // {profiles.fleet = example.profiles.fleet // {select = example.profiles.fleet.select // {excludePaths = [pattern];};};}))) ["[" "[abc" "]" "a**" "**a" "a/**b" "***"];
+  assert lib.all (pattern: accepts (example // {profiles.fleet = example.profiles.fleet // {select = example.profiles.fleet.select // {includePaths = [pattern];};};})) ["**" "retired/**" "repos/*/demo?" "literal"];
   assert !(accepts (example // {profiles.fleet = example.profiles.fleet // {rollout.canaries = ["git.example.org/team/typo"];};}));
   assert accepts (example // {profiles.fleet = example.profiles.fleet // {rollout.canaries = example.profiles.fleet.select.coordinates;};});
   assert lib.all (sourceRevision: !(accepts (withGenerator {inherit sourceRevision;}))) ["trunk" "abc123" (lib.concatStrings (lib.replicate 40 "A"))];
