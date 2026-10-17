@@ -92,7 +92,7 @@ jobs:
           XDG_CACHE_HOME: "/tmp/.cache"
           CARGO_HOME: "/tmp/.cargo"
           CARGO_BUILD_JOBS: "2"
-        run: if [ "$GITHUB_WORKFLOW" = CI ] && [ "$GITHUB_JOB" = test ]; then nix develop -c bash scripts/qualify-updater-sandbox-host.sh; fi
+        run: if [ "$GITHUB_WORKFLOW" = CI ] && [ "$GITHUB_JOB" = test ]; then nix develop -c bash scripts/qualify-updater-tests.sh; fi
 
       - name: Verify packaged contents simit
         working-directory: .simit-release-source
