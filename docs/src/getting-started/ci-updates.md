@@ -181,6 +181,14 @@ invalidate earlier candidate acceptance. Failed, skipped, cancelled, neutral or
 rerun required cases cannot qualify. Receipts and adapter responses remain in
 `stateDirectory`; `--status` reads them without discovery or forge queries.
 
+Repository clones, receipts and baselines are isolated under a profile-specific
+directory in `stateDirectory`. `--status` reports only the requested profile.
+Receipt policy hashes include the active profile, its workspace, and its generator
+and consumer forge records. Frozen selection keys use the profile, workspace and
+generator forge policy. Changes to unrelated configuration entries therefore
+preserve the frozen selection and resumable candidates; changes to a transaction's
+referenced policy still invalidate its pending receipt.
+
 The v1 built-in adapter supports GitHub Actions originals with configured app
 authority, complete job/step success and app-bound legacy protection contexts.
 Active rulesets and PR-required protections are rejected. It does not migrate

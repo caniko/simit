@@ -56,12 +56,14 @@ pub fn run(args: Args) -> Result<()> {
         .context("unknown update profile")?;
     let workspace = &config.workspaces[&profile.workspace];
     if args.status {
-        let receipts = engine::status(&workspace.state_directory)?;
+        let receipts = engine::status(&engine::profile_directory(workspace, &args.profile))?;
         println!("{}", serde_json::to_string_pretty(&receipts)?);
         return Ok(());
     }
     let _lock = engine::lock(&workspace.state_directory)?;
-    let selection_key = crate::review::canonical_digest(&(&config, &args.profile, &args.repo))?;
+    let selection_policy = engine::policy_digest(&config, profile, workspace, None)?;
+    let selection_key =
+        crate::review::canonical_digest(&(&args.profile, &selection_policy, &args.repo))?;
     let frozen_path = engine::selection_path(&workspace.state_directory, &selection_key);
     let prior: Option<engine::FrozenSelection> = if args.push && frozen_path.exists() {
         Some(crate::review::read_json(&frozen_path)?)
@@ -107,6 +109,7 @@ pub fn run(args: Args) -> Result<()> {
     for project in frozen.projects.iter().take(count) {
         match engine::update(
             &config,
+            &args.profile,
             profile,
             workspace,
             project,

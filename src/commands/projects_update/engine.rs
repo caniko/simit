@@ -122,6 +122,33 @@ pub fn selection_path(root: &Path, key: &str) -> PathBuf {
     root.join(format!("rollout-{key}.json"))
 }
 
+pub fn profile_directory(workspace: &Workspace, name: &str) -> PathBuf {
+    workspace
+        .state_directory
+        .join(format!("profile-{}", digest(name.as_bytes())))
+}
+
+pub fn policy_digest(
+    config: &Config,
+    profile: &Profile,
+    workspace: &Workspace,
+    consumer_forge: Option<&str>,
+) -> Result<String> {
+    let generator = config
+        .forges
+        .get(&profile.generator.forge)
+        .context("unknown generator forge")?;
+    let consumer = consumer_forge
+        .map(|name| {
+            config
+                .forges
+                .get_key_value(name)
+                .context("unknown consumer forge")
+        })
+        .transpose()?;
+    canonical_digest(&(profile, workspace, generator, consumer))
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Receipt {
@@ -360,6 +387,7 @@ fn hashes(
 
 pub fn update(
     config: &Config,
+    profile_name: &str,
     profile: &Profile,
     workspace: &Workspace,
     project: &Project,
@@ -367,12 +395,11 @@ pub fn update(
     wait_seconds: u64,
 ) -> Result<Receipt> {
     let deadline = Instant::now() + Duration::from_secs(wait_seconds);
-    let root = workspace
-        .state_directory
+    let root = profile_directory(workspace, profile_name)
         .join(format!("repo-{}", digest(project.coordinate.as_bytes())));
     private_directory(&root)?;
     let receipt_path = root.join("receipt.json");
-    let config_digest = canonical_digest(&(config, profile))?;
+    let config_digest = policy_digest(config, profile, workspace, Some(&project.forge))?;
     let forge = &config.forges[&project.forge];
     let over = profile.project_overrides.get(&project.coordinate);
     let target = over.and_then(|o| o.target_branch.as_deref());
@@ -869,6 +896,122 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn profiles_keep_independent_candidates_receipts_and_baselines() {
+        let mut f = Fixture::new();
+        let mut other = serde_json::to_value(&f.config.profiles["fleet"]).unwrap();
+        other["generator"]["sourceRevision"] = json!("b".repeat(40));
+        f.config
+            .profiles
+            .insert("other".into(), serde_json::from_value(other).unwrap());
+        f.write_inventory();
+        f.control(json!({"candidate":"pending"}));
+        assert!(f.cli("fleet", true).is_err());
+        // A different profile must prepare its own preview rather than resume
+        // the first profile's candidate with incompatible policy.
+        f.cli("other", false).unwrap();
+        assert!(f.cli("other", true).is_err());
+        let workspace = &f.config.workspaces["projects"];
+        let fleet_root = profile_directory(workspace, "fleet");
+        let other_root = profile_directory(workspace, "other");
+        let first = status(&fleet_root).unwrap();
+        let second = status(&other_root).unwrap();
+        assert_eq!(first.len(), 1);
+        assert_eq!(second.len(), 1);
+        assert_ne!(first[0].candidate, second[0].candidate);
+        let first_receipt = serde_json::to_value(&first[0]).unwrap();
+        f.control(json!({}));
+        f.cli("other", true).unwrap();
+        assert_eq!(
+            serde_json::to_value(&status(&fleet_root).unwrap()[0]).unwrap(),
+            first_receipt
+        );
+        assert_eq!(status(&other_root).unwrap()[0].phase, "qualified");
+        let repo = format!("repo-{}", digest(f.project.coordinate.as_bytes()));
+        assert!(!fleet_root.join(&repo).join("baseline.json").exists());
+        assert!(other_root.join(&repo).join("baseline.json").is_file());
+    }
+
+    #[test]
+    fn unrelated_configuration_edits_resume_the_same_frozen_candidate() {
+        let mut f = Fixture::new();
+        f.write_inventory();
+        f.control(json!({"candidate":"pending"}));
+        assert!(f.cli("fleet", true).is_err());
+        let pending = status(&profile_directory(
+            &f.config.workspaces["projects"],
+            "fleet",
+        ))
+        .unwrap()
+        .remove(0);
+        let mut cfg = serde_json::to_value(&f.config).unwrap();
+        cfg["profiles"]["unused"] = cfg["profiles"]["fleet"].clone();
+        cfg["forges"]["unused"] = cfg["forges"]["fixture"].clone();
+        cfg["forges"]["unused"]["apiUrl"] = json!("https://unused.example/api");
+        cfg["workspaces"]["unused"] = cfg["workspaces"]["projects"].clone();
+        cfg["workspaces"]["unused"]["root"] = json!(f.source.with_file_name("unused-projects"));
+        cfg["workspaces"]["unused"]["stateDirectory"] =
+            json!(f.source.with_file_name("unused-state"));
+        f.config = serde_json::from_value(cfg).unwrap();
+        f.config.validate().unwrap();
+        // Resumption must use the frozen inventory, even when rediscovery is unavailable.
+        fs::remove_file(
+            f.config.workspaces["projects"]
+                .inventory
+                .file
+                .as_ref()
+                .unwrap(),
+        )
+        .unwrap();
+        f.control(json!({}));
+        f.cli("fleet", true).unwrap();
+        let adopted = status(&profile_directory(
+            &f.config.workspaces["projects"],
+            "fleet",
+        ))
+        .unwrap()
+        .remove(0);
+        assert_eq!(adopted.phase, "qualified");
+        assert_eq!(adopted.candidate, pending.candidate);
+        assert_eq!(adopted.config_digest, pending.config_digest);
+    }
+
+    #[test]
+    fn referenced_policy_changes_still_block_pending_candidates() {
+        for field in ["profile", "workspace", "forge"] {
+            let mut f = Fixture::new();
+            f.control(json!({"candidate":"pending"}));
+            let pending = f.update(true).unwrap();
+            match field {
+                "profile" => {
+                    f.config
+                        .profiles
+                        .get_mut("fleet")
+                        .unwrap()
+                        .rollout
+                        .batch_size = 2
+                }
+                "workspace" => {
+                    f.config
+                        .workspaces
+                        .get_mut("projects")
+                        .unwrap()
+                        .inventory
+                        .max_age_seconds = 600
+                }
+                _ => f.config.forges.get_mut("fixture").unwrap().check_authority = "999".into(),
+            }
+            assert!(
+                f.update(true)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("another policy"),
+                "{field}"
+            );
+            assert_eq!(f.remote_head(), pending.source);
+        }
+    }
+
+    #[test]
     fn executes_enrolled_snapshot_when_generator_path_changes_during_qualification() {
         let f = Fixture::new();
         let generator = &f.config.profiles["fleet"].generator.executable;
@@ -891,8 +1034,7 @@ mod tests {
     fn interrupted_initial_clones_resume_without_manual_state_removal() {
         for complete in [false, true] {
             let f = Fixture::new();
-            let root = f.config.workspaces["projects"]
-                .state_directory
+            let root = profile_directory(&f.config.workspaces["projects"], "fleet")
                 .join(format!("repo-{}", digest(f.project.coordinate.as_bytes())));
             fs::create_dir_all(&root).unwrap();
             let checkout = root.join("checkout");
@@ -963,7 +1105,7 @@ mod tests {
                     assert!(run().is_err());
                     assert_eq!(f.remote_head(), source);
                     assert!(
-                        !status(&workspace.state_directory)
+                        !status(&profile_directory(workspace, "fleet"))
                             .unwrap()
                             .iter()
                             .any(|r| r.coordinate == second.coordinate)
@@ -971,7 +1113,7 @@ mod tests {
                 } else {
                     run().unwrap();
                     assert!(
-                        status(&workspace.state_directory)
+                        status(&profile_directory(workspace, "fleet"))
                             .unwrap()
                             .iter()
                             .any(|r| r.coordinate == second.coordinate && r.phase == "qualified")
@@ -1156,9 +1298,40 @@ mod tests {
                 source,
             }
         }
+        fn write_inventory(&self) {
+            let workspace = &self.config.workspaces["projects"];
+            save(
+                workspace.inventory.file.as_ref().unwrap(),
+                &Inventory {
+                    schema_version: 1,
+                    root: workspace.root.clone(),
+                    observed_at: chrono::Utc::now(),
+                    producer: "fixture".into(),
+                    policy_digest: "b".repeat(64),
+                    projects: vec![self.project.clone()],
+                },
+            )
+            .unwrap();
+        }
+        fn cli(&self, profile: &str, push: bool) -> Result<()> {
+            let config = self.control.with_file_name("updates.json");
+            save(&config, &self.config)?;
+            super::super::run(super::super::Args {
+                config,
+                profile: profile.into(),
+                repo: vec![],
+                dry_run: false,
+                push,
+                status: false,
+                wait_seconds: 0,
+                limit: None,
+                json: true,
+            })
+        }
         fn update(&self, push: bool) -> Result<Receipt> {
             update(
                 &self.config,
+                "fleet",
                 &self.config.profiles["fleet"],
                 &self.config.workspaces["projects"],
                 &self.project,
@@ -1186,7 +1359,11 @@ mod tests {
         let pending = f.update(true).unwrap();
         assert_eq!(pending.phase, "candidate");
         assert_eq!(f.remote_head(), source);
-        let status_before = status(&f.config.workspaces["projects"].state_directory).unwrap();
+        let status_before = status(&profile_directory(
+            &f.config.workspaces["projects"],
+            "fleet",
+        ))
+        .unwrap();
         assert_eq!(status_before[0].candidate, pending.candidate);
         f.control(json!({"adoption":"pending"}));
         let adopting = f.update(true).unwrap();
@@ -1238,7 +1415,12 @@ mod tests {
         assert!(f.update(true).is_err());
         assert_eq!(f.remote_head(), race);
         assert_eq!(
-            status(&f.config.workspaces["projects"].state_directory).unwrap()[0].phase,
+            status(&profile_directory(
+                &f.config.workspaces["projects"],
+                "fleet"
+            ))
+            .unwrap()[0]
+                .phase,
             "landing"
         );
     }
@@ -1285,8 +1467,7 @@ mod tests {
             .unwrap(),
             "new output"
         );
-        let checkout = f.config.workspaces["projects"]
-            .state_directory
+        let checkout = profile_directory(&f.config.workspaces["projects"], "fleet")
             .join(format!("repo-{}", digest(f.project.coordinate.as_bytes())))
             .join("checkout");
         fs::write(
