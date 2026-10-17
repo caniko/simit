@@ -16,6 +16,7 @@
   in
     builtins.length parts
     >= 3
+    && builtins.head parts == lib.toLower (builtins.head parts)
     && builtins.match ".*[[:space:]\\\\:?#@].*" value == null
     && lib.all (part: part != "" && part != "." && part != "..") parts;
   validBranch = branch:

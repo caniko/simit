@@ -154,6 +154,10 @@ and runtime validation reject an unlisted canary before discovery.
 Each forge hostname must have exactly one configured policy. Inventory can name
 that policy but cannot choose a weaker adapter, credential or check authority for
 the same host. Rust and Nix reject duplicate host entries before discovery.
+Forge hosts and the hostname portion of every enrolled or discovered coordinate
+must use lowercase. Validation rejects case aliases before discovery; it does
+not silently change enrollment or receipt keys. Remote DNS host comparison is
+case-insensitive, while repository owner/path spelling remains exact.
 
 Inventory commands run in read-only Linux filesystem, network and PID namespaces,
 with a private writable temporary directory. The host `/run` socket tree and Nix

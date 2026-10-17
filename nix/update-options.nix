@@ -13,6 +13,7 @@
   in
     builtins.length parts
     >= 3
+    && builtins.head parts == lib.toLower (builtins.head parts)
     && builtins.match ".*[[:space:]\\\\:?#@].*" value == null
     && lib.all (part: part != "" && part != "." && part != "..") parts);
   command = types.submodule {
@@ -51,7 +52,7 @@ in {
   })) {};
   forges = option (types.attrsOf (types.submodule {
     options = {
-      host = mkOption {type = types.strMatching "[^/:[:space:]]+";};
+      host = mkOption {type = types.addCheck (types.strMatching "[^/:[:space:]]+") (host: host == lib.toLower host);};
       apiUrl = mkOption {
         type = types.addCheck (types.strMatching "https://[^/:?#@[:space:]]+(:[0-9]{1,5})?(/[^?#[:space:]]*)?") (value: let
           port = builtins.match "https://[^/:?#@[:space:]]+:([0-9]+)(/.*)?" value;

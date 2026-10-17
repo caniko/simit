@@ -121,6 +121,10 @@
 in
   assert rendered.schemaVersion == 1;
   assert !(accepts (withOtherForge "git.example.org"));
+  assert !(accepts (withOtherForge "Git.Example.Org"));
+  assert !(accepts (withForge {host = "Git.Example.Org";}));
+  assert !(accepts (example // {profiles.fleet = example.profiles.fleet // {select.coordinates = ["Git.Example.Org/Team/Demo"];};}));
+  assert accepts (example // {profiles.fleet = example.profiles.fleet // {select.coordinates = ["git.example.org/Team/Demo"];};});
   assert accepts (withOtherForge "other.example.org");
   assert lib.all (count: !(accepts (example // {profiles.fleet = example.profiles.fleet // {rollout.batchSize = count;};})) && !(accepts (example // {profiles.fleet = example.profiles.fleet // {rollout.maxConcurrent = count;};}))) [0 4294967296];
   assert accepts (example

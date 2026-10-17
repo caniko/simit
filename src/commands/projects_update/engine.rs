@@ -367,15 +367,19 @@ fn remote_identity(remote: &str, expected: &str) -> Result<()> {
             && url.fragment().is_none(),
         "invalid repository transport"
     );
+    let (host, repository) = expected
+        .split_once('/')
+        .context("missing enrolled repository")?;
     ensure!(
-        format!(
-            "{}/{}",
-            url.host_str().context("missing repository host")?,
-            url.path()
+        url.host_str()
+            .context("missing repository host")?
+            .eq_ignore_ascii_case(host)
+            && url
+                .path()
                 .trim_start_matches('/')
                 .strip_suffix(".git")
                 .unwrap_or_else(|| url.path().trim_start_matches('/'))
-        ) == expected,
+                == repository,
         "adapter remote differs from enrolled coordinate"
     );
     Ok(())
@@ -2186,6 +2190,18 @@ if os.fork() == 0:
                 remote_identity(remote, "fixture.example/team/demo").is_ok(),
                 "{remote}"
             );
+        }
+    }
+
+    #[test]
+    fn remote_host_case_is_insensitive_but_repository_case_is_exact() {
+        for remote in [
+            "https://FiXtUrE.example/Team/Demo.git",
+            "ssh://git@FiXtUrE.example/Team/Demo.git",
+        ] {
+            remote_identity(remote, "fixture.example/Team/Demo").unwrap();
+            assert!(remote_identity(remote, "fixture.example/team/demo").is_err());
+            assert!(remote_identity(remote, "other.example/Team/Demo").is_err());
         }
     }
 

@@ -302,6 +302,10 @@ impl Config {
         let mut forge_hosts = BTreeSet::new();
         for forge in self.forges.values() {
             ensure!(
+                forge.host == forge.host.to_ascii_lowercase(),
+                "forge hostnames must use canonical lowercase"
+            );
+            ensure!(
                 forge_hosts.insert(&forge.host),
                 "forge hosts must be unique; inventory cannot select a different policy for the same host"
             );
@@ -497,6 +501,37 @@ mod tests {
                 .to_string()
                 .contains("operator-owned coordinate enrollment")
         );
+    }
+
+    #[test]
+    fn canonical_hosts_reject_case_aliases_without_folding_repository_paths() {
+        for host in ["Forge.example", "FORGE.EXAMPLE"] {
+            let mut cfg = config();
+            cfg.forges.get_mut("example").unwrap().host = host.into();
+            assert!(
+                cfg.validate()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("canonical lowercase")
+            );
+            assert!(
+                coordinate(&format!("{host}/Team/Demo"))
+                    .unwrap_err()
+                    .to_string()
+                    .contains("canonical lowercase")
+            );
+        }
+        coordinate("forge.example/Team/Demo").unwrap();
+        let mut cfg = config();
+        cfg.profiles.get_mut("fleet").unwrap().select.coordinates =
+            vec!["Forge.example/team/demo".into()];
+        assert!(cfg.validate().is_err());
+        let mut cfg = config();
+        let mut alias: Forge =
+            serde_json::from_value(serde_json::to_value(&cfg.forges["example"]).unwrap()).unwrap();
+        alias.host = "Forge.example".into();
+        cfg.forges.insert("alias".into(), alias);
+        assert!(cfg.validate().is_err());
     }
 
     #[test]
@@ -832,6 +867,11 @@ impl Command {
     }
 }
 pub fn coordinate(value: &str) -> Result<()> {
+    let host = value.split('/').next().unwrap_or_default();
+    ensure!(
+        host == host.to_ascii_lowercase(),
+        "repository hostnames must use canonical lowercase"
+    );
     ensure!(
         value.split('/').count() >= 3
             && !value.contains(['\\', ':', '\0', '?', '#', '@'])
