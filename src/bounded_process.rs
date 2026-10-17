@@ -404,6 +404,7 @@ fn capture(
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use std::{os::fd::OwnedFd, os::unix::net::UnixStream};
 
     #[test]
     fn cleanup_racing_a_would_block_read_does_not_drop_queued_bytes() {
@@ -451,12 +452,14 @@ mod tests {
         let token = Cancellation::default();
         let marker = root.path().join("started");
         let late = root.path().join("late-effect");
+        let (mut peer, input) = UnixStream::pair().unwrap();
+        peer.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
         std::thread::scope(|scope| {
             let run = scope.spawn(|| run_bounded(
-                Command::new("sh").args(["-c", "printf '\\377\\000diagnostic' >&2; touch \"$MARKER\"; (sleep 0.5; touch \"$LATE\") & (while :; do printf 'abcdefgh'; sleep 0.01; done) & while :; do printf 'errors' >&2; sleep 0.01; done"])
+                Command::new("sh").args(["-c", "exec 3<&0; printf '\\377\\000diagnostic' >&2; touch \"$MARKER\"; (cat <&3; touch \"$LATE\") & (while :; do printf 'abcdefgh'; sleep 0.01; done) & while :; do printf 'errors' >&2; sleep 0.01; done"])
                     .env("MARKER", &marker).env("LATE", &late),
                 &root.path().join("stdout"), &root.path().join("stderr"), &token,
-                Limits { timeout: Duration::from_secs(2), stdout: 65536, stderr: 65536 }, None,
+                Limits { timeout: Duration::from_secs(2), stdout: 65536, stderr: 65536 }, Some(File::from(OwnedFd::from(input))),
             ));
             let deadline = Instant::now() + Duration::from_secs(1);
             while !marker.exists() {
@@ -479,7 +482,7 @@ mod tests {
                 .any(|bytes| bytes == b"cancelled")
         );
         assert!(stderr.len() <= 65536);
-        std::thread::sleep(Duration::from_millis(600));
+        assert_eq!(peer.read(&mut [0]).unwrap(), 0);
         assert!(!late.exists());
     }
 
@@ -523,10 +526,12 @@ mod tests {
         for fail_after in [0, 1] {
             let root = tempfile::tempdir().unwrap();
             let marker = root.path().join("late-effect");
+            let (mut peer, input) = UnixStream::pair().unwrap();
+            peer.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
             let start = Instant::now();
             let result = run_bounded_with_readers(
                 Command::new("sh")
-                    .args(["-c", "sleep 0.2; touch \"$MARKER\""])
+                    .args(["-c", "cat; touch \"$MARKER\""])
                     .env("MARKER", &marker),
                 &root.path().join("stdout"),
                 &root.path().join("stderr"),
@@ -536,7 +541,7 @@ mod tests {
                     stdout: 32,
                     stderr: 256,
                 },
-                None,
+                Some(File::from(OwnedFd::from(input))),
                 &mut Readers {
                     fail_after: Some(fail_after),
                     started: 0,
@@ -549,7 +554,7 @@ mod tests {
                     .contains("cannot start output capture reader")
             );
             assert!(start.elapsed() < Duration::from_secs(1));
-            std::thread::sleep(Duration::from_millis(250));
+            assert_eq!(peer.read(&mut [0]).unwrap(), 0);
             assert!(!marker.exists());
         }
     }
@@ -657,8 +662,6 @@ mod tests {
     }
     #[test]
     fn deadline_kills_descendants_not_just_the_shell() {
-        use std::{os::fd::OwnedFd, os::unix::net::UnixStream};
-
         let root = tempfile::tempdir().unwrap();
         let marker = root.path().join("late-effect");
         // Keep the descendant blocked until cleanup. A timed side effect races
