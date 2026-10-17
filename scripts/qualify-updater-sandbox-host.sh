@@ -3,8 +3,10 @@
 set -euo pipefail
 test "${GITHUB_ACTIONS:-}" = true
 bwrap=$(readlink -f "$(command -v bwrap)")
-true_program=$(readlink -f "$(type -P true)")
+# Preserve the applet name: Nix's true can be a symlink to multicall coreutils.
+true_program="$(readlink -f "$(dirname "$(type -P true)")")/true"
 case "$bwrap" in /nix/store/*/bin/bwrap) ;; *) exit 1 ;; esac
+case "$true_program" in /nix/store/*/bin/true) ;; *) exit 1 ;; esac
 uname -a
 cat /proc/self/attr/current
 grep '^Cap' /proc/self/status
