@@ -322,11 +322,7 @@ fn build_workflow(
                 } else {
                     format!("{name}-no-default-features")
                 };
-                let targets = if options.unit_tests_only {
-                    " --lib"
-                } else {
-                    ""
-                };
+                let targets = ci::unit_test_target_args(package, options);
                 steps.push(step(
                     &name,
                     image,

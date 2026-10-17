@@ -40,6 +40,9 @@ pub(crate) fn files(
     {
         bail!("monorepo qualification requires GitHub Actions and runtime nix");
     }
+    config
+        .ci
+        .validate_effective_backend(CiProvider::Actions, Platform::Github)?;
     if include_publishers && (config.vscode.is_some() || config.jetbrains.is_some()) {
         bail!(
             "monorepo extension publication is not supported; manage extension publishers independently and use --primary-only for qualification regeneration"
@@ -182,7 +185,12 @@ pub(crate) fn files(
         "needs": needs, "if": "${{ always() }}", "runs-on": runner, "timeout-minutes": 5,
         "steps": [{"name": "Require every selected component", "env": {"RESULTS": "${{ toJSON(needs) }}", "SELECTED": "${{ needs.plan.outputs.selected }}"}, "run": "printf '%s' \"$RESULTS\" | jq -e --argjson selected \"$SELECTED\" '. as $jobs | $jobs.plan.result == \"success\" and all($selected[]; $jobs[\"component-\" + .].result == \"success\")'"}]
     }));
-    let workflow = json!({"name": "Monorepo qualification", "on": {"push": {"branches": ["**"]}, "pull_request": {}, "workflow_dispatch": {}}, "permissions": {"contents": "read"}, "concurrency": {"group": "monorepo-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event.pull_request.head.ref || github.ref_name }}", "cancel-in-progress": true}, "jobs": jobs});
+    let branches = if config.ci.push_branches.is_empty() {
+        vec!["**".to_owned()]
+    } else {
+        config.ci.push_branches.clone()
+    };
+    let workflow = json!({"name": "Monorepo qualification", "on": {"push": {"branches": branches}, "pull_request": {}, "workflow_dispatch": {}}, "permissions": {"contents": "read"}, "concurrency": {"group": "monorepo-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event.pull_request.head.ref || github.ref_name }}", "cancel-in-progress": true}, "jobs": jobs});
     let mut files = vec![GeneratedFile {
         relative_path: PathBuf::from(".github/workflows/ci.yaml"),
         content: format!(
