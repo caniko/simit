@@ -422,23 +422,11 @@ impl Config {
             // Use Git's complete ref grammar before state creation or generation.
             // The candidate suffix is always hexadecimal, so a fixed suffix
             // validates every branch this policy can construct.
-            ensure!(
-                std::process::Command::new("git")
-                    .args([
-                        "check-ref-format",
-                        &format!(
-                            "refs/heads/{}0000000000000000",
-                            profile.rollout.maintenance_ref_prefix
-                        )
-                    ])
-                    .stdin(std::process::Stdio::null())
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .status()
-                    .context("validate maintenance ref prefix with Git")?
-                    .success(),
-                "maintenance prefix is not a valid Git ref namespace"
-            );
+            branch(&format!(
+                "{}0000000000000000",
+                profile.rollout.maintenance_ref_prefix
+            ))
+            .context("maintenance prefix is not a valid Git ref namespace")?;
             for pattern in profile
                 .select
                 .include_paths
@@ -454,6 +442,9 @@ impl Config {
             for (key, value) in &profile.project_overrides {
                 coordinate(key)?;
                 requirements(&value.required_checks)?;
+                if let Some(target) = &value.target_branch {
+                    branch(target).context("invalid override target branch")?;
+                }
                 ensure!(
                     value.enable || value.reason.as_ref().is_some_and(|s| !s.trim().is_empty()),
                     "disabled project override requires a reason"
@@ -636,6 +627,45 @@ mod tests {
     }
 
     #[test]
+    fn override_targets_are_validated_before_transactions() {
+        for target in [
+            "",
+            "-option",
+            "feature..ci",
+            "feature/",
+            "feature.",
+            ".hidden/ci",
+            "feature.lock",
+            "feature//ci",
+            "feature@{ci",
+            "feature ci",
+        ] {
+            let mut cfg = config();
+            cfg.profiles
+                .get_mut("fleet")
+                .unwrap()
+                .project_overrides
+                .insert(
+                    "forge.example/team/demo".into(),
+                    serde_json::from_value(serde_json::json!({"targetBranch": target})).unwrap(),
+                );
+            assert!(cfg.validate().is_err(), "{target:?}");
+        }
+        for target in ["trunk", "custom-layout/ci", "feature./ci"] {
+            let mut cfg = config();
+            cfg.profiles
+                .get_mut("fleet")
+                .unwrap()
+                .project_overrides
+                .insert(
+                    "forge.example/team/demo".into(),
+                    serde_json::from_value(serde_json::json!({"targetBranch": target})).unwrap(),
+                );
+            cfg.validate().unwrap();
+        }
+    }
+
+    #[test]
     fn selection_is_layout_independent_and_exclusions_win() {
         let selection: Selection =
             serde_json::from_value(serde_json::json!({"coordinates":["forge.example/team/demo"]}))
@@ -812,6 +842,23 @@ fn absolute(path: &Path) -> Result<()> {
                 std::path::Component::RootDir | std::path::Component::Normal(_)
             )),
         "runtime paths must be absolute and must not contain traversal components"
+    );
+    Ok(())
+}
+
+fn branch(value: &str) -> Result<()> {
+    ensure!(
+        !value.is_empty()
+            && !value.starts_with('-')
+            && std::process::Command::new("git")
+                .args(["check-ref-format", &format!("refs/heads/{value}")])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .context("validate branch name with Git")?
+                .success(),
+        "invalid Git branch name"
     );
     Ok(())
 }

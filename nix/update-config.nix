@@ -17,14 +17,17 @@
     >= 3
     && builtins.match ".*[[:space:]\\\\:?#@].*" value == null
     && lib.all (part: part != "" && part != "." && part != "..") parts;
-  validPrefix = prefix:
-    lib.hasSuffix "/" prefix
-    && !(lib.hasPrefix "-" prefix)
-    && !(lib.hasInfix ".." prefix)
-    && !(lib.hasInfix "@{" prefix)
-    && builtins.match ".*[[:cntrl:][:space:]].*" prefix == null
-    && lib.all (char: !(lib.hasInfix char prefix)) ["~" "^" ":" "?" "*" "[" "\\"]
-    && lib.all (part: part != "" && !(lib.hasPrefix "." part) && !(lib.hasSuffix ".lock" part)) (lib.splitString "/" (lib.removeSuffix "/" prefix));
+  validBranch = branch:
+    branch
+    != ""
+    && !(lib.hasPrefix "-" branch)
+    && !(lib.hasSuffix "." branch)
+    && !(lib.hasInfix ".." branch)
+    && !(lib.hasInfix "@{" branch)
+    && builtins.match ".*[[:cntrl:][:space:]].*" branch == null
+    && lib.all (char: !(lib.hasInfix char branch)) ["~" "^" ":" "?" "*" "[" "\\"]
+    && lib.all (part: part != "" && !(lib.hasPrefix "." part) && !(lib.hasSuffix ".lock" part)) (lib.splitString "/" branch);
+  validPrefix = prefix: lib.hasSuffix "/" prefix && validBranch "${prefix}0000000000000000";
   validArgument = forge: argument: let
     parts = lib.splitString "=" argument;
     value =
@@ -62,6 +65,7 @@
     && lib.all lib.id (lib.mapAttrsToList (key: override:
       coordinate key
       && requirements override.requiredChecks
+      && (override.targetBranch == null || validBranch override.targetBranch)
       && (override.enable || (override.reason != null && builtins.match "[[:space:]]*" override.reason == null)))
     profile.projectOverrides);
   validForge = forge:

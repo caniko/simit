@@ -293,7 +293,10 @@ Script interpreter chains must also resolve entirely inside the store. Tool
 execution clears runtime-injection environment variables and disables Python
 user-site imports; Python scripts should use an isolated (`-I`) store interpreter.
 HTTPS clone URLs must not contain a username or password; SSH usernames remain
-supported through operator Git authentication.
+supported through operator Git authentication. Clone URLs must use the protocol's
+default port, because enrollment identifies the service by hostname. Override
+target branches are validated as complete Git branch refs before discovery; the
+Nix policy renderer enforces the same branch grammar.
 
 Generator qualification selects push workflows containing the configured required
 check names under their enrolled application authority. Unrelated docs or release
@@ -302,6 +305,11 @@ continues to admit every owned push workflow independently.
 
 The v1 built-in adapter supports GitHub Actions originals with configured app
 authority, complete job/step success and app-bound legacy protection contexts.
+Workflow source must expose its jobs and steps directly: `continue-on-error` is
+accepted only when absent or the literal `false`. Expressions and reusable
+workflow calls require an adapter that can establish the underlying outcomes.
+This source check applies to generator and consumer qualification, and to
+pre-push admission of committed candidate bytes.
 Required checks from other applications, unbound contexts, active rulesets and
 PR-required protections are rejected during admission. It does not migrate
 protection contexts, CI engine variables, or PR-only custody contracts. Those

@@ -359,6 +359,7 @@ fn remote_identity(remote: &str, expected: &str) -> Result<()> {
     let url = url::Url::parse(remote)?;
     ensure!(
         matches!(url.scheme(), "https" | "ssh")
+            && (url.port().is_none() || (url.scheme() == "ssh" && url.port() == Some(22)))
             && (url.scheme() != "https" || url.username().is_empty())
             && url.password().is_none()
             && url.query().is_none()
@@ -1821,6 +1822,8 @@ if os.fork() == 0:
         for remote in [
             "https://TOKEN@fixture.example/team/demo.git",
             "https://git:TOKEN@fixture.example/team/demo.git",
+            "https://fixture.example:8443/team/demo.git",
+            "ssh://git@fixture.example:2222/team/demo.git",
         ] {
             let f = Fixture::new();
             f.control(json!({"remote":remote}));
@@ -1849,6 +1852,15 @@ if os.fork() == 0:
             )
             .is_ok()
         );
+        for remote in [
+            "https://fixture.example:443/team/demo.git",
+            "ssh://git@fixture.example:22/team/demo.git",
+        ] {
+            assert!(
+                remote_identity(remote, "fixture.example/team/demo").is_ok(),
+                "{remote}"
+            );
+        }
     }
 
     #[test]

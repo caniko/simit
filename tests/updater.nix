@@ -121,6 +121,8 @@ in
   assert lib.all (arguments: !(accepts (withForge {adapter = example.forges.enterprise.adapter // {inherit arguments;};}))) [["relative/script.py"] ["--file=/mutable/script.py"]];
   assert lib.all (sourceCoordinate: !(accepts (withGenerator {inherit sourceCoordinate;}))) ["git.example.org/team" "git.example.org/team/../simit" "git.example.org/team/a b"];
   assert lib.all (maintenanceRefPrefix: !(accepts (example // {profiles.fleet = example.profiles.fleet // {rollout = {inherit maintenanceRefPrefix;};};}))) ["maintenance" "bad..ref/" "bad.lock/" "bad//ref/" "bad@{ref/" "bad ref/"];
+  assert lib.all (targetBranch: !(accepts (example // {profiles.fleet = example.profiles.fleet // {projectOverrides."git.example.org/team/demo" = {inherit targetBranch;};};}))) ["" "-option" "feature..ci" "feature/" "feature." ".hidden/ci" "feature.lock" "feature//ci" "feature@{ci" "feature ci"];
+  assert lib.all (targetBranch: accepts (example // {profiles.fleet = example.profiles.fleet // {projectOverrides."git.example.org/team/demo" = {inherit targetBranch;};};})) ["trunk" "custom-layout/ci" "feature./ci"];
   assert lib.all (state: !(accepts (withOtherState state))) ["/state" "/state/custom-updater" "/state//custom-updater/child/"];
   assert accepts (withOtherState "/state/custom-updater-sibling");
   assert lib.all (hash:

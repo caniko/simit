@@ -205,6 +205,31 @@ fn push_workflow(path: &str, file: &Value, branch: Option<&str>) -> Result<bool>
     if let (Some(trigger), Some(branch)) = (trigger, branch) {
         admit_branch(trigger, branch)?;
     }
+    if trigger.is_some() {
+        let jobs = yaml
+            .get("jobs")
+            .and_then(serde_yaml::Value::as_mapping)
+            .context("missing workflow jobs")?;
+        ensure!(!jobs.is_empty(), "empty workflow job inventory");
+        for job in jobs.values() {
+            ensure!(
+                job.get("uses").is_none(),
+                "reusable workflow outcomes require a source-aware adapter"
+            );
+            let steps = job
+                .get("steps")
+                .and_then(serde_yaml::Value::as_sequence)
+                .context("missing workflow steps")?;
+            ensure!(!steps.is_empty(), "empty workflow step inventory");
+            for node in std::iter::once(job).chain(steps) {
+                ensure!(
+                    node.get("continue-on-error")
+                        .is_none_or(|value| value.as_bool() == Some(false)),
+                    "workflow can mask failed job or step outcomes"
+                );
+            }
+        }
+    }
     Ok(trigger.is_some())
 }
 
@@ -397,6 +422,10 @@ pub fn execute(request: &AdapterRequest) -> Result<AdapterResponse> {
         .as_array()
         .context("missing workflow runs")?;
     let mut generator_jobs = std::collections::BTreeMap::new();
+    let source = |path: &str| {
+        let path = path.split('/').map(encoded).collect::<Vec<_>>().join("/");
+        api.get(&format!("{endpoint}/contents/{path}?ref={revision}"))
+    };
     let paths = if request.workflows.is_empty() {
         generator_workflow_paths(runs, |run| {
             let run_id = number(run, "/id")?;
@@ -421,10 +450,7 @@ pub fn execute(request: &AdapterRequest) -> Result<AdapterResponse> {
             Ok(required)
         })?
     } else {
-        requested_workflows(&request.workflows, request.branch.as_deref(), |path| {
-            let path = path.split('/').map(encoded).collect::<Vec<_>>().join("/");
-            api.get(&format!("{endpoint}/contents/{path}?ref={revision}"))
-        })?
+        requested_workflows(&request.workflows, request.branch.as_deref(), source)?
     };
     if paths.is_empty() {
         response.status = "pending".into();
@@ -436,6 +462,12 @@ pub fn execute(request: &AdapterRequest) -> Result<AdapterResponse> {
                 && (path.ends_with(".yaml") || path.ends_with(".yml")),
             "GitHub adapter cannot qualify this workflow format"
         );
+        if request.workflows.is_empty() {
+            ensure!(
+                push_workflow(&path, &source(&path)?, request.branch.as_deref())?,
+                "generator qualification requires a push workflow"
+            );
+        }
         let matching = runs
             .iter()
             .filter(|r| r["path"] == path)
@@ -709,7 +741,7 @@ mod tests {
             ".github/workflows/manual.yml",
         ]
         .map(str::to_owned);
-        let selected = requested_workflows(&paths, None, |path| Ok(json!({"path":path,"type":"file","encoding":"base64","content":base64::engine::general_purpose::STANDARD.encode(if path.ends_with("manual.yml") {"on: workflow_dispatch\n"} else {"on: [push, pull_request]\n"})}))).unwrap();
+        let selected = requested_workflows(&paths, None, |path| Ok(json!({"path":path,"type":"file","encoding":"base64","content":base64::engine::general_purpose::STANDARD.encode(if path.ends_with("manual.yml") {"on: workflow_dispatch\n"} else {"on: [push, pull_request]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: exit 0\n"})}))).unwrap();
         assert_eq!(
             selected,
             BTreeSet::from([".github/workflows/ci.yaml".into()])
@@ -719,7 +751,7 @@ mod tests {
             "[push, pull_request]",
             "\n  push:\n    branches: [trunk]",
         ] {
-            let file = json!({"path":paths[2],"type":"file","encoding":"base64","content":base64::engine::general_purpose::STANDARD.encode(format!("on: {trigger}\n"))});
+            let file = json!({"path":paths[2],"type":"file","encoding":"base64","content":base64::engine::general_purpose::STANDARD.encode(format!("on: {trigger}\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: exit 0\n"))});
             assert!(push_workflow(&paths[2], &file, Some("trunk")).unwrap());
         }
         assert!(requested_workflows(&paths, None, |_| Ok(Value::Null)).is_err());
@@ -741,7 +773,7 @@ mod tests {
             ("tags: ['v*']", false),
             ("branches: ['maintenance/?*']", false),
         ] {
-            let file = json!({"path":path,"type":"file","encoding":"base64","content":base64::engine::general_purpose::STANDARD.encode(format!("on:\n  push:\n    {filters}\n"))});
+            let file = json!({"path":path,"type":"file","encoding":"base64","content":base64::engine::general_purpose::STANDARD.encode(format!("on:\n  push:\n    {filters}\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: exit 0\n"))});
             assert_eq!(
                 push_workflow(path, &file, Some(branch)).is_ok(),
                 admitted,
@@ -749,6 +781,41 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn workflow_admission_rejects_masked_and_opaque_step_outcomes() {
+        let path = ".github/workflows/ci.yaml";
+        for (job, admitted) in [
+            (
+                "runs-on: ubuntu-latest\n    steps:\n      - run: exit 0",
+                true,
+            ),
+            (
+                "runs-on: ubuntu-latest\n    continue-on-error: false\n    steps:\n      - run: exit 0\n        continue-on-error: false",
+                true,
+            ),
+            (
+                "runs-on: ubuntu-latest\n    continue-on-error: true\n    steps:\n      - run: exit 1",
+                false,
+            ),
+            (
+                "runs-on: ubuntu-latest\n    steps:\n      - run: exit 1\n        continue-on-error: true",
+                false,
+            ),
+            (
+                "runs-on: ubuntu-latest\n    steps:\n      - run: exit 1\n        continue-on-error: '${{ matrix.experimental }}'",
+                false,
+            ),
+            ("uses: team/repo/.github/workflows/hidden.yml@trunk", false),
+        ] {
+            let file = json!({"path":path,"type":"file","encoding":"base64","content":base64::engine::general_purpose::STANDARD.encode(format!("on: push\njobs:\n  test:\n    {job}\n"))});
+            assert_eq!(
+                push_workflow(path, &file, Some("trunk")).is_ok(),
+                admitted,
+                "{job}"
+            );
+        }
+    }
+
     #[test]
     fn original_admission_requires_exact_source_app_attempt_and_complete_jobs() {
         let revision = "a".repeat(40);
