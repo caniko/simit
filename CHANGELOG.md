@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Explain complete operator enrollment with `simit projects update --plan`,
+  including missing, disabled and filtered canaries, without forge requests,
+  credential reads or candidate generation. Bind the report to policy and
+  inventory digests while retaining execution-time canary admission.
 - Workstation-owned updater profiles through `simit projects update`,
   `lib.mkUpdateConfig` and `nixosModules.updater`, with isolated primary-CI
   candidates, exact-source qualification, conditional landing and resumable
