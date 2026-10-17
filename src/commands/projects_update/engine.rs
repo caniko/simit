@@ -289,9 +289,9 @@ fn workflows(plan: &CiUpdatePlan) -> Vec<String> {
         .collect()
 }
 
-fn generate(profile: &Profile, checkout: &Path) -> Result<CiUpdatePlan> {
+fn generate(executable: &Path, checkout: &Path) -> Result<CiUpdatePlan> {
     let command = Command {
-        program: profile.generator.executable.clone(),
+        program: executable.to_owned(),
         arguments: vec![
             "init".into(),
             "ci".into(),
@@ -428,19 +428,26 @@ pub fn update(
         );
     } else {
         if checkout.exists() {
-            let owner: String = crate::review::read_json(&root.join("clone-owner.json"))?;
             ensure!(
-                owner == project.coordinate
-                    && fs::symlink_metadata(&checkout)?.is_dir()
-                    && git(&checkout, &["rev-parse", "--show-toplevel"])?
-                        == checkout.canonicalize()?.to_string_lossy(),
-                "refusing to retire an unowned or redirected checkout"
+                fs::symlink_metadata(&checkout)?.is_dir(),
+                "refusing to retire a redirected state checkout"
             );
-            // Only updater-owned disposable clones are retired.
+            if root.join("clone-owner.json").exists() {
+                let owner: String = crate::review::read_json(&root.join("clone-owner.json"))?;
+                ensure!(
+                    owner == project.coordinate,
+                    "refusing to retire another repository's checkout"
+                );
+            }
+            // This reserved path is disposable private state, including legacy
+            // partial clones that were interrupted before recording ownership.
             fs::remove_dir_all(&checkout)?;
         }
+        let staging = tempfile::Builder::new()
+            .prefix("clone-")
+            .tempdir_in(&root)?;
         git(
-            &root,
+            staging.path(),
             &[
                 "clone",
                 "--quiet",
@@ -451,15 +458,38 @@ pub fn update(
                 "checkout",
             ],
         )?;
+        // Record ownership before publishing the complete clone. An interruption
+        // can leave an unused marker, but never an unmarked published checkout.
         save(&root.join("clone-owner.json"), &project.coordinate)?;
+        fs::rename(staging.path().join("checkout"), &checkout)?;
         git(&checkout, &["checkout", "--detach", &observed.revision])?;
     }
-    if let Some(d) = &profile.generator.executable_sha256 {
+    let generator_snapshot = tempfile::Builder::new()
+        .prefix("generator-")
+        .tempdir_in(&root)?;
+    let generator = if let Some(d) = &profile.generator.executable_sha256 {
+        let bytes = fs::read(&profile.generator.executable)?;
         ensure!(
-            &digest(&fs::read(&profile.generator.executable)?) == d,
+            &digest(&bytes) == d,
             "generator executable digest differs from enrollment"
         );
-    }
+        let executable = generator_snapshot.path().join(
+            profile
+                .generator
+                .executable
+                .file_name()
+                .context("generator executable has no file name")?,
+        );
+        fs::write(&executable, bytes)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&executable, fs::Permissions::from_mode(0o500))?;
+        }
+        executable
+    } else {
+        profile.generator.executable.clone()
+    };
     // Qualify the immutable generator source independently of consumer candidates.
     let generator_forge = &config.forges[&profile.generator.forge];
     let generator_evidence = wait(
@@ -485,7 +515,7 @@ pub fn update(
     {
         previous
     } else {
-        let plan = generate(profile, &checkout)?;
+        let plan = generate(&generator, &checkout)?;
         let paths = plan
             .files
             .iter()
@@ -837,6 +867,119 @@ pub fn update(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn executes_enrolled_snapshot_when_generator_path_changes_during_qualification() {
+        let f = Fixture::new();
+        let generator = &f.config.profiles["fleet"].generator.executable;
+        f.control(json!({"replaceGenerator":generator}));
+        let receipt = f.update(true).unwrap();
+        assert_eq!(receipt.phase, "qualified");
+        assert_eq!(
+            fs::read_to_string(generator).unwrap(),
+            "#!/bin/sh\nexit 71\n"
+        );
+        assert!(
+            f.update(true)
+                .unwrap_err()
+                .to_string()
+                .contains("digest differs")
+        );
+    }
+
+    #[test]
+    fn interrupted_initial_clones_resume_without_manual_state_removal() {
+        for complete in [false, true] {
+            let f = Fixture::new();
+            let root = f.config.workspaces["projects"]
+                .state_directory
+                .join(format!("repo-{}", digest(f.project.coordinate.as_bytes())));
+            fs::create_dir_all(&root).unwrap();
+            let checkout = root.join("checkout");
+            if complete {
+                git(
+                    &root,
+                    &["clone", "--quiet", f.remote.to_str().unwrap(), "checkout"],
+                )
+                .unwrap();
+            } else {
+                fs::create_dir(&checkout).unwrap();
+                fs::write(checkout.join("partial"), "interrupted clone\n").unwrap();
+            }
+            let receipt = f.update(true).unwrap();
+            assert_eq!(receipt.phase, "qualified");
+            assert_eq!(
+                fs::read_to_string(f.source.join("application.txt")).unwrap(),
+                "application source\n"
+            );
+        }
+    }
+
+    #[test]
+    fn continuation_reaches_later_batches_and_preserves_canary_barriers() {
+        for qualification_status in ["failed", "pending"] {
+            for (stop_on_failure, canary) in [(false, false), (false, true), (true, false)] {
+                let mut f = Fixture::new();
+                let profile = f.config.profiles.get_mut("fleet").unwrap();
+                profile.rollout.stop_on_failure = stop_on_failure;
+                if canary {
+                    profile.rollout.canaries.push(f.project.coordinate.clone());
+                }
+                let mut second = f.project.clone();
+                second.coordinate = "fixture.example/team/next".into();
+                second.relative_path = "other/next".into();
+                let workspace = &f.config.workspaces["projects"];
+                save(
+                    workspace.inventory.file.as_ref().unwrap(),
+                    &Inventory {
+                        schema_version: 1,
+                        root: workspace.root.clone(),
+                        observed_at: chrono::Utc::now(),
+                        producer: "fixture".into(),
+                        policy_digest: "b".repeat(64),
+                        projects: vec![f.project.clone(), second.clone()],
+                    },
+                )
+                .unwrap();
+                let config = f.control.with_file_name("updates.json");
+                save(&config, &f.config).unwrap();
+                f.control(json!({"coordinateStatus":{&f.project.coordinate:{"candidate":qualification_status}}}));
+                let run = || {
+                    super::super::run(super::super::Args {
+                        config: config.clone(),
+                        profile: "fleet".into(),
+                        repo: vec![],
+                        dry_run: false,
+                        push: true,
+                        status: false,
+                        wait_seconds: 0,
+                        limit: None,
+                        json: true,
+                    })
+                };
+                let source = f.remote_head();
+                assert!(run().is_err());
+                if stop_on_failure || canary {
+                    assert!(run().is_err());
+                    assert_eq!(f.remote_head(), source);
+                    assert!(
+                        !status(&workspace.state_directory)
+                            .unwrap()
+                            .iter()
+                            .any(|r| r.coordinate == second.coordinate)
+                    );
+                } else {
+                    run().unwrap();
+                    assert!(
+                        status(&workspace.state_directory)
+                            .unwrap()
+                            .iter()
+                            .any(|r| r.coordinate == second.coordinate && r.phase == "qualified")
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn uncredentialed_tools_strip_secrets_and_keep_operator_git_configuration() {

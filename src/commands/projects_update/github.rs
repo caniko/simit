@@ -284,16 +284,7 @@ pub fn execute(request: &AdapterRequest) -> Result<AdapterResponse> {
             response.status = "pending".into();
             continue;
         }
-        for job in jobs {
-            response.checks.push(Check {
-                name: text(&job, "/name")?,
-                authority: authority.to_string(),
-                revision: revision.clone(),
-                run: run_id.to_string(),
-                attempt: 1,
-                status: "success".into(),
-            });
-        }
+        record_checks(&mut response, &jobs, authority, run_id)?;
     }
     // Absence of an enrolled required context is pending, never implicit success.
     if request.required_checks.iter().any(|r| {
@@ -306,6 +297,29 @@ pub fn execute(request: &AdapterRequest) -> Result<AdapterResponse> {
     }
     response.validate(request)?;
     Ok(response)
+}
+
+fn record_checks(
+    response: &mut AdapterResponse,
+    jobs: &[Value],
+    authority: u64,
+    run_id: u64,
+) -> Result<()> {
+    for job in jobs {
+        response.checks.push(Check {
+            name: text(job, "/name")?,
+            authority: authority.to_string(),
+            revision: response.revision.clone(),
+            run: run_id.to_string(),
+            attempt: 1,
+            status: "success".into(),
+        });
+    }
+    let mut seen = BTreeSet::new();
+    response
+        .checks
+        .retain(|check| seen.insert((check.name.clone(), check.authority.clone())));
+    Ok(())
 }
 
 fn admit_run(
@@ -374,6 +388,61 @@ fn admit_run(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn shared_job_names_qualify_only_after_each_workflow_succeeds() {
+        let revision = "a".repeat(40);
+        let request: AdapterRequest = serde_json::from_value(json!({
+            "schemaVersion":1,"operation":"qualify","coordinate":"forge.example/team/demo",
+            "apiUrl":"https://forge.example/api","credentialFile":null,"authority":"777",
+            "revision":revision,"branch":"maintenance/test","workflows":[],
+            "requiredChecks":[{"name":"test","authority":"777"}]
+        }))
+        .unwrap();
+        let mut response: AdapterResponse = serde_json::from_value(json!({
+            "schemaVersion":1,"coordinate":request.coordinate,"repositoryId":"2",
+            "defaultBranch":"trunk","revision":revision,"remote":"https://forge.example/team/demo.git",
+            "policyDigest":"b".repeat(64),"requirements":[],"status":"success","checks":[]
+        })).unwrap();
+        for (id, path) in [
+            (42, ".github/workflows/first.yaml"),
+            (43, ".github/workflows/second.yaml"),
+        ] {
+            let run = json!({"id":id,"repository":{"id":2},"head_repository":{"id":2},"event":"push","head_sha":revision,"head_branch":"maintenance/test","path":path,"run_attempt":1,"check_suite_id":5,"status":"completed","conclusion":"success"});
+            let suite = json!({"id":5,"app":{"id":777},"head_sha":revision});
+            let jobs = json!({"total_count":1,"jobs":[{"id":8,"run_id":id,"run_attempt":1,"head_sha":revision,"name":"test","status":"completed","conclusion":"success","steps":[{"number":1,"status":"completed","conclusion":"success"}]}]});
+            assert!(
+                admit_run(
+                    (2, 777),
+                    &revision,
+                    Some("maintenance/test"),
+                    path,
+                    &run,
+                    &jobs,
+                    &suite
+                )
+                .unwrap()
+            );
+            record_checks(&mut response, jobs["jobs"].as_array().unwrap(), 777, id).unwrap();
+            let mut failed_jobs = jobs.clone();
+            failed_jobs["jobs"][0]["steps"][0]["conclusion"] = json!("failure");
+            assert!(
+                admit_run(
+                    (2, 777),
+                    &revision,
+                    Some("maintenance/test"),
+                    path,
+                    &run,
+                    &failed_jobs,
+                    &suite
+                )
+                .is_err()
+            );
+        }
+        response.validate(&request).unwrap();
+        assert_eq!(response.checks.len(), 1);
+    }
+
     #[test]
     fn actions_adapter_selects_push_triggers_from_owned_source_inventory() {
         let paths = [

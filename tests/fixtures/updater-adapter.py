@@ -17,11 +17,14 @@ def git(*args):
 branch = request["branch"] or "trunk"
 revision = request["revision"] or git("rev-parse", f"refs/heads/{branch}")
 status = "success"
+if request["operation"] == "qualify" and not request["branch"] and "replaceGenerator" in control:
+    pathlib.Path(control["replaceGenerator"]).write_text("#!/bin/sh\nexit 71\n")
 if request["operation"] == "qualify" and request["branch"]:
     if "expectedWorkflows" in control:
         assert request["workflows"] == control["expectedWorkflows"]
     phase = "candidate" if branch.startswith("maintenance/") else "adoption"
-    status = control.get(phase, "success")
+    status = control.get("coordinateStatus", {}).get(request["coordinate"], {}).get(
+        phase, control.get(phase, "success"))
 checks = [
     dict(name=r["name"], authority=r["authority"], revision=revision,
          run="original-42", attempt=1, status="success")

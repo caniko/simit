@@ -146,6 +146,18 @@ pub fn run(args: Args) -> Result<()> {
                     && matches!(r["phase"].as_str(), Some("qualified" | "unchanged"))
             })
         });
+        if !profile.rollout.stop_on_failure {
+            let attempted = reports
+                .iter()
+                .filter_map(|r| r["coordinate"].as_str())
+                .collect::<std::collections::BTreeSet<_>>();
+            // Keep incomplete canaries at the front as barriers; retry ordinary
+            // failures only after repositories this rollout has not attempted.
+            frozen.projects.sort_by_key(|p| {
+                !profile.rollout.canaries.contains(&p.coordinate)
+                    && attempted.contains(p.coordinate.as_str())
+            });
+        }
         frozen.completed = frozen.projects.is_empty();
         engine::save(&frozen_path, &frozen)?;
     }
