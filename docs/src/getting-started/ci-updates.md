@@ -219,8 +219,11 @@ For each repository:
    the same candidate using an explicit Git lease.
 7. Verify exact-source default/target-branch adoption and record a new baseline.
 
-Managed hashes identify canonical Git blobs from the staged/committed tree,
-so clean/smudge filters and newline conversion do not invalidate the next rollout.
+Managed identities include the canonical Git mode and blob from the staged/committed
+tree, so clean/smudge filters and newline conversion do not invalidate the next
+rollout. Executable-bit changes require reconciliation even when the content is
+unchanged. Working-copy checks honor Git's `core.fileMode` setting. Older blob-only
+baselines lack mode evidence and require explicit reconciliation before reuse.
 An adopted receipt with a missing baseline requires explicit reconciliation;
 `enrollCurrent` cannot silently initialize it again. Serialized state must fit the
 same size limit used by the reader before it can replace a retained receipt.

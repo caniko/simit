@@ -608,6 +608,12 @@ fn hashes(
     paths: impl Iterator<Item = String>,
     tree: Option<&str>,
 ) -> Result<BTreeMap<String, Option<String>>> {
+    #[cfg(unix)]
+    let filemode = tree.is_none()
+        && git(
+            root,
+            &["config", "--bool", "--default", "true", "core.filemode"],
+        )? == "true";
     paths
         .map(|p| {
             relative(Path::new(&p))?;
@@ -625,30 +631,50 @@ fn hashes(
                 }
                 parent = parent.parent().context("invalid managed path")?;
             }
-            // Git blob identities survive clean/smudge and newline conversion.
+            // Canonical mode/blob identities preserve conversion while detecting chmod.
             let hash = if let Some(tree) = tree {
                 let object = git(
                     root,
-                    &[
-                        "--literal-pathspecs",
-                        "ls-tree",
-                        "--object-only",
-                        tree,
-                        "--",
-                        &p,
-                    ],
+                    &["--literal-pathspecs", "ls-tree", "-z", tree, "--", &p],
                 )?;
                 if object.is_empty() {
                     None
                 } else {
-                    Some(object)
+                    let metadata = object
+                        .split_once('\t')
+                        .context("missing managed tree entry")?
+                        .0;
+                    ensure!(
+                        metadata.starts_with("100644 blob ")
+                            || metadata.starts_with("100755 blob "),
+                        "managed output is not a regular Git file"
+                    );
+                    Some(metadata.to_owned())
                 }
             } else if path.exists() {
                 ensure!(path.is_file(), "managed output is not a file");
-                Some(git(
+                let index = git(
                     root,
-                    &["hash-object", &format!("--path={p}"), "--", &p],
-                )?)
+                    &["--literal-pathspecs", "ls-files", "--stage", "-z", "--", &p],
+                )?;
+                let mode = index.split_whitespace().next().unwrap_or("100644");
+                #[cfg(unix)]
+                let mode = if filemode {
+                    use std::os::unix::fs::PermissionsExt;
+                    if path.metadata()?.permissions().mode() & 0o100 != 0 {
+                        "100755"
+                    } else {
+                        "100644"
+                    }
+                } else {
+                    mode
+                };
+                ensure!(
+                    matches!(mode, "100644" | "100755"),
+                    "managed output is not a regular Git file"
+                );
+                let object = git(root, &["hash-object", &format!("--path={p}"), "--", &p])?;
+                Some(format!("{mode} blob {object}"))
             } else {
                 None
             };
@@ -1473,6 +1499,85 @@ if os.fork() == 0:
             .unwrap()
             .is_empty()
         );
+    }
+
+    #[test]
+    fn managed_identities_follow_git_filemode_without_mutating_the_index() {
+        use std::os::unix::fs::PermissionsExt;
+        let f = Fixture::new();
+        let paths = || std::iter::once("application.txt".to_owned());
+        let committed = hashes(&f.source, paths(), Some("HEAD")).unwrap();
+        fs::set_permissions(
+            f.source.join("application.txt"),
+            fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        assert_ne!(hashes(&f.source, paths(), None).unwrap(), committed);
+        assert_eq!(hashes(&f.source, paths(), Some("HEAD")).unwrap(), committed);
+        assert!(git(&f.source, &["diff", "--cached"]).unwrap().is_empty());
+        git(&f.source, &["config", "core.filemode", "false"]).unwrap();
+        assert_eq!(hashes(&f.source, paths(), None).unwrap(), committed);
+        git(
+            &f.source,
+            &["update-index", "--chmod=+x", "--", "application.txt"],
+        )
+        .unwrap();
+        assert_ne!(hashes(&f.source, paths(), None).unwrap(), committed);
+    }
+
+    #[test]
+    fn namespace_managed_mode_only_changes_require_baseline_reconciliation() {
+        use std::os::unix::fs::PermissionsExt;
+        for executable in [false, true] {
+            let f = Fixture::new();
+            let path = ".github/workflows/ci.yaml";
+            if executable {
+                fs::set_permissions(f.source.join(path), fs::Permissions::from_mode(0o755))
+                    .unwrap();
+                f.publish(&f.source, "enroll executable managed source");
+            }
+            assert_eq!(f.update(true).unwrap().phase, "qualified");
+            let checkout = f.root().join("checkout");
+            fs::set_permissions(
+                checkout.join(path),
+                fs::Permissions::from_mode(if executable { 0o644 } else { 0o755 }),
+            )
+            .unwrap();
+            let source = f.publish(&checkout, "change only the managed Git mode");
+            let baseline = fs::read(f.root().join("baseline.json")).unwrap();
+            let receipt = fs::read(f.root().join("receipt.json")).unwrap();
+            assert!(
+                f.update(true)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("managed outputs changed")
+            );
+            assert_eq!(f.remote_head(), source);
+            assert_eq!(fs::read(f.root().join("baseline.json")).unwrap(), baseline);
+            assert_eq!(fs::read(f.root().join("receipt.json")).unwrap(), receipt);
+        }
+    }
+
+    #[test]
+    fn namespace_legacy_blob_only_baselines_require_explicit_reconciliation() {
+        let f = Fixture::new();
+        assert_eq!(f.update(true).unwrap().phase, "qualified");
+        let path = f.root().join("baseline.json");
+        let mut baseline: Baseline = crate::review::read_json(&path).unwrap();
+        for object in baseline.managed.values_mut().flatten() {
+            *object = object.split_whitespace().next_back().unwrap().to_owned();
+        }
+        save(&path, &baseline).unwrap();
+        let legacy = fs::read(&path).unwrap();
+        let source = f.remote_head();
+        assert!(
+            f.update(true)
+                .unwrap_err()
+                .to_string()
+                .contains("explicit reconciliation")
+        );
+        assert_eq!(fs::read(path).unwrap(), legacy);
+        assert_eq!(f.remote_head(), source);
     }
 
     #[test]
