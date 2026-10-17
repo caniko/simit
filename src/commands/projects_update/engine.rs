@@ -2863,7 +2863,8 @@ else:
         assert_eq!(environment["PATH"], std::env::var("PATH").unwrap());
         assert_eq!(environment["HOME"], std::env::var("HOME").unwrap());
         assert_eq!(environment["GIT_TERMINAL_PROMPT"], "0");
-        assert_eq!(environment["PYTHONNOUSERSITE"], "1");
+        // Nix's Python wrapper normalizes nonempty values to "true".
+        assert!(!environment["PYTHONNOUSERSITE"].is_empty());
     }
 
     #[test]

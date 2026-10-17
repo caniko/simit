@@ -28,6 +28,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Admit the path/repository/branch-isolated concurrency emitted by aggregate
+  primary CI and the full-ref form emitted by separate-event Rust CI. Require
+  aggregate workflows to exclude tags and retain rejection of unknown groups,
+  dynamic cancellation and per-job concurrency.
 - Keep local monorepo gate process creation interruptible by normal termination
   signals until native child cleanup can take ownership.
 - Use job Bash for generated monorepo gate supervision on hosted and custom runners,
