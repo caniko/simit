@@ -57,6 +57,7 @@ policy for standalone installations.
         requiredChecks = [{name = "test"; authority = "15368";}];
       };
       select = {
+        coordinates = ["github.com/example/canary" "github.com/example/project"];
         kinds = ["owned-repo"];
         lifecycles = ["active"];
         access = ["normal"];
@@ -86,7 +87,8 @@ policy for standalone installations.
 All identities, paths, endpoints, authorities and checks in this example are
 operator policy. Use the actual qualified generator source and required check
 names for the selected repositories. A non-store generator must additionally
-enroll `executableSha256`.
+enroll `executableSha256`. Executable scripts require an immutable Nix-store
+interpreter chain; `/usr/bin/env` and mutable system interpreters are rejected.
 
 Runtime roots and credential paths are strings. Nix evaluation does not inspect
 worktrees, query forges or read credential contents. Git transport authentication
@@ -105,7 +107,7 @@ identity, signing configuration, transport and credential-file access.
 ## Selection and inventory
 
 Supply exactly one `inventory.file` or `inventory.command`. Commands are absolute
-executables with argv arrays and bounded timeouts. Their JSON snapshot has:
+executables with argv arrays and timeouts of 1 through 900 seconds. Their JSON snapshot has:
 
 ```json
 {
@@ -129,6 +131,11 @@ executables with argv arrays and bounded timeouts. Their JSON snapshot has:
   ]
 }
 ```
+
+Every profile requires a non-empty `select.coordinates` list declared by the
+workstation operator. Inventory observations cannot add to that enrollment;
+their `policyDigest` records provenance, not deployment authority. Exact
+coordinates are rechecked when processing frozen selections as well.
 
 The timestamp must be fresh at rollout start. Metadata selectors are combined
 with AND, path exclusions win, and exact coordinates disambiguate short names.
@@ -169,7 +176,10 @@ For each repository:
 3. Obtain `init ci --primary-only --plan-json` in an isolated clone. The versioned
    ownership plan supplies writes and deletions; it uses the project's existing
    resolved configuration without creating a new configuration file. Generation
-   must preserve Git configuration, hooks and refs as well as source files.
+   must preserve persistent updater state, Git configuration, hooks and refs as
+   well as source files. State outside the current checkout is checkpointed and
+   verified before trusting the plan, including when generation fails. Detected
+   mutations are restored and the transaction fails.
 4. Compare managed files with the adopted baseline, prepare a scoped candidate
    commit, and retain its diff and identity. Every present managed path must stay
    in the plan or be explicitly listed as obsolete; omission cannot drop ownership.
@@ -177,6 +187,9 @@ For each repository:
 6. Reinspect source and policy, then conditionally advance the target branch to
    the same candidate using an explicit Git lease.
 7. Verify exact-source default/target-branch adoption and record a new baseline.
+
+Managed hashes identify canonical Git blobs from the staged/committed tree,
+so clean/smudge filters and newline conversion do not invalidate the next rollout.
 
 Existing workflow branch filters must admit `maintenanceRefPrefix`. Missing
 candidate events, checks or capability support cannot authorize landing. Remote
@@ -199,6 +212,13 @@ fresh candidate from the newly observed source, preserving the adopted baseline.
 A candidate already awaiting adoption, or one found in the new source's ancestry,
 requires explicit adoption reconciliation instead of silently restarting.
 
+Interrupted generation or an unsuccessful checkpoint restoration leaves
+`generation-checkpoint.json` in the workspace state root, naming the retained
+recovery snapshot. Further transactions stop before adapter dispatch. Stop the
+workspace's updater services and reconcile state against that snapshot before
+removing the marker. The snapshot excludes the current disposable checkout and
+preserves the other state files and their permissions.
+
 Provision each service state directory with mode `0700`, owned by its configured
 user. The module does not create arbitrary state paths through root-owned tmpfiles.
 At runtime the updater resolves existing path components, checks every state tree
@@ -209,6 +229,9 @@ configured arguments must be absolute store paths or enrolled in `adapterInputs`
 as path-to-SHA-256 entries. Digest-enrolled files are executed or read from private
 verified snapshots; store inputs must resolve to files inside the store. Adapters
 run from a private directory, with runtime values supplied through request JSON.
+Script interpreter chains must also resolve entirely inside the store. Tool
+execution clears runtime-injection environment variables and disables Python
+user-site imports; Python scripts should use an isolated (`-I`) store interpreter.
 HTTPS clone URLs must not contain a username or password; SSH usernames remain
 supported through operator Git authentication.
 

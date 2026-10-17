@@ -4,6 +4,7 @@ use anyhow::{Context, Result, ensure};
 use clap::Args as ClapArgs;
 use std::path::PathBuf;
 
+mod checkpoint;
 mod engine;
 mod github;
 pub mod schema;
@@ -62,6 +63,7 @@ pub fn run(args: Args) -> Result<()> {
     }
     let state_directory = config.state_directory(workspace)?;
     let _lock = engine::lock(&state_directory)?;
+    checkpoint::ensure_idle(&state_directory)?;
     let selection_policy = engine::policy_digest(&config, profile, workspace, None)?;
     let selection_key =
         crate::review::canonical_digest(&(&args.profile, &selection_policy, &args.repo))?;

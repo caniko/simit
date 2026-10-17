@@ -20,6 +20,7 @@
     };
     profiles.fleet = {
       workspace = "projects";
+      select.coordinates = ["git.example.org/team/demo"];
       generator = {
         executable = "/nix/store/fixture-simit/bin/simit";
         sourceRevision = lib.concatStrings (lib.replicate 40 "a");
@@ -96,6 +97,11 @@ in
   assert !(builtins.tryEval (builtins.deepSeq (mkConfig (example // {profiles.fleet = example.profiles.fleet // {generator = example.profiles.fleet.generator // {executable = "/nix/store/../../tmp/generator";};};})) true)).success;
   assert !(builtins.tryEval (builtins.deepSeq (mkConfig (example // {profiles.fleet = example.profiles.fleet // {generator = example.profiles.fleet.generator // {sourceCoordinate = "other.example/team/simit";};};})) true)).success;
   assert !(builtins.tryEval (builtins.deepSeq (mkConfig (example // {unknownOption = true;})) true)).success;
+  assert !(builtins.tryEval (builtins.deepSeq (mkConfig (example // {profiles.fleet = example.profiles.fleet // {select.coordinates = [];};})) true)).success;
+  assert lib.all (timeoutSeconds: !(builtins.tryEval (builtins.deepSeq (mkConfig (example // {workspaces.projects = example.workspaces.projects // {inventory.command = example.workspaces.projects.inventory.command // {inherit timeoutSeconds;};};})) true)).success) [0 901];
+  assert lib.all (timeoutSeconds: !(builtins.tryEval (builtins.deepSeq (mkConfig (example // {forges.enterprise = example.forges.enterprise // {adapter = example.forges.enterprise.adapter // {inherit timeoutSeconds;};};})) true)).success) [0 901];
+  assert lib.all (timeoutSeconds: (mkConfig (example // {workspaces.projects = example.workspaces.projects // {inventory.command = example.workspaces.projects.inventory.command // {inherit timeoutSeconds;};};})).workspaces.projects.inventory.command.timeoutSeconds == timeoutSeconds) [1 900];
+  assert lib.all (timeoutSeconds: (mkConfig (example // {forges.enterprise = example.forges.enterprise // {adapter = example.forges.enterprise.adapter // {inherit timeoutSeconds;};};})).forges.enterprise.adapter.timeoutSeconds == timeoutSeconds) [1 900];
   assert !(builtins.tryEval (builtins.deepSeq (mkConfig (withGenerator {executable = "/opt/simit";})) true)).success;
   assert (mkConfig (withGenerator {
     executable = "/opt/simit";
@@ -105,6 +111,7 @@ in
   assert !(builtins.tryEval (builtins.deepSeq (mkConfig (example // {profiles.fleet.workspace = "missing";})) true)).success;
   assert service.serviceConfig.User == "operator";
   assert service.serviceConfig.UMask == "0077";
+  assert service.serviceConfig.PrivateTmp;
   assert service.serviceConfig.ReadWritePaths == ["/state/custom-updater"];
   assert !(lib.any (rule: lib.hasInfix "/state/custom-updater" rule) system.config.systemd.tmpfiles.rules);
   assert !(builtins.tryEval (builtins.deepSeq (mkConfig (example // {forges.enterprise = example.forges.enterprise // {adapterSha256 = null;};})) true)).success;

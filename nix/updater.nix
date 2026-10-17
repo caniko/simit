@@ -76,6 +76,7 @@ in {
           Group = user.group;
           UMask = "0077";
           NoNewPrivileges = true;
+          PrivateTmp = true;
           ProtectSystem = "strict";
           ProtectHome = "read-only";
           ReadWritePaths = map (workspace: workspace.stateDirectory) (builtins.attrValues desired.workspaces);

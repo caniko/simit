@@ -166,7 +166,7 @@ impl Selection {
             && project.simit_ci != "custom"
             && matches(&self.include_paths, &project.relative_path)?
             && !matches(&self.exclude_paths, &project.relative_path)?
-            && (self.coordinates.is_empty() || self.coordinates.contains(&project.coordinate)))
+            && self.coordinates.contains(&project.coordinate))
     }
 }
 
@@ -366,6 +366,13 @@ impl Config {
                 "only primary CI scope is supported"
             );
             ensure!(
+                !profile.select.coordinates.is_empty(),
+                "profiles require operator-owned coordinate enrollment"
+            );
+            for enrolled in &profile.select.coordinates {
+                coordinate(enrolled)?;
+            }
+            ensure!(
                 self.forges.contains_key(&profile.generator.forge),
                 "unknown generator forge"
             );
@@ -449,12 +456,29 @@ mod tests {
         assert!(cfg.validate().is_err());
     }
 
+    #[test]
+    fn coordinate_enrollment_is_operator_owned_and_required() {
+        let mut cfg = config();
+        cfg.profiles
+            .get_mut("fleet")
+            .unwrap()
+            .select
+            .coordinates
+            .clear();
+        assert!(
+            cfg.validate()
+                .unwrap_err()
+                .to_string()
+                .contains("operator-owned coordinate enrollment")
+        );
+    }
+
     fn config() -> Config {
         serde_json::from_value(serde_json::json!({
             "schemaVersion":1,
             "workspaces":{"projects":{"root":"/work/projects","stateDirectory":"/state/updater","inventory":{"file":"/work/inventory.json"}}},
             "forges":{"example":{"host":"forge.example","apiUrl":"https://forge.example/api","adapter":{"program":"/bin/adapter"},"adapterSha256":"b".repeat(64),"checkAuthority":"777"}},
-            "profiles":{"fleet":{"workspace":"projects","scopes":["ci"],"generator":{"executable":"/nix/store/fixture/bin/simit","sourceRevision":"a".repeat(40),"sourceCoordinate":"forge.example/team/generator","forge":"example","requiredChecks":[{"name":"test","authority":"777"}]}}}
+            "profiles":{"fleet":{"workspace":"projects","scopes":["ci"],"select":{"coordinates":["forge.example/team/demo"]},"generator":{"executable":"/nix/store/fixture/bin/simit","sourceRevision":"a".repeat(40),"sourceCoordinate":"forge.example/team/generator","forge":"example","requiredChecks":[{"name":"test","authority":"777"}]}}}
         })).unwrap()
     }
 
@@ -502,7 +526,9 @@ mod tests {
 
     #[test]
     fn selection_is_layout_independent_and_exclusions_win() {
-        let selection: Selection = serde_json::from_str("{}").unwrap();
+        let selection: Selection =
+            serde_json::from_value(serde_json::json!({"coordinates":["forge.example/team/demo"]}))
+                .unwrap();
         for path in ["repos/owned/demo", "owned/demo", "another/layout/demo"] {
             let project = Project {
                 coordinate: "forge.example/team/demo".into(),
@@ -516,6 +542,10 @@ mod tests {
                 mirrors: vec![],
             };
             assert!(selection.matches(&project).unwrap());
+            let mut fabricated = project.clone();
+            fabricated.coordinate = "forge.example/team/unlisted".into();
+            assert!(!selection.matches(&fabricated).unwrap());
+            assert!(!Selection::default().matches(&project).unwrap());
             let mut denied = selection.clone();
             denied.exclude_paths = vec![format!("{}/**", path.rsplit_once('/').unwrap().0)];
             assert!(!denied.matches(&project).unwrap());

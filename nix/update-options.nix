@@ -6,7 +6,7 @@
     options = {
       program = mkOption {type = types.str;};
       arguments = option strings [];
-      timeoutSeconds = option types.ints.positive 120;
+      timeoutSeconds = option (types.ints.between 1 900) 120;
     };
   };
   requirement = types.submodule {
@@ -70,7 +70,11 @@ in {
           checkoutRoles = option strings ["canonical"];
           includePaths = option strings ["**"];
           excludePaths = option strings [];
-          coordinates = option strings [];
+          coordinates = mkOption {
+            type = strings;
+            default = [];
+            description = "Exact canonical repository coordinates enrolled by operator policy. Each profile requires a non-empty list; inventory observations only narrow it.";
+          };
         };
       }) {};
       scopes = option (types.listOf (types.enum ["ci"])) ["ci"];

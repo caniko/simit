@@ -23,6 +23,7 @@
     && (profile.generator.executableSha256 != null || lib.hasPrefix "/nix/store/" profile.generator.executable)
     && lib.hasPrefix "${cfg.forges.${profile.generator.forge}.host}/" profile.generator.sourceCoordinate
     && profile.scopes == ["ci"]
+    && profile.select.coordinates != []
     && profile.generator.requiredChecks != [];
   validForge = forge:
     absolute forge.adapter.program

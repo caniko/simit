@@ -36,6 +36,25 @@ fn tool_command(
     for key in process::UNTRUSTED_TOOL_ENV {
         child.env_remove(key);
     }
+    for key in [
+        "PYTHONPATH",
+        "PYTHONHOME",
+        "BASH_ENV",
+        "ENV",
+        "LD_PRELOAD",
+        "LD_LIBRARY_PATH",
+        "DYLD_INSERT_LIBRARIES",
+        "DYLD_LIBRARY_PATH",
+        "NODE_OPTIONS",
+        "NODE_PATH",
+        "RUBYOPT",
+        "RUBYLIB",
+        "PERL5OPT",
+        "PERL5LIB",
+    ] {
+        child.env_remove(key);
+    }
+    child.env("PYTHONNOUSERSITE", "1");
     Ok(child)
 }
 
@@ -232,7 +251,7 @@ fn adapter(forge: &Forge, request: &AdapterRequest, root: &Path) -> Result<Adapt
         .prefix("adapter-")
         .tempdir_in(root)?;
     let mut command = forge.adapter.clone();
-    command.program = verified_input(
+    command.program = verified_executable(
         &command.program,
         forge.adapter_sha256.as_deref(),
         snapshots.path(),
@@ -322,7 +341,10 @@ fn remote_identity(remote: &str, expected: &str) -> Result<()> {
         format!(
             "{}/{}",
             url.host_str().context("missing repository host")?,
-            url.path().trim_start_matches('/').trim_end_matches(".git")
+            url.path()
+                .trim_start_matches('/')
+                .strip_suffix(".git")
+                .unwrap_or_else(|| url.path().trim_start_matches('/'))
         ) == expected,
         "adapter remote differs from enrolled coordinate"
     );
@@ -362,6 +384,37 @@ fn verified_input(
         fs::set_permissions(&pinned, fs::Permissions::from_mode(0o500))?;
     }
     Ok(pinned)
+}
+
+fn verified_executable(
+    path: &Path,
+    expected: Option<&str>,
+    snapshots: &Path,
+    label: &str,
+) -> Result<PathBuf> {
+    let executable = verified_input(path, expected, snapshots, label)?;
+    let mut current = executable.clone();
+    let mut seen = BTreeSet::new();
+    loop {
+        ensure!(
+            seen.insert(current.clone()),
+            "cyclic executable interpreter chain"
+        );
+        let bytes = fs::read(&current)?;
+        let Some(script) = bytes.strip_prefix(b"#!") else {
+            return Ok(executable);
+        };
+        let line = script
+            .split(|byte| *byte == b'\n')
+            .next()
+            .unwrap_or_default();
+        let interpreter = std::str::from_utf8(line)?
+            .split_whitespace()
+            .next()
+            .context("missing script interpreter")?;
+        current = store_file(Path::new(interpreter), Path::new("/nix/store"))
+            .context("script interpreter must be an immutable Nix-store file; env-selected and mutable runtimes are not enrolled")?;
+    }
 }
 
 fn inspect(
@@ -451,7 +504,7 @@ fn git_metadata(checkout: &Path) -> Result<String> {
     canonical_digest(&entries)
 }
 
-fn generate(executable: &Path, checkout: &Path) -> Result<CiUpdatePlan> {
+fn generate(executable: &Path, checkout: &Path, state_directory: &Path) -> Result<CiUpdatePlan> {
     let metadata = git_metadata(checkout)?;
     let configuration = git(checkout, &["config", "--null", "--list", "--show-origin"])?;
     let command = Command {
@@ -464,8 +517,10 @@ fn generate(executable: &Path, checkout: &Path) -> Result<CiUpdatePlan> {
         ],
         timeout_seconds: 900,
     };
-    let plan: CiUpdatePlan =
-        serde_json::from_slice(&command_output(&command, &[], Some(checkout))?)?;
+    let output = super::checkpoint::protect(state_directory, checkout, || {
+        command_output(&command, &[], Some(checkout))
+    })?;
+    let plan: CiUpdatePlan = serde_json::from_slice(&output)?;
     // Inspect raw metadata before invoking Git with any generator-written policy.
     ensure!(
         git_metadata(checkout)? == metadata,
@@ -503,6 +558,7 @@ fn generate(executable: &Path, checkout: &Path) -> Result<CiUpdatePlan> {
 fn hashes(
     root: &Path,
     paths: impl Iterator<Item = String>,
+    tree: Option<&str>,
 ) -> Result<BTreeMap<String, Option<String>>> {
     paths
         .map(|p| {
@@ -521,8 +577,30 @@ fn hashes(
                 }
                 parent = parent.parent().context("invalid managed path")?;
             }
-            let hash = if path.exists() {
-                Some(digest(&fs::read(path)?))
+            // Git blob identities survive clean/smudge and newline conversion.
+            let hash = if let Some(tree) = tree {
+                let object = git(
+                    root,
+                    &[
+                        "--literal-pathspecs",
+                        "ls-tree",
+                        "--object-only",
+                        tree,
+                        "--",
+                        &p,
+                    ],
+                )?;
+                if object.is_empty() {
+                    None
+                } else {
+                    Some(object)
+                }
+            } else if path.exists() {
+                ensure!(path.is_file(), "managed output is not a file");
+                Some(git(
+                    root,
+                    &["hash-object", &format!("--path={p}"), "--", &p],
+                )?)
             } else {
                 None
             };
@@ -550,8 +628,13 @@ pub fn update(
         project.coordinate.starts_with(&format!("{}/", forge.host)),
         "frozen project coordinate differs from the current consumer forge host"
     );
+    ensure!(
+        profile.select.matches(project)?,
+        "project is outside operator-owned coordinate enrollment or selection"
+    );
     let deadline = Instant::now() + Duration::from_secs(wait_seconds);
     let state_directory = config.state_directory(workspace)?;
+    super::checkpoint::ensure_idle(&state_directory)?;
     let profile_directory = resolved_path(&profile_directory(workspace, profile_name))?;
     ensure!(
         profile_directory.starts_with(&state_directory),
@@ -699,7 +782,7 @@ pub fn update(
     let generator_snapshot = tempfile::Builder::new()
         .prefix("generator-")
         .tempdir_in(&root)?;
-    let generator = verified_input(
+    let generator = verified_executable(
         &profile.generator.executable,
         profile.generator.executable_sha256.as_deref(),
         generator_snapshot.path(),
@@ -730,7 +813,7 @@ pub fn update(
     {
         previous
     } else {
-        let plan = generate(&generator, &checkout)?;
+        let plan = generate(&generator, &checkout, &state_directory)?;
         let paths = plan
             .files
             .iter()
@@ -741,7 +824,7 @@ pub fn update(
                     .map(|p| p.to_string_lossy().into_owned()),
             )
             .collect::<Vec<_>>();
-        let before = hashes(&checkout, paths.clone().into_iter())?;
+        let before = hashes(&checkout, paths.clone().into_iter(), None)?;
         let baseline_path = root.join("baseline.json");
         if baseline_path.exists() {
             let baseline: Baseline = crate::review::read_json(&baseline_path)?;
@@ -750,7 +833,10 @@ pub fn update(
                 "repository identity differs from adopted baseline"
             );
             ensure!(
-                hashes(&checkout, baseline.managed.keys().cloned())? == baseline.managed,
+                hashes(&checkout, baseline.managed.keys().cloned(), Some("HEAD"))?
+                    == baseline.managed
+                    && hashes(&checkout, baseline.managed.keys().cloned(), None)?
+                        == baseline.managed,
                 "managed outputs changed since adoption; explicit reconciliation is required"
             );
             ensure!(
@@ -786,15 +872,16 @@ pub fn update(
             false,
             false,
         )?;
-        let managed = hashes(&checkout, paths.into_iter())?;
         let mut stage = vec!["--literal-pathspecs", "add", "--all", "--force", "--"];
         stage.extend(
-            managed
-                .keys()
-                .filter(|p| managed[*p].is_some() || before[*p].is_some())
+            paths
+                .iter()
+                .filter(|p| checkout.join(p).exists() || before[*p].is_some())
                 .map(String::as_str),
         );
         git(&checkout, &stage)?;
+        let tree = git(&checkout, &["write-tree"])?;
+        let managed = hashes(&checkout, paths.into_iter(), Some(&tree))?;
         let diff = git(
             &checkout,
             &[
@@ -951,7 +1038,8 @@ pub fn update(
         }
     };
     ensure!(
-        hashes(&checkout, receipt.managed.keys().cloned())? == receipt.managed
+        hashes(&checkout, receipt.managed.keys().cloned(), Some("HEAD"))? == receipt.managed
+            && hashes(&checkout, receipt.managed.keys().cloned(), None)? == receipt.managed
             && git(&checkout, &["status", "--porcelain"])?.is_empty(),
         "retained candidate files changed"
     );
@@ -1095,8 +1183,12 @@ mod tests {
         let f = Fixture::new();
         assert_eq!(f.update(true).unwrap().phase, "qualified");
         let checkout = f.root().join("checkout");
-        let mut plan =
-            generate(&f.config.profiles["fleet"].generator.executable, &checkout).unwrap();
+        let mut plan = generate(
+            &f.config.profiles["fleet"].generator.executable,
+            &checkout,
+            &f.config.workspaces["projects"].state_directory,
+        )
+        .unwrap();
         plan.files
             .retain(|file| file.relative_path != Path::new("new-managed.txt"));
         save(&checkout.join("fixture-plan.json"), &plan).unwrap();
@@ -1124,6 +1216,152 @@ mod tests {
             )
             .unwrap()
             .is_empty()
+        );
+    }
+
+    #[test]
+    fn managed_baselines_use_git_blobs_across_checkout_conversion() {
+        let f = Fixture::new();
+        fs::write(f.source.join(".gitattributes"), "* text eol=crlf\n").unwrap();
+        f.publish(&f.source, "enroll checkout conversion");
+        let adopted = f.update(true).unwrap();
+        assert_eq!(adopted.phase, "qualified");
+        assert_eq!(f.update(true).unwrap().phase, "unchanged");
+        assert!(
+            fs::read(f.root().join("checkout/new-managed.txt"))
+                .unwrap()
+                .ends_with(b"\r\n")
+        );
+    }
+
+    #[test]
+    fn clone_identity_removes_only_one_transport_suffix() {
+        for scheme in ["https://", "ssh://git@"] {
+            assert!(
+                remote_identity(
+                    &format!("{scheme}fixture.example/team/demo.git.git"),
+                    "fixture.example/team/demo.git"
+                )
+                .is_ok()
+            );
+            assert!(
+                remote_identity(
+                    &format!("{scheme}fixture.example/team/demo.git.git"),
+                    "fixture.example/team/demo"
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn inventory_cannot_enroll_an_unlisted_repository_or_resume_it_directly() {
+        let mut f = Fixture::new();
+        f.project.coordinate = "fixture.example/team/not-enrolled".into();
+        f.write_inventory();
+        assert!(f.cli("fleet", true).is_err());
+        assert!(
+            f.update(true)
+                .unwrap_err()
+                .to_string()
+                .contains("operator-owned coordinate enrollment")
+        );
+        assert!(!f.root().exists());
+        let control: serde_json::Value = crate::review::read_json(&f.control).unwrap();
+        assert_eq!(control, json!({}));
+    }
+
+    #[test]
+    fn interrupted_generation_blocks_before_adapter_dispatch() {
+        let f = Fixture::new();
+        let state = &f.config.workspaces["projects"].state_directory;
+        private_directory(state).unwrap();
+        save(
+            &state.join("generation-checkpoint.json"),
+            &json!({"snapshot":"retained-recovery"}),
+        )
+        .unwrap();
+        assert!(
+            f.update(true)
+                .unwrap_err()
+                .to_string()
+                .contains("interrupted generation")
+        );
+        let control: serde_json::Value = crate::review::read_json(&f.control).unwrap();
+        assert_eq!(control, json!({}));
+        assert!(!f.root().exists());
+    }
+
+    #[test]
+    fn generators_cannot_poison_state_even_when_they_fail() {
+        for fail in [false, true] {
+            for name in [
+                "baseline.json",
+                "receipt.json",
+                "workflows.json",
+                "../../rollout-poison.json",
+            ] {
+                let mut f = Fixture::new();
+                let adopted = f.update(true).unwrap();
+                let target = f.root().join(name);
+                let original = fs::read(&target).ok();
+                let generator =
+                    fs::read_to_string(&f.config.profiles["fleet"].generator.executable).unwrap();
+                f.inject_generator(&format!(
+                    "from pathlib import Path\nPath({:?}).write_text('poisoned')\n{}",
+                    target.to_str().unwrap(),
+                    if fail { "raise SystemExit(71)\n" } else { "" }
+                ));
+                assert!(
+                    f.update(true)
+                        .unwrap_err()
+                        .to_string()
+                        .contains("persistent updater state")
+                );
+                assert_eq!(fs::read(&target).ok(), original);
+                assert_eq!(f.remote_head(), adopted.candidate);
+                assert!(
+                    !f.config.workspaces["projects"]
+                        .state_directory
+                        .join("generation-checkpoint.json")
+                        .exists()
+                );
+                let enrolled = &mut f.config.profiles.get_mut("fleet").unwrap().generator;
+                fs::write(&enrolled.executable, &generator).unwrap();
+                enrolled.executable_sha256 = Some(digest(generator.as_bytes()));
+                assert_eq!(f.update(true).unwrap().phase, "unchanged");
+            }
+        }
+    }
+
+    #[test]
+    fn script_execution_requires_an_immutable_interpreter_chain() {
+        let temp = tempfile::tempdir().unwrap();
+        let script = temp.path().join("script");
+        let snapshots = temp.path().join("snapshots");
+        for shebang in ["#!/usr/bin/env python3", "#!/bin/sh", "#!/mutable/python3"] {
+            fs::write(&script, format!("{shebang}\nprint('unqualified')\n")).unwrap();
+            assert!(
+                verified_executable(
+                    &script,
+                    Some(&digest(&fs::read(&script).unwrap())),
+                    &snapshots,
+                    "fixture"
+                )
+                .is_err(),
+                "{shebang}"
+            );
+        }
+        let f = Fixture::new();
+        let generator = &f.config.profiles["fleet"].generator;
+        assert!(
+            verified_executable(
+                &generator.executable,
+                generator.executable_sha256.as_deref(),
+                &snapshots,
+                "fixture"
+            )
+            .is_ok()
         );
     }
 
@@ -1176,14 +1414,9 @@ mod tests {
             "printf '#!/bin/sh\\nexit 71\\n' > .git/hooks/pre-commit; chmod +x .git/hooks/pre-commit",
         ] {
             let mut f = Fixture::new();
-            let generator = &mut f.config.profiles.get_mut("fleet").unwrap().generator;
-            let original = fs::read_to_string(&generator.executable).unwrap();
-            fs::write(
-                &generator.executable,
-                original.replacen('\n', &format!("\n{mutation}\n"), 1),
-            )
-            .unwrap();
-            generator.executable_sha256 = Some(digest(&fs::read(&generator.executable).unwrap()));
+            f.inject_generator(&format!(
+                "import subprocess\nsubprocess.run({mutation:?}, shell=True, check=True)\n"
+            ));
             let source = f.remote_head();
             assert!(
                 f.update(true)
@@ -1306,7 +1539,15 @@ mod tests {
             let mut script = forge.adapter.program.clone();
             let mut original = fs::read_to_string(&script).unwrap();
             if interpreter {
-                let python = original.lines().next().unwrap().strip_prefix("#!").unwrap();
+                let python = original
+                    .lines()
+                    .next()
+                    .unwrap()
+                    .strip_prefix("#!")
+                    .unwrap()
+                    .split_whitespace()
+                    .next()
+                    .unwrap();
                 let shell =
                     fs::canonicalize(std::env::var_os("BASH").unwrap_or_else(|| "/bin/sh".into()))
                         .unwrap();
@@ -1739,30 +1980,34 @@ mod tests {
                 .output()
                 .unwrap();
             assert!(python.status.success());
-            let python = String::from_utf8(python.stdout).unwrap().trim().to_owned();
+            let python =
+                fs::canonicalize(String::from_utf8(python.stdout).unwrap().trim()).unwrap();
+            assert!(
+                python.starts_with("/nix/store"),
+                "updater engine fixtures require the Nix test shell's immutable Python runtime"
+            );
+            let python = python.to_str().unwrap();
             let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
-            // Generator enrollment is an actual executable digest, with a tiny
-            // launcher pointing to the test-only renderer.
+            // Enroll the renderer bytes and an immutable, isolated interpreter.
             let generator = root.join("generator");
             fs::write(
                 &generator,
                 format!(
-                    "#!/bin/sh\nexec '{}' '{}' \"$@\"\n",
-                    python,
-                    fixtures.join("updater-generator.py").display()
+                    "#!{python} -I\n{}",
+                    fs::read_to_string(fixtures.join("updater-generator.py")).unwrap()
                 ),
             )
             .unwrap();
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(&generator, fs::Permissions::from_mode(0o700)).unwrap();
             let adapter = root.join("adapter");
-            fs::write(&adapter, format!("#!{python}\nimport sys\nsys.argv = [sys.argv[0], {:?}, {:?}, *sys.argv[1:]]\n{}", control.to_str().unwrap(), remote.to_str().unwrap(), fs::read_to_string(fixtures.join("updater-adapter.py")).unwrap())).unwrap();
+            fs::write(&adapter, format!("#!{python} -I\nimport sys\nsys.argv = [sys.argv[0], {:?}, {:?}, *sys.argv[1:]]\n{}", control.to_str().unwrap(), remote.to_str().unwrap(), fs::read_to_string(fixtures.join("updater-adapter.py")).unwrap())).unwrap();
             fs::set_permissions(&adapter, fs::Permissions::from_mode(0o700)).unwrap();
             let config: Config = serde_json::from_value(json!({
                 "schemaVersion":1,
                 "workspaces":{"projects":{"root":root.join("projects"),"stateDirectory":root.join("state"),"inventory":{"file":root.join("inventory.json")}}},
                 "forges":{"fixture":{"host":"fixture.example","apiUrl":"https://fixture.example/api","adapter":{"program":adapter},"adapterSha256":digest(&fs::read(&adapter).unwrap()),"checkAuthority":"777"}},
-                "profiles":{"fleet":{"workspace":"projects","scopes":["ci"],"enrollCurrent":true,"rollout":{"maintenanceRefPrefix":"maintenance/"},"generator":{"executable":generator,"executableSha256":digest(&fs::read(&generator).unwrap()),"sourceRevision":"a".repeat(40),"sourceCoordinate":"fixture.example/team/generator","forge":"fixture","requiredChecks":[{"name":"generator","authority":"777"}]}}}
+                "profiles":{"fleet":{"workspace":"projects","scopes":["ci"],"select":{"coordinates":["fixture.example/team/demo","fixture.example/team/next"]},"enrollCurrent":true,"rollout":{"maintenanceRefPrefix":"maintenance/"},"generator":{"executable":generator,"executableSha256":digest(&fs::read(&generator).unwrap()),"sourceRevision":"a".repeat(40),"sourceCoordinate":"fixture.example/team/generator","forge":"fixture","requiredChecks":[{"name":"generator","authority":"777"}]}}}
             })).unwrap();
             config.validate().unwrap();
             let project = Project {
@@ -1851,6 +2096,16 @@ mod tests {
         }
         fn control(&self, value: serde_json::Value) {
             save(&self.control, &value).unwrap();
+        }
+        fn inject_generator(&mut self, code: &str) {
+            let generator = &mut self.config.profiles.get_mut("fleet").unwrap().generator;
+            let original = fs::read_to_string(&generator.executable).unwrap();
+            fs::write(
+                &generator.executable,
+                original.replacen('\n', &format!("\n{code}\n"), 1),
+            )
+            .unwrap();
+            generator.executable_sha256 = Some(digest(&fs::read(&generator.executable).unwrap()));
         }
     }
 
