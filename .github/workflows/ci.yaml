@@ -42,8 +42,11 @@ jobs:
       - name: Add cargo bin to PATH
         run: echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
 
-      - name: Project setup
+      - name: Project setup 1
         run: printf '%s\n' 'NIX_CONFIG<<SIMIT_NIX_LIMITS' 'experimental-features = nix-command flakes' 'max-jobs = 1' 'cores = 2' 'SIMIT_NIX_LIMITS' >> "$GITHUB_ENV"
+
+      - name: Project setup 2
+        run: if [ "$GITHUB_WORKFLOW" = CI ] && [ "$GITHUB_JOB" = test ]; then nix develop -c bash scripts/qualify-updater-sandbox-host.sh; fi
 
       - name: Format check
         run: |

@@ -397,6 +397,9 @@ fn verified_input(
         digest(&bytes) == expected,
         "{label} digest differs from enrollment"
     );
+    if path.starts_with("/nix/store") {
+        return store_file(path, Path::new("/nix/store"));
+    }
     let directory = snapshots.join(digest(path.as_os_str().as_encoded_bytes()));
     fs::create_dir_all(&directory)?;
     let pinned = directory.join(path.file_name().context("input has no file name")?);
@@ -1697,18 +1700,11 @@ if os.fork() == 0:
         ] {
             let mut f = Fixture::new();
             f.inject_generator(&format!(
-                "import subprocess\nsubprocess.run({mutation:?}, shell=True, check=True)\n"
+                "import subprocess\nresult = subprocess.run({mutation:?}, shell=True, capture_output=True, text=True)\nassert result.returncode != 0, 'Git mutation succeeded'\nassert 'Read-only file system' in result.stderr, result.stderr\n"
             ));
             let source = f.remote_head();
-            assert!(
-                f.update(true)
-                    .unwrap_err()
-                    .to_string()
-                    .contains("generation sandbox failed"),
-                "{mutation}"
-            );
+            assert_eq!(f.update(false).unwrap().phase, "preview", "{mutation}");
             assert_eq!(f.remote_head(), source);
-            assert!(!f.root().join("receipt.json").exists());
         }
     }
 
@@ -2540,10 +2536,31 @@ if os.fork() == 0:
     fn namespace_failed_or_unsupported_qualification_cannot_land() {
         let f = Fixture::new();
         let source = f.remote_head();
+        f.control(json!({"candidate":"pending"}));
+        let pending = f.update(true).unwrap();
+        assert_eq!(pending.phase, "candidate");
         for status in ["failed", "unsupported", "skipped", "cancelled"] {
             f.control(json!({"candidate":status}));
-            assert!(f.update(true).is_err(), "{status}");
+            let error = f.update(true).unwrap_err().to_string();
+            assert!(
+                error.contains(if matches!(status, "failed" | "unsupported") {
+                    "adapter rejected qualify"
+                } else {
+                    "invalid adapter status"
+                }),
+                "{status}: {error}"
+            );
+            let request: AdapterRequest =
+                crate::review::read_json(&f.root().join("request.json")).unwrap();
+            assert_eq!(request.operation, "qualify");
+            assert_eq!(
+                request.revision.as_deref(),
+                Some(pending.candidate.as_str())
+            );
+            assert_eq!(request.branch.as_deref(), Some(pending.branch.as_str()));
             assert_eq!(f.remote_head(), source);
         }
+        f.control(json!({}));
+        assert_eq!(f.update(true).unwrap().phase, "qualified");
     }
 }

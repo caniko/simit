@@ -83,7 +83,14 @@ pub fn generation(executable: &Path, checkout: &Path, nix_state: &Path) -> Resul
         ]);
     command.args(["--symlink"]).arg(tool("sh")?).arg("/bin/sh");
     command.arg("--ro-bind").arg(checkout).arg("/source");
-    command.arg("--ro-bind").arg(executable).arg("/generator");
+    // Store wrappers and $ORIGIN loaders must retain their installation path.
+    // Mutable, digest-enrolled scripts have already been privately snapshotted.
+    let program = if executable.starts_with("/nix/store") {
+        executable
+    } else {
+        command.arg("--ro-bind").arg(executable).arg("/generator");
+        Path::new("/generator")
+    };
     command.arg("--bind").arg(nix_state).arg("/nix/var/nix");
     for (key, value) in [
         ("PATH", path.to_str().context("non-UTF-8 tool PATH")?),
@@ -112,15 +119,9 @@ pub fn generation(executable: &Path, checkout: &Path, nix_state: &Path) -> Resul
     }
     // Making the generator PID 1 ties every descendant's lifetime to its exit;
     // the kernel kills and reaps that namespace before Bubblewrap completes.
-    command.args([
-        "--chdir",
-        "/source",
-        "--",
-        "/generator",
-        "init",
-        "ci",
-        "--primary-only",
-        "--plan-json",
-    ]);
+    command
+        .args(["--chdir", "/source", "--"])
+        .arg(program)
+        .args(["init", "ci", "--primary-only", "--plan-json"]);
     Ok(command)
 }
