@@ -57,6 +57,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   retain source-bound packed candidates for byte-verified retries, reject
   conflicting registry content, and keep publication credentials out of
   packing, lookups, and command output.
+- Honor monorepo push-branch filters and select binary unit tests when a Rust
+  CI selection has no library, including aggregate and Nextest workflows.
+- Preserve per-member Crow MSRV checks under Omnix replacement and run split
+  audit/deny setup and checks on their selected quality runner.
 - Carry CLI cancellation through every source Git probe and launch probe children
   with a clean environment; document the required isolated observer-job boundary.
 - Revalidate captured attempt-one jobs and log contents against GitHub during

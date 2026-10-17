@@ -2889,6 +2889,10 @@ fn generates_github_plain_cargo_workflows() {
     );
     assert!(ci.contains("path: ~/.cargo/bin"));
     assert!(ci.contains("hashFiles('.github/workflows/*.yaml')"));
+    assert!(ci.contains("cargo-bin-${{ runner.os }}-${{ runner.arch }}-"));
+    assert!(ci.contains(
+        "save-if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}"
+    ));
     assert!(!ci.contains("hashFiles('.forgejo/workflows/ci.yaml', '.github/workflows/ci.yaml')"));
     assert!(ci.contains(
         "command -v cargo-nextest >/dev/null 2>&1 || cargo install cargo-nextest --locked --version 0.9.100"
@@ -2913,6 +2917,10 @@ fn generates_github_plain_cargo_workflows() {
     );
     assert!(publish.contains("path: ~/.cargo/bin"));
     assert!(publish.contains("hashFiles('.github/workflows/*.yaml')"));
+    assert!(publish.contains("cargo-bin-${{ runner.os }}-${{ runner.arch }}-"));
+    assert!(publish.contains(
+        "save-if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}"
+    ));
     assert!(
         !publish.contains("hashFiles('.forgejo/workflows/ci.yaml', '.github/workflows/ci.yaml')")
     );
