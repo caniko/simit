@@ -304,6 +304,12 @@ arguments are restricted to no arguments, Python's isolated `-I`, or
 shell `-e`; arguments that can select another script or loader are rejected.
 Tool execution clears runtime-injection environment variables and disables Python
 user-site imports; Python scripts should use an isolated (`-I`) store interpreter.
+Adapter and inventory commands start with a cleared environment. Only `PATH`,
+`HOME`, locale/timezone, temporary-directory, CA-bundle and `NIX_STATE_DIR` runtime
+settings are inherited. Forge/package-registry credentials and unlisted variables
+are excluded; adapters receive the configured `credentialFile` through request
+JSON. The updater's separate Git transport commands retain operator Git identity,
+signing and transport configuration.
 HTTPS clone URLs must not contain a username or password; SSH usernames remain
 supported through operator Git authentication. Clone URLs must use the protocol's
 default port, because enrollment identifies the service by hostname. Override

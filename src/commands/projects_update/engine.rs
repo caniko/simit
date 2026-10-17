@@ -27,33 +27,33 @@ fn tool_command(
     argv.extend_from_slice(extra);
     let mut child = std::process::Command::new(&command.program);
     child
+        .env_clear()
         .args(argv)
         .stdin(std::process::Stdio::null())
         .env("GIT_TERMINAL_PROMPT", "0");
     if let Some(path) = cwd {
         child.current_dir(path);
     }
-    for key in process::UNTRUSTED_TOOL_ENV {
-        child.env_remove(key);
-    }
+    // Runtime plumbing is shared; forge and registry authority is not. The
+    // adapter receives its sole enrolled API credential through request JSON.
     for key in [
-        "PYTHONPATH",
-        "PYTHONHOME",
-        "BASH_ENV",
-        "ENV",
-        "LD_PRELOAD",
-        "LD_AUDIT",
-        "LD_LIBRARY_PATH",
-        "DYLD_INSERT_LIBRARIES",
-        "DYLD_LIBRARY_PATH",
-        "NODE_OPTIONS",
-        "NODE_PATH",
-        "RUBYOPT",
-        "RUBYLIB",
-        "PERL5OPT",
-        "PERL5LIB",
+        "PATH",
+        "HOME",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "TZ",
+        "TMPDIR",
+        "TMP",
+        "TEMP",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "NIX_SSL_CERT_FILE",
+        "NIX_STATE_DIR",
     ] {
-        child.env_remove(key);
+        if let Some(value) = std::env::var_os(key) {
+            child.env(key, value);
+        }
     }
     child.env("PYTHONNOUSERSITE", "1");
     Ok(child)
@@ -2423,36 +2423,72 @@ if os.fork() == 0:
     }
 
     #[test]
-    fn uncredentialed_tools_strip_secrets_and_keep_operator_git_configuration() {
-        let command = Command {
-            program: "/bin/tool".into(),
-            arguments: vec![],
-            timeout_seconds: 1,
-        };
-        let child = tool_command(&command, &[], None).unwrap();
-        let environment = child.get_envs().collect::<BTreeMap<_, _>>();
-        for key in [
+    fn adapters_inherit_only_explicit_runtime_environment() {
+        let secrets = [
             "GH_TOKEN",
             "GITHUB_TOKEN",
-            "GITHUB_OAUTH_TOKEN",
-            "GITHUB_TOKEN_CMD",
             "CODEBERG_TOKEN",
-            "CODEFLOE_TOKEN",
+            "FORGEJO_TOKEN",
+            "GITEA_TOKEN",
+            "GITLAB_TOKEN",
             "ATTIC_TOKEN",
-            "CACHIX_AUTH_TOKEN",
-            "CACHIX_SIGNING_KEY",
+            "CARGO_REGISTRY_TOKEN",
+            "CARGO_REGISTRIES_PRIVATE_TOKEN",
+            "NPM_TOKEN",
+            "NODE_AUTH_TOKEN",
+            "TWINE_PASSWORD",
+            "UV_PUBLISH_PASSWORD",
+            "UNLISTED_FORGE_TOKEN",
             "NIX_CONFIG",
-            "NIX_PATH",
-            "NIX_USER_CONF_FILES",
-        ] {
-            assert_eq!(
-                environment.get(std::ffi::OsStr::new(key)),
-                Some(&None),
-                "{key}"
+            "PYTHONPATH",
+        ];
+        if std::env::var_os("SIMIT_UPDATER_ENV_PROBE").is_none() {
+            // Seed a private parent process instead of racing process-global
+            // environment mutation with the rest of the test suite.
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+            child.args([
+                "--exact",
+                "commands::projects_update::engine::tests::adapters_inherit_only_explicit_runtime_environment",
+                "--nocapture",
+            ]).env("SIMIT_UPDATER_ENV_PROBE", "1");
+            for key in secrets {
+                child.env(key, "synthetic-unrelated-credential");
+            }
+            let output = child.output().unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success(),
+                "{stdout}\n{}",
+                String::from_utf8_lossy(&output.stderr)
             );
+            assert!(
+                stdout.contains("1 passed"),
+                "environment probe did not execute: {stdout}"
+            );
+            return;
         }
-        assert!(!environment.contains_key(std::ffi::OsStr::new("GIT_CONFIG_GLOBAL")));
-        assert!(!environment.contains_key(std::ffi::OsStr::new("GIT_CONFIG_NOSYSTEM")));
+        let command = Command {
+            program: super::super::sandbox::tool("python3").unwrap(),
+            arguments: vec![
+                "-I".into(),
+                "-c".into(),
+                "import json, os; print(json.dumps(dict(os.environ)))".into(),
+            ],
+            timeout_seconds: 10,
+        };
+        let environment: BTreeMap<String, String> =
+            serde_json::from_slice(&command_output(&command, &[], None).unwrap()).unwrap();
+        for key in secrets.into_iter().chain([
+            "SIMIT_UPDATER_ENV_PROBE",
+            "GIT_CONFIG_GLOBAL",
+            "GIT_CONFIG_NOSYSTEM",
+        ]) {
+            assert!(!environment.contains_key(key), "inherited {key}");
+        }
+        assert_eq!(environment["PATH"], std::env::var("PATH").unwrap());
+        assert_eq!(environment["HOME"], std::env::var("HOME").unwrap());
+        assert_eq!(environment["GIT_TERMINAL_PROMPT"], "0");
+        assert_eq!(environment["PYTHONNOUSERSITE"], "1");
     }
 
     #[test]
