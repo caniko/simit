@@ -79,7 +79,7 @@ in {
           ProtectSystem = "strict";
           ProtectHome = "read-only";
           ReadWritePaths = map (workspace: workspace.stateDirectory) (builtins.attrValues desired.workspaces);
-          ExecStart = lib.escapeShellArgs ["${cfg.package}/bin/simit" "projects" "update" "--config" "/etc/simit/updates.json" "--profile" name "--push" "--json" "--wait-seconds" (toString cfg.waitSeconds)];
+          ExecStart = lib.escapeShellArgs ["${cfg.package}/bin/simit" "projects" "update" "--config" policy "--profile" name "--push" "--json" "--wait-seconds" (toString cfg.waitSeconds)];
           TimeoutStartSec = "infinity";
         };
       })

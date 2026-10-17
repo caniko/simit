@@ -20,6 +20,7 @@
     builtins.hasAttr profile.workspace cfg.workspaces
     && builtins.hasAttr profile.generator.forge cfg.forges
     && absolute profile.generator.executable
+    && (profile.generator.executableSha256 != null || lib.hasPrefix "/nix/store/" profile.generator.executable)
     && lib.hasPrefix "${cfg.forges.${profile.generator.forge}.host}/" profile.generator.sourceCoordinate
     && profile.scopes == ["ci"]
     && profile.generator.requiredChecks != [];

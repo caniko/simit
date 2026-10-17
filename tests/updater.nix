@@ -44,6 +44,8 @@
     // {
       workspaces.projects = example.workspaces.projects // {inherit stateDirectory;};
     };
+  withGenerator = generator:
+    example // {profiles.fleet = example.profiles.fleet // {generator = example.profiles.fleet.generator // generator;};};
   system = lib.nixosSystem {
     system = "x86_64-linux";
     modules = [
@@ -94,6 +96,12 @@ in
   assert !(builtins.tryEval (builtins.deepSeq (mkConfig (example // {profiles.fleet = example.profiles.fleet // {generator = example.profiles.fleet.generator // {executable = "/nix/store/../../tmp/generator";};};})) true)).success;
   assert !(builtins.tryEval (builtins.deepSeq (mkConfig (example // {profiles.fleet = example.profiles.fleet // {generator = example.profiles.fleet.generator // {sourceCoordinate = "other.example/team/simit";};};})) true)).success;
   assert !(builtins.tryEval (builtins.deepSeq (mkConfig (example // {unknownOption = true;})) true)).success;
+  assert !(builtins.tryEval (builtins.deepSeq (mkConfig (withGenerator {executable = "/opt/simit";})) true)).success;
+  assert (mkConfig (withGenerator {
+    executable = "/opt/simit";
+    executableSha256 = lib.concatStrings (lib.replicate 64 "a");
+  })).profiles.fleet.generator.executable
+  == "/opt/simit";
   assert !(builtins.tryEval (builtins.deepSeq (mkConfig (example // {profiles.fleet.workspace = "missing";})) true)).success;
   assert service.serviceConfig.User == "operator";
   assert service.serviceConfig.UMask == "0077";
@@ -102,6 +110,7 @@ in
   assert !(builtins.tryEval (builtins.deepSeq (mkConfig (example // {forges.enterprise = example.forges.enterprise // {adapterSha256 = null;};})) true)).success;
   assert system.config.systemd.timers.simit-updater-fleet.timerConfig.OnCalendar == "hourly";
   assert lib.hasInfix "--profile" service.serviceConfig.ExecStart;
+  assert lib.hasInfix "--config ${system.config.environment.etc."simit/updates.json".source}" service.serviceConfig.ExecStart;
   assert map lib.getName system.config.services.simit-updater.runtimePackages == ["git"];
   assert map lib.getName customSystem.config.services.simit-updater.runtimePackages == ["git" "cargo"]; {
     inherit rendered;

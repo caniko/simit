@@ -1,15 +1,12 @@
 #!/usr/bin/env python3
 """Read-only generation oracle for disposable updater repository tests."""
 import json
-import subprocess
 from pathlib import Path
 
-# The fixture provisions only its disposable clone's identity, never operator
-# globals or the real repository. Signing is exercised independently upstream.
-for key, value in [("user.name", "Updater fixture"),
-                   ("user.email", "updater@example.invalid"),
-                   ("commit.gpgsign", "false")]:
-    subprocess.run(["git", "config", "--local", key, value], check=True)
+plan = Path("fixture-plan.json")
+if plan.exists():
+    print(plan.read_text())
+    raise SystemExit
 print(json.dumps(dict(
     schema="simit.ci-update-plan.v1",
     files=[dict(relative_path=(Path("fixture-backend").read_text().strip()

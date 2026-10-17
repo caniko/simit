@@ -61,6 +61,17 @@ fn run_tool(command: std::process::Command, timeout_seconds: u64) -> Result<Stri
 
 fn git(root: &Path, argv: &[&str]) -> Result<String> {
     let mut command = std::process::Command::new("git");
+    // Disposable test clones receive their fixture identity before generation.
+    // Production Git identity, signing and hooks are never overridden.
+    #[cfg(test)]
+    command.args([
+        "-c",
+        "user.name=Updater fixture",
+        "-c",
+        "user.email=updater@example.invalid",
+        "-c",
+        "commit.gpgsign=false",
+    ]);
     command
         .current_dir(root)
         .args(argv)
@@ -386,7 +397,63 @@ fn workflows(plan: &CiUpdatePlan) -> Vec<String> {
         .collect()
 }
 
+fn git_metadata(checkout: &Path) -> Result<String> {
+    let root = checkout.join(".git");
+    ensure!(
+        fs::symlink_metadata(&root)?.is_dir(),
+        "redirected candidate Git metadata"
+    );
+    let mut pending = vec![root.clone()];
+    let mut visited = BTreeSet::new();
+    let mut entries = BTreeMap::new();
+    // Read-only Git may refresh the index/stat caches. Object contents are
+    // content-addressed, but objects/info (including alternates) remains policy.
+    while let Some(path) = pending.pop() {
+        let resolved = path.canonicalize()?;
+        let metadata = fs::metadata(&resolved)?;
+        #[cfg(unix)]
+        let permissions = {
+            use std::os::unix::fs::MetadataExt;
+            metadata.mode()
+        };
+        #[cfg(not(unix))]
+        let permissions = u32::from(metadata.permissions().readonly());
+        let content = if metadata.is_dir() {
+            if visited.insert(resolved.clone()) {
+                for child in fs::read_dir(&path)? {
+                    let child = child?.path();
+                    if path == root
+                        && matches!(
+                            child.file_name().and_then(|name| name.to_str()),
+                            Some("objects" | "logs" | "index")
+                        )
+                    {
+                        if child.file_name() == Some(std::ffi::OsStr::new("objects"))
+                            && child.join("info").exists()
+                        {
+                            pending.push(child.join("info"));
+                        }
+                        continue;
+                    }
+                    pending.push(child);
+                }
+            }
+            "directory".into()
+        } else {
+            ensure!(
+                metadata.is_file(),
+                "unsupported candidate Git metadata entry"
+            );
+            digest(&fs::read(&resolved)?)
+        };
+        entries.insert(path, (resolved, permissions, content));
+    }
+    canonical_digest(&entries)
+}
+
 fn generate(executable: &Path, checkout: &Path) -> Result<CiUpdatePlan> {
+    let metadata = git_metadata(checkout)?;
+    let configuration = git(checkout, &["config", "--null", "--list", "--show-origin"])?;
     let command = Command {
         program: executable.to_owned(),
         arguments: vec![
@@ -399,6 +466,15 @@ fn generate(executable: &Path, checkout: &Path) -> Result<CiUpdatePlan> {
     };
     let plan: CiUpdatePlan =
         serde_json::from_slice(&command_output(&command, &[], Some(checkout))?)?;
+    // Inspect raw metadata before invoking Git with any generator-written policy.
+    ensure!(
+        git_metadata(checkout)? == metadata,
+        "read-only generator modified Git metadata"
+    );
+    ensure!(
+        git(checkout, &["config", "--null", "--list", "--show-origin"])? == configuration,
+        "read-only generator modified effective Git configuration"
+    );
     ensure!(
         git(checkout, &["status", "--porcelain"])?.is_empty(),
         "read-only generator plan modified candidate sources"
@@ -465,6 +541,15 @@ pub fn update(
     wait_seconds: u64,
 ) -> Result<Receipt> {
     config.validate()?;
+    coordinate(&project.coordinate)?;
+    let forge = config
+        .forges
+        .get(&project.forge)
+        .context("unknown consumer forge")?;
+    ensure!(
+        project.coordinate.starts_with(&format!("{}/", forge.host)),
+        "frozen project coordinate differs from the current consumer forge host"
+    );
     let deadline = Instant::now() + Duration::from_secs(wait_seconds);
     let state_directory = config.state_directory(workspace)?;
     let profile_directory = resolved_path(&profile_directory(workspace, profile_name))?;
@@ -482,7 +567,6 @@ pub fn update(
     private_directory(&root)?;
     let receipt_path = root.join("receipt.json");
     let config_digest = policy_digest(config, profile, workspace, Some(&project.forge))?;
-    let forge = &config.forges[&project.forge];
     let over = profile.project_overrides.get(&project.coordinate);
     let target = over.and_then(|o| o.target_branch.as_deref());
     let observed = inspect(forge, project, target, &root)?;
@@ -500,7 +584,7 @@ pub fn update(
         !requirements.is_empty(),
         "repository requires explicit qualification checks"
     );
-    let previous: Option<Receipt> = if receipt_path.exists() {
+    let mut previous: Option<Receipt> = if receipt_path.exists() {
         Some(crate::review::read_json(&receipt_path)?)
     } else {
         None
@@ -513,6 +597,45 @@ pub fn update(
         );
     }
     let checkout = root.join("checkout");
+    if let Some(retained) = previous.as_ref().filter(|receipt| {
+        !matches!(receipt.phase.as_str(), "qualified" | "unchanged")
+            && observed.revision != receipt.source
+            && observed.revision != receipt.candidate
+    }) {
+        ensure!(
+            matches!(
+                retained.phase.as_str(),
+                "prepared" | "candidate" | "landing"
+            ) && retained.default_branch == observed.default_branch
+                && retained.policy_digest == observed.policy_digest,
+            "landed source or repository policy changed; explicit reconciliation is required"
+        );
+        git(
+            &checkout,
+            &[
+                "fetch",
+                "--quiet",
+                "--no-tags",
+                "origin",
+                &observed.revision,
+            ],
+        )?;
+        ensure!(
+            git(
+                &checkout,
+                &["merge-base", &retained.candidate, &observed.revision]
+            )? != retained.candidate,
+            "remote advanced beyond the landed candidate; adoption reconciliation is required"
+        );
+        // Archive before replacing the checkout, so interruption cannot leave an
+        // unfinished receipt referring to a new clone. Adopted baselines survive.
+        fs::rename(
+            &receipt_path,
+            root.join(format!("invalidated-{}.json", canonical_digest(retained)?)),
+        )?;
+        File::open(&root)?.sync_all()?;
+        previous = None;
+    }
     if let Some(previous) = previous
         .as_ref()
         .filter(|r| !matches!(r.phase.as_str(), "qualified" | "unchanged"))
@@ -629,6 +752,13 @@ pub fn update(
             ensure!(
                 hashes(&checkout, baseline.managed.keys().cloned())? == baseline.managed,
                 "managed outputs changed since adoption; explicit reconciliation is required"
+            );
+            ensure!(
+                baseline
+                    .managed
+                    .iter()
+                    .all(|(path, hash)| hash.is_none() || before.contains_key(path)),
+                "generation plan abandons a managed path; retain it or explicitly mark it obsolete"
             );
             ensure!(
                 before
@@ -959,6 +1089,179 @@ pub fn update(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn managed_paths_cannot_disappear_without_explicit_retirement() {
+        let f = Fixture::new();
+        assert_eq!(f.update(true).unwrap().phase, "qualified");
+        let checkout = f.root().join("checkout");
+        let mut plan =
+            generate(&f.config.profiles["fleet"].generator.executable, &checkout).unwrap();
+        plan.files
+            .retain(|file| file.relative_path != Path::new("new-managed.txt"));
+        save(&checkout.join("fixture-plan.json"), &plan).unwrap();
+        let source = f.publish(&checkout, "omit an adopted managed file");
+        assert!(
+            f.update(true)
+                .unwrap_err()
+                .to_string()
+                .contains("abandons a managed path")
+        );
+        assert_eq!(f.remote_head(), source);
+        let baseline: Baseline = crate::review::read_json(&f.root().join("baseline.json")).unwrap();
+        assert!(baseline.managed["new-managed.txt"].is_some());
+
+        plan.obsolete.push("new-managed.txt".into());
+        save(&checkout.join("fixture-plan.json"), &plan).unwrap();
+        f.publish(&checkout, "explicitly retire the adopted file");
+        let adopted = f.update(true).unwrap();
+        assert_eq!(adopted.phase, "qualified");
+        assert_eq!(adopted.managed["new-managed.txt"], None);
+        assert!(
+            git(
+                &f.remote,
+                &["ls-tree", &adopted.candidate, "--", "new-managed.txt"]
+            )
+            .unwrap()
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn frozen_unattempted_projects_recheck_the_current_consumer_forge_host() {
+        let mut f = Fixture::new();
+        let generator_forge =
+            serde_json::from_value(serde_json::to_value(&f.config.forges["fixture"]).unwrap())
+                .unwrap();
+        f.config.forges.insert("generator".into(), generator_forge);
+        f.config.profiles.get_mut("fleet").unwrap().generator.forge = "generator".into();
+        let mut second = f.project.clone();
+        second.coordinate = "fixture.example/team/next".into();
+        second.relative_path = "other/next".into();
+        f.write_inventory();
+        let inventory_path = f.config.workspaces["projects"]
+            .inventory
+            .file
+            .as_ref()
+            .unwrap();
+        let mut inventory: Inventory = crate::review::read_json(inventory_path).unwrap();
+        inventory.projects.push(second.clone());
+        save(inventory_path, &inventory).unwrap();
+        f.cli("fleet", true).unwrap();
+        let source = f.remote_head();
+        let calls = fs::read(&f.control).unwrap();
+        let second_root = profile_directory(&f.config.workspaces["projects"], "fleet")
+            .join(format!("repo-{}", digest(second.coordinate.as_bytes())));
+        assert!(!second_root.exists());
+        fs::remove_file(inventory_path).unwrap();
+        f.config.forges.get_mut("fixture").unwrap().host = "replacement.example".into();
+        f.config.validate().unwrap();
+        assert!(f.cli("fleet", true).is_err());
+        assert_eq!(
+            fs::read(&f.control).unwrap(),
+            calls,
+            "stale frozen coordinates must not reach the adapter"
+        );
+        assert!(!second_root.exists());
+        assert_eq!(f.remote_head(), source);
+    }
+
+    #[test]
+    fn generators_cannot_change_git_identity_signing_remotes_or_hooks() {
+        for mutation in [
+            "git config --local user.name 'Generator override'",
+            "git config --local commit.gpgsign true",
+            "git config --local remote.origin.url https://unselected.example/team/demo.git",
+            "git config --local core.hooksPath /tmp/generator-hooks",
+            "printf '#!/bin/sh\\nexit 71\\n' > .git/hooks/pre-commit; chmod +x .git/hooks/pre-commit",
+        ] {
+            let mut f = Fixture::new();
+            let generator = &mut f.config.profiles.get_mut("fleet").unwrap().generator;
+            let original = fs::read_to_string(&generator.executable).unwrap();
+            fs::write(
+                &generator.executable,
+                original.replacen('\n', &format!("\n{mutation}\n"), 1),
+            )
+            .unwrap();
+            generator.executable_sha256 = Some(digest(&fs::read(&generator.executable).unwrap()));
+            let source = f.remote_head();
+            assert!(
+                f.update(true)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("modified Git metadata"),
+                "{mutation}"
+            );
+            assert_eq!(f.remote_head(), source);
+            assert!(!f.root().join("receipt.json").exists());
+        }
+    }
+
+    #[test]
+    fn unlanded_candidates_rebuild_after_source_movement_and_retain_the_old_receipt() {
+        for phase in ["prepared", "candidate", "landing"] {
+            let f = Fixture::new();
+            f.control(json!({"candidate":"pending"}));
+            let mut pending = f.update(true).unwrap();
+            pending.phase = phase.into();
+            save(&f.root().join("receipt.json"), &pending).unwrap();
+            fs::write(
+                f.source.join("application.txt"),
+                "concurrent application change\n",
+            )
+            .unwrap();
+            let source = f.publish(&f.source, "advance while the candidate waits");
+            f.control(json!({}));
+            let adopted = f.update(true).unwrap();
+            assert_eq!(adopted.phase, "qualified");
+            assert_eq!(adopted.source, source);
+            assert_ne!(adopted.candidate, pending.candidate);
+            let archived: Receipt = crate::review::read_json(&f.root().join(format!(
+                "invalidated-{}.json",
+                canonical_digest(&pending).unwrap()
+            )))
+            .unwrap();
+            assert_eq!(
+                serde_json::to_value(archived).unwrap(),
+                serde_json::to_value(pending).unwrap()
+            );
+            assert_eq!(
+                git(
+                    &f.remote,
+                    &["show", &format!("{}:application.txt", adopted.candidate)]
+                )
+                .unwrap(),
+                "concurrent application change"
+            );
+        }
+    }
+
+    #[test]
+    fn source_movement_after_landing_preserves_adoption_reconciliation() {
+        for phase in ["landing", "adopting"] {
+            let f = Fixture::new();
+            f.control(json!({"adoption":"pending"}));
+            let mut landed = f.update(true).unwrap();
+            assert_eq!(landed.phase, "adopting");
+            landed.phase = phase.into();
+            save(&f.root().join("receipt.json"), &landed).unwrap();
+            let checkout = f.root().join("checkout");
+            fs::write(checkout.join("application.txt"), "after landing\n").unwrap();
+            let source = f.publish(&checkout, "advance beyond the landed candidate");
+            f.control(json!({}));
+            assert!(
+                f.update(true)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("reconciliation is required")
+            );
+            assert_eq!(f.remote_head(), source);
+            let retained: Receipt =
+                crate::review::read_json(&f.root().join("receipt.json")).unwrap();
+            assert_eq!(retained.candidate, landed.candidate);
+            assert_eq!(retained.phase, phase);
+        }
+    }
 
     #[test]
     fn credential_bearing_clone_urls_are_rejected_before_evidence_is_saved() {
@@ -1481,6 +1784,26 @@ mod tests {
                 remote,
                 source,
             }
+        }
+        fn root(&self) -> PathBuf {
+            profile_directory(&self.config.workspaces["projects"], "fleet").join(format!(
+                "repo-{}",
+                digest(self.project.coordinate.as_bytes())
+            ))
+        }
+        fn publish(&self, checkout: &Path, message: &str) -> String {
+            git(checkout, &["add", "--all"]).unwrap();
+            git(checkout, &["commit", "--quiet", "-m", message]).unwrap();
+            git(
+                checkout,
+                &[
+                    "push",
+                    self.remote.to_str().unwrap(),
+                    "HEAD:refs/heads/trunk",
+                ],
+            )
+            .unwrap();
+            self.remote_head()
         }
         fn write_inventory(&self) {
             let workspace = &self.config.workspaces["projects"];

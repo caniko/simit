@@ -97,7 +97,9 @@ hooks are honored when creating candidate commits.
 The module creates `simit-updater-<profile>.service` and, when scheduled, its
 timer. State is private and writable; workspace source and user configuration
 remain read-only in the service. The selected user must already exist unless
-using the module's dedicated `simit-updater` user. Provision that user's Git
+using the module's dedicated `simit-updater` user. Services load the generated
+regular Nix-store policy file directly; `/etc/simit/updates.json` remains its
+operator-facing link. Provision that user's Git
 identity, signing configuration, transport and credential-file access.
 
 ## Selection and inventory
@@ -166,9 +168,11 @@ For each repository:
 2. Qualify the pinned generator source and verify its enrolled executable.
 3. Obtain `init ci --primary-only --plan-json` in an isolated clone. The versioned
    ownership plan supplies writes and deletions; it uses the project's existing
-   resolved configuration without creating a new configuration file.
+   resolved configuration without creating a new configuration file. Generation
+   must preserve Git configuration, hooks and refs as well as source files.
 4. Compare managed files with the adopted baseline, prepare a scoped candidate
-   commit, and retain its diff and identity.
+   commit, and retain its diff and identity. Every present managed path must stay
+   in the plan or be explicitly listed as obsolete; omission cannot drop ownership.
 5. Push a maintenance ref and require exact-candidate original push qualification.
 6. Reinspect source and policy, then conditionally advance the target branch to
    the same candidate using an explicit Git lease.
@@ -187,7 +191,13 @@ Receipt policy hashes include the active profile, its workspace, and its generat
 and consumer forge records. Frozen selection keys use the profile, workspace and
 generator forge policy. Changes to unrelated configuration entries therefore
 preserve the frozen selection and resumable candidates; changes to a transaction's
-referenced policy still invalidate its pending receipt.
+referenced policy still invalidate its pending receipt. Frozen projects revalidate
+against the currently enrolled consumer forge host before any adapter request.
+
+Before landing, source movement archives the invalidated receipt and prepares a
+fresh candidate from the newly observed source, preserving the adopted baseline.
+A candidate already awaiting adoption, or one found in the new source's ancestry,
+requires explicit adoption reconciliation instead of silently restarting.
 
 Provision each service state directory with mode `0700`, owned by its configured
 user. The module does not create arbitrary state paths through root-owned tmpfiles.
