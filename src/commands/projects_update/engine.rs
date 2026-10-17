@@ -1812,7 +1812,7 @@ if os.fork() == 0:
             verified_input(&input, Some(&first_digest), &snapshots, "fixture")
                 .unwrap_err()
                 .to_string()
-                .contains("fixture digest changed")
+                .contains("fixture digest differs from enrollment")
         );
         assert_eq!(fs::read_dir(&snapshots).unwrap().count(), before);
         let changed = verified_input(
