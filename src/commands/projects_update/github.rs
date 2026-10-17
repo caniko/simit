@@ -231,8 +231,8 @@ fn push_workflow(path: &str, file: &Value, branch: Option<&str>) -> Result<bool>
     if let (Some(trigger), Some(branch)) = (trigger, branch) {
         admit_branch(trigger, branch)?;
     }
-    if trigger.is_some() {
-        admit_concurrency(&yaml)?;
+    if let Some(trigger) = trigger {
+        admit_concurrency(path, &yaml, trigger)?;
         let jobs = yaml
             .get("jobs")
             .and_then(serde_yaml::Value::as_mapping)
@@ -268,7 +268,11 @@ fn push_workflow(path: &str, file: &Value, branch: Option<&str>) -> Result<bool>
     Ok(trigger.is_some())
 }
 
-fn admit_concurrency(workflow: &serde_yaml::Value) -> Result<()> {
+fn admit_concurrency(
+    path: &str,
+    workflow: &serde_yaml::Value,
+    trigger: &serde_yaml::Value,
+) -> Result<()> {
     let Some(concurrency) = workflow.get("concurrency") else {
         return Ok(());
     };
@@ -276,18 +280,33 @@ fn admit_concurrency(workflow: &serde_yaml::Value) -> Result<()> {
         .get("group")
         .and_then(serde_yaml::Value::as_str)
         .context("workflow concurrency requires an explicit workflow/ref-isolated group")?;
+    // Aggregate CI coalesces push and PR runs by source repository and branch.
+    // Its literal prefix must be this workflow's path; tags must be excluded so
+    // a same-named tag cannot cancel a qualification branch's original run.
+    let aggregate = group
+        == format!(
+            "{path}-${{{{ github.event.pull_request.head.repo.full_name || github.repository }}}}-${{{{ github.event.pull_request.head.ref || github.ref_name }}}}"
+        )
+        && trigger.get("tags").is_none()
+        && trigger
+            .get("tags-ignore")
+            .and_then(serde_yaml::Value::as_sequence)
+            .is_some_and(|patterns| patterns.len() == 1 && patterns[0].as_str() == Some("**"));
     // ponytail: prove only these path/ref-scoped forms (including generated CI).
     // Other expressions need a provider-native concurrency evaluator. Even
     // cancel-in-progress:false replaces pending runs in a shared group.
     ensure!(
-        matches!(
-            group,
-            "${{ github.workflow_ref }}"
-                | "${{ github.workflow_ref }}-${{ github.ref }}"
-                | "${{ github.workflow_ref }}-${{ github.event_name }}-${{ github.head_ref || github.ref_name }}"
-        ) && concurrency
-            .get("cancel-in-progress")
-            .is_none_or(|value| value.as_bool().is_some()),
+        (aggregate
+            || matches!(
+                group,
+                "${{ github.workflow_ref }}"
+                    | "${{ github.workflow_ref }}-${{ github.ref }}"
+                    | "${{ github.workflow_ref }}-${{ github.event_name }}-${{ github.head_ref || github.ref_name }}"
+                    | "${{ github.workflow_ref }}-${{ github.event_name }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.ref_type == 'tag' && github.ref || format('refs/heads/{0}', github.event.pull_request.head.ref || github.ref_name) }}"
+            ))
+            && concurrency
+                .get("cancel-in-progress")
+                .is_none_or(|value| value.as_bool().is_some()),
         "workflow concurrency is not provably isolated by workflow path and qualification ref"
     );
     Ok(())
@@ -1089,6 +1108,96 @@ mod tests {
             json!({"total_count":1,"workflows":[{"id":1,"path":".github/workflows/ci.yaml"}]}),
         ] {
             assert!(admit_workflow_states(&paths, &invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn generated_rust_primary_concurrency_is_admitted_without_accepting_nearby_unsafe_groups() {
+        use crate::{
+            cli::{CiProvider, Platform, Runtime, WorkspaceStrategy},
+            render::ci::{self, CiOptions, FilesRequest, SelfCheckOptions},
+            user_config::{ResolvedCiRunners, ResolvedRunner},
+        };
+        let package = serde_json::from_value(json!({
+            "id":"demo", "name":"demo", "version":"0.1.0", "manifest_path":"/demo/Cargo.toml"
+        }))
+        .unwrap();
+        let runner = ResolvedRunner {
+            name: None,
+            labels: vec!["ubuntu-24.04".into()],
+        };
+        let runners = ResolvedCiRunners {
+            ci: runner.clone(),
+            release: runner,
+            windows: None,
+        };
+        for runtime in [Runtime::Cargo, Runtime::Nix] {
+            for (workspace_strategy, separate_events) in [
+                (WorkspaceStrategy::Members, false),
+                (WorkspaceStrategy::Aggregate, false),
+                (WorkspaceStrategy::Aggregate, true),
+            ] {
+                let files = ci::primary_files(FilesRequest {
+                    provider: CiProvider::Actions,
+                    platform: Platform::Github,
+                    crow: &Default::default(),
+                    runtime,
+                    package: &package,
+                    file_suffix: None,
+                    self_check: SelfCheckOptions {
+                        enabled: false,
+                        release: false,
+                        runner_override: None,
+                        windows_runner_override: None,
+                        packages: &[],
+                        workspace: true,
+                    },
+                    runners: &runners,
+                    step_runners: &Default::default(),
+                    options: CiOptions {
+                        workspace_strategy,
+                        separate_events,
+                        ..Default::default()
+                    },
+                })
+                .unwrap();
+                let generated = &files[0];
+                let path = generated.relative_path.to_str().unwrap();
+                let source = |content: &str| {
+                    json!({"path":path,"type":"file","encoding":"base64",
+                    "content":base64::engine::general_purpose::STANDARD.encode(content)})
+                };
+                for branch in ["simit/update/0123456789abcdef", "trunk"] {
+                    assert!(
+                        push_workflow(path, &source(&generated.content), Some(branch)).unwrap(),
+                        "{runtime:?} {workspace_strategy:?} separate_events={separate_events}"
+                    );
+                }
+                if workspace_strategy == WorkspaceStrategy::Aggregate && !separate_events {
+                    for (from, to) in [
+                        (
+                            "group: .github/workflows/ci.yaml-",
+                            "group: .github/workflows/other.yaml-",
+                        ),
+                        (
+                            "github.event.pull_request.head.repo.full_name || github.repository",
+                            "github.repository",
+                        ),
+                        ("tags-ignore: [\"**\"]", "tags: [\"**\"]"),
+                        (
+                            "cancel-in-progress: true",
+                            "cancel-in-progress: '${{ inputs.cancel }}'",
+                        ),
+                    ] {
+                        let changed = generated.content.replace(from, to);
+                        assert_ne!(changed, generated.content, "missing mutation {from}");
+                        assert!(
+                            push_workflow(path, &source(&changed), Some("trunk")).is_err(),
+                            "{from}"
+                        );
+                    }
+                }
+            }
         }
     }
 
