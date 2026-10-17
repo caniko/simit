@@ -97,7 +97,7 @@ with tempfile.TemporaryDirectory(prefix="simit-packaged-updater-") as temporary:
                       "workspaces": {"projects": {"root": str(case / "projects"), "stateDirectory": str(case / "state"), "inventory": {"file": str(inventory)}}},
                       "forges": {"fixture": {"host": "fixture.example", "apiUrl": "https://fixture.example/api", "adapter": {"program": str(adapter)},
                                              "adapterSha256": hashlib.sha256(adapter.read_bytes()).hexdigest(), "checkAuthority": "777"}},
-                      "profiles": {"fleet": {"workspace": "projects", "select": {"coordinates": ["fixture.example/team/demo"]},
+                      "profiles": {"fleet": {"workspace": "projects", "scopes": ["ci"], "select": {"coordinates": ["fixture.example/team/demo"]},
                                              "enrollCurrent": True, "generator": enrollment}}})
         output = run(str(generator), "projects", "update", "--config", str(config), "--profile", "fleet", "--wait-seconds", "0", "--json", env=env)
         reports = json.loads(output)

@@ -12,7 +12,7 @@ fn directories() -> Vec<PathBuf> {
         .collect()
 }
 
-fn tool(name: &str) -> Result<PathBuf> {
+pub(super) fn tool(name: &str) -> Result<PathBuf> {
     directories()
         .iter()
         .find_map(|directory| {

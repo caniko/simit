@@ -1868,9 +1868,7 @@ if os.fork() == 0:
                     .split_whitespace()
                     .next()
                     .unwrap();
-                let shell =
-                    fs::canonicalize(std::env::var_os("BASH").unwrap_or_else(|| "/bin/sh".into()))
-                        .unwrap();
+                let shell = super::super::sandbox::tool("sh").unwrap();
                 original = format!(
                     "#!/bin/sh\nexec '{python}' - \"$@\" <<'SIMIT_ADAPTER_ORACLE'\n{original}\nSIMIT_ADAPTER_ORACLE\n"
                 );
@@ -1886,6 +1884,7 @@ if os.fork() == 0:
             f.config.validate().unwrap();
             f.control(json!({"candidate":"pending"}));
             let pending = f.update(true).unwrap();
+            assert_eq!(pending.phase, "candidate");
             let marker = f.control.with_file_name("unverified-adapter-ran");
             let injected = if interpreter {
                 format!("\ntouch '{}'\n", marker.display())
