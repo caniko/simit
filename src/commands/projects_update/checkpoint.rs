@@ -13,7 +13,26 @@ const MARKER: &str = "generation-checkpoint.json";
 #[derive(PartialEq, Eq)]
 struct Entry {
     permissions: fs::Permissions,
-    hash: Option<String>,
+    kind: Kind,
+}
+
+#[derive(PartialEq, Eq)]
+enum Kind {
+    Directory,
+    File(String),
+    Symlink(PathBuf, bool),
+}
+
+fn symlink(target: &Path, path: &Path, _directory: bool) -> Result<()> {
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(target, path)?;
+    #[cfg(windows)]
+    if _directory {
+        std::os::windows::fs::symlink_dir(target, path)?;
+    } else {
+        std::os::windows::fs::symlink_file(target, path)?;
+    }
+    Ok(())
 }
 
 pub fn ensure_idle(root: &Path) -> Result<()> {
@@ -40,18 +59,33 @@ fn capture(
         }
         let metadata = fs::symlink_metadata(&path)?;
         ensure!(
-            metadata.is_file() || metadata.is_dir(),
+            metadata.is_file() || metadata.is_dir() || metadata.is_symlink(),
             "unsupported entry in persistent updater state"
         );
         let relative = path.strip_prefix(root)?.to_owned();
-        let hash = if metadata.is_dir() {
+        let kind = if metadata.is_symlink() {
+            #[cfg(windows)]
+            let directory = {
+                use std::os::windows::fs::MetadataExt;
+                metadata.file_attributes() & 0x10 != 0
+            };
+            #[cfg(not(windows))]
+            let directory = false;
+            let target = fs::read_link(&path)?;
+            if let Some(backup) = backup {
+                let destination = backup.join(&relative);
+                fs::create_dir_all(destination.parent().context("missing checkpoint parent")?)?;
+                symlink(&target, &destination, directory)?;
+            }
+            Kind::Symlink(target, directory)
+        } else if metadata.is_dir() {
             if let Some(backup) = backup {
                 fs::create_dir_all(backup.join(&relative))?;
             }
             for child in fs::read_dir(&path)? {
                 pending.push(child?.path());
             }
-            None
+            Kind::Directory
         } else {
             let hash = digest(&fs::read(&path)?);
             if let Some(backup) = backup {
@@ -59,15 +93,22 @@ fn capture(
                 fs::create_dir_all(destination.parent().context("missing checkpoint parent")?)?;
                 fs::copy(&path, destination)?;
             }
-            Some(hash)
+            Kind::File(hash)
         };
         entries.insert(
             relative,
             Entry {
                 permissions: metadata.permissions(),
-                hash,
+                kind,
             },
         );
+    }
+    if let Some(backup) = backup {
+        for (relative, entry) in entries.iter().rev() {
+            if !matches!(entry.kind, Kind::Symlink(..)) {
+                fs::set_permissions(backup.join(relative), entry.permissions.clone())?;
+            }
+        }
     }
     Ok(entries)
 }
@@ -125,19 +166,23 @@ pub fn protect<T>(
             clear(root, root, checkout)?;
             for (relative, entry) in &entries {
                 let path = root.join(relative);
-                if let Some(hash) = &entry.hash {
-                    let original = backup.join(relative);
-                    ensure!(
-                        digest(&fs::read(&original)?) == *hash,
-                        "checkpoint contents changed"
-                    );
-                    fs::copy(original, &path)?;
-                } else {
-                    fs::create_dir_all(&path)?;
+                match &entry.kind {
+                    Kind::File(hash) => {
+                        let original = backup.join(relative);
+                        ensure!(
+                            digest(&fs::read(&original)?) == *hash,
+                            "checkpoint contents changed"
+                        );
+                        fs::copy(original, &path)?;
+                    }
+                    Kind::Directory => fs::create_dir_all(&path)?,
+                    Kind::Symlink(target, directory) => symlink(target, &path, *directory)?,
                 }
             }
             for (relative, entry) in entries.iter().rev() {
-                fs::set_permissions(root.join(relative), entry.permissions.clone())?;
+                if !matches!(entry.kind, Kind::Symlink(..)) {
+                    fs::set_permissions(root.join(relative), entry.permissions.clone())?;
+                }
             }
             ensure!(
                 capture(root, checkout, None)? == entries,

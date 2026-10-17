@@ -42,6 +42,7 @@ fn tool_command(
         "BASH_ENV",
         "ENV",
         "LD_PRELOAD",
+        "LD_AUDIT",
         "LD_LIBRARY_PATH",
         "DYLD_INSERT_LIBRARIES",
         "DYLD_LIBRARY_PATH",
@@ -1303,6 +1304,12 @@ mod tests {
             ] {
                 let mut f = Fixture::new();
                 let adopted = f.update(true).unwrap();
+                // Other retained repositories can contain source symlinks. Their
+                // targets must never be followed while checkpointing/restoring.
+                let link = f.config.workspaces["projects"]
+                    .state_directory
+                    .join("retained-link");
+                std::os::unix::fs::symlink(f.source.join("application.txt"), &link).unwrap();
                 let target = f.root().join(name);
                 let original = fs::read(&target).ok();
                 let generator =
@@ -1319,6 +1326,14 @@ mod tests {
                         .contains("persistent updater state")
                 );
                 assert_eq!(fs::read(&target).ok(), original);
+                assert_eq!(
+                    fs::read_link(&link).unwrap(),
+                    f.source.join("application.txt")
+                );
+                assert_eq!(
+                    fs::read_to_string(f.source.join("application.txt")).unwrap(),
+                    "application source\n"
+                );
                 assert_eq!(f.remote_head(), adopted.candidate);
                 assert!(
                     !f.config.workspaces["projects"]
