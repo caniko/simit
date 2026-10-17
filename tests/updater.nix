@@ -48,6 +48,20 @@
   withGenerator = generator:
     example // {profiles.fleet = example.profiles.fleet // {generator = example.profiles.fleet.generator // generator;};};
   withForge = forge: example // {forges.enterprise = example.forges.enterprise // forge;};
+  withOtherForge = host:
+    example
+    // {
+      forges =
+        example.forges
+        // {
+          other =
+            example.forges.enterprise
+            // {
+              inherit host;
+              checkAuthority = "999";
+            };
+        };
+    };
   withInventory = inventory: example // {workspaces.projects = example.workspaces.projects // {inherit inventory;};};
   withOtherState = stateDirectory:
     example
@@ -106,6 +120,8 @@
   };
 in
   assert rendered.schemaVersion == 1;
+  assert !(accepts (withOtherForge "git.example.org"));
+  assert accepts (withOtherForge "other.example.org");
   assert lib.all (count: !(accepts (example // {profiles.fleet = example.profiles.fleet // {rollout.batchSize = count;};})) && !(accepts (example // {profiles.fleet = example.profiles.fleet // {rollout.maxConcurrent = count;};}))) [0 4294967296];
   assert accepts (example
     // {

@@ -299,7 +299,12 @@ impl Config {
                 ensure!(path.is_absolute(), "inventory path must be absolute");
             }
         }
+        let mut forge_hosts = BTreeSet::new();
         for forge in self.forges.values() {
+            ensure!(
+                forge_hosts.insert(&forge.host),
+                "forge hosts must be unique; inventory cannot select a different policy for the same host"
+            );
             let url = url::Url::parse(&forge.api_url)?;
             ensure!(
                 url.scheme() == "https"
@@ -492,6 +497,23 @@ mod tests {
                 .to_string()
                 .contains("operator-owned coordinate enrollment")
         );
+    }
+
+    #[test]
+    fn forge_hosts_cannot_delegate_policy_choice_to_inventory() {
+        let mut cfg = config();
+        let mut weaker: Forge =
+            serde_json::from_value(serde_json::to_value(&cfg.forges["example"]).unwrap()).unwrap();
+        weaker.check_authority = "999".into();
+        cfg.forges.insert("weaker".into(), weaker);
+        assert!(
+            cfg.validate()
+                .unwrap_err()
+                .to_string()
+                .contains("forge hosts must be unique")
+        );
+        cfg.forges.get_mut("weaker").unwrap().host = "other.example".into();
+        cfg.validate().unwrap();
     }
 
     #[test]

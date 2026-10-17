@@ -149,6 +149,9 @@ their `policyDigest` records provenance, not deployment authority. Exact
 coordinates are rechecked when processing frozen selections as well.
 Configured canaries must be a subset of that coordinate enrollment; both Nix
 and runtime validation reject an unlisted canary before discovery.
+Each forge hostname must have exactly one configured policy. Inventory can name
+that policy but cannot choose a weaker adapter, credential or check authority for
+the same host. Rust and Nix reject duplicate host entries before discovery.
 
 Inventory commands run in read-only Linux filesystem, network and PID namespaces,
 with a private writable temporary directory. The host `/run` socket tree and Nix

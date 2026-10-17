@@ -6,6 +6,7 @@
     ];
   };
   cfg = evaluated.config;
+  forgeHosts = map (forge: forge.host) (builtins.attrValues cfg.forges);
   normalized = path: "/" + lib.concatStringsSep "/" (lib.filter (part: part != "") (lib.splitString "/" path));
   absolute = path: lib.hasPrefix "/" path && lib.all (part: part != "." && part != "..") (lib.splitString "/" path);
   contains = parent: child: parent == "/" || parent == child || lib.hasPrefix "${parent}/" child;
@@ -84,6 +85,7 @@
 in
   if
     lib.all lib.id (lib.mapAttrsToList validWorkspace cfg.workspaces)
+    && builtins.length (lib.unique forgeHosts) == builtins.length forgeHosts
     && lib.all validForge (builtins.attrValues cfg.forges)
     && lib.all validProfile (builtins.attrValues cfg.profiles)
   then cfg

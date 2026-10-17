@@ -1754,13 +1754,39 @@ if os.fork() == 0:
     }
 
     #[test]
-    fn namespace_frozen_unattempted_projects_recheck_the_current_consumer_forge_host() {
+    fn inventory_cannot_select_a_weaker_policy_for_the_same_forge_host() {
         let mut f = Fixture::new();
-        let generator_forge =
+        let mut weaker: Forge =
             serde_json::from_value(serde_json::to_value(&f.config.forges["fixture"]).unwrap())
                 .unwrap();
+        weaker.check_authority = "999".into();
+        f.config.forges.insert("weaker".into(), weaker);
+        f.project.forge = "weaker".into();
+        f.write_inventory();
+        let source = f.remote_head();
+        assert!(
+            f.cli("fleet", true)
+                .unwrap_err()
+                .to_string()
+                .contains("forge hosts must be unique")
+        );
+        assert!(!f.config.workspaces["projects"].state_directory.exists());
+        assert!(!f.root().exists());
+        assert_eq!(f.remote_head(), source);
+        assert_eq!(fs::read_to_string(&f.control).unwrap().trim(), "{}");
+    }
+
+    #[test]
+    fn namespace_frozen_unattempted_projects_recheck_the_current_consumer_forge_host() {
+        let mut f = Fixture::new();
+        let mut generator_forge: Forge =
+            serde_json::from_value(serde_json::to_value(&f.config.forges["fixture"]).unwrap())
+                .unwrap();
+        generator_forge.host = "generator.example".into();
         f.config.forges.insert("generator".into(), generator_forge);
-        f.config.profiles.get_mut("fleet").unwrap().generator.forge = "generator".into();
+        let generator = &mut f.config.profiles.get_mut("fleet").unwrap().generator;
+        generator.forge = "generator".into();
+        generator.source_coordinate = "generator.example/team/generator".into();
         let mut second = f.project.clone();
         second.coordinate = "fixture.example/team/next".into();
         second.relative_path = "other/next".into();
