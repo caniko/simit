@@ -167,8 +167,55 @@ fn generator_workflow_paths(
     Ok(paths)
 }
 
+fn protection_requirements(protection: &Value, authority: u64) -> Result<Vec<Requirement>> {
+    let status = &protection["required_status_checks"];
+    if status.is_null() {
+        return Ok(vec![]);
+    }
+    let contexts = status["contexts"]
+        .as_array()
+        .context("missing required contexts")?;
+    let checks = status["checks"]
+        .as_array()
+        .context("required context authorities are unavailable")?;
+    let mut requirements = Vec::new();
+    for check in checks {
+        ensure!(
+            check["app_id"].as_u64() == Some(authority),
+            "external or unbound required checks need an adapter with external-check qualification support"
+        );
+        let name = text(check, "/context")?;
+        ensure!(
+            contexts.iter().any(|context| context == &name),
+            "required check inventory differs from contexts"
+        );
+        requirements.push(Requirement {
+            name,
+            authority: authority.to_string(),
+        });
+    }
+    ensure!(
+        contexts
+            .iter()
+            .all(|name| requirements.iter().any(|r| name == &r.name)),
+        "required context lacks application binding"
+    );
+    Ok(requirements)
+}
+
 pub fn execute(request: &AdapterRequest) -> Result<AdapterResponse> {
     request.validate()?;
+    let authority: u64 = request
+        .authority
+        .parse()
+        .context("GitHub check authority must be a numeric application ID")?;
+    ensure!(
+        request
+            .required_checks
+            .iter()
+            .all(|r| r.authority == authority.to_string()),
+        "external required checks need a supporting adapter"
+    );
     let (_, repository) = request
         .coordinate
         .split_once('/')
@@ -218,24 +265,7 @@ pub fn execute(request: &AdapterRequest) -> Result<AdapterResponse> {
             protection["required_pull_request_reviews"].is_null(),
             "repository requires pull requests; direct updater landing is unsupported"
         );
-        if let Some(contexts) = protection["required_status_checks"]["contexts"].as_array() {
-            let checks = protection["required_status_checks"]["checks"]
-                .as_array()
-                .context("required context authorities are unavailable")?;
-            for name in contexts {
-                let check = checks
-                    .iter()
-                    .find(|c| c["context"] == *name)
-                    .context("required context lacks application binding")?;
-                let authority = check["app_id"]
-                    .as_u64()
-                    .context("unbound status context cannot qualify automated updates")?;
-                requirements.push(Requirement {
-                    name: name.as_str().context("invalid required context")?.into(),
-                    authority: authority.to_string(),
-                });
-            }
-        }
+        requirements = protection_requirements(&protection, authority)?;
         protection
     } else {
         Value::Null
@@ -298,10 +328,6 @@ pub fn execute(request: &AdapterRequest) -> Result<AdapterResponse> {
         response.status = "pending".into();
         return Ok(response);
     }
-    let authority: u64 = request
-        .authority
-        .parse()
-        .context("GitHub check authority must be a numeric application ID")?;
     for path in paths {
         ensure!(
             path.starts_with(".github/workflows/")
@@ -456,6 +482,26 @@ fn admit_run(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn inspection_rejects_external_unbound_and_incomplete_required_checks() {
+        for app in [json!(42), json!(-1), Value::Null] {
+            let policy = json!({"required_status_checks":{"contexts":["test"],"checks":[{"context":"test","app_id":app}]}});
+            assert!(protection_requirements(&policy, 777).is_err());
+        }
+        let mut policy = json!({"required_status_checks":{"contexts":["test"],"checks":[{"context":"test","app_id":777}]}});
+        let admitted = protection_requirements(&policy, 777).unwrap();
+        assert_eq!(admitted.len(), 1);
+        assert_eq!(admitted[0].name, "test");
+        assert_eq!(admitted[0].authority, "777");
+        policy["required_status_checks"]["contexts"] = json!(["missing"]);
+        assert!(protection_requirements(&policy, 777).is_err());
+        assert!(
+            protection_requirements(&Value::Null, 777)
+                .unwrap()
+                .is_empty()
+        );
+    }
 
     #[test]
     fn paginated_job_inventory_preserves_and_enforces_the_reported_total() {

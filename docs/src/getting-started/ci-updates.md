@@ -109,6 +109,10 @@ identity, signing configuration, transport and credential-file access.
 Each service can write only the state directory of its profile's workspace.
 Workspace state directories must be disjoint, including after runtime symlink
 resolution. Enrollment digests use exactly 64 lowercase hexadecimal characters.
+Generator source revisions require full 40-character lowercase commit SHAs.
+Inventory paths, command executables and credential files are absolute runtime
+paths; credentials cannot reside in the Nix store. These constraints are checked
+while rendering the workstation policy as well as at runtime.
 
 ## Selection and inventory
 
@@ -208,6 +212,11 @@ host Nix daemon or host fetcher cache. Its PID-1 lifetime kills and reaps descen
 before successful generation completes. The native `sandboxPackage` is configurable
 in the dev-station flake; standalone users supply immutable store-backed `bwrap`
 and runtime tools on `PATH`. Missing namespace support fails closed.
+Hosts restricting user namespaces through AppArmor must provision an allowance
+for the enrolled immutable Bubblewrap executable through their host configuration.
+The updater does not change host policy. Hosted qualification records the initial
+probe and kernel diagnostics before loading an executable-scoped allowance on
+its disposable runner, then repeats the probe with isolation still enabled.
 
 Flake configuration forbids input/lock updates, flake-provided Nix settings and
 import-from-derivation. Evaluation uses a disposable local store without network
@@ -263,6 +272,9 @@ Forge adapters require a store-backed executable or `adapterSha256`. File-valued
 configured arguments must be absolute store paths or enrolled in `adapterInputs`
 as path-to-SHA-256 entries. Digest-enrolled files are executed or read from private
 verified snapshots; store inputs must resolve to files inside the store. Adapters
+and generators retain their resolved store installation paths even when a digest
+is supplied, preserving wrapper resources and installation-relative loaders.
+Non-store snapshots remain isolated from their mutable original locations. Adapters
 run from a private directory, with runtime values supplied through request JSON.
 Script interpreter chains must also resolve entirely inside the store. Tool
 execution clears runtime-injection environment variables and disables Python
@@ -277,7 +289,8 @@ continues to admit every owned push workflow independently.
 
 The v1 built-in adapter supports GitHub Actions originals with configured app
 authority, complete job/step success and app-bound legacy protection contexts.
-Active rulesets and PR-required protections are rejected. It does not migrate
+Required checks from other applications, unbound contexts, active rulesets and
+PR-required protections are rejected during admission. It does not migrate
 protection contexts, CI engine variables, or PR-only custody contracts. Those
 transitions require a later protocol with explicit ordered migration support.
 Other forge/CI backends can enroll an absolute adapter command implementing the
@@ -288,8 +301,8 @@ owned Actions YAML at the exact requested revision to identify push triggers.
 
 ## Dependencies and verification
 
-The updater reuses existing Rust dependencies. `Cargo.toml`, `Cargo.lock` and
-flake inputs do not change. `runtimePackages` controls native service tools;
+The updater reuses existing Rust dependencies and flake inputs.
+`runtimePackages` controls native service tools;
 add OpenSSH for SSH transports, Cargo for Rust metadata, Nix for flake config,
 and the configured signing program when needed.
 

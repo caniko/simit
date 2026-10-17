@@ -9,6 +9,32 @@
   normalized = path: "/" + lib.concatStringsSep "/" (lib.filter (part: part != "") (lib.splitString "/" path));
   absolute = path: lib.hasPrefix "/" path && lib.all (part: part != "." && part != "..") (lib.splitString "/" path);
   contains = parent: child: parent == "/" || parent == child || lib.hasPrefix "${parent}/" child;
+  requirements = values: builtins.length (lib.unique values) == builtins.length values;
+  coordinate = value: let
+    parts = lib.splitString "/" value;
+  in
+    builtins.length parts
+    >= 3
+    && builtins.match ".*[[:space:]\\\\:?#@].*" value == null
+    && lib.all (part: part != "" && part != "." && part != "..") parts;
+  validPrefix = prefix:
+    lib.hasSuffix "/" prefix
+    && !(lib.hasPrefix "-" prefix)
+    && !(lib.hasInfix ".." prefix)
+    && !(lib.hasInfix "@{" prefix)
+    && builtins.match ".*[[:cntrl:][:space:]].*" prefix == null
+    && lib.all (char: !(lib.hasInfix char prefix)) ["~" "^" ":" "?" "*" "[" "\\"]
+    && lib.all (part: part != "" && !(lib.hasPrefix "." part) && !(lib.hasSuffix ".lock" part)) (lib.splitString "/" (lib.removeSuffix "/" prefix));
+  validArgument = forge: argument: let
+    parts = lib.splitString "=" argument;
+    value =
+      if lib.hasPrefix "-" argument && builtins.length parts > 1
+      then lib.concatStringsSep "=" (lib.tail parts)
+      else argument;
+  in
+    if lib.hasPrefix "/" value
+    then absolute value && (contains "/nix/store" value || builtins.hasAttr value forge.adapterInputs)
+    else !(lib.hasInfix "/" value) && !(lib.hasInfix "\\" value) && value != "." && value != "..";
   validWorkspace = name: workspace:
     absolute workspace.root
     && absolute workspace.stateDirectory
@@ -27,10 +53,21 @@
     && lib.hasPrefix "${cfg.forges.${profile.generator.forge}.host}/" profile.generator.sourceCoordinate
     && profile.scopes == ["ci"]
     && profile.select.coordinates != []
-    && profile.generator.requiredChecks != [];
+    && profile.generator.requiredChecks != []
+    && requirements profile.generator.requiredChecks
+    && requirements profile.requiredChecks
+    && validPrefix profile.rollout.maintenanceRefPrefix
+    && lib.all (pattern: !(lib.hasPrefix "/" pattern) && !(lib.elem ".." (lib.splitString "/" pattern))) (profile.select.includePaths ++ profile.select.excludePaths)
+    && lib.all lib.id (lib.mapAttrsToList (key: override:
+      coordinate key
+      && requirements override.requiredChecks
+      && (override.enable || (override.reason != null && builtins.match "[[:space:]]*" override.reason == null)))
+    profile.projectOverrides);
   validForge = forge:
     absolute forge.adapter.program
-    && (forge.adapterSha256 != null || lib.hasPrefix "/nix/store/" forge.adapter.program);
+    && (forge.adapterSha256 != null || lib.hasPrefix "/nix/store/" forge.adapter.program)
+    && lib.all absolute (builtins.attrNames forge.adapterInputs)
+    && lib.all (validArgument forge) forge.adapter.arguments;
 in
   if
     lib.all lib.id (lib.mapAttrsToList validWorkspace cfg.workspaces)

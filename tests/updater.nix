@@ -48,6 +48,7 @@
   withGenerator = generator:
     example // {profiles.fleet = example.profiles.fleet // {generator = example.profiles.fleet.generator // generator;};};
   withForge = forge: example // {forges.enterprise = example.forges.enterprise // forge;};
+  withInventory = inventory: example // {workspaces.projects = example.workspaces.projects // {inherit inventory;};};
   withOtherState = stateDirectory:
     example
     // {
@@ -105,6 +106,19 @@
   };
 in
   assert rendered.schemaVersion == 1;
+  assert lib.all (sourceRevision: !(accepts (withGenerator {inherit sourceRevision;}))) ["trunk" "abc123" (lib.concatStrings (lib.replicate 40 "A"))];
+  assert lib.all (path:
+    !(accepts (withInventory {file = path;}))
+    && !(accepts (withInventory {command.program = path;}))
+    && !(accepts (withForge {credentialFile = path;}))) ["relative.json" "../inventory" "/run/../credentials"];
+  assert lib.all (credentialFile: !(accepts (withForge {inherit credentialFile;}))) ["/nix/store/fixture-token" "/nix//store/fixture-token"];
+  assert accepts (withInventory {file = "/runtime/not-present-inventory.json";});
+  assert lib.all (apiUrl: !(accepts (withForge {inherit apiUrl;}))) ["http://git.example.org" "https://token@git.example.org/api" "https://git.example.org/api?token=x" "https://git.example.org/api#fragment"];
+  assert lib.all (host: !(accepts (withForge {inherit host;}))) ["" "git.example.org:443" "git.example.org/api"];
+  assert !(accepts (withForge {adapterInputs."relative.py" = lib.concatStrings (lib.replicate 64 "f");}));
+  assert lib.all (arguments: !(accepts (withForge {adapter = example.forges.enterprise.adapter // {inherit arguments;};}))) [["relative/script.py"] ["--file=/mutable/script.py"]];
+  assert lib.all (sourceCoordinate: !(accepts (withGenerator {inherit sourceCoordinate;}))) ["git.example.org/team" "git.example.org/team/../simit" "git.example.org/team/a b"];
+  assert lib.all (maintenanceRefPrefix: !(accepts (example // {profiles.fleet = example.profiles.fleet // {rollout = {inherit maintenanceRefPrefix;};};}))) ["maintenance" "bad..ref/" "bad.lock/" "bad//ref/" "bad@{ref/" "bad ref/"];
   assert lib.all (state: !(accepts (withOtherState state))) ["/state" "/state/custom-updater" "/state//custom-updater/child/"];
   assert accepts (withOtherState "/state/custom-updater-sibling");
   assert lib.all (hash:
