@@ -146,6 +146,8 @@ in
   assert lib.all (credentialFile: !(accepts (withForge {inherit credentialFile;}))) ["/nix/store/fixture-token" "/nix//store/fixture-token"];
   assert accepts (withInventory {file = "/runtime/not-present-inventory.json";});
   assert lib.all (apiUrl: !(accepts (withForge {inherit apiUrl;}))) ["http://git.example.org" "https://token@git.example.org/api" "https://git.example.org/api?token=x" "https://git.example.org/api#fragment"];
+  assert lib.all (apiUrl: !(accepts (withForge {inherit apiUrl;}))) ["https://git.example.org:bogus/api" "https://git.example.org:/api" "https://git.example.org:443:80/api" "https://git.example.org:65536/api" "https://git.example.org:123456/api"];
+  assert lib.all (apiUrl: accepts (withForge {inherit apiUrl;})) ["https://git.example.org/api" "https://git.example.org:443/api" "https://git.example.org:8443/api/v3" "https://git.example.org:00443/api" "https://git.example.org:65535/api"];
   assert lib.all (host: !(accepts (withForge {inherit host;}))) ["" "git.example.org:443" "git.example.org/api"];
   assert !(accepts (withForge {adapterInputs."relative.py" = lib.concatStrings (lib.replicate 64 "f");}));
   assert lib.all (arguments: !(accepts (withForge {adapter = example.forges.enterprise.adapter // {inherit arguments;};}))) [["relative/script.py"] ["--file=/mutable/script.py"]];

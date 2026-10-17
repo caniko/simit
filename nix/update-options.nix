@@ -52,7 +52,12 @@ in {
   forges = option (types.attrsOf (types.submodule {
     options = {
       host = mkOption {type = types.strMatching "[^/:[:space:]]+";};
-      apiUrl = mkOption {type = types.strMatching "https://[^/?#@[:space:]]+(/[^?#[:space:]]*)?";};
+      apiUrl = mkOption {
+        type = types.addCheck (types.strMatching "https://[^/:?#@[:space:]]+(:[0-9]{1,5})?(/[^?#[:space:]]*)?") (value: let
+          port = builtins.match "https://[^/:?#@[:space:]]+:([0-9]+)(/.*)?" value;
+        in
+          port == null || lib.toIntBase10 (builtins.head port) <= 65535);
+      };
       credentialFile = option (types.nullOr (types.addCheck absolute (path: !(normalized path == "/nix/store" || lib.hasPrefix "/nix/store/" (normalized path))))) null;
       adapter = mkOption {type = command;};
       adapterSha256 = option (types.nullOr sha256) null;
