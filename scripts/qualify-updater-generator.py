@@ -74,7 +74,7 @@ with tempfile.TemporaryDirectory(prefix="simit-packaged-updater-") as temporary:
         remote = case / "remote.git"
         run("git", "clone", "--quiet", "--bare", str(source), str(remote), env=env)
         control = case / "control.json"
-        save(control, {"remote": "https://fixture.example/team/demo.git"})
+        save(control, {"remotes": {f"fixture.example/team/{name}": f"https://fixture.example/team/{name}.git" for name in ["demo", "generator"]}})
         adapter = case / "adapter"
         adapter.write_text(f"#!{python} -I\nimport sys\nsys.argv = [sys.argv[0], {str(control)!r}, {str(remote)!r}, *sys.argv[1:]]\n" +
                            (repository / "tests/fixtures/updater-adapter.py").read_text())
