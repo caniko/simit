@@ -7,6 +7,7 @@ use std::path::PathBuf;
 mod checkpoint;
 mod engine;
 mod github;
+mod sandbox;
 pub mod schema;
 use schema::*;
 

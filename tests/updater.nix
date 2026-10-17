@@ -76,6 +76,18 @@
       })
     ];
   };
+  multiWorkspaceSystem = system.extendModules {
+    modules = [
+      {
+        services.simit-updater.workspaces.other = {
+          root = "/work/other-projects";
+          stateDirectory = "/state/other-updater";
+          inventory.file = "/runtime/other-inventory.json";
+        };
+        services.simit-updater.profiles.other = example.profiles.fleet // {workspace = "other";};
+      }
+    ];
+  };
 in
   assert rendered.schemaVersion == 1;
   assert rendered.profiles.fleet.select.includePaths == ["**"];
@@ -114,7 +126,10 @@ in
   assert service.serviceConfig.User == "operator";
   assert service.serviceConfig.UMask == "0077";
   assert service.serviceConfig.PrivateTmp;
+  assert lib.elem system.config.services.simit-updater.sandboxPackage service.path;
   assert service.serviceConfig.ReadWritePaths == ["/state/custom-updater"];
+  assert multiWorkspaceSystem.config.systemd.services.simit-updater-fleet.serviceConfig.ReadWritePaths == ["/state/custom-updater"];
+  assert multiWorkspaceSystem.config.systemd.services.simit-updater-other.serviceConfig.ReadWritePaths == ["/state/other-updater"];
   assert !(lib.any (rule: lib.hasInfix "/state/custom-updater" rule) system.config.systemd.tmpfiles.rules);
   assert !(builtins.tryEval (builtins.deepSeq (mkConfig (example // {forges.enterprise = example.forges.enterprise // {adapterSha256 = null;};})) true)).success;
   assert system.config.systemd.timers.simit-updater-fleet.timerConfig.OnCalendar == "hourly";

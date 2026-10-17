@@ -23,6 +23,7 @@ policy for standalone installations.
     # Git is the only default runtime tool. Choose additional tools according
     # to the generator, adapters, transport and signing policy in this profile.
     runtimePackages = with pkgs; [git cargo nix gnupg];
+    sandboxPackage = pkgs.bubblewrap;
 
     workspaces.projects = {
       root = "/work/projects";
@@ -103,6 +104,7 @@ using the module's dedicated `simit-updater` user. Services load the generated
 regular Nix-store policy file directly; `/etc/simit/updates.json` remains its
 operator-facing link. Provision that user's Git
 identity, signing configuration, transport and credential-file access.
+Each service can write only the state directory of its profile's workspace.
 
 ## Selection and inventory
 
@@ -174,13 +176,13 @@ For each repository:
 
 1. Resolve forge identity, remote default branch, target revision and protection.
 2. Qualify the pinned generator source and verify its enrolled executable.
-3. Obtain `init ci --primary-only --plan-json` in an isolated clone. The versioned
+3. Obtain `init ci --primary-only --plan-json` in an isolated Linux sandbox. The versioned
    ownership plan supplies writes and deletions; it uses the project's existing
    resolved configuration without creating a new configuration file. Generation
    must preserve persistent updater state, Git configuration, hooks and refs as
    well as source files. State outside the current checkout is checkpointed and
    verified before trusting the plan, including when generation fails. Detected
-   mutations are restored and the transaction fails.
+    mutations are restored and the transaction fails.
 4. Compare managed files with the adopted baseline, prepare a scoped candidate
    commit, and retain its diff and identity. Every present managed path must stay
    in the plan or be explicitly listed as obsolete; omission cannot drop ownership.
@@ -191,6 +193,23 @@ For each repository:
 
 Managed hashes identify canonical Git blobs from the staged/committed tree,
 so clean/smudge filters and newline conversion do not invalidate the next rollout.
+An adopted receipt with a missing baseline requires explicit reconciliation;
+`enrollCurrent` cannot silently initialize it again. Serialized state must fit the
+same size limit used by the reader before it can replace a retained receipt.
+
+Generation exposes only the read-only candidate checkout, the enrolled executable,
+and the read-only Nix store. The child has a cleared environment, private temporary
+home, network and PID namespaces, and no updater state, credential files, SSH agent,
+host Nix daemon or host fetcher cache. Its PID-1 lifetime kills and reaps descendants
+before successful generation completes. The native `sandboxPackage` is configurable
+in the dev-station flake; standalone users supply immutable store-backed `bwrap`
+and runtime tools on `PATH`. Missing namespace support fails closed.
+
+Flake configuration forbids input/lock updates, flake-provided Nix settings and
+import-from-derivation. Evaluation uses a disposable local store without network
+access. Inputs must be available from the exposed source/store paths; private or
+unavailable inputs require explicit offline preparation rather than credentialed
+fetching during generation. Updater execution currently requires Linux.
 
 Existing workflow branch filters must admit `maintenanceRefPrefix`. Missing
 candidate events, checks or capability support cannot authorize landing. Remote

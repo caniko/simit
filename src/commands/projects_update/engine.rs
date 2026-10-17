@@ -147,6 +147,10 @@ pub fn save<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     let mut temp = tempfile::NamedTempFile::new_in(path.parent().context("missing state parent")?)?;
     serde_json::to_writer_pretty(&mut temp, value)?;
     temp.write_all(b"\n")?;
+    ensure!(
+        temp.as_file().metadata()?.len() <= crate::review::MAX_JSON_BYTES,
+        "serialized updater state exceeds the JSON read limit"
+    );
     temp.as_file().sync_all()?;
     temp.persist(path)?;
     File::open(path.parent().unwrap())?.sync_all()?;
@@ -519,20 +523,11 @@ fn git_metadata(checkout: &Path) -> Result<String> {
 fn generate(executable: &Path, checkout: &Path, state_directory: &Path) -> Result<CiUpdatePlan> {
     let metadata = git_metadata(checkout)?;
     let configuration = git(checkout, &["config", "--null", "--list", "--show-origin"])?;
-    let command = Command {
-        program: executable.to_owned(),
-        arguments: vec![
-            "init".into(),
-            "ci".into(),
-            "--primary-only".into(),
-            "--plan-json".into(),
-        ],
-        timeout_seconds: 900,
-    };
     let output = super::checkpoint::protect(state_directory, checkout, || {
-        command_output(&command, &[], Some(checkout))
+        run_tool(super::sandbox::generation(executable, checkout)?, 900)
+            .context("credential-free generation sandbox failed")
     })?;
-    let plan: CiUpdatePlan = serde_json::from_slice(&output)?;
+    let plan: CiUpdatePlan = serde_json::from_str(&output)?;
     // Inspect raw metadata before invoking Git with any generator-written policy.
     ensure!(
         git_metadata(checkout)? == metadata,
@@ -689,6 +684,11 @@ pub fn update(
             previous.coordinate == project.coordinate
                 && previous.repository_id == observed.repository_id,
             "repository identity differs from the enrolled receipt"
+        );
+        ensure!(
+            !matches!(previous.phase.as_str(), "qualified" | "unchanged")
+                || root.join("baseline.json").is_file(),
+            "adopted receipt has no baseline; explicit reconciliation is required"
         );
     }
     let checkout = root.join("checkout");
@@ -1187,10 +1187,113 @@ pub fn update(
     Ok(receipt)
 }
 
-#[cfg(all(test, unix))]
+// The updater's execution boundary is Linux namespaces; portable policy and
+// adapter tests remain in their respective modules on the other platforms.
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn oversized_serialized_state_preserves_the_readable_previous_receipt() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("receipt.json");
+        save(&path, &"previous readable receipt").unwrap();
+        // JSON escaping doubles these bytes although raw command output fits.
+        let diff = "\n".repeat(crate::review::MAX_JSON_BYTES as usize / 2);
+        assert!(save(&path, &json!({"diff": diff})).is_err());
+        let previous: String = crate::review::read_json(&path).unwrap();
+        assert_eq!(previous, "previous readable receipt");
+    }
+
+    #[test]
+    fn adopted_receipts_cannot_reenroll_a_missing_baseline() {
+        for phase in ["qualified", "unchanged"] {
+            let f = Fixture::new();
+            let adopted = f.update(true).unwrap();
+            assert_eq!(adopted.phase, "qualified");
+            if phase == "unchanged" {
+                assert_eq!(f.update(true).unwrap().phase, phase);
+            }
+            fs::remove_file(f.root().join("baseline.json")).unwrap();
+            let checkout = f.root().join("checkout");
+            fs::write(checkout.join("new-managed.txt"), "project-owned content\n").unwrap();
+            let source = f.publish(&checkout, "occupy a previously adopted path");
+            let receipt = fs::read(f.root().join("receipt.json")).unwrap();
+            assert!(
+                f.update(true)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("adopted receipt has no baseline")
+            );
+            assert_eq!(f.remote_head(), source);
+            assert_eq!(fs::read(f.root().join("receipt.json")).unwrap(), receipt);
+        }
+    }
+
+    #[test]
+    fn generation_cannot_read_credentials_or_reach_host_network_and_daemon() {
+        let mut f = Fixture::new();
+        let secret = f.source.with_file_name("forge-credential");
+        fs::write(&secret, "private-forge-token").unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        fs::write(
+            f.source.join("flake.nix"),
+            "{ outputs = _: { simitConfig.ci.extra_setup = [\"safe\"]; }; }\n",
+        )
+        .unwrap();
+        f.publish(&f.source, "enroll a no-input flake");
+        f.inject_generator(&format!(r#"
+import os, socket, subprocess
+from pathlib import Path
+assert not Path({secret:?}).exists()
+assert not Path('/nix/var/nix/daemon-socket/socket').exists()
+assert not any(key in os.environ for key in ('SSH_AUTH_SOCK', 'GH_TOKEN', 'GITHUB_TOKEN'))
+try:
+    socket.create_connection(('127.0.0.1', {port}), timeout=0.1)
+except OSError:
+    pass
+else:
+    raise AssertionError('host network is reachable')
+argv = ['nix', 'eval', '--json', '--offline', '--no-update-lock-file', '--no-write-lock-file']
+safe = subprocess.run([*argv, '.#simitConfig'], capture_output=True, text=True)
+assert safe.returncode == 0, safe.stderr
+assert 'safe' in safe.stdout
+unsafe = subprocess.run([*argv, '--expr', 'builtins.readFile {nix_path}'], capture_output=True, text=True)
+assert unsafe.returncode != 0
+assert 'private-forge-token' not in unsafe.stdout
+"#, secret = secret.to_str().unwrap(), nix_path = serde_json::to_string(secret.to_str().unwrap()).unwrap()));
+        assert_eq!(f.update(true).unwrap().phase, "qualified");
+        assert_eq!(fs::read_to_string(secret).unwrap(), "private-forge-token");
+    }
+
+    #[test]
+    fn detached_generator_descendants_cannot_mutate_state_after_generation() {
+        let mut f = Fixture::new();
+        let target = f.source.with_file_name("descendant-poison");
+        let state = f.config.workspaces["projects"].state_directory.clone();
+        let held = lock(&state).unwrap();
+        f.inject_generator(&format!(
+            r#"
+import os, time
+from pathlib import Path
+assert os.getpid() == 1
+if os.fork() == 0:
+    os.setsid()
+    time.sleep(0.2)
+    Path({:?}).write_text('poisoned')
+    os._exit(0)
+"#,
+            target.to_str().unwrap()
+        ));
+        assert_eq!(f.update(true).unwrap().phase, "qualified");
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(!target.exists());
+        verify_lock(&state, &held).unwrap();
+        assert!(!state.join("generation-checkpoint.json").exists());
+        assert_eq!(f.update(true).unwrap().phase, "unchanged");
+    }
 
     #[test]
     fn managed_paths_cannot_disappear_without_explicit_retirement() {
@@ -1278,18 +1381,19 @@ mod tests {
 
     #[test]
     fn replacing_the_workspace_lock_retains_recovery_and_stops_the_transaction() {
-        let mut f = Fixture::new();
+        let f = Fixture::new();
         let state = f.config.workspaces["projects"].state_directory.clone();
         let held = lock(&state).unwrap();
         let path = state.join("lock");
-        f.inject_generator(&format!("from pathlib import Path\nimport os\nlock = Path({:?})\nmode = lock.stat().st_mode & 0o777\nlock.unlink()\nlock.touch()\nos.chmod(lock, mode)\n", path.to_str().unwrap()));
+        let checkout = state.join("checkout");
+        fs::create_dir(&checkout).unwrap();
         let source = f.remote_head();
-        assert!(
-            f.update(true)
-                .unwrap_err()
-                .to_string()
-                .contains("workspace lock")
-        );
+        let result = super::super::checkpoint::protect(&state, &checkout, || {
+            fs::remove_file(&path)?;
+            fs::write(&path, "")?;
+            Ok(())
+        });
+        assert!(result.unwrap_err().to_string().contains("workspace lock"));
         assert!(verify_lock(&state, &held).is_err());
         assert_eq!(f.remote_head(), source);
         assert!(!f.root().join("receipt.json").exists());
@@ -1388,7 +1492,7 @@ mod tests {
                     f.update(true)
                         .unwrap_err()
                         .to_string()
-                        .contains("persistent updater state")
+                        .contains("generation sandbox failed")
                 );
                 assert_eq!(fs::read(&target).ok(), original);
                 assert_eq!(
@@ -1502,7 +1606,7 @@ mod tests {
                 f.update(true)
                     .unwrap_err()
                     .to_string()
-                    .contains("modified Git metadata"),
+                    .contains("generation sandbox failed"),
                 "{mutation}"
             );
             assert_eq!(f.remote_head(), source);

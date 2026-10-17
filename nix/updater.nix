@@ -30,6 +30,11 @@ in {
           this workstation's enrolled projects and Git configuration.
         '';
       };
+      sandboxPackage = lib.mkOption {
+        type = lib.types.package;
+        default = pkgs.bubblewrap;
+        description = "Immutable Bubblewrap implementation used for credential-free, network-isolated generation.";
+      };
       user = lib.mkOption {
         type = lib.types.str;
         default = "simit-updater";
@@ -63,12 +68,12 @@ in {
     users.groups = lib.mkIf (cfg.user == "simit-updater") {simit-updater = {};};
     environment.systemPackages = [cfg.package];
     environment.etc."simit/updates.json".source = policy;
-    systemd.services = lib.mapAttrs' (name: _:
+    systemd.services = lib.mapAttrs' (name: profile:
       lib.nameValuePair "simit-updater-${name}" {
         description = "Qualify and deploy Simit profile ${name}";
         wants = ["network-online.target"];
         after = ["network-online.target"];
-        path = cfg.runtimePackages;
+        path = [cfg.sandboxPackage pkgs.bash] ++ cfg.runtimePackages;
         environment.HOME = user.home;
         serviceConfig = {
           Type = "oneshot";
@@ -79,7 +84,7 @@ in {
           PrivateTmp = true;
           ProtectSystem = "strict";
           ProtectHome = "read-only";
-          ReadWritePaths = map (workspace: workspace.stateDirectory) (builtins.attrValues desired.workspaces);
+          ReadWritePaths = [desired.workspaces.${profile.workspace}.stateDirectory];
           ExecStart = lib.escapeShellArgs ["${cfg.package}/bin/simit" "projects" "update" "--config" policy "--profile" name "--push" "--json" "--wait-seconds" (toString cfg.waitSeconds)];
           TimeoutStartSec = "infinity";
         };
