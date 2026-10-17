@@ -274,14 +274,16 @@ impl Config {
             );
             absolute(&workspace.root)?;
             absolute(&workspace.state_directory)?;
-            self.state_directory(workspace)?;
-            ensure!(
-                self.workspaces.values().all(|source| !workspace
-                    .state_directory
-                    .starts_with(&source.root)
-                    && !source.root.starts_with(&workspace.state_directory)),
-                "update state and all source workspace trees must be disjoint"
-            );
+            let state = self.state_directory(workspace)?;
+            for (other_name, other) in &self.workspaces {
+                if name != other_name {
+                    let other = resolved_path(&other.state_directory)?;
+                    ensure!(
+                        !state.starts_with(&other) && !other.starts_with(&state),
+                        "workspace state trees must be disjoint"
+                    );
+                }
+            }
             ensure!(
                 workspace.inventory.file.is_some() != workspace.inventory.command.is_some(),
                 "choose exactly one inventory file or command"
@@ -409,6 +411,26 @@ impl Config {
                     && !profile.rollout.maintenance_ref_prefix.starts_with('-'),
                 "maintenance prefix must be a ref namespace ending in /"
             );
+            // Use Git's complete ref grammar before state creation or generation.
+            // The candidate suffix is always hexadecimal, so a fixed suffix
+            // validates every branch this policy can construct.
+            ensure!(
+                std::process::Command::new("git")
+                    .args([
+                        "check-ref-format",
+                        &format!(
+                            "refs/heads/{}0000000000000000",
+                            profile.rollout.maintenance_ref_prefix
+                        )
+                    ])
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status()
+                    .context("validate maintenance ref prefix with Git")?
+                    .success(),
+                "maintenance prefix is not a valid Git ref namespace"
+            );
             for pattern in profile
                 .select
                 .include_paths
@@ -522,6 +544,71 @@ mod tests {
         assert!(cfg.validate().is_err());
         cfg.workspaces.get_mut("other").unwrap().root = "/work/other".into();
         cfg.validate().unwrap();
+        for state in ["/state", "/state/updater", "/state/updater/child"] {
+            cfg.workspaces.get_mut("other").unwrap().state_directory = state.into();
+            assert!(cfg.validate().is_err(), "{state}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_state_aliases_cannot_bypass_disjointness() {
+        let root = tempfile::tempdir().unwrap();
+        let state = root.path().join("state");
+        std::fs::create_dir(&state).unwrap();
+        let alias = root.path().join("alias");
+        std::os::unix::fs::symlink(&state, &alias).unwrap();
+        let mut cfg = config();
+        cfg.workspaces.get_mut("projects").unwrap().state_directory = state;
+        let mut other: Workspace =
+            serde_json::from_value(serde_json::to_value(&cfg.workspaces["projects"]).unwrap())
+                .unwrap();
+        other.state_directory = alias.join("not-created");
+        cfg.workspaces.insert("other".into(), other);
+        assert!(
+            cfg.validate()
+                .unwrap_err()
+                .to_string()
+                .contains("workspace state trees must be disjoint")
+        );
+        assert!(!alias.join("not-created").exists());
+    }
+
+    #[test]
+    fn maintenance_prefixes_are_checked_before_transactions() {
+        for prefix in [
+            "simit..update/",
+            "simit@{update/",
+            ".hidden/update/",
+            "simit.lock/update/",
+            "simit//update/",
+            "simit/update ",
+            "simit/update?/",
+            "simit/update\\/",
+            "simit/update\n/",
+        ] {
+            let mut cfg = config();
+            cfg.profiles
+                .get_mut("fleet")
+                .unwrap()
+                .rollout
+                .maintenance_ref_prefix = prefix.into();
+            assert!(cfg.validate().is_err(), "{prefix:?}");
+        }
+        for prefix in [
+            "simit/update/",
+            "custom-layout/updates/",
+            "simit.update/",
+            "simit./update/",
+        ] {
+            let mut cfg = config();
+            cfg.profiles
+                .get_mut("fleet")
+                .unwrap()
+                .rollout
+                .maintenance_ref_prefix = prefix.into();
+            cfg.validate().unwrap();
+        }
     }
 
     #[test]

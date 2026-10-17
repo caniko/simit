@@ -1207,6 +1207,7 @@ pub fn update(
 
 // The updater's execution boundary is Linux namespaces; portable policy and
 // adapter tests remain in their respective modules on the other platforms.
+// Only namespace_* tests execute Bubblewrap; package checks run the rest here.
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
@@ -1225,7 +1226,7 @@ mod tests {
     }
 
     #[test]
-    fn adopted_receipts_cannot_reenroll_a_missing_baseline() {
+    fn namespace_adopted_receipts_cannot_reenroll_a_missing_baseline() {
         for phase in ["qualified", "unchanged"] {
             let f = Fixture::new();
             let adopted = f.update(true).unwrap();
@@ -1250,7 +1251,7 @@ mod tests {
     }
 
     #[test]
-    fn generation_cannot_read_credentials_or_reach_host_network_and_daemon() {
+    fn namespace_generation_cannot_read_credentials_or_reach_host_network_and_daemon() {
         let mut f = Fixture::new();
         let secret = f.source.with_file_name("forge-credential");
         fs::write(&secret, "private-forge-token").unwrap();
@@ -1267,6 +1268,7 @@ import os, socket, subprocess
 from pathlib import Path
 assert not Path({secret:?}).exists()
 assert not Path('/nix/var/nix/daemon-socket/socket').exists()
+assert Path('/nix/var/nix/db/schema').read_text().strip().isdigit()
 assert not any(key in os.environ for key in ('SSH_AUTH_SOCK', 'GH_TOKEN', 'GITHUB_TOKEN'))
 try:
     socket.create_connection(('127.0.0.1', {port}), timeout=0.1)
@@ -1287,7 +1289,7 @@ assert 'private-forge-token' not in unsafe.stdout
     }
 
     #[test]
-    fn generation_resolves_locked_remote_inputs_from_offline_store_registrations() {
+    fn namespace_generation_resolves_locked_remote_inputs_from_offline_store_registrations() {
         let mut f = Fixture::new();
         let input = f.source.with_file_name("seed").join("source");
         fs::create_dir_all(&input).unwrap();
@@ -1339,7 +1341,7 @@ assert 'offline-input' in value.stdout
     }
 
     #[test]
-    fn detached_generator_descendants_cannot_mutate_state_after_generation() {
+    fn namespace_detached_generator_descendants_cannot_mutate_state_after_generation() {
         let mut f = Fixture::new();
         let target = f.source.with_file_name("descendant-poison");
         let state = f.config.workspaces["projects"].state_directory.clone();
@@ -1366,7 +1368,7 @@ if os.fork() == 0:
     }
 
     #[test]
-    fn managed_paths_cannot_disappear_without_explicit_retirement() {
+    fn namespace_managed_paths_cannot_disappear_without_explicit_retirement() {
         let f = Fixture::new();
         assert_eq!(f.update(true).unwrap().phase, "qualified");
         let checkout = f.root().join("checkout");
@@ -1407,7 +1409,7 @@ if os.fork() == 0:
     }
 
     #[test]
-    fn managed_baselines_use_git_blobs_across_checkout_conversion() {
+    fn namespace_managed_baselines_use_git_blobs_across_checkout_conversion() {
         let f = Fixture::new();
         fs::write(f.source.join(".gitattributes"), "* text eol=crlf\n").unwrap();
         f.publish(&f.source, "enroll checkout conversion");
@@ -1435,7 +1437,7 @@ if os.fork() == 0:
     }
 
     #[test]
-    fn unrelated_non_utf8_filenames_do_not_block_managed_updates() {
+    fn namespace_unrelated_non_utf8_filenames_do_not_block_managed_updates() {
         use std::os::unix::ffi::OsStringExt;
         let f = Fixture::new();
         let name = std::ffi::OsString::from_vec(vec![b'a', 0xff]);
@@ -1533,7 +1535,7 @@ if os.fork() == 0:
     }
 
     #[test]
-    fn generators_cannot_poison_state_even_when_they_fail() {
+    fn namespace_generators_cannot_poison_state_even_when_they_fail() {
         for fail in [false, true] {
             for name in [
                 "baseline.json",
@@ -1646,7 +1648,7 @@ if os.fork() == 0:
     }
 
     #[test]
-    fn frozen_unattempted_projects_recheck_the_current_consumer_forge_host() {
+    fn namespace_frozen_unattempted_projects_recheck_the_current_consumer_forge_host() {
         let mut f = Fixture::new();
         let generator_forge =
             serde_json::from_value(serde_json::to_value(&f.config.forges["fixture"]).unwrap())
@@ -1685,7 +1687,7 @@ if os.fork() == 0:
     }
 
     #[test]
-    fn generators_cannot_change_git_identity_signing_remotes_or_hooks() {
+    fn namespace_generators_cannot_change_git_identity_signing_remotes_or_hooks() {
         for mutation in [
             "git config --local user.name 'Generator override'",
             "git config --local commit.gpgsign true",
@@ -1711,7 +1713,7 @@ if os.fork() == 0:
     }
 
     #[test]
-    fn unlanded_candidates_rebuild_after_source_movement_and_retain_the_old_receipt() {
+    fn namespace_unlanded_candidates_rebuild_after_source_movement_and_retain_the_old_receipt() {
         for phase in ["prepared", "candidate", "landing"] {
             let f = Fixture::new();
             f.control(json!({"candidate":"pending"}));
@@ -1750,7 +1752,7 @@ if os.fork() == 0:
     }
 
     #[test]
-    fn source_movement_after_landing_preserves_adoption_reconciliation() {
+    fn namespace_source_movement_after_landing_preserves_adoption_reconciliation() {
         for phase in ["landing", "adopting"] {
             let f = Fixture::new();
             f.control(json!({"adoption":"pending"}));
@@ -1812,7 +1814,7 @@ if os.fork() == 0:
     }
 
     #[test]
-    fn replaced_adapter_programs_and_script_arguments_cannot_qualify_a_candidate() {
+    fn namespace_replaced_adapter_programs_and_script_arguments_cannot_qualify_a_candidate() {
         for interpreter in [false, true] {
             let mut f = Fixture::new();
             let forge = f.config.forges.get_mut("fixture").unwrap();
@@ -1901,7 +1903,7 @@ if os.fork() == 0:
     }
 
     #[test]
-    fn profiles_keep_independent_candidates_receipts_and_baselines() {
+    fn namespace_profiles_keep_independent_candidates_receipts_and_baselines() {
         let mut f = Fixture::new();
         let mut other = serde_json::to_value(&f.config.profiles["fleet"]).unwrap();
         other["generator"]["sourceRevision"] = json!("b".repeat(40));
@@ -1937,7 +1939,7 @@ if os.fork() == 0:
     }
 
     #[test]
-    fn unrelated_configuration_edits_resume_the_same_frozen_candidate() {
+    fn namespace_unrelated_configuration_edits_resume_the_same_frozen_candidate() {
         let mut f = Fixture::new();
         f.write_inventory();
         f.control(json!({"candidate":"pending"}));
@@ -1981,7 +1983,7 @@ if os.fork() == 0:
     }
 
     #[test]
-    fn referenced_policy_changes_still_block_pending_candidates() {
+    fn namespace_referenced_policy_changes_still_block_pending_candidates() {
         for field in ["profile", "workspace", "forge"] {
             let mut f = Fixture::new();
             f.control(json!({"candidate":"pending"}));
@@ -2017,7 +2019,7 @@ if os.fork() == 0:
     }
 
     #[test]
-    fn executes_enrolled_snapshot_when_generator_path_changes_during_qualification() {
+    fn namespace_executes_enrolled_snapshot_when_generator_path_changes_during_qualification() {
         let f = Fixture::new();
         let generator = &f.config.profiles["fleet"].generator.executable;
         f.control(json!({"replaceGenerator":generator}));
@@ -2036,7 +2038,7 @@ if os.fork() == 0:
     }
 
     #[test]
-    fn interrupted_initial_clones_resume_without_manual_state_removal() {
+    fn namespace_interrupted_initial_clones_resume_without_manual_state_removal() {
         for complete in [false, true] {
             let f = Fixture::new();
             let root = profile_directory(&f.config.workspaces["projects"], "fleet")
@@ -2063,7 +2065,7 @@ if os.fork() == 0:
     }
 
     #[test]
-    fn continuation_reaches_later_batches_and_preserves_canary_barriers() {
+    fn namespace_continuation_reaches_later_batches_and_preserves_canary_barriers() {
         for qualification_status in ["failed", "pending"] {
             for (stop_on_failure, canary) in [(false, false), (false, true), (true, false)] {
                 let mut f = Fixture::new();
@@ -2181,7 +2183,7 @@ if os.fork() == 0:
     }
 
     #[test]
-    fn custom_adapter_qualifies_non_actions_plan_through_adoption() {
+    fn namespace_custom_adapter_qualifies_non_actions_plan_through_adoption() {
         let f = Fixture::new();
         fs::write(f.source.join("fixture-backend"), ".crow/build.yaml\n").unwrap();
         git(&f.source, &["add", "fixture-backend"]).unwrap();
@@ -2390,7 +2392,7 @@ if os.fork() == 0:
     }
 
     #[test]
-    fn preview_pending_candidate_and_interrupted_adoption_resume_same_commit() {
+    fn namespace_preview_pending_candidate_and_interrupted_adoption_resume_same_commit() {
         let f = Fixture::new();
         let source = f.remote_head();
         let preview = f.update(false).unwrap();
@@ -2432,7 +2434,7 @@ if os.fork() == 0:
     }
 
     #[test]
-    fn concurrent_default_branch_writer_is_not_overwritten_by_landing() {
+    fn namespace_concurrent_default_branch_writer_is_not_overwritten_by_landing() {
         let f = Fixture::new();
         let source = f.remote_head();
         fs::write(
@@ -2468,7 +2470,7 @@ if os.fork() == 0:
     }
 
     #[test]
-    fn changed_policy_or_source_invalidates_retained_candidate() {
+    fn namespace_changed_policy_or_source_invalidates_retained_candidate() {
         let f = Fixture::new();
         f.control(json!({"candidate":"pending"}));
         let pending = f.update(true).unwrap();
@@ -2485,7 +2487,7 @@ if os.fork() == 0:
     }
 
     #[test]
-    fn ignored_managed_outputs_are_committed_and_later_edits_block_updates() {
+    fn namespace_ignored_managed_outputs_are_committed_and_later_edits_block_updates() {
         let f = Fixture::new();
         fs::write(f.source.join(".gitignore"), "new-managed.txt\n").unwrap();
         git(&f.source, &["add", ".gitignore"]).unwrap();
@@ -2535,7 +2537,7 @@ if os.fork() == 0:
     }
 
     #[test]
-    fn failed_or_unsupported_qualification_cannot_land() {
+    fn namespace_failed_or_unsupported_qualification_cannot_land() {
         let f = Fixture::new();
         let source = f.remote_head();
         for status in ["failed", "unsupported", "skipped", "cancelled"] {

@@ -107,6 +107,8 @@ regular Nix-store policy file directly; `/etc/simit/updates.json` remains its
 operator-facing link. Provision that user's Git
 identity, signing configuration, transport and credential-file access.
 Each service can write only the state directory of its profile's workspace.
+Workspace state directories must be disjoint, including after runtime symlink
+resolution. Enrollment digests use exactly 64 lowercase hexadecimal characters.
 
 ## Selection and inventory
 
@@ -210,7 +212,7 @@ and runtime tools on `PATH`. Missing namespace support fails closed.
 Flake configuration forbids input/lock updates, flake-provided Nix settings and
 import-from-derivation. Evaluation uses a disposable local store without network
 access, initialized from a consistent SQLite snapshot of the host's Nix store
-registrations. The snapshot includes committed WAL contents; the live database
+registrations and its schema marker. The snapshot includes committed WAL contents; the live database
 and daemon are never exposed to generation. `NIX_STATE_DIR` may select the host
 state directory; its default is `/nix/var/nix`. Locked inputs already registered
 in the host store remain available offline. Missing inputs require explicit
@@ -308,6 +310,7 @@ custom workspace paths, runtime tools and a credential file that does not exist
 during evaluation.
 
 Bubblewrap's runtime tests cannot run inside Nix's build sandbox. Package and
-nextest derivations exclude that engine test group; the hosted native
+nextest derivations exclude only engine tests named `namespace_*`; the other
+engine checks remain in package qualification. The hosted native
 `cargo test --all-features` and `cargo test --no-default-features` steps run the
 complete group, including credential isolation and locked offline inputs.

@@ -2,6 +2,7 @@
   inherit (lib) mkOption types;
   option = type: default: mkOption {inherit type default;};
   strings = types.listOf types.str;
+  sha256 = types.strMatching "[0-9a-f]{64}";
   command = types.submodule {
     options = {
       program = mkOption {type = types.str;};
@@ -42,8 +43,8 @@ in {
       apiUrl = mkOption {type = types.str;};
       credentialFile = option (types.nullOr types.str) null;
       adapter = mkOption {type = command;};
-      adapterSha256 = option (types.nullOr types.str) null;
-      adapterInputs = option (types.attrsOf types.str) {};
+      adapterSha256 = option (types.nullOr sha256) null;
+      adapterInputs = option (types.attrsOf sha256) {};
       checkAuthority = mkOption {type = types.str;};
     };
   })) {};
@@ -57,7 +58,7 @@ in {
             sourceRevision = mkOption {type = types.str;};
             sourceCoordinate = mkOption {type = types.str;};
             forge = mkOption {type = types.str;};
-            executableSha256 = option (types.nullOr types.str) null;
+            executableSha256 = option (types.nullOr sha256) null;
             requiredChecks = mkOption {type = requirements;};
           };
         };

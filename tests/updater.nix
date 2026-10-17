@@ -47,6 +47,21 @@
     };
   withGenerator = generator:
     example // {profiles.fleet = example.profiles.fleet // {generator = example.profiles.fleet.generator // generator;};};
+  withForge = forge: example // {forges.enterprise = example.forges.enterprise // forge;};
+  withOtherState = stateDirectory:
+    example
+    // {
+      workspaces =
+        example.workspaces
+        // {
+          other = {
+            root = "/work/other-projects";
+            inherit stateDirectory;
+            inventory.file = "/runtime/other-inventory.json";
+          };
+        };
+    };
+  accepts = value: (builtins.tryEval (builtins.deepSeq (mkConfig value) true)).success;
   system = lib.nixosSystem {
     system = "x86_64-linux";
     modules = [
@@ -90,6 +105,13 @@
   };
 in
   assert rendered.schemaVersion == 1;
+  assert lib.all (state: !(accepts (withOtherState state))) ["/state" "/state/custom-updater" "/state//custom-updater/child/"];
+  assert accepts (withOtherState "/state/custom-updater-sibling");
+  assert lib.all (hash:
+    !(accepts (withGenerator {executableSha256 = hash;}))
+    && !(accepts (withForge {adapterSha256 = hash;}))
+    && !(accepts (withForge {adapterInputs."/runtime/adapter.py" = hash;}))) ["" "abc" (lib.concatStrings (lib.replicate 64 "A")) (lib.concatStrings (lib.replicate 64 "g"))];
+  assert accepts (withForge {adapterInputs."/runtime/adapter.py" = lib.concatStrings (lib.replicate 64 "f");});
   assert rendered.profiles.fleet.select.includePaths == ["**"];
   assert rendered.forges.enterprise.credentialFile == "/run/credentials/not-present-during-evaluation";
   assert lib.all (state: !(builtins.tryEval (builtins.deepSeq (mkConfig (workspaceWithState state)) true)).success) ["/" "/work" "/work/" "/work//custom-layout" "/work/custom-layout/state"];

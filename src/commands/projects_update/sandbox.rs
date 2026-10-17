@@ -31,6 +31,8 @@ pub fn generation(executable: &Path, checkout: &Path, nix_state: &Path) -> Resul
             .unwrap_or_else(|| "/nix/var/nix".into());
         let destination = nix_state.join("db/db.sqlite");
         std::fs::create_dir_all(destination.parent().context("missing database parent")?)?;
+        let schema_path = source_state.join("db/schema");
+        let schema = std::fs::read(&schema_path)?;
         let mut snapshot = Command::new(tool("sqlite3")?);
         snapshot
             .env_clear()
@@ -45,6 +47,11 @@ pub fn generation(executable: &Path, checkout: &Path, nix_state: &Path) -> Resul
                     .replace('\'', "''")
             ));
         super::engine::run_tool(snapshot, 120).context("snapshot offline Nix registrations")?;
+        ensure!(
+            std::fs::read(schema_path)? == schema,
+            "Nix store schema changed during snapshot"
+        );
+        std::fs::write(nix_state.join("db/schema"), schema)?;
     }
     let path = std::env::join_paths(&directories)?;
     let mut command = Command::new(tool("bwrap")?);
@@ -53,6 +60,7 @@ pub fn generation(executable: &Path, checkout: &Path, nix_state: &Path) -> Resul
         .stdin(std::process::Stdio::null())
         .args([
             "--unshare-all",
+            "--unshare-user",
             "--die-with-parent",
             "--new-session",
             "--as-pid-1",

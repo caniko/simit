@@ -135,9 +135,9 @@
           inherit cargoArtifacts;
           nativeBuildInputs = commonArgs.nativeBuildInputs ++ [preCommitBin];
           nativeCheckInputs = [pkgs.git pkgs.gnupg pkgs.nodejs pkgs.jq pkgs.python3 pkgs.actionlint] ++ pkgs.lib.optionals pkgs.stdenv.isLinux [pkgs.bubblewrap pkgs.nix pkgs.sqlite];
-          # Bubblewrap cannot nest inside Nix's build sandbox. CI runs these
-          # tests in both feature modes through its native cargo test steps.
-          cargoTestExtraArgs = "-- --skip commands::projects_update::engine::tests";
+          # Namespace integration runs in both hosted runtime feature modes.
+          # Keep the engine's non-namespace checks in package qualification.
+          cargoTestExtraArgs = "-- --skip commands::projects_update::engine::tests::namespace_";
         });
 
       publicCargoArtifacts = publicCraneLib.buildDepsOnly commonArgs;
@@ -146,7 +146,7 @@
           cargoArtifacts = publicCargoArtifacts;
           nativeBuildInputs = commonArgs.nativeBuildInputs ++ [preCommitBin];
           nativeCheckInputs = [pkgs.git pkgs.gnupg pkgs.nodejs pkgs.jq pkgs.python3 pkgs.actionlint] ++ pkgs.lib.optionals pkgs.stdenv.isLinux [pkgs.bubblewrap pkgs.nix pkgs.sqlite];
-          cargoTestExtraArgs = "-- --skip commands::projects_update::engine::tests";
+          cargoTestExtraArgs = "-- --skip commands::projects_update::engine::tests::namespace_";
         });
 
       actionlintCheck =
@@ -218,7 +218,7 @@
         // {
           cargoArtifacts = publicCargoArtifacts;
           nativeCheckInputs = [pkgs.git pkgs.gnupg pkgs.nodejs pkgs.jq pkgs.python3 pkgs.actionlint] ++ pkgs.lib.optionals pkgs.stdenv.isLinux [pkgs.bubblewrap pkgs.nix pkgs.sqlite];
-          cargoNextestExtraArgs = "-E 'not test(commands::projects_update::engine::tests)'";
+          cargoNextestExtraArgs = "-E 'not test(commands::projects_update::engine::tests::namespace_)'";
         });
 
       docCheck = publicCraneLib.cargoDoc (commonArgs

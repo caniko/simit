@@ -36,7 +36,7 @@
       nativeCheckInputs = [pkgs.git pkgs.gnupg pkgs.clippy pkgs.rustfmt pkgs.nodejs pkgs.jq pkgs.actionlint pkgs.python3] ++ pkgs.lib.optionals pkgs.stdenv.isLinux [pkgs.bubblewrap pkgs.nix pkgs.sqlite];
       # Namespace execution is qualified outside Nix's build sandbox by the
       # source CI's all-features and no-default-features runtime suites.
-      checkFlags = ["--skip=commands::projects_update::engine::tests"];
+      checkFlags = ["--skip=commands::projects_update::engine::tests::namespace_"];
       postInstall = ''
         for binary in simit repo-review; do
           wrapProgram "$out/bin/$binary" \
