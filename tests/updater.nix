@@ -16,6 +16,7 @@
         program = "/bin/simit";
         arguments = ["projects" "update-github-adapter"];
       };
+      adapterSha256 = lib.concatStrings (lib.replicate 64 "b");
     };
     profiles.fleet = {
       workspace = "projects";
@@ -97,6 +98,8 @@ in
   assert service.serviceConfig.User == "operator";
   assert service.serviceConfig.UMask == "0077";
   assert service.serviceConfig.ReadWritePaths == ["/state/custom-updater"];
+  assert !(lib.any (rule: lib.hasInfix "/state/custom-updater" rule) system.config.systemd.tmpfiles.rules);
+  assert !(builtins.tryEval (builtins.deepSeq (mkConfig (example // {forges.enterprise = example.forges.enterprise // {adapterSha256 = null;};})) true)).success;
   assert system.config.systemd.timers.simit-updater-fleet.timerConfig.OnCalendar == "hourly";
   assert lib.hasInfix "--profile" service.serviceConfig.ExecStart;
   assert map lib.getName system.config.services.simit-updater.runtimePackages == ["git"];

@@ -63,7 +63,6 @@ in {
     users.groups = lib.mkIf (cfg.user == "simit-updater") {simit-updater = {};};
     environment.systemPackages = [cfg.package];
     environment.etc."simit/updates.json".source = policy;
-    systemd.tmpfiles.rules = map (workspace: "d ${lib.escapeShellArg workspace.stateDirectory} 0700 ${cfg.user} ${user.group} - -") (builtins.attrValues desired.workspaces);
     systemd.services = lib.mapAttrs' (name: _:
       lib.nameValuePair "simit-updater-${name}" {
         description = "Qualify and deploy Simit profile ${name}";

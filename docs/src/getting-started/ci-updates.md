@@ -189,6 +189,24 @@ generator forge policy. Changes to unrelated configuration entries therefore
 preserve the frozen selection and resumable candidates; changes to a transaction's
 referenced policy still invalidate its pending receipt.
 
+Provision each service state directory with mode `0700`, owned by its configured
+user. The module does not create arbitrary state paths through root-owned tmpfiles.
+At runtime the updater resolves existing path components, checks every state tree
+against the resolved workspace roots, and rejects overlaps before creating files.
+
+Forge adapters require a store-backed executable or `adapterSha256`. File-valued
+configured arguments must be absolute store paths or enrolled in `adapterInputs`
+as path-to-SHA-256 entries. Digest-enrolled files are executed or read from private
+verified snapshots; store inputs must resolve to files inside the store. Adapters
+run from a private directory, with runtime values supplied through request JSON.
+HTTPS clone URLs must not contain a username or password; SSH usernames remain
+supported through operator Git authentication.
+
+Generator qualification selects push workflows containing the configured required
+check names under their enrolled application authority. Unrelated docs or release
+workflows do not become implicit generator requirements. Consumer qualification
+continues to admit every owned push workflow independently.
+
 The v1 built-in adapter supports GitHub Actions originals with configured app
 authority, complete job/step success and app-bound legacy protection contexts.
 Active rulesets and PR-required protections are rejected. It does not migrate

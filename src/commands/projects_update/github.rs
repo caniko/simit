@@ -132,6 +132,19 @@ fn requested_workflows(
     Ok(workflows)
 }
 
+fn generator_workflow_paths(
+    runs: &[Value],
+    mut required: impl FnMut(&Value) -> Result<bool>,
+) -> Result<BTreeSet<String>> {
+    let mut paths = BTreeSet::new();
+    for run in runs {
+        if required(run)? {
+            paths.insert(text(run, "/path")?);
+        }
+    }
+    Ok(paths)
+}
+
 pub fn execute(request: &AdapterRequest) -> Result<AdapterResponse> {
     request.validate()?;
     let (_, repository) = request
@@ -226,10 +239,27 @@ pub fn execute(request: &AdapterRequest) -> Result<AdapterResponse> {
         query.push_str(&format!("&branch={}", encoded(branch)));
     }
     let runs = api.list(&query, "workflow_runs")?;
+    let mut generator_jobs = std::collections::BTreeMap::new();
     let paths = if request.workflows.is_empty() {
-        runs.iter()
-            .map(|r| text(r, "/path"))
-            .collect::<Result<BTreeSet<_>>>()?
+        generator_workflow_paths(&runs, |run| {
+            let run_id = number(run, "/id")?;
+            let jobs = api.list(
+                &format!("{endpoint}/actions/runs/{run_id}/attempts/1/jobs"),
+                "jobs",
+            )?;
+            let suite = api.get(&format!(
+                "{endpoint}/check-suites/{}",
+                number(run, "/check_suite_id")?
+            ))?;
+            let required = request.required_checks.iter().any(|requirement| {
+                suite["app"]["id"]
+                    .as_u64()
+                    .is_some_and(|id| id.to_string() == requirement.authority)
+                    && jobs.iter().any(|job| job["name"] == requirement.name)
+            });
+            generator_jobs.insert(run_id, (jobs, suite));
+            Ok(required)
+        })?
     } else {
         requested_workflows(&request.workflows, |path| {
             let path = path.split('/').map(encoded).collect::<Vec<_>>().join("/");
@@ -263,14 +293,20 @@ pub fn execute(request: &AdapterRequest) -> Result<AdapterResponse> {
             continue;
         };
         let run_id = number(run, "/id")?;
-        let suite = api.get(&format!(
-            "{endpoint}/check-suites/{}",
-            number(run, "/check_suite_id")?
-        ))?;
-        let jobs = api.list(
-            &format!("{endpoint}/actions/runs/{run_id}/attempts/1/jobs"),
-            "jobs",
-        )?;
+        let (jobs, suite) = if let Some(evidence) = generator_jobs.remove(&run_id) {
+            evidence
+        } else {
+            (
+                api.list(
+                    &format!("{endpoint}/actions/runs/{run_id}/attempts/1/jobs"),
+                    "jobs",
+                )?,
+                api.get(&format!(
+                    "{endpoint}/check-suites/{}",
+                    number(run, "/check_suite_id")?
+                ))?,
+            )
+        };
         let completed = serde_json::json!({"total_count":jobs.len(),"jobs":jobs});
         if !admit_run(
             (id, authority),
@@ -388,6 +424,22 @@ fn admit_run(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn unrelated_failed_or_ambiguous_workflows_do_not_gate_generator_checks() {
+        let runs = [
+            json!({"id":1,"path":".github/workflows/ci.yaml"}),
+            json!({"id":2,"path":".github/workflows/docs.yaml","conclusion":"failure"}),
+            json!({"id":3,"path":".github/workflows/docs.yaml","conclusion":"failure"}),
+        ];
+        let paths = generator_workflow_paths(&runs, |run| Ok(run["id"] == 1)).unwrap();
+        assert_eq!(paths, BTreeSet::from([".github/workflows/ci.yaml".into()]));
+        assert!(
+            generator_workflow_paths(&runs, |_| Ok(false))
+                .unwrap()
+                .is_empty()
+        );
+    }
 
     #[test]
     fn shared_job_names_qualify_only_after_each_workflow_succeeds() {

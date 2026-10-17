@@ -42,6 +42,8 @@ in {
       apiUrl = mkOption {type = types.str;};
       credentialFile = option (types.nullOr types.str) null;
       adapter = mkOption {type = command;};
+      adapterSha256 = option (types.nullOr types.str) null;
+      adapterInputs = option (types.attrsOf types.str) {};
       checkAuthority = mkOption {type = types.str;};
     };
   })) {};

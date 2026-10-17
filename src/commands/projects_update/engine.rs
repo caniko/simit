@@ -217,14 +217,49 @@ fn request(
 
 fn adapter(forge: &Forge, request: &AdapterRequest, root: &Path) -> Result<AdapterResponse> {
     request.validate()?;
+    let snapshots = tempfile::Builder::new()
+        .prefix("adapter-")
+        .tempdir_in(root)?;
+    let mut command = forge.adapter.clone();
+    command.program = verified_input(
+        &command.program,
+        forge.adapter_sha256.as_deref(),
+        snapshots.path(),
+        "adapter executable",
+    )?;
+    for argument in &mut command.arguments {
+        let (prefix, value) = if argument.starts_with('-') {
+            argument
+                .split_once('=')
+                .map_or((None, argument.as_str()), |(flag, value)| {
+                    (Some(flag), value)
+                })
+        } else {
+            (None, argument.as_str())
+        };
+        let path = Path::new(value);
+        if path.is_absolute() {
+            let pinned = verified_input(
+                path,
+                forge.adapter_inputs.get(path).map(String::as_str),
+                snapshots.path(),
+                "adapter input",
+            )?;
+            *argument = prefix.map_or_else(
+                || pinned.to_string_lossy().into_owned(),
+                |flag| format!("{flag}={}", pinned.display()),
+            );
+        }
+    }
     let path = root.join("request.json");
     save(&path, request)?;
     let response: AdapterResponse = serde_json::from_slice(&command_output(
-        &forge.adapter,
+        &command,
         &["--request".into(), path.to_string_lossy().into_owned()],
-        None,
+        Some(snapshots.path()),
     )?)?;
     response.validate(request)?;
+    remote_identity(&response.remote, &request.coordinate)?;
     save(
         &root.join(format!(
             "evidence-{}.json",
@@ -266,6 +301,7 @@ fn remote_identity(remote: &str, expected: &str) -> Result<()> {
     let url = url::Url::parse(remote)?;
     ensure!(
         matches!(url.scheme(), "https" | "ssh")
+            && (url.scheme() != "https" || url.username().is_empty())
             && url.password().is_none()
             && url.query().is_none()
             && url.fragment().is_none(),
@@ -280,6 +316,41 @@ fn remote_identity(remote: &str, expected: &str) -> Result<()> {
         "adapter remote differs from enrolled coordinate"
     );
     Ok(())
+}
+
+fn store_file(path: &Path, store: &Path) -> Result<PathBuf> {
+    let resolved = path.canonicalize()?;
+    ensure!(
+        path.starts_with(store) && resolved.starts_with(store) && resolved.is_file(),
+        "store input must resolve to an immutable file inside the Nix store"
+    );
+    Ok(resolved)
+}
+
+fn verified_input(
+    path: &Path,
+    expected: Option<&str>,
+    snapshots: &Path,
+    label: &str,
+) -> Result<PathBuf> {
+    let Some(expected) = expected else {
+        return store_file(path, Path::new("/nix/store"));
+    };
+    let bytes = fs::read(path)?;
+    ensure!(
+        digest(&bytes) == expected,
+        "{label} digest differs from enrollment"
+    );
+    let directory = snapshots.join(digest(path.as_os_str().as_encoded_bytes()));
+    fs::create_dir_all(&directory)?;
+    let pinned = directory.join(path.file_name().context("input has no file name")?);
+    fs::write(&pinned, bytes)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&pinned, fs::Permissions::from_mode(0o500))?;
+    }
+    Ok(pinned)
 }
 
 fn inspect(
@@ -305,7 +376,6 @@ fn inspect(
         response.status == "success",
         "repository inspection incomplete"
     );
-    remote_identity(&response.remote, &project.coordinate)?;
     Ok(response)
 }
 
@@ -394,9 +464,21 @@ pub fn update(
     push: bool,
     wait_seconds: u64,
 ) -> Result<Receipt> {
+    config.validate()?;
     let deadline = Instant::now() + Duration::from_secs(wait_seconds);
-    let root = profile_directory(workspace, profile_name)
-        .join(format!("repo-{}", digest(project.coordinate.as_bytes())));
+    let state_directory = config.state_directory(workspace)?;
+    let profile_directory = resolved_path(&profile_directory(workspace, profile_name))?;
+    ensure!(
+        profile_directory.starts_with(&state_directory),
+        "profile state escapes its workspace state directory"
+    );
+    let root = resolved_path(
+        &profile_directory.join(format!("repo-{}", digest(project.coordinate.as_bytes()))),
+    )?;
+    ensure!(
+        root.starts_with(&profile_directory),
+        "repository state escapes its profile state directory"
+    );
     private_directory(&root)?;
     let receipt_path = root.join("receipt.json");
     let config_digest = policy_digest(config, profile, workspace, Some(&project.forge))?;
@@ -494,29 +576,12 @@ pub fn update(
     let generator_snapshot = tempfile::Builder::new()
         .prefix("generator-")
         .tempdir_in(&root)?;
-    let generator = if let Some(d) = &profile.generator.executable_sha256 {
-        let bytes = fs::read(&profile.generator.executable)?;
-        ensure!(
-            &digest(&bytes) == d,
-            "generator executable digest differs from enrollment"
-        );
-        let executable = generator_snapshot.path().join(
-            profile
-                .generator
-                .executable
-                .file_name()
-                .context("generator executable has no file name")?,
-        );
-        fs::write(&executable, bytes)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&executable, fs::Permissions::from_mode(0o500))?;
-        }
-        executable
-    } else {
-        profile.generator.executable.clone()
-    };
+    let generator = verified_input(
+        &profile.generator.executable,
+        profile.generator.executable_sha256.as_deref(),
+        generator_snapshot.path(),
+        "generator executable",
+    )?;
     // Qualify the immutable generator source independently of consumer candidates.
     let generator_forge = &config.forges[&profile.generator.forge];
     let generator_evidence = wait(
@@ -896,6 +961,122 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn credential_bearing_clone_urls_are_rejected_before_evidence_is_saved() {
+        for remote in [
+            "https://TOKEN@fixture.example/team/demo.git",
+            "https://git:TOKEN@fixture.example/team/demo.git",
+        ] {
+            let f = Fixture::new();
+            f.control(json!({"remote":remote}));
+            assert!(f.update(false).is_err());
+            let root = profile_directory(&f.config.workspaces["projects"], "fleet")
+                .join(format!("repo-{}", digest(f.project.coordinate.as_bytes())));
+            assert!(!fs::read_dir(root).unwrap().any(|entry| {
+                entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("evidence-")
+            }));
+        }
+        assert!(
+            remote_identity(
+                "https://fixture.example/team/demo.git",
+                "fixture.example/team/demo"
+            )
+            .is_ok()
+        );
+        assert!(
+            remote_identity(
+                "ssh://git@fixture.example/team/demo.git",
+                "fixture.example/team/demo"
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn replaced_adapter_programs_and_script_arguments_cannot_qualify_a_candidate() {
+        for interpreter in [false, true] {
+            let mut f = Fixture::new();
+            let forge = f.config.forges.get_mut("fixture").unwrap();
+            let mut script = forge.adapter.program.clone();
+            let mut original = fs::read_to_string(&script).unwrap();
+            if interpreter {
+                let python = original.lines().next().unwrap().strip_prefix("#!").unwrap();
+                let shell =
+                    fs::canonicalize(std::env::var_os("BASH").unwrap_or_else(|| "/bin/sh".into()))
+                        .unwrap();
+                original = format!(
+                    "#!/bin/sh\nexec '{python}' - \"$@\" <<'SIMIT_ADAPTER_ORACLE'\n{original}\nSIMIT_ADAPTER_ORACLE\n"
+                );
+                script = f.control.with_file_name("adapter-input.sh");
+                fs::write(&script, &original).unwrap();
+                forge.adapter.program = shell.clone();
+                forge.adapter.arguments = vec![script.to_string_lossy().into_owned()];
+                forge.adapter_sha256 = Some(digest(&fs::read(shell).unwrap()));
+                forge
+                    .adapter_inputs
+                    .insert(script.clone(), digest(original.as_bytes()));
+            }
+            f.config.validate().unwrap();
+            f.control(json!({"candidate":"pending"}));
+            let pending = f.update(true).unwrap();
+            let marker = f.control.with_file_name("unverified-adapter-ran");
+            let injected = if interpreter {
+                format!("\ntouch '{}'\n", marker.display())
+            } else {
+                format!(
+                    "\nimport pathlib; pathlib.Path({:?}).write_text('unverified')\n",
+                    marker.to_str().unwrap()
+                )
+            };
+            fs::write(&script, original.replacen('\n', &injected, 1)).unwrap();
+            f.control(json!({}));
+            assert!(f.update(true).is_err());
+            assert!(!marker.exists());
+            assert_eq!(f.remote_head(), pending.source);
+        }
+    }
+
+    #[test]
+    fn immutable_store_inputs_cannot_resolve_to_mutable_targets() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = temp.path().join("store");
+        fs::create_dir(&store).unwrap();
+        let store = store.canonicalize().unwrap();
+        let mutable = temp.path().join("mutable");
+        fs::write(&mutable, "unverified bytes").unwrap();
+        let escaping = store.join("escaping");
+        std::os::unix::fs::symlink(&mutable, &escaping).unwrap();
+        assert!(store_file(&escaping, &store).is_err());
+        let immutable = store.join("immutable");
+        fs::write(&immutable, "store bytes").unwrap();
+        let valid = store.join("valid");
+        std::os::unix::fs::symlink(&immutable, &valid).unwrap();
+        assert_eq!(
+            store_file(&valid, &store).unwrap(),
+            immutable.canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn resolved_workspace_overlap_is_rejected_before_state_creation() {
+        let mut f = Fixture::new();
+        let workspace = f.config.workspaces.get_mut("projects").unwrap();
+        fs::create_dir_all(&workspace.root).unwrap();
+        let alias = workspace.state_directory.with_file_name("state-alias");
+        std::os::unix::fs::symlink(&workspace.root, &alias).unwrap();
+        workspace.state_directory = alias.join("nested/updater");
+        let source = workspace.root.clone();
+        let permissions = fs::metadata(&source).unwrap().permissions();
+        f.write_inventory();
+        assert!(f.cli("fleet", true).is_err());
+        assert!(!source.join("nested").exists());
+        assert_eq!(fs::metadata(source).unwrap().permissions(), permissions);
+    }
+
+    #[test]
     fn profiles_keep_independent_candidates_receipts_and_baselines() {
         let mut f = Fixture::new();
         let mut other = serde_json::to_value(&f.config.profiles["fleet"]).unwrap();
@@ -1271,10 +1452,13 @@ mod tests {
             .unwrap();
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(&generator, fs::Permissions::from_mode(0o700)).unwrap();
+            let adapter = root.join("adapter");
+            fs::write(&adapter, format!("#!{python}\nimport sys\nsys.argv = [sys.argv[0], {:?}, {:?}, *sys.argv[1:]]\n{}", control.to_str().unwrap(), remote.to_str().unwrap(), fs::read_to_string(fixtures.join("updater-adapter.py")).unwrap())).unwrap();
+            fs::set_permissions(&adapter, fs::Permissions::from_mode(0o700)).unwrap();
             let config: Config = serde_json::from_value(json!({
                 "schemaVersion":1,
                 "workspaces":{"projects":{"root":root.join("projects"),"stateDirectory":root.join("state"),"inventory":{"file":root.join("inventory.json")}}},
-                "forges":{"fixture":{"host":"fixture.example","apiUrl":"https://fixture.example/api","adapter":{"program":python,"arguments":[fixtures.join("updater-adapter.py"),control,remote]},"checkAuthority":"777"}},
+                "forges":{"fixture":{"host":"fixture.example","apiUrl":"https://fixture.example/api","adapter":{"program":adapter},"adapterSha256":digest(&fs::read(&adapter).unwrap()),"checkAuthority":"777"}},
                 "profiles":{"fleet":{"workspace":"projects","scopes":["ci"],"enrollCurrent":true,"rollout":{"maintenanceRefPrefix":"maintenance/"},"generator":{"executable":generator,"executableSha256":digest(&fs::read(&generator).unwrap()),"sourceRevision":"a".repeat(40),"sourceCoordinate":"fixture.example/team/generator","forge":"fixture","requiredChecks":[{"name":"generator","authority":"777"}]}}}
             })).unwrap();
             config.validate().unwrap();

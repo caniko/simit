@@ -60,11 +60,12 @@ pub fn run(args: Args) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&receipts)?);
         return Ok(());
     }
-    let _lock = engine::lock(&workspace.state_directory)?;
+    let state_directory = config.state_directory(workspace)?;
+    let _lock = engine::lock(&state_directory)?;
     let selection_policy = engine::policy_digest(&config, profile, workspace, None)?;
     let selection_key =
         crate::review::canonical_digest(&(&args.profile, &selection_policy, &args.repo))?;
-    let frozen_path = engine::selection_path(&workspace.state_directory, &selection_key);
+    let frozen_path = engine::selection_path(&state_directory, &selection_key);
     let prior: Option<engine::FrozenSelection> = if args.push && frozen_path.exists() {
         Some(crate::review::read_json(&frozen_path)?)
     } else {

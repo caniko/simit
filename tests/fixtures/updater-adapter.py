@@ -33,7 +33,7 @@ checks = [
 response = dict(
     schemaVersion=1, coordinate=request["coordinate"], repositoryId="42",
     defaultBranch=control.get("defaultBranch", "trunk"), revision=revision,
-    remote=pathlib.Path(remote).as_uri(), policyDigest=control.get("policy", "b" * 64),
+    remote=control.get("remote", pathlib.Path(remote).as_uri()), policyDigest=control.get("policy", "b" * 64),
     requirements=[dict(name="test", authority="777")], status=status, checks=checks,
 )
 if request["operation"] == "inspect":

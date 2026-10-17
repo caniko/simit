@@ -1,4 +1,4 @@
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -54,6 +54,9 @@ pub struct Forge {
     pub api_url: String,
     pub credential_file: Option<PathBuf>,
     pub adapter: Command,
+    pub adapter_sha256: Option<String>,
+    #[serde(default)]
+    pub adapter_inputs: BTreeMap<PathBuf, String>,
     /// Provider-specific check identity, interpreted by the enrolled adapter.
     pub check_authority: String,
 }
@@ -247,6 +250,18 @@ pub struct Project {
 }
 
 impl Config {
+    pub fn state_directory(&self, workspace: &Workspace) -> Result<PathBuf> {
+        let state = resolved_path(&workspace.state_directory)?;
+        for source in self.workspaces.values() {
+            let root = resolved_path(&source.root)?;
+            ensure!(
+                !state.starts_with(&root) && !root.starts_with(&state),
+                "resolved update state and source workspace trees must be disjoint"
+            );
+        }
+        Ok(state)
+    }
+
     pub fn validate(&self) -> Result<()> {
         ensure!(
             self.schema_version == 1,
@@ -259,6 +274,7 @@ impl Config {
             );
             absolute(&workspace.root)?;
             absolute(&workspace.state_directory)?;
+            self.state_directory(workspace)?;
             ensure!(
                 self.workspaces.values().all(|source| !workspace
                     .state_directory
@@ -298,6 +314,40 @@ impl Config {
                 "invalid forge identity"
             );
             forge.adapter.validate()?;
+            absolute(&forge.adapter.program)?;
+            ensure!(
+                forge.adapter_sha256.is_some() || forge.adapter.program.starts_with("/nix/store"),
+                "non-store forge adapters require an enrolled executable SHA-256"
+            );
+            if let Some(hash) = &forge.adapter_sha256 {
+                sha256(hash)?;
+            }
+            for (path, hash) in &forge.adapter_inputs {
+                absolute(path)?;
+                sha256(hash)?;
+            }
+            for argument in &forge.adapter.arguments {
+                let value = if argument.starts_with('-') {
+                    argument
+                        .split_once('=')
+                        .map_or(argument.as_str(), |(_, value)| value)
+                } else {
+                    argument
+                };
+                let path = Path::new(value);
+                if path.is_absolute() {
+                    absolute(path)?;
+                    ensure!(
+                        path.starts_with("/nix/store") || forge.adapter_inputs.contains_key(path),
+                        "file-valued adapter arguments require a store path or enrolled SHA-256"
+                    );
+                } else {
+                    ensure!(
+                        !value.contains(['/', '\\']) && !matches!(value, "." | ".."),
+                        "adapter file arguments must be absolute"
+                    );
+                }
+            }
             if let Some(path) = &forge.credential_file {
                 absolute(path)?;
                 ensure!(
@@ -380,11 +430,30 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn adapter_programs_and_file_arguments_require_enrollment() {
+        let mut cfg = config();
+        cfg.forges.get_mut("example").unwrap().adapter_sha256 = None;
+        assert!(cfg.validate().is_err());
+        let forge = cfg.forges.get_mut("example").unwrap();
+        forge.adapter.program = "/nix/store/fixture/bin/python".into();
+        forge.adapter.arguments = vec!["/mutable/adapter.py".into()];
+        assert!(cfg.validate().is_err());
+        cfg.forges
+            .get_mut("example")
+            .unwrap()
+            .adapter_inputs
+            .insert("/mutable/adapter.py".into(), "a".repeat(64));
+        cfg.validate().unwrap();
+        cfg.forges.get_mut("example").unwrap().adapter.arguments = vec!["../adapter.py".into()];
+        assert!(cfg.validate().is_err());
+    }
+
     fn config() -> Config {
         serde_json::from_value(serde_json::json!({
             "schemaVersion":1,
             "workspaces":{"projects":{"root":"/work/projects","stateDirectory":"/state/updater","inventory":{"file":"/work/inventory.json"}}},
-            "forges":{"example":{"host":"forge.example","apiUrl":"https://forge.example/api","adapter":{"program":"/bin/adapter"},"checkAuthority":"777"}},
+            "forges":{"example":{"host":"forge.example","apiUrl":"https://forge.example/api","adapter":{"program":"/bin/adapter"},"adapterSha256":"b".repeat(64),"checkAuthority":"777"}},
             "profiles":{"fleet":{"workspace":"projects","scopes":["ci"],"generator":{"executable":"/nix/store/fixture/bin/simit","sourceRevision":"a".repeat(40),"sourceCoordinate":"forge.example/team/generator","forge":"example","requiredChecks":[{"name":"test","authority":"777"}]}}}
         })).unwrap()
     }
@@ -578,6 +647,32 @@ fn absolute(path: &Path) -> Result<()> {
         "runtime paths must be absolute and must not contain traversal components"
     );
     Ok(())
+}
+
+pub fn resolved_path(path: &Path) -> Result<PathBuf> {
+    absolute(path)?;
+    let mut ancestor = path;
+    let mut missing = Vec::new();
+    loop {
+        match std::fs::symlink_metadata(ancestor) {
+            Ok(_) => {
+                let mut resolved = ancestor.canonicalize()?;
+                for component in missing.into_iter().rev() {
+                    resolved.push(component);
+                }
+                return Ok(resolved);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                missing.push(
+                    ancestor
+                        .file_name()
+                        .context("missing runtime path ancestor")?,
+                );
+                ancestor = ancestor.parent().context("missing runtime path parent")?;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
 }
 pub fn sha256(value: &str) -> Result<()> {
     ensure!(

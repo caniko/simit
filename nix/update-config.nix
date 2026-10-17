@@ -23,9 +23,13 @@
     && lib.hasPrefix "${cfg.forges.${profile.generator.forge}.host}/" profile.generator.sourceCoordinate
     && profile.scopes == ["ci"]
     && profile.generator.requiredChecks != [];
+  validForge = forge:
+    absolute forge.adapter.program
+    && (forge.adapterSha256 != null || lib.hasPrefix "/nix/store/" forge.adapter.program);
 in
   if
     lib.all validWorkspace (builtins.attrValues cfg.workspaces)
+    && lib.all validForge (builtins.attrValues cfg.forges)
     && lib.all validProfile (builtins.attrValues cfg.profiles)
   then cfg
   else throw "simit updater: invalid workspace paths/inventory source or profile enrollment"
