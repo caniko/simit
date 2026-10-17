@@ -206,3 +206,8 @@ nix develop .#test -c cargo test --locked --test init_ci \
 
 Reuse a dedicated `--target-dir` across invocations. A fresh directory compiles
 existing dependencies and is not evidence of dependency additions.
+
+The existing CI `nix flake check` also evaluates `checks.<system>.simit-updater-config`.
+It checks typed policy rendering and the NixOS service/timer configuration with
+custom workspace paths, runtime tools and a credential file that does not exist
+during evaluation.

@@ -302,6 +302,11 @@
         simit-audit = auditCheck;
         simit-deny = denyCheck;
         simit-custody-source = custodySourceCheck;
+        simit-updater-config = let
+          checked = import ./tests/updater.nix {inherit nixpkgs;};
+        in
+          assert checked.serviceVerified;
+            pkgs.writeText "simit-updater-config.json" (builtins.toJSON checked.rendered);
 
         clippy = clippyCheck;
         nextest = nextestCheck;
