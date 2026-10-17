@@ -379,7 +379,7 @@ pub fn execute(request: &AdapterRequest) -> Result<AdapterResponse> {
         schema_version: 1,
         coordinate: request.coordinate.clone(),
         repository_id: id.to_string(),
-        default_branch,
+        default_branch: default_branch.clone(),
         revision: revision.clone(),
         remote: text(&repo, "/clone_url")?,
         policy_digest: crate::review::canonical_digest(&policy)?,
