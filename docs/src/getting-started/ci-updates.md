@@ -326,8 +326,10 @@ workflow calls require an adapter that can establish the underlying outcomes.
 This source check applies to generator and consumer qualification, and to
 pre-push admission of committed candidate bytes.
 Required checks from other applications, unbound contexts, active rulesets and
-PR-required protections are rejected during admission. It does not migrate
-protection contexts, CI engine variables, or PR-only custody contracts. Those
+PR-required protections are rejected during admission.
+Ruleset admission queries each exact maintenance/adoption branch, including a
+maintenance ref that has not been created, before publishing a prepared receipt.
+It does not migrate protection contexts, CI engine variables, or PR-only custody contracts. Those
 transitions require a later protocol with explicit ordered migration support.
 Other forge/CI backends can enroll an absolute adapter command implementing the
 same versioned inspect/qualify contract and its source-binding requirements.

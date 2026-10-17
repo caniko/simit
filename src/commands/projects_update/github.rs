@@ -268,6 +268,19 @@ fn generator_workflow_paths(
     Ok(paths)
 }
 
+fn admit_rules(
+    endpoint: &str,
+    branch: &str,
+    mut get: impl FnMut(&str) -> Result<Value>,
+) -> Result<()> {
+    let rules = get(&format!("{endpoint}/rules/branches/{}", encoded(branch)))?;
+    ensure!(
+        rules.as_array().context("missing branch rules")?.is_empty(),
+        "active rulesets require an adapter with ruleset-transition support"
+    );
+    Ok(())
+}
+
 fn protection_requirements(protection: &Value, authority: u64) -> Result<Vec<Requirement>> {
     let status = &protection["required_status_checks"];
     if status.is_null() {
@@ -334,12 +347,17 @@ pub fn execute(request: &AdapterRequest) -> Result<AdapterResponse> {
     );
     let id = number(&repo, "/id")?;
     let default_branch = text(&repo, "/default_branch")?;
-    let branch = if request.operation == "admit" {
-        default_branch.as_str()
+    let branch = request.branch.as_deref().unwrap_or(&default_branch);
+    if matches!(request.operation.as_str(), "inspect" | "admit") {
+        // Rules can govern a maintenance ref before it exists. Query that exact
+        // name without requiring a branch object or substituting the default.
+        admit_rules(&endpoint, branch, |path| api.list(path, ""))?;
+    }
+    let info = if request.operation == "admit" {
+        Value::Null
     } else {
-        request.branch.as_deref().unwrap_or(&default_branch)
+        api.get(&format!("{endpoint}/branches/{}", encoded(branch)))?
     };
-    let info = api.get(&format!("{endpoint}/branches/{}", encoded(branch)))?;
     let revision = if matches!(request.operation.as_str(), "qualify" | "admit") {
         request
             .revision
@@ -350,14 +368,6 @@ pub fn execute(request: &AdapterRequest) -> Result<AdapterResponse> {
     };
     let mut requirements = Vec::new();
     let policy = if request.operation == "inspect" {
-        let rules = api.list(
-            &format!("{endpoint}/rules/branches/{}", encoded(branch)),
-            "",
-        )?;
-        ensure!(
-            rules.as_array().context("missing branch rules")?.is_empty(),
-            "active rulesets require an adapter with ruleset-transition support"
-        );
         let protection = if info["protected"] == true {
             api.get(&format!(
                 "{endpoint}/branches/{}/protection",
@@ -639,6 +649,46 @@ mod tests {
             protection_requirements(&Value::Null, 777)
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn ruleset_admission_checks_the_exact_uncreated_maintenance_branch() {
+        let endpoint = "repos/team/demo";
+        let rules = |path: &str| -> Result<Value> {
+            Ok(match path {
+                "repos/team/demo/rules/branches/custom-default" => json!([]),
+                "repos/team/demo/rules/branches/maintenance%2F0123456789abcdef" => {
+                    json!([{"type":"creation"}])
+                }
+                _ => panic!("unexpected branch rules request: {path}"),
+            })
+        };
+        admit_rules(endpoint, "custom-default", rules).unwrap();
+        assert!(
+            admit_rules(endpoint, "maintenance/0123456789abcdef", rules)
+                .unwrap_err()
+                .to_string()
+                .contains("active rulesets")
+        );
+        admit_rules(endpoint, "maintenance/uncreated", |path| {
+            assert_eq!(
+                path,
+                "repos/team/demo/rules/branches/maintenance%2Funcreated"
+            );
+            Ok(json!([]))
+        })
+        .unwrap();
+        for invalid in [Value::Null, json!({}), json!({"rules":[]})] {
+            assert!(
+                admit_rules(endpoint, "maintenance/uncreated", |_| Ok(invalid.clone())).is_err()
+            );
+        }
+        assert!(
+            admit_rules(endpoint, "maintenance/uncreated", |_| anyhow::bail!(
+                "rules inventory unavailable"
+            ))
+            .is_err()
         );
     }
 
