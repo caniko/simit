@@ -59,7 +59,7 @@ fn tool_command(
     Ok(child)
 }
 
-fn run_tool(command: std::process::Command, timeout_seconds: u64) -> Result<String> {
+pub(super) fn run_tool(command: std::process::Command, timeout_seconds: u64) -> Result<String> {
     let log = tempfile::NamedTempFile::new()?;
     let result = process::run_command_with_limits(
         command,
@@ -73,6 +73,13 @@ fn run_tool(command: std::process::Command, timeout_seconds: u64) -> Result<Stri
     match result {
         Ok(output) => Ok(output),
         Err(error) => {
+            // Unit-test tools use synthetic inputs; retain their diagnostics in
+            // hosted logs even when a failed Nix build removes its workdir.
+            #[cfg(test)]
+            eprintln!(
+                "fixture tool stderr: {}",
+                fs::read_to_string(log.path()).unwrap_or_default()
+            );
             let (_, path) = log.keep()?;
             Err(error).with_context(|| format!("tool stderr retained at {}", path.display()))
         }
@@ -418,6 +425,13 @@ fn verified_executable(
         );
         let bytes = fs::read(&current)?;
         let Some(script) = bytes.strip_prefix(b"#!") else {
+            if current == executable {
+                // An executable digest does not bind PT_INTERP, RPATH or shared
+                // libraries. Native programs must retain their store closure
+                // and original location rather than run a relocated snapshot.
+                return store_file(path, Path::new("/nix/store"))
+                    .context("native executable runtimes must be Nix-store backed");
+            }
             return Ok(executable);
         };
         let line = script
@@ -523,9 +537,13 @@ fn git_metadata(checkout: &Path) -> Result<String> {
 fn generate(executable: &Path, checkout: &Path, state_directory: &Path) -> Result<CiUpdatePlan> {
     let metadata = git_metadata(checkout)?;
     let configuration = git(checkout, &["config", "--null", "--list", "--show-origin"])?;
+    let nix_state = tempfile::tempdir()?;
     let output = super::checkpoint::protect(state_directory, checkout, || {
-        run_tool(super::sandbox::generation(executable, checkout)?, 900)
-            .context("credential-free generation sandbox failed")
+        run_tool(
+            super::sandbox::generation(executable, checkout, nix_state.path())?,
+            900,
+        )
+        .context("credential-free generation sandbox failed")
     })?;
     let plan: CiUpdatePlan = serde_json::from_str(&output)?;
     // Inspect raw metadata before invoking Git with any generator-written policy.
@@ -1269,6 +1287,58 @@ assert 'private-forge-token' not in unsafe.stdout
     }
 
     #[test]
+    fn generation_resolves_locked_remote_inputs_from_offline_store_registrations() {
+        let mut f = Fixture::new();
+        let input = f.source.with_file_name("seed").join("source");
+        fs::create_dir_all(&input).unwrap();
+        fs::write(
+            input.join("flake.nix"),
+            "{ outputs = _: { marker = \"offline-input\"; }; }\n",
+        )
+        .unwrap();
+        let mut add = std::process::Command::new("nix-store");
+        add.arg("--add").arg(&input);
+        let stored = run_tool(add, 120).unwrap();
+        assert!(Path::new(stored.trim()).is_dir());
+        let mut hash = std::process::Command::new("nix");
+        hash.args([
+            "--extra-experimental-features",
+            "nix-command",
+            "hash",
+            "path",
+            "--sri",
+        ])
+        .arg(&input);
+        let nar_hash = run_tool(hash, 120).unwrap().trim().to_owned();
+        fs::write(
+            f.source.join("flake.nix"),
+            r#"{
+  inputs.cached.url = "github:fixture/offline";
+  outputs = { cached, ... }: { simitConfig.ci.extra_setup = [ cached.marker ]; };
+}
+"#,
+        )
+        .unwrap();
+        save(&f.source.join("flake.lock"), &json!({
+            "version": 7, "root": "root", "nodes": {
+                "root": {"inputs": {"cached": "cached"}},
+                "cached": {
+                    "locked": {"type": "github", "owner": "fixture", "repo": "offline", "rev": "a".repeat(40), "narHash": nar_hash},
+                    "original": {"type": "github", "owner": "fixture", "repo": "offline"}
+                }
+            }
+        })).unwrap();
+        f.publish(&f.source, "enroll a locked cached remote input");
+        f.inject_generator(r#"
+import subprocess
+value = subprocess.run(['nix', 'eval', '--json', '--offline', '--no-update-lock-file', '--no-write-lock-file', '.#simitConfig'], capture_output=True, text=True)
+assert value.returncode == 0, value.stderr
+assert 'offline-input' in value.stdout
+"#);
+        assert_eq!(f.update(true).unwrap().phase, "qualified");
+    }
+
+    #[test]
     fn detached_generator_descendants_cannot_mutate_state_after_generation() {
         let mut f = Fixture::new();
         let target = f.source.with_file_name("descendant-poison");
@@ -1546,6 +1616,32 @@ if os.fork() == 0:
                 "fixture"
             )
             .is_ok()
+        );
+    }
+
+    #[test]
+    fn native_executable_digests_cannot_enroll_mutable_runtime_closures() {
+        let temp = tempfile::tempdir().unwrap();
+        let native = temp.path().join("adapter");
+        let python = std::process::Command::new("python3")
+            .args(["-c", "import sys; print(sys.executable)"])
+            .output()
+            .unwrap();
+        assert!(python.status.success());
+        let source = fs::canonicalize(String::from_utf8(python.stdout).unwrap().trim()).unwrap();
+        assert!(source.starts_with("/nix/store"));
+        fs::copy(&source, &native).unwrap();
+        let hash = digest(&fs::read(&native).unwrap());
+        assert_eq!(
+            verified_executable(&source, Some(&hash), temp.path(), "fixture").unwrap(),
+            source
+        );
+        let result = verified_executable(&native, Some(&hash), temp.path(), "fixture");
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("native executable runtimes must be Nix-store backed")
         );
     }
 

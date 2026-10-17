@@ -90,6 +90,8 @@ operator policy. Use the actual qualified generator source and required check
 names for the selected repositories. A non-store generator must additionally
 enroll `executableSha256`. Executable scripts require an immutable Nix-store
 interpreter chain; `/usr/bin/env` and mutable system interpreters are rejected.
+Native executables must be store-backed even with an enrolled digest: a digest
+alone does not bind their dynamic loaders or shared libraries.
 
 Runtime roots and credential paths are strings. Nix evaluation does not inspect
 worktrees, query forges or read credential contents. Git transport authentication
@@ -182,7 +184,7 @@ For each repository:
    must preserve persistent updater state, Git configuration, hooks and refs as
    well as source files. State outside the current checkout is checkpointed and
    verified before trusting the plan, including when generation fails. Detected
-    mutations are restored and the transaction fails.
+   mutations are restored and the transaction fails.
 4. Compare managed files with the adopted baseline, prepare a scoped candidate
    commit, and retain its diff and identity. Every present managed path must stay
    in the plan or be explicitly listed as obsolete; omission cannot drop ownership.
@@ -198,7 +200,7 @@ An adopted receipt with a missing baseline requires explicit reconciliation;
 same size limit used by the reader before it can replace a retained receipt.
 
 Generation exposes only the read-only candidate checkout, the enrolled executable,
-and the read-only Nix store. The child has a cleared environment, private temporary
+and the Nix store through a disposable copy-on-write overlay. The child has a cleared environment, private temporary
 home, network and PID namespaces, and no updater state, credential files, SSH agent,
 host Nix daemon or host fetcher cache. Its PID-1 lifetime kills and reaps descendants
 before successful generation completes. The native `sandboxPackage` is configurable
@@ -207,9 +209,14 @@ and runtime tools on `PATH`. Missing namespace support fails closed.
 
 Flake configuration forbids input/lock updates, flake-provided Nix settings and
 import-from-derivation. Evaluation uses a disposable local store without network
-access. Inputs must be available from the exposed source/store paths; private or
-unavailable inputs require explicit offline preparation rather than credentialed
-fetching during generation. Updater execution currently requires Linux.
+access, initialized from a consistent SQLite snapshot of the host's Nix store
+registrations. The snapshot includes committed WAL contents; the live database
+and daemon are never exposed to generation. `NIX_STATE_DIR` may select the host
+state directory; its default is `/nix/var/nix`. Locked inputs already registered
+in the host store remain available offline. Missing inputs require explicit
+preparation rather than credentialed fetching during generation. Updater execution
+currently requires Linux. SQLite is supplied by the NixOS module; standalone
+users include an immutable `sqlite3` on `PATH` for flake-backed configuration.
 
 Existing workflow branch filters must admit `maintenanceRefPrefix`. Missing
 candidate events, checks or capability support cannot authorize landing. Remote
@@ -299,3 +306,8 @@ The existing CI `nix flake check` also evaluates `checks.<system>.simit-updater-
 It checks typed policy rendering and the NixOS service/timer configuration with
 custom workspace paths, runtime tools and a credential file that does not exist
 during evaluation.
+
+Bubblewrap's runtime tests cannot run inside Nix's build sandbox. Package and
+nextest derivations exclude that engine test group; the hosted native
+`cargo test --all-features` and `cargo test --no-default-features` steps run the
+complete group, including credential isolation and locked offline inputs.

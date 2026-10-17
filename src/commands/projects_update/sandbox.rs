@@ -2,7 +2,7 @@
 use anyhow::{Context, Result, ensure};
 use std::{path::Path, process::Command};
 
-pub fn generation(executable: &Path, checkout: &Path) -> Result<Command> {
+pub fn generation(executable: &Path, checkout: &Path, nix_state: &Path) -> Result<Command> {
     ensure!(
         cfg!(target_os = "linux"),
         "updater generation requires Linux namespaces"
@@ -22,6 +22,30 @@ pub fn generation(executable: &Path, checkout: &Path) -> Result<Command> {
             })
             .with_context(|| format!("generation requires an immutable Nix-store {name} on PATH"))
     };
+    let flake = checkout.join("flake.nix");
+    if flake.is_file() && crate::config::flake_declares_simit_config(&flake)? {
+        // SQLite's online snapshot includes committed WAL content without
+        // exposing the live database, daemon socket or host fetcher cache.
+        let source_state = std::env::var_os("NIX_STATE_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| "/nix/var/nix".into());
+        let destination = nix_state.join("db/db.sqlite");
+        std::fs::create_dir_all(destination.parent().context("missing database parent")?)?;
+        let mut snapshot = Command::new(tool("sqlite3")?);
+        snapshot
+            .env_clear()
+            .stdin(std::process::Stdio::null())
+            .arg("-readonly")
+            .arg(source_state.join("db/db.sqlite"))
+            .arg(format!(
+                "VACUUM INTO '{}';",
+                destination
+                    .to_str()
+                    .context("non-UTF-8 snapshot path")?
+                    .replace('\'', "''")
+            ));
+        super::engine::run_tool(snapshot, 120).context("snapshot offline Nix registrations")?;
+    }
     let path = std::env::join_paths(&directories)?;
     let mut command = Command::new(tool("bwrap")?);
     command
@@ -35,8 +59,9 @@ pub fn generation(executable: &Path, checkout: &Path) -> Result<Command> {
             "--cap-drop",
             "ALL",
             "--disable-userns",
-            "--ro-bind",
+            "--overlay-src",
             "/nix/store",
+            "--tmp-overlay",
             "/nix/store",
             "--proc",
             "/proc",
@@ -51,6 +76,7 @@ pub fn generation(executable: &Path, checkout: &Path) -> Result<Command> {
     command.args(["--symlink"]).arg(tool("sh")?).arg("/bin/sh");
     command.arg("--ro-bind").arg(checkout).arg("/source");
     command.arg("--ro-bind").arg(executable).arg("/generator");
+    command.arg("--bind").arg(nix_state).arg("/nix/var/nix");
     for (key, value) in [
         ("PATH", path.to_str().context("non-UTF-8 tool PATH")?),
         ("HOME", "/tmp/home"),
@@ -62,12 +88,11 @@ pub fn generation(executable: &Path, checkout: &Path) -> Result<Command> {
         ("GIT_CONFIG_GLOBAL", "/dev/null"),
         ("GIT_TERMINAL_PROMPT", "0"),
         ("PYTHONNOUSERSITE", "1"),
-        // A private local store has no daemon socket, host DB, fetcher cache or
-        // credentials. Missing inputs fail closed in the network namespace.
-        (
-            "NIX_REMOTE",
-            "local?real=/tmp/nix-store&state=/tmp/nix-state&log=/tmp/nix-log",
-        ),
+        // Registrations are a consistent private snapshot. Store writes go to
+        // Bubblewrap's disposable overlay, never the host store or its daemon.
+        ("NIX_REMOTE", "local"),
+        ("NIX_STATE_DIR", "/nix/var/nix"),
+        ("NIX_LOG_DIR", "/tmp/nix-log"),
         ("NIX_CONF_DIR", "/tmp/nix-conf"),
         ("NIX_USER_CONF_FILES", "/dev/null"),
         (

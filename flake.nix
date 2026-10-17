@@ -134,7 +134,10 @@
         // {
           inherit cargoArtifacts;
           nativeBuildInputs = commonArgs.nativeBuildInputs ++ [preCommitBin];
-          nativeCheckInputs = [pkgs.git pkgs.gnupg pkgs.nodejs pkgs.jq pkgs.python3 pkgs.actionlint] ++ pkgs.lib.optionals pkgs.stdenv.isLinux [pkgs.bubblewrap pkgs.nix];
+          nativeCheckInputs = [pkgs.git pkgs.gnupg pkgs.nodejs pkgs.jq pkgs.python3 pkgs.actionlint] ++ pkgs.lib.optionals pkgs.stdenv.isLinux [pkgs.bubblewrap pkgs.nix pkgs.sqlite];
+          # Bubblewrap cannot nest inside Nix's build sandbox. CI runs these
+          # tests in both feature modes through its native cargo test steps.
+          cargoTestExtraArgs = "-- --skip commands::projects_update::engine::tests";
         });
 
       publicCargoArtifacts = publicCraneLib.buildDepsOnly commonArgs;
@@ -142,7 +145,8 @@
         // {
           cargoArtifacts = publicCargoArtifacts;
           nativeBuildInputs = commonArgs.nativeBuildInputs ++ [preCommitBin];
-          nativeCheckInputs = [pkgs.git pkgs.gnupg pkgs.nodejs pkgs.jq pkgs.python3 pkgs.actionlint] ++ pkgs.lib.optionals pkgs.stdenv.isLinux [pkgs.bubblewrap pkgs.nix];
+          nativeCheckInputs = [pkgs.git pkgs.gnupg pkgs.nodejs pkgs.jq pkgs.python3 pkgs.actionlint] ++ pkgs.lib.optionals pkgs.stdenv.isLinux [pkgs.bubblewrap pkgs.nix pkgs.sqlite];
+          cargoTestExtraArgs = "-- --skip commands::projects_update::engine::tests";
         });
 
       actionlintCheck =
@@ -213,7 +217,8 @@
       nextestCheck = publicCraneLib.cargoNextest (commonArgs
         // {
           cargoArtifacts = publicCargoArtifacts;
-          nativeCheckInputs = [pkgs.git pkgs.gnupg pkgs.nodejs pkgs.jq pkgs.python3 pkgs.actionlint] ++ pkgs.lib.optionals pkgs.stdenv.isLinux [pkgs.bubblewrap pkgs.nix];
+          nativeCheckInputs = [pkgs.git pkgs.gnupg pkgs.nodejs pkgs.jq pkgs.python3 pkgs.actionlint] ++ pkgs.lib.optionals pkgs.stdenv.isLinux [pkgs.bubblewrap pkgs.nix pkgs.sqlite];
+          cargoNextestExtraArgs = "-E 'not test(commands::projects_update::engine::tests)'";
         });
 
       docCheck = publicCraneLib.cargoDoc (commonArgs
@@ -326,7 +331,7 @@
         ];
       in {
         test = publicCraneLib.devShell {
-          packages = with pkgs; [git gnupg nodejs jq python3 actionlint perl] ++ lib.optionals stdenv.isLinux [bubblewrap nix];
+          packages = with pkgs; [git gnupg nodejs jq python3 actionlint perl] ++ lib.optionals stdenv.isLinux [bubblewrap nix sqlite];
         };
         msrv = let
           msrvToolchain = harbor.lib.rust.mkToolchain {
@@ -369,7 +374,7 @@
               rust-analyzer
               taplo
             ]
-            ++ pkgs.lib.optionals pkgs.stdenv.isLinux [pkgs.bubblewrap pkgs.nix]
+            ++ pkgs.lib.optionals pkgs.stdenv.isLinux [pkgs.bubblewrap pkgs.nix pkgs.sqlite]
             ++ pre-commit-check.enabledPackages;
           shellHook = pre-commit-check.shellHook;
         };

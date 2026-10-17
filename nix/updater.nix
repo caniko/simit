@@ -73,7 +73,7 @@ in {
         description = "Qualify and deploy Simit profile ${name}";
         wants = ["network-online.target"];
         after = ["network-online.target"];
-        path = [cfg.sandboxPackage pkgs.bash] ++ cfg.runtimePackages;
+        path = [cfg.sandboxPackage pkgs.bash pkgs.sqlite] ++ cfg.runtimePackages;
         environment.HOME = user.home;
         serviceConfig = {
           Type = "oneshot";
