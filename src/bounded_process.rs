@@ -657,26 +657,41 @@ mod tests {
     }
     #[test]
     fn deadline_kills_descendants_not_just_the_shell() {
+        use std::{os::fd::OwnedFd, os::unix::net::UnixStream};
+
         let root = tempfile::tempdir().unwrap();
         let marker = root.path().join("late-effect");
+        // Keep the descendant blocked until cleanup. A timed side effect races
+        // the supervisor's scheduling and can precede an otherwise correct kill.
+        let (mut peer, input) = UnixStream::pair().unwrap();
+        peer.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
         let start = Instant::now();
         let result = run_bounded(
             Command::new("sh")
-                .args(["-c", "(sleep 0.2; touch \"$MARKER\") & wait"])
+                .args([
+                    "-c",
+                    "exec 3<&0; (printf ready; cat <&3; touch \"$MARKER\") & wait",
+                ])
                 .env("MARKER", &marker),
             &root.path().join("stdout"),
             &root.path().join("stderr"),
             &Cancellation::default(),
             Limits {
-                timeout: Duration::from_millis(50),
+                timeout: Duration::from_secs(1),
                 stdout: 32,
                 stderr: 64,
             },
-            None,
+            Some(File::from(OwnedFd::from(input))),
         );
-        assert!(result.is_err());
-        assert!(start.elapsed() < Duration::from_secs(1));
-        std::thread::sleep(Duration::from_millis(250));
+        assert!(matches!(
+            result.unwrap_err().downcast_ref::<ProcessError>(),
+            Some(ProcessError::Timeout)
+        ));
+        assert!(start.elapsed() < Duration::from_secs(5));
+        assert_eq!(std::fs::read(root.path().join("stdout")).unwrap(), b"ready");
+        // EOF proves all inherited socket holders exited, including the
+        // background child; killing just the waiting shell cannot produce it.
+        assert_eq!(peer.read(&mut [0]).unwrap(), 0);
         assert!(!marker.exists());
     }
 
