@@ -1227,12 +1227,19 @@ mod tests {
         f.publish(&f.source, "enroll checkout conversion");
         let adopted = f.update(true).unwrap();
         assert_eq!(adopted.phase, "qualified");
-        assert_eq!(f.update(true).unwrap().phase, "unchanged");
+        // Materialize the committed representation before generation writes LF
+        // again. The subsequent fresh-clone rollout must accept that baseline.
+        git(
+            &f.root().join("checkout"),
+            &["checkout-index", "--all", "--force"],
+        )
+        .unwrap();
         assert!(
             fs::read(f.root().join("checkout/new-managed.txt"))
                 .unwrap()
                 .ends_with(b"\r\n")
         );
+        assert_eq!(f.update(true).unwrap().phase, "unchanged");
     }
 
     #[test]
