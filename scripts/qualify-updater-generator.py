@@ -8,6 +8,8 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
+from contextlib import ExitStack
 
 
 def run(*args, **kwargs):
@@ -21,6 +23,15 @@ def save(path, value):
     path.write_text(json.dumps(value, indent=2) + "\n")
 
 
+def stop_oracle(process):
+    process.terminate()
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+
+
 generator = Path(sys.argv[1]).resolve(strict=True)
 assert str(generator).startswith("/nix/store/")
 repository = Path(__file__).resolve().parents[1]
@@ -28,7 +39,7 @@ revision = run("git", "rev-parse", "HEAD", cwd=repository)
 python = Path(sys.executable).resolve(strict=True)
 assert str(python).startswith("/nix/store/")
 
-with tempfile.TemporaryDirectory(prefix="simit-packaged-updater-") as temporary:
+with tempfile.TemporaryDirectory(prefix="simit-packaged-updater-") as temporary, ExitStack() as cleanups:
     root = Path(temporary)
     # A digest-enrolled store script must keep its sibling resources too.
     wrapper = root / "updater-wrapper"
@@ -75,9 +86,18 @@ with tempfile.TemporaryDirectory(prefix="simit-packaged-updater-") as temporary:
         run("git", "clone", "--quiet", "--bare", str(source), str(remote), env=env)
         control = case / "control.json"
         save(control, {"remotes": {f"fixture.example/team/{name}": f"https://fixture.example/team/{name}.git" for name in ["demo", "generator"]}})
+        ready = case / "oracle-port"
+        oracle = subprocess.Popen([str(python), "-I", str(repository / "tests/fixtures/updater-adapter.py"),
+                                   str(control), str(remote), str(ready)], env=env, stdout=subprocess.DEVNULL)
+        cleanups.callback(stop_oracle, oracle)
+        deadline = time.monotonic() + 10
+        while not ready.exists() or not ready.read_text().isdigit():
+            assert oracle.poll() is None, "oracle exited before readiness"
+            assert time.monotonic() < deadline, "oracle did not become ready"
+            time.sleep(0.01)
         adapter = case / "adapter"
-        adapter.write_text(f"#!{python} -I\nimport sys\nsys.argv = [sys.argv[0], {str(control)!r}, {str(remote)!r}, *sys.argv[1:]]\n" +
-                           (repository / "tests/fixtures/updater-adapter.py").read_text())
+        adapter.write_text(f"#!{python} -I\noracle_url = 'http://127.0.0.1:{int(ready.read_text())}'\n" +
+                            (repository / "tests/fixtures/updater-adapter-client.py").read_text())
         adapter.chmod(0o500)
         inventory = case / "inventory.json"
         save(inventory, {"schemaVersion": 1, "root": str(case / "projects"),

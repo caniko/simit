@@ -280,42 +280,66 @@ fn adapter(forge: &Forge, request: &AdapterRequest, root: &Path) -> Result<Adapt
         .prefix("adapter-")
         .tempdir_in(root)?;
     let mut command = forge.adapter.clone();
-    command.program = verified_executable(
+    let executable = verified_executable(
         &command.program,
         forge.adapter_sha256.as_deref(),
         snapshots.path(),
         "adapter executable",
     )?;
-    for argument in &mut command.arguments {
-        let (prefix, value) = if argument.starts_with('-') {
+    let mut inputs = BTreeMap::new();
+    if command.program.starts_with("/nix/store") {
+        command.program = executable;
+    } else {
+        inputs.insert(command.program.clone(), executable);
+    }
+    // Helpers need enrollment even when imported by the entrypoint rather than
+    // named on argv. Bind verified bytes at their declared paths for imports.
+    for (path, hash) in &forge.adapter_inputs {
+        let pinned = verified_input(path, Some(hash), snapshots.path(), "adapter input")?;
+        ensure!(
+            !inputs.contains_key(path),
+            "adapter input overlaps its executable"
+        );
+        if !path.starts_with("/nix/store") {
+            inputs.insert(path.clone(), pinned);
+        }
+    }
+    for argument in &command.arguments {
+        let value = if argument.starts_with('-') {
             argument
                 .split_once('=')
-                .map_or((None, argument.as_str()), |(flag, value)| {
-                    (Some(flag), value)
-                })
+                .map_or(argument.as_str(), |(_, value)| value)
         } else {
-            (None, argument.as_str())
+            argument.as_str()
         };
         let path = Path::new(value);
         if path.is_absolute() {
-            let pinned = verified_input(
-                path,
-                forge.adapter_inputs.get(path).map(String::as_str),
-                snapshots.path(),
-                "adapter input",
-            )?;
-            *argument = prefix.map_or_else(
-                || pinned.to_string_lossy().into_owned(),
-                |flag| format!("{flag}={}", pinned.display()),
-            );
+            if path.starts_with("/nix/store") {
+                store_file(path, Path::new("/nix/store"))?;
+            } else {
+                ensure!(inputs.contains_key(path), "adapter input is not enrolled");
+            }
         }
+    }
+    if let Some(credential) = &request.credential_file {
+        ensure!(
+            !inputs.contains_key(credential),
+            "adapter credential overlaps code inputs"
+        );
+        let pinned = snapshots.path().join("credential");
+        fs::write(&pinned, fs::read(credential)?)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&pinned, fs::Permissions::from_mode(0o400))?;
+        }
+        inputs.insert(credential.clone(), pinned);
     }
     let path = root.join("request.json");
     save(&path, request)?;
-    let response: AdapterResponse = serde_json::from_slice(&command_output(
-        &command,
-        &["--request".into(), path.to_string_lossy().into_owned()],
-        Some(snapshots.path()),
+    let response: AdapterResponse = serde_json::from_str(&run_tool(
+        super::sandbox::adapter(&command, &inputs, &path)?,
+        command.timeout_seconds,
     )?)?;
     response.validate(request)?;
     remote_identity(&response.remote, &request.coordinate)?;
@@ -2148,7 +2172,7 @@ if os.fork() == 0:
     }
 
     #[test]
-    fn credential_bearing_clone_urls_are_rejected_before_evidence_is_saved() {
+    fn namespace_credential_bearing_clone_urls_are_rejected_before_evidence_is_saved() {
         for remote in [
             "https://TOKEN@fixture.example/team/demo.git",
             "https://git:TOKEN@fixture.example/team/demo.git",
@@ -2190,6 +2214,115 @@ if os.fork() == 0:
                 remote_identity(remote, "fixture.example/team/demo").is_ok(),
                 "{remote}"
             );
+        }
+    }
+
+    #[test]
+    fn namespace_adapters_see_only_enrolled_helpers_and_their_own_credential() {
+        for interpreter in [false, true] {
+            let mut f = Fixture::new();
+            let entrypoint = f.config.forges["fixture"].adapter.program.clone();
+            let helper = f.control.with_file_name("enrolled-helper.py");
+            let undeclared = f.control.with_file_name("undeclared-helper.py");
+            let credential = f.control.with_file_name("enrolled-credential");
+            let unrelated = f.control.with_file_name("other-forge-credential");
+            fs::write(&helper, "marker = 'verified helper'\n").unwrap();
+            fs::write(
+                &undeclared,
+                "raise AssertionError('unverified helper loaded')\n",
+            )
+            .unwrap();
+            fs::write(&credential, "synthetic-enrolled-token").unwrap();
+            fs::write(&unrelated, "synthetic-unrelated-token").unwrap();
+            let original = fs::read_to_string(&entrypoint).unwrap();
+            let (shebang, body) = original.split_once('\n').unwrap();
+            let probe = format!(
+                r#"
+import json, os, pathlib, sys
+assert os.getpid() == 1
+assert os.environ['HOME'] == '/tmp/home'
+assert not any(key in os.environ for key in ('GITHUB_TOKEN', 'UNLISTED_FORGE_TOKEN', 'PYTHONPATH'))
+for path in {:?}:
+    assert not pathlib.Path(path).exists(), path
+assert not pathlib.Path('/run/current-system').exists()
+assert not pathlib.Path('/nix/var/nix/daemon-socket/socket').exists()
+request = json.loads(pathlib.Path(sys.argv[-1]).read_text())
+token = pathlib.Path(request['credentialFile'])
+assert token.read_text() == 'synthetic-enrolled-token'
+try:
+    token.write_text('changed')
+except OSError:
+    pass
+else:
+    raise AssertionError('credential mount is writable')
+"#,
+                [&undeclared, &unrelated, &f.control, &f.remote, &f.source]
+            );
+            // The oracle replaces the host helper after verification, before
+            // this import. Only the pinned bytes may be visible in the child.
+            let after_response = format!(
+                "\nscope = dict()\nexec(pathlib.Path({helper:?}).read_text(), scope)\nassert scope['marker'] == 'verified helper'\n"
+            );
+            fs::write(
+                &entrypoint,
+                format!("{shebang}\n{probe}\n{body}\n{after_response}"),
+            )
+            .unwrap();
+            let forge = f.config.forges.get_mut("fixture").unwrap();
+            forge.credential_file = Some(credential.clone());
+            forge.adapter_sha256 = Some(digest(&fs::read(&entrypoint).unwrap()));
+            forge
+                .adapter_inputs
+                .insert(helper.clone(), digest(&fs::read(&helper).unwrap()));
+            if interpreter {
+                forge.adapter.program = super::super::sandbox::tool("python3").unwrap();
+                forge.adapter.arguments =
+                    vec!["-I".into(), entrypoint.to_string_lossy().into_owned()];
+                forge.adapter_sha256 = None;
+                forge
+                    .adapter_inputs
+                    .insert(entrypoint.clone(), digest(&fs::read(&entrypoint).unwrap()));
+            }
+            f.config.validate().unwrap();
+            let source = f.remote_head();
+            f.control(json!({"replaceHelper":helper}));
+            let root = f.root();
+            private_directory(&root).unwrap();
+            let forge = &f.config.forges["fixture"];
+            let request = request(
+                forge,
+                &f.project.coordinate,
+                "inspect",
+                None,
+                None,
+                vec![],
+                vec![],
+            );
+            assert_eq!(adapter(forge, &request, &root).unwrap().status, "success");
+            assert!(
+                fs::read_to_string(&helper)
+                    .unwrap()
+                    .contains("unverified replacement")
+            );
+            let calls = fs::read(&f.control).unwrap();
+            fs::write(
+                &helper,
+                "raise AssertionError('replaced helper executed')\n",
+            )
+            .unwrap();
+            assert!(
+                adapter(forge, &request, &root)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("adapter input digest differs from enrollment")
+            );
+            assert_eq!(fs::read(&f.control).unwrap(), calls);
+            assert_eq!(
+                fs::read_to_string(credential).unwrap(),
+                "synthetic-enrolled-token"
+            );
+            assert_eq!(f.remote_head(), source);
+            assert!(!f.root().join("receipt.json").exists());
         }
     }
 
@@ -2714,7 +2847,16 @@ if os.fork() == 0:
         );
     }
 
+    struct Oracle(std::process::Child);
+    impl Drop for Oracle {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
     struct Fixture {
+        _oracle: Oracle,
         _temporary: tempfile::TempDir,
         config: Config,
         project: Project,
@@ -2786,7 +2928,45 @@ if os.fork() == 0:
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(&generator, fs::Permissions::from_mode(0o700)).unwrap();
             let adapter = root.join("adapter");
-            fs::write(&adapter, format!("#!{python} -I\nimport sys\nsys.argv = [sys.argv[0], {:?}, {:?}, *sys.argv[1:]]\n{}", control.to_str().unwrap(), remote.to_str().unwrap(), fs::read_to_string(fixtures.join("updater-adapter.py")).unwrap())).unwrap();
+            let ready = root.join("oracle-port");
+            let mut oracle = Oracle(
+                std::process::Command::new(python)
+                    .env_clear()
+                    .env("PATH", std::env::var_os("PATH").unwrap())
+                    .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                    .env("GIT_CONFIG_NOSYSTEM", "1")
+                    .arg("-I")
+                    .arg(fixtures.join("updater-adapter.py"))
+                    .arg(&control)
+                    .arg(&remote)
+                    .arg(&ready)
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .spawn()
+                    .unwrap(),
+            );
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let port = loop {
+                if let Ok(port) = fs::read_to_string(&ready)
+                    && let Ok(port) = port.parse::<u16>()
+                {
+                    break port;
+                }
+                assert!(
+                    oracle.0.try_wait().unwrap().is_none(),
+                    "oracle exited before readiness"
+                );
+                assert!(Instant::now() < deadline, "oracle did not become ready");
+                std::thread::sleep(Duration::from_millis(10));
+            };
+            fs::write(
+                &adapter,
+                format!(
+                    "#!{python} -I\noracle_url = 'http://127.0.0.1:{port}'\n{}",
+                    fs::read_to_string(fixtures.join("updater-adapter-client.py")).unwrap()
+                ),
+            )
+            .unwrap();
             fs::set_permissions(&adapter, fs::Permissions::from_mode(0o700)).unwrap();
             let config: Config = serde_json::from_value(json!({
                 "schemaVersion":1,
@@ -2807,6 +2987,7 @@ if os.fork() == 0:
                 mirrors: vec![],
             };
             Self {
+                _oracle: oracle,
                 _temporary: temp,
                 config,
                 project,

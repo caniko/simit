@@ -1,6 +1,7 @@
-//! Candidate configuration can execute tools: expose no updater authority to it.
+//! Filesystem and process boundaries for discovery, adapters and generation.
 use anyhow::{Context, Result, ensure};
 use std::{
+    collections::BTreeMap,
     path::{Path, PathBuf},
     process::Command,
 };
@@ -21,6 +22,102 @@ pub(super) fn tool(name: &str) -> Result<PathBuf> {
             (resolved.starts_with("/nix/store") && resolved.is_file()).then_some(path)
         })
         .with_context(|| format!("sandbox requires an immutable Nix-store {name} on PATH"))
+}
+
+pub(super) fn adapter(
+    executable: &super::schema::Command,
+    inputs: &BTreeMap<PathBuf, PathBuf>,
+    request: &Path,
+) -> Result<Command> {
+    ensure!(
+        cfg!(target_os = "linux"),
+        "updater adapters require Linux namespaces"
+    );
+    executable.validate()?;
+    let path = std::env::join_paths(directories())?;
+    let mut command = Command::new(tool("bwrap")?);
+    command
+        .env_clear()
+        .stdin(std::process::Stdio::null())
+        .args([
+            "--unshare-all",
+            "--share-net",
+            "--unshare-user",
+            "--die-with-parent",
+            "--new-session",
+            "--as-pid-1",
+            "--cap-drop",
+            "ALL",
+            "--disable-userns",
+            "--ro-bind",
+            "/nix/store",
+            "/nix/store",
+            "--proc",
+            "/proc",
+            "--dev",
+            "/dev",
+            "--tmpfs",
+            "/tmp",
+            "--dir",
+            "/tmp/home",
+            "--clearenv",
+        ]);
+    command.arg("--symlink").arg(tool("sh")?).arg("/bin/sh");
+    // Only network plumbing is inherited from the host. No host home, source,
+    // updater state, daemon sockets or ambient executable directories are bound.
+    for file in ["/etc/resolv.conf", "/etc/hosts", "/etc/nsswitch.conf"] {
+        if Path::new(file).is_file() {
+            command.args(["--ro-bind", file, file]);
+        }
+    }
+    if let Some(bundle) = option_env!("SIMIT_TRUSTED_CA_BUNDLE")
+        .map(PathBuf::from)
+        .or_else(|| {
+            Path::new("/etc/ssl/certs/ca-certificates.crt")
+                .canonicalize()
+                .ok()
+        })
+        .filter(|path| path.starts_with("/nix/store") && path.is_file())
+    {
+        command.args(["--setenv", "SSL_CERT_FILE"]).arg(&bundle);
+        command
+            .arg("--ro-bind")
+            .arg(bundle)
+            .arg("/etc/ssl/certs/ca-certificates.crt");
+    }
+    for key in ["SSL_CERT_FILE", "SSL_CERT_DIR", "NIX_SSL_CERT_FILE"] {
+        if let Some(source) = std::env::var_os(key)
+            && let Ok(source) = Path::new(&source).canonicalize()
+            && source.starts_with("/nix/store")
+        {
+            command.args(["--setenv", key]).arg(source);
+        }
+    }
+    for (destination, source) in inputs {
+        command.arg("--ro-bind").arg(source).arg(destination);
+    }
+    command
+        .arg("--ro-bind")
+        .arg(request)
+        .arg("/simit/request.json");
+    for (key, value) in [
+        ("PATH", path.to_str().context("non-UTF-8 adapter PATH")?),
+        ("HOME", "/tmp/home"),
+        ("TMPDIR", "/tmp"),
+        ("LANG", "C.UTF-8"),
+        ("GIT_CONFIG_NOSYSTEM", "1"),
+        ("GIT_CONFIG_GLOBAL", "/dev/null"),
+        ("GIT_TERMINAL_PROMPT", "0"),
+        ("PYTHONNOUSERSITE", "1"),
+    ] {
+        command.args(["--setenv", key, value]);
+    }
+    command
+        .args(["--chdir", "/tmp/home", "--"])
+        .arg(&executable.program)
+        .args(&executable.arguments)
+        .args(["--request", "/simit/request.json"]);
+    Ok(command)
 }
 
 pub fn inventory(command: &super::schema::Command) -> Result<Vec<u8>> {

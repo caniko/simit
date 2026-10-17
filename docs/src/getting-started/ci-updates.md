@@ -297,6 +297,12 @@ user. The module does not create arbitrary state paths through root-owned tmpfil
 At runtime the updater resolves existing path components, checks every state tree
 against the resolved workspace roots, and rejects overlaps before creating files.
 
+Forge adapters execute in Linux namespaces with an empty filesystem view populated
+by the read-only Nix store, enrolled code snapshots, the exact request, the one
+configured credential, DNS plumbing and immutable CA certificates. They retain
+network access to their forge. Home and temporary storage are private, host state
+and daemon sockets are absent, and descendants cannot outlive the adapter.
+
 Forge adapters require a store-backed executable or `adapterSha256`. File-valued
 configured arguments must be absolute store paths or enrolled in `adapterInputs`
 as path-to-SHA-256 entries. Digest-enrolled mutable files are executed or read from
@@ -305,19 +311,24 @@ even when the same input is re-enrolled or supplied more than once. Store inputs
 must resolve to files inside the store. Adapters
 and generators retain their resolved store installation paths even when a digest
 is supplied, preserving wrapper resources and installation-relative loaders.
-Non-store snapshots remain isolated from their mutable original locations. Adapters
-run from a private directory, with runtime values supplied through request JSON.
+Every `adapterInputs` entry is checked, including helpers not named on argv.
+Verified mutable inputs are mounted at their enrolled absolute paths so scripts
+can import declared siblings; other mutable helpers are inaccessible. These
+checks also apply to store interpreters executing a configured script argument.
+Mutable host originals are never mounted into the adapter; only their verified
+snapshots are exposed. Adapters run from a private directory, with runtime values
+supplied through request JSON.
 Script interpreter chains must also resolve entirely inside the store. Shebang
 arguments are restricted to no arguments, Python's isolated `-I`, or
 shell `-e`; arguments that can select another script or loader are rejected.
 Tool execution clears runtime-injection environment variables and disables Python
 user-site imports; Python scripts should use an isolated (`-I`) store interpreter.
-Adapter and inventory commands start with a cleared environment. Only `PATH`,
-`HOME`, locale/timezone, temporary-directory, CA-bundle and `NIX_STATE_DIR` runtime
-settings are inherited. Forge/package-registry credentials and unlisted variables
-are excluded; adapters receive the configured `credentialFile` through request
-JSON. The updater's separate Git transport commands retain operator Git identity,
-signing and transport configuration.
+Inventory launchers start with a cleared environment and an explicit runtime
+allowlist. Adapters use only store-backed `PATH`/CA paths and private home/temp
+settings. Forge/package-registry credentials and unlisted variables are excluded;
+adapters receive their configured `credentialFile` through request JSON and a
+read-only file mount. The updater's separate Git transport commands retain
+operator Git identity, signing and transport configuration.
 HTTPS clone URLs must not contain a username or password; SSH usernames remain
 supported through operator Git authentication. Clone URLs must use the protocol's
 default port, because enrollment identifies the service by hostname. Override
