@@ -107,7 +107,8 @@ identity, signing configuration, transport and credential-file access.
 ## Selection and inventory
 
 Supply exactly one `inventory.file` or `inventory.command`. Commands are absolute
-executables with argv arrays and timeouts of 1 through 900 seconds. Their JSON snapshot has:
+executables with argv arrays and timeouts of 1 through 900 seconds. Inventory
+freshness is bounded to 1 through 86400 seconds. Their JSON snapshot has:
 
 ```json
 {
@@ -214,10 +215,16 @@ requires explicit adoption reconciliation instead of silently restarting.
 
 Interrupted generation or an unsuccessful checkpoint restoration leaves
 `generation-checkpoint.json` in the workspace state root, naming the retained
-recovery snapshot. Further transactions stop before adapter dispatch. Stop the
-workspace's updater services and reconcile state against that snapshot before
-removing the marker. The snapshot excludes the current disposable checkout and
-preserves the other state files and their permissions.
+recovery snapshot in that same durable state directory. Recovery bytes are synced
+before the marker is published; service-private temporary storage is used only
+for disposable tool output. Further transactions stop before adapter dispatch.
+Stop the workspace's updater services and reconcile state against that snapshot
+before removing the marker. The snapshot excludes the current disposable checkout
+and preserves the other state files and their permissions.
+
+The updater also verifies the workspace lock's file identity across generation
+and before saving rollout progress. Replacing the lock stops the transaction and
+retains recovery evidence rather than restoring state under a different lock.
 
 Provision each service state directory with mode `0700`, owned by its configured
 user. The module does not create arbitrary state paths through root-owned tmpfiles.

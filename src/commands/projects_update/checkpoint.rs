@@ -1,10 +1,10 @@
 //! Checkpoint updater state across read-only generation, including failed tools.
-use super::engine::save;
+use super::engine::{save, verify_lock};
 use crate::review::digest;
 use anyhow::{Context, Result, bail, ensure};
 use std::{
     collections::BTreeMap,
-    fs,
+    fs::{self, File},
     path::{Path, PathBuf},
 };
 
@@ -49,12 +49,13 @@ pub fn ensure_idle(root: &Path) -> Result<()> {
 fn capture(
     root: &Path,
     checkout: &Path,
-    backup: Option<&Path>,
+    backup: &Path,
+    copy: bool,
 ) -> Result<BTreeMap<PathBuf, Entry>> {
     let mut pending = vec![root.to_owned()];
     let mut entries = BTreeMap::new();
     while let Some(path) = pending.pop() {
-        if path == checkout || path == root.join(MARKER) {
+        if path == checkout || path == backup || path == root.join(MARKER) {
             continue;
         }
         let metadata = fs::symlink_metadata(&path)?;
@@ -72,14 +73,14 @@ fn capture(
             #[cfg(not(windows))]
             let directory = false;
             let target = fs::read_link(&path)?;
-            if let Some(backup) = backup {
+            if copy {
                 let destination = backup.join(&relative);
                 fs::create_dir_all(destination.parent().context("missing checkpoint parent")?)?;
                 symlink(&target, &destination, directory)?;
             }
             Kind::Symlink(target, directory)
         } else if metadata.is_dir() {
-            if let Some(backup) = backup {
+            if copy {
                 fs::create_dir_all(backup.join(&relative))?;
             }
             for child in fs::read_dir(&path)? {
@@ -88,10 +89,11 @@ fn capture(
             Kind::Directory
         } else {
             let hash = digest(&fs::read(&path)?);
-            if let Some(backup) = backup {
+            if copy {
                 let destination = backup.join(&relative);
                 fs::create_dir_all(destination.parent().context("missing checkpoint parent")?)?;
-                fs::copy(&path, destination)?;
+                fs::copy(&path, &destination)?;
+                File::open(destination)?.sync_all()?;
             }
             Kind::File(hash)
         };
@@ -103,18 +105,21 @@ fn capture(
             },
         );
     }
-    if let Some(backup) = backup {
+    if copy {
         for (relative, entry) in entries.iter().rev() {
             if !matches!(entry.kind, Kind::Symlink(..)) {
                 fs::set_permissions(backup.join(relative), entry.permissions.clone())?;
+                if matches!(entry.kind, Kind::Directory) {
+                    File::open(backup.join(relative))?.sync_all()?;
+                }
             }
         }
     }
     Ok(entries)
 }
 
-fn clear(root: &Path, path: &Path, checkout: &Path) -> Result<()> {
-    if path == checkout || path == root.join(MARKER) {
+fn clear(root: &Path, path: &Path, checkout: &Path, backup: &Path) -> Result<()> {
+    if path == checkout || path == backup || path == root.join(MARKER) {
         return Ok(());
     }
     let metadata = fs::symlink_metadata(path)?;
@@ -124,7 +129,7 @@ fn clear(root: &Path, path: &Path, checkout: &Path) -> Result<()> {
     }
     if metadata.is_dir() {
         for child in fs::read_dir(path)? {
-            clear(root, &child?.path(), checkout)?;
+            clear(root, &child?.path(), checkout, backup)?;
         }
         if path != root && !checkout.starts_with(path) {
             fs::remove_dir(path)?;
@@ -149,21 +154,40 @@ pub fn protect<T>(
     // child write confinement can replace the checkpoint for larger fleets.
     let backup = tempfile::Builder::new()
         .prefix("simit-generation-state-")
-        .tempdir()?;
-    let entries = capture(root, checkout, Some(backup.path()))?;
+        .tempdir_in(root)?;
+    let entries = capture(root, checkout, backup.path(), true)?;
+    let held = match File::open(root.join("lock")) {
+        Ok(file) => Some(file),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
     let marker = root.join(MARKER);
     save(&marker, &serde_json::json!({"snapshot": backup.path()}))?;
     // Keep recovery bytes across interruption or an unsuccessful restoration.
     let backup = backup.keep();
     let output = operation();
-    let unchanged = capture(root, checkout, None).is_ok_and(|current| current == entries);
+    let check_lock = || -> Result<()> {
+        if let Some(held) = &held {
+            verify_lock(root, held).with_context(|| {
+                format!(
+                    "workspace lock changed; recovery snapshot retained at {}",
+                    backup.display()
+                )
+            })?;
+        }
+        Ok(())
+    };
+    // Content equality cannot detect unlink/recreate of an empty lock file.
+    // Never restore or continue without the original locked inode.
+    check_lock()?;
+    let unchanged = capture(root, checkout, &backup, false).is_ok_and(|current| current == entries);
     if !unchanged {
         let restore = || -> Result<()> {
             ensure!(
                 fs::symlink_metadata(root)?.is_dir(),
                 "persistent updater state root was redirected"
             );
-            clear(root, root, checkout)?;
+            clear(root, root, checkout, &backup)?;
             for (relative, entry) in &entries {
                 let path = root.join(relative);
                 match &entry.kind {
@@ -185,7 +209,7 @@ pub fn protect<T>(
                 }
             }
             ensure!(
-                capture(root, checkout, None)? == entries,
+                capture(root, checkout, &backup, false)? == entries,
                 "restored persistent updater state differs from checkpoint"
             );
             Ok(())
@@ -197,6 +221,7 @@ pub fn protect<T>(
             )
         })?;
     }
+    check_lock()?;
     fs::remove_file(marker)?;
     fs::remove_dir_all(backup)?;
     ensure!(
@@ -204,4 +229,32 @@ pub fn protect<T>(
         "read-only generator modified persistent updater state; checkpoint restored"
     );
     output
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn interrupted_generation_keeps_recovery_inside_durable_workspace_state() {
+        let root = tempfile::tempdir().unwrap();
+        let checkout = root.path().join("checkout");
+        fs::create_dir(&checkout).unwrap();
+        fs::write(root.path().join("baseline.json"), "original baseline").unwrap();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            protect::<()>(root.path(), &checkout, || panic!("interrupted generation")).unwrap();
+        }));
+        assert!(result.is_err());
+        assert!(ensure_idle(root.path()).is_err());
+        let marker: serde_json::Value =
+            crate::review::read_json(&root.path().join(MARKER)).unwrap();
+        let snapshot = Path::new(marker["snapshot"].as_str().unwrap());
+        assert_eq!(snapshot.parent(), Some(root.path()));
+        assert_eq!(
+            fs::read_to_string(snapshot.join("baseline.json")).unwrap(),
+            "original baseline"
+        );
+        assert!(!snapshot.join("checkout").exists());
+        assert_eq!(fs::read_dir(snapshot).unwrap().count(), 1);
+    }
 }

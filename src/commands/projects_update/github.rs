@@ -58,24 +58,46 @@ impl Api {
         );
         Ok(serde_json::from_slice(&bytes)?)
     }
-    fn list(&self, path: &str, key: &str) -> Result<Vec<Value>> {
-        let mut result = Vec::new();
-        for page in 1..=20 {
+    fn list(&self, path: &str, key: &str) -> Result<Value> {
+        collection(key, |page| {
             let separator = if path.contains('?') { '&' } else { '?' };
-            let value = self.get(&format!("{path}{separator}per_page=100&page={page}"))?;
-            let entries = if key.is_empty() {
-                value.as_array()
-            } else {
-                value[key].as_array()
-            }
-            .context("missing GitHub collection")?;
-            result.extend(entries.iter().cloned());
-            if entries.len() < 100 {
-                return Ok(result);
-            }
-        }
-        anyhow::bail!("GitHub collection exceeds adapter pagination ceiling")
+            self.get(&format!("{path}{separator}per_page=100&page={page}"))
+        })
     }
+}
+
+fn collection(key: &str, mut page: impl FnMut(u32) -> Result<Value>) -> Result<Value> {
+    let mut result = Vec::new();
+    let mut reported = None;
+    for index in 1..=20 {
+        let mut value = page(index)?;
+        let entries = if key.is_empty() {
+            value.as_array()
+        } else {
+            let count = number(&value, "/total_count")?;
+            ensure!(
+                reported.is_none_or(|previous| previous == count),
+                "GitHub collection count changed during pagination"
+            );
+            reported = Some(count);
+            value[key].as_array()
+        }
+        .context("missing GitHub collection")?;
+        let complete = entries.len() < 100;
+        result.extend(entries.iter().cloned());
+        if complete {
+            if key.is_empty() {
+                return Ok(Value::Array(result));
+            }
+            ensure!(
+                reported == Some(result.len() as u64),
+                "incomplete GitHub collection inventory"
+            );
+            value[key] = Value::Array(result);
+            return Ok(value);
+        }
+    }
+    anyhow::bail!("GitHub collection exceeds adapter pagination ceiling")
 }
 
 fn text(value: &Value, key: &str) -> Result<String> {
@@ -181,7 +203,7 @@ pub fn execute(request: &AdapterRequest) -> Result<AdapterResponse> {
             "",
         )?;
         ensure!(
-            rules.is_empty(),
+            rules.as_array().context("missing branch rules")?.is_empty(),
             "active rulesets require an adapter with ruleset-transition support"
         );
         let protection = if info["protected"] == true {
@@ -239,14 +261,18 @@ pub fn execute(request: &AdapterRequest) -> Result<AdapterResponse> {
         query.push_str(&format!("&branch={}", encoded(branch)));
     }
     let runs = api.list(&query, "workflow_runs")?;
+    let runs = runs["workflow_runs"]
+        .as_array()
+        .context("missing workflow runs")?;
     let mut generator_jobs = std::collections::BTreeMap::new();
     let paths = if request.workflows.is_empty() {
-        generator_workflow_paths(&runs, |run| {
+        generator_workflow_paths(runs, |run| {
             let run_id = number(run, "/id")?;
             let jobs = api.list(
                 &format!("{endpoint}/actions/runs/{run_id}/attempts/1/jobs"),
                 "jobs",
             )?;
+            let job_entries = jobs["jobs"].as_array().context("missing job inventory")?;
             let suite = api.get(&format!(
                 "{endpoint}/check-suites/{}",
                 number(run, "/check_suite_id")?
@@ -255,7 +281,9 @@ pub fn execute(request: &AdapterRequest) -> Result<AdapterResponse> {
                 suite["app"]["id"]
                     .as_u64()
                     .is_some_and(|id| id.to_string() == requirement.authority)
-                    && jobs.iter().any(|job| job["name"] == requirement.name)
+                    && job_entries
+                        .iter()
+                        .any(|job| job["name"] == requirement.name)
             });
             generator_jobs.insert(run_id, (jobs, suite));
             Ok(required)
@@ -307,20 +335,24 @@ pub fn execute(request: &AdapterRequest) -> Result<AdapterResponse> {
                 ))?,
             )
         };
-        let completed = serde_json::json!({"total_count":jobs.len(),"jobs":jobs});
         if !admit_run(
             (id, authority),
             &revision,
             request.branch.as_deref(),
             &path,
             run,
-            &completed,
+            &jobs,
             &suite,
         )? {
             response.status = "pending".into();
             continue;
         }
-        record_checks(&mut response, &jobs, authority, run_id)?;
+        record_checks(
+            &mut response,
+            jobs["jobs"].as_array().context("missing job inventory")?,
+            authority,
+            run_id,
+        )?;
     }
     // Absence of an enrolled required context is pending, never implicit success.
     if request.required_checks.iter().any(|r| {
@@ -424,6 +456,31 @@ fn admit_run(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn paginated_job_inventory_preserves_and_enforces_the_reported_total() {
+        assert!(collection("jobs", |_| Ok(json!({"total_count":2,"jobs":[{"id":1}]}))).is_err());
+        assert!(collection("jobs", |_| Ok(json!({"jobs":[{"id":1}]}))).is_err());
+        let first = (0..100).map(|id| json!({"id":id})).collect::<Vec<_>>();
+        let complete = collection("jobs", |page| {
+            Ok(if page == 1 {
+                json!({"total_count":101,"jobs":first})
+            } else {
+                json!({"total_count":101,"jobs":[{"id":100}]})
+            })
+        })
+        .unwrap();
+        assert_eq!(complete["total_count"], 101);
+        assert_eq!(complete["jobs"].as_array().unwrap().len(), 101);
+        assert!(
+            collection("jobs", |page| Ok(if page == 1 {
+                json!({"total_count":101,"jobs":first})
+            } else {
+                json!({"total_count":100,"jobs":[]})
+            }))
+            .is_err()
+        );
+    }
 
     #[test]
     fn unrelated_failed_or_ambiguous_workflows_do_not_gate_generator_checks() {

@@ -62,7 +62,7 @@ pub fn run(args: Args) -> Result<()> {
         return Ok(());
     }
     let state_directory = config.state_directory(workspace)?;
-    let _lock = engine::lock(&state_directory)?;
+    let lock = engine::lock(&state_directory)?;
     checkpoint::ensure_idle(&state_directory)?;
     let selection_policy = engine::policy_digest(&config, profile, workspace, None)?;
     let selection_key =
@@ -145,6 +145,7 @@ pub fn run(args: Args) -> Result<()> {
     }
     // Successful repositories are removed only from this frozen rollout; receipts
     // retain their identity and baseline for subsequent generator revisions.
+    engine::verify_lock(&state_directory, &lock)?;
     if args.push {
         frozen.projects.retain(|p| {
             !reports.iter().any(|r| {

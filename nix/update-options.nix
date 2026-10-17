@@ -30,7 +30,7 @@ in {
           options = {
             file = option (types.nullOr types.str) null;
             command = option (types.nullOr command) null;
-            maxAgeSeconds = option types.ints.positive 300;
+            maxAgeSeconds = option (types.ints.between 1 86400) 300;
           };
         };
       };

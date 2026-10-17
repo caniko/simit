@@ -118,6 +118,17 @@ pub fn lock(root: &Path) -> Result<File> {
     Ok(file)
 }
 
+pub fn verify_lock(root: &Path, held: &File) -> Result<()> {
+    let original = same_file::Handle::from_file(held.try_clone()?)?;
+    let current = same_file::Handle::from_path(root.join("lock"))
+        .context("workspace lock disappeared or became inaccessible")?;
+    ensure!(
+        original == current,
+        "workspace lock identity changed; reconciliation is required"
+    );
+    Ok(())
+}
+
 fn private_directory(path: &Path) -> Result<()> {
     fs::create_dir_all(path)?;
     ensure!(
@@ -1044,7 +1055,9 @@ pub fn update(
             && git(&checkout, &["status", "--porcelain"])?.is_empty(),
         "retained candidate files changed"
     );
-    let tracked = git(&checkout, &["ls-files", "-z"])?;
+    let mut tracked_paths = vec!["--literal-pathspecs", "ls-files", "-z", "--"];
+    tracked_paths.extend(receipt.managed.keys().map(String::as_str));
+    let tracked = git(&checkout, &tracked_paths)?;
     let tracked = tracked.split('\0').collect::<BTreeSet<_>>();
     ensure!(
         receipt
@@ -1227,19 +1240,64 @@ mod tests {
         f.publish(&f.source, "enroll checkout conversion");
         let adopted = f.update(true).unwrap();
         assert_eq!(adopted.phase, "qualified");
-        // Materialize the committed representation before generation writes LF
-        // again. The subsequent fresh-clone rollout must accept that baseline.
+        // A separate fresh clone proves checkout conversion without relying on
+        // checkout-index to rewrite an already up-to-date working file.
+        let converted = f.source.with_file_name("converted");
         git(
-            &f.root().join("checkout"),
-            &["checkout-index", "--all", "--force"],
+            &f.source,
+            &[
+                "clone",
+                "--quiet",
+                f.remote.to_str().unwrap(),
+                converted.to_str().unwrap(),
+            ],
         )
         .unwrap();
         assert!(
-            fs::read(f.root().join("checkout/new-managed.txt"))
+            fs::read(converted.join("new-managed.txt"))
                 .unwrap()
                 .ends_with(b"\r\n")
         );
         assert_eq!(f.update(true).unwrap().phase, "unchanged");
+    }
+
+    #[test]
+    fn unrelated_non_utf8_filenames_do_not_block_managed_updates() {
+        use std::os::unix::ffi::OsStringExt;
+        let f = Fixture::new();
+        let name = std::ffi::OsString::from_vec(vec![b'a', 0xff]);
+        fs::write(f.source.join(&name), "project-owned bytes\n").unwrap();
+        f.publish(&f.source, "retain a non-UTF-8 project filename");
+        assert_eq!(f.update(true).unwrap().phase, "qualified");
+        assert_eq!(f.update(true).unwrap().phase, "unchanged");
+        assert_eq!(
+            fs::read(f.root().join("checkout").join(name)).unwrap(),
+            b"project-owned bytes\n"
+        );
+    }
+
+    #[test]
+    fn replacing_the_workspace_lock_retains_recovery_and_stops_the_transaction() {
+        let mut f = Fixture::new();
+        let state = f.config.workspaces["projects"].state_directory.clone();
+        let held = lock(&state).unwrap();
+        let path = state.join("lock");
+        f.inject_generator(&format!("from pathlib import Path\nimport os\nlock = Path({:?})\nmode = lock.stat().st_mode & 0o777\nlock.unlink()\nlock.touch()\nos.chmod(lock, mode)\n", path.to_str().unwrap()));
+        let source = f.remote_head();
+        assert!(
+            f.update(true)
+                .unwrap_err()
+                .to_string()
+                .contains("workspace lock")
+        );
+        assert!(verify_lock(&state, &held).is_err());
+        assert_eq!(f.remote_head(), source);
+        assert!(!f.root().join("receipt.json").exists());
+        let marker: serde_json::Value =
+            crate::review::read_json(&state.join("generation-checkpoint.json")).unwrap();
+        let snapshot = Path::new(marker["snapshot"].as_str().unwrap());
+        assert!(snapshot.starts_with(&state));
+        assert!(snapshot.join("lock").is_file());
     }
 
     #[test]
