@@ -438,10 +438,14 @@ fn verified_input(
     fs::create_dir_all(snapshots)?;
     // Every verification owns fresh bytes; never rewrite a read-only snapshot
     // retained by another executable or argument from the same transaction.
-    let directory = tempfile::Builder::new()
-        .prefix("input-")
-        .tempdir_in(snapshots)?
-        .keep();
+    let mut directory = tempfile::Builder::new();
+    directory.prefix("input-");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        directory.permissions(fs::Permissions::from_mode(0o700));
+    }
+    let directory = directory.tempdir_in(snapshots)?.keep();
     let pinned = directory.join(path.file_name().context("input has no file name")?);
     fs::write(&pinned, bytes)?;
     #[cfg(unix)]
