@@ -32,6 +32,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Keep managed README badges outside fenced code examples, including shell
+  comments that resemble headings beneath an HTML banner.
 - Admit the path/repository/branch-isolated concurrency emitted by aggregate
   primary CI and the full-ref form emitted by separate-event Rust CI. Require
   aggregate workflows to exclude tags and retain rejection of unknown groups,

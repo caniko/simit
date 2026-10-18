@@ -369,15 +369,37 @@ fn upsert_block(readme: &str, block: &str) -> Result<String> {
 
 fn top_level_heading_end(readme: &str) -> Option<(usize, &str)> {
     let mut offset = 0;
+    let mut fence = None;
+    // ponytail: scan fenced blocks and column-zero ATX H1s only; use a Markdown
+    // parser if general block semantics (HTML blocks, setext headings) are needed.
     for line in readme.split_inclusive('\n') {
         let line_without_newline = line.trim_end_matches(['\r', '\n']);
-        if line_without_newline.starts_with("# ") {
+        let content = line_without_newline.trim_start_matches(' ');
+        let marker = content
+            .as_bytes()
+            .first()
+            .copied()
+            .filter(|byte| matches!(byte, b'`' | b'~'));
+        if let Some(marker) = marker.filter(|_| line_without_newline.len() - content.len() <= 3) {
+            let width = content.bytes().take_while(|byte| *byte == marker).count();
+            let suffix = &content[width..];
+            match fence {
+                Some((open, minimum))
+                    if marker == open
+                        && width >= minimum
+                        && suffix.trim_matches([' ', '\t']).is_empty() =>
+                {
+                    fence = None;
+                }
+                None if width >= 3 && (marker == b'~' || !suffix.contains('`')) => {
+                    fence = Some((marker, width));
+                }
+                _ => {}
+            }
+        } else if fence.is_none() && line_without_newline.starts_with("# ") {
             return Some((offset + line.len(), line_without_newline));
         }
         offset += line.len();
-    }
-    if readme.starts_with("# ") {
-        return Some((readme.len(), readme));
     }
     None
 }
@@ -404,6 +426,26 @@ mod tests {
     fn prepends_block_when_h1_is_absent() {
         let out = upsert_block("<p align=\"center\">banner</p>\n", "BLOCK\n").unwrap();
         assert_eq!(out, "BLOCK\n\n<p align=\"center\">banner</p>\n");
+    }
+
+    #[test]
+    fn keeps_badges_outside_fenced_examples() {
+        for input in [
+            "<p>banner</p>\n\n```bash\n# Or already cloned — sync first:\ngit submodule update --init --recursive\n```\n",
+            "<p>banner</p>\r\n\r\n  ~~~sh\r\n# Not a heading\r\n  ~~~\r\n",
+            "````sh\n```\n~~~\n# Still inside the longer fence\n````\n",
+            "```sh\n``` trailing text\n# Still inside an unclosed fence\n",
+        ] {
+            assert_eq!(
+                upsert_block(input, "BLOCK\n").unwrap(),
+                format!("BLOCK\n\n{input}"),
+                "changed the example instead of prepending: {input:?}"
+            );
+        }
+        assert_eq!(
+            upsert_block("```sh\n# Comment\n```\n\n# Demo\n\nbody\n", "BLOCK\n").unwrap(),
+            "```sh\n# Comment\n```\n\n# Demo\n\nBLOCK\n\nbody\n"
+        );
     }
 
     #[test]
