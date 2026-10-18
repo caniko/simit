@@ -135,22 +135,32 @@ fn files_for_scope(request: FilesRequest<'_>, primary_only: bool) -> Result<Vec<
 
     let image = image_for(&request)?;
     let suffix = request.file_suffix;
-    let mut files = vec![GeneratedFile {
-        relative_path: crow_path("build", suffix, request.format),
-        content: render_workflow(
-            build_workflow(
-                request.crow,
-                request.runtime,
-                request.package,
-                &image,
-                request.self_check,
-                request.runners,
-                &request.options,
-                request.step_runners,
-            ),
-            request.format,
-        )?,
-    }];
+    let mut files = if !request.options.repository_checks
+        && (request.options.check_command.is_some()
+            || request.crow.check_command.is_some()
+            || (request.options.om_ci == OmCiMode::Replace
+                && !request.options.with_docs
+                && !request.options.with_msrv))
+    {
+        Vec::new()
+    } else {
+        vec![GeneratedFile {
+            relative_path: crow_path("build", suffix, request.format),
+            content: render_workflow(
+                build_workflow(
+                    request.crow,
+                    request.runtime,
+                    request.package,
+                    &image,
+                    request.self_check,
+                    request.runners,
+                    &request.options,
+                    request.step_runners,
+                ),
+                request.format,
+            )?,
+        }]
+    };
 
     if !primary_only && request.options.publish_crates && request.package.is_publishable() {
         files.push(GeneratedFile {
@@ -215,6 +225,15 @@ fn build_workflow(
         );
     }
 
+    if runtime == Runtime::Nix
+        && options.repository_checks
+        && options
+            .components
+            .contains(&crate::config::CiComponent::FlakeWiring)
+    {
+        steps.push(step("flake-wiring", image, "nix run --no-write-lock-file git+https://github.com/caniko/simit.git -- init flake --check --diff".to_owned()));
+    }
+
     if let Some(command) = &config.check_command {
         if let Some(secret) = &config.check_push_secret {
             let mut push = step("project-check-push", image, command.clone()).secret(secret);
@@ -227,8 +246,10 @@ fn build_workflow(
             steps.push(step("project-check", image, command.clone()));
         }
     } else if let Some(command) = options.check_command.as_deref() {
-        if runtime == Runtime::Nix && options.nix_flake_check {
-            steps.push(step("nix-check", image, format!("{prefix}nix flake check")));
+        if runtime == Runtime::Nix
+            && let Some(command) = options.flake_check_command()
+        {
+            steps.push(step("nix-check", image, command.to_owned()));
         }
         let command = if runtime == Runtime::Cargo {
             format!("rustup component add clippy rustfmt && {command}")
@@ -237,77 +258,135 @@ fn build_workflow(
         };
         steps.push(step(crate::render::ci::STEP_PROJECT_CHECK, image, command));
     } else {
-        if runtime == Runtime::Nix && options.nix_flake_check && options.om_ci != OmCiMode::Replace
+        if runtime == Runtime::Nix
+            && options.om_ci != OmCiMode::Replace
+            && let Some(command) = options.flake_check_command()
         {
-            steps.push(step("nix-check", image, format!("{prefix}nix flake check")));
+            steps.push(step("nix-check", image, command.to_owned()));
         }
-        steps.push(step(
-            if runtime == Runtime::Nix {
-                crate::render::ci::STEP_FORMAT
+        if options.repository_checks {
+            steps.push(step(
+                if runtime == Runtime::Nix {
+                    crate::render::ci::STEP_FORMAT
+                } else {
+                    STEP_CARGO_FMT
+                },
+                image,
+                if runtime == Runtime::Nix {
+                    // Crow preprocesses dollars before invoking the shell. Escape
+                    // this generated shell/Nix command, including \${...}, so its
+                    // runtime expressions survive that separate expansion layer.
+                    format!(
+                        "{prefix}{}",
+                        crate::render::ci::NIX_FORMAT_COMMAND.replace('$', "$$")
+                    )
+                } else {
+                    format!("{prefix}cargo fmt --all -- --check")
+                },
+            ));
+        }
+        if options.om_ci != OmCiMode::Replace {
+            if options.with_nextest {
+                let command = if runtime == Runtime::Cargo {
+                    format!(
+                        "command -v cargo-nextest >/dev/null 2>&1 || cargo install cargo-nextest --locked --version {}",
+                        ci::CARGO_NEXTEST_VERSION
+                    )
+                } else {
+                    format!("{prefix}cargo-nextest --version")
+                };
+                steps.push(step("nextest-tool", image, command));
+            }
+            let selector = package_selector(package, options);
+            let mut modes = vec![if options.all_features {
+                " --all-features"
             } else {
-                STEP_CARGO_FMT
-            },
-            image,
-            if runtime == Runtime::Nix {
-                // Crow preprocesses dollars before invoking the shell. Escape
-                // this generated shell/Nix command, including \${...}, so its
-                // runtime expressions survive that separate expansion layer.
-                format!(
-                    "{prefix}{}",
-                    crate::render::ci::NIX_FORMAT_COMMAND.replace('$', "$$")
-                )
-            } else {
-                format!("{prefix}cargo fmt --all -- --check")
-            },
-        ));
-        steps.push(step(
-            STEP_CARGO_TEST,
-            image,
-            format!("{prefix}cargo test{}", package_selector(package, options)),
-        ));
+                ""
+            }];
+            if !package.features.is_empty() {
+                modes.push(" --no-default-features");
+            }
+            for (index, features) in modes.into_iter().enumerate() {
+                let harness = if options.with_nextest {
+                    "cargo nextest run"
+                } else {
+                    "cargo test"
+                };
+                let name = if options.with_nextest {
+                    "cargo-nextest"
+                } else {
+                    STEP_CARGO_TEST
+                };
+                let name = if index == 0 {
+                    name.to_owned()
+                } else {
+                    format!("{name}-no-default-features")
+                };
+                let targets = ci::unit_test_target_args(package, options);
+                steps.push(step(
+                    &name,
+                    image,
+                    format!("{prefix}{harness}{features}{selector}{targets}"),
+                ));
+                if options.with_nextest && !options.unit_tests_only && package.has_doctests() {
+                    steps.push(step(
+                        format!("{name}-doctests"),
+                        image,
+                        format!("{prefix}cargo test --doc{features}{selector}"),
+                    ));
+                }
+                let name = if index == 0 {
+                    STEP_CARGO_CLIPPY.to_owned()
+                } else {
+                    format!("{STEP_CARGO_CLIPPY}-no-default-features")
+                };
+                steps.push(step(
+                    name,
+                    image,
+                    format!(
+                        "{prefix}cargo clippy --all-targets{features}{selector} -- --deny warnings"
+                    ),
+                ));
+            }
+        }
         if options.with_docs {
             steps.push(step(
                 STEP_CARGO_DOC,
                 image,
-                format!("{prefix}cargo doc --no-deps --all-features"),
-            ));
-        }
-        if options.with_nextest {
-            steps.push(step(
-                "cargo-nextest",
-                image,
                 format!(
-                    "{prefix}cargo nextest run --all-features{}",
+                    "{prefix}cargo doc{} --no-deps --all-features",
                     package_selector(package, options)
                 ),
             ));
         }
-        if options.with_audit {
+        if options.with_msrv {
+            steps.push(step(
+                "cargo-msrv",
+                image,
+                ci::msrv_check_command(runtime, package, options).replace('$', "$$"),
+            ));
+        }
+        if options.repository_checks && options.with_audit {
             steps.push(step(
                 "cargo-audit",
                 image,
                 format!("{prefix}cargo audit --no-fetch --stale"),
             ));
         }
-        if options.with_deny {
+        if options.repository_checks && options.with_deny {
             steps.push(step(
                 "cargo-deny",
                 image,
                 format!("{prefix}cargo deny check bans licenses sources"),
             ));
         }
-        if options.om_ci != OmCiMode::Off {
+        if options.repository_checks && options.om_ci != OmCiMode::Off {
             steps.push(
                 Step::new("om-ci", image)
                     .command(format!("nix run \"{}\" -- ci run", options.omnix_ref)),
             );
         }
-        steps.push(step(
-            STEP_CARGO_CLIPPY,
-            image,
-            format!("{prefix}cargo clippy --all-targets -- --deny warnings"),
-        ));
-        if package.is_publishable() {
+        if options.om_ci != OmCiMode::Replace && package.is_publishable() {
             steps.push(step(
                 STEP_CARGO_PACKAGE,
                 image,
@@ -862,6 +941,24 @@ pub fn release_file(
     config: &CrowCiConfig,
     inputs: &ReleaseWorkflowInputs<'_>,
 ) -> Result<GeneratedFile> {
+    if !inputs.required_gates.is_empty() {
+        bail!(
+            "Crow release workflows do not support required gates; use an Actions release provider to enforce them"
+        );
+    }
+    if inputs.tag_prefix != crate::release_identity::TagPrefix::None {
+        bail!(
+            "Crow release workflows do not support prefixed tags; use an Actions release provider to enforce the configured prefix"
+        );
+    }
+    if matches!(
+        inputs.notes_source,
+        Some(crate::config::ReleaseNotesSource::Git | crate::config::ReleaseNotesSource::Changelog)
+    ) {
+        bail!(
+            "Crow release workflows do not support release notes; use an Actions release provider or explicitly select notes source none"
+        );
+    }
     let image = nix_image(config)?;
     let mut build = Step::new("release", &image)
         .command("test -n \"$${CI_COMMIT_TAG:-}\"".to_owned())

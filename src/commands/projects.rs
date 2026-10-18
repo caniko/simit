@@ -55,6 +55,8 @@ pub fn run(command: ProjectsCommand) -> Result<()> {
         ProjectsAction::Scan(args) => scan(args),
         ProjectsAction::Audit(args) => audit(args),
         ProjectsAction::Regenerate(args) => regenerate(args),
+        ProjectsAction::Update(args) => super::projects_update::run(args),
+        ProjectsAction::UpdateGithubAdapter(args) => super::projects_update::adapter(args),
         ProjectsAction::Discover(args) => discover(args),
         ProjectsAction::Forget(args) => forget(args),
         ProjectsAction::Prune(args) => prune(args),
@@ -109,12 +111,12 @@ fn regenerate(args: ProjectsRegenerateArgs) -> Result<()> {
             // the CI feature inherits the inferred workflow target. Passing the
             // CI platform to `init release` would override a GitHub release
             // target on a Crow/Forgejo CI project.
-            if feature == "ci" {
-                if let Some(backend) = target {
-                    child.args(["--platform", backend.platform().as_str()]);
-                    if backend.provider() == crate::cli::CiProvider::Crow {
-                        child.args(["--ci-provider", "crow"]);
-                    }
+            if feature == "ci"
+                && let Some(backend) = target
+            {
+                child.args(["--platform", backend.platform().as_str()]);
+                if backend.provider() == crate::cli::CiProvider::Crow {
+                    child.args(["--ci-provider", "crow"]);
                 }
             }
             if !args.write {
@@ -757,10 +759,10 @@ fn print_project(path: &Utf8Path, entry: &ProjectEntry) -> Result<()> {
     println!("path: {path}");
     println!("first_seen: {}", entry.first_seen.to_rfc3339());
     println!("last_seen: {}", entry.last_seen.to_rfc3339());
-    if !entry_is_missing(path) {
-        if let Some(command) = init_ci::project_regeneration_command(path.as_std_path())? {
-            println!("regen: {command}");
-        }
+    if !entry_is_missing(path)
+        && let Some(command) = init_ci::project_regeneration_command(path.as_std_path())?
+    {
+        println!("regen: {command}");
     }
     println!();
     if entry_is_missing(path) {

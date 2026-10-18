@@ -148,7 +148,9 @@ pub fn draft_file(path: &Path, base_ref: Option<&str>, dry_run: bool) -> Result<
         .unwrap_or_else(|| Path::new("."));
     let root = git_output(search_root, &["rev-parse", "--show-toplevel"])?;
     let content = read_file(path)?;
-    let updated = draft_content(&content, Path::new(root.trim()), base_ref)?;
+    let root = Path::new(root.trim());
+    let prefix = crate::config::ProjectConfig::load(root)?.release.tag_prefix;
+    let updated = draft_content_with_prefix(&content, root, base_ref, prefix)?;
     if dry_run {
         print!("{updated}");
         Ok(())
@@ -158,9 +160,51 @@ pub fn draft_file(path: &Path, base_ref: Option<&str>, dry_run: bool) -> Result<
 }
 
 pub fn draft_content(content: &str, repo_root: &Path, base_ref: Option<&str>) -> Result<String> {
+    draft_content_with_prefix(content, repo_root, base_ref, Default::default())
+}
+
+pub(crate) fn draft_content_with_prefix(
+    content: &str,
+    repo_root: &Path,
+    base_ref: Option<&str>,
+    prefix: crate::release_identity::TagPrefix,
+) -> Result<String> {
     check_content(content)?;
-    let range = changelog_range(repo_root, base_ref)?;
-    let subjects = commit_subjects(repo_root, &range)?;
+    let range = changelog_range(repo_root, base_ref, prefix)?;
+    draft_range(content, repo_root, &range)
+}
+
+pub(crate) fn draft_component_content(
+    content: &str,
+    repo_root: &Path,
+    namespace: &str,
+    paths: &[String],
+) -> Result<String> {
+    crate::release_notes::component_git_notes_script(namespace, paths)?;
+    let tags = git_output(repo_root, &["tag", "--merged", "HEAD", "--sort=-v:refname"])?;
+    let base = tags
+        .lines()
+        .find(|tag| crate::release_identity::ReleaseTag::parse_for_package(namespace, tag).is_ok());
+    let mut range = if let Some(base) = base {
+        changelog_range(repo_root, Some(base), Default::default())?
+    } else {
+        ChangelogRange {
+            git: "HEAD".to_owned(),
+            label: format!("initial {namespace} snapshot"),
+            initial: true,
+            paths: Vec::new(),
+        }
+    };
+    range.paths = paths
+        .iter()
+        .map(|path| format!(":(literal){path}"))
+        .collect();
+    draft_range(content, repo_root, &range)
+}
+
+fn draft_range(content: &str, repo_root: &Path, range: &ChangelogRange) -> Result<String> {
+    check_content(content)?;
+    let subjects = commit_subjects(repo_root, range)?;
     if subjects.is_empty() {
         bail!(
             "no non-noise commits found for changelog range {}",
@@ -169,10 +213,10 @@ pub fn draft_content(content: &str, repo_root: &Path, base_ref: Option<&str>) ->
     }
     let prompt = draft_prompt(
         repo_root,
-        &range,
+        range,
         &subjects,
-        &area_summary(repo_root, &range)?,
-        &shortstat(repo_root, &range)?,
+        &area_summary(repo_root, range)?,
+        &shortstat(repo_root, range)?,
     )?;
     let candidate = run_codex(repo_root, &prompt)?;
     let entries = parse_draft_entries(&candidate)?;
@@ -195,7 +239,29 @@ pub fn release_file(
     repo_root: Option<&Path>,
 ) -> Result<()> {
     let content = read_file(path)?;
-    let updated = release_content(&content, version, date, repo_url, path, repo_root)?;
+    let discovered = git_output(
+        path.parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new(".")),
+        &["rev-parse", "--show-toplevel"],
+    )
+    .ok();
+    let root = repo_root.or_else(|| discovered.as_deref().map(|root| Path::new(root.trim())));
+    let prefix = root
+        .map(crate::config::ProjectConfig::load)
+        .transpose()?
+        .unwrap_or_default()
+        .release
+        .tag_prefix;
+    let updated = release_content_with_prefix(
+        &content,
+        version,
+        date,
+        repo_url,
+        path,
+        root,
+        prefix.as_str(),
+    )?;
     write_file(path, &updated)
 }
 
@@ -207,19 +273,46 @@ pub fn release_content(
     path: &Path,
     repo_root: Option<&Path>,
 ) -> Result<String> {
+    release_content_with_namespace(content, version, date, repo_url, path, repo_root, None)
+}
+
+pub(crate) fn release_content_with_namespace(
+    content: &str,
+    version: &Version,
+    date: Date,
+    repo_url: Option<&str>,
+    path: &Path,
+    repo_root: Option<&Path>,
+    namespace: Option<&str>,
+) -> Result<String> {
+    let prefix = namespace
+        .map(|name| format!("{name}/v"))
+        .unwrap_or_default();
+    release_content_with_prefix(content, version, date, repo_url, path, repo_root, &prefix)
+}
+
+pub(crate) fn release_content_with_prefix(
+    content: &str,
+    version: &Version,
+    date: Date,
+    repo_url: Option<&str>,
+    path: &Path,
+    repo_root: Option<&Path>,
+    prefix: &str,
+) -> Result<String> {
     let mut document = parse_document(content)?;
     let unreleased = unreleased_section(&document)?;
     let unreleased_start = unreleased.start;
     let unreleased_end = unreleased.end;
 
     let latest = latest_released_version(&document)?;
-    if let Some(latest) = latest.as_ref() {
-        if version <= latest {
-            bail!(
-                "release version {version} must be greater than the latest changelog release {}",
-                latest
-            );
-        }
+    if let Some(latest) = latest.as_ref()
+        && version <= latest
+    {
+        bail!(
+            "release version {version} must be greater than the latest changelog release {}",
+            latest
+        );
     }
 
     let body = trimmed_body_lines(&document.lines[unreleased_start + 1..unreleased_end]);
@@ -247,7 +340,7 @@ pub fn release_content(
         .or_else(|| extract_repo_url_from_footer(content))
         .or_else(|| repo_root.or_else(|| path.parent()).and_then(git_origin_url));
     if let Some(repo) = repo {
-        update_reference_links(&mut document.lines, &repo, version, latest.as_ref());
+        update_reference_links(&mut document.lines, &repo, version, latest.as_ref(), prefix);
     }
 
     Ok(render_lines(&document.lines))
@@ -282,12 +375,12 @@ pub fn check_content(content: &str) -> Result<()> {
         if let SectionKind::Version(version) = &section.kind {
             let heading = &document.lines[section.start];
             parse_version_heading(heading)?;
-            if let Some(previous) = previous {
-                if version >= previous {
-                    bail!(
-                        "release sections must be in descending semver order; found {version} after {previous}"
-                    );
-                }
+            if let Some(previous) = previous
+                && version >= previous
+            {
+                bail!(
+                    "release sections must be in descending semver order; found {version} after {previous}"
+                );
             }
             previous = Some(version);
         }
@@ -567,9 +660,14 @@ struct ChangelogRange {
     git: String,
     label: String,
     initial: bool,
+    paths: Vec<String>,
 }
 
-fn changelog_range(repo_root: &Path, requested: Option<&str>) -> Result<ChangelogRange> {
+fn changelog_range(
+    repo_root: &Path,
+    requested: Option<&str>,
+    prefix: crate::release_identity::TagPrefix,
+) -> Result<ChangelogRange> {
     if let Some(requested) = requested {
         let requested = requested.trim();
         if requested.is_empty() {
@@ -580,15 +678,17 @@ fn changelog_range(repo_root: &Path, requested: Option<&str>) -> Result<Changelo
             git: format!("{}..HEAD", merge_base.trim()),
             label: requested.to_owned(),
             initial: false,
+            paths: Vec::new(),
         });
     }
 
     let tags = git_output(repo_root, &["tag", "--merged", "HEAD", "--sort=-v:refname"])?;
-    if let Some(tag) = tags.lines().find(|tag| Version::parse(tag.trim()).is_ok()) {
+    if let Some(tag) = tags.lines().find(|tag| prefix.parse(tag.trim()).is_ok()) {
         return Ok(ChangelogRange {
             git: format!("{}..HEAD", tag.trim()),
             label: tag.trim().to_owned(),
             initial: false,
+            paths: Vec::new(),
         });
     }
 
@@ -596,13 +696,15 @@ fn changelog_range(repo_root: &Path, requested: Option<&str>) -> Result<Changelo
         git: "HEAD".to_owned(),
         label: "initial snapshot".to_owned(),
         initial: true,
+        paths: Vec::new(),
     })
 }
 
 fn commit_subjects(repo_root: &Path, range: &ChangelogRange) -> Result<Vec<String>> {
-    let output = git_output(
+    let output = scoped_git_output(
         repo_root,
         &["log", "--no-merges", "--format=%s", &range.git],
+        range,
     )?;
     Ok(output
         .lines()
@@ -627,7 +729,7 @@ fn is_noise_subject(subject: &str) -> bool {
 
 fn area_summary(repo_root: &Path, range: &ChangelogRange) -> Result<String> {
     let output = if range.initial {
-        git_output(
+        scoped_git_output(
             repo_root,
             &[
                 "diff-tree",
@@ -637,16 +739,17 @@ fn area_summary(repo_root: &Path, range: &ChangelogRange) -> Result<String> {
                 "-r",
                 "HEAD",
             ],
+            range,
         )?
     } else {
-        git_output(repo_root, &["diff", "--dirstat=files,0", &range.git])?
+        scoped_git_output(repo_root, &["diff", "--dirstat=files,0", &range.git], range)?
     };
     Ok(output.lines().take(30).collect::<Vec<_>>().join("\n"))
 }
 
 fn shortstat(repo_root: &Path, range: &ChangelogRange) -> Result<String> {
     if range.initial {
-        git_output(
+        scoped_git_output(
             repo_root,
             &[
                 "diff-tree",
@@ -656,10 +759,18 @@ fn shortstat(repo_root: &Path, range: &ChangelogRange) -> Result<String> {
                 "-r",
                 "HEAD",
             ],
+            range,
         )
     } else {
-        git_output(repo_root, &["diff", "--shortstat", &range.git])
+        scoped_git_output(repo_root, &["diff", "--shortstat", &range.git], range)
     }
+}
+
+fn scoped_git_output(repo_root: &Path, args: &[&str], range: &ChangelogRange) -> Result<String> {
+    let mut args = args.to_vec();
+    args.push("--");
+    args.extend(range.paths.iter().map(String::as_str));
+    git_output(repo_root, &args)
 }
 
 fn draft_prompt(
@@ -894,6 +1005,7 @@ fn update_reference_links(
     repo_url: &str,
     version: &Version,
     previous: Option<&Version>,
+    prefix: &str,
 ) {
     let footer_start = detect_footer_start(lines).unwrap_or(lines.len());
     let existing = if footer_start < lines.len() {
@@ -913,15 +1025,35 @@ fn update_reference_links(
     };
 
     let new_unreleased = format!(
-        "[Unreleased]: {}/compare/{}...HEAD",
+        "[Unreleased]: {}/compare/{prefix}{}...HEAD",
         repo_url.trim_end_matches('/'),
         version
     );
     let new_version = previous.map(|previous| {
+        let previous_text = previous.to_string();
+        let previous_tag = existing
+            .iter()
+            .filter_map(|line| {
+                let (label, url) = line.split_once("]: ")?;
+                let (_, refs) = url.split_once("/compare/")?;
+                let candidate = if label == "[Unreleased" {
+                    refs.strip_suffix("...HEAD")?
+                } else if label == format!("[{previous}") {
+                    refs.rsplit_once("...")?.1
+                } else {
+                    return None;
+                };
+                (candidate == previous_text
+                    || candidate.strip_prefix('v') == Some(previous_text.as_str())
+                    || candidate.strip_prefix(prefix) == Some(previous_text.as_str()))
+                .then_some(candidate.to_owned())
+            })
+            .next()
+            .unwrap_or_else(|| format!("{prefix}{previous}"));
         format!(
-            "[{version}]: {}/compare/{}...{}",
+            "[{version}]: {}/compare/{}...{prefix}{}",
             repo_url.trim_end_matches('/'),
-            previous,
+            previous_tag,
             version
         )
     });
@@ -952,4 +1084,33 @@ fn update_reference_links(
     }
     replacement.extend(footer);
     lines.splice(replace_start..lines.len(), replacement);
+}
+
+#[cfg(test)]
+mod prefix_adoption_tests {
+    #[test]
+    fn comparison_links_preserve_the_preceding_tag_spelling() {
+        for (old, prefix) in [
+            ("1.1.0", "v"),
+            ("v1.1.0", ""),
+            ("engine/v1.1.0", "engine/v"),
+        ] {
+            let mut lines = vec![format!(
+                "[Unreleased]: https://example/repo/compare/{old}...HEAD"
+            )];
+            super::update_reference_links(
+                &mut lines,
+                "https://example/repo",
+                &"1.2.0".parse().unwrap(),
+                Some(&"1.1.0".parse().unwrap()),
+                prefix,
+            );
+            assert!(
+                lines.contains(&format!(
+                    "[1.2.0]: https://example/repo/compare/{old}...{prefix}1.2.0"
+                )),
+                "{lines:?}"
+            );
+        }
+    }
 }

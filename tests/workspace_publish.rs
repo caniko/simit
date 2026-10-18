@@ -339,7 +339,15 @@ fn member_workflows_have_unique_check_names_for_single_split_and_gate_jobs() {
                 Some(format!("CI ({member})").as_str())
             );
             let jobs = workflow["jobs"].as_mapping().unwrap();
-            assert_eq!(jobs.len(), if split { 4 } else { 2 });
+            assert_eq!(
+                jobs.len(),
+                match (member, split) {
+                    ("a", true) => 4,
+                    ("a", false) => 2,
+                    (_, true) => 3,
+                    (_, false) => 1,
+                }
+            );
             for (id, job) in jobs {
                 let name = job["name"]
                     .as_str()
@@ -351,7 +359,12 @@ fn member_workflows_have_unique_check_names_for_single_split_and_gate_jobs() {
                 );
             }
             assert!(!text.contains("--all-features"));
-            assert!(text.contains("cargo test --no-default-features"));
+            assert!(text.contains(&format!("cargo test -p {member}")));
+            assert_eq!(
+                text.matches("run: cargo test --no-default-features")
+                    .count(),
+                usize::from(member == "a")
+            );
         }
         let check = simit()
             .current_dir(temp.path())
@@ -398,7 +411,10 @@ fn coordinated_publication_preserves_five_member_ci_policies_and_dependency_orde
         let content = read(&ci);
         assert!(content.contains(&format!("cargo test -p {name} --all-features")));
         assert!(content.contains("cargo doc"));
-        assert!(content.contains("member-contract"));
+        assert_eq!(
+            content.matches("gate-member-contract:").count(),
+            usize::from(name == "a")
+        );
         member_ci.insert(ci, content);
     }
     // Only publication switches to a dependency-ordered carrier. CI policy,
@@ -494,73 +510,121 @@ fn coordinated_publication_preserves_five_member_ci_policies_and_dependency_orde
 
 #[cfg(unix)]
 #[test]
-fn coordinated_tag_validation_rejects_a_moved_tag_before_checkout() {
+fn coordinated_tag_prefixes_validate_source_and_archive_versions() {
     use std::os::unix::fs::PermissionsExt;
 
-    let temp = init_coordinated_workspace("");
-    let output = simit()
-        .current_dir(temp.path())
-        .args(["init", "ci", "--runtime", "cargo"])
-        .output()
-        .unwrap();
-    assert!(output.status.success(), "{output:?}");
-    let workflow: serde_yaml::Value = serde_yaml::from_str(&read(
-        &temp.path().join(".github/workflows/publish-workspace.yaml"),
-    ))
-    .unwrap();
-    let script = workflow["jobs"]["build"]["steps"]
-        .as_sequence()
-        .unwrap()
-        .iter()
-        .find(|step| step["name"].as_str() == Some("Validate signed release tag"))
-        .unwrap()["run"]
-        .as_str()
-        .unwrap();
-
-    // Exercise the rendered shell boundary without contacting GitHub or requiring
-    // an operator signing key. Signature verification succeeds in this fixture;
-    // only the binding between the tag commit and the immutable event SHA varies.
-    let bin = temp.path().join("bin");
-    fs::create_dir(&bin).unwrap();
-    fs::create_dir_all(temp.path().join("keys")).unwrap();
-    fs::write(
-        temp.path().join("keys/maintainers.gpg"),
-        "fixture trust root",
-    )
-    .unwrap();
-    for (name, body) in [
-        ("gpg", "exit 0"),
-        (
-            "git",
-            "case \"$1\" in\nfetch|verify-tag) exit 0;;\nshow) printf 'fixture trust root';;\nrev-parse) case \"$3\" in HEAD) printf '%s\\n' \"$GITHUB_SHA\";; *) printf '%s\\n' \"$TEST_TAG_SHA\";; esac;;\ncheckout) touch checkout-ran;;\n*) exit 99;;\nesac",
-        ),
-        ("cargo", "printf 'fixture@0.1.0\\n'"),
-    ] {
-        let path = bin.join(name);
-        fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
-    }
-    let path = std::env::join_paths(
-        std::iter::once(bin).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
-    )
-    .unwrap();
-    let event_sha = "1111111111111111111111111111111111111111";
-    for tag_sha in ["2222222222222222222222222222222222222222", event_sha] {
-        let output = Command::new("bash")
+    for prefix in ["", "v"] {
+        let temp = init_coordinated_workspace("");
+        if !prefix.is_empty() {
+            let config = read(&temp.path().join("simit.toml"));
+            fs::write(
+                temp.path().join("simit.toml"),
+                format!("{config}\n[release]\ntag_prefix = '{prefix}'\n"),
+            )
+            .unwrap();
+        }
+        let output = simit()
             .current_dir(temp.path())
-            .args(["-c", script])
-            .env("PATH", &path)
-            .env("TMPDIR", temp.path())
-            .env("GITHUB_REF_NAME", "0.1.0")
-            .env("GITHUB_SHA", event_sha)
-            .env("TEST_TAG_SHA", tag_sha)
+            .args(["init", "ci", "--runtime", "cargo"])
             .output()
             .unwrap();
-        assert_eq!(output.status.success(), tag_sha == event_sha, "{output:?}");
-        assert!(
-            !temp.path().join("checkout-ran").exists(),
-            "the tag validator must never checkout a mutable tag"
-        );
+        assert!(output.status.success(), "{output:?}");
+        let workflow: serde_yaml::Value = serde_yaml::from_str(&read(
+            &temp.path().join(".github/workflows/publish-workspace.yaml"),
+        ))
+        .unwrap();
+        assert_eq!(workflow["on"]["push"]["tags"][0], format!("{prefix}[0-9]*"));
+        let script = workflow["jobs"]["build"]["steps"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .find(|step| step["name"].as_str() == Some("Validate signed release tag"))
+            .unwrap()["run"]
+            .as_str()
+            .unwrap();
+
+        // Exercise the rendered shell boundary without contacting GitHub or requiring
+        // an operator signing key. Signature verification succeeds in this fixture;
+        // only the binding between the tag commit and the immutable event SHA varies.
+        let bin = temp.path().join("bin");
+        fs::create_dir(&bin).unwrap();
+        fs::create_dir_all(temp.path().join("keys")).unwrap();
+        fs::write(
+            temp.path().join("keys/maintainers.gpg"),
+            "fixture trust root",
+        )
+        .unwrap();
+        for (name, body) in [
+            ("gpg", "exit 0"),
+            (
+                "git",
+                "case \"$1\" in\nfetch|verify-tag) exit 0;;\nshow) printf 'fixture trust root';;\ncat-file) printf 'tag %s\\n\\n' \"$GITHUB_REF_NAME\";;\nrev-parse) case \"$3\" in HEAD) printf '%s\\n' \"$GITHUB_SHA\";; *) printf '%s\\n' \"$TEST_TAG_SHA\";; esac;;\ncheckout) touch checkout-ran;;\n*) exit 99;;\nesac",
+            ),
+            ("cargo", "printf 'fixture@%s\\n' \"${TEST_VERSION:-0.1.0}\""),
+        ] {
+            let path = bin.join(name);
+            fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let path = std::env::join_paths(
+            std::iter::once(bin).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+        )
+        .unwrap();
+        let event_sha = "1111111111111111111111111111111111111111";
+        for tag_sha in ["2222222222222222222222222222222222222222", event_sha] {
+            let output = Command::new("bash")
+                .current_dir(temp.path())
+                .args(["-c", script])
+                .env("PATH", &path)
+                .env("TMPDIR", temp.path())
+                .env("GITHUB_REF_NAME", format!("{prefix}0.1.0"))
+                .env("GITHUB_SHA", event_sha)
+                .env("TEST_TAG_SHA", tag_sha)
+                .output()
+                .unwrap();
+            assert_eq!(output.status.success(), tag_sha == event_sha, "{output:?}");
+            assert!(
+                !temp.path().join("checkout-ran").exists(),
+                "the tag validator must never checkout a mutable tag"
+            );
+        }
+        for step in workflow["jobs"]["build"]["steps"].as_sequence().unwrap() {
+            let Some(name) = step["name"]
+                .as_str()
+                .and_then(|name| name.strip_prefix("Build immutable archive "))
+            else {
+                continue;
+            };
+            let packaged = temp
+                .path()
+                .join(format!("simit-package-target/package/{name}-0.1.0.crate"));
+            fs::create_dir_all(packaged.parent().unwrap()).unwrap();
+            fs::write(packaged, "fixture archive").unwrap();
+            for version in ["0.1.0", "0.2.0"] {
+                let output = Command::new("bash")
+                    .current_dir(temp.path())
+                    .args(["-c", step["run"].as_str().unwrap()])
+                    .env("PATH", &path)
+                    .env("RUNNER_TEMP", temp.path())
+                    .env("GITHUB_REF_NAME", format!("{prefix}0.1.0"))
+                    .env("TEST_VERSION", version)
+                    .output()
+                    .unwrap();
+                assert_eq!(
+                    output.status.success(),
+                    version == "0.1.0",
+                    "{prefix}/{name}/{version}: {output:?}"
+                );
+            }
+            assert_eq!(
+                read(
+                    &temp
+                        .path()
+                        .join(format!("simit-crates/{name}/{name}-0.1.0.crate"))
+                ),
+                "fixture archive"
+            );
+        }
     }
 }
 

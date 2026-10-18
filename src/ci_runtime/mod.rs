@@ -7,4 +7,6 @@ pub mod log_archive;
 pub mod log_custody;
 mod log_http;
 pub mod log_reconcile;
+pub mod observer;
 pub mod process;
+mod trusted_platform;

@@ -2,11 +2,11 @@
   description = "Semver-aware git commit helper for Rust projects";
 
   inputs = {
-    rs-harbor.url = "github:caniko/harbor-rs/fac8049316846e0ef1c1e6acd92aed7a337b333a";
+    harbor.url = "git+https://github.com/caniko/harbor.git?ref=feat/harbor-monorepo-components&rev=e8b1996580e4ecd51dd402edf4a16d9df88e3a1b";
 
-    nixpkgs.follows = "rs-harbor/nixpkgs";
-    rust-overlay.follows = "rs-harbor/rust-overlay";
-    crane.follows = "rs-harbor/crane";
+    nixpkgs.follows = "harbor/nixpkgs";
+    rust-overlay.follows = "harbor/rust-overlay";
+    crane.follows = "harbor/crane";
     flake-utils.url = "github:numtide/flake-utils";
     treefmt-nix = {
       url = "github:numtide/treefmt-nix";
@@ -16,14 +16,9 @@
       url = "github:cachix/git-hooks.nix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
-    # plinth trunk trips both of this flake's `nix flake check` gates: it still
-    # declares the retired Codeberg nix-cache-pin mirror (whose trunk orphaned
-    # the revision we locked), and its Cargo.lock wants dioxus 0.7.9 while our
-    # nixpkgs ships dioxus-cli 0.7.10. This compatibility successor preserves
-    # fix/dioxus-0.7.10 and its exact tartan revision, using public GitHub Cargo
-    # transport. It still predates the nix-cache-pin input entirely.
+    # Consume the exact locally and hosted-qualified static-site/library repair.
     plinth = {
-      url = "git+https://github.com/caniko/plinth.git?ref=fix/tartan-github-transport-20261012-ses-ed08&rev=79d5a44310f6a7f620a8ebcf8c6dc78389cf4a36";
+      url = "git+https://github.com/caniko/plinth.git?ref=migrate/harbor-combined-20261012-features&rev=534dfa6dd6217db97b7ccd313501120a3c34d912";
       inputs.nixpkgs.follows = "nixpkgs";
     };
     advisory-db = {
@@ -36,7 +31,7 @@
     self,
     advisory-db,
     nixpkgs,
-    rs-harbor,
+    harbor,
     plinth,
     flake-utils,
     rust-overlay,
@@ -51,19 +46,19 @@
         overlays = [(import rust-overlay)];
       };
 
-      toolchain = rs-harbor.lib.mkToolchain {
+      toolchain = harbor.lib.rust.mkToolchain {
         inherit pkgs;
         toolchainProfile = "nightly";
       };
       inherit (toolchain) craneLib;
-      cross = rs-harbor.lib.mkCross {inherit pkgs system;};
+      cross = harbor.lib.rust.mkCross {inherit pkgs system;};
       simitVersion = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).package.version;
       # `nix run github:caniko/simit` is the public CLI
       # distribution path and must work on runners without canix's managed
       # sccache transport. Keep cached derivations for Simit's own checks,
       # but make the default runnable package self-contained.
       publicCraneLib =
-        (rs-harbor.lib.mkToolchain {
+        (harbor.lib.rust.mkToolchain {
           inherit pkgs;
           toolchainProfile = "nightly";
           cache.enable = false;
@@ -98,9 +93,15 @@
           (craneLib.filterCargoSources path type)
           || builtins.elem pathString (map (name: "${toString ./.}/${name}") ["README.md" "LICENSE" "CHANGELOG.md"])
           || pkgs.lib.hasInfix "/src/review/assets/" pathString
+          || pkgs.lib.hasSuffix "/src/monorepo/native_release.py" pathString
+          || pkgs.lib.hasSuffix "/src/monorepo/nix_diagnostics.sh" pathString
+          || pkgs.lib.hasSuffix "/src/monorepo/provision.sh" pathString
           || pkgs.lib.hasInfix "/tests/fixtures/" pathString
           || pkgs.lib.hasSuffix "/src/render/ci/nix_dependencies.py" pathString
           || pkgs.lib.hasSuffix "/src/render/ci/custody.py" pathString
+          || pkgs.lib.hasSuffix "/scripts" pathString
+          || pkgs.lib.hasInfix "/scripts/qualify-" pathString
+          || pkgs.lib.hasSuffix "/src/render/ci/custody_sealed.py" pathString
           || pkgs.lib.hasSuffix "ci-actions.json" pathString
           || pkgs.lib.hasSuffix "/.github" pathString
           || pkgs.lib.hasSuffix "/.github/workflows" pathString
@@ -112,6 +113,10 @@
 
       commonArgs = {
         inherit src;
+        # Compile-time trust anchors work in the sandbox and become runtime
+        # closure references. Job PATH/SSL_CERT_* cannot replace these inputs.
+        SIMIT_TRUSTED_GIT = "${pkgs.git}/bin/git";
+        SIMIT_TRUSTED_CA_BUNDLE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
         strictDeps = true;
         cargoExtraArgs = "--all-features";
         # The publisher's license-compatible TLS backend builds OpenSSL from
@@ -129,7 +134,10 @@
         // {
           inherit cargoArtifacts;
           nativeBuildInputs = commonArgs.nativeBuildInputs ++ [preCommitBin];
-          nativeCheckInputs = [pkgs.git pkgs.gnupg pkgs.nodejs pkgs.jq pkgs.python3];
+          nativeCheckInputs = [pkgs.git pkgs.gnupg pkgs.nodejs pkgs.jq pkgs.python3 pkgs.actionlint] ++ pkgs.lib.optionals pkgs.stdenv.isLinux [pkgs.bubblewrap pkgs.nix pkgs.sqlite];
+          # Namespace integration runs in both hosted runtime feature modes.
+          # Keep the engine's non-namespace checks in package qualification.
+          cargoTestExtraArgs = "-- --skip commands::projects_update::engine::tests::namespace_";
         });
 
       publicCargoArtifacts = publicCraneLib.buildDepsOnly commonArgs;
@@ -137,7 +145,8 @@
         // {
           cargoArtifacts = publicCargoArtifacts;
           nativeBuildInputs = commonArgs.nativeBuildInputs ++ [preCommitBin];
-          nativeCheckInputs = [pkgs.git pkgs.gnupg pkgs.nodejs pkgs.jq pkgs.python3];
+          nativeCheckInputs = [pkgs.git pkgs.gnupg pkgs.nodejs pkgs.jq pkgs.python3 pkgs.actionlint] ++ pkgs.lib.optionals pkgs.stdenv.isLinux [pkgs.bubblewrap pkgs.nix pkgs.sqlite];
+          cargoTestExtraArgs = "-- --skip commands::projects_update::engine::tests::namespace_";
         });
 
       actionlintCheck =
@@ -154,7 +163,7 @@
       staticPackages =
         if system == "x86_64-linux"
         then
-          rs-harbor.lib.mkCrossPackages {
+          harbor.lib.rust.mkCrossPackages {
             inherit pkgs cross;
             craneLib = publicCraneLib;
             pname = "simit";
@@ -171,7 +180,7 @@
       binaryRelease =
         if system == "x86_64-linux"
         then
-          rs-harbor.lib.mkBinaryRelease {
+          harbor.lib.rust.mkBinaryRelease {
             inherit pkgs;
             pname = "simit";
             version = simitVersion;
@@ -208,7 +217,8 @@
       nextestCheck = publicCraneLib.cargoNextest (commonArgs
         // {
           cargoArtifacts = publicCargoArtifacts;
-          nativeCheckInputs = [pkgs.git pkgs.gnupg pkgs.nodejs pkgs.jq pkgs.python3];
+          nativeCheckInputs = [pkgs.git pkgs.gnupg pkgs.nodejs pkgs.jq pkgs.python3 pkgs.actionlint] ++ pkgs.lib.optionals pkgs.stdenv.isLinux [pkgs.bubblewrap pkgs.nix pkgs.sqlite];
+          cargoNextestExtraArgs = "-E 'not test(commands::projects_update::engine::tests::namespace_)'";
         });
 
       docCheck = publicCraneLib.cargoDoc (commonArgs
@@ -224,6 +234,21 @@
       denyCheck = publicCraneLib.cargoDeny {
         inherit src;
       };
+
+      custodySourceCheck = pkgs.runCommand "check-simit-custody-filtered-source" {} ''
+        mkdir -p "$out"
+        for relative in \
+          src/render/ci/custody.py \
+          src/render/ci/custody_sealed.py \
+          tests/fixtures/ci-custody-contract.py \
+          tests/fixtures/ci-sealed-custody-contract.py; do
+          test -s "${src}/$relative"
+          cmp "${src}/$relative" "${./.}/$relative"
+          checksum=$(sha256sum "${src}/$relative")
+          printf '%s  %s\n' "''${checksum%% *}" "$relative" >> "$out/source.sha256"
+        done
+        cat "$out/source.sha256"
+      '';
 
       docs = pkgs.stdenv.mkDerivation {
         pname = "simit-docs";
@@ -280,6 +305,12 @@
         simit-doc = docCheck;
         simit-audit = auditCheck;
         simit-deny = denyCheck;
+        simit-custody-source = custodySourceCheck;
+        simit-updater-config = let
+          checked = import ./tests/updater.nix {inherit nixpkgs;};
+        in
+          assert checked.serviceVerified;
+            pkgs.writeText "simit-updater-config.json" (builtins.toJSON checked.rendered);
 
         clippy = clippyCheck;
         nextest = nextestCheck;
@@ -299,8 +330,11 @@
           rust-analyzer
         ];
       in {
+        test = publicCraneLib.devShell {
+          packages = with pkgs; [git gnupg nodejs jq python3 actionlint perl] ++ lib.optionals stdenv.isLinux [bubblewrap nix sqlite];
+        };
         msrv = let
-          msrvToolchain = rs-harbor.lib.mkToolchain {
+          msrvToolchain = harbor.lib.rust.mkToolchain {
             inherit pkgs;
             toolchainFile = ./rust-toolchain-msrv.toml;
             withRustAnalyzer = false;
@@ -308,10 +342,10 @@
             cache.enable = false;
           };
         in
-          (rs-harbor.lib.mkDevShells {
+          (harbor.lib.rust.mkDevShells {
             inherit pkgs;
             inherit (msrvToolchain) craneLib;
-            cross = rs-harbor.lib.mkCross {
+            cross = harbor.lib.rust.mkCross {
               inherit pkgs system;
               enableOsxcross = false;
             };
@@ -326,6 +360,7 @@
           checks = self.checks.${system};
           packages = with pkgs;
             [
+              treefmtEval.config.build.wrapper
               alejandra
               cargo-audit
               cargo-deny
@@ -339,13 +374,14 @@
               rust-analyzer
               taplo
             ]
+            ++ pkgs.lib.optionals pkgs.stdenv.isLinux [pkgs.bubblewrap pkgs.nix pkgs.sqlite]
             ++ pre-commit-check.enabledPackages;
           shellHook = pre-commit-check.shellHook;
         };
 
         docs = publicCraneLib.devShell {
           checks = self.checks.${system};
-          packages = docsPackages ++ pre-commit-check.enabledPackages;
+          packages = [treefmtEval.config.build.wrapper] ++ docsPackages ++ pre-commit-check.enabledPackages;
           shellHook = pre-commit-check.shellHook;
         };
       };
@@ -355,6 +391,15 @@
         mkReviewTools = args: import ./nix/review-tools.nix ({source = self;} // args);
         simitModule = import ./nix/simit-module.nix {lib = nixpkgs.lib;};
         mkSimitConfig = import ./nix/simit-config.nix {lib = nixpkgs.lib;};
+        mkUpdateConfig = import ./nix/update-config.nix {lib = nixpkgs.lib;};
+      };
+      nixosModules.updater = {
+        lib,
+        pkgs,
+        ...
+      }: {
+        imports = [./nix/updater.nix];
+        services.simit-updater.package = lib.mkDefault self.packages.${pkgs.stdenv.hostPlatform.system}.default;
       };
     };
 }

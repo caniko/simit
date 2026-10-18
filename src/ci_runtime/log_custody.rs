@@ -528,7 +528,7 @@ pub fn authenticate(
     fs::write(temp.path().join("signature"), &signature_raw)?;
     let keyring = read(&approval.keyring, budget)?;
     fs::write(temp.path().join("trusted.gpg"), &keyring)?;
-    let status = super::process::query(
+    let status = crate::bounded_process::query(
         Command::new("gpgv")
             .arg("--homedir")
             .arg(temp.path())

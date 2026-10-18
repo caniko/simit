@@ -2,6 +2,11 @@
 
 The Rust library exposes the modules used by the `simit` binary.
 
+- `runtime_admission` validates versioned bounded readiness probes and retains
+  fresh observation receipts. See [Runtime Admission](runtime-admission.md).
+- `bounded_process` and `cancellation` provide shared byte-preserving Unix
+  execution with explicit deadlines and caller-owned cancellation. Existing
+  `ci_runtime::process` and `ci_runtime::cancellation` paths remain compatible.
 - `cargo` parses Cargo metadata (including dependency `kind`/`optional`/`target`/`rename`
   for publish-ordering classification), selects workspace packages, plans semantic
   version bumps, and updates manifests and lockfiles.

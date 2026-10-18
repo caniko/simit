@@ -4,6 +4,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::cargo;
 use crate::cli::{ChocolateyAction, ChocolateyBumpArgs, ChocolateyCommand, ChocolateyRenderArgs};
@@ -73,6 +75,13 @@ pub(crate) fn bump(args: ChocolateyBumpArgs) -> Result<()> {
     }
     write_package(package_dir, &package)?;
 
+    if args.pack {
+        let key_env = args.api_key_env.as_deref().unwrap_or(&resolved.api_key_env);
+        let key = std::env::var(key_env).unwrap_or_default();
+        let directory = package_dir.canonicalize()?;
+        packed_candidate(&directory, &resolved, &args.version, key_env, &key)?;
+    }
+
     if args.push {
         let api_key_env = args
             .api_key_env
@@ -89,15 +98,20 @@ pub(crate) fn bump(args: ChocolateyBumpArgs) -> Result<()> {
         if api_key.is_empty() {
             bail!("Chocolatey API key environment variable ${api_key_env} is empty");
         }
-        if !args.force_resubmit && package_version_exists(&resolved.id, &args.version)? {
+        let already_current = pack_and_push(
+            package_dir,
+            &resolved,
+            &args.version,
+            api_key_env,
+            &api_key,
+            args.force_resubmit,
+        )?;
+        if already_current {
             println!(
                 "already-current: Chocolatey {} {}",
                 resolved.id, args.version
             );
-            registry::touch_current_project_or_warn([("chocolatey", FeatureStatus::Managed)]);
-            return Ok(());
         }
-        pack_and_push(package_dir, &resolved.push.source, &api_key)?;
     }
     registry::touch_current_project_or_warn([("chocolatey", FeatureStatus::Managed)]);
     Ok(())
@@ -193,63 +207,329 @@ fn sha256_set(archives: &BTreeMap<Architecture, PathBuf>) -> Result<Sha256Set> {
     Ok(sha256s)
 }
 
-fn pack_and_push(package_dir: &Path, source: &str, api_key: &str) -> Result<()> {
+/// Returns true only when the registry's package bytes match this packed candidate.
+fn pack_and_push(
+    package_dir: &Path,
+    resolved: &ResolvedChocolatey,
+    version: &str,
+    api_key_env: &str,
+    api_key: &str,
+    force_resubmit: bool,
+) -> Result<bool> {
     let package_dir = package_dir
         .canonicalize()
         .with_context(|| format!("canonicalizing {}", package_dir.display()))?;
-    let nuspec = package_nuspec(&package_dir)?;
-    let pack = Command::new("choco")
-        .arg("pack")
-        .arg(&nuspec)
-        .arg("--output-directory")
-        .arg(&package_dir)
-        .current_dir(&package_dir)
-        .status()
-        .with_context(choco_missing_context)?;
-    if !pack.success() {
-        bail!("choco pack failed");
+    let (nupkg, candidate_sha256) =
+        packed_candidate(&package_dir, resolved, version, api_key_env, api_key)?;
+    let matches = || remote_package_matches(resolved, version, &candidate_sha256, api_key_env);
+    if !force_resubmit && matches()? {
+        return Ok(true);
     }
-
-    let nupkg = newest_nupkg(&package_dir)?;
     let push = Command::new("choco")
         .arg("push")
         .arg(&nupkg)
         .arg("--source")
-        .arg(source)
+        .arg(&resolved.push.source)
         .arg("--api-key")
         .arg(api_key)
         .current_dir(&package_dir)
-        .status()
-        .with_context(choco_missing_context)?;
-    if !push.success() {
-        bail!("choco push failed; Chocolatey rejects duplicate version pushes");
-    }
-    Ok(())
-}
-
-pub(crate) fn package_version_exists(id: &str, version: &str) -> Result<bool> {
-    let filter = format!(
-        "Id eq '{}' and Version eq '{}'",
-        odata_quote(id),
-        odata_quote(version)
-    );
-    let url = format!(
-        "https://community.chocolatey.org/api/v2/Packages()?%24filter={}",
-        percent_encode(&filter)
-    );
-    let output = Command::new("curl")
-        .arg("-fsSL")
-        .arg(&url)
         .output()
-        .with_context(|| "checking Chocolatey package version with curl")?;
-    if !output.status.success() {
-        bail!("Chocolatey package version check failed");
+        .with_context(choco_missing_context)?;
+    if !push.status.success() {
+        // Another publisher may have won the race. An error string is not evidence.
+        if matches()? {
+            return Ok(true);
+        }
+        bail!("choco push failed: {}", redacted_output(&push, api_key));
     }
-    Ok(String::from_utf8_lossy(&output.stdout).contains("<entry>"))
+    Ok(false)
 }
 
-fn odata_quote(value: &str) -> String {
-    value.replace('\'', "''")
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct PackedCandidate {
+    source_sha256: String,
+    package_sha256: String,
+    #[serde(default)]
+    package_filename: Option<String>,
+}
+
+fn packed_candidate(
+    package_dir: &Path,
+    resolved: &ResolvedChocolatey,
+    version: &str,
+    api_key_env: &str,
+    api_key: &str,
+) -> Result<(PathBuf, String)> {
+    let nuspec = package_nuspec(package_dir)?;
+    let mut source = Sha256::new();
+    for path in [
+        &nuspec,
+        &package_dir.join("tools/chocolateyInstall.ps1"),
+        &package_dir.join("tools/chocolateyUninstall.ps1"),
+    ] {
+        source.update(sha256::sha256_of_file(path)?);
+    }
+    let source_sha256 = hex::encode(source.finalize());
+    let cache = package_dir.join(".simit-candidates");
+    let retained = cache.join(&source_sha256);
+    if retained.exists() {
+        let receipt: PackedCandidate =
+            serde_json::from_slice(&fs::read(retained.join("receipt.json"))?)
+                .context("reading retained Chocolatey candidate identity")?;
+        let retained_nupkg = packed_package(&retained, &resolved.id, version)?;
+        if receipt.source_sha256 != source_sha256
+            || receipt.package_filename.as_deref().is_some_and(|name| {
+                Some(name) != retained_nupkg.file_name().and_then(|name| name.to_str())
+            })
+            || receipt.package_sha256 != sha256::sha256_of_file(&retained_nupkg)?
+        {
+            bail!("retained Chocolatey candidate identity changed");
+        }
+        return Ok((retained_nupkg, receipt.package_sha256));
+    }
+    // ZIP timestamps can change on repacking; preserve the exact first candidate
+    // with a binding to all generated payload files so retries use identical bytes.
+    let packed =
+        tempfile::TempDir::new_in(package_dir).context("creating Chocolatey pack output")?;
+    let pack = Command::new("choco")
+        .arg("pack")
+        .arg(&nuspec)
+        .arg("--output-directory")
+        .arg(packed.path())
+        .current_dir(package_dir)
+        .env_remove(api_key_env)
+        .output()
+        .with_context(choco_missing_context)?;
+    if !pack.status.success() {
+        bail!("choco pack failed: {}", redacted_output(&pack, api_key));
+    }
+
+    let nupkg = packed_package(packed.path(), &resolved.id, version)?;
+    let basename = nupkg
+        .file_name()
+        .context("packed package has no filename")?;
+    let retained_nupkg = retained.join(basename);
+    let candidate_sha256 = sha256::sha256_of_file(&nupkg)?;
+    fs::write(
+        packed.path().join("receipt.json"),
+        serde_json::to_vec(&PackedCandidate {
+            source_sha256,
+            package_sha256: candidate_sha256.clone(),
+            package_filename: Some(basename.to_string_lossy().into_owned()),
+        })?,
+    )?;
+    fs::create_dir_all(cache)?;
+    fs::rename(packed.path(), &retained).context("retaining exact Chocolatey candidate")?;
+    Ok((retained_nupkg, candidate_sha256))
+}
+
+fn packed_package(directory: &Path, id: &str, version: &str) -> Result<PathBuf> {
+    let packages = fs::read_dir(directory)?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<std::io::Result<Vec<_>>>()?
+        .into_iter()
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "nupkg")
+        })
+        .collect::<Vec<_>>();
+    let [package] = packages.as_slice() else {
+        bail!("choco pack must create exactly one .nupkg");
+    };
+    let metadata = fs::symlink_metadata(package)?;
+    let filename = package
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    let original = format!("{id}.{version}.nupkg");
+    let normalized = format!("{id}.{}.nupkg", normalized_version(version));
+    if !metadata.is_file()
+        || metadata.len() == 0
+        || !(filename.eq_ignore_ascii_case(&original) || filename.eq_ignore_ascii_case(&normalized))
+    {
+        bail!("choco pack did not create the expected nonempty package identity");
+    }
+    Ok(package.clone())
+}
+
+// NuGet normalization removes build metadata, leading zeroes and a zero fourth part.
+fn normalized_version(version: &str) -> String {
+    let version = version.split('+').next().unwrap_or(version);
+    let (core, suffix) = version.split_once('-').unwrap_or((version, ""));
+    let mut parts = core
+        .split('.')
+        .map(|part| {
+            let trimmed = part.trim_start_matches('0');
+            if trimmed.is_empty() { "0" } else { trimmed }
+        })
+        .collect::<Vec<_>>();
+    if !core
+        .split('.')
+        .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        return version.to_owned();
+    }
+    while parts.len() < 3 {
+        parts.push("0");
+    }
+    if parts.len() == 4 && parts[3] == "0" {
+        parts.pop();
+    }
+    let normalized = parts.join(".");
+    if suffix.is_empty() {
+        normalized
+    } else {
+        format!("{normalized}-{suffix}")
+    }
+}
+
+fn remote_package_matches(
+    resolved: &ResolvedChocolatey,
+    version: &str,
+    candidate_sha256: &str,
+    api_key_env: &str,
+) -> Result<bool> {
+    let source = registry_url(&resolved.push.source)?;
+    // The public service separates its push endpoint from its NuGet v2 feed.
+    let lookup_source = if source.host_str() == Some("push.chocolatey.org") && source.path() == "/"
+    {
+        "https://community.chocolatey.org/api/v2"
+    } else {
+        source.as_str().trim_end_matches('/')
+    };
+    let url = package_lookup_url(lookup_source, &resolved.id, version, api_key_env)?;
+    let downloaded = tempfile::NamedTempFile::new().context("creating Chocolatey lookup output")?;
+    let status = registry_lookup(&url, downloaded.path(), api_key_env)?;
+    match status.as_slice() {
+        b"404" => Ok(false),
+        b"200" if sha256::sha256_of_file(downloaded.path())? == candidate_sha256 => Ok(true),
+        b"200" => bail!(
+            "Chocolatey registry already has conflicting package bytes for {} {version}",
+            resolved.id
+        ),
+        _ => bail!("Chocolatey registry lookup returned an unexpected HTTP status"),
+    }
+}
+
+fn registry_url(value: &str) -> Result<url::Url> {
+    let url =
+        url::Url::parse(value).map_err(|_| anyhow::anyhow!("invalid Chocolatey registry URL"))?;
+    if !matches!(url.scheme(), "https" | "http")
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        bail!(
+            "Chocolatey registry lookup requires an HTTP(S) URL without credentials, query or fragment"
+        );
+    }
+    Ok(url)
+}
+
+fn package_lookup_url(source: &str, id: &str, version: &str, api_key_env: &str) -> Result<String> {
+    let index = tempfile::NamedTempFile::new().context("creating NuGet discovery output")?;
+    let status = registry_lookup(source, index.path(), api_key_env)?;
+    let body = fs::read(index.path())?;
+    let explicit_index = registry_url(source)?.path().ends_with(".json");
+    let json =
+        if body.iter().find(|byte| !byte.is_ascii_whitespace()) == Some(&b'{') || explicit_index {
+            Some(
+                serde_json::from_slice::<serde_json::Value>(&body)
+                    .context("reading Chocolatey NuGet service index")?,
+            )
+        } else {
+            None
+        };
+    // NuGet v2 OData service documents can also be JSON; only v3 has this schema.
+    let json_index = explicit_index
+        || json.as_ref().is_some_and(|index| {
+            index.get("version").is_some() || index.get("resources").is_some()
+        });
+    if json_index {
+        if status != b"200" {
+            bail!("Chocolatey NuGet service index lookup returned an unexpected HTTP status");
+        }
+        let index = json.context("NuGet service index is not JSON")?;
+        if index["version"]
+            .as_str()
+            .and_then(|version| semver::Version::parse(version).ok())
+            .is_none_or(|version| version.major != 3)
+        {
+            bail!("Chocolatey NuGet service index must use schema version 3");
+        }
+        let resources = index["resources"]
+            .as_array()
+            .context("NuGet service index has no resources")?;
+        let base = resources
+            .iter()
+            .find(|resource| resource["@type"] == "PackageBaseAddress/3.0.0")
+            .and_then(|resource| resource["@id"].as_str())
+            .context("NuGet service index has no PackageBaseAddress/3.0.0 resource")?;
+        let base = registry_url(base)?;
+        let id = percent_encode(&id.to_lowercase());
+        let version = percent_encode(&normalized_version(version).to_lowercase());
+        return Ok(format!(
+            "{}/{id}/{version}/{id}.{version}.nupkg",
+            base.as_str().trim_end_matches('/')
+        ));
+    }
+    if status != b"200" && status != b"404" {
+        bail!("Chocolatey registry discovery returned an unexpected HTTP status");
+    }
+    Ok(format!(
+        "{}/package/{}/{}",
+        source.trim_end_matches('/'),
+        percent_encode(id),
+        percent_encode(&normalized_version(version))
+    ))
+}
+
+fn registry_lookup(url: &str, destination: &Path, api_key_env: &str) -> Result<Vec<u8>> {
+    let output = Command::new("curl")
+        .args([
+            "--silent",
+            "--show-error",
+            "--location",
+            "--proto",
+            "=http,https",
+            "--proto-redir",
+            "=http,https",
+            "--connect-timeout",
+            "10",
+            "--max-time",
+            "60",
+        ])
+        .arg("--output")
+        .arg(destination)
+        .args(["--write-out", "%{http_code}", "--url", url])
+        .env_remove(api_key_env)
+        .output()
+        .context("running Chocolatey registry lookup")?;
+    if !output.status.success() {
+        bail!("Chocolatey registry lookup failed");
+    }
+    if matches!(output.stdout.as_slice(), b"401" | b"403") {
+        bail!(
+            "Chocolatey authenticated registry reads are not supported (HTTP {}); use a feed with anonymous discovery and package downloads",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
+    Ok(output.stdout)
+}
+
+fn redacted_output(output: &std::process::Output, api_key: &str) -> String {
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    if api_key.is_empty() {
+        text
+    } else {
+        text.replace(api_key, "[REDACTED]")
+    }
 }
 
 fn percent_encode(value: &str) -> String {
@@ -281,28 +561,6 @@ fn package_nuspec(package_dir: &Path) -> Result<PathBuf> {
         [] => bail!("no .nuspec file found in {}", package_dir.display()),
         _ => bail!("multiple .nuspec files found in {}", package_dir.display()),
     }
-}
-
-fn newest_nupkg(package_dir: &Path) -> Result<PathBuf> {
-    let mut packages = fs::read_dir(package_dir)
-        .with_context(|| format!("reading {}", package_dir.display()))?
-        .filter_map(|entry| entry.ok())
-        .filter_map(|entry| {
-            let path = entry.path();
-            (path.extension().and_then(|ext| ext.to_str()) == Some("nupkg")).then_some(path)
-        })
-        .collect::<Vec<_>>();
-    packages.sort();
-    packages
-        .pop()
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "choco pack did not create a .nupkg in {}",
-                package_dir.display()
-            )
-        })?
-        .canonicalize()
-        .with_context(|| format!("canonicalizing newest .nupkg in {}", package_dir.display()))
 }
 
 fn choco_missing_context() -> String {

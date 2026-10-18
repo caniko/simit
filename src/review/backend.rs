@@ -136,7 +136,7 @@ pub fn prepare(plan: &Plan, system: &str, out: &Path) -> Result<EffectivePlan> {
     // First metadata invocation verifies the recipe's declared non-flake input before overriding it.
     let initial: Value =
         serde_json::from_str(&run("nix", &a, None, Some(&out.join("metadata.log")))?)?;
-    if let Some(r) = &plan.request.recipe {
+    let metadata = if let Some(r) = &plan.request.recipe {
         let lock = &initial["locks"];
         let root = lock["root"].as_str().unwrap_or("");
         let node = lock["nodes"][root]["inputs"][&r.source_input]
@@ -151,9 +151,12 @@ pub fn prepare(plan: &Plan, system: &str, out: &Path) -> Result<EffectivePlan> {
             &r.source_input,
             &source_ref(plan),
         ]));
-    }
-    let metadata: Value =
-        serde_json::from_str(&run("nix", &a, None, Some(&out.join("lock.log")))?)?;
+        serde_json::from_str(&run("nix", &a, None, Some(&out.join("lock.log")))?)?
+    } else {
+        // Both phases share the same lookup and retained diagnostics without an override.
+        fs::copy(out.join("metadata.log"), out.join("lock.log"))?;
+        initial
+    };
     ensure!(
         metadata["locked"]["rev"] == plan.recipe.as_ref().unwrap_or(&plan.target).commit,
         "Nix fetched a different root revision"
@@ -420,20 +423,20 @@ pub fn build_with_cache_opt_in(
         Ok(())
     })();
     #[cfg(target_os = "linux")]
-    if let Some(cache) = &mut cache {
-        if result.compiler_cache_cleanup != Some(Outcome::Passed) {
-            match cache.stop() {
-                Ok(receipt) => {
-                    write_json(&out.join("compiler-cache-cleanup.json"), &receipt)?;
-                    result.compiler_cache_cleanup = Some(Outcome::Passed);
-                }
-                Err(error) => {
-                    result.compiler_cache_cleanup = Some(Outcome::Failed);
-                    write_json(
-                        &out.join("compiler-cache-cleanup.json"),
-                        &serde_json::json!({"stopped": false, "error": error.to_string()}),
-                    )?;
-                }
+    if let Some(cache) = &mut cache
+        && result.compiler_cache_cleanup != Some(Outcome::Passed)
+    {
+        match cache.stop() {
+            Ok(receipt) => {
+                write_json(&out.join("compiler-cache-cleanup.json"), &receipt)?;
+                result.compiler_cache_cleanup = Some(Outcome::Passed);
+            }
+            Err(error) => {
+                result.compiler_cache_cleanup = Some(Outcome::Failed);
+                write_json(
+                    &out.join("compiler-cache-cleanup.json"),
+                    &serde_json::json!({"stopped": false, "error": error.to_string()}),
+                )?;
             }
         }
     }

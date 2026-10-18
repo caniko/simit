@@ -41,10 +41,47 @@ pub struct Package {
     pub features: BTreeMap<String, Vec<String>>,
     #[serde(default)]
     pub dependencies: Vec<Dependency>,
+    #[serde(default)]
+    pub targets: Vec<Target>,
     pub manifest_path: Utf8PathBuf,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct Target {
+    #[serde(default)]
+    pub doctest: bool,
+    #[serde(default)]
+    pub kind: Vec<String>,
+}
+
 impl Package {
+    pub fn has_doctests(&self) -> bool {
+        self.targets.iter().any(|target| target.doctest)
+    }
+
+    pub fn has_library_target(&self) -> bool {
+        self.targets.iter().any(|target| {
+            target.kind.iter().any(|kind| {
+                matches!(
+                    kind.as_str(),
+                    "lib" | "rlib" | "dylib" | "cdylib" | "staticlib" | "proc-macro"
+                )
+            })
+        })
+    }
+
+    pub fn has_binary_target(&self) -> bool {
+        self.targets
+            .iter()
+            .any(|target| target.kind.iter().any(|kind| kind == "bin"))
+    }
+
+    pub fn is_publishable_to_crates_io(&self) -> bool {
+        self.publish
+            .as_ref()
+            .is_none_or(|registries| registries.iter().any(|registry| registry == "crates-io"))
+    }
+
     pub fn is_publishable(&self) -> bool {
         self.publish
             .as_ref()
@@ -410,11 +447,10 @@ pub fn update_workspace_version(
         .get_mut("package")
         .and_then(|item| item.as_table_mut())
         .and_then(|package| package.get_mut("version"))
+        && version_item.as_str() != Some(new_version.as_str())
     {
-        if version_item.as_str() != Some(new_version.as_str()) {
-            *version_item = toml_edit::value(new_version.clone());
-            changed = true;
-        }
+        *version_item = toml_edit::value(new_version.clone());
+        changed = true;
     }
 
     if let Some(dependencies) = workspace

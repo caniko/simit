@@ -58,6 +58,29 @@ impl CiBackend {
     }
 }
 
+/// Release consumers share the generator's sole-target / CI / Forgejo fallback.
+pub fn release_backend(
+    cfg: &ProjectConfig,
+    platform: Option<Platform>,
+    provider: Option<CiProvider>,
+) -> Result<CiBackend> {
+    let platform = platform
+        .or(match (&cfg.release.github, &cfg.release.codeberg) {
+            (Some(_), None) => Some(Platform::Github),
+            (None, Some(_)) => Some(Platform::Forgejo),
+            _ => cfg.ci.platform,
+        })
+        .unwrap_or(Platform::Forgejo);
+    let provider = provider.unwrap_or_else(|| {
+        if platform == Platform::Github {
+            CiProvider::Actions
+        } else {
+            cfg.ci.provider.unwrap_or(CiProvider::Actions)
+        }
+    });
+    CiBackend::from_parts(provider, platform)
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct CiCliOverrides {
     pub runtime: Option<RuntimeChoice>,
@@ -167,11 +190,10 @@ impl CiInference {
             workspace_strategy,
             packages,
             all_features: Some(all_content.contains("--all-features")),
-            unit_tests_only: Some(
-                all_content
-                    .lines()
-                    .any(|line| line.contains("cargo test") && line.contains(" --lib")),
-            ),
+            unit_tests_only: Some(all_content.lines().any(|line| {
+                (line.contains("cargo test") || line.contains("cargo nextest run"))
+                    && (line.contains(" --lib") || line.contains(" --bins"))
+            })),
             // Keep these markers in sync with the emitting sites in
             // src/render/ci.rs: optional tool steps, om-ci, and artifact files.
             with_nextest: Some(all_content.contains("cargo nextest run")),
@@ -429,7 +451,14 @@ impl ResolvedCiInputs {
         omnix_ref: String,
     ) -> CiOptions {
         CiOptions {
+            tag_prefix: cfg.release.tag_prefix,
             nix_builds: cfg.ci.nix_builds.clone(),
+            components: cfg.ci.components.clone(),
+            repository_checks: true,
+            workspace_has_doctests: false,
+            workspace_has_features: false,
+            workspace_has_library: false,
+            workspace_has_binary: false,
             all_features: self.all_features,
             unit_tests_only: self.unit_tests_only,
             nix_substituters: cfg.release.artifacts.substituters.clone(),
@@ -441,6 +470,7 @@ impl ResolvedCiInputs {
             nix_flake_check: self.nix_flake_check,
             independent_lanes: cfg.ci.independent_lanes,
             separate_events: cfg.ci.separate_events,
+            push_branches: cfg.ci.push_branches.clone(),
             with_msrv: self.with_msrv,
             with_audit: self.with_audit,
             with_deny: self.with_deny,
@@ -798,10 +828,10 @@ fn infer_self_check_packages(content: &str) -> Vec<String> {
             let mut packages = Vec::new();
             let mut parts = line.split_whitespace();
             while let Some(part) = parts.next() {
-                if part == "--package" {
-                    if let Some(package) = parts.next() {
-                        packages.push(shell_unquote(package));
-                    }
+                if part == "--package"
+                    && let Some(package) = parts.next()
+                {
+                    packages.push(shell_unquote(package));
                 }
             }
             packages

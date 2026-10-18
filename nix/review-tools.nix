@@ -26,10 +26,17 @@
       version = (builtins.fromTOML (builtins.readFile "${source}/Cargo.toml")).package.version;
       src = pkgs.lib.cleanSource source;
       cargoLock.lockFile = "${source}/Cargo.lock";
+      # This standalone builder has no system Git/CA paths inside its sandbox.
+      # Bind the immutable inputs at compilation, as in the public flake package.
+      SIMIT_TRUSTED_GIT = "${pkgs.git}/bin/git";
+      SIMIT_TRUSTED_CA_BUNDLE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
       nativeBuildInputs = [pkgs.makeWrapper pkgs.perl];
       # The full Simit suite invokes release preflight in temporary Cargo
       # projects, so its nested quality commands need the matching toolchain.
-      nativeCheckInputs = [pkgs.git pkgs.gnupg pkgs.clippy pkgs.rustfmt pkgs.nodejs pkgs.jq pkgs.python3];
+      nativeCheckInputs = [pkgs.git pkgs.gnupg pkgs.clippy pkgs.rustfmt pkgs.nodejs pkgs.jq pkgs.actionlint pkgs.python3] ++ pkgs.lib.optionals pkgs.stdenv.isLinux [pkgs.bubblewrap pkgs.nix pkgs.sqlite];
+      # Namespace execution is qualified outside Nix's build sandbox by the
+      # source CI's all-features and no-default-features runtime suites.
+      checkFlags = ["--skip=commands::projects_update::engine::tests::namespace_"];
       postInstall = ''
         for binary in simit repo-review; do
           wrapProgram "$out/bin/$binary" \

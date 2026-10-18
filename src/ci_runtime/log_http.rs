@@ -28,7 +28,7 @@ fn client() -> Result<Client> {
 }
 
 fn credential(budget: &Budget) -> Result<zeroize::Zeroizing<Vec<u8>>> {
-    super::process::query_secret(
+    crate::bounded_process::query_secret(
         Command::new("gh").args(["auth", "token", "--hostname", "github.com"]),
         budget.remaining()?.min(std::time::Duration::from_secs(30)),
     )

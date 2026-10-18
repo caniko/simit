@@ -10,10 +10,20 @@ use anyhow::{Context, Result, bail};
 use crate::render::ci::is_generated_workflow_marker;
 use crate::render::diff::unified_diff;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct GeneratedFile {
     pub relative_path: PathBuf,
     pub content: String,
+}
+
+/// Versioned primary-CI ownership boundary consumed by workstation updaters.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CiUpdatePlan {
+    pub schema: String,
+    pub files: Vec<GeneratedFile>,
+    pub obsolete: Vec<PathBuf>,
 }
 
 /// A complete generated-workflow plan: the files to render plus a predicate

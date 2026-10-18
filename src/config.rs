@@ -30,6 +30,8 @@ pub struct ProjectConfig {
     #[serde(default)]
     pub review_policy: Option<crate::render::review_policy::Config>,
     #[serde(default)]
+    pub monorepo: Option<crate::monorepo::Config>,
+    #[serde(default)]
     pub review: Option<crate::review::generation::Config>,
     #[serde(default)]
     pub prebuild: Option<PrebuildConfig>,
@@ -444,6 +446,9 @@ pub struct CiConfig {
     /// Retain independent GitHub Rust CI push and PR originals, including aggregate CI.
     #[serde(default)]
     pub separate_events: bool,
+    /// Branch push filters for language CI; empty preserves all branch pushes.
+    #[serde(default)]
+    pub push_branches: Vec<String>,
     #[serde(default)]
     pub workspace_strategy: WorkspaceStrategy,
     /// Opt-in coordinated dependency-ordered workspace publication.
@@ -473,7 +478,7 @@ pub struct CiConfig {
     /// Whether generated Rust checks should pass `--all-features`.
     #[serde(default)]
     pub all_features: Option<bool>,
-    /// Whether generated Rust tests should limit Cargo to library targets.
+    /// Limit Rust tests to libraries, or binary unit tests when no library is selected.
     #[serde(default)]
     pub unit_tests_only: bool,
     #[serde(default)]
@@ -523,7 +528,8 @@ pub struct CiConfig {
     pub pages: Option<CodebergPagesConfig>,
     #[serde(default)]
     pub step_runners: BTreeMap<String, String>,
-    /// Workflow components. Currently used by Python/Nix CI; an empty list
+    /// Workflow components. Rust/Nix CI uses these to select flake validation;
+    /// Cargo checks retain their feature and package selectors. An empty list
     /// selects the complete project-appropriate default set.
     #[serde(default)]
     pub components: Vec<CiComponent>,
@@ -537,6 +543,16 @@ impl CiConfig {
         provider: CiProvider,
         platform: Platform,
     ) -> Result<()> {
+        if self.separate_events && !self.push_branches.is_empty() {
+            bail!(
+                "[ci].push_branches cannot filter explicitly retained separate_events producers; migrate event evidence and policy together"
+            );
+        }
+        if !self.push_branches.is_empty()
+            && (provider != CiProvider::Actions || platform != Platform::Github)
+        {
+            bail!("[ci].push_branches requires the effective GitHub Actions backend");
+        }
         if self.separate_events && (provider != CiProvider::Actions || platform != Platform::Github)
         {
             bail!("[ci].separate_events requires the effective GitHub Actions backend");
@@ -598,6 +614,8 @@ pub struct NixBuildConfig {
     pub only: bool,
     /// Preserve independent push and PR producers instead of coalescing their runs.
     pub separate_events: bool,
+    /// Branch push filters for this matrix; empty preserves all branch pushes.
+    pub push_branches: Vec<String>,
     /// Opt into tag pushes alongside all branch pushes; preserve pattern order.
     pub push_tags: Vec<String>,
     /// Partition all declared installables into jobs sharing a Nix store.
@@ -842,29 +860,32 @@ impl NixBuildConfig {
     }
 
     pub(crate) fn validate_push_tags(&self) -> Result<()> {
-        if self.push_tags.iter().any(|pattern| {
-            pattern.trim().is_empty()
-                || pattern.chars().any(|character| {
-                    character.is_control()
-                        || matches!(character, '\u{2028}' | '\u{2029}' | '\u{fffe}' | '\u{ffff}')
-                })
-        }) {
+        if self.separate_events && !self.push_branches.is_empty() {
             bail!(
-                "simit project config: [ci.nix_build].push_tags requires nonempty patterns without controls, Unicode line separators, or YAML-forbidden characters"
+                "[ci.nix_build].push_branches cannot filter explicitly retained separate_events producers; migrate event evidence and policy together"
             );
         }
-        if !self.push_tags.is_empty()
-            && self
-                .push_tags
-                .iter()
-                .all(|pattern| pattern.starts_with('!'))
-        {
-            bail!(
-                "simit project config: [ci.nix_build].push_tags requires at least one positive pattern"
-            );
-        }
-        Ok(())
+        validate_event_patterns("[ci.nix_build].push_branches", &self.push_branches)?;
+        validate_event_patterns("[ci.nix_build].push_tags", &self.push_tags)
     }
+}
+
+fn validate_event_patterns(name: &str, patterns: &[String]) -> Result<()> {
+    if patterns.iter().any(|pattern| {
+        pattern.trim().is_empty()
+            || pattern.chars().any(|character| {
+                character.is_control()
+                    || matches!(character, '\u{2028}' | '\u{2029}' | '\u{fffe}' | '\u{ffff}')
+            })
+    }) {
+        bail!(
+            "simit project config: {name} requires nonempty patterns without controls, Unicode line separators, or YAML-forbidden characters"
+        );
+    }
+    if !patterns.is_empty() && patterns.iter().all(|pattern| pattern.starts_with('!')) {
+        bail!("simit project config: {name} requires at least one positive pattern");
+    }
+    Ok(())
 }
 
 /// Public, credential-free CI cache configuration, independent of publication.
@@ -997,6 +1018,11 @@ pub struct CodebergPagesConfig {
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ReleaseConfig {
+    /// Git tag prefix; package and artifact versions remain unprefixed.
+    #[serde(default)]
+    pub tag_prefix: crate::release_identity::TagPrefix,
+    #[serde(default)]
+    pub notes: ReleaseNotesConfig,
     /// Changelog drafting performed before a release commit is created.
     #[serde(default)]
     pub changelog: ReleaseChangelogConfig,
@@ -1033,6 +1059,38 @@ pub struct ReleaseChangelogConfig {
     /// Draft `[Unreleased]` from commits before `simit release` promotes it.
     #[serde(default)]
     pub auto_draft: bool,
+}
+
+/// Explicit notes policy overrides the legacy hosted `body_from_changelog` flag.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ReleaseNotesConfig {
+    pub source: Option<ReleaseNotesSource>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ReleaseNotesSource {
+    Changelog,
+    Git,
+    None,
+}
+
+impl ReleaseConfig {
+    pub fn notes_source(&self, platform: Platform) -> ReleaseNotesSource {
+        self.notes.source.unwrap_or_else(|| {
+            let body_from_changelog = match platform {
+                Platform::Github => self.github.as_ref().map(|r| r.body_from_changelog),
+                Platform::Forgejo => self.codeberg.as_ref().map(|r| r.body_from_changelog),
+                Platform::Gitlab => None,
+            };
+            if body_from_changelog == Some(false) {
+                ReleaseNotesSource::None
+            } else {
+                ReleaseNotesSource::Changelog
+            }
+        })
+    }
 }
 
 /// `[release.publish]` — downstream publisher failure policy.
@@ -1872,6 +1930,12 @@ pub struct CoprConfig {
     /// Spec path relative to the workspace root; defaults to `<name>.spec`.
     #[serde(default = "default_copr_spec_path")]
     pub spec_path: Option<String>,
+    /// COPR SCM Makefile relative to the workspace root.
+    #[serde(default = "default_copr_makefile_path")]
+    pub makefile_path: String,
+    /// Shared SRPM staging directory relative to the workspace root.
+    #[serde(default = "default_copr_srpm_dir")]
+    pub srpm_dir: String,
     /// COPR project for stable releases, e.g. `owner/project`.
     pub project: Option<String>,
     /// COPR project for prereleases; defaults to `<project>-testing`.
@@ -1889,6 +1953,14 @@ pub struct CoprConfig {
 
 fn default_copr_login_secret() -> String {
     "copr_login".to_owned()
+}
+
+fn default_copr_makefile_path() -> String {
+    ".copr/Makefile".to_owned()
+}
+
+fn default_copr_srpm_dir() -> String {
+    "srpms".to_owned()
 }
 
 fn default_copr_username_secret() -> String {
@@ -2010,6 +2082,7 @@ fn default_cargo_deb_version() -> String {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedHomebrew {
+    pub tag_prefix: crate::release_identity::TagPrefix,
     pub name: String,
     pub binaries: Vec<String>,
     pub tap_url: String,
@@ -2037,6 +2110,7 @@ pub struct HomebrewOverrides<'a> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedChocolatey {
+    pub tag_prefix: crate::release_identity::TagPrefix,
     pub name: String,
     pub id: String,
     pub title: String,
@@ -2085,6 +2159,7 @@ pub struct ChocolateyOverrides<'a> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedScoop {
+    pub tag_prefix: crate::release_identity::TagPrefix,
     pub name: String,
     pub bucket_url: String,
     pub bucket_token_secret: String,
@@ -2112,6 +2187,7 @@ pub struct ScoopOverrides<'a> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedAur {
+    pub tag_prefix: crate::release_identity::TagPrefix,
     pub name: String,
     pub description: String,
     pub url: String,
@@ -2160,6 +2236,8 @@ pub struct ResolvedCopr {
     pub build_requires: Vec<String>,
     pub binaries: Vec<String>,
     pub spec_path: String,
+    pub makefile_path: String,
+    pub srpm_dir: String,
     pub project: Option<String>,
     pub testing_project: Option<String>,
     pub login_secret: String,
@@ -2239,24 +2317,28 @@ impl ProjectConfig {
                 bail!("[review_policy] requires GitHub Actions");
             }
         }
+        if let Some(monorepo) = &self.monorepo {
+            monorepo.validate()?;
+        }
         if let Some(review) = &self.review {
             review.validate()?;
         }
         if self.ci.workspace && !self.ci.packages.is_empty() {
             bail!("simit project config: [ci].workspace cannot be true when [ci].packages is set");
         }
-        if let Some(command) = &self.ci.check_command {
-            if command.trim().is_empty() || command.contains(['\n', '\r']) {
-                bail!(
-                    "simit project config: [ci].check_command must be a non-empty single-line command"
-                );
-            }
+        if let Some(command) = &self.ci.check_command
+            && (command.trim().is_empty() || command.contains(['\n', '\r']))
+        {
+            bail!(
+                "simit project config: [ci].check_command must be a non-empty single-line command"
+            );
         }
         if self.ci.with_nix_cargo_cache && self.ci.runtime == Some(Runtime::Cargo) {
             bail!("simit project config: [ci].with_nix_cargo_cache requires runtime = \"nix\"");
         }
         validate_nonempty_strings("simit project config: [ci].packages", &self.ci.packages)?;
         validate_nonempty_strings("simit project config: [ci].nix_builds", &self.ci.nix_builds)?;
+        validate_event_patterns("[ci].push_branches", &self.ci.push_branches)?;
         validate_nix_build_config(self)?;
         if let Some(custody) = &self.ci.custody {
             custody.validate()?;
@@ -2721,17 +2803,15 @@ impl ProjectConfig {
         if homebrew.download_repo.is_empty() {
             bail!("simit project config: [homebrew].download_repo is required");
         }
-        if let Some(desc) = &homebrew.description {
-            if desc.chars().count() > 80 {
-                bail!(
-                    "simit project config: [homebrew].description must be 80 characters or fewer"
-                );
-            }
+        if let Some(desc) = &homebrew.description
+            && desc.chars().count() > 80
+        {
+            bail!("simit project config: [homebrew].description must be 80 characters or fewer");
         }
-        if let Some(home) = &homebrew.homepage {
-            if !home.starts_with("https://") {
-                bail!("simit project config: [homebrew].homepage must start with https://");
-            }
+        if let Some(home) = &homebrew.homepage
+            && !home.starts_with("https://")
+        {
+            bail!("simit project config: [homebrew].homepage must start with https://");
         }
         if !homebrew.platforms.any_enabled() {
             bail!("simit project config: [homebrew].platforms has all platforms disabled");
@@ -2749,17 +2829,17 @@ impl ProjectConfig {
         if chocolatey.download_repo.is_empty() {
             bail!("simit project config: [chocolatey].download_repo is required");
         }
-        if let Some(desc) = &chocolatey.description {
-            if desc.chars().count() > 4000 {
-                bail!(
-                    "simit project config: [chocolatey].description must be 4000 characters or fewer"
-                );
-            }
+        if let Some(desc) = &chocolatey.description
+            && desc.chars().count() > 4000
+        {
+            bail!(
+                "simit project config: [chocolatey].description must be 4000 characters or fewer"
+            );
         }
-        if let Some(tags) = &chocolatey.tags {
-            if tags.chars().count() > 4000 {
-                bail!("simit project config: [chocolatey].tags must be 4000 characters or fewer");
-            }
+        if let Some(tags) = &chocolatey.tags
+            && tags.chars().count() > 4000
+        {
+            bail!("simit project config: [chocolatey].tags must be 4000 characters or fewer");
         }
         reject_basic_auth_url(
             "simit project config: [chocolatey].push.source",
@@ -2857,6 +2937,7 @@ impl ProjectConfig {
         }
 
         Ok(ResolvedHomebrew {
+            tag_prefix: self.release.tag_prefix,
             name,
             binaries,
             tap_url,
@@ -2956,10 +3037,10 @@ impl ProjectConfig {
             .tags
             .map(str::to_owned)
             .or_else(|| cfg.and_then(|chocolatey| chocolatey.tags.clone()));
-        if let Some(tags) = &tags {
-            if tags.chars().count() > 4000 {
-                bail!("chocolatey.tags must be 4000 characters or fewer");
-            }
+        if let Some(tags) = &tags
+            && tags.chars().count() > 4000
+        {
+            bail!("chocolatey.tags must be 4000 characters or fewer");
         }
         let release_notes_url = overrides
             .release_notes_url
@@ -2978,6 +3059,7 @@ impl ProjectConfig {
         reject_basic_auth_url("chocolatey.push.source", &push_source)?;
 
         Ok(ResolvedChocolatey {
+            tag_prefix: self.release.tag_prefix,
             name,
             id,
             title,
@@ -3073,6 +3155,7 @@ impl ProjectConfig {
         }
 
         Ok(ResolvedScoop {
+            tag_prefix: self.release.tag_prefix,
             name,
             bucket_url,
             bucket_token_secret: cfg.map_or_else(default_scoop_bucket_token_secret, |scoop| {
@@ -3112,6 +3195,21 @@ impl ProjectConfig {
             "simit project config: [copr].download_repo",
             &copr.download_repo,
         )?;
+        for (name, path) in [
+            ("makefile_path", &copr.makefile_path),
+            ("srpm_dir", &copr.srpm_dir),
+        ] {
+            if path.is_empty()
+                || path.contains(['\n', '\r', '\0'])
+                || Path::new(path)
+                    .components()
+                    .any(|part| !matches!(part, std::path::Component::Normal(_)))
+            {
+                bail!(
+                    "simit project config: [copr].{name} must be a non-empty workspace-relative path without traversal"
+                );
+            }
+        }
         Ok(())
     }
 
@@ -3126,10 +3224,10 @@ impl ProjectConfig {
         // The apt repo_url is an SSH git remote (e.g. ssh://git@host/...), where a
         // `user@` userinfo is expected; only reject an embedded `:password@`.
         reject_password_url("simit project config: [apt].repo_url", &apt.repo_url)?;
-        if let Some(public_url) = &apt.public_url {
-            if !public_url.starts_with("https://") {
-                bail!("simit project config: [apt].public_url must start with https://");
-            }
+        if let Some(public_url) = &apt.public_url
+            && !public_url.starts_with("https://")
+        {
+            bail!("simit project config: [apt].public_url must start with https://");
         }
         if apt.pages.provider != "codeberg-git-pages" {
             bail!("simit project config: [apt].pages.provider must be codeberg-git-pages");
@@ -3206,6 +3304,7 @@ impl ProjectConfig {
             .unwrap_or_else(|| format!("{host}/{download_repo}.git"));
 
         Ok(ResolvedAur {
+            tag_prefix: self.release.tag_prefix,
             name,
             description,
             url,
@@ -3304,6 +3403,34 @@ impl ProjectConfig {
         let spec_path = cfg
             .and_then(|copr| copr.spec_path.clone())
             .unwrap_or_else(|| format!("{name}.spec"));
+        let spec_components = Path::new(&spec_path).components();
+        if spec_path.contains(['\n', '\r', '\0'])
+            || !spec_components
+                .clone()
+                .any(|part| matches!(part, std::path::Component::Normal(_)))
+            || spec_components.into_iter().any(|part| {
+                !matches!(
+                    part,
+                    std::path::Component::Normal(_) | std::path::Component::CurDir
+                )
+            })
+        {
+            bail!(
+                "simit project config: [copr].spec_path must be a non-empty workspace-relative path without traversal"
+            );
+        }
+        let makefile_path = cfg.map_or_else(default_copr_makefile_path, |copr| {
+            copr.makefile_path.clone()
+        });
+        let output_components = |path: &str| {
+            Path::new(path)
+                .components()
+                .filter(|part| *part != std::path::Component::CurDir)
+                .collect::<std::path::PathBuf>()
+        };
+        if output_components(&spec_path) == output_components(&makefile_path) {
+            bail!("COPR spec_path and makefile_path must resolve to distinct output paths");
+        }
         let project = overrides
             .project
             .map(str::to_owned)
@@ -3329,6 +3456,8 @@ impl ProjectConfig {
                 .unwrap_or_default(),
             binaries,
             spec_path,
+            makefile_path,
+            srpm_dir: cfg.map_or_else(default_copr_srpm_dir, |copr| copr.srpm_dir.clone()),
             project,
             testing_project,
             login_secret: cfg
@@ -3573,10 +3702,10 @@ fn reject_password_url(name: &str, value: &str) -> Result<()> {
         .find(['/', '?', '#'])
         .map_or(value.len(), |offset| authority_start + offset);
     let authority = &value[authority_start..authority_end];
-    if let Some((userinfo, _host)) = authority.rsplit_once('@') {
-        if userinfo.contains(':') {
-            bail!("{name} must not include an embedded password");
-        }
+    if let Some((userinfo, _host)) = authority.rsplit_once('@')
+        && userinfo.contains(':')
+    {
+        bail!("{name} must not include an embedded password");
     }
     Ok(())
 }
@@ -3931,6 +4060,7 @@ fn set_nix_build_table(table: &mut Table, options: &NixBuildConfig) {
     build.set_implicit(false);
     set_bool(&mut build, "only", options.only);
     set_bool(&mut build, "separate_events", options.separate_events);
+    set_string_array(&mut build, "push_branches", &options.push_branches);
     set_string_array(&mut build, "push_tags", &options.push_tags);
     set_string_map(&mut build, "system_runners", &options.system_runners);
     set_string_array(&mut build, "check_systems", &options.check_systems);
@@ -3978,6 +4108,9 @@ fn set_nix_build_table(table: &mut Table, options: &NixBuildConfig) {
 fn set_ci_table(table: &mut Table, ci: &CiConfig) {
     if let Some(config) = &ci.custody {
         let mut custody = Table::new();
+        if config.protocol == custody::Protocol::SealedV2 {
+            custody["protocol"] = value("sealed-v2");
+        }
         custody["repository"] = value(&config.repository);
         custody["status_context"] = value(&config.status_context);
         custody["producer_attempt"] = value(config.producer_attempt as i64);
@@ -4022,6 +4155,7 @@ fn set_ci_table(table: &mut Table, ci: &CiConfig) {
     set_optional_bool_default_true(table, "nix_flake_check", ci.nix_flake_check);
     set_bool(table, "independent_lanes", ci.independent_lanes);
     set_bool(table, "separate_events", ci.separate_events);
+    set_string_array(table, "push_branches", &ci.push_branches);
     set_optional_string(
         table,
         "workspace_strategy",
@@ -4308,7 +4442,7 @@ fn load_flake_config(workspace_root: &Path) -> Result<Option<ProjectConfigSource
         return Ok(None);
     }
 
-    let command_text = "nix --extra-experimental-features 'nix-command flakes' eval --json --no-write-lock-file .#simitConfig";
+    let command_text = "nix --extra-experimental-features 'nix-command flakes' eval --json --no-update-lock-file --no-write-lock-file --option accept-flake-config false --option allow-import-from-derivation false .#simitConfig";
     let output = Command::new("nix")
         .current_dir(workspace_root)
         .args([
@@ -4316,7 +4450,14 @@ fn load_flake_config(workspace_root: &Path) -> Result<Option<ProjectConfigSource
             "nix-command flakes",
             "eval",
             "--json",
+            "--no-update-lock-file",
             "--no-write-lock-file",
+            "--option",
+            "accept-flake-config",
+            "false",
+            "--option",
+            "allow-import-from-derivation",
+            "false",
             ".#simitConfig",
         ])
         .output()
@@ -4333,15 +4474,25 @@ fn load_flake_config(workspace_root: &Path) -> Result<Option<ProjectConfigSource
         );
     }
 
-    let config =
+    let config: ProjectConfig =
         serde_json::from_slice(&output.stdout).context("parsing flake outputs.simitConfig JSON")?;
+    if config.monorepo.as_ref().is_some_and(|monorepo| {
+        monorepo
+            .components
+            .iter()
+            .any(|component| !component.releases.is_empty())
+    }) {
+        bail!(
+            "native release owners require static simit.toml or Cargo metadata policy; flake outputs.simitConfig cannot preserve non-evaluated historical publication policy"
+        );
+    }
     Ok(Some(ProjectConfigSource {
         label: "flake outputs.simitConfig".to_owned(),
         config,
     }))
 }
 
-fn flake_declares_simit_config(path: &Path) -> Result<bool> {
+pub(crate) fn flake_declares_simit_config(path: &Path) -> Result<bool> {
     let text =
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     Ok(text

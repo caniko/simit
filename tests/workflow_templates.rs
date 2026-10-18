@@ -730,6 +730,49 @@ fn configured_template_sources_are_in_the_actual_cargo_package_file_set() {
 }
 
 #[test]
+fn observer_launch_qualification_keeps_credentials_in_a_fresh_hosted_job() {
+    let template = include_str!("../.simit/workflows/qualify-observer-isolation.yaml.in");
+    let generated = include_str!("../.github/workflows/qualify-observer-isolation.yaml");
+    assert_eq!(generated.splitn(3, '\n').nth(2), Some(template));
+    let workflow: serde_yaml::Value = serde_yaml::from_str(template).unwrap();
+    let observer = &workflow["jobs"]["clean-observer"];
+    assert_eq!(observer["needs"], "producer-environment");
+    assert_eq!(observer["runs-on"], "ubuntu-24.04");
+    assert_eq!(observer["permissions"]["contents"], "read");
+    let steps = observer["steps"].as_sequence().unwrap();
+    assert_eq!(steps[0]["shell"], "python");
+    let launch = steps
+        .iter()
+        .find(|step| {
+            step["run"]
+                .as_str()
+                .is_some_and(|run| run.contains("ci observe-original"))
+        })
+        .unwrap();
+    assert_eq!(launch["env"]["GH_TOKEN"], "isolation-fixture-only");
+    assert!(launch["run"].as_str().unwrap().contains("capture_complete"));
+    let spec: simit::ci_runtime::observer::Spec =
+        serde_json::from_str(include_str!("../.simit/workflows/observer-isolation.json")).unwrap();
+    spec.validate().unwrap();
+}
+
+#[test]
+fn engine_msrv_gates_match_its_declared_compiler() {
+    let manifest: toml_edit::DocumentMut = include_str!("../Cargo.toml").parse().unwrap();
+    let version = format!(
+        "{}.0",
+        manifest["package"]["rust-version"].as_str().unwrap()
+    );
+    for workflow in [
+        include_str!("../.github/workflows/review-compatibility.yml"),
+        include_str!("../.simit/workflows/qualify-observer-isolation.yaml.in"),
+    ] {
+        assert!(workflow.contains(&format!("rustup toolchain install {version} ")));
+        assert!(workflow.contains(&format!("cargo +{version} test --locked")));
+    }
+}
+
+#[test]
 fn hard_linked_active_workflow_sources_fail_before_any_writes() {
     for directory in [".github/workflows", ".forgejo/workflows"] {
         let temp = project();

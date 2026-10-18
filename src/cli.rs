@@ -19,6 +19,10 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Commands {
+    /// Bounded runtime readiness observations.
+    #[cfg(feature = "runtime-admission-cli")]
+    #[command(subcommand)]
+    Runtime(crate::runtime_admission::cli::Command),
     #[command(subcommand, about = "Execute versioned CI runtime contracts")]
     Ci(crate::ci_runtime::cli::Command),
     #[command(
@@ -47,6 +51,8 @@ pub enum Commands {
     Config(ConfigCommand),
     #[command(about = "Inspect and maintain the per-user project registry")]
     Projects(ProjectsCommand),
+    #[command(about = "Plan qualification for declarative repository components")]
+    Monorepo(MonorepoCommand),
     #[command(about = "Apply deterministic simit project upgrades")]
     Upgrade(UpgradeCommand),
     #[command(about = "Print shell completion scripts")]
@@ -70,6 +76,67 @@ pub struct TestCommand {
         help = "Test executable and arguments, after -- (no shell expansion)"
     )]
     pub command: Vec<OsString>,
+}
+
+#[derive(Debug, Args)]
+pub struct MonorepoCommand {
+    #[command(subcommand)]
+    pub action: MonorepoAction,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum MonorepoAction {
+    #[command(about = "Print affected components in dependency order without writing files")]
+    Plan(MonorepoPlanCommand),
+    #[command(
+        about = "Run one declared component check and retain bounded Nix failure diagnostics"
+    )]
+    Check(MonorepoCheckCommand),
+}
+
+#[derive(Debug, Args)]
+pub struct MonorepoCheckCommand {
+    #[arg(long)]
+    pub component: String,
+    #[arg(long)]
+    pub check: String,
+    #[arg(
+        long,
+        help = "Capture Linux kernel and Nix daemon evidence when the check fails"
+    )]
+    pub nix_diagnostics: bool,
+    #[arg(
+        long,
+        value_enum,
+        default_value = "local",
+        help = "Use configured literals locally, or require every gate variable from the evaluated CI step environment"
+    )]
+    pub gate_env: MonorepoGateEnv,
+    #[arg(
+        long,
+        help = "Absolute Unix deadline supplied by generated CI, including provisioning time and leaving provider diagnostic grace"
+    )]
+    pub deadline: Option<u64>,
+    #[arg(long, hide = true, requires = "deadline")]
+    pub supervisor_ready: Option<Utf8PathBuf>,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum MonorepoGateEnv {
+    Local,
+    ProviderResolved,
+    /// Generated callers pass inert aliases until the gate shell is launched.
+    ProviderStaged,
+}
+
+#[derive(Debug, Args)]
+pub struct MonorepoPlanCommand {
+    #[arg(long, value_name = "REVISION", conflicts_with = "changed_paths")]
+    pub base: Option<String>,
+    #[arg(long = "changed-path", value_name = "PATH", action = clap::ArgAction::Append)]
+    pub changed_paths: Vec<String>,
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Args)]
@@ -201,6 +268,13 @@ pub struct CommitCommand {
 
 #[derive(Debug, Args)]
 pub struct ReleaseCommand {
+    #[arg(
+        long,
+        value_name = "ID",
+        conflicts_with = "workspace",
+        help = "Select the owning monorepo component for an independent release"
+    )]
+    pub component: Option<String>,
     #[arg(
         long,
         value_enum,
@@ -368,6 +442,24 @@ pub struct ReleaseCommand {
     #[arg(long, help = "New directory for credential-free archive verification")]
     pub publisher_output: Option<Utf8PathBuf>,
     #[arg(
+        long,
+        help = "Trusted package namespace for an independent <package>/v<version> tag"
+    )]
+    pub tag_namespace: Option<String>,
+
+    /// Protected native publication enrollment; never read from candidate CLI/config.
+    #[arg(long, hide = true, requires = "native_registry")]
+    pub native_manifest: Option<String>,
+
+    #[arg(long, hide = true, value_parser = ["python", "npm"], requires = "native_manifest")]
+    pub native_registry: Option<String>,
+
+    #[arg(long, hide = true, requires = "native_registry")]
+    pub native_provenance: bool,
+
+    #[arg(long, hide = true, default_value = "", value_parser = ["", "v"])]
+    pub publisher_tag_prefix: String,
+    #[arg(
         long = "reconstruct-package",
         help = "Trusted workspace release members to package together for dependency resolution"
     )]
@@ -482,6 +574,8 @@ pub enum BumpKind {
 
 #[derive(Debug, Args)]
 pub struct InitCiCommand {
+    #[arg(long, requires = "primary_only", conflicts_with_all = ["check", "diff"], help = "Print the versioned primary-CI ownership plan without writing files")]
+    pub plan_json: bool,
     #[arg(
         long,
         conflicts_with_all = ["pages_only", "prebuild_only", "review_only"],
@@ -1503,6 +1597,12 @@ pub struct ChocolateyBumpArgs {
     pub push: bool,
     #[arg(
         long,
+        conflicts_with = "push",
+        help = "Retain a packed candidate without registry access or publication credentials"
+    )]
+    pub pack: bool,
+    #[arg(
+        long,
         value_name = "URL",
         help = "Chocolatey push source URL (defaults to config or community feed)"
     )]
@@ -2183,6 +2283,10 @@ pub enum ProjectsAction {
     Audit(ProjectsAuditArgs),
     #[command(about = "Regenerate selected generated CI and release workflows")]
     Regenerate(ProjectsRegenerateArgs),
+    #[command(about = "Qualify and deploy generated primary CI updates without pull requests")]
+    Update(crate::commands::projects_update::Args),
+    #[command(about = "Run the GitHub Actions updater adapter protocol")]
+    UpdateGithubAdapter(crate::commands::projects_update::AdapterArgs),
     #[command(about = "Discover Rust workspaces under a filesystem subtree")]
     Discover(ProjectsDiscoverArgs),
     #[command(about = "Forget one registered project")]

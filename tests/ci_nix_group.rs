@@ -764,7 +764,10 @@ fn cancellation_between_commands_prevents_all_later_hooks_and_members() {
 
 #[test]
 fn cancellation_retains_incomplete_receipt_and_stops_later_members_and_descendants() {
-    use std::time::{Duration, Instant};
+    use std::{
+        io::Write,
+        time::{Duration, Instant},
+    };
     let f = Fixture::new();
     fs::remove_file(f.root.path().join("bin/nix")).unwrap();
     symlink(
@@ -781,13 +784,36 @@ fn cancellation_retains_incomplete_receipt_and_stops_later_members_and_descendan
     .unwrap();
     let marker = f.root.path().join("started");
     let late = f.root.path().join("late-effect");
+    let input_path = f.root.path().join("input");
+    assert!(
+        Command::new("mkfifo")
+            .arg(&input_path)
+            .status()
+            .unwrap()
+            .success()
+    );
     let mut child = f
         .command()
         .env("GROUP_STARTED", &marker)
         .env("GROUP_LATE_EFFECT", &late)
+        .env("GROUP_INPUT", &input_path)
         .spawn()
         .unwrap();
     let deadline = Instant::now() + Duration::from_secs(5);
+    let mut input = loop {
+        match rustix::fs::open(
+            &input_path,
+            rustix::fs::OFlags::WRONLY | rustix::fs::OFlags::NONBLOCK | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::empty(),
+        ) {
+            Ok(fd) => break fs::File::from(fd),
+            Err(rustix::io::Errno::NXIO) => {
+                assert!(Instant::now() < deadline, "fixture failed to open input");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => panic!("fixture input: {error}"),
+        }
+    };
     while !marker.exists() {
         assert!(Instant::now() < deadline, "fixture failed to start");
         std::thread::sleep(Duration::from_millis(10));
@@ -800,7 +826,22 @@ fn cancellation_retains_incomplete_receipt_and_stops_later_members_and_descendan
     assert!(!child.wait().unwrap().success());
     assert_eq!(f.receipt()["complete"], false);
     assert!(!f.root.path().join("results/1").exists());
-    std::thread::sleep(Duration::from_millis(2200));
+    // Keep the descendant blocked until cancellation has completed. EPIPE
+    // proves all inherited readers exited without racing a timed side effect.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match input.write(b"x") {
+            Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => break,
+            Ok(1) => {
+                assert!(
+                    Instant::now() < deadline,
+                    "descendant retained the input pipe"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            result => panic!("fixture input: {result:?}"),
+        }
+    }
     assert!(!late.exists());
 }
 

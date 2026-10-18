@@ -36,6 +36,45 @@ license = "MIT"
 }
 
 #[test]
+fn primary_plan_is_versioned_read_only_and_preserves_other_owners() {
+    let temp = init_package(false);
+    fs::write(
+        temp.path().join("simit.toml"),
+        "[ci]\nplatform = 'github'\nprovider = 'actions'\nruntime = 'cargo'\n",
+    )
+    .unwrap();
+    fs::create_dir_all(temp.path().join(".github/workflows")).unwrap();
+    let publisher = temp.path().join(".github/workflows/publish-crate.yaml");
+    fs::write(&publisher, "project-owned publisher\n").unwrap();
+    let before = fs::read(temp.path().join("simit.toml")).unwrap();
+    let output = simit()
+        .current_dir(temp.path())
+        .args(["init", "ci", "--primary-only", "--plan-json"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let plan: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(plan["schema"], "simit.ci-update-plan.v1");
+    assert!(
+        plan["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["relative_path"] == ".github/workflows/ci.yaml")
+    );
+    assert!(!temp.path().join(".github/workflows/ci.yaml").exists());
+    assert_eq!(fs::read(temp.path().join("simit.toml")).unwrap(), before);
+    assert_eq!(
+        fs::read_to_string(publisher).unwrap(),
+        "project-owned publisher\n"
+    );
+}
+
+#[test]
 fn nix_format_jobs_are_uncached_across_providers_and_job_layouts() {
     for (platform, provider, path, step_runners) in [
         ("github", "actions", ".github/workflows/ci.yaml", ""),
@@ -65,8 +104,13 @@ fn nix_format_jobs_are_uncached_across_providers_and_job_layouts() {
         );
         let workflow = read(&temp.path().join(path));
         assert_yaml_parses(&workflow);
+        let invocation = if provider == "crow" {
+            "exec \"$$formatter_exe\" --ci"
+        } else {
+            "exec \"$formatter_exe\" --ci"
+        };
         assert!(
-            workflow.contains("treefmt --ci"),
+            workflow.contains("formatter_program") && workflow.contains(invocation),
             "{platform}/{provider}: {workflow}"
         );
         assert!(!workflow.contains("treefmt --fail-on-change"));
@@ -1055,7 +1099,7 @@ token_secret = "ATTIC_TOKEN"
     assert_eq!(
         yaml["concurrency"]["group"].as_str(),
         Some(
-            "${{ github.workflow_ref }}-${{ github.event_name }}-${{ github.head_ref || github.ref_name }}-prebuild"
+            "${{ github.workflow_ref }}-${{ github.event_name }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.head_ref || github.ref_name }}-prebuild"
         )
     );
     assert_eq!(
@@ -1067,6 +1111,8 @@ token_secret = "ATTIC_TOKEN"
     assert!(workflow.contains("workflow_call:\n    inputs:\n      release:"));
     assert!(workflow.contains("secrets:\n      attic_token:\n        required: true"));
     assert!(workflow.contains("runs-on: ${{ matrix.runner }}"));
+    assert!(workflow.contains("timeout-minutes: 180"));
+    assert!(workflow.contains("--print-build-logs --max-jobs 1 --cores 2"));
     assert!(workflow.contains("nix build '.#server' --out-link '.simit-prebuild/ci-0'"));
     assert!(
         workflow.contains("nix build '.#release-bundle' --out-link '.simit-prebuild/release-0'")
@@ -2043,6 +2089,194 @@ prepublish_commands = ["nix flake check --no-build"]
     assert!(check.success());
 }
 
+#[cfg(unix)]
+#[test]
+fn vscode_publishers_use_configured_release_tag_prefix() {
+    for platform in ["github", "forgejo"] {
+        for prefix in ["", "v"] {
+            let temp = init_package(true);
+            fs::write(temp.path().join("simit.toml"), format!(
+                "[ci]\nruntime='nix'\n[release]\ntag_prefix='{prefix}'\n[vscode]\ncodeberg_repo='example/extension'\n"
+            )).unwrap();
+            let output = simit_with_user_config(temp.path())
+                .current_dir(temp.path())
+                .args([
+                    "init",
+                    "ci",
+                    "--platform",
+                    platform,
+                    "--runtime",
+                    "nix",
+                    "--with-vscode",
+                ])
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            let directory = if platform == "github" {
+                ".github"
+            } else {
+                ".forgejo"
+            };
+            let output = simit_with_user_config(temp.path())
+                .current_dir(temp.path())
+                .args(["init", "ci", "--check"])
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{platform}/{prefix}: {output:?}");
+            let workflow = read(&temp.path().join(format!(
+                "{directory}/workflows/publish-vscode-extension.yaml"
+            )));
+            let doc: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
+            assert_eq!(
+                doc["on"]["push"]["tags"][0],
+                format!("{prefix}[0-9]*.[0-9]*.[0-9]*")
+            );
+            let script = doc["jobs"]["publish"]["steps"]
+                .as_sequence()
+                .unwrap()
+                .iter()
+                .find(|step| step["name"] == "Validate release tag and extension version")
+                .unwrap()["run"]
+                .as_str()
+                .unwrap();
+            let version_script = script.split("git_fetch()").next().unwrap();
+            for tag in ["1.2.3", "v1.2.3", "vv1.2.3", "branch"] {
+                let output = Command::new("bash")
+                    .args([
+                        "-c",
+                        &format!("{version_script}\ntest \"$VERSION\" = 1.2.3"),
+                    ])
+                    .env("GITHUB_REF_NAME", tag)
+                    .output()
+                    .unwrap();
+                assert_eq!(
+                    output.status.success(),
+                    tag == format!("{prefix}1.2.3"),
+                    "{platform}/{prefix}/{tag}: {output:?}"
+                );
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn vscode_signed_tag_names_reject_component_aliases_before_credentials() {
+    let key = TempDir::new().unwrap();
+    let output = Command::new("gpg")
+        .env("GNUPGHOME", key.path())
+        .args([
+            "--batch",
+            "--pinentry-mode",
+            "loopback",
+            "--passphrase",
+            "",
+            "--quick-generate-key",
+            "Extension fixture <extension@example.invalid>",
+            "ed25519",
+            "sign",
+            "0",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    for platform in ["github", "forgejo"] {
+        for prefix in ["", "v"] {
+            let temp = init_package(true);
+            let root = temp.path();
+            fs::write(root.join("simit.toml"), format!("[ci]\nruntime='nix'\n[release]\ntag_prefix='{prefix}'\n[vscode]\ncodeberg_repo='example/extension'\n")).unwrap();
+            let output = simit_with_user_config(root)
+                .current_dir(root)
+                .args([
+                    "init",
+                    "ci",
+                    "--platform",
+                    platform,
+                    "--runtime",
+                    "nix",
+                    "--with-vscode",
+                ])
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            let dir = if platform == "github" {
+                ".github"
+            } else {
+                ".forgejo"
+            };
+            let doc: serde_yaml::Value = serde_yaml::from_str(&read(
+                &root.join(format!("{dir}/workflows/publish-vscode-extension.yaml")),
+            ))
+            .unwrap();
+            let steps = doc["jobs"]["publish"]["steps"].as_sequence().unwrap();
+            let validation = steps
+                .iter()
+                .position(|step| step["name"] == "Validate release tag and extension version")
+                .unwrap();
+            let credentials = steps
+                .iter()
+                .position(|step| step["name"] == "Validate publish credentials")
+                .unwrap();
+            assert!(validation < credentials);
+            let script = steps[validation]["run"].as_str().unwrap();
+            let (_, signature_boundary) = script.split_once("git verify-tag").unwrap();
+            let signature_boundary = signature_boundary
+                .split("extension_version=")
+                .next()
+                .unwrap();
+            let git = |args: &[&str]| {
+                let output = Command::new("git")
+                    .current_dir(root)
+                    .env("GNUPGHOME", key.path())
+                    .args([
+                        "-c",
+                        "user.name=Extension fixture",
+                        "-c",
+                        "user.email=extension@example.invalid",
+                        "-c",
+                        "user.signingkey=extension@example.invalid",
+                    ])
+                    .args(args)
+                    .output()
+                    .unwrap();
+                assert!(output.status.success(), "{output:?}");
+                output
+            };
+            git(&["init"]);
+            git(&["add", "src", "Cargo.toml", "flake.nix", "simit.toml"]);
+            git(&["commit", "-m", "fixture"]);
+            git(&["tag", "-s", "component-a/v0.1.0", "-m", "component release"]);
+            let object =
+                String::from_utf8(git(&["rev-parse", "refs/tags/component-a/v0.1.0"]).stdout)
+                    .unwrap();
+            let tag = format!("{prefix}0.1.0");
+            git(&["update-ref", &format!("refs/tags/{tag}"), object.trim()]);
+            git(&["verify-tag", &format!("refs/tags/{tag}")]);
+            let validate = || {
+                Command::new("bash")
+                    .current_dir(root)
+                    .env("GNUPGHOME", key.path())
+                    .env("GITHUB_REF_NAME", &tag)
+                    .args([
+                        "-euo",
+                        "pipefail",
+                        "-c",
+                        &format!("git verify-tag{signature_boundary}\nprintf validated > admitted"),
+                    ])
+                    .output()
+                    .unwrap()
+            };
+            let output = validate();
+            assert!(!output.status.success(), "{platform}/{prefix}: {output:?}");
+            assert!(!root.join("admitted").exists());
+            git(&["tag", "-s", "-f", &tag, "-m", "correct release"]);
+            let output = validate();
+            assert!(output.status.success(), "{output:?}");
+            assert!(root.join("admitted").exists());
+        }
+    }
+}
+
 #[test]
 fn forgejo_nix_can_generate_jetbrains_publish_workflow() {
     let temp = init_package(true);
@@ -2096,10 +2330,10 @@ prepublish_commands = ["nix flake check --no-build"]
     assert!(workflow.contains("name: Publish JetBrains Plugin"));
     assert!(workflow.contains("runs-on: atlas-nix-trusted"));
     assert!(workflow.contains("INSTALLABLE: .#jetbrains-plugin"));
-    assert!(workflow.contains("tags: [\"[0-9]*.[0-9]*.[0-9]*\", \"v[0-9]*.[0-9]*.[0-9]*\"]"));
+    assert!(workflow.contains("tags: [\"[0-9]*.[0-9]*.[0-9]*\"]"));
     assert!(workflow.contains("  workflow_dispatch:\n    inputs:\n      version:"));
-    assert!(workflow.contains("VERSION=\"${{ github.event.inputs.version || github.ref_name }}\""));
-    assert!(workflow.contains("VERSION=\"${VERSION#v}\""));
+    assert!(workflow.contains("VERSION=\"$DISPATCH_VERSION\""));
+    assert!(workflow.contains("VERSION=\"$TAG_LABEL\""));
     assert!(workflow.contains("<id>$PLUGIN_XML_ID</id>"));
     assert!(workflow.contains("CERTIFICATE_CHAIN_FILE=\"$RUNNER_TEMP/certificate-chain.pem\""));
     assert!(workflow.contains(
@@ -2126,6 +2360,88 @@ prepublish_commands = ["nix flake check --no-build"]
     assert!(!workflow.contains("secrets.JETBRAINS_MARKETPLACE_TOKEN"));
     #[cfg(unix)]
     verify_jetbrains_signed_archive_selection(temp.path(), &yaml);
+}
+
+#[cfg(unix)]
+#[test]
+fn jetbrains_publishers_enforce_configured_release_prefix() {
+    for platform in ["github", "forgejo"] {
+        for prefix in ["", "v"] {
+            let temp = init_package(true);
+            let root = temp.path();
+            fs::create_dir_all(root.join("plugin/src/main/resources/META-INF")).unwrap();
+            fs::write(
+                root.join("plugin/src/main/resources/META-INF/plugin.xml"),
+                "<idea-plugin><id>com.example.demo</id></idea-plugin>",
+            )
+            .unwrap();
+            fs::write(
+                root.join("plugin/gradle.properties"),
+                "pluginVersion=0.1.0\n",
+            )
+            .unwrap();
+            fs::write(root.join("simit.toml"), format!("[ci]\nruntime='nix'\n[release]\ntag_prefix='{prefix}'\n[jetbrains]\nplugin_dir='plugin'\nplugin_xml_id='com.example.demo'\npackage_installable='.#plugin'\n")).unwrap();
+            let output = simit_with_user_config(root)
+                .current_dir(root)
+                .args([
+                    "init",
+                    "ci",
+                    "--platform",
+                    platform,
+                    "--runtime",
+                    "nix",
+                    "--with-jetbrains",
+                ])
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            let dir = if platform == "github" {
+                ".github"
+            } else {
+                ".forgejo"
+            };
+            let workflow: serde_yaml::Value = serde_yaml::from_str(&read(
+                &root.join(format!("{dir}/workflows/publish-jetbrains-plugin.yaml")),
+            ))
+            .unwrap();
+            assert_eq!(
+                workflow["on"]["push"]["tags"],
+                serde_yaml::to_value(vec![format!("{prefix}[0-9]*.[0-9]*.[0-9]*")]).unwrap()
+            );
+            let steps = workflow["jobs"]["publish"]["steps"].as_sequence().unwrap();
+            let script = steps
+                .iter()
+                .find(|s| s["name"] == "Validate plugin version and metadata")
+                .unwrap()["run"]
+                .as_str()
+                .unwrap();
+            for (label, dispatch, success) in [
+                (format!("{prefix}0.1.0"), "", true),
+                (
+                    if prefix.is_empty() { "v0.1.0" } else { "0.1.0" }.to_owned(),
+                    "",
+                    false,
+                ),
+                ("trunk".to_owned(), "0.1.0", true),
+            ] {
+                let output = Command::new("bash")
+                    .current_dir(root)
+                    .env("TAG_LABEL", &label)
+                    .env("DISPATCH_VERSION", dispatch)
+                    .env("PLUGIN_DIR", "plugin")
+                    .env("PLUGIN_XML_ID", "com.example.demo")
+                    .env("GITHUB_ENV", root.join("environment"))
+                    .args(["-c", script])
+                    .output()
+                    .unwrap();
+                assert_eq!(
+                    output.status.success(),
+                    success,
+                    "{platform}/{prefix}/{label}: {output:?}"
+                );
+            }
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -2612,6 +2928,10 @@ fn generates_github_plain_cargo_workflows() {
     );
     assert!(ci.contains("path: ~/.cargo/bin"));
     assert!(ci.contains("hashFiles('.github/workflows/*.yaml')"));
+    assert!(ci.contains("cargo-bin-${{ runner.os }}-${{ runner.arch }}-"));
+    assert!(ci.contains(
+        "save-if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}"
+    ));
     assert!(!ci.contains("hashFiles('.forgejo/workflows/ci.yaml', '.github/workflows/ci.yaml')"));
     assert!(ci.contains(
         "command -v cargo-nextest >/dev/null 2>&1 || cargo install cargo-nextest --locked --version 0.9.100"
@@ -2636,6 +2956,10 @@ fn generates_github_plain_cargo_workflows() {
     );
     assert!(publish.contains("path: ~/.cargo/bin"));
     assert!(publish.contains("hashFiles('.github/workflows/*.yaml')"));
+    assert!(publish.contains("cargo-bin-${{ runner.os }}-${{ runner.arch }}-"));
+    assert!(publish.contains(
+        "save-if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}"
+    ));
     assert!(
         !publish.contains("hashFiles('.forgejo/workflows/ci.yaml', '.github/workflows/ci.yaml')")
     );
@@ -4598,6 +4922,11 @@ fn optional_strict_flags_render_expected_steps() {
 #[test]
 fn forgejo_nix_homebrew_step_matches_hardened_shape() {
     let temp = init_package(true);
+    fs::write(
+        temp.path().join("simit.toml"),
+        "[release]\ntag_prefix = 'v'\n",
+    )
+    .unwrap();
 
     let status = simit_with_user_config(temp.path())
         .current_dir(temp.path())
@@ -4659,10 +4988,12 @@ fn forgejo_nix_homebrew_step_matches_hardened_shape() {
     assert!(workflow.contains("--description 'demo binary' \\"));
     assert!(workflow.contains("--homepage 'https://example.com' \\"));
     assert!(workflow.contains("--license MIT \\"));
-    assert!(workflow.contains("--archive \"darwin_arm=https://codeberg.org/foo/demo/releases/download/${VERSION}/demo-${VERSION}-aarch64-darwin.tar.gz,release/demo-${VERSION}-aarch64-darwin.tar.gz\" \\"));
-    assert!(!workflow.contains("--archive \"darwin_intel=https://codeberg.org/foo/demo/releases/download/${VERSION}/demo-${VERSION}-x86_64-darwin.tar.gz,release/demo-${VERSION}-x86_64-darwin.tar.gz\" \\"));
-    assert!(workflow.contains("--archive \"linux_arm=https://codeberg.org/foo/demo/releases/download/${VERSION}/demo-${VERSION}-aarch64-linux.tar.gz,release/demo-${VERSION}-aarch64-linux.tar.gz\" \\"));
-    assert!(workflow.contains("--archive \"linux_intel=https://codeberg.org/foo/demo/releases/download/${VERSION}/demo-${VERSION}-x86_64-linux.tar.gz,release/demo-${VERSION}-x86_64-linux.tar.gz\" \\"));
+    assert!(workflow.contains("RELEASE_TAG=\"$VERSION\""));
+    assert!(workflow.contains("VERSION=\"${VERSION#v}\""));
+    assert!(workflow.contains("--archive \"darwin_arm=https://codeberg.org/foo/demo/releases/download/${RELEASE_TAG}/demo-${VERSION}-aarch64-darwin.tar.gz,release/demo-${VERSION}-aarch64-darwin.tar.gz\" \\"));
+    assert!(!workflow.contains("--archive \"darwin_intel=https://codeberg.org/foo/demo/releases/download/${RELEASE_TAG}/demo-${VERSION}-x86_64-darwin.tar.gz,release/demo-${VERSION}-x86_64-darwin.tar.gz\" \\"));
+    assert!(workflow.contains("--archive \"linux_arm=https://codeberg.org/foo/demo/releases/download/${RELEASE_TAG}/demo-${VERSION}-aarch64-linux.tar.gz,release/demo-${VERSION}-aarch64-linux.tar.gz\" \\"));
+    assert!(workflow.contains("--archive \"linux_intel=https://codeberg.org/foo/demo/releases/download/${RELEASE_TAG}/demo-${VERSION}-x86_64-linux.tar.gz,release/demo-${VERSION}-x86_64-linux.tar.gz\" \\"));
     assert_eq!(workflow.matches("--binary ").count(), 2);
     assert!(workflow.contains("--binary demo \\"));
     assert!(workflow.contains("--binary demo-ui \\"));
@@ -5406,6 +5737,92 @@ pypi_token_secret = "PYPI_API_TOKEN"
     assert!(workflow.contains("id-token: write"));
     assert!(workflow.contains("uv publish --trusted-publishing always"));
     assert!(!workflow.contains("UV_PUBLISH_TOKEN"));
+}
+
+#[test]
+#[cfg(unix)]
+fn pypi_publishers_validate_the_configured_tag_prefix_before_version_lookup() {
+    use simit::cli::{Platform, Runtime};
+    use simit::release_identity::TagPrefix;
+    use simit::render::ci::{CiOptions, maturin_publish_file, python_publish_file};
+    use simit::user_config::ResolvedRunner;
+    use std::os::unix::fs::PermissionsExt;
+    let temp = TempDir::new().unwrap();
+    let nix = temp.path().join("nix");
+    fs::write(
+        &nix,
+        "#!/bin/sh\nprintf '%s' \"${FIXTURE_VERSION:-1.2.3}\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&nix, fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!(
+        "{}:{}",
+        temp.path().display(),
+        std::env::var("PATH").unwrap()
+    );
+    let runner = ResolvedRunner {
+        name: None,
+        labels: vec!["ubuntu-24.04".into()],
+    };
+    for (prefix, expected) in [(TagPrefix::V, "v1.2.3"), (TagPrefix::None, "1.2.3")] {
+        let options = CiOptions {
+            tag_prefix: prefix,
+            ..Default::default()
+        };
+        for platform in [Platform::Github, Platform::Forgejo] {
+            for file in [
+                python_publish_file(platform, Runtime::Nix, &runner, &options).unwrap(),
+                maturin_publish_file(platform, Runtime::Nix, &runner, &options).unwrap(),
+            ] {
+                let workflow: serde_yaml::Value = serde_yaml::from_str(&file.content).unwrap();
+                assert_eq!(
+                    workflow["on"]["push"]["tags"][0].as_str(),
+                    Some(if prefix == TagPrefix::V {
+                        "v[0-9]*"
+                    } else {
+                        "[0-9]*"
+                    })
+                );
+                let script = workflow["jobs"]["publish"]["steps"]
+                    .as_sequence()
+                    .unwrap()
+                    .iter()
+                    .find(|step| step["name"] == "Validate release tag")
+                    .unwrap()["run"]
+                    .as_str()
+                    .unwrap();
+                for (tag, success) in [
+                    (expected, true),
+                    (
+                        if prefix == TagPrefix::V {
+                            "1.2.3"
+                        } else {
+                            "v1.2.3"
+                        },
+                        false,
+                    ),
+                    ("v1.2", false),
+                    ("v1.2.3;exit 0", false),
+                ] {
+                    let output = Command::new("bash")
+                        .args(["-euo", "pipefail", "-c", script])
+                        .env("PATH", &path)
+                        .env("GITHUB_REF_NAME", tag)
+                        .output()
+                        .unwrap();
+                    assert_eq!(output.status.success(), success, "{tag}: {output:?}");
+                }
+                let output = Command::new("bash")
+                    .args(["-euo", "pipefail", "-c", script])
+                    .env("PATH", &path)
+                    .env("GITHUB_REF_NAME", expected)
+                    .env("FIXTURE_VERSION", "1.2.4")
+                    .output()
+                    .unwrap();
+                assert!(!output.status.success(), "{output:?}");
+            }
+        }
+    }
 }
 
 #[test]

@@ -1041,6 +1041,10 @@ fn infer_expected_primary_ci_files(
         backend.provider(),
         backend.platform(),
     )?;
+    if config.monorepo.is_some() {
+        let include_publishers = config.vscode.is_none() && config.jetbrains.is_none();
+        return crate::monorepo::ci::files(workspace_root, &config, include_publishers);
+    }
     let snapshots = workflow_snapshots(marked);
     if backend.provider() == CiProvider::Crow {
         return infer_expected_crow_files(workspace_root, marked, &snapshots);
@@ -1153,12 +1157,13 @@ fn infer_expected_primary_ci_files(
             })
             .unwrap_or("ubuntu-latest");
         let runner = ResolvedRunner::literal(runner)?;
-        let generated = crate::render::ci::nix_flake_ci_file_with_system_runners(
+        let generated = crate::render::ci::nix_flake_ci_file_with_events(
             platform,
             &runner,
             &config.ci.nix_system_runners,
             &config.ci_cache_artifacts(),
             &config.ci.components,
+            &config.ci.push_branches,
         )?;
         let mut files = if config.ci.nix_build.only {
             Vec::new()
@@ -1283,8 +1288,21 @@ fn infer_expected_primary_ci_files(
             packages.iter().collect::<Vec<_>>()
         };
     let mut files = Vec::new();
-    for package in generation_packages {
+    for (index, package) in generation_packages.into_iter().enumerate() {
         let package_options = ci::CiOptions {
+            repository_checks: index == 0,
+            workspace_has_doctests: resolved.workspace_strategy
+                == crate::cli::WorkspaceStrategy::Aggregate
+                && packages.iter().any(cargo::Package::has_doctests),
+            workspace_has_features: resolved.workspace_strategy
+                == crate::cli::WorkspaceStrategy::Aggregate
+                && packages.iter().any(|package| !package.features.is_empty()),
+            workspace_has_library: resolved.workspace_strategy
+                == crate::cli::WorkspaceStrategy::Aggregate
+                && packages.iter().any(cargo::Package::has_library_target),
+            workspace_has_binary: resolved.workspace_strategy
+                == crate::cli::WorkspaceStrategy::Aggregate
+                && packages.iter().any(cargo::Package::has_binary_target),
             package_scoped,
             publish_crates: options.publish_crates
                 && resolved.publish_strategy != crate::config::PublishStrategy::Coordinated,
@@ -1300,7 +1318,10 @@ fn infer_expected_primary_ci_files(
             runtime: resolved.runtime,
             package,
             file_suffix: package_scoped.then_some(package.name.as_str()),
-            self_check,
+            self_check: ci::SelfCheckOptions {
+                enabled: self_check.enabled && index == 0,
+                ..self_check
+            },
             runners: &runners,
             options: package_options,
             step_runners: &step_runners,
@@ -1402,12 +1423,14 @@ fn push_prebuild_file(
     let Some(prebuild) = &config.prebuild else {
         return Ok(());
     };
-    files.push(crate::render::ci::github_prebuild_file(
+    files.push(crate::render::ci::github_prebuild_file_with_policy(
         prebuild.effective_system_runners(&config.ci),
         &config.ci.nix_builds,
         prebuild,
         &config.release.artifacts,
         config.release.attic.as_ref(),
+        config.release.tag_prefix,
+        config.release.notes_source(Platform::Github),
     )?);
     Ok(())
 }
@@ -1584,7 +1607,7 @@ fn infer_expected_crow_files(
         .iter()
         .any(|package| package.name == "simit");
     let mut files = Vec::new();
-    for package in &packages {
+    for (index, package) in packages.iter().enumerate() {
         files.extend(crate::render::crow::files(
             crate::render::crow::FilesRequest {
                 format,
@@ -1593,7 +1616,7 @@ fn infer_expected_crow_files(
                 package,
                 file_suffix: package_scoped.then_some(package.name.as_str()),
                 self_check: ci::SelfCheckOptions {
-                    enabled: self_check,
+                    enabled: self_check && index == 0,
                     release: config.release.github.is_some() || config.release.codeberg.is_some(),
                     runner_override: None,
                     windows_runner_override: None,
@@ -1602,6 +1625,7 @@ fn infer_expected_crow_files(
                 },
                 runners: &runners,
                 options: ci::CiOptions {
+                    repository_checks: index == 0,
                     package_scoped,
                     ..options.clone()
                 },
@@ -1612,50 +1636,47 @@ fn infer_expected_crow_files(
     if marked
         .iter()
         .any(|workflow| workflow_name(&workflow.relative_path) == Some("pages"))
+        && let Some(pages) = config.resolve_codeberg_pages()?
     {
-        if let Some(pages) = config.resolve_codeberg_pages()? {
-            files.push(crate::render::crow::codeberg_pages_file(
-                format,
-                &crow,
-                &runners.ci,
-                &ci::CodebergPagesOptions {
-                    repo: pages.repo,
-                    owner: pages.owner,
-                    canonical_domain: pages.canonical_domain,
-                    site_output: pages.site_output,
-                    token_secret: pages.token_secret,
-                    source_branch: pages.source_branch,
-                    deploy_app: pages.deploy_app,
-                    extra_setup: config.ci.extra_setup.clone(),
-                },
-            )?);
-        }
+        files.push(crate::render::crow::codeberg_pages_file(
+            format,
+            &crow,
+            &runners.ci,
+            &ci::CodebergPagesOptions {
+                repo: pages.repo,
+                owner: pages.owner,
+                canonical_domain: pages.canonical_domain,
+                site_output: pages.site_output,
+                token_secret: pages.token_secret,
+                source_branch: pages.source_branch,
+                deploy_app: pages.deploy_app,
+                extra_setup: config.ci.extra_setup.clone(),
+            },
+        )?);
     }
     if marked
         .iter()
         .any(|workflow| workflow_name(&workflow.relative_path) == Some("publish-vscode-extension"))
+        && let Some(vscode) = config.resolve_vscode()?
     {
-        if let Some(vscode) = config.resolve_vscode()? {
-            files.push(crate::render::crow::vscode_extension_file(
-                format,
-                &crow,
-                &runners.release,
-                &vscode,
-            )?);
-        }
+        files.push(crate::render::crow::vscode_extension_file(
+            format,
+            &crow,
+            &runners.release,
+            &vscode,
+        )?);
     }
     if marked
         .iter()
         .any(|workflow| workflow_name(&workflow.relative_path) == Some("publish-jetbrains-plugin"))
+        && let Some(jetbrains) = config.resolve_jetbrains()?
     {
-        if let Some(jetbrains) = config.resolve_jetbrains()? {
-            files.push(crate::render::crow::jetbrains_plugin_file(
-                format,
-                &crow,
-                &runners.release,
-                &jetbrains,
-            )?);
-        }
+        files.push(crate::render::crow::jetbrains_plugin_file(
+            format,
+            &crow,
+            &runners.release,
+            &jetbrains,
+        )?);
     }
     if marked
         .iter()
@@ -2311,10 +2332,10 @@ fn expand_home(path: &str) -> String {
     if path == "~" {
         return env::var("HOME").unwrap_or_else(|_| path.to_owned());
     }
-    if let Some(rest) = path.strip_prefix("~/") {
-        if let Ok(home) = env::var("HOME") {
-            return format!("{home}/{rest}");
-        }
+    if let Some(rest) = path.strip_prefix("~/")
+        && let Ok(home) = env::var("HOME")
+    {
+        return format!("{home}/{rest}");
     }
     path.to_owned()
 }
@@ -2885,6 +2906,7 @@ jobs:
             publish: None,
             features: BTreeMap::new(),
             dependencies: Vec::new(),
+            targets: Vec::new(),
             manifest_path: Utf8PathBuf::from("/workspace/crates/modde-cli/Cargo.toml"),
         };
         let marked = vec![WorkflowFile {

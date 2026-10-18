@@ -87,6 +87,8 @@ jobs:
 
           git_fetch --force --tags origin "refs/tags/${tag}:refs/tags/${tag}"
           git verify-tag "$tag"
+          signed_tag_name="$(git cat-file tag "refs/tags/$tag" | sed -n '1,/^$/s/^tag //p')"
+          test "$signed_tag_name" = "$tag" || { echo 'Signed tag object name differs from the release label' >&2; exit 1; }
           validated_sha="$(git rev-parse --verify "refs/tags/${tag}^{commit}")"
           checkout_sha="$(git rev-parse --verify HEAD)"
           if [ "$validated_sha" != "$checkout_sha" ]; then
@@ -105,8 +107,11 @@ jobs:
             exit 1
           fi
 
-      - name: Project setup
+      - name: Project setup 1
         run: printf '%s\n' 'NIX_CONFIG<<SIMIT_NIX_LIMITS' 'experimental-features = nix-command flakes' 'max-jobs = 1' 'cores = 2' 'SIMIT_NIX_LIMITS' >> "$GITHUB_ENV"
+
+      - name: Project setup 2
+        run: if [ "$GITHUB_WORKFLOW" = CI ] && [ "$GITHUB_JOB" = test ]; then nix develop -c bash scripts/qualify-updater-tests.sh; fi
 
       - name: Check flake
         run: nix flake check
@@ -114,11 +119,17 @@ jobs:
       - name: Test all features
         run: nix develop -c cargo test --all-features
 
+      - name: Test no default features
+        run: nix develop -c cargo test --no-default-features
+
       - name: Build docs
         run: nix develop .#docs -c cargo doc --no-deps --all-features
 
       - name: Clippy all features
         run: nix develop -c cargo clippy --all-targets --all-features -- --deny warnings
+
+      - name: Clippy no default features
+        run: nix develop -c cargo clippy --all-targets --no-default-features -- --deny warnings
 
       - name: Dry-run publish
         run: nix develop -c cargo publish --dry-run

@@ -193,6 +193,7 @@ case "$1" in
 fetch) [ "$authenticated" = 1 ] || exit 95;;
 show) [ "$2" = 'FETCH_HEAD:keys/maintainers.gpg' ] || exit 90; [ "$TEST_KEY_AVAILABLE" = 1 ] || exit 91; printf default-branch-key;;
 verify-tag) exit 0;;
+cat-file) printf 'tag %s\n\n' "$GITHUB_REF_NAME";;
 rev-parse) case "$3" in HEAD) printf '%s\n' "$TEST_CHECKOUT_SHA";; refs/tags/*) printf '%s\n' "$TEST_TAG_SHA";; *) exit 92;; esac;;
 *) exit 99;;
 esac"#,

@@ -161,7 +161,7 @@ impl ReportBudget {
     }
 }
 fn git(checkout: &Path, arguments: &[&str], budget: &Budget) -> Result<String> {
-    Ok(String::from_utf8(super::process::query(
+    Ok(String::from_utf8(crate::bounded_process::query(
         Command::new("git").arg("-C").arg(checkout).args(arguments),
         budget.remaining()?,
         1024 * 1024,
@@ -590,14 +590,13 @@ fn reference(path: &Path, budget: &mut Budget) -> Result<Value> {
                 "downloadStatus",
                 "crossOriginAuthorizationForwarded",
             ] {
-                if let Some(v) = value.get(key) {
-                    if (key.ends_with("Status")
+                if let Some(v) = value.get(key)
+                    && ((key.ends_with("Status")
                         && v.as_u64()
                             .is_some_and(|status| (100..600).contains(&status)))
-                        || (key == "crossOriginAuthorizationForwarded" && v.is_boolean())
-                    {
-                        safe.insert(key.into(), v.clone());
-                    }
+                        || (key == "crossOriginAuthorizationForwarded" && v.is_boolean()))
+                {
+                    safe.insert(key.into(), v.clone());
                 }
             }
             for key in ["apiHeaders", "downloadHeaders"] {

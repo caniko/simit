@@ -39,6 +39,54 @@ with_msrv = true
 
 ## Generic CI vs Release Publishing
 
+### Execution ownership and duplicate work
+
+Member CI runs repository formatting, full-flake validation, dependency audit,
+dependency policy and declared integration gates once, in the first selected
+member's workflow. Each member retains its own tests, Clippy, documentation,
+MSRV and package checks. A project-wide `check_command` or Omnix replacement
+has one CI owner; per-package release workflows keep their independent
+publication prerequisites. Update required contexts when migrating existing
+member workflows; the shared gate must remain required.
+
+Rust/Nix CI honors `components = ["flake-evaluation"]` with
+`nix flake check --no-build`. Selecting `"checks"` instead performs full flake
+validation; selecting both does not repeat evaluation before that same full
+check. The independent lane's all-system evaluation and Python's evaluation
+plus selected check builds cover different scopes and remain separate.
+An evaluation-only migration needs complete replacement build coverage before
+it qualifies; a list of successful selected builds alone does not prove it.
+
+Nextest replaces the ordinary test harness and retains separate Cargo doctests
+for doctest-enabled library targets, including each feature mode. Binary-only
+packages and `unit_tests_only` do not get invalid or out-of-scope doctest commands.
+`unit_tests_only` selects library tests, or binary unit tests when the selected
+packages have no library target; aggregate CI considers every selected member.
+Omnix replacement suppresses generic Cargo tests and Clippy across Actions,
+split-runner and Crow layouts. Omnix augmentation retains both by design.
+
+To qualify PRs and validate default-branch pushes once per source, explicitly
+set the repository's real default branch in the relevant policies:
+
+```toml
+[ci]
+push_branches = ["trunk"]
+
+[ci.nix_build]
+push_branches = ["trunk"]
+```
+
+These are trigger filters, not successful job-level skips. Empty lists preserve
+all branch pushes. The primary filter supports GitHub Actions Rust/Python/flake
+and monorepo qualification CI;
+the matrix filter supports GitHub Actions matrices, including grouped builds.
+Projects requiring independent push/PR originals retain their existing
+`separate_events` policies until their custody enrollment and required contexts
+have migrated together. Combining branch filters with explicit `separate_events`
+is rejected before generation. Release/tag triggers retain their separate policy.
+Distinct MSRV, feature, platform, extracted-package, all-system evaluation and
+fresh-execution checks are separate acceptance cases, not duplicate work.
+
 ### Native grouped Nix executor
 
 Grouped workflows invoke `simit ci nix-group`. Before adopting regenerated
@@ -369,10 +417,19 @@ drift. Modified or dynamic inline manifests require an explicit project edit;
 Simit does not discard extra toolchain settings to force the migration.
 Existing/custom flakes must provide the
 same shell contract; hooks-only generation leaves their shells project-owned.
-Use Harbor's `mkToolchain` with an exact-version toolchain manifest and its
+The generated `nix/rust-toolchain-msrv.toml` is source-owned and must be committed
+alongside the flake, so read-only evaluation works in a fresh checkout.
+Use Harbor's `lib.rust.mkToolchain` with an exact-version toolchain manifest and its
 `mkCross`/`mkDevShells` helpers. Clear inherited nightly-only `RUSTFLAGS` and
 `CARGO_ENCODED_RUSTFLAGS` in stable/MSRV shells, and carry project-specific native
 build dependencies into the MSRV environment.
+
+Generated native Rust, cross Rust and Python flakes consume one exact-qualified
+`github.com/caniko/harbor` input. Rust APIs live under `harbor.lib.rust`, Python
+APIs under `harbor.lib.python`, and shared toolchain follows use `harbor/<input>`.
+Existing project-owned flakes using standalone Harbor inputs keep their current
+wiring during hooks-only generation; migrate their input, follows and API calls
+together before retiring a standalone source.
 
 ### Publishing mode
 
@@ -441,6 +498,31 @@ simit init ci --platform forgejo --runtime nix
 ```
 
 ## Focused Hosted Nix Builds
+
+### Project-owned formatting
+
+`simit init flake --scope full` wires the project treefmt policy into:
+
+- `formatter.<system>` for `nix fmt`;
+- `checks.<system>.formatting` for the uncached formatting gate;
+- the development shell's packages for direct `treefmt` use;
+- the pre-commit hook, using the same wrapper with `--ci`.
+
+Rust and cross-platform shells use the pinned Rust formatter supplied to
+`nix/treefmt.nix`; Python shells use the same treefmt wrapper for their own
+language policy. Run `treefmt` inside `nix develop`, or use `nix fmt`.
+
+Custom flakes retain ownership of their shell definitions. Include
+`treefmtEval.config.build.wrapper` in `packages` (or Python `extraPackages`)
+beside `pre-commit-check.enabledPackages`. `simit init flake --check --diff`
+reports missing shell wiring; a comment or the formatter output alone does
+not satisfy that check.
+
+Generated Nix CI executes the project formatter with `--ci` and propagates
+evaluation, build and formatting failures. A project with `nix/treefmt.nix`,
+`treefmt.toml` or `.treefmt.toml` must provide the flake formatter output;
+an ambient treefmt or a Rust-only check cannot substitute for its policy.
+Legacy Nix projects without a treefmt policy retain their Cargo fmt gate.
 
 Declare the exact installables that qualify a feature in `[ci].nix_builds`.
 GitHub Actions projects can configure their matrix independently of ordinary
@@ -664,6 +746,14 @@ workflow = ".github/workflows/nix-builds.yaml"
 jobs = ["build (network)", "build (pinentry)"]
 artifacts = ["nix-build-0", "nix-build-1"]
 ```
+
+Existing policies retain the `strict-v1` protocol by default. Set
+`protocol = "sealed-v2"` in `[ci.custody]` to select the prospective
+[sealed-original custody contract](../ci-sealed-custody.md): capture each
+completion immediately, seal complete evidence as an immutable artifact, and
+independently verify exact capsules before aggregation and source-head reporting.
+The following describes the default observer; v2's jobs, completeness admission
+and installation-specific capsule lifecycle are documented separately.
 
 GitHub executes `workflow_run` from the default branch and fires it when **any**
 listed workflow completes. Install the observer on that branch before testing

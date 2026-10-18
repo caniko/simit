@@ -6,6 +6,10 @@ use simit::commands;
 
 fn main() {
     if let Err(err) = run() {
+        if let Some(gate_exit) = err.downcast_ref::<simit::monorepo::GateExit>() {
+            eprintln!("simit: {gate_exit}");
+            std::process::exit(gate_exit.code());
+        }
         if let Some(test_exit) = err.downcast_ref::<simit::commands::test::TestExit>() {
             std::process::exit(test_exit.code());
         }
@@ -29,7 +33,14 @@ fn main() {
 
 fn run() -> Result<()> {
     let cli = Cli::parse();
+    if matches!(&cli.command, Commands::Init(command) if matches!(command.action, InitAction::Ci(_) | InitAction::Flake(_)))
+        && let Some(root) = simit::monorepo::find_root(&std::env::current_dir()?)?
+    {
+        std::env::set_current_dir(root)?;
+    }
     match cli.command {
+        #[cfg(feature = "runtime-admission-cli")]
+        Commands::Runtime(command) => simit::runtime_admission::cli::run(command),
         Commands::Ci(command) => simit::ci_runtime::cli::run(command),
         Commands::Review(command) => simit::review::cli::finish(command),
         Commands::Commit(command) => commands::commit::run(command),
@@ -64,6 +75,7 @@ fn run() -> Result<()> {
         Commands::Config(command) => commands::config::run(command),
         Commands::Test(command) => commands::test::run(command),
         Commands::Projects(command) => commands::projects::run(command),
+        Commands::Monorepo(command) => simit::monorepo::run(command),
         Commands::Upgrade(command) => commands::upgrade::run(command),
         Commands::Completions(command) => commands::completions::run(command),
         Commands::Man(command) => commands::man::run(command),

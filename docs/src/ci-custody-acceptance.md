@@ -7,6 +7,11 @@ the live evidence below from an independently authorized trusted default-branch
 installation. Keep the collector and existing required test/build/receipt gates
 until the consumer owner accepts that evidence.
 
+This procedure describes the default `strict-v1` installation. The explicit
+`sealed-v2` successor has an additional [sealed-custody contract and acceptance
+matrix](ci-sealed-custody.md). Changing that protocol is prospective; it does not
+reclassify historical failed ZIP checks or establish installed-runtime acceptance.
+
 ## Freeze the installation and authority
 
 The repository owner chooses a same-repository acceptance environment and
