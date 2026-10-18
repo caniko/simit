@@ -1445,6 +1445,7 @@ dependencies = [
  "toml_edit",
  "unicode-normalization",
  "url",
+ "zeroize",
  "zip",
 ]
 

@@ -92,6 +92,117 @@ impl Default for Limits {
     }
 }
 
+/// Reuse bounded process ownership for read-only provider/signature queries.
+pub(super) fn query(command: &mut Command, timeout: Duration, maximum: u64) -> Result<Vec<u8>> {
+    let root = tempfile::tempdir()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700))?;
+    }
+    let stdout = root.path().join("stdout");
+    let stderr = root.path().join("stderr");
+    let status = run_bounded(
+        command,
+        &stdout,
+        &stderr,
+        &Cancellation::default(),
+        Limits {
+            timeout,
+            stdout: maximum,
+            stderr: 64 * 1024,
+        },
+        None,
+    )?;
+    // Child diagnostics can contain URLs or credentials. Do not copy them into reports.
+    ensure!(
+        status == 0,
+        "read-only evidence query failed (exit {status})"
+    );
+    Ok(std::fs::read(stdout)?)
+}
+
+/// Credential stdout stays in zeroized memory. Stderr is bounded and discarded.
+#[cfg(unix)]
+pub(super) fn query_secret(
+    command: &mut Command,
+    timeout: Duration,
+) -> Result<zeroize::Zeroizing<Vec<u8>>> {
+    use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
+    use std::os::unix::process::CommandExt;
+    let stopped = AtomicBool::new(false);
+    let deadline = Instant::now()
+        .checked_add(timeout)
+        .context("invalid credential deadline")?;
+    command
+        .process_group(0)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut raw = zeroize::Zeroizing::new(Vec::new());
+    let failed = AtomicBool::new(false);
+    std::thread::scope(|scope| -> Result<()> {
+        let mut child = ChildGuard(
+            command
+                .spawn()
+                .context("cannot query provider credential")?,
+            &stopped,
+        );
+        let output = child.0.stdout.take().context("missing credential stdout")?;
+        let errors = child.0.stderr.take().context("missing credential stderr")?;
+        fcntl_setfl(&output, fcntl_getfl(&output)? | OFlags::NONBLOCK)?;
+        fcntl_setfl(&errors, fcntl_getfl(&errors)? | OFlags::NONBLOCK)?;
+        let stdout_reader = std::thread::Builder::new().spawn_scoped(scope, || {
+            let result = capture(output, &mut *raw, 4096, &stopped);
+            if result.is_err() {
+                failed.store(true, Ordering::SeqCst);
+            }
+            result
+        })?;
+        let stderr_reader = std::thread::Builder::new().spawn_scoped(scope, || {
+            let result = capture(errors, std::io::sink(), 64 * 1024, &stopped);
+            if result.is_err() {
+                failed.store(true, Ordering::SeqCst);
+            }
+            result
+        })?;
+        let outcome = (|| {
+            loop {
+                ensure!(
+                    !failed.load(Ordering::SeqCst),
+                    "credential query output limit exceeded"
+                );
+                ensure!(
+                    Instant::now() < deadline,
+                    "credential query deadline exhausted"
+                );
+                if let Some(status) = child.0.try_wait()? {
+                    ensure!(status.success(), "provider credential query failed");
+                    return Ok(());
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        })();
+        drop(child);
+        let stdout_result = stdout_reader
+            .join()
+            .map_err(|_| anyhow::anyhow!("credential reader failed"))?;
+        let stderr_result = stderr_reader
+            .join()
+            .map_err(|_| anyhow::anyhow!("credential reader failed"))?;
+        outcome?;
+        stdout_result?;
+        stderr_result?;
+        Ok(())
+    })?;
+    Ok(raw)
+}
+
+#[cfg(not(unix))]
+pub(super) fn query_secret(_: &mut Command, _: Duration) -> Result<zeroize::Zeroizing<Vec<u8>>> {
+    anyhow::bail!("bounded in-memory credential queries require Unix process ownership")
+}
+
 fn run_bounded(
     command: &mut Command,
     stdout_path: &Path,
@@ -271,18 +382,18 @@ fn run_bounded_with_readers(
 
 fn capture(
     mut input: impl Read,
-    mut output: File,
+    mut output: impl Write,
     maximum: u64,
     stopped: &AtomicBool,
 ) -> Result<()> {
     let mut remaining = maximum;
-    let mut buffer = [0; 64 * 1024];
+    let mut buffer = zeroize::Zeroizing::new([0; 64 * 1024]);
     loop {
         // Observe cleanup before the read. If cleanup races a WouldBlock read,
         // retry once after observing it so bytes queued before child exit cannot
         // be discarded merely because EOF is held open by a descendant.
         let finished = stopped.load(Ordering::SeqCst);
-        let count = match input.read(&mut buffer) {
+        let count = match input.read(&mut *buffer) {
             Ok(0) => return Ok(()),
             Ok(count) => count,
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,

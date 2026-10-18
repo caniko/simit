@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Read-only `simit ci log-reconcile` separates native archive integrity,
+  authenticated acquisition, step completeness, producer eligibility and
+  provider regression observations. Strict fresh verification remains the
+  default; retained-native omission tolerance is an explicit consumer policy.
 - Opt-in `[ci].separate_events` for GitHub Rust CI, preserving independent push
   and PR originals in aggregate workspaces while retaining default coalescing.
 - Native dependency export-stream admission with importer-compatible NAR bounds,

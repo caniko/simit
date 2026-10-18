@@ -8,6 +8,8 @@ use std::path::PathBuf;
 pub enum Command {
     /// Execute every enrolled Nix member on one worker and retain per-member evidence.
     NixGroup(GroupArgs),
+    /// Reconcile retained native ZIPs under an explicit consumer contract (no provider writes).
+    LogReconcile(super::log_reconcile::Args),
 }
 
 /// Group execution input locations.
@@ -24,6 +26,7 @@ pub struct GroupArgs {
 /// Dispatch through the same public library used by native consumers.
 pub fn run(command: Command) -> Result<()> {
     match command {
+        Command::LogReconcile(args) => super::log_reconcile::run(args),
         Command::NixGroup(args) => {
             let cancellation = super::cancellation::Cancellation::default();
             // This CLI exits after its one command. Retain handlers for that entire

@@ -127,6 +127,7 @@ toml_edit = { version = "0.25", features = ["serde"] }
 tempfile = "3"
 tar = "0.4"
 zip = { version = "2", default-features = false, features = ["deflate"] }
+zeroize = "1"
 
 [[example]]
 name = "ci-stream-oracle"
