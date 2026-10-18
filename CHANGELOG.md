@@ -32,6 +32,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Qualify generated native prebuild push runs against exact source job/step
+  identities: require release-only skips, complete native matrix execution and
+  successful default-branch publication while rejecting unknown predicates.
 - Keep managed README badges outside fenced code examples, including shell
   comments that resemble headings beneath an HTML banner.
 - Admit the path/repository/branch-isolated concurrency emitted by aggregate
