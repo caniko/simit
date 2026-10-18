@@ -375,14 +375,22 @@ workflows do not become implicit generator requirements. Consumer qualification
 continues to admit every owned push workflow independently.
 
 The v1 built-in adapter supports GitHub Actions originals with configured app
-authority, complete job/step success and app-bound legacy protection contexts.
+authority, complete applicable job/step success and app-bound legacy protection contexts.
 Workflow source must expose its jobs and steps directly: `continue-on-error` is
 accepted only when absent or the literal `false`. Expressions and reusable
 workflow calls require an adapter that can establish the underlying outcomes.
-Explicit job/step `if` conditions also require a supporting adapter, including
-literal conditions: v1 requires complete success and cannot admit skipped steps.
-Conditional workflows are rejected before publishing a candidate, rather than
-retaining one whose normal skip outcomes cannot qualify.
+Explicit job `if` conditions and unknown step conditions require a supporting
+adapter and are rejected before publishing a candidate. A single source job may
+use the generated prebuild's exact branch-push predicates: `inputs.release`, its
+non-PR variant, default-branch publication (or release), and `always()`. On an
+original push, release inputs are absent: release-only steps must be skipped,
+maintenance publication must be skipped, and default-branch publication and
+cleanup must succeed. Every conditional result must match the exact candidate
+workflow's step ordinal and literal name. Missing, duplicate or unexpected
+outcomes fail closed. Conditional native matrix jobs support only a static,
+include-only system/runner matrix with native job names; every distinct source
+row must be present and successful. A skipped applicable gate never establishes
+acceptance, and the workflow and all jobs must still succeed.
 This source check applies to generator and consumer qualification, and to
 pre-push admission of committed candidate bytes.
 Required checks from other applications, unbound contexts, active rulesets,
@@ -417,6 +425,10 @@ forms below, with an absent or literal boolean `cancel-in-progress`:
 - `${{ github.workflow_ref }}-${{ github.ref }}`
 - `${{ github.workflow_ref }}-${{ github.event_name }}-${{ github.head_ref || github.ref_name }}`
 
+The generated prebuild form using `github.workflow_ref`, event, source repository,
+source branch and the `-prebuild` suffix is also admitted, including its exact
+`!inputs.release && (push || pull_request)` cancellation expression. This is a
+source-bound proof for push qualification; no general expression evaluation is used.
 Other expressions and job-level concurrency require a supporting adapter.
 Workflow display names do not establish uniqueness. Even with cancellation
 disabled, a shared group can replace pending originals. Case-colliding selected

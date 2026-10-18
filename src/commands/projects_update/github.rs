@@ -3,7 +3,11 @@ use super::schema::*;
 use anyhow::{Context, Result, ensure};
 use base64::Engine;
 use serde_json::Value;
-use std::{collections::BTreeSet, io::Read, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    io::Read,
+    time::Duration,
+};
 
 struct Api {
     client: reqwest::blocking::Client,
@@ -207,7 +211,7 @@ fn admit_branch(trigger: &serde_yaml::Value, branch: &str) -> Result<()> {
     Ok(())
 }
 
-fn push_workflow(path: &str, file: &Value, branch: Option<&str>) -> Result<bool> {
+fn workflow_source(path: &str, file: &Value) -> Result<serde_yaml::Value> {
     ensure!(
         file["path"] == path && file["type"] == "file" && file["encoding"] == "base64",
         "workflow source inventory is incomplete"
@@ -215,7 +219,138 @@ fn push_workflow(path: &str, file: &Value, branch: Option<&str>) -> Result<bool>
     let content = text(file, "/content")?;
     let content =
         base64::engine::general_purpose::STANDARD.decode(content.replace(['\r', '\n'], ""))?;
-    let yaml: serde_yaml::Value = serde_yaml::from_slice(&content)?;
+    Ok(serde_yaml::from_slice(&content)?)
+}
+
+#[derive(Default)]
+struct PushSteps {
+    jobs: Option<BTreeSet<String>>,
+    outcomes: BTreeMap<u64, (String, bool)>,
+}
+
+fn push_step_runs(condition: &str, default_branch: bool) -> Result<bool> {
+    // ponytail: prove only these generated branch-push predicates. Inputs are
+    // absent on push, hence false; extend with source-aware proofs, not eval.
+    // https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#inputs-context
+    match condition {
+        "${{ inputs.release }}"
+        | "${{ inputs.release && github.event_name != 'pull_request' }}" => Ok(false),
+        "${{ (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) || (inputs.release && github.event_name != 'pull_request') }}" => {
+            Ok(default_branch)
+        }
+        "${{ always() }}" => Ok(true),
+        _ => anyhow::bail!(
+            "conditional jobs or steps require an adapter with a proven push predicate"
+        ),
+    }
+}
+
+fn push_steps(workflow: &serde_yaml::Value, default_branch: bool) -> Result<PushSteps> {
+    let jobs = workflow["jobs"]
+        .as_mapping()
+        .context("missing workflow jobs")?;
+    let mut expected = PushSteps::default();
+    if !jobs.values().any(|job| {
+        job["steps"]
+            .as_sequence()
+            .is_some_and(|steps| steps.iter().any(|step| step.get("if").is_some()))
+    }) {
+        return Ok(expected);
+    }
+    // ponytail: conditional steps support one source job and a static include
+    // matrix; add provider-native job-id binding before supporting other shapes.
+    ensure!(jobs.len() == 1, "conditional steps require one source job");
+    for (id, job) in jobs {
+        let steps = job["steps"]
+            .as_sequence()
+            .context("missing workflow steps")?;
+        for (index, step) in steps.iter().enumerate() {
+            let runs = if let Some(condition) = step.get("if") {
+                let condition = condition
+                    .as_str()
+                    .context("conditional jobs or steps need a literal predicate")?;
+                push_step_runs(condition, default_branch)?
+            } else {
+                true
+            };
+            let name = step["name"]
+                .as_str()
+                .context("conditional workflow steps need literal names")?;
+            ensure!(
+                !name.is_empty() && !name.contains("${{"),
+                "conditional workflow steps need literal names"
+            );
+            expected
+                .outcomes
+                .insert(index as u64 + 2, (name.into(), runs));
+        }
+        if !expected.outcomes.is_empty() {
+            let name = job
+                .get("name")
+                .unwrap_or(id)
+                .as_str()
+                .context("conditional steps need a literal job name")?;
+            ensure!(
+                !name.is_empty() && !name.contains("${{"),
+                "conditional steps need a literal job name"
+            );
+            let names = if let Some(matrix) = job
+                .get("strategy")
+                .and_then(|strategy| strategy.get("matrix"))
+            {
+                let mapping = matrix
+                    .as_mapping()
+                    .context("conditional steps need a static include matrix")?;
+                let include = matrix["include"]
+                    .as_sequence()
+                    .context("conditional steps need a static include matrix")?;
+                ensure!(
+                    mapping.len() == 1 && !include.is_empty(),
+                    "conditional steps need a nonempty include-only matrix"
+                );
+                ensure!(
+                    job.get("name").is_none(),
+                    "conditional matrix job names must use native expansion"
+                );
+                let mut names = BTreeSet::new();
+                for row in include {
+                    let row = row
+                        .as_mapping()
+                        .context("conditional steps need literal matrix rows")?;
+                    ensure!(
+                        row.len() == 2
+                            && row
+                                .get(serde_yaml::Value::String("system".into()))
+                                .is_some()
+                            && row
+                                .get(serde_yaml::Value::String("runner".into()))
+                                .is_some()
+                            && row.values().all(|value| value
+                                .as_str()
+                                .is_some_and(|value| !value.is_empty() && !value.contains("${{"))),
+                        "conditional steps need literal native system/runner matrix rows"
+                    );
+                    let values = row
+                        .values()
+                        .map(|value| value.as_str().unwrap())
+                        .collect::<Vec<_>>();
+                    ensure!(
+                        names.insert(format!("{name} ({})", values.join(", "))),
+                        "conditional matrix job names collide"
+                    );
+                }
+                names
+            } else {
+                BTreeSet::from([name.to_owned()])
+            };
+            expected.jobs = Some(names);
+        }
+    }
+    Ok(expected)
+}
+
+fn push_workflow(path: &str, file: &Value, branch: Option<&str>) -> Result<bool> {
+    let yaml = workflow_source(path, file)?;
     let unfiltered = serde_yaml::Value::Null;
     let trigger = match yaml.get("on") {
         Some(serde_yaml::Value::String(event)) => (event == "push").then_some(&unfiltered),
@@ -240,6 +375,10 @@ fn push_workflow(path: &str, file: &Value, branch: Option<&str>) -> Result<bool>
         ensure!(!jobs.is_empty(), "empty workflow job inventory");
         for job in jobs.values() {
             ensure!(
+                job.get("if").is_none(),
+                "conditional jobs or steps require an adapter with job-outcome admission"
+            );
+            ensure!(
                 job.get("concurrency").is_none(),
                 "job concurrency requires an adapter with cancellation-safe scheduling admission"
             );
@@ -254,16 +393,13 @@ fn push_workflow(path: &str, file: &Value, branch: Option<&str>) -> Result<bool>
             ensure!(!steps.is_empty(), "empty workflow step inventory");
             for node in std::iter::once(job).chain(steps) {
                 ensure!(
-                    node.get("if").is_none(),
-                    "conditional jobs or steps require an adapter with skipped-outcome admission"
-                );
-                ensure!(
                     node.get("continue-on-error")
                         .is_none_or(|value| value.as_bool() == Some(false)),
                     "workflow can mask failed job or step outcomes"
                 );
             }
         }
+        push_steps(&yaml, false)?;
     }
     Ok(trigger.is_some())
 }
@@ -292,11 +428,14 @@ fn admit_concurrency(
             .get("tags-ignore")
             .and_then(serde_yaml::Value::as_sequence)
             .is_some_and(|patterns| patterns.len() == 1 && patterns[0].as_str() == Some("**"));
+    let prebuild = group
+        == "${{ github.workflow_ref }}-${{ github.event_name }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.head_ref || github.ref_name }}-prebuild";
     // ponytail: prove only these path/ref-scoped forms (including generated CI).
     // Other expressions need a provider-native concurrency evaluator. Even
     // cancel-in-progress:false replaces pending runs in a shared group.
     ensure!(
         (aggregate
+            || prebuild
             || matches!(
                 group,
                 "${{ github.workflow_ref }}"
@@ -306,7 +445,7 @@ fn admit_concurrency(
             ))
             && concurrency
                 .get("cancel-in-progress")
-                .is_none_or(|value| value.as_bool().is_some()),
+                .is_none_or(|value| value.as_bool().is_some() || (prebuild && value.as_str() == Some("${{ !inputs.release && (github.event_name == 'push' || github.event_name == 'pull_request') }}"))),
         "workflow concurrency is not provably isolated by workflow path and qualification ref"
     );
     Ok(())
@@ -706,9 +845,17 @@ fn execute_with(
         .as_array()
         .context("missing workflow runs")?;
     let mut generator_jobs = std::collections::BTreeMap::new();
-    let source = |path: &str| {
-        let path = path.split('/').map(encoded).collect::<Vec<_>>().join("/");
-        get(&format!("{endpoint}/contents/{path}?ref={revision}"))
+    let mut sources: BTreeMap<String, Value> = BTreeMap::new();
+    let mut source = |path: &str| -> Result<Value> {
+        if let Some(file) = sources.get(path) {
+            return Ok(file.clone());
+        }
+        let encoded_path = path.split('/').map(encoded).collect::<Vec<_>>().join("/");
+        let file = get(&format!(
+            "{endpoint}/contents/{encoded_path}?ref={revision}"
+        ))?;
+        sources.insert(path.to_owned(), file.clone());
+        Ok(file)
     };
     let paths = if request.workflows.is_empty() {
         generator_workflow_paths(runs, branch, |run| {
@@ -735,7 +882,7 @@ fn execute_with(
             Ok(required)
         })?
     } else {
-        requested_workflows(&request.workflows, Some(branch), source)?
+        requested_workflows(&request.workflows, Some(branch), &mut source)?
     };
     if paths.is_empty() {
         response.status = "pending".into();
@@ -751,12 +898,23 @@ fn execute_with(
                 && (path.ends_with(".yaml") || path.ends_with(".yml")),
             "GitHub adapter cannot qualify this workflow format"
         );
+        let file = source(&path)?;
         if request.workflows.is_empty() {
             ensure!(
-                push_workflow(&path, &source(&path)?, Some(branch))?,
+                push_workflow(&path, &file, Some(branch))?,
                 "generator qualification requires a push workflow"
             );
         }
+        let expected = push_steps(
+            &workflow_source(&path, &file)?,
+            branch.eq_ignore_ascii_case(&default_branch),
+        )?;
+        ensure!(
+            expected.outcomes.is_empty()
+                || (branch.is_ascii() && default_branch.is_ascii())
+                || branch == default_branch,
+            "conditional push qualification needs a provable branch-name comparison"
+        );
         let matching = runs
             .iter()
             .filter(|r| r["path"] == path && r["head_branch"] == branch)
@@ -787,12 +945,11 @@ fn execute_with(
         };
         if !admit_run(
             (id, authority),
-            &revision,
-            Some(branch),
-            &path,
+            (&revision, Some(branch), &path),
             run,
             &jobs,
             &suite,
+            &expected,
         )? {
             response.status = "pending".into();
             continue;
@@ -842,12 +999,11 @@ fn record_checks(
 
 fn admit_run(
     (repository_id, authority): (u64, u64),
-    revision: &str,
-    branch: Option<&str>,
-    workflow: &str,
+    (revision, branch, workflow): (&str, Option<&str>, &str),
     run: &Value,
     completed_jobs: &Value,
     suite: &Value,
+    expected: &PushSteps,
 ) -> Result<bool> {
     ensure!(
         run["repository"]["id"] == repository_id
@@ -879,8 +1035,22 @@ fn admit_run(
         !jobs.is_empty() && completed_jobs["total_count"].as_u64() == Some(jobs.len() as u64),
         "incomplete job inventory"
     );
+    ensure!(
+        expected
+            .jobs
+            .as_ref()
+            .is_none_or(|names| names.len() == jobs.len()),
+        "incomplete source matrix job inventory"
+    );
+    let mut job_names = expected.jobs.clone();
     let mut seen = BTreeSet::new();
     for job in jobs {
+        ensure!(
+            job_names
+                .as_mut()
+                .is_none_or(|names| job["name"].as_str().is_some_and(|name| names.remove(name))),
+            "missing, duplicate or mismatched source job name"
+        );
         ensure!(
             job["run_id"] == run["id"]
                 && job["run_attempt"] == 1
@@ -891,12 +1061,37 @@ fn admit_run(
             "job is missing, duplicated, rerun or non-success"
         );
         let steps = job["steps"].as_array().context("missing step inventory")?;
+        ensure!(!steps.is_empty(), "job has an empty step inventory");
+        let mut outcomes = expected.outcomes.clone();
+        let mut step_numbers = BTreeSet::new();
+        for step in steps {
+            ensure!(
+                expected.outcomes.is_empty()
+                    || step["number"]
+                        .as_u64()
+                        .is_some_and(|number| step_numbers.insert(number)),
+                "missing or duplicate source-bound step number"
+            );
+            let conclusion = if let Some((name, runs)) = step["number"]
+                .as_u64()
+                .and_then(|number| outcomes.remove(&number))
+            {
+                ensure!(
+                    step["name"] == name,
+                    "conditional step source identity mismatch"
+                );
+                if runs { "success" } else { "skipped" }
+            } else {
+                "success"
+            };
+            ensure!(
+                step["status"] == "completed" && step["conclusion"] == conclusion,
+                "job has an unproved step outcome"
+            );
+        }
         ensure!(
-            !steps.is_empty()
-                && steps
-                    .iter()
-                    .all(|s| s["status"] == "completed" && s["conclusion"] == "success"),
-            "job has a non-success step"
+            outcomes.is_empty(),
+            "job is missing source-bound conditional steps"
         );
     }
     Ok(true)
@@ -1108,6 +1303,226 @@ mod tests {
             json!({"total_count":1,"workflows":[{"id":1,"path":".github/workflows/ci.yaml"}]}),
         ] {
             assert!(admit_workflow_states(&paths, &invalid).is_err());
+        }
+    }
+
+    fn generated_prebuild() -> crate::project::GeneratedFile {
+        use crate::{
+            config::{ArtifactsConfig, AtticConfig, PrebuildConfig},
+            render::ci,
+        };
+        let attic: AtticConfig = serde_json::from_value(json!({
+            "cache":"example", "url":"https://cache.example", "token_name":"example",
+            "token_secret":"ATTIC_TOKEN"
+        }))
+        .unwrap();
+        ci::github_prebuild_file(
+            &std::collections::BTreeMap::from([
+                ("x86_64-linux".into(), "ubuntu-24.04".into()),
+                ("aarch64-darwin".into(), "macos-15".into()),
+            ]),
+            &[".#default".into()],
+            &PrebuildConfig {
+                release_archives: true,
+                publish_attic: true,
+                attic_app: Some(".#push-cache".into()),
+                ..Default::default()
+            },
+            &ArtifactsConfig {
+                prebuild_binaries: true,
+                ..Default::default()
+            },
+            Some(&attic),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn generated_prebuild_push_is_admitted_with_release_and_publication_conditions() {
+        let file = generated_prebuild();
+        let path = file.relative_path.to_str().unwrap();
+        let source = json!({"path":path,"type":"file","encoding":"base64",
+            "content":base64::engine::general_purpose::STANDARD.encode(&file.content)});
+        for branch in ["maintenance/candidate", "trunk"] {
+            let result = push_workflow(path, &source, Some(branch));
+            assert!(result.is_ok(), "{branch}: {result:?}");
+        }
+        for (from, to) in [
+            ("github.workflow_ref", "github.workflow"),
+            ("-prebuild", ""),
+            ("!inputs.release &&", "inputs.release &&"),
+            ("if: ${{ inputs.release }}", "if: ${{ inputs.unproved }}"),
+            ("if: ${{ inputs.release }}", "if: true"),
+            ("name: Validate tag", "name: '${{ inputs.name }}'"),
+            ("runner: macos-15", "runner: '${{ inputs.runner }}'"),
+            (
+                "runs-on: ${{ matrix.runner }}",
+                "name: '${{ matrix.system }}'\n    runs-on: ${{ matrix.runner }}",
+            ),
+            ("include:", "other: [x86_64-linux]\n        include:"),
+            (
+                "  build:\n",
+                "  extra:\n    steps:\n      - name: Extra\n        run: true\n  build:\n",
+            ),
+        ] {
+            let changed = json!({"path":path,"type":"file","encoding":"base64",
+                "content":base64::engine::general_purpose::STANDARD.encode(file.content.replace(from, to))});
+            assert!(
+                push_workflow(path, &changed, Some("maintenance/candidate")).is_err(),
+                "{from} -> {to}"
+            );
+        }
+    }
+
+    #[test]
+    fn production_prebuild_qualification_binds_every_source_conditional_outcome() {
+        let file = generated_prebuild();
+        let path = file.relative_path.to_str().unwrap();
+        let yaml: serde_yaml::Value = serde_yaml::from_str(&file.content).unwrap();
+        let source_steps = yaml["jobs"]["build"]["steps"].as_sequence().unwrap();
+        let revision = "a".repeat(40);
+        for branch in ["maintenance/candidate", "trunk", "TRUNK"] {
+            let mut request: AdapterRequest = serde_json::from_value(json!({
+                "schemaVersion":1,"operation":"admit","coordinate":"forge.example/team/demo",
+                "apiUrl":"https://forge.example/api","authority":"777","revision":revision,
+                "branch":branch,"workflows":[path],"requiredChecks":[],
+                "plan":{"schema":"simit.ci-update-plan.v1","files":[{"relative_path":path,"content":file.content}],"obsolete":[]}
+            })).unwrap();
+            let mut steps = vec![
+                json!({"number":1,"name":"Set up job","status":"completed","conclusion":"success"}),
+            ];
+            for (index, step) in source_steps.iter().enumerate() {
+                let name = step["name"].as_str().unwrap();
+                let runs = match name {
+                    "Validate tag"
+                    | "Build unsigned release archives"
+                    | "Upload unsigned release archives" => false,
+                    "Publish flake inputs to Attic" | "Upload flake input manifest" => {
+                        branch != "maintenance/candidate"
+                    }
+                    _ => true,
+                };
+                steps.push(json!({"number":index+2,"name":name,"status":"completed","conclusion":if runs {"success"} else {"skipped"}}));
+            }
+            steps.push(json!({"number":100,"name":"Post Checkout","status":"completed","conclusion":"success"}));
+            let jobs = json!({"total_count":2,"jobs":[
+                {"id":8,"run_id":42,"run_attempt":1,"head_sha":revision,"name":"build (aarch64-darwin, macos-15)","status":"completed","conclusion":"success","steps":steps},
+                {"id":9,"run_id":42,"run_attempt":1,"head_sha":revision,"name":"build (x86_64-linux, ubuntu-24.04)","status":"completed","conclusion":"success","steps":steps}
+            ]});
+            let replay = |request: &AdapterRequest, jobs: &Value| {
+                execute_with(
+                    request,
+                    |endpoint| {
+                        Ok(match endpoint {
+                            "repos/team/demo" => {
+                                json!({"id":2,"full_name":"team/demo","archived":false,"disabled":false,"default_branch":"trunk","clone_url":"https://forge.example/team/demo.git"})
+                            }
+                            "repos/team/demo/actions/workflows?per_page=100&page=1" => {
+                                json!({"total_count":1,"workflows":[{"id":10,"path":path,"state":"active"}]})
+                            }
+                            "repos/team/demo/actions/runs/42/attempts/1/jobs?per_page=100&page=1" => {
+                                jobs.clone()
+                            }
+                            "repos/team/demo/check-suites/5" => {
+                                json!({"id":5,"app":{"id":777},"head_sha":revision})
+                            }
+                            _ if endpoint
+                                == format!(
+                                    "repos/team/demo/rules/branches/{}?per_page=100&page=1",
+                                    encoded(branch)
+                                ) =>
+                            {
+                                json!([])
+                            }
+                            _ if endpoint
+                                == format!("repos/team/demo/branches/{}", encoded(branch)) =>
+                            {
+                                json!({"commit":{"sha":revision}})
+                            }
+                            _ if endpoint
+                                == format!("repos/team/demo/contents/{path}?ref={revision}") =>
+                            {
+                                json!({"path":path,"type":"file","encoding":"base64","content":base64::engine::general_purpose::STANDARD.encode(&file.content)})
+                            }
+                            _ if endpoint
+                                == format!(
+                                    "repos/team/demo/actions/runs?head_sha={revision}&event=push&branch={}&per_page=100&page=1",
+                                    encoded(branch)
+                                ) =>
+                            {
+                                json!({"total_count":1,"workflow_runs":[{"id":42,"repository":{"id":2},"head_repository":{"id":2},"head_sha":revision,"path":path,"event":"push","run_attempt":1,"head_branch":branch,"check_suite_id":5,"status":"completed","conclusion":"success"}]})
+                            }
+                            _ => anyhow::bail!("unexpected endpoint {endpoint}"),
+                        })
+                    },
+                    |_, _| Ok(()),
+                )
+            };
+            assert_eq!(replay(&request, &jobs).unwrap().status, "success");
+            request.operation = "qualify".into();
+            request.plan = None;
+            assert_eq!(replay(&request, &jobs).unwrap().status, "success");
+            let release = steps
+                .iter()
+                .position(|step| step["name"] == "Validate tag")
+                .unwrap();
+            let publish = steps
+                .iter()
+                .position(|step| step["name"] == "Publish flake inputs to Attic")
+                .unwrap();
+            let build = steps
+                .iter()
+                .position(|step| step["name"] == "Build native Nix outputs")
+                .unwrap();
+            for (index, key, value) in [
+                (release, "conclusion", json!("success")),
+                (release, "name", json!("Unrelated skipped step")),
+                (release, "number", json!(99)),
+                (release, "status", json!("in_progress")),
+                (build, "conclusion", json!("skipped")),
+                (
+                    publish,
+                    "conclusion",
+                    json!(if branch == "maintenance/candidate" {
+                        "success"
+                    } else {
+                        "skipped"
+                    }),
+                ),
+                (publish, "conclusion", json!("failure")),
+            ] {
+                let mut changed = jobs.clone();
+                changed["jobs"][0]["steps"][index][key] = value;
+                assert!(
+                    replay(&request, &changed).is_err(),
+                    "{branch}: {index}/{key}"
+                );
+            }
+            let mut missing = jobs.clone();
+            missing["jobs"][0]["steps"]
+                .as_array_mut()
+                .unwrap()
+                .remove(release);
+            assert!(replay(&request, &missing).is_err());
+            let mut missing = jobs.clone();
+            missing["jobs"][0]["steps"]
+                .as_array_mut()
+                .unwrap()
+                .remove(build);
+            assert!(replay(&request, &missing).is_err());
+            let mut missing = jobs.clone();
+            missing["total_count"] = json!(1);
+            missing["jobs"].as_array_mut().unwrap().pop();
+            assert!(replay(&request, &missing).is_err());
+            let mut duplicate = jobs.clone();
+            duplicate["jobs"][0]["steps"]
+                .as_array_mut()
+                .unwrap()
+                .push(steps[release].clone());
+            assert!(replay(&request, &duplicate).is_err());
+            let mut duplicate = jobs.clone();
+            duplicate["jobs"][1]["name"] = duplicate["jobs"][0]["name"].clone();
+            assert!(replay(&request, &duplicate).is_err());
         }
     }
 
@@ -1573,12 +1988,11 @@ mod tests {
             assert!(
                 admit_run(
                     (2, 777),
-                    &revision,
-                    Some("maintenance/test"),
-                    path,
+                    (&revision, Some("maintenance/test"), path),
                     &run,
                     &jobs,
-                    &suite
+                    &suite,
+                    &PushSteps::default(),
                 )
                 .unwrap()
             );
@@ -1588,12 +2002,11 @@ mod tests {
             assert!(
                 admit_run(
                     (2, 777),
-                    &revision,
-                    Some("maintenance/test"),
-                    path,
+                    (&revision, Some("maintenance/test"), path),
                     &run,
                     &failed_jobs,
-                    &suite
+                    &suite,
+                    &PushSteps::default(),
                 )
                 .is_err()
             );
@@ -1775,12 +2188,15 @@ mod tests {
         let admit = |r: &Value, j: &Value, s: &Value| {
             admit_run(
                 (2, 777),
-                &revision,
-                Some("maintenance/test"),
-                ".github/workflows/ci.yaml",
+                (
+                    &revision,
+                    Some("maintenance/test"),
+                    ".github/workflows/ci.yaml",
+                ),
                 r,
                 j,
                 s,
+                &PushSteps::default(),
             )
         };
         assert!(admit(&run, &jobs, &suite).unwrap());
