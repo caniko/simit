@@ -22,7 +22,7 @@ policy for standalone installations.
 
     # Git is the only default runtime tool. Choose additional tools according
     # to the generator, adapters, transport and signing policy in this profile.
-    runtimePackages = with pkgs; [git cargo nix gnupg];
+    runtimePackages = with pkgs; [git openssh cargo nix sqlite gnupg];
     sandboxPackage = pkgs.bubblewrap;
 
     workspaces.projects = {
@@ -186,7 +186,7 @@ policies are excluded. Forge connections and the profile's eligible selection
 jointly determine deployment authority; inventory alone does not enroll a repo.
 
 An inventory adapter can reuse an existing workspace catalog. Canix's
-`workspace simit-inventory --forge HOST=KEY` projection uses its configured tree,
+`workspace simit-inventory --raw --forge HOST=KEY` projection uses its configured tree,
 sources, exclusions and canonical/mirror policy. Its lifecycle is `observed`;
 select that explicitly when enrolling these observations, or supply an inventory
 producer with independently declared lifecycle data.
@@ -194,10 +194,24 @@ producer with independently declared lifecycle data.
 ## Commands and transaction
 
 ```sh
+simit projects update --profile fleet --plan --json
 simit projects update --profile fleet --dry-run
 simit projects update --profile fleet --push
 simit projects update --profile fleet --status
 ```
+
+`--plan` explains every operator-enrolled coordinate, including missing inventory
+entries, disabled overrides, CLI narrowing and observations rejected by kind,
+lifecycle, access, checkout role, CI policy or path selectors. Its versioned JSON
+report retains inventory and policy digests and explicitly marks qualification
+`not-run`. It performs protected inventory discovery under the workspace lock,
+without invoking forge adapters, reading forge credentials, verifying a generator,
+cloning repositories or creating candidates or rollout progress. Empty selections
+are reportable, including a configured canary rejected by lifecycle or other
+selection filters. Execution still requires every canary to be eligible and
+included in CLI narrowing. Duplicate eligible canonical identities, unlisted
+canaries and invalid CLI selection remain errors. `--plan` cannot be combined with execution/status modes
+or a batch limit; it reports the full selection before batching.
 
 Use `--config PATH` outside NixOS. `--repo HOST/OWNER/REPO` narrows selection;
 configured canaries must remain included. `--limit N` further bounds the profile's

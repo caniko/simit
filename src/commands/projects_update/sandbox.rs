@@ -190,6 +190,34 @@ pub fn inventory(command: &super::schema::Command) -> Result<Vec<u8>> {
     )
 }
 
+fn snapshot_registrations(source_state: &Path, nix_state: &Path) -> Result<()> {
+    let destination = nix_state.join("db/db.sqlite");
+    std::fs::create_dir_all(destination.parent().context("missing database parent")?)?;
+    let schema_path = source_state.join("db/schema");
+    let schema = std::fs::read(&schema_path)?;
+    let mut snapshot = Command::new(tool("sqlite3")?);
+    snapshot
+        .env_clear()
+        .stdin(std::process::Stdio::null())
+        .args(["-cmd", ".timeout 10000"])
+        .arg("-readonly")
+        .arg(source_state.join("db/db.sqlite"))
+        .arg(format!(
+            "VACUUM INTO '{}';",
+            destination
+                .to_str()
+                .context("non-UTF-8 snapshot path")?
+                .replace('\'', "''")
+        ));
+    super::engine::run_tool(snapshot, 120).context("snapshot offline Nix registrations")?;
+    ensure!(
+        std::fs::read(schema_path)? == schema,
+        "Nix store schema changed during snapshot"
+    );
+    std::fs::write(nix_state.join("db/schema"), schema)?;
+    Ok(())
+}
+
 pub fn generation(executable: &Path, checkout: &Path, nix_state: &Path) -> Result<Command> {
     ensure!(
         cfg!(target_os = "linux"),
@@ -205,29 +233,7 @@ pub fn generation(executable: &Path, checkout: &Path, nix_state: &Path) -> Resul
         let source_state = std::env::var_os("NIX_STATE_DIR")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| "/nix/var/nix".into());
-        let destination = nix_state.join("db/db.sqlite");
-        std::fs::create_dir_all(destination.parent().context("missing database parent")?)?;
-        let schema_path = source_state.join("db/schema");
-        let schema = std::fs::read(&schema_path)?;
-        let mut snapshot = Command::new(tool("sqlite3")?);
-        snapshot
-            .env_clear()
-            .stdin(std::process::Stdio::null())
-            .arg("-readonly")
-            .arg(source_state.join("db/db.sqlite"))
-            .arg(format!(
-                "VACUUM INTO '{}';",
-                destination
-                    .to_str()
-                    .context("non-UTF-8 snapshot path")?
-                    .replace('\'', "''")
-            ));
-        super::engine::run_tool(snapshot, 120).context("snapshot offline Nix registrations")?;
-        ensure!(
-            std::fs::read(schema_path)? == schema,
-            "Nix store schema changed during snapshot"
-        );
-        std::fs::write(nix_state.join("db/schema"), schema)?;
+        snapshot_registrations(&source_state, nix_state)?;
     }
     let path = std::env::join_paths(&directories)?;
     let mut command = Command::new(tool("bwrap")?);
@@ -300,4 +306,60 @@ pub fn generation(executable: &Path, checkout: &Path, nix_state: &Path) -> Resul
         .arg(program)
         .args(["init", "ci", "--primary-only", "--plan-json"]);
     Ok(command)
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+    use std::{
+        io::{BufRead, BufReader, Write},
+        process::Stdio,
+        time::Duration,
+    };
+
+    #[test]
+    fn registration_snapshot_waits_for_a_writer_and_preserves_committed_data() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        let destination = root.path().join("snapshot");
+        std::fs::create_dir_all(source.join("db")).unwrap();
+        std::fs::write(source.join("db/schema"), "10").unwrap();
+        let sqlite = tool("sqlite3").unwrap();
+        let mut writer = Command::new(&sqlite)
+            .env_clear()
+            .arg("-batch")
+            .arg(source.join("db/db.sqlite"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut input = writer.stdin.take().unwrap();
+        input.write_all(b"CREATE TABLE registrations(value); BEGIN EXCLUSIVE; INSERT INTO registrations VALUES ('committed');\n.print locked\n").unwrap();
+        let mut ready = String::new();
+        BufReader::new(writer.stdout.take().unwrap())
+            .read_line(&mut ready)
+            .unwrap();
+        assert_eq!(ready, "locked\n");
+        std::thread::scope(|scope| {
+            let release = scope.spawn(move || {
+                std::thread::sleep(Duration::from_millis(500));
+                input.write_all(b"COMMIT;\n").unwrap();
+                drop(input);
+                assert!(writer.wait().unwrap().success());
+            });
+            let result = snapshot_registrations(&source, &destination);
+            release.join().unwrap();
+            result.unwrap();
+        });
+        let snapshot = Command::new(sqlite)
+            .env_clear()
+            .arg("-readonly")
+            .arg(destination.join("db/db.sqlite"))
+            .arg("SELECT value FROM registrations;")
+            .output()
+            .unwrap();
+        assert!(snapshot.status.success(), "{snapshot:?}");
+        assert_eq!(snapshot.stdout, b"committed\n");
+        assert_eq!(std::fs::read(destination.join("db/schema")).unwrap(), b"10");
+    }
 }

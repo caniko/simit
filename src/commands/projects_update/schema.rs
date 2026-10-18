@@ -141,6 +141,10 @@ impl Default for Selection {
 
 impl Selection {
     pub fn matches(&self, project: &Project) -> Result<bool> {
+        Ok(self.exclusion_reason(project)?.is_none())
+    }
+
+    pub fn exclusion_reason(&self, project: &Project) -> Result<Option<&'static str>> {
         let matches = |patterns: &[String], value: &str| -> Result<bool> {
             Ok(patterns
                 .iter()
@@ -158,15 +162,33 @@ impl Selection {
                     )
                 }))
         };
-        Ok(self.kinds.contains(&project.kind)
-            && self.lifecycles.contains(&project.lifecycle)
-            && self.access.contains(&project.access)
-            && self.checkout_roles.contains(&project.checkout_role)
-            && project.simit_ci != "excluded"
-            && project.simit_ci != "custom"
-            && matches(&self.include_paths, &project.relative_path)?
-            && !matches(&self.exclude_paths, &project.relative_path)?
-            && self.coordinates.contains(&project.coordinate))
+        Ok([
+            (self.kinds.contains(&project.kind), "kind"),
+            (self.lifecycles.contains(&project.lifecycle), "lifecycle"),
+            (self.access.contains(&project.access), "access"),
+            (
+                self.checkout_roles.contains(&project.checkout_role),
+                "checkout-role",
+            ),
+            (
+                !matches!(project.simit_ci.as_str(), "excluded" | "custom"),
+                "ci-policy",
+            ),
+            (
+                matches(&self.include_paths, &project.relative_path)?,
+                "include-path",
+            ),
+            (
+                !matches(&self.exclude_paths, &project.relative_path)?,
+                "exclude-path",
+            ),
+            (
+                self.coordinates.contains(&project.coordinate),
+                "coordinate-enrollment",
+            ),
+        ]
+        .into_iter()
+        .find_map(|(accepted, reason)| (!accepted).then_some(reason)))
     }
 }
 
