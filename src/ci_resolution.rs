@@ -83,6 +83,8 @@ pub fn release_backend(
 
 #[derive(Debug, Clone, Default)]
 pub struct CiCliOverrides {
+    /// Initialization-only policy, lower precedence than persisted settings.
+    pub default_publish_strategy: Option<crate::config::PublishStrategy>,
     pub runtime: Option<RuntimeChoice>,
     pub runner: Option<String>,
     pub windows_runner: Option<String>,
@@ -215,11 +217,12 @@ impl CiInference {
                     .iter()
                     .any(|workflow| workflow_name(&workflow.relative_path) == Some("publish-pypi")),
             ),
-            publish_crates: Some(
-                marked.iter().any(|workflow| {
-                    workflow_name(&workflow.relative_path) == Some("publish-crate")
-                }),
-            ),
+            publish_crates: Some(marked.iter().any(|workflow| {
+                matches!(
+                    workflow_name(&workflow.relative_path),
+                    Some("publish-crate" | "publish-workspace" | "release-plz")
+                )
+            })),
             publish_strategy: Some(infer_publish_strategy(marked)),
             required_gates: Some(infer_required_gates(&all_content)),
             om_ci: Some(infer_om_ci_mode(&all_content)),
@@ -343,10 +346,21 @@ impl ResolvedCiInputs {
             );
         }
 
+        let newly_enabled_publishing = (cli.publish_crates == Some(true)
+            || cli.with_artifacts == Some(true))
+            && !cfg.ci.publish_crates
+            && !cfg.ci.with_artifacts
+            && inference.publish_crates != Some(true)
+            && inference.with_artifacts != Some(true);
         let publish_strategy = cli
             .publish_strategy
             .or(config.publish_strategy)
-            .or(inference.publish_strategy)
+            .or_else(|| {
+                newly_enabled_publishing
+                    .then_some(cli.default_publish_strategy)
+                    .flatten()
+                    .or(inference.publish_strategy)
+            })
             .unwrap_or_default();
         let required_gates = if cfg.ci.required_gates.is_empty() {
             inference.required_gates.unwrap_or_default()
@@ -578,7 +592,32 @@ impl CiConfigLayer {
         if simit_toml.exists() {
             return Self::from_simit_toml(&simit_toml, cfg);
         }
-        Ok(Self::from_non_simit_config(cfg))
+        let manifest = workspace_root.join("Cargo.toml");
+        if manifest.exists() {
+            let text = fs::read_to_string(&manifest)?;
+            let document = text.parse::<toml_edit::DocumentMut>()?;
+            for scope in ["workspace", "package"] {
+                if let Some(ci) = document
+                    .get(scope)
+                    .and_then(|item| item.get("metadata"))
+                    .and_then(|item| item.get("simit"))
+                    .and_then(|item| item.get("ci"))
+                {
+                    // Preserve explicit default-valued policy in Cargo metadata too.
+                    return Ok(Self::from_table(ci.as_table_like(), cfg));
+                }
+            }
+        }
+        let mut layer = Self::from_non_simit_config(cfg);
+        if workspace_root.join("flake.nix").exists()
+            && crate::config::flake_declares_simit_config(&workspace_root.join("flake.nix"))?
+        {
+            // This source cannot be rewritten: retain its policy until the
+            // operator changes the flake declaration explicitly.
+            layer.publish_strategy = Some(cfg.ci.publish_strategy);
+            layer.publish_crates = Some(cfg.ci.publish_crates);
+        }
+        Ok(layer)
     }
 
     fn from_simit_toml(path: &Path, cfg: &ProjectConfig) -> Result<Self> {
@@ -587,14 +626,19 @@ impl CiConfigLayer {
         let document = text
             .parse::<toml_edit::DocumentMut>()
             .with_context(|| format!("parsing {}", path.display()))?;
-        let ci_table = document.get("ci").and_then(|item| item.as_table());
+        Ok(Self::from_table(
+            document.get("ci").and_then(|item| item.as_table_like()),
+            cfg,
+        ))
+    }
 
+    fn from_table(ci_table: Option<&dyn toml_edit::TableLike>, cfg: &ProjectConfig) -> Self {
         let step_runners = present(ci_table, "step_runners").and_then(|_| {
             let m = &cfg.ci.step_runners;
             if m.is_empty() { None } else { Some(m.clone()) }
         });
 
-        Ok(Self {
+        Self {
             runtime: present(ci_table, "runtime").and(cfg.ci.runtime),
             runner: present(ci_table, "runner").and_then(|_| cfg.ci.runner.clone()),
             windows_runner: present(ci_table, "windows_runner")
@@ -621,7 +665,7 @@ impl CiConfigLayer {
             om_ci: present(ci_table, "om_ci").map(|_| cfg.ci.om_ci),
             om_ci_augment: present(ci_table, "om_ci_augment").map(|_| cfg.ci.om_ci_augment),
             omnix_ref: present(ci_table, "omnix_ref").and_then(|_| cfg.ci.omnix_ref.clone()),
-        })
+        }
     }
 
     fn from_non_simit_config(cfg: &ProjectConfig) -> Self {
@@ -658,7 +702,7 @@ impl CiConfigLayer {
     }
 }
 
-fn present(table: Option<&toml_edit::Table>, key: &str) -> Option<()> {
+fn present(table: Option<&dyn toml_edit::TableLike>, key: &str) -> Option<()> {
     table.and_then(|table| table.contains_key(key).then_some(()))
 }
 
@@ -840,6 +884,14 @@ fn infer_self_check_packages(content: &str) -> Vec<String> {
 }
 
 fn infer_publish_strategy(marked: &[WorkflowSnapshot]) -> crate::config::PublishStrategy {
+    if marked.iter().any(|workflow| {
+        workflow
+            .relative_path
+            .file_stem()
+            .is_some_and(|stem| stem == "release-plz")
+    }) {
+        return crate::config::PublishStrategy::ReleasePlz;
+    }
     let coordinated = marked.iter().any(|workflow| {
         workflow
             .relative_path

@@ -151,6 +151,8 @@ fn verify_publish_binding(member_scoped: bool) {
         "--runtime",
         "cargo",
         "--publish-crates",
+        "--publish-strategy",
+        "members",
     ]);
     if member_scoped {
         command.arg("--workspace");

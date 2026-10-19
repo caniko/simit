@@ -1,0 +1,424 @@
+//! Release-plz owns crate releases; Simit qualifies its immutable source first.
+
+use std::{fs, path::Path};
+
+use anyhow::{Context, Result, bail};
+
+use super::ci::{self, CiOptions};
+use crate::{
+    cargo::{Metadata, Package},
+    cli::{CiProvider, Platform, Runtime},
+    config::ProjectConfig,
+    project::GeneratedFile,
+};
+
+pub const VERSION: &str = "0.3.172";
+pub const REVISION: &str = "8b523fa6c4eb4992f18365ac50a196b4dc6a1013";
+// Upstream release asset for the fixed ubuntu-24.04 x86_64 worker.
+pub const CLI_SHA256: &str = "db58a4668ce9ef0b6431e96a665715745e9a5d7f0b0b28a610034d94de3970df";
+pub const CONFIG: &str = "release-plz.toml";
+pub const HELPER: &str = ".simit/release-plz.py";
+
+pub fn validate_backend(provider: CiProvider, platform: Platform) -> Result<()> {
+    if provider != CiProvider::Actions || platform != Platform::Github {
+        bail!("release-plz publication requires GitHub Actions");
+    }
+    Ok(())
+}
+
+pub fn files(
+    metadata: &Metadata,
+    config: &ProjectConfig,
+    runtime: Runtime,
+    options: &CiOptions,
+) -> Result<Vec<GeneratedFile>> {
+    let packages: Vec<Package> = metadata
+        .packages
+        .iter()
+        .filter(|p| metadata.workspace_members.contains(&p.id))
+        .cloned()
+        .collect();
+    let publishable: Vec<_> = packages
+        .iter()
+        .filter(|p| p.is_publishable_to_crates_io())
+        .collect();
+    if publishable.is_empty() {
+        bail!("release-plz requires at least one package publishable to crates.io");
+    }
+    if packages
+        .iter()
+        .any(|p| p.is_publishable() && !p.is_publishable_to_crates_io())
+    {
+        bail!("release-plz currently supports only the crates.io registry");
+    }
+    let owns_hosted_release =
+        config.release.github.is_some() || options.with_artifacts || config.prebuild.is_some();
+    if publishable.len() > 1 && owns_hosted_release {
+        bail!(
+            "release-plz multi-package publication cannot be combined with repository-wide binary release workflows"
+        );
+    }
+    if !config.release.signing.required {
+        bail!(
+            "release-plz requires [release.signing].required = true and an authorized CI signing key"
+        );
+    }
+    let credentials = &config.ci.release_plz;
+    if credentials.app_id_variable.is_some() != credentials.app_private_key_secret.is_some() {
+        bail!("[ci.release_plz] requires app_id_variable and app_private_key_secret together");
+    }
+    if credentials.app_id_variable.is_none()
+        && credentials
+            .token_secret
+            .eq_ignore_ascii_case("GITHUB_TOKEN")
+    {
+        bail!(
+            "release-plz requires an App token or PAT; GITHUB_TOKEN cannot trigger release-PR checks or downstream tag workflows"
+        );
+    }
+    for name in [
+        &credentials.token_secret,
+        &credentials.registry_token_secret,
+        &credentials.signing_key_secret,
+        &credentials.signing_passphrase_secret,
+    ]
+    .into_iter()
+    .chain(credentials.app_id_variable.iter())
+    .chain(credentials.app_private_key_secret.iter())
+    {
+        crate::config::validate_environment_name("[ci.release_plz] credential name", name)?;
+    }
+    ci::validate_credential_free_workflow("", options)?;
+    // Keep graph validation shared with the coordinated publisher. release-plz
+    // supplies the actual dependency ordering and per-package version updates.
+    crate::commands::release_plan::build_release_plan(metadata, &[])?;
+    let tag = if publishable.len() == 1 {
+        format!("{}{{{{ version }}}}", config.release.tag_prefix.as_str())
+    } else {
+        "{{ package }}/v{{ version }}".into()
+    };
+    let mut toml = format!(
+        "{}\n# release-plz {VERSION}, reviewed upstream revision {REVISION}\n[workspace]\nrelease_always = false\nrelease = false\ngit_release_enable = {}\ngit_tag_name = {:?}\npr_branch_prefix = \"release-plz-\"\n",
+        ci::GENERATED_WORKFLOW_MARKER,
+        !owns_hosted_release,
+        tag
+    );
+    for package in &publishable {
+        toml.push_str(&format!(
+            "\n[[package]]\nname = {:?}\nrelease = true\n",
+            package.name
+        ));
+    }
+    Ok(vec![
+        GeneratedFile {
+            relative_path: CONFIG.into(),
+            content: toml,
+        },
+        GeneratedFile {
+            relative_path: HELPER.into(),
+            content: include_str!("ci/release_plz.py").into(),
+        },
+        GeneratedFile {
+            relative_path: ".github/workflows/release-plz.yaml".into(),
+            content: workflow(config, runtime, options, &packages),
+        },
+    ])
+}
+
+/// Migration must never silently activate two independent crate publishers.
+pub fn validate_migration(root: &Path, config: &ProjectConfig) -> Result<()> {
+    for path in [
+        CONFIG,
+        ".release-plz.toml",
+        ".config/release-plz.toml",
+        HELPER,
+    ] {
+        match fs::read_to_string(root.join(path)) {
+            Ok(content) if !ci::is_generated_workflow_marker(&content) => {
+                bail!(
+                    "release-plz migration: reconcile hand-written {path} before enabling generated release-plz"
+                );
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("reading {path} for release-plz migration"));
+            }
+        }
+    }
+    for directory in [".github/workflows", ".forgejo/workflows"] {
+        let path = root.join(directory);
+        if !path.is_dir() {
+            continue;
+        }
+        for entry in fs::read_dir(path)? {
+            let entry = entry?;
+            if !entry.file_type()?.is_file() {
+                continue;
+            }
+            if !matches!(
+                entry
+                    .path()
+                    .extension()
+                    .and_then(|extension| extension.to_str()),
+                Some("yaml" | "yml")
+            ) {
+                continue;
+            }
+            let content = fs::read_to_string(entry.path())?;
+            let template = super::workflow_templates::is_template_output(
+                &config.ci,
+                &Path::new(directory).join(entry.file_name()),
+                &content,
+            );
+            if (!ci::is_generated_workflow_marker(&content) || template)
+                && competing_publisher(&content)?
+            {
+                bail!(
+                    "release-plz migration: reconcile competing publisher {} before enabling release-plz",
+                    entry.path().display()
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn competing_publisher(content: &str) -> Result<bool> {
+    // ponytail: detect literal steps/actions; wrappers and reusable workflows
+    // need migration review until there is a shared shell/workflow call parser.
+    let workflow: serde_yaml::Value = serde_yaml::from_str(content)?;
+    let Some(jobs) = workflow.get("jobs").and_then(serde_yaml::Value::as_mapping) else {
+        return Ok(false);
+    };
+    for job in jobs.values() {
+        for step in job
+            .get("steps")
+            .and_then(serde_yaml::Value::as_sequence)
+            .into_iter()
+            .flatten()
+        {
+            if let Some(action) = step.get("uses").and_then(serde_yaml::Value::as_str)
+                && (action.contains("release-plz/action@") || action.contains("/publish-crates@"))
+            {
+                return Ok(true);
+            }
+            if let Some(run) = step.get("run").and_then(serde_yaml::Value::as_str) {
+                let words: Vec<_> = run
+                    .split_whitespace()
+                    .map(|word| word.trim_matches(['\'', '"', ';']))
+                    .collect();
+                for (index, word) in words.iter().enumerate() {
+                    let program = Path::new(word).file_name().and_then(|name| name.to_str());
+                    if matches!(program, Some("release-plz" | "cargo-release"))
+                        || (program == Some("cargo")
+                            && (words.get(index + 1) == Some(&"publish")
+                                || (words
+                                    .get(index + 1)
+                                    .is_some_and(|word| word.starts_with('+'))
+                                    && words.get(index + 2) == Some(&"publish"))))
+                    {
+                        return Ok(true);
+                    }
+                }
+            }
+        }
+    }
+    Ok(false)
+}
+
+pub fn auxiliary_path(path: &Path) -> bool {
+    path == Path::new(CONFIG) || path == Path::new(HELPER)
+}
+
+pub fn credential_contract(
+    config: &ProjectConfig,
+) -> Vec<super::release_workflow::ReleaseCredential> {
+    use super::release_workflow::{
+        ReleaseCredential, ReleaseCredentialContext, ReleaseCredentialKind, ReleaseCredentialScope,
+    };
+    let config = &config.ci.release_plz;
+    let mut credentials = vec![
+        ReleaseCredential::secret(
+            &config.registry_token_secret,
+            ReleaseCredentialScope::Repo,
+            "release-plz",
+            true,
+            "crates.io API token for release-plz publication.",
+        ),
+        ReleaseCredential::secret(
+            &config.signing_key_secret,
+            ReleaseCredentialScope::Repo,
+            "release-plz",
+            true,
+            "OpenPGP private key authorized by the committed release trust root; identity comes from its UID.",
+        ),
+        ReleaseCredential::secret(
+            &config.signing_passphrase_secret,
+            ReleaseCredentialScope::Repo,
+            "release-plz",
+            false,
+            "Optional passphrase for the release-plz signing key.",
+        ),
+    ];
+    if let (Some(id), Some(key)) = (&config.app_id_variable, &config.app_private_key_secret) {
+        credentials.push(ReleaseCredential { name: id.clone(), kind: ReleaseCredentialKind::Variable, scope: ReleaseCredentialScope::Repo, channel: "release-plz".into(), required: true, context: ReleaseCredentialContext::Vars, description: Some("GitHub App installed on this repository with contents and pull-requests write permission.".into()) });
+        credentials.push(ReleaseCredential::secret(
+            key,
+            ReleaseCredentialScope::Repo,
+            "release-plz",
+            true,
+            "Private key for the repository-scoped GitHub App installation token.",
+        ));
+    } else {
+        credentials.push(ReleaseCredential::secret(&config.token_secret, ReleaseCredentialScope::Repo, "release-plz", true, "Repository-scoped PAT with contents and pull-requests write permission; must trigger PR checks and tag workflows."));
+    }
+    credentials
+}
+
+fn checkout(w: &mut String) {
+    w.push_str(&format!("      - uses: {}\n        with:\n          ref: ${{{{ github.sha }}}}\n          fetch-depth: 0\n          persist-credentials: false\n\n", ci::github_action_ref("actions/checkout", "v7.0.1")));
+}
+
+fn install(w: &mut String, runtime: Runtime) {
+    let prefix = if runtime == Runtime::Nix {
+        "nix develop -c "
+    } else {
+        ""
+    };
+    w.push_str(&format!(r#"      - name: Install pinned release-plz {VERSION}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/release-plz/bin"
+          archive="$RUNNER_TEMP/release-plz.tar.gz"
+          curl --proto '=https' --tlsv1.2 -fsSL --retry 3 --connect-timeout 10 --max-time 120 \
+            'https://github.com/release-plz/release-plz/releases/download/release-plz-v{VERSION}/release-plz-x86_64-unknown-linux-musl.tar.gz' -o "$archive"
+          printf '%s  %s\n' '{CLI_SHA256}' "$archive" | sha256sum --check --strict
+          tar -xzf "$archive" -C "$RUNNER_TEMP/release-plz/bin" release-plz
+          {prefix}"$RUNNER_TEMP/release-plz/bin/release-plz" --version
+
+"#));
+}
+
+fn authentication(w: &mut String, config: &ProjectConfig) -> String {
+    let credentials = &config.ci.release_plz;
+    if let (Some(id), Some(key)) = (
+        &credentials.app_id_variable,
+        &credentials.app_private_key_secret,
+    ) {
+        w.push_str(&format!("      - name: Create repository-scoped release token\n        id: app\n        uses: {}\n        with:\n          app-id: ${{{{ vars.{id} }}}}\n          private-key: ${{{{ secrets.{key} }}}}\n          owner: ${{{{ github.repository_owner }}}}\n          repositories: ${{{{ github.event.repository.name }}}}\n          permission-contents: write\n          permission-pull-requests: write\n\n", ci::github_action_ref("actions/create-github-app-token", "v2")));
+        "${{ steps.app.outputs.token }}".into()
+    } else {
+        format!("${{{{ secrets.{} }}}}", credentials.token_secret)
+    }
+}
+
+fn signing(w: &mut String, config: &ProjectConfig) {
+    let credentials = &config.ci.release_plz;
+    w.push_str(&format!("      - name: Configure authorized tag signing\n        env:\n          RELEASE_KEY: ${{{{ secrets.{} }}}}\n          RELEASE_PASSPHRASE: ${{{{ secrets.{} }}}}\n          RELEASE_TRUST_ROOT: {:?}\n        run: |\n", credentials.signing_key_secret, credentials.signing_passphrase_secret, config.release.signing.trust_root));
+    w.push_str(r#"          set -euo pipefail
+          test -n "$RELEASE_KEY" || { echo 'Missing release-plz signing key' >&2; exit 1; }
+          export GNUPGHOME="$RUNNER_TEMP/release-plz-gnupg"
+          mkdir -m 700 "$GNUPGHOME"
+          printf '%s' "$RELEASE_KEY" | gpg --batch --import
+          python3 "$RUNNER_TEMP/release-plz-admission.py" identity "$RELEASE_TRUST_ROOT"
+          printf '%s' "$RELEASE_PASSPHRASE" > "$GNUPGHOME/passphrase"
+          chmod 600 "$GNUPGHOME/passphrase"
+          cat > "$GNUPGHOME/gpg-sign" <<'SIMIT_GPG'
+          #!/bin/sh
+          exec gpg --batch --pinentry-mode loopback --passphrase-file "$GNUPGHOME/passphrase" "$@"
+          SIMIT_GPG
+          chmod 700 "$GNUPGHOME/gpg-sign"
+          git config --local gpg.program "$GNUPGHOME/gpg-sign"
+          git config --local tag.gpgSign true
+          git config --local commit.gpgSign true
+          printf 'release-plz signing probe' | "$GNUPGHOME/gpg-sign" --local-user "$(git config user.signingkey)" --detach-sign > "$GNUPGHOME/probe.sig"
+          echo "GNUPGHOME=$GNUPGHOME" >> "$GITHUB_ENV"
+
+"#);
+}
+
+fn invocation(runtime: Runtime, command: &str) -> String {
+    let prefix = if runtime == Runtime::Nix {
+        "nix develop -c "
+    } else {
+        ""
+    };
+    format!(
+        "{prefix}python3 \"$RUNNER_TEMP/release-plz-admission.py\" run {command} --config \"$RUNNER_TEMP/release-plz.toml\""
+    )
+}
+
+fn prepare(w: &mut String) {
+    w.push_str(
+        r#"      - name: Preserve event-owned release policy and publication guard
+        run: |
+          set -euo pipefail
+          cp .simit/release-plz.py "$RUNNER_TEMP/release-plz-admission.py"
+          cp release-plz.toml "$RUNNER_TEMP/release-plz.toml"
+          mkdir -p "$RUNNER_TEMP/release-plz-guard"
+          cat > "$RUNNER_TEMP/release-plz-guard/cargo" <<'SIMIT_CARGO'
+          #!/bin/sh
+          exec python3 "$RUNNER_TEMP/release-plz-admission.py" cargo "$@"
+          SIMIT_CARGO
+          chmod 700 "$RUNNER_TEMP/release-plz-guard/cargo"
+          cat > "$RUNNER_TEMP/release-plz-credentials" <<'SIMIT_CREDENTIALS'
+          #!/bin/sh
+          if [ "$1" = get ]; then
+            printf 'username=x-access-token\npassword=%s\n' "$GIT_TOKEN"
+          fi
+          SIMIT_CREDENTIALS
+          chmod 700 "$RUNNER_TEMP/release-plz-credentials"
+
+"#,
+    );
+}
+
+fn workflow(
+    config: &ProjectConfig,
+    runtime: Runtime,
+    options: &CiOptions,
+    packages: &[Package],
+) -> String {
+    let mut w = format!(
+        "{}\n# release-plz owns release PRs, crates.io publication and signed tags.\n# Use an App/PAT: GITHUB_TOKEN cannot trigger PR checks or tag workflows.\n# Reruns skip published crates; recover missing tags explicitly (see CI adoption docs).\nname: Release-plz\n\non:\n  push:\n    branches: [\"**\"]\n\npermissions:\n  contents: read\n\nconcurrency:\n  group: release-plz-${{{{ github.repository }}}}-${{{{ github.ref }}}}\n  cancel-in-progress: false\n\njobs:\n  select:\n    if: github.ref == format('refs/heads/{{0}}', github.event.repository.default_branch)\n    runs-on: ubuntu-24.04\n    timeout-minutes: 15\n    permissions:\n      contents: read\n      pull-requests: read\n    outputs:\n      release_sha: ${{{{ steps.select.outputs.release_sha }}}}\n    steps:\n",
+        ci::GENERATED_WORKFLOW_MARKER
+    );
+    checkout(&mut w);
+    w.push_str("      - name: Resolve release-plz immutable revision\n        id: select\n        env:\n          GH_TOKEN: ${{ github.token }}\n        run: python3 .simit/release-plz.py select\n\n  qualify:\n    needs: select\n    if: needs.select.outputs.release_sha != ''\n    runs-on: ubuntu-24.04\n    timeout-minutes: 120\n    permissions:\n      contents: read\n      pull-requests: read\n");
+    ci::push_job_env(&mut w, Platform::Github, runtime, &options.extra_env, true);
+    w.push_str("    steps:\n");
+    checkout(&mut w);
+    prepare(&mut w);
+    w.push_str("      - name: Qualify exact release revision\n        env:\n          SIMIT_RELEASE_SHA: ${{ needs.select.outputs.release_sha }}\n        run: git checkout --detach \"$SIMIT_RELEASE_SHA\"\n\n");
+    ci::release_plz_setup(&mut w, runtime, options);
+    ci::release_plz_checks(&mut w, runtime, packages, options);
+    install(&mut w, runtime);
+    w.push_str(&format!("      - name: Qualify release-plz release dry run\n        env:\n          GIT_TOKEN: ${{{{ github.token }}}}\n          SIMIT_EXPECTED_RELEASE_SHA: ${{{{ needs.select.outputs.release_sha }}}}\n        run: |\n          set -euo pipefail\n          git checkout --detach \"$GITHUB_SHA\"\n          {}\n\n", invocation(runtime, "release --dry-run")));
+    w.push_str("  publish:\n    needs: [select, qualify]\n    runs-on: ubuntu-24.04\n    timeout-minutes: 60\n    permissions:\n      contents: read\n      pull-requests: read\n    steps:\n");
+    checkout(&mut w);
+    prepare(&mut w);
+    ci::release_plz_setup(&mut w, runtime, options);
+    install(&mut w, runtime);
+    w.push_str("      - name: Recheck immutable release selection\n        env:\n          GH_TOKEN: ${{ github.token }}\n          SIMIT_EXPECTED_RELEASE_SHA: ${{ needs.select.outputs.release_sha }}\n        run: python3 \"$RUNNER_TEMP/release-plz-admission.py\" select\n\n");
+    signing(&mut w, config);
+    let token = authentication(&mut w, config);
+    w.push_str(&format!("      - name: Publish qualified crates and signed tags\n        env:\n          GIT_TOKEN: {token}\n          CARGO_REGISTRY_TOKEN: ${{{{ secrets.{} }}}}\n          SIMIT_EXPECTED_RELEASE_SHA: ${{{{ needs.select.outputs.release_sha }}}}\n        run: |\n          set -euo pipefail\n          test -n \"$GIT_TOKEN\" && test -n \"$CARGO_REGISTRY_TOKEN\" || {{ echo 'Missing release-plz automation/registry token' >&2; exit 1; }}\n          git config --local credential.helper \"$RUNNER_TEMP/release-plz-credentials\"\n          {}\n\n", config.ci.release_plz.registry_token_secret, invocation(runtime, "release")));
+    cleanup(&mut w);
+    w.push_str("  release-pr:\n    needs: [select, qualify, publish]\n    if: always() && needs.select.result == 'success' && (needs.qualify.result == 'success' || needs.select.outputs.release_sha == '') && (needs.publish.result == 'success' || needs.publish.result == 'skipped')\n    runs-on: ubuntu-24.04\n    timeout-minutes: 60\n    permissions:\n      contents: read\n      pull-requests: read\n    steps:\n");
+    checkout(&mut w);
+    prepare(&mut w);
+    ci::release_plz_setup(&mut w, runtime, options);
+    install(&mut w, runtime);
+    w.push_str("      - name: Restore release PR base branch at the event revision\n        run: git switch --force-create \"$GITHUB_REF_NAME\" \"$GITHUB_SHA\"\n\n");
+    signing(&mut w, config);
+    let token = authentication(&mut w, config);
+    w.push_str(&format!("      - name: Update release PR\n        env:\n          GIT_TOKEN: {token}\n        run: |\n          set -euo pipefail\n          test -n \"$GIT_TOKEN\" || {{ echo 'Missing release-plz automation token' >&2; exit 1; }}\n          git config --local credential.helper \"$RUNNER_TEMP/release-plz-credentials\"\n          {}\n\n", invocation(runtime, "release-pr")));
+    cleanup(&mut w);
+    w.trim_end().to_owned() + "\n"
+}
+
+fn cleanup(w: &mut String) {
+    w.push_str("      - name: Remove signing material\n        if: always()\n        run: |\n          git config --local --unset-all credential.helper || true\n          gpgconf --kill gpg-agent || true\n          rm -rf \"$RUNNER_TEMP/release-plz-gnupg\"\n\n");
+}

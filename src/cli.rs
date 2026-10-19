@@ -794,6 +794,12 @@ pub struct InitCiCommand {
     )]
     pub coordinated_publish: Option<bool>,
     #[arg(
+        long,
+        value_enum,
+        help = "Rust publication strategy; release-plz is the default for newly enabled GitHub Actions publishing"
+    )]
+    pub publish_strategy: Option<crate::config::PublishStrategy>,
+    #[arg(
         long = "with-homebrew",
         help = "Add a Homebrew tap publishing step (Nix runtime)"
     )]

@@ -8,6 +8,7 @@ pub mod flake;
 pub mod gitignore;
 pub mod homebrew_formula;
 pub mod pkgbuild;
+pub mod release_plz;
 pub mod release_workflow;
 pub mod review_policy;
 pub mod rpm_spec;

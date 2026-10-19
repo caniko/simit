@@ -162,6 +162,8 @@ fn ci_artifact_gates_validate_full_tag_but_parse_configured_version_prefix() {
                 "--runtime",
                 "cargo",
                 "--with-artifacts",
+                "--publish-strategy",
+                "members",
             ])
             .output()
             .unwrap();

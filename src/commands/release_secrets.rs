@@ -123,7 +123,11 @@ pub(crate) fn project_credentials(
         winget: cfg.winget.as_ref(),
         announce: cfg.release.announce.as_ref(),
     };
-    Ok(release_workflow::credential_contract(&inputs))
+    let mut credentials = release_workflow::credential_contract(&inputs);
+    if cfg.ci.publish_strategy == crate::config::PublishStrategy::ReleasePlz {
+        credentials.extend(crate::render::release_plz::credential_contract(cfg));
+    }
+    Ok(credentials)
 }
 
 pub fn inspect_minisign_input(command: ReleaseCommand) -> Result<()> {

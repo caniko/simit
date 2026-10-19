@@ -54,6 +54,11 @@ pub(crate) fn files(
     config
         .ci
         .validate_effective_backend(CiProvider::Actions, Platform::Github)?;
+    if config.ci.publish_strategy == crate::config::PublishStrategy::ReleasePlz {
+        bail!(
+            "release-plz does not support mixed-language monorepos; configure publication per Cargo workspace"
+        );
+    }
     if include_publishers && (config.vscode.is_some() || config.jetbrains.is_some()) {
         bail!(
             "monorepo extension publication is not supported; manage extension publishers independently and use --primary-only for qualification regeneration"
@@ -393,6 +398,11 @@ fn require_hosted_qualification(jobs: &Value) -> Result<()> {
 }
 
 pub(crate) fn resolve_config(root: &Path, command: &InitCiCommand) -> Result<ProjectConfig> {
+    if command.publish_strategy == Some(crate::config::PublishStrategy::ReleasePlz) {
+        bail!(
+            "release-plz does not support mixed-language monorepos; configure publication per Cargo workspace"
+        );
+    }
     if command.diff && !command.check {
         bail!("--diff requires --check");
     }
@@ -420,6 +430,7 @@ pub(crate) fn resolve_config(root: &Path, command: &InitCiCommand) -> Result<Pro
         || command.with_artifacts.is_some()
         || command.with_pypi_publish.is_some()
         || command.coordinated_publish.is_some()
+        || command.publish_strategy.is_some()
         || command.with_homebrew
         || command.with_chocolatey
         || command.with_scoop

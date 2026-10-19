@@ -91,7 +91,7 @@
           pathString = toString path;
         in
           (craneLib.filterCargoSources path type)
-          || builtins.elem pathString (map (name: "${toString ./.}/${name}") ["README.md" "LICENSE" "CHANGELOG.md"])
+          || builtins.elem pathString (map (name: "${toString ./.}/${name}") ["README.md" "LICENSE" "CHANGELOG.md" "release-plz.toml"])
           || pkgs.lib.hasInfix "/src/review/assets/" pathString
           || pkgs.lib.hasSuffix "/src/monorepo/native_release.py" pathString
           || pkgs.lib.hasSuffix "/src/monorepo/nix_diagnostics.sh" pathString
@@ -102,6 +102,8 @@
           || pkgs.lib.hasSuffix "/scripts" pathString
           || pkgs.lib.hasInfix "/scripts/qualify-" pathString
           || pkgs.lib.hasSuffix "/src/render/ci/custody_sealed.py" pathString
+          || pkgs.lib.hasSuffix "/src/render/ci/release_plz.py" pathString
+          || pkgs.lib.hasSuffix "/.simit/release-plz.py" pathString
           || pkgs.lib.hasSuffix "ci-actions.json" pathString
           || pkgs.lib.hasSuffix "/.github" pathString
           || pkgs.lib.hasSuffix "/.github/workflows" pathString

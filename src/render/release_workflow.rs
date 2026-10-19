@@ -91,7 +91,7 @@ pub enum ReleaseCredentialContext {
 }
 
 impl ReleaseCredential {
-    fn secret(
+    pub(crate) fn secret(
         name: impl Into<String>,
         scope: ReleaseCredentialScope,
         channel: impl Into<String>,

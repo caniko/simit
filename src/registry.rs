@@ -598,9 +598,21 @@ pub fn audit_ci(workspace_root: &Path) -> Result<CiAudit> {
             (path.clone(), file.content.clone())
         })
         .collect::<BTreeMap<_, _>>();
-    for path in expected.keys().filter(|p| p.starts_with(".github/actions")) {
+    for path in expected.keys().filter(|p| {
+        p.starts_with(".github/actions") || crate::render::release_plz::auxiliary_path(p)
+    }) {
         if let Ok(content) = fs::read_to_string(workspace_root.join(path)) {
             actual.insert(path.clone(), content);
+        }
+    }
+    for path in [
+        crate::render::release_plz::CONFIG,
+        crate::render::release_plz::HELPER,
+    ] {
+        if let Ok(content) = fs::read_to_string(workspace_root.join(path))
+            && ci::is_generated_workflow_marker(&content)
+        {
+            actual.insert(PathBuf::from(path), content);
         }
     }
 
@@ -950,11 +962,27 @@ fn marked_workflows_drift(workspace_root: &Path, marked: &[WorkflowFile]) -> boo
         .map(|file| (file.relative_path, file.content))
         .collect::<BTreeMap<_, _>>();
 
+    for path in [
+        crate::render::release_plz::CONFIG,
+        crate::render::release_plz::HELPER,
+    ] {
+        if !expected.contains_key(Path::new(path))
+            && fs::read_to_string(workspace_root.join(path))
+                .is_ok_and(|content| ci::is_generated_workflow_marker(&content))
+        {
+            return true;
+        }
+    }
+
     let actions_drift = expected
         .iter()
-        .filter(|(p, _)| p.starts_with(".github/actions"))
+        .filter(|(p, _)| {
+            p.starts_with(".github/actions") || crate::render::release_plz::auxiliary_path(p)
+        })
         .any(|(p, c)| fs::read_to_string(workspace_root.join(p)).as_ref().ok() != Some(c));
-    expected.retain(|p, _| !p.starts_with(".github/actions"));
+    expected.retain(|p, _| {
+        !p.starts_with(".github/actions") && !crate::render::release_plz::auxiliary_path(p)
+    });
     actions_drift
         || expected.len() != marked.len()
         || marked.iter().any(|workflow| {
@@ -1033,6 +1061,9 @@ fn infer_expected_primary_ci_files(
     // file drift. `{:#}` keeps the offending keys in the message.
     let config =
         ProjectConfig::load(workspace_root).context("loading simit project configuration")?;
+    if config.ci.publish_strategy == crate::config::PublishStrategy::ReleasePlz {
+        crate::render::release_plz::validate_backend(backend.provider(), backend.platform())?;
+    }
     config
         .ci
         .validate_effective_backend(backend.provider(), backend.platform())?;
@@ -1305,7 +1336,7 @@ fn infer_expected_primary_ci_files(
                 && packages.iter().any(cargo::Package::has_binary_target),
             package_scoped,
             publish_crates: options.publish_crates
-                && resolved.publish_strategy != crate::config::PublishStrategy::Coordinated,
+                && resolved.publish_strategy == crate::config::PublishStrategy::Members,
             homebrew: infer_homebrew_options(&config, package, marked)?,
             chocolatey: infer_chocolatey_options(&config, package, marked)?,
             scoop: infer_scoop_options(&config, package, marked)?,
@@ -1327,7 +1358,15 @@ fn infer_expected_primary_ci_files(
             step_runners: &step_runners,
         })?);
     }
-    if resolved.publish_strategy == crate::config::PublishStrategy::Coordinated {
+    if resolved.publish_strategy == crate::config::PublishStrategy::ReleasePlz {
+        crate::render::release_plz::validate_backend(backend.provider(), platform)?;
+        files.extend(crate::render::release_plz::files(
+            &metadata,
+            &config,
+            resolved.runtime,
+            &options,
+        )?);
+    } else if resolved.publish_strategy == crate::config::PublishStrategy::Coordinated {
         if platform == Platform::Github && options.publish_crates {
             // Registry drift check is best-effort: if the workspace graph is
             // broken, skip the publish file so the primary `init ci --check`
@@ -1412,7 +1451,10 @@ fn infer_expected_primary_ci_files(
 
     Ok(files
         .into_iter()
-        .filter(|file| is_workflow_path(&file.relative_path))
+        .filter(|file| {
+            is_workflow_path(&file.relative_path)
+                || crate::render::release_plz::auxiliary_path(&file.relative_path)
+        })
         .collect())
 }
 
