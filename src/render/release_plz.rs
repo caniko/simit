@@ -342,6 +342,97 @@ fn commands_publish(
         .join("\n")
         .replace("\\\n", "");
     for line in run.split(['\n', ';']) {
+        // Reuse the already-locked shell lexer: quoted assignment values must
+        // stay together while finding the executable behind env/sudo prefixes.
+        let shell_words = shlex::split(line);
+        if shell_words.is_none()
+            && ((line
+                .split_whitespace()
+                .next()
+                .and_then(|word| word.split_once('='))
+                .is_some_and(|(name, _)| {
+                    crate::config::validate_environment_name("publisher prefix", name).is_ok()
+                })
+                && !line.contains("$("))
+                || line.split_whitespace().any(|word| {
+                    matches!(
+                        Path::new(word).file_name().and_then(|name| name.to_str()),
+                        Some("env" | "sudo" | "exec" | "command")
+                    )
+                }))
+        {
+            bail!("release-plz migration: reconcile opaque publisher command prefix");
+        }
+        let mut executable = true;
+        let mut wrapper = None;
+        let mut option_value = false;
+        for word in shell_words.iter().flatten() {
+            let word = word.as_str();
+            if option_value {
+                option_value = false;
+                continue;
+            }
+            if executable
+                && !word.starts_with('-')
+                && let Some((name, _)) = word.split_once('=')
+                && (wrapper == Some("env")
+                    || crate::config::validate_environment_name("publisher prefix", name).is_ok())
+            {
+                continue;
+            }
+            if executable && wrapper.is_some() && word.starts_with('-') {
+                match word {
+                    "-u" | "--unset" | "--user" | "-g" | "--group" | "-a" | "--argv0" => {
+                        option_value = true;
+                    }
+                    "--"
+                    | "-i"
+                    | "--ignore-environment"
+                    | "-0"
+                    | "--null"
+                    | "--debug"
+                    | "-E"
+                    | "--preserve-env"
+                    | "-H"
+                    | "--set-home"
+                    | "-n"
+                    | "--non-interactive" => {}
+                    word if [
+                        "--unset=",
+                        "--user=",
+                        "--group=",
+                        "--argv0=",
+                        "--preserve-env=",
+                    ]
+                    .iter()
+                    .any(|option| word.starts_with(option)) => {}
+                    _ => bail!(
+                        "release-plz migration: reconcile opaque publisher wrapper option {word}"
+                    ),
+                }
+                continue;
+            }
+            let local_executable = executable;
+            let program = Path::new(word).file_name().and_then(|name| name.to_str());
+            wrapper = program.filter(|program| {
+                local_executable && matches!(*program, "env" | "sudo" | "exec" | "command")
+            });
+            executable = matches!(
+                word,
+                "-c" | "-lc" | "if" | "then" | "do" | "|" | "&&" | "||"
+            ) || wrapper.is_some();
+            if local_executable
+                && !Path::new(word).is_absolute()
+                && word.contains('/')
+                && !word.contains(['$', '{', '}'])
+                && (word.starts_with("./") || cwd.join(word).is_file())
+                && local_publisher(root, cwd, word, seen, false)?
+            {
+                return Ok(true);
+            }
+        }
+        // The broad token scan also recognizes literal Cargo calls in scripts
+        // written in other languages (for example Python subprocess arrays).
         let words: Vec<_> = line
             .split(|c: char| c.is_whitespace() || "\"'[](),;".contains(c))
             .filter(|word| !word.is_empty())
@@ -359,30 +450,6 @@ fn commands_publish(
                     && (arguments.first() == Some(&"publish")
                         || (arguments.first().is_some_and(|arg| arg.starts_with('-'))
                             && arguments.contains(&"publish"))))
-            {
-                return Ok(true);
-            }
-            // Follow executables, not path operands such as actionlint's input.
-            if (index == 0
-                || matches!(
-                    words[index - 1],
-                    "-c" | "-lc"
-                        | "--"
-                        | "exec"
-                        | "env"
-                        | "sudo"
-                        | "if"
-                        | "then"
-                        | "do"
-                        | "|"
-                        | "&&"
-                        | "||"
-                ))
-                && !Path::new(word).is_absolute()
-                && word.contains('/')
-                && !word.contains(['$', '{', '}'])
-                && (word.starts_with("./") || cwd.join(word).is_file())
-                && local_publisher(root, cwd, word, seen, false)?
             {
                 return Ok(true);
             }

@@ -1840,6 +1840,7 @@ dependencies = [
  "serde_yaml",
  "sha1",
  "sha2",
+ "shlex",
  "signal-hook",
  "socket2",
  "tar",

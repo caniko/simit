@@ -76,6 +76,9 @@ external or opaque local files and local actions require explicit reconciliation
 Tracked and unignored local scripts are inspected regardless of extension;
 ignored untracked build outputs are not source inputs. A generated-file marker
 alone cannot exempt a publisher that the migration plan leaves active.
+Environment assignments and supported wrapper options are consumed before
+inspecting the executable. Opaque options such as directory changes or split-string
+execution require explicit reconciliation instead of silently skipping a wrapper.
 This bounded scan is not a general program analyzer: review generated executables,
 computed/downloaded commands and remote reusable workflows before enabling
 publication.

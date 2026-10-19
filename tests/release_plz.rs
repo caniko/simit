@@ -643,6 +643,67 @@ fn migration_follows_local_publisher_wrappers_and_reusable_jobs() {
 }
 
 #[test]
+fn migration_follows_environment_and_wrapper_prefixes() {
+    for command in [
+        "RELEASE=1 ./scripts/ship",
+        "env RELEASE=1 ./scripts/ship",
+        "env RELEASE=1 ./scripts/ship.sh",
+        "env -i -u SECRET RELEASE=1 scripts/ship",
+        "env --unset SECRET -- RELEASE=1 scripts/ship",
+        "/usr/bin/env --unset=SECRET RELEASE=1 scripts/ship",
+        "sudo -u root env RELEASE=1 scripts/ship",
+        "env MESSAGE='release request' ./scripts/ship",
+        "./scripts/ship=now",
+        "env A/B=1 ./scripts/ship",
+        "env --chdir scripts RELEASE=1 ./ship",
+        "env -S 'RELEASE=1 ./scripts/ship'",
+    ] {
+        let temp = project("");
+        fs::create_dir_all(temp.path().join(".github/workflows")).unwrap();
+        fs::create_dir(temp.path().join("scripts")).unwrap();
+        for name in ["ship", "ship.sh", "ship=now"] {
+            fs::write(temp.path().join("scripts").join(name), "cargo publish\n").unwrap();
+        }
+        fs::write(
+            temp.path().join(".github/workflows/custom.yaml"),
+            format!("jobs:\n  ship:\n    steps:\n      - run: {command}\n"),
+        )
+        .unwrap();
+        let output = init(temp.path(), &["--publish-crates"]);
+        assert!(!output.status.success(), "accepted {command}");
+        assert!(String::from_utf8_lossy(&output.stderr).contains("publisher"));
+        assert!(!temp.path().join("release-plz.toml").exists());
+        assert_eq!(
+            fs::read_to_string(temp.path().join("simit.toml")).unwrap(),
+            ""
+        );
+    }
+    for command in [
+        "env MESSAGE='release request' ./scripts/check",
+        "env -i -u SECRET RELEASE=1 ./scripts/check",
+        "sudo -u root env RELEASE=1 ./scripts/check",
+        "env RELEASE=1 ./scripts/check ./scripts/ship",
+        "env ./scripts/ship=now",
+        "printf -- -f",
+        "env RELEASE=1 ./scripts/check -- ./scripts/ship",
+    ] {
+        let temp = project("");
+        fs::create_dir_all(temp.path().join(".github/workflows")).unwrap();
+        fs::create_dir(temp.path().join("scripts")).unwrap();
+        fs::write(temp.path().join("scripts/check"), "cargo test\n").unwrap();
+        fs::write(temp.path().join("scripts/ship"), "cargo publish\n").unwrap();
+        fs::write(temp.path().join("scripts/ship=now"), "cargo publish\n").unwrap();
+        fs::write(
+            temp.path().join(".github/workflows/custom.yaml"),
+            format!("jobs:\n  check:\n    steps:\n      - run: {command}\n"),
+        )
+        .unwrap();
+        let output = init(temp.path(), &["--publish-crates"]);
+        assert!(output.status.success(), "{command}: {output:?}");
+    }
+}
+
+#[test]
 fn migration_inspects_custom_shells_and_their_default_scopes() {
     for (workflow, script, rejects) in [
         (
