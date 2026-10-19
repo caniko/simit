@@ -67,7 +67,7 @@ jobs:
         run: nix develop .#docs -c cargo doc --no-deps --all-features
 
       - name: Check generated CI
-        run: nix develop -c cargo run -- init ci --platform github --runtime nix --runner ubuntu-latest --with-docs --publish-crates --check
+        run: nix develop -c cargo run -- init ci --platform github --runtime nix --runner ubuntu-latest --with-docs --check
 
       - name: Check generated flake and hooks
         run: nix develop -c cargo run -- init flake --check

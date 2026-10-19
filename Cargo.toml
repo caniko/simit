@@ -23,6 +23,8 @@ include = [
   "/.github/workflows/*.yaml",
   "/.github/workflows/*.yml",
   "/.simit/workflows/**",
+  "/.simit/release-plz.py",
+  "/release-plz.toml",
   "/CHANGELOG.md",
   "/LICENSE",
   "/README.md",
@@ -52,6 +54,7 @@ runtime = "nix"
 runner = "ubuntu-latest"
 with_docs = true
 publish_crates = true
+publish_strategy = "release-plz"
 nix_builds = [".#default"]
 
 extra_setup = [
@@ -91,9 +94,6 @@ aarch64-darwin = "macos-15"
 [package.metadata.simit.ci.pages]
 repo = "caniko/simit"
 canonical_domain = "simit.tartanoglu.com"
-
-[package.metadata.simit.release.changelog]
-auto_draft = true
 
 [package.metadata.simit.release.github]
 repo = "caniko/simit"
