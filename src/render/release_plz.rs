@@ -341,7 +341,31 @@ fn commands_publish(
         .collect::<Vec<_>>()
         .join("\n")
         .replace("\\\n", "");
-    for line in run.split(['\n', ';']) {
+    // Shell evaluation also runs inside assignments and data arguments. Use the
+    // grammar's exact substitution ranges, not token/quote stripping, so benign
+    // substitutions and single-quoted literal strings remain distinguishable.
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_bash::LANGUAGE.into())?;
+    let tree = parser
+        .parse(&run, None)
+        .context("parsing publisher commands")?;
+    let mut nodes = vec![tree.root_node()];
+    let mut substitutions = Vec::new();
+    while let Some(node) = nodes.pop() {
+        if matches!(node.kind(), "command_substitution" | "process_substitution") {
+            if node.has_error() {
+                bail!("release-plz migration: reconcile opaque publisher substitution");
+            }
+            let text = node.utf8_text(run.as_bytes())?;
+            let start = if text.starts_with('`') { 1 } else { 2 };
+            substitutions.push(&text[start..text.len() - 1]);
+        }
+        nodes.extend(node.named_children(&mut node.walk()));
+    }
+    for line in std::iter::once(run.as_str())
+        .chain(substitutions)
+        .flat_map(|fragment| fragment.split(['\n', ';']))
+    {
         // Reuse the already-locked shell lexer: quoted assignment values must
         // stay together while finding the executable behind env/sudo prefixes.
         let shell_words = shlex::split(line);
@@ -382,6 +406,8 @@ fn commands_publish(
             }
             if executable && wrapper.is_some() && word.starts_with('-') {
                 match word {
+                    "-v" | "-V" if wrapper == Some("command") => break,
+                    "-p" if wrapper == Some("command") => {}
                     "-u" | "--unset" | "--user" | "-g" | "--group" | "-a" | "--argv0" => {
                         option_value = true;
                     }

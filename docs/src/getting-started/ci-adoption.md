@@ -79,6 +79,10 @@ alone cannot exempt a publisher that the migration plan leaves active.
 Environment assignments and supported wrapper options are consumed before
 inspecting the executable. Opaque options such as directory changes or split-string
 execution require explicit reconciliation instead of silently skipping a wrapper.
+Bash syntax trees also expose nested command/backtick and process substitutions,
+including substitutions inside assignment values, parameter expansions and data
+arguments. Their literal commands are inspected without evaluating them; malformed
+substitutions require reconciliation. Single-quoted literal text is not executed.
 This bounded scan is not a general program analyzer: review generated executables,
 computed/downloaded commands and remote reusable workflows before enabling
 publication.

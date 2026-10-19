@@ -655,6 +655,8 @@ fn migration_follows_environment_and_wrapper_prefixes() {
         "env MESSAGE='release request' ./scripts/ship",
         "./scripts/ship=now",
         "env A/B=1 ./scripts/ship",
+        "command -p env RELEASE=1 ./scripts/ship",
+        "exec -a ship ./scripts/ship",
         "env --chdir scripts RELEASE=1 ./ship",
         "env -S 'RELEASE=1 ./scripts/ship'",
     ] {
@@ -686,6 +688,8 @@ fn migration_follows_environment_and_wrapper_prefixes() {
         "env ./scripts/ship=now",
         "printf -- -f",
         "env RELEASE=1 ./scripts/check -- ./scripts/ship",
+        "command -v ./scripts/ship",
+        "RESULT=$(command -v cargo) true",
     ] {
         let temp = project("");
         fs::create_dir_all(temp.path().join(".github/workflows")).unwrap();
@@ -700,6 +704,48 @@ fn migration_follows_environment_and_wrapper_prefixes() {
         .unwrap();
         let output = init(temp.path(), &["--publish-crates"]);
         assert!(output.status.success(), "{command}: {output:?}");
+    }
+}
+
+#[test]
+fn migration_inspects_shell_substitutions_without_executing_them() {
+    for (command, rejects) in [
+        ("RESULT=$(./scripts/ship) true", true),
+        ("RESULT=$(scripts/ship) true", true),
+        ("RESULT=`./scripts/ship` true", true),
+        ("RESULT=${UNSET:-$(./scripts/ship)} true", true),
+        ("RESULT=<(./scripts/ship) true", true),
+        ("RESULT=>(./scripts/ship) true", true),
+        ("env RESULT=$(./scripts/ship) true", true),
+        ("env --unset=$(./scripts/ship) true", true),
+        ("sudo -u $(./scripts/ship) true", true),
+        ("RESULT=$(env RELEASE=1 ./scripts/ship) true", true),
+        ("RESULT=$(echo $(./scripts/ship)) true", true),
+        ("true \"$(./scripts/ship)\"", true),
+        ("RESULT=$(uname -m) true", false),
+        ("RESULT='$(./scripts/ship)' true", false),
+        ("RESULT=$(./scripts/check) true", false),
+    ] {
+        let temp = project("");
+        fs::create_dir_all(temp.path().join(".github/workflows")).unwrap();
+        fs::create_dir(temp.path().join("scripts")).unwrap();
+        fs::write(temp.path().join("scripts/ship"), "cargo publish\n").unwrap();
+        fs::write(temp.path().join("scripts/check"), "cargo test\n").unwrap();
+        fs::write(
+            temp.path().join(".github/workflows/custom.yaml"),
+            format!("jobs:\n  check:\n    steps:\n      - run: {command}\n"),
+        )
+        .unwrap();
+        let output = init(temp.path(), &["--publish-crates"]);
+        assert_eq!(!output.status.success(), rejects, "{command}: {output:?}");
+        if rejects {
+            assert!(String::from_utf8_lossy(&output.stderr).contains("publisher"));
+            assert!(!temp.path().join("release-plz.toml").exists());
+            assert_eq!(
+                fs::read_to_string(temp.path().join("simit.toml")).unwrap(),
+                ""
+            );
+        }
     }
 }
 

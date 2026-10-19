@@ -150,6 +150,8 @@ schemars = "1"
 url = "2"
 unicode-normalization = "0.1.25"
 toml_edit = { version = "0.25", features = ["serde"] }
+tree-sitter = "0.25"
+tree-sitter-bash = "0.25"
 tempfile = "3"
 tokio = { version = "1", features = ["rt", "time"] }
 tar = "0.4"
