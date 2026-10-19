@@ -120,6 +120,14 @@ pub fn verify_reconstructed_crate(
 ) -> Result<()> {
     let candidate = crate_members(candidate, root).context("read candidate crate")?;
     let reconstructed = crate_members(reconstructed, root).context("read signed-source crate")?;
+    verify_crate_members(&candidate, &reconstructed, root)
+}
+
+pub(super) fn verify_crate_members(
+    candidate: &BTreeMap<String, CrateMember>,
+    reconstructed: &BTreeMap<String, CrateMember>,
+    root: &str,
+) -> Result<()> {
     ensure!(
         candidate.len() == reconstructed.len()
             && candidate.iter().all(|(path, member)| {

@@ -55,6 +55,26 @@ fn new_publishing_defaults_to_release_plz_and_round_trips() {
     assert!(workflow.contains("run release "));
     assert!(workflow.contains("tag.gpgSign true"));
     assert!(workflow.contains("Qualify exact release revision"));
+    let reconcile = yaml["jobs"]["publish"]["steps"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .position(|step| {
+            step["run"]
+                .as_str()
+                .is_some_and(|run| run.contains("--release-plz-check-registry"))
+        })
+        .unwrap();
+    let signing = yaml["jobs"]["publish"]["steps"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .position(|step| step["name"] == "Configure authorized tag signing")
+        .unwrap();
+    assert!(
+        reconcile < signing,
+        "tags-only releases must reconcile every registry version before signing"
+    );
     assert!(
         !temp
             .path()
@@ -459,6 +479,10 @@ fn migration_follows_local_publisher_wrappers_and_reusable_jobs() {
         ),
         (
             "jobs:\n  ship:\n    uses: ./.github/workflows/reusable.yaml\n",
+            "cargo publish\n",
+        ),
+        (
+            "jobs:\n  ship:\n    steps:\n      - run: bash -e -o pipefail scripts/ship.sh\n",
             "cargo publish\n",
         ),
         (

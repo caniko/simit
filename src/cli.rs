@@ -443,6 +443,8 @@ pub struct ReleaseCommand {
     pub publisher_output: Option<Utf8PathBuf>,
     #[arg(long, hide = true)]
     pub release_plz_archives: Option<Utf8PathBuf>,
+    #[arg(long, hide = true, requires = "release_plz_archives")]
+    pub release_plz_check_registry: bool,
     #[arg(
         long,
         help = "Trusted package namespace for an independent <package>/v<version> tag"

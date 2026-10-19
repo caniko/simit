@@ -160,6 +160,12 @@ Git tree with the qualified engine's data-only Cargo path. Project Cargo config,
 wrappers, hooks, Nix expressions and build scripts never run with release
 credentials. The release-plz Cargo adapter routes uploads through that same
 archive verifier and registry transport, and refuses build-capable commands.
+Before release-plz can upload or push any tag, Simit reconciles every existing
+workspace version, including crates release-plz will skip. Each upload repeats
+that check. A published archive must match its registry checksum and the qualified
+package contents. Unchanged members may carry an older ancestral Git SHA; only
+that provenance field may differ. Changed contents, dirty/non-ancestral source
+bindings, wrong identities and yanked versions stop the entire release.
 
 Release PR preparation runs `release-plz update` without release credentials,
 including its available semver checks. A fresh worker admits only regular-file

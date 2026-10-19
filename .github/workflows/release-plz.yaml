@@ -257,12 +257,12 @@ jobs:
           RELEASE_TRUST_ROOT: "keys/maintainers.gpg"
         run: python3 "$RUNNER_TEMP/release-plz-admission.py" select
 
-      - name: Independently reconstruct every qualified archive without credentials
+      - name: Reconstruct qualified archives and reconcile all registry versions without credentials
         env:
           SIMIT_EXPECTED_RELEASE_SHA: ${{ needs.select.outputs.release_sha }}
           SIMIT_RELEASE_PLZ_SOURCE: ${{ runner.temp }}/release-plz-event-source
         run: |
-          "$RUNNER_TEMP/simit-release-plz-publisher" release publisher --publisher-stage prepare --repo "$GITHUB_REPOSITORY" --release-plz-archives "$RUNNER_TEMP/release-plz-archives"
+          "$RUNNER_TEMP/simit-release-plz-publisher" release publisher --publisher-stage prepare --repo "$GITHUB_REPOSITORY" --release-plz-archives "$RUNNER_TEMP/release-plz-archives" --release-plz-check-registry
 
       - name: Configure authorized tag signing
         env:

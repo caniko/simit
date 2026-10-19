@@ -340,15 +340,15 @@ fn commands_publish(
             if matches!(
                 program,
                 Some("bash" | "sh" | "python" | "python3" | "node" | "pwsh" | "ruby")
-            ) && let Some(local) = words.get(index + 1)
-                && !local.starts_with('-')
-                && !local.contains('$')
-                && (cwd.join(local).is_file()
-                    || matches!(
-                        Path::new(local).extension().and_then(|ext| ext.to_str()),
-                        Some("sh" | "bash" | "py" | "js" | "ps1" | "rb")
-                    ))
-                && local_publisher(root, cwd, local, seen, false)?
+            ) && let Some(local) = arguments.iter().find(|local| {
+                !local.starts_with('-')
+                    && !local.contains('$')
+                    && (cwd.join(local).is_file()
+                        || matches!(
+                            Path::new(local).extension().and_then(|ext| ext.to_str()),
+                            Some("sh" | "bash" | "py" | "js" | "ps1" | "rb")
+                        ))
+            }) && local_publisher(root, cwd, local, seen, false)?
             {
                 return Ok(true);
             }
@@ -564,7 +564,7 @@ fn workflow(
     install(&mut w, Runtime::Cargo);
     w.push_str(&format!("      - name: Download same-run qualified archives\n        uses: {}\n        with:\n          name: release-plz-crates-${{{{ github.run_attempt }}}}\n          path: ${{{{ runner.temp }}}}/release-plz-archives\n\n", ci::github_action_ref("actions/download-artifact", "v8.0.2")));
     w.push_str(&format!("      - name: Recheck immutable release selection\n        working-directory: ${{{{ runner.temp }}}}/release-plz-event-source\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n          SIMIT_EXPECTED_RELEASE_SHA: ${{{{ needs.select.outputs.release_sha }}}}\n          RELEASE_TRUST_ROOT: {:?}\n        run: python3 \"$RUNNER_TEMP/release-plz-admission.py\" select\n\n", config.release.signing.trust_root));
-    w.push_str("      - name: Independently reconstruct every qualified archive without credentials\n        env:\n          SIMIT_EXPECTED_RELEASE_SHA: ${{ needs.select.outputs.release_sha }}\n          SIMIT_RELEASE_PLZ_SOURCE: ${{ runner.temp }}/release-plz-event-source\n        run: |\n          \"$RUNNER_TEMP/simit-release-plz-publisher\" release publisher --publisher-stage prepare --repo \"$GITHUB_REPOSITORY\" --release-plz-archives \"$RUNNER_TEMP/release-plz-archives\"\n\n");
+    w.push_str("      - name: Reconstruct qualified archives and reconcile all registry versions without credentials\n        env:\n          SIMIT_EXPECTED_RELEASE_SHA: ${{ needs.select.outputs.release_sha }}\n          SIMIT_RELEASE_PLZ_SOURCE: ${{ runner.temp }}/release-plz-event-source\n        run: |\n          \"$RUNNER_TEMP/simit-release-plz-publisher\" release publisher --publisher-stage prepare --repo \"$GITHUB_REPOSITORY\" --release-plz-archives \"$RUNNER_TEMP/release-plz-archives\" --release-plz-check-registry\n\n");
     signing(&mut w, config);
     let token = authentication(&mut w, config);
     w.push_str(&format!("      - name: Publish verified archives and signed tags\n        env:\n          GIT_TOKEN: {token}\n          CARGO_REGISTRY_TOKEN: ${{{{ secrets.{} }}}}\n          SIMIT_EXPECTED_RELEASE_SHA: ${{{{ needs.select.outputs.release_sha }}}}\n          SIMIT_RELEASE_PLZ_PUBLISHER: ${{{{ runner.temp }}}}/simit-release-plz-publisher\n        run: |\n          set -euo pipefail\n          test -n \"$GIT_TOKEN\" && test -n \"$CARGO_REGISTRY_TOKEN\" || {{ echo 'Missing release-plz automation/registry token' >&2; exit 1; }}\n          {}\n\n", config.ci.release_plz.registry_token_secret, invocation(Runtime::Cargo, "release")));
