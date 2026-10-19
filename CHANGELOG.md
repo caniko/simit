@@ -32,6 +32,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Bind receipt-producing ungrouped Nix builds to the exact pull-request head and
+  source repository, matching grouped builds instead of recording a merge commit.
 - Qualify generated native prebuild push runs against exact source job/step
   identities: require release-only skips, complete native matrix execution and
   successful default-branch publication while rejecting unknown predicates.
