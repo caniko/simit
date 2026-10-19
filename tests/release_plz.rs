@@ -847,6 +847,92 @@ fn migration_inspects_cargo_action_commands() {
 }
 
 #[test]
+fn migration_resolves_env_shebangs_without_running_them() {
+    for shebang in [
+        "#!/usr/bin/env -S FOO=bar python3",
+        "#!/usr/bin/env -S --unset FOO python3",
+        "#!/usr/bin/env -S --unset=FOO BAR=baz python3",
+        "#!/usr/bin/env -S --argv0 wrapper python3",
+        "#!/usr/bin/env -S -- FOO=bar python3",
+    ] {
+        for publishes in [true, false] {
+            let temp = project("");
+            fs::create_dir_all(temp.path().join(".github/workflows")).unwrap();
+            fs::create_dir(temp.path().join("scripts")).unwrap();
+            fs::write(
+                temp.path().join("scripts/launcher"),
+                format!("{shebang}\nimport subprocess\nsubprocess.run(['./scripts/ship'])\n"),
+            )
+            .unwrap();
+            fs::write(
+                temp.path().join("scripts/ship"),
+                if publishes {
+                    "cargo publish\n"
+                } else {
+                    "cargo test\n"
+                },
+            )
+            .unwrap();
+            fs::write(
+                temp.path().join(".github/workflows/custom.yaml"),
+                "jobs:\n  check:\n    steps:\n      - run: ./scripts/launcher\n",
+            )
+            .unwrap();
+            let output = init(temp.path(), &["--publish-crates"]);
+            assert_eq!(!output.status.success(), publishes, "{shebang}: {output:?}");
+            if publishes {
+                assert!(String::from_utf8_lossy(&output.stderr).contains("publisher"));
+                assert!(!temp.path().join("release-plz.toml").exists());
+            }
+        }
+    }
+}
+
+#[test]
+fn migration_requires_reconciliation_for_native_execution_overrides() {
+    for (shell, command) in [
+        (
+            "python3 {0}",
+            "subprocess.run(['placeholder'], executable='./scripts/ship')",
+        ),
+        (
+            "python3 {0}",
+            "subprocess.Popen(['placeholder'], executable = './scripts/ship')",
+        ),
+        (
+            "python3 {0}",
+            "subprocess.check_call(\n  ['placeholder'],\n  executable='./scripts/ship'\n)",
+        ),
+        (
+            "python3 {0}",
+            "subprocess.run(['placeholder'],  # choose the real program\n  executable='./scripts/ship')",
+        ),
+        (
+            "python3 {0}",
+            "subprocess.run(['./scripts/check'], cwd='release')",
+        ),
+        (
+            "node {0}",
+            "require('child_process').execFileSync('./scripts/check', {cwd:'release'})",
+        ),
+    ] {
+        let temp = project("");
+        fs::create_dir_all(temp.path().join(".github/workflows")).unwrap();
+        fs::create_dir(temp.path().join("scripts")).unwrap();
+        fs::write(temp.path().join("scripts/ship"), "cargo publish\n").unwrap();
+        fs::write(temp.path().join("scripts/check"), "cargo test\n").unwrap();
+        fs::create_dir_all(temp.path().join("release/scripts")).unwrap();
+        fs::write(temp.path().join("release/scripts/check"), "cargo publish\n").unwrap();
+        let command = command.replace('\n', "\n          ");
+        fs::write(temp.path().join(".github/workflows/custom.yaml"), format!("jobs:\n  check:\n    steps:\n      - shell: {shell}\n        run: |\n          {command}\n")).unwrap();
+        let output = init(temp.path(), &["--publish-crates"]);
+        assert!(!output.status.success(), "{command}: {output:?}");
+        assert!(String::from_utf8_lossy(&output.stderr).contains("publisher"));
+        assert!(!temp.path().join("release-plz.toml").exists());
+    }
+}
+
+#[test]
 fn migration_follows_literal_native_process_launches_in_non_shell_steps() {
     for (shell, command, executes) in [
         ("python3 {0}", "subprocess.run(['./scripts/ship'])", true),
@@ -876,6 +962,16 @@ fn migration_follows_literal_native_process_launches_in_non_shell_steps() {
         (
             "python3 {0}",
             "subprocess.run(['true', './scripts/ship'])",
+            false,
+        ),
+        (
+            "python3 {0}",
+            "subprocess.run(['true'], cwd='release')",
+            false,
+        ),
+        (
+            "python3 {0}",
+            "subprocess.run(['true'])\nexecutable = './scripts/ship'",
             false,
         ),
     ] {

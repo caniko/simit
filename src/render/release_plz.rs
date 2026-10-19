@@ -348,20 +348,56 @@ fn local_publisher(
     })?;
     // Direct execution uses the shebang. An explicit interpreter/source call
     // overrides it, and each resulting grammar has its own recursion receipt.
-    let shell = shell.unwrap_or_else(|| {
-        let mut words = content
+    let shell = if let Some(shell) = shell {
+        shell
+    } else {
+        let shebang = content
             .lines()
             .next()
             .unwrap_or("")
             .strip_prefix("#!")
-            .unwrap_or("")
-            .split_whitespace();
+            .unwrap_or("");
+        let words = shlex::split(shebang)
+            .context("release-plz migration: reconcile opaque publisher shebang")?;
+        let mut words = words.iter().map(String::as_str);
         let mut program = words.next().unwrap_or("");
         if Path::new(program)
             .file_name()
             .is_some_and(|name| name == "env")
         {
-            program = words.find(|word| !word.starts_with('-')).unwrap_or("");
+            let mut options = true;
+            loop {
+                let word = words.next().unwrap_or("");
+                if word.contains(['$', '`']) {
+                    bail!("release-plz migration: reconcile computed publisher shebang");
+                }
+                if !word.starts_with('-') && word.contains('=') {
+                    continue;
+                }
+                if options && word.starts_with('-') {
+                    match word {
+                        "--" => options = false,
+                        "-i"
+                        | "--ignore-environment"
+                        | "-v"
+                        | "--debug"
+                        | "-S"
+                        | "--split-string" => {}
+                        "-u" | "--unset" | "-a" | "--argv0" => {
+                            words.next().context(
+                                "release-plz migration: missing publisher shebang option value",
+                            )?;
+                        }
+                        word if word.starts_with("--unset=") || word.starts_with("--argv0=") => {}
+                        _ => bail!(
+                            "release-plz migration: reconcile opaque publisher shebang option {word}"
+                        ),
+                    }
+                    continue;
+                }
+                program = word;
+                break;
+            }
         }
         !matches!(
             Path::new(program)
@@ -369,7 +405,7 @@ fn local_publisher(
                 .and_then(|name| name.to_str()),
             Some("python" | "python3" | "node" | "pwsh" | "ruby")
         )
-    });
+    };
     if !seen.insert((
         cwd.clone(),
         path.clone(),
@@ -558,6 +594,18 @@ fn commands_publish(
                 continue;
             }
             let arguments = &words[index + 1..];
+            if native_launch
+                && line.match_indices("executable").any(|(position, keyword)| {
+                    line[position + keyword.len()..]
+                        .trim_start()
+                        .starts_with('=')
+                        && shlex::split(&line[..position]).is_none_or(|prefix| {
+                            prefix.last().is_some_and(|word| word.ends_with([',', '(']))
+                        })
+                })
+            {
+                bail!("release-plz migration: reconcile native publisher execution override");
+            }
             let arguments = if arguments.first().is_some_and(|arg| arg.starts_with('+')) {
                 &arguments[1..]
             } else {
@@ -581,6 +629,22 @@ fn commands_publish(
                 ["args=", rest @ ..] | ["args", "=", rest @ ..] if native_launch => rest,
                 _ => arguments,
             };
+            if native_launch
+                && arguments.first().is_some_and(|local| {
+                    (!Path::new(local).is_absolute() && local.contains('/'))
+                        || cwd.join(local).is_file()
+                })
+                && arguments.iter().any(|argument| {
+                    let argument = argument.trim_start_matches('{');
+                    argument == "cwd"
+                        || argument.starts_with("cwd=")
+                        || argument.starts_with("cwd:")
+                })
+            {
+                bail!(
+                    "release-plz migration: reconcile native publisher working-directory override"
+                );
+            }
             if (sourced
                 || native_launch
                 || matches!(
