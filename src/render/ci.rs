@@ -1400,9 +1400,11 @@ pub fn nix_build_matrix_file_with_options(
     }
     workflow.push_str("    steps:\n");
     let checkout_version = nix_build_action_version(runner, options, "v7.0.1", "v4.3.1");
-    push_checkout_step_with_version(&mut workflow, platform, checkout_version);
     if options.capture_results {
+        push_source_head_checkout_with_version(&mut workflow, checkout_version);
         workflow.push_str("      - name: Prepare Nix build evidence\n        env:\n          INSTALLABLE: ${{ matrix.installable }}\n        run: |\n          SIMIT_NIX_BUILD_RESULTS=\"$RUNNER_TEMP/simit-nix-build-${{ strategy.job-index }}\"\n          printf '%s\\n' \"SIMIT_NIX_BUILD_RESULTS=$SIMIT_NIX_BUILD_RESULTS\" >> \"$GITHUB_ENV\"\n          mkdir -p \"$SIMIT_NIX_BUILD_RESULTS\"\n          git rev-parse HEAD > \"$SIMIT_NIX_BUILD_RESULTS/revision\"\n          printf '%s\\n' \"$INSTALLABLE\" > \"$SIMIT_NIX_BUILD_RESULTS/installable\"\n");
+    } else {
+        push_checkout_step_with_version(&mut workflow, platform, checkout_version);
     }
     push_install_nix_step_with_cache(&mut workflow, platform, substituters, trusted_public_keys);
     push_required_env_step(&mut workflow, &options.required_secrets);
