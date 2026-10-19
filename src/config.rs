@@ -4581,8 +4581,22 @@ fn load_flake_config(workspace_root: &Path) -> Result<Option<ProjectConfigSource
         );
     }
 
-    let config: ProjectConfig =
+    let declaration: serde_json::Value =
         serde_json::from_slice(&output.stdout).context("parsing flake outputs.simitConfig JSON")?;
+    let config: ProjectConfig = serde_json::from_value(declaration.clone())
+        .context("parsing flake outputs.simitConfig JSON")?;
+    let ci = declaration
+        .get("ci")
+        .and_then(serde_json::Value::as_object)
+        .map(|ci| {
+            // Only declaration presence is needed here. Flake JSON can contain
+            // null Option values, which are valid config but not valid TOML.
+            let mut table = Table::new();
+            for key in ci.keys() {
+                table.insert(key, value(true));
+            }
+            Item::Table(table)
+        });
     if config.monorepo.as_ref().is_some_and(|monorepo| {
         monorepo
             .components
@@ -4596,7 +4610,7 @@ fn load_flake_config(workspace_root: &Path) -> Result<Option<ProjectConfigSource
     Ok(Some(ProjectConfigSource {
         label: "flake outputs.simitConfig".to_owned(),
         config,
-        ci: None,
+        ci,
     }))
 }
 

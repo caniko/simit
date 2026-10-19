@@ -617,6 +617,24 @@ download_repo = "caniko/mythos"
 }
 
 #[test]
+fn explicit_default_ci_in_a_flake_remains_the_configuration_source() {
+    with_fake_nix(
+        r#"{"ci":{"publish_crates":false,"publish_strategy":"members","runner":null}}"#,
+        |temp| {
+            fs::write(
+                temp.path().join("flake.nix"),
+                "{ outputs = { self }: { simitConfig = {}; }; }",
+            )
+            .unwrap();
+            let cfg = ProjectConfig::load(temp.path()).unwrap();
+            assert!(!ProjectConfig::can_persist_ci(temp.path()).unwrap());
+            assert!(ProjectConfig::write_ci(temp.path(), &cfg.ci).is_err());
+            assert!(!temp.path().join("simit.toml").exists());
+        },
+    );
+}
+
+#[test]
 fn valid_homebrew_section_loads_and_validates() {
     let cfg = load_toml(
         r#"[homebrew]
