@@ -76,6 +76,12 @@ extra_env = { FLAKE_SSH_KEY = "${{ secrets.FLAKE_SSH_KEY }}" }
     // export the runtime path through GITHUB_ENV for later steps instead.
     assert!(job["env"]["SIMIT_NIX_BUILD_RESULTS"].is_null());
     let steps = job["steps"].as_sequence().unwrap();
+    let checkout = &steps[0];
+    assert_eq!(
+        checkout["with"]["ref"],
+        "${{ github.event.pull_request.head.sha || github.sha }}"
+    );
+    assert_eq!(checkout["with"]["persist-credentials"], false);
     let scripts = steps
         .iter()
         .filter_map(|step| step["run"].as_str())

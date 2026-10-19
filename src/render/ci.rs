@@ -1098,6 +1098,8 @@ pub fn nix_build_matrix_file_with_options(
     workflow.push_str("    steps:\n");
     push_checkout_step(&mut workflow, platform);
     if options.capture_results {
+        // Receipts qualify the candidate itself, not GitHub's synthetic PR merge.
+        workflow.push_str("        with:\n          ref: ${{ github.event.pull_request.head.sha || github.sha }}\n          persist-credentials: false\n\n");
         workflow.push_str("      - name: Prepare Nix build evidence\n        env:\n          INSTALLABLE: ${{ matrix.installable }}\n        run: |\n          SIMIT_NIX_BUILD_RESULTS=\"$RUNNER_TEMP/simit-nix-build-${{ strategy.job-index }}\"\n          printf '%s\\n' \"SIMIT_NIX_BUILD_RESULTS=$SIMIT_NIX_BUILD_RESULTS\" >> \"$GITHUB_ENV\"\n          mkdir -p \"$SIMIT_NIX_BUILD_RESULTS\"\n          git rev-parse HEAD > \"$SIMIT_NIX_BUILD_RESULTS/revision\"\n          printf '%s\\n' \"$INSTALLABLE\" > \"$SIMIT_NIX_BUILD_RESULTS/installable\"\n");
     }
     push_install_nix_step_with_cache(&mut workflow, platform, substituters, trusted_public_keys);
