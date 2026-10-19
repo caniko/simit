@@ -310,10 +310,13 @@ fn commands_publish(
 ) -> Result<bool> {
     // ponytail: bounded literal references, not general shell/program analysis.
     // Computed/downloaded commands still require operator migration review.
-    for line in run
+    let run = run
         .lines()
         .filter(|line| !line.trim_start().starts_with('#'))
-    {
+        .collect::<Vec<_>>()
+        .join("\n")
+        .replace("\\\n", "");
+    for line in run.lines() {
         let words: Vec<_> = line
             .split(|c: char| c.is_whitespace() || "\"'[](){},;".contains(c))
             .filter(|word| !word.is_empty())
@@ -337,18 +340,25 @@ fn commands_publish(
             if word.starts_with("./") && local_publisher(root, cwd, word, seen, false)? {
                 return Ok(true);
             }
-            if matches!(
-                program,
-                Some("bash" | "sh" | "python" | "python3" | "node" | "pwsh" | "ruby")
-            ) && let Some(local) = arguments.iter().find(|local| {
-                !local.starts_with('-')
-                    && !local.contains('$')
-                    && (cwd.join(local).is_file()
-                        || matches!(
-                            Path::new(local).extension().and_then(|ext| ext.to_str()),
-                            Some("sh" | "bash" | "py" | "js" | "ps1" | "rb")
-                        ))
-            }) && local_publisher(root, cwd, local, seen, false)?
+            let sourced = matches!(*word, "source" | ".");
+            if (sourced
+                || matches!(
+                    program,
+                    Some("bash" | "sh" | "python" | "python3" | "node" | "pwsh" | "ruby")
+                ))
+                && let Some(local) = arguments
+                    .iter()
+                    .take(if sourced { 1 } else { arguments.len() })
+                    .find(|local| {
+                        !local.starts_with('-')
+                            && !local.contains('$')
+                            && (cwd.join(local).is_file()
+                                || matches!(
+                                    Path::new(local).extension().and_then(|ext| ext.to_str()),
+                                    Some("sh" | "bash" | "py" | "js" | "ps1" | "rb")
+                                ))
+                    })
+                && local_publisher(root, cwd, local, seen, false)?
             {
                 return Ok(true);
             }

@@ -486,6 +486,26 @@ fn migration_follows_local_publisher_wrappers_and_reusable_jobs() {
             "cargo publish\n",
         ),
         (
+            "jobs:\n  ship:\n    steps:\n      - run: source scripts/ship.sh\n",
+            "cargo publish\n",
+        ),
+        (
+            "jobs:\n  ship:\n    steps:\n      - run: . scripts/ship.sh\n",
+            "cargo publish\n",
+        ),
+        (
+            "jobs:\n  ship:\n    steps:\n      - run: |\n          cargo --locked \\\n            publish\n",
+            "echo unused\n",
+        ),
+        (
+            "jobs:\n  ship:\n    steps:\n      - run: |\n          bash \\\n            scripts/ship.sh\n",
+            "cargo publish\n",
+        ),
+        (
+            "jobs:\n  ship:\n    steps:\n      - run: |\n          # A comment does not continue the next command \\\n          cargo publish\n",
+            "echo unused\n",
+        ),
+        (
             "defaults:\n  run:\n    working-directory: scripts\njobs:\n  ship:\n    steps:\n      - run: ./ship.sh\n",
             "cargo publish\n",
         ),
