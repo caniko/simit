@@ -3,6 +3,7 @@
 """Revision admission for release-plz 0.3.172 and its Cargo publication guard."""
 
 import email.utils
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -207,7 +208,9 @@ def admit_pr():
         records = git("ls-files", "--stage", "-z", "--", path)
         if not records.startswith(("100644 ", "100755 ")) or records.count("\0") > 1:
             raise RuntimeError("release-plz update contains a link or deletion")
-    tree = git("write-tree") if patch else ""
+    tree = git("write-tree")
+    if tree == git("rev-parse", "HEAD^{tree}"):
+        tree = ""
     with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as output:
         output.write(f"SIMIT_RELEASE_PR_TREE={tree}\n")
 
@@ -240,15 +243,21 @@ def apply_pr():
         raise RuntimeError("reconcile multiple open release-plz PRs before updating")
     previous = prs[0] if prs else None
     expected = previous["head"]["sha"] if previous else ""
-    if previous and f"<!-- simit-release-plz-head: {expected} -->" not in (previous["body"] or ""):
-        raise RuntimeError("release PR contains unrecognized/manual changes; reconcile it before updating")
+    if previous:
+        receipt = re.fullmatch(r"(.*)\n\n<!-- simit-release-plz-head: ([0-9a-f]{40}) ([0-9a-f]{64}) -->",
+                               previous["body"] or "", flags=re.DOTALL)
+        if (not receipt or receipt[2] != expected
+            or hashlib.sha256(receipt[1].encode("utf-8")).hexdigest() != receipt[3]):
+            raise RuntimeError("release PR contains unrecognized/manual changes; reconcile it before updating")
     branch = previous["head"]["ref"] if previous else f"release-plz-{os.environ['GITHUB_SHA']}"
     sha = subprocess.check_output(["git", "commit-tree", "-S", tree, "-p", os.environ["GITHUB_SHA"]],
         input="chore: release\n\nPrepared by release-plz 0.3.172.\n", text=True).strip()
     reference = f"refs/heads/{branch}"
     subprocess.run(["git", "push", f"--force-with-lease={reference}:{expected}", "origin", f"{sha}:{reference}"], check=True)
     summary = read_data(Path(os.environ["RUNNER_TEMP"]) / "release-plz-pr/summary.txt", 60_000).decode("utf-8", errors="replace")
-    body = f"Prepared by release-plz 0.3.172.\n\n```text\n{summary}\n```\n\n<!-- simit-release-plz-head: {sha} -->"
+    content = f"Prepared by release-plz 0.3.172.\n\n```text\n{summary}\n```"
+    digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    body = f"{content}\n\n<!-- simit-release-plz-head: {sha} {digest} -->"
     if previous:
         result = github("PATCH", f"repos/{repo}/pulls/{previous['number']}", {"body": body})
     else:
@@ -298,7 +307,11 @@ def signing_identity(trust_root):
         if line.startswith("uid:")
     )
     uid = re.sub(r"\\x([0-9a-fA-F]{2})", lambda match: chr(int(match[1], 16)), uid)
-    name, address = email.utils.parseaddr(uid)
+    # GPG UIDs are not RFC 5322 display names: an unquoted ':' in the name
+    # must not be interpreted as a mail group and discard the preceding name.
+    name, _, mailbox = uid.rpartition("<")
+    name = name.strip()
+    _, address = email.utils.parseaddr(f"<{mailbox}")
     if not name or not address or any(c in name + address for c in "\r\n"):
         raise RuntimeError("authorized signing key needs a name and email UID")
     for field, value in (

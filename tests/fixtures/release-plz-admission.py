@@ -130,12 +130,14 @@ with tempfile.TemporaryDirectory() as directory:
         )
 
     trust = Path(directory) / "trust.asc"
-    trust.write_text(key(home, "Release Fixture <fixture@example.invalid>"))
+    uid_name = "Release %20 Fixture: Δ"
+    trust.write_text(key(home, f"{uid_name} <fixture@example.invalid>"))
     git("add", "trust.asc")
     tree = git("write-tree")
     git("checkout", "--detach", commit("trust root", squashed))
     admission.signing_identity("trust.asc")
     assert git("config", "user.email") == "fixture@example.invalid"
+    assert git("config", "user.name") == uid_name
     git("config", "tag.gpgSign", "true")
     git("tag", "v0.2.0", "-m", "release")
     git("verify-tag", "v0.2.0")

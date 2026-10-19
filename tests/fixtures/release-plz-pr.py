@@ -80,7 +80,20 @@ with tempfile.TemporaryDirectory() as directory:
     assert "0.2.0" in git("show", f"{generated}:Cargo.toml")
     assert "Prepared by release-plz" in git("show", f"{generated}:CHANGELOG.md")
     assert git("rev-parse", "HEAD") == sha
-    prs.append({"number": 1, "body": requests[0][2]["body"], "head": {"ref": branch, "sha": sha, "repo": {"full_name": "owner/repo"}}})
+    prs.append({"number": 1, "body": requests[0][2]["body"], "head": {"ref": branch, "sha": generated, "repo": {"full_name": "owner/repo"}}})
+    admission.apply_pr()
+    assert requests[-1][0] == "PATCH", "automatic refresh should reuse the existing PR"
+    generated = git("ls-remote", "--heads", "origin", f"refs/heads/{branch}").split()[0]
+    prs[0]["head"]["sha"] = generated
+    prs[0]["body"] = requests[-1][2]["body"] + "\n\nOwner's manual notes."
+    try:
+        admission.apply_pr()
+        raise AssertionError("overwrote manual PR body edits")
+    except RuntimeError:
+        pass
+    assert len(requests) == 2
+    prs[0]["body"] = requests[-1][2]["body"]
+    prs[0]["head"]["sha"] = sha
     try:
         admission.apply_pr()
         raise AssertionError("overwrote a manually changed release PR")
@@ -89,9 +102,20 @@ with tempfile.TemporaryDirectory() as directory:
     assert git("ls-remote", "--heads", "origin", f"refs/heads/{branch}").split()[0] == generated
     remote_sha = "f" * 40
     admission.apply_pr()
-    assert len(requests) == 1, "stale source must not replace a newer release PR"
+    assert len(requests) == 2, "stale source must not replace a newer release PR"
     admission.subprocess.check_output = original_check_output
     subprocess.run(["gpgconf", "--kill", "gpg-agent"], check=True)
+
+    git("reset", "--hard", sha)
+    # A valid no-op hunk can come from an untrusted worker even though git diff
+    # would normally emit an empty patch. Do not sign an empty release commit.
+    (runtime / "release-plz-pr/update.patch").write_text(
+        'diff --git a/Cargo.toml b/Cargo.toml\n--- a/Cargo.toml\n+++ b/Cargo.toml\n'
+        '@@ -1,3 +1,3 @@\n [package]\n-name="fixture"\n+name="fixture"\n version="0.1.0"\n'
+    )
+    (runtime / "env").write_text("")
+    admission.admit_pr()
+    assert (runtime / "env").read_text() == "SIMIT_RELEASE_PR_TREE=\n"
 
     # Reject workflow changes, links, and deleted manifests before importing keys.
     for kind in ("workflow", "link", "deletion"):
