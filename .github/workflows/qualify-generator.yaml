@@ -66,8 +66,8 @@ jobs:
           generator=$(python3 -c 'import json,os; print(os.path.join(json.load(open(os.path.join(os.environ["RUNNER_TEMP"], "generator-qualification/result.json")))[0]["outputs"]["out"], "bin/simit"))')
           cp "$generator" "$RUNNER_TEMP/generator-qualification/simit"
           sha256sum "$RUNNER_TEMP/generator-qualification/simit" > "$RUNNER_TEMP/generator-qualification/simit.sha256"
-          "$generator" init ci --platform github --runtime nix --runner ubuntu-latest --with-docs --publish-crates
-          "$generator" init ci --platform github --runtime nix --runner ubuntu-latest --with-docs --publish-crates --check --diff
+          PATH="${generator%/simit}:$PATH" simit init ci --platform github --runtime nix --runner ubuntu-latest --with-docs --publish-crates
+          PATH="${generator%/simit}:$PATH" simit init ci --platform github --runtime nix --runner ubuntu-latest --with-docs --publish-crates --check --diff
           git diff --check
           git diff > "$RUNNER_TEMP/generator-qualification/regenerated.diff"
           git status --porcelain --untracked-files=all > "$RUNNER_TEMP/generator-qualification/regenerated.status"

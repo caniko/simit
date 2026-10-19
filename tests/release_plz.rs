@@ -732,8 +732,19 @@ fn migration_follows_environment_and_wrapper_prefixes() {
 }
 
 #[test]
-fn migration_inspects_shell_substitutions_without_executing_them() {
+fn migration_inspects_indirect_shell_commands_without_executing_them() {
     for (command, rejects) in [
+        ("PUBLISHER=cargo; $PUBLISHER publish", true),
+        ("PUBLISHER=cargo; ${PUBLISHER} --locked publish", true),
+        ("PUBLISHER='./scripts/ship'; \"$PUBLISHER\"", true),
+        ("PUBLISHER=./scripts/ship; ${PUBLISHER}", true),
+        ("EVALUATOR=eval; $EVALUATOR './scripts/ship'", true),
+        ("eval './scripts/ship'", true),
+        ("command eval './scripts/ship'", true),
+        ("builtin eval './scripts/ship'", true),
+        ("env PUBLISHER=cargo $PUBLISHER publish", true),
+        ("PUBLISHER=./scripts/check; \"$PUBLISHER\"", true),
+        ("echo 'eval ./scripts/ship'", false),
         ("RESULT=$(./scripts/ship) true", true),
         ("RESULT=$(scripts/ship) true", true),
         ("RESULT=`./scripts/ship` true", true),
@@ -753,6 +764,10 @@ fn migration_inspects_shell_substitutions_without_executing_them() {
         ("RESULT=$(uname -m) true", false),
         ("RESULT='$(./scripts/ship)' true", false),
         ("RESULT=$(./scripts/check) true", false),
+        ("git -c \"http.extraHeader=$HEADER\" fetch origin", false),
+        ("ROOT=$(dirname \"$(command -v true)\") true", false),
+        ("PATH=\"$TOOLS/bin:$PATH\" cargo test", false),
+        ("PATH=\"$TOOLS/bin:$PATH\" cargo publish", true),
     ] {
         let temp = project("");
         fs::create_dir_all(temp.path().join(".github/workflows")).unwrap();
@@ -775,6 +790,23 @@ fn migration_inspects_shell_substitutions_without_executing_them() {
             );
         }
     }
+}
+
+#[test]
+fn migration_uses_the_invoked_interpreter_instead_of_a_script_extension() {
+    let temp = project("");
+    fs::create_dir_all(temp.path().join(".github/workflows")).unwrap();
+    fs::create_dir(temp.path().join("scripts")).unwrap();
+    fs::write(
+        temp.path().join("scripts/custom.py"),
+        "#!/usr/bin/env python3\nPUBLISHER=cargo\n$PUBLISHER publish\n",
+    )
+    .unwrap();
+    fs::write(temp.path().join(".github/workflows/custom.yaml"), "jobs:\n  check:\n    steps:\n      - run: |\n          python3 scripts/custom.py || true\n          bash scripts/custom.py\n").unwrap();
+    let output = init(temp.path(), &["--publish-crates"]);
+    assert!(!output.status.success(), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("publisher"));
+    assert!(!temp.path().join("release-plz.toml").exists());
 }
 
 #[test]

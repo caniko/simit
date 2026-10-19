@@ -22,13 +22,23 @@ with tempfile.TemporaryDirectory() as directory:
     root = Path(directory)
     os.chdir(root)
     git("init", "-b", "trunk")
+    gpg = root / "gnupg"
+    gpg.mkdir(mode=0o700)
+    os.environ["GNUPGHOME"] = str(gpg)
+    subprocess.run(["gpg", "--batch", "--pinentry-mode", "loopback", "--passphrase", "", "--quick-generate-key", "Release Fixture <fixture@example.invalid>", "ed25519", "sign", "0"], check=True, capture_output=True)
+    fingerprint = next(line.split(":")[9] for line in subprocess.check_output(["gpg", "--with-colons", "--list-secret-keys"], text=True).splitlines() if line.startswith("fpr:"))
+    git("config", "user.name", "Release Fixture")
+    git("config", "user.email", "fixture@example.invalid")
+    git("config", "user.signingkey", fingerprint)
+    (root / "keys").mkdir()
+    (root / "keys/maintainers.gpg").write_bytes(subprocess.check_output(["gpg", "--export", fingerprint]))
     original = '[package]\nname="fixture"\nversion="0.1.0"\n'
     (root / "Cargo.toml").write_text(original)
     (root / ".github/workflows").mkdir(parents=True)
     (root / ".github/workflows/ci.yml").write_text("jobs: {}\n")
     (root / "old").mkdir()
     (root / "old/Cargo.lock").write_text("# lockfile\n")
-    git("add", ".")
+    git("add", "Cargo.toml", ".github", "old", "keys")
     tree = git("write-tree")
     commit = f"tree {tree}\nauthor Fixture <fixture@example.invalid> 1700000000 +0000\ncommitter Fixture <fixture@example.invalid> 1700000000 +0000\n\ninitial\n"
     sha = git("hash-object", "-t", "commit", "--stdin", "-w", input=commit)
@@ -39,6 +49,7 @@ with tempfile.TemporaryDirectory() as directory:
     os.environ.update({
         "RUNNER_TEMP": str(runtime), "GITHUB_SHA": sha, "GITHUB_REPOSITORY": "owner/repo",
         "GITHUB_REF_NAME": "trunk", "GITHUB_ENV": str(runtime / "env"),
+        "RELEASE_TRUST_ROOT": "keys/maintainers.gpg",
     })
     (root / "Cargo.toml").write_text(original.replace("0.1.0", "0.2.0"))
     (root / "CHANGELOG.md").write_text("# Changelog\n\n## 0.2.0\n\nPrepared by release-plz.\n")
@@ -51,14 +62,6 @@ with tempfile.TemporaryDirectory() as directory:
     assert (root / "Cargo.toml").read_text() == original, "admission must only change the index"
     assert not (root / "CHANGELOG.md").exists()
     assert git("show", ":Cargo.toml").find("0.2.0") != -1
-    gpg = root / "gnupg"
-    gpg.mkdir(mode=0o700)
-    os.environ["GNUPGHOME"] = str(gpg)
-    subprocess.run(["gpg", "--batch", "--pinentry-mode", "loopback", "--passphrase", "", "--quick-generate-key", "Release Fixture <fixture@example.invalid>", "ed25519", "sign", "0"], check=True, capture_output=True)
-    fingerprint = next(line.split(":")[9] for line in subprocess.check_output(["gpg", "--with-colons", "--list-secret-keys"], text=True).splitlines() if line.startswith("fpr:"))
-    git("config", "user.name", "Release Fixture")
-    git("config", "user.email", "fixture@example.invalid")
-    git("config", "user.signingkey", fingerprint)
     remote = root / "remote.git"
     git("init", "--bare", str(remote))
     git("remote", "add", "origin", str(remote))
@@ -76,19 +79,83 @@ with tempfile.TemporaryDirectory() as directory:
     prs = [{"number": 2, "head": {"ref": "release-plz-deleted-fork", "repo": None}}]
     admission.api = lambda path: prs
     requests = []
-    admission.github = lambda method, path, payload: requests.append((method, path, payload)) or {"html_url": "https://github.com/owner/repo/pull/1"}
-    admission.apply_pr()
-    assert requests[0][0] == "POST"
+    fail = True
+
+    def github(method, path, payload):
+        requests.append((method, path, payload))
+        if fail:
+            raise RuntimeError("transient PR API failure")
+        return {"html_url": "https://github.com/owner/repo/pull/1"}
+
+    admission.github = github
+    try:
+        admission.apply_pr()
+        raise AssertionError("expected the injected PR creation failure")
+    except RuntimeError as error:
+        assert "transient" in str(error)
     branch = requests[0][2]["head"]
+    pending = git("ls-remote", "--heads", "origin", f"refs/heads/{branch}").split()[0]
+    # A lookalike orphan is not a recovery receipt, even at the right ref/tree.
+    message = git("show", "-s", "--format=%B", pending)
+    prepared = os.environ["SIMIT_RELEASE_PR_TREE"]
+    raw = f"tree {prepared}\nparent {sha}\nauthor Fixture <fixture@example.invalid> 1700000000 +0000\ncommitter Fixture <fixture@example.invalid> 1700000000 +0000\n\n{message}\n"
+    unsigned = git("hash-object", "-t", "commit", "--stdin", "-w", input=raw)
+    bad_heads = [unsigned]
+    for candidate_tree, parent, candidate_message in [
+        (tree, sha, message), (prepared, pending, message), (prepared, sha, message + "\nmanual amendment"),
+    ]:
+        bad_heads.append(git("commit-tree", "-S", candidate_tree, "-p", parent, input=candidate_message + "\n"))
+    for candidate in bad_heads:
+        git("push", "--force", "origin", f"{candidate}:refs/heads/{branch}")
+        before = len(requests)
+        try:
+            admission.apply_pr()
+            raise AssertionError("resumed an unsigned or source/body-mismatched orphan")
+        except (RuntimeError, subprocess.CalledProcessError):
+            pass
+        assert len(requests) == before
+    git("--git-dir", str(remote), "update-ref", f"refs/heads/{branch}", pending)
+    fail = False
+    remote_sha = "f" * 40  # Later pushes must not strand an already-pushed PR.
+    admission.apply_pr()
+    remote_sha = sha
+    assert requests[-1][0] == "POST"
     generated = git("ls-remote", "--heads", "origin", f"refs/heads/{branch}").split()[0]
+    assert generated == pending, "retry must reuse the already-pushed signed commit"
     git("verify-commit", generated)
     assert "0.2.0" in git("show", f"{generated}:Cargo.toml")
     assert "Prepared by release-plz" in git("show", f"{generated}:CHANGELOG.md")
     assert git("rev-parse", "HEAD") == sha
-    prs.insert(0, {"number": 1, "body": requests[0][2]["body"], "head": {"ref": branch, "sha": generated, "repo": {"full_name": "owner/repo"}}})
+    prs.insert(0, {"number": 1, "body": requests[-1][2]["body"], "head": {"ref": branch, "sha": generated, "repo": {"full_name": "owner/repo"}}})
+    delivered = len(requests)
+    admission.apply_pr()
+    assert len(requests) == delivered, "a successful delivery with a lost response must be a no-op"
+    (runtime / "release-plz-pr/summary.txt").write_text("updated release summary\n")
+    fail = True
+    previous_body = prs[0]["body"]
+    try:
+        admission.apply_pr()
+        raise AssertionError("expected the injected PR update failure")
+    except RuntimeError as error:
+        assert "transient" in str(error)
+    pending = git("ls-remote", "--heads", "origin", f"refs/heads/{branch}").split()[0]
+    assert pending != generated
+    prs[0]["head"]["sha"] = pending  # GitHub observes the push even though PATCH failed.
+    prs[0]["body"] = previous_body + "\n\nOwner's manual notes."
+    before = len(requests)
+    try:
+        admission.apply_pr()
+        raise AssertionError("retry overwrote manual edits after a failed PATCH")
+    except RuntimeError:
+        pass
+    assert len(requests) == before
+    prs[0]["body"] = previous_body
+    fail = False
     admission.apply_pr()
     assert requests[-1][0] == "PATCH", "automatic refresh should reuse the existing PR"
     generated = git("ls-remote", "--heads", "origin", f"refs/heads/{branch}").split()[0]
+    assert generated == pending
+    delivered = len(requests)
     prs[0]["head"]["sha"] = generated
     prs[0]["body"] = requests[-1][2]["body"] + "\n\nOwner's manual notes."
     try:
@@ -96,7 +163,7 @@ with tempfile.TemporaryDirectory() as directory:
         raise AssertionError("overwrote manual PR body edits")
     except RuntimeError:
         pass
-    assert len(requests) == 2
+    assert len(requests) == delivered
     prs[0]["body"] = requests[-1][2]["body"]
     prs[0]["head"]["sha"] = sha
     try:
@@ -105,9 +172,12 @@ with tempfile.TemporaryDirectory() as directory:
     except RuntimeError:
         pass
     assert git("ls-remote", "--heads", "origin", f"refs/heads/{branch}").split()[0] == generated
+    prs[0]["head"]["sha"] = generated
+    prs[0]["body"] = requests[-1][2]["body"]
+    (runtime / "release-plz-pr/summary.txt").write_text("superseded prepared update\n")
     remote_sha = "f" * 40
     admission.apply_pr()
-    assert len(requests) == 2, "stale source must not replace a newer release PR"
+    assert len(requests) == delivered, "stale source must not replace a newer release PR"
     admission.subprocess.check_output = original_check_output
     subprocess.run(["gpgconf", "--kill", "gpg-agent"], check=True)
 

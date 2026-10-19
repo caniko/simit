@@ -79,6 +79,8 @@ alone cannot exempt a publisher that the migration plan leaves active.
 Environment assignments and supported wrapper options are consumed before
 inspecting the executable. Opaque options such as directory changes or split-string
 execution require explicit reconciliation instead of silently skipping a wrapper.
+Variable-expanded executable names and shell `eval` also require reconciliation;
+use literal executable names so a retained publisher cannot hide behind them.
 Bash syntax trees also expose nested command/backtick and process substitutions,
 including substitutions inside assignment values, parameter expansions and data
 arguments. Their literal commands are inspected without evaluating them; malformed
@@ -183,9 +185,11 @@ including its available semver checks. A fresh worker admits only regular-file
 changes to `Cargo.toml`, `Cargo.lock` and `CHANGELOG.md` into the Git index, then
 signs and delivers that tree. It preserves an existing PR using an exact-head
 lease and refuses to overwrite manual edits. Close or explicitly reconcile an
-existing upstream-created release PR before the first generated update. If a
-branch push succeeds but its PR API update fails, reconcile the branch and PR
-head receipt before retrying; a retry does not discard unrecognized changes.
+existing upstream-created release PR before the first generated update. A pushed
+signed commit also binds the prepared summary and the exact prior PR body. Failed
+PR creation/update API calls can resume without repushing; an already-delivered
+response is a no-op. Recovery verifies the committed trust root, exact event
+parent and admitted tree and never discards unrecognized/manual changes.
 Failed release qualification or publication also blocks the next PR update.
 
 Each immutable push keeps a separate run with no in-progress cancellation, so

@@ -221,7 +221,7 @@ pub fn validate_migration(
 fn competing_publisher(
     root: &Path,
     content: &str,
-    seen: &mut BTreeSet<(PathBuf, PathBuf)>,
+    seen: &mut BTreeSet<(PathBuf, PathBuf, Option<bool>)>,
 ) -> Result<bool> {
     let workflow: serde_yaml::Value = serde_yaml::from_str(content)?;
     let Some(jobs) = workflow.get("jobs").and_then(serde_yaml::Value::as_mapping) else {
@@ -230,7 +230,7 @@ fn competing_publisher(
     for job in jobs.values() {
         if let Some(local) = job.get("uses").and_then(serde_yaml::Value::as_str)
             && local.starts_with("./")
-            && local_publisher(root, root, local, seen, true)?
+            && local_publisher(root, root, local, seen, true, true)?
         {
             return Ok(true);
         }
@@ -265,8 +265,15 @@ fn competing_publisher(
                     .or_else(|| workflow.get("defaults")?.get("run")?.get("shell"))
                     .and_then(serde_yaml::Value::as_str)
                     .unwrap_or("");
-                if commands_publish(root, &root.join(directory), shell, seen)?
-                    || commands_publish(root, &root.join(directory), run, seen)?
+                let shell_program = Path::new(shell.split_whitespace().next().unwrap_or(""))
+                    .file_stem()
+                    .and_then(|name| name.to_str());
+                let is_shell = !matches!(
+                    shell_program,
+                    Some("python" | "python3" | "node" | "pwsh" | "ruby")
+                );
+                if commands_publish(root, &root.join(directory), shell, seen, true)?
+                    || commands_publish(root, &root.join(directory), run, seen, is_shell)?
                 {
                     return Ok(true);
                 }
@@ -280,8 +287,9 @@ fn local_publisher(
     root: &Path,
     cwd: &Path,
     local: &str,
-    seen: &mut BTreeSet<(PathBuf, PathBuf)>,
+    seen: &mut BTreeSet<(PathBuf, PathBuf, Option<bool>)>,
     workflow: bool,
+    shell: bool,
 ) -> Result<bool> {
     let root = root.canonicalize()?;
     let cwd = cwd.canonicalize().with_context(|| {
@@ -314,16 +322,22 @@ fn local_publisher(
     {
         bail!("release-plz migration: reconcile uninspectable publisher reference {local}");
     }
-    if !seen.insert((cwd.clone(), path.clone())) {
-        return Ok(false);
-    }
-    let content = fs::read_to_string(path).with_context(|| {
+    let content = fs::read_to_string(&path).with_context(|| {
         format!("release-plz migration: reconcile opaque publisher reference {local}")
     })?;
+    // Only an explicit interpreter changes grammar; a suffix/shebang cannot
+    // suppress shell checks when this file is sourced or run through Bash.
+    if !seen.insert((
+        cwd.clone(),
+        path.clone(),
+        if workflow { None } else { Some(shell) },
+    )) {
+        return Ok(false);
+    }
     if workflow {
         competing_publisher(&root, &content, seen)
     } else {
-        commands_publish(&root, &cwd, &content, seen)
+        commands_publish(&root, &cwd, &content, seen, shell)
     }
 }
 
@@ -331,7 +345,8 @@ fn commands_publish(
     root: &Path,
     cwd: &Path,
     run: &str,
-    seen: &mut BTreeSet<(PathBuf, PathBuf)>,
+    seen: &mut BTreeSet<(PathBuf, PathBuf, Option<bool>)>,
+    is_shell: bool,
 ) -> Result<bool> {
     // ponytail: bounded literal references, not general shell/program analysis.
     // Computed/downloaded commands still require operator migration review.
@@ -349,7 +364,11 @@ fn commands_publish(
     let tree = parser
         .parse(&run, None)
         .context("parsing publisher commands")?;
-    let mut nodes = vec![tree.root_node()];
+    let mut nodes = if is_shell {
+        vec![tree.root_node()]
+    } else {
+        Vec::new()
+    };
     let mut commands = Vec::new();
     while let Some(node) = nodes.pop() {
         if matches!(node.kind(), "command_substitution" | "process_substitution")
@@ -358,39 +377,28 @@ fn commands_publish(
             bail!("release-plz migration: reconcile opaque publisher substitution");
         }
         if node.kind() == "command" {
-            commands.push(node.utf8_text(run.as_bytes())?);
+            let mut words = Vec::new();
+            for word in node
+                .child_by_field_name("name")
+                .into_iter()
+                .chain(node.children_by_field_name("argument", &mut node.walk()))
+            {
+                let text = word.utf8_text(run.as_bytes())?;
+                // Lex one grammar-delimited word at a time. Nested quotes in
+                // assignments must not turn data into a phantom executable.
+                let literal = shlex::split(text).filter(|words| words.len() == 1);
+                words.push(literal.map_or_else(|| text.to_owned(), |words| words[0].clone()));
+            }
+            commands.push(words);
         }
         nodes.extend(node.named_children(&mut node.walk()));
     }
-    for line in std::iter::once(run.as_str())
-        .chain(commands)
-        .flat_map(|fragment| fragment.split(['\n', ';']))
-    {
-        // Reuse the already-locked shell lexer: quoted assignment values must
-        // stay together while finding the executable behind env/sudo prefixes.
-        let shell_words = shlex::split(line);
-        if shell_words.is_none()
-            && ((line
-                .split_whitespace()
-                .next()
-                .and_then(|word| word.split_once('='))
-                .is_some_and(|(name, _)| {
-                    crate::config::validate_environment_name("publisher prefix", name).is_ok()
-                })
-                && !line.contains("$("))
-                || line.split_whitespace().any(|word| {
-                    matches!(
-                        Path::new(word).file_name().and_then(|name| name.to_str()),
-                        Some("env" | "sudo" | "exec" | "command")
-                    )
-                }))
-        {
-            bail!("release-plz migration: reconcile opaque publisher command prefix");
-        }
+    for shell_words in &commands {
         let mut executable = true;
         let mut wrapper = None;
         let mut option_value = false;
-        for word in shell_words.iter().flatten() {
+        let mut launcher = false;
+        for word in shell_words {
             let word = word.as_str();
             if option_value {
                 option_value = false;
@@ -440,23 +448,37 @@ fn commands_publish(
             }
             let local_executable = executable;
             let program = Path::new(word).file_name().and_then(|name| name.to_str());
+            if local_executable && (word.contains(['$', '`']) || program == Some("eval")) {
+                bail!("release-plz migration: reconcile opaque publisher executable {word}");
+            }
             wrapper = program.filter(|program| {
-                local_executable && matches!(*program, "env" | "sudo" | "exec" | "command")
+                local_executable
+                    && matches!(*program, "env" | "sudo" | "exec" | "command" | "builtin")
             });
-            executable = matches!(
-                word,
-                "-c" | "-lc" | "if" | "then" | "do" | "|" | "&&" | "||"
-            ) || wrapper.is_some();
+            if local_executable && wrapper.is_none() {
+                launcher = matches!(
+                    program,
+                    Some("nix" | "bash" | "sh" | "python" | "python3" | "node" | "pwsh" | "ruby")
+                );
+            }
+            executable =
+                wrapper.is_some() || (launcher && matches!(word, "-c" | "-lc" | "--command"));
             if local_executable
                 && !Path::new(word).is_absolute()
                 && word.contains('/')
                 && !word.contains(['$', '{', '}'])
                 && (word.starts_with("./") || cwd.join(word).is_file())
-                && local_publisher(root, cwd, word, seen, false)?
+                && local_publisher(root, cwd, word, seen, false, true)?
             {
                 return Ok(true);
             }
         }
+    }
+    let commands: Vec<_> = commands.iter().map(|words| words.join(" ")).collect();
+    for line in std::iter::once(run.as_str())
+        .chain(commands.iter().map(String::as_str))
+        .flat_map(|fragment| fragment.split(['\n', ';']))
+    {
         // The broad token scan also recognizes literal Cargo calls in scripts
         // written in other languages (for example Python subprocess arrays).
         let words: Vec<_> = line
@@ -503,7 +525,14 @@ fn commands_publish(
                                         Some("sh" | "bash" | "py" | "js" | "ps1" | "rb")
                                     )))
                     })
-                && local_publisher(root, cwd, local, seen, false)?
+                && local_publisher(
+                    root,
+                    cwd,
+                    local,
+                    seen,
+                    false,
+                    sourced || matches!(program, Some("bash" | "sh")),
+                )?
             {
                 return Ok(true);
             }
@@ -740,7 +769,7 @@ fn workflow(
     w.push_str(&format!("      - name: Download prepared release PR data\n        uses: {}\n        with:\n          name: release-plz-pr-${{{{ github.run_attempt }}}}\n          path: ${{{{ runner.temp }}}}/release-plz-pr\n\n      - name: Admit only release data into the event index\n        run: python3 \"$RUNNER_TEMP/release-plz-admission.py\" admit-pr\n\n", ci::github_action_ref("actions/download-artifact", "v8.0.2")));
     signing(&mut w, config);
     let token = authentication(&mut w, config);
-    w.push_str(&format!("      - name: Deliver signed release-plz update without executing project code\n        env:\n          GIT_TOKEN: {token}\n        run: |\n          set -euo pipefail\n          test -n \"$GIT_TOKEN\" || {{ echo 'Missing release-plz automation token' >&2; exit 1; }}\n          python3 \"$RUNNER_TEMP/release-plz-admission.py\" apply-pr\n\n"));
+    w.push_str(&format!("      - name: Deliver signed release-plz update without executing project code\n        env:\n          GIT_TOKEN: {token}\n          RELEASE_TRUST_ROOT: {:?}\n        run: |\n          set -euo pipefail\n          test -n \"$GIT_TOKEN\" || {{ echo 'Missing release-plz automation token' >&2; exit 1; }}\n          python3 \"$RUNNER_TEMP/release-plz-admission.py\" apply-pr\n\n", config.release.signing.trust_root));
     cleanup(&mut w);
     w.trim_end().to_owned() + "\n"
 }

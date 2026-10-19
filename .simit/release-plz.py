@@ -294,25 +294,56 @@ def apply_pr():
     base = os.environ["GITHUB_REF_NAME"]
     base_ref = urllib.parse.quote(base, safe="")
     current = json.loads(subprocess.check_output(["gh", "api", f"repos/{repo}/git/ref/heads/{base_ref}"], text=True))
-    if current["object"]["sha"] != os.environ["GITHUB_SHA"]:
-        print("Newer default-branch source supersedes this release PR update")
-        return
+    superseded = current["object"]["sha"] != os.environ["GITHUB_SHA"]
     prs = [pr for pr in api(f"repos/{repo}/pulls?state=open&base={base_ref}&per_page=100")
            if pr["head"]["ref"].startswith("release-plz-") and (pr["head"].get("repo") or {}).get("full_name") == repo]
     if len(prs) > 1:
         raise RuntimeError("reconcile multiple open release-plz PRs before updating")
     previous = prs[0] if prs else None
-    expected = previous["head"]["sha"] if previous else ""
-    if previous:
-        verify_receipt(previous)
     branch = previous["head"]["ref"] if previous else f"release-plz-{os.environ['GITHUB_SHA']}"
-    sha = subprocess.check_output(["git", "commit-tree", "-S", tree, "-p", os.environ["GITHUB_SHA"]],
-        input="chore: release\n\nPrepared by release-plz 0.3.172.\n", text=True).strip()
-    reference = f"refs/heads/{branch}"
-    subprocess.run(["git", "push", f"--force-with-lease={reference}:{expected}", "origin", f"{sha}:{reference}"], check=True)
+    if not re.fullmatch(r"release-plz-[0-9a-f]{40}", branch):
+        raise RuntimeError("reconcile an unrecognized release-plz branch before updating")
     summary = read_data(Path(os.environ["RUNNER_TEMP"]) / "release-plz-pr/summary.txt", 60_000).decode("utf-8", errors="replace")
     content = f"Prepared by release-plz 0.3.172.\n\n```text\n{summary}\n```"
     digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+    def message(previous_body):
+        prior = hashlib.sha256(previous_body.encode("utf-8")).hexdigest()
+        return f"chore: release\n\nPrepared by release-plz 0.3.172.\n\nsimit-release-plz-body: {digest}\nsimit-release-plz-previous-body: {prior}"
+
+    reference = f"refs/heads/{branch}"
+    remote = git("ls-remote", "--heads", "origin", reference).split()
+    if remote and (len(remote) != 2 or remote[1] != reference or not re.fullmatch(r"[0-9a-f]{40}", remote[0])):
+        raise RuntimeError("invalid release-plz remote reference")
+    expected = remote[0] if remote else ""
+    if previous and expected != previous["head"]["sha"]:
+        raise RuntimeError("release PR branch changed during delivery; retry/reconcile it")
+    prior_body = (previous["body"] or "") if previous else ""
+    resume = False
+    if expected:
+        subprocess.run(["git", "fetch", "--no-tags", "origin", expected], check=True)
+        verify_release_head(expected)
+        head_tree, parents, head_message = git("show", "-s", "--format=%T%n%P%n%B", expected).split("\n", 2)
+        same_source = head_tree == tree and parents == os.environ["GITHUB_SHA"]
+        body = f"{content}\n\n<!-- simit-release-plz-head: {expected} {digest} -->"
+        if previous and same_source and prior_body == body:
+            print(f"https://github.com/{repo}/pull/{previous['number']}")
+            return
+        # The signed commit binds both the prepared summary and the exact old
+        # PR body. A failed POST/PATCH can resume, but manual edits cannot.
+        resume = same_source and head_message == message(prior_body)
+        if not previous and not resume:
+            raise RuntimeError("reconcile an unrecognized release-plz branch before creating a PR")
+    sha = expected
+    if not resume:
+        if superseded:
+            print("Newer default-branch source supersedes this release PR update")
+            return
+        if previous:
+            verify_receipt(previous)
+        sha = subprocess.check_output(["git", "commit-tree", "-S", tree, "-p", os.environ["GITHUB_SHA"]],
+            input=message(prior_body) + "\n", text=True).strip()
+        subprocess.run(["git", "push", f"--force-with-lease={reference}:{expected}", "origin", f"{sha}:{reference}"], check=True)
     body = f"{content}\n\n<!-- simit-release-plz-head: {sha} {digest} -->"
     if previous:
         result = github("PATCH", f"repos/{repo}/pulls/{previous['number']}", {"body": body})

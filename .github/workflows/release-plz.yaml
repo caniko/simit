@@ -492,6 +492,7 @@ jobs:
       - name: Deliver signed release-plz update without executing project code
         env:
           GIT_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+          RELEASE_TRUST_ROOT: "keys/maintainers.gpg"
         run: |
           set -euo pipefail
           test -n "$GIT_TOKEN" || { echo 'Missing release-plz automation token' >&2; exit 1; }

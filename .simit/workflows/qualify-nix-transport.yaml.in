@@ -69,7 +69,7 @@ jobs:
           [[ "$SIMIT_CI_ENGINE_REVISION" =~ ^[0-9a-f]{40}$ ]]
           engine_path=$(env -u GH_TOKEN -u GITHUB_TOKEN -u GITHUB_OAUTH_TOKEN -u ATTIC_TOKEN -u CACHIX_AUTH_TOKEN -u CACHIX_SIGNING_KEY nix build --no-link --no-update-lock-file --print-out-paths --max-jobs 1 --cores 2 --option accept-flake-config false --option access-tokens '' --option substituters https://cache.nixos.org "github:caniko/simit/$SIMIT_CI_ENGINE_REVISION#default")
           test -x "$engine_path/bin/simit"
-          "$engine_path/bin/simit" ci nix-group --help > /dev/null
+          PATH="$engine_path/bin:$PATH" simit ci nix-group --help > /dev/null
           printf '%s\n' "SIMIT_CI_ENGINE=$engine_path/bin/simit" >> "$GITHUB_ENV"
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
