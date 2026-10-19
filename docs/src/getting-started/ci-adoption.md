@@ -81,6 +81,11 @@ inspecting the executable. Opaque options such as directory changes or split-str
 execution require explicit reconciliation instead of silently skipping a wrapper.
 Variable-expanded executable names and shell `eval` also require reconciliation;
 use literal executable names so a retained publisher cannot hide behind them.
+The `actions-rs/cargo` command input is inspected; unresolved command expressions
+require reconciliation. In explicit Python, Node, Ruby and PowerShell steps,
+known native process-launch calls also expose literal local executables for
+inspection, including multi-line argv lists. Arguments passed as data are not
+treated as executables.
 Bash syntax trees also expose nested command/backtick and process substitutions,
 including substitutions inside assignment values, parameter expansions and data
 arguments. Their literal commands are inspected without evaluating them; malformed
@@ -190,6 +195,10 @@ signed commit also binds the prepared summary and the exact prior PR body. Faile
 PR creation/update API calls can resume without repushing; an already-delivered
 response is a no-op. Recovery verifies the committed trust root, exact event
 parent and admitted tree and never discards unrecognized/manual changes.
+Superseded events never create or update a PR, including on retry. A current-source
+successor may replace an interrupted older signed update only when its exact
+prior-body binding still matches and its single source parent is ancestral to the
+current event; it delivers newly admitted current-source data, not the stale tree.
 Failed release qualification or publication also blocks the next PR update.
 
 Each immutable push keeps a separate run with no in-progress cancellation, so

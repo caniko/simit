@@ -294,7 +294,9 @@ def apply_pr():
     base = os.environ["GITHUB_REF_NAME"]
     base_ref = urllib.parse.quote(base, safe="")
     current = json.loads(subprocess.check_output(["gh", "api", f"repos/{repo}/git/ref/heads/{base_ref}"], text=True))
-    superseded = current["object"]["sha"] != os.environ["GITHUB_SHA"]
+    if current["object"]["sha"] != os.environ["GITHUB_SHA"]:
+        print("Newer default-branch source supersedes this release PR update")
+        return
     prs = [pr for pr in api(f"repos/{repo}/pulls?state=open&base={base_ref}&per_page=100")
            if pr["head"]["ref"].startswith("release-plz-") and (pr["head"].get("repo") or {}).get("full_name") == repo]
     if len(prs) > 1:
@@ -307,9 +309,9 @@ def apply_pr():
     content = f"Prepared by release-plz 0.3.172.\n\n```text\n{summary}\n```"
     digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
 
-    def message(previous_body):
+    def message(previous_body, body_digest=digest):
         prior = hashlib.sha256(previous_body.encode("utf-8")).hexdigest()
-        return f"chore: release\n\nPrepared by release-plz 0.3.172.\n\nsimit-release-plz-body: {digest}\nsimit-release-plz-previous-body: {prior}"
+        return f"chore: release\n\nPrepared by release-plz 0.3.172.\n\nsimit-release-plz-body: {body_digest}\nsimit-release-plz-previous-body: {prior}"
 
     reference = f"refs/heads/{branch}"
     remote = git("ls-remote", "--heads", "origin", reference).split()
@@ -320,6 +322,7 @@ def apply_pr():
         raise RuntimeError("release PR branch changed during delivery; retry/reconcile it")
     prior_body = (previous["body"] or "") if previous else ""
     resume = False
+    pending = False
     if expected:
         subprocess.run(["git", "fetch", "--no-tags", "origin", expected], check=True)
         verify_release_head(expected)
@@ -332,14 +335,19 @@ def apply_pr():
         # The signed commit binds both the prepared summary and the exact old
         # PR body. A failed POST/PATCH can resume, but manual edits cannot.
         resume = same_source and head_message == message(prior_body)
+        # A current-source successor may replace an abandoned older delivery,
+        # but only its signed prior-body binding can waive the stale head receipt.
+        recorded = re.search(r"\nsimit-release-plz-body: ([0-9a-f]{64})\n", head_message)
+        pending = bool(recorded and head_message == message(prior_body, recorded[1]))
+        pending = pending and bool(re.fullmatch(r"[0-9a-f]{40}", parents)) and subprocess.run(
+            ["git", "merge-base", "--is-ancestor", parents, os.environ["GITHUB_SHA"]],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        ).returncode == 0
         if not previous and not resume:
             raise RuntimeError("reconcile an unrecognized release-plz branch before creating a PR")
     sha = expected
     if not resume:
-        if superseded:
-            print("Newer default-branch source supersedes this release PR update")
-            return
-        if previous:
+        if previous and not pending:
             verify_receipt(previous)
         sha = subprocess.check_output(["git", "commit-tree", "-S", tree, "-p", os.environ["GITHUB_SHA"]],
             input=message(prior_body) + "\n", text=True).strip()

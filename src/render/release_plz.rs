@@ -230,7 +230,7 @@ fn competing_publisher(
     for job in jobs.values() {
         if let Some(local) = job.get("uses").and_then(serde_yaml::Value::as_str)
             && local.starts_with("./")
-            && local_publisher(root, root, local, seen, true, true)?
+            && local_publisher(root, root, local, seen, true, None)?
         {
             return Ok(true);
         }
@@ -246,6 +246,27 @@ fn competing_publisher(
                     || action.starts_with("./"))
             {
                 return Ok(true);
+            }
+            if let Some(action) = step.get("uses").and_then(serde_yaml::Value::as_str)
+                && action
+                    .split('@')
+                    .next()
+                    .is_some_and(|name| name.eq_ignore_ascii_case("actions-rs/cargo"))
+            {
+                // The action passes its required command input directly to Cargo.
+                let command = step
+                    .get("with")
+                    .and_then(|inputs| inputs.get("command"))
+                    .and_then(serde_yaml::Value::as_str)
+                    .context(
+                        "release-plz migration: reconcile opaque Cargo-action publisher command",
+                    )?;
+                if command.contains(['$', '{', '}']) {
+                    bail!("release-plz migration: reconcile opaque Cargo-action publisher command");
+                }
+                if commands_publish(root, root, &format!("cargo {command}"), seen, true)? {
+                    return Ok(true);
+                }
             }
             if let Some(run) = step.get("run").and_then(serde_yaml::Value::as_str) {
                 let directory = step
@@ -289,7 +310,7 @@ fn local_publisher(
     local: &str,
     seen: &mut BTreeSet<(PathBuf, PathBuf, Option<bool>)>,
     workflow: bool,
-    shell: bool,
+    shell: Option<bool>,
 ) -> Result<bool> {
     let root = root.canonicalize()?;
     let cwd = cwd.canonicalize().with_context(|| {
@@ -325,8 +346,30 @@ fn local_publisher(
     let content = fs::read_to_string(&path).with_context(|| {
         format!("release-plz migration: reconcile opaque publisher reference {local}")
     })?;
-    // Only an explicit interpreter changes grammar; a suffix/shebang cannot
-    // suppress shell checks when this file is sourced or run through Bash.
+    // Direct execution uses the shebang. An explicit interpreter/source call
+    // overrides it, and each resulting grammar has its own recursion receipt.
+    let shell = shell.unwrap_or_else(|| {
+        let mut words = content
+            .lines()
+            .next()
+            .unwrap_or("")
+            .strip_prefix("#!")
+            .unwrap_or("")
+            .split_whitespace();
+        let mut program = words.next().unwrap_or("");
+        if Path::new(program)
+            .file_name()
+            .is_some_and(|name| name == "env")
+        {
+            program = words.find(|word| !word.starts_with('-')).unwrap_or("");
+        }
+        !matches!(
+            Path::new(program)
+                .file_stem()
+                .and_then(|name| name.to_str()),
+            Some("python" | "python3" | "node" | "pwsh" | "ruby")
+        )
+    });
     if !seen.insert((
         cwd.clone(),
         path.clone(),
@@ -468,17 +511,20 @@ fn commands_publish(
                 && word.contains('/')
                 && !word.contains(['$', '{', '}'])
                 && (word.starts_with("./") || cwd.join(word).is_file())
-                && local_publisher(root, cwd, word, seen, false, true)?
+                && local_publisher(root, cwd, word, seen, false, None)?
             {
                 return Ok(true);
             }
         }
     }
     let commands: Vec<_> = commands.iter().map(|words| words.join(" ")).collect();
-    for line in std::iter::once(run.as_str())
+    let lines = std::iter::once(run.as_str())
         .chain(commands.iter().map(String::as_str))
         .flat_map(|fragment| fragment.split(['\n', ';']))
-    {
+        .map(|line| (line, false));
+    // Native argv can span lines. Do not merge unrelated Cargo-looking data
+    // across lines when inspecting this additional native-launch-only view.
+    for (line, native_only) in lines.chain((!is_shell).then_some((run.as_str(), true))) {
         // The broad token scan also recognizes literal Cargo calls in scripts
         // written in other languages (for example Python subprocess arrays).
         let words: Vec<_> = line
@@ -487,6 +533,30 @@ fn commands_publish(
             .collect();
         for (index, word) in words.iter().enumerate() {
             let program = Path::new(word).file_name().and_then(|name| name.to_str());
+            let native_launch = !is_shell
+                && matches!(
+                    word.rsplit('.').next(),
+                    Some(
+                        "run"
+                            | "call"
+                            | "check_call"
+                            | "check_output"
+                            | "Popen"
+                            | "system"
+                            | "exec"
+                            | "execv"
+                            | "execve"
+                            | "spawn"
+                            | "spawnSync"
+                            | "execFile"
+                            | "execFileSync"
+                            | "execSync"
+                            | "&"
+                    )
+                );
+            if native_only && !native_launch {
+                continue;
+            }
             let arguments = &words[index + 1..];
             let arguments = if arguments.first().is_some_and(|arg| arg.starts_with('+')) {
                 &arguments[1..]
@@ -507,18 +577,28 @@ fn commands_publish(
             } else {
                 arguments
             };
+            let arguments = match arguments {
+                ["args=", rest @ ..] | ["args", "=", rest @ ..] if native_launch => rest,
+                _ => arguments,
+            };
             if (sourced
+                || native_launch
                 || matches!(
                     program,
                     Some("bash" | "sh" | "python" | "python3" | "node" | "pwsh" | "ruby")
                 ))
                 && let Some(local) = arguments
                     .iter()
-                    .take(if sourced { 1 } else { arguments.len() })
+                    .take(if sourced || native_launch {
+                        1
+                    } else {
+                        arguments.len()
+                    })
                     .find(|local| {
                         !local.starts_with('-')
                             && !local.contains(['$', '{', '}'])
-                            && (cwd.join(local).is_file()
+                            && ((native_launch && local.starts_with("./"))
+                                || cwd.join(local).is_file()
                                 || (!Path::new(local).is_absolute()
                                     && matches!(
                                         Path::new(local).extension().and_then(|ext| ext.to_str()),
@@ -531,7 +611,7 @@ fn commands_publish(
                     local,
                     seen,
                     false,
-                    sourced || matches!(program, Some("bash" | "sh")),
+                    (!native_launch).then_some(sourced || matches!(program, Some("bash" | "sh"))),
                 )?
             {
                 return Ok(true);

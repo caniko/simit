@@ -807,6 +807,94 @@ fn migration_uses_the_invoked_interpreter_instead_of_a_script_extension() {
     assert!(!output.status.success(), "{output:?}");
     assert!(String::from_utf8_lossy(&output.stderr).contains("publisher"));
     assert!(!temp.path().join("release-plz.toml").exists());
+
+    // Direct execution uses the shebang, while an explicit Bash invocation
+    // above must inspect the very same path using Bash grammar instead.
+    fs::write(temp.path().join("scripts/ship"), "cargo publish\n").unwrap();
+    fs::write(
+        temp.path().join("scripts/custom.py"),
+        "#!/usr/bin/env python3\nimport subprocess\nsubprocess.run(['./scripts/ship'])\n",
+    )
+    .unwrap();
+    fs::write(
+        temp.path().join(".github/workflows/custom.yaml"),
+        "jobs:\n  check:\n    steps:\n      - run: ./scripts/custom.py\n",
+    )
+    .unwrap();
+    let output = init(temp.path(), &["--publish-crates"]);
+    assert!(!output.status.success(), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("publisher"));
+    assert!(!temp.path().join("release-plz.toml").exists());
+}
+
+#[test]
+fn migration_inspects_cargo_action_commands() {
+    for (command, rejects) in [
+        ("publish", true),
+        ("${{ matrix.command }}", true),
+        ("test", false),
+    ] {
+        let temp = project("");
+        fs::create_dir_all(temp.path().join(".github/workflows")).unwrap();
+        fs::write(temp.path().join(".github/workflows/custom.yaml"), format!("jobs:\n  cargo:\n    steps:\n      - uses: actions-rs/cargo@v1\n        with:\n          command: {command}\n")).unwrap();
+        let output = init(temp.path(), &["--publish-crates"]);
+        assert_eq!(!output.status.success(), rejects, "{command}: {output:?}");
+        if rejects {
+            assert!(String::from_utf8_lossy(&output.stderr).contains("publisher"));
+            assert!(!temp.path().join("release-plz.toml").exists());
+        }
+    }
+}
+
+#[test]
+fn migration_follows_literal_native_process_launches_in_non_shell_steps() {
+    for (shell, command, executes) in [
+        ("python3 {0}", "subprocess.run(['./scripts/ship'])", true),
+        (
+            "python3 {0}",
+            "subprocess.check_call(['./scripts/ship'])",
+            true,
+        ),
+        (
+            "python3 {0}",
+            "subprocess.run(args=['./scripts/ship'])",
+            true,
+        ),
+        (
+            "python3 {0}",
+            "subprocess.run(\n  ['./scripts/ship']\n)",
+            true,
+        ),
+        ("python3 {0}", "os.system('./scripts/ship')", true),
+        (
+            "node {0}",
+            "require('child_process').execFileSync('./scripts/ship')",
+            true,
+        ),
+        ("ruby {0}", "system('./scripts/ship')", true),
+        ("pwsh {0}", "& ./scripts/ship", true),
+        (
+            "python3 {0}",
+            "subprocess.run(['true', './scripts/ship'])",
+            false,
+        ),
+    ] {
+        for (script, publishes) in [("cargo publish\n", true), ("cargo test\n", false)] {
+            let rejects = executes && publishes;
+            let temp = project("");
+            fs::create_dir_all(temp.path().join(".github/workflows")).unwrap();
+            fs::create_dir(temp.path().join("scripts")).unwrap();
+            fs::write(temp.path().join("scripts/ship"), script).unwrap();
+            let command = command.replace('\n', "\n          ");
+            fs::write(temp.path().join(".github/workflows/custom.yaml"), format!("jobs:\n  check:\n    steps:\n      - shell: {shell}\n        run: |\n          {command}\n")).unwrap();
+            let output = init(temp.path(), &["--publish-crates"]);
+            assert_eq!(!output.status.success(), rejects, "{command}: {output:?}");
+            if rejects {
+                assert!(String::from_utf8_lossy(&output.stderr).contains("publisher"));
+                assert!(!temp.path().join("release-plz.toml").exists());
+            }
+        }
+    }
 }
 
 #[test]

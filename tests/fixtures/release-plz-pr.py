@@ -116,9 +116,12 @@ with tempfile.TemporaryDirectory() as directory:
         assert len(requests) == before
     git("--git-dir", str(remote), "update-ref", f"refs/heads/{branch}", pending)
     fail = False
-    remote_sha = "f" * 40  # Later pushes must not strand an already-pushed PR.
+    remote_sha = "f" * 40
+    before = len(requests)
     admission.apply_pr()
+    assert len(requests) == before, "a stale retry must not create a PR"
     remote_sha = sha
+    admission.apply_pr()
     assert requests[-1][0] == "POST"
     generated = git("ls-remote", "--heads", "origin", f"refs/heads/{branch}").split()[0]
     assert generated == pending, "retry must reuse the already-pushed signed commit"
@@ -150,11 +153,27 @@ with tempfile.TemporaryDirectory() as directory:
         pass
     assert len(requests) == before
     prs[0]["body"] = previous_body
+    try:
+        admission.apply_pr()
+        raise AssertionError("expected a second injected PR update failure")
+    except RuntimeError as error:
+        assert "transient" in str(error)
+    assert git("ls-remote", "--heads", "origin", f"refs/heads/{branch}").split()[0] == pending
+    next_source = git("commit-tree", tree, "-p", sha, input="next default-branch source\n")
+    remote_sha = next_source
+    before = len(requests)
+    admission.apply_pr()
+    assert len(requests) == before, "a superseded PATCH retry must not mutate the PR"
+    git("update-ref", "refs/heads/trunk", next_source)
+    os.environ["GITHUB_SHA"] = next_source
+    (runtime / "release-plz-pr/summary.txt").write_text("current-source release summary\n")
     fail = False
     admission.apply_pr()
     assert requests[-1][0] == "PATCH", "automatic refresh should reuse the existing PR"
     generated = git("ls-remote", "--heads", "origin", f"refs/heads/{branch}").split()[0]
-    assert generated == pending
+    assert generated != pending
+    assert git("show", "-s", "--format=%P", generated) == next_source
+    assert "current-source release summary" in requests[-1][2]["body"]
     delivered = len(requests)
     prs[0]["head"]["sha"] = generated
     prs[0]["body"] = requests[-1][2]["body"] + "\n\nOwner's manual notes."
@@ -182,6 +201,7 @@ with tempfile.TemporaryDirectory() as directory:
     subprocess.run(["gpgconf", "--kill", "gpg-agent"], check=True)
 
     git("reset", "--hard", sha)
+    os.environ["GITHUB_SHA"] = sha
     # A valid no-op hunk can come from an untrusted worker even though git diff
     # would normally emit an empty patch. Do not sign an empty release commit.
     (runtime / "release-plz-pr/update.patch").write_text(
