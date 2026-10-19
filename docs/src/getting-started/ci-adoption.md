@@ -132,7 +132,7 @@ trusted-publishing registration applies to the new workflow.
 
 The CLI is pinned to release-plz **0.3.172** (reviewed source
 `8b523fa6c4eb4992f18365ac50a196b4dc6a1013`). The fixed Linux worker verifies the
-upstream musl binary's SHA-256 before execution, independently of the project's
+upstream GNU binary's SHA-256 before execution, independently of the project's
 MSRV. Credential-free Nix jobs execute update preparation through `nix develop -c`;
 credentialed jobs use the verified standalone binary and data-only operations.
 Workflow actions use the shared immutable action registry.

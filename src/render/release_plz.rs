@@ -14,8 +14,8 @@ use crate::{
 
 pub const VERSION: &str = "0.3.172";
 pub const REVISION: &str = "8b523fa6c4eb4992f18365ac50a196b4dc6a1013";
-// Upstream release asset for the fixed ubuntu-24.04 x86_64 worker.
-pub const CLI_SHA256: &str = "db58a4668ce9ef0b6431e96a665715745e9a5d7f0b0b28a610034d94de3970df";
+// GNU asset for ubuntu-24.04; musl's stack detection rejects changelog parsing.
+pub const CLI_SHA256: &str = "84b7013d164e1fc780b31dc9ef190977830599d6cb5ce81c993f6fcbd3cdc1aa";
 pub const CONFIG: &str = "release-plz.toml";
 pub const HELPER: &str = ".simit/release-plz.py";
 
@@ -332,7 +332,7 @@ fn install(w: &mut String, runtime: Runtime) {
           mkdir -p "$RUNNER_TEMP/release-plz/bin"
           archive="$RUNNER_TEMP/release-plz.tar.gz"
           curl --proto '=https' --tlsv1.2 -fsSL --retry 3 --connect-timeout 10 --max-time 120 \
-            'https://github.com/release-plz/release-plz/releases/download/release-plz-v{VERSION}/release-plz-x86_64-unknown-linux-musl.tar.gz' -o "$archive"
+            'https://github.com/release-plz/release-plz/releases/download/release-plz-v{VERSION}/release-plz-x86_64-unknown-linux-gnu.tar.gz' -o "$archive"
           printf '%s  %s\n' '{CLI_SHA256}' "$archive" | sha256sum --check --strict
           tar -xzf "$archive" -C "$RUNNER_TEMP/release-plz/bin" release-plz
           {prefix}"$RUNNER_TEMP/release-plz/bin/release-plz" --version
