@@ -256,7 +256,15 @@ fn competing_publisher(
                     })
                     .and_then(serde_yaml::Value::as_str)
                     .unwrap_or(".");
-                if commands_publish(root, &root.join(directory), run, seen)? {
+                let shell = step
+                    .get("shell")
+                    .or_else(|| job.get("defaults")?.get("run")?.get("shell"))
+                    .or_else(|| workflow.get("defaults")?.get("run")?.get("shell"))
+                    .and_then(serde_yaml::Value::as_str)
+                    .unwrap_or("");
+                if commands_publish(root, &root.join(directory), shell, seen)?
+                    || commands_publish(root, &root.join(directory), run, seen)?
+                {
                     return Ok(true);
                 }
             }
@@ -337,10 +345,23 @@ fn commands_publish(
             {
                 return Ok(true);
             }
-            if word.starts_with("./") && local_publisher(root, cwd, word, seen, false)? {
+            if (word.starts_with("./")
+                || (index == 0
+                    && word.contains('/')
+                    && matches!(
+                        Path::new(word).extension().and_then(|ext| ext.to_str()),
+                        Some("sh" | "bash" | "py" | "js" | "ps1" | "rb")
+                    )))
+                && local_publisher(root, cwd, word, seen, false)?
+            {
                 return Ok(true);
             }
             let sourced = matches!(*word, "source" | ".");
+            let arguments = if sourced && arguments.first() == Some(&"--") {
+                &arguments[1..]
+            } else {
+                arguments
+            };
             if (sourced
                 || matches!(
                     program,

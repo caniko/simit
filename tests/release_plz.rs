@@ -130,6 +130,41 @@ fn existing_implicit_and_explicit_members_are_preserved() {
 }
 
 #[test]
+fn changing_ci_preserves_custom_release_plz_credentials() {
+    for scope in [
+        "ci",
+        "package.metadata.simit.ci",
+        "workspace.metadata.simit.ci",
+    ] {
+        for authentication in [
+            "token_secret = \"CUSTOM_TOKEN\"\n",
+            "app_id_variable = \"CUSTOM_APP_ID\"\napp_private_key_secret = \"CUSTOM_APP_KEY\"\n",
+        ] {
+            let declaration = format!(
+                "[{scope}]\npublish_crates = true\npublish_strategy = \"release-plz\"\n[{scope}.release_plz]\n{authentication}registry_token_secret = \"CUSTOM_REGISTRY\"\nsigning_key_secret = \"CUSTOM_SIGNING_KEY\"\nsigning_passphrase_secret = \"CUSTOM_SIGNING_PASSWORD\"\n"
+            );
+            let temp = project(if scope == "ci" { &declaration } else { "" });
+            if scope != "ci" {
+                let manifest = temp.path().join("Cargo.toml");
+                let text = fs::read_to_string(&manifest).unwrap();
+                fs::write(&manifest, format!("{text}\n{declaration}")).unwrap();
+            }
+            let before = simit::config::ProjectConfig::load(temp.path())
+                .unwrap()
+                .ci
+                .release_plz;
+            let output = init(temp.path(), &["--with-docs"]);
+            assert!(output.status.success(), "{output:?}");
+            let config = simit::config::ProjectConfig::load(temp.path()).unwrap();
+            assert!(config.ci.with_docs);
+            assert_eq!(config.ci.release_plz, before, "{scope}: {authentication}");
+            let output = init(temp.path(), &["--check", "--diff"]);
+            assert!(output.status.success(), "{output:?}");
+        }
+    }
+}
+
+#[test]
 fn migration_retires_owned_publishers_and_preserves_metadata_source() {
     let temp = project("[ci]\npublish_crates = true\nwith_docs = true\n");
     assert!(init(temp.path(), &[]).status.success());
@@ -474,6 +509,10 @@ fn migration_follows_local_publisher_wrappers_and_reusable_jobs() {
             "cargo --locked publish\n",
         ),
         (
+            "jobs:\n  ship:\n    steps:\n      - run: scripts/ship.sh\n",
+            "cargo publish\n",
+        ),
+        (
             "jobs:\n  ship:\n    runs-on: ubuntu-latest\n    steps:\n      - run: nix develop -c bash scripts/ship.sh\n",
             "bash scripts/second.sh\n",
         ),
@@ -491,6 +530,14 @@ fn migration_follows_local_publisher_wrappers_and_reusable_jobs() {
         ),
         (
             "jobs:\n  ship:\n    steps:\n      - run: . scripts/ship.sh\n",
+            "cargo publish\n",
+        ),
+        (
+            "jobs:\n  ship:\n    steps:\n      - run: source -- scripts/ship.sh\n",
+            "cargo publish\n",
+        ),
+        (
+            "jobs:\n  ship:\n    steps:\n      - run: . -- scripts/ship.sh\n",
             "cargo publish\n",
         ),
         (
@@ -539,6 +586,62 @@ fn migration_follows_local_publisher_wrappers_and_reusable_jobs() {
             fs::read_to_string(temp.path().join("simit.toml")).unwrap(),
             ""
         );
+    }
+}
+
+#[test]
+fn migration_inspects_custom_shells_and_their_default_scopes() {
+    for (workflow, script, rejects) in [
+        (
+            "jobs:\n  ship:\n    steps:\n      - shell: ./scripts/ship.sh {0}\n        run: echo benign\n",
+            "cargo publish\n",
+            true,
+        ),
+        (
+            "jobs:\n  ship:\n    steps:\n      - shell: scripts/ship.sh {0}\n        run: echo benign\n",
+            "cargo publish\n",
+            true,
+        ),
+        (
+            "defaults:\n  run:\n    shell: bash scripts/ship.sh {0}\njobs:\n  ship:\n    steps:\n      - run: echo benign\n",
+            "cargo publish\n",
+            true,
+        ),
+        (
+            "jobs:\n  ship:\n    defaults:\n      run:\n        shell: ./scripts/ship.sh {0}\n    steps:\n      - run: echo benign\n",
+            "cargo publish\n",
+            true,
+        ),
+        (
+            "jobs:\n  ship:\n    steps:\n      - working-directory: scripts\n        shell: ./ship.sh {0}\n        run: echo benign\n",
+            "cargo publish\n",
+            true,
+        ),
+        (
+            "jobs:\n  ship:\n    steps:\n      - shell: ./scripts/ship.sh {0}\n        run: echo benign\n",
+            "cargo test\n",
+            false,
+        ),
+        (
+            "defaults:\n  run:\n    shell: ./scripts/ship.sh {0}\njobs:\n  ship:\n    steps:\n      - shell: bash\n        run: echo benign\n",
+            "cargo publish\n",
+            false,
+        ),
+    ] {
+        let temp = project("");
+        fs::create_dir_all(temp.path().join(".github/workflows")).unwrap();
+        fs::create_dir(temp.path().join("scripts")).unwrap();
+        fs::write(temp.path().join("scripts/ship.sh"), script).unwrap();
+        fs::write(temp.path().join(".github/workflows/custom.yaml"), workflow).unwrap();
+        let output = init(temp.path(), &["--publish-crates"]);
+        assert_eq!(!output.status.success(), rejects, "{workflow}: {output:?}");
+        if rejects {
+            assert!(!temp.path().join("release-plz.toml").exists());
+            assert_eq!(
+                fs::read_to_string(temp.path().join("simit.toml")).unwrap(),
+                ""
+            );
+        }
     }
 }
 
