@@ -1018,8 +1018,9 @@ be valid and unique across gates; retention defaults to seven days and accepts
 1–90 days. Uploads use `always()` and warn on missing files; the gate's failure
 still blocks publication. Relative paths follow the gate's source checkout,
 including the isolated signed-source checkout in trusted crate verification.
-Trusted crate publishers suffix the name with the package to avoid collisions
-between member verification jobs. Forgejo and Crow reject this GitHub-only option.
+Trusted crate publishers use `<artifact-name>.<package-name>` to avoid collisions
+between gate/member pairs, including hyphenated names. Forgejo and Crow reject
+this GitHub-only option.
 
 ## Coordinated Workspace Publication
 

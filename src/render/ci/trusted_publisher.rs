@@ -453,7 +453,7 @@ pub(super) fn publisher_file_with_namespace(
                     &mut w,
                     gate,
                     ".simit-release-source/",
-                    &format!("-{name}"),
+                    &format!(".{name}"),
                 );
             }
         }
