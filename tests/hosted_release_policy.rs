@@ -20,6 +20,7 @@ fn project(config: &str) -> TempDir {
 fn render(root: &Path) -> String {
     let output = common::simit()
         .current_dir(root)
+        .env("XDG_CONFIG_HOME", root.join(".xdg"))
         .args(["init", "release", "--print"])
         .output()
         .unwrap();
@@ -36,7 +37,7 @@ const HOSTED: &str = "[release.codeberg]\nrepo = \"example/player\"\n\n[release.
 #[test]
 fn github_release_gates_retain_evidence_without_ignoring_failure() {
     let dir = project(
-        "[ci]\nplatform='github'\n[[ci.required_gates]]\nid='integration'\nrun='false'\n[ci.required_gates.artifacts]\nname='evidence'\npaths=['target/evidence/']\n[release.github]\nrepo='example/player'\n[release.artifacts]\nprebuild_binaries=true\nsign=false\n",
+        "[ci]\nplatform='github'\n[[ci.required_gates]]\nid='integration'\nrun='false'\n[ci.required_gates.artifacts]\nname='evidence'\npaths=['target/evidence/']\n[release.github]\nrepo='example/player'\n[release.artifacts]\nrunner='ubuntu-24.04'\nprebuild_binaries=true\nsign=false\n",
     );
     let yaml: serde_yaml::Value = serde_yaml::from_str(&render(dir.path())).unwrap();
     let steps = yaml["jobs"]["validate"]["steps"].as_sequence().unwrap();
