@@ -33,6 +33,30 @@ fn new_publishing_defaults_to_release_plz_and_round_trips() {
         fs::read_to_string(temp.path().join(".github/workflows/release-plz.yaml")).unwrap();
     let yaml: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
     assert_eq!(yaml["permissions"]["contents"], "read");
+    assert_eq!(
+        yaml["concurrency"]["group"],
+        "release-plz-${{ github.repository }}-${{ github.run_id }}"
+    );
+    assert_eq!(yaml["concurrency"]["cancel-in-progress"], false);
+    assert_eq!(yaml["jobs"]["select"]["timeout-minutes"], 360);
+    assert_eq!(yaml["jobs"]["select"]["permissions"]["actions"], "read");
+    let select_steps = yaml["jobs"]["select"]["steps"].as_sequence().unwrap();
+    let prior = select_steps
+        .iter()
+        .position(|step| {
+            step["run"]
+                .as_str()
+                .is_some_and(|run| run.ends_with(" prior-run"))
+        })
+        .unwrap();
+    let selection = select_steps
+        .iter()
+        .position(|step| step["id"] == "select")
+        .unwrap();
+    assert!(
+        prior < selection,
+        "failed predecessors must block selection and every later mutation"
+    );
     let recheck = yaml["jobs"]["publish"]["steps"]
         .as_sequence()
         .unwrap()

@@ -188,9 +188,14 @@ branch push succeeds but its PR API update fails, reconcile the branch and PR
 head receipt before retrying; a retry does not discard unrecognized changes.
 Failed release qualification or publication also blocks the next PR update.
 
-Each immutable push keeps its publication run; later source pushes cannot replace
-a queued release event. Release PR delivery is serialized and skips superseded
-default-branch revisions. Publication is never canceled halfway through. Release-plz uploads
+Each immutable push keeps a separate run with no in-progress cancellation, so
+later pushes do not replace a queued release event. Before selection, Simit waits
+up to 350 minutes for the preceding default-branch run through the read-only
+Actions API. Failed, canceled or timed-out predecessors block all later publication
+and PR preparation; retry/reconcile them in run-number order before retrying the
+blocked runs. Incomplete provider history also fails closed.
+Release PR delivery skips superseded default-branch revisions. Publication is
+never canceled halfway through. Release-plz uploads
 crates **before** pushing tags and skips versions already published on a retry.
 A failed tag push can therefore leave a published crate without a tag; rerunning
 does not promise tag repair. Inspect the failed run, the selected SHA, and crates.io

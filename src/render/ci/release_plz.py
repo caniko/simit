@@ -13,6 +13,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.parse
 
 
@@ -20,11 +21,11 @@ def git(*args):
     return subprocess.check_output(["git", *args], text=True).strip()
 
 
-def api(path):
+def api(path, key=None):
     pages = json.loads(
         subprocess.check_output(["gh", "api", "--paginate", "--slurp", path], text=True)
     )
-    return [item for page in pages for item in page]
+    return [item for page in pages for item in (page[key] if key else page)]
 
 
 def verify_receipt(pr):
@@ -81,6 +82,32 @@ def release_sha(event_sha, prs, commits):
         stderr=subprocess.DEVNULL,
     )
     return sha if ancestor.returncode == 0 else event_sha
+
+
+def prior_run():
+    repo = os.environ["GITHUB_REPOSITORY"]
+    run_id = int(os.environ["GITHUB_RUN_ID"])
+    current = github("GET", f"repos/{repo}/actions/runs/{run_id}", {})
+    branch = urllib.parse.quote(os.environ["GITHUB_REF_NAME"], safe="")
+    runs = api(f"repos/{repo}/actions/workflows/{int(current['workflow_id'])}/runs?event=push&branch={branch}&per_page=100", "workflow_runs")
+    if current["id"] != run_id or not any(run["id"] == run_id for run in runs):
+        raise RuntimeError("release-plz workflow-run history is incomplete")
+    previous = max((run for run in runs if run["run_number"] < current["run_number"]),
+                   key=lambda run: run["run_number"], default=None)
+    # Filtered Actions queries expose at most 1,000 results. Never mistake a
+    # truncated historical run for initial enrollment when many newer runs exist.
+    if previous is None and len(runs) >= 1000:
+        raise RuntimeError("release-plz predecessor is outside the provider history window")
+    deadline = time.monotonic() + 350 * 60
+    while previous:
+        if previous["status"] == "completed":
+            if previous["conclusion"] != "success":
+                raise RuntimeError(f"release-plz predecessor run {previous['id']} must succeed; retry/reconcile it before advancing")
+            break
+        if time.monotonic() >= deadline:
+            raise RuntimeError(f"release-plz predecessor run {previous['id']} did not complete within the wait budget")
+        time.sleep(15)
+        previous = github("GET", f"repos/{repo}/actions/runs/{previous['id']}", {})
 
 
 def select():
@@ -356,7 +383,9 @@ def signing_identity(trust_root):
 
 
 if __name__ == "__main__":
-    if sys.argv[1] == "select":
+    if sys.argv[1] == "prior-run":
+        prior_run()
+    elif sys.argv[1] == "select":
         select()
     elif sys.argv[1] == "cargo":
         cargo()

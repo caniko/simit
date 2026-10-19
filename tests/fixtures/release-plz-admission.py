@@ -20,6 +20,55 @@ def git(*args):
     return subprocess.check_output(["git", *args], text=True).strip()
 
 
+os.environ.update({"GITHUB_REPOSITORY": "owner/repo", "GITHUB_REF_NAME": "trunk", "GITHUB_RUN_ID": "20"})
+current_run = {"id": 20, "workflow_id": 9, "run_number": 5}
+predecessor = {"id": 19, "run_number": 4, "status": "completed", "conclusion": "success"}
+newer = {"id": 21, "run_number": 6, "status": "queued", "conclusion": None}
+original_api, original_github = admission.api, admission.github
+original_sleep, original_monotonic = admission.time.sleep, admission.time.monotonic
+runs = [newer, current_run, predecessor]
+admission.github = lambda method, path, payload: current_run if path.endswith("/20") else predecessor
+admission.api = lambda path, key=None: runs
+for conclusion in ["failure", "cancelled", "skipped", "timed_out"]:
+    predecessor.update(status="completed", conclusion=conclusion)
+    try:
+        admission.prior_run()
+        raise AssertionError(f"advanced past a {conclusion} predecessor")
+    except RuntimeError:
+        pass
+for status in ["queued", "in_progress", "waiting"]:
+    predecessor.update(status=status, conclusion=None)
+    admission.time.sleep = lambda seconds: predecessor.update(status="completed", conclusion="success")
+    admission.prior_run()  # No advancement until the predecessor succeeds.
+    assert predecessor["status"] == "completed"
+predecessor.update(status="in_progress", conclusion=None)
+clock = iter([0, 350 * 60 + 1])
+admission.time.monotonic = lambda: next(clock)
+try:
+    admission.prior_run()
+    raise AssertionError("waited beyond the bounded predecessor budget")
+except RuntimeError as error:
+    assert "wait budget" in str(error)
+admission.time.sleep, admission.time.monotonic = original_sleep, original_monotonic
+predecessor.update(status="completed", conclusion="success")
+admission.prior_run()  # A successful retry unblocks the next immutable event.
+runs = [newer, current_run]
+admission.prior_run()  # Initial enrollment has no earlier default-branch event.
+runs = [newer]
+try:
+    admission.prior_run()
+    raise AssertionError("accepted incomplete workflow-run history")
+except RuntimeError:
+    pass
+runs = [current_run] + [newer] * 999
+try:
+    admission.prior_run()
+    raise AssertionError("treated a truncated predecessor history as initial enrollment")
+except RuntimeError:
+    pass
+admission.api, admission.github = original_api, original_github
+
+
 with tempfile.TemporaryDirectory() as directory:
     os.chdir(directory)
     git("init", "-b", "trunk")
