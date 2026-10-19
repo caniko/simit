@@ -195,16 +195,22 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
             component_script.as_deref(),
         ),
     ];
-    if hosted {
+    let release_plz = config.ci.publish_strategy == crate::config::PublishStrategy::ReleasePlz;
+    if hosted || release_plz {
         let package = packages
             .first()
-            .context("hosted release verification requires a selected package")?;
-        results.push(check_hosted_workflow(
-            workspace_root,
-            &package.name,
-            backend,
-        ));
-        match super::release_secrets::project_credentials(&config, package, platform) {
+            .context("release credential verification requires a selected package")?;
+        let credentials = if hosted {
+            results.push(check_hosted_workflow(
+                workspace_root,
+                &package.name,
+                backend,
+            ));
+            super::release_secrets::project_credentials(&config, package, platform)
+        } else {
+            crate::render::release_plz::credential_contract(&config)
+        };
+        match credentials {
             Ok(credentials) => results.push(CheckResult::blocked(
                 "remote secrets",
                 format!(
@@ -219,11 +225,13 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
                 "check `simit release secrets contract --json` and the repository Actions settings",
             )),
             Err(error) => results.push(CheckResult::fail(
-                "hosted release target",
+                "release credentials",
                 error.to_string(),
-                "repair the hosted release configuration",
+                "repair the release credential configuration",
             )),
         }
+    }
+    if hosted {
         if config
             .release
             .artifacts
@@ -248,11 +256,13 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
         && packages.iter().any(Package::is_publishable_to_crates_io)
     {
         results.extend(check_crates_io(&packages, &version));
-        results.push(CheckResult::blocked(
-            "remote secrets",
-            "remote secrets: CRATES_IO_API_TOKEN presence not verifiable locally",
-            "run `simit release secrets` once available; until then verify the remote secret in Forgejo/GitHub settings",
-        ));
+        if !release_plz {
+            results.push(CheckResult::blocked(
+                "remote secrets",
+                "remote secrets: CRATES_IO_API_TOKEN presence not verifiable locally",
+                "run `simit release secrets` once available; until then verify the remote secret in Forgejo/GitHub settings",
+            ));
+        }
     }
     results.push(check_tag(
         workspace_root,

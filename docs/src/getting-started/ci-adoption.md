@@ -154,7 +154,9 @@ is repository-scoped and inherited by release-plz's temporary repositories. See 
 [upstream token contract](https://release-plz.dev/docs/github/token).
 
 `simit release secrets contract --platform github` includes the release-plz
-secret/variable requirements. The workflow checks credentials before writes,
+secret/variable requirements. `simit release verify` uses that contract for required
+credentials, including custom registry secrets and crate-only releases; it does
+not also request an unused default registry secret. The workflow checks credentials before writes,
 derives its Git identity from the authorized signing key's UID, enables
 `tag.gpgSign`, probes signing, and deletes the private key material afterward.
 Existing downstream signed-tag/trust-root admission remains required. This
