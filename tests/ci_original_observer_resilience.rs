@@ -101,6 +101,8 @@ impl Transport for Provider {
                 "total_count": runs.len(),
                 "workflow_runs": runs
             }))?
+        } else if endpoint.contains("actions/jobs/") && endpoint.ends_with("/logs") {
+            b"original successful execution\n".to_vec()
         } else {
             let id: u64 = endpoint
                 .split("actions/runs/")
@@ -157,12 +159,14 @@ impl Transport for Provider {
 fn fixture(ready_after: Vec<u64>, timeout_seconds: u64) -> (Spec, Identity, Provider, TestClock) {
     let elapsed = Rc::new(Cell::new(Duration::ZERO));
     let mut archive = zip::ZipWriter::new(Cursor::new(Vec::new()));
-    archive
-        .start_file("test/1_Test.txt", zip::write::SimpleFileOptions::default())
-        .unwrap();
-    archive
-        .write_all(b"original successful execution\n")
-        .unwrap();
+    for name in ["0_test.txt", "test/1_Test.txt"] {
+        archive
+            .start_file(name, zip::write::SimpleFileOptions::default())
+            .unwrap();
+        archive
+            .write_all(b"original successful execution\n")
+            .unwrap();
+    }
     let workflows = (0..ready_after.len())
         .map(|i| (Provider::workflow(i).to_owned(), vec!["test".to_owned()]))
         .collect();
