@@ -915,6 +915,13 @@ fn migration_requires_reconciliation_for_native_execution_overrides() {
             "node {0}",
             "require('child_process').execFileSync('./scripts/check', {cwd:'release'})",
         ),
+        ("ruby {0}", "system('./scripts/check', chdir: 'release')"),
+        ("ruby {0}", "spawn('./scripts/check', :chdir => 'release')"),
+        ("ruby {0}", "spawn('./scripts/check',:chdir=>'release')"),
+        (
+            "node {0}",
+            "require('child_process').execFileSync('./scripts/check', {'cwd':'release'})",
+        ),
     ] {
         let temp = project("");
         fs::create_dir_all(temp.path().join(".github/workflows")).unwrap();
@@ -974,6 +981,22 @@ fn migration_follows_literal_native_process_launches_in_non_shell_steps() {
             "subprocess.run(['true'])\nexecutable = './scripts/ship'",
             false,
         ),
+        (
+            "python3 {0}",
+            "subprocess.run(['echo', 'executable=value'])",
+            false,
+        ),
+        (
+            "python3 {0}",
+            "subprocess.run(['true'])\nenrollment = {'executable': './scripts/ship'}",
+            false,
+        ),
+        (
+            "python3 {0}",
+            "subprocess.run(['./scripts/ship', 'cwd=value'])",
+            true,
+        ),
+        ("ruby {0}", "system('./scripts/ship', 'chdir:value')", true),
     ] {
         for (script, publishes) in [("cargo publish\n", true), ("cargo test\n", false)] {
             let rejects = executes && publishes;

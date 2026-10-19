@@ -86,10 +86,10 @@ require reconciliation. In explicit Python, Node, Ruby and PowerShell steps,
 known native process-launch calls also expose literal local executables for
 inspection, including multi-line argv lists. Arguments passed as data are not
 treated as executables.
-Native execution overrides such as Python's `executable=` and Python/Node `cwd`
-require explicit reconciliation. Direct `env` shebangs consume supported options
-and assignments before selecting the interpreter; computed or unsupported forms
-fail closed.
+Native execution overrides such as Python's `executable=`, Python/Node `cwd` and
+Ruby `chdir` require explicit reconciliation. Direct `env` shebangs consume
+supported options and assignments before selecting the interpreter; computed or
+unsupported forms fail closed.
 Bash syntax trees also expose nested command/backtick and process substitutions,
 including substitutions inside assignment values, parameter expansions and data
 arguments. Their literal commands are inspected without evaluating them; malformed

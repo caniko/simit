@@ -594,16 +594,29 @@ fn commands_publish(
                 continue;
             }
             let arguments = &words[index + 1..];
-            if native_launch
-                && line.match_indices("executable").any(|(position, keyword)| {
-                    line[position + keyword.len()..]
-                        .trim_start()
-                        .starts_with('=')
-                        && shlex::split(&line[..position]).is_none_or(|prefix| {
-                            prefix.last().is_some_and(|word| word.ends_with([',', '(']))
+            let keyword_override = |keyword: &str| {
+                line.match_indices(keyword).any(|(position, keyword)| {
+                    let mut prefix = &line[..position];
+                    let mut suffix = line[position + keyword.len()..].trim_start();
+                    // Object keys can be quoted; an argv string containing a
+                    // key/value pair is still data, not a native-call option.
+                    if let Some(quote) = prefix.chars().last().filter(|c| matches!(c, '\'' | '"')) {
+                        let Some(rest) = suffix.strip_prefix(quote) else {
+                            return false;
+                        };
+                        prefix = &prefix[..prefix.len() - quote.len_utf8()];
+                        suffix = rest.trim_start();
+                    }
+                    (suffix.starts_with('=')
+                        || (keyword != "executable" && suffix.starts_with(':')))
+                        && shlex::split(prefix).is_some_and(|prefix| {
+                            prefix
+                                .last()
+                                .is_some_and(|word| word.ends_with([',', '(', '{', ':']))
                         })
                 })
-            {
+            };
+            if native_launch && keyword_override("executable") {
                 bail!("release-plz migration: reconcile native publisher execution override");
             }
             let arguments = if arguments.first().is_some_and(|arg| arg.starts_with('+')) {
@@ -634,12 +647,7 @@ fn commands_publish(
                     (!Path::new(local).is_absolute() && local.contains('/'))
                         || cwd.join(local).is_file()
                 })
-                && arguments.iter().any(|argument| {
-                    let argument = argument.trim_start_matches('{');
-                    argument == "cwd"
-                        || argument.starts_with("cwd=")
-                        || argument.starts_with("cwd:")
-                })
+                && (keyword_override("cwd") || keyword_override("chdir"))
             {
                 bail!(
                     "release-plz migration: reconcile native publisher working-directory override"
