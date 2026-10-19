@@ -30,12 +30,43 @@ pub fn validate_backend(provider: CiProvider, platform: Platform) -> Result<()> 
     Ok(())
 }
 
+fn validate_credentials(credentials: &crate::config::ReleasePlzConfig) -> Result<()> {
+    if credentials.app_id_variable.is_some() != credentials.app_private_key_secret.is_some() {
+        bail!("[ci.release_plz] requires app_id_variable and app_private_key_secret together");
+    }
+    if credentials.app_id_variable.is_none()
+        && credentials
+            .token_secret
+            .eq_ignore_ascii_case("GITHUB_TOKEN")
+    {
+        bail!(
+            "release-plz requires an App token or PAT; GITHUB_TOKEN cannot trigger release-PR checks or downstream tag workflows"
+        );
+    }
+    for name in [
+        &credentials.token_secret,
+        &credentials.registry_token_secret,
+        &credentials.signing_key_secret,
+        &credentials.signing_passphrase_secret,
+    ]
+    .into_iter()
+    .chain(credentials.app_id_variable.iter())
+    .chain(credentials.app_private_key_secret.iter())
+    {
+        crate::config::validate_environment_name("[ci.release_plz] credential name", name)?;
+    }
+    Ok(())
+}
+
 pub fn files(
     metadata: &Metadata,
     config: &ProjectConfig,
     runtime: Runtime,
     options: &CiOptions,
 ) -> Result<Vec<GeneratedFile>> {
+    if !options.publish_crates {
+        bail!("release-plz requires --publish-crates");
+    }
     let packages: Vec<Package> = metadata
         .packages
         .iter()
@@ -76,31 +107,7 @@ pub fn files(
     {
         bail!("release-plz signing trust_root must be a committed relative path");
     }
-    let credentials = &config.ci.release_plz;
-    if credentials.app_id_variable.is_some() != credentials.app_private_key_secret.is_some() {
-        bail!("[ci.release_plz] requires app_id_variable and app_private_key_secret together");
-    }
-    if credentials.app_id_variable.is_none()
-        && credentials
-            .token_secret
-            .eq_ignore_ascii_case("GITHUB_TOKEN")
-    {
-        bail!(
-            "release-plz requires an App token or PAT; GITHUB_TOKEN cannot trigger release-PR checks or downstream tag workflows"
-        );
-    }
-    for name in [
-        &credentials.token_secret,
-        &credentials.registry_token_secret,
-        &credentials.signing_key_secret,
-        &credentials.signing_passphrase_secret,
-    ]
-    .into_iter()
-    .chain(credentials.app_id_variable.iter())
-    .chain(credentials.app_private_key_secret.iter())
-    {
-        crate::config::validate_environment_name("[ci.release_plz] credential name", name)?;
-    }
+    validate_credentials(&config.ci.release_plz)?;
     ci::validate_credential_free_workflow("", options)?;
     // Keep graph validation shared with the coordinated publisher. release-plz
     // supplies the actual dependency ordering and per-package version updates.
@@ -699,11 +706,12 @@ pub fn auxiliary_path(path: &Path) -> bool {
 
 pub fn credential_contract(
     config: &ProjectConfig,
-) -> Vec<super::release_workflow::ReleaseCredential> {
+) -> Result<Vec<super::release_workflow::ReleaseCredential>> {
     use super::release_workflow::{
         ReleaseCredential, ReleaseCredentialContext, ReleaseCredentialKind, ReleaseCredentialScope,
     };
     let config = &config.ci.release_plz;
+    validate_credentials(config)?;
     let mut credentials = vec![
         ReleaseCredential {
             name: "SIMIT_PUBLISHER_REVISION".into(),
@@ -748,7 +756,7 @@ pub fn credential_contract(
     } else {
         credentials.push(ReleaseCredential::secret(&config.token_secret, ReleaseCredentialScope::Repo, "release-plz", true, "Repository-scoped PAT with contents and pull-requests write permission; must trigger PR checks and tag workflows."));
     }
-    credentials
+    Ok(credentials)
 }
 
 fn checkout(w: &mut String) {

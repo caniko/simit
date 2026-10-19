@@ -190,7 +190,7 @@ pub fn run(command: InitCiCommand) -> Result<()> {
                 "release-plz publication requires the full workspace; use --workspace without --package selectors"
             );
         }
-        if !resolved.publish_crates && !resolved.with_artifacts {
+        if !resolved.publish_crates {
             bail!("release-plz requires --publish-crates");
         }
         if !ProjectConfig::can_persist_ci(workspace_root)?

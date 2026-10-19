@@ -125,7 +125,7 @@ pub(crate) fn project_credentials(
     };
     let mut credentials = release_workflow::credential_contract(&inputs);
     if cfg.ci.publish_strategy == crate::config::PublishStrategy::ReleasePlz {
-        credentials.extend(crate::render::release_plz::credential_contract(cfg));
+        credentials.extend(crate::render::release_plz::credential_contract(cfg)?);
     }
     Ok(credentials)
 }

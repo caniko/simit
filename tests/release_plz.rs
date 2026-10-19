@@ -198,6 +198,110 @@ fn changing_ci_preserves_custom_release_plz_credentials() {
 }
 
 #[test]
+fn release_plz_requires_crate_publication_even_with_artifacts() {
+    for config in ["", "[ci]\npublish_crates = false\n"] {
+        for artifacts in [false, true] {
+            let temp = project(config);
+            let mut flags = vec!["--publish-strategy", "release-plz"];
+            if artifacts {
+                flags.push("--with-artifacts");
+            }
+            let output = init(temp.path(), &flags);
+            assert!(!output.status.success(), "{artifacts}: {output:?}");
+            assert!(String::from_utf8_lossy(&output.stderr).contains("requires --publish-crates"));
+            assert_eq!(
+                fs::read_to_string(temp.path().join("simit.toml")).unwrap(),
+                config
+            );
+            assert!(!temp.path().join(".github").exists());
+            assert!(!temp.path().join("release-plz.toml").exists());
+        }
+    }
+}
+
+#[test]
+fn artifact_only_generation_keeps_the_legacy_strategy() {
+    let temp = project("");
+    let output = init(temp.path(), &["--with-artifacts"]);
+    assert!(output.status.success(), "{output:?}");
+    assert!(!temp.path().join("release-plz.toml").exists());
+    assert_eq!(
+        simit::config::ProjectConfig::load(temp.path())
+            .unwrap()
+            .ci
+            .publish_strategy,
+        simit::config::PublishStrategy::Members
+    );
+    assert!(init(temp.path(), &["--check"]).status.success());
+}
+
+#[test]
+fn credential_contract_rejects_invalid_app_and_credential_names() {
+    for (credentials, error) in [
+        ("app_id_variable = 'APP_ID'", "together"),
+        ("app_private_key_secret = 'APP_KEY'", "together"),
+        ("token_secret = 'GITHUB_TOKEN'", "App token or PAT"),
+        ("registry_token_secret = 'bad-name'", "credential name"),
+        ("signing_key_secret = ''", "credential name"),
+        ("signing_passphrase_secret = 'bad-name'", "credential name"),
+        (
+            "app_id_variable = 'bad-name'\napp_private_key_secret = 'APP_KEY'",
+            "credential name",
+        ),
+    ] {
+        let temp = project(&format!(
+            "[ci]\nplatform = 'github'\npublish_crates = true\npublish_strategy = 'release-plz'\n[ci.release_plz]\n{credentials}\n"
+        ));
+        for output in [
+            common::simit()
+                .current_dir(temp.path())
+                .args(["release", "secrets", "contract", "--json"])
+                .output()
+                .unwrap(),
+            init(temp.path(), &[]),
+        ] {
+            assert!(!output.status.success(), "{credentials}: {output:?}");
+            assert!(output.stdout.is_empty(), "{output:?}");
+            assert!(
+                String::from_utf8_lossy(&output.stderr).contains(error),
+                "{output:?}"
+            );
+        }
+        assert!(!temp.path().join("release-plz.toml").exists());
+    }
+    for credentials in [
+        "token_secret = 'CUSTOM_PAT'",
+        "app_id_variable = 'APP_ID'\napp_private_key_secret = 'APP_KEY'",
+    ] {
+        let temp = project(&format!(
+            "[ci]\nplatform = 'github'\npublish_crates = true\npublish_strategy = 'release-plz'\n[ci.release_plz]\n{credentials}\n"
+        ));
+        let output = common::simit()
+            .current_dir(temp.path())
+            .args(["release", "secrets", "contract", "--json"])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let contract: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let names: Vec<_> = contract
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|entry| entry["channel"] == "release-plz")
+            .map(|entry| entry["name"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"CRATES_IO_API_TOKEN"));
+        assert_eq!(
+            names.contains(&"CUSTOM_PAT"),
+            credentials.contains("CUSTOM_PAT")
+        );
+        assert_eq!(names.contains(&"APP_ID"), credentials.contains("APP_ID"));
+        assert_eq!(names.contains(&"APP_KEY"), credentials.contains("APP_KEY"));
+        assert!(!names.contains(&"RELEASE_PLZ_TOKEN"));
+    }
+}
+
+#[test]
 fn migration_retires_owned_publishers_and_preserves_metadata_source() {
     let temp = project("[ci]\npublish_crates = true\nwith_docs = true\n");
     assert!(init(temp.path(), &[]).status.success());
@@ -441,6 +545,27 @@ fn real_git_merge_squash_and_cargo_revision_guard() {
 
 #[test]
 fn actionlint_validates_native_concurrency_queue_contract() {
+    let workflow: serde_yaml::Value = serde_yaml::from_str(
+        &fs::read_to_string(".github/workflows/qualify-release-generator.yaml").unwrap(),
+    )
+    .unwrap();
+    let lint = workflow["jobs"]["qualify-release-generator"]["steps"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .find(|step| {
+            step["name"]
+                .as_str()
+                .is_some_and(|name| name.starts_with("Lint signed-release workflows"))
+        })
+        .unwrap();
+    assert!(
+        lint["run"]
+            .as_str()
+            .unwrap()
+            .starts_with("nix develop --no-update-lock-file .#test -c actionlint "),
+        "the hosted qualification must use the same patched tool as local tests"
+    );
     let output = Command::new("python3")
         .args(["tests/fixtures/actionlint-queue.py", "actionlint"])
         .output()
@@ -1270,7 +1395,7 @@ fn empty_sources_do_not_shadow_or_block_explicit_cargo_policy() {
 #[test]
 fn single_crate_artifacts_keep_hosted_release_ownership_and_tag_prefix() {
     let temp = project("[release]\ntag_prefix = \"v\"\n");
-    let output = init(temp.path(), &["--with-artifacts"]);
+    let output = init(temp.path(), &["--publish-crates", "--with-artifacts"]);
     assert!(output.status.success(), "{output:?}");
     let config: toml_edit::DocumentMut = fs::read_to_string(temp.path().join("release-plz.toml"))
         .unwrap()

@@ -54,6 +54,9 @@ simit init ci --check --diff
 The older `--coordinated-publish[=false]` flag still maps to coordinated/members;
 conflicting selections are rejected. An explicit `members` selection
 is persisted even though it is the legacy default.
+Release-plz requires crate publication to be enabled (`--publish-crates` or the
+matching project setting), even when binary artifacts are requested. Artifact-only
+generation keeps the legacy strategy rather than implicitly adopting release-plz.
 
 Release-plz computes versions and per-package changelogs and orchestrates crates.io
 publication and signed tags. Simit delivers its prepared release PR data and
@@ -137,6 +140,9 @@ registry_token_secret = "CRATES_IO_API_TOKEN"
 signing_key_secret = "RELEASE_PLZ_GPG_PRIVATE_KEY"
 signing_passphrase_secret = "RELEASE_PLZ_GPG_PASSPHRASE"
 ```
+
+Workflow generation and `release secrets contract --json` share the same App-pair
+and credential-name validation; an incomplete pair never falls back to a PAT contract.
 
 Place these tables under `package.metadata.simit` or `workspace.metadata.simit`
 when Cargo metadata is the existing config source. `token_secret` overrides the

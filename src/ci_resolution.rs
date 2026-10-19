@@ -346,8 +346,7 @@ impl ResolvedCiInputs {
             );
         }
 
-        let newly_enabled_publishing = (cli.publish_crates == Some(true)
-            || cli.with_artifacts == Some(true))
+        let newly_enabled_publishing = cli.publish_crates == Some(true)
             && !cfg.ci.publish_crates
             && !cfg.ci.with_artifacts
             && inference.publish_crates != Some(true)
