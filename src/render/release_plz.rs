@@ -143,6 +143,7 @@ pub fn validate_migration(
     root: &Path,
     config: &ProjectConfig,
     files: &[GeneratedFile],
+    obsolete: &[PathBuf],
 ) -> Result<()> {
     for file in files {
         if super::workflow_templates::is_template_output(
@@ -197,12 +198,14 @@ pub fn validate_migration(
                 continue;
             }
             let content = fs::read_to_string(entry.path())?;
-            let template = super::workflow_templates::is_template_output(
-                &config.ci,
-                &Path::new(directory).join(entry.file_name()),
-                &content,
-            );
-            if (!ci::is_generated_workflow_marker(&content) || template)
+            let relative = Path::new(directory).join(entry.file_name());
+            let replaced = obsolete.contains(&relative)
+                || files.iter().any(|file| {
+                    super::workflow_templates::same_output(root, &file.relative_path, &relative)
+                });
+            if (!ci::is_generated_workflow_marker(&content)
+                || !replaced
+                || super::workflow_templates::is_template_output(&config.ci, &relative, &content))
                 && competing_publisher(root, &content, &mut BTreeSet::new())?
             {
                 bail!(
@@ -290,6 +293,20 @@ fn local_publisher(
     let path = cwd.join(local).canonicalize().with_context(|| {
         format!("release-plz migration: reconcile uninspectable publisher reference {local}")
     })?;
+    // Ignore untracked build outputs, not tracked sources matching ignore rules.
+    // A local build must not change migration's source inventory.
+    if !workflow
+        && path.starts_with(&root)
+        && std::process::Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(["check-ignore", "--quiet", "--"])
+            .arg(&path)
+            .output()
+            .is_ok_and(|output| output.status.success())
+    {
+        return Ok(false);
+    }
     if !path.starts_with(&root)
         || !path.is_file()
         || fs::metadata(&path)?.len() > 1024 * 1024
@@ -324,9 +341,9 @@ fn commands_publish(
         .collect::<Vec<_>>()
         .join("\n")
         .replace("\\\n", "");
-    for line in run.lines() {
+    for line in run.split(['\n', ';']) {
         let words: Vec<_> = line
-            .split(|c: char| c.is_whitespace() || "\"'[](){},;".contains(c))
+            .split(|c: char| c.is_whitespace() || "\"'[](),;".contains(c))
             .filter(|word| !word.is_empty())
             .collect();
         for (index, word) in words.iter().enumerate() {
@@ -345,13 +362,26 @@ fn commands_publish(
             {
                 return Ok(true);
             }
-            if (word.starts_with("./")
-                || (index == 0
-                    && word.contains('/')
-                    && matches!(
-                        Path::new(word).extension().and_then(|ext| ext.to_str()),
-                        Some("sh" | "bash" | "py" | "js" | "ps1" | "rb")
-                    )))
+            // Follow executables, not path operands such as actionlint's input.
+            if (index == 0
+                || matches!(
+                    words[index - 1],
+                    "-c" | "-lc"
+                        | "--"
+                        | "exec"
+                        | "env"
+                        | "sudo"
+                        | "if"
+                        | "then"
+                        | "do"
+                        | "|"
+                        | "&&"
+                        | "||"
+                ))
+                && !Path::new(word).is_absolute()
+                && word.contains('/')
+                && !word.contains(['$', '{', '}'])
+                && (word.starts_with("./") || cwd.join(word).is_file())
                 && local_publisher(root, cwd, word, seen, false)?
             {
                 return Ok(true);
@@ -372,12 +402,13 @@ fn commands_publish(
                     .take(if sourced { 1 } else { arguments.len() })
                     .find(|local| {
                         !local.starts_with('-')
-                            && !local.contains('$')
+                            && !local.contains(['$', '{', '}'])
                             && (cwd.join(local).is_file()
-                                || matches!(
-                                    Path::new(local).extension().and_then(|ext| ext.to_str()),
-                                    Some("sh" | "bash" | "py" | "js" | "ps1" | "rb")
-                                ))
+                                || (!Path::new(local).is_absolute()
+                                    && matches!(
+                                        Path::new(local).extension().and_then(|ext| ext.to_str()),
+                                        Some("sh" | "bash" | "py" | "js" | "ps1" | "rb")
+                                    )))
                     })
                 && local_publisher(root, cwd, local, seen, false)?
             {

@@ -2243,12 +2243,6 @@ fn reconcile_ci_files(
         files.push(ci::custody::file(custody)?);
     }
     crate::render::workflow_templates::append(workspace_root, &config.ci, &mut files)?;
-    if files
-        .iter()
-        .any(|file| file.relative_path == Path::new(crate::render::release_plz::CONFIG))
-    {
-        crate::render::release_plz::validate_migration(workspace_root, &config, &files)?;
-    }
     let mut obsolete =
         project::obsolete_generated_workflows(workspace_root, &files, is_ci_managed_workflow_name)?;
     for path in [
@@ -2270,6 +2264,12 @@ fn reconcile_ci_files(
     )?);
     obsolete.sort();
     obsolete.dedup();
+    if files
+        .iter()
+        .any(|file| file.relative_path == Path::new(crate::render::release_plz::CONFIG))
+    {
+        crate::render::release_plz::validate_migration(workspace_root, &config, &files, &obsolete)?;
+    }
     project::reconcile_generated_files(
         workspace_root,
         &files,

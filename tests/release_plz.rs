@@ -286,6 +286,7 @@ fn migration_keeps_qualification_workflows_that_only_reference_release_tools() {
     let output = init(temp.path(), &["--publish-crates"]);
     assert!(output.status.success(), "{output:?}");
     assert!(temp.path().join(".github/workflows/qualify.yaml").exists());
+    assert!(init(temp.path(), &["--check"]).status.success());
 }
 
 #[test]
@@ -296,6 +297,45 @@ fn migration_requires_reconciling_a_competing_project_template() {
     let output = init(temp.path(), &["--publish-crates"]);
     assert!(!output.status.success(), "{output:?}");
     assert!(String::from_utf8_lossy(&output.stderr).contains("competing publisher"));
+}
+
+#[test]
+fn migration_inspects_marked_publishers_unless_the_plan_replaces_or_retires_them() {
+    for name in ["ship.yaml", "ship.yml", "ci.yaml", "publish-crate.yaml"] {
+        let temp = project("");
+        fs::create_dir_all(temp.path().join(".github/workflows")).unwrap();
+        let workflow = temp.path().join(".github/workflows").join(name);
+        let content = format!(
+            "{}\njobs:\n  publish:\n    steps:\n      - run: cargo publish\n",
+            simit::render::ci::GENERATED_WORKFLOW_MARKER
+        );
+        fs::write(&workflow, &content).unwrap();
+        let output = init(
+            temp.path(),
+            &["--publish-crates", "--publish-strategy", "release-plz"],
+        );
+        if name.starts_with("ship") {
+            assert!(!output.status.success(), "{name}: {output:?}");
+            assert_eq!(fs::read_to_string(&workflow).unwrap(), content);
+            assert!(!temp.path().join("release-plz.toml").exists());
+            assert_eq!(
+                fs::read_to_string(temp.path().join("simit.toml")).unwrap(),
+                ""
+            );
+        } else {
+            assert!(output.status.success(), "{name}: {output:?}");
+            if name == "publish-crate.yaml" {
+                assert!(!workflow.exists());
+            } else {
+                assert!(
+                    !fs::read_to_string(&workflow)
+                        .unwrap()
+                        .contains("cargo publish")
+                );
+            }
+            assert!(init(temp.path(), &["--check"]).status.success());
+        }
+    }
 }
 
 #[test]
@@ -513,6 +553,18 @@ fn migration_follows_local_publisher_wrappers_and_reusable_jobs() {
             "cargo publish\n",
         ),
         (
+            "jobs:\n  ship:\n    steps:\n      - run: scripts/ship\n",
+            "cargo publish\n",
+        ),
+        (
+            "jobs:\n  ship:\n    steps:\n      - run: nix develop -c scripts/ship\n",
+            "cargo publish\n",
+        ),
+        (
+            "jobs:\n  ship:\n    steps:\n      - run: true; scripts/ship\n",
+            "cargo publish\n",
+        ),
+        (
             "jobs:\n  ship:\n    runs-on: ubuntu-latest\n    steps:\n      - run: nix develop -c bash scripts/ship.sh\n",
             "bash scripts/second.sh\n",
         ),
@@ -569,6 +621,7 @@ fn migration_follows_local_publisher_wrappers_and_reusable_jobs() {
         fs::create_dir_all(temp.path().join(".github/workflows")).unwrap();
         fs::create_dir(temp.path().join("scripts")).unwrap();
         fs::write(temp.path().join("scripts/ship.sh"), script).unwrap();
+        fs::write(temp.path().join("scripts/ship"), script).unwrap();
         fs::write(temp.path().join("scripts/second.sh"), "cargo publish\n").unwrap();
         if workflow.contains("uses:") {
             fs::write(
@@ -603,6 +656,11 @@ fn migration_inspects_custom_shells_and_their_default_scopes() {
             true,
         ),
         (
+            "jobs:\n  ship:\n    steps:\n      - shell: scripts/ship {0}\n        run: echo benign\n",
+            "cargo publish\n",
+            true,
+        ),
+        (
             "defaults:\n  run:\n    shell: bash scripts/ship.sh {0}\njobs:\n  ship:\n    steps:\n      - run: echo benign\n",
             "cargo publish\n",
             true,
@@ -632,6 +690,7 @@ fn migration_inspects_custom_shells_and_their_default_scopes() {
         fs::create_dir_all(temp.path().join(".github/workflows")).unwrap();
         fs::create_dir(temp.path().join("scripts")).unwrap();
         fs::write(temp.path().join("scripts/ship.sh"), script).unwrap();
+        fs::write(temp.path().join("scripts/ship"), script).unwrap();
         fs::write(temp.path().join(".github/workflows/custom.yaml"), workflow).unwrap();
         let output = init(temp.path(), &["--publish-crates"]);
         assert_eq!(!output.status.success(), rejects, "{workflow}: {output:?}");
@@ -646,13 +705,81 @@ fn migration_inspects_custom_shells_and_their_default_scopes() {
 }
 
 #[test]
+fn migration_does_not_treat_computed_path_fragments_as_literal_scripts() {
+    for command in [
+        "bash \"$(dirname \"$0\")/check-command.sh\"\n",
+        "bash \"${SCRIPT_DIR}/check-command.sh\"\n",
+        "bash \"${{ github.workspace }}/check-command.sh\"\n",
+    ] {
+        let temp = project("");
+        fs::create_dir_all(temp.path().join(".github/workflows")).unwrap();
+        fs::create_dir(temp.path().join("scripts")).unwrap();
+        fs::write(temp.path().join("scripts/check.sh"), command).unwrap();
+        fs::write(
+            temp.path().join(".github/workflows/custom.yaml"),
+            "jobs:\n  check:\n    steps:\n      - run: bash scripts/check.sh\n",
+        )
+        .unwrap();
+        let output = init(temp.path(), &["--publish-crates"]);
+        assert!(output.status.success(), "{command}: {output:?}");
+    }
+}
+
+#[test]
+fn migration_distinguishes_source_scripts_from_ignored_build_outputs() {
+    let temp = project("");
+    assert!(
+        Command::new("git")
+            .current_dir(temp.path())
+            .args(["init", "-b", "trunk"])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    fs::create_dir_all(temp.path().join(".github/workflows")).unwrap();
+    fs::create_dir(temp.path().join("build-output")).unwrap();
+    fs::write(temp.path().join(".gitignore"), "build-output/\n").unwrap();
+    fs::write(
+        temp.path().join("build-output/qualifier"),
+        b"\x7fELF\xff\xfe",
+    )
+    .unwrap();
+    fs::write(
+        temp.path().join(".github/workflows/custom.yaml"),
+        "jobs:\n  check:\n    steps:\n      - run: build-output/qualifier\n",
+    )
+    .unwrap();
+    let output = init(temp.path(), &["--publish-crates"]);
+    assert!(output.status.success(), "{output:?}");
+    // A tracked source is still inspected even if its path matches .gitignore.
+    fs::write(
+        temp.path().join("build-output/qualifier"),
+        "cargo publish\n",
+    )
+    .unwrap();
+    assert!(
+        Command::new("git")
+            .current_dir(temp.path())
+            .args(["add", "--force", "build-output/qualifier"])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    let output = init(temp.path(), &[]);
+    assert!(!output.status.success(), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("competing publisher"));
+}
+
+#[test]
 fn migration_inspects_benign_scripts_and_stops_at_opaque_local_actions() {
     let temp = project("");
     fs::create_dir_all(temp.path().join(".github/workflows")).unwrap();
     fs::create_dir(temp.path().join("scripts")).unwrap();
     fs::write(
         temp.path().join("scripts/check.sh"),
-        "#!/bin/sh\n# bash comments are not commands\nbash scripts/cycle.sh\ncargo test\n",
+        "#!/bin/sh\n# bash comments are not commands\nbash scripts/cycle.sh\ncp -a ./. \"$tmp\"\ncargo test\n",
     )
     .unwrap();
     fs::write(

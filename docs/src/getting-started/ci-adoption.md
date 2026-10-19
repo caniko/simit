@@ -73,9 +73,12 @@ be reconciled explicitly before generation; Simit reports their paths.
 Migration follows literal local scripts and reusable workflows, respecting
 workflow/job/step working directories and custom shell templates. Missing,
 external or opaque local files and local actions require explicit reconciliation.
-This bounded scan is not a
-general program analyzer: review computed/downloaded commands and remote reusable
-workflows before enabling publication.
+Tracked and unignored local scripts are inspected regardless of extension;
+ignored untracked build outputs are not source inputs. A generated-file marker
+alone cannot exempt a publisher that the migration plan leaves active.
+This bounded scan is not a general program analyzer: review generated executables,
+computed/downloaded commands and remote reusable workflows before enabling
+publication.
 
 Initial support includes Cargo and Nix runtimes, a single publishable crate
 with binary releases, and ordinary multi-crate Cargo workspaces. Package
