@@ -140,7 +140,11 @@ The generated config uses `release_always = false`: ordinary default-branch
 pushes update a release PR; merging that PR starts publication.
 
 Release-plz may publish the last commit of a merged release PR rather than the
-merge event's branch tip. Simit resolves that immutable revision, runs project
+merge event's branch tip. Simit requires a same-repository generated release
+branch and matching head/body receipt, verifies the original head's OpenPGP
+signature against the event's committed trust root, and resolves that immutable
+revision. Squashed PR heads are fetched with the read-only token when absent
+from the event checkout. Simit runs project
 checks and required gates on it in a credential-free job, and verifies packaged
 archives with modern Cargo's unpublished-workspace dependency staging. Merge commits select the PR head; squash merges select the event
 commit. Publication rechecks selection, and a Cargo wrapper refuses any upload
@@ -160,6 +164,7 @@ lease and refuses to overwrite manual edits. Close or explicitly reconcile an
 existing upstream-created release PR before the first generated update. If a
 branch push succeeds but its PR API update fails, reconcile the branch and PR
 head receipt before retrying; a retry does not discard unrecognized changes.
+Failed release qualification or publication also blocks the next PR update.
 
 Each immutable push keeps its publication run; later source pushes cannot replace
 a queued release event. Release PR delivery is serialized and skips superseded

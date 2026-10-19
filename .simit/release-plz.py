@@ -27,6 +27,32 @@ def api(path):
     return [item for page in pages for item in page]
 
 
+def verify_receipt(pr):
+    receipt = re.fullmatch(r"(.*)\n\n<!-- simit-release-plz-head: ([0-9a-f]{40}) ([0-9a-f]{64}) -->",
+                           pr["body"] or "", flags=re.DOTALL)
+    if (not receipt or receipt[2] != pr["head"]["sha"]
+        or hashlib.sha256(receipt[1].encode("utf-8")).hexdigest() != receipt[3]):
+        raise RuntimeError("release PR contains unrecognized/manual changes; reconcile it before updating")
+
+
+def verify_release_head(sha):
+    if subprocess.run(["git", "cat-file", "-e", f"{sha}^{{commit}}"],
+                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode:
+        # Squashed/rebased PR heads need not be reachable from the event. Fetch
+        # the immutable object with the read-only token, including private repos.
+        subprocess.run(["git", "-c", "credential.helper=", "-c",
+                        "credential.https://github.com.helper=!gh auth git-credential",
+                        "fetch", "--no-tags", f"https://github.com/{os.environ['GITHUB_REPOSITORY']}.git", sha], check=True)
+    public_key = committed_trust_root(os.environ["RELEASE_TRUST_ROOT"])
+    with tempfile.TemporaryDirectory() as home:
+        env = {**os.environ, "GNUPGHOME": home, "GIT_CONFIG_GLOBAL": os.devnull,
+               "GIT_CONFIG_NOSYSTEM": "1"}
+        subprocess.run(["gpg", "--batch", "--import"], input=public_key, env=env, check=True,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        subprocess.run(["git", "-c", "gpg.format=openpgp", "-c", "gpg.program=gpg",
+                        "verify-commit", sha], env=env, check=True)
+
+
 def release_sha(event_sha, prs, commits):
     # Mirror should_release at release-plz commit 8b523fa6c4eb4992f18365ac50a196b4dc6a1013.
     # A merge releases the last PR commit; a squash releases the event commit.
@@ -36,14 +62,19 @@ def release_sha(event_sha, prs, commits):
     if (
         not pr["merged_at"]
         or pr["base"]["repo"]["full_name"] != os.environ["GITHUB_REPOSITORY"]
+        or pr["base"]["ref"] != os.environ["GITHUB_REF_NAME"]
+        or (pr["head"].get("repo") or {}).get("full_name") != os.environ["GITHUB_REPOSITORY"]
+        or not re.fullmatch(r"release-plz-[0-9a-f]{40}", pr["head"]["ref"])
     ):
-        raise RuntimeError("release PR must be merged into this repository")
+        raise RuntimeError("release PR must be generated in this repository and merged into its default branch")
+    verify_receipt(pr)
     history = commits(pr["number"])
     if not history:
         raise RuntimeError("release PR has no commits")
     sha = history[-1]["sha"]
-    if not re.fullmatch(r"[0-9a-f]{40}", sha):
+    if not re.fullmatch(r"[0-9a-f]{40}", sha) or sha != pr["head"]["sha"]:
         raise RuntimeError("invalid release commit")
+    verify_release_head(sha)
     ancestor = subprocess.run(
         ["git", "merge-base", "--is-ancestor", sha, event_sha],
         stdout=subprocess.DEVNULL,
@@ -198,14 +229,16 @@ def admit_pr():
     patch = read_data(directory / "update.patch", 16 * 1024 * 1024)
     if patch:
         subprocess.run(["git", "apply", "--cached", "--binary", "-"], input=patch, check=True)
-    paths = git("diff", "--cached", "--name-only", "-z").split("\0")
+    # Disabling rename detection exposes both paths, including the removed
+    # source. No destination can hide a workflow deletion behind an allowed name.
+    paths = git("diff", "--cached", "--no-renames", "--name-only", "-z").split("\0")
     for path in filter(None, paths):
         parts = Path(path).parts
         if (not parts or Path(path).is_absolute()
             or any(part in (".", "..", ".git", ".github", ".forgejo", ".simit") for part in parts)
             or parts[-1] not in ("Cargo.toml", "Cargo.lock", "CHANGELOG.md")):
             raise RuntimeError("release-plz update changed a non-release path")
-        records = git("ls-files", "--stage", "-z", "--", path)
+        records = git("--literal-pathspecs", "ls-files", "--stage", "-z", "--", path)
         if not records.startswith(("100644 ", "100755 ")) or records.count("\0") > 1:
             raise RuntimeError("release-plz update contains a link or deletion")
     tree = git("write-tree")
@@ -244,11 +277,7 @@ def apply_pr():
     previous = prs[0] if prs else None
     expected = previous["head"]["sha"] if previous else ""
     if previous:
-        receipt = re.fullmatch(r"(.*)\n\n<!-- simit-release-plz-head: ([0-9a-f]{40}) ([0-9a-f]{64}) -->",
-                               previous["body"] or "", flags=re.DOTALL)
-        if (not receipt or receipt[2] != expected
-            or hashlib.sha256(receipt[1].encode("utf-8")).hexdigest() != receipt[3]):
-            raise RuntimeError("release PR contains unrecognized/manual changes; reconcile it before updating")
+        verify_receipt(previous)
     branch = previous["head"]["ref"] if previous else f"release-plz-{os.environ['GITHUB_SHA']}"
     sha = subprocess.check_output(["git", "commit-tree", "-S", tree, "-p", os.environ["GITHUB_SHA"]],
         input="chore: release\n\nPrepared by release-plz 0.3.172.\n", text=True).strip()
@@ -263,6 +292,18 @@ def apply_pr():
     else:
         result = github("POST", f"repos/{repo}/pulls", {"title": "chore: release", "head": branch, "base": base, "body": body})
     print(result["html_url"])
+
+
+def committed_trust_root(trust_root):
+    path = Path(trust_root)
+    if path.is_absolute() or not path.parts or ".." in path.parts:
+        raise RuntimeError("release trust root must be a committed relative path")
+    records = subprocess.check_output(["git", "ls-tree", "-z", "HEAD", "--", trust_root], text=True)
+    records = [record.split("\t", 1)[0].split() for record in records.split("\0")
+               if record and record.split("\t", 1)[1] == path.as_posix()]
+    if len(records) != 1 or records[0][0] not in ("100644", "100755") or records[0][1] != "blob":
+        raise RuntimeError("release trust root must be a regular committed file")
+    return subprocess.check_output(["git", "cat-file", "blob", records[0][2]])
 
 
 def signing_identity(trust_root):
@@ -282,15 +323,7 @@ def signing_identity(trust_root):
                 yield fields[9]
                 primary = False
 
-    path = Path(trust_root)
-    if path.is_absolute() or not path.parts or ".." in path.parts:
-        raise RuntimeError("release trust root must be a committed relative path")
-    records = subprocess.check_output(["git", "ls-tree", "-z", "HEAD", "--", trust_root], text=True)
-    records = [record.split("\t", 1)[0].split() for record in records.split("\0")
-               if record and record.split("\t", 1)[1] == path.as_posix()]
-    if len(records) != 1 or records[0][0] not in ("100644", "100755") or records[0][1] != "blob":
-        raise RuntimeError("release trust root must be a regular committed file")
-    public_key = subprocess.check_output(["git", "cat-file", "blob", records[0][2]])
+    public_key = committed_trust_root(trust_root)
     authorized = set(primaries(subprocess.check_output(
         ["gpg", "--batch", "--with-colons", "--show-keys"], input=public_key,
     ).decode("utf-8")))

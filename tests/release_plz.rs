@@ -33,6 +33,23 @@ fn new_publishing_defaults_to_release_plz_and_round_trips() {
         fs::read_to_string(temp.path().join(".github/workflows/release-plz.yaml")).unwrap();
     let yaml: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
     assert_eq!(yaml["permissions"]["contents"], "read");
+    let recheck = yaml["jobs"]["publish"]["steps"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .find(|step| step["name"] == "Recheck immutable release selection")
+        .unwrap();
+    assert_eq!(
+        recheck["working-directory"],
+        "${{ runner.temp }}/release-plz-event-source"
+    );
+    let prepare_if = yaml["jobs"]["prepare-pr"]["if"].as_str().unwrap();
+    assert!(
+        prepare_if.contains(
+            "needs.select.outputs.release_sha == '' && needs.publish.result == 'skipped'"
+        )
+    );
+    assert!(!prepare_if.contains("|| needs.publish.result == 'skipped')"));
     assert!(workflow.contains("update --config"));
     assert!(workflow.contains("apply-pr"));
     assert!(workflow.contains("run release "));
@@ -402,6 +419,30 @@ fn explicit_metadata_members_overrides_new_default_in_both_cargo_scopes() {
                 .contains("# Keep the opted-out policy.")
         );
         assert!(init(temp.path(), &["--check"]).status.success());
+    }
+}
+
+#[test]
+fn migration_detects_publish_after_cargo_global_options() {
+    for command in [
+        "cargo --locked publish",
+        "cargo +stable --config 'build.jobs = 1' --offline publish --dry-run",
+        "/usr/bin/cargo --color=never --frozen publish -p demo",
+    ] {
+        let temp = project("");
+        fs::create_dir_all(temp.path().join(".github/workflows")).unwrap();
+        let workflow = format!(
+            "name: Existing publisher\non: push\njobs:\n  publish:\n    runs-on: ubuntu-latest\n    steps:\n      - run: {command}\n"
+        );
+        fs::write(temp.path().join(".github/workflows/custom.yaml"), workflow).unwrap();
+        let output = init(temp.path(), &["--publish-crates"]);
+        assert!(!output.status.success(), "accepted {command}");
+        assert!(String::from_utf8_lossy(&output.stderr).contains("competing publisher"));
+        assert!(!temp.path().join("release-plz.toml").exists());
+        assert_eq!(
+            fs::read_to_string(temp.path().join("simit.toml")).unwrap(),
+            ""
+        );
     }
 }
 

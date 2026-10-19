@@ -1,6 +1,7 @@
 """Execute release selection and the Cargo boundary against real Git histories."""
 
 import importlib.util
+import hashlib
 import os
 from pathlib import Path
 import shutil
@@ -22,7 +23,32 @@ def git(*args):
 with tempfile.TemporaryDirectory() as directory:
     os.chdir(directory)
     git("init", "-b", "trunk")
-    tree = subprocess.check_output(["git", "mktree"], input="", text=True).strip()
+    home = Path(directory) / "gnupg"
+    home.mkdir(mode=0o700)
+    os.environ["GNUPGHOME"] = str(home)
+
+    def key(home, uid):
+        subprocess.run(
+            ["gpg", "--homedir", str(home), "--batch", "--pinentry-mode", "loopback",
+             "--passphrase", "", "--quick-generate-key", uid, "ed25519", "sign", "0"],
+            check=True, capture_output=True,
+        )
+        return subprocess.check_output(
+            ["gpg", "--homedir", str(home), "--armor", "--export"], text=True
+        )
+
+    trust = Path(directory) / "trust.asc"
+    uid_name = "Release %20 Fixture: Δ"
+    trust.write_text(key(home, f"{uid_name} <fixture@example.invalid>"))
+    git("add", "trust.asc")
+    tree = git("write-tree")
+    os.environ["RELEASE_TRUST_ROOT"] = "trust.asc"
+    git("config", "user.name", uid_name)
+    git("config", "user.email", "fixture@example.invalid")
+    fingerprint = next(line.split(":")[9] for line in subprocess.check_output(
+        ["gpg", "--with-colons", "--list-secret-keys"], text=True,
+    ).splitlines() if line.startswith("fpr:"))
+    git("config", "user.signingkey", fingerprint)
 
     def commit(message, *parents):
         # Disposable object fixtures need no operator identity, hooks or signer.
@@ -36,18 +62,47 @@ with tempfile.TemporaryDirectory() as directory:
         ).strip()
 
     base = commit("initial")
-    prepared = commit("release", base)
+    prepared = subprocess.check_output(["git", "commit-tree", "-S", tree, "-p", base], input="chore: release\n", text=True).strip()
     merged = commit("merge", base, prepared)
     git("checkout", "--detach", merged)
     os.environ["GITHUB_REPOSITORY"] = "owner/repo"
+    os.environ["GITHUB_REF_NAME"] = "trunk"
+    body = "Prepared by release-plz 0.3.172."
+
+    def receipt(sha):
+        return f"{body}\n\n<!-- simit-release-plz-head: {sha} {hashlib.sha256(body.encode()).hexdigest()} -->"
+
     pr = {
         "number": 17,
-        "head": {"ref": "release-plz-test"},
+        "head": {"ref": f"release-plz-{base}", "sha": prepared, "repo": {"full_name": "owner/repo"}},
+        "body": receipt(prepared),
         "merged_at": "2026-10-19T00:00:00Z",
-        "base": {"repo": {"full_name": "owner/repo"}},
+        "base": {"ref": "trunk", "repo": {"full_name": "owner/repo"}},
     }
     commits = lambda number: [{"sha": prepared}]
     assert admission.release_sha(merged, [pr], commits) == prepared
+    # The trusted-engine bootstrap checks out the event again at shallow depth.
+    # Recheck in the full clone retained before that checkout.
+    retained = Path(directory) / "retained-event-source"
+    git("clone", "--no-hardlinks", "--no-checkout", ".", str(retained))
+    shallow = Path(directory) / ".git/shallow"
+    shallow.write_text(merged + "\n")
+    assert admission.release_sha(merged, [pr], commits) == merged
+    os.chdir(retained)
+    assert admission.release_sha(merged, [pr], commits) == prepared
+    os.chdir(directory)
+    shallow.unlink()
+    for bad_pr in (
+        {**pr, "head": {**pr["head"], "repo": {"full_name": "fork/repo"}}},
+        {**pr, "body": "no generated receipt"},
+        {**pr, "head": {**pr["head"], "sha": base}, "body": receipt(base)},
+        {**pr, "base": {**pr["base"], "ref": "other"}},
+    ):
+        try:
+            admission.release_sha(merged, [bad_pr], lambda number: [{"sha": bad_pr["head"]["sha"]}])
+            raise AssertionError("admitted an unauthenticated release PR")
+        except (RuntimeError, subprocess.CalledProcessError):
+            pass
     assert admission.release_sha(merged, [], commits) == ""
     try:
         admission.release_sha(merged, [{**pr, "merged_at": None}], commits)
@@ -98,6 +153,17 @@ with tempfile.TemporaryDirectory() as directory:
     squashed = commit("squash", base)
     git("checkout", "--detach", squashed)
     assert admission.release_sha(squashed, [pr], commits) == squashed
+    # The original signed head of a squash may be missing from the event clone.
+    # Exercise its immutable fetch through a disposable local transport.
+    git("update-ref", "refs/heads/trunk", squashed)
+    git("update-ref", f"refs/heads/{pr['head']['ref']}", prepared)
+    missing = Path(directory) / "missing-pr-head"
+    git("clone", "--no-local", "--depth", "1", "--branch", "trunk", Path(directory).as_uri(), str(missing))
+    os.chdir(missing)
+    git("config", f"url.{Path(directory).as_uri()}.insteadOf", "https://github.com/owner/repo.git")
+    assert subprocess.run(["git", "cat-file", "-e", prepared], capture_output=True).returncode != 0
+    assert admission.release_sha(squashed, [pr], commits) == squashed
+    os.chdir(directory)
     assert guard(squashed, "publish").returncode == 0
     assert guard(prepared, "publish").returncode != 0
     # An API result changing between admission and publication fails closed.
@@ -112,26 +178,6 @@ with tempfile.TemporaryDirectory() as directory:
         pass
 
     # The workflow must sign with a key authorized by the committed trust root.
-    home = Path(directory) / "gnupg"
-    home.mkdir(mode=0o700)
-    os.environ["GNUPGHOME"] = str(home)
-
-    def key(home, uid):
-        subprocess.run(
-            [
-                "gpg", "--homedir", str(home), "--batch", "--pinentry-mode", "loopback",
-                "--passphrase", "", "--quick-generate-key", uid, "ed25519", "sign", "0",
-            ],
-            check=True,
-            capture_output=True,
-        )
-        return subprocess.check_output(
-            ["gpg", "--homedir", str(home), "--armor", "--export"], text=True
-        )
-
-    trust = Path(directory) / "trust.asc"
-    uid_name = "Release %20 Fixture: Δ"
-    trust.write_text(key(home, f"{uid_name} <fixture@example.invalid>"))
     git("add", "trust.asc")
     tree = git("write-tree")
     git("checkout", "--detach", commit("trust root", squashed))
@@ -150,6 +196,19 @@ with tempfile.TemporaryDirectory() as directory:
     other_home = Path(directory) / "other-gnupg"
     other_home.mkdir(mode=0o700)
     trust.write_text(key(other_home, "Other Fixture <other@example.invalid>"))
+    other_key = next(line.split(":")[9] for line in subprocess.check_output(
+        ["gpg", "--homedir", str(other_home), "--with-colons", "--list-secret-keys"], text=True,
+    ).splitlines() if line.startswith("fpr:"))
+    impostor = subprocess.check_output(
+        ["git", "-c", f"user.signingkey={other_key}", "commit-tree", "-S", tree, "-p", squashed],
+        input="chore: release\n", text=True, env={**os.environ, "GNUPGHOME": str(other_home)},
+    ).strip()
+    fake_pr = {**pr, "head": {**pr["head"], "sha": impostor}, "body": receipt(impostor)}
+    try:
+        admission.release_sha(squashed, [fake_pr], lambda number: [{"sha": impostor}])
+        raise AssertionError("accepted a head signed outside the committed trust root")
+    except subprocess.CalledProcessError:
+        pass
     git("add", "trust.asc")
     tree = git("write-tree")
     git("checkout", "--detach", commit("unauthorized trust root", git("rev-parse", "HEAD")))
@@ -167,7 +226,7 @@ with tempfile.TemporaryDirectory() as directory:
     runtime = Path(directory) / "runtime"
     binary = runtime / "release-plz/bin/release-plz"
     binary.parent.mkdir(parents=True)
-    binary.write_text("""#!/usr/bin/env python3
+    binary.write_text(f"""#!{sys.executable}
 import os, pathlib, subprocess, tempfile
 assert not pathlib.Path('.cargo/config.toml').exists()
 assert not pathlib.Path('crate/.cargo/config.toml').exists()

@@ -37,6 +37,7 @@ jobs:
         id: select
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TRUST_ROOT: "keys/maintainers.gpg"
         run: python3 .simit/release-plz.py select
 
   qualify:
@@ -249,9 +250,11 @@ jobs:
           path: ${{ runner.temp }}/release-plz-archives
 
       - name: Recheck immutable release selection
+        working-directory: ${{ runner.temp }}/release-plz-event-source
         env:
           GH_TOKEN: ${{ github.token }}
           SIMIT_EXPECTED_RELEASE_SHA: ${{ needs.select.outputs.release_sha }}
+          RELEASE_TRUST_ROOT: "keys/maintainers.gpg"
         run: python3 "$RUNNER_TEMP/release-plz-admission.py" select
 
       - name: Independently reconstruct every qualified archive without credentials
@@ -306,7 +309,7 @@ jobs:
 
   prepare-pr:
     needs: [select, publish]
-    if: always() && needs.select.result == 'success' && (needs.publish.result == 'success' || needs.publish.result == 'skipped')
+    if: always() && needs.select.result == 'success' && (needs.publish.result == 'success' || (needs.select.outputs.release_sha == '' && needs.publish.result == 'skipped'))
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     permissions:

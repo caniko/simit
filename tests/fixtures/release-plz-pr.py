@@ -24,6 +24,10 @@ with tempfile.TemporaryDirectory() as directory:
     git("init", "-b", "trunk")
     original = '[package]\nname="fixture"\nversion="0.1.0"\n'
     (root / "Cargo.toml").write_text(original)
+    (root / ".github/workflows").mkdir(parents=True)
+    (root / ".github/workflows/ci.yml").write_text("jobs: {}\n")
+    (root / "old").mkdir()
+    (root / "old/Cargo.lock").write_text("# lockfile\n")
     git("add", ".")
     tree = git("write-tree")
     commit = f"tree {tree}\nauthor Fixture <fixture@example.invalid> 1700000000 +0000\ncommitter Fixture <fixture@example.invalid> 1700000000 +0000\n\ninitial\n"
@@ -118,7 +122,7 @@ with tempfile.TemporaryDirectory() as directory:
     assert (runtime / "env").read_text() == "SIMIT_RELEASE_PR_TREE=\n"
 
     # Reject workflow changes, links, and deleted manifests before importing keys.
-    for kind in ("workflow", "link", "deletion"):
+    for kind in ("workflow", "link", "deletion", "workflow-rename", "release-rename"):
         git("reset", "--hard", sha)
         if kind == "workflow":
             path = root / ".github/workflows/evil.yaml"
@@ -128,8 +132,12 @@ with tempfile.TemporaryDirectory() as directory:
         elif kind == "link":
             (root / "Cargo.lock").symlink_to("/proc/self/environ")
             git("add", "--intent-to-add", "Cargo.lock")
-        else:
+        elif kind == "deletion":
             (root / "Cargo.toml").unlink()
+        else:
+            (root / "x").mkdir(exist_ok=True)
+            source = ".github/workflows/ci.yml" if kind == "workflow-rename" else "old/Cargo.lock"
+            git("mv", source, "x/Cargo.lock")
         bad = subprocess.check_output(["git", "diff", "--binary", "HEAD"])
         git("reset", "--hard", sha)
         (runtime / "release-plz-pr/update.patch").write_bytes(bad)

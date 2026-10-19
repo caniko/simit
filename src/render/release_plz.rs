@@ -237,13 +237,17 @@ fn competing_publisher(content: &str) -> Result<bool> {
                     .collect();
                 for (index, word) in words.iter().enumerate() {
                     let program = Path::new(word).file_name().and_then(|name| name.to_str());
+                    let arguments = &words[index + 1..];
+                    let arguments = if arguments.first().is_some_and(|arg| arg.starts_with('+')) {
+                        &arguments[1..]
+                    } else {
+                        arguments
+                    };
                     if matches!(program, Some("release-plz" | "cargo-release"))
                         || (program == Some("cargo")
-                            && (words.get(index + 1) == Some(&"publish")
-                                || (words
-                                    .get(index + 1)
-                                    .is_some_and(|word| word.starts_with('+'))
-                                    && words.get(index + 2) == Some(&"publish"))))
+                            && (arguments.first() == Some(&"publish")
+                                || (arguments.first().is_some_and(|arg| arg.starts_with('-'))
+                                    && arguments.contains(&"publish"))))
                     {
                         return Ok(true);
                     }
@@ -431,7 +435,7 @@ fn workflow(
         ci::GENERATED_WORKFLOW_MARKER
     );
     checkout(&mut w);
-    w.push_str("      - name: Resolve release-plz immutable revision\n        id: select\n        env:\n          GH_TOKEN: ${{ github.token }}\n        run: python3 .simit/release-plz.py select\n\n  qualify:\n    needs: select\n    if: needs.select.outputs.release_sha != ''\n    runs-on: ubuntu-24.04\n    timeout-minutes: 120\n    permissions:\n      contents: read\n      pull-requests: read\n");
+    w.push_str(&format!("      - name: Resolve release-plz immutable revision\n        id: select\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n          RELEASE_TRUST_ROOT: {:?}\n        run: python3 .simit/release-plz.py select\n\n  qualify:\n    needs: select\n    if: needs.select.outputs.release_sha != ''\n    runs-on: ubuntu-24.04\n    timeout-minutes: 120\n    permissions:\n      contents: read\n      pull-requests: read\n", config.release.signing.trust_root));
     ci::push_job_env(&mut w, Platform::Github, runtime, &options.extra_env, true);
     w.push_str("    steps:\n");
     checkout(&mut w);
@@ -460,13 +464,13 @@ fn workflow(
     w.push_str("      - name: Preserve qualified publisher outside project checkouts\n        run: cp .simit-publisher-engine/target/release/simit \"$RUNNER_TEMP/simit-release-plz-publisher\"\n\n");
     install(&mut w, Runtime::Cargo);
     w.push_str(&format!("      - name: Download same-run qualified archives\n        uses: {}\n        with:\n          name: release-plz-crates-${{{{ github.run_attempt }}}}\n          path: ${{{{ runner.temp }}}}/release-plz-archives\n\n", ci::github_action_ref("actions/download-artifact", "v8.0.2")));
-    w.push_str("      - name: Recheck immutable release selection\n        env:\n          GH_TOKEN: ${{ github.token }}\n          SIMIT_EXPECTED_RELEASE_SHA: ${{ needs.select.outputs.release_sha }}\n        run: python3 \"$RUNNER_TEMP/release-plz-admission.py\" select\n\n");
+    w.push_str(&format!("      - name: Recheck immutable release selection\n        working-directory: ${{{{ runner.temp }}}}/release-plz-event-source\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n          SIMIT_EXPECTED_RELEASE_SHA: ${{{{ needs.select.outputs.release_sha }}}}\n          RELEASE_TRUST_ROOT: {:?}\n        run: python3 \"$RUNNER_TEMP/release-plz-admission.py\" select\n\n", config.release.signing.trust_root));
     w.push_str("      - name: Independently reconstruct every qualified archive without credentials\n        env:\n          SIMIT_EXPECTED_RELEASE_SHA: ${{ needs.select.outputs.release_sha }}\n          SIMIT_RELEASE_PLZ_SOURCE: ${{ runner.temp }}/release-plz-event-source\n        run: |\n          \"$RUNNER_TEMP/simit-release-plz-publisher\" release publisher --publisher-stage prepare --repo \"$GITHUB_REPOSITORY\" --release-plz-archives \"$RUNNER_TEMP/release-plz-archives\"\n\n");
     signing(&mut w, config);
     let token = authentication(&mut w, config);
     w.push_str(&format!("      - name: Publish verified archives and signed tags\n        env:\n          GIT_TOKEN: {token}\n          CARGO_REGISTRY_TOKEN: ${{{{ secrets.{} }}}}\n          SIMIT_EXPECTED_RELEASE_SHA: ${{{{ needs.select.outputs.release_sha }}}}\n          SIMIT_RELEASE_PLZ_PUBLISHER: ${{{{ runner.temp }}}}/simit-release-plz-publisher\n        run: |\n          set -euo pipefail\n          test -n \"$GIT_TOKEN\" && test -n \"$CARGO_REGISTRY_TOKEN\" || {{ echo 'Missing release-plz automation/registry token' >&2; exit 1; }}\n          {}\n\n", config.ci.release_plz.registry_token_secret, invocation(Runtime::Cargo, "release")));
     cleanup(&mut w);
-    w.push_str("  prepare-pr:\n    needs: [select, publish]\n    if: always() && needs.select.result == 'success' && (needs.publish.result == 'success' || needs.publish.result == 'skipped')\n    runs-on: ubuntu-24.04\n    timeout-minutes: 120\n    permissions:\n      contents: read\n      pull-requests: read\n");
+    w.push_str("  prepare-pr:\n    needs: [select, publish]\n    if: always() && needs.select.result == 'success' && (needs.publish.result == 'success' || (needs.select.outputs.release_sha == '' && needs.publish.result == 'skipped'))\n    runs-on: ubuntu-24.04\n    timeout-minutes: 120\n    permissions:\n      contents: read\n      pull-requests: read\n");
     ci::push_job_env(&mut w, Platform::Github, runtime, &options.extra_env, true);
     w.push_str("    steps:\n");
     checkout(&mut w);

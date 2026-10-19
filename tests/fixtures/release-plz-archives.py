@@ -4,6 +4,7 @@ import io
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -53,16 +54,34 @@ with tempfile.TemporaryDirectory() as directory:
     marker.unlink()
     event = root / "event.json"
     event.write_text(json.dumps({"repository": {"full_name": "owner/repo", "default_branch": "trunk"}}))
+    # This self-contained workspace needs no external registry data. Keep real
+    # reconstruction offline in Nix sandboxes, and retain fixture-only diagnostics
+    # without weakening the publisher's credential-safe errors.
+    tools = root / "tools"
+    tools.mkdir()
+    cargo_log = root / "cargo.log"
+    (tools / "cargo").write_text(f'''#!{sys.executable}
+import os, pathlib, subprocess, sys
+assert all(name not in os.environ for name in ('CRATES_IO_API_TOKEN', 'GIT_TOKEN', 'RELEASE_KEY'))
+if sys.argv[1] == 'package':
+    sys.argv.append('--offline')
+result = subprocess.run([{shutil.which('cargo')!r}, *sys.argv[1:]], stderr=subprocess.PIPE)
+with pathlib.Path({str(cargo_log)!r}).open('ab') as log:
+    log.write(result.stderr)
+sys.exit(result.returncode)
+''')
+    (tools / "cargo").chmod(0o700)
     env = {
         **os.environ, "GITHUB_EVENT_PATH": str(event), "GITHUB_EVENT_NAME": "push",
         "GITHUB_REF": "refs/heads/trunk", "GITHUB_REPOSITORY": "owner/repo",
         "GITHUB_SHA": sha, "SIMIT_EXPECTED_RELEASE_SHA": sha,
         "SIMIT_RELEASE_PLZ_SOURCE": str(source), "CRATES_IO_API_TOKEN": "fixture-registry-secret",
         "GIT_TOKEN": "fixture-write-secret", "RELEASE_KEY": "fixture-signing-secret",
+        "PATH": f"{tools}:{os.environ['PATH']}",
     }
     command = [engine, "release", "publisher", "--publisher-stage", "prepare", "--repo", "owner/repo", "--release-plz-archives", str(target / "package")]
     result = subprocess.run(command, env=env, capture_output=True)
-    assert result.returncode == 0, result.stderr.decode()
+    assert result.returncode == 0, result.stderr.decode() + cargo_log.read_text()
     assert not marker.exists(), "independent admission executed project code with secrets"
     archive = target / "package/simit-release-plz-fixture-base-0.1.0.crate"
     original = archive.read_bytes()
