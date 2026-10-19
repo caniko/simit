@@ -271,7 +271,7 @@ def apply_pr():
         print("Newer default-branch source supersedes this release PR update")
         return
     prs = [pr for pr in api(f"repos/{repo}/pulls?state=open&base={base_ref}&per_page=100")
-           if pr["head"]["ref"].startswith("release-plz-") and pr["head"]["repo"]["full_name"] == repo]
+           if pr["head"]["ref"].startswith("release-plz-") and (pr["head"].get("repo") or {}).get("full_name") == repo]
     if len(prs) > 1:
         raise RuntimeError("reconcile multiple open release-plz PRs before updating")
     previous = prs[0] if prs else None

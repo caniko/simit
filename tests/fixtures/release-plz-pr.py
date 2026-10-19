@@ -72,7 +72,8 @@ with tempfile.TemporaryDirectory() as directory:
         return original_check_output(args, **kwargs)
 
     admission.subprocess.check_output = check_output
-    prs = []
+    # GitHub retains open PRs after their fork repository has been deleted.
+    prs = [{"number": 2, "head": {"ref": "release-plz-deleted-fork", "repo": None}}]
     admission.api = lambda path: prs
     requests = []
     admission.github = lambda method, path, payload: requests.append((method, path, payload)) or {"html_url": "https://github.com/owner/repo/pull/1"}
@@ -84,7 +85,7 @@ with tempfile.TemporaryDirectory() as directory:
     assert "0.2.0" in git("show", f"{generated}:Cargo.toml")
     assert "Prepared by release-plz" in git("show", f"{generated}:CHANGELOG.md")
     assert git("rev-parse", "HEAD") == sha
-    prs.append({"number": 1, "body": requests[0][2]["body"], "head": {"ref": branch, "sha": generated, "repo": {"full_name": "owner/repo"}}})
+    prs.insert(0, {"number": 1, "body": requests[0][2]["body"], "head": {"ref": branch, "sha": generated, "repo": {"full_name": "owner/repo"}}})
     admission.apply_pr()
     assert requests[-1][0] == "PATCH", "automatic refresh should reuse the existing PR"
     generated = git("ls-remote", "--heads", "origin", f"refs/heads/{branch}").split()[0]
