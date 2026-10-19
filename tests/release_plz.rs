@@ -447,6 +447,96 @@ fn migration_detects_publish_after_cargo_global_options() {
 }
 
 #[test]
+fn migration_follows_local_publisher_wrappers_and_reusable_jobs() {
+    for (workflow, script) in [
+        (
+            "jobs:\n  ship:\n    runs-on: ubuntu-latest\n    steps:\n      - run: ./scripts/ship.sh\n",
+            "cargo --locked publish\n",
+        ),
+        (
+            "jobs:\n  ship:\n    runs-on: ubuntu-latest\n    steps:\n      - run: nix develop -c bash scripts/ship.sh\n",
+            "bash scripts/second.sh\n",
+        ),
+        (
+            "jobs:\n  ship:\n    uses: ./.github/workflows/reusable.yaml\n",
+            "cargo publish\n",
+        ),
+        (
+            "defaults:\n  run:\n    working-directory: scripts\njobs:\n  ship:\n    steps:\n      - run: ./ship.sh\n",
+            "cargo publish\n",
+        ),
+        (
+            "jobs:\n  ship:\n    defaults:\n      run:\n        working-directory: scripts\n    steps:\n      - run: bash ship.sh\n",
+            "cargo publish\n",
+        ),
+        (
+            "jobs:\n  ship:\n    steps:\n      - working-directory: scripts\n        run: python3 ship.sh\n",
+            "import subprocess\nsubprocess.run(['cargo', 'publish'])\n",
+        ),
+    ] {
+        let temp = project("");
+        fs::create_dir_all(temp.path().join(".github/workflows")).unwrap();
+        fs::create_dir(temp.path().join("scripts")).unwrap();
+        fs::write(temp.path().join("scripts/ship.sh"), script).unwrap();
+        fs::write(temp.path().join("scripts/second.sh"), "cargo publish\n").unwrap();
+        if workflow.contains("uses:") {
+            fs::write(
+                temp.path().join(".github/workflows/reusable.yaml"),
+                "jobs:\n  publish:\n    steps:\n      - run: bash scripts/ship.sh\n",
+            )
+            .unwrap();
+        }
+        fs::write(temp.path().join(".github/workflows/custom.yaml"), workflow).unwrap();
+        let output = init(temp.path(), &["--publish-crates"]);
+        assert!(!output.status.success(), "{output:?}");
+        assert!(String::from_utf8_lossy(&output.stderr).contains("publisher"));
+        assert!(!temp.path().join("release-plz.toml").exists());
+        assert_eq!(
+            fs::read_to_string(temp.path().join("simit.toml")).unwrap(),
+            ""
+        );
+    }
+}
+
+#[test]
+fn migration_inspects_benign_scripts_and_stops_at_opaque_local_actions() {
+    let temp = project("");
+    fs::create_dir_all(temp.path().join(".github/workflows")).unwrap();
+    fs::create_dir(temp.path().join("scripts")).unwrap();
+    fs::write(
+        temp.path().join("scripts/check.sh"),
+        "#!/bin/sh\n# bash comments are not commands\nbash scripts/cycle.sh\ncargo test\n",
+    )
+    .unwrap();
+    fs::write(
+        temp.path().join("scripts/cycle.sh"),
+        "bash scripts/check.sh\n",
+    )
+    .unwrap();
+    let workflow = temp.path().join(".github/workflows/custom.yaml");
+    fs::write(
+        &workflow,
+        "jobs:\n  check:\n    steps:\n      - run: bash scripts/check.sh\n",
+    )
+    .unwrap();
+    let output = init(temp.path(), &["--publish-crates"]);
+    assert!(output.status.success(), "{output:?}");
+    for step in [
+        "uses: ./.github/actions/ship",
+        "run: bash scripts/missing.sh",
+    ] {
+        fs::write(
+            &workflow,
+            format!("jobs:\n  ship:\n    steps:\n      - {step}\n"),
+        )
+        .unwrap();
+        let output = init(temp.path(), &[]);
+        assert!(!output.status.success(), "{output:?}");
+        assert!(String::from_utf8_lossy(&output.stderr).contains("publisher"));
+    }
+}
+
+#[test]
 fn persistence_freezes_members_even_when_the_typed_config_is_unchanged() {
     let temp = project("[ci]\npublish_crates = true\n");
     let config = simit::config::ProjectConfig::load(temp.path()).unwrap();

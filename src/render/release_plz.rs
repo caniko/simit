@@ -1,6 +1,10 @@
 //! Release-plz owns crate releases; Simit qualifies its immutable source first.
 
-use std::{fs, path::Path};
+use std::{
+    collections::BTreeSet,
+    fs,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Context, Result, bail};
 
@@ -145,7 +149,7 @@ pub fn validate_migration(
             &config.ci,
             &file.relative_path,
             &file.content,
-        ) && competing_publisher(&file.content)?
+        ) && competing_publisher(root, &file.content, &mut BTreeSet::new())?
         {
             bail!(
                 "release-plz migration: reconcile competing publisher {} before enabling release-plz",
@@ -199,7 +203,7 @@ pub fn validate_migration(
                 &content,
             );
             if (!ci::is_generated_workflow_marker(&content) || template)
-                && competing_publisher(&content)?
+                && competing_publisher(root, &content, &mut BTreeSet::new())?
             {
                 bail!(
                     "release-plz migration: reconcile competing publisher {} before enabling release-plz",
@@ -211,14 +215,22 @@ pub fn validate_migration(
     Ok(())
 }
 
-fn competing_publisher(content: &str) -> Result<bool> {
-    // ponytail: detect literal steps/actions; wrappers and reusable workflows
-    // need migration review until there is a shared shell/workflow call parser.
+fn competing_publisher(
+    root: &Path,
+    content: &str,
+    seen: &mut BTreeSet<(PathBuf, PathBuf)>,
+) -> Result<bool> {
     let workflow: serde_yaml::Value = serde_yaml::from_str(content)?;
     let Some(jobs) = workflow.get("jobs").and_then(serde_yaml::Value::as_mapping) else {
         return Ok(false);
     };
     for job in jobs.values() {
+        if let Some(local) = job.get("uses").and_then(serde_yaml::Value::as_str)
+            && local.starts_with("./")
+            && local_publisher(root, root, local, seen, true)?
+        {
+            return Ok(true);
+        }
         for step in job
             .get("steps")
             .and_then(serde_yaml::Value::as_sequence)
@@ -226,32 +238,119 @@ fn competing_publisher(content: &str) -> Result<bool> {
             .flatten()
         {
             if let Some(action) = step.get("uses").and_then(serde_yaml::Value::as_str)
-                && (action.contains("release-plz/action@") || action.contains("/publish-crates@"))
+                && (action.contains("release-plz/action@")
+                    || action.contains("/publish-crates@")
+                    || action.starts_with("./"))
             {
                 return Ok(true);
             }
             if let Some(run) = step.get("run").and_then(serde_yaml::Value::as_str) {
-                let words: Vec<_> = run
-                    .split_whitespace()
-                    .map(|word| word.trim_matches(['\'', '"', ';']))
-                    .collect();
-                for (index, word) in words.iter().enumerate() {
-                    let program = Path::new(word).file_name().and_then(|name| name.to_str());
-                    let arguments = &words[index + 1..];
-                    let arguments = if arguments.first().is_some_and(|arg| arg.starts_with('+')) {
-                        &arguments[1..]
-                    } else {
-                        arguments
-                    };
-                    if matches!(program, Some("release-plz" | "cargo-release"))
-                        || (program == Some("cargo")
-                            && (arguments.first() == Some(&"publish")
-                                || (arguments.first().is_some_and(|arg| arg.starts_with('-'))
-                                    && arguments.contains(&"publish"))))
-                    {
-                        return Ok(true);
-                    }
+                let directory = step
+                    .get("working-directory")
+                    .or_else(|| job.get("defaults")?.get("run")?.get("working-directory"))
+                    .or_else(|| {
+                        workflow
+                            .get("defaults")?
+                            .get("run")?
+                            .get("working-directory")
+                    })
+                    .and_then(serde_yaml::Value::as_str)
+                    .unwrap_or(".");
+                if commands_publish(root, &root.join(directory), run, seen)? {
+                    return Ok(true);
                 }
+            }
+        }
+    }
+    Ok(false)
+}
+
+fn local_publisher(
+    root: &Path,
+    cwd: &Path,
+    local: &str,
+    seen: &mut BTreeSet<(PathBuf, PathBuf)>,
+    workflow: bool,
+) -> Result<bool> {
+    let root = root.canonicalize()?;
+    let cwd = cwd.canonicalize().with_context(|| {
+        format!(
+            "release-plz migration: reconcile opaque publisher directory {}",
+            cwd.display()
+        )
+    })?;
+    let path = cwd.join(local).canonicalize().with_context(|| {
+        format!("release-plz migration: reconcile uninspectable publisher reference {local}")
+    })?;
+    if !path.starts_with(&root)
+        || !path.is_file()
+        || fs::metadata(&path)?.len() > 1024 * 1024
+        || seen.len() >= 128
+    {
+        bail!("release-plz migration: reconcile uninspectable publisher reference {local}");
+    }
+    if !seen.insert((cwd.clone(), path.clone())) {
+        return Ok(false);
+    }
+    let content = fs::read_to_string(path).with_context(|| {
+        format!("release-plz migration: reconcile opaque publisher reference {local}")
+    })?;
+    if workflow {
+        competing_publisher(&root, &content, seen)
+    } else {
+        commands_publish(&root, &cwd, &content, seen)
+    }
+}
+
+fn commands_publish(
+    root: &Path,
+    cwd: &Path,
+    run: &str,
+    seen: &mut BTreeSet<(PathBuf, PathBuf)>,
+) -> Result<bool> {
+    // ponytail: bounded literal references, not general shell/program analysis.
+    // Computed/downloaded commands still require operator migration review.
+    for line in run
+        .lines()
+        .filter(|line| !line.trim_start().starts_with('#'))
+    {
+        let words: Vec<_> = line
+            .split(|c: char| c.is_whitespace() || "\"'[](){},;".contains(c))
+            .filter(|word| !word.is_empty())
+            .collect();
+        for (index, word) in words.iter().enumerate() {
+            let program = Path::new(word).file_name().and_then(|name| name.to_str());
+            let arguments = &words[index + 1..];
+            let arguments = if arguments.first().is_some_and(|arg| arg.starts_with('+')) {
+                &arguments[1..]
+            } else {
+                arguments
+            };
+            if matches!(program, Some("release-plz" | "cargo-release"))
+                || (program == Some("cargo")
+                    && (arguments.first() == Some(&"publish")
+                        || (arguments.first().is_some_and(|arg| arg.starts_with('-'))
+                            && arguments.contains(&"publish"))))
+            {
+                return Ok(true);
+            }
+            if word.starts_with("./") && local_publisher(root, cwd, word, seen, false)? {
+                return Ok(true);
+            }
+            if matches!(
+                program,
+                Some("bash" | "sh" | "python" | "python3" | "node" | "pwsh" | "ruby")
+            ) && let Some(local) = words.get(index + 1)
+                && !local.starts_with('-')
+                && !local.contains('$')
+                && (cwd.join(local).is_file()
+                    || matches!(
+                        Path::new(local).extension().and_then(|ext| ext.to_str()),
+                        Some("sh" | "bash" | "py" | "js" | "ps1" | "rb")
+                    ))
+                && local_publisher(root, cwd, local, seen, false)?
+            {
+                return Ok(true);
             }
         }
     }

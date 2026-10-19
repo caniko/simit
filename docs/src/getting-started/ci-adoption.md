@@ -70,6 +70,11 @@ The generated files are `release-plz.toml`, `.simit/release-plz.py`, and
 all three. Generator-owned member/coordinated publishers are retired during
 migration. Hand-written competing publishers or release-plz configuration must
 be reconciled explicitly before generation; Simit reports their paths.
+Migration follows literal local scripts and reusable workflows, respecting
+workflow/job/step working directories. Missing, external or opaque local files
+and local actions require explicit reconciliation. This bounded scan is not a
+general program analyzer: review computed/downloaded commands and remote reusable
+workflows before enabling publication.
 
 Initial support includes Cargo and Nix runtimes, a single publishable crate
 with binary releases, and ordinary multi-crate Cargo workspaces. Package
