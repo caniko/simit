@@ -23,6 +23,7 @@ struct Provider {
     runs: VecDeque<Value>,
     failures: VecDeque<u16>,
     logs: Vec<u8>,
+    job_logs: Vec<u8>,
     jobs: Option<Value>,
     discovery: Option<Value>,
     workflow_path: Option<String>,
@@ -74,6 +75,8 @@ impl Transport for Provider {
                     .collect::<Vec<_>>()
             );
             serde_json::to_vec(&jobs)?
+        } else if endpoint.contains("actions/jobs/") && endpoint.ends_with("/logs") {
+            self.job_logs.clone()
         } else if endpoint.ends_with("/logs") {
             self.logs.clone()
         } else if endpoint.contains("actions/runs?") {
@@ -100,13 +103,16 @@ impl Transport for Provider {
 }
 fn fixture() -> (Spec, Identity, Provider) {
     let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
-    zip.start_file("test/1_Test.txt", zip::write::SimpleFileOptions::default())
-        .unwrap();
-    zip.write_all(b"original execution log\n").unwrap();
+    for name in ["0_test.txt", "test/1_Test.txt"] {
+        zip.start_file(name, zip::write::SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(b"original execution log\n").unwrap();
+    }
     let provider = Provider {
         runs: VecDeque::new(),
         failures: VecDeque::new(),
         logs: zip.finish().unwrap().into_inner(),
+        job_logs: b"original execution log\n".to_vec(),
         jobs: None,
         discovery: None,
         workflow_path: None,
@@ -904,7 +910,10 @@ impl Transport for Uploaded {
         cancellation.check()?;
         let body = if endpoint.ends_with("/zip") {
             self.archive.clone()
-        } else if endpoint.contains("/attempts/1/jobs?") || endpoint.ends_with("/attempts/1/logs") {
+        } else if endpoint.contains("/attempts/1/jobs?")
+            || endpoint.ends_with("/attempts/1/logs")
+            || endpoint.contains("actions/jobs/")
+        {
             return self
                 .provider
                 .get(endpoint, _maximum, _timeout, cancellation);
@@ -1114,7 +1123,7 @@ fn native_retention_rejects_substituted_upload_identity_digest_expiry_and_local_
 #[test]
 fn unsigned_recaptured_jobs_and_logs_cannot_gain_authority_from_the_artifact_digest() {
     use sha2::{Digest, Sha256};
-    for kind in ["jobs", "logs"] {
+    for kind in ["jobs", "logs", "complete-job-log", "complete-forgery"] {
         let (spec, identity, mut provider) = fixture();
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("packet");
@@ -1132,20 +1141,34 @@ fn unsigned_recaptured_jobs_and_logs_cannot_gain_authority_from_the_artifact_dig
             let mut jobs: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
             jobs[0]["steps"][0]["name"] = json!("Forged successful step");
             std::fs::write(path, serde_json::to_vec_pretty(&jobs).unwrap()).unwrap();
+        } else if kind == "complete-job-log" {
+            std::fs::write(root.join("12/job-logs/22.txt"), b"forged successful log\n").unwrap();
         } else {
             let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
-            zip.start_file("test/1_Test.txt", zip::write::SimpleFileOptions::default())
-                .unwrap();
-            zip.write_all(b"forged successful log\n").unwrap();
+            let mut names = vec!["test/1_Test.txt"];
+            if kind == "complete-forgery" {
+                names.push("0_test.txt");
+                std::fs::write(root.join("12/job-logs/22.txt"), b"forged successful log\n")
+                    .unwrap();
+            }
+            for name in &names {
+                zip.start_file(*name, zip::write::SimpleFileOptions::default())
+                    .unwrap();
+                zip.write_all(b"forged successful log\n").unwrap();
+            }
             let raw = zip.finish().unwrap().into_inner();
             std::fs::write(root.join("12/provider-logs.zip"), &raw).unwrap();
             let producer = &mut captured.producers[0];
             producer.raw_logs_sha256 = hex::encode(Sha256::digest(&raw));
-            producer.log_members = [(
-                "test/1_Test.txt".into(),
-                hex::encode(Sha256::digest(b"forged successful log\n")),
-            )]
-            .into();
+            producer.log_members = names
+                .into_iter()
+                .map(|name| {
+                    (
+                        name.into(),
+                        hex::encode(Sha256::digest(b"forged successful log\n")),
+                    )
+                })
+                .collect();
             std::fs::write(
                 root.join("12/provider-log-members.json"),
                 serde_json::to_vec_pretty(&producer.log_members).unwrap(),
@@ -1198,13 +1221,16 @@ fn fresh_provider_zip_container_metadata_is_not_log_content_authority() {
     .unwrap();
     let (mut upload, digest) = uploaded(&root);
     let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
-    zip.start_file(
-        "test/1_Test.txt",
-        zip::write::SimpleFileOptions::default()
-            .last_modified_time(zip::DateTime::from_date_and_time(2020, 1, 2, 3, 4, 6).unwrap()),
-    )
-    .unwrap();
-    zip.write_all(b"original execution log\n").unwrap();
+    for name in ["0_test.txt", "test/1_Test.txt"] {
+        zip.start_file(
+            name,
+            zip::write::SimpleFileOptions::default().last_modified_time(
+                zip::DateTime::from_date_and_time(2020, 1, 2, 3, 4, 6).unwrap(),
+            ),
+        )
+        .unwrap();
+        zip.write_all(b"original execution log\n").unwrap();
+    }
     upload.provider.logs = zip.finish().unwrap().into_inner();
     assert_ne!(provider.logs, upload.provider.logs);
     let result = verify_retention(
@@ -1222,4 +1248,288 @@ fn fresh_provider_zip_container_metadata_is_not_log_content_authority() {
         std::fs::read(root.join("12/provider-logs.zip")).unwrap(),
         provider.logs
     );
+}
+
+#[test]
+fn redundant_step_zip_members_may_disappear_or_reappear_without_losing_job_logs() {
+    // Both PR #34 originals returned different numeric step-file inventories
+    // while all complete aggregate job logs remained byte-identical.
+    for steps in [7, 20] {
+        for remove in [false, true] {
+            let (spec, identity, mut provider) = fixture();
+            let make_logs = |include_steps| {
+                let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+                zip.start_file("0_test.txt", zip::write::SimpleFileOptions::default())
+                    .unwrap();
+                zip.write_all(b"original execution log\n").unwrap();
+                zip.start_file("test/system.txt", zip::write::SimpleFileOptions::default())
+                    .unwrap();
+                zip.write_all(b"runner diagnostics\n").unwrap();
+                if include_steps {
+                    for step in 1..=steps {
+                        zip.start_file(
+                            format!("test/{step}_Test.txt"),
+                            zip::write::SimpleFileOptions::default(),
+                        )
+                        .unwrap();
+                        zip.write_all(b"original execution log\n").unwrap();
+                    }
+                }
+                zip.finish().unwrap().into_inner()
+            };
+            provider.logs = make_logs(remove);
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().join("packet");
+            observe_with(
+                &spec,
+                &identity,
+                &root,
+                &mut provider,
+                &mut FakeClock::default(),
+                &Cancellation::default(),
+            )
+            .unwrap();
+            let original = std::fs::read(root.join("receipt.json")).unwrap();
+            let (mut upload, digest) = uploaded(&root);
+            upload.provider.logs = make_logs(!remove);
+            let result = verify_retention(
+                &spec,
+                &identity,
+                &root,
+                42,
+                &digest,
+                &mut upload,
+                &Cancellation::default(),
+            )
+            .unwrap();
+            assert_eq!(result["capture_complete"], true);
+            assert_eq!(result["qualified"], false);
+            assert_eq!(std::fs::read(root.join("receipt.json")).unwrap(), original);
+            assert_eq!(
+                std::fs::read(root.join("12/provider-logs.zip")).unwrap(),
+                provider.logs
+            );
+        }
+    }
+}
+
+#[test]
+fn fresh_complete_job_logs_cannot_drift_even_when_the_run_zip_is_unchanged() {
+    for logs in [b"forged successful execution\n".as_slice(), b""] {
+        let (spec, identity, mut provider) = fixture();
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("packet");
+        observe_with(
+            &spec,
+            &identity,
+            &root,
+            &mut provider,
+            &mut FakeClock::default(),
+            &Cancellation::default(),
+        )
+        .unwrap();
+        let original = std::fs::read(root.join("receipt.json")).unwrap();
+        let (mut upload, digest) = uploaded(&root);
+        upload.provider.job_logs = logs.to_vec();
+        assert!(
+            verify_retention(
+                &spec,
+                &identity,
+                &root,
+                42,
+                &digest,
+                &mut upload,
+                &Cancellation::default()
+            )
+            .is_err()
+        );
+        assert_eq!(std::fs::read(root.join("receipt.json")).unwrap(), original);
+        assert!(
+            !root
+                .with_file_name("packet.retention")
+                .join("retention.json")
+                .exists()
+        );
+    }
+}
+
+#[test]
+fn only_redundant_numeric_step_members_can_change_inventory_and_shared_bytes_never_change() {
+    use std::collections::BTreeMap;
+    let original = BTreeMap::from([
+        (
+            "0_test.txt".to_owned(),
+            b"original execution log\n".to_vec(),
+        ),
+        (
+            "test/1_Test.txt".to_owned(),
+            b"original step copy\n".to_vec(),
+        ),
+        (
+            "test/0_Test.txt".to_owned(),
+            b"not a numeric step copy\n".to_vec(),
+        ),
+        (
+            "test/+1_Test.txt".to_owned(),
+            b"not provider decimal syntax\n".to_vec(),
+        ),
+        (
+            "test/18446744073709551616_Test.txt".to_owned(),
+            b"overflow\n".to_vec(),
+        ),
+        (
+            "test/system.txt".to_owned(),
+            b"runner diagnostics\n".to_vec(),
+        ),
+        (
+            "test/notes.txt".to_owned(),
+            b"other provider data\n".to_vec(),
+        ),
+    ]);
+    let archive = |members: &BTreeMap<String, Vec<u8>>| {
+        let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        for (name, raw) in members {
+            zip.start_file(name, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            zip.write_all(raw).unwrap();
+        }
+        zip.finish().unwrap().into_inner()
+    };
+    for (name, remove) in [
+        ("0_test.txt", true),
+        ("0_test.txt", false),
+        ("test/1_Test.txt", false),
+        ("test/0_Test.txt", true),
+        ("test/+1_Test.txt", true),
+        ("test/18446744073709551616_Test.txt", true),
+        ("test/system.txt", true),
+        ("test/system.txt", false),
+        ("test/notes.txt", true),
+        ("test/unexpected.txt", false),
+    ] {
+        let (spec, identity, mut provider) = fixture();
+        provider.logs = archive(&original);
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("packet");
+        observe_with(
+            &spec,
+            &identity,
+            &root,
+            &mut provider,
+            &mut FakeClock::default(),
+            &Cancellation::default(),
+        )
+        .unwrap();
+        let before = std::fs::read(root.join("receipt.json")).unwrap();
+        let (mut upload, digest) = uploaded(&root);
+        let mut changed = original.clone();
+        if remove {
+            changed.remove(name);
+        } else {
+            changed.insert(name.into(), b"changed\n".to_vec());
+        }
+        upload.provider.logs = archive(&changed);
+        assert!(
+            verify_retention(
+                &spec,
+                &identity,
+                &root,
+                42,
+                &digest,
+                &mut upload,
+                &Cancellation::default()
+            )
+            .is_err(),
+            "{name}, remove={remove}"
+        );
+        assert_eq!(std::fs::read(root.join("receipt.json")).unwrap(), before);
+        assert!(
+            !root
+                .with_file_name("packet.retention")
+                .join("retention.json")
+                .exists()
+        );
+    }
+}
+
+#[test]
+fn aggregate_log_coverage_preserves_original_job_multiplicity() {
+    for count in 0..=3 {
+        let (mut spec, identity, mut provider) = fixture();
+        spec.workflows.insert(
+            ".github/workflows/ci.yaml".into(),
+            vec!["test".into(), "other".into()],
+        );
+        provider.jobs = Some(json!({"total_count": 2, "jobs": [
+            {"id":22,"run_id":12,"head_sha":"a".repeat(40),"name":"test","status":"completed","conclusion":"success","steps":[{"number":1,"status":"completed","conclusion":"success"}]},
+            {"id":23,"run_id":12,"head_sha":"a".repeat(40),"name":"other","status":"completed","conclusion":"success","steps":[{"number":1,"status":"completed","conclusion":"success"}]}
+        ]}));
+        let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        for name in std::iter::once("test/1_Test.txt".to_owned())
+            .chain((0..count).map(|index| format!("{index}_test.txt")))
+        {
+            zip.start_file(name, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            zip.write_all(b"original execution log\n").unwrap();
+        }
+        provider.logs = zip.finish().unwrap().into_inner();
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("packet");
+        let result = observe_with(
+            &spec,
+            &identity,
+            &root,
+            &mut provider,
+            &mut FakeClock::default(),
+            &Cancellation::default(),
+        );
+        assert_eq!(
+            result.is_ok(),
+            count == 2,
+            "aggregate count={count}: {result:?}"
+        );
+        assert_eq!(receipt(&root)["capture_complete"], count == 2);
+        if count == 2 {
+            let (mut upload, digest) = uploaded(&root);
+            upload.provider.logs = provider.logs.clone();
+            upload.provider.jobs = provider.jobs.clone();
+            verify_retention(
+                &spec,
+                &identity,
+                &root,
+                42,
+                &digest,
+                &mut upload,
+                &Cancellation::default(),
+            )
+            .unwrap();
+        }
+    }
+}
+
+#[test]
+fn empty_or_mismatched_complete_job_logs_cannot_complete_capture() {
+    for logs in [b"".as_slice(), b"different complete log\n"] {
+        let (spec, identity, mut provider) = fixture();
+        provider.job_logs = logs.to_vec();
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("packet");
+        assert!(
+            observe_with(
+                &spec,
+                &identity,
+                &root,
+                &mut provider,
+                &mut FakeClock::default(),
+                &Cancellation::default()
+            )
+            .is_err()
+        );
+        assert_eq!(receipt(&root)["capture_complete"], false);
+        assert_eq!(receipt(&root)["qualified"], false);
+        assert_eq!(
+            std::fs::read(root.join("12/provider-logs.zip")).unwrap(),
+            provider.logs
+        );
+    }
 }
