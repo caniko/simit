@@ -2,6 +2,7 @@
 
 import importlib.util
 import hashlib
+import json
 import os
 from pathlib import Path
 import shutil
@@ -126,10 +127,56 @@ with tempfile.TemporaryDirectory() as directory:
         "head": {"ref": f"release-plz-{base}", "sha": prepared, "repo": {"full_name": "owner/repo"}},
         "body": receipt(prepared),
         "merged_at": "2026-10-19T00:00:00Z",
+        "merge_commit_sha": merged,
         "base": {"ref": "trunk", "repo": {"full_name": "owner/repo"}},
     }
     commits = lambda number: [{"sha": prepared}]
     assert admission.release_sha(merged, [pr], commits) == prepared
+    # A push can contain a release merge followed by another ordinary commit.
+    # Querying only its tip must not silently skip that release and advance PRs.
+    followup = commit("after merged release", merged)
+    event = Path(directory) / "event.json"
+    output = Path(directory) / "selection-output"
+
+    def select_push(before, after, prs, expected=None):
+        event.write_text(json.dumps({"before": before, "after": after}))
+        output.write_text("")
+        os.environ.update(GITHUB_EVENT_PATH=str(event), GITHUB_EVENT_NAME="push",
+                          GITHUB_SHA=after, GITHUB_OUTPUT=str(output))
+        os.environ.pop("SIMIT_EXPECTED_RELEASE_SHA", None)
+        if expected is not None:
+            os.environ["SIMIT_EXPECTED_RELEASE_SHA"] = expected
+        git("checkout", "--detach", after)
+        # Even if every commit is associated with the PR, its exact merge must
+        # be in this push range; neither its branch commits nor old merges count.
+        admission.api = lambda path: prs if "/commits/" in path else [
+            {"sha": next(pr["head"]["sha"] for pr in prs if f"/pulls/{pr['number']}/" in path)}
+        ]
+        admission.select()
+        return output.read_text()
+
+    assert select_push(base, merged, [pr]) == f"release_sha={prepared}\n"
+    assert select_push(base, followup, [pr]) == f"release_sha={prepared}\n", "skipped a release merge before the push tip"
+    assert select_push(merged, followup, [pr]) == "release_sha=\n", "reselected a release outside the push"
+    assert select_push("0" * 40, merged, [pr]) == f"release_sha={prepared}\n"
+    prepared2 = subprocess.check_output(["git", "commit-tree", "-S", tree, "-p", followup], input="chore: second release\n", text=True).strip()
+    merged2 = commit("second release merge", followup, prepared2)
+    pr2 = {**pr, "number": 18, "head": {**pr["head"], "sha": prepared2},
+           "body": receipt(prepared2), "merge_commit_sha": merged2}
+    try:
+        select_push(base, merged2, [pr, pr2])
+        raise AssertionError("advanced past multiple release merges in one push")
+    except RuntimeError as error:
+        assert "multiple release PRs" in str(error)
+        assert output.read_text() == ""
+    for before in [commit("unrelated history"), "a" * 40, "invalid"]:
+        try:
+            select_push(before, followup, [pr])
+            raise AssertionError("accepted incomplete/non-fast-forward push history")
+        except RuntimeError:
+            assert output.read_text() == ""
+    admission.api = original_api
+    git("checkout", "--detach", merged)
     # The trusted-engine bootstrap checks out the event again at shallow depth.
     # Recheck in the full clone retained before that checkout.
     retained = Path(directory) / "retained-event-source"
@@ -202,6 +249,12 @@ with tempfile.TemporaryDirectory() as directory:
     squashed = commit("squash", base)
     git("checkout", "--detach", squashed)
     assert admission.release_sha(squashed, [pr], commits) == squashed
+    squash_pr = {**pr, "merge_commit_sha": squashed}
+    after_squash = commit("after squash", squashed)
+    assert select_push(base, after_squash, [squash_pr]) == f"release_sha={squashed}\n"
+    assert select_push(squashed, after_squash, [squash_pr]) == "release_sha=\n"
+    admission.api = original_api
+    git("checkout", "--detach", squashed)
     # The original signed head of a squash may be missing from the event clone.
     # Exercise its immutable fetch through a disposable local transport.
     git("update-ref", "refs/heads/trunk", squashed)
@@ -216,15 +269,12 @@ with tempfile.TemporaryDirectory() as directory:
     assert guard(squashed, "publish").returncode == 0
     assert guard(prepared, "publish").returncode != 0
     # An API result changing between admission and publication fails closed.
-    os.environ["GITHUB_SHA"] = squashed
-    os.environ["GITHUB_OUTPUT"] = str(Path(directory) / "output")
-    os.environ["SIMIT_EXPECTED_RELEASE_SHA"] = prepared
-    admission.api = lambda path: [pr] if "/commits/" in path else commits(17)
     try:
-        admission.select()
+        select_push(base, squashed, [squash_pr], expected=prepared)
         raise AssertionError("accepted a changed release selection")
-    except RuntimeError:
-        pass
+    except RuntimeError as error:
+        assert "changed after qualification" in str(error)
+        assert output.read_text() == ""
 
     # The workflow must sign with a key authorized by the committed trust root.
     git("add", "trust.asc")

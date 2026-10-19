@@ -173,8 +173,12 @@ signature against the event's committed trust root, and resolves that immutable
 revision. Squashed PR heads are fetched with the read-only token when absent
 from the event checkout. Simit runs project
 checks and required gates on it in a credential-free job, and verifies packaged
-archives with modern Cargo's unpublished-workspace dependency staging. Merge commits select the PR head; squash merges select the event
-commit. Publication rechecks selection, and a Cargo wrapper refuses any upload
+archives with modern Cargo's unpublished-workspace dependency staging. Merge commits select the PR head; squash merges select the squash
+commit. Selection inspects the complete native push range, so later commits in
+the same push cannot hide a release merge or replace its selected revision.
+Only exact PR merge commits introduced by that push count. Multiple release PRs
+in one push and incomplete/non-fast-forward history require reconciliation before
+publication or PR preparation can advance. Publication rechecks selection, and a Cargo wrapper refuses any upload
 from a different revision. Qualification of branch HEAD alone is insufficient.
 
 The publication worker independently reconstructs every archive from the selected

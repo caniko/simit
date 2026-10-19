@@ -117,10 +117,30 @@ def select():
         or git("rev-parse", "HEAD") != event_sha
     ):
         raise RuntimeError("selection requires the immutable event checkout")
+    event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())
+    before = event.get("before", "")
+    if (os.environ["GITHUB_EVENT_NAME"] != "push" or event.get("after") != event_sha
+        or not re.fullmatch(r"[0-9a-f]{40}", before)):
+        raise RuntimeError("release selection requires the complete native push range")
+    if before != "0" * 40 and subprocess.run(
+        ["git", "merge-base", "--is-ancestor", before, event_sha],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    ).returncode:
+        raise RuntimeError("release selection requires complete fast-forward push history; reconcile it before advancing")
     repo = os.environ["GITHUB_REPOSITORY"]
+    revisions = git("rev-list", "--reverse", f"{before}..{event_sha}" if before != "0" * 40 else event_sha).splitlines()
+    releases = {}
+    for revision in revisions:
+        for pr in api(f"repos/{repo}/commits/{revision}/pulls?per_page=100"):
+            # Associations also include PR branch commits and old/open PRs.
+            # Only an actual merge introduced by this push can trigger release.
+            if pr["head"]["ref"].startswith("release-plz-") and pr.get("merge_commit_sha") == revision:
+                releases[pr["number"]] = (revision, pr)
+    if len(releases) > 1:
+        raise RuntimeError("multiple release PRs in one push require reconciliation before advancing")
+    merge, prs = next(((revision, [pr]) for revision, pr in releases.values()), (event_sha, []))
     sha = release_sha(
-        event_sha,
-        api(f"repos/{repo}/commits/{event_sha}/pulls?per_page=100"),
+        merge, prs,
         lambda number: api(f"repos/{repo}/pulls/{number}/commits?per_page=100"),
     )
     expected = os.environ.get("SIMIT_EXPECTED_RELEASE_SHA")
