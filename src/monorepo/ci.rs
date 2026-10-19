@@ -9,14 +9,25 @@ use crate::config::ProjectConfig;
 use crate::project::GeneratedFile;
 use crate::render::ci::{GENERATED_WORKFLOW_MARKER, github_action_ref, immutable_action_ref};
 
+// GitHub caps both steps and hosted jobs at 360 minutes. Diagnostics are bounded
+// to at most three 20-second subprocesses; reserve two minutes at both boundaries.
+const DIAGNOSTIC_GRACE_MINUTES: u64 = 2;
+const HOSTED_JOB_MINUTES: u64 = 360;
+
+fn gate_budget() -> Value {
+    json!({"id": "simit-gate-budget", "name": "Reserve timeout diagnostic grace", "shell": "bash", "run": format!("printf 'deadline=%s\\n' \"$(( $(date +%s) + {} ))\" >> \"$GITHUB_OUTPUT\"", (HOSTED_JOB_MINUTES - DIAGNOSTIC_GRACE_MINUTES) * 60)})
+}
+
 pub(super) fn checkout(node24: bool) -> Value {
     let version = if node24 { "v7.0.1" } else { "v4.3.1" };
     json!({"uses": github_action_ref("actions/checkout", version).split(" #").next().unwrap(), "with": {"fetch-depth": 0, "persist-credentials": false}})
 }
 
 pub(super) fn install_nix(node24: bool) -> Value {
+    // 2.35.2 contains the lost build-slot wakeup fix (NixOS/nix fba3f6e).
+    // The action's default 2.35.1 can abort Worker::run during qualification.
     let version = if node24 { "v31.11.1" } else { "v31" };
-    json!({"uses": immutable_action_ref("https://github.com/cachix/install-nix-action", version).trim_start_matches("https://github.com/").split(" #").next().unwrap()})
+    json!({"uses": immutable_action_ref("https://github.com/cachix/install-nix-action", version).trim_start_matches("https://github.com/").split(" #").next().unwrap(), "with": {"install_url": "https://releases.nixos.org/nix/nix-2.35.2/install"}})
 }
 
 pub(super) fn input_transport() -> Value {
@@ -40,6 +51,9 @@ pub(crate) fn files(
     {
         bail!("monorepo qualification requires GitHub Actions and runtime nix");
     }
+    config
+        .ci
+        .validate_effective_backend(CiProvider::Actions, Platform::Github)?;
     if include_publishers && (config.vscode.is_some() || config.jetbrains.is_some()) {
         bail!(
             "monorepo extension publication is not supported; manage extension publishers independently and use --primary-only for qualification regeneration"
@@ -71,21 +85,61 @@ pub(crate) fn files(
         .as_ref()
         .context("missing monorepo config")?
         .resolve(root)?;
+    if include_publishers
+        && (config.ci.publish_crates
+            || graph
+                .components
+                .values()
+                .any(|component| component.releases.iter().any(|release| release.publish)))
+    {
+        // Publication sources keep their static, credential-free contract.
+        for component in graph.components.values() {
+            for gate in &component.checks {
+                for (name, value) in &gate.env {
+                    if value.contains("${{") {
+                        bail!(
+                            "component {} check {} environment {name:?} cannot contain workflow expressions in publication workflows",
+                            component.id,
+                            gate.id
+                        );
+                    }
+                }
+            }
+        }
+    }
     let runner = config.ci.runner.as_deref().unwrap_or("ubuntu-latest");
     crate::user_config::validate_runner_label(runner)?;
     let node24 = crate::render::ci::github_runner_supports_node24(runner);
-    let mut jobs = serde_json::Map::new();
-    jobs.insert("plan".into(), json!({
-        "runs-on": runner,
-        "timeout-minutes": 20,
-        "env": {"NIX_CONFIG": "experimental-features = nix-command flakes"},
-        "outputs": {"selected": "${{ steps.plan.outputs.selected }}"},
-        "steps": [checkout(node24), install_nix(node24), input_transport(), {
-            "id": "plan", "name": "Select affected components", "shell": "bash",
-            "env": {"BASE_REVISION": "${{ github.event.pull_request.base.sha || github.event.before }}"},
-            "run": "set -euo pipefail\nif [ -n \"$BASE_REVISION\" ] && git cat-file -e \"$BASE_REVISION^{commit}\" 2>/dev/null; then\n  nix develop --print-build-logs .#ci --command simit monorepo plan --base \"$BASE_REVISION\" --json > plan.json\nelse\n  nix develop --print-build-logs .#ci --command simit monorepo plan --json > plan.json\nfi\nselected=$(jq -c '.selected' plan.json)\nprintf 'selected=%s\\n' \"$selected\" >> \"$GITHUB_OUTPUT\"\ncat plan.json\n"
-        }]
+    let scope = if include_publishers {
+        ""
+    } else {
+        " --primary-only"
+    };
+    let drift_check = json!({"name": "Verify generated workflows", "run": format!("nix develop --print-build-logs .#ci --command simit init ci --check{scope}")});
+    let flake_path = root.join("flake.nix");
+    // Evaluated policy retains native worker validation; static policy has one owner.
+    let evaluated_policy =
+        flake_path.is_file() && crate::config::flake_declares_simit_config(&flake_path)?;
+    let mut plan_steps = vec![checkout(node24), install_nix(node24), input_transport()];
+    if !evaluated_policy {
+        plan_steps.push(drift_check.clone());
+    }
+    plan_steps.push(json!({
+        "id": "plan", "name": "Select affected components", "shell": "bash",
+        "env": {"BASE_REVISION": "${{ github.event.pull_request.base.sha || github.event.before }}"},
+        "run": "set -euo pipefail\nif [ -n \"$BASE_REVISION\" ] && git cat-file -e \"$BASE_REVISION^{commit}\" 2>/dev/null; then\n  nix develop --print-build-logs .#ci --command simit monorepo plan --base \"$BASE_REVISION\" --json > plan.json\nelse\n  nix develop --print-build-logs .#ci --command simit monorepo plan --json > plan.json\nfi\nselected=$(jq -c '.selected' plan.json)\nprintf 'selected=%s\\n' \"$selected\" >> \"$GITHUB_OUTPUT\"\ncat plan.json\n"
     }));
+    let mut jobs = serde_json::Map::new();
+    jobs.insert(
+        "plan".into(),
+        json!({
+            "runs-on": runner,
+            "timeout-minutes": 20,
+            "env": {"NIX_CONFIG": "experimental-features = nix-command flakes"},
+            "outputs": {"selected": "${{ steps.plan.outputs.selected }}"},
+            "steps": plan_steps
+        }),
+    );
     let mut needs = vec!["plan".to_owned()];
     for component in graph.components.values() {
         if component.checks.is_empty() {
@@ -127,36 +181,68 @@ pub(crate) fn files(
                     .is_some_and(|runner| crate::render::ci::github_runner_supports_node24(runner))
             })
         };
-        let mut steps = vec![checkout(node24), install_nix(node24), input_transport()];
+        let mut steps = vec![
+            gate_budget(),
+            checkout(node24),
+            install_nix(node24),
+            input_transport(),
+        ];
         if !component.systems.is_empty() {
             steps.push(json!({"name": "Verify runner system", "shell":"bash", "env":{"EXPECTED_NIX_SYSTEM":"${{ matrix.system }}"}, "run":"set -euo pipefail\nactual_system=$(nix eval --impure --raw --expr builtins.currentSystem)\nif [ \"$actual_system\" != \"$EXPECTED_NIX_SYSTEM\" ]; then\n  echo \"Native Nix runner mismatch: expected $EXPECTED_NIX_SYSTEM, got $actual_system\" >&2\n  exit 1\nfi\n"}));
         }
-        let scope = if include_publishers {
-            ""
-        } else {
-            " --primary-only"
-        };
-        steps.push(json!({"name": "Verify generated workflows", "run": format!("nix develop --print-build-logs .#ci --command simit init ci --check{scope}")}));
+        if evaluated_policy {
+            steps.push(drift_check.clone());
+        }
         for gate in &component.checks {
-            // The project-owned command is one argument to Bash, not an interpolated
-            // expression; GitHub event data never enters a shell command.
-            let quoted = format!("'{}'", gate.run.replace('\'', "'\\''"));
-            let assignments = gate
-                .env
-                .iter()
-                .map(|(key, value)| {
-                    format!("'{}'", format!("{key}={value}").replace('\'', "'\\''"))
-                })
-                .collect::<Vec<_>>()
-                .join(" ");
-            let env = if assignments.is_empty() {
+            // Run the validated config through native Simit, already alive when
+            // a Nix daemon dies, so failure evidence does not need another eval.
+            // Capture evaluated step values before nix develop can override them
+            // with devShell variables. Names are validated shell identifiers.
+            let environment = if gate.env.is_empty() {
                 String::new()
             } else {
-                format!("env {assignments} ")
+                format!(
+                    "env {} ",
+                    gate.env
+                        .keys()
+                        .enumerate()
+                        .map(|(index, _)| format!(
+                            "SIMIT_GATE_VALUE_{index}=\"$SIMIT_GATE_VALUE_{index}\""
+                        ))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                )
             };
-            let mut step = json!({"name": gate.id, "timeout-minutes": gate.timeout_minutes, "run": format!("nix develop --print-build-logs .#ci --command {env}bash -euo pipefail -c {quoted}")});
+            let provider_minutes =
+                (gate.timeout_minutes + DIAGNOSTIC_GRACE_MINUTES).min(HOSTED_JOB_MINUTES);
+            let gate_seconds = gate
+                .timeout_minutes
+                .min(HOSTED_JOB_MINUTES - DIAGNOSTIC_GRACE_MINUTES)
+                * 60;
+            let job_deadline = "${{ steps.simit-gate-budget.outputs.deadline }}";
+            // Compute before nix develop so provisioning consumes this budget.
+            // Use no shell variables that could overwrite declared gate values.
+            let deadline = format!(
+                "\"$(( $(date +%s) + {gate_seconds} < {job_deadline} ? $(date +%s) + {gate_seconds} : {job_deadline} ))\""
+            );
+            // Native writes the private marker only after it has initialized its
+            // timer and cancellation handlers and process creation returns.
+            // Until then the outer supervisor owns the deadline and diagnostics.
+            let diagnostics = super::check::NIX_DIAGNOSTICS;
+            let provision = include_str!("provision.sh");
+            let run = format!(
+                "set -euo pipefail\nSIMIT_GATE_DIRECTORY=$(mktemp -d)\nset -- \"$SIMIT_GATE_DIRECTORY\" \"$(date +%s)\" {deadline}\nunset SIMIT_GATE_DIRECTORY\ntest -n \"$1\"\ntest -d \"$1\"\ntrap 'rm -f -- \"$1/ready\" \"$1/ready.diagnostics-complete\" || true; rmdir -- \"$1\" || true' EXIT\nset -- \"$@\" nix develop --print-build-logs .#ci --command {environment}simit monorepo check --component {} --check {} --nix-diagnostics --gate-env provider-staged --deadline \"$3\" --supervisor-ready \"$1/ready\"\nif (\n  set -- \"$1/ready\" \"$3\" \"${{@:4}}\"\n{provision}\n); then\n  exit 0\nelse\n  set -- \"$1\" \"$2\" \"$3\" \"$?\"\nfi\nif [ ! -f \"$1/ready.diagnostics-complete\" ]; then\n  (\n    set -- \"$2\"\n{diagnostics}\n  ) || true\nfi\nexit \"$4\"\n",
+                component.id, gate.id
+            );
+            let mut step = json!({"name": gate.id, "shell": "bash", "timeout-minutes": provider_minutes, "run": run});
             if !gate.env.is_empty() {
-                step["env"] = json!(gate.env);
+                step["env"] = json!(
+                    gate.env
+                        .values()
+                        .enumerate()
+                        .map(|(index, value)| (format!("SIMIT_GATE_VALUE_{index}"), json!(value)))
+                        .collect::<serde_json::Map<_, _>>()
+                );
             }
             steps.push(step);
         }
@@ -167,7 +253,12 @@ pub(crate) fn files(
         "needs": needs, "if": "${{ always() }}", "runs-on": runner, "timeout-minutes": 5,
         "steps": [{"name": "Require every selected component", "env": {"RESULTS": "${{ toJSON(needs) }}", "SELECTED": "${{ needs.plan.outputs.selected }}"}, "run": "printf '%s' \"$RESULTS\" | jq -e --argjson selected \"$SELECTED\" '. as $jobs | $jobs.plan.result == \"success\" and all($selected[]; $jobs[\"component-\" + .].result == \"success\")'"}]
     }));
-    let workflow = json!({"name": "Monorepo qualification", "on": {"push": {"branches": ["**"]}, "pull_request": {}, "workflow_dispatch": {}}, "permissions": {"contents": "read"}, "concurrency": {"group": "monorepo-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event.pull_request.head.ref || github.ref_name }}", "cancel-in-progress": true}, "jobs": jobs});
+    let branches = if config.ci.push_branches.is_empty() {
+        vec!["**".to_owned()]
+    } else {
+        config.ci.push_branches.clone()
+    };
+    let workflow = json!({"name": "Monorepo qualification", "on": {"push": {"branches": branches}, "pull_request": {}, "workflow_dispatch": {}}, "permissions": {"contents": "read"}, "concurrency": {"group": "monorepo-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event.pull_request.head.ref || github.ref_name }}", "cancel-in-progress": true}, "jobs": jobs});
     let mut files = vec![GeneratedFile {
         relative_path: PathBuf::from(".github/workflows/ci.yaml"),
         content: format!(

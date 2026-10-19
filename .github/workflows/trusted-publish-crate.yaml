@@ -76,7 +76,7 @@ jobs:
           ref: ${{ github.event.workflow_run.head_sha }}
           path: .simit-release-source
           persist-credentials: false
-      - name: Project setup
+      - name: Project setup 1
         working-directory: .simit-release-source
         env:
           NIX_CONFIG: "experimental-features = nix-command flakes"
@@ -84,6 +84,15 @@ jobs:
           CARGO_HOME: "/tmp/.cargo"
           CARGO_BUILD_JOBS: "2"
         run: printf '%s\n' 'NIX_CONFIG<<SIMIT_NIX_LIMITS' 'experimental-features = nix-command flakes' 'max-jobs = 1' 'cores = 2' 'SIMIT_NIX_LIMITS' >> "$GITHUB_ENV"
+
+      - name: Project setup 2
+        working-directory: .simit-release-source
+        env:
+          NIX_CONFIG: "experimental-features = nix-command flakes"
+          XDG_CACHE_HOME: "/tmp/.cache"
+          CARGO_HOME: "/tmp/.cargo"
+          CARGO_BUILD_JOBS: "2"
+        run: if [ "$GITHUB_WORKFLOW" = CI ] && [ "$GITHUB_JOB" = test ]; then nix develop -c bash scripts/qualify-updater-tests.sh; fi
 
       - name: Verify packaged contents simit
         working-directory: .simit-release-source

@@ -14,6 +14,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Explain complete operator enrollment with `simit projects update --plan`,
+  including missing, disabled and filtered canaries, without forge requests,
+  credential reads or candidate generation. Bind the report to policy and
+  inventory digests while retaining execution-time canary admission.
+- Workstation-owned updater profiles through `simit projects update`,
+  `lib.mkUpdateConfig` and `nixosModules.updater`, with isolated primary-CI
+  candidates, exact-source qualification, conditional landing and resumable
+  adoption receipts. Runtime tools are configurable and default to Git.
+- A lightweight `devShells.<system>.test` for native tests without the default
+  documentation, website and pre-commit provisioning.
 - Native `simit ci observe-original` and `verify-original-retention` capture
   enrolled original GitHub producers with bounded transient GET retries, one
   aggregate deadline, continuous identity binding, explicit incomplete receipts,
@@ -22,6 +32,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Qualify generated native prebuild push runs against exact source job/step
+  identities: require release-only skips, complete native matrix execution and
+  successful default-branch publication while rejecting unknown predicates.
+- Keep managed README badges outside fenced code examples, including shell
+  comments that resemble headings beneath an HTML banner.
+- Admit the path/repository/branch-isolated concurrency emitted by aggregate
+  primary CI and the full-ref form emitted by separate-event Rust CI. Require
+  aggregate workflows to exclude tags and retain rejection of unknown groups,
+  dynamic cancellation and per-job concurrency.
+- Keep local monorepo gate process creation interruptible by normal termination
+  signals until native child cleanup can take ownership.
+- Use job Bash for generated monorepo gate supervision on hosted and custom runners,
+  retain diagnostics on gate spawn failure or abrupt native termination and
+  propagate gate exit codes. Keep the tool PATH while
+  locating Bash in Nix sandboxes before restoring the gate's configured PATH.
+- Preserve configured monorepo gate environment data across Bash and Nix startup,
+  remove consumed provider aliases and reject read-only and dynamically managed
+  Bash names and startup-sensitive `BASH_ENV` before execution. Require private
+  supervisor directories and bound provisioning (including executable startup),
+  native initialization and gate process creation so failed or
+  timed-out checks retain their diagnostic reserve.
+- Limit COPR staging cleanup to generated source RPMs, preserving project files
+  when the staging directory also contains specs or sources.
+- Clarify NuGet v2/v3 Chocolatey source configuration and reject authenticated
+  registry reads explicitly without exposing publication credentials.
+- Discover NuGet v3 package-content resources for Chocolatey byte verification
+  and omit SemVer build metadata from normalized package filenames and lookups.
+- Reject traversal in COPR spec output paths and enter AUR clones before dropping
+  root privileges, preserving private workspace permissions and clone ownership.
+- Persist and verify source-bound Chocolatey candidates before Actions
+  publication, retain normalized package filenames, isolate prebuild concurrency
+  by fork repository, and reject colliding COPR spec/Makefile outputs.
+- Honor configured COPR Makefile and SRPM staging paths, match the RPM spec's
+  source archive basename, and reject missing, empty, or duplicate SRPMs.
+- Give disposable COPR release fixtures a repository-local Git identity so
+  production-package tests also run in identity-free Nix sandboxes.
+- Link managed APT badges to the configured public repository URL.
+- Generate AUR metadata as an unprivileged user on root release runners;
+  restore clone ownership on success or failure and preserve prior metadata
+  when generation fails.
+- Run Chocolatey release publication in the project's declared environment;
+  retain source-bound packed candidates for byte-verified retries, reject
+  conflicting registry content, and keep publication credentials out of
+  packing, lookups, and command output.
+- Honor monorepo push-branch filters and select binary unit tests when a Rust
+  CI selection has no library, including aggregate and Nextest workflows.
+- Preserve per-member Crow MSRV checks under Omnix replacement and run split
+  audit/deny setup and checks on their selected quality runner.
 - Carry CLI cancellation through every source Git probe and launch probe children
   with a clean environment; document the required isolated observer-job boundary.
 - Revalidate captured attempt-one jobs and log contents against GitHub during

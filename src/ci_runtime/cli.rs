@@ -190,13 +190,18 @@ mod tests {
         let output = root.path().join("slow-git");
         let cancel = std::thread::spawn(move || {
             let deadline = Instant::now() + Duration::from_secs(10);
-            while !std::fs::metadata(&output).is_ok_and(|metadata| metadata.len() > 0)
-                && Instant::now() < deadline
-            {
+            let mut started = false;
+            while Instant::now() < deadline {
+                if std::fs::read(&output)
+                    .is_ok_and(|bytes| bytes == b"probe started\n" || bytes == b"probe started\r\n")
+                {
+                    started = true;
+                    break;
+                }
                 std::thread::sleep(Duration::from_millis(10));
             }
             token.cancel();
-            Instant::now()
+            (started, Instant::now())
         });
         let start = Instant::now();
         #[cfg(unix)]
@@ -207,15 +212,13 @@ mod tests {
         };
         #[cfg(windows)]
         let mut command = {
-            let mut command = std::process::Command::new(
-                r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
-            );
+            // Native built-ins avoid managed PowerShell startup in the probe's
+            // intentionally cleared environment. /d disables cmd AutoRun hooks.
+            let mut command = std::process::Command::new(r"C:\Windows\System32\cmd.exe");
             command.args([
-                "-NoLogo",
-                "-NoProfile",
-                "-NonInteractive",
-                "-Command",
-                "[Console]::WriteLine('probe started'); while ($true) {}",
+                "/d",
+                "/c",
+                "echo probe started& for /l %i in (0,0,1) do @rem",
             ]);
             command
         };
@@ -229,7 +232,12 @@ mod tests {
             },
             1024,
         );
-        let cancelled_at = cancel.join().unwrap();
+        let (started, cancelled_at) = cancel.join().unwrap();
+        assert!(
+            started,
+            "probe did not emit its start marker; stderr: {}",
+            String::from_utf8_lossy(&std::fs::read(root.path().join("slow-git.errors")).unwrap())
+        );
         assert!(result.unwrap_err().to_string().contains("cancelled"));
         assert!(cancelled_at.elapsed() < Duration::from_secs(3));
         assert_eq!(

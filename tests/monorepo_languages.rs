@@ -6,6 +6,8 @@ use serde_json::Value;
 use tempfile::TempDir;
 
 mod common;
+#[path = "common/monorepo_caller.rs"]
+mod monorepo_caller;
 
 fn write(root: &Path, path: &str, content: &str) {
     let path = root.join(path);
@@ -170,17 +172,26 @@ fn generated_component_gates_match_local_bash_and_pipeline_failure_semantics() {
             .as_sequence()
             .unwrap();
         let gate = steps.iter().find(|step| step["name"] == "test").unwrap();
-        assert_eq!(gate["timeout-minutes"], 7);
-        let script = gate["run"]
-            .as_str()
-            .unwrap()
-            .split_once("--command ")
-            .unwrap()
-            .1;
+        assert_eq!(gate["timeout-minutes"], 9);
+        let script = monorepo_caller::script(
+            root,
+            &workflow,
+            "component-python",
+            gate["run"].as_str().unwrap(),
+        );
+        let script = script
+            .replace("nix develop --print-build-logs .#ci --command", "")
+            .replace(
+                "simit monorepo",
+                &format!("'{}' monorepo", env!("CARGO_BIN_EXE_simit")),
+            );
         let output = Command::new("bash")
-            .args(["-euo", "pipefail", "-c", script])
+            .args(["-euo", "pipefail", "-c", &script])
             .current_dir(root)
-            .env("CHECK_VALUE", "devShell override")
+            .env(
+                "SIMIT_GATE_VALUE_0",
+                gate["env"]["SIMIT_GATE_VALUE_0"].as_str().unwrap(),
+            )
             .output()
             .unwrap();
         assert_eq!(output.status.success(), success, "{output:?}");

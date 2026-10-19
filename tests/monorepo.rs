@@ -6,6 +6,9 @@ use serde_json::Value;
 use tempfile::TempDir;
 
 mod common;
+#[cfg(unix)]
+#[path = "common/monorepo_caller.rs"]
+mod monorepo_caller;
 
 fn write(root: &Path, path: &str, content: &str) {
     let path = root.join(path);
@@ -296,25 +299,23 @@ fn monorepo_rejects_unsupported_extension_publication_before_reconciliation() {
             &fs::read_to_string(root.join(".github/workflows/ci.yaml")).unwrap(),
         )
         .unwrap();
-        for id in ["core", "rust", "python", "worker"] {
-            let step = ci["jobs"][format!("component-{id}")]["steps"]
-                .as_sequence()
-                .unwrap()
-                .iter()
-                .find(|step| step["name"] == "Verify generated workflows")
-                .unwrap();
-            let (_, command) = step["run"]
-                .as_str()
-                .unwrap()
-                .split_once("--command simit ")
-                .unwrap();
-            let output = common::simit()
-                .current_dir(root)
-                .args(command.split_whitespace())
-                .output()
-                .unwrap();
-            assert!(output.status.success(), "{id}: {output:?}");
-        }
+        let step = ci["jobs"]["plan"]["steps"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .find(|step| step["name"] == "Verify generated workflows")
+            .unwrap();
+        let (_, command) = step["run"]
+            .as_str()
+            .unwrap()
+            .split_once("--command simit ")
+            .unwrap();
+        let output = common::simit()
+            .current_dir(root)
+            .args(command.split_whitespace())
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
         assert_eq!(fs::read_to_string(root.join(path)).unwrap(), publisher);
         assert_eq!(fs::read_to_string(root.join("simit.toml")).unwrap(), config);
     }
@@ -390,7 +391,7 @@ fn cycles_duplicate_ownership_and_traversal_are_rejected() {
 }
 
 #[test]
-fn component_gate_environments_reject_workflow_expressions() {
+fn component_gate_environments_resolve_provider_expressions_only_in_ci() {
     for (value, valid) in [
         ("${{ secrets.TEST_TOKEN }}", false),
         ("prefix-${{ github.ref }}", false),
@@ -429,14 +430,27 @@ fn component_gate_environments_reject_workflow_expressions() {
                 .args(args)
                 .output()
                 .unwrap();
-            assert_eq!(output.status.success(), valid, "{value:?}: {output:?}");
-            if !valid {
-                assert!(
-                    String::from_utf8_lossy(&output.stderr).contains("workflow expressions"),
-                    "{output:?}"
-                );
-                assert!(!root.join(".github/workflows/ci.yaml").exists());
-            }
+            assert!(output.status.success(), "{value:?}: {output:?}");
+        }
+        let output = common::simit()
+            .current_dir(root)
+            .args([
+                "monorepo",
+                "check",
+                "--component",
+                "core",
+                "--check",
+                "test",
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.success(), valid, "{value:?}: {output:?}");
+        if !valid {
+            assert!(
+                String::from_utf8_lossy(&output.stderr).contains("provider expression requires"),
+                "{output:?}"
+            );
+            assert!(!String::from_utf8_lossy(&output.stderr).contains(value));
         }
         assert_eq!(fs::read_to_string(root.join("simit.toml")).unwrap(), config);
     }
@@ -605,6 +619,17 @@ fn flake_configuration_resolves_from_non_cargo_members_and_stops_at_git_boundari
     assert!(output.status.success(), "{output:?}");
     assert!(temp.path().join(".github/workflows/ci.yaml").is_file());
     assert!(!temp.path().join("python/.github").exists());
+    let workflow = fs::read_to_string(temp.path().join(".github/workflows/ci.yaml")).unwrap();
+    assert_eq!(
+        workflow.matches("name: Verify generated workflows").count(),
+        2
+    );
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
+    assert!(
+        !serde_yaml::to_string(&yaml["jobs"]["plan"])
+            .unwrap()
+            .contains("init ci --check")
+    );
     fs::create_dir(temp.path().join("python/.git")).unwrap();
     let output = common::simit()
         .current_dir(temp.path().join("python"))
@@ -667,6 +692,23 @@ fn qualification_generation_is_complete_and_member_stable() {
     }
     let text = fs::read_to_string(temp.path().join(".github/workflows/ci.yaml")).unwrap();
     let yaml: serde_yaml::Value = serde_yaml::from_str(&text).unwrap();
+    assert_eq!(text.matches("name: Verify generated workflows").count(), 1);
+    let plan_steps = yaml["jobs"]["plan"]["steps"].as_sequence().unwrap();
+    let drift = plan_steps
+        .iter()
+        .position(|step| step["name"] == "Verify generated workflows")
+        .unwrap();
+    let selection = plan_steps
+        .iter()
+        .position(|step| step["id"] == "plan")
+        .unwrap();
+    assert!(drift < selection);
+    assert!(
+        yaml["jobs"]["qualified"]["needs"]
+            .as_sequence()
+            .unwrap()
+            .contains(&serde_yaml::Value::from("plan"))
+    );
     assert_eq!(
         yaml["concurrency"]["group"],
         "monorepo-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event.pull_request.head.ref || github.ref_name }}"
@@ -696,6 +738,79 @@ fn qualification_generation_is_complete_and_member_stable() {
 }
 
 #[test]
+fn monorepo_branch_filters_preserve_order_prs_and_primary_scope() {
+    for (literal, branches) in [
+        ("[]", vec!["**"]),
+        ("[\"trunk\"]", vec!["trunk"]),
+        (
+            "[\"trunk\", \"release/**\", \"!release/archive/**\"]",
+            vec!["trunk", "release/**", "!release/archive/**"],
+        ),
+    ] {
+        let temp = TempDir::new().unwrap();
+        write(
+            temp.path(),
+            "simit.toml",
+            &format!(
+                "[ci]\nplatform = \"github\"\nruntime = \"nix\"\nrunner = \"ubuntu-24.04\"\npush_branches = {literal}\n[monorepo]\nschema_version = 1\n[[monorepo.components]]\nid = \"python\"\npaths = [\"python\"]\nchecks = [{{id = \"test\", run = \"true\"}}]\n"
+            ),
+        );
+        write(temp.path(), "python/example.py", "pass\n");
+        write(temp.path(), "flake.nix", "{}\n");
+        for primary in [false, true] {
+            for check in [false, true] {
+                let mut command = common::simit();
+                command.current_dir(temp.path()).args(["init", "ci"]);
+                if primary {
+                    command.arg("--primary-only");
+                }
+                if check {
+                    command.args(["--check", "--diff"]);
+                }
+                let output = command.output().unwrap();
+                assert!(output.status.success(), "{output:?}");
+            }
+            let text = fs::read_to_string(temp.path().join(".github/workflows/ci.yaml")).unwrap();
+            let yaml: serde_yaml::Value = serde_yaml::from_str(&text).unwrap();
+            assert_eq!(
+                yaml["on"]["push"]["branches"],
+                serde_yaml::to_value(&branches).unwrap()
+            );
+            assert!(yaml["on"]["pull_request"].is_mapping());
+            assert!(yaml["on"]["workflow_dispatch"].is_mapping());
+            assert!(yaml["on"]["push"]["tags"].is_null());
+        }
+    }
+}
+
+#[test]
+fn monorepo_branch_filters_reject_explicit_dual_event_producers() {
+    let temp = fixture();
+    let path = temp.path().join("simit.toml");
+    let config = fs::read_to_string(&path).unwrap().replacen(
+        "runtime = \"nix\"",
+        "runtime = \"nix\"\npush_branches = [\"trunk\"]\nseparate_events = true",
+        1,
+    );
+    fs::write(path, config).unwrap();
+    for primary in [false, true] {
+        let mut command = common::simit();
+        command.current_dir(temp.path()).args(["init", "ci"]);
+        if primary {
+            command.arg("--primary-only");
+        }
+        let output = command.output().unwrap();
+        assert!(!output.status.success());
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            error.contains("push_branches") && error.contains("separate_events"),
+            "{error}"
+        );
+        assert!(!temp.path().join(".github/workflows").exists());
+    }
+}
+
+#[test]
 fn component_release_plan_keeps_independent_versions_and_dependency_order() {
     let temp = fixture();
     let manifest = fs::read_to_string(temp.path().join("crates/worker/Cargo.toml")).unwrap();
@@ -716,6 +831,220 @@ fn component_release_plan_keeps_independent_versions_and_dependency_order() {
     assert_eq!(value["entries"][1]["name"], "worker");
     assert_eq!(value["entries"][0]["version"], "0.1.0");
     assert_eq!(value["entries"][1]["tag"], "worker/v0.7.0");
+}
+
+#[test]
+fn qualification_concurrency_coalesces_repository_events_but_isolates_forks() {
+    let temp = fixture();
+    enroll_release_checks(temp.path());
+    let output = common::simit()
+        .current_dir(temp.path())
+        .args(["init", "ci"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let workflow: serde_yaml::Value =
+        serde_yaml::from_slice(&fs::read(temp.path().join(".github/workflows/ci.yaml")).unwrap())
+            .unwrap();
+    let group = workflow["concurrency"]["group"].as_str().unwrap();
+    // Evaluate the generated Actions interpolation against distinct event contexts.
+    let evaluate = |context: Value| {
+        let mut remaining = group;
+        let mut result = String::new();
+        while let Some((literal, expression)) = remaining.split_once("${{") {
+            result.push_str(literal);
+            let (expression, rest) = expression.split_once("}}").unwrap();
+            let value = expression
+                .split("||")
+                .find_map(|selector| {
+                    selector
+                        .trim()
+                        .split('.')
+                        .try_fold(&context, |value, key| value.get(key))
+                        .and_then(Value::as_str)
+                        .filter(|value| !value.is_empty())
+                })
+                .expect("concurrency selector must resolve for each event");
+            result.push_str(value);
+            remaining = rest;
+        }
+        result.push_str(remaining);
+        result
+    };
+    let push =
+        |repo: &str| serde_json::json!({"github": {"repository": repo, "ref_name": "repair"}});
+    let pr = |repo: &str| serde_json::json!({"github": {"repository": "caniko/simit", "ref_name": "64/merge", "event": {"pull_request": {"head": {"ref": "repair", "repo": {"full_name": repo}}}}}});
+    assert_eq!(workflow["concurrency"]["cancel-in-progress"], true);
+    assert_eq!(evaluate(push("caniko/simit")), evaluate(pr("caniko/simit")));
+    assert_eq!(evaluate(push("fork-a/simit")), evaluate(pr("fork-a/simit")));
+    assert_ne!(evaluate(pr("fork-a/simit")), evaluate(pr("fork-b/simit")));
+    assert_ne!(evaluate(pr("fork-a/simit")), evaluate(push("caniko/simit")));
+}
+
+#[cfg(unix)]
+#[test]
+fn generated_component_gate_propagates_pipeline_failure() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = fixture();
+    let root = temp.path();
+    enroll_release_checks(root);
+    let config = fs::read_to_string(root.join("simit.toml"))
+        .unwrap()
+        .replace(
+            "run = \"true\"",
+            "run = \"false | tee pipeline-output; touch incorrectly-continued\"",
+        );
+    write(root, "simit.toml", &config);
+    let output = common::simit()
+        .current_dir(root)
+        .args(["init", "ci"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let workflow: serde_yaml::Value =
+        serde_yaml::from_slice(&fs::read(root.join(".github/workflows/ci.yaml")).unwrap()).unwrap();
+    let step = workflow["jobs"]["component-core"]["steps"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .find(|step| step["name"] == "test")
+        .unwrap();
+    write(
+        root,
+        "bin/nix",
+        "#!/bin/sh\nwhile [ \"$1\" != --command ]; do shift; done\nshift\nexec \"$@\"\n",
+    );
+    fs::set_permissions(root.join("bin/nix"), fs::Permissions::from_mode(0o755)).unwrap();
+    std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_simit"), root.join("bin/simit")).unwrap();
+    let script = monorepo_caller::script(
+        root,
+        &workflow,
+        "component-core",
+        step["run"].as_str().unwrap(),
+    );
+    let output = Command::new("bash")
+        .current_dir(root)
+        .args(["-euo", "pipefail", "-c", &script])
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                root.join("bin").display(),
+                std::env::var("PATH").unwrap()
+            ),
+        )
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "{output:?}");
+    assert!(root.join("pipeline-output").exists());
+    assert!(!root.join("incorrectly-continued").exists());
+}
+
+#[test]
+fn primary_regeneration_preserves_independent_publishers_and_signing_from_members() {
+    let temp = fixture();
+    let root = temp.path();
+    enroll_release_checks(root);
+    let config = fs::read_to_string(root.join("simit.toml"))
+        .unwrap()
+        .replace(
+            "runtime = \"nix\"",
+            "runtime = \"nix\"\npublish_crates = true",
+        );
+    write(root, "simit.toml", &config);
+    let run = |cwd: &Path, args: &[&str]| {
+        common::simit()
+            .current_dir(cwd)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let output = run(root, &["init", "ci"]);
+    assert!(output.status.success(), "{output:?}");
+    let full_ci = fs::read(root.join(".github/workflows/ci.yaml")).unwrap();
+    for args in [
+        vec!["init", "ci", "--check"],
+        vec!["init", "ci", "--check", "--diff"],
+        vec!["init", "ci"],
+    ] {
+        let output = run(root, &args);
+        assert!(output.status.success(), "{args:?}: {output:?}");
+        assert_eq!(
+            fs::read(root.join(".github/workflows/ci.yaml")).unwrap(),
+            full_ci
+        );
+    }
+    // Drift in independent outputs must not widen a primary-only operation.
+    let publisher = ".github/workflows/trusted-publish-crate-worker.yaml";
+    let original = fs::read_to_string(root.join(publisher)).unwrap();
+    write(
+        root,
+        publisher,
+        &format!("{original}\n# Independently owned publisher change\n"),
+    );
+    write(
+        root,
+        ".github/workflows/publish-npm-independent.yaml",
+        "name: Independent npm publisher\non: [workflow_dispatch]\njobs: {}\n",
+    );
+    let config = fs::read(root.join("simit.toml")).unwrap();
+    let key = fs::read(root.join("keys/maintainers.gpg")).unwrap();
+    let publishers: Vec<_> = fs::read_dir(root.join(".github/workflows"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.file_name().unwrap() != "ci.yaml")
+        .map(|path| {
+            let bytes = fs::read(&path).unwrap();
+            (path, bytes)
+        })
+        .collect();
+    let output = run(root, &["init", "ci", "--check", "--diff"]);
+    assert!(!output.status.success(), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains(publisher));
+    // The first primary regeneration changes CI's self-check scope. Snapshot
+    // that output before checking repeatability from the root and members.
+    let output = run(root, &["init", "ci", "--primary-only"]);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(fs::read(root.join("simit.toml")).unwrap(), config);
+    assert_eq!(fs::read(root.join("keys/maintainers.gpg")).unwrap(), key);
+    for (path, bytes) in &publishers {
+        assert_eq!(&fs::read(path).unwrap(), bytes);
+    }
+    let ci = fs::read(root.join(".github/workflows/ci.yaml")).unwrap();
+    for cwd in [
+        root.to_path_buf(),
+        root.join("crates/worker"),
+        root.join("python"),
+    ] {
+        for args in [
+            vec!["init", "ci", "--primary-only"],
+            vec!["init", "ci", "--primary-only", "--check"],
+            vec!["init", "ci", "--primary-only", "--check", "--diff"],
+            vec!["init", "ci", "--primary-only"],
+        ] {
+            let output = run(&cwd, &args);
+            assert!(output.status.success(), "{args:?}: {output:?}");
+            assert_eq!(
+                fs::read(root.join(".github/workflows/ci.yaml")).unwrap(),
+                ci
+            );
+            assert_eq!(fs::read(root.join("simit.toml")).unwrap(), config);
+            assert_eq!(fs::read(root.join("keys/maintainers.gpg")).unwrap(), key);
+            for (path, bytes) in &publishers {
+                assert_eq!(&fs::read(path).unwrap(), bytes);
+            }
+        }
+    }
+    write(root, ".github/workflows/ci.yaml", "primary drift\n");
+    let output = run(root, &["init", "ci", "--primary-only", "--check", "--diff"]);
+    assert!(!output.status.success(), "{output:?}");
+    assert_eq!(
+        fs::read_to_string(root.join(".github/workflows/ci.yaml")).unwrap(),
+        "primary drift\n"
+    );
+    for (path, bytes) in &publishers {
+        assert_eq!(&fs::read(path).unwrap(), bytes);
+    }
 }
 
 #[test]
@@ -1923,6 +2252,14 @@ fn independent_publication_qualifies_native_components_and_keeps_version_drift_s
     assert_eq!(workflow["on"]["push"]["tags"][0], "worker/v[0-9]*");
     assert_eq!(workflow["permissions"]["contents"], "read");
     assert_eq!(workflow["jobs"]["build"]["needs"][0], "qualified");
+    assert_eq!(text.matches("name: Verify generated workflows").count(), 1);
+    assert!(
+        workflow["jobs"]["plan"]["steps"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .any(|step| step["name"] == "Verify generated workflows")
+    );
     assert!(workflow["on"]["workflow_dispatch"].is_null());
     assert!(!text.contains("secrets."));
     assert_eq!(
@@ -1958,7 +2295,7 @@ fn independent_publication_qualifies_native_components_and_keeps_version_drift_s
         system_guard
             < steps
                 .iter()
-                .position(|step| step["name"] == "Verify generated workflows")
+                .position(|step| step["name"] == "qualify")
                 .unwrap()
     );
     assert_eq!(
@@ -2178,22 +2515,22 @@ fn qualification_actions_follow_hosted_and_mixed_private_capacity() {
             ("plan", runner != Some("atlas")),
             ("component-core", hosted_component),
         ] {
+            let actions = workflow["jobs"][job]["steps"]
+                .as_sequence()
+                .unwrap()
+                .iter()
+                .filter_map(|step| step["uses"].as_str())
+                .collect::<Vec<_>>();
             let expected = simit::render::ci::github_action_ref(
                 "actions/checkout",
                 if hosted { "v7.0.1" } else { "v4.3.1" },
             );
-            assert_eq!(
-                workflow["jobs"][job]["steps"][0]["uses"].as_str().unwrap(),
-                expected.split(" #").next().unwrap()
-            );
+            assert_eq!(actions[0], expected.split(" #").next().unwrap());
             let expected = simit::render::ci::github_action_ref(
                 "cachix/install-nix-action",
                 if hosted { "v31.11.1" } else { "v31" },
             );
-            assert_eq!(
-                workflow["jobs"][job]["steps"][1]["uses"].as_str().unwrap(),
-                expected.split(" #").next().unwrap()
-            );
+            assert_eq!(actions[1], expected.split(" #").next().unwrap());
         }
     }
 }

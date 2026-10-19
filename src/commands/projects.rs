@@ -55,6 +55,8 @@ pub fn run(command: ProjectsCommand) -> Result<()> {
         ProjectsAction::Scan(args) => scan(args),
         ProjectsAction::Audit(args) => audit(args),
         ProjectsAction::Regenerate(args) => regenerate(args),
+        ProjectsAction::Update(args) => super::projects_update::run(args),
+        ProjectsAction::UpdateGithubAdapter(args) => super::projects_update::adapter(args),
         ProjectsAction::Discover(args) => discover(args),
         ProjectsAction::Forget(args) => forget(args),
         ProjectsAction::Prune(args) => prune(args),

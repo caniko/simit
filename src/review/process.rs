@@ -8,6 +8,21 @@ use std::{
     time::{Duration, Instant},
 };
 
+pub(crate) const UNTRUSTED_TOOL_ENV: &[&str] = &[
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "GITHUB_OAUTH_TOKEN",
+    "GITHUB_TOKEN_CMD",
+    "CODEBERG_TOKEN",
+    "CODEFLOE_TOKEN",
+    "ATTIC_TOKEN",
+    "CACHIX_AUTH_TOKEN",
+    "CACHIX_SIGNING_KEY",
+    "NIX_CONFIG",
+    "NIX_PATH",
+    "NIX_USER_CONF_FILES",
+];
+
 pub fn command(program: &str, args: &[String], cwd: Option<&Path>) -> Command {
     let mut c = Command::new(program);
     c.args(args).stdin(Stdio::null());
@@ -15,18 +30,7 @@ pub fn command(program: &str, args: &[String], cwd: Option<&Path>) -> Command {
         c.current_dir(p);
     }
     if program != "gh" {
-        for key in [
-            "GH_TOKEN",
-            "GITHUB_TOKEN",
-            "GITHUB_OAUTH_TOKEN",
-            "GITHUB_TOKEN_CMD",
-            "ATTIC_TOKEN",
-            "CACHIX_AUTH_TOKEN",
-            "CACHIX_SIGNING_KEY",
-            "NIX_CONFIG",
-            "NIX_PATH",
-            "NIX_USER_CONF_FILES",
-        ] {
+        for key in UNTRUSTED_TOOL_ENV {
             c.env_remove(key);
         }
     }
@@ -95,6 +99,7 @@ pub fn run_command_with_limits(
     let mut child = c
         .spawn()
         .with_context(|| format!("cannot start {program}"))?;
+    let mut poll_interval = Duration::from_millis(1);
     let status = loop {
         if let Some(status) = child.try_wait()? {
             break status;
@@ -107,7 +112,8 @@ pub fn run_command_with_limits(
             let _ = child.wait();
             anyhow::bail!("{program} exceeded time/output limits");
         }
-        std::thread::sleep(Duration::from_millis(100));
+        std::thread::sleep(poll_interval.min(deadline.saturating_duration_since(Instant::now())));
+        poll_interval = (poll_interval * 2).min(Duration::from_millis(100));
     };
     // Tool stderr can contain target-controlled strings or credentials: never echo it in a privileged job.
     ensure!(

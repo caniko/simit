@@ -70,11 +70,25 @@ are rejected. A component may contain multiple paths and Cargo packages.
 
 ## Generated qualification CI
 
+Monorepo workflows install Nix **2.35.2** explicitly, including their native
+prebuild and crate archive prerequisites. This release contains the upstream
+[lost build-slot wakeup fix](https://github.com/NixOS/nix/commit/fba3f6e49bea5f6b7b5b75ab794e32afaabd5d26)
+for the `!awake.empty()` assertion abort observed with the install action's
+2.35.1 default. The installer remains pinned when regenerating workflows.
+
 `simit init ci` and `simit init ci --check` operate on the complete root workflow
 set from both root and member directories. GitHub Actions runs the planner at the
 checked-out revision and qualifies the selected components. Missing push-base
 objects trigger full qualification. Every component requires explicit checks;
 failed or cancelled selected jobs fail the aggregate `qualified` gate.
+`[ci].push_branches` filters branch pushes while retaining pull-request and
+manual qualification; an empty list preserves all branch pushes.
+
+Static policy from `simit.toml` or Cargo metadata verifies generated workflows
+once in the prerequisite `plan` job, before component selection. Flake-evaluated
+`outputs.simitConfig` retains verification on each component worker. Native
+runner-system guards and component checks remain on their selected workers.
+Release qualification retains the same verification ownership.
 
 The root `devShells.<system>.ci` must supply Simit with this component support,
 Cargo, and the tools used by checks. Each command runs in that shell with its
@@ -85,6 +99,89 @@ declared environment and timeout. `systems` can select native runners using
 `formatter_modules` are composed into the generated root treefmt module; custom
 flakes retain their existing ownership contract. Language and publication
 overrides must not be used to replace component qualification commands.
+
+### Running a declared check
+
+```console
+simit monorepo check --component core --check evaluate --nix-diagnostics
+```
+
+Local checks use configured environment literals even when the calling shell
+already defines those variables. Provider expressions (`${{ ... }}`) cannot be
+evaluated locally and are rejected before execution without printing their values.
+Generated Actions callers use `--gate-env provider-staged`: every configured
+gate variable must be present under its inert evaluated step alias (an empty value
+is valid), and its bytes are passed directly to the gate without shell expansion.
+Direct `--gate-env provider-resolved` invocations read the declared variable names.
+Checks run once from the project root with Bash `-euo pipefail`; failure diagnostics
+never retry the check or replace its failure status.
+
+The native runner resolves the root configuration, validates the component and
+check, and executes its project-owned command with `bash -euo pipefail` and the declared
+environment. Unknown checks fail before execution. Generated qualification uses
+this runner inside the project's `ci` shell. Both local and generated checks enforce
+the declared timeout; on expiry the runner stops the gate process group before
+collecting diagnostics. Evaluated step values are passed through the Nix shell
+even if its devShell defines the same variable. Local release qualification rejects
+unresolved provider expressions before running any selected gate.
+
+Generated checks reserve two minutes for bounded diagnostics after the gate's
+deadline. The deadline is captured before `nix develop`, so provisioning counts
+toward the step budget, and is capped by a job deadline captured before checkout
+and installation. GitHub steps and jobs retain their 360-minute maximum; a gate
+at that maximum receives up to 358 minutes in CI. Local invocations without the
+generated `--deadline` retain the full configured timeout. An expired CI budget
+collects diagnostics without starting the gate.
+
+Successful setup gates may retain background services for later gates. Failed,
+timed-out or cancelled gates stop their process group before diagnostics; the
+local CLI handles SIGINT, SIGTERM and SIGHUP. During synchronous local process
+creation, those signals retain their default termination behavior until a child
+exists and native cleanup can run. Generated callers supervise that startup
+window with their outer deadline. If Nix provisioning fails before
+the native runner starts, the caller collects the same bounded diagnostics and
+returns the provisioning status. Separate private startup and diagnostic-completion
+markers allow fallback evidence after abrupt native termination while avoiding
+duplicate completed captures. If their private directory cannot
+be created, the caller stops before provisioning or installing cleanup traps.
+
+Generated checks stage provider values under inert environment names before
+Bash starts and use `--gate-env provider-staged` to pass them through native
+initialization. Consumed staging aliases are removed from the gate environment.
+The native runner assigns declared data after gate Bash startup,
+preserving values such as `IFS` and `PWD` that Bash normally rewrites. A gate's
+`PATH` applies only to the gate, preserving the tool paths needed to start Simit
+and Bash even in Nix sandboxes without `/bin/bash`.
+Read-only and dynamically managed Bash names are rejected during graph validation,
+before execution or writes. This includes integer/computed names such as `RANDOM`,
+`SRANDOM`, `OPTIND`, `HISTCMD`, `SECONDS`, `LINENO` and `BASH_ARGV0`, as well as
+Bash's internal arrays: they cannot preserve arbitrary scalar environment data.
+Startup-sensitive `BASH_ENV` is also rejected: gates must source setup files
+explicitly in their declared command. Mutable scalar
+names such as `IFS` and `PWD` remain supported. See the
+[Bash variable reference](https://www.gnu.org/software/bash/manual/html_node/Bash-Variables.html).
+The existing job Bash supervises asynchronous provisioning in an isolated process
+group, including executable lookup and startup, on hosted and custom Nix runners.
+It enforces the remaining deadline during
+Nix provisioning, native initialization (including Cargo metadata) and gate
+process creation, stops its process group on timeout, and leaves the reserved time
+for diagnostics. Only after validation, environment capture, timer creation, cancellation setup and
+completion of the spawn attempt does native Simit mark its ownership of the gate
+deadline and cleanup.
+Spawn failures still attempt diagnostics after that handoff. The separate
+completion marker is written only after the diagnostic script returns success.
+Failed gates return
+their original exit code (or `128 + signal` for signal termination) through the
+CLI and generated supervisor, independently of diagnostic success.
+
+On Linux, `--nix-diagnostics` captures `/proc/meminfo`, memory pressure, Nix
+daemon status, and bounded daemon/kernel journals after a failed check. Journal
+queries start at the check's start time, retain at most 150 entries each, and
+use non-interactive sudo with a 15-second timeout and five-second termination
+grace per command. Missing tools or
+permissions are reported without changing the failed result. The runner does
+not retry the gate or restart the daemon, and does not dump its environment.
+These diagnostics are written to stderr and retained in the provider job log.
 
 ## Independent Cargo releases
 

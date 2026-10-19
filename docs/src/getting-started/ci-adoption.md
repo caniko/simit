@@ -39,6 +39,54 @@ with_msrv = true
 
 ## Generic CI vs Release Publishing
 
+### Execution ownership and duplicate work
+
+Member CI runs repository formatting, full-flake validation, dependency audit,
+dependency policy and declared integration gates once, in the first selected
+member's workflow. Each member retains its own tests, Clippy, documentation,
+MSRV and package checks. A project-wide `check_command` or Omnix replacement
+has one CI owner; per-package release workflows keep their independent
+publication prerequisites. Update required contexts when migrating existing
+member workflows; the shared gate must remain required.
+
+Rust/Nix CI honors `components = ["flake-evaluation"]` with
+`nix flake check --no-build`. Selecting `"checks"` instead performs full flake
+validation; selecting both does not repeat evaluation before that same full
+check. The independent lane's all-system evaluation and Python's evaluation
+plus selected check builds cover different scopes and remain separate.
+An evaluation-only migration needs complete replacement build coverage before
+it qualifies; a list of successful selected builds alone does not prove it.
+
+Nextest replaces the ordinary test harness and retains separate Cargo doctests
+for doctest-enabled library targets, including each feature mode. Binary-only
+packages and `unit_tests_only` do not get invalid or out-of-scope doctest commands.
+`unit_tests_only` selects library tests, or binary unit tests when the selected
+packages have no library target; aggregate CI considers every selected member.
+Omnix replacement suppresses generic Cargo tests and Clippy across Actions,
+split-runner and Crow layouts. Omnix augmentation retains both by design.
+
+To qualify PRs and validate default-branch pushes once per source, explicitly
+set the repository's real default branch in the relevant policies:
+
+```toml
+[ci]
+push_branches = ["trunk"]
+
+[ci.nix_build]
+push_branches = ["trunk"]
+```
+
+These are trigger filters, not successful job-level skips. Empty lists preserve
+all branch pushes. The primary filter supports GitHub Actions Rust/Python/flake
+and monorepo qualification CI;
+the matrix filter supports GitHub Actions matrices, including grouped builds.
+Projects requiring independent push/PR originals retain their existing
+`separate_events` policies until their custody enrollment and required contexts
+have migrated together. Combining branch filters with explicit `separate_events`
+is rejected before generation. Release/tag triggers retain their separate policy.
+Distinct MSRV, feature, platform, extracted-package, all-system evaluation and
+fresh-execution checks are separate acceptance cases, not duplicate work.
+
 ### Native grouped Nix executor
 
 Grouped workflows invoke `simit ci nix-group`. Before adopting regenerated

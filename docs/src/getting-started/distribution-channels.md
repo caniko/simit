@@ -70,10 +70,61 @@ download_repo = "example/foo"
 [copr]
 download_repo = "example/foo"
 project = "example/foo"
+# Optional COPR SCM entrypoint; defaults to ".copr/Makefile".
+makefile_path = "dist/copr/Makefile"
+# Shared release-workflow build/publish directory; defaults to "srpms".
+srpm_dir = "target/release-artifacts/srpms"
 
 [apt]
 repo_url = "ssh://git@codeberg.org/example/foo-apt.git"
+public_url = "https://apt.example.com/"
 ```
+
+`copr.makefile_path` is a workspace-relative path without parent traversal.
+Render, init, drift checks, next-step instructions, and the managed COPR badge
+all use that path. The managed apt badge uses `apt.public_url` when declared;
+otherwise it links to `dist/apt/conf/distributions`.
+
+The COPR release workflow creates the `repo-vVERSION.tar.gz` basename expected
+by the generated RPM spec. `copr.srpm_dir` selects the same workspace-relative
+staging directory for the build and publisher. Publication requires exactly
+one nonempty `.src.rpm` there.
+
+AUR metadata generation works for unprivileged and root release runners.
+Root runners use `setpriv` with an unprivileged UID/GID for `makepkg`, then
+restore the clone's original ownership on success or failure. Metadata is
+replaced only after generation succeeds; failed generation does not publish.
+
+Chocolatey publication runs inside the project's declared Nix development
+environment, with `chocolatey.nix_tool` supplying the external packager. It
+retains the exact packed candidate and its source/content hashes under
+`<package-dir>/.simit-candidates/`; keep that directory when retrying the same
+publication. A retry skips publication only when the registry's downloaded
+package is byte-identical. Different bytes, failed lookups, and unverified
+push failures remain errors. The public Chocolatey push service is checked
+through its community NuGet v2 feed. For custom HTTP(S) push sources, provide
+the NuGet v2 base URL or a NuGet v3 service index. Packing and registry lookups
+do not receive the configured API-key environment variable.
+
+Use `simit dist chocolatey bump --pack` with the same package/archive options
+to retain a candidate without registry access or an API key. Actions release
+workflows restore and explicitly save that source-bound candidate before
+publication, then require a successful restore so a fresh hosted retry uses
+the original package bytes. The cache key includes repository, ref, commit,
+and generated payload hashes. Packing discovers the single nonempty package
+and retains its actual filename, including Chocolatey CLI 2.x version
+normalization.
+
+Registry byte verification discovers NuGet v3 `PackageBaseAddress/3.0.0`
+resources from the configured service index and uses normalized, lowercase
+package IDs/versions for content URLs. NuGet v2 feeds retain their package
+download route. Build metadata is omitted from normalized filenames and lookup
+versions. Discovery and downloads keep publication credentials out of their
+environment; unavailable or malformed service indexes fail verification.
+Service discovery and package downloads must allow anonymous reads, even when
+publication requires an API key. Feeds requiring authenticated reads are not
+supported: HTTP 401/403 from discovery or download is rejected before upload,
+without retrying with publication credentials or forwarding them through redirects.
 
 For an harbor-rs project whose flake exposes the conventional
 `packages.<system>.release-bundle`, the release artifact section can instead

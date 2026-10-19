@@ -8,8 +8,6 @@ use crate::cli::{CoprAction, CoprCommand, CoprRenderArgs};
 use crate::config::{CoprOverrides, ProjectConfig, ResolvedCopr};
 use crate::render::{copr_makefile, rpm_spec};
 
-pub const MAKEFILE_PATH: &str = ".copr/Makefile";
-
 pub fn run(command: CoprCommand) -> Result<()> {
     match command.action {
         CoprAction::Render(args) => render(args),
@@ -22,7 +20,7 @@ fn render(args: CoprRenderArgs) -> Result<()> {
     let rendered = render_files(&resolved, version);
     println!("==> {}", resolved.spec_path);
     print!("{}", rendered.spec);
-    println!("==> {MAKEFILE_PATH}");
+    println!("==> {}", resolved.makefile_path);
     print!("{}", rendered.makefile);
     Ok(())
 }
@@ -63,7 +61,7 @@ pub(crate) fn write_files(
     fs::write(&spec_path, &rendered.spec)
         .with_context(|| format!("writing {}", spec_path.display()))?;
 
-    let makefile_path = workspace_root.join(MAKEFILE_PATH);
+    let makefile_path = workspace_root.join(&resolved.makefile_path);
     if let Some(parent) = makefile_path.parent() {
         fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
     }

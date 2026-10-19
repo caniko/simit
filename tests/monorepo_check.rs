@@ -1,0 +1,1346 @@
+#![cfg(unix)]
+
+use std::{fs, os::unix::fs::PermissionsExt, process::Command};
+
+use tempfile::TempDir;
+
+#[path = "common/monorepo_caller.rs"]
+mod monorepo_caller;
+
+fn fixture() -> TempDir {
+    let temp = TempDir::new().unwrap();
+    let bin = temp.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    fs::write(
+        bin.join("timeout"),
+        "#!/bin/sh\nprintf fixture-diagnostics-unavailable >&2\nexit 127\n",
+    )
+    .unwrap();
+    fs::set_permissions(bin.join("timeout"), fs::Permissions::from_mode(0o755)).unwrap();
+    fs::write(
+        temp.path().join("simit.toml"),
+        r#"
+[ci]
+platform = "github"
+provider = "actions"
+runtime = "nix"
+[monorepo]
+schema_version = 1
+[[monorepo.components]]
+id = "core"
+paths = ["core"]
+checks = [
+  { id = "pass", run = "printf '%s' \"$GATE_VALUE\"", env = { GATE_VALUE = "gate-owned" } },
+  { id = "fail", run = "printf original-failure >&2; exit 7" },
+]
+"#,
+    )
+    .unwrap();
+    temp
+}
+
+fn check(root: &TempDir, id: &str) -> std::process::Output {
+    let path = std::env::join_paths(std::iter::once(root.path().join("bin")).chain(
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
+    ))
+    .unwrap();
+    Command::new(env!("CARGO_BIN_EXE_simit"))
+        .current_dir(root.path())
+        .args([
+            "monorepo",
+            "check",
+            "--component",
+            "core",
+            "--check",
+            id,
+            "--nix-diagnostics",
+        ])
+        .env("GATE_VALUE", "inherited")
+        .env("PATH", path)
+        .env("UNRELATED_SECRET", "must-not-be-reported")
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn runs_the_declared_gate_and_its_environment() {
+    let output = check(&fixture(), "pass");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, b"gate-owned");
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("Nix failure diagnostics"));
+}
+
+#[test]
+fn failure_keeps_original_status_when_diagnostics_are_unavailable() {
+    let output = check(&fixture(), "fail");
+    assert_eq!(output.status.code(), Some(7));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("original-failure"));
+    assert!(stderr.contains("exit status: 7"));
+    assert!(stderr.contains("Nix failure diagnostics"));
+    assert!(!stderr.contains("must-not-be-reported"));
+}
+
+#[test]
+fn unknown_gate_fails_before_execution_or_diagnostics() {
+    let output = check(&fixture(), "absent");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("unknown check absent"));
+    assert!(!stderr.contains("Nix failure diagnostics"));
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn successful_diagnostics_cannot_turn_the_failed_gate_green() {
+    let root = fixture();
+    fs::write(
+        root.path().join("bin/timeout"),
+        "#!/bin/sh\nprintf 'captured: %s\\n' \"$*\"\n",
+    )
+    .unwrap();
+    let output = check(&root, "fail");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("exit status: 7"));
+    assert!(
+        stderr.contains("captured: --kill-after=5s 15s sudo -n systemctl show nix-daemon.service")
+    );
+    assert!(stderr.contains("journalctl --dmesg --since @"));
+    assert!(stderr.contains("--lines=150 --no-pager"));
+    assert!(!stderr.contains("must-not-be-reported"));
+}
+
+#[test]
+fn generated_qualification_runs_native_diagnostics_for_every_gate() {
+    let root = fixture();
+    let output = Command::new(env!("CARGO_BIN_EXE_simit"))
+        .current_dir(root.path())
+        .args(["init", "ci"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        &fs::read_to_string(root.path().join(".github/workflows/ci.yaml")).unwrap(),
+    )
+    .unwrap();
+    let steps = yaml["jobs"]["component-core"]["steps"]
+        .as_sequence()
+        .unwrap();
+    // Exercise the installed daemon fix, not the action's moving default.
+    for job in ["plan", "component-core"] {
+        let installer = yaml["jobs"][job]["steps"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .find(|step| {
+                step["uses"]
+                    .as_str()
+                    .is_some_and(|action| action.starts_with("cachix/install-nix-action@"))
+            })
+            .unwrap();
+        assert_eq!(
+            installer["with"]["install_url"].as_str(),
+            Some("https://releases.nixos.org/nix/nix-2.35.2/install")
+        );
+    }
+    for id in ["pass", "fail"] {
+        let step = steps
+            .iter()
+            .find(|step| step["name"].as_str() == Some(id))
+            .unwrap();
+        assert!(step["run"].as_str().unwrap().contains(&format!(
+            "simit monorepo check --component core --check {id} --nix-diagnostics"
+        )));
+        assert_eq!(step["timeout-minutes"].as_u64(), Some(32));
+        assert!(step["run"].as_str().unwrap().contains("--deadline"));
+    }
+    assert!(
+        !steps
+            .iter()
+            .any(|step| step["name"] == "Provision gate supervisor Python")
+    );
+    assert_eq!(
+        steps
+            .iter()
+            .find(|step| step["name"].as_str() == Some("pass"))
+            .unwrap()["env"]["SIMIT_GATE_VALUE_0"]
+            .as_str(),
+        Some("gate-owned")
+    );
+}
+
+#[test]
+fn gate_path_does_not_replace_the_bash_lookup_path() {
+    let root = environment_fixture("/no/gate/tools");
+    let config = root.path().join("simit.toml");
+    fs::write(
+        &config,
+        fs::read_to_string(&config)
+            .unwrap()
+            .replace("GATE_VALUE", "PATH"),
+    )
+    .unwrap();
+    let bash = Command::new("bash")
+        .args(["-c", "command -v bash"])
+        .output()
+        .unwrap();
+    assert!(bash.status.success());
+    fs::write(
+        root.path().join("bin/bash"),
+        format!(
+            "#!/bin/sh\nprintf x >> bash-startups\nexec {} \"$@\"\n",
+            String::from_utf8(bash.stdout).unwrap().trim()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(
+        root.path().join("bin/bash"),
+        fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_simit"))
+        .current_dir(root.path())
+        .args([
+            "monorepo",
+            "check",
+            "--component",
+            "core",
+            "--check",
+            "pass",
+        ])
+        .env("PATH", root.path().join("bin"))
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        fs::read(root.path().join("observed")).unwrap(),
+        b"/no/gate/tools"
+    );
+    assert_eq!(fs::read(root.path().join("executions")).unwrap(), b"x");
+    assert_eq!(fs::read(root.path().join("bash-startups")).unwrap(), b"x");
+}
+
+#[test]
+fn spawn_failure_attempts_diagnostics_after_claiming_ownership() {
+    let root = fixture();
+    let marker = root.path().join("ready");
+    let output = Command::new(env!("CARGO_BIN_EXE_simit"))
+        .current_dir(root.path())
+        .args([
+            "monorepo",
+            "check",
+            "--component",
+            "core",
+            "--check",
+            "fail",
+            "--nix-diagnostics",
+            "--deadline",
+            "9999999999",
+            "--supervisor-ready",
+        ])
+        .arg(&marker)
+        .env("PATH", root.path().join("bin"))
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(marker.exists());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("diagnostics unavailable"), "{stderr}");
+    assert!(stderr.contains("run declared component check"), "{stderr}");
+}
+
+#[test]
+fn generated_gate_keeps_the_original_exit_code() {
+    let output = generated_gate(&fixture(), "fail", None);
+    assert_eq!(output.status.code(), Some(7), "{output:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr)
+            .matches("Nix failure diagnostics")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn expired_provider_deadline_retains_diagnostics_without_starting_the_gate() {
+    let root = environment_fixture("literal");
+    let output = Command::new(env!("CARGO_BIN_EXE_simit"))
+        .current_dir(root.path())
+        .args([
+            "monorepo",
+            "check",
+            "--component",
+            "core",
+            "--check",
+            "pass",
+            "--deadline",
+            "1",
+            "--nix-diagnostics",
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("timed out"), "{stderr}");
+    assert!(stderr.contains("Nix failure diagnostics"), "{stderr}");
+    assert!(!root.path().join("executions").exists());
+}
+
+#[test]
+fn maximum_gate_timeout_reserves_provider_and_job_diagnostic_grace() {
+    let root = fixture();
+    let config = fs::read_to_string(root.path().join("simit.toml"))
+        .unwrap()
+        .replace("id = \"fail\",", "id = \"fail\", timeout_minutes = 360,");
+    fs::write(root.path().join("simit.toml"), config).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_simit"))
+        .current_dir(root.path())
+        .args(["init", "ci"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        &fs::read_to_string(root.path().join(".github/workflows/ci.yaml")).unwrap(),
+    )
+    .unwrap();
+    let job = &yaml["jobs"]["component-core"];
+    assert_eq!(job["timeout-minutes"], 360);
+    let steps = job["steps"].as_sequence().unwrap();
+    assert_eq!(steps[0]["id"], "simit-gate-budget");
+    assert!(steps[0]["run"].as_str().unwrap().contains("21480"));
+    let gate = steps.iter().find(|step| step["name"] == "fail").unwrap();
+    assert_eq!(gate["timeout-minutes"], 360);
+    assert!(gate["run"].as_str().unwrap().contains("21480"));
+    assert!(
+        gate["run"]
+            .as_str()
+            .unwrap()
+            .contains("steps.simit-gate-budget.outputs.deadline")
+    );
+}
+
+fn environment_fixture(value: &str) -> TempDir {
+    let root = fixture();
+    let config = fs::read_to_string(root.path().join("simit.toml")).unwrap();
+    let config = config.replace("\"gate-owned\"", &toml_edit::Value::from(value).to_string());
+    let config = config.replace(
+        "printf '%s' \\\"$GATE_VALUE\\\"",
+        "printf x >> executions; printf '%s' \\\"$GATE_VALUE\\\" > observed; pwd > working-directory",
+    );
+    fs::write(root.path().join("simit.toml"), config).unwrap();
+    root
+}
+
+fn generated_gate(root: &TempDir, id: &str, value: Option<&str>) -> std::process::Output {
+    generated_gate_with_deadline(root, id, value, None)
+}
+
+fn generated_gate_with_deadline(
+    root: &TempDir,
+    id: &str,
+    value: Option<&str>,
+    budget_seconds: Option<u64>,
+) -> std::process::Output {
+    // Nix provisioning is the external boundary. Execute the unmodified generated
+    // caller, forwarding its exact argv to the real candidate Simit executable.
+    let bin = root.path().join("bin");
+    if !bin.join("nix").exists() {
+        fs::write(bin.join("nix"), "#!/bin/sh\nset -eu\ntest \"$1 $2 $3 $4\" = 'develop --print-build-logs .#ci --command'\nshift 4\nexport GATE_VALUE=devShell-override\nexec \"$@\"\n").unwrap();
+    }
+    fs::set_permissions(bin.join("nix"), fs::Permissions::from_mode(0o755)).unwrap();
+    std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_simit"), bin.join("simit")).unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_simit"))
+        .current_dir(root.path())
+        .args(["init", "ci"])
+        .output()
+        .unwrap();
+    assert!(generated.status.success(), "{generated:?}");
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        &fs::read_to_string(root.path().join(".github/workflows/ci.yaml")).unwrap(),
+    )
+    .unwrap();
+    let step = yaml["jobs"]["component-core"]["steps"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .find(|step| step["name"].as_str() == Some(id))
+        .unwrap();
+    let path = std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    )))
+    .unwrap();
+    let mut caller = Command::new("bash");
+    // Start the exercised caller's budget after fixture generation, not before
+    // starting a separate Cargo metadata/generation process on a slow worker.
+    let script = budget_seconds.map_or_else(
+        || {
+            monorepo_caller::script(
+                root.path(),
+                &yaml,
+                "component-core",
+                step["run"].as_str().unwrap(),
+            )
+        },
+        |seconds| {
+            let deadline = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+                + seconds;
+            step["run"].as_str().unwrap().replace(
+                "${{ steps.simit-gate-budget.outputs.deadline }}",
+                &deadline.to_string(),
+            )
+        },
+    );
+    caller
+        .current_dir(root.path())
+        // GitHub's explicit Bash shell supplies errexit/pipefail, not nounset.
+        .args(["-e", "-o", "pipefail", "-c", &script])
+        .env("PATH", path)
+        .env_remove("GATE_VALUE");
+    let preload = root.path().join("provision-spawn.so");
+    if preload.exists() {
+        caller.env("LD_PRELOAD", preload);
+    }
+    // Actions supplies the evaluated step environment, including empty values.
+    if let Some(environment) = step["env"].as_mapping() {
+        for name in environment.keys() {
+            let name = name.as_str().unwrap();
+            caller.env_remove(name);
+            if let Some(value) = value {
+                caller.env(name, value);
+            }
+        }
+    }
+    if let Some(value) = value {
+        caller.env("UNRELATED_SECRET", value);
+    }
+    caller.output().unwrap()
+}
+
+#[test]
+fn generated_caller_counts_provisioning_against_the_remaining_job_budget() {
+    let root = environment_fixture("literal");
+    fs::write(
+        root.path().join("bin/nix"),
+        "#!/bin/sh\nsleep 5\nshift 4\nexec \"$@\"\n",
+    )
+    .unwrap();
+    let output =
+        generated_gate_with_deadline(&root, "pass", Some("never-report-this-secret"), Some(2));
+    assert!(!output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("timed out"), "{stderr}");
+    assert!(stderr.contains("Nix failure diagnostics"), "{stderr}");
+    assert!(!stderr.contains("never-report-this-secret"));
+    assert!(!root.path().join("executions").exists());
+}
+
+#[test]
+fn generated_caller_preserves_provider_values_as_data_exactly_once_at_project_root() {
+    for (configured, value) in [
+        ("${{ secrets.TEST_TOKEN }}", ""),
+        ("${{ secrets.TEST_TOKEN }}", "provider-secret"),
+        (
+            "${{ secrets.TEST_TOKEN }}",
+            "'\" $(touch injected); `touch injected` & | $HOME",
+        ),
+        ("configured-literal", "evaluated-step-value"),
+    ] {
+        let root = environment_fixture(configured);
+        let output = generated_gate(&root, "pass", Some(value));
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(
+            fs::read(root.path().join("observed")).unwrap(),
+            value.as_bytes()
+        );
+        assert_eq!(fs::read(root.path().join("executions")).unwrap(), b"x");
+        assert_eq!(
+            fs::read_to_string(root.path().join("working-directory"))
+                .unwrap()
+                .trim(),
+            root.path().canonicalize().unwrap().to_str().unwrap()
+        );
+        assert!(!root.path().join("injected").exists());
+        assert!(output.stdout.is_empty());
+        assert!(output.stderr.is_empty());
+    }
+}
+
+#[test]
+fn provider_staging_aliases_do_not_reach_gate_subprocesses() {
+    for generated in [false, true] {
+        let root = environment_fixture("${{ secrets.TEST_TOKEN }}");
+        let path = root.path().join("simit.toml");
+        fs::write(
+            &path,
+            fs::read_to_string(&path)
+                .unwrap()
+                .replace(
+                    "pwd > working-directory",
+                    "env -u GATE_VALUE -u SECOND_VALUE > child-environment",
+                )
+                .replace(
+                    "env = { GATE_VALUE =",
+                    "env = { SECOND_VALUE = 'provider-data', GATE_VALUE =",
+                ),
+        )
+        .unwrap();
+        let value = "never-report-this-secret";
+        let output = if generated {
+            generated_gate(&root, "pass", Some(value))
+        } else {
+            Command::new(env!("CARGO_BIN_EXE_simit"))
+                .current_dir(root.path())
+                .args([
+                    "monorepo",
+                    "check",
+                    "--component",
+                    "core",
+                    "--check",
+                    "pass",
+                    "--gate-env",
+                    "provider-staged",
+                ])
+                .env("SIMIT_GATE_VALUE_0", value)
+                .env("SIMIT_GATE_VALUE_1", value)
+                .output()
+                .unwrap()
+        };
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(
+            fs::read(root.path().join("observed")).unwrap(),
+            value.as_bytes()
+        );
+        let environment = fs::read_to_string(root.path().join("child-environment")).unwrap();
+        assert!(
+            !environment.contains("SIMIT_GATE_VALUE_"),
+            "staging alias leaked"
+        );
+        assert!(
+            !environment.contains("SIMIT_NATIVE_GATE_VALUE_"),
+            "native alias leaked"
+        );
+        assert!(output.stdout.is_empty());
+        assert!(output.stderr.is_empty());
+    }
+}
+
+#[test]
+fn generated_caller_requires_a_private_supervisor_directory_before_provisioning() {
+    for script in ["exit 23", "exit 0", "printf missing-directory"] {
+        let root = environment_fixture("literal");
+        let bin = root.path().join("bin");
+        for (name, body) in [
+            ("mktemp", script),
+            ("nix", "printf x >> provisioning-executions; exit 0"),
+            // A broken caller must not remove a shared /ready during reproduction.
+            ("rm", "printf x >> cleanup-executions"),
+            ("rmdir", "printf x >> cleanup-executions"),
+        ] {
+            fs::write(bin.join(name), format!("#!/bin/sh\n{body}\n")).unwrap();
+            fs::set_permissions(bin.join(name), fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let output = generated_gate(&root, "pass", Some("never-report-this-secret"));
+        assert!(!output.status.success(), "{script}: {output:?}");
+        assert!(!root.path().join("provisioning-executions").exists());
+        assert!(!root.path().join("executions").exists());
+        assert!(!root.path().join("cleanup-executions").exists());
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("never-report-this-secret"));
+    }
+}
+
+#[test]
+fn provider_mode_requires_present_values_even_for_configured_literals() {
+    for configured in ["literal", "${{ secrets.TEST_TOKEN }}"] {
+        let root = environment_fixture(configured);
+        let output = generated_gate(&root, "pass", None);
+        assert!(!output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("GATE_VALUE")
+                && (stderr.contains("unbound variable")
+                    || stderr.contains("missing provider-resolved gate environment variable")),
+            "{stderr}"
+        );
+        assert!(!stderr.contains(configured));
+        assert!(!stderr.contains("Nix failure diagnostics"));
+        assert!(!root.path().join("executions").exists());
+        let direct = Command::new(env!("CARGO_BIN_EXE_simit"))
+            .current_dir(root.path())
+            .args([
+                "monorepo",
+                "check",
+                "--component",
+                "core",
+                "--check",
+                "pass",
+                "--gate-env",
+                "provider-resolved",
+            ])
+            .env_remove("GATE_VALUE")
+            .output()
+            .unwrap();
+        assert!(!direct.status.success());
+        let error = String::from_utf8_lossy(&direct.stderr);
+        assert!(
+            error.contains("missing provider-resolved gate environment variable GATE_VALUE"),
+            "{error}"
+        );
+        assert!(!error.contains(configured));
+        assert!(!root.path().join("executions").exists());
+    }
+}
+
+#[test]
+fn local_literals_override_inherited_values_without_shell_interpretation() {
+    for value in ["", "'\" $(touch injected); `touch injected` & | $HOME"] {
+        let root = environment_fixture(value);
+        let output = check(&root, "pass");
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(
+            fs::read(root.path().join("observed")).unwrap(),
+            value.as_bytes()
+        );
+        assert_eq!(fs::read(root.path().join("executions")).unwrap(), b"x");
+        assert!(!root.path().join("injected").exists());
+    }
+}
+
+#[test]
+fn local_provider_expressions_fail_before_execution_without_exposing_values() {
+    let root = environment_fixture("prefix-${{ secrets.DO_NOT_REPORT }}");
+    let output = check(&root, "pass");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("provider expression requires --gate-env provider-resolved"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("DO_NOT_REPORT"));
+    assert!(!stderr.contains("inherited"));
+    assert!(!root.path().join("executions").exists());
+}
+
+#[test]
+fn generated_failures_keep_status_and_do_not_dump_resolved_secrets() {
+    let root = environment_fixture("${{ secrets.TEST_TOKEN }}");
+    let output = generated_gate(&root, "fail", Some("never-report-this-secret"));
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("original-failure"));
+    assert!(stderr.contains("exit status: 7"));
+    assert!(stderr.contains("Nix failure diagnostics"));
+    assert!(!stderr.contains("never-report-this-secret"));
+    assert_eq!(stderr.matches("Nix failure diagnostics").count(), 1);
+}
+
+#[test]
+fn generated_gate_preserves_bash_pipeline_and_unset_variable_failures() {
+    for command in [
+        "false | true",
+        "printf '%s' \"$SIMIT_MISSING_GATE_VARIABLE\"",
+    ] {
+        let root = environment_fixture("literal");
+        let path = root.path().join("simit.toml");
+        let config = fs::read_to_string(&path).unwrap();
+        let config = config.replace(
+            "printf x >> executions; printf '%s' \\\"$GATE_VALUE\\\" > observed; pwd > working-directory",
+            &format!("printf x >> executions; {}; touch after-failure", command.replace('"', "\\\"")),
+        );
+        fs::write(path, config).unwrap();
+        let output = generated_gate(&root, "pass", Some("never-report-this-secret"));
+        assert!(!output.status.success(), "{output:?}");
+        assert_eq!(fs::read(root.path().join("executions")).unwrap(), b"x");
+        assert!(!root.path().join("after-failure").exists());
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("never-report-this-secret"));
+    }
+}
+
+#[test]
+fn validates_the_complete_graph_before_running_a_gate() {
+    let root = environment_fixture("literal");
+    let path = root.path().join("simit.toml");
+    let config = fs::read_to_string(&path)
+        .unwrap()
+        .replace("id = \"fail\"", "id = \"pass\"");
+    fs::write(path, config).unwrap();
+    let output = check(&root, "pass");
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("duplicate check"));
+    assert!(!root.path().join("executions").exists());
+}
+
+#[test]
+fn member_invocations_run_from_the_project_root() {
+    let root = environment_fixture("literal");
+    let member = root.path().join("core/nested");
+    fs::create_dir_all(&member).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_simit"))
+        .current_dir(member)
+        .args([
+            "monorepo",
+            "check",
+            "--component",
+            "core",
+            "--check",
+            "pass",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(fs::read(root.path().join("executions")).unwrap(), b"x");
+    assert_eq!(
+        fs::read_to_string(root.path().join("working-directory"))
+            .unwrap()
+            .trim(),
+        root.path().canonicalize().unwrap().to_str().unwrap()
+    );
+}
+
+#[test]
+fn local_timeout_stops_the_gate_and_descendants_without_retrying() {
+    let root = fixture();
+    let path = root.path().join("simit.toml");
+    let config = fs::read_to_string(&path).unwrap().replace(
+        "{ id = \"fail\", run = \"printf original-failure >&2; exit 7\" }",
+        "{ id = \"fail\", timeout_minutes = 1, run = \"printf x >> executions; (sleep 65; touch leaked) & wait\" }",
+    );
+    fs::write(path, config).unwrap();
+    let started = std::time::Instant::now();
+    // output() also waits for inherited pipes held by the descendant: killing
+    // only Bash would still block until sleep finishes and the marker is made.
+    let output = check(&root, "fail");
+    assert!(!output.status.success(), "{output:?}");
+    assert!(started.elapsed() < std::time::Duration::from_secs(64));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("timed out (configured limit: 1 minutes)"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("Nix failure diagnostics"));
+    assert!(!stderr.contains("must-not-be-reported"));
+    assert_eq!(fs::read(root.path().join("executions")).unwrap(), b"x");
+    assert!(!root.path().join("leaked").exists());
+}
+
+#[test]
+fn successful_setup_gate_retains_its_background_service_for_the_next_gate() {
+    let root = fixture();
+    let path = root.path().join("simit.toml");
+    let config = fs::read_to_string(&path).unwrap().replace(
+        "printf original-failure >&2; exit 7",
+        "(sleep 0.1; touch service-ready; sleep 30) </dev/null >/dev/null 2>&1 & echo $$ > service-pid",
+    ).replace("printf '%s' \\\"$GATE_VALUE\\\"", "sleep 0.3; test -f service-ready");
+    fs::write(&path, config).unwrap();
+    let setup = check(&root, "fail");
+    assert!(setup.status.success(), "{setup:?}");
+    let pid = fs::read_to_string(root.path().join("service-pid")).unwrap();
+    let next = check(&root, "pass");
+    let pid = rustix::process::Pid::from_raw(pid.trim().parse().unwrap()).unwrap();
+    let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+    assert!(
+        next.status.success(),
+        "successful setup lost its service: {next:?}"
+    );
+}
+
+#[test]
+fn cancellation_stops_the_isolated_gate_and_descendants() {
+    for signal in [rustix::process::Signal::INT, rustix::process::Signal::TERM] {
+        let root = fixture();
+        let path = root.path().join("simit.toml");
+        let config = fs::read_to_string(&path).unwrap().replace(
+            "printf original-failure >&2; exit 7",
+            "echo $$ > gate-pid; (sleep 3; touch leaked) & echo ready > ready; wait",
+        );
+        fs::write(path, config).unwrap();
+        let mut child = Command::new(env!("CARGO_BIN_EXE_simit"))
+            .current_dir(root.path())
+            .args([
+                "monorepo",
+                "check",
+                "--component",
+                "core",
+                "--check",
+                "fail",
+            ])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !root.path().join("ready").exists() {
+            assert!(std::time::Instant::now() < deadline, "gate did not start");
+            assert!(child.try_wait().unwrap().is_none());
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let started = std::time::Instant::now();
+        rustix::process::kill_process(
+            rustix::process::Pid::from_raw(child.id() as i32).unwrap(),
+            signal,
+        )
+        .unwrap();
+        let output = child.wait_with_output().unwrap();
+        let elapsed = started.elapsed();
+        let gate_pid = fs::read_to_string(root.path().join("gate-pid")).unwrap();
+        let _ = rustix::process::kill_process_group(
+            rustix::process::Pid::from_raw(gate_pid.trim().parse().unwrap()).unwrap(),
+            rustix::process::Signal::KILL,
+        );
+        assert!(!output.status.success(), "{output:?}");
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "descendants held pipes after cancellation: {elapsed:?}"
+        );
+        assert!(!root.path().join("leaked").exists());
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("cancelled"),
+            "{output:?}"
+        );
+    }
+}
+
+#[test]
+fn generated_provisioning_failure_keeps_status_and_collects_diagnostics_once() {
+    let root = environment_fixture("${{ secrets.TEST_TOKEN }}");
+    fs::write(root.path().join("bin/nix"), "#!/bin/sh\nprintf x >> provisioning-executions\nprintf provisioning-failure >&2\nexit 23\n").unwrap();
+    let output = generated_gate(&root, "pass", Some("never-report-this-secret"));
+    assert_eq!(output.status.code(), Some(23), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("provisioning-failure"));
+    assert!(stderr.contains("Nix failure diagnostics"), "{stderr}");
+    assert_eq!(stderr.matches("Nix failure diagnostics").count(), 1);
+    assert!(!stderr.contains("never-report-this-secret"));
+    assert_eq!(
+        fs::read(root.path().join("provisioning-executions")).unwrap(),
+        b"x"
+    );
+    assert!(!root.path().join("executions").exists());
+}
+
+#[test]
+fn provider_values_survive_startup_and_internal_name_collisions() {
+    for name in [
+        "IFS",
+        "PWD",
+        "SIMIT_GATE_VALUE_0",
+        "SIMIT_NATIVE_GATE_VALUE_0",
+        "SIMIT_GATE_DIRECTORY",
+    ] {
+        let root = environment_fixture("${{ secrets.TEST_TOKEN }}");
+        let path = root.path().join("simit.toml");
+        fs::write(
+            &path,
+            fs::read_to_string(&path)
+                .unwrap()
+                .replace("GATE_VALUE", name),
+        )
+        .unwrap();
+        let value = "provider-'\" $(touch injected); & |";
+        let output = generated_gate(&root, "pass", Some(value));
+        assert!(output.status.success(), "{name}: {output:?}");
+        assert_eq!(
+            fs::read(root.path().join("observed")).unwrap(),
+            value.as_bytes(),
+            "{name}"
+        );
+        assert_eq!(fs::read(root.path().join("executions")).unwrap(), b"x");
+        assert!(!root.path().join("injected").exists());
+    }
+}
+
+#[test]
+fn local_literals_survive_bash_special_environment_normalization() {
+    for name in ["IFS", "PWD"] {
+        let value = "literal-'\" $(touch injected); & |";
+        let root = environment_fixture(value);
+        let path = root.path().join("simit.toml");
+        fs::write(
+            &path,
+            fs::read_to_string(&path)
+                .unwrap()
+                .replace("GATE_VALUE", name),
+        )
+        .unwrap();
+        let output = Command::new(env!("CARGO_BIN_EXE_simit"))
+            .current_dir(root.path())
+            .args([
+                "monorepo",
+                "check",
+                "--component",
+                "core",
+                "--check",
+                "pass",
+            ])
+            .env(name, "unrelated-inherited")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{name}: {output:?}");
+        assert_eq!(
+            fs::read(root.path().join("observed")).unwrap(),
+            value.as_bytes(),
+            "{name}"
+        );
+        assert_eq!(fs::read(root.path().join("executions")).unwrap(), b"x");
+        assert!(!root.path().join("injected").exists());
+    }
+}
+
+#[test]
+fn stalled_provisioning_expires_before_the_provider_deadline() {
+    let root = environment_fixture("literal");
+    fs::write(
+        root.path().join("bin/nix"),
+        "#!/bin/sh\nprintf x >> provisioning-executions\n(sleep 5; touch leaked) & wait\n",
+    )
+    .unwrap();
+    let started = std::time::Instant::now();
+    let output =
+        generated_gate_with_deadline(&root, "pass", Some("never-report-this-secret"), Some(2));
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(4),
+        "provisioning ignored the reserved deadline"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Nix failure diagnostics"), "{stderr}");
+    assert!(!stderr.contains("never-report-this-secret"));
+    assert_eq!(
+        fs::read(root.path().join("provisioning-executions")).unwrap(),
+        b"x"
+    );
+    assert!(!root.path().join("executions").exists());
+    assert!(!root.path().join("leaked").exists());
+}
+
+#[test]
+fn generated_gate_path_does_not_hide_the_native_runner() {
+    let root = environment_fixture("${{ secrets.TEST_TOKEN }}");
+    let path = root.path().join("simit.toml");
+    fs::write(
+        &path,
+        fs::read_to_string(&path)
+            .unwrap()
+            .replace("GATE_VALUE", "PATH"),
+    )
+    .unwrap();
+    let output = generated_gate(&root, "pass", Some("/usr/bin:/bin"));
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        fs::read(root.path().join("observed")).unwrap(),
+        b"/usr/bin:/bin"
+    );
+    assert_eq!(fs::read(root.path().join("executions")).unwrap(), b"x");
+}
+
+#[test]
+fn readonly_and_managed_bash_environment_names_reject_before_execution() {
+    for name in [
+        "UID",
+        "EUID",
+        "PPID",
+        "BASHOPTS",
+        "SHELLOPTS",
+        "BASH_VERSINFO",
+        "OPTIND",
+        "RANDOM",
+        "SRANDOM",
+        "HISTCMD",
+        "SECONDS",
+        "LINENO",
+        "BASHPID",
+        "EPOCHSECONDS",
+        "EPOCHREALTIME",
+        "BASH_MONOSECONDS",
+        "BASH_SUBSHELL",
+        "BASH_COMPAT",
+        "BASH_XTRACEFD",
+        "BASH_ALIASES",
+        "BASH_ARGC",
+        "BASH_ARGV",
+        "BASH_ARGV0",
+        "BASH_ENV",
+        "BASH_CMDS",
+        "BASH_COMMAND",
+        "BASH_LINENO",
+        "BASH_SOURCE",
+        "DIRSTACK",
+        "FUNCNAME",
+        "GROUPS",
+        "PIPESTATUS",
+        "_",
+    ] {
+        let root = environment_fixture("never-report-this-secret");
+        let path = root.path().join("simit.toml");
+        fs::write(
+            &path,
+            fs::read_to_string(&path)
+                .unwrap()
+                .replace("GATE_VALUE", name),
+        )
+        .unwrap();
+        for args in [
+            vec![
+                "monorepo",
+                "check",
+                "--component",
+                "core",
+                "--check",
+                "pass",
+            ],
+            vec!["init", "ci"],
+        ] {
+            let output = Command::new(env!("CARGO_BIN_EXE_simit"))
+                .current_dir(root.path())
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(!output.status.success(), "{name}: {output:?}");
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                stderr.contains("unsupported ")
+                    && stderr.contains(&format!("Bash environment name {name}")),
+                "{stderr}"
+            );
+            assert!(!stderr.contains("never-report-this-secret"));
+        }
+        assert!(!root.path().join("executions").exists());
+        assert!(!root.path().join(".github").exists());
+    }
+}
+
+#[test]
+fn native_initialization_remains_supervised_until_deadline_ownership() {
+    let root = environment_fixture("literal");
+    let config = root.path().join("simit.toml");
+    fs::write(
+        &config,
+        fs::read_to_string(&config).unwrap().replace(
+            "paths = [\"core\"]",
+            "paths = [\"core\"]\ncargo_packages = [\"initialization-delay\"]",
+        ),
+    )
+    .unwrap();
+    fs::write(root.path().join("Cargo.toml"), "[package]\nname='initialization-delay'\nversion='0.1.0'\nedition='2024'\n[lib]\npath='core/lib.rs'\n").unwrap();
+    fs::create_dir(root.path().join("core")).unwrap();
+    fs::write(root.path().join("core/lib.rs"), "").unwrap();
+    fs::write(
+        root.path().join("bin/cargo"),
+        "#!/bin/sh\nprintf x >> metadata-executions\n(sleep 5; touch leaked) & wait\nexit 7\n",
+    )
+    .unwrap();
+    fs::set_permissions(
+        root.path().join("bin/cargo"),
+        fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    let started = std::time::Instant::now();
+    let output =
+        generated_gate_with_deadline(&root, "pass", Some("never-report-this-secret"), Some(3));
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "native initialization escaped supervision"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Nix failure diagnostics"), "{stderr}");
+    assert_eq!(stderr.matches("Nix failure diagnostics").count(), 1);
+    assert!(!stderr.contains("never-report-this-secret"));
+    assert_eq!(
+        fs::read(root.path().join("metadata-executions")).unwrap(),
+        b"x"
+    );
+    assert!(!root.path().join("executions").exists());
+    assert!(!root.path().join("leaked").exists());
+}
+
+#[test]
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn stalled_gate_process_creation_preserves_hosted_deadlines_and_local_interrupts() {
+    let root = environment_fixture("literal");
+    // Block glibc process creation in native Simit, before any Bash child exists.
+    // The generated caller and its outer supervisor do not load this shim.
+    let source = root.path().join("spawn.c");
+    let library = root.path().join("spawn.so");
+    fs::write(
+        &source,
+        r#"
+#include <dlfcn.h>
+#include <spawn.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+int posix_spawnp(pid_t *pid, const char *file,
+                 const posix_spawn_file_actions_t *actions,
+                 const posix_spawnattr_t *attr, char *const argv[], char *const envp[]) {
+    if (strcmp(file, "bash") == 0) {
+        FILE *probe = fopen("spawn-blocked", "w");
+        if (!probe) _exit(125);
+        fclose(probe);
+        for (;;) pause();
+    }
+    int (*next)(pid_t *, const char *, const posix_spawn_file_actions_t *,
+                const posix_spawnattr_t *, char *const [], char *const []) =
+        dlsym(RTLD_NEXT, "posix_spawnp");
+    return next(pid, file, actions, attr, argv, envp);
+}
+"#,
+    )
+    .unwrap();
+    let compiled = Command::new("cc")
+        .args(["-shared", "-fPIC"])
+        .arg(&source)
+        .arg("-o")
+        .arg(&library)
+        .arg("-ldl")
+        .output()
+        .unwrap();
+    assert!(compiled.status.success(), "{compiled:?}");
+    // Keep the failing reproduction bounded even if native claims ownership early.
+    // The watchdog shares native's group and is cleaned up by the outer supervisor.
+    let nix = root.path().join("bin/nix");
+    fs::write(&nix, format!("#!/bin/sh\nshift 4\nexport LD_PRELOAD='{}'\n(sleep 10; kill -KILL $$) </dev/null >/dev/null 2>&1 &\nexec \"$@\"\n", library.display())).unwrap();
+    let started = std::time::Instant::now();
+    let output =
+        generated_gate_with_deadline(&root, "pass", Some("never-report-this-secret"), Some(2));
+    assert!(
+        root.path().join("spawn-blocked").exists(),
+        "spawn was not blocked: {output:?}"
+    );
+    assert_eq!(output.status.code(), Some(124), "{output:?}");
+    assert!(started.elapsed() < std::time::Duration::from_secs(9));
+    assert!(!root.path().join("executions").exists());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        stderr.matches("Nix failure diagnostics").count(),
+        1,
+        "{stderr}"
+    );
+    assert!(!stderr.contains("never-report-this-secret"));
+    // Local execution has no outer watcher. A blocked spawn must retain the
+    // default signal path instead of merely setting an unobserved atomic flag.
+    use std::os::unix::process::ExitStatusExt;
+    for (signal, expected) in [
+        (rustix::process::Signal::INT, signal_hook::consts::SIGINT),
+        (rustix::process::Signal::TERM, signal_hook::consts::SIGTERM),
+        (rustix::process::Signal::HUP, signal_hook::consts::SIGHUP),
+    ] {
+        fs::remove_file(root.path().join("spawn-blocked")).unwrap();
+        let mut child = Command::new(env!("CARGO_BIN_EXE_simit"))
+            .current_dir(root.path())
+            .args([
+                "monorepo",
+                "check",
+                "--component",
+                "core",
+                "--check",
+                "pass",
+            ])
+            .env("LD_PRELOAD", &library)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let ready = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !root.path().join("spawn-blocked").exists() {
+            assert!(std::time::Instant::now() < ready);
+            assert!(child.try_wait().unwrap().is_none());
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        rustix::process::kill_process(
+            rustix::process::Pid::from_raw(child.id() as i32).unwrap(),
+            signal,
+        )
+        .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while child.try_wait().unwrap().is_none() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        // Bound the failing reproduction without leaving its paused native process.
+        if child.try_wait().unwrap().is_none() {
+            child.kill().unwrap();
+        }
+        let output = child.wait_with_output().unwrap();
+        assert_eq!(output.status.signal(), Some(expected), "{output:?}");
+        assert!(!root.path().join("executions").exists());
+    }
+}
+
+#[test]
+fn abrupt_native_termination_after_handoff_retains_fallback_diagnostics() {
+    let root = environment_fixture("literal");
+    let config = root.path().join("simit.toml");
+    fs::write(&config, fs::read_to_string(&config).unwrap().replace(
+        "\"printf original-failure >&2; exit 7\"",
+        &toml_edit::Value::from("while [ ! -s \"$GATE_SUPERVISOR_READY\" ]; do sleep 0.01; done; printf x >> executions; (sleep 5; touch leaked) & kill -KILL \"$PPID\"; wait").to_string(),
+    )).unwrap();
+    fs::write(root.path().join("bin/nix"), "#!/bin/sh\nprevious=\nfor word do\n  if [ \"$previous\" = --supervisor-ready ]; then export GATE_SUPERVISOR_READY=$word; fi\n  previous=$word\ndone\nshift 4\nexec \"$@\"\n").unwrap();
+    let started = std::time::Instant::now();
+    let output = generated_gate(&root, "fail", Some("never-report-this-secret"));
+    assert_eq!(output.status.code(), Some(137), "{output:?}");
+    assert!(started.elapsed() < std::time::Duration::from_secs(3));
+    assert!(!root.path().join("leaked").exists());
+    assert_eq!(fs::read(root.path().join("executions")).unwrap(), b"x");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        stderr.matches("Nix failure diagnostics").count(),
+        1,
+        "{stderr}"
+    );
+    assert!(!stderr.contains("never-report-this-secret"));
+}
+
+#[test]
+fn custom_nixos_runner_supervision_works_without_host_python() {
+    let root = environment_fixture("literal");
+    let config = root.path().join("simit.toml");
+    fs::write(
+        &config,
+        fs::read_to_string(&config).unwrap().replace(
+            "runtime = \"nix\"",
+            "runtime = \"nix\"\nrunner = \"self-hosted-nixos\"",
+        ),
+    )
+    .unwrap();
+    let python = root.path().join("bin/python3");
+    fs::write(
+        &python,
+        "#!/bin/sh\nprintf host-python-unavailable >&2\nexit 127\n",
+    )
+    .unwrap();
+    fs::set_permissions(&python, fs::Permissions::from_mode(0o755)).unwrap();
+    let output = generated_gate(&root, "pass", Some("provider-data"));
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        fs::read(root.path().join("observed")).unwrap(),
+        b"provider-data"
+    );
+    let workflow = fs::read_to_string(root.path().join(".github/workflows/ci.yaml")).unwrap();
+    assert!(workflow.contains("self-hosted-nixos"));
+    assert!(!workflow.contains("actions/setup-python@"));
+}
+
+#[test]
+fn provisioning_supervisor_cancellation_stops_its_process_group() {
+    for (signal, code) in [
+        (rustix::process::Signal::INT, 130),
+        (rustix::process::Signal::TERM, 143),
+        (rustix::process::Signal::HUP, 129),
+    ] {
+        let root = fixture();
+        let mut child = Command::new("bash")
+            .current_dir(root.path())
+            .args([
+                "-euo",
+                "pipefail",
+                "-c",
+                include_str!("../src/monorepo/provision.sh"),
+                "simit-supervisor",
+            ])
+            .arg(root.path().join("ready"))
+            .arg("9999999999")
+            .args([
+                "bash",
+                "-c",
+                "printf x > provisioning-ready; (sleep 3; touch leaked) & wait",
+            ])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !root.path().join("provisioning-ready").exists() {
+            assert!(std::time::Instant::now() < deadline);
+            assert!(child.try_wait().unwrap().is_none());
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let started = std::time::Instant::now();
+        rustix::process::kill_process(
+            rustix::process::Pid::from_raw(child.id() as i32).unwrap(),
+            signal,
+        )
+        .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert_eq!(output.status.code(), Some(code), "{output:?}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        assert!(!root.path().join("leaked").exists());
+    }
+}
+
+#[test]
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn stalled_nix_exec_remains_under_the_outer_deadline() {
+    let root = environment_fixture("literal");
+    // Delay exec itself in the child, before nix has started or closed the
+    // subprocess error pipe. The finite delay keeps the failing reproduction bounded.
+    let source = root.path().join("exec.c");
+    let library = root.path().join("provision-spawn.so");
+    fs::write(
+        &source,
+        r#"
+#include <dlfcn.h>
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+static void delay(const char *file) {
+    const char *name = strrchr(file, '/');
+    if (strcmp(name ? name + 1 : file, "nix") == 0) {
+        FILE *probe = fopen("exec-blocked", "w");
+        if (!probe) _exit(125);
+        fclose(probe);
+        sleep(5);
+    }
+}
+int execv(const char *file, char *const argv[]) {
+    delay(file);
+    int (*next)(const char *, char *const []) = dlsym(RTLD_NEXT, "execv");
+    return next(file, argv);
+}
+int execve(const char *file, char *const argv[], char *const envp[]) {
+    delay(file);
+    int (*next)(const char *, char *const [], char *const []) = dlsym(RTLD_NEXT, "execve");
+    return next(file, argv, envp);
+}
+"#,
+    )
+    .unwrap();
+    let compiled = Command::new("cc")
+        .args(["-shared", "-fPIC"])
+        .arg(source)
+        .arg("-o")
+        .arg(library)
+        .arg("-ldl")
+        .output()
+        .unwrap();
+    assert!(compiled.status.success(), "{compiled:?}");
+    let started = std::time::Instant::now();
+    let output =
+        generated_gate_with_deadline(&root, "pass", Some("never-report-this-secret"), Some(2));
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(4),
+        "nix exec escaped supervision"
+    );
+    assert!(root.path().join("exec-blocked").exists(), "{output:?}");
+    assert_eq!(output.status.code(), Some(124), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Nix provisioning timed out"), "{stderr}");
+    assert_eq!(
+        stderr.matches("Nix failure diagnostics").count(),
+        1,
+        "{stderr}"
+    );
+    assert!(!stderr.contains("never-report-this-secret"));
+    assert!(!root.path().join("executions").exists());
+}

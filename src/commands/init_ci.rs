@@ -267,7 +267,7 @@ pub fn run(command: InitCiCommand) -> Result<()> {
             packages.iter().collect::<Vec<_>>()
         };
     let mut files = Vec::new();
-    for package in generation_packages {
+    for (index, package) in generation_packages.into_iter().enumerate() {
         let homebrew = if command.with_homebrew {
             Some(homebrew_options(&cfg, &command.homebrew, package)?)
         } else {
@@ -284,6 +284,19 @@ pub fn run(command: InitCiCommand) -> Result<()> {
             None
         };
         let package_options = CiOptions {
+            repository_checks: index == 0,
+            workspace_has_doctests: resolved.workspace_strategy
+                == crate::cli::WorkspaceStrategy::Aggregate
+                && packages.iter().any(cargo::Package::has_doctests),
+            workspace_has_features: resolved.workspace_strategy
+                == crate::cli::WorkspaceStrategy::Aggregate
+                && packages.iter().any(|package| !package.features.is_empty()),
+            workspace_has_library: resolved.workspace_strategy
+                == crate::cli::WorkspaceStrategy::Aggregate
+                && packages.iter().any(cargo::Package::has_library_target),
+            workspace_has_binary: resolved.workspace_strategy
+                == crate::cli::WorkspaceStrategy::Aggregate
+                && packages.iter().any(cargo::Package::has_binary_target),
             homebrew,
             chocolatey,
             scoop,
@@ -309,7 +322,7 @@ pub fn run(command: InitCiCommand) -> Result<()> {
             package,
             file_suffix: multi_package_workspace.then_some(package.name.as_str()),
             self_check: SelfCheckOptions {
-                enabled: self_check,
+                enabled: self_check && index == 0,
                 release: cfg.release.github.is_some() || cfg.release.codeberg.is_some(),
                 runner_override: self_check_runner,
                 windows_runner_override: self_check_windows_runner,
@@ -821,12 +834,13 @@ fn run_nix_only_at(command: InitCiCommand, workspace_root: &Path) -> Result<()> 
             relative_path: PathBuf::from(".gitlab-ci.yml"),
             content: ci::gitlab_nix_flake_workflow(),
         },
-        _ => ci::nix_flake_ci_file_with_system_runners(
+        _ => ci::nix_flake_ci_file_with_events(
             platform,
             &ResolvedRunner::literal(&runner)?,
             &system_runners,
             &cfg.ci_cache_artifacts(),
             &cfg.ci.components,
+            &cfg.ci.push_branches,
         )?,
     };
     let mut files = if cfg.ci.nix_build.only {
@@ -1134,7 +1148,7 @@ fn run_crow(
     options.publish_crates = publish_crates;
     let multi_package_workspace = metadata.workspace_members.len() > 1;
     let mut files = Vec::new();
-    for package in &packages {
+    for (index, package) in packages.iter().enumerate() {
         let homebrew = if command.with_homebrew {
             Some(homebrew_options(cfg, &command.homebrew, package)?)
         } else {
@@ -1151,6 +1165,7 @@ fn run_crow(
             None
         };
         let package_options = CiOptions {
+            repository_checks: index == 0,
             package_scoped: multi_package_workspace,
             homebrew,
             chocolatey,
@@ -1170,7 +1185,7 @@ fn run_crow(
             package,
             file_suffix: multi_package_workspace.then_some(package.name.as_str()),
             self_check: SelfCheckOptions {
-                enabled: self_check,
+                enabled: self_check && index == 0,
                 release: cfg.release.github.is_some() || cfg.release.codeberg.is_some(),
                 runner_override: resolved.runner.as_deref(),
                 windows_runner_override: resolved.windows_runner.as_deref(),
@@ -1649,6 +1664,7 @@ pub(crate) fn project_regeneration_command(workspace_root: &Path) -> Result<Opti
         resolved.publish_crates || with_artifacts || with_homebrew || windows_packagers;
     let inferred_pages = infer_codeberg_pages_from_workflows(&snapshots)?;
     let command = InitCiCommand {
+        plan_json: false,
         primary_only: false,
         pages_only: false,
         prebuild_only: false,
@@ -2102,6 +2118,17 @@ fn reconcile_ci_files(
             if !crate::render::workflow_templates::is_template_output(&config.ci, &path, &content) {
                 primary_obsolete.push(path);
             }
+        }
+        if command.plan_json {
+            println!(
+                "{}",
+                serde_json::to_string(&project::CiUpdatePlan {
+                    schema: "simit.ci-update-plan.v1".into(),
+                    files,
+                    obsolete: primary_obsolete,
+                })?
+            );
+            return Ok(());
         }
         return project::reconcile_generated_files(
             workspace_root,
