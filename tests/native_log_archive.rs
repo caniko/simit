@@ -309,12 +309,14 @@ fn readback_and_input_variants_cannot_restart_or_evade_the_shared_budget() {
         std::os::unix::fs::symlink(&path, &symlink).unwrap();
         assert!(inspect(&symlink).is_err());
         let fifo = root.path().join("fifo.zip");
-        rustix::fs::mkfifoat(
-            rustix::fs::CWD,
-            &fifo,
-            rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
-        )
-        .unwrap();
+        assert!(
+            std::process::Command::new("mkfifo")
+                .args(["-m", "600"])
+                .arg(&fifo)
+                .status()
+                .unwrap()
+                .success()
+        );
         assert!(inspect(&fifo).is_err());
     }
 }
