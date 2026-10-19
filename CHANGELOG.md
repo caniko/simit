@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Retain optional required-gate diagnostic artifacts in GitHub CI and signed-release verification, including failed gates.
+
 ### Changed
 
 - Raise Simit's minimum Rust version to 1.88 to use the security-patched Hickory
