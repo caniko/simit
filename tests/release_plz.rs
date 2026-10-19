@@ -38,6 +38,15 @@ fn new_publishing_defaults_to_release_plz_and_round_trips() {
         "release-plz-${{ github.repository }}-${{ github.run_id }}"
     );
     assert_eq!(yaml["concurrency"]["cancel-in-progress"], false);
+    assert_eq!(yaml["jobs"]["select"]["concurrency"]["queue"], "max");
+    assert_eq!(
+        yaml["jobs"]["select"]["concurrency"]["group"],
+        "release-plz-admission-${{ github.repository }}-${{ github.ref }}"
+    );
+    assert_eq!(
+        yaml["jobs"]["select"]["concurrency"]["cancel-in-progress"],
+        false
+    );
     assert_eq!(yaml["jobs"]["select"]["timeout-minutes"], 360);
     assert_eq!(yaml["jobs"]["select"]["permissions"]["actions"], "read");
     let select_steps = yaml["jobs"]["select"]["steps"].as_sequence().unwrap();
@@ -425,6 +434,15 @@ fn real_git_merge_squash_and_cargo_revision_guard() {
             "tests/fixtures/release-plz-admission.py",
             "src/render/ci/release_plz.py",
         ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+}
+
+#[test]
+fn actionlint_validates_native_concurrency_queue_contract() {
+    let output = Command::new("python3")
+        .args(["tests/fixtures/actionlint-queue.py", "actionlint"])
         .output()
         .unwrap();
     assert!(output.status.success(), "{output:?}");

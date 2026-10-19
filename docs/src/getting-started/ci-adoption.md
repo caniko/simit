@@ -209,12 +209,22 @@ prior-body binding still matches and its single source parent is ancestral to th
 current event; it delivers newly admitted current-source data, not the stale tree.
 Failed release qualification or publication also blocks the next PR update.
 
-Each immutable push keeps a separate run with no in-progress cancellation, so
-later pushes do not replace a queued release event. Before selection, Simit waits
-up to 350 minutes for the preceding default-branch run through the read-only
-Actions API. Failed, canceled or timed-out predecessors block all later publication
-and PR preparation; retry/reconcile them in run-number order before retrying the
-blocked runs. Incomplete provider history also fails closed.
+Each immutable push keeps a separate run with no in-progress cancellation. Its
+selection job uses GitHub's native `queue: max` admission group: waiting behind
+another selection job does not consume its 360-minute execution timeout. After
+admission, Simit waits up to 350 minutes for the preceding default-branch run
+through the read-only Actions API. A predecessor must have already completed its
+own selection, so the budget excludes that predecessor's admission wait.
+[GitHub queues up to 100 pending jobs](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency#example-queueing-multiple-pending-runs);
+overflow is canceled, and FIFO follows queue arrival, not event/run-number order.
+Out-of-order admission fails rather than deadlocking the occupied slot. Failed,
+canceled or timed-out predecessors block all later publication and PR preparation;
+retry/reconcile them in run-number order before retrying blocked runs. Incomplete
+provider history also fails closed. Actionlint 1.7.12 does not yet support `queue`;
+Simit's Nix development/test environments use `nix/actionlint-queue.patch` to
+validate `single|max` and reject `max` with literal `cancel-in-progress: true`,
+without suppressing any other lint checks. Downstream lint environments need
+equivalent queue support until upstream adds it.
 Release PR delivery skips superseded default-branch revisions. Publication is
 never canceled halfway through. Release-plz uploads
 crates **before** pushing tags and skips versions already published on a retry.

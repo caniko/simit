@@ -98,6 +98,13 @@ def prior_run():
     # truncated historical run for initial enrollment when many newer runs exist.
     if previous is None and len(runs) >= 1000:
         raise RuntimeError("release-plz predecessor is outside the provider history window")
+    if previous and previous["status"] != "completed":
+        jobs = api(f"repos/{repo}/actions/runs/{int(previous['id'])}/jobs?filter=latest&per_page=100", "jobs")
+        if not any(job["name"] == "select" and job["status"] == "completed"
+                   and job["conclusion"] == "success" for job in jobs):
+            # The queued select job owns the admission slot. Waiting for a
+            # predecessor that still needs that slot would deadlock the queue.
+            raise RuntimeError(f"release-plz predecessor run {previous['id']} has not completed admission; retry in run order")
     deadline = time.monotonic() + 350 * 60
     while previous:
         if previous["status"] == "completed":

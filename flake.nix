@@ -52,6 +52,7 @@
       };
       inherit (toolchain) craneLib;
       cross = harbor.lib.rust.mkCross {inherit pkgs system;};
+      actionlint = pkgs.callPackage ./nix/actionlint.nix {};
       simitVersion = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).package.version;
       # `nix run github:caniko/simit` is the public CLI
       # distribution path and must work on runners without canix's managed
@@ -136,7 +137,7 @@
         // {
           inherit cargoArtifacts;
           nativeBuildInputs = commonArgs.nativeBuildInputs ++ [preCommitBin];
-          nativeCheckInputs = [pkgs.git pkgs.gnupg pkgs.nodejs pkgs.jq pkgs.python3 pkgs.actionlint] ++ pkgs.lib.optionals pkgs.stdenv.isLinux [pkgs.bubblewrap pkgs.nix pkgs.sqlite];
+          nativeCheckInputs = [pkgs.git pkgs.gnupg pkgs.nodejs pkgs.jq pkgs.python3 actionlint] ++ pkgs.lib.optionals pkgs.stdenv.isLinux [pkgs.bubblewrap pkgs.nix pkgs.sqlite];
           # Namespace integration runs in both hosted runtime feature modes.
           # Keep the engine's non-namespace checks in package qualification.
           cargoTestExtraArgs = "-- --skip commands::projects_update::engine::tests::namespace_";
@@ -147,14 +148,15 @@
         // {
           cargoArtifacts = publicCargoArtifacts;
           nativeBuildInputs = commonArgs.nativeBuildInputs ++ [preCommitBin];
-          nativeCheckInputs = [pkgs.git pkgs.gnupg pkgs.nodejs pkgs.jq pkgs.python3 pkgs.actionlint] ++ pkgs.lib.optionals pkgs.stdenv.isLinux [pkgs.bubblewrap pkgs.nix pkgs.sqlite];
+          nativeCheckInputs = [pkgs.git pkgs.gnupg pkgs.nodejs pkgs.jq pkgs.python3 actionlint] ++ pkgs.lib.optionals pkgs.stdenv.isLinux [pkgs.bubblewrap pkgs.nix pkgs.sqlite];
           cargoTestExtraArgs = "-- --skip commands::projects_update::engine::tests::namespace_";
         });
 
       actionlintCheck =
         pkgs.runCommand "simit-actionlint" {
-          nativeBuildInputs = [pkgs.actionlint];
+          nativeBuildInputs = [actionlint pkgs.python3];
         } ''
+          python3 ${src}/tests/fixtures/actionlint-queue.py ${actionlint}/bin/actionlint
           for workflow in ${src}/.github/workflows/*.yml ${src}/.github/workflows/*.yaml; do
             [ -e "$workflow" ] || continue
             actionlint "$workflow"
@@ -219,7 +221,7 @@
       nextestCheck = publicCraneLib.cargoNextest (commonArgs
         // {
           cargoArtifacts = publicCargoArtifacts;
-          nativeCheckInputs = [pkgs.git pkgs.gnupg pkgs.nodejs pkgs.jq pkgs.python3 pkgs.actionlint] ++ pkgs.lib.optionals pkgs.stdenv.isLinux [pkgs.bubblewrap pkgs.nix pkgs.sqlite];
+          nativeCheckInputs = [pkgs.git pkgs.gnupg pkgs.nodejs pkgs.jq pkgs.python3 actionlint] ++ pkgs.lib.optionals pkgs.stdenv.isLinux [pkgs.bubblewrap pkgs.nix pkgs.sqlite];
           cargoNextestExtraArgs = "-E 'not test(commands::projects_update::engine::tests::namespace_)'";
         });
 

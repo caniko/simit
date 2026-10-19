@@ -28,8 +28,9 @@ newer = {"id": 21, "run_number": 6, "status": "queued", "conclusion": None}
 original_api, original_github = admission.api, admission.github
 original_sleep, original_monotonic = admission.time.sleep, admission.time.monotonic
 runs = [newer, current_run, predecessor]
+predecessor_jobs = [{"name": "select", "status": "completed", "conclusion": "success"}]
 admission.github = lambda method, path, payload: current_run if path.endswith("/20") else predecessor
-admission.api = lambda path, key=None: runs
+admission.api = lambda path, key=None: predecessor_jobs if key == "jobs" else runs
 for conclusion in ["failure", "cancelled", "skipped", "timed_out"]:
     predecessor.update(status="completed", conclusion=conclusion)
     try:
@@ -53,6 +54,38 @@ except RuntimeError as error:
 admission.time.sleep, admission.time.monotonic = original_sleep, original_monotonic
 predecessor.update(status="completed", conclusion="success")
 admission.prior_run()  # A successful retry unblocks the next immutable event.
+# Native queue admission excludes time spent behind the preceding gate. Model
+# run 3 starting after run 2's 300-minute wait, then 300 minutes of real work.
+predecessor.update(status="in_progress", conclusion=None)
+clock = iter([300 * 60, 600 * 60])
+admission.time.monotonic = lambda: next(clock)
+admission.time.sleep = lambda seconds: predecessor.update(status="completed", conclusion="success")
+admission.prior_run()
+admission.time.sleep, admission.time.monotonic = original_sleep, original_monotonic
+# Provider FIFO is admission-time, not run-number order. A later gate must not
+# occupy the only admission slot while an older gate is queued behind it.
+for status in ["queued", "in_progress"]:
+    predecessor.update(status="in_progress", conclusion=None)
+    predecessor_jobs[0].update(status=status, conclusion=None)
+    admission.time.sleep = lambda seconds: predecessor.update(status="completed", conclusion="success")
+    try:
+        admission.prior_run()
+        raise AssertionError("waited on a predecessor still needing the occupied admission slot")
+    except RuntimeError as error:
+        assert "admission" in str(error)
+admission.time.sleep = original_sleep
+predecessor.update(status="completed", conclusion="success")
+predecessor_jobs[0].update(status="completed", conclusion="success")
+for jobs in [[], [{"name": "select", "status": "completed", "conclusion": "failure"}]]:
+    predecessor.update(status="in_progress", conclusion=None)
+    admission.api = lambda path, key=None: jobs if key == "jobs" else runs
+    try:
+        admission.prior_run()
+        raise AssertionError("accepted missing or unsuccessful predecessor admission")
+    except RuntimeError as error:
+        assert "admission" in str(error)
+admission.api = lambda path, key=None: predecessor_jobs if key == "jobs" else runs
+predecessor.update(status="completed", conclusion="success")
 runs = [newer, current_run]
 admission.prior_run()  # Initial enrollment has no earlier default-branch event.
 runs = [newer]
