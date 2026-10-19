@@ -822,6 +822,7 @@ fn direct_publisher_rendering_validates_all_candidate_environment_names() {
                     run: "cargo test".into(),
                     timeout_minutes: 1,
                     env: [(name.into(), "safe".into())].into(),
+                    artifacts: None,
                 }),
             }
             let result = render(options);

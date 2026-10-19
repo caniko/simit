@@ -530,7 +530,7 @@ pub fn render(inputs: &ReleaseWorkflowInputs<'_>) -> String {
             push_install_nix(&mut w, inputs.platform, inputs.artifacts);
         }
         push_validate_tag(&mut w, inputs.artifacts, inputs.tag_prefix, notes_source);
-        push_required_gates(&mut w, inputs.required_gates);
+        push_required_gates(&mut w, inputs.required_gates, inputs.platform);
     }
     if github_prebuild {
         w.push_str("  prebuild:\n    needs: validate\n    uses: ./.github/workflows/prebuild.yaml\n    with:\n      release: true\n");
@@ -989,7 +989,7 @@ fn push_release_notes(
     }
 }
 
-fn push_required_gates(w: &mut String, gates: &[RequiredGate]) {
+fn push_required_gates(w: &mut String, gates: &[RequiredGate], platform: Platform) {
     for gate in gates {
         writeln!(
             w,
@@ -1011,6 +1011,9 @@ fn push_required_gates(w: &mut String, gates: &[RequiredGate]) {
         w.push_str("        run: |\n          set -euo pipefail\n");
         for line in gate.run.lines() {
             writeln!(w, "          {line}").expect("write");
+        }
+        if platform == Platform::Github {
+            crate::render::ci::push_required_gate_artifacts(w, gate, "", "");
         }
     }
 }

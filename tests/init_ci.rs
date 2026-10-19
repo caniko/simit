@@ -294,6 +294,126 @@ required_gates = [
     }
 }
 
+#[test]
+fn required_gate_evidence_survives_failure_and_round_trips_through_publishers() {
+    let temp = init_package(true);
+    fs::write(
+        temp.path().join("simit.toml"),
+        r#"[ci]
+platform = "github"
+provider = "actions"
+runtime = "cargo"
+publish_crates = true
+[[ci.required_gates]]
+id = "browser"
+run = "cargo test"
+[ci.required_gates.artifacts]
+name = "browser-evidence"
+paths = [" leading-evidence/", "target/evidence/", "!target/evidence/private/**"]
+retention_days = 14
+"#,
+    )
+    .unwrap();
+    for check in [false, true] {
+        let mut command = simit();
+        command.current_dir(temp.path()).args(["init", "ci"]);
+        if check {
+            command.args(["--check", "--diff"]);
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    for (file, prefix) in [
+        ("ci.yaml", ""),
+        ("trusted-publish-crate.yaml", ".simit-release-source/"),
+    ] {
+        let yaml: serde_yaml::Value =
+            serde_yaml::from_str(&read(&temp.path().join(".github/workflows").join(file))).unwrap();
+        let steps = yaml["jobs"]
+            .as_mapping()
+            .unwrap()
+            .values()
+            .filter_map(|job| job["steps"].as_sequence())
+            .find(|steps| {
+                steps
+                    .iter()
+                    .any(|step| step["name"] == "Required gate browser")
+            })
+            .unwrap();
+        let gate = steps
+            .iter()
+            .position(|step| step["name"] == "Required gate browser")
+            .unwrap();
+        let upload = &steps[gate + 1];
+        assert_eq!(upload["if"], "always()");
+        assert!(
+            upload["uses"]
+                .as_str()
+                .unwrap()
+                .starts_with("actions/upload-artifact@")
+        );
+        assert!(
+            upload["with"]["name"]
+                .as_str()
+                .unwrap()
+                .starts_with("browser-evidence")
+        );
+        assert_eq!(
+            upload["with"]["path"],
+            format!(
+                "{prefix} leading-evidence/\n{prefix}target/evidence/\n!{prefix}target/evidence/private/**\n"
+            )
+        );
+        assert_eq!(upload["with"]["retention-days"], 14);
+        assert!(steps[gate]["continue-on-error"].is_null());
+    }
+    let config: toml_edit::DocumentMut = read(&temp.path().join("simit.toml")).parse().unwrap();
+    assert_eq!(
+        config["ci"]["required_gates"][0]["artifacts"]["retention_days"].as_integer(),
+        Some(14)
+    );
+}
+
+#[test]
+fn required_gate_artifacts_reject_invalid_or_unsupported_configuration() {
+    for (platform, artifacts) in [
+        ("forgejo", "name='evidence'\npaths=['target/evidence']"),
+        ("github", "name=''\npaths=['target/evidence']"),
+        ("github", "name='evidence'\npaths=[]"),
+        (
+            "github",
+            "name='evidence'\npaths=[\"target/evidence\\nother\"]",
+        ),
+        (
+            "github",
+            "name='evidence'\npaths=['target/evidence']\nretention_days=0",
+        ),
+        (
+            "github",
+            "name='evidence'\npaths=['target/evidence']\nretention_days=91",
+        ),
+    ] {
+        let temp = init_package(true);
+        fs::write(temp.path().join("simit.toml"), format!("[ci]\nplatform='{platform}'\nprovider='actions'\n[[ci.required_gates]]\nid='browser'\nrun='cargo test'\n[ci.required_gates.artifacts]\n{artifacts}\n")).unwrap();
+        let output = simit()
+            .current_dir(temp.path())
+            .args(["init", "ci"])
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("artifact"),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!temp.path().join(".github/workflows/ci.yaml").exists());
+    }
+}
+
 fn init_flake_only() -> TempDir {
     let temp = TempDir::new().unwrap();
     fs::write(

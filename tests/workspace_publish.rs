@@ -182,6 +182,9 @@ fn coordinated_publish_generates_ordered_gated_workflow() {
 id = "gel-integration"
 run = "nix run .#test-gel"
 timeout_minutes = 30
+[ci.required_gates.artifacts]
+name = "gel-evidence"
+paths = ["target/evidence/"]
 "#,
     );
 
@@ -278,6 +281,19 @@ timeout_minutes = 30
     );
     // Gate failure blocks publication via needs chain.
     let parsed: serde_yaml::Value = serde_yaml::from_str(&trusted).unwrap();
+    for member in ["a", "b", "c", "d"] {
+        let upload = parsed["jobs"][format!("verify-{member}")]["steps"]
+            .as_sequence()
+            .unwrap()
+            .last()
+            .unwrap();
+        assert_eq!(upload["if"], "always()");
+        assert_eq!(upload["with"]["name"], format!("gel-evidence-{member}"));
+        assert_eq!(
+            upload["with"]["path"],
+            ".simit-release-source/target/evidence/\n"
+        );
+    }
     assert!(
         parsed["jobs"]["verify-a"]["steps"]
             .as_sequence()

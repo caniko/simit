@@ -449,6 +449,12 @@ pub(super) fn publisher_file_with_namespace(
                     directory,
                 );
                 w.push_str(&format!("        run: {}\n", gate.run));
+                push_required_gate_artifacts(
+                    &mut w,
+                    gate,
+                    ".simit-release-source/",
+                    &format!("-{name}"),
+                );
             }
         }
         w.push_str(&format!("  {publish}:\n"));

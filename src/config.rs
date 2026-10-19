@@ -394,6 +394,22 @@ pub struct RequiredGate {
     pub timeout_minutes: u64,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+    /// Optional evidence retained by GitHub Actions even when the gate fails.
+    #[serde(default)]
+    pub artifacts: Option<RequiredGateArtifacts>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RequiredGateArtifacts {
+    pub name: String,
+    pub paths: Vec<String>,
+    #[serde(default = "default_gate_artifact_retention_days")]
+    pub retention_days: u64,
+}
+
+fn default_gate_artifact_retention_days() -> u64 {
+    7
 }
 
 fn default_gate_timeout_minutes() -> u64 {
@@ -3812,6 +3828,7 @@ fn validate_runner_label_opt(name: &str, value: Option<&str>) -> Result<()> {
 fn validate_required_gates(ci: &CiConfig) -> Result<()> {
     use std::collections::BTreeSet;
     let mut seen = BTreeSet::new();
+    let mut artifact_names = BTreeSet::new();
     for gate in &ci.required_gates {
         let id = gate.id.trim();
         if id.is_empty() {
@@ -3846,6 +3863,35 @@ fn validate_required_gates(ci: &CiConfig) -> Result<()> {
             bail!(
                 "simit project config: [[ci.required_gates.{id}]] timeout_minutes must be 1..=360"
             );
+        }
+        if let Some(artifacts) = &gate.artifacts {
+            if ci.platform != Some(Platform::Github) || ci.provider == Some(CiProvider::Crow) {
+                bail!("simit project config: required gate artifacts require GitHub Actions");
+            }
+            if artifacts.name.trim().is_empty()
+                || artifacts.name.chars().any(char::is_control)
+                || artifacts
+                    .name
+                    .contains(['/', '\\', ':', '"', '<', '>', '|', '*', '?'])
+                || !artifact_names.insert(&artifacts.name)
+            {
+                bail!(
+                    "simit project config: required gate artifact names must be valid and unique"
+                );
+            }
+            if artifacts.paths.is_empty()
+                || artifacts
+                    .paths
+                    .iter()
+                    .any(|path| path.trim().is_empty() || path.chars().any(char::is_control))
+            {
+                bail!(
+                    "simit project config: required gate artifact paths must be non-empty single-line paths"
+                );
+            }
+            if !(1..=90).contains(&artifacts.retention_days) {
+                bail!("simit project config: required gate artifact retention_days must be 1..=90");
+            }
         }
         for (key, value) in &gate.env {
             if key.trim().is_empty() || key.contains(['\n', '\r', ' ', '=']) {
@@ -3882,6 +3928,20 @@ fn set_required_gates_table(table: &mut Table, gates: &[RequiredGate]) {
                 env.insert(key.as_str(), Value::from(value.as_str()));
             }
             item.insert("env", Value::InlineTable(env));
+        }
+        if let Some(artifacts) = &gate.artifacts {
+            let mut value = InlineTable::default();
+            value.insert("name", Value::from(artifacts.name.as_str()));
+            let mut paths = Array::new();
+            for path in &artifacts.paths {
+                paths.push(path.as_str());
+            }
+            value.insert("paths", Value::Array(paths));
+            value.insert(
+                "retention_days",
+                Value::from(artifacts.retention_days as i64),
+            );
+            item.insert("artifacts", Value::InlineTable(value));
         }
         array.push(Value::InlineTable(item));
     }

@@ -34,6 +34,23 @@ fn render(root: &Path) -> String {
 const HOSTED: &str = "[release.codeberg]\nrepo = \"example/player\"\n\n[release.artifacts]\nrunner = \"atlas-nix-trusted\"\nprebuild_binaries = true\nsign = false\n";
 
 #[test]
+fn github_release_gates_retain_evidence_without_ignoring_failure() {
+    let dir = project(
+        "[ci]\nplatform='github'\n[[ci.required_gates]]\nid='integration'\nrun='false'\n[ci.required_gates.artifacts]\nname='evidence'\npaths=['target/evidence/']\n[release.github]\nrepo='example/player'\n[release.artifacts]\nprebuild_binaries=true\nsign=false\n",
+    );
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&render(dir.path())).unwrap();
+    let steps = yaml["jobs"]["validate"]["steps"].as_sequence().unwrap();
+    let gate = steps
+        .iter()
+        .position(|step| step["name"] == "Required gate integration")
+        .unwrap();
+    assert!(steps[gate]["continue-on-error"].is_null());
+    assert_eq!(steps[gate + 1]["if"], "always()");
+    assert_eq!(steps[gate + 1]["with"]["name"], "evidence");
+    assert_eq!(steps[gate + 1]["with"]["retention-days"], 7);
+}
+
+#[test]
 fn prebuild_requires_gates_and_uses_effective_legacy_notes_policy() {
     let dir = project(
         "[ci]\nrequired_gates = [{id='integration',run='false | tee gate.log',timeout_minutes=7}]\n[release.github]\nrepo='example/player'\nbody_from_changelog=false\n[release.artifacts]\nrunner='ubuntu-24.04'\nprebuild_binaries=true\nsign=false\n[prebuild]\nrelease_archives=true\npublish_attic=true\nattic_app='push-flake-inputs'\nsystem_runners={x86_64-linux='ubuntu-24.04'}\n[release.attic]\nurl='https://cache.example.invalid'\ncache='release'\ntoken_name='release'\ntoken_secret='ATTIC_TOKEN'\n",

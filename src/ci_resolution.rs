@@ -915,6 +915,7 @@ fn infer_required_gates(content: &str) -> Vec<crate::config::RequiredGate> {
             run,
             timeout_minutes,
             env: BTreeMap::new(),
+            artifacts: None,
         });
     }
     gates.sort_by(|a, b| a.id.cmp(&b.id));

@@ -3163,7 +3163,48 @@ fn push_required_gate_jobs(
         workflow.push_str("\n        run: ");
         workflow.push_str(&gate.run);
         workflow.push('\n');
+        push_required_gate_artifacts(workflow, gate, "", "");
     }
+}
+
+pub(crate) fn push_required_gate_artifacts(
+    workflow: &mut String,
+    gate: &crate::config::RequiredGate,
+    directory: &str,
+    suffix: &str,
+) {
+    let Some(artifacts) = &gate.artifacts else {
+        return;
+    };
+    workflow.push_str(
+        "\n      - name: Retain required gate evidence\n        if: always()\n        uses: ",
+    );
+    workflow.push_str(&github_action_ref("actions/upload-artifact", "v7.0.1"));
+    workflow.push_str(&format!(
+        "\n        with:\n          name: \"{}{}\"\n",
+        yaml_double_quote(&artifacts.name),
+        yaml_double_quote(suffix)
+    ));
+    let mut paths = String::new();
+    for path in &artifacts.paths {
+        let (exclude, path) = path
+            .strip_prefix('!')
+            .map_or(("", path.as_str()), |path| ("!", path));
+        let prefix = if Path::new(path).is_absolute() || path.starts_with('~') {
+            ""
+        } else {
+            directory
+        };
+        paths.push_str(&format!("{exclude}{prefix}{path}\n"));
+    }
+    workflow.push_str(&format!(
+        "          path: {}\n",
+        serde_json::to_string(&paths).expect("artifact paths serialize")
+    ));
+    workflow.push_str(&format!(
+        "          retention-days: {}\n          if-no-files-found: warn\n",
+        artifacts.retention_days
+    ));
 }
 
 pub(crate) fn sanitize_gate_id(id: &str) -> String {

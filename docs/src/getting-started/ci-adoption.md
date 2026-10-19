@@ -1004,6 +1004,23 @@ not inherit test-only services or credentials. Release secrets
 belong only to independent default-branch upload jobs in the protected
 `simit-crates-io` environment.
 
+On GitHub Actions, a gate can retain diagnostic files after success or failure:
+
+```toml
+[ci.required_gates.artifacts]
+name = "gel-evidence"
+paths = ["target/evidence/", "e2e/test-results/"]
+retention_days = 14
+```
+
+Place this table immediately after the gate it belongs to. Artifact names must
+be valid and unique across gates; retention defaults to seven days and accepts
+1–90 days. Uploads use `always()` and warn on missing files; the gate's failure
+still blocks publication. Relative paths follow the gate's source checkout,
+including the isolated signed-source checkout in trusted crate verification.
+Trusted crate publishers suffix the name with the package to avoid collisions
+between member verification jobs. Forgejo and Crow reject this GitHub-only option.
+
 ## Coordinated Workspace Publication
 
 Member-scoped publishing (`publish-crate-<crate>.yaml`) has no cross-crate
