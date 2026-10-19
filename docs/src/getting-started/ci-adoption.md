@@ -55,8 +55,9 @@ The older `--coordinated-publish[=false]` flag still maps to coordinated/members
 conflicting selections are rejected. An explicit `members` selection
 is persisted even though it is the legacy default.
 
-Release-plz owns versions, per-package changelogs, release PRs, crates.io uploads,
-and signed tags. Simit owns configured binary builds, checksums, attestations and
+Release-plz computes versions and per-package changelogs and orchestrates crates.io
+publication and signed tags. Simit delivers its prepared release PR data and
+verified crate archives from separate credentialed workers. Simit also owns configured binary builds, checksums, attestations and
 hosted assets. In that arrangement `release-plz.toml` sets
 `git_release_enable = false`, so only Simit creates the hosted release. For
 crate-only projects release-plz also creates the hosted release. Single-crate tags
@@ -88,6 +89,11 @@ Configure these repository secrets before enabling default-branch execution:
 | `RELEASE_PLZ_GPG_PRIVATE_KEY` | Armored OpenPGP private key authorized by the committed `[release.signing].trust_root` |
 | `RELEASE_PLZ_GPG_PASSPHRASE`  | Optional signing-key passphrase                                                        |
 
+Set the repository variable `SIMIT_PUBLISHER_REVISION` to an independently
+qualified immutable Simit revision with release-plz archive admission support.
+An engine enrolled for the older tag publishers must be qualified and updated
+before adopting this integration.
+
 A repository-installed GitHub App is preferred over a PAT. To use one, set a
 repository App ID variable and private-key secret, then configure:
 
@@ -110,7 +116,8 @@ when Cargo metadata is the existing config source. `token_secret` overrides the
 PAT secret name when no App is configured. The generated App token is restricted
 to this repository and contents/pull-requests write permission. The default
 `GITHUB_TOKEN` cannot trigger release-PR CI or the downstream tag workflows;
-it is used only for read-only selection and dry-run qualification. See the
+it is used only for read-only selection and update preparation. Git authentication
+is repository-scoped and inherited by release-plz's temporary repositories. See the
 [upstream token contract](https://release-plz.dev/docs/github/token).
 
 `simit release secrets contract --platform github` includes the release-plz
@@ -126,19 +133,37 @@ trusted-publishing registration applies to the new workflow.
 The CLI is pinned to release-plz **0.3.172** (reviewed source
 `8b523fa6c4eb4992f18365ac50a196b4dc6a1013`). The fixed Linux worker verifies the
 upstream musl binary's SHA-256 before execution, independently of the project's
-MSRV. Nix jobs execute it through `nix develop -c`; workflow actions use the
-shared immutable action registry.
+MSRV. Credential-free Nix jobs execute update preparation through `nix develop -c`;
+credentialed jobs use the verified standalone binary and data-only operations.
+Workflow actions use the shared immutable action registry.
 The generated config uses `release_always = false`: ordinary default-branch
 pushes update a release PR; merging that PR starts publication.
 
 Release-plz may publish the last commit of a merged release PR rather than the
 merge event's branch tip. Simit resolves that immutable revision, runs project
-checks and required gates on it in a credential-free job, and dry-runs the pinned
-release CLI. Merge commits select the PR head; squash merges select the event
+checks and required gates on it in a credential-free job, and verifies packaged
+archives with modern Cargo's unpublished-workspace dependency staging. Merge commits select the PR head; squash merges select the event
 commit. Publication rechecks selection, and a Cargo wrapper refuses any upload
 from a different revision. Qualification of branch HEAD alone is insufficient.
 
-Publication is serialized and never canceled halfway through. Release-plz uploads
+The publication worker independently reconstructs every archive from the selected
+Git tree with the qualified engine's data-only Cargo path. Project Cargo config,
+wrappers, hooks, Nix expressions and build scripts never run with release
+credentials. The release-plz Cargo adapter routes uploads through that same
+archive verifier and registry transport, and refuses build-capable commands.
+
+Release PR preparation runs `release-plz update` without release credentials,
+including its available semver checks. A fresh worker admits only regular-file
+changes to `Cargo.toml`, `Cargo.lock` and `CHANGELOG.md` into the Git index, then
+signs and delivers that tree. It preserves an existing PR using an exact-head
+lease and refuses to overwrite manual edits. Close or explicitly reconcile an
+existing upstream-created release PR before the first generated update. If a
+branch push succeeds but its PR API update fails, reconcile the branch and PR
+head receipt before retrying; a retry does not discard unrecognized changes.
+
+Each immutable push keeps its publication run; later source pushes cannot replace
+a queued release event. Release PR delivery is serialized and skips superseded
+default-branch revisions. Publication is never canceled halfway through. Release-plz uploads
 crates **before** pushing tags and skips versions already published on a retry.
 A failed tag push can therefore leave a published crate without a tag; rerunning
 does not promise tag repair. Inspect the failed run, the selected SHA, and crates.io

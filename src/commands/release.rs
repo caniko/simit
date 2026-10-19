@@ -19,6 +19,7 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
         || command.source_workflow.is_some()
         || command.publisher_workflow.is_some()
         || command.publisher_output.is_some()
+        || command.release_plz_archives.is_some()
         || command.tag_namespace.is_some()
         || !command.reconstruct_packages.is_empty()
     {

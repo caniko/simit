@@ -18,7 +18,7 @@ pub mod custody;
 mod independent_lanes;
 mod nix_dependencies;
 mod nix_groups;
-mod trusted_publisher;
+pub(super) mod trusted_publisher;
 
 pub const OMNIX_REF_DEFAULT: &str = "github:juspay/omnix/v1.3.2";
 pub const GENERATED_WORKFLOW_MARKER: &str =
@@ -4151,7 +4151,7 @@ fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
-fn shell_word(value: &str) -> String {
+pub(super) fn shell_word(value: &str) -> String {
     if !value.is_empty()
         && value.bytes().all(|byte| {
             byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b'/' | b'#')
@@ -5190,6 +5190,11 @@ pub(crate) fn release_plz_setup(workflow: &mut String, runtime: Runtime, options
     } else {
         push_rust_setup_step(workflow, Platform::Github);
     }
+}
+
+pub(crate) fn release_plz_update_setup(workflow: &mut String, options: &CiOptions) {
+    push_required_env_step(workflow, &options.required_env);
+    push_extra_setup_steps(workflow, &options.extra_setup);
 }
 
 pub(crate) fn release_plz_checks(

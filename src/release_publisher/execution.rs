@@ -27,6 +27,8 @@ use super::{
 };
 use crate::cli::{PublisherStage, ReleaseCommand};
 
+mod release_plz;
+
 const MAX_PROVIDER_BYTES: u64 = 160 * 1024 * 1024;
 
 fn env_value(name: &str) -> Result<String> {
@@ -107,6 +109,9 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
         !command.dry_run,
         "--dry-run is not supported for the trusted publisher; use --publisher-stage prepare for credential-free verification"
     );
+    if command.release_plz_archives.is_some() {
+        return release_plz::run(command);
+    }
     let stage = command
         .publisher_stage
         .context("--publisher-stage is required")?;

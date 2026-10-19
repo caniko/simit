@@ -5,10 +5,14 @@
 import email.utils
 import json
 import os
+from pathlib import Path
 import re
 import shutil
+import stat
 import subprocess
 import sys
+import tempfile
+import urllib.parse
 
 
 def git(*args):
@@ -69,30 +73,193 @@ def select():
 
 def cargo():
     args = sys.argv[2:]
-    if "publish" in args:
+    if (not args or args[0] not in ("metadata", "info", "publish")
+        or any(arg == "--config" or arg.startswith("--config=") for arg in args)):
+        raise RuntimeError("credentialed release-plz only permits data-only Cargo operations")
+    if args[0] == "publish":
         expected = os.environ["SIMIT_EXPECTED_RELEASE_SHA"]
         if not expected or git("rev-parse", "HEAD") != expected:
             raise RuntimeError("refusing cargo publish from an unqualified revision")
+        package = args[args.index("--package") + 1]
+        env = {**os.environ, "PATH": os.environ["SIMIT_RELEASE_PLZ_TOOL_PATH"]}
+        env["CRATES_IO_API_TOKEN"] = env.get("CARGO_REGISTRY_TOKEN", "")
+        subprocess.run([
+            os.environ["SIMIT_RELEASE_PLZ_PUBLISHER"], "release", "publisher",
+            "--publisher-stage", "prepare" if "--dry-run" in args else "publish",
+            "--repo", os.environ["GITHUB_REPOSITORY"], "--package", package,
+            "--release-plz-archives", f"{os.environ['RUNNER_TEMP']}/release-plz-archives",
+        ], check=True, env=env)
+        # The pinned release-plz parses Cargo's stderr to recognize a successful
+        # upload (including dry runs); return that protocol only after admission.
+        print(f"   Uploading {package}", file=sys.stderr)
+        return
     real_cargo = os.environ["SIMIT_REAL_CARGO"]
-    os.execv(real_cargo, [real_cargo, *args])
+    # Cargo discovers config from cwd, not --manifest-path. Never execute project
+    # wrappers/credential providers, and never pass release credentials to Cargo.
+    with tempfile.TemporaryDirectory() as home:
+        env = {
+            "PATH": os.environ["SIMIT_RELEASE_PLZ_TOOL_PATH"], "HOME": home,
+            "CARGO_HOME": home, "RUSTUP_TOOLCHAIN": "stable",
+            "RUSTUP_HOME": os.environ.get("RUSTUP_HOME", str(Path.home() / ".rustup")),
+        }
+        raise SystemExit(subprocess.run([real_cargo, *args], cwd="/", env=env).returncode)
+
+
+def git_credentials():
+    root = os.environ["RUNNER_TEMP"]
+    # release-plz's temporary clones do not inherit checkout-local config.
+    count = int(os.environ.get("GIT_CONFIG_COUNT", "0"))
+    for key, value in (
+        ("credential.helper", ""),
+        ("credential.https://github.com.helper", f"{root}/release-plz-credentials"),
+        ("credential.https://github.com.useHttpPath", "true"),
+        ("core.symlinks", "false"),
+    ):
+        os.environ[f"GIT_CONFIG_KEY_{count}"] = key
+        os.environ[f"GIT_CONFIG_VALUE_{count}"] = value
+        count += 1
+    os.environ["GIT_CONFIG_COUNT"] = str(count)
 
 
 def run():
     root = os.environ["RUNNER_TEMP"]
+    git_credentials()
     real_cargo = shutil.which("cargo")
     if real_cargo is None:
         raise RuntimeError("cargo is required in the selected release runtime")
     os.environ["SIMIT_REAL_CARGO"] = real_cargo
+    os.environ["SIMIT_RELEASE_PLZ_TOOL_PATH"] = os.environ["PATH"]
+    os.environ["SIMIT_RELEASE_PLZ_SOURCE"] = f"{root}/release-plz-event-source"
+    # The CLI's native Cargo library also reads workspace config. Keep it in a
+    # clean sparse checkout: Git checkout must not restore credential providers
+    # or executable wrappers while release-plz switches release revisions.
+    settings = {key: git("config", "--get", key) for key in (
+        "user.name", "user.email", "user.signingkey", "gpg.program", "tag.gpgSign",
+    )}
+    source = os.environ["SIMIT_RELEASE_PLZ_SOURCE"]
+    expected = os.environ["SIMIT_EXPECTED_RELEASE_SHA"]
+    if not re.fullmatch(r"[0-9a-f]{40}", expected):
+        raise RuntimeError("publication requires an admitted release revision")
+    publish = f"{root}/release-plz-publish"
+    subprocess.run(["git", "clone", "--no-hardlinks", "--no-checkout", "--", source, publish], check=True)
+    os.chdir(publish)
+    subprocess.run(["git", "config", "core.symlinks", "false"], check=True)
+    subprocess.run(["git", "sparse-checkout", "set", "--no-cone", "--stdin"],
+        input="/*\n!.cargo/\n!**/.cargo/\n", text=True, check=True)
+    subprocess.run(["git", "checkout", "--detach", expected], check=True)
+    for key, value in settings.items():
+        subprocess.run(["git", "config", "--local", key, value], check=True)
+    subprocess.run(["git", "remote", "set-url", "origin",
+                    f"https://github.com/{os.environ['GITHUB_REPOSITORY']}.git"], check=True)
+    os.environ["RUSTUP_HOME"] = os.environ.get("RUSTUP_HOME", str(Path.home() / ".rustup"))
+    os.environ["HOME"] = f"{root}/release-plz-home"
+    os.environ["CARGO_HOME"] = f"{root}/release-plz-home/cargo"
+    os.environ["RUSTUP_TOOLCHAIN"] = "stable"
+    os.environ["GIT_CONFIG_NOSYSTEM"] = "1"
+    os.environ["GIT_CONFIG_GLOBAL"] = os.devnull
+    Path(os.environ["CARGO_HOME"]).mkdir(parents=True)
     os.environ["PATH"] = f"{root}/release-plz-guard:{os.environ['PATH']}"
     os.environ["CARGO"] = f"{root}/release-plz-guard/cargo"
     release_plz = f"{root}/release-plz/bin/release-plz"
     os.execv(release_plz, [release_plz, *sys.argv[2:]])
 
 
+def update():
+    git_credentials()
+    release_plz = f"{os.environ['RUNNER_TEMP']}/release-plz/bin/release-plz"
+    os.execv(release_plz, [release_plz, "update", *sys.argv[2:]])
+
+
+def prepare_pr():
+    directory = Path(os.environ["RUNNER_TEMP"]) / "release-plz-pr"
+    directory.mkdir()
+    for path in filter(None, git("ls-files", "--others", "--exclude-standard", "-z").split("\0")):
+        if Path(path).name in ("Cargo.toml", "Cargo.lock", "CHANGELOG.md"):
+            subprocess.run(["git", "add", "--intent-to-add", "--", path], check=True)
+    # Only data crosses to the credentialed worker; its index admission below
+    # independently checks paths and modes before the signing key is imported.
+    patch = subprocess.check_output(["git", "diff", "--binary", "HEAD"])
+    (directory / "update.patch").write_bytes(patch)
+    summary = Path(os.environ["RUNNER_TEMP"]) / "release-plz-update.log"
+    (directory / "summary.txt").write_bytes(summary.read_bytes()[:60_000])
+
+
+def read_data(path, limit):
+    if not stat.S_ISREG(path.lstat().st_mode) or path.stat().st_size > limit:
+        raise RuntimeError("invalid release-plz data artifact")
+    return path.read_bytes()
+
+
+def admit_pr():
+    if git("rev-parse", "HEAD") != os.environ["GITHUB_SHA"]:
+        raise RuntimeError("release PR admission requires the event checkout")
+    directory = Path(os.environ["RUNNER_TEMP"]) / "release-plz-pr"
+    patch = read_data(directory / "update.patch", 16 * 1024 * 1024)
+    if patch:
+        subprocess.run(["git", "apply", "--cached", "--binary", "-"], input=patch, check=True)
+    paths = git("diff", "--cached", "--name-only", "-z").split("\0")
+    for path in filter(None, paths):
+        parts = Path(path).parts
+        if (not parts or Path(path).is_absolute()
+            or any(part in (".", "..", ".git", ".github", ".forgejo", ".simit") for part in parts)
+            or parts[-1] not in ("Cargo.toml", "Cargo.lock", "CHANGELOG.md")):
+            raise RuntimeError("release-plz update changed a non-release path")
+        records = git("ls-files", "--stage", "-z", "--", path)
+        if not records.startswith(("100644 ", "100755 ")) or records.count("\0") > 1:
+            raise RuntimeError("release-plz update contains a link or deletion")
+    tree = git("write-tree") if patch else ""
+    with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as output:
+        output.write(f"SIMIT_RELEASE_PR_TREE={tree}\n")
+
+
+def github(method, path, payload):
+    return json.loads(subprocess.check_output(
+        ["gh", "api", "--method", method, path, "--input", "-"],
+        input=json.dumps(payload), text=True,
+    ))
+
+
+def apply_pr():
+    tree = os.environ.get("SIMIT_RELEASE_PR_TREE", "")
+    if not tree:
+        return
+    if git("write-tree") != tree or git("rev-parse", "HEAD") != os.environ["GITHUB_SHA"]:
+        raise RuntimeError("admitted release PR source changed")
+    git_credentials()
+    os.environ["GH_TOKEN"] = os.environ["GIT_TOKEN"]
+    repo = os.environ["GITHUB_REPOSITORY"]
+    base = os.environ["GITHUB_REF_NAME"]
+    base_ref = urllib.parse.quote(base, safe="")
+    current = json.loads(subprocess.check_output(["gh", "api", f"repos/{repo}/git/ref/heads/{base_ref}"], text=True))
+    if current["object"]["sha"] != os.environ["GITHUB_SHA"]:
+        print("Newer default-branch source supersedes this release PR update")
+        return
+    prs = [pr for pr in api(f"repos/{repo}/pulls?state=open&base={base_ref}&per_page=100")
+           if pr["head"]["ref"].startswith("release-plz-") and pr["head"]["repo"]["full_name"] == repo]
+    if len(prs) > 1:
+        raise RuntimeError("reconcile multiple open release-plz PRs before updating")
+    previous = prs[0] if prs else None
+    expected = previous["head"]["sha"] if previous else ""
+    if previous and f"<!-- simit-release-plz-head: {expected} -->" not in (previous["body"] or ""):
+        raise RuntimeError("release PR contains unrecognized/manual changes; reconcile it before updating")
+    branch = previous["head"]["ref"] if previous else f"release-plz-{os.environ['GITHUB_SHA']}"
+    sha = subprocess.check_output(["git", "commit-tree", "-S", tree, "-p", os.environ["GITHUB_SHA"]],
+        input="chore: release\n\nPrepared by release-plz 0.3.172.\n", text=True).strip()
+    reference = f"refs/heads/{branch}"
+    subprocess.run(["git", "push", f"--force-with-lease={reference}:{expected}", "origin", f"{sha}:{reference}"], check=True)
+    summary = read_data(Path(os.environ["RUNNER_TEMP"]) / "release-plz-pr/summary.txt", 60_000).decode("utf-8", errors="replace")
+    body = f"Prepared by release-plz 0.3.172.\n\n```text\n{summary}\n```\n\n<!-- simit-release-plz-head: {sha} -->"
+    if previous:
+        result = github("PATCH", f"repos/{repo}/pulls/{previous['number']}", {"body": body})
+    else:
+        result = github("POST", f"repos/{repo}/pulls", {"title": "chore: release", "head": branch, "base": base, "body": body})
+    print(result["html_url"])
+
+
 def signing_identity(trust_root):
-    def gpg(*args):
+    def gpg(*args, input=None):
         return subprocess.check_output(
-            ["gpg", "--batch", "--with-colons", *args], text=True
+            ["gpg", "--batch", "--with-colons", *args], text=True, input=input
         )
 
     # Only primary fingerprints: a private subkey is authorized by its primary.
@@ -106,7 +273,18 @@ def signing_identity(trust_root):
                 yield fields[9]
                 primary = False
 
-    authorized = set(primaries(gpg("--show-keys", trust_root)))
+    path = Path(trust_root)
+    if path.is_absolute() or not path.parts or ".." in path.parts:
+        raise RuntimeError("release trust root must be a committed relative path")
+    records = subprocess.check_output(["git", "ls-tree", "-z", "HEAD", "--", trust_root], text=True)
+    records = [record.split("\t", 1)[0].split() for record in records.split("\0")
+               if record and record.split("\t", 1)[1] == path.as_posix()]
+    if len(records) != 1 or records[0][0] not in ("100644", "100755") or records[0][1] != "blob":
+        raise RuntimeError("release trust root must be a regular committed file")
+    public_key = subprocess.check_output(["git", "cat-file", "blob", records[0][2]])
+    authorized = set(primaries(subprocess.check_output(
+        ["gpg", "--batch", "--with-colons", "--show-keys"], input=public_key,
+    ).decode("utf-8")))
     key = next(
         (key for key in primaries(gpg("--list-secret-keys")) if key in authorized), None
     )
@@ -140,5 +318,13 @@ if __name__ == "__main__":
         signing_identity(sys.argv[2])
     elif sys.argv[1] == "run":
         run()
+    elif sys.argv[1] == "prepare-pr":
+        prepare_pr()
+    elif sys.argv[1] == "update":
+        update()
+    elif sys.argv[1] == "admit-pr":
+        admit_pr()
+    elif sys.argv[1] == "apply-pr":
+        apply_pr()
     else:
         raise SystemExit("unknown release-plz admission command")

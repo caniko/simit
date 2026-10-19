@@ -322,7 +322,7 @@ pub(crate) fn bootstrap(w: &mut String) {
     push_action_uses(w, Platform::Github, None, "checkout", "v7.0.1", "v4.3.1");
     w.push_str("        with:\n          repository: caniko/simit\n          ref: ${{ vars.SIMIT_PUBLISHER_REVISION }}\n          path: .simit-publisher-engine\n          persist-credentials: false\n");
     push_rust_setup_step(w, Platform::Github);
-    w.push_str("      - name: Build trusted publisher engine\n        working-directory: .simit-publisher-engine\n        run: cargo build --release --locked\n");
+    w.push_str("      - name: Build trusted publisher engine\n        working-directory: /\n        run: cargo build --release --locked --manifest-path \"$GITHUB_WORKSPACE/.simit-publisher-engine/Cargo.toml\" --target-dir \"$GITHUB_WORKSPACE/.simit-publisher-engine/target\"\n");
 }
 
 pub(super) fn publisher_file(

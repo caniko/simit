@@ -441,6 +441,8 @@ pub struct ReleaseCommand {
     pub publisher_workflow: Option<String>,
     #[arg(long, help = "New directory for credential-free archive verification")]
     pub publisher_output: Option<Utf8PathBuf>,
+    #[arg(long, hide = true)]
+    pub release_plz_archives: Option<Utf8PathBuf>,
     #[arg(
         long,
         help = "Trusted package namespace for an independent <package>/v<version> tag"

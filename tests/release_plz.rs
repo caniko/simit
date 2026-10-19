@@ -33,7 +33,8 @@ fn new_publishing_defaults_to_release_plz_and_round_trips() {
         fs::read_to_string(temp.path().join(".github/workflows/release-plz.yaml")).unwrap();
     let yaml: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
     assert_eq!(yaml["permissions"]["contents"], "read");
-    assert!(workflow.contains("run release-pr"));
+    assert!(workflow.contains("update --config"));
+    assert!(workflow.contains("apply-pr"));
     assert!(workflow.contains("run release "));
     assert!(workflow.contains("tag.gpgSign true"));
     assert!(workflow.contains("Qualify exact release revision"));
@@ -264,7 +265,12 @@ fn workspace_uses_package_tags_and_credential_free_exact_source_checks() {
     assert!(!qualify.contains("secrets."));
     assert!(qualify.contains("cargo test -p demo"));
     assert!(qualify.contains("cargo test -p helper"));
-    assert!(qualify.contains("release --dry-run"));
+    assert!(qualify.contains("package --locked --allow-dirty"));
+    for job in ["publish", "release-pr"] {
+        let job = serde_yaml::to_string(&workflow["jobs"][job]).unwrap();
+        assert!(!job.contains("nix develop"));
+        assert!(!job.contains("cargo publish"));
+    }
     assert!(text.contains("permission-pull-requests: write"));
     assert!(init(temp.path(), &["--check"]).status.success());
     assert_eq!(
@@ -286,6 +292,90 @@ fn real_git_merge_squash_and_cargo_revision_guard() {
         .output()
         .unwrap();
     assert!(output.status.success(), "{output:?}");
+}
+
+#[test]
+fn workspace_archives_are_independently_reconstructed_without_project_execution() {
+    let output = Command::new("python3")
+        .args([
+            "tests/fixtures/release-plz-archives.py",
+            env!("CARGO_BIN_EXE_simit"),
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+}
+
+#[test]
+fn release_pr_delivery_only_applies_admitted_data_and_preserves_manual_edits() {
+    let output = Command::new("python3")
+        .args([
+            "tests/fixtures/release-plz-pr.py",
+            "src/render/ci/release_plz.py",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+}
+
+#[test]
+fn git_credentials_are_scoped_to_this_https_repository() {
+    use std::{io::Write, process::Stdio};
+
+    let temp = project("");
+    assert!(init(temp.path(), &["--publish-crates"]).status.success());
+    let text = fs::read_to_string(temp.path().join(".github/workflows/release-plz.yaml")).unwrap();
+    let workflow: serde_yaml::Value = serde_yaml::from_str(&text).unwrap();
+    let prepare = workflow["jobs"]["publish"]["steps"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .find_map(|step| {
+            step["run"]
+                .as_str()
+                .filter(|run| run.contains("SIMIT_CREDENTIALS"))
+        })
+        .unwrap();
+    let runtime = tempfile::tempdir().unwrap();
+    assert!(
+        Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(temp.path())
+            .status()
+            .unwrap()
+            .success()
+    );
+    let output = Command::new("bash")
+        .args(["-c", prepare])
+        .current_dir(temp.path())
+        .env("RUNNER_TEMP", runtime.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    for (protocol, host, path, allowed) in [
+        ("https", "github.com", "owner/repo.git", true),
+        ("https", "github.com", "owner/repo", true),
+        ("https", "other.example", "owner/repo.git", false),
+        ("https", "github.com", "other/repo.git", false),
+        ("http", "github.com", "owner/repo.git", false),
+    ] {
+        let mut process = Command::new(runtime.path().join("release-plz-credentials"))
+            .arg("get")
+            .env("GITHUB_REPOSITORY", "owner/repo")
+            .env("GIT_TOKEN", "fixture-token")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        write!(
+            process.stdin.take().unwrap(),
+            "protocol={protocol}\nhost={host}\npath={path}\n\n"
+        )
+        .unwrap();
+        let output = process.wait_with_output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(!output.stdout.is_empty(), allowed);
+    }
 }
 
 #[test]

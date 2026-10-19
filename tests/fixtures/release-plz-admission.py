@@ -56,12 +56,17 @@ with tempfile.TemporaryDirectory() as directory:
         pass
 
     def guard(expected, *args):
+        if args and args[0] == "publish":
+            args = (*args, "--package", "demo")
         return subprocess.run(
             [sys.executable, str(helper), "cargo", *args],
             env={
                 **os.environ,
                 "SIMIT_EXPECTED_RELEASE_SHA": expected,
                 "SIMIT_REAL_CARGO": shutil.which("true"),
+                "SIMIT_RELEASE_PLZ_TOOL_PATH": os.environ["PATH"],
+                "SIMIT_RELEASE_PLZ_PUBLISHER": shutil.which("true"),
+                "RUNNER_TEMP": directory,
             },
             capture_output=True,
         )
@@ -70,8 +75,24 @@ with tempfile.TemporaryDirectory() as directory:
     assert guard(prepared, "publish").returncode != 0
     assert guard(prepared, "publish", "--dry-run").returncode != 0
     assert guard(prepared, "metadata").returncode == 0
+    assert guard(prepared, "build").returncode != 0
+    assert guard(prepared, "metadata", "--config", "build.rustc-wrapper=bad").returncode != 0
+    assert guard(prepared, "metadata", "--config=build.rustc-wrapper=bad").returncode != 0
+    probe = Path(directory) / "data-cargo"
+    probe.write_text(f"#!{sys.executable}\nimport os\nassert os.getcwd() == '/'\nassert all(name not in os.environ for name in ('GIT_TOKEN', 'CARGO_REGISTRY_TOKEN', 'GNUPGHOME', 'RUSTC_WRAPPER'))\n")
+    probe.chmod(0o700)
+    result = subprocess.run(
+        [sys.executable, str(helper), "cargo", "metadata"],
+        env={**os.environ, "SIMIT_REAL_CARGO": str(probe),
+             "SIMIT_RELEASE_PLZ_TOOL_PATH": os.environ["PATH"],
+             "GIT_TOKEN": "fixture-write-secret", "CARGO_REGISTRY_TOKEN": "fixture-registry-secret",
+             "GNUPGHOME": "fixture-private-directory", "RUSTC_WRAPPER": "untrusted"},
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr.decode()
     git("checkout", "--detach", prepared)
-    assert guard(prepared, "publish").returncode == 0
+    published = guard(prepared, "publish")
+    assert published.returncode == 0 and b"Uploading demo" in published.stderr
     assert guard("", "publish").returncode != 0
 
     squashed = commit("squash", base)
@@ -110,16 +131,28 @@ with tempfile.TemporaryDirectory() as directory:
 
     trust = Path(directory) / "trust.asc"
     trust.write_text(key(home, "Release Fixture <fixture@example.invalid>"))
-    admission.signing_identity(str(trust))
+    git("add", "trust.asc")
+    tree = git("write-tree")
+    git("checkout", "--detach", commit("trust root", squashed))
+    admission.signing_identity("trust.asc")
     assert git("config", "user.email") == "fixture@example.invalid"
     git("config", "tag.gpgSign", "true")
     git("tag", "v0.2.0", "-m", "release")
     git("verify-tag", "v0.2.0")
+    # The project's actual trust root is a binary keyring, not armored UTF-8.
+    trust.write_bytes(subprocess.check_output(["gpg", "--homedir", str(home), "--export"]))
+    git("add", "trust.asc")
+    tree = git("write-tree")
+    git("checkout", "--detach", commit("binary trust root", git("rev-parse", "HEAD")))
+    admission.signing_identity("trust.asc")
     other_home = Path(directory) / "other-gnupg"
     other_home.mkdir(mode=0o700)
     trust.write_text(key(other_home, "Other Fixture <other@example.invalid>"))
+    git("add", "trust.asc")
+    tree = git("write-tree")
+    git("checkout", "--detach", commit("unauthorized trust root", git("rev-parse", "HEAD")))
     try:
-        admission.signing_identity(str(trust))
+        admission.signing_identity("trust.asc")
         raise AssertionError("accepted a private key outside the trust root")
     except RuntimeError:
         pass
@@ -127,5 +160,49 @@ with tempfile.TemporaryDirectory() as directory:
         subprocess.run(
             ["gpgconf", "--homedir", str(home), "--kill", "gpg-agent"], check=True
         )
+
+    # release-plz copies/clones repositories; local checkout config is not inherited.
+    runtime = Path(directory) / "runtime"
+    binary = runtime / "release-plz/bin/release-plz"
+    binary.parent.mkdir(parents=True)
+    binary.write_text("""#!/usr/bin/env python3
+import os, pathlib, subprocess, tempfile
+assert not pathlib.Path('.cargo/config.toml').exists()
+assert not pathlib.Path('crate/.cargo/config.toml').exists()
+assert subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip() == os.environ['SIMIT_EXPECTED_RELEASE_SHA']
+with tempfile.TemporaryDirectory() as clone:
+    subprocess.run(["git", "init", clone], check=True, capture_output=True)
+    result = subprocess.run(["git", "-C", clone, "credential", "fill"],
+        input="protocol=https\\nhost=github.com\\npath=owner/repo.git\\n\\n",
+        text=True, check=True, capture_output=True)
+    assert "password=fixture-token" in result.stdout
+""")
+    binary.chmod(0o700)
+    credentials = runtime / "release-plz-credentials"
+    credentials.write_text('#!/bin/sh\nprintf "username=x-access-token\\npassword=%s\\n" "$GIT_TOKEN"\n')
+    credentials.chmod(0o700)
+    git("config", "--local", "credential.helper", str(credentials))
+    git("config", "--local", "gpg.program", "gpg")
+    for cargo_dir in [Path(".cargo"), Path("crate/.cargo")]:
+        cargo_dir.mkdir(parents=True)
+        (cargo_dir / "config.toml").write_text('[registry]\nglobal-credential-providers=["malicious"]\n')
+    git("add", ".cargo", "crate")
+    tree = git("write-tree")
+    event_sha = commit("project Cargo config", git("rev-parse", "HEAD"))
+    git("checkout", "--detach", event_sha)
+    git("clone", "--no-hardlinks", "--no-checkout", ".", str(runtime / "release-plz-event-source"))
+    result = subprocess.run(
+        [sys.executable, str(helper), "run", "release"],
+        env={
+            **os.environ,
+            "RUNNER_TEMP": str(runtime),
+            "GIT_TOKEN": "fixture-token",
+            "SIMIT_EXPECTED_RELEASE_SHA": event_sha,
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_TERMINAL_PROMPT": "0",
+        },
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr.decode()
 
 print("release-plz merge, squash, publication and authorized tag-signing checks passed")
