@@ -226,6 +226,22 @@ fn migration_requires_reconciling_a_competing_project_template() {
 }
 
 #[test]
+fn migration_rejects_a_new_competing_template_before_writing_outputs() {
+    let temp = project(
+        "[ci.workflow_templates]\n\".github/workflows/publish.yaml\" = \".simit/publish.yaml.in\"\n",
+    );
+    fs::create_dir(temp.path().join(".simit")).unwrap();
+    fs::write(temp.path().join(".simit/publish.yaml.in"), "name: Publish\non: push\njobs:\n  publish:\n    runs-on: ubuntu-24.04\n    steps:\n      - run: cargo publish\n").unwrap();
+    let before = fs::read(temp.path().join("simit.toml")).unwrap();
+    let output = init(temp.path(), &["--publish-crates"]);
+    assert!(!output.status.success(), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("competing publisher"));
+    assert!(!temp.path().join(".github").exists());
+    assert!(!temp.path().join("release-plz.toml").exists());
+    assert_eq!(fs::read(temp.path().join("simit.toml")).unwrap(), before);
+}
+
+#[test]
 fn workspace_uses_package_tags_and_credential_free_exact_source_checks() {
     let temp = project(
         "[ci]\nworkspace = true\npublish_crates = true\npublish_strategy = \"release-plz\"\n[ci.release_plz]\napp_id_variable = \"RELEASE_APP_ID\"\napp_private_key_secret = \"RELEASE_APP_KEY\"\n",
@@ -328,6 +344,39 @@ fn default_valued_cargo_policy_keeps_its_source_and_explicit_strategy() {
         assert!(!temp.path().join("simit.toml").exists());
         assert!(!temp.path().join("release-plz.toml").exists());
         assert!(init(temp.path(), &["--check"]).status.success());
+    }
+}
+
+#[test]
+fn empty_sources_do_not_shadow_or_block_explicit_cargo_policy() {
+    for empty in ["# Placeholder.\n", "[ci]\n"] {
+        for declaration in [
+            "[package.metadata.simit.ci]\nplatform = \"github\"\npublish_crates = false\npublish_strategy = \"members\"\n",
+            "[workspace.metadata.simit.ci]\npublish_crates = false\npublish_strategy = \"members\"\n",
+        ] {
+            let temp = project(empty);
+            let manifest = temp.path().join("Cargo.toml");
+            let text = fs::read_to_string(&manifest).unwrap();
+            fs::write(&manifest, format!("{text}\n{declaration}")).unwrap();
+            let output = init(temp.path(), &["--publish-crates"]);
+            assert!(output.status.success(), "{output:?}");
+            assert!(
+                temp.path()
+                    .join(".github/workflows/publish-crate.yaml")
+                    .exists()
+            );
+            assert!(!temp.path().join("release-plz.toml").exists());
+            assert_eq!(
+                fs::read_to_string(temp.path().join("simit.toml")).unwrap(),
+                empty
+            );
+            assert!(
+                fs::read_to_string(&manifest)
+                    .unwrap()
+                    .contains("publish_crates = true")
+            );
+            assert!(init(temp.path(), &["--check"]).status.success());
+        }
     }
 }
 

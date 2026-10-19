@@ -126,7 +126,24 @@ pub fn files(
 }
 
 /// Migration must never silently activate two independent crate publishers.
-pub fn validate_migration(root: &Path, config: &ProjectConfig) -> Result<()> {
+pub fn validate_migration(
+    root: &Path,
+    config: &ProjectConfig,
+    files: &[GeneratedFile],
+) -> Result<()> {
+    for file in files {
+        if super::workflow_templates::is_template_output(
+            &config.ci,
+            &file.relative_path,
+            &file.content,
+        ) && competing_publisher(&file.content)?
+        {
+            bail!(
+                "release-plz migration: reconcile competing publisher {} before enabling release-plz",
+                file.relative_path.display()
+            );
+        }
+    }
     for path in [
         CONFIG,
         ".release-plz.toml",

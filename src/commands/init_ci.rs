@@ -193,7 +193,6 @@ pub fn run(command: InitCiCommand) -> Result<()> {
         if !resolved.publish_crates && !resolved.with_artifacts {
             bail!("release-plz requires --publish-crates");
         }
-        crate::render::release_plz::validate_migration(workspace_root, &cfg)?;
         if !ProjectConfig::can_persist_ci(workspace_root)?
             && cfg.ci.publish_strategy != crate::config::PublishStrategy::ReleasePlz
         {
@@ -2244,6 +2243,12 @@ fn reconcile_ci_files(
         files.push(ci::custody::file(custody)?);
     }
     crate::render::workflow_templates::append(workspace_root, &config.ci, &mut files)?;
+    if files
+        .iter()
+        .any(|file| file.relative_path == Path::new(crate::render::release_plz::CONFIG))
+    {
+        crate::render::release_plz::validate_migration(workspace_root, &config, &files)?;
+    }
     let mut obsolete =
         project::obsolete_generated_workflows(workspace_root, &files, is_ci_managed_workflow_name)?;
     for path in [

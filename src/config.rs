@@ -2325,10 +2325,7 @@ pub struct AptOverrides<'a> {
 
 impl ProjectConfig {
     pub fn load(workspace_root: &Path) -> Result<Self> {
-        let sources = Self::load_sources(workspace_root)?
-            .into_iter()
-            .filter(|source| !source.config.is_empty())
-            .collect::<Vec<_>>();
+        let sources = Self::load_sources(workspace_root)?;
         match sources.as_slice() {
             [] => Ok(Self::default()),
             [source] => {
@@ -2840,14 +2837,28 @@ impl ProjectConfig {
         }
     }
 
-    fn load_sources(workspace_root: &Path) -> Result<Vec<ProjectConfigSource>> {
+    pub(crate) fn ci_declaration(workspace_root: &Path) -> Result<Option<Item>> {
+        Ok(Self::load_static_sources(workspace_root)?
+            .into_iter()
+            .next()
+            .and_then(|source| source.ci))
+    }
+
+    fn load_static_sources(workspace_root: &Path) -> Result<Vec<ProjectConfigSource>> {
         let mut sources = Vec::new();
 
         if let Some(source) = load_simit_toml(workspace_root)? {
             sources.push(source);
         }
         sources.extend(load_cargo_metadata_config(workspace_root)?);
-        if let Some(source) = load_flake_config(workspace_root)? {
+        sources.retain(|source| !source.is_empty());
+        Ok(sources)
+    }
+
+    fn load_sources(workspace_root: &Path) -> Result<Vec<ProjectConfigSource>> {
+        let mut sources = Self::load_static_sources(workspace_root)?;
+        if let Some(source) = load_flake_config(workspace_root)?.filter(|source| !source.is_empty())
+        {
             sources.push(source);
         }
 
@@ -4432,6 +4443,18 @@ fn runtime_name(runtime: Runtime) -> &'static str {
 struct ProjectConfigSource {
     label: String,
     config: ProjectConfig,
+    ci: Option<Item>,
+}
+
+impl ProjectConfigSource {
+    fn is_empty(&self) -> bool {
+        self.config.is_empty()
+            && self
+                .ci
+                .as_ref()
+                .and_then(Item::as_table_like)
+                .is_none_or(|table| table.is_empty())
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -4470,9 +4493,11 @@ fn load_simit_toml(workspace_root: &Path) -> Result<Option<ProjectConfigSource>>
         std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
     let config =
         toml_edit::de::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+    let document = text.parse::<DocumentMut>()?;
     Ok(Some(ProjectConfigSource {
         label: "simit.toml".to_owned(),
         config,
+        ci: document.get("ci").cloned(),
     }))
 }
 
@@ -4486,6 +4511,15 @@ fn load_cargo_metadata_config(workspace_root: &Path) -> Result<Vec<ProjectConfig
         std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
     let manifest: CargoManifestConfig =
         toml_edit::de::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+    let document = text.parse::<DocumentMut>()?;
+    let ci = |scope| {
+        document
+            .get(scope)
+            .and_then(|item| item.get("metadata"))
+            .and_then(|item| item.get("simit"))
+            .and_then(|item| item.get("ci"))
+            .cloned()
+    };
 
     let mut sources = Vec::new();
     if let Some(config) = manifest
@@ -4495,12 +4529,14 @@ fn load_cargo_metadata_config(workspace_root: &Path) -> Result<Vec<ProjectConfig
         sources.push(ProjectConfigSource {
             label: "Cargo.toml [workspace.metadata.simit]".to_owned(),
             config,
+            ci: ci("workspace"),
         });
     }
     if let Some(config) = manifest.package.and_then(|package| package.metadata.simit) {
         sources.push(ProjectConfigSource {
             label: "Cargo.toml [package.metadata.simit]".to_owned(),
             config,
+            ci: ci("package"),
         });
     }
 
@@ -4560,6 +4596,7 @@ fn load_flake_config(workspace_root: &Path) -> Result<Option<ProjectConfigSource
     Ok(Some(ProjectConfigSource {
         label: "flake outputs.simitConfig".to_owned(),
         config,
+        ci: None,
     }))
 }
 

@@ -588,25 +588,8 @@ struct CiConfigLayer {
 
 impl CiConfigLayer {
     fn load(workspace_root: &Path, cfg: &ProjectConfig) -> Result<Self> {
-        let simit_toml = workspace_root.join("simit.toml");
-        if simit_toml.exists() {
-            return Self::from_simit_toml(&simit_toml, cfg);
-        }
-        let manifest = workspace_root.join("Cargo.toml");
-        if manifest.exists() {
-            let text = fs::read_to_string(&manifest)?;
-            let document = text.parse::<toml_edit::DocumentMut>()?;
-            for scope in ["workspace", "package"] {
-                if let Some(ci) = document
-                    .get(scope)
-                    .and_then(|item| item.get("metadata"))
-                    .and_then(|item| item.get("simit"))
-                    .and_then(|item| item.get("ci"))
-                {
-                    // Preserve explicit default-valued policy in Cargo metadata too.
-                    return Ok(Self::from_table(ci.as_table_like(), cfg));
-                }
-            }
+        if let Some(ci) = ProjectConfig::ci_declaration(workspace_root)? {
+            return Ok(Self::from_table(ci.as_table_like(), cfg));
         }
         let mut layer = Self::from_non_simit_config(cfg);
         if workspace_root.join("flake.nix").exists()
@@ -618,18 +601,6 @@ impl CiConfigLayer {
             layer.publish_crates = Some(cfg.ci.publish_crates);
         }
         Ok(layer)
-    }
-
-    fn from_simit_toml(path: &Path, cfg: &ProjectConfig) -> Result<Self> {
-        let text =
-            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-        let document = text
-            .parse::<toml_edit::DocumentMut>()
-            .with_context(|| format!("parsing {}", path.display()))?;
-        Ok(Self::from_table(
-            document.get("ci").and_then(|item| item.as_table_like()),
-            cfg,
-        ))
     }
 
     fn from_table(ci_table: Option<&dyn toml_edit::TableLike>, cfg: &ProjectConfig) -> Self {
