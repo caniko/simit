@@ -44,6 +44,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Bind receipt-producing ungrouped Nix builds to the exact pull-request head and
+  source repository, matching grouped builds instead of recording a merge commit.
 - Preserve build-only checks, workflow lint and release/flake regeneration on
   every primary CI push branch when consolidating validation ownership.
 - Keep push and pull-request generator qualification separate so one event
