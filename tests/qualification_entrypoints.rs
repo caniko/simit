@@ -85,6 +85,29 @@ fn qualification_entrypoints_exist_in_the_candidate_and_packaged_source() {
 }
 
 #[test]
+fn generator_qualification_preserves_release_parity_push_branches() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let release: serde_yaml::Value = serde_yaml::from_str(
+        &fs::read_to_string(root.join(".github/workflows/qualify-release-generator.yaml")).unwrap(),
+    )
+    .unwrap();
+    for name in [
+        ".github/workflows/qualify-generator.yaml",
+        ".simit/workflows/qualify-generator.yaml.in",
+    ] {
+        let generator: serde_yaml::Value =
+            serde_yaml::from_str(&fs::read_to_string(root.join(name)).unwrap()).unwrap();
+        let branches = generator["on"]["push"]["branches"].as_sequence().unwrap();
+        for branch in release["on"]["push"]["branches"].as_sequence().unwrap() {
+            assert!(
+                branches.contains(branch),
+                "{name} omits parity for {branch:?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn generator_qualification_checks_out_the_exact_candidate() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     for name in [

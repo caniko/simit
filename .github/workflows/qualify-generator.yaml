@@ -6,8 +6,10 @@ on:
   push:
     branches:
       [
+        "maintenance/release-tag-binding",
         "fix/hermes-workflow-templates",
         "migrate/harbor-monorepo-reconcile-20261012-current",
+        "fix/monorepo-nix-diagnostics-20261014",
         "trunk",
       ]
   pull_request:
