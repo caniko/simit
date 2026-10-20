@@ -66,6 +66,22 @@ pub(super) fn validate_credential_free_source(workflow: &str, options: &CiOption
             }
         }
     }
+    // Verification gates run in a nested checkout, uploads in the workspace.
+    // Unknown leading expressions could expand to either root; never guess.
+    for artifacts in options
+        .required_gates
+        .iter()
+        .filter_map(|gate| gate.artifacts.as_ref())
+    {
+        for path in &artifacts.paths {
+            let path = path.strip_prefix('!').unwrap_or(path);
+            if path.starts_with("${{") && !artifact_path_has_absolute_context(path) {
+                bail!(
+                    "trusted verification artifact path has ambiguous rootedness; use a literal relative prefix or a direct runner.temp or github.workspace expression"
+                );
+            }
+        }
+    }
     Ok(())
 }
 

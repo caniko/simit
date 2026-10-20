@@ -3211,7 +3211,7 @@ pub(crate) fn push_required_gate_artifacts(
             .map_or(("", path.as_str()), |path| ("!", path));
         // Classify the runner's syntax, not the generator host's native paths.
         let absolute = path.starts_with(['/', '\\', '~'])
-            || path.starts_with("${{")
+            || artifact_path_has_absolute_context(path)
             || (path.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
                 && path.as_bytes().get(1) == Some(&b':')
                 && path
@@ -3229,6 +3229,17 @@ pub(crate) fn push_required_gate_artifacts(
         "          retention-days: {}\n          if-no-files-found: warn\n",
         artifacts.retention_days
     ));
+}
+
+fn artifact_path_has_absolute_context(path: &str) -> bool {
+    path.strip_prefix("${{")
+        .and_then(crate::config::github_expression)
+        .is_some_and(|(expression, _)| {
+            matches!(
+                expression.trim().to_ascii_lowercase().as_str(),
+                "runner.temp" | "github.workspace"
+            )
+        })
 }
 
 pub(crate) fn sanitize_gate_id(id: &str) -> String {

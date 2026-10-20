@@ -1063,6 +1063,11 @@ retention, not an external custody guarantee.
 Relative paths follow the gate's source checkout, including the isolated
 signed-source checkout in trusted crate verification. Absolute, tilde and leading
 expression paths (for example `${{ runner.temp }}/evidence`) remain unchanged.
+For isolated trusted verification, leading expressions must directly reference
+`runner.temp` or `github.workspace`, whose values are absolute. Other leading
+expressions are rejected because their rootedness is unknown. Put variable
+subdirectories after a literal relative prefix (for example
+`target/${{ vars.EVIDENCE_SUBDIR }}/report.xml`) or use a literal path instead.
 Artifact expressions cannot reference the `env` context: upload actions do not
 inherit candidate gate environments. Use literal values or `runner`, `github`
 or `vars` contexts instead.

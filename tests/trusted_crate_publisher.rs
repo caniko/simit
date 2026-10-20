@@ -715,6 +715,58 @@ fn credential_free_artifact_names_cannot_expose_the_source_token() {
 }
 
 #[test]
+fn isolated_artifact_uploads_reject_ambiguous_leading_expression_roots() {
+    for mode in ["single", "members", "coordinated"] {
+        let temp = publisher_project(mode);
+        let config = fs::read_to_string(temp.path().join("simit.toml")).unwrap();
+        let files = fs::read_dir(temp.path().join(".github/workflows"))
+            .unwrap()
+            .map(|entry| {
+                let path = entry.unwrap().path();
+                let bytes = fs::read(&path).unwrap();
+                (path, bytes)
+            })
+            .collect::<Vec<_>>();
+        for path in [
+            "${{ vars.EVIDENCE_DIR }}/report.xml",
+            "!${{ vars.EVIDENCE_DIR }}/private/**",
+            "${{ vars.env }}/evidence",
+            "${{ format('{0}/env', runner.temp) }}/evidence",
+            "${{ format('prefix/{0}', runner.temp) }}/evidence",
+            "${{ true && runner.temp || 'relative' }}/evidence",
+        ] {
+            fs::write(temp.path().join("simit.toml"), format!("{config}\n[[ci.required_gates]]\nid='integration'\nrun='cargo test'\n[ci.required_gates.artifacts]\nname='evidence'\npaths=[{}]\n", toml_edit::Value::from(path))).unwrap();
+            let output = common::simit()
+                .current_dir(temp.path())
+                .args(["init", "ci"])
+                .output()
+                .unwrap();
+            assert!(!output.status.success(), "{mode}: {path}: {output:?}");
+            assert!(
+                String::from_utf8_lossy(&output.stderr)
+                    .contains("artifact path has ambiguous rootedness"),
+                "{output:?}"
+            );
+            for (path, bytes) in &files {
+                assert_eq!(fs::read(path).unwrap(), *bytes);
+            }
+        }
+        // Without isolated verification, the gate and upload share the workspace.
+        let output = common::simit()
+            .current_dir(temp.path())
+            .args([
+                "init",
+                "ci",
+                "--publish-crates=false",
+                "--coordinated-publish=false",
+            ])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{mode}: {output:?}");
+    }
+}
+
+#[test]
 fn artifact_gate_job_budgets_cover_all_commands_and_uploads() {
     for mode in ["single", "members", "coordinated"] {
         let temp = publisher_project(mode);
