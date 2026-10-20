@@ -51,7 +51,8 @@ fn github_release_gates_retain_evidence_without_ignoring_failure() {
         steps[gate + 1]["if"],
         "always() && steps.simit-required-gate-integration.outcome != '' && steps.simit-required-gate-integration.outcome != 'skipped'"
     );
-    assert_eq!(steps[gate + 1]["with"]["name"], "evidence");
+    assert_eq!(steps[gate + 1]["with"]["name"], "gate.evidence");
+    assert_eq!(steps[gate + 1]["with"]["include-hidden-files"], true);
     assert_eq!(steps[gate + 1]["with"]["retention-days"], 7);
 }
 
@@ -103,6 +104,82 @@ fn required_gate_artifacts_follow_the_effective_release_backend_and_runner() {
             String::from_utf8_lossy(&output.stderr).contains("artifact"),
             "{output:?}"
         );
+    }
+}
+
+#[test]
+fn hosted_release_artifact_gates_share_the_bounded_upload_budget() {
+    for prebuild in [
+        "",
+        "[prebuild]\nrelease_archives=true\npublish_attic=false\nsystem_runners={x86_64-linux='ubuntu-24.04'}\n",
+    ] {
+        for (timeout, accepted) in [(170, true), (171, false), (180, false)] {
+            let mut config = String::from("[ci]\nplatform='github'\n");
+            for id in ["first", "second"] {
+                config.push_str(&format!("[[ci.required_gates]]\nid='{id}'\nrun='false'\ntimeout_minutes={timeout}\n[ci.required_gates.artifacts]\nname='{id}'\npaths=['target/evidence/']\n"));
+            }
+            config.push_str(&format!("[release.github]\nrepo='example/player'\n[release.artifacts]\nrunner='ubuntu-24.04'\nprebuild_binaries=true\nsign=false\n{prebuild}"));
+            let dir = project(&config);
+            let output = common::simit()
+                .current_dir(dir.path())
+                .args(["init", "release", "--print"])
+                .output()
+                .unwrap();
+            assert_eq!(
+                output.status.success(),
+                accepted,
+                "{timeout}: {prebuild}: {output:?}"
+            );
+            if accepted {
+                let yaml: serde_yaml::Value = serde_yaml::from_slice(&output.stdout).unwrap();
+                assert_eq!(yaml["jobs"]["validate"]["timeout-minutes"], 360);
+            } else {
+                assert!(
+                    String::from_utf8_lossy(&output.stderr).contains("360"),
+                    "{output:?}"
+                );
+            }
+            assert!(!dir.path().join(".github/workflows/release.yml").exists());
+        }
+    }
+}
+
+#[test]
+fn hosted_release_gate_artifacts_cannot_alias_reusable_prebuild_artifacts() {
+    for name in ["release-x86_64-linux", "flake-inputs-x86_64-linux"] {
+        let dir = project(&format!(
+            "[ci]\nplatform='github'\nprovider='actions'\nruntime='nix'\n[[ci.required_gates]]\nid='integration'\nrun='false'\n[ci.required_gates.artifacts]\nname='{name}'\npaths=['.playwright/']\n[release.github]\nrepo='example/player'\n[release.artifacts]\nrunner='ubuntu-24.04'\nprebuild_binaries=true\nsign=false\n[prebuild]\nrelease_archives=true\npublish_attic=true\nattic_app='push-flake-inputs'\nsystem_runners={{x86_64-linux='ubuntu-24.04'}}\n[release.attic]\nurl='https://cache.example.invalid'\ncache='release'\ntoken_name='release'\ntoken_secret='ATTIC_TOKEN'\n"
+        ));
+        fs::write(dir.path().join("flake.nix"), "{}\n").unwrap();
+        let release: serde_yaml::Value = serde_yaml::from_str(&render(dir.path())).unwrap();
+        let steps = release["jobs"]["validate"]["steps"].as_sequence().unwrap();
+        let upload = steps
+            .iter()
+            .find(|step| step["name"] == "Retain required gate evidence")
+            .unwrap();
+        let gate_name = upload["with"]["name"].as_str().unwrap();
+        assert_eq!(gate_name, format!("gate.{name}"));
+        assert_eq!(upload["with"]["path"], ".playwright/\n");
+        assert_eq!(upload["with"]["include-hidden-files"], true);
+        let output = common::simit()
+            .current_dir(dir.path())
+            .args(["init", "ci", "--prebuild-only"])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let prebuild: serde_yaml::Value = serde_yaml::from_str(
+            &fs::read_to_string(dir.path().join(".github/workflows/prebuild.yaml")).unwrap(),
+        )
+        .unwrap();
+        let names = prebuild["jobs"]["build"]["steps"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .filter_map(|step| step["with"]["name"].as_str())
+            .map(|name| name.replace("${{ matrix.system }}", "x86_64-linux"))
+            .collect::<Vec<_>>();
+        assert!(names.contains(&name.to_owned()), "{names:?}");
+        assert!(!names.iter().any(|name| name == gate_name), "{names:?}");
     }
 }
 

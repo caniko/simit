@@ -11,8 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   source builds and release verification, including failed gates but not skipped
   ones. Preserve runner compatibility, reject action-trimmed input whitespace,
   resolve effective backends after overrides, reserve CI and shared publishing
-  upload time, retain hidden-checkout and absolute-path evidence, reject artifact
-  authentication contexts and keep diagnostics separate from immutable archives.
+  upload time, retain selected hidden and absolute-path evidence, reject artifact
+  authentication and step-local environment contexts, and keep diagnostics
+  separate from immutable archives and reusable release-prebuild artifacts.
 
 ### Changed
 

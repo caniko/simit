@@ -1030,7 +1030,13 @@ fn push_required_gates(w: &mut String, gates: &[RequiredGate], platform: Platfor
             writeln!(w, "          {line}").expect("write");
         }
         if platform == Platform::Github {
-            crate::render::ci::push_required_gate_artifacts(w, gate, Some(&runner), "", "");
+            crate::render::ci::push_required_gate_artifacts(
+                w,
+                gate,
+                Some(&runner),
+                "",
+                ("gate.", ""),
+            );
         }
     }
 }

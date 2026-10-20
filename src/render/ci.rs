@@ -3172,7 +3172,7 @@ fn push_required_gate_jobs(
         workflow.push_str("        run: ");
         workflow.push_str(&gate.run);
         workflow.push('\n');
-        push_required_gate_artifacts(workflow, gate, Some(&runners.ci), "", "");
+        push_required_gate_artifacts(workflow, gate, Some(&runners.ci), "", ("", ""));
     }
 }
 
@@ -3181,7 +3181,7 @@ pub(crate) fn push_required_gate_artifacts(
     gate: &crate::config::RequiredGate,
     runner: Option<&ResolvedRunner>,
     directory: &str,
-    suffix: &str,
+    name_affixes: (&str, &str),
 ) {
     let Some(artifacts) = &gate.artifacts else {
         return;
@@ -3199,10 +3199,10 @@ pub(crate) fn push_required_gate_artifacts(
         "v4.6.2",
     );
     workflow.push_str(&format!(
-        "        with:\n          name: \"{}{}\"\n          include-hidden-files: {}\n",
+        "        with:\n          name: \"{}{}{}\"\n          include-hidden-files: true\n",
+        yaml_double_quote(name_affixes.0),
         yaml_double_quote(&artifacts.name),
-        yaml_double_quote(suffix),
-        !directory.is_empty()
+        yaml_double_quote(name_affixes.1)
     ));
     let mut paths = String::new();
     for path in &artifacts.paths {

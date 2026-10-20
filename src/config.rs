@@ -431,6 +431,69 @@ pub(crate) fn required_gate_job_timeout(gates: &[RequiredGate], minimum: u64) ->
         .max(minimum)
 }
 
+pub(crate) fn validate_required_gate_job_budget(gates: &[RequiredGate]) -> Result<()> {
+    if required_gate_job_timeout(gates, 0) > 360 {
+        bail!(
+            "required gate artifacts need a shared publishing job budget of at most 360 minutes, including all gate timeouts, 10 setup minutes and 5 minutes per upload"
+        );
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_required_gate_artifact_expressions(
+    artifacts: &RequiredGateArtifacts,
+) -> Result<()> {
+    for mut input in
+        std::iter::once(artifacts.name.as_str()).chain(artifacts.paths.iter().map(String::as_str))
+    {
+        while let Some((_, body)) = input.split_once("${{") {
+            let (expression, remainder) = github_expression(body)
+                .context("required gate artifacts must use complete GitHub expressions")?;
+            input = remainder;
+            // Upload actions intentionally do not inherit candidate step environments.
+            // Ignore string literals and properties of other contexts (e.g. vars.env).
+            let references_env = expression.split('\'').step_by(2).any(|part| {
+                let part = part.to_ascii_lowercase();
+                part.match_indices("env").any(|(index, _)| {
+                    let before = &part[..index];
+                    let after = &part[index + 3..];
+                    !before.ends_with(|ch: char| ch.is_ascii_alphanumeric() || ch == '_')
+                        && !before.trim_end().ends_with('.')
+                        && !after.starts_with(|ch: char| ch.is_ascii_alphanumeric() || ch == '_')
+                })
+            });
+            if references_env {
+                bail!(
+                    "required gate artifact expressions must not reference env; use literal paths or runner, github or vars contexts instead of step-local environment values"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+// Expression terminators/openers inside quoted literals are data, not syntax.
+// GitHub escapes a single quote inside its string literals by doubling it.
+pub(crate) fn github_expression(body: &str) -> Option<(&str, &str)> {
+    let bytes = body.as_bytes();
+    let mut quoted = false;
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'\'' {
+            if quoted && bytes.get(index + 1) == Some(&b'\'') {
+                index += 2;
+                continue;
+            }
+            quoted = !quoted;
+        }
+        if !quoted && bytes[index..].starts_with(b"}}") {
+            return Some((&body[..index], &body[index + 2..]));
+        }
+        index += 1;
+    }
+    None
+}
+
 /// Workspace crates.io publishing strategy.
 #[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -3933,6 +3996,7 @@ fn validate_required_gates(ci: &CiConfig) -> Result<()> {
             if !(1..=90).contains(&artifacts.retention_days) {
                 bail!("simit project config: required gate artifact retention_days must be 1..=90");
             }
+            validate_required_gate_artifact_expressions(artifacts)?;
         }
         for (key, value) in &gate.env {
             if key.trim().is_empty() || key.contains(['\n', '\r', ' ', '=']) {

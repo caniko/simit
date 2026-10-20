@@ -1,6 +1,7 @@
 //! Paired credential-free source builds and independent default-branch publishers.
 
 use super::*;
+use crate::config::github_expression;
 use anyhow::Context;
 
 // Candidate-controlled build scripts/setup run only on fresh hosted workers,
@@ -8,11 +9,7 @@ use anyhow::Context;
 pub(super) const CANDIDATE_RUNNER: &str = "ubuntu-24.04";
 
 pub(super) fn validate_credential_free_source(workflow: &str, options: &CiOptions) -> Result<()> {
-    if crate::config::required_gate_job_timeout(&options.required_gates, 60) > 360 {
-        bail!(
-            "required gate artifacts need a shared publishing job budget of at most 360 minutes, including all gate timeouts, 10 setup minutes and 5 minutes per upload"
-        );
-    }
+    crate::config::validate_required_gate_job_budget(&options.required_gates)?;
     // Names are shell/YAML syntax, never expressions or executable defaults.
     // Recheck direct renderer callers as well as ProjectConfig consumers.
     for name in &options.required_env {
@@ -24,6 +21,9 @@ pub(super) fn validate_credential_free_source(workflow: &str, options: &CiOption
     for gate in &options.required_gates {
         for name in gate.env.keys() {
             crate::config::validate_environment_name("release source required gate env key", name)?;
+        }
+        if let Some(artifacts) = &gate.artifacts {
+            crate::config::validate_required_gate_artifact_expressions(artifacts)?;
         }
     }
     // Required gates also run against candidate source in the fresh trusted
@@ -67,28 +67,6 @@ pub(super) fn validate_credential_free_source(workflow: &str, options: &CiOption
         }
     }
     Ok(())
-}
-
-// Expression terminators/openers inside quoted literals are data, not syntax.
-// GitHub escapes a single quote inside its string literals by doubling it.
-fn github_expression(body: &str) -> Option<(&str, &str)> {
-    let bytes = body.as_bytes();
-    let mut quoted = false;
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] == b'\'' {
-            if quoted && bytes.get(index + 1) == Some(&b'\'') {
-                index += 2;
-                continue;
-            }
-            quoted = !quoted;
-        }
-        if !quoted && bytes[index..].starts_with(b"}}") {
-            return Some((&body[..index], &body[index + 2..]));
-        }
-        index += 1;
-    }
-    None
 }
 
 fn references_github_authentication(expression: &str) -> bool {
@@ -335,7 +313,7 @@ pub(super) fn push_source_required_gates(w: &mut String, options: &CiOptions) {
         }
         w.push_str(&format!("        run: {}\n", gate.run));
         // Keep diagnostics outside the immutable simit-crate-<package>-<attempt> namespace.
-        push_required_gate_artifacts(w, gate, None, "", ".source");
+        push_required_gate_artifacts(w, gate, None, "", ("", ".source"));
     }
 }
 
@@ -488,7 +466,7 @@ pub(super) fn publisher_file_with_namespace(
                     gate,
                     None,
                     ".simit-release-source/",
-                    &format!(".{name}"),
+                    ("", &format!(".{name}")),
                 );
             }
         }

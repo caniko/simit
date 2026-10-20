@@ -310,7 +310,7 @@ run = "cargo test"
 timeout_minutes = 60
 [ci.required_gates.artifacts]
 name = "browser-evidence"
-paths = ["target/evidence/", "!target/evidence/private/**"]
+paths = ["target/evidence/", "!target/evidence/private/**", ".playwright/"]
 retention_days = 14
 "#,
     )
@@ -362,7 +362,7 @@ retention_days = 14
             "always() && steps.simit-required-gate-browser.outcome != '' && steps.simit-required-gate-browser.outcome != 'skipped'"
         );
         assert_eq!(upload["timeout-minutes"], 5);
-        assert_eq!(upload["with"]["include-hidden-files"], !prefix.is_empty());
+        assert_eq!(upload["with"]["include-hidden-files"], true);
         assert!(
             upload["uses"]
                 .as_str()
@@ -372,7 +372,9 @@ retention_days = 14
         assert_eq!(upload["with"]["name"], format!("browser-evidence{suffix}"));
         assert_eq!(
             upload["with"]["path"],
-            format!("{prefix}target/evidence/\n!{prefix}target/evidence/private/**\n")
+            format!(
+                "{prefix}target/evidence/\n!{prefix}target/evidence/private/**\n{prefix}.playwright/\n"
+            )
         );
         assert_eq!(upload["with"]["retention-days"], 14);
         assert!(steps[gate]["continue-on-error"].is_null());
@@ -426,6 +428,8 @@ fn trusted_gate_artifact_paths_preserve_runner_absolute_syntax() {
         "${{ runner.temp }}/evidence",
         "!${{ runner.temp }}/private/**",
         "${{ github.workspace }}/evidence",
+        "${{ format('{0}/env', runner.temp) }}/evidence",
+        "${{ vars.env }}/evidence",
         "/var/evidence/",
         "~/evidence/",
         r"C:\evidence\",
@@ -461,7 +465,10 @@ fn trusted_gate_artifact_paths_preserve_runner_absolute_syntax() {
             ".simit-release-source/target/evidence/\n",
             "!.simit-release-source/target/evidence/private/**\n",
             "${{ runner.temp }}/evidence\n!${{ runner.temp }}/private/**\n",
-            "${{ github.workspace }}/evidence\n/var/evidence/\n~/evidence/\n",
+            "${{ github.workspace }}/evidence\n",
+            "${{ format('{0}/env', runner.temp) }}/evidence\n",
+            "${{ vars.env }}/evidence\n",
+            "/var/evidence/\n~/evidence/\n",
             "C:\\evidence\\\nC:/evidence/\n\\\\server\\evidence\\\n",
             ".simit-release-source/C:relative\\evidence\n",
         )
@@ -513,6 +520,42 @@ fn required_gate_artifacts_reject_invalid_or_unsupported_configuration() {
             String::from_utf8_lossy(&output.stderr)
         );
         assert!(!temp.path().join(".github/workflows/ci.yaml").exists());
+    }
+}
+
+#[test]
+fn required_gate_artifacts_reject_step_environment_expressions() {
+    for expression in [
+        "${{ env.EVIDENCE_DIR }}",
+        "${{ ENV['EVIDENCE_DIR'] }}",
+        "${{ toJSON(env) }}",
+        "${{ format('}}{0}', env.EVIDENCE_DIR) }}",
+        "${{ format('${{}}{0}', env.EVIDENCE_DIR) }}",
+    ] {
+        for field in ["name", "paths"] {
+            let temp = init_package(true);
+            let (name, path) = if field == "name" {
+                (expression, "target/evidence/")
+            } else {
+                ("evidence", expression)
+            };
+            fs::write(temp.path().join("simit.toml"), format!("[ci]\nplatform='github'\nruntime='cargo'\n[[ci.required_gates]]\nid='browser'\nrun='false'\nenv={{EVIDENCE_DIR='target/evidence/'}}\n[ci.required_gates.artifacts]\nname={}\npaths=[{}]\n", toml_edit::Value::from(name), toml_edit::Value::from(path))).unwrap();
+            let output = simit()
+                .current_dir(temp.path())
+                .args(["init", "ci"])
+                .output()
+                .unwrap();
+            assert!(
+                !output.status.success(),
+                "{field}: {expression}: {output:?}"
+            );
+            assert!(
+                String::from_utf8_lossy(&output.stderr)
+                    .contains("artifact expressions must not reference env"),
+                "{output:?}"
+            );
+            assert!(!temp.path().join(".github/workflows/ci.yaml").exists());
+        }
     }
 }
 
