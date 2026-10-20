@@ -1028,6 +1028,61 @@ not inherit test-only services or credentials. Release secrets
 belong only to independent default-branch upload jobs in the protected
 `simit-crates-io` environment.
 
+On GitHub Actions, a gate can retain diagnostic files after success or failure:
+
+```toml
+[ci.required_gates.artifacts]
+name = "gel-evidence"
+paths = ["target/evidence/", "e2e/test-results/"]
+retention_days = 14
+```
+
+Place this table immediately after the gate it belongs to. Artifact names must
+be valid and unique across gates. Names and paths cannot have surrounding
+whitespace: the upload action trims inputs rather than preserving those names.
+Retention defaults to seven days and accepts 1–90 days. Uploads use `always()`
+with the gate step's outcome: failed gates retain evidence, but skipped or
+not-started gates cannot publish stale files under their names. Missing files
+warn; the gate's failure still blocks publication. Uploads are bounded to five
+minutes and use the action version compatible with the effective runner.
+Hidden files within explicitly selected paths are included; exclude sensitive
+files explicitly, even when they start with a dot.
+
+Artifact-bearing CI gates apply `timeout_minutes` to the command step and give
+the job fifteen extra minutes for setup and upload, so their configured command
+timeout must be at most 345 minutes. Other gates retain their existing limit.
+Signed-source and trusted verification jobs reserve ten setup minutes plus all
+gate command deadlines and five minutes per diagnostic upload, with a minimum
+job limit of sixty minutes; larger existing job limits are retained.
+Configurations exceeding the shared 360-minute
+publishing job limit are rejected, including hosted-release validation jobs;
+independent CI gates do not share that limit.
+Workflow/job cancellation can still prevent an upload; this is diagnostic
+retention, not an external custody guarantee.
+
+Relative paths follow the gate's source checkout, including the isolated
+signed-source checkout in trusted crate verification. Absolute, tilde and leading
+expression paths (for example `${{ runner.temp }}/evidence`) remain unchanged.
+For isolated trusted verification, leading expressions must directly reference
+`runner.temp` or `github.workspace`, whose values are absolute. Other leading
+expressions are rejected because their rootedness is unknown. Put variable
+subdirectories after a literal relative prefix (for example
+`target/${{ vars.EVIDENCE_SUBDIR }}/report.xml`) or use a literal path instead.
+Artifact expressions cannot reference the `env` context: upload actions do not
+inherit candidate gate environments. Use literal values or `runner`, `github`
+or `vars` contexts instead.
+Artifact names and paths in credential-free publishing cannot reference GitHub
+secrets or authentication contexts. Signed-tag source builds
+also retain gate failures before the success-gated trusted publisher can start.
+Their diagnostics use `<artifact-name>.source` to avoid crate archive names.
+Trusted crate publishers use `<artifact-name>.<package-name>` to avoid collisions
+between gate/member pairs, including hyphenated names. Hosted-release validation
+uses `gate.<artifact-name>` to avoid the reusable prebuild's `release-<system>`
+and `flake-inputs-<system>` artifact namespaces. Ordinary CI names are unchanged.
+Forgejo and Crow reject
+this GitHub-only option after CLI backend overrides are resolved; hosted release
+generation checks its effective release backend independently of the CI default.
+
 ## Coordinated Workspace Publication
 
 Member-scoped publishing (`publish-crate-<crate>.yaml`) has no cross-crate

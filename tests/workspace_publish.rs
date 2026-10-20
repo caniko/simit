@@ -182,6 +182,9 @@ fn coordinated_publish_generates_ordered_gated_workflow() {
 id = "gel-integration"
 run = "nix run .#test-gel"
 timeout_minutes = 30
+[ci.required_gates.artifacts]
+name = "gel-evidence"
+paths = ["target/evidence/"]
 "#,
     );
 
@@ -276,8 +279,34 @@ timeout_minutes = 30
         parsed["jobs"]["build"]["env"]["CARGO_HOME"].as_str(),
         Some("/tmp/.cargo")
     );
+    let steps = parsed["jobs"]["build"]["steps"].as_sequence().unwrap();
+    let gate = steps
+        .iter()
+        .position(|step| step["name"] == "Required gate gel-integration")
+        .unwrap();
+    assert_eq!(steps[gate + 1]["with"]["name"], "gel-evidence.source");
+    assert_eq!(
+        steps[gate + 1]["if"],
+        "always() && steps.simit-required-gate-gel-integration.outcome != '' && steps.simit-required-gate-gel-integration.outcome != 'skipped'"
+    );
     // Gate failure blocks publication via needs chain.
     let parsed: serde_yaml::Value = serde_yaml::from_str(&trusted).unwrap();
+    for member in ["a", "b", "c", "d"] {
+        let upload = parsed["jobs"][format!("verify-{member}")]["steps"]
+            .as_sequence()
+            .unwrap()
+            .last()
+            .unwrap();
+        assert_eq!(
+            upload["if"],
+            "always() && steps.simit-required-gate-gel-integration.outcome != '' && steps.simit-required-gate-gel-integration.outcome != 'skipped'"
+        );
+        assert_eq!(upload["with"]["name"], format!("gel-evidence.{member}"));
+        assert_eq!(
+            upload["with"]["path"],
+            ".simit-release-source/target/evidence/\n"
+        );
+    }
     assert!(
         parsed["jobs"]["verify-a"]["steps"]
             .as_sequence()
@@ -303,6 +332,68 @@ timeout_minutes = 30
     // Auditable non-publishing summary.
     assert!(trusted.contains("publish-report"));
     assert!(trusted.contains("if: always()"));
+}
+
+#[test]
+fn coordinated_gate_artifacts_are_unique_across_hyphenated_packages() {
+    let temp = TempDir::new().unwrap();
+    let packages = ["browser", "ui-browser"];
+    fs::write(
+        temp.path().join("Cargo.toml"),
+        "[workspace]\nmembers = ['browser', 'ui-browser']\nresolver = '2'\n",
+    )
+    .unwrap();
+    for package in packages {
+        let root = temp.path().join(package);
+        fs::create_dir(&root).unwrap();
+        write_minimal_package(&root, package);
+    }
+    fs::write(
+        temp.path().join("flake.nix"),
+        "{ outputs = { self }: {}; }\n",
+    )
+    .unwrap();
+    let artifacts = ["trace", "trace-ui", "trace.ui_coverage"];
+    let gates = artifacts
+        .iter()
+        .enumerate()
+        .map(|(index, name)| {
+            format!(
+                "[[ci.required_gates]]\nid = 'gate-{index}'\nrun = 'cargo test'\n[ci.required_gates.artifacts]\nname = '{name}'\npaths = ['target/evidence/']\n"
+            )
+        })
+        .collect::<String>();
+    write_workspace_simit_toml(temp.path(), &gates);
+    let output = simit()
+        .current_dir(temp.path())
+        .env("XDG_CONFIG_HOME", temp.path().join(".xdg"))
+        .args(["init", "ci"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let workflow: serde_yaml::Value = serde_yaml::from_str(&read(
+        &temp
+            .path()
+            .join(".github/workflows/trusted-publish-workspace.yaml"),
+    ))
+    .unwrap();
+    let mut names = std::collections::BTreeSet::new();
+    let mut uploads = 0;
+    for job in workflow["jobs"].as_mapping().unwrap().values() {
+        for step in job["steps"].as_sequence().unwrap() {
+            if step["name"] == "Retain required gate evidence" {
+                let name = step["with"]["name"].as_str().unwrap();
+                assert!(names.insert(name), "duplicate gate artifact: {name}");
+                uploads += 1;
+            }
+        }
+    }
+    assert_eq!(uploads, packages.len() * artifacts.len());
+    for artifact in artifacts {
+        for package in packages {
+            assert!(names.contains(format!("{artifact}.{package}").as_str()));
+        }
+    }
 }
 
 #[test]

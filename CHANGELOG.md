@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Retain optional required-gate diagnostic artifacts in GitHub CI, signed-tag
+  source builds and release verification, including failed gates but not skipped
+  ones. Preserve runner compatibility, reject action-trimmed input whitespace,
+  resolve effective backends after overrides, reserve CI and shared publishing
+  upload time, retain selected hidden and absolute-path evidence, reject artifact
+  authentication and step-local environment contexts, and keep diagnostics
+  separate from immutable archives and reusable release-prebuild artifacts.
+  Reject ambiguously rooted leading expressions in isolated verification instead
+  of silently collecting from the wrong checkout.
+
 ### Changed
 
 - Deduplicate Simit's own generator qualification and native/Nix validation;
