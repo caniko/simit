@@ -88,6 +88,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with a clean environment; document the required isolated observer-job boundary.
 - Revalidate captured attempt-one jobs and log contents against GitHub during
   retention; an artifact digest cannot authenticate a recomputed forged receipt.
+- Bind original custody to complete logs from validated attempt-one job IDs,
+  tolerating only transient redundant step-file ZIP membership while preserving
+  exact shared contents, complete aggregate coverage and all retention bounds.
 - Reserve full partial-download retry bodies independently of fresh metadata and
   log revalidation, without resetting the retention deadline.
 - Preserve `@` in workflow filenames and refs, rejecting ambiguous producer paths.
