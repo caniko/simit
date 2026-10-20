@@ -34,6 +34,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Preserve release/flake regeneration on every existing release-qualification
+  push branch when consolidating validation ownership.
 - Qualify generated native prebuild push runs against exact source job/step
   identities: require release-only skips, complete native matrix execution and
   successful default-branch publication while rejecting unknown predicates.
