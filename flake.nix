@@ -322,14 +322,7 @@
           pkgs.runCommand "check-simit-default-package-cache-policy" {} "touch $out";
       };
 
-      devShells = let
-        docsPackages = with pkgs; [
-          mdbook
-          plinthProject
-          pre-commit
-          rust-analyzer
-        ];
-      in {
+      devShells = {
         test = publicCraneLib.devShell {
           packages = with pkgs; [git gnupg nodejs jq python3 actionlint perl] ++ lib.optionals stdenv.isLinux [bubblewrap nix sqlite];
         };
@@ -380,9 +373,10 @@
         };
 
         docs = publicCraneLib.devShell {
-          checks = self.checks.${system};
-          packages = [treefmtEval.config.build.wrapper] ++ docsPackages ++ pre-commit-check.enabledPackages;
-          shellHook = pre-commit-check.shellHook;
+          # Rustdoc needs the Rust dependency inputs, not the site generator or
+          # repository hooks. Site builds retain their own Plinth dependency.
+          inputsFrom = [publicCargoArtifacts];
+          packages = [pkgs.mdbook];
         };
       };
     })
