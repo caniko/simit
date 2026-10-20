@@ -688,6 +688,8 @@ fn migration_detects_publish_after_cargo_global_options() {
         "cargo --locked publish",
         "cargo +stable --config 'build.jobs = 1' --offline publish --dry-run",
         "/usr/bin/cargo --color=never --frozen publish -p demo",
+        "cargo release --execute",
+        "cargo --locked release patch --execute --no-confirm",
     ] {
         let temp = project("");
         fs::create_dir_all(temp.path().join(".github/workflows")).unwrap();
@@ -704,6 +706,21 @@ fn migration_detects_publish_after_cargo_global_options() {
             ""
         );
     }
+}
+
+#[test]
+fn migration_requires_reconciling_opaque_remote_reusable_workflows() {
+    let temp = project("");
+    fs::create_dir_all(temp.path().join(".github/workflows")).unwrap();
+    fs::write(
+        temp.path().join(".github/workflows/custom.yaml"),
+        "name: Existing publisher\non: push\njobs:\n  ship:\n    uses: acme/release/.github/workflows/publish.yml@v1\n",
+    )
+    .unwrap();
+    let output = init(temp.path(), &["--publish-crates"]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("competing publisher"));
+    assert!(!temp.path().join("release-plz.toml").exists());
 }
 
 #[test]

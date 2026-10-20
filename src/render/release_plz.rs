@@ -235,9 +235,11 @@ fn competing_publisher(
         return Ok(false);
     };
     for job in jobs.values() {
-        if let Some(local) = job.get("uses").and_then(serde_yaml::Value::as_str)
-            && local.starts_with("./")
-            && local_publisher(root, root, local, seen, true, None)?
+        // Remote reusable workflows are opaque and may publish, so they need
+        // reconciliation just like opaque local actions.
+        if let Some(reusable) = job.get("uses").and_then(serde_yaml::Value::as_str)
+            && (!reusable.starts_with("./")
+                || local_publisher(root, root, reusable, seen, true, None)?)
         {
             return Ok(true);
         }
@@ -631,11 +633,15 @@ fn commands_publish(
             } else {
                 arguments
             };
+            // `cargo release --execute` publishes, tags and pushes like cargo-release.
+            let cargo_subcommand = |name| {
+                arguments.first() == Some(&name)
+                    || (arguments.first().is_some_and(|arg| arg.starts_with('-'))
+                        && arguments.contains(&name))
+            };
             if matches!(program, Some("release-plz" | "cargo-release"))
                 || (program == Some("cargo")
-                    && (arguments.first() == Some(&"publish")
-                        || (arguments.first().is_some_and(|arg| arg.starts_with('-'))
-                            && arguments.contains(&"publish"))))
+                    && (cargo_subcommand("publish") || cargo_subcommand("release")))
             {
                 return Ok(true);
             }

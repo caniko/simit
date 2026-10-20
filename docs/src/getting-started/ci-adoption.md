@@ -75,7 +75,9 @@ migration. Hand-written competing publishers or release-plz configuration must
 be reconciled explicitly before generation; Simit reports their paths.
 Migration follows literal local scripts and reusable workflows, respecting
 workflow/job/step working directories and custom shell templates. Missing,
-external or opaque local files and local actions require explicit reconciliation.
+external or opaque local files, local actions and remote reusable workflows
+require explicit reconciliation. `cargo publish`, `cargo release`, `cargo-release`
+and `release-plz` invocations count as competing publishers.
 Tracked and unignored local scripts are inspected regardless of extension;
 ignored untracked build outputs are not source inputs. A generated-file marker
 alone cannot exempt a publisher that the migration plan leaves active.
