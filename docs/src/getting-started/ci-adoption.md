@@ -106,6 +106,8 @@ Rustdoc's shell carries Rust dependency inputs and mdBook; site builds own Plint
 Both push and PR originals remain explicitly enrolled for custody. Native-platform,
 transport, observer-isolation and publisher-boundary qualifications retain their
 independent workflows and required contexts.
+Both replacement qualifiers cover every primary CI push branch, including branches
+without an open pull request.
 
 ### Native grouped Nix executor
 
