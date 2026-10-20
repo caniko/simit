@@ -416,6 +416,21 @@ fn default_gate_timeout_minutes() -> u64 {
     30
 }
 
+/// Preserve existing job minima, reserving setup and every gate/upload deadline.
+pub(crate) fn required_gate_job_timeout(gates: &[RequiredGate], minimum: u64) -> u64 {
+    if !gates.iter().any(|gate| gate.artifacts.is_some()) {
+        return minimum;
+    }
+    gates
+        .iter()
+        .fold(10_u64, |budget, gate| {
+            budget
+                .saturating_add(gate.timeout_minutes)
+                .saturating_add(if gate.artifacts.is_some() { 5 } else { 0 })
+        })
+        .max(minimum)
+}
+
 /// Workspace crates.io publishing strategy.
 #[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]

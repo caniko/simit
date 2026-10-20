@@ -307,7 +307,7 @@ publish_crates = true
 [[ci.required_gates]]
 id = "browser"
 run = "cargo test"
-timeout_minutes = 7
+timeout_minutes = 60
 [ci.required_gates.artifacts]
 name = "browser-evidence"
 paths = ["target/evidence/", "!target/evidence/private/**"]
@@ -331,7 +331,11 @@ retention_days = 14
     for (file, prefix, suffix) in [
         ("ci.yaml", "", ""),
         ("publish-crate.yaml", "", ".source"),
-        ("trusted-publish-crate.yaml", ".simit-release-source/", ".demo"),
+        (
+            "trusted-publish-crate.yaml",
+            ".simit-release-source/",
+            ".demo",
+        ),
     ] {
         let yaml: serde_yaml::Value =
             serde_yaml::from_str(&read(&temp.path().join(".github/workflows").join(file))).unwrap();
@@ -352,12 +356,13 @@ retention_days = 14
             .unwrap();
         let upload = &steps[gate + 1];
         assert_eq!(steps[gate]["id"], "simit-required-gate-browser");
-        assert_eq!(steps[gate]["timeout-minutes"], 7);
+        assert_eq!(steps[gate]["timeout-minutes"], 60);
         assert_eq!(
             upload["if"],
             "always() && steps.simit-required-gate-browser.outcome != '' && steps.simit-required-gate-browser.outcome != 'skipped'"
         );
         assert_eq!(upload["timeout-minutes"], 5);
+        assert_eq!(upload["with"]["include-hidden-files"], !prefix.is_empty());
         assert!(
             upload["uses"]
                 .as_str()
@@ -374,7 +379,7 @@ retention_days = 14
     }
     let ci: serde_yaml::Value =
         serde_yaml::from_str(&read(&temp.path().join(".github/workflows/ci.yaml"))).unwrap();
-    assert_eq!(ci["jobs"]["gate-browser"]["timeout-minutes"], 22);
+    assert_eq!(ci["jobs"]["gate-browser"]["timeout-minutes"], 75);
     let config: toml_edit::DocumentMut = read(&temp.path().join("simit.toml")).parse().unwrap();
     assert_eq!(
         config["ci"]["required_gates"][0]["artifacts"]["retention_days"].as_integer(),
@@ -404,9 +409,63 @@ fn required_gate_source_evidence_names_do_not_alias_crate_archives() {
             .filter_map(|step| step["with"]["name"].as_str())
             .collect::<Vec<_>>();
         assert!(uploads.contains(&"simit-crate-demo-${{ github.run_attempt }}"));
-        assert!(uploads.contains(&"simit-crate-demo-1.source"), "{uploads:?}");
+        assert!(
+            uploads.contains(&"simit-crate-demo-1.source"),
+            "{uploads:?}"
+        );
         assert!(!uploads.contains(&"simit-crate-demo-1"));
     }
+}
+
+#[test]
+fn trusted_gate_artifact_paths_preserve_runner_absolute_syntax() {
+    let temp = init_package(true);
+    let paths = [
+        "target/evidence/",
+        "!target/evidence/private/**",
+        "${{ runner.temp }}/evidence",
+        "!${{ runner.temp }}/private/**",
+        "${{ github.workspace }}/evidence",
+        "/var/evidence/",
+        "~/evidence/",
+        r"C:\evidence\",
+        "C:/evidence/",
+        r"\\server\evidence\",
+        r"C:relative\evidence",
+    ];
+    let paths = toml_edit::Value::Array(paths.into_iter().collect());
+    fs::write(temp.path().join("simit.toml"), format!("[ci]\nplatform='github'\nruntime='cargo'\npublish_crates=true\n[[ci.required_gates]]\nid='browser'\nrun='cargo test'\n[ci.required_gates.artifacts]\nname='evidence'\npaths={paths}\n")).unwrap();
+    let output = simit()
+        .current_dir(temp.path())
+        .args(["init", "ci"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let workflow: serde_yaml::Value = serde_yaml::from_str(&read(
+        &temp
+            .path()
+            .join(".github/workflows/trusted-publish-crate.yaml"),
+    ))
+    .unwrap();
+    let steps = workflow["jobs"]["verify-demo"]["steps"]
+        .as_sequence()
+        .unwrap();
+    let upload = steps
+        .iter()
+        .find(|step| step["name"] == "Retain required gate evidence")
+        .unwrap();
+    assert_eq!(upload["with"]["include-hidden-files"], true);
+    assert_eq!(
+        upload["with"]["path"],
+        concat!(
+            ".simit-release-source/target/evidence/\n",
+            "!.simit-release-source/target/evidence/private/**\n",
+            "${{ runner.temp }}/evidence\n!${{ runner.temp }}/private/**\n",
+            "${{ github.workspace }}/evidence\n/var/evidence/\n~/evidence/\n",
+            "C:\\evidence\\\nC:/evidence/\n\\\\server\\evidence\\\n",
+            ".simit-release-source/C:relative\\evidence\n",
+        )
+    );
 }
 
 #[test]

@@ -8,6 +8,11 @@ use anyhow::Context;
 pub(super) const CANDIDATE_RUNNER: &str = "ubuntu-24.04";
 
 pub(super) fn validate_credential_free_source(workflow: &str, options: &CiOptions) -> Result<()> {
+    if crate::config::required_gate_job_timeout(&options.required_gates, 60) > 360 {
+        bail!(
+            "required gate artifacts need a shared publishing job budget of at most 360 minutes, including all gate timeouts, 10 setup minutes and 5 minutes per upload"
+        );
+    }
     // Names are shell/YAML syntax, never expressions or executable defaults.
     // Recheck direct renderer callers as well as ProjectConfig consumers.
     for name in &options.required_env {
@@ -29,7 +34,12 @@ pub(super) fn validate_credential_free_source(workflow: &str, options: &CiOption
         .map(|(_, value)| value.as_str())
         .chain(options.extra_setup.iter().map(String::as_str))
         .chain(options.required_gates.iter().flat_map(|gate| {
-            std::iter::once(gate.run.as_str()).chain(gate.env.values().map(String::as_str))
+            std::iter::once(gate.run.as_str())
+                .chain(gate.env.values().map(String::as_str))
+                .chain(gate.artifacts.iter().flat_map(|artifacts| {
+                    std::iter::once(artifacts.name.as_str())
+                        .chain(artifacts.paths.iter().map(String::as_str))
+                }))
         }));
     // The generator's fixed signed-tag admission step needs command-local
     // read-only provider authentication. User-controlled build bindings must
@@ -231,7 +241,10 @@ pub(super) fn source_workflow_with_namespace(
     }
     w.push_str("permissions:\n  contents: read\n\nconcurrency:\n  group: ${{ github.workflow_ref }}-${{ github.ref }}\n  cancel-in-progress: false\n\njobs:\n  build:\n    runs-on: ");
     w.push_str(CANDIDATE_RUNNER);
-    w.push_str("\n    timeout-minutes: 60\n");
+    w.push_str(&format!(
+        "\n    timeout-minutes: {}\n",
+        crate::config::required_gate_job_timeout(&options.required_gates, 60)
+    ));
     push_job_env(&mut w, Platform::Github, runtime, &options.extra_env, true);
     w.push_str("    steps:\n");
     push_event_checkout_step(&mut w, Platform::Github, None);
@@ -409,7 +422,10 @@ pub(super) fn publisher_file_with_namespace(
         w.push_str("    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'\n");
         w.push_str("    runs-on: ");
         w.push_str(CANDIDATE_RUNNER);
-        w.push_str("\n    timeout-minutes: 60\n    steps:\n");
+        w.push_str(&format!(
+            "\n    timeout-minutes: {}\n    steps:\n",
+            crate::config::required_gate_job_timeout(&options.required_gates, 60)
+        ));
         bootstrap(&mut w);
         if runtime == Runtime::Nix {
             push_install_nix_step_with_cache(

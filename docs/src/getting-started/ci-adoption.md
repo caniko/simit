@@ -1049,11 +1049,20 @@ minutes and use the action version compatible with the effective runner.
 Artifact-bearing CI gates apply `timeout_minutes` to the command step and give
 the job fifteen extra minutes for setup and upload, so their configured command
 timeout must be at most 345 minutes. Other gates retain their existing limit.
+Signed-source and trusted verification jobs reserve ten setup minutes plus all
+gate command deadlines and five minutes per diagnostic upload, with a minimum
+job limit of sixty minutes; larger existing job limits are retained.
+Configurations exceeding the shared 360-minute
+publishing job limit are rejected; independent CI gates do not share that limit.
 Workflow/job cancellation can still prevent an upload; this is diagnostic
 retention, not an external custody guarantee.
 
 Relative paths follow the gate's source checkout, including the isolated
-signed-source checkout in trusted crate verification. Signed-tag source builds
+signed-source checkout in trusted crate verification. Verification uploads
+include hidden files from that explicit checkout. Absolute, tilde and leading
+expression paths (for example `${{ runner.temp }}/evidence`) remain unchanged.
+Artifact names and paths in credential-free publishing cannot reference GitHub
+secrets or authentication contexts. Signed-tag source builds
 also retain gate failures before the success-gated trusted publisher can start.
 Their diagnostics use `<artifact-name>.source` to avoid crate archive names.
 Trusted crate publishers use `<artifact-name>.<package-name>` to avoid collisions

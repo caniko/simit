@@ -662,6 +662,10 @@ fn credential_free_inputs_reject_github_token_and_indirect_context_access() {
                     "[[ci.required_gates]]\nid='integration'\nrun={}\n",
                     toml_edit::Value::from(format!("echo {expression}"))
                 ),
+                format!(
+                    "[[ci.required_gates]]\nid='integration'\nrun='cargo test'\n[ci.required_gates.artifacts]\nname='evidence'\npaths=[{}]\n",
+                    toml_edit::Value::from(expression)
+                ),
             ] {
                 fs::write(
                     temp.path().join("simit.toml"),
@@ -687,6 +691,104 @@ fn credential_free_inputs_reject_github_token_and_indirect_context_access() {
                 }
             }
         }
+    }
+}
+
+#[test]
+fn credential_free_artifact_names_cannot_expose_the_source_token() {
+    for mode in ["single", "members", "coordinated"] {
+        let temp = publisher_project(mode);
+        let config = fs::read_to_string(temp.path().join("simit.toml")).unwrap();
+        fs::write(temp.path().join("simit.toml"), format!("{config}\n[[ci.required_gates]]\nid='integration'\nrun='cargo test'\n[ci.required_gates.artifacts]\nname='${{{{ github.token }}}}'\npaths=['target/evidence/']\n")).unwrap();
+        let output = common::simit()
+            .current_dir(temp.path())
+            .args(["init", "ci"])
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{mode}: {output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains("must not reference GitHub authentication contexts"),
+            "{output:?}"
+        );
+    }
+}
+
+#[test]
+fn artifact_gate_job_budgets_cover_all_commands_and_uploads() {
+    for mode in ["single", "members", "coordinated"] {
+        let temp = publisher_project(mode);
+        let config = fs::read_to_string(temp.path().join("simit.toml")).unwrap();
+        let mut gates = String::from(
+            "\n[[ci.required_gates]]\nid='setup'\nrun='cargo test'\ntimeout_minutes=40\n",
+        );
+        for id in ["first", "second"] {
+            gates.push_str(&format!("[[ci.required_gates]]\nid='{id}'\nrun='cargo test'\ntimeout_minutes=60\n[ci.required_gates.artifacts]\nname='{id}'\npaths=['target/evidence/']\n"));
+        }
+        fs::write(temp.path().join("simit.toml"), format!("{config}{gates}")).unwrap();
+        let output = common::simit()
+            .current_dir(temp.path())
+            .args(["init", "ci"])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{mode}: {output:?}");
+        let mut jobs = 0;
+        for entry in fs::read_dir(temp.path().join(".github/workflows")).unwrap() {
+            let path = entry.unwrap().path();
+            let name = path.file_name().unwrap().to_string_lossy();
+            if !name.starts_with("publish-") && !name.starts_with("trusted-publish-") {
+                continue;
+            }
+            let workflow: Value =
+                serde_yaml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+            for job in workflow["jobs"].as_mapping().unwrap().values() {
+                if job["steps"]
+                    .as_sequence()
+                    .unwrap()
+                    .iter()
+                    .any(|step| step["name"] == "Required gate first")
+                {
+                    // Single/member source jobs retain GitHub's 360-minute default.
+                    let timeout = job["timeout-minutes"].as_u64().unwrap_or(360);
+                    assert!((180..=360).contains(&timeout), "{mode}: {path:?}");
+                    jobs += 1;
+                }
+            }
+        }
+        assert!(jobs >= 2, "{mode}");
+        fs::write(
+            temp.path().join("simit.toml"),
+            format!(
+                "{config}{}",
+                gates.replace("timeout_minutes=60", "timeout_minutes=160")
+            ),
+        )
+        .unwrap();
+        let output = common::simit()
+            .current_dir(temp.path())
+            .args(["init", "ci"])
+            .output()
+            .unwrap();
+        assert!(
+            !output.status.success(),
+            "{mode}: accepted an over-budget shared job"
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("360"),
+            "{output:?}"
+        );
+        // Independent CI gates do not share a job budget or require a publisher.
+        let output = common::simit()
+            .current_dir(temp.path())
+            .args([
+                "init",
+                "ci",
+                "--publish-crates=false",
+                "--coordinated-publish=false",
+            ])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{mode}: {output:?}");
     }
 }
 

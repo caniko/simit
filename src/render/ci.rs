@@ -3199,20 +3199,26 @@ pub(crate) fn push_required_gate_artifacts(
         "v4.6.2",
     );
     workflow.push_str(&format!(
-        "        with:\n          name: \"{}{}\"\n",
+        "        with:\n          name: \"{}{}\"\n          include-hidden-files: {}\n",
         yaml_double_quote(&artifacts.name),
-        yaml_double_quote(suffix)
+        yaml_double_quote(suffix),
+        !directory.is_empty()
     ));
     let mut paths = String::new();
     for path in &artifacts.paths {
         let (exclude, path) = path
             .strip_prefix('!')
             .map_or(("", path.as_str()), |path| ("!", path));
-        let prefix = if Path::new(path).is_absolute() || path.starts_with('~') {
-            ""
-        } else {
-            directory
-        };
+        // Classify the runner's syntax, not the generator host's native paths.
+        let absolute = path.starts_with(['/', '\\', '~'])
+            || path.starts_with("${{")
+            || (path.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
+                && path.as_bytes().get(1) == Some(&b':')
+                && path
+                    .as_bytes()
+                    .get(2)
+                    .is_some_and(|ch| matches!(ch, b'/' | b'\\')));
+        let prefix = if absolute { "" } else { directory };
         paths.push_str(&format!("{exclude}{prefix}{path}\n"));
     }
     workflow.push_str(&format!(
