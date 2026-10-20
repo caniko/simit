@@ -108,6 +108,8 @@ transport, observer-isolation and publisher-boundary qualifications retain their
 independent workflows and required contexts.
 Both replacement qualifiers cover every primary CI push branch, including branches
 without an open pull request.
+Their concurrency groups separate push and PR events, while newer revisions still
+supersede older runs within each event stream.
 
 ### Native grouped Nix executor
 

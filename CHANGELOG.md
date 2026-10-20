@@ -36,6 +36,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Preserve build-only checks, workflow lint and release/flake regeneration on
   every primary CI push branch when consolidating validation ownership.
+- Keep push and pull-request generator qualification separate so one event
+  cannot cancel the other's required check.
 - Qualify generated native prebuild push runs against exact source job/step
   identities: require release-only skips, complete native matrix execution and
   successful default-branch publication while rejecting unknown predicates.

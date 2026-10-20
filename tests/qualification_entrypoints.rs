@@ -85,7 +85,7 @@ fn qualification_entrypoints_exist_in_the_candidate_and_packaged_source() {
 }
 
 #[test]
-fn replacement_qualifiers_preserve_primary_ci_push_branches() {
+fn replacement_qualifiers_preserve_primary_ci_push_coverage() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let primary: serde_yaml::Value =
         serde_yaml::from_str(&fs::read_to_string(root.join(".github/workflows/ci.yaml")).unwrap())
@@ -102,6 +102,13 @@ fn replacement_qualifiers_preserve_primary_ci_push_branches() {
             qualifier["on"]["push"]["branches"].as_sequence().unwrap(),
             branches,
             "{name} must cover every primary CI push branch"
+        );
+        assert!(
+            qualifier["concurrency"]["group"]
+                .as_str()
+                .unwrap()
+                .contains("${{ github.event_name }}"),
+            "{name} must not cancel required qualification across push and PR events"
         );
     }
 }
