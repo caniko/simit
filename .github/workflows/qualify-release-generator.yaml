@@ -4,13 +4,7 @@ name: Qualify signed-release generator
 
 on:
   push:
-    branches:
-      [
-        maintenance/release-tag-binding,
-        migrate/harbor-monorepo-reconcile-20261012-current,
-        fix/monorepo-nix-diagnostics-20261014,
-        trunk,
-      ]
+    branches: ["**"]
   pull_request:
 
 permissions:

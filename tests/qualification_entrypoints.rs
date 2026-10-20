@@ -85,25 +85,24 @@ fn qualification_entrypoints_exist_in_the_candidate_and_packaged_source() {
 }
 
 #[test]
-fn generator_qualification_preserves_release_parity_push_branches() {
+fn replacement_qualifiers_preserve_primary_ci_push_branches() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let release: serde_yaml::Value = serde_yaml::from_str(
-        &fs::read_to_string(root.join(".github/workflows/qualify-release-generator.yaml")).unwrap(),
-    )
-    .unwrap();
+    let primary: serde_yaml::Value =
+        serde_yaml::from_str(&fs::read_to_string(root.join(".github/workflows/ci.yaml")).unwrap())
+            .unwrap();
+    let branches = primary["on"]["push"]["branches"].as_sequence().unwrap();
     for name in [
         ".github/workflows/qualify-generator.yaml",
         ".simit/workflows/qualify-generator.yaml.in",
+        ".github/workflows/qualify-release-generator.yaml",
     ] {
-        let generator: serde_yaml::Value =
+        let qualifier: serde_yaml::Value =
             serde_yaml::from_str(&fs::read_to_string(root.join(name)).unwrap()).unwrap();
-        let branches = generator["on"]["push"]["branches"].as_sequence().unwrap();
-        for branch in release["on"]["push"]["branches"].as_sequence().unwrap() {
-            assert!(
-                branches.contains(branch),
-                "{name} omits parity for {branch:?}"
-            );
-        }
+        assert_eq!(
+            qualifier["on"]["push"]["branches"].as_sequence().unwrap(),
+            branches,
+            "{name} must cover every primary CI push branch"
+        );
     }
 }
 
