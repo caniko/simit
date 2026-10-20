@@ -2,12 +2,7 @@ name: Qualify generator and retain regeneration
 
 on:
   push:
-    branches:
-      [
-        "fix/hermes-workflow-templates",
-        "migrate/harbor-monorepo-reconcile-20261012-current",
-        "trunk",
-      ]
+    branches: ["**"]
   pull_request:
   workflow_dispatch:
 
@@ -15,7 +10,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event.pull_request.head.ref || github.ref_name }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event.pull_request.head.ref || github.ref_name }}
   cancel-in-progress: true
 
 jobs:
@@ -58,6 +53,16 @@ jobs:
           nix develop -c bash scripts/qualify-updater-sandbox-host.sh
           generator=$(python3 -c 'import json,os; print(os.path.join(json.load(open(os.path.join(os.environ["RUNNER_TEMP"], "generator-qualification/result.json")))[0]["outputs"]["out"], "bin/simit"))')
           nix develop -c python3 scripts/qualify-updater-generator.py "$generator" 2>&1 | tee "$RUNNER_TEMP/generator-qualification/updater-sandbox.log"
+      - name: Validate Nix-only checks
+        run: |
+          set -euo pipefail
+          nix build --no-link --no-update-lock-file --max-jobs 1 --cores 2 --json \
+            .#checks.x86_64-linux.audit \
+            .#checks.x86_64-linux.deny \
+            .#checks.x86_64-linux.simit-custody-source \
+            .#checks.x86_64-linux.simit-updater-config \
+            .#checks.x86_64-linux.default-package-is-publicly-buildable \
+            > "$RUNNER_TEMP/generator-qualification/nix-checks.json"
       - name: Regenerate through this exact Simit source
         run: |
           set -euo pipefail
@@ -66,6 +71,9 @@ jobs:
           sha256sum "$RUNNER_TEMP/generator-qualification/simit" > "$RUNNER_TEMP/generator-qualification/simit.sha256"
           "$generator" init ci --platform github --runtime nix --runner ubuntu-latest --with-docs --publish-crates
           "$generator" init ci --platform github --runtime nix --runner ubuntu-latest --with-docs --publish-crates --check --diff
+          "$generator" init release --platform github
+          "$generator" init release --platform github --check --diff
+          "$generator" init flake --check --diff
           git diff --check
           git diff > "$RUNNER_TEMP/generator-qualification/regenerated.diff"
           git status --porcelain --untracked-files=all > "$RUNNER_TEMP/generator-qualification/regenerated.status"

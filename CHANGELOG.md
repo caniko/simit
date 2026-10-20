@@ -7,8 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Retain optional required-gate diagnostic artifacts in GitHub CI, signed-tag
+  source builds and release verification, including failed gates but not skipped
+  ones. Preserve runner compatibility, reject action-trimmed input whitespace,
+  resolve effective backends after overrides, reserve CI and shared publishing
+  upload time, retain selected hidden and absolute-path evidence, reject artifact
+  authentication and step-local environment contexts, and keep diagnostics
+  separate from immutable archives and reusable release-prebuild artifacts.
+  Reject ambiguously rooted leading expressions in isolated verification instead
+  of silently collecting from the wrong checkout.
+
 ### Changed
 
+- Deduplicate Simit's own generator qualification and native/Nix validation;
+  retain Nix-only checks with the production build and lighten the Rustdoc shell.
 - Raise Simit's minimum Rust version to 1.88 to use the security-patched Hickory
   DNS resolver; generated projects keep their independently declared minimums.
 
@@ -34,6 +46,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Bind receipt-producing ungrouped Nix builds to the exact pull-request head and
   source repository, matching grouped builds instead of recording a merge commit.
+- Preserve build-only checks, workflow lint and release/flake regeneration on
+  every primary CI push branch when consolidating validation ownership.
+- Keep push and pull-request generator qualification separate so one event
+  cannot cancel the other's required check.
 - Qualify generated native prebuild push runs against exact source job/step
   identities: require release-only skips, complete native matrix execution and
   successful default-branch publication while rejecting unknown predicates.
@@ -86,6 +102,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with a clean environment; document the required isolated observer-job boundary.
 - Revalidate captured attempt-one jobs and log contents against GitHub during
   retention; an artifact digest cannot authenticate a recomputed forged receipt.
+- Bind original custody to complete logs from validated attempt-one job IDs,
+  tolerating only transient redundant step-file ZIP membership while preserving
+  exact shared contents, complete aggregate coverage and all retention bounds.
 - Reserve full partial-download retry bodies independently of fresh metadata and
   log revalidation, without resetting the retention deadline.
 - Preserve `@` in workflow filenames and refs, rejecting ambiguous producer paths.

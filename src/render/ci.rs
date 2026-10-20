@@ -3129,7 +3129,8 @@ fn push_required_gate_jobs(
         workflow.push_str("    runs-on: ");
         workflow.push_str(&runs_on(&runners.ci));
         workflow.push('\n');
-        workflow.push_str(&format!("    timeout-minutes: {}\n", gate.timeout_minutes));
+        let job_timeout = gate.timeout_minutes + if gate.artifacts.is_some() { 15 } else { 0 };
+        workflow.push_str(&format!("    timeout-minutes: {job_timeout}\n"));
         push_job_github_read_permissions(workflow, platform);
         // Gate env is scoped to this job only. Values may reference
         // `${{ secrets.X }}` for project-owned test credentials; release
@@ -3162,10 +3163,85 @@ fn push_required_gate_jobs(
         }
         workflow.push_str("      - name: Required gate ");
         workflow.push_str(&gate.id);
-        workflow.push_str("\n        run: ");
+        workflow.push('\n');
+        if gate.artifacts.is_some() {
+            workflow.push_str(&format!(
+                "        id: simit-required-gate-{}\n        timeout-minutes: {}\n",
+                sanitize_gate_id(&gate.id),
+                gate.timeout_minutes
+            ));
+        }
+        workflow.push_str("        run: ");
         workflow.push_str(&gate.run);
         workflow.push('\n');
+        push_required_gate_artifacts(workflow, gate, Some(&runners.ci), "", ("", ""));
     }
+}
+
+pub(crate) fn push_required_gate_artifacts(
+    workflow: &mut String,
+    gate: &crate::config::RequiredGate,
+    runner: Option<&ResolvedRunner>,
+    directory: &str,
+    name_affixes: (&str, &str),
+) {
+    let Some(artifacts) = &gate.artifacts else {
+        return;
+    };
+    let id = sanitize_gate_id(&gate.id);
+    workflow.push_str(&format!(
+        "\n      - name: Retain required gate evidence\n        if: always() && steps.simit-required-gate-{id}.outcome != '' && steps.simit-required-gate-{id}.outcome != 'skipped'\n        timeout-minutes: 5\n",
+    ));
+    push_action_uses(
+        workflow,
+        Platform::Github,
+        runner,
+        "upload-artifact",
+        "v7.0.1",
+        "v4.6.2",
+    );
+    workflow.push_str(&format!(
+        "        with:\n          name: \"{}{}{}\"\n          include-hidden-files: true\n",
+        yaml_double_quote(name_affixes.0),
+        yaml_double_quote(&artifacts.name),
+        yaml_double_quote(name_affixes.1)
+    ));
+    let mut paths = String::new();
+    for path in &artifacts.paths {
+        let (exclude, path) = path
+            .strip_prefix('!')
+            .map_or(("", path.as_str()), |path| ("!", path));
+        // Classify the runner's syntax, not the generator host's native paths.
+        let absolute = path.starts_with(['/', '\\', '~'])
+            || artifact_path_has_absolute_context(path)
+            || (path.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
+                && path.as_bytes().get(1) == Some(&b':')
+                && path
+                    .as_bytes()
+                    .get(2)
+                    .is_some_and(|ch| matches!(ch, b'/' | b'\\')));
+        let prefix = if absolute { "" } else { directory };
+        paths.push_str(&format!("{exclude}{prefix}{path}\n"));
+    }
+    workflow.push_str(&format!(
+        "          path: {}\n",
+        serde_json::to_string(&paths).expect("artifact paths serialize")
+    ));
+    workflow.push_str(&format!(
+        "          retention-days: {}\n          if-no-files-found: warn\n",
+        artifacts.retention_days
+    ));
+}
+
+fn artifact_path_has_absolute_context(path: &str) -> bool {
+    path.strip_prefix("${{")
+        .and_then(crate::config::github_expression)
+        .is_some_and(|(expression, _)| {
+            matches!(
+                expression.trim().to_ascii_lowercase().as_str(),
+                "runner.temp" | "github.workspace"
+            )
+        })
 }
 
 pub(crate) fn sanitize_gate_id(id: &str) -> String {
@@ -3261,6 +3337,10 @@ fn publish_workflow(
                 options.tag_prefix,
             ));
             push_extra_setup_steps(&mut workflow, &options.extra_setup);
+            // Retain failing source gates before the success-gated verifier.
+            if platform == Platform::Github {
+                trusted_publisher::push_source_required_gates(&mut workflow, &options);
+            }
             match options.om_ci {
                 OmCiMode::Off => {
                     push_nix_publish_legacy_steps(&mut workflow, platform, package, &options);
@@ -3297,6 +3377,9 @@ fn publish_workflow(
                 options.tag_prefix,
             ));
             push_extra_setup_steps(&mut workflow, &options.extra_setup);
+            if platform == Platform::Github {
+                trusted_publisher::push_source_required_gates(&mut workflow, &options);
+            }
             push_test_steps(&mut workflow, runtime, package, &options);
             push_quality_tool_install_steps(&mut workflow, runtime, &options);
             push_optional_publish_steps(&mut workflow, runtime, package, &options);
