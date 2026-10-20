@@ -78,7 +78,11 @@ pub fn release_backend(
             cfg.ci.provider.unwrap_or(CiProvider::Actions)
         }
     });
-    CiBackend::from_parts(provider, platform)
+    let backend = CiBackend::from_parts(provider, platform)?;
+    cfg.ci
+        .validate_required_gate_artifacts_backend(provider, platform)?;
+    crate::config::validate_required_gate_job_budget(&cfg.ci.required_gates)?;
+    Ok(backend)
 }
 
 #[derive(Debug, Clone, Default)]
@@ -937,6 +941,7 @@ fn infer_required_gates(content: &str) -> Vec<crate::config::RequiredGate> {
             run,
             timeout_minutes,
             env: BTreeMap::new(),
+            artifacts: None,
         });
     }
     gates.sort_by(|a, b| a.id.cmp(&b.id));

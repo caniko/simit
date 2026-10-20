@@ -1,6 +1,7 @@
 //! Paired credential-free source builds and independent default-branch publishers.
 
 use super::*;
+use crate::config::github_expression;
 use anyhow::Context;
 
 // Candidate-controlled build scripts/setup run only on fresh hosted workers,
@@ -8,6 +9,7 @@ use anyhow::Context;
 pub(super) const CANDIDATE_RUNNER: &str = "ubuntu-24.04";
 
 pub(super) fn validate_credential_free_source(workflow: &str, options: &CiOptions) -> Result<()> {
+    crate::config::validate_required_gate_job_budget(&options.required_gates)?;
     // Names are shell/YAML syntax, never expressions or executable defaults.
     // Recheck direct renderer callers as well as ProjectConfig consumers.
     for name in &options.required_env {
@@ -20,6 +22,9 @@ pub(super) fn validate_credential_free_source(workflow: &str, options: &CiOption
         for name in gate.env.keys() {
             crate::config::validate_environment_name("release source required gate env key", name)?;
         }
+        if let Some(artifacts) = &gate.artifacts {
+            crate::config::validate_required_gate_artifact_expressions(artifacts)?;
+        }
     }
     // Required gates also run against candidate source in the fresh trusted
     // verify job, including when the tag workflow does not render those gates.
@@ -29,7 +34,12 @@ pub(super) fn validate_credential_free_source(workflow: &str, options: &CiOption
         .map(|(_, value)| value.as_str())
         .chain(options.extra_setup.iter().map(String::as_str))
         .chain(options.required_gates.iter().flat_map(|gate| {
-            std::iter::once(gate.run.as_str()).chain(gate.env.values().map(String::as_str))
+            std::iter::once(gate.run.as_str())
+                .chain(gate.env.values().map(String::as_str))
+                .chain(gate.artifacts.iter().flat_map(|artifacts| {
+                    std::iter::once(artifacts.name.as_str())
+                        .chain(artifacts.paths.iter().map(String::as_str))
+                }))
         }));
     // The generator's fixed signed-tag admission step needs command-local
     // read-only provider authentication. User-controlled build bindings must
@@ -56,29 +66,23 @@ pub(super) fn validate_credential_free_source(workflow: &str, options: &CiOption
             }
         }
     }
-    Ok(())
-}
-
-// Expression terminators/openers inside quoted literals are data, not syntax.
-// GitHub escapes a single quote inside its string literals by doubling it.
-fn github_expression(body: &str) -> Option<(&str, &str)> {
-    let bytes = body.as_bytes();
-    let mut quoted = false;
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] == b'\'' {
-            if quoted && bytes.get(index + 1) == Some(&b'\'') {
-                index += 2;
-                continue;
+    // Verification gates run in a nested checkout, uploads in the workspace.
+    // Unknown leading expressions could expand to either root; never guess.
+    for artifacts in options
+        .required_gates
+        .iter()
+        .filter_map(|gate| gate.artifacts.as_ref())
+    {
+        for path in &artifacts.paths {
+            let path = path.strip_prefix('!').unwrap_or(path);
+            if path.starts_with("${{") && !artifact_path_has_absolute_context(path) {
+                bail!(
+                    "trusted verification artifact path has ambiguous rootedness; use a literal relative prefix or a direct runner.temp or github.workspace expression"
+                );
             }
-            quoted = !quoted;
         }
-        if !quoted && bytes[index..].starts_with(b"}}") {
-            return Some((&body[..index], &body[index + 2..]));
-        }
-        index += 1;
     }
-    None
+    Ok(())
 }
 
 fn references_github_authentication(expression: &str) -> bool {
@@ -231,7 +235,10 @@ pub(super) fn source_workflow_with_namespace(
     }
     w.push_str("permissions:\n  contents: read\n\nconcurrency:\n  group: ${{ github.workflow_ref }}-${{ github.ref }}\n  cancel-in-progress: false\n\njobs:\n  build:\n    runs-on: ");
     w.push_str(CANDIDATE_RUNNER);
-    w.push_str("\n    timeout-minutes: 60\n");
+    w.push_str(&format!(
+        "\n    timeout-minutes: {}\n",
+        crate::config::required_gate_job_timeout(&options.required_gates, 60)
+    ));
     push_job_env(&mut w, Platform::Github, runtime, &options.extra_env, true);
     w.push_str("    steps:\n");
     push_event_checkout_step(&mut w, Platform::Github, None);
@@ -264,22 +271,7 @@ pub(super) fn source_workflow_with_namespace(
     if options.with_deny {
         push_deny_step(&mut w, command_prefix(runtime));
     }
-    for gate in &options.required_gates {
-        w.push_str(&format!(
-            "      - name: Required gate {}\n        timeout-minutes: {}\n        env:\n",
-            gate.id, gate.timeout_minutes
-        ));
-        if gate.env.is_empty() {
-            w.push_str("          SIMIT_REQUIRED_GATE: \"1\"\n");
-        }
-        for (key, value) in &gate.env {
-            w.push_str(&format!(
-                "          {key}: \"{}\"\n",
-                yaml_double_quote(value)
-            ));
-        }
-        w.push_str(&format!("        run: {}\n", gate.run));
-    }
+    push_source_required_gates(&mut w, options);
     for name in names {
         let prefix = command_prefix(runtime);
         let quoted = shell_word(name);
@@ -312,6 +304,33 @@ pub(super) fn source_workflow_with_namespace(
     }
     trim_trailing_blank_lines(&mut w);
     w
+}
+
+pub(super) fn push_source_required_gates(w: &mut String, options: &CiOptions) {
+    for gate in &options.required_gates {
+        w.push_str(&format!(
+            "      - name: Required gate {}\n        timeout-minutes: {}\n        env:\n",
+            gate.id, gate.timeout_minutes
+        ));
+        if gate.env.is_empty() {
+            w.push_str("          SIMIT_REQUIRED_GATE: \"1\"\n");
+        }
+        for (key, value) in &gate.env {
+            w.push_str(&format!(
+                "          {key}: \"{}\"\n",
+                yaml_double_quote(value)
+            ));
+        }
+        if gate.artifacts.is_some() {
+            w.push_str(&format!(
+                "        id: simit-required-gate-{}\n",
+                sanitize_gate_id(&gate.id)
+            ));
+        }
+        w.push_str(&format!("        run: {}\n", gate.run));
+        // Keep diagnostics outside the immutable simit-crate-<package>-<attempt> namespace.
+        push_required_gate_artifacts(w, gate, None, "", ("", ".source"));
+    }
 }
 
 pub(crate) fn bootstrap(w: &mut String) {
@@ -397,7 +416,10 @@ pub(super) fn publisher_file_with_namespace(
         w.push_str("    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'\n");
         w.push_str("    runs-on: ");
         w.push_str(CANDIDATE_RUNNER);
-        w.push_str("\n    timeout-minutes: 60\n    steps:\n");
+        w.push_str(&format!(
+            "\n    timeout-minutes: {}\n    steps:\n",
+            crate::config::required_gate_job_timeout(&options.required_gates, 60)
+        ));
         bootstrap(&mut w);
         if runtime == Runtime::Nix {
             push_install_nix_step_with_cache(
@@ -448,7 +470,20 @@ pub(super) fn publisher_file_with_namespace(
                     &environment.into_iter().collect::<Vec<_>>(),
                     directory,
                 );
+                if gate.artifacts.is_some() {
+                    w.push_str(&format!(
+                        "        id: simit-required-gate-{}\n",
+                        sanitize_gate_id(&gate.id)
+                    ));
+                }
                 w.push_str(&format!("        run: {}\n", gate.run));
+                push_required_gate_artifacts(
+                    &mut w,
+                    gate,
+                    None,
+                    ".simit-release-source/",
+                    ("", &format!(".{name}")),
+                );
             }
         }
         w.push_str(&format!("  {publish}:\n"));

@@ -394,10 +394,104 @@ pub struct RequiredGate {
     pub timeout_minutes: u64,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+    /// Optional evidence retained by GitHub Actions even when the gate fails.
+    #[serde(default)]
+    pub artifacts: Option<RequiredGateArtifacts>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RequiredGateArtifacts {
+    pub name: String,
+    pub paths: Vec<String>,
+    #[serde(default = "default_gate_artifact_retention_days")]
+    pub retention_days: u64,
+}
+
+fn default_gate_artifact_retention_days() -> u64 {
+    7
 }
 
 fn default_gate_timeout_minutes() -> u64 {
     30
+}
+
+/// Preserve existing job minima, reserving setup and every gate/upload deadline.
+pub(crate) fn required_gate_job_timeout(gates: &[RequiredGate], minimum: u64) -> u64 {
+    if !gates.iter().any(|gate| gate.artifacts.is_some()) {
+        return minimum;
+    }
+    gates
+        .iter()
+        .fold(10_u64, |budget, gate| {
+            budget
+                .saturating_add(gate.timeout_minutes)
+                .saturating_add(if gate.artifacts.is_some() { 5 } else { 0 })
+        })
+        .max(minimum)
+}
+
+pub(crate) fn validate_required_gate_job_budget(gates: &[RequiredGate]) -> Result<()> {
+    if required_gate_job_timeout(gates, 0) > 360 {
+        bail!(
+            "required gate artifacts need a shared publishing job budget of at most 360 minutes, including all gate timeouts, 10 setup minutes and 5 minutes per upload"
+        );
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_required_gate_artifact_expressions(
+    artifacts: &RequiredGateArtifacts,
+) -> Result<()> {
+    for mut input in
+        std::iter::once(artifacts.name.as_str()).chain(artifacts.paths.iter().map(String::as_str))
+    {
+        while let Some((_, body)) = input.split_once("${{") {
+            let (expression, remainder) = github_expression(body)
+                .context("required gate artifacts must use complete GitHub expressions")?;
+            input = remainder;
+            // Upload actions intentionally do not inherit candidate step environments.
+            // Ignore string literals and properties of other contexts (e.g. vars.env).
+            let references_env = expression.split('\'').step_by(2).any(|part| {
+                let part = part.to_ascii_lowercase();
+                part.match_indices("env").any(|(index, _)| {
+                    let before = &part[..index];
+                    let after = &part[index + 3..];
+                    !before.ends_with(|ch: char| ch.is_ascii_alphanumeric() || ch == '_')
+                        && !before.trim_end().ends_with('.')
+                        && !after.starts_with(|ch: char| ch.is_ascii_alphanumeric() || ch == '_')
+                })
+            });
+            if references_env {
+                bail!(
+                    "required gate artifact expressions must not reference env; use literal paths or runner, github or vars contexts instead of step-local environment values"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+// Expression terminators/openers inside quoted literals are data, not syntax.
+// GitHub escapes a single quote inside its string literals by doubling it.
+pub(crate) fn github_expression(body: &str) -> Option<(&str, &str)> {
+    let bytes = body.as_bytes();
+    let mut quoted = false;
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'\'' {
+            if quoted && bytes.get(index + 1) == Some(&b'\'') {
+                index += 2;
+                continue;
+            }
+            quoted = !quoted;
+        }
+        if !quoted && bytes[index..].starts_with(b"}}") {
+            return Some((&body[..index], &body[index + 2..]));
+        }
+        index += 1;
+    }
+    None
 }
 
 /// Workspace crates.io publishing strategy.
@@ -581,6 +675,7 @@ impl CiConfig {
         provider: CiProvider,
         platform: Platform,
     ) -> Result<()> {
+        self.validate_required_gate_artifacts_backend(provider, platform)?;
         if self.separate_events && !self.push_branches.is_empty() {
             bail!(
                 "[ci].push_branches cannot filter explicitly retained separate_events producers; migrate event evidence and policy together"
@@ -604,6 +699,22 @@ impl CiConfig {
             bail!(
                 "[ci.nix_build] options require GitHub Actions (effective GitHub Actions backend)"
             );
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_required_gate_artifacts_backend(
+        &self,
+        provider: CiProvider,
+        platform: Platform,
+    ) -> Result<()> {
+        if self
+            .required_gates
+            .iter()
+            .any(|gate| gate.artifacts.is_some())
+            && (provider != CiProvider::Actions || platform != Platform::Github)
+        {
+            bail!("required gate artifacts require the effective GitHub Actions backend");
         }
         Ok(())
     }
@@ -3894,6 +4005,7 @@ fn validate_runner_label_opt(name: &str, value: Option<&str>) -> Result<()> {
 fn validate_required_gates(ci: &CiConfig) -> Result<()> {
     use std::collections::BTreeSet;
     let mut seen = BTreeSet::new();
+    let mut artifact_names = BTreeSet::new();
     for gate in &ci.required_gates {
         let id = gate.id.trim();
         if id.is_empty() {
@@ -3928,6 +4040,45 @@ fn validate_required_gates(ci: &CiConfig) -> Result<()> {
             bail!(
                 "simit project config: [[ci.required_gates.{id}]] timeout_minutes must be 1..=360"
             );
+        }
+        if let Some(artifacts) = &gate.artifacts {
+            if gate.timeout_minutes > 345 {
+                bail!(
+                    "simit project config: required gate artifacts need 15 minutes of job overhead; timeout_minutes must be at most 345"
+                );
+            }
+            // @actions/core trims ECMAScript whitespace, including the BOM.
+            if artifacts.name.trim().is_empty()
+                || artifacts
+                    .name
+                    .trim_matches(|ch: char| ch.is_whitespace() || ch == '\u{feff}')
+                    != artifacts.name
+                || artifacts.name.chars().any(char::is_control)
+                || artifacts
+                    .name
+                    .contains(['/', '\\', ':', '"', '<', '>', '|', '*', '?'])
+                || !artifact_names.insert(&artifacts.name)
+            {
+                bail!(
+                    "simit project config: required gate artifact names must be valid and unique without surrounding whitespace"
+                );
+            }
+            if artifacts.paths.is_empty()
+                || artifacts.paths.iter().any(|path| {
+                    path.trim().is_empty()
+                        || path.trim_matches(|ch: char| ch.is_whitespace() || ch == '\u{feff}')
+                            != path
+                        || path.chars().any(char::is_control)
+                })
+            {
+                bail!(
+                    "simit project config: required gate artifact paths must be non-empty single-line paths without surrounding whitespace"
+                );
+            }
+            if !(1..=90).contains(&artifacts.retention_days) {
+                bail!("simit project config: required gate artifact retention_days must be 1..=90");
+            }
+            validate_required_gate_artifact_expressions(artifacts)?;
         }
         for (key, value) in &gate.env {
             if key.trim().is_empty() || key.contains(['\n', '\r', ' ', '=']) {
@@ -3964,6 +4115,20 @@ fn set_required_gates_table(table: &mut Table, gates: &[RequiredGate]) {
                 env.insert(key.as_str(), Value::from(value.as_str()));
             }
             item.insert("env", Value::InlineTable(env));
+        }
+        if let Some(artifacts) = &gate.artifacts {
+            let mut value = InlineTable::default();
+            value.insert("name", Value::from(artifacts.name.as_str()));
+            let mut paths = Array::new();
+            for path in &artifacts.paths {
+                paths.push(path.as_str());
+            }
+            value.insert("paths", Value::Array(paths));
+            value.insert(
+                "retention_days",
+                Value::from(artifacts.retention_days as i64),
+            );
+            item.insert("artifacts", Value::InlineTable(value));
         }
         array.push(Value::InlineTable(item));
     }
