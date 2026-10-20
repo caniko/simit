@@ -1014,13 +1014,28 @@ retention_days = 14
 ```
 
 Place this table immediately after the gate it belongs to. Artifact names must
-be valid and unique across gates; retention defaults to seven days and accepts
-1–90 days. Uploads use `always()` and warn on missing files; the gate's failure
-still blocks publication. Relative paths follow the gate's source checkout,
-including the isolated signed-source checkout in trusted crate verification.
+be valid and unique across gates. Names and paths cannot have surrounding
+whitespace: the upload action trims inputs rather than preserving those names.
+Retention defaults to seven days and accepts 1–90 days. Uploads use `always()`
+with the gate step's outcome: failed gates retain evidence, but skipped or
+not-started gates cannot publish stale files under their names. Missing files
+warn; the gate's failure still blocks publication. Uploads are bounded to five
+minutes and use the action version compatible with the effective runner.
+
+Artifact-bearing CI gates apply `timeout_minutes` to the command step and give
+the job fifteen extra minutes for setup and upload, so their configured command
+timeout must be at most 345 minutes. Other gates retain their existing limit.
+Workflow/job cancellation can still prevent an upload; this is diagnostic
+retention, not an external custody guarantee.
+
+Relative paths follow the gate's source checkout, including the isolated
+signed-source checkout in trusted crate verification. Signed-tag source builds
+also retain gate failures before the success-gated trusted publisher can start.
+Their diagnostics use `<artifact-name>.source` to avoid crate archive names.
 Trusted crate publishers use `<artifact-name>.<package-name>` to avoid collisions
 between gate/member pairs, including hyphenated names. Forgejo and Crow reject
-this GitHub-only option.
+this GitHub-only option after CLI backend overrides are resolved; hosted release
+generation checks its effective release backend independently of the CI default.
 
 ## Coordinated Workspace Publication
 

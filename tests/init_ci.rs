@@ -307,9 +307,10 @@ publish_crates = true
 [[ci.required_gates]]
 id = "browser"
 run = "cargo test"
+timeout_minutes = 7
 [ci.required_gates.artifacts]
 name = "browser-evidence"
-paths = [" leading-evidence/", "target/evidence/", "!target/evidence/private/**"]
+paths = ["target/evidence/", "!target/evidence/private/**"]
 retention_days = 14
 "#,
     )
@@ -327,9 +328,10 @@ retention_days = 14
             String::from_utf8_lossy(&output.stderr)
         );
     }
-    for (file, prefix) in [
-        ("ci.yaml", ""),
-        ("trusted-publish-crate.yaml", ".simit-release-source/"),
+    for (file, prefix, suffix) in [
+        ("ci.yaml", "", ""),
+        ("publish-crate.yaml", "", ".source"),
+        ("trusted-publish-crate.yaml", ".simit-release-source/", ".demo"),
     ] {
         let yaml: serde_yaml::Value =
             serde_yaml::from_str(&read(&temp.path().join(".github/workflows").join(file))).unwrap();
@@ -349,28 +351,30 @@ retention_days = 14
             .position(|step| step["name"] == "Required gate browser")
             .unwrap();
         let upload = &steps[gate + 1];
-        assert_eq!(upload["if"], "always()");
+        assert_eq!(steps[gate]["id"], "simit-required-gate-browser");
+        assert_eq!(steps[gate]["timeout-minutes"], 7);
+        assert_eq!(
+            upload["if"],
+            "always() && steps.simit-required-gate-browser.outcome != '' && steps.simit-required-gate-browser.outcome != 'skipped'"
+        );
+        assert_eq!(upload["timeout-minutes"], 5);
         assert!(
             upload["uses"]
                 .as_str()
                 .unwrap()
                 .starts_with("actions/upload-artifact@")
         );
-        assert!(
-            upload["with"]["name"]
-                .as_str()
-                .unwrap()
-                .starts_with("browser-evidence")
-        );
+        assert_eq!(upload["with"]["name"], format!("browser-evidence{suffix}"));
         assert_eq!(
             upload["with"]["path"],
-            format!(
-                "{prefix} leading-evidence/\n{prefix}target/evidence/\n!{prefix}target/evidence/private/**\n"
-            )
+            format!("{prefix}target/evidence/\n!{prefix}target/evidence/private/**\n")
         );
         assert_eq!(upload["with"]["retention-days"], 14);
         assert!(steps[gate]["continue-on-error"].is_null());
     }
+    let ci: serde_yaml::Value =
+        serde_yaml::from_str(&read(&temp.path().join(".github/workflows/ci.yaml"))).unwrap();
+    assert_eq!(ci["jobs"]["gate-browser"]["timeout-minutes"], 22);
     let config: toml_edit::DocumentMut = read(&temp.path().join("simit.toml")).parse().unwrap();
     assert_eq!(
         config["ci"]["required_gates"][0]["artifacts"]["retention_days"].as_integer(),
@@ -379,10 +383,49 @@ retention_days = 14
 }
 
 #[test]
+fn required_gate_source_evidence_names_do_not_alias_crate_archives() {
+    for runtime in ["cargo", "nix"] {
+        let temp = init_package(true);
+        fs::write(temp.path().join("simit.toml"), format!("[ci]\nplatform='github'\nruntime='{runtime}'\npublish_crates=true\n[[ci.required_gates]]\nid='browser'\nrun='cargo test'\n[ci.required_gates.artifacts]\nname='simit-crate-demo-1'\npaths=['target/evidence/']\n")).unwrap();
+        let output = simit()
+            .current_dir(temp.path())
+            .args(["init", "ci"])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let workflow: serde_yaml::Value = serde_yaml::from_str(&read(
+            &temp.path().join(".github/workflows/publish-crate.yaml"),
+        ))
+        .unwrap();
+        let uploads = workflow["jobs"]["publish"]["steps"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .filter_map(|step| step["with"]["name"].as_str())
+            .collect::<Vec<_>>();
+        assert!(uploads.contains(&"simit-crate-demo-${{ github.run_attempt }}"));
+        assert!(uploads.contains(&"simit-crate-demo-1.source"), "{uploads:?}");
+        assert!(!uploads.contains(&"simit-crate-demo-1"));
+    }
+}
+
+#[test]
 fn required_gate_artifacts_reject_invalid_or_unsupported_configuration() {
     for (platform, artifacts) in [
         ("forgejo", "name='evidence'\npaths=['target/evidence']"),
         ("github", "name=''\npaths=['target/evidence']"),
+        ("github", "name=' evidence'\npaths=['target/evidence']"),
+        ("github", "name='evidence '\npaths=['target/evidence']"),
+        (
+            "github",
+            "name='\u{feff}evidence'\npaths=['target/evidence']",
+        ),
+        ("github", "name='evidence'\npaths=[' target/evidence']"),
+        ("github", "name='evidence'\npaths=['target/evidence ']"),
+        (
+            "github",
+            "name='evidence'\npaths=['\u{feff}target/evidence']",
+        ),
         ("github", "name='evidence'\npaths=[]"),
         (
             "github",
@@ -411,6 +454,70 @@ fn required_gate_artifacts_reject_invalid_or_unsupported_configuration() {
             String::from_utf8_lossy(&output.stderr)
         );
         assert!(!temp.path().join(".github/workflows/ci.yaml").exists());
+    }
+}
+
+#[test]
+fn required_gate_artifacts_use_the_effective_cli_backend() {
+    for configured in ["", "platform='forgejo'\nprovider='crow'\n"] {
+        let temp = init_package(true);
+        fs::write(temp.path().join("simit.toml"), format!("[ci]\n{configured}runtime='cargo'\nrunner='ubuntu-24.04'\n[[ci.required_gates]]\nid='browser'\nrun='false'\n[ci.required_gates.artifacts]\nname='evidence'\npaths=['target/evidence']\n")).unwrap();
+        let output = simit()
+            .current_dir(temp.path())
+            .args([
+                "init",
+                "ci",
+                "--platform",
+                "github",
+                "--ci-provider",
+                "actions",
+            ])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert!(temp.path().join(".github/workflows/ci.yaml").exists());
+    }
+}
+
+#[test]
+fn required_gate_artifact_upload_matches_the_ci_runner() {
+    for (runner, version) in [("ubuntu-24.04", "v7.0.1"), ("private-linux", "v4.6.2")] {
+        let temp = init_package(true);
+        fs::write(temp.path().join("simit.toml"), format!("[ci]\nplatform='github'\nruntime='cargo'\nrunner='{runner}'\n[[ci.required_gates]]\nid='browser'\nrun='false'\n[ci.required_gates.artifacts]\nname='evidence'\npaths=['target/evidence']\n")).unwrap();
+        let output = simit()
+            .current_dir(temp.path())
+            .args(["init", "ci"])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let workflow = read(&temp.path().join(".github/workflows/ci.yaml"));
+        assert!(
+            workflow.contains(&simit::render::ci::github_action_ref(
+                "actions/upload-artifact",
+                version
+            )),
+            "{workflow}"
+        );
+    }
+}
+
+#[test]
+fn required_gate_artifact_timeouts_reserve_setup_and_upload_budget() {
+    for (timeout, accepted) in [(345, true), (346, false), (360, false)] {
+        let temp = init_package(true);
+        fs::write(temp.path().join("simit.toml"), format!("[ci]\nplatform='github'\nruntime='cargo'\nrunner='ubuntu-24.04'\n[[ci.required_gates]]\nid='browser'\nrun='false'\ntimeout_minutes={timeout}\n[ci.required_gates.artifacts]\nname='evidence'\npaths=['target/evidence']\n")).unwrap();
+        let output = simit()
+            .current_dir(temp.path())
+            .args(["init", "ci"])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.success(), accepted, "{timeout}: {output:?}");
+        if accepted {
+            let yaml: serde_yaml::Value =
+                serde_yaml::from_str(&read(&temp.path().join(".github/workflows/ci.yaml")))
+                    .unwrap();
+            assert_eq!(yaml["jobs"]["gate-browser"]["timeout-minutes"], 360);
+        }
     }
 }
 

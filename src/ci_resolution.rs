@@ -78,7 +78,10 @@ pub fn release_backend(
             cfg.ci.provider.unwrap_or(CiProvider::Actions)
         }
     });
-    CiBackend::from_parts(provider, platform)
+    let backend = CiBackend::from_parts(provider, platform)?;
+    cfg.ci
+        .validate_required_gate_artifacts_backend(provider, platform)?;
+    Ok(backend)
 }
 
 #[derive(Debug, Clone, Default)]

@@ -46,9 +46,64 @@ fn github_release_gates_retain_evidence_without_ignoring_failure() {
         .position(|step| step["name"] == "Required gate integration")
         .unwrap();
     assert!(steps[gate]["continue-on-error"].is_null());
-    assert_eq!(steps[gate + 1]["if"], "always()");
+    assert_eq!(steps[gate]["id"], "simit-required-gate-integration");
+    assert_eq!(
+        steps[gate + 1]["if"],
+        "always() && steps.simit-required-gate-integration.outcome != '' && steps.simit-required-gate-integration.outcome != 'skipped'"
+    );
     assert_eq!(steps[gate + 1]["with"]["name"], "evidence");
     assert_eq!(steps[gate + 1]["with"]["retention-days"], 7);
+}
+
+#[test]
+fn required_gate_artifacts_follow_the_effective_release_backend_and_runner() {
+    for (runner, version) in [("ubuntu-24.04", "v7.0.1"), ("private-linux", "v4.6.2")] {
+        let dir = project(&format!(
+            "[ci]\nplatform='forgejo'\nprovider='crow'\n[[ci.required_gates]]\nid='first'\nrun='false'\n[ci.required_gates.artifacts]\nname='first'\npaths=['target/evidence/']\n[[ci.required_gates]]\nid='second'\nrun='false'\n[ci.required_gates.artifacts]\nname='second'\npaths=['target/evidence/']\n[release.github]\nrepo='example/player'\n[release.artifacts]\nrunner='{runner}'\nprebuild_binaries=true\nsign=false\n"
+        ));
+        let workflow = render(dir.path());
+        let yaml: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
+        let steps = yaml["jobs"]["validate"]["steps"].as_sequence().unwrap();
+        for id in ["first", "second"] {
+            let gate = steps
+                .iter()
+                .position(|step| step["name"] == format!("Required gate {id}"))
+                .unwrap();
+            assert_eq!(steps[gate]["id"], format!("simit-required-gate-{id}"));
+            assert_eq!(
+                steps[gate + 1]["if"],
+                format!(
+                    "always() && steps.simit-required-gate-{id}.outcome != '' && steps.simit-required-gate-{id}.outcome != 'skipped'"
+                )
+            );
+        }
+        assert!(
+            workflow.contains(&simit::render::ci::github_action_ref(
+                "actions/upload-artifact",
+                version
+            )),
+            "{workflow}"
+        );
+        let output = common::simit()
+            .current_dir(dir.path())
+            .env("XDG_CONFIG_HOME", dir.path().join(".xdg"))
+            .args([
+                "init",
+                "release",
+                "--platform",
+                "forgejo",
+                "--ci-provider",
+                "actions",
+                "--print",
+            ])
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("artifact"),
+            "{output:?}"
+        );
+    }
 }
 
 #[test]

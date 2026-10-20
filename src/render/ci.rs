@@ -3127,7 +3127,8 @@ fn push_required_gate_jobs(
         workflow.push_str("    runs-on: ");
         workflow.push_str(&runs_on(&runners.ci));
         workflow.push('\n');
-        workflow.push_str(&format!("    timeout-minutes: {}\n", gate.timeout_minutes));
+        let job_timeout = gate.timeout_minutes + if gate.artifacts.is_some() { 15 } else { 0 };
+        workflow.push_str(&format!("    timeout-minutes: {job_timeout}\n"));
         push_job_github_read_permissions(workflow, platform);
         // Gate env is scoped to this job only. Values may reference
         // `${{ secrets.X }}` for project-owned test credentials; release
@@ -3160,28 +3161,45 @@ fn push_required_gate_jobs(
         }
         workflow.push_str("      - name: Required gate ");
         workflow.push_str(&gate.id);
-        workflow.push_str("\n        run: ");
+        workflow.push('\n');
+        if gate.artifacts.is_some() {
+            workflow.push_str(&format!(
+                "        id: simit-required-gate-{}\n        timeout-minutes: {}\n",
+                sanitize_gate_id(&gate.id),
+                gate.timeout_minutes
+            ));
+        }
+        workflow.push_str("        run: ");
         workflow.push_str(&gate.run);
         workflow.push('\n');
-        push_required_gate_artifacts(workflow, gate, "", "");
+        push_required_gate_artifacts(workflow, gate, Some(&runners.ci), "", "");
     }
 }
 
 pub(crate) fn push_required_gate_artifacts(
     workflow: &mut String,
     gate: &crate::config::RequiredGate,
+    runner: Option<&ResolvedRunner>,
     directory: &str,
     suffix: &str,
 ) {
     let Some(artifacts) = &gate.artifacts else {
         return;
     };
-    workflow.push_str(
-        "\n      - name: Retain required gate evidence\n        if: always()\n        uses: ",
-    );
-    workflow.push_str(&github_action_ref("actions/upload-artifact", "v7.0.1"));
+    let id = sanitize_gate_id(&gate.id);
     workflow.push_str(&format!(
-        "\n        with:\n          name: \"{}{}\"\n",
+        "\n      - name: Retain required gate evidence\n        if: always() && steps.simit-required-gate-{id}.outcome != '' && steps.simit-required-gate-{id}.outcome != 'skipped'\n        timeout-minutes: 5\n",
+    ));
+    push_action_uses(
+        workflow,
+        Platform::Github,
+        runner,
+        "upload-artifact",
+        "v7.0.1",
+        "v4.6.2",
+    );
+    workflow.push_str(&format!(
+        "        with:\n          name: \"{}{}\"\n",
         yaml_double_quote(&artifacts.name),
         yaml_double_quote(suffix)
     ));
@@ -3300,6 +3318,10 @@ fn publish_workflow(
                 options.tag_prefix,
             ));
             push_extra_setup_steps(&mut workflow, &options.extra_setup);
+            // Retain failing source gates before the success-gated verifier.
+            if platform == Platform::Github {
+                trusted_publisher::push_source_required_gates(&mut workflow, &options);
+            }
             match options.om_ci {
                 OmCiMode::Off => {
                     push_nix_publish_legacy_steps(&mut workflow, platform, package, &options);
@@ -3336,6 +3358,9 @@ fn publish_workflow(
                 options.tag_prefix,
             ));
             push_extra_setup_steps(&mut workflow, &options.extra_setup);
+            if platform == Platform::Github {
+                trusted_publisher::push_source_required_gates(&mut workflow, &options);
+            }
             push_test_steps(&mut workflow, runtime, package, &options);
             push_quality_tool_install_steps(&mut workflow, runtime, &options);
             push_optional_publish_steps(&mut workflow, runtime, package, &options);

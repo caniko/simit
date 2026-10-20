@@ -530,7 +530,12 @@ pub fn render(inputs: &ReleaseWorkflowInputs<'_>) -> String {
             push_install_nix(&mut w, inputs.platform, inputs.artifacts);
         }
         push_validate_tag(&mut w, inputs.artifacts, inputs.tag_prefix, notes_source);
-        push_required_gates(&mut w, inputs.required_gates, inputs.platform);
+        push_required_gates(
+            &mut w,
+            inputs.required_gates,
+            inputs.platform,
+            inputs.runner,
+        );
     }
     if github_prebuild {
         w.push_str("  prebuild:\n    needs: validate\n    uses: ./.github/workflows/prebuild.yaml\n    with:\n      release: true\n");
@@ -989,7 +994,11 @@ fn push_release_notes(
     }
 }
 
-fn push_required_gates(w: &mut String, gates: &[RequiredGate], platform: Platform) {
+fn push_required_gates(w: &mut String, gates: &[RequiredGate], platform: Platform, runner: &str) {
+    let runner = crate::user_config::ResolvedRunner {
+        name: None,
+        labels: vec![runner.to_owned()],
+    };
     for gate in gates {
         writeln!(
             w,
@@ -1008,12 +1017,20 @@ fn push_required_gates(w: &mut String, gates: &[RequiredGate], platform: Platfor
                 .expect("write");
             }
         }
+        if gate.artifacts.is_some() {
+            writeln!(
+                w,
+                "        id: simit-required-gate-{}",
+                crate::render::ci::sanitize_gate_id(&gate.id)
+            )
+            .expect("write");
+        }
         w.push_str("        run: |\n          set -euo pipefail\n");
         for line in gate.run.lines() {
             writeln!(w, "          {line}").expect("write");
         }
         if platform == Platform::Github {
-            crate::render::ci::push_required_gate_artifacts(w, gate, "", "");
+            crate::render::ci::push_required_gate_artifacts(w, gate, Some(&runner), "", "");
         }
     }
 }

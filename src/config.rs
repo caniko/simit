@@ -559,6 +559,7 @@ impl CiConfig {
         provider: CiProvider,
         platform: Platform,
     ) -> Result<()> {
+        self.validate_required_gate_artifacts_backend(provider, platform)?;
         if self.separate_events && !self.push_branches.is_empty() {
             bail!(
                 "[ci].push_branches cannot filter explicitly retained separate_events producers; migrate event evidence and policy together"
@@ -582,6 +583,22 @@ impl CiConfig {
             bail!(
                 "[ci.nix_build] options require GitHub Actions (effective GitHub Actions backend)"
             );
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_required_gate_artifacts_backend(
+        &self,
+        provider: CiProvider,
+        platform: Platform,
+    ) -> Result<()> {
+        if self
+            .required_gates
+            .iter()
+            .any(|gate| gate.artifacts.is_some())
+            && (provider != CiProvider::Actions || platform != Platform::Github)
+        {
+            bail!("required gate artifacts require the effective GitHub Actions backend");
         }
         Ok(())
     }
@@ -3865,10 +3882,17 @@ fn validate_required_gates(ci: &CiConfig) -> Result<()> {
             );
         }
         if let Some(artifacts) = &gate.artifacts {
-            if ci.platform != Some(Platform::Github) || ci.provider == Some(CiProvider::Crow) {
-                bail!("simit project config: required gate artifacts require GitHub Actions");
+            if gate.timeout_minutes > 345 {
+                bail!(
+                    "simit project config: required gate artifacts need 15 minutes of job overhead; timeout_minutes must be at most 345"
+                );
             }
+            // @actions/core trims ECMAScript whitespace, including the BOM.
             if artifacts.name.trim().is_empty()
+                || artifacts
+                    .name
+                    .trim_matches(|ch: char| ch.is_whitespace() || ch == '\u{feff}')
+                    != artifacts.name
                 || artifacts.name.chars().any(char::is_control)
                 || artifacts
                     .name
@@ -3876,17 +3900,19 @@ fn validate_required_gates(ci: &CiConfig) -> Result<()> {
                 || !artifact_names.insert(&artifacts.name)
             {
                 bail!(
-                    "simit project config: required gate artifact names must be valid and unique"
+                    "simit project config: required gate artifact names must be valid and unique without surrounding whitespace"
                 );
             }
             if artifacts.paths.is_empty()
-                || artifacts
-                    .paths
-                    .iter()
-                    .any(|path| path.trim().is_empty() || path.chars().any(char::is_control))
+                || artifacts.paths.iter().any(|path| {
+                    path.trim().is_empty()
+                        || path.trim_matches(|ch: char| ch.is_whitespace() || ch == '\u{feff}')
+                            != path
+                        || path.chars().any(char::is_control)
+                })
             {
                 bail!(
-                    "simit project config: required gate artifact paths must be non-empty single-line paths"
+                    "simit project config: required gate artifact paths must be non-empty single-line paths without surrounding whitespace"
                 );
             }
             if !(1..=90).contains(&artifacts.retention_days) {

@@ -279,6 +279,16 @@ paths = ["target/evidence/"]
         parsed["jobs"]["build"]["env"]["CARGO_HOME"].as_str(),
         Some("/tmp/.cargo")
     );
+    let steps = parsed["jobs"]["build"]["steps"].as_sequence().unwrap();
+    let gate = steps
+        .iter()
+        .position(|step| step["name"] == "Required gate gel-integration")
+        .unwrap();
+    assert_eq!(steps[gate + 1]["with"]["name"], "gel-evidence.source");
+    assert_eq!(
+        steps[gate + 1]["if"],
+        "always() && steps.simit-required-gate-gel-integration.outcome != '' && steps.simit-required-gate-gel-integration.outcome != 'skipped'"
+    );
     // Gate failure blocks publication via needs chain.
     let parsed: serde_yaml::Value = serde_yaml::from_str(&trusted).unwrap();
     for member in ["a", "b", "c", "d"] {
@@ -287,7 +297,10 @@ paths = ["target/evidence/"]
             .unwrap()
             .last()
             .unwrap();
-        assert_eq!(upload["if"], "always()");
+        assert_eq!(
+            upload["if"],
+            "always() && steps.simit-required-gate-gel-integration.outcome != '' && steps.simit-required-gate-gel-integration.outcome != 'skipped'"
+        );
         assert_eq!(upload["with"]["name"], format!("gel-evidence.{member}"));
         assert_eq!(
             upload["with"]["path"],

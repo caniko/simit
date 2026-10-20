@@ -264,22 +264,7 @@ pub(super) fn source_workflow_with_namespace(
     if options.with_deny {
         push_deny_step(&mut w, command_prefix(runtime));
     }
-    for gate in &options.required_gates {
-        w.push_str(&format!(
-            "      - name: Required gate {}\n        timeout-minutes: {}\n        env:\n",
-            gate.id, gate.timeout_minutes
-        ));
-        if gate.env.is_empty() {
-            w.push_str("          SIMIT_REQUIRED_GATE: \"1\"\n");
-        }
-        for (key, value) in &gate.env {
-            w.push_str(&format!(
-                "          {key}: \"{}\"\n",
-                yaml_double_quote(value)
-            ));
-        }
-        w.push_str(&format!("        run: {}\n", gate.run));
-    }
+    push_source_required_gates(&mut w, options);
     for name in names {
         let prefix = command_prefix(runtime);
         let quoted = shell_word(name);
@@ -312,6 +297,33 @@ pub(super) fn source_workflow_with_namespace(
     }
     trim_trailing_blank_lines(&mut w);
     w
+}
+
+pub(super) fn push_source_required_gates(w: &mut String, options: &CiOptions) {
+    for gate in &options.required_gates {
+        w.push_str(&format!(
+            "      - name: Required gate {}\n        timeout-minutes: {}\n        env:\n",
+            gate.id, gate.timeout_minutes
+        ));
+        if gate.env.is_empty() {
+            w.push_str("          SIMIT_REQUIRED_GATE: \"1\"\n");
+        }
+        for (key, value) in &gate.env {
+            w.push_str(&format!(
+                "          {key}: \"{}\"\n",
+                yaml_double_quote(value)
+            ));
+        }
+        if gate.artifacts.is_some() {
+            w.push_str(&format!(
+                "        id: simit-required-gate-{}\n",
+                sanitize_gate_id(&gate.id)
+            ));
+        }
+        w.push_str(&format!("        run: {}\n", gate.run));
+        // Keep diagnostics outside the immutable simit-crate-<package>-<attempt> namespace.
+        push_required_gate_artifacts(w, gate, None, "", ".source");
+    }
 }
 
 pub(crate) fn bootstrap(w: &mut String) {
@@ -448,10 +460,17 @@ pub(super) fn publisher_file_with_namespace(
                     &environment.into_iter().collect::<Vec<_>>(),
                     directory,
                 );
+                if gate.artifacts.is_some() {
+                    w.push_str(&format!(
+                        "        id: simit-required-gate-{}\n",
+                        sanitize_gate_id(&gate.id)
+                    ));
+                }
                 w.push_str(&format!("        run: {}\n", gate.run));
                 push_required_gate_artifacts(
                     &mut w,
                     gate,
+                    None,
                     ".simit-release-source/",
                     &format!(".{name}"),
                 );
