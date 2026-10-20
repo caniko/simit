@@ -556,14 +556,12 @@ fn actionlint_validates_native_concurrency_queue_contract() {
         .find(|step| {
             step["name"]
                 .as_str()
-                .is_some_and(|name| name.starts_with("Lint signed-release workflows"))
+                .is_some_and(|name| name.starts_with("Lint all workflows"))
         })
         .unwrap();
-    assert!(
-        lint["run"]
-            .as_str()
-            .unwrap()
-            .starts_with("nix develop --no-update-lock-file .#test -c actionlint "),
+    assert_eq!(
+        lint["run"].as_str(),
+        Some("nix develop --no-update-lock-file .#test -c actionlint"),
         "the hosted qualification must use the same patched tool as local tests"
     );
     let output = Command::new("python3")

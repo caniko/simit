@@ -23,7 +23,7 @@ fn source_manifests_hash_dash_and_option_like_names_as_files() {
         );
     }
     for path in [
-        ".github/workflows/qualify-release-generator.yaml",
+        ".github/workflows/qualify-generator.yaml",
         ".github/workflows/review-compatibility.yml",
     ] {
         let workflow =

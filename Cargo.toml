@@ -56,7 +56,11 @@ with_docs = true
 publish_crates = true
 publish_strategy = "release-plz"
 nix_builds = [".#default"]
-
+# Native CI owns formatting, feature modes, Clippy and Rustdoc. The exact
+# production-generator qualifier owns the filtered package and Nix-only checks.
+components = ["flake-evaluation"]
+# Both original events are intentionally enrolled by the custody fixture.
+separate_events = true
 extra_setup = [
   "printf '%s\\n' 'NIX_CONFIG<<SIMIT_NIX_LIMITS' 'experimental-features = nix-command flakes' 'max-jobs = 1' 'cores = 2' 'SIMIT_NIX_LIMITS' >> \"$GITHUB_ENV\"",
   "if [ \"$GITHUB_WORKFLOW\" = CI ] && [ \"$GITHUB_JOB\" = test ]; then nix develop -c bash scripts/qualify-updater-tests.sh; fi",

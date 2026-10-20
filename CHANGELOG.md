@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Deduplicate Simit's own generator qualification and native/Nix validation;
+  retain Nix-only checks with the production build and lighten the Rustdoc shell.
 - Raise Simit's minimum Rust version to 1.88 to use the security-patched Hickory
   DNS resolver; generated projects keep their independently declared minimums.
 
@@ -32,6 +34,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Preserve build-only checks, workflow lint and release/flake regeneration on
+  every primary CI push branch when consolidating validation ownership.
+- Keep push and pull-request generator qualification separate so one event
+  cannot cancel the other's required check.
 - Qualify generated native prebuild push runs against exact source job/step
   identities: require release-only skips, complete native matrix execution and
   successful default-branch publication while rejecting unknown predicates.
@@ -84,6 +90,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with a clean environment; document the required isolated observer-job boundary.
 - Revalidate captured attempt-one jobs and log contents against GitHub during
   retention; an artifact digest cannot authenticate a recomputed forged receipt.
+- Bind original custody to complete logs from validated attempt-one job IDs,
+  tolerating only transient redundant step-file ZIP membership while preserving
+  exact shared contents, complete aggregate coverage and all retention bounds.
 - Reserve full partial-download retry bodies independently of fresh metadata and
   log revalidation, without resetting the retention deadline.
 - Preserve `@` in workflow filenames and refs, rejecting ambiguous producer paths.

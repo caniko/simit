@@ -123,7 +123,7 @@ impl Spec {
         let capture = self
             .workflows
             .values()
-            .map(|jobs| (jobs.len() as u64).div_ceil(100) + 4)
+            .map(|jobs| (jobs.len() as u64).div_ceil(100) + 4 + jobs.len() as u64)
             .sum::<u64>();
         let required = MAX_ATTEMPTS
             * (rounds * (MAX_PAGES + self.workflows.len() as u64) + capture + MAX_PAGES);
@@ -919,6 +919,55 @@ fn log_members(
 ) -> Result<BTreeMap<String, String>> {
     archive_members(raw, LOG_BYTES, 10000, &mut check)
 }
+
+fn validate_job_log_coverage(
+    members: &BTreeMap<String, String>,
+    mut jobs: Vec<&String>,
+) -> Result<()> {
+    // Keep multiplicity: different original jobs can have identical logs.
+    let mut aggregate = members
+        .iter()
+        .filter(|(name, _)| !name.contains('/'))
+        .map(|(_, hash)| hash)
+        .collect::<Vec<_>>();
+    aggregate.sort_unstable();
+    jobs.sort_unstable();
+    ensure!(
+        aggregate == jobs,
+        "authoritative job logs differ from provider ZIP aggregate coverage"
+    );
+    Ok(())
+}
+
+fn redundant_step_log(name: &str) -> bool {
+    name.rsplit_once('/').is_some_and(|(_, file)| {
+        file.strip_suffix(".txt")
+            .and_then(|stem| stem.split_once('_'))
+            .is_some_and(|(number, name)| {
+                !name.is_empty()
+                    && number.bytes().all(|byte| byte.is_ascii_digit())
+                    && number.parse::<u64>().is_ok_and(|number| number > 0)
+            })
+    })
+}
+
+fn validate_log_member_retention(
+    captured: &BTreeMap<String, String>,
+    fresh: &BTreeMap<String, String>,
+) -> Result<()> {
+    ensure!(
+        captured
+            .iter()
+            .filter(|(name, _)| !redundant_step_log(name))
+            .eq(fresh.iter().filter(|(name, _)| !redundant_step_log(name)))
+            && captured
+                .iter()
+                .all(|(name, hash)| fresh.get(name).is_none_or(|current| current == hash)),
+        "authoritative attempt-one logs differ from captured log content"
+    );
+    Ok(())
+}
+
 fn archive_members(
     raw: &[u8],
     maximum: u64,
@@ -1116,6 +1165,19 @@ pub fn observe_with(
                 write_json(&folder.join("provider-log-members.json"), &members)?;
                 successful_run(&run)?;
                 validate_jobs(&jobs, spec, identity, id, &workflow)?;
+                fs::create_dir(folder.join("job-logs"))?;
+                let mut job_logs = Vec::new();
+                for job in &jobs {
+                    let job_id = job["id"].as_u64().context("missing job id")?;
+                    // The documented job-ID endpoint returns complete plain-text
+                    // logs; numeric step-file copies in run ZIPs are not stable.
+                    // https://docs.github.com/en/rest/actions/workflow-jobs#download-job-logs-for-a-workflow-run
+                    let raw = observer.get(&format!("actions/jobs/{job_id}/logs"), LOG_BYTES)?;
+                    ensure!(!raw.is_empty(), "original job has no complete log");
+                    fs::write(folder.join(format!("job-logs/{job_id}.txt")), &raw)?;
+                    job_logs.push(digest_checked(&raw, || observer.remaining().map(|_| ()))?);
+                }
+                validate_job_log_coverage(&members, job_logs.iter().collect())?;
                 let after = observer.json(&format!("actions/runs/{id}"))?;
                 validate_run(&after, spec, identity, id, &workflow)?;
                 successful_run(&after)?;
@@ -1390,7 +1452,6 @@ fn verify_retention_with(
         let mut jobs: Vec<Value> = serde_json::from_slice(&jobs_raw)?;
         validate_jobs(&jobs, spec, identity, producer.run_id, &producer.workflow)?;
         jobs.sort_by_key(|job| job["id"].as_u64());
-        captured_jobs.insert(producer.run_id, jobs);
         let raw = read_bytes_checked(&folder.join("provider-logs.zip"), LOG_BYTES, || {
             observer.remaining().map(|_| ())
         })?;
@@ -1403,6 +1464,18 @@ fn verify_retention_with(
                 && log_members(&raw, || observer.remaining().map(|_| ()))? == producer.log_members,
             "provider archive differs"
         );
+        let job_logs = jobs
+            .iter()
+            .map(|job| {
+                let id = job["id"].as_u64().context("missing job id")?;
+                receipt
+                    .members
+                    .get(&format!("{}/job-logs/{id}.txt", producer.run_id))
+                    .context("missing captured complete job log")
+            })
+            .collect::<Result<Vec<_>>>()?;
+        validate_job_log_coverage(&producer.log_members, job_logs)?;
+        captured_jobs.insert(producer.run_id, jobs);
     }
     ensure!(
         enrolled == spec.workflows.keys().cloned().collect(),
@@ -1449,16 +1522,31 @@ fn verify_retention_with(
             captured_jobs.get(&producer.run_id) == Some(&jobs),
             "authoritative attempt-one jobs differ from captured jobs"
         );
+        let mut job_logs = Vec::new();
+        for job in &jobs {
+            let id = job["id"].as_u64().context("missing job id")?;
+            let raw = observer.get(&format!("actions/jobs/{id}/logs"), LOG_BYTES)?;
+            let hash = digest_checked(&raw, || observer.remaining().map(|_| ()))?;
+            ensure!(
+                !raw.is_empty()
+                    && receipt
+                        .members
+                        .get(&format!("{}/job-logs/{id}.txt", producer.run_id))
+                        == Some(&hash),
+                "authoritative attempt-one complete job logs differ from captured logs"
+            );
+            job_logs.push(hash);
+        }
         let raw = observer.get(
             &format!("actions/runs/{}/attempts/1/logs", producer.run_id),
             LOG_BYTES,
         )?;
-        // GitHub may regenerate a ZIP container. Compare every admitted log
-        // member's content, retaining both raw archives without substitution.
-        ensure!(
-            log_members(&raw, || observer.remaining().map(|_| ()))? == producer.log_members,
-            "authoritative attempt-one logs differ from captured log content"
-        );
+        let members = log_members(&raw, || observer.remaining().map(|_| ()))?;
+        validate_job_log_coverage(&members, job_logs.iter().collect())?;
+        // GitHub can omit or restore redundant numeric step-file copies. Every
+        // complete job remains byte-bound to its original ID and aggregate log;
+        // all other members and every shared member's content must still match.
+        validate_log_member_retention(&producer.log_members, &members)?;
     }
     let fresh = observer.pages(
         &format!(
@@ -1524,6 +1612,61 @@ fn validate_artifact(
 mod tests {
     use super::*;
 
+    #[test]
+    fn retained_toolbelt_original_member_pairs_preserve_all_six_job_logs() {
+        // Exact name/hash projections, independently compared with both retained
+        // raw provider ZIP pairs and all twelve job-ID API responses. Keep the
+        // original archive digests/IDs without vendoring megabytes of raw logs.
+        let cases: Vec<Value> = serde_json::from_str(include_str!(
+            "../../tests/fixtures/toolbelt-original-log-members.json"
+        ))
+        .unwrap();
+        for case in cases {
+            let captured: BTreeMap<String, String> =
+                serde_json::from_value(case["captured"].clone()).unwrap();
+            let jobs: BTreeMap<String, String> =
+                serde_json::from_value(case["job_logs"].clone()).unwrap();
+            assert_eq!(jobs.len(), 6);
+            let mut fresh = captured.clone();
+            for name in case["revalidated_omissions"].as_array().unwrap() {
+                assert!(fresh.remove(name.as_str().unwrap()).is_some());
+            }
+            assert_eq!(
+                (captured.len(), fresh.len()),
+                if case["event"] == "push" {
+                    (32, 12)
+                } else {
+                    (39, 32)
+                }
+            );
+            assert_ne!(captured, fresh); // The previous exact-map verifier rejects both originals.
+            validate_job_log_coverage(&captured, jobs.values().collect()).unwrap();
+            validate_job_log_coverage(&fresh, jobs.values().collect()).unwrap();
+            validate_log_member_retention(&captured, &fresh).unwrap();
+            validate_log_member_retention(&fresh, &captured).unwrap();
+            for name in captured.keys() {
+                let mut changed = captured.clone();
+                changed.insert(name.clone(), "0".repeat(64));
+                assert!(
+                    validate_log_member_retention(&captured, &changed).is_err(),
+                    "changed {name}"
+                );
+                changed.remove(name);
+                assert_eq!(
+                    validate_log_member_retention(&captured, &changed).is_ok(),
+                    redundant_step_log(name),
+                    "removed {name}"
+                );
+                if !name.contains('/') {
+                    assert!(
+                        validate_job_log_coverage(&changed, jobs.values().collect()).is_err(),
+                        "missing aggregate {name}"
+                    );
+                }
+            }
+        }
+    }
+
     fn retention_packet(root: &Path) -> Receipt {
         let mut receipt = pending_receipt();
         receipt.capture_complete = true;
@@ -1534,11 +1677,15 @@ mod tests {
         let jobs = json!([{"id":3,"run_id":1,"run_attempt":1,"head_sha":"a".repeat(40),"name":"test","status":"completed","conclusion":"success","steps":[{"number":1,"name":"Test","status":"completed","conclusion":"success"}]}]);
         write_json(&folder.join("jobs.json"), &jobs).unwrap();
         let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
-        zip.start_file("test/1_Test.txt", zip::write::SimpleFileOptions::default())
-            .unwrap();
-        zip.write_all(b"original log").unwrap();
+        for name in ["0_test.txt", "test/1_Test.txt"] {
+            zip.start_file(name, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            zip.write_all(b"original log").unwrap();
+        }
         let raw = zip.finish().unwrap().into_inner();
         fs::write(folder.join("provider-logs.zip"), &raw).unwrap();
+        fs::create_dir(folder.join("job-logs")).unwrap();
+        fs::write(folder.join("job-logs/3.txt"), b"original log").unwrap();
         fs::write(root.join("event.json"), &receipt.identity.event_json).unwrap();
         receipt.producers.push(Producer {
             run_id: 1,

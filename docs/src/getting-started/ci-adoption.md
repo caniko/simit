@@ -298,6 +298,30 @@ is rejected before generation. Release/tag triggers retain their separate policy
 Distinct MSRV, feature, platform, extracted-package, all-system evaluation and
 fresh-execution checks are separate acceptance cases, not duplicate work.
 
+### Simit's own CI ownership
+
+Simit uses evaluation-only primary CI with these required execution owners:
+
+| Coverage                                                                                                                          | Owner                       |
+| --------------------------------------------------------------------------------------------------------------------------------- | --------------------------- |
+| Formatting, flake evaluation, all-feature and no-default-feature tests/Clippy, Rustdoc, generator drift, package inventory        | `test`                      |
+| Production package build and its filtered-source all-feature tests; dependency closure                                            | `qualify`                   |
+| Locked advisory audit, dependency policy, filtered custody assets, public-package cache policy                                    | `qualify`                   |
+| Complete production-generator regeneration and retained source/tree/binary/workflow evidence, including signed-release publishing | `qualify`                   |
+| All workflow lint, including both signed-release publishers                                                                       | `qualify-release-generator` |
+
+The full-flake check outputs remain available locally. CI avoids rebuilding
+their formatting, Clippy, test and Rustdoc equivalents before native validation.
+The source-filtered production package still builds and runs its tests separately.
+Rustdoc's shell carries Rust dependency inputs and mdBook; site builds own Plinth.
+Both push and PR originals remain explicitly enrolled for custody. Native-platform,
+transport, observer-isolation and publisher-boundary qualifications retain their
+independent workflows and required contexts.
+Both replacement qualifiers cover every primary CI push branch, including branches
+without an open pull request.
+Their concurrency groups separate push and PR events, while newer revisions still
+supersede older runs within each event stream.
+
 ### Native grouped Nix executor
 
 Grouped workflows invoke `simit ci nix-group`. Before adopting regenerated
