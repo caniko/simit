@@ -34,6 +34,26 @@ use crate::render::ci::{
 use crate::user_config::{ResolvedRunner, UserConfig, validate_runner_label};
 
 pub fn run(command: InitCiCommand) -> Result<()> {
+    if let (Some(strategy), Some(coordinated)) =
+        (command.publish_strategy, command.coordinated_publish)
+    {
+        let legacy = if coordinated {
+            crate::config::PublishStrategy::Coordinated
+        } else {
+            crate::config::PublishStrategy::Members
+        };
+        if strategy != legacy {
+            bail!("--publish-strategy conflicts with --coordinated-publish");
+        }
+    }
+    if command.publish_strategy == Some(crate::config::PublishStrategy::ReleasePlz)
+        && let Some(platform) = command.platform
+    {
+        crate::render::release_plz::validate_backend(
+            command.ci_provider.unwrap_or(CiProvider::Actions),
+            platform,
+        )?;
+    }
     if let Some(root) = crate::monorepo::find_root(&std::env::current_dir()?)?
         && !command.review_only
         && !command.prebuild_only
@@ -103,6 +123,11 @@ pub fn run(command: InitCiCommand) -> Result<()> {
         .or(cfg.ci.platform)
         .unwrap_or(Platform::Forgejo);
     let backend = CiBackend::from_parts(provider, platform)?;
+    if command.publish_strategy.or(Some(cfg.ci.publish_strategy))
+        == Some(crate::config::PublishStrategy::ReleasePlz)
+    {
+        crate::render::release_plz::validate_backend(provider, platform)?;
+    }
     cfg.ci.validate_effective_backend(provider, platform)?;
     ci::custody::validate_backend(&cfg.ci, provider, platform)?;
     crate::render::workflow_templates::validate_backend(&cfg.ci, provider, platform)?;
@@ -116,7 +141,33 @@ pub fn run(command: InitCiCommand) -> Result<()> {
     let workflow_snapshots = workflow_snapshots_for_platform(workspace_root, platform)?;
     let inference = CiInference::from_workflows(&workflow_snapshots)?;
     let inferred_pages = infer_codeberg_pages_from_workflows(&workflow_snapshots)?;
-    let cli_overrides = ci_cli_overrides(&command);
+    let mut cli_overrides = ci_cli_overrides(&command);
+    let publishable_count = metadata
+        .packages
+        .iter()
+        .filter(|p| metadata.workspace_members.contains(&p.id) && p.is_publishable_to_crates_io())
+        .count();
+    let binary_release = command.with_artifacts.unwrap_or(cfg.ci.with_artifacts)
+        || command.with_homebrew
+        || command.with_chocolatey
+        || command.with_scoop
+        || cfg.release.github.is_some()
+        || cfg.prebuild.is_some();
+    if platform == Platform::Github
+        && provider == CiProvider::Actions
+        && publishable_count > 0
+        && (publishable_count == 1 || !binary_release)
+        && command.packages.is_empty()
+        && cfg.ci.packages.is_empty()
+        && cfg.release.signing.required
+        && (metadata.workspace_members.len() <= 1 || command.workspace || cfg.ci.workspace)
+        && metadata
+            .packages
+            .iter()
+            .all(|p| !p.is_publishable() || p.is_publishable_to_crates_io())
+    {
+        cli_overrides.default_publish_strategy = Some(crate::config::PublishStrategy::ReleasePlz);
+    }
     let mut resolved =
         ResolvedCiInputs::resolve(workspace_root, &cfg, &cli_overrides, Some(&inference))?;
     if cfg.ci.independent_lanes && !resolved.step_runners.is_empty() {
@@ -129,6 +180,27 @@ pub fn run(command: InitCiCommand) -> Result<()> {
     validate_runner(resolved.windows_runner.as_deref())?;
     let packages = cargo::select_packages(&metadata, &resolved.packages, resolved.workspace)?;
     let coordinated = resolved.publish_strategy == crate::config::PublishStrategy::Coordinated;
+    let release_plz = resolved.publish_strategy == crate::config::PublishStrategy::ReleasePlz;
+    if release_plz {
+        crate::render::release_plz::validate_backend(provider, platform)?;
+        if !resolved.packages.is_empty()
+            || (metadata.workspace_members.len() > 1 && !resolved.workspace)
+        {
+            bail!(
+                "release-plz publication requires the full workspace; use --workspace without --package selectors"
+            );
+        }
+        if !resolved.publish_crates {
+            bail!("release-plz requires --publish-crates");
+        }
+        if !ProjectConfig::can_persist_ci(workspace_root)?
+            && cfg.ci.publish_strategy != crate::config::PublishStrategy::ReleasePlz
+        {
+            bail!(
+                "persist publish_strategy = \"release-plz\" in the existing project config source before generating release-plz"
+            );
+        }
+    }
     if coordinated {
         if platform != Platform::Github {
             bail!("coordinated workspace publication requires --platform github in v1");
@@ -146,7 +218,7 @@ pub fn run(command: InitCiCommand) -> Result<()> {
         }
     }
     if resolved.workspace_strategy == crate::cli::WorkspaceStrategy::Aggregate
-        && ((resolved.publish_crates && !coordinated)
+        && ((resolved.publish_crates && !coordinated && !release_plz)
             || command.with_homebrew
             || command.with_chocolatey
             || command.with_scoop)
@@ -300,7 +372,7 @@ pub fn run(command: InitCiCommand) -> Result<()> {
             homebrew,
             chocolatey,
             scoop,
-            publish_crates: publish_crates && !coordinated,
+            publish_crates: publish_crates && !coordinated && !release_plz,
             package_scoped: multi_package_workspace,
             workspace_strategy: resolved.workspace_strategy,
             ..options.clone()
@@ -334,7 +406,14 @@ pub fn run(command: InitCiCommand) -> Result<()> {
             step_runners: &step_runners,
         })?);
     }
-    if coordinated && !command.primary_only {
+    if release_plz && !command.primary_only {
+        files.extend(crate::render::release_plz::files(
+            &metadata,
+            &cfg,
+            resolved.runtime,
+            &options,
+        )?);
+    } else if coordinated && !command.primary_only {
         if !publish_crates {
             bail!("coordinated workspace publication requires --publish-crates");
         }
@@ -605,6 +684,7 @@ fn validate_prebuild_only_options(command: &InitCiCommand) -> Result<()> {
         || command.workspace
         || command.workspace_strategy.is_some()
         || command.coordinated_publish.is_some()
+        || command.publish_strategy.is_some()
         || command.runner.is_some()
         || command.windows_runner.is_some()
         || !command.step_runner.is_empty()
@@ -784,6 +864,7 @@ fn run_nix_only_at(command: InitCiCommand, workspace_root: &Path) -> Result<()> 
         || command.with_vscode
         || command.with_jetbrains
         || command.coordinated_publish.is_some()
+        || command.publish_strategy.is_some()
         || !cfg.ci.required_gates.is_empty()
     {
         bail!("release and language-specific options are not supported for Nix-only CI");
@@ -943,6 +1024,7 @@ fn run_python(command: InitCiCommand) -> Result<()> {
         || command.with_artifacts == Some(true)
         || command.publish_crates == Some(true)
         || command.coordinated_publish.is_some()
+        || command.publish_strategy.is_some()
         || !cfg.ci.required_gates.is_empty()
     {
         bail!("Python uv CI currently supports CI only, not release packaging workflows");
@@ -1296,7 +1378,10 @@ fn run_crow_python(
     if command.workspace || !command.packages.is_empty() {
         bail!("Python uv Crow CI does not support --workspace or --package");
     }
-    if command.coordinated_publish.is_some() || !cfg.ci.required_gates.is_empty() {
+    if command.coordinated_publish.is_some()
+        || command.publish_strategy.is_some()
+        || !cfg.ci.required_gates.is_empty()
+    {
         bail!(
             "required gates and coordinated publication are only supported for Actions workflows in v1"
         );
@@ -1419,13 +1504,16 @@ fn ci_cli_overrides(command: &InitCiCommand) -> CiCliOverrides {
         granular: command.granular,
         workspace: command.workspace,
         workspace_strategy: command.workspace_strategy,
-        publish_strategy: command.coordinated_publish.map(|enabled| {
-            if enabled {
-                crate::config::PublishStrategy::Coordinated
-            } else {
-                crate::config::PublishStrategy::Members
-            }
+        publish_strategy: command.publish_strategy.or_else(|| {
+            command.coordinated_publish.map(|enabled| {
+                if enabled {
+                    crate::config::PublishStrategy::Coordinated
+                } else {
+                    crate::config::PublishStrategy::Members
+                }
+            })
         }),
+        default_publish_strategy: None,
         packages: command.packages.clone(),
         with_nextest: command.with_nextest,
         with_nix_cargo_cache: command.with_nix_cargo_cache,
@@ -1436,7 +1524,9 @@ fn ci_cli_overrides(command: &InitCiCommand) -> CiCliOverrides {
         with_docs: command.with_docs,
         with_artifacts: command.with_artifacts,
         with_pypi_publish: command.with_pypi_publish,
-        publish_crates: command.publish_crates,
+        publish_crates: (command.with_homebrew || command.with_chocolatey || command.with_scoop)
+            .then_some(true)
+            .or(command.publish_crates),
         with_om_ci: command.with_om_ci,
         om_ci_augment: command.om_ci_augment,
         omnix_ref: command.omnix_ref.clone(),
@@ -1673,6 +1763,7 @@ pub(crate) fn project_regeneration_command(workspace_root: &Path) -> Result<Opti
         workspace: false,
         workspace_strategy: None,
         coordinated_publish: None,
+        publish_strategy: None,
         platform: Some(platform),
         ci_provider: Some(CiProvider::Actions),
         crow_format: None,
@@ -1861,6 +1952,9 @@ pub(crate) fn render_regeneration_command(
     }
     if resolved.publish_strategy == crate::config::PublishStrategy::Coordinated {
         args.push("--coordinated-publish".to_owned());
+    }
+    if resolved.publish_strategy == crate::config::PublishStrategy::ReleasePlz {
+        args.push("--publish-strategy release-plz".to_owned());
     }
     if resolved.with_pypi_publish {
         args.push("--with-pypi-publish".to_owned());
@@ -2151,12 +2245,31 @@ fn reconcile_ci_files(
     crate::render::workflow_templates::append(workspace_root, &config.ci, &mut files)?;
     let mut obsolete =
         project::obsolete_generated_workflows(workspace_root, &files, is_ci_managed_workflow_name)?;
+    for path in [
+        crate::render::release_plz::CONFIG,
+        crate::render::release_plz::HELPER,
+    ] {
+        if !files
+            .iter()
+            .any(|file| file.relative_path == Path::new(path))
+            && let Ok(content) = fs::read_to_string(workspace_root.join(path))
+            && ci::is_generated_workflow_marker(&content)
+        {
+            obsolete.push(PathBuf::from(path));
+        }
+    }
     obsolete.extend(crate::render::workflow_templates::obsolete(
         workspace_root,
         &files,
     )?);
     obsolete.sort();
     obsolete.dedup();
+    if files
+        .iter()
+        .any(|file| file.relative_path == Path::new(crate::render::release_plz::CONFIG))
+    {
+        crate::render::release_plz::validate_migration(workspace_root, &config, &files, &obsolete)?;
+    }
     project::reconcile_generated_files(
         workspace_root,
         &files,
@@ -2269,6 +2382,8 @@ fn is_ci_managed_workflow_name(name: &std::ffi::OsStr) -> bool {
             | "publish-workspace.yml"
             | "trusted-publish-workspace.yaml"
             | "trusted-publish-workspace.yml"
+            | "release-plz.yaml"
+            | "release-plz.yml"
             | "trusted-publish-crate.yaml"
             | "trusted-publish-crate.yml"
             | "release-artifacts.yaml"

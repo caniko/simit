@@ -37,4 +37,4 @@ jobs:
           git config --global --add url.https://github.com/.insteadOf ssh://git@github.com/
           git config --global --add url.https://github.com/.insteadOf git@github.com:
       - name: Lint all workflows, including signed-release publishers
-        run: nix shell --inputs-from . nixpkgs#actionlint -c actionlint
+        run: nix develop --no-update-lock-file .#test -c actionlint

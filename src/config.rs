@@ -495,7 +495,7 @@ pub(crate) fn github_expression(body: &str) -> Option<(&str, &str)> {
 }
 
 /// Workspace crates.io publishing strategy.
-#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Deserialize, clap::ValueEnum, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum PublishStrategy {
     /// One independent `publish-crate-<name>.yaml` per publishable member
@@ -505,6 +505,43 @@ pub enum PublishStrategy {
     /// One coordinated `publish-workspace.yaml` that publishes prerequisites
     /// before dependents in release-plan order (GitHub Actions only in v1).
     Coordinated,
+    /// Release PRs, versioning, changelogs and publication through release-plz.
+    ReleasePlz,
+}
+
+impl PublishStrategy {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Members => "members",
+            Self::Coordinated => "coordinated",
+            Self::ReleasePlz => "release-plz",
+        }
+    }
+}
+
+/// Credentials for release-plz; values name GitHub secrets/variables, never keys.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct ReleasePlzConfig {
+    pub token_secret: String,
+    pub app_id_variable: Option<String>,
+    pub app_private_key_secret: Option<String>,
+    pub registry_token_secret: String,
+    pub signing_key_secret: String,
+    pub signing_passphrase_secret: String,
+}
+
+impl Default for ReleasePlzConfig {
+    fn default() -> Self {
+        Self {
+            token_secret: "RELEASE_PLZ_TOKEN".into(),
+            app_id_variable: None,
+            app_private_key_secret: None,
+            registry_token_secret: "CRATES_IO_API_TOKEN".into(),
+            signing_key_secret: "RELEASE_PLZ_GPG_PRIVATE_KEY".into(),
+            signing_passphrase_secret: "RELEASE_PLZ_GPG_PASSPHRASE".into(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
@@ -545,11 +582,12 @@ pub struct CiConfig {
     pub push_branches: Vec<String>,
     #[serde(default)]
     pub workspace_strategy: WorkspaceStrategy,
-    /// Opt-in coordinated dependency-ordered workspace publication.
-    /// Requires `publish_crates = true`. GitHub Actions only in v1; other
-    /// backends fail explicitly instead of silently degrading.
+    /// Crate publisher ownership; release-plz is selected during supported new
+    /// GitHub Actions initialization. Existing configurations retain Members.
     #[serde(default)]
     pub publish_strategy: PublishStrategy,
+    #[serde(default)]
+    pub release_plz: ReleasePlzConfig,
     #[serde(default)]
     pub packages: Vec<String>,
     /// Nix installables that must be built by generated hosted-runner jobs.
@@ -2649,9 +2687,10 @@ impl ProjectConfig {
                 );
             }
         }
-        if self.ci.publish_strategy == PublishStrategy::Coordinated && !self.ci.publish_crates {
+        if self.ci.publish_strategy != PublishStrategy::Members && !self.ci.publish_crates {
             bail!(
-                "simit project config: [ci].publish_strategy = \"coordinated\" requires [ci].publish_crates = true"
+                "simit project config: [ci].publish_strategy = {:?} requires [ci].publish_crates = true",
+                self.ci.publish_strategy.as_str()
             );
         }
         if let Some(pages) = &self.ci.pages {
@@ -2806,9 +2845,15 @@ impl ProjectConfig {
         if sources.is_empty() && *ci == CiConfig::default() {
             return Ok(false);
         }
-        match sources.as_slice() {
-            [] => {}
-            [source] if source.label == "simit.toml" => {}
+        let (filename, scope) = match sources.as_slice() {
+            [] => ("simit.toml", None),
+            [source] if source.label == "simit.toml" => ("simit.toml", None),
+            [source] if source.label == "Cargo.toml [workspace.metadata.simit]" => {
+                ("Cargo.toml", Some("workspace"))
+            }
+            [source] if source.label == "Cargo.toml [package.metadata.simit]" => {
+                ("Cargo.toml", Some("package"))
+            }
             [source] => {
                 bail!(
                     "cannot persist [ci] into simit.toml while project config comes from {}; move project config into simit.toml first",
@@ -2825,13 +2870,14 @@ impl ProjectConfig {
                     "multiple simit project config sources found ({labels}); keep exactly one of simit.toml, Cargo.toml [workspace.metadata.simit], Cargo.toml [package.metadata.simit], or flake outputs.simitConfig"
                 );
             }
-        }
+        };
 
-        if sources.len() == 1 && sources[0].config.ci == *ci {
+        let unchanged = sources.len() == 1 && sources[0].config.ci == *ci;
+        if unchanged && !ci.publish_crates {
             return Ok(false);
         }
 
-        let path = workspace_root.join("simit.toml");
+        let path = workspace_root.join(filename);
         let current_text = if path.exists() {
             std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?
         } else {
@@ -2844,17 +2890,41 @@ impl ProjectConfig {
                 .parse::<DocumentMut>()
                 .with_context(|| format!("parsing {}", path.display()))?
         };
-        let mut table = match document.remove("ci") {
-            Some(Item::Table(table)) => table,
-            Some(_) => bail!("parsing {}: [ci] must be a table", path.display()),
-            None => Table::new(),
+        let container = if let Some(scope) = scope {
+            &mut document[scope]["metadata"]["simit"]
+        } else {
+            document.as_item_mut()
         };
-        table.set_implicit(false);
-        set_ci_table(&mut table, ci);
-        document["ci"] = Item::Table(table);
+        let container = container
+            .as_table_like_mut()
+            .context("project config must be a table")?;
+        if unchanged {
+            let table = container
+                .get_mut("ci")
+                .and_then(Item::as_table_like_mut)
+                .context("[ci] must be a table")?;
+            if table.contains_key("publish_strategy") {
+                return Ok(false);
+            }
+            // Freeze the legacy policy without reformatting unrelated settings.
+            table.insert("publish_strategy", value(ci.publish_strategy.as_str()));
+        } else {
+            let mut table = match container.remove("ci") {
+                Some(Item::Table(table)) => table,
+                Some(Item::Value(Value::InlineTable(table))) => table.into_table(),
+                Some(_) => bail!("parsing {}: [ci] must be a table", path.display()),
+                None => Table::new(),
+            };
+            table.set_implicit(false);
+            set_ci_table(&mut table, ci);
+            container.insert("ci", Item::Table(table));
+        }
 
-        std::fs::write(&path, document.to_string())
-            .with_context(|| format!("writing {}", path.display()))?;
+        let updated = document.to_string();
+        if updated == current_text {
+            return Ok(false);
+        }
+        std::fs::write(&path, updated).with_context(|| format!("writing {}", path.display()))?;
         Ok(true)
     }
 
@@ -2863,6 +2933,7 @@ impl ProjectConfig {
         match sources.as_slice() {
             [] => Ok(true),
             [source] if source.label == "simit.toml" => Ok(true),
+            [source] if source.label.starts_with("Cargo.toml [") => Ok(true),
             [_] => Ok(false),
             _ => {
                 let labels = sources
@@ -2877,21 +2948,32 @@ impl ProjectConfig {
         }
     }
 
-    fn load_sources(workspace_root: &Path) -> Result<Vec<ProjectConfigSource>> {
+    pub(crate) fn ci_declaration(workspace_root: &Path) -> Result<Option<Item>> {
+        Ok(Self::load_static_sources(workspace_root)?
+            .into_iter()
+            .next()
+            .and_then(|source| source.ci))
+    }
+
+    fn load_static_sources(workspace_root: &Path) -> Result<Vec<ProjectConfigSource>> {
         let mut sources = Vec::new();
 
         if let Some(source) = load_simit_toml(workspace_root)? {
             sources.push(source);
         }
         sources.extend(load_cargo_metadata_config(workspace_root)?);
-        if let Some(source) = load_flake_config(workspace_root)? {
+        sources.retain(|source| !source.is_empty());
+        Ok(sources)
+    }
+
+    fn load_sources(workspace_root: &Path) -> Result<Vec<ProjectConfigSource>> {
+        let mut sources = Self::load_static_sources(workspace_root)?;
+        if let Some(source) = load_flake_config(workspace_root)?.filter(|source| !source.is_empty())
+        {
             sources.push(source);
         }
 
-        Ok(sources
-            .into_iter()
-            .filter(|source| !source.config.is_empty())
-            .collect())
+        Ok(sources)
     }
 
     /// Validate the optional `[homebrew]` section.
@@ -4352,11 +4434,11 @@ fn set_ci_table(table: &mut Table, ci: &CiConfig) {
     set_optional_string(table, "pypi_token_secret", ci.pypi_token_secret.as_deref());
     set_bool(table, "pypi_trusted_publishing", ci.pypi_trusted_publishing);
     set_bool(table, "publish_crates", ci.publish_crates);
-    if ci.publish_strategy != PublishStrategy::Members {
-        table["publish_strategy"] = value(match ci.publish_strategy {
-            PublishStrategy::Members => "members",
-            PublishStrategy::Coordinated => "coordinated",
-        });
+    if ci.publish_crates
+        || ci.publish_strategy != PublishStrategy::Members
+        || table.contains_key("publish_strategy")
+    {
+        table["publish_strategy"] = value(ci.publish_strategy.as_str());
     } else {
         table.remove("publish_strategy");
     }
@@ -4526,6 +4608,18 @@ fn runtime_name(runtime: Runtime) -> &'static str {
 struct ProjectConfigSource {
     label: String,
     config: ProjectConfig,
+    ci: Option<Item>,
+}
+
+impl ProjectConfigSource {
+    fn is_empty(&self) -> bool {
+        self.config.is_empty()
+            && self
+                .ci
+                .as_ref()
+                .and_then(Item::as_table_like)
+                .is_none_or(|table| table.is_empty())
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -4564,9 +4658,11 @@ fn load_simit_toml(workspace_root: &Path) -> Result<Option<ProjectConfigSource>>
         std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
     let config =
         toml_edit::de::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+    let document = text.parse::<DocumentMut>()?;
     Ok(Some(ProjectConfigSource {
         label: "simit.toml".to_owned(),
         config,
+        ci: document.get("ci").cloned(),
     }))
 }
 
@@ -4580,6 +4676,15 @@ fn load_cargo_metadata_config(workspace_root: &Path) -> Result<Vec<ProjectConfig
         std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
     let manifest: CargoManifestConfig =
         toml_edit::de::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+    let document = text.parse::<DocumentMut>()?;
+    let ci = |scope| {
+        document
+            .get(scope)
+            .and_then(|item| item.get("metadata"))
+            .and_then(|item| item.get("simit"))
+            .and_then(|item| item.get("ci"))
+            .cloned()
+    };
 
     let mut sources = Vec::new();
     if let Some(config) = manifest
@@ -4589,12 +4694,14 @@ fn load_cargo_metadata_config(workspace_root: &Path) -> Result<Vec<ProjectConfig
         sources.push(ProjectConfigSource {
             label: "Cargo.toml [workspace.metadata.simit]".to_owned(),
             config,
+            ci: ci("workspace"),
         });
     }
     if let Some(config) = manifest.package.and_then(|package| package.metadata.simit) {
         sources.push(ProjectConfigSource {
             label: "Cargo.toml [package.metadata.simit]".to_owned(),
             config,
+            ci: ci("package"),
         });
     }
 
@@ -4639,8 +4746,22 @@ fn load_flake_config(workspace_root: &Path) -> Result<Option<ProjectConfigSource
         );
     }
 
-    let config: ProjectConfig =
+    let declaration: serde_json::Value =
         serde_json::from_slice(&output.stdout).context("parsing flake outputs.simitConfig JSON")?;
+    let config: ProjectConfig = serde_json::from_value(declaration.clone())
+        .context("parsing flake outputs.simitConfig JSON")?;
+    let ci = declaration
+        .get("ci")
+        .and_then(serde_json::Value::as_object)
+        .map(|ci| {
+            // Only declaration presence is needed here. Flake JSON can contain
+            // null Option values, which are valid config but not valid TOML.
+            let mut table = Table::new();
+            for key in ci.keys() {
+                table.insert(key, value(true));
+            }
+            Item::Table(table)
+        });
     if config.monorepo.as_ref().is_some_and(|monorepo| {
         monorepo
             .components
@@ -4654,6 +4775,7 @@ fn load_flake_config(workspace_root: &Path) -> Result<Option<ProjectConfigSource
     Ok(Some(ProjectConfigSource {
         label: "flake outputs.simitConfig".to_owned(),
         config,
+        ci,
     }))
 }
 

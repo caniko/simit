@@ -69,15 +69,15 @@ jobs:
           generator=$(python3 -c 'import json,os; print(os.path.join(json.load(open(os.path.join(os.environ["RUNNER_TEMP"], "generator-qualification/result.json")))[0]["outputs"]["out"], "bin/simit"))')
           cp "$generator" "$RUNNER_TEMP/generator-qualification/simit"
           sha256sum "$RUNNER_TEMP/generator-qualification/simit" > "$RUNNER_TEMP/generator-qualification/simit.sha256"
-          "$generator" init ci --platform github --runtime nix --runner ubuntu-latest --with-docs --publish-crates
-          "$generator" init ci --platform github --runtime nix --runner ubuntu-latest --with-docs --publish-crates --check --diff
-          "$generator" init release --platform github
-          "$generator" init release --platform github --check --diff
-          "$generator" init flake --check --diff
+          PATH="${generator%/simit}:$PATH" simit init ci --platform github --runtime nix --runner ubuntu-latest --with-docs --publish-crates
+          PATH="${generator%/simit}:$PATH" simit init ci --platform github --runtime nix --runner ubuntu-latest --with-docs --publish-crates --check --diff
+          PATH="${generator%/simit}:$PATH" simit init release --platform github
+          PATH="${generator%/simit}:$PATH" simit init release --platform github --check --diff
+          PATH="${generator%/simit}:$PATH" simit init flake --check --diff
           git diff --check
           git diff > "$RUNNER_TEMP/generator-qualification/regenerated.diff"
           git status --porcelain --untracked-files=all > "$RUNNER_TEMP/generator-qualification/regenerated.status"
-          tar -czf "$RUNNER_TEMP/generator-qualification/regenerated.tar.gz" Cargo.toml .github/workflows .simit/workflows
+          tar -czf "$RUNNER_TEMP/generator-qualification/regenerated.tar.gz" Cargo.toml .github/workflows .simit/workflows .simit/release-plz.py release-plz.toml
           sha256sum "$RUNNER_TEMP/generator-qualification/regenerated.tar.gz" > "$RUNNER_TEMP/generator-qualification/regenerated.sha256"
           git diff --exit-code
           test ! -s "$RUNNER_TEMP/generator-qualification/regenerated.status"

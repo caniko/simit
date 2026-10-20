@@ -10,6 +10,7 @@
     inherit system;
     config.allowDeprecatedx86_64Darwin = true;
   };
+  actionlint = pkgs.callPackage "${source}/nix/actionlint.nix" {};
   python = pkgs.python3.withPackages (ps: [(ps.toPythonModule pkgs.nixpkgs-review)]);
   selector = (pkgs.writeShellScriptBin "repo-review-nixpkgs-select" ''
     exec ${python}/bin/python ${source}/src/review/assets/nixpkgs.py "$@"
@@ -33,7 +34,7 @@
       nativeBuildInputs = [pkgs.makeWrapper pkgs.perl];
       # The full Simit suite invokes release preflight in temporary Cargo
       # projects, so its nested quality commands need the matching toolchain.
-      nativeCheckInputs = [pkgs.git pkgs.gnupg pkgs.clippy pkgs.rustfmt pkgs.nodejs pkgs.jq pkgs.actionlint pkgs.python3] ++ pkgs.lib.optionals pkgs.stdenv.isLinux [pkgs.bubblewrap pkgs.nix pkgs.sqlite];
+      nativeCheckInputs = [pkgs.git pkgs.gnupg pkgs.clippy pkgs.rustfmt pkgs.nodejs pkgs.jq actionlint pkgs.python3] ++ pkgs.lib.optionals pkgs.stdenv.isLinux [pkgs.bubblewrap pkgs.nix pkgs.sqlite];
       # Namespace execution is qualified outside Nix's build sandbox by the
       # source CI's all-features and no-default-features runtime suites.
       checkFlags = ["--skip=commands::projects_update::engine::tests::namespace_"];

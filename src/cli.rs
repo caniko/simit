@@ -441,6 +441,10 @@ pub struct ReleaseCommand {
     pub publisher_workflow: Option<String>,
     #[arg(long, help = "New directory for credential-free archive verification")]
     pub publisher_output: Option<Utf8PathBuf>,
+    #[arg(long, hide = true)]
+    pub release_plz_archives: Option<Utf8PathBuf>,
+    #[arg(long, hide = true, requires = "release_plz_archives")]
+    pub release_plz_check_registry: bool,
     #[arg(
         long,
         help = "Trusted package namespace for an independent <package>/v<version> tag"
@@ -793,6 +797,12 @@ pub struct InitCiCommand {
         help = "Generate one coordinated publish-workspace.yaml in release-plan order instead of per-member workflows (GitHub only, requires --workspace --publish-crates)"
     )]
     pub coordinated_publish: Option<bool>,
+    #[arg(
+        long,
+        value_enum,
+        help = "Rust publication strategy; release-plz is the default for newly enabled GitHub Actions publishing"
+    )]
+    pub publish_strategy: Option<crate::config::PublishStrategy>,
     #[arg(
         long = "with-homebrew",
         help = "Add a Homebrew tap publishing step (Nix runtime)"

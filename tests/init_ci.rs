@@ -127,7 +127,13 @@ fn private_github_runner_generation_preserves_the_compatible_checkout_baseline()
     .unwrap();
     let result = simit()
         .current_dir(temp.path())
-        .args(["init", "ci", "--publish-crates"])
+        .args([
+            "init",
+            "ci",
+            "--publish-crates",
+            "--publish-strategy",
+            "members",
+        ])
         .output()
         .unwrap();
     assert!(result.status.success(), "{result:?}");
@@ -3236,6 +3242,8 @@ fn generates_github_plain_cargo_workflows() {
             "github",
             "--with-nextest",
             "--publish-crates",
+            "--publish-strategy",
+            "members",
         ])
         .status()
         .unwrap();
@@ -3696,6 +3704,8 @@ homepage = "https://example.com/demo"
             "--with-scoop",
             "--windows-runner",
             "windows-latest",
+            "--publish-strategy",
+            "members",
         ])
         .status()
         .unwrap();

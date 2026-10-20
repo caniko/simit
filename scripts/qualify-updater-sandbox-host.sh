@@ -14,7 +14,7 @@ for setting in kernel.apparmor_restrict_unprivileged_userns user.max_user_namesp
   sysctl "$setting" || true
 done
 probe() {
-  env -i "$bwrap" --unshare-all --unshare-user --die-with-parent --new-session \
+  env -i PATH="$PATH" bwrap --unshare-all --unshare-user --die-with-parent --new-session \
     --as-pid-1 --cap-drop ALL --disable-userns \
     --ro-bind /nix/store /nix/store --proc /proc --dev /dev --tmpfs /tmp \
     -- "$true_program"

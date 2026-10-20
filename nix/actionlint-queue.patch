@@ -1,0 +1,41 @@
+diff --git a/parse.go b/parse.go
+--- a/parse.go
++++ b/parse.go
+@@ -810 +810,2 @@ func (p *parser) parseConcurrency(pos *Pos, n *yaml.Node) *Concurrency {
+-	ret := &Concurrency{Pos: pos}
++	ret := &Concurrency{Pos: pos}
++	var queue *String
+@@ -820,12 +821,21 @@ func (p *parser) parseConcurrency(pos *Pos, n *yaml.Node) *Concurrency {
+-			ret.Group = p.parseString(e.val, false)
+-		case "cancel-in-progress":
+-			ret.CancelInProgress = p.parseBool(e.val)
+-		default:
+-			p.unexpectedKey(e.key, "concurrency", []string{"group", "cancel-in-progress"})
+-		}
+-	}
+-	if ret.Group == nil {
+-		p.errorAt(pos, "group name is missing in \"concurrency\" section")
+-	}
+-	return ret
+-}
++			ret.Group = p.parseString(e.val, false)
++		case "cancel-in-progress":
++			ret.CancelInProgress = p.parseBool(e.val)
++		case "queue":
++			queue = p.parseString(e.val, false)
++			if queue != nil && queue.Value != "single" && queue.Value != "max" {
++				p.errorAt(queue.Pos, "concurrency queue must be single or max")
++			}
++		default:
++			p.unexpectedKey(e.key, "concurrency", []string{"group", "cancel-in-progress", "queue"})
++		}
++	}
++	if ret.Group == nil {
++		p.errorAt(pos, "group name is missing in \"concurrency\" section")
++	}
++	if queue != nil && queue.Value == "max" && ret.CancelInProgress != nil &&
++		ret.CancelInProgress.Expression == nil && ret.CancelInProgress.Value {
++		p.errorAt(queue.Pos, "concurrency queue max cannot use cancel-in-progress true")
++	}
++	return ret
++}

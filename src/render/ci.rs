@@ -18,7 +18,7 @@ pub mod custody;
 mod independent_lanes;
 mod nix_dependencies;
 mod nix_groups;
-mod trusted_publisher;
+pub(super) mod trusted_publisher;
 
 pub const OMNIX_REF_DEFAULT: &str = "github:juspay/omnix/v1.3.2";
 pub const GENERATED_WORKFLOW_MARKER: &str =
@@ -4236,7 +4236,7 @@ fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
-fn shell_word(value: &str) -> String {
+pub(super) fn shell_word(value: &str) -> String {
     if !value.is_empty()
         && value.bytes().all(|byte| {
             byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b'/' | b'#')
@@ -4403,7 +4403,7 @@ fn push_container(workflow: &mut String, platform: Platform, runtime: Runtime, p
     }
 }
 
-fn push_job_env(
+pub(crate) fn push_job_env(
     workflow: &mut String,
     _platform: Platform,
     runtime: Runtime,
@@ -5261,6 +5261,89 @@ fn command_prefix(runtime: Runtime) -> &'static str {
     match runtime {
         Runtime::Cargo => "",
         Runtime::Nix => "nix develop -c ",
+    }
+}
+
+pub(crate) fn release_plz_setup(workflow: &mut String, runtime: Runtime, options: &CiOptions) {
+    if runtime == Runtime::Nix {
+        push_install_nix_step_with_cache(
+            workflow,
+            Platform::Github,
+            &options.nix_substituters,
+            &options.nix_trusted_public_keys,
+        );
+    } else {
+        push_rust_setup_step(workflow, Platform::Github);
+    }
+}
+
+pub(crate) fn release_plz_update_setup(workflow: &mut String, options: &CiOptions) {
+    push_required_env_step(workflow, &options.required_env);
+    push_extra_setup_steps(workflow, &options.extra_setup);
+}
+
+pub(crate) fn release_plz_checks(
+    workflow: &mut String,
+    runtime: Runtime,
+    packages: &[Package],
+    options: &CiOptions,
+) {
+    push_required_env_step(workflow, &options.required_env);
+    push_extra_setup_steps(workflow, &options.extra_setup);
+    if runtime == Runtime::Nix {
+        workflow.push_str(&format!("      - name: Format check\n        run: |\n          # Expand formatter variables inside the Nix shell.\n          # shellcheck disable=SC2016\n          nix develop -c {NIX_FORMAT_COMMAND}\n\n"));
+        push_nix_check_steps(workflow, options);
+        if !options.nix_builds.is_empty() {
+            workflow.push_str(
+                "      - name: Qualify declared Nix installables\n        run: nix build --no-link",
+            );
+            for installable in &options.nix_builds {
+                workflow.push(' ');
+                workflow.push_str(&shell_word(installable));
+            }
+            workflow.push_str("\n\n");
+        }
+    } else {
+        workflow
+            .push_str("      - name: Format check\n        run: cargo fmt --all -- --check\n\n");
+    }
+    if runtime == Runtime::Nix && options.om_ci != OmCiMode::Off {
+        push_om_ci_step(workflow, options);
+    }
+    if let Some(command) = &options.check_command {
+        workflow.push_str(&project_check_step_yaml(runtime, command));
+    } else if options.om_ci != OmCiMode::Replace {
+        for (index, package) in packages.iter().enumerate() {
+            let options = CiOptions {
+                package_scoped: true,
+                workspace_strategy: WorkspaceStrategy::Members,
+                repository_checks: index == 0,
+                ..options.clone()
+            };
+            push_test_steps(workflow, runtime, package, &options);
+            push_clippy_steps(workflow, runtime, package, &options);
+            push_optional_ci_steps(workflow, runtime, package, &options);
+        }
+    }
+    push_quality_ci_steps(workflow, runtime, options);
+    for gate in &options.required_gates {
+        workflow.push_str(&format!(
+            "      - name: Required gate {}\n        timeout-minutes: {}\n",
+            gate.id, gate.timeout_minutes
+        ));
+        if !gate.env.is_empty() {
+            workflow.push_str("        env:\n");
+            for (key, value) in &gate.env {
+                workflow.push_str(&format!(
+                    "          {key}: \"{}\"\n",
+                    yaml_double_quote(value)
+                ));
+            }
+        }
+        workflow.push_str(&format!(
+            "        run: |\n          {}\n\n",
+            gate.run.replace('\n', "\n          ")
+        ));
     }
 }
 

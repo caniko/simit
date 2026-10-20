@@ -18,6 +18,21 @@ pub fn run(command: InitReleaseCommand) -> Result<()> {
     let workspace_root = metadata.workspace_root.as_std_path();
     let package = cargo::representative_package(&metadata, command.package.as_deref())?;
     let cfg = ProjectConfig::load(workspace_root)?;
+    if cfg.ci.publish_strategy == crate::config::PublishStrategy::ReleasePlz
+        && metadata
+            .packages
+            .iter()
+            .filter(|package| {
+                metadata.workspace_members.contains(&package.id)
+                    && package.is_publishable_to_crates_io()
+            })
+            .count()
+            > 1
+    {
+        bail!(
+            "release-plz multi-package publication cannot be combined with repository-wide binary release workflows"
+        );
+    }
 
     let backend =
         crate::ci_resolution::release_backend(&cfg, command.platform, command.ci_provider)?;
