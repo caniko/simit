@@ -2711,6 +2711,7 @@ fn nix_only_crate_publication_rejects_unsupported_shapes_without_writing() {
         ("publish_strategy = \"coordinated\"\n", vec![]),
         ("", vec!["--maintainers-gpg", "keys/custom.gpg"]),
         ("", vec!["--platform", "gitlab"]),
+        ("om_ci = true\n", vec![]),
     ] {
         let temp = project("[ci.nix_build]\nonly = true");
         let config = temp.path().join("simit.toml");
@@ -2792,4 +2793,60 @@ fn nix_only_crate_publication_preserves_the_feature_policy() {
     .unwrap();
     assert!(source.contains("cargo test"), "{source}");
     assert!(!source.contains("--all-features"), "{source}");
+}
+
+#[test]
+fn nix_only_crate_publication_preserves_the_unit_test_scope() {
+    let temp = nix_only_publish_workspace("unit_tests_only = true\n", "");
+    let output = generate(&temp, &[]);
+    assert!(output.status.success(), "{output:?}");
+    let source = fs::read_to_string(
+        temp.path()
+            .join(".github/workflows/publish-crate-native-core.yaml"),
+    )
+    .unwrap();
+    assert!(source.contains(" --lib"), "{source}");
+}
+
+#[test]
+fn nix_only_publication_audit_rejects_what_generation_rejects() {
+    // Start from valid generated Nix-only CI without publication, then enable a
+    // publication shape that generation rejects; the audit must agree.
+    let gitlab = TempDir::new().unwrap();
+    fs::write(
+        gitlab.path().join("flake.nix"),
+        "{ outputs = { self }: {}; }\n",
+    )
+    .unwrap();
+    fs::write(
+        gitlab.path().join("simit.toml"),
+        "[ci]\nplatform = \"gitlab\"\nprovider = \"actions\"\nruntime = \"nix\"\nrunner = \"shared\"\n",
+    )
+    .unwrap();
+    let trust_root = nix_only_publish_workspace("", "");
+    let config = trust_root.path().join("simit.toml");
+    let content = fs::read_to_string(&config)
+        .unwrap()
+        .replace("publish_crates = true\n", "");
+    fs::write(&config, content).unwrap();
+    for (temp, release) in [
+        (&gitlab, ""),
+        (
+            &trust_root,
+            "\n[release.signing]\ntrust_root = \"keys/custom.gpg\"\n",
+        ),
+    ] {
+        let output = generate(temp, &[]);
+        assert!(output.status.success(), "{output:?}");
+        assert!(simit::registry::audit_ci(temp.path()).is_ok());
+        let config = temp.path().join("simit.toml");
+        let invalid = fs::read_to_string(&config).unwrap().replacen(
+            "[ci]\n",
+            "[ci]\npublish_crates = true\n",
+            1,
+        ) + release;
+        fs::write(&config, invalid).unwrap();
+        assert!(simit::registry::audit_ci(temp.path()).is_err(), "{release}");
+        assert!(!generate(temp, &["--check"]).status.success(), "{release}");
+    }
 }

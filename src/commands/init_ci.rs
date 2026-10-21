@@ -823,6 +823,38 @@ fn run_nix_only(command: InitCiCommand) -> Result<()> {
     run_nix_only_at(command, &workspace_root)
 }
 
+/// Publication shapes the Nix-only publishers cannot honour. Generation and
+/// the drift audit both call this before any platform-specific early return.
+pub(crate) fn validate_nix_only_publication(
+    cfg: &ProjectConfig,
+    platform: Platform,
+    trust_root_override: Option<&str>,
+) -> Result<()> {
+    if !cfg.ci.publish_crates {
+        return Ok(());
+    }
+    if platform == Platform::Gitlab {
+        bail!("Nix-only crate publication requires GitHub or Forgejo Actions");
+    }
+    if cfg.ci.publish_strategy != crate::config::PublishStrategy::Members {
+        bail!(
+            "Nix-only crate publication supports only publish_strategy = \"members\"; got {:?}",
+            cfg.ci.publish_strategy
+        );
+    }
+    if cfg.ci.om_ci || cfg.ci.om_ci_augment {
+        bail!("Nix-only crate publication does not support om_ci; use language CI for Omnix");
+    }
+    // Signed-tag workflows import the fixed keys/maintainers.gpg path.
+    let trust_root = trust_root_override.unwrap_or(&cfg.release.signing.trust_root);
+    if Path::new(trust_root) != Path::new("keys/maintainers.gpg") {
+        bail!(
+            "Nix-only crate publication requires the default keys/maintainers.gpg trust root; got {trust_root}"
+        );
+    }
+    Ok(())
+}
+
 /// crates.io publish workflows for a Nix-only Cargo workspace.
 ///
 /// Each publishable member gets the same tag-triggered source workflow and
@@ -837,15 +869,7 @@ pub(crate) fn nix_only_publish_files(
     if !cfg.ci.publish_crates {
         return Ok(Vec::new());
     }
-    if platform == Platform::Gitlab {
-        bail!("Nix-only crate publication requires GitHub or Forgejo Actions");
-    }
-    if cfg.ci.publish_strategy != crate::config::PublishStrategy::Members {
-        bail!(
-            "Nix-only crate publication supports only publish_strategy = \"members\"; got {:?}",
-            cfg.ci.publish_strategy
-        );
-    }
+    validate_nix_only_publication(cfg, platform, None)?;
     if !workspace_root.join("Cargo.toml").is_file() {
         bail!("[ci].publish_crates requires a Cargo workspace at the project root");
     }
@@ -858,6 +882,7 @@ pub(crate) fn nix_only_publish_files(
         ci_nix_trusted_public_keys: cfg.ci_cache_artifacts().trusted_public_keys,
         nix_flake_check: !cfg.ci.nix_build.only,
         all_features: cfg.ci.all_features.unwrap_or(true),
+        unit_tests_only: cfg.ci.unit_tests_only,
         publish_crates: true,
         extra_setup: cfg.ci.extra_setup.clone(),
         extra_env: cfg
@@ -1051,17 +1076,11 @@ fn run_nix_only_at(command: InitCiCommand, workspace_root: &Path) -> Result<()> 
         )?);
     }
     if !command.primary_only && cfg.ci.publish_crates {
-        // Signed-tag workflows import the fixed keys/maintainers.gpg path.
-        let trust_root = command
-            .maintainers_gpg
-            .as_ref()
-            .map(|path| path.as_str().to_owned())
-            .unwrap_or_else(|| cfg.release.signing.trust_root.clone());
-        if Path::new(&trust_root) != Path::new("keys/maintainers.gpg") {
-            bail!(
-                "Nix-only crate publication requires the default keys/maintainers.gpg trust root; got {trust_root}"
-            );
-        }
+        validate_nix_only_publication(
+            &cfg,
+            platform,
+            command.maintainers_gpg.as_ref().map(|path| path.as_str()),
+        )?;
         files.extend(nix_only_publish_files(
             workspace_root,
             &cfg,

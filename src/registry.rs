@@ -1082,6 +1082,9 @@ fn infer_expected_primary_ci_files(
     }
     let platform = backend.platform();
     if platform == Platform::Gitlab && workspace_root.join("flake.nix").is_file() {
+        if config.ci.nix_build.only || !workspace_root.join("Cargo.toml").is_file() {
+            crate::commands::init_ci::validate_nix_only_publication(&config, platform, None)?;
+        }
         return Ok(vec![project::GeneratedFile {
             relative_path: PathBuf::from(".gitlab-ci.yml"),
             content: crate::render::ci::gitlab_nix_flake_workflow(),
@@ -1160,6 +1163,7 @@ fn infer_expected_primary_ci_files(
         && workspace_root.join("flake.nix").is_file()
     {
         config.ci.validate_nix_only_language_options()?;
+        crate::commands::init_ci::validate_nix_only_publication(&config, platform, None)?;
         if platform == Platform::Gitlab {
             return Ok(vec![project::GeneratedFile {
                 relative_path: PathBuf::from(".gitlab-ci.yml"),
