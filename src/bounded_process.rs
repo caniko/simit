@@ -453,7 +453,12 @@ mod tests {
         let marker = root.path().join("started");
         let late = root.path().join("late-effect");
         let (mut peer, input) = UnixStream::pair().unwrap();
-        peer.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        // macOS sets close-on-exec after socketpair(2) returns, so a child that
+        // a concurrent test spawns in that window can briefly inherit `input`.
+        // Such holders exit with their own tests; only a permanent holder in
+        // the cancelled group fails this bound.
+        peer.set_read_timeout(Some(Duration::from_secs(60)))
+            .unwrap();
         std::thread::scope(|scope| {
             let run = scope.spawn(|| run_bounded(
                 Command::new("sh").args(["-c", "exec 3<&0; printf '\\377\\000diagnostic' >&2; touch \"$MARKER\"; (cat <&3; touch \"$LATE\") & (while :; do printf 'abcdefgh'; sleep 0.01; done) & while :; do printf 'errors' >&2; sleep 0.01; done"])
