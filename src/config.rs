@@ -1085,14 +1085,16 @@ impl ProjectConfig {
         artifacts
     }
 
-    /// Whether `[ci].nix_builds` get their own matrix workflow. Without `[prebuild]` they always
-    /// do; with it, the prebuild absorbs them unless it declares its own `[prebuild].nix_builds`
-    /// or `[ci.nix_build]` configures a qualification matrix.
-    pub fn ci_owns_nix_build_matrix(&self) -> bool {
-        self.prebuild
-            .as_ref()
-            .is_none_or(|prebuild| !prebuild.nix_builds.is_empty())
-            || self.ci.nix_build != NixBuildConfig::default()
+    /// Whether `[ci].nix_builds` get their own matrix workflow on the primary `platform`. Without
+    /// `[prebuild]` they always do; with it, the prebuild absorbs them unless the primary CI is
+    /// GitHub (the only platform both share) and `[prebuild].nix_builds` or `[ci.nix_build]`
+    /// configures a separate qualification matrix.
+    pub fn ci_owns_nix_build_matrix(&self, platform: Platform) -> bool {
+        let Some(prebuild) = &self.prebuild else {
+            return true;
+        };
+        platform == Platform::Github
+            && (!prebuild.nix_builds.is_empty() || self.ci.nix_build != NixBuildConfig::default())
     }
 }
 
