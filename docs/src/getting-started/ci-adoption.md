@@ -838,7 +838,9 @@ Generate and check with `simit init ci --platform github --runtime nix`, then
 emits `nix-builds.yaml` without a broad flake-check workflow. Switching to it
 removes obsolete Simit-managed primary CI while preserving project-owned
 workflows. It cannot be combined with `components`, `nix_system_runners`, or
-`prebuild` or language-specific release flags. Rust workspaces resolve this
+`prebuild` or language-specific release flags. Without `only`, an explicit
+`[ci.nix_build]` matrix may coexist with `[prebuild]`; `[prebuild].nix_builds`
+then selects the published subset (default: every `[ci].nix_builds` entry). Rust workspaces resolve this
 policy from the workspace root, including invocations from member directories.
 Select all required Rust checks explicitly as Nix installables in this mode.
 Rust and Python projects can also use the other matrix options alongside their

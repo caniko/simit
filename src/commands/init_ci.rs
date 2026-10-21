@@ -457,7 +457,10 @@ pub fn run(command: InitCiCommand) -> Result<()> {
             }
         }
     }
-    if provider == CiProvider::Actions && cfg.prebuild.is_none() && !options.nix_builds.is_empty() {
+    if provider == CiProvider::Actions
+        && cfg.ci_owns_nix_build_matrix()
+        && !options.nix_builds.is_empty()
+    {
         files.push(ci::nix_build_matrix_file_with_options(
             platform,
             &runners.ci,
@@ -929,7 +932,10 @@ fn run_nix_only_at(command: InitCiCommand, workspace_root: &Path) -> Result<()> 
     } else {
         vec![generated]
     };
-    if provider == CiProvider::Actions && cfg.prebuild.is_none() && !cfg.ci.nix_builds.is_empty() {
+    if provider == CiProvider::Actions
+        && cfg.ci_owns_nix_build_matrix()
+        && !cfg.ci.nix_builds.is_empty()
+    {
         files.push(ci::nix_build_matrix_file_with_options(
             platform,
             &ResolvedRunner::literal(&runner)?,
@@ -995,7 +1001,7 @@ fn github_prebuild_file(cfg: &ProjectConfig) -> Result<Option<project::Generated
     };
     Ok(Some(ci::github_prebuild_file_with_policy(
         prebuild.effective_system_runners(&cfg.ci),
-        &cfg.ci.nix_builds,
+        prebuild.effective_nix_builds(&cfg.ci),
         prebuild,
         &cfg.release.artifacts,
         cfg.release.attic.as_ref(),
@@ -1102,7 +1108,10 @@ fn run_python(command: InitCiCommand) -> Result<()> {
         &cfg.flake.expected_outputs.checks,
         &cfg.ci.components,
     )?];
-    if provider == CiProvider::Actions && cfg.prebuild.is_none() && !options.nix_builds.is_empty() {
+    if provider == CiProvider::Actions
+        && cfg.ci_owns_nix_build_matrix()
+        && !options.nix_builds.is_empty()
+    {
         files.push(ci::nix_build_matrix_file_with_options(
             platform,
             &runners.ci,

@@ -2611,3 +2611,38 @@ fn exact_matrix_rejects_missing_installables_other_backends_and_prebuild() {
         );
     }
 }
+
+#[test]
+fn explicit_matrix_qualifies_alongside_prebuild_publication() {
+    let prebuild = "\n[prebuild]\nnix_builds = [\".#checks.x86_64-linux.client\"]\nsystem_runners = { x86_64-linux = \"ubuntu-24.04\" }\n";
+    let temp = project(&format!(
+        "[ci.nix_build]\ncapture_results = true\ncheck_systems = [\"x86_64-linux\"]\n[ci.nix_build.groups]\nall = [\".#checks.x86_64-linux.client\", \".#checks.x86_64-linux.recovery\"]{prebuild}"
+    ));
+    let result = generate(&temp, &[]);
+    assert!(result.status.success(), "{result:?}");
+    let matrix = workflow(&temp);
+    assert_eq!(
+        matrix["jobs"]["build"]["strategy"]["matrix"]["include"][0]["group"],
+        "all"
+    );
+    let published =
+        fs::read_to_string(temp.path().join(".github/workflows/prebuild.yaml")).unwrap();
+    assert!(published.contains("'.#checks.x86_64-linux.client'"));
+    assert!(!published.contains("recovery"), "{published}");
+    assert!(generate(&temp, &["--check", "--diff"]).status.success());
+
+    // Without an explicit matrix the prebuild still absorbs [ci].nix_builds.
+    let temp = project("\n[prebuild]\nsystem_runners = { x86_64-linux = \"ubuntu-24.04\" }\n");
+    let result = generate(&temp, &[]);
+    assert!(result.status.success(), "{result:?}");
+    assert!(
+        !temp
+            .path()
+            .join(".github/workflows/nix-builds.yaml")
+            .exists()
+    );
+    let published =
+        fs::read_to_string(temp.path().join(".github/workflows/prebuild.yaml")).unwrap();
+    assert!(published.contains("'.#checks.x86_64-linux.client'"));
+    assert!(published.contains("'.#checks.x86_64-linux.recovery'"));
+}

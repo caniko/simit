@@ -1082,6 +1082,13 @@ impl ProjectConfig {
         }
         artifacts
     }
+
+    /// Whether `[ci].nix_builds` get their own matrix workflow. Without `[prebuild]` they always
+    /// do; with it, the prebuild absorbs them unless `[ci.nix_build]` explicitly configures a
+    /// qualification matrix.
+    pub fn ci_owns_nix_build_matrix(&self) -> bool {
+        self.prebuild.is_none() || self.ci.nix_build != NixBuildConfig::default()
+    }
 }
 
 /// `[prebuild]` - native GitHub Nix builds shared by CI and releases.
@@ -1099,9 +1106,22 @@ pub struct PrebuildConfig {
     /// prebuild additive when the project's primary CI is Forgejo or Crow.
     #[serde(default)]
     pub system_runners: BTreeMap<String, String>,
+    /// Installables the prebuild realizes and publishes. Empty falls back to
+    /// `[ci].nix_builds`, so a `[ci.nix_build]` matrix can qualify more outputs (checks) than
+    /// the prebuild publishes.
+    #[serde(default)]
+    pub nix_builds: Vec<String>,
 }
 
 impl PrebuildConfig {
+    pub(crate) fn effective_nix_builds<'a>(&'a self, ci: &'a CiConfig) -> &'a [String] {
+        if self.nix_builds.is_empty() {
+            &ci.nix_builds
+        } else {
+            &self.nix_builds
+        }
+    }
+
     pub(crate) fn effective_system_runners<'a>(
         &'a self,
         ci: &'a CiConfig,
@@ -2580,12 +2600,25 @@ impl ProjectConfig {
                 "simit project config: [prebuild].system_runners",
                 &prebuild.system_runners,
             )?;
-            if self.ci.nix_builds.is_empty()
+            validate_nonempty_strings(
+                "simit project config: [prebuild].nix_builds",
+                &prebuild.nix_builds,
+            )?;
+            if prebuild
+                .nix_builds
+                .iter()
+                .any(|installable| installable.contains('\n') || installable.contains('\r'))
+            {
+                bail!(
+                    "simit project config: [prebuild].nix_builds must contain single-line installables"
+                );
+            }
+            if prebuild.effective_nix_builds(&self.ci).is_empty()
                 && !prebuild.release_archives
                 && prebuild.attic_app.is_none()
             {
                 bail!(
-                    "simit project config: [prebuild] requires [ci].nix_builds, release_archives = true, or attic_app"
+                    "simit project config: [prebuild] requires [prebuild].nix_builds, [ci].nix_builds, release_archives = true, or attic_app"
                 );
             }
             if prebuild.release_archives
@@ -4210,8 +4243,8 @@ fn validate_nix_build_config(config: &ProjectConfig) -> Result<()> {
     if ci.nix_builds.is_empty() {
         bail!("simit project config: [ci.nix_build] requires [ci].nix_builds");
     }
-    if config.prebuild.is_some() {
-        bail!("simit project config: [ci.nix_build] cannot be combined with [prebuild]");
+    if options.only && config.prebuild.is_some() {
+        bail!("simit project config: [ci.nix_build].only cannot be combined with [prebuild]");
     }
     if ci
         .platform
