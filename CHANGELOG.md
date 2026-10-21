@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- GitLab primaries: `init ci --check` now reports stale generated workflows
+  (such as a former GitHub `nix-builds.yaml`) exactly as a write removes them,
+  and `audit_ci` expects the GitHub prebuild generated beside `.gitlab-ci.yml`.
 - Allow a `[ci].nix_builds` qualification matrix alongside `[prebuild]` when
   `[prebuild].nix_builds` selects the published subset or `[ci.nix_build]` is
   configured on GitHub primary CI; `--prebuild-only` keeps that matrix,

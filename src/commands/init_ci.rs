@@ -1168,14 +1168,10 @@ fn run_nix_only_at(command: InitCiCommand, workspace_root: &Path) -> Result<()> 
             "Nix-only CI is not up to date; run `{remediation}` (edit [ci.nix_system_runners] for native labels)"
         )
     };
-    if command.check {
-        if platform == Platform::Gitlab && !command.primary_only {
-            project::check_generated_files(workspace_root, &files, &message, command.diff)?;
-        } else {
-            reconcile_ci_files(workspace_root, files, &message, &command)?;
-        }
-    } else {
-        reconcile_ci_files(workspace_root, files, &message, &command)?;
+    // --check reconciles exactly like a write, so it also reports the stale generated
+    // workflows a write would remove (e.g. a GitHub matrix after moving to GitLab).
+    reconcile_ci_files(workspace_root, files, &message, &command)?;
+    if !command.check {
         if command.primary_only {
             return Ok(());
         }
