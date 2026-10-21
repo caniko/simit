@@ -1082,6 +1082,8 @@ fn infer_expected_primary_ci_files(
     }
     let platform = backend.platform();
     if platform == Platform::Gitlab && workspace_root.join("flake.nix").is_file() {
+        // GitLab flake projects always render the Nix-only flake workflow.
+        crate::commands::init_ci::validate_nix_only_publication(&config, platform, None)?;
         return Ok(vec![project::GeneratedFile {
             relative_path: PathBuf::from(".gitlab-ci.yml"),
             content: crate::render::ci::gitlab_nix_flake_workflow(),
@@ -1160,6 +1162,7 @@ fn infer_expected_primary_ci_files(
         && workspace_root.join("flake.nix").is_file()
     {
         config.ci.validate_nix_only_language_options()?;
+        crate::commands::init_ci::validate_nix_only_publication(&config, platform, None)?;
         if platform == Platform::Gitlab {
             return Ok(vec![project::GeneratedFile {
                 relative_path: PathBuf::from(".gitlab-ci.yml"),
@@ -1215,6 +1218,12 @@ fn infer_expected_primary_ci_files(
                 &config.ci.nix_build,
             )?);
         }
+        files.extend(crate::commands::init_ci::nix_only_publish_files(
+            workspace_root,
+            &config,
+            platform,
+            &runner,
+        )?);
         if let Some(pages) = config_pages_or_inferred(workspace_root, &config, marked)? {
             files.push(crate::render::ci::codeberg_pages_file(
                 platform, &runner, &pages,

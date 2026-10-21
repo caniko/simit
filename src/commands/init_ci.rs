@@ -823,6 +823,164 @@ fn run_nix_only(command: InitCiCommand) -> Result<()> {
     run_nix_only_at(command, &workspace_root)
 }
 
+/// Publication shapes the Nix-only publishers cannot honour. Generation and
+/// the drift audit both call this before any platform-specific early return.
+pub(crate) fn validate_nix_only_publication(
+    cfg: &ProjectConfig,
+    platform: Platform,
+    trust_root_override: Option<&str>,
+) -> Result<()> {
+    if !cfg.ci.publish_crates {
+        return Ok(());
+    }
+    if platform == Platform::Gitlab {
+        bail!("Nix-only crate publication requires GitHub or Forgejo Actions");
+    }
+    match cfg.ci.publish_strategy {
+        crate::config::PublishStrategy::Members => {}
+        crate::config::PublishStrategy::Coordinated if platform == Platform::Github => {}
+        crate::config::PublishStrategy::Coordinated => {
+            bail!("Nix-only coordinated crate publication requires GitHub Actions")
+        }
+        strategy => bail!(
+            "Nix-only crate publication supports publish_strategy = \"members\" or \"coordinated\"; got {strategy:?}"
+        ),
+    }
+    if cfg.ci.om_ci || cfg.ci.om_ci_augment {
+        bail!("Nix-only crate publication does not support om_ci; use language CI for Omnix");
+    }
+    // Signed-tag workflows import the fixed keys/maintainers.gpg path.
+    let trust_root = trust_root_override.unwrap_or(&cfg.release.signing.trust_root);
+    if Path::new(trust_root) != Path::new("keys/maintainers.gpg") {
+        bail!(
+            "Nix-only crate publication requires the default keys/maintainers.gpg trust root; got {trust_root}"
+        );
+    }
+    Ok(())
+}
+
+/// crates.io publish workflows for a Nix-only Cargo workspace.
+///
+/// Each publishable member gets the same tag-triggered source workflow and
+/// paired trusted publisher as aggregate language CI. The tag workflow runs a
+/// flake check only when the primary Nix-only CI does.
+pub(crate) fn nix_only_publish_files(
+    workspace_root: &Path,
+    cfg: &ProjectConfig,
+    platform: Platform,
+    runner: &ResolvedRunner,
+) -> Result<Vec<project::GeneratedFile>> {
+    if !cfg.ci.publish_crates {
+        return Ok(Vec::new());
+    }
+    validate_nix_only_publication(cfg, platform, None)?;
+    if !workspace_root.join("Cargo.toml").is_file() {
+        bail!("[ci].publish_crates requires a Cargo workspace at the project root");
+    }
+    let metadata = cargo::cargo_metadata(&cargo::find_manifest(workspace_root)?)?;
+    let options = ci::CiOptions {
+        tag_prefix: cfg.release.tag_prefix,
+        nix_substituters: cfg.release.artifacts.substituters.clone(),
+        nix_trusted_public_keys: cfg.release.artifacts.trusted_public_keys.clone(),
+        ci_nix_substituters: cfg.ci_cache_artifacts().substituters,
+        ci_nix_trusted_public_keys: cfg.ci_cache_artifacts().trusted_public_keys,
+        nix_flake_check: !cfg.ci.nix_build.only,
+        all_features: cfg.ci.all_features.unwrap_or(true),
+        unit_tests_only: cfg.ci.unit_tests_only,
+        publish_crates: true,
+        extra_setup: cfg.ci.extra_setup.clone(),
+        extra_env: cfg
+            .ci
+            .extra_env
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect(),
+        required_secrets: cfg.ci.required_secrets.clone(),
+        required_env: cfg.ci.required_env.clone(),
+        push_branches: cfg.ci.push_branches.clone(),
+        required_gates: cfg.ci.required_gates.clone(),
+        ..ci::CiOptions::default()
+    };
+    let members = cargo::select_packages(&metadata, &[], true)?;
+    let crates_io = |name: &str| {
+        members
+            .iter()
+            .find(|member| member.name == name)
+            .map(cargo::Package::is_publishable_to_crates_io)
+    };
+    let coordinated = cfg.ci.publish_strategy == crate::config::PublishStrategy::Coordinated;
+    // The coordinated plan publishes every publishable member to crates.io.
+    if let Some(member) = members.iter().find(|member| {
+        coordinated && member.is_publishable() && !member.is_publishable_to_crates_io()
+    }) {
+        bail!(
+            "coordinated Nix-only publication targets crates.io; {} publishes to another registry",
+            member.name
+        );
+    }
+    let mut files = Vec::new();
+    for package in &members {
+        // The generated publisher targets crates.io with CRATES_IO_API_TOKEN,
+        // so every local registry dependency must also reach crates.io.
+        if package.is_publishable_to_crates_io() {
+            for dependency in &package.dependencies {
+                if !(dependency.path.is_some() && dependency.is_publish_ordering()) {
+                    continue;
+                }
+                match crates_io(&dependency.name) {
+                    Some(false) => bail!(
+                        "{} depends on workspace member {} which is not published to crates.io",
+                        package.name,
+                        dependency.name
+                    ),
+                    // Members publishers share one tag and run concurrently.
+                    Some(true) if !coordinated => bail!(
+                        "{} depends on workspace member {}; set publish_strategy = \"coordinated\" for dependency-ordered publication",
+                        package.name,
+                        dependency.name
+                    ),
+                    _ => {}
+                }
+            }
+            if coordinated {
+                continue;
+            }
+            files.extend(ci::publish_files(
+                platform,
+                Runtime::Nix,
+                package,
+                runner,
+                options.clone(),
+            )?);
+        }
+    }
+    if coordinated {
+        let plan = crate::commands::release_plan::build_release_plan(&metadata, &[])?;
+        files.extend(ci::publish_workspace_files(
+            platform,
+            ci::PublishWorkspaceInputs {
+                runtime: Runtime::Nix,
+                runner,
+                options,
+                plan: plan
+                    .entries
+                    .iter()
+                    .map(|entry| (entry.package.name.clone(), entry.depends_on.clone()))
+                    .collect(),
+                versions: plan
+                    .entries
+                    .iter()
+                    .map(|entry| (entry.package.name.clone(), entry.package.version.clone()))
+                    .collect(),
+            },
+        )?);
+    }
+    if files.is_empty() {
+        bail!("[ci].publish_crates requires at least one publishable workspace package");
+    }
+    Ok(files)
+}
+
 fn run_nix_only_at(command: InitCiCommand, workspace_root: &Path) -> Result<()> {
     if !workspace_root.join("flake.nix").is_file() {
         bail!("Nix CI generation requires flake.nix at the workspace root");
@@ -847,6 +1005,7 @@ fn run_nix_only_at(command: InitCiCommand, workspace_root: &Path) -> Result<()> 
     if provider != CiProvider::Actions {
         bail!("Nix-only CI currently supports the Actions provider only");
     }
+    let configured_publish_crates = cfg.ci.publish_crates;
     // Resolve CLI overrides before validation and persistence. These options
     // belong to language/release workflows; Nix-only renderers cannot honour
     // them, and accepting them would silently remove the requested gate.
@@ -868,6 +1027,14 @@ fn run_nix_only_at(command: InitCiCommand, workspace_root: &Path) -> Result<()> 
     }
     cfg.ci.nix_flake_check = command.nix_flake_check.or(cfg.ci.nix_flake_check);
     cfg.ci.validate_nix_only_language_options()?;
+    if cfg.ci.publish_crates
+        && !configured_publish_crates
+        && !ProjectConfig::can_persist_ci(workspace_root)?
+    {
+        bail!(
+            "persist [ci].publish_crates = true in the existing project config source before generating Nix-only crate publishers"
+        );
+    }
     if command.with_homebrew
         || command.with_chocolatey
         || command.with_scoop
@@ -951,6 +1118,28 @@ fn run_nix_only_at(command: InitCiCommand, workspace_root: &Path) -> Result<()> 
             &cfg.ci_cache_artifacts().substituters,
             &cfg.ci_cache_artifacts().trusted_public_keys,
             &cfg.ci.nix_build,
+        )?);
+    }
+    if !command.primary_only && cfg.ci.publish_crates {
+        validate_nix_only_publication(
+            &cfg,
+            platform,
+            command.maintainers_gpg.as_ref().map(|path| path.as_str()),
+        )?;
+        files.extend(nix_only_publish_files(
+            workspace_root,
+            &cfg,
+            platform,
+            &ResolvedRunner::literal(&runner)?,
+        )?);
+        files.push(release_trust::generated_file(
+            workspace_root,
+            &cfg,
+            &TrustOverrides {
+                key: command.maintainer_key.clone(),
+                trust_root: command.maintainers_gpg.clone(),
+            },
+            command.check,
         )?);
     }
     if let Some(prebuild) = github_prebuild_file(&cfg)? {

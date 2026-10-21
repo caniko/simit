@@ -737,7 +737,6 @@ impl CiConfig {
             ("with_docs", self.with_docs),
             ("with_artifacts", self.with_artifacts),
             ("with_pypi_publish", self.with_pypi_publish),
-            ("publish_crates", self.publish_crates),
         ] {
             if enabled {
                 bail!(
@@ -750,6 +749,9 @@ impl CiConfig {
             bail!(
                 "[ci].check_command and nix_flake_check=false require Rust language CI; use [ci].components for Nix-only checks"
             );
+        }
+        if !self.required_gates.is_empty() {
+            bail!("[[ci.required_gates]] requires Rust language CI; use Nix installables instead");
         }
         Ok(())
     }

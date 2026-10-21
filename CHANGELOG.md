@@ -11,6 +11,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `[prebuild].nix_builds` selects the published subset or `[ci.nix_build]` is
   configured; `--prebuild-only` keeps that matrix, `only = true` still excludes
   `[prebuild]`, and prebuild-only projects render unchanged.
+- Allow `publish_crates` with Nix-only CI. Nix-only Cargo workspaces receive the
+  per-member signed-tag publish workflows, paired trusted publishers and release
+  trust root without language CI workflows, and their tag workflows omit
+  `nix flake check` when the primary CI does. Dependent members require the
+  dependency-ordered coordinated strategy.
 - Retain optional required-gate diagnostic artifacts in GitHub CI, signed-tag
   source builds and release verification, including failed gates but not skipped
   ones. Preserve runner compatibility, reject action-trimmed input whitespace,
