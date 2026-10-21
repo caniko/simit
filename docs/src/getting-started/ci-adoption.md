@@ -297,6 +297,8 @@ Projects requiring independent push/PR originals retain their existing
 `separate_events` policies until their custody enrollment and required contexts
 have migrated together. Combining branch filters with explicit `separate_events`
 is rejected before generation. Release/tag triggers retain their separate policy.
+`[prebuild].push_branches` filters the native prebuild's branch pushes the same
+way; pull requests still run it and releases still reuse it via `workflow_call`.
 Distinct MSRV, feature, platform, extracted-package, all-system evaluation and
 fresh-execution checks are separate acceptance cases, not duplicate work.
 

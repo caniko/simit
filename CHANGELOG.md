@@ -42,6 +42,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Add `[prebuild].push_branches` to limit the native prebuild's branch pushes;
+  pull requests and release `workflow_call` are unchanged, and Simit's own
+  macOS prebuild now runs on pull requests and `trunk` pushes only.
+
 - Reuse declared heavy Nix inputs of grouped GitHub matrices across runs through
   `[ci.nix_build].cache_installables`, keyed by exact derivation and refusing any
   cached closure that would satisfy a qualification output.
