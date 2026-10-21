@@ -4832,8 +4832,10 @@ fn push_nix_publish_legacy_steps(
     package: &Package,
     options: &CiOptions,
 ) {
-    workflow.push_str("      - name: Check flake\n");
-    workflow.push_str("        run: nix flake check\n\n");
+    if options.nix_flake_check {
+        workflow.push_str("      - name: Check flake\n");
+        workflow.push_str("        run: nix flake check\n\n");
+    }
     push_test_steps(workflow, Runtime::Nix, package, options);
     push_quality_tool_install_steps(workflow, Runtime::Nix, options);
     push_optional_publish_steps(workflow, Runtime::Nix, package, options);

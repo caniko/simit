@@ -697,8 +697,14 @@ artifact and package-manager publishing flags such as `--with-artifacts`,
 Nix-only generation, including `[ci.nix_build].only = true`, rejects enabled
 language/release options from either the command line or `[ci]`. This includes
 `with_nextest`, `with_msrv`, `with_audit`, `with_deny`, `with_docs`,
-`with_artifacts`, `with_pypi_publish`, and `publish_crates`. Put required checks
-inside the declared Nix installables or use language CI. Explicit `--flag=false`
+`with_artifacts`, and `with_pypi_publish`. Put required checks inside the
+declared Nix installables or use language CI. `publish_crates` is supported: a
+Nix-only Cargo workspace receives the same per-member `publish-crate-*.yaml`
+tag workflows and `trusted-publish-crate-*.yaml` publishers as aggregate
+language CI, without language CI workflows. Under `only = true` the tag
+workflow omits `nix flake check`, matching the primary CI. Members that depend
+on each other require `publish_strategy = "coordinated"`, which emits the
+dependency-ordered `publish-workspace.yaml` on GitHub instead. Explicit `--flag=false`
 overrides disable the matching project option and persist that choice when
 generating. Rejected requests leave configuration and workflow files intact.
 
@@ -838,7 +844,10 @@ Generate and check with `simit init ci --platform github --runtime nix`, then
 emits `nix-builds.yaml` without a broad flake-check workflow. Switching to it
 removes obsolete Simit-managed primary CI while preserving project-owned
 workflows. It cannot be combined with `components`, `nix_system_runners`, or
-`prebuild` or language-specific release flags. Rust workspaces resolve this
+`prebuild` or language-specific release flags other than `publish_crates`. Without `only`, the matrix
+coexists with `[prebuild]` once `[prebuild].nix_builds` selects the published
+subset or `[ci.nix_build]` sets an option; otherwise the prebuild realizes every
+`[ci].nix_builds` entry itself. Rust workspaces resolve this
 policy from the workspace root, including invocations from member directories.
 Select all required Rust checks explicitly as Nix installables in this mode.
 Rust and Python projects can also use the other matrix options alongside their

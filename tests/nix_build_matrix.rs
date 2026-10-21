@@ -1991,14 +1991,12 @@ fn rust_flake_can_select_exact_nix_gates_from_its_workspace_root() {
         simit::registry::audit_ci(temp.path()).unwrap().status,
         simit::registry::FeatureStatus::Managed
     );
-    for extra in [vec!["--runtime", "cargo"], vec!["--publish-crates=true"]] {
-        let output = generate(&temp, &extra);
-        assert!(!output.status.success(), "{output:?}");
-        assert_eq!(
-            original,
-            fs::read(temp.path().join(".github/workflows/nix-builds.yaml")).unwrap()
-        );
-    }
+    let output = generate(&temp, &["--runtime", "cargo"]);
+    assert!(!output.status.success(), "{output:?}");
+    assert_eq!(
+        original,
+        fs::read(temp.path().join(".github/workflows/nix-builds.yaml")).unwrap()
+    );
 }
 
 #[test]
@@ -2121,7 +2119,6 @@ fn nix_only_rejects_effective_language_options_before_changing_workflows() {
         "with_docs",
         "with_artifacts",
         "with_pypi_publish",
-        "publish_crates",
     ] {
         for from_config in [false, true] {
             let temp = project("[ci.nix_build]\nonly = true");
@@ -2208,12 +2205,7 @@ fn nix_only_persists_explicit_false_overrides_for_language_options() {
 
 #[test]
 fn rust_workspace_nix_only_rejects_requested_gates_from_member_directories() {
-    for option in [
-        "with_artifacts",
-        "with_audit",
-        "with_msrv",
-        "publish_crates",
-    ] {
+    for option in ["with_artifacts", "with_audit", "with_msrv"] {
         for from_config in [false, true] {
             let temp = project("[ci.nix_build]\nonly = true");
             fs::write(
@@ -2610,4 +2602,312 @@ fn exact_matrix_rejects_missing_installables_other_backends_and_prebuild() {
             "{output:?}"
         );
     }
+}
+
+#[test]
+fn explicit_matrix_qualifies_alongside_prebuild_publication() {
+    let prebuild = "\n[prebuild]\nnix_builds = [\".#checks.x86_64-linux.client\"]\nsystem_runners = { x86_64-linux = \"ubuntu-24.04\" }\n";
+    let temp = project(&format!(
+        "[ci.nix_build]\ncapture_results = true\ncheck_systems = [\"x86_64-linux\"]\n[ci.nix_build.groups]\nall = [\".#checks.x86_64-linux.client\", \".#checks.x86_64-linux.recovery\"]{prebuild}"
+    ));
+    let result = generate(&temp, &[]);
+    assert!(result.status.success(), "{result:?}");
+    let matrix = workflow(&temp);
+    assert_eq!(
+        matrix["jobs"]["build"]["strategy"]["matrix"]["include"][0]["group"],
+        "all"
+    );
+    let published =
+        fs::read_to_string(temp.path().join(".github/workflows/prebuild.yaml")).unwrap();
+    assert!(published.contains("'.#checks.x86_64-linux.client'"));
+    assert!(!published.contains("recovery"), "{published}");
+    assert!(generate(&temp, &["--check", "--diff"]).status.success());
+
+    // Declaring the published subset alone opts [ci].nix_builds into their own matrix, and
+    // regenerating only the prebuild keeps that matrix.
+    let temp = project(prebuild);
+    assert!(generate(&temp, &[]).status.success());
+    let matrix = temp.path().join(".github/workflows/nix-builds.yaml");
+    assert!(matrix.exists());
+    let result = generate(&temp, &["--prebuild-only"]);
+    assert!(result.status.success(), "{result:?}");
+    assert!(matrix.exists());
+    let result = generate(&temp, &["--prebuild-only", "--check"]);
+    assert!(result.status.success(), "{result:?}");
+
+    // Without an explicit matrix the prebuild still absorbs [ci].nix_builds.
+    let temp = project("\n[prebuild]\nsystem_runners = { x86_64-linux = \"ubuntu-24.04\" }\n");
+    let result = generate(&temp, &[]);
+    assert!(result.status.success(), "{result:?}");
+    assert!(
+        !temp
+            .path()
+            .join(".github/workflows/nix-builds.yaml")
+            .exists()
+    );
+    let published =
+        fs::read_to_string(temp.path().join(".github/workflows/prebuild.yaml")).unwrap();
+    assert!(published.contains("'.#checks.x86_64-linux.client'"));
+    assert!(published.contains("'.#checks.x86_64-linux.recovery'"));
+}
+
+#[test]
+fn nix_only_workspace_publishes_crates_without_language_ci_or_flake_check() {
+    let temp = project("[ci.nix_build]\nonly = true");
+    let config = temp.path().join("simit.toml");
+    let content = fs::read_to_string(&config)
+        .unwrap()
+        .replace("[ci]\n", "[ci]\npublish_crates = true\n");
+    fs::write(&config, content).unwrap();
+    fs::write(
+        temp.path().join("Cargo.toml"),
+        "[workspace]\nmembers = [\"core\", \"tool\", \"private\"]\nresolver = \"3\"\n",
+    )
+    .unwrap();
+    for (name, extra) in [
+        ("native-core", ""),
+        ("native-tool", "publish = false\n"),
+        ("native-private", "publish = [\"internal\"]\n"),
+    ] {
+        let member = temp.path().join(name.trim_start_matches("native-"));
+        fs::create_dir_all(member.join("src")).unwrap();
+        fs::write(
+            member.join("Cargo.toml"),
+            format!(
+                "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2024\"\nlicense = \"MIT\"\n{extra}"
+            ),
+        )
+        .unwrap();
+        fs::write(member.join("src/lib.rs"), "").unwrap();
+    }
+
+    let output = generate(&temp, &[]);
+    assert!(output.status.success(), "{output:?}");
+    let workflows = temp.path().join(".github/workflows");
+    let source = fs::read_to_string(workflows.join("publish-crate-native-core.yaml")).unwrap();
+    let publisher =
+        fs::read_to_string(workflows.join("trusted-publish-crate-native-core.yaml")).unwrap();
+    assert!(publisher.contains("Build Crate native-core"), "{publisher}");
+    assert!(!source.contains("nix flake check"), "{source}");
+    assert!(temp.path().join("keys/maintainers.gpg").is_file());
+    assert!(!workflows.join("publish-crate-native-tool.yaml").exists());
+    assert!(!workflows.join("publish-crate-native-private.yaml").exists());
+    assert!(!workflows.join("ci.yaml").exists());
+    assert!(workflows.join("nix-builds.yaml").is_file());
+
+    let check = generate(&temp, &["--check", "--diff"]);
+    assert!(check.status.success(), "{check:?}");
+    let audit = simit::registry::audit_ci(temp.path()).unwrap();
+    assert_eq!(
+        audit.status,
+        simit::registry::FeatureStatus::Managed,
+        "{audit:?}"
+    );
+}
+
+#[test]
+fn nix_only_crate_publication_rejects_unsupported_shapes_without_writing() {
+    for (config_extra, args) in [
+        ("publish_strategy = \"release-plz\"\n", vec![]),
+        ("", vec!["--maintainers-gpg", "keys/custom.gpg"]),
+        ("", vec!["--platform", "gitlab"]),
+        ("om_ci = true\n", vec![]),
+    ] {
+        let temp = project("[ci.nix_build]\nonly = true");
+        let config = temp.path().join("simit.toml");
+        let content = fs::read_to_string(&config).unwrap().replace(
+            "[ci]\n",
+            &format!("[ci]\npublish_crates = true\n{config_extra}"),
+        );
+        fs::write(&config, content).unwrap();
+        fs::write(
+            temp.path().join("Cargo.toml"),
+            "[package]\nname = \"native-core\"\nversion = \"0.1.0\"\nedition = \"2024\"\nlicense = \"MIT\"\n",
+        )
+        .unwrap();
+        fs::create_dir(temp.path().join("src")).unwrap();
+        fs::write(temp.path().join("src/lib.rs"), "").unwrap();
+        let output = generate(&temp, &args);
+        assert!(
+            !output.status.success(),
+            "{config_extra} {args:?}: {output:?}"
+        );
+        assert!(!temp.path().join(".github/workflows").exists());
+    }
+}
+
+fn nix_only_publish_workspace(ci_extra: &str, core_dependencies: &str) -> TempDir {
+    let temp = project("[ci.nix_build]\nonly = true");
+    let config = temp.path().join("simit.toml");
+    let content = fs::read_to_string(&config).unwrap().replace(
+        "[ci]\n",
+        &format!("[ci]\npublish_crates = true\n{ci_extra}"),
+    );
+    fs::write(&config, content).unwrap();
+    fs::write(
+        temp.path().join("Cargo.toml"),
+        "[workspace]\nmembers = [\"core\", \"private\"]\nresolver = \"3\"\n",
+    )
+    .unwrap();
+    for (dir, manifest) in [
+        (
+            "core",
+            format!(
+                "[package]\nname = \"native-core\"\nversion = \"0.1.0\"\nedition = \"2024\"\nlicense = \"MIT\"\n[dependencies]\n{core_dependencies}"
+            ),
+        ),
+        (
+            "private",
+            "[package]\nname = \"native-private\"\nversion = \"0.1.0\"\nedition = \"2024\"\nlicense = \"MIT\"\npublish = [\"internal\"]\n".to_owned(),
+        ),
+    ] {
+        let member = temp.path().join(dir);
+        fs::create_dir_all(member.join("src")).unwrap();
+        fs::write(member.join("Cargo.toml"), manifest).unwrap();
+        fs::write(member.join("src/lib.rs"), "").unwrap();
+    }
+    temp
+}
+
+#[test]
+fn nix_only_crate_publication_requires_a_crates_io_dependency_closure() {
+    let temp = nix_only_publish_workspace(
+        "",
+        "native-private = { path = \"../private\", version = \"0.1.0\" }\n",
+    );
+    let output = generate(&temp, &[]);
+    assert!(!output.status.success(), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("not published to crates.io"));
+    assert!(!temp.path().join(".github/workflows").exists());
+}
+
+#[test]
+fn nix_only_crate_publication_preserves_the_feature_policy() {
+    let temp = nix_only_publish_workspace("all_features = false\n", "");
+    let output = generate(&temp, &[]);
+    assert!(output.status.success(), "{output:?}");
+    let source = fs::read_to_string(
+        temp.path()
+            .join(".github/workflows/publish-crate-native-core.yaml"),
+    )
+    .unwrap();
+    assert!(source.contains("cargo test"), "{source}");
+    assert!(!source.contains("--all-features"), "{source}");
+}
+
+#[test]
+fn nix_only_crate_publication_preserves_the_unit_test_scope() {
+    let temp = nix_only_publish_workspace("unit_tests_only = true\n", "");
+    let output = generate(&temp, &[]);
+    assert!(output.status.success(), "{output:?}");
+    let source = fs::read_to_string(
+        temp.path()
+            .join(".github/workflows/publish-crate-native-core.yaml"),
+    )
+    .unwrap();
+    assert!(source.contains(" --lib"), "{source}");
+}
+
+#[test]
+fn nix_only_publication_audit_rejects_what_generation_rejects() {
+    // Start from valid generated Nix-only CI without publication, then enable a
+    // publication shape that generation rejects; the audit must agree.
+    let gitlab = TempDir::new().unwrap();
+    fs::write(
+        gitlab.path().join("flake.nix"),
+        "{ outputs = { self }: {}; }\n",
+    )
+    .unwrap();
+    fs::write(
+        gitlab.path().join("simit.toml"),
+        "[ci]\nplatform = \"gitlab\"\nprovider = \"actions\"\nruntime = \"nix\"\nrunner = \"shared\"\n",
+    )
+    .unwrap();
+    let trust_root = nix_only_publish_workspace("", "");
+    let config = trust_root.path().join("simit.toml");
+    let content = fs::read_to_string(&config)
+        .unwrap()
+        .replace("publish_crates = true\n", "");
+    fs::write(&config, content).unwrap();
+    for (temp, release) in [
+        (&gitlab, ""),
+        (
+            &trust_root,
+            "\n[release.signing]\ntrust_root = \"keys/custom.gpg\"\n",
+        ),
+    ] {
+        let output = generate(temp, &[]);
+        assert!(output.status.success(), "{output:?}");
+        assert!(simit::registry::audit_ci(temp.path()).is_ok());
+        let config = temp.path().join("simit.toml");
+        let invalid = fs::read_to_string(&config).unwrap().replacen(
+            "[ci]\n",
+            "[ci]\npublish_crates = true\n",
+            1,
+        ) + release;
+        fs::write(&config, invalid).unwrap();
+        assert!(simit::registry::audit_ci(temp.path()).is_err(), "{release}");
+        assert!(!generate(temp, &["--check"]).status.success(), "{release}");
+    }
+}
+
+fn dependent_publish_workspace(strategy: &str) -> TempDir {
+    let temp = project("[ci.nix_build]\nonly = true");
+    let config = temp.path().join("simit.toml");
+    let content = fs::read_to_string(&config).unwrap().replace(
+        "[ci]\n",
+        &format!("[ci]\npublish_crates = true\npublish_strategy = \"{strategy}\"\n"),
+    );
+    fs::write(&config, content).unwrap();
+    fs::write(
+        temp.path().join("Cargo.toml"),
+        "[workspace]\nmembers = [\"base\", \"top\"]\nresolver = \"3\"\n",
+    )
+    .unwrap();
+    for (dir, name, dependencies) in [
+        ("base", "native-base", ""),
+        (
+            "top",
+            "native-top",
+            "native-base = { path = \"../base\", version = \"0.1.0\" }\n",
+        ),
+    ] {
+        let member = temp.path().join(dir);
+        fs::create_dir_all(member.join("src")).unwrap();
+        fs::write(
+            member.join("Cargo.toml"),
+            format!(
+                "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2024\"\nlicense = \"MIT\"\n[dependencies]\n{dependencies}"
+            ),
+        )
+        .unwrap();
+        fs::write(member.join("src/lib.rs"), "").unwrap();
+    }
+    temp
+}
+
+#[test]
+fn nix_only_members_publication_rejects_dependent_members() {
+    let temp = dependent_publish_workspace("members");
+    let output = generate(&temp, &[]);
+    assert!(!output.status.success(), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("coordinated"));
+    assert!(!temp.path().join(".github/workflows").exists());
+}
+
+#[test]
+fn nix_only_coordinated_publication_orders_dependent_members() {
+    let temp = dependent_publish_workspace("coordinated");
+    let output = generate(&temp, &[]);
+    assert!(output.status.success(), "{output:?}");
+    let workflows = temp.path().join(".github/workflows");
+    assert!(workflows.join("publish-workspace.yaml").is_file());
+    assert!(workflows.join("trusted-publish-workspace.yaml").is_file());
+    assert!(!workflows.join("publish-crate-native-base.yaml").exists());
+    assert!(!workflows.join("ci.yaml").exists());
+    assert!(generate(&temp, &["--check", "--diff"]).status.success());
+    assert_eq!(
+        simit::registry::audit_ci(temp.path()).unwrap().status,
+        simit::registry::FeatureStatus::Managed
+    );
 }
