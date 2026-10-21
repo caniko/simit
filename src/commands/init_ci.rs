@@ -601,12 +601,16 @@ fn run_prebuild_only(command: InitCiCommand) -> Result<()> {
         .context("--prebuild-only requires a [prebuild] configuration")?;
     let files = [file];
     let message = "Prebuild workflow is not up to date; run `simit init ci --prebuild-only`";
+    let mut expected = files
+        .iter()
+        .map(|file| file.relative_path.clone())
+        .collect::<BTreeSet<_>>();
+    if cfg.ci_owns_nix_build_matrix() && !cfg.ci.nix_builds.is_empty() {
+        // The primary scope owns the qualification matrix; this scope must not remove it.
+        expected.insert(PathBuf::from(Platform::Github.workflow_dir()).join("nix-builds.yaml"));
+    }
     if command.check {
         project::check_generated_files(&workspace_root, &files, message, command.diff)?;
-        let expected = files
-            .iter()
-            .map(|file| file.relative_path.clone())
-            .collect::<BTreeSet<_>>();
         let obsolete = obsolete_nix_workflows(&workspace_root, Platform::Github, &expected)?;
         if !obsolete.is_empty() {
             bail!(
@@ -620,7 +624,10 @@ fn run_prebuild_only(command: InitCiCommand) -> Result<()> {
         }
     } else {
         project::write_generated_files(&workspace_root, &files)?;
-        cleanup_obsolete_nix_workflows(&workspace_root, Platform::Github, &files)?;
+        for relative in obsolete_nix_workflows(&workspace_root, Platform::Github, &expected)? {
+            fs::remove_file(workspace_root.join(&relative))
+                .with_context(|| format!("removing obsolete {}", relative.display()))?;
+        }
         registry::touch_current_project_or_warn([("ci", FeatureStatus::Managed)]);
     }
     Ok(())
@@ -2324,22 +2331,6 @@ fn validate_review_policy_backend(
         && (platform != Platform::Github || provider != CiProvider::Actions)
     {
         bail!("[review_policy] requires the effective CI backend to be GitHub Actions");
-    }
-    Ok(())
-}
-
-fn cleanup_obsolete_nix_workflows(
-    workspace_root: &Path,
-    platform: Platform,
-    expected: &[project::GeneratedFile],
-) -> Result<()> {
-    let expected = expected
-        .iter()
-        .map(|file| file.relative_path.clone())
-        .collect::<BTreeSet<_>>();
-    for relative in obsolete_nix_workflows(workspace_root, platform, &expected)? {
-        fs::remove_file(workspace_root.join(&relative))
-            .with_context(|| format!("removing obsolete {}", relative.display()))?;
     }
     Ok(())
 }

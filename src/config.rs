@@ -1084,10 +1084,13 @@ impl ProjectConfig {
     }
 
     /// Whether `[ci].nix_builds` get their own matrix workflow. Without `[prebuild]` they always
-    /// do; with it, the prebuild absorbs them unless `[ci.nix_build]` explicitly configures a
-    /// qualification matrix.
+    /// do; with it, the prebuild absorbs them unless it declares its own `[prebuild].nix_builds`
+    /// or `[ci.nix_build]` configures a qualification matrix.
     pub fn ci_owns_nix_build_matrix(&self) -> bool {
-        self.prebuild.is_none() || self.ci.nix_build != NixBuildConfig::default()
+        self.prebuild
+            .as_ref()
+            .is_none_or(|prebuild| !prebuild.nix_builds.is_empty())
+            || self.ci.nix_build != NixBuildConfig::default()
     }
 }
 

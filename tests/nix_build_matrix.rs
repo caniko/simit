@@ -2631,6 +2631,18 @@ fn explicit_matrix_qualifies_alongside_prebuild_publication() {
     assert!(!published.contains("recovery"), "{published}");
     assert!(generate(&temp, &["--check", "--diff"]).status.success());
 
+    // Declaring the published subset alone opts [ci].nix_builds into their own matrix, and
+    // regenerating only the prebuild keeps that matrix.
+    let temp = project(prebuild);
+    assert!(generate(&temp, &[]).status.success());
+    let matrix = temp.path().join(".github/workflows/nix-builds.yaml");
+    assert!(matrix.exists());
+    let result = generate(&temp, &["--prebuild-only"]);
+    assert!(result.status.success(), "{result:?}");
+    assert!(matrix.exists());
+    let result = generate(&temp, &["--prebuild-only", "--check"]);
+    assert!(result.status.success(), "{result:?}");
+
     // Without an explicit matrix the prebuild still absorbs [ci].nix_builds.
     let temp = project("\n[prebuild]\nsystem_runners = { x86_64-linux = \"ubuntu-24.04\" }\n");
     let result = generate(&temp, &[]);
