@@ -1991,14 +1991,12 @@ fn rust_flake_can_select_exact_nix_gates_from_its_workspace_root() {
         simit::registry::audit_ci(temp.path()).unwrap().status,
         simit::registry::FeatureStatus::Managed
     );
-    for extra in [vec!["--runtime", "cargo"], vec!["--publish-crates=true"]] {
-        let output = generate(&temp, &extra);
-        assert!(!output.status.success(), "{output:?}");
-        assert_eq!(
-            original,
-            fs::read(temp.path().join(".github/workflows/nix-builds.yaml")).unwrap()
-        );
-    }
+    let output = generate(&temp, &["--runtime", "cargo"]);
+    assert!(!output.status.success(), "{output:?}");
+    assert_eq!(
+        original,
+        fs::read(temp.path().join(".github/workflows/nix-builds.yaml")).unwrap()
+    );
 }
 
 #[test]
@@ -2121,7 +2119,6 @@ fn nix_only_rejects_effective_language_options_before_changing_workflows() {
         "with_docs",
         "with_artifacts",
         "with_pypi_publish",
-        "publish_crates",
     ] {
         for from_config in [false, true] {
             let temp = project("[ci.nix_build]\nonly = true");
@@ -2208,12 +2205,7 @@ fn nix_only_persists_explicit_false_overrides_for_language_options() {
 
 #[test]
 fn rust_workspace_nix_only_rejects_requested_gates_from_member_directories() {
-    for option in [
-        "with_artifacts",
-        "with_audit",
-        "with_msrv",
-        "publish_crates",
-    ] {
+    for option in ["with_artifacts", "with_audit", "with_msrv"] {
         for from_config in [false, true] {
             let temp = project("[ci.nix_build]\nonly = true");
             fs::write(
@@ -2657,4 +2649,53 @@ fn explicit_matrix_qualifies_alongside_prebuild_publication() {
         fs::read_to_string(temp.path().join(".github/workflows/prebuild.yaml")).unwrap();
     assert!(published.contains("'.#checks.x86_64-linux.client'"));
     assert!(published.contains("'.#checks.x86_64-linux.recovery'"));
+}
+
+#[test]
+fn nix_only_workspace_publishes_crates_without_language_ci_or_flake_check() {
+    let temp = project("[ci.nix_build]\nonly = true");
+    let config = temp.path().join("simit.toml");
+    let content = fs::read_to_string(&config)
+        .unwrap()
+        .replace("[ci]\n", "[ci]\npublish_crates = true\n");
+    fs::write(&config, content).unwrap();
+    fs::write(
+        temp.path().join("Cargo.toml"),
+        "[workspace]\nmembers = [\"core\", \"tool\"]\nresolver = \"3\"\n",
+    )
+    .unwrap();
+    for (name, extra) in [("native-core", ""), ("native-tool", "publish = false\n")] {
+        let member = temp.path().join(name.trim_start_matches("native-"));
+        fs::create_dir_all(member.join("src")).unwrap();
+        fs::write(
+            member.join("Cargo.toml"),
+            format!(
+                "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2024\"\nlicense = \"MIT\"\n{extra}"
+            ),
+        )
+        .unwrap();
+        fs::write(member.join("src/lib.rs"), "").unwrap();
+    }
+
+    let output = generate(&temp, &[]);
+    assert!(output.status.success(), "{output:?}");
+    let workflows = temp.path().join(".github/workflows");
+    let source = fs::read_to_string(workflows.join("publish-crate-native-core.yaml")).unwrap();
+    let publisher =
+        fs::read_to_string(workflows.join("trusted-publish-crate-native-core.yaml")).unwrap();
+    assert!(publisher.contains("Build Crate native-core"), "{publisher}");
+    assert!(!source.contains("nix flake check"), "{source}");
+    assert!(temp.path().join("keys/maintainers.gpg").is_file());
+    assert!(!workflows.join("publish-crate-native-tool.yaml").exists());
+    assert!(!workflows.join("ci.yaml").exists());
+    assert!(workflows.join("nix-builds.yaml").is_file());
+
+    let check = generate(&temp, &["--check", "--diff"]);
+    assert!(check.status.success(), "{check:?}");
+    let audit = simit::registry::audit_ci(temp.path()).unwrap();
+    assert_eq!(
+        audit.status,
+        simit::registry::FeatureStatus::Managed,
+        "{audit:?}"
+    );
 }

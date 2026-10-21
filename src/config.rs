@@ -737,7 +737,6 @@ impl CiConfig {
             ("with_docs", self.with_docs),
             ("with_artifacts", self.with_artifacts),
             ("with_pypi_publish", self.with_pypi_publish),
-            ("publish_crates", self.publish_crates),
         ] {
             if enabled {
                 bail!(

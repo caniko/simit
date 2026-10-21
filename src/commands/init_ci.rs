@@ -823,6 +823,62 @@ fn run_nix_only(command: InitCiCommand) -> Result<()> {
     run_nix_only_at(command, &workspace_root)
 }
 
+/// crates.io publish workflows for a Nix-only Cargo workspace.
+///
+/// Each publishable member gets the same tag-triggered source workflow and
+/// paired trusted publisher as aggregate language CI. The tag workflow runs a
+/// flake check only when the primary Nix-only CI does.
+pub(crate) fn nix_only_publish_files(
+    workspace_root: &Path,
+    cfg: &ProjectConfig,
+    platform: Platform,
+    runner: &ResolvedRunner,
+) -> Result<Vec<project::GeneratedFile>> {
+    if !cfg.ci.publish_crates {
+        return Ok(Vec::new());
+    }
+    if !workspace_root.join("Cargo.toml").is_file() {
+        bail!("[ci].publish_crates requires a Cargo workspace at the project root");
+    }
+    let metadata = cargo::cargo_metadata(&cargo::find_manifest(workspace_root)?)?;
+    let options = ci::CiOptions {
+        tag_prefix: cfg.release.tag_prefix,
+        nix_substituters: cfg.release.artifacts.substituters.clone(),
+        nix_trusted_public_keys: cfg.release.artifacts.trusted_public_keys.clone(),
+        ci_nix_substituters: cfg.ci_cache_artifacts().substituters,
+        ci_nix_trusted_public_keys: cfg.ci_cache_artifacts().trusted_public_keys,
+        nix_flake_check: !cfg.ci.nix_build.only,
+        publish_crates: true,
+        extra_setup: cfg.ci.extra_setup.clone(),
+        extra_env: cfg
+            .ci
+            .extra_env
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect(),
+        required_secrets: cfg.ci.required_secrets.clone(),
+        required_env: cfg.ci.required_env.clone(),
+        push_branches: cfg.ci.push_branches.clone(),
+        ..ci::CiOptions::default()
+    };
+    let mut files = Vec::new();
+    for package in cargo::select_packages(&metadata, &[], true)? {
+        if package.is_publishable() {
+            files.extend(ci::publish_files(
+                platform,
+                Runtime::Nix,
+                &package,
+                runner,
+                options.clone(),
+            )?);
+        }
+    }
+    if files.is_empty() {
+        bail!("[ci].publish_crates requires at least one publishable workspace package");
+    }
+    Ok(files)
+}
+
 fn run_nix_only_at(command: InitCiCommand, workspace_root: &Path) -> Result<()> {
     if !workspace_root.join("flake.nix").is_file() {
         bail!("Nix CI generation requires flake.nix at the workspace root");
@@ -951,6 +1007,23 @@ fn run_nix_only_at(command: InitCiCommand, workspace_root: &Path) -> Result<()> 
             &cfg.ci_cache_artifacts().substituters,
             &cfg.ci_cache_artifacts().trusted_public_keys,
             &cfg.ci.nix_build,
+        )?);
+    }
+    if !command.primary_only && cfg.ci.publish_crates {
+        files.extend(nix_only_publish_files(
+            workspace_root,
+            &cfg,
+            platform,
+            &ResolvedRunner::literal(&runner)?,
+        )?);
+        files.push(release_trust::generated_file(
+            workspace_root,
+            &cfg,
+            &TrustOverrides {
+                key: command.maintainer_key.clone(),
+                trust_root: command.maintainers_gpg.clone(),
+            },
+            command.check,
         )?);
     }
     if let Some(prebuild) = github_prebuild_file(&cfg)? {

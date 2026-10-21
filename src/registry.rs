@@ -1215,6 +1215,12 @@ fn infer_expected_primary_ci_files(
                 &config.ci.nix_build,
             )?);
         }
+        files.extend(crate::commands::init_ci::nix_only_publish_files(
+            workspace_root,
+            &config,
+            platform,
+            &runner,
+        )?);
         if let Some(pages) = config_pages_or_inferred(workspace_root, &config, marked)? {
             files.push(crate::render::ci::codeberg_pages_file(
                 platform, &runner, &pages,
