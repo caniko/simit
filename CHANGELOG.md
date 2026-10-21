@@ -36,6 +36,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   retain Nix-only checks with the production build and lighten the Rustdoc shell.
 - Raise Simit's minimum Rust version to 1.88 to use the security-patched Hickory
   DNS resolver; generated projects keep their independently declared minimums.
+- Reuse the pinned grouped-build engine's closure across runs through the
+  GitHub Actions cache instead of compiling Simit in every group job;
+  provisioning and its revision/digest evidence are unchanged.
 
 ### Added
 
