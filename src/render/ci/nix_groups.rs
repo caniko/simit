@@ -156,6 +156,7 @@ pub(super) fn render(
         push_producer_env(w, options)
     });
     nix_dependencies::import(&mut workflow, runner, options, installables)?;
+    push_input_cache_restore(&mut workflow, options);
     let mut limits = Vec::new();
     if let Some(value) = options.max_jobs {
         limits.extend(["--max-jobs".to_owned(), value.to_string()]);
@@ -184,6 +185,7 @@ pub(super) fn render(
         workflow.push_str(&format!("            {})\n              (umask 077; set -C; printf '%s' {quoted} > \"$SIMIT_NIX_BUILD_RESULTS/group-spec.json\")\n              ;;\n", shell_word(name)));
     }
     workflow.push_str("            *) echo 'Unknown Nix execution group' >&2; exit 1 ;;\n          esac\n          \"$SIMIT_CI_ENGINE\" ci nix-group --spec \"$SIMIT_NIX_BUILD_RESULTS/group-spec.json\"\n");
+    push_input_cache_save(&mut workflow, options);
     push_diagnostics_fallback(&mut workflow, options);
     workflow.push_str("      - name: Upload Nix build evidence\n        if: always()\n");
     push_action_uses(
@@ -218,6 +220,135 @@ pub(super) fn render(
         relative_path: PathBuf::from(".github/workflows/nix-builds.yaml"),
         content: workflow,
     })
+}
+
+/// GitHub keeps a 10 GB repository cache; one input closure must not evict the rest.
+// ponytail: fixed 4 GiB per-input ceiling; make it configurable if a real input needs more.
+const INPUT_CACHE_MAX_BYTES: u64 = 4 << 30;
+
+fn input_cache_action(action: &str) -> String {
+    // Restore and save are subdirectories of the pinned actions/cache commit.
+    github_action_ref("actions/cache", "v6.1.0").replacen(
+        "actions/cache@",
+        &format!("actions/cache/{action}@"),
+        1,
+    )
+}
+
+fn push_input_cache_hits(workflow: &mut String, options: &NixBuildConfig) {
+    for index in 0..options.cache_installables.len() {
+        workflow.push_str(&format!("          SIMIT_NIX_CACHE_HIT_{index}: ${{{{ steps.simit-nix-cache-{index}.outputs.cache-hit }}}}\n"));
+    }
+}
+
+/// Cross-run reuse of declared heavy inputs, keyed by their exact derivation.
+/// A miss or unreadable entry is an ordinary build; a cached closure can never
+/// satisfy a qualification output of the job.
+fn push_input_cache_restore(workflow: &mut String, options: &NixBuildConfig) {
+    if options.cache_installables.is_empty() {
+        return;
+    }
+    workflow.push_str("      - name: Resolve cached Nix inputs\n        id: simit-nix-cache\n        shell: bash\n");
+    push_producer_env(workflow, options);
+    workflow.push_str(r#"        run: |
+          set -euo pipefail
+          cache_root="$RUNNER_TEMP/simit-nix-cache"
+          mkdir -p "$cache_root"
+          resolve() {
+            local drv
+            drv=$(nix path-info --derivation --no-update-lock-file "$2")
+            [[ "$drv" =~ ^/nix/store/([0-9a-z]{32})-[^/]+\.drv$ ]] || { echo "Cached Nix input $2 must select exactly one local derivation" >&2; exit 1; }
+            printf '%s\n' "$drv" > "$cache_root/$1.drv"
+            printf 'key-%s=simit-nix-input-v1-%s\n' "$1" "${BASH_REMATCH[1]}" >> "$GITHUB_OUTPUT"
+          }
+"#);
+    for (index, installable) in options.cache_installables.iter().enumerate() {
+        workflow.push_str(&format!(
+            "          resolve {index} {}\n",
+            shell_word(installable)
+        ));
+    }
+    for index in 0..options.cache_installables.len() {
+        workflow.push_str(&format!("      - name: Restore cached Nix input {index}\n        id: simit-nix-cache-{index}\n        uses: {}\n        with:\n          path: ${{{{ runner.temp }}}}/simit-nix-cache/{index}\n          key: ${{{{ steps.simit-nix-cache.outputs.key-{index} }}}}\n", input_cache_action("restore")));
+    }
+    workflow.push_str("      - name: Import cached Nix inputs\n        shell: bash\n        env:\n          SIMIT_NIX_GROUP: ${{ matrix.group }}\n");
+    push_input_cache_hits(workflow, options);
+    push_producer_env_lines(workflow, options);
+    workflow.push_str("        run: |\n          set -euo pipefail\n          cache_root=\"$RUNNER_TEMP/simit-nix-cache\"\n          case \"$SIMIT_NIX_GROUP\" in\n");
+    for (name, members) in &options.groups {
+        let attrs: Vec<_> = members
+            .iter()
+            .map(|member| shell_word(member.split_once('^').map_or(member, |(path, _)| path)))
+            .collect();
+        workflow.push_str(&format!(
+            "            {}) members=({}) ;;\n",
+            shell_word(name),
+            attrs.join(" ")
+        ));
+    }
+    workflow.push_str(r#"            *) echo 'Unknown Nix execution group' >&2; exit 1 ;;
+          esac
+          gate_drvs=$(nix path-info --derivation --no-update-lock-file "${members[@]}")
+          gates=$(nix-store --query --outputs $gate_drvs)
+          test -n "$gates"
+          import_input() {
+            local hit="SIMIT_NIX_CACHE_HIT_$1" outputs closure
+            [ "${!hit}" = true ] || return 0
+            outputs=$(nix-store --query --outputs "$(cat "$cache_root/$1.drv")")
+            if ! closure=$(nix path-info --store "file://$cache_root/$1" --recursive $outputs); then
+              echo "::warning::Cached Nix input $1 is unreadable; building it normally"
+              rm -rf "$cache_root/$1"
+              return 0
+            fi
+            if grep -xF -- "$gates" <<< "$closure"; then
+              echo "Cached Nix input $1 contains the qualification outputs above" >&2
+              exit 1
+            fi
+            nix copy --no-check-sigs --from "file://$cache_root/$1" $outputs || echo "::warning::Cached Nix input $1 failed to import; building it normally"
+            rm -rf "$cache_root/$1"
+          }
+"#);
+    for index in 0..options.cache_installables.len() {
+        workflow.push_str(&format!("          import_input {index}\n"));
+    }
+}
+
+/// Publish only inputs this job realized, including when a later gate failed.
+fn push_input_cache_save(workflow: &mut String, options: &NixBuildConfig) {
+    if options.cache_installables.is_empty() {
+        return;
+    }
+    workflow.push_str("      - name: Export cached Nix inputs\n        id: simit-nix-cache-save\n        if: ${{ !cancelled() }}\n        shell: bash\n        env:\n");
+    push_input_cache_hits(workflow, options);
+    push_producer_env_lines(workflow, options);
+    workflow.push_str(&r#"        run: |
+          set -euo pipefail
+          cache_root="$RUNNER_TEMP/simit-nix-cache"
+          export_input() {
+            local hit="SIMIT_NIX_CACHE_HIT_$1" outputs bytes
+            [ "${!hit}" != true ] && test -s "$cache_root/$1.drv" || return 0
+            outputs=$(nix-store --query --outputs "$(cat "$cache_root/$1.drv")")
+            nix-store --check-validity $outputs 2>/dev/null || return 0
+            if ! nix copy --to "file://$cache_root/$1?compression=zstd" $outputs; then
+              echo "::warning::Cached Nix input $1 failed to export; not saving it"
+              rm -rf "$cache_root/$1"
+              return 0
+            fi
+            bytes=$(du -sb "$cache_root/$1" | cut -f1)
+            if [ "$bytes" -gt MAX_BYTES ]; then
+              echo "::warning::Cached Nix input $1 closure is $bytes bytes; not saving above MAX_BYTES"
+              rm -rf "$cache_root/$1"
+              return 0
+            fi
+            printf 'save-%s=true\n' "$1" >> "$GITHUB_OUTPUT"
+          }
+"#.replace("MAX_BYTES", &INPUT_CACHE_MAX_BYTES.to_string()));
+    for index in 0..options.cache_installables.len() {
+        workflow.push_str(&format!("          export_input {index}\n"));
+    }
+    for index in 0..options.cache_installables.len() {
+        workflow.push_str(&format!("      - name: Save cached Nix input {index}\n        if: ${{{{ !cancelled() && steps.simit-nix-cache-save.outputs.save-{index} == 'true' }}}}\n        uses: {}\n        with:\n          path: ${{{{ runner.temp }}}}/simit-nix-cache/{index}\n          key: ${{{{ steps.simit-nix-cache.outputs.key-{index} }}}}\n", input_cache_action("save")));
+    }
 }
 
 fn push_diagnostics_fallback(workflow: &mut String, options: &NixBuildConfig) {

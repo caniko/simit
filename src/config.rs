@@ -777,6 +777,8 @@ pub struct NixBuildConfig {
     pub dependency_max_mib: Option<u64>,
     /// Always re-execute selected qualification derivations, including cache hits.
     pub fresh_installables: Vec<String>,
+    /// Heavy local build inputs reused across runs through the GitHub Actions cache.
+    pub cache_installables: Vec<String>,
     pub timeout_minutes: Option<u64>,
     pub max_parallel: Option<u64>,
     pub max_jobs: Option<u64>,
@@ -883,7 +885,26 @@ impl NixBuildConfig {
                 "[ci].nix_builds must use source-bound local derivations when dependency transport is enabled"
             );
         }
+        let mut cached = std::collections::BTreeSet::new();
+        for member in &self.cache_installables {
+            if !member.starts_with(".#")
+                || member.len() <= 2
+                || member.contains('^')
+                || member == ".#checks"
+                || member.starts_with(".#checks.")
+                || installables.contains(member)
+                || self.dependency_installables.contains(member)
+                || !cached.insert(member)
+            {
+                bail!(
+                    "[ci.nix_build].cache_installables must be unique local build inputs without output selectors, not qualification outputs or transported dependencies"
+                );
+            }
+        }
         if self.groups.is_empty() {
+            if !self.cache_installables.is_empty() {
+                bail!("[ci.nix_build].cache_installables requires groups");
+            }
             if !self.check_systems.is_empty() {
                 bail!("[ci.nix_build].check_systems requires groups");
             }
@@ -987,9 +1008,9 @@ impl NixBuildConfig {
     /// Generator-owned environment and retained scripts must stay runtime data.
     pub(crate) fn validate_runtime_inputs(&self) -> Result<()> {
         for name in self.extra_env.keys() {
-            if name.starts_with("SIMIT_DEPENDENCY_") {
+            if name.starts_with("SIMIT_DEPENDENCY_") || name.starts_with("SIMIT_NIX_CACHE_") {
                 bail!(
-                    "simit project config: [ci.nix_build].extra_env cannot override reserved transport variable {name}"
+                    "simit project config: [ci.nix_build].extra_env cannot override reserved generator variable {name}"
                 );
             }
         }
@@ -4320,6 +4341,11 @@ fn set_nix_build_table(table: &mut Table, options: &NixBuildConfig) {
         &mut build,
         "fresh_installables",
         &options.fresh_installables,
+    );
+    set_string_array(
+        &mut build,
+        "cache_installables",
+        &options.cache_installables,
     );
     if !options.groups.is_empty() {
         let mut groups = Table::new();

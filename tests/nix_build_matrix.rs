@@ -180,6 +180,141 @@ fn invalid_group_coverage_rejects_before_any_workflow_or_config_write() {
 
 #[cfg(unix)]
 #[test]
+fn grouped_input_cache_reuses_declared_inputs_without_satisfying_gates() {
+    let groups = "[ci.nix_build.groups]\nnetwork = [\".#checks.x86_64-linux.client\", \".#checks.x86_64-linux.recovery\"]";
+    let temp = project(&format!(
+        "[ci.nix_build]\nonly = true\ncapture_results = true\ncache_installables = [\".#packages.x86_64-linux.kernel\"]\n{groups}"
+    ));
+    let result = generate(&temp, &[]);
+    assert!(result.status.success(), "{result:?}");
+    let check = generate(&temp, &["--check"]);
+    assert!(check.status.success(), "{check:?}");
+    let value = workflow(&temp);
+    let steps = value["jobs"]["build"]["steps"].as_sequence().unwrap();
+    let names: Vec<_> = steps.iter().map(|s| s["name"].as_str().unwrap()).collect();
+    let at = |name: &str| {
+        names
+            .iter()
+            .position(|candidate| *candidate == name)
+            .unwrap_or_else(|| panic!("{name}: {names:?}"))
+    };
+    for pair in [
+        "Resolve cached Nix inputs",
+        "Restore cached Nix input 0",
+        "Import cached Nix inputs",
+        "Build Nix group",
+        "Export cached Nix inputs",
+        "Save cached Nix input 0",
+    ]
+    .windows(2)
+    {
+        assert!(at(pair[0]) < at(pair[1]), "{names:?}");
+    }
+    let step = |name: &str| &steps[at(name)];
+    for (name, action) in [
+        ("Restore cached Nix input 0", "restore"),
+        ("Save cached Nix input 0", "save"),
+    ] {
+        assert_eq!(
+            step(name)["uses"],
+            format!("actions/cache/{action}@55cc8345863c7cc4c66a329aec7e433d2d1c52a9")
+        );
+        assert_eq!(
+            step(name)["with"]["key"],
+            "${{ steps.simit-nix-cache.outputs.key-0 }}"
+        );
+        assert_eq!(
+            step(name)["with"]["path"],
+            "${{ runner.temp }}/simit-nix-cache/0"
+        );
+        assert!(step(name)["with"]["restore-keys"].is_null());
+    }
+    assert_eq!(
+        step("Export cached Nix inputs")["if"],
+        "${{ !cancelled() }}"
+    );
+    assert_eq!(
+        step("Save cached Nix input 0")["if"],
+        "${{ !cancelled() && steps.simit-nix-cache-save.outputs.save-0 == 'true' }}"
+    );
+
+    let bin = temp.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    for tool in ["nix", "nix-store"] {
+        std::os::unix::fs::symlink(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/input-cache-nix.sh"),
+            bin.join(tool),
+        )
+        .unwrap();
+    }
+    let calls = temp.path().join("calls");
+    let run = |name: &str, closure: &str| {
+        let script = temp.path().join("step.sh");
+        fs::write(&script, step(name)["run"].as_str().unwrap()).unwrap();
+        Command::new("bash")
+            .arg(&script)
+            .env("RUNNER_TEMP", temp.path())
+            .env("GITHUB_OUTPUT", temp.path().join("output"))
+            .env("CACHE_CALLS", &calls)
+            .env("CACHE_CLOSURE", closure)
+            .env("SIMIT_NIX_GROUP", "network")
+            .env("SIMIT_NIX_CACHE_HIT_0", "true")
+            .env(
+                "PATH",
+                std::env::join_paths(
+                    std::iter::once(bin.clone())
+                        .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+                )
+                .unwrap(),
+            )
+            .output()
+            .unwrap()
+    };
+    let resolved = run("Resolve cached Nix inputs", "");
+    assert!(resolved.status.success(), "{resolved:?}");
+    assert!(
+        fs::read_to_string(temp.path().join("output"))
+            .unwrap()
+            .contains("key-0=simit-nix-input-v1-00000000000000000000000000000003\n")
+    );
+    // A cached closure containing a gate output would skip that gate's execution.
+    let poisoned = run("Import cached Nix inputs", "/nix/store/recovery-out");
+    assert!(!poisoned.status.success(), "{poisoned:?}");
+    assert!(
+        String::from_utf8_lossy(&poisoned.stderr).contains("contains the qualification outputs"),
+        "{poisoned:?}"
+    );
+    assert!(!fs::read_to_string(&calls).unwrap().contains("nix copy"));
+    let clean = run("Import cached Nix inputs", "/nix/store/glibc");
+    assert!(clean.status.success(), "{clean:?}");
+    assert!(fs::read_to_string(&calls).unwrap().contains(&format!(
+        "nix copy --no-check-sigs --from file://{}/simit-nix-cache/0 /nix/store/kernel-out /nix/store/kernel-dev\n",
+        temp.path().display()
+    )));
+
+    for (cached, groups) in [
+        (".#checks.x86_64-linux.client", groups),
+        (".#checks.x86_64-linux.other", groups),
+        (".#packages.x86_64-linux.kernel^out", groups),
+        ("github:example/kernel#default", groups),
+        (".#packages.x86_64-linux.kernel", ""),
+    ] {
+        let temp = project(&format!(
+            "[ci.nix_build]\nonly = true\ncapture_results = true\ncache_installables = [\"{cached}\"]\n{groups}"
+        ));
+        let result = generate(&temp, &[]);
+        assert!(!result.status.success(), "{cached}: {result:?}");
+        assert!(
+            String::from_utf8_lossy(&result.stderr).contains("cache_installables"),
+            "{result:?}"
+        );
+        assert!(!temp.path().join(".github/workflows").exists());
+    }
+}
+
+#[cfg(unix)]
+#[test]
 fn native_exact_matrix_groups_route_homogeneous_members_and_roundtrip() {
     let temp = project(
         r#"[ci.nix_build]
@@ -2282,7 +2417,7 @@ fn direct_nix_matrix_rendering_enforces_retained_hook_and_transport_boundaries()
         .to_string();
         assert!(
             error.contains(if phase == "transport" {
-                "reserved transport"
+                "reserved generator variable"
             } else {
                 "Actions expressions"
             }),

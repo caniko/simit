@@ -1186,6 +1186,28 @@ are rejected from dependency transport before export/import. Keep
 VMs and other runtime checks in this explicit fresh set, and measure export,
 download/import and cache-hit costs alongside end-to-end latency.
 
+`cache_installables` reuses heavy local build inputs across runs, such as a
+patched kernel that only a VM gate consumes. It requires groups and accepts bare
+`.#attribute` derivations that are neither qualification outputs, `checks`, nor
+transported dependencies:
+
+```toml
+[ci.nix_build]
+cache_installables = [".#nixosTests.x86_64-linux.vm.nodes.machine.boot.kernelPackages.kernel"]
+```
+
+Each grouped job resolves every entry to its exact derivation and restores the
+GitHub Actions cache key `simit-nix-input-v1-<derivation hash>` without restore
+keys, so a changed input is a miss and builds normally. A hit imports all of the
+derivation's outputs and their closure before the group runs, unless that
+closure contains an output of one of the group's qualification members; that
+fails the job instead of silently skipping a gate. An unreadable entry is
+ignored. After the group runs, including when a member failed, entries the job
+realized but did not restore are exported and saved, up to 4 GiB each. Cache
+scopes are GitHub's: pull requests read default-branch entries and write only
+their own scope. Imports skip signature checks, so declare only inputs whose
+producers you trust as much as the default branch.
+
 Configured matrices normally coalesce a branch push with its pull request. Set
 `[ci.nix_build].separate_events = true` when acceptance requires both original
 producers: the concurrency group then includes the workflow ref and event name,
