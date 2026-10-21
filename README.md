@@ -753,11 +753,12 @@ Simit invokes the app only on the repository's default branch or a trusted
 release call; pull requests and feature branches never receive the token.
 
 By default the prebuild realizes `[ci].nix_builds` and no separate
-`nix-builds.yaml` is generated. Setting `[prebuild].nix_builds` (the published
-subset, such as the packages) or configuring `[ci.nix_build]` (for example
-`groups` with `check_systems`) gives `[ci].nix_builds` their own qualification
-matrix alongside the prebuild; `simit init ci --prebuild-only` leaves that
-matrix in place. `[ci.nix_build].only` remains incompatible with `[prebuild]`.
+`nix-builds.yaml` is generated. When the primary CI is GitHub Actions, setting
+`[prebuild].nix_builds` (the published subset, such as the packages) or
+configuring `[ci.nix_build]` (for example `groups` with `check_systems`) gives
+`[ci].nix_builds` their own qualification matrix alongside the prebuild;
+`simit init ci --prebuild-only` leaves that matrix in place. Forgejo, GitLab and
+Crow primaries get no such matrix, and `--prebuild-only` removes a stale one. `[ci.nix_build].only` remains incompatible with `[prebuild]`.
 
 ## Project config
 
