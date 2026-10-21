@@ -857,6 +857,7 @@ pub(crate) fn nix_only_publish_files(
         ci_nix_substituters: cfg.ci_cache_artifacts().substituters,
         ci_nix_trusted_public_keys: cfg.ci_cache_artifacts().trusted_public_keys,
         nix_flake_check: !cfg.ci.nix_build.only,
+        all_features: cfg.ci.all_features.unwrap_or(true),
         publish_crates: true,
         extra_setup: cfg.ci.extra_setup.clone(),
         extra_env: cfg
@@ -871,14 +872,34 @@ pub(crate) fn nix_only_publish_files(
         required_gates: cfg.ci.required_gates.clone(),
         ..ci::CiOptions::default()
     };
+    let members = cargo::select_packages(&metadata, &[], true)?;
+    let crates_io = |name: &str| {
+        members
+            .iter()
+            .find(|member| member.name == name)
+            .map(cargo::Package::is_publishable_to_crates_io)
+    };
     let mut files = Vec::new();
-    for package in cargo::select_packages(&metadata, &[], true)? {
-        // The generated publisher targets crates.io with CRATES_IO_API_TOKEN.
+    for package in &members {
+        // The generated publisher targets crates.io with CRATES_IO_API_TOKEN,
+        // so every local registry dependency must also reach crates.io.
         if package.is_publishable_to_crates_io() {
+            for dependency in &package.dependencies {
+                if dependency.path.is_some()
+                    && dependency.is_publish_ordering()
+                    && crates_io(&dependency.name) == Some(false)
+                {
+                    bail!(
+                        "{} depends on workspace member {} which is not published to crates.io",
+                        package.name,
+                        dependency.name
+                    );
+                }
+            }
             files.extend(ci::publish_files(
                 platform,
                 Runtime::Nix,
-                &package,
+                package,
                 runner,
                 options.clone(),
             )?);
@@ -914,6 +935,7 @@ fn run_nix_only_at(command: InitCiCommand, workspace_root: &Path) -> Result<()> 
     if provider != CiProvider::Actions {
         bail!("Nix-only CI currently supports the Actions provider only");
     }
+    let configured_publish_crates = cfg.ci.publish_crates;
     // Resolve CLI overrides before validation and persistence. These options
     // belong to language/release workflows; Nix-only renderers cannot honour
     // them, and accepting them would silently remove the requested gate.
@@ -935,6 +957,14 @@ fn run_nix_only_at(command: InitCiCommand, workspace_root: &Path) -> Result<()> 
     }
     cfg.ci.nix_flake_check = command.nix_flake_check.or(cfg.ci.nix_flake_check);
     cfg.ci.validate_nix_only_language_options()?;
+    if cfg.ci.publish_crates
+        && !configured_publish_crates
+        && !ProjectConfig::can_persist_ci(workspace_root)?
+    {
+        bail!(
+            "persist [ci].publish_crates = true in the existing project config source before generating Nix-only crate publishers"
+        );
+    }
     if command.with_homebrew
         || command.with_chocolatey
         || command.with_scoop

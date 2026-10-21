@@ -750,6 +750,9 @@ impl CiConfig {
                 "[ci].check_command and nix_flake_check=false require Rust language CI; use [ci].components for Nix-only checks"
             );
         }
+        if !self.required_gates.is_empty() {
+            bail!("[[ci.required_gates]] requires Rust language CI; use Nix installables instead");
+        }
         Ok(())
     }
 }

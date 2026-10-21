@@ -2734,3 +2734,62 @@ fn nix_only_crate_publication_rejects_unsupported_shapes_without_writing() {
         assert!(!temp.path().join(".github/workflows").exists());
     }
 }
+
+fn nix_only_publish_workspace(ci_extra: &str, core_dependencies: &str) -> TempDir {
+    let temp = project("[ci.nix_build]\nonly = true");
+    let config = temp.path().join("simit.toml");
+    let content = fs::read_to_string(&config).unwrap().replace(
+        "[ci]\n",
+        &format!("[ci]\npublish_crates = true\n{ci_extra}"),
+    );
+    fs::write(&config, content).unwrap();
+    fs::write(
+        temp.path().join("Cargo.toml"),
+        "[workspace]\nmembers = [\"core\", \"private\"]\nresolver = \"3\"\n",
+    )
+    .unwrap();
+    for (dir, manifest) in [
+        (
+            "core",
+            format!(
+                "[package]\nname = \"native-core\"\nversion = \"0.1.0\"\nedition = \"2024\"\nlicense = \"MIT\"\n[dependencies]\n{core_dependencies}"
+            ),
+        ),
+        (
+            "private",
+            "[package]\nname = \"native-private\"\nversion = \"0.1.0\"\nedition = \"2024\"\nlicense = \"MIT\"\npublish = [\"internal\"]\n".to_owned(),
+        ),
+    ] {
+        let member = temp.path().join(dir);
+        fs::create_dir_all(member.join("src")).unwrap();
+        fs::write(member.join("Cargo.toml"), manifest).unwrap();
+        fs::write(member.join("src/lib.rs"), "").unwrap();
+    }
+    temp
+}
+
+#[test]
+fn nix_only_crate_publication_requires_a_crates_io_dependency_closure() {
+    let temp = nix_only_publish_workspace(
+        "",
+        "native-private = { path = \"../private\", version = \"0.1.0\" }\n",
+    );
+    let output = generate(&temp, &[]);
+    assert!(!output.status.success(), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("not published to crates.io"));
+    assert!(!temp.path().join(".github/workflows").exists());
+}
+
+#[test]
+fn nix_only_crate_publication_preserves_the_feature_policy() {
+    let temp = nix_only_publish_workspace("all_features = false\n", "");
+    let output = generate(&temp, &[]);
+    assert!(output.status.success(), "{output:?}");
+    let source = fs::read_to_string(
+        temp.path()
+            .join(".github/workflows/publish-crate-native-core.yaml"),
+    )
+    .unwrap();
+    assert!(source.contains("cargo test"), "{source}");
+    assert!(!source.contains("--all-features"), "{source}");
+}
