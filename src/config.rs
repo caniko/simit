@@ -892,7 +892,12 @@ impl NixBuildConfig {
                 || member.contains('^')
                 || member == ".#checks"
                 || member.starts_with(".#checks.")
-                || installables.contains(member)
+                || installables.iter().any(|output| {
+                    output
+                        .split_once('^')
+                        .map_or(output.as_str(), |(path, _)| path)
+                        == member
+                })
                 || self.dependency_installables.contains(member)
                 || !cached.insert(member)
             {

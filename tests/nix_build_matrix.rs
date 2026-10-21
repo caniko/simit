@@ -311,6 +311,20 @@ fn grouped_input_cache_reuses_declared_inputs_without_satisfying_gates() {
         );
         assert!(!temp.path().join(".github/workflows").exists());
     }
+    // A selected output aliases the same derivation as its bare attribute.
+    let temp = project(&format!(
+        "[ci.nix_build]\nonly = true\ncapture_results = true\ncache_installables = [\".#packages.x86_64-linux.kernel\"]\n{groups}"
+    ));
+    let config = fs::read_to_string(temp.path().join("simit.toml"))
+        .unwrap()
+        .replace(
+            ".#checks.x86_64-linux.recovery",
+            ".#packages.x86_64-linux.kernel^out",
+        );
+    fs::write(temp.path().join("simit.toml"), config).unwrap();
+    let result = generate(&temp, &[]);
+    assert!(!result.status.success(), "{result:?}");
+    assert!(String::from_utf8_lossy(&result.stderr).contains("cache_installables"));
 }
 
 #[cfg(unix)]

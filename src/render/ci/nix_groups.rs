@@ -224,7 +224,7 @@ pub(super) fn render(
 
 /// GitHub keeps a 10 GB repository cache; one input closure must not evict the rest.
 // ponytail: fixed 4 GiB per-input ceiling; make it configurable if a real input needs more.
-const INPUT_CACHE_MAX_BYTES: u64 = 4 << 30;
+const INPUT_CACHE_MAX_KIB: u64 = 4 << 20;
 
 fn input_cache_action(action: &str) -> String {
     // Restore and save are subdirectories of the pinned actions/cache commit.
@@ -325,7 +325,7 @@ fn push_input_cache_save(workflow: &mut String, options: &NixBuildConfig) {
           set -euo pipefail
           cache_root="$RUNNER_TEMP/simit-nix-cache"
           export_input() {
-            local hit="SIMIT_NIX_CACHE_HIT_$1" outputs bytes
+            local hit="SIMIT_NIX_CACHE_HIT_$1" outputs kib
             [ "${!hit}" != true ] && test -s "$cache_root/$1.drv" || return 0
             outputs=$(nix-store --query --outputs "$(cat "$cache_root/$1.drv")")
             nix-store --check-validity $outputs 2>/dev/null || return 0
@@ -334,15 +334,16 @@ fn push_input_cache_save(workflow: &mut String, options: &NixBuildConfig) {
               rm -rf "$cache_root/$1"
               return 0
             fi
-            bytes=$(du -sb "$cache_root/$1" | cut -f1)
-            if [ "$bytes" -gt MAX_BYTES ]; then
-              echo "::warning::Cached Nix input $1 closure is $bytes bytes; not saving above MAX_BYTES"
+            # POSIX du: Darwin has no byte-granular -b.
+            kib=$(du -sk "$cache_root/$1" | cut -f1)
+            if [ "$kib" -gt MAX_KIB ]; then
+              echo "::warning::Cached Nix input $1 closure is $kib KiB; not saving above MAX_KIB KiB"
               rm -rf "$cache_root/$1"
               return 0
             fi
             printf 'save-%s=true\n' "$1" >> "$GITHUB_OUTPUT"
           }
-"#.replace("MAX_BYTES", &INPUT_CACHE_MAX_BYTES.to_string()));
+"#.replace("MAX_KIB", &INPUT_CACHE_MAX_KIB.to_string()));
     for index in 0..options.cache_installables.len() {
         workflow.push_str(&format!("          export_input {index}\n"));
     }
