@@ -836,11 +836,15 @@ pub(crate) fn validate_nix_only_publication(
     if platform == Platform::Gitlab {
         bail!("Nix-only crate publication requires GitHub or Forgejo Actions");
     }
-    if cfg.ci.publish_strategy != crate::config::PublishStrategy::Members {
-        bail!(
-            "Nix-only crate publication supports only publish_strategy = \"members\"; got {:?}",
-            cfg.ci.publish_strategy
-        );
+    match cfg.ci.publish_strategy {
+        crate::config::PublishStrategy::Members => {}
+        crate::config::PublishStrategy::Coordinated if platform == Platform::Github => {}
+        crate::config::PublishStrategy::Coordinated => {
+            bail!("Nix-only coordinated crate publication requires GitHub Actions")
+        }
+        strategy => bail!(
+            "Nix-only crate publication supports publish_strategy = \"members\" or \"coordinated\"; got {strategy:?}"
+        ),
     }
     if cfg.ci.om_ci || cfg.ci.om_ci_augment {
         bail!("Nix-only crate publication does not support om_ci; use language CI for Omnix");
@@ -904,22 +908,42 @@ pub(crate) fn nix_only_publish_files(
             .find(|member| member.name == name)
             .map(cargo::Package::is_publishable_to_crates_io)
     };
+    let coordinated = cfg.ci.publish_strategy == crate::config::PublishStrategy::Coordinated;
+    // The coordinated plan publishes every publishable member to crates.io.
+    if let Some(member) = members.iter().find(|member| {
+        coordinated && member.is_publishable() && !member.is_publishable_to_crates_io()
+    }) {
+        bail!(
+            "coordinated Nix-only publication targets crates.io; {} publishes to another registry",
+            member.name
+        );
+    }
     let mut files = Vec::new();
     for package in &members {
         // The generated publisher targets crates.io with CRATES_IO_API_TOKEN,
         // so every local registry dependency must also reach crates.io.
         if package.is_publishable_to_crates_io() {
             for dependency in &package.dependencies {
-                if dependency.path.is_some()
-                    && dependency.is_publish_ordering()
-                    && crates_io(&dependency.name) == Some(false)
-                {
-                    bail!(
+                if !(dependency.path.is_some() && dependency.is_publish_ordering()) {
+                    continue;
+                }
+                match crates_io(&dependency.name) {
+                    Some(false) => bail!(
                         "{} depends on workspace member {} which is not published to crates.io",
                         package.name,
                         dependency.name
-                    );
+                    ),
+                    // Members publishers share one tag and run concurrently.
+                    Some(true) if !coordinated => bail!(
+                        "{} depends on workspace member {}; set publish_strategy = \"coordinated\" for dependency-ordered publication",
+                        package.name,
+                        dependency.name
+                    ),
+                    _ => {}
                 }
+            }
+            if coordinated {
+                continue;
             }
             files.extend(ci::publish_files(
                 platform,
@@ -929,6 +953,27 @@ pub(crate) fn nix_only_publish_files(
                 options.clone(),
             )?);
         }
+    }
+    if coordinated {
+        let plan = crate::commands::release_plan::build_release_plan(&metadata, &[])?;
+        files.extend(ci::publish_workspace_files(
+            platform,
+            ci::PublishWorkspaceInputs {
+                runtime: Runtime::Nix,
+                runner,
+                options,
+                plan: plan
+                    .entries
+                    .iter()
+                    .map(|entry| (entry.package.name.clone(), entry.depends_on.clone()))
+                    .collect(),
+                versions: plan
+                    .entries
+                    .iter()
+                    .map(|entry| (entry.package.name.clone(), entry.package.version.clone()))
+                    .collect(),
+            },
+        )?);
     }
     if files.is_empty() {
         bail!("[ci].publish_crates requires at least one publishable workspace package");

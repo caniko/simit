@@ -2708,7 +2708,7 @@ fn nix_only_workspace_publishes_crates_without_language_ci_or_flake_check() {
 #[test]
 fn nix_only_crate_publication_rejects_unsupported_shapes_without_writing() {
     for (config_extra, args) in [
-        ("publish_strategy = \"coordinated\"\n", vec![]),
+        ("publish_strategy = \"release-plz\"\n", vec![]),
         ("", vec!["--maintainers-gpg", "keys/custom.gpg"]),
         ("", vec!["--platform", "gitlab"]),
         ("om_ci = true\n", vec![]),
@@ -2849,4 +2849,65 @@ fn nix_only_publication_audit_rejects_what_generation_rejects() {
         assert!(simit::registry::audit_ci(temp.path()).is_err(), "{release}");
         assert!(!generate(temp, &["--check"]).status.success(), "{release}");
     }
+}
+
+fn dependent_publish_workspace(strategy: &str) -> TempDir {
+    let temp = project("[ci.nix_build]\nonly = true");
+    let config = temp.path().join("simit.toml");
+    let content = fs::read_to_string(&config).unwrap().replace(
+        "[ci]\n",
+        &format!("[ci]\npublish_crates = true\npublish_strategy = \"{strategy}\"\n"),
+    );
+    fs::write(&config, content).unwrap();
+    fs::write(
+        temp.path().join("Cargo.toml"),
+        "[workspace]\nmembers = [\"base\", \"top\"]\nresolver = \"3\"\n",
+    )
+    .unwrap();
+    for (dir, name, dependencies) in [
+        ("base", "native-base", ""),
+        (
+            "top",
+            "native-top",
+            "native-base = { path = \"../base\", version = \"0.1.0\" }\n",
+        ),
+    ] {
+        let member = temp.path().join(dir);
+        fs::create_dir_all(member.join("src")).unwrap();
+        fs::write(
+            member.join("Cargo.toml"),
+            format!(
+                "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2024\"\nlicense = \"MIT\"\n[dependencies]\n{dependencies}"
+            ),
+        )
+        .unwrap();
+        fs::write(member.join("src/lib.rs"), "").unwrap();
+    }
+    temp
+}
+
+#[test]
+fn nix_only_members_publication_rejects_dependent_members() {
+    let temp = dependent_publish_workspace("members");
+    let output = generate(&temp, &[]);
+    assert!(!output.status.success(), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("coordinated"));
+    assert!(!temp.path().join(".github/workflows").exists());
+}
+
+#[test]
+fn nix_only_coordinated_publication_orders_dependent_members() {
+    let temp = dependent_publish_workspace("coordinated");
+    let output = generate(&temp, &[]);
+    assert!(output.status.success(), "{output:?}");
+    let workflows = temp.path().join(".github/workflows");
+    assert!(workflows.join("publish-workspace.yaml").is_file());
+    assert!(workflows.join("trusted-publish-workspace.yaml").is_file());
+    assert!(!workflows.join("publish-crate-native-base.yaml").exists());
+    assert!(!workflows.join("ci.yaml").exists());
+    assert!(generate(&temp, &["--check", "--diff"]).status.success());
+    assert_eq!(
+        simit::registry::audit_ci(temp.path()).unwrap().status,
+        simit::registry::FeatureStatus::Managed
+    );
 }

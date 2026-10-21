@@ -702,7 +702,9 @@ declared Nix installables or use language CI. `publish_crates` is supported: a
 Nix-only Cargo workspace receives the same per-member `publish-crate-*.yaml`
 tag workflows and `trusted-publish-crate-*.yaml` publishers as aggregate
 language CI, without language CI workflows. Under `only = true` the tag
-workflow omits `nix flake check`, matching the primary CI. Explicit `--flag=false`
+workflow omits `nix flake check`, matching the primary CI. Members that depend
+on each other require `publish_strategy = "coordinated"`, which emits the
+dependency-ordered `publish-workspace.yaml` on GitHub instead. Explicit `--flag=false`
 overrides disable the matching project option and persist that choice when
 generating. Rejected requests leave configuration and workflow files intact.
 
