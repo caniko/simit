@@ -9,8 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Allow a `[ci].nix_builds` qualification matrix alongside `[prebuild]` when
   `[prebuild].nix_builds` selects the published subset or `[ci.nix_build]` is
-  configured; `--prebuild-only` keeps that matrix, `only = true` still excludes
-  `[prebuild]`, and prebuild-only projects render unchanged.
+  configured on GitHub primary CI; `--prebuild-only` keeps that matrix,
+  `only = true` still excludes `[prebuild]`, and prebuild-only projects (and
+  GitLab, Forgejo or Crow primaries) render unchanged.
 - Allow `publish_crates` with Nix-only CI. Nix-only Cargo workspaces receive the
   per-member signed-tag publish workflows, paired trusted publishers and release
   trust root without language CI workflows, and their tag workflows omit

@@ -2911,3 +2911,39 @@ fn nix_only_coordinated_publication_orders_dependent_members() {
         simit::registry::FeatureStatus::Managed
     );
 }
+
+#[test]
+fn published_subset_adds_no_matrix_outside_github_primary_ci() {
+    let prebuild = "\n[prebuild]\nnix_builds = [\".#checks.x86_64-linux.client\"]\nsystem_runners = { x86_64-linux = \"ubuntu-24.04\" }\n";
+    for platform in ["gitlab", "forgejo"] {
+        let temp = project(prebuild);
+        let config = temp.path().join("simit.toml");
+        let content = fs::read_to_string(&config).unwrap().replace(
+            "platform = \"github\"",
+            &format!("platform = \"{platform}\""),
+        );
+        fs::write(&config, content).unwrap();
+        let result = generate(&temp, &[]);
+        assert!(result.status.success(), "{platform}: {result:?}");
+        assert!(
+            !temp
+                .path()
+                .join(".github/workflows/nix-builds.yaml")
+                .exists()
+        );
+    }
+
+    // A GitHub matrix left behind after moving primary CI to Forgejo is obsolete.
+    let temp = project(prebuild);
+    assert!(generate(&temp, &[]).status.success());
+    let stale = temp.path().join(".github/workflows/nix-builds.yaml");
+    assert!(stale.exists());
+    let config = temp.path().join("simit.toml");
+    let content = fs::read_to_string(&config)
+        .unwrap()
+        .replace("platform = \"github\"", "platform = \"forgejo\"");
+    fs::write(&config, content).unwrap();
+    let result = generate(&temp, &["--prebuild-only"]);
+    assert!(result.status.success(), "{result:?}");
+    assert!(!stale.exists());
+}

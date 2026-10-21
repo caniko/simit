@@ -1129,7 +1129,7 @@ fn infer_expected_primary_ci_files(
             &config.ci.components,
         )?];
         if backend.provider() == CiProvider::Actions
-            && config.ci_owns_nix_build_matrix()
+            && config.ci_owns_nix_build_matrix(platform)
             && !options.nix_builds.is_empty()
         {
             files.push(crate::render::ci::nix_build_matrix_file_with_options(
@@ -1205,7 +1205,7 @@ fn infer_expected_primary_ci_files(
             vec![generated]
         };
         if backend.provider() == CiProvider::Actions
-            && config.ci_owns_nix_build_matrix()
+            && config.ci_owns_nix_build_matrix(platform)
             && !config.ci.nix_builds.is_empty()
         {
             files.push(crate::render::ci::nix_build_matrix_file_with_options(
@@ -1424,7 +1424,7 @@ fn infer_expected_primary_ci_files(
         }
     }
     if backend.provider() == CiProvider::Actions
-        && config.ci_owns_nix_build_matrix()
+        && config.ci_owns_nix_build_matrix(platform)
         && !options.nix_builds.is_empty()
     {
         files.push(crate::render::ci::nix_build_matrix_file_with_options(

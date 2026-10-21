@@ -458,7 +458,7 @@ pub fn run(command: InitCiCommand) -> Result<()> {
         }
     }
     if provider == CiProvider::Actions
-        && cfg.ci_owns_nix_build_matrix()
+        && cfg.ci_owns_nix_build_matrix(platform)
         && !options.nix_builds.is_empty()
     {
         files.push(ci::nix_build_matrix_file_with_options(
@@ -605,7 +605,11 @@ fn run_prebuild_only(command: InitCiCommand) -> Result<()> {
         .iter()
         .map(|file| file.relative_path.clone())
         .collect::<BTreeSet<_>>();
-    if cfg.ci_owns_nix_build_matrix() && !cfg.ci.nix_builds.is_empty() {
+    let primary_platform = cfg.ci.platform.unwrap_or(Platform::Forgejo);
+    if cfg.ci.provider.unwrap_or(CiProvider::Actions) == CiProvider::Actions
+        && cfg.ci_owns_nix_build_matrix(primary_platform)
+        && !cfg.ci.nix_builds.is_empty()
+    {
         // The primary scope owns the qualification matrix; this scope must not remove it.
         expected.insert(PathBuf::from(Platform::Github.workflow_dir()).join("nix-builds.yaml"));
     }
@@ -1107,7 +1111,7 @@ fn run_nix_only_at(command: InitCiCommand, workspace_root: &Path) -> Result<()> 
         vec![generated]
     };
     if provider == CiProvider::Actions
-        && cfg.ci_owns_nix_build_matrix()
+        && cfg.ci_owns_nix_build_matrix(platform)
         && !cfg.ci.nix_builds.is_empty()
     {
         files.push(ci::nix_build_matrix_file_with_options(
@@ -1305,7 +1309,7 @@ fn run_python(command: InitCiCommand) -> Result<()> {
         &cfg.ci.components,
     )?];
     if provider == CiProvider::Actions
-        && cfg.ci_owns_nix_build_matrix()
+        && cfg.ci_owns_nix_build_matrix(platform)
         && !options.nix_builds.is_empty()
     {
         files.push(ci::nix_build_matrix_file_with_options(
