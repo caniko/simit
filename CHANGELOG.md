@@ -26,6 +26,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Reuse declared heavy Nix inputs of grouped GitHub matrices across runs through
+  `[ci.nix_build].cache_installables`, keyed by exact derivation and refusing any
+  cached closure that would satisfy a qualification output.
 - Explain complete operator enrollment with `simit projects update --plan`,
   including missing, disabled and filtered canaries, without forge requests,
   credential reads or candidate generation. Bind the report to policy and
