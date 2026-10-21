@@ -1084,20 +1084,14 @@ fn infer_expected_primary_ci_files(
     if platform == Platform::Gitlab && workspace_root.join("flake.nix").is_file() {
         // GitLab flake projects always render the Nix-only flake workflow.
         crate::commands::init_ci::validate_nix_only_publication(&config, platform, None)?;
-        return Ok(vec![project::GeneratedFile {
-            relative_path: PathBuf::from(".gitlab-ci.yml"),
-            content: crate::render::ci::gitlab_nix_flake_workflow(),
-        }]);
+        return gitlab_flake_files(&config);
     }
     if !config.ci.nix_build.only
         && !workspace_root.join("Cargo.toml").is_file()
         && python::is_python_uv_project(workspace_root)
     {
         if platform == Platform::Gitlab {
-            return Ok(vec![project::GeneratedFile {
-                relative_path: PathBuf::from(".gitlab-ci.yml"),
-                content: crate::render::ci::gitlab_nix_flake_workflow(),
-            }]);
+            return gitlab_flake_files(&config);
         }
         let inference = CiInference::from_workflows(&snapshots)?;
         let resolved = crate::ci_resolution::ResolvedCiInputs::resolve(
@@ -1164,10 +1158,7 @@ fn infer_expected_primary_ci_files(
         config.ci.validate_nix_only_language_options()?;
         crate::commands::init_ci::validate_nix_only_publication(&config, platform, None)?;
         if platform == Platform::Gitlab {
-            return Ok(vec![project::GeneratedFile {
-                relative_path: PathBuf::from(".gitlab-ci.yml"),
-                content: crate::render::ci::gitlab_nix_flake_workflow(),
-            }]);
+            return gitlab_flake_files(&config);
         }
         let runner = config
             .ci
@@ -1465,6 +1456,16 @@ fn infer_expected_primary_ci_files(
                 || crate::render::release_plz::auxiliary_path(&file.relative_path)
         })
         .collect())
+}
+
+/// GitLab flake CI plus the GitHub prebuild, which `init ci` generates for any primary.
+fn gitlab_flake_files(config: &ProjectConfig) -> Result<Vec<project::GeneratedFile>> {
+    let mut files = vec![project::GeneratedFile {
+        relative_path: PathBuf::from(".gitlab-ci.yml"),
+        content: crate::render::ci::gitlab_nix_flake_workflow(),
+    }];
+    push_prebuild_file(&mut files, config)?;
+    Ok(files)
 }
 
 fn push_prebuild_file(
