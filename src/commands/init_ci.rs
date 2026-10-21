@@ -837,6 +837,15 @@ pub(crate) fn nix_only_publish_files(
     if !cfg.ci.publish_crates {
         return Ok(Vec::new());
     }
+    if platform == Platform::Gitlab {
+        bail!("Nix-only crate publication requires GitHub or Forgejo Actions");
+    }
+    if cfg.ci.publish_strategy != crate::config::PublishStrategy::Members {
+        bail!(
+            "Nix-only crate publication supports only publish_strategy = \"members\"; got {:?}",
+            cfg.ci.publish_strategy
+        );
+    }
     if !workspace_root.join("Cargo.toml").is_file() {
         bail!("[ci].publish_crates requires a Cargo workspace at the project root");
     }
@@ -859,11 +868,13 @@ pub(crate) fn nix_only_publish_files(
         required_secrets: cfg.ci.required_secrets.clone(),
         required_env: cfg.ci.required_env.clone(),
         push_branches: cfg.ci.push_branches.clone(),
+        required_gates: cfg.ci.required_gates.clone(),
         ..ci::CiOptions::default()
     };
     let mut files = Vec::new();
     for package in cargo::select_packages(&metadata, &[], true)? {
-        if package.is_publishable() {
+        // The generated publisher targets crates.io with CRATES_IO_API_TOKEN.
+        if package.is_publishable_to_crates_io() {
             files.extend(ci::publish_files(
                 platform,
                 Runtime::Nix,
@@ -1010,6 +1021,17 @@ fn run_nix_only_at(command: InitCiCommand, workspace_root: &Path) -> Result<()> 
         )?);
     }
     if !command.primary_only && cfg.ci.publish_crates {
+        // Signed-tag workflows import the fixed keys/maintainers.gpg path.
+        let trust_root = command
+            .maintainers_gpg
+            .as_ref()
+            .map(|path| path.as_str().to_owned())
+            .unwrap_or_else(|| cfg.release.signing.trust_root.clone());
+        if Path::new(&trust_root) != Path::new("keys/maintainers.gpg") {
+            bail!(
+                "Nix-only crate publication requires the default keys/maintainers.gpg trust root; got {trust_root}"
+            );
+        }
         files.extend(nix_only_publish_files(
             workspace_root,
             &cfg,

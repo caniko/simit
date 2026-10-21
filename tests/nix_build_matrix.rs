@@ -2661,10 +2661,14 @@ fn nix_only_workspace_publishes_crates_without_language_ci_or_flake_check() {
     fs::write(&config, content).unwrap();
     fs::write(
         temp.path().join("Cargo.toml"),
-        "[workspace]\nmembers = [\"core\", \"tool\"]\nresolver = \"3\"\n",
+        "[workspace]\nmembers = [\"core\", \"tool\", \"private\"]\nresolver = \"3\"\n",
     )
     .unwrap();
-    for (name, extra) in [("native-core", ""), ("native-tool", "publish = false\n")] {
+    for (name, extra) in [
+        ("native-core", ""),
+        ("native-tool", "publish = false\n"),
+        ("native-private", "publish = [\"internal\"]\n"),
+    ] {
         let member = temp.path().join(name.trim_start_matches("native-"));
         fs::create_dir_all(member.join("src")).unwrap();
         fs::write(
@@ -2687,6 +2691,7 @@ fn nix_only_workspace_publishes_crates_without_language_ci_or_flake_check() {
     assert!(!source.contains("nix flake check"), "{source}");
     assert!(temp.path().join("keys/maintainers.gpg").is_file());
     assert!(!workflows.join("publish-crate-native-tool.yaml").exists());
+    assert!(!workflows.join("publish-crate-native-private.yaml").exists());
     assert!(!workflows.join("ci.yaml").exists());
     assert!(workflows.join("nix-builds.yaml").is_file());
 
@@ -2698,4 +2703,34 @@ fn nix_only_workspace_publishes_crates_without_language_ci_or_flake_check() {
         simit::registry::FeatureStatus::Managed,
         "{audit:?}"
     );
+}
+
+#[test]
+fn nix_only_crate_publication_rejects_unsupported_shapes_without_writing() {
+    for (config_extra, args) in [
+        ("publish_strategy = \"coordinated\"\n", vec![]),
+        ("", vec!["--maintainers-gpg", "keys/custom.gpg"]),
+        ("", vec!["--platform", "gitlab"]),
+    ] {
+        let temp = project("[ci.nix_build]\nonly = true");
+        let config = temp.path().join("simit.toml");
+        let content = fs::read_to_string(&config).unwrap().replace(
+            "[ci]\n",
+            &format!("[ci]\npublish_crates = true\n{config_extra}"),
+        );
+        fs::write(&config, content).unwrap();
+        fs::write(
+            temp.path().join("Cargo.toml"),
+            "[package]\nname = \"native-core\"\nversion = \"0.1.0\"\nedition = \"2024\"\nlicense = \"MIT\"\n",
+        )
+        .unwrap();
+        fs::create_dir(temp.path().join("src")).unwrap();
+        fs::write(temp.path().join("src/lib.rs"), "").unwrap();
+        let output = generate(&temp, &args);
+        assert!(
+            !output.status.success(),
+            "{config_extra} {args:?}: {output:?}"
+        );
+        assert!(!temp.path().join(".github/workflows").exists());
+    }
 }
