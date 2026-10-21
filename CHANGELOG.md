@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Allow a `[ci].nix_builds` qualification matrix alongside `[prebuild]` when
+  `[prebuild].nix_builds` selects the published subset or `[ci.nix_build]` is
+  configured; `--prebuild-only` keeps that matrix, `only = true` still excludes
+  `[prebuild]`, and prebuild-only projects render unchanged.
 - Retain optional required-gate diagnostic artifacts in GitHub CI, signed-tag
   source builds and release verification, including failed gates but not skipped
   ones. Preserve runner compatibility, reject action-trimmed input whitespace,

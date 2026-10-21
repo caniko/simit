@@ -1127,7 +1127,7 @@ fn infer_expected_primary_ci_files(
             &config.ci.components,
         )?];
         if backend.provider() == CiProvider::Actions
-            && config.prebuild.is_none()
+            && config.ci_owns_nix_build_matrix()
             && !options.nix_builds.is_empty()
         {
             files.push(crate::render::ci::nix_build_matrix_file_with_options(
@@ -1202,7 +1202,7 @@ fn infer_expected_primary_ci_files(
             vec![generated]
         };
         if backend.provider() == CiProvider::Actions
-            && config.prebuild.is_none()
+            && config.ci_owns_nix_build_matrix()
             && !config.ci.nix_builds.is_empty()
         {
             files.push(crate::render::ci::nix_build_matrix_file_with_options(
@@ -1415,7 +1415,7 @@ fn infer_expected_primary_ci_files(
         }
     }
     if backend.provider() == CiProvider::Actions
-        && config.prebuild.is_none()
+        && config.ci_owns_nix_build_matrix()
         && !options.nix_builds.is_empty()
     {
         files.push(crate::render::ci::nix_build_matrix_file_with_options(
@@ -1467,7 +1467,7 @@ fn push_prebuild_file(
     };
     files.push(crate::render::ci::github_prebuild_file_with_policy(
         prebuild.effective_system_runners(&config.ci),
-        &config.ci.nix_builds,
+        prebuild.effective_nix_builds(&config.ci),
         prebuild,
         &config.release.artifacts,
         config.release.attic.as_ref(),
