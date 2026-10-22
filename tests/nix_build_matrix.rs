@@ -114,6 +114,25 @@ fn grouped_installables_share_a_runner_with_complete_per_output_evidence() {
             .unwrap()
             .contains("\"$SIMIT_CI_ENGINE\" ci nix-group")
     );
+    // The pinned engine's closure is reused across runs around unchanged provisioning.
+    let at = |name: &str| steps.iter().position(|s| s["name"] == name).unwrap();
+    let key =
+        "simit-engine-v1-${{ vars.SIMIT_CI_ENGINE_REVISION }}-${{ runner.os }}-${{ runner.arch }}";
+    assert_eq!(
+        steps[at("Restore grouped-build engine")]["with"]["key"],
+        key
+    );
+    assert_eq!(steps[at("Save grouped-build engine")]["with"]["key"], key);
+    assert!(at("Restore grouped-build engine") < at("Import grouped-build engine"));
+    assert!(at("Import grouped-build engine") < setup);
+    assert!(setup < at("Export grouped-build engine"));
+    assert!(at("Export grouped-build engine") < at("Save grouped-build engine"));
+    assert!(
+        steps[at("Import grouped-build engine")]["run"]
+            .as_str()
+            .unwrap()
+            .contains("nix copy --no-check-sigs --all")
+    );
     assert!(generate(&temp, &["--check", "--diff"]).status.success());
     assert!(generate(&temp, &[]).status.success());
     assert_eq!(
