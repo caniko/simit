@@ -7,9 +7,21 @@ use anyhow::Context;
 // Candidate-controlled build scripts/setup run only on fresh hosted workers,
 // independently of configured CI/release runners and their mounted credentials.
 pub(super) const CANDIDATE_RUNNER: &str = "ubuntu-24.04";
+// Setup, the workspace lane and packaging; required gates add their deadlines.
+const CANDIDATE_JOB_MINUTES: u64 = 60;
 
+/// Validates a source/publisher pair whose build and verify jobs run `options`
+/// gates serially.
 pub(super) fn validate_credential_free_source(workflow: &str, options: &CiOptions) -> Result<()> {
-    crate::config::validate_required_gate_job_budget(&options.required_gates)?;
+    crate::config::validate_required_gate_job_budget(
+        &options.required_gates,
+        CANDIDATE_JOB_MINUTES,
+    )?;
+    validate_credential_free_inputs(workflow, options)
+}
+
+/// Credential-safety checks only; gates checked here may run in their own jobs.
+pub(super) fn validate_credential_free_inputs(workflow: &str, options: &CiOptions) -> Result<()> {
     // Names are shell/YAML syntax, never expressions or executable defaults.
     // Recheck direct renderer callers as well as ProjectConfig consumers.
     for name in &options.required_env {
@@ -237,7 +249,7 @@ pub(super) fn source_workflow_with_namespace(
     w.push_str(CANDIDATE_RUNNER);
     w.push_str(&format!(
         "\n    timeout-minutes: {}\n",
-        crate::config::required_gate_job_timeout(&options.required_gates, 60)
+        crate::config::required_gate_job_timeout(&options.required_gates, CANDIDATE_JOB_MINUTES)
     ));
     push_job_env(&mut w, Platform::Github, runtime, &options.extra_env, true);
     w.push_str("    steps:\n");
@@ -418,7 +430,10 @@ pub(super) fn publisher_file_with_namespace(
         w.push_str(CANDIDATE_RUNNER);
         w.push_str(&format!(
             "\n    timeout-minutes: {}\n    steps:\n",
-            crate::config::required_gate_job_timeout(&options.required_gates, 60)
+            crate::config::required_gate_job_timeout(
+                &options.required_gates,
+                CANDIDATE_JOB_MINUTES
+            )
         ));
         bootstrap(&mut w);
         if runtime == Runtime::Nix {

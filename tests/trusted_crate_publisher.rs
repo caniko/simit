@@ -845,6 +845,79 @@ fn artifact_gate_job_budgets_cover_all_commands_and_uploads() {
 }
 
 #[test]
+fn gate_job_budgets_cover_gates_without_artifacts() {
+    for mode in ["single", "members", "coordinated"] {
+        let temp = publisher_project(mode);
+        let config = fs::read_to_string(temp.path().join("simit.toml")).unwrap();
+        let gates = "\n[[ci.required_gates]]\nid='first'\nrun='cargo test'\ntimeout_minutes=150\n[[ci.required_gates]]\nid='second'\nrun='cargo test'\ntimeout_minutes=150\n";
+        fs::write(temp.path().join("simit.toml"), format!("{config}{gates}")).unwrap();
+        let output = common::simit()
+            .current_dir(temp.path())
+            .args(["init", "ci"])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{mode}: {output:?}");
+        let mut jobs = 0;
+        for entry in fs::read_dir(temp.path().join(".github/workflows")).unwrap() {
+            let path = entry.unwrap().path();
+            let name = path.file_name().unwrap().to_string_lossy();
+            if !name.starts_with("publish-") && !name.starts_with("trusted-publish-") {
+                continue;
+            }
+            let workflow: Value =
+                serde_yaml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+            for job in workflow["jobs"].as_mapping().unwrap().values() {
+                if job["steps"]
+                    .as_sequence()
+                    .unwrap()
+                    .iter()
+                    .any(|step| step["name"] == "Required gate first")
+                {
+                    // Both gates add to the job's own 60 minutes: 60 + 150 + 150.
+                    let timeout = job["timeout-minutes"].as_u64().unwrap_or(360);
+                    assert_eq!(timeout, 360, "{mode}: {path:?}");
+                    jobs += 1;
+                }
+            }
+        }
+        assert!(jobs >= 2, "{mode}");
+        fs::write(
+            temp.path().join("simit.toml"),
+            format!(
+                "{config}{}",
+                gates.replace("timeout_minutes=150", "timeout_minutes=151")
+            ),
+        )
+        .unwrap();
+        let output = common::simit()
+            .current_dir(temp.path())
+            .args(["init", "ci"])
+            .output()
+            .unwrap();
+        assert!(
+            !output.status.success(),
+            "{mode}: accepted an over-budget shared job"
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("360"),
+            "{output:?}"
+        );
+        // Independent CI gates do not share a job budget or require a publisher.
+        let output = common::simit()
+            .current_dir(temp.path())
+            .args([
+                "init",
+                "ci",
+                "--publish-crates=false",
+                "--coordinated-publish=false",
+            ])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{mode}: {output:?}");
+    }
+}
+
+#[test]
 fn tag_archive_generation_retains_nonsecret_build_environment() {
     let temp = publisher_project("coordinated");
     let config = fs::read_to_string(temp.path().join("simit.toml")).unwrap();
