@@ -23,6 +23,29 @@ pub(super) fn checkout(node24: bool) -> Value {
     json!({"uses": github_action_ref("actions/checkout", version).split(" #").next().unwrap(), "with": {"fetch-depth": 0, "persist-credentials": false}})
 }
 
+/// Submodule gitlinks are empty unless every generated checkout fetches them.
+pub(super) fn checkout_submodules(config: &ProjectConfig, workflow: &mut Value) {
+    if !config
+        .monorepo
+        .as_ref()
+        .is_some_and(|monorepo| monorepo.submodules)
+    {
+        return;
+    }
+    let jobs = workflow.get_mut("jobs").and_then(Value::as_object_mut);
+    for job in jobs.into_iter().flat_map(|jobs| jobs.values_mut()) {
+        let steps = job.get_mut("steps").and_then(Value::as_array_mut);
+        for step in steps.into_iter().flatten() {
+            if step["uses"]
+                .as_str()
+                .is_some_and(|uses| uses.starts_with("actions/checkout@"))
+            {
+                step["with"]["submodules"] = json!("recursive");
+            }
+        }
+    }
+}
+
 pub(super) fn install_nix(node24: bool) -> Value {
     // 2.35.2 contains the lost build-slot wakeup fix (NixOS/nix fba3f6e).
     // The action's default 2.35.1 can abort Worker::run during qualification.
@@ -263,7 +286,8 @@ pub(crate) fn files(
     } else {
         config.ci.push_branches.clone()
     };
-    let workflow = json!({"name": "Monorepo qualification", "on": {"push": {"branches": branches}, "pull_request": {}, "workflow_dispatch": {}}, "permissions": {"contents": "read"}, "concurrency": {"group": "monorepo-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event.pull_request.head.ref || github.ref_name }}", "cancel-in-progress": true}, "jobs": jobs});
+    let mut workflow = json!({"name": "Monorepo qualification", "on": {"push": {"branches": branches}, "pull_request": {}, "workflow_dispatch": {}}, "permissions": {"contents": "read"}, "concurrency": {"group": "monorepo-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event.pull_request.head.ref || github.ref_name }}", "cancel-in-progress": true}, "jobs": jobs});
+    checkout_submodules(config, &mut workflow);
     let mut files = vec![GeneratedFile {
         relative_path: PathBuf::from(".github/workflows/ci.yaml"),
         content: format!(
@@ -326,6 +350,7 @@ pub(crate) fn files(
                         .clone(),
                 );
             release["jobs"]["build"]["needs"] = json!(["qualified"]);
+            checkout_submodules(config, &mut release);
             file.content = format!(
                 "{GENERATED_WORKFLOW_MARKER}\n{}",
                 serde_yaml::to_string(&release)?

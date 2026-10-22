@@ -2698,3 +2698,49 @@ fn component_automatic_changelog_drafting_uses_only_owned_history() {
     );
     assert_eq!(fixture_git(root, &["status", "--porcelain"]), "");
 }
+
+#[cfg(unix)]
+#[test]
+fn submodule_components_fetch_recursively_in_every_generated_checkout() {
+    let temp = fixture();
+    let root = temp.path();
+    enroll_release_checks(root);
+    let config = fs::read_to_string(root.join("simit.toml"))
+        .unwrap()
+        .replace(
+            "runtime = \"nix\"",
+            "runtime = \"nix\"\npublish_crates = true",
+        )
+        .replace(
+            "schema_version = 1",
+            "schema_version = 1\nsubmodules = true",
+        );
+    write(root, "simit.toml", &config);
+    let output = common::simit()
+        .current_dir(root)
+        .args(["init", "ci"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    for workflow in ["ci.yaml", "publish-crate-engine.yaml"] {
+        let workflow: serde_yaml::Value = serde_yaml::from_slice(
+            &fs::read(root.join(".github/workflows").join(workflow)).unwrap(),
+        )
+        .unwrap();
+        let checkouts: Vec<_> = workflow["jobs"]
+            .as_mapping()
+            .unwrap()
+            .values()
+            .flat_map(|job| job["steps"].as_sequence().unwrap())
+            .filter(|step| {
+                step["uses"]
+                    .as_str()
+                    .is_some_and(|uses| uses.starts_with("actions/checkout@"))
+            })
+            .collect();
+        assert!(checkouts.len() > 1);
+        for step in checkouts {
+            assert_eq!(step["with"]["submodules"], "recursive");
+        }
+    }
+}

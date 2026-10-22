@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Add opt-in `[monorepo].submodules`: generated GitHub qualification and source
+  publication checkouts fetch Git submodule components recursively. Output is
+  unchanged when it is absent.
 - Add `[release.artifacts].netrc_secret` so GitHub release and prebuild jobs
   authenticate private Nix substituters from a netrc Actions secret, written
   with mode 0600 under `$RUNNER_TEMP` before Nix is installed. Non-GitHub
