@@ -76,6 +76,7 @@ pub(super) fn files(
                     .unwrap()
                     .clone(),
             );
+            super::ci::checkout_submodules(config, &mut workflow);
             let source_path = format!(
                 ".github/workflows/publish-{}-{}.yaml",
                 registry.name(),

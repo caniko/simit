@@ -100,6 +100,11 @@ declared environment and timeout. `systems` can select native runners using
 flakes retain their existing ownership contract. Language and publication
 overrides must not be used to replace component qualification commands.
 
+Set `submodules = true` when components are Git submodules. Every generated
+GitHub `actions/checkout` step in qualification and source publication workflows
+then fetches them with `submodules: recursive`. Trusted publishers still admit
+only plain signed source trees and reject submodule entries.
+
 ### Running a declared check
 
 ```console

@@ -28,6 +28,9 @@ pub struct Config {
     /// Root-relative, project-owned treefmt modules composed by init flake.
     #[serde(default)]
     pub formatter_modules: Vec<String>,
+    /// Components are Git submodules; generated checkouts fetch them recursively.
+    #[serde(default)]
+    pub submodules: bool,
 }
 
 fn default_shared_paths() -> Vec<String> {
