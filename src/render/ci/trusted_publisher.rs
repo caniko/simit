@@ -10,11 +10,18 @@ pub(super) const CANDIDATE_RUNNER: &str = "ubuntu-24.04";
 // Setup, the workspace lane and packaging; required gates add their deadlines.
 const CANDIDATE_JOB_MINUTES: u64 = 60;
 
+/// Validates a source/publisher pair whose build and verify jobs run `options`
+/// gates serially.
 pub(super) fn validate_credential_free_source(workflow: &str, options: &CiOptions) -> Result<()> {
     crate::config::validate_required_gate_job_budget(
         &options.required_gates,
         CANDIDATE_JOB_MINUTES,
     )?;
+    validate_credential_free_inputs(workflow, options)
+}
+
+/// Credential-safety checks only; gates checked here may run in their own jobs.
+pub(super) fn validate_credential_free_inputs(workflow: &str, options: &CiOptions) -> Result<()> {
     // Names are shell/YAML syntax, never expressions or executable defaults.
     // Recheck direct renderer callers as well as ProjectConfig consumers.
     for name in &options.required_env {
