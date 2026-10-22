@@ -297,6 +297,8 @@ Projects requiring independent push/PR originals retain their existing
 `separate_events` policies until their custody enrollment and required contexts
 have migrated together. Combining branch filters with explicit `separate_events`
 is rejected before generation. Release/tag triggers retain their separate policy.
+`[prebuild].push_branches` filters the native prebuild's branch pushes the same
+way; pull requests still run it and releases still reuse it via `workflow_call`.
 Distinct MSRV, feature, platform, extracted-package, all-system evaluation and
 fresh-execution checks are separate acceptance cases, not duplicate work.
 
@@ -345,6 +347,12 @@ The immutable engine supports `x86_64-linux`, `aarch64-linux` and
 generation; custom runners must pass the system guard before provisioning.
 Grouped configuration cannot override reserved `SIMIT_CI_*`, `SIMIT_NIX_*` or
 `INSTALLABLES` runtime inputs.
+The pinned engine's closure is reused across runs through the GitHub Actions
+cache key `simit-engine-v1-<revision>-<os>-<arch>`, so group jobs evaluate the
+pin instead of compiling Simit each time. Provisioning, the source revision and
+the executable digest evidence are unchanged; a miss or unreadable entry builds
+normally. Like `cache_installables`, entries carry the trust of the
+repository's default-branch runs.
 
 The command reads the generated environment lists, or accepts
 `--spec <file> --results <directory>`. The public

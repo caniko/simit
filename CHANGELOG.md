@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   submodules pinned by the signed superproject tree (`--source-submodules`):
   `.gitmodules` from the signed tree, same-owner HTTPS remotes only, exact
   pinned commits, no nesting. Gitlinks remain rejected without the setting.
+- Add `[release.artifacts].netrc_secret` so GitHub release and prebuild jobs
+  authenticate private Nix substituters from a netrc Actions secret, written
+  with mode 0600 under `$RUNNER_TEMP` before Nix is installed. Non-GitHub
+  release backends reject it.
 - GitLab primaries: `init ci --check` now reports stale generated workflows
   (such as a former GitHub `nix-builds.yaml`) exactly as a write removes them,
   and `audit_ci` expects the GitHub prebuild generated beside `.gitlab-ci.yml`.
@@ -43,8 +47,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   retain Nix-only checks with the production build and lighten the Rustdoc shell.
 - Raise Simit's minimum Rust version to 1.88 to use the security-patched Hickory
   DNS resolver; generated projects keep their independently declared minimums.
+- Reuse the pinned grouped-build engine's closure across runs through the
+  GitHub Actions cache instead of compiling Simit in every group job;
+  provisioning and its revision/digest evidence are unchanged.
 
 ### Added
+
+- Add `[prebuild].push_branches` to limit the native prebuild's branch pushes;
+  pull requests and release `workflow_call` are unchanged, and Simit's own
+  macOS prebuild now runs on pull requests and `trunk` pushes only.
 
 - Reuse declared heavy Nix inputs of grouped GitHub matrices across runs through
   `[ci.nix_build].cache_installables`, keyed by exact derivation and refusing any

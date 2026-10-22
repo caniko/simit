@@ -1169,9 +1169,27 @@ pub fn github_prebuild_file_with_policy(
         );
         workflow.push_str(": Attic token for trusted push and release publication.\n");
     }
-    workflow.push_str("name: Native Nix prebuild\n\non:\n  push:\n    branches: [\"**\"]\n    tags-ignore: [\"**\"]\n  pull_request:\n  workflow_dispatch:\n  workflow_call:\n    inputs:\n      release:\n        required: false\n        type: boolean\n        default: false\n");
+    if let Some(secret) = &artifacts.netrc_secret {
+        if attic.is_none() {
+            workflow.push_str("# Required repository secret:\n");
+        }
+        workflow.push_str(&format!(
+            "# - {secret}: netrc for private Nix substituters.\n"
+        ));
+    }
+    workflow.push_str("name: Native Nix prebuild\n\non:\n  push:\n");
+    push_ci_branches(&mut workflow, &prebuild.push_branches);
+    workflow.push_str("    tags-ignore: [\"**\"]\n  pull_request:\n  workflow_dispatch:\n  workflow_call:\n    inputs:\n      release:\n        required: false\n        type: boolean\n        default: false\n");
+    if attic.is_some() || artifacts.netrc_secret.is_some() {
+        workflow.push_str("    secrets:\n");
+    }
     if attic.is_some() {
-        workflow.push_str("    secrets:\n      attic_token:\n        required: true\n");
+        workflow.push_str("      attic_token:\n        required: true\n");
+    }
+    if let Some(secret) = &artifacts.netrc_secret {
+        // Declared under its repository name so push runs and release calls
+        // read the same `secrets.<name>`.
+        workflow.push_str(&format!("      {secret}:\n        required: false\n"));
     }
     workflow.push_str("\npermissions:\n  contents: read\n\n");
     workflow.push_str("concurrency:\n  group: ${{ github.workflow_ref }}-${{ github.event_name }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.head_ref || github.ref_name }}-prebuild\n  cancel-in-progress: ${{ !inputs.release && (github.event_name == 'push' || github.event_name == 'pull_request') }}\n\n");
@@ -1189,11 +1207,12 @@ pub fn github_prebuild_file_with_policy(
     let checkout_version = github_matrix_action_version(system_runners, "v7.0.1", "v4.3.1");
     let artifact_version = github_matrix_action_version(system_runners, "v7.0.2", "v4.6.2");
     push_event_checkout_step_with_version(&mut workflow, Platform::Github, checkout_version);
-    push_install_nix_step_with_cache(
+    push_install_nix_step_with_netrc(
         &mut workflow,
         Platform::Github,
         &artifacts.substituters,
         &artifacts.trusted_public_keys,
+        artifacts.netrc_secret.as_deref(),
     );
     // Reusable release prebuilds also validate their own event checkout before
     // any project-controlled evaluation/build or Attic credential use.
@@ -4669,6 +4688,28 @@ fn push_install_nix_step_with_cache(
     substituters: &[String],
     trusted_public_keys: &[String],
 ) {
+    push_install_nix_step_with_netrc(workflow, platform, substituters, trusted_public_keys, None);
+}
+
+pub(crate) const NIX_NETRC_FILE_CONFIG: &str = "netrc-file = ${{ runner.temp }}/simit-nix-netrc";
+
+/// Write a netrc secret where `NIX_NETRC_FILE_CONFIG` points the Nix daemon.
+/// The secret reaches the script only through `env`, never its body. An empty
+/// secret (fork pull requests) leaves an empty netrc, so substitution stays
+/// anonymous instead of failing.
+pub(crate) fn push_nix_netrc_step(workflow: &mut String, secret: &str) {
+    workflow.push_str("      - name: Configure Nix substituter credentials\n        env:\n          SIMIT_NIX_NETRC: ${{ secrets.");
+    workflow.push_str(secret);
+    workflow.push_str(" }}\n        run: |\n          umask 077\n          printf '%s\\n' \"$SIMIT_NIX_NETRC\" > \"$RUNNER_TEMP/simit-nix-netrc\"\n");
+}
+
+fn push_install_nix_step_with_netrc(
+    workflow: &mut String,
+    platform: Platform,
+    substituters: &[String],
+    trusted_public_keys: &[String],
+    netrc_secret: Option<&str>,
+) {
     if platform == Platform::Forgejo {
         if !substituters.is_empty() || !trusted_public_keys.is_empty() {
             let mut config = String::new();
@@ -4690,10 +4731,13 @@ fn push_install_nix_step_with_cache(
         return;
     }
 
+    if let Some(secret) = netrc_secret {
+        push_nix_netrc_step(workflow, secret);
+    }
     workflow.push_str("      - name: Install Nix\n");
     workflow.push_str("        uses: ");
     workflow.push_str(&github_action_ref("cachix/install-nix-action", "v31.11.1"));
-    if !substituters.is_empty() || !trusted_public_keys.is_empty() {
+    if !substituters.is_empty() || !trusted_public_keys.is_empty() || netrc_secret.is_some() {
         workflow.push_str("\n        with:\n          extra_nix_config: |\n            experimental-features = nix-command flakes\n");
         if !substituters.is_empty() {
             workflow.push_str("            substituters = ");
@@ -4703,6 +4747,11 @@ fn push_install_nix_step_with_cache(
         if !trusted_public_keys.is_empty() {
             workflow.push_str("            trusted-public-keys = ");
             workflow.push_str(&trusted_public_keys.join(" "));
+            workflow.push('\n');
+        }
+        if netrc_secret.is_some() {
+            workflow.push_str("            ");
+            workflow.push_str(NIX_NETRC_FILE_CONFIG);
             workflow.push('\n');
         }
         workflow.push('\n');

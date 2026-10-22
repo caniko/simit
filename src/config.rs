@@ -1118,6 +1118,10 @@ pub struct PrebuildConfig {
     /// the prebuild publishes.
     #[serde(default)]
     pub nix_builds: Vec<String>,
+    /// Branch pushes that run the prebuild; empty preserves every branch.
+    /// Pull requests still run it, and release publication uses `workflow_call`.
+    #[serde(default)]
+    pub push_branches: Vec<String>,
 }
 
 impl PrebuildConfig {
@@ -1431,6 +1435,8 @@ pub struct ArtifactsConfig {
     /// `nix.conf` trusted-public-keys added in the install-nix step.
     #[serde(default)]
     pub trusted_public_keys: Vec<String>,
+    /// GitHub Actions secret holding netrc content for private substituters.
+    pub netrc_secret: Option<String>,
     /// Flake attribute whose `.version` must equal the tag
     /// (`nix eval --raw .#<attr>.version`). Skipped when unset.
     pub version_attr: Option<String>,
@@ -2597,6 +2603,12 @@ impl ProjectConfig {
                 token_secret,
             )?;
         }
+        if let Some(netrc_secret) = &self.release.artifacts.netrc_secret {
+            validate_github_actions_secret_identifier(
+                "simit project config: [release.artifacts].netrc_secret",
+                netrc_secret,
+            )?;
+        }
         if let Some(prebuild) = &self.prebuild {
             if prebuild.effective_system_runners(&self.ci).is_empty() {
                 bail!(
@@ -2611,6 +2623,7 @@ impl ProjectConfig {
                 "simit project config: [prebuild].nix_builds",
                 &prebuild.nix_builds,
             )?;
+            validate_event_patterns("[prebuild].push_branches", &prebuild.push_branches)?;
             if prebuild
                 .nix_builds
                 .iter()

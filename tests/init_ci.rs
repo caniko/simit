@@ -1370,6 +1370,42 @@ runtime = "nix"
 }
 
 #[test]
+fn github_prebuild_push_branches_filter_only_branch_pushes() {
+    let temp = init_flake_only();
+    fs::write(
+        temp.path().join("simit.toml"),
+        r#"[prebuild]
+push_branches = ["trunk"]
+
+[prebuild.system_runners]
+"x86_64-linux" = "ubuntu-24.04"
+
+[ci]
+provider = "actions"
+platform = "github"
+runtime = "nix"
+nix_builds = [".#server"]
+"#,
+    )
+    .unwrap();
+    let status = simit()
+        .current_dir(temp.path())
+        .args(["init", "ci", "--platform", "github", "--runtime", "nix"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let workflow = read(&temp.path().join(".github/workflows/prebuild.yaml"));
+    assert_yaml_parses(&workflow);
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
+    let on = &yaml["on"];
+    assert_eq!(on["push"]["branches"][0].as_str(), Some("trunk"));
+    assert_eq!(on["push"]["branches"].as_sequence().unwrap().len(), 1);
+    assert_eq!(on["push"]["tags-ignore"][0].as_str(), Some("**"));
+    assert!(on.get("pull_request").is_some());
+    assert!(on["workflow_call"]["inputs"]["release"].is_mapping());
+}
+
+#[test]
 fn github_prebuild_is_reusable_publishes_attic_and_tracks_drift() {
     let temp = init_flake_only();
     fs::write(

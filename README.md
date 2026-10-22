@@ -737,6 +737,16 @@ Projects using the conventional harbor-rs output can opt in with the shorter
 `nix_bundle_attrs = ["release-bundle"]` unless an explicit attribute list is
 provided.
 
+When a bundle needs paths from a private substituter, set
+`[release.artifacts].netrc_secret` to the name of a GitHub Actions secret
+holding netrc content (for example `machine attic.example.com password
+<token>`). Every GitHub release and prebuild job that installs Nix with the
+`[release.artifacts]` substituters writes it to a mode-0600 file under
+`$RUNNER_TEMP` before installing Nix and points `netrc-file` at it.
+Same-repository pull-request prebuilds receive it too, so use a pull-only
+token; fork pull requests get an empty netrc and substitute anonymously. Other
+release backends reject the key.
+
 GitHub flake-input publication is additive to the primary CI provider. Point
 `attic_app` at an app built with `rs-harbor.lib.mkAtticPush { flake = "."; }`:
 
