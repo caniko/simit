@@ -1118,6 +1118,10 @@ pub struct PrebuildConfig {
     /// the prebuild publishes.
     #[serde(default)]
     pub nix_builds: Vec<String>,
+    /// Branch pushes that run the prebuild; empty preserves every branch.
+    /// Pull requests still run it, and release publication uses `workflow_call`.
+    #[serde(default)]
+    pub push_branches: Vec<String>,
 }
 
 impl PrebuildConfig {
@@ -2611,6 +2615,7 @@ impl ProjectConfig {
                 "simit project config: [prebuild].nix_builds",
                 &prebuild.nix_builds,
             )?;
+            validate_event_patterns("[prebuild].push_branches", &prebuild.push_branches)?;
             if prebuild
                 .nix_builds
                 .iter()

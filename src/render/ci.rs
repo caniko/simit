@@ -1166,7 +1166,9 @@ pub fn github_prebuild_file_with_policy(
         );
         workflow.push_str(": Attic token for trusted push and release publication.\n");
     }
-    workflow.push_str("name: Native Nix prebuild\n\non:\n  push:\n    branches: [\"**\"]\n    tags-ignore: [\"**\"]\n  pull_request:\n  workflow_dispatch:\n  workflow_call:\n    inputs:\n      release:\n        required: false\n        type: boolean\n        default: false\n");
+    workflow.push_str("name: Native Nix prebuild\n\non:\n  push:\n");
+    push_ci_branches(&mut workflow, &prebuild.push_branches);
+    workflow.push_str("    tags-ignore: [\"**\"]\n  pull_request:\n  workflow_dispatch:\n  workflow_call:\n    inputs:\n      release:\n        required: false\n        type: boolean\n        default: false\n");
     if attic.is_some() {
         workflow.push_str("    secrets:\n      attic_token:\n        required: true\n");
     }
