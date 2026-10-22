@@ -1304,12 +1304,12 @@ Artifact-bearing CI gates apply `timeout_minutes` to the command step and give
 the job fifteen extra minutes for setup and upload, so their configured command
 timeout must be at most 345 minutes. Other gates retain their existing limit.
 Signed-source and trusted verification jobs run every gate serially, with or
-without artifacts, and reserve ten setup minutes plus all gate command
-deadlines and five minutes per diagnostic upload, with a minimum
-job limit of sixty minutes; larger existing job limits are retained.
-Configurations exceeding the shared 360-minute
-publishing job limit are rejected, including hosted-release validation jobs;
-independent CI gates do not share that limit.
+without artifacts. They add all gate command deadlines and five minutes per
+diagnostic upload to their own sixty-minute limit, which stays reserved for
+setup, the workspace lane and packaging. Hosted-release validation jobs add the
+same gate budget to ten setup minutes. Configurations exceeding the shared
+360-minute publishing job limit are rejected; independent CI gates do not share
+that limit.
 Workflow/job cancellation can still prevent an upload; this is diagnostic
 retention, not an external custody guarantee.
 

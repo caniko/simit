@@ -849,7 +849,7 @@ fn gate_job_budgets_cover_gates_without_artifacts() {
     for mode in ["single", "members", "coordinated"] {
         let temp = publisher_project(mode);
         let config = fs::read_to_string(temp.path().join("simit.toml")).unwrap();
-        let gates = "\n[[ci.required_gates]]\nid='first'\nrun='cargo test'\ntimeout_minutes=100\n[[ci.required_gates]]\nid='second'\nrun='cargo test'\ntimeout_minutes=100\n";
+        let gates = "\n[[ci.required_gates]]\nid='first'\nrun='cargo test'\ntimeout_minutes=150\n[[ci.required_gates]]\nid='second'\nrun='cargo test'\ntimeout_minutes=150\n";
         fs::write(temp.path().join("simit.toml"), format!("{config}{gates}")).unwrap();
         let output = common::simit()
             .current_dir(temp.path())
@@ -873,9 +873,9 @@ fn gate_job_budgets_cover_gates_without_artifacts() {
                     .iter()
                     .any(|step| step["name"] == "Required gate first")
                 {
-                    // Both gates run serially in this job: 10 setup + 100 + 100.
+                    // Both gates add to the job's own 60 minutes: 60 + 150 + 150.
                     let timeout = job["timeout-minutes"].as_u64().unwrap_or(360);
-                    assert!((210..=360).contains(&timeout), "{mode}: {path:?}");
+                    assert_eq!(timeout, 360, "{mode}: {path:?}");
                     jobs += 1;
                 }
             }
@@ -885,7 +885,7 @@ fn gate_job_budgets_cover_gates_without_artifacts() {
             temp.path().join("simit.toml"),
             format!(
                 "{config}{}",
-                gates.replace("timeout_minutes=100", "timeout_minutes=176")
+                gates.replace("timeout_minutes=150", "timeout_minutes=151")
             ),
         )
         .unwrap();

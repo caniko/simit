@@ -416,23 +416,20 @@ fn default_gate_timeout_minutes() -> u64 {
     30
 }
 
-/// Preserve existing job minima, reserving setup and every gate/upload deadline.
-/// Gates run serially in shared jobs whether or not they retain artifacts.
-pub(crate) fn required_gate_job_timeout(gates: &[RequiredGate], minimum: u64) -> u64 {
-    gates
-        .iter()
-        .fold(10_u64, |budget, gate| {
-            budget
-                .saturating_add(gate.timeout_minutes)
-                .saturating_add(if gate.artifacts.is_some() { 5 } else { 0 })
-        })
-        .max(minimum)
+/// Gates run serially in shared jobs whether or not they retain artifacts, so
+/// every gate/upload deadline is added to the `base` limit of the job's own steps.
+pub(crate) fn required_gate_job_timeout(gates: &[RequiredGate], base: u64) -> u64 {
+    gates.iter().fold(base, |budget, gate| {
+        budget
+            .saturating_add(gate.timeout_minutes)
+            .saturating_add(if gate.artifacts.is_some() { 5 } else { 0 })
+    })
 }
 
-pub(crate) fn validate_required_gate_job_budget(gates: &[RequiredGate]) -> Result<()> {
-    if required_gate_job_timeout(gates, 0) > 360 {
+pub(crate) fn validate_required_gate_job_budget(gates: &[RequiredGate], base: u64) -> Result<()> {
+    if required_gate_job_timeout(gates, base) > 360 {
         bail!(
-            "required gates need a shared publishing job budget of at most 360 minutes, including all gate timeouts, 10 setup minutes and 5 minutes per artifact upload"
+            "required gates need a shared publishing job budget of at most 360 minutes: {base} minutes for the job's own steps plus all gate timeouts and 5 minutes per artifact upload"
         );
     }
     Ok(())

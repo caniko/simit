@@ -36,8 +36,9 @@ pub fn run(command: InitReleaseCommand) -> Result<()> {
 
     let backend =
         crate::ci_resolution::release_backend(&cfg, command.platform, command.ci_provider)?;
-    // The hosted validation job runs every required gate serially.
-    crate::config::validate_required_gate_job_budget(&cfg.ci.required_gates)?;
+    // The hosted validation job runs every required gate serially after
+    // about ten minutes of checkout, Nix setup and tag validation.
+    crate::config::validate_required_gate_job_budget(&cfg.ci.required_gates, 10)?;
     let platform = backend.platform();
     let provider = backend.provider();
     if platform == Platform::Gitlab {

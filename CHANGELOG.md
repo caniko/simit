@@ -7,9 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- Signed-source and trusted crate verification jobs reserve every required
-  gate's deadline even when no gate retains artifacts. They previously stayed at
-  60 minutes and cancelled serial gates mid-release. Generating publishers and
+- Signed-source and trusted crate verification jobs add every required gate's
+  deadline to their own 60 minutes, even when no gate retains artifacts. They
+  previously stayed at 60 minutes and cancelled serial gates mid-release, or
+  left the workspace lane and packaging only the slack after artifact-bearing
+  gates. Generating publishers and
   hosted releases whose serial gates exceed the 360-minute job limit now fails
   with or without artifacts; independent CI gate jobs and local release
   commands are no longer subject to that limit.
