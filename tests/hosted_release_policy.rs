@@ -153,6 +153,13 @@ fn hosted_release_gates_share_the_bounded_job_budget() {
                     "{output:?}"
                 );
             }
+            // Tooling that only selects the release backend renders no shared job.
+            let output = common::simit()
+                .current_dir(dir.path())
+                .args(["release", "secrets", "contract", "--json"])
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{timeout}: {output:?}");
             assert!(!dir.path().join(".github/workflows/release.yml").exists());
         }
     }

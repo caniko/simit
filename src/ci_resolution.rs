@@ -81,7 +81,6 @@ pub fn release_backend(
     let backend = CiBackend::from_parts(provider, platform)?;
     cfg.ci
         .validate_required_gate_artifacts_backend(provider, platform)?;
-    crate::config::validate_required_gate_job_budget(&cfg.ci.required_gates)?;
     Ok(backend)
 }
 
