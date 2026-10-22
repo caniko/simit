@@ -114,6 +114,25 @@ fn grouped_installables_share_a_runner_with_complete_per_output_evidence() {
             .unwrap()
             .contains("\"$SIMIT_CI_ENGINE\" ci nix-group")
     );
+    // The pinned engine's closure is reused across runs around unchanged provisioning.
+    let at = |name: &str| steps.iter().position(|s| s["name"] == name).unwrap();
+    let key =
+        "simit-engine-v1-${{ vars.SIMIT_CI_ENGINE_REVISION }}-${{ runner.os }}-${{ runner.arch }}";
+    assert_eq!(
+        steps[at("Restore grouped-build engine")]["with"]["key"],
+        key
+    );
+    assert_eq!(steps[at("Save grouped-build engine")]["with"]["key"], key);
+    assert!(at("Restore grouped-build engine") < at("Import grouped-build engine"));
+    assert!(at("Import grouped-build engine") < setup);
+    assert!(setup < at("Export grouped-build engine"));
+    assert!(at("Export grouped-build engine") < at("Save grouped-build engine"));
+    assert!(
+        steps[at("Import grouped-build engine")]["run"]
+            .as_str()
+            .unwrap()
+            .contains("nix copy --no-check-sigs --all")
+    );
     assert!(generate(&temp, &["--check", "--diff"]).status.success());
     assert!(generate(&temp, &[]).status.success());
     assert_eq!(
@@ -923,15 +942,23 @@ fn committed_engine_revision_is_the_fork_safe_fallback_for_the_repository_variab
     let result = generate(&temp, &[]);
     assert!(result.status.success(), "{result:?}");
     let value = workflow(&temp);
-    let setup = value["jobs"]["build"]["steps"]
-        .as_sequence()
-        .unwrap()
-        .iter()
-        .find(|s| s["name"] == "Provision grouped-build Rust engine")
-        .unwrap();
+    let steps = value["jobs"]["build"]["steps"].as_sequence().unwrap();
+    let step = |name: &str| steps.iter().find(|s| s["name"] == name).unwrap();
+    let revision = format!("(vars.SIMIT_CI_ENGINE_REVISION || '{pin}')");
     assert_eq!(
-        setup["env"]["SIMIT_CI_ENGINE_REVISION"],
-        format!("${{{{ vars.SIMIT_CI_ENGINE_REVISION || '{pin}' }}}}").as_str()
+        step("Provision grouped-build Rust engine")["env"]["SIMIT_CI_ENGINE_REVISION"],
+        format!("${{{{ {revision} }}}}").as_str()
+    );
+    // The engine cache follows the effective revision, so fork runs reuse it too.
+    let key = format!(
+        "simit-engine-v1-${{{{ {revision} }}}}-${{{{ runner.os }}}}-${{{{ runner.arch }}}}"
+    );
+    for name in ["Restore grouped-build engine", "Save grouped-build engine"] {
+        assert_eq!(step(name)["with"]["key"], key.as_str());
+    }
+    assert_eq!(
+        step("Restore grouped-build engine")["if"],
+        format!("${{{{ {revision} != '' }}}}").as_str()
     );
     assert!(generate(&temp, &["--check"]).status.success());
 

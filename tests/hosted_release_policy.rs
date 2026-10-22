@@ -108,6 +108,86 @@ fn required_gate_artifacts_follow_the_effective_release_backend_and_runner() {
 }
 
 #[test]
+fn netrc_secret_authenticates_github_release_nix_substituters() {
+    let config = "[ci]\nplatform='github'\n[release.github]\nrepo='example/player'\n[prebuild]\nrelease_archives=true\nsystem_runners={aarch64-darwin='macos-15'}\n[release.artifacts]\nrunner='ubuntu-24.04'\nprebuild_binaries=true\nsign=false\nsubstituters=['https://attic.example/private']\n";
+    let netrc_file = "netrc-file = ${{ runner.temp }}/simit-nix-netrc\n";
+    let prebuild = |dir: &Path| {
+        let cfg = simit::config::ProjectConfig::load(dir).unwrap();
+        let prebuild = cfg.prebuild.as_ref().unwrap();
+        simit::render::ci::github_prebuild_file(
+            &prebuild.system_runners,
+            &[],
+            prebuild,
+            &cfg.release.artifacts,
+            None,
+        )
+        .unwrap()
+        .content
+    };
+
+    let dir = project(config);
+    for workflow in [render(dir.path()), prebuild(dir.path())] {
+        assert!(!workflow.contains("netrc"), "{workflow}");
+    }
+
+    let dir = project(&format!("{config}netrc_secret='ATTIC_NETRC'\n"));
+    for (workflow, job, secret) in [
+        (render(dir.path()), "release", "${{ secrets.ATTIC_NETRC }}"),
+        (prebuild(dir.path()), "build", "${{ secrets.ATTIC_NETRC }}"),
+    ] {
+        let yaml: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
+        let steps = yaml["jobs"][job]["steps"].as_sequence().unwrap();
+        let write = steps
+            .iter()
+            .position(|step| step["name"] == "Configure Nix substituter credentials")
+            .unwrap();
+        assert_eq!(steps[write]["env"]["SIMIT_NIX_NETRC"], secret);
+        assert!(!steps[write]["run"].as_str().unwrap().contains("${{"));
+        let nix_config = steps[write + 1]["with"]["extra_nix_config"]
+            .as_str()
+            .unwrap();
+        assert!(nix_config.contains(netrc_file), "{nix_config}");
+        assert!(workflow.contains("# - ATTIC_NETRC: netrc for private Nix substituters."));
+        if job == "build" {
+            assert_eq!(
+                yaml["on"]["workflow_call"]["secrets"]["ATTIC_NETRC"]["required"],
+                false
+            );
+        }
+    }
+    let release: serde_yaml::Value = serde_yaml::from_str(&render(dir.path())).unwrap();
+    assert_eq!(
+        release["jobs"]["prebuild"]["secrets"]["ATTIC_NETRC"],
+        "${{ secrets.ATTIC_NETRC }}"
+    );
+
+    for (config, error) in [
+        (
+            format!("{config}netrc_secret='ATTIC_NETRC'\n")
+                .replace("[release.github]", "[release.codeberg]"),
+            "netrc_secret requires the effective GitHub Actions backend",
+        ),
+        (
+            format!("{config}netrc_secret='GITHUB_NETRC'\n"),
+            "reserved GITHUB_ prefix",
+        ),
+    ] {
+        let dir = project(&config);
+        let output = common::simit()
+            .current_dir(dir.path())
+            .env("XDG_CONFIG_HOME", dir.path().join(".xdg"))
+            .args(["init", "release", "--print"])
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(error),
+            "{output:?}"
+        );
+    }
+}
+
+#[test]
 fn hosted_release_artifact_gates_share_the_bounded_upload_budget() {
     for prebuild in [
         "",

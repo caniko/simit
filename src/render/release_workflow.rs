@@ -189,6 +189,15 @@ pub fn credential_contract(inputs: &ReleaseWorkflowInputs<'_>) -> Vec<ReleaseCre
             "Optional password for COSIGN_PRIVATE_KEY.",
         ));
     }
+    if let Some(secret) = &inputs.artifacts.netrc_secret {
+        credentials.push(ReleaseCredential::secret(
+            secret,
+            ReleaseCredentialScope::Repo,
+            "nix",
+            true,
+            "netrc content authenticating private Nix substituters.",
+        ));
+    }
     if let Some(apt) = inputs.apt.filter(|_| channel_enabled(inputs, "apt")) {
         let required = channel_credential_required(inputs, "apt", true);
         let apt_gpg_fingerprint_variable = apt_fingerprint_variable(apt);
@@ -539,16 +548,19 @@ pub fn render(inputs: &ReleaseWorkflowInputs<'_>) -> String {
     }
     if github_prebuild {
         w.push_str("  prebuild:\n    needs: validate\n    uses: ./.github/workflows/prebuild.yaml\n    with:\n      release: true\n");
-        if let Some(attic) = inputs.attic.filter(|_| prebuild_publishes_attic(inputs)) {
+        let attic = inputs.attic.filter(|_| prebuild_publishes_attic(inputs));
+        if attic.is_some() || inputs.artifacts.netrc_secret.is_some() {
+            w.push_str("    secrets:\n");
+        }
+        if let Some(attic) = attic {
             let token_secret = attic
                 .token_secret
                 .as_deref()
                 .expect("validated GitHub Attic token secret");
-            writeln!(
-                w,
-                "    secrets:\n      attic_token: ${{{{ secrets.{token_secret} }}}}"
-            )
-            .expect("write");
+            writeln!(w, "      attic_token: ${{{{ secrets.{token_secret} }}}}").expect("write");
+        }
+        if let Some(secret) = &inputs.artifacts.netrc_secret {
+            writeln!(w, "      {secret}: ${{{{ secrets.{secret} }}}}").expect("write");
         }
     }
     w.push_str("  release:\n");
@@ -684,6 +696,9 @@ fn push_secrets_header(w: &mut String, inputs: &ReleaseWorkflowInputs<'_>) {
             "# - MINISIGN_SECRET_KEY, MINISIGN_PASSWORD: minisign signing of SHA256SUMS.txt.\n",
         );
         w.push_str("# - COSIGN_PRIVATE_KEY, COSIGN_PASSWORD: optional fallback when keyless Sigstore OIDC is unavailable.\n");
+    }
+    if let Some(secret) = &inputs.artifacts.netrc_secret {
+        writeln!(w, "# - {secret}: netrc for private Nix substituters.").expect("write");
     }
     if let Some(apt) = inputs.apt.filter(|_| channel_enabled(inputs, "apt")) {
         writeln!(
@@ -840,6 +855,9 @@ fn push_checkout(w: &mut String, platform: Platform, runner: &str) {
 }
 
 fn push_install_nix(w: &mut String, platform: Platform, artifacts: &ArtifactsConfig) {
+    if let Some(secret) = &artifacts.netrc_secret {
+        crate::render::ci::push_nix_netrc_step(w, secret);
+    }
     w.push_str("      - uses: ");
     if platform == Platform::Forgejo {
         w.push_str(&immutable_action_ref(
@@ -869,6 +887,14 @@ fn push_install_nix(w: &mut String, platform: Platform, artifacts: &ArtifactsCon
             w,
             "            trusted-public-keys = {}",
             artifacts.trusted_public_keys.join(" ")
+        )
+        .expect("write");
+    }
+    if artifacts.netrc_secret.is_some() {
+        writeln!(
+            w,
+            "            {}",
+            crate::render::ci::NIX_NETRC_FILE_CONFIG
         )
         .expect("write");
     }
@@ -2772,6 +2798,7 @@ mod tests {
             runner: Some("atlas".to_owned()),
             substituters: vec!["https://cache.example/c".to_owned()],
             trusted_public_keys: vec!["c:abc=".to_owned()],
+            netrc_secret: None,
             version_attr: Some("modde".to_owned()),
             supply_chain_command: Some("cargo deny check".to_owned()),
             build_commands: vec!["nix build .#modde --out-link release/x".to_owned()],

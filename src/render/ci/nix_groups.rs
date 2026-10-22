@@ -115,11 +115,12 @@ pub(super) fn render(
     // committed fallback serves runs without repository variables (fork PRs),
     // which already execute their own head's workflow file.
     let revision = match &options.engine_revision {
-        Some(revision) => format!("${{{{ vars.SIMIT_CI_ENGINE_REVISION || '{revision}' }}}}"),
-        None => "${{ vars.SIMIT_CI_ENGINE_REVISION }}".to_owned(),
+        Some(revision) => format!("(vars.SIMIT_CI_ENGINE_REVISION || '{revision}')"),
+        None => "vars.SIMIT_CI_ENGINE_REVISION".to_owned(),
     };
+    push_engine_cache_restore(&mut workflow, &revision);
     workflow.push_str(&format!(
-        "      - name: Provision grouped-build Rust engine\n        shell: bash\n        env:\n          SIMIT_CI_ENGINE_REVISION: {revision}\n"
+        "      - name: Provision grouped-build Rust engine\n        shell: bash\n        env:\n          SIMIT_CI_ENGINE_REVISION: ${{{{ {revision} }}}}\n"
     ));
     workflow.push_str(r#"          BASH_ENV: ''
           ENV: ''
@@ -141,6 +142,7 @@ pub(super) fn render(
           printf '%s  %s\n' "$engine_digest" "$engine_path/bin/simit" > "$SIMIT_NIX_BUILD_RESULTS/engine-executable.sha256"
           printf '%s\n' "SIMIT_CI_ENGINE=$engine_path/bin/simit" >> "$GITHUB_ENV"
 "#);
+    push_engine_cache_save(&mut workflow, &revision);
     push_required_env_step_with_context(&mut workflow, &options.required_secrets, |w| {
         push_producer_env(w, options)
     });
@@ -230,6 +232,55 @@ pub(super) fn render(
 /// GitHub keeps a 10 GB repository cache; one input closure must not evict the rest.
 // ponytail: fixed 4 GiB per-input ceiling; make it configurable if a real input needs more.
 const INPUT_CACHE_MAX_KIB: u64 = 4 << 20;
+
+fn engine_cache_key(revision: &str) -> String {
+    format!("simit-engine-v1-${{{{ {revision} }}}}-${{{{ runner.os }}}}-${{{{ runner.arch }}}}")
+}
+
+/// Reuse the pinned engine's closure across runs instead of compiling it in
+/// every group job. Provisioning still evaluates the same pin and records its
+/// digest; a miss or unreadable entry is an ordinary build. Like cached inputs,
+/// entries carry the trust of the repository's default-branch runs.
+fn push_engine_cache_restore(workflow: &mut String, revision: &str) {
+    workflow.push_str(&format!("      - name: Restore grouped-build engine\n        id: simit-engine-cache\n        if: ${{{{ {revision} != '' }}}}\n        uses: {}\n        with:\n          path: ${{{{ runner.temp }}}}/simit-engine-cache\n          key: {}\n", input_cache_action("restore"), engine_cache_key(revision)));
+    workflow.push_str(r#"      - name: Import grouped-build engine
+        if: ${{ steps.simit-engine-cache.outputs.cache-hit == 'true' }}
+        shell: bash
+        env:
+          BASH_ENV: ''
+          ENV: ''
+          NIX_CONFIG: 'experimental-features = nix-command flakes'
+          NIX_USER_CONF_FILES: /dev/null
+          NIX_PATH: ''
+        run: |
+          set -euo pipefail
+          cache_root="$RUNNER_TEMP/simit-engine-cache"
+          env -u GH_TOKEN -u GITHUB_TOKEN -u GITHUB_OAUTH_TOKEN -u ATTIC_TOKEN -u CACHIX_AUTH_TOKEN -u CACHIX_SIGNING_KEY nix copy --no-check-sigs --all --from "file://$cache_root" || echo '::warning::Cached grouped-build engine failed to import; building it normally'
+          rm -rf "$cache_root"
+"#);
+}
+
+fn push_engine_cache_save(workflow: &mut String, revision: &str) {
+    workflow.push_str(&format!("      - name: Export grouped-build engine\n        id: simit-engine-cache-save\n        if: ${{{{ {revision} != '' && steps.simit-engine-cache.outputs.cache-hit != 'true' }}}}\n"));
+    workflow.push_str(r#"        shell: bash
+        env:
+          BASH_ENV: ''
+          ENV: ''
+          NIX_CONFIG: 'experimental-features = nix-command flakes'
+          NIX_USER_CONF_FILES: /dev/null
+          NIX_PATH: ''
+        run: |
+          set -euo pipefail
+          cache_root="$RUNNER_TEMP/simit-engine-cache"
+          rm -rf "$cache_root"
+          if nix copy --to "file://$cache_root?compression=zstd" "${SIMIT_CI_ENGINE%/bin/simit}"; then
+            printf 'save=true\n' >> "$GITHUB_OUTPUT"
+          else
+            echo '::warning::Grouped-build engine failed to export; not saving it'
+          fi
+"#);
+    workflow.push_str(&format!("      - name: Save grouped-build engine\n        if: ${{{{ steps.simit-engine-cache-save.outputs.save == 'true' }}}}\n        uses: {}\n        with:\n          path: ${{{{ runner.temp }}}}/simit-engine-cache\n          key: {}\n", input_cache_action("save"), engine_cache_key(revision)));
+}
 
 fn input_cache_action(action: &str) -> String {
     // Restore and save are subdirectories of the pinned actions/cache commit.
