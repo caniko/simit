@@ -468,6 +468,11 @@ pub struct ReleaseCommand {
         help = "Trusted workspace release members to package together for dependency resolution"
     )]
     pub reconstruct_packages: Vec<String>,
+    #[arg(
+        long,
+        help = "Admit signed-tree-pinned Git submodules from the superproject owner's HTTPS remotes"
+    )]
+    pub source_submodules: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]

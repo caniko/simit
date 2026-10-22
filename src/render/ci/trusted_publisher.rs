@@ -393,6 +393,11 @@ pub(super) fn publisher_file_with_namespace(
         },
         |package| format!(" --tag-namespace {}", shell_word(package)),
     );
+    let namespace_argument = if options.source_submodules {
+        format!("{namespace_argument} --source-submodules")
+    } else {
+        namespace_argument
+    };
     for (name, dependencies) in plan {
         // Cargo names already use GitHub's permitted job-ID alphabet. Keep
         // their spelling: collapsing '-'/'_' or case aliases distinct crates.
@@ -443,6 +448,9 @@ pub(super) fn publisher_file_with_namespace(
             "v4.3.1",
         );
         w.push_str("        with:\n          ref: ${{ github.event.workflow_run.head_sha }}\n          path: .simit-release-source\n          persist-credentials: false\n");
+        if options.source_submodules {
+            w.push_str("          submodules: recursive\n");
+        }
         let directory = ".simit-release-source";
         let candidate_context = |w: &mut String| {
             push_candidate_context(w, runtime, &options.extra_env, directory);

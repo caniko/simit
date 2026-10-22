@@ -28,6 +28,8 @@ use super::{
 use crate::cli::{PublisherStage, ReleaseCommand};
 
 mod release_plz;
+#[cfg(test)]
+mod submodule_tests;
 
 const MAX_PROVIDER_BYTES: u64 = 160 * 1024 * 1024;
 
@@ -47,7 +49,7 @@ fn package_name(name: &str) -> Result<()> {
     Ok(())
 }
 
-fn data_command(program: &str, state: &Path) -> Result<Command> {
+pub(super) fn data_command(program: &str, state: &Path) -> Result<Command> {
     let mut command = Command::new(program);
     command
         .env_clear()
@@ -76,7 +78,7 @@ fn data_command(program: &str, state: &Path) -> Result<Command> {
     Ok(command)
 }
 
-fn output(command: &mut Command) -> Result<Output> {
+pub(super) fn output(command: &mut Command) -> Result<Output> {
     let output = command
         .output()
         .context("execute trusted data-only release tool")?;
@@ -110,6 +112,10 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
         "--dry-run is not supported for the trusted publisher; use --publisher-stage prepare for credential-free verification"
     );
     if command.release_plz_archives.is_some() {
+        ensure!(
+            !command.source_submodules,
+            "release-plz publication does not admit submodules"
+        );
         return release_plz::run(command);
     }
     let stage = command
@@ -266,20 +272,24 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
             .args(["remote", "add", "origin"])
             .arg(format!("https://github.com/{repository}.git")),
     )?;
-    let mut fetch = data_command("git", state.path())?;
-    // Read-only Actions authentication; never forward a crates.io token to Git.
-    fetch
-        .env("GIT_CONFIG_COUNT", "3")
-        .env("GIT_CONFIG_KEY_2", "http.https://github.com/.extraheader")
-        .env(
-            "GIT_CONFIG_VALUE_2",
-            format!(
-                "Authorization: Basic {}",
-                base64::engine::general_purpose::STANDARD.encode(format!("x-access-token:{token}"))
-            ),
-        );
-    output(
+    let fetch = || -> Result<Command> {
+        let mut fetch = data_command("git", state.path())?;
+        // Read-only Actions authentication; never forward a crates.io token to Git.
         fetch
+            .env("GIT_CONFIG_COUNT", "3")
+            .env("GIT_CONFIG_KEY_2", "http.https://github.com/.extraheader")
+            .env(
+                "GIT_CONFIG_VALUE_2",
+                format!(
+                    "Authorization: Basic {}",
+                    base64::engine::general_purpose::STANDARD
+                        .encode(format!("x-access-token:{token}"))
+                ),
+            );
+        Ok(fetch)
+    };
+    output(
+        fetch()?
             .arg("-C")
             .arg(&source)
             .args(["fetch", "--no-tags", "origin"])
@@ -326,13 +336,25 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
         verify_tag_only_source_workflow(&signed_workflow.stdout, &enrolled_workflow)?;
     }
     checkout_signed_source(state.path(), &source, &bound.source_sha)?;
+    let submodules = if command.source_submodules {
+        super::source::admit_submodules(
+            &fetch,
+            &source,
+            &bound.source_sha,
+            &super::source::github_owner_prefix(&repository)?,
+        )?
+    } else {
+        Default::default()
+    };
     let tracked = output(
         data_command("git", state.path())?
             .arg("-C")
             .arg(&source)
             .args(["ls-files", "--stage", "-z"]),
     )?;
-    let inert_links = super::source::validate_tree(&source, &tracked.stdout)?;
+    let mut inert_links =
+        super::source::validate_signed_tree(&source, &tracked.stdout, &submodules.gitlinks)?;
+    inert_links.extend(submodules.links);
     let artifact_prefix = if native {
         format!(
             "native-release-{}-",
@@ -505,7 +527,13 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
     verify_reconstructed_crate(&candidate, &reconstructed, &root)?;
     let checksum = hex::encode(Sha256::digest(&candidate));
     let members = crate_members(&candidate, &root)?;
-    super::source::reject_link_members(&members, &root, &source, &inert_links)?;
+    super::source::reject_link_members(
+        &members,
+        &root,
+        &source,
+        &inert_links,
+        &submodules.gitlinks,
+    )?;
     let cargo_manifest = members
         .get(&format!("{root}/Cargo.toml"))
         .context("crate has no normalized manifest")?;
@@ -1905,7 +1933,14 @@ mod tests {
         let reconstructed = fs::read(archive).unwrap();
         verify_reconstructed_crate(&candidate, &reconstructed, archive_root).unwrap();
         let members = crate_members(&candidate, archive_root).unwrap();
-        super::super::source::reject_link_members(&members, archive_root, &source, &links).unwrap();
+        super::super::source::reject_link_members(
+            &members,
+            archive_root,
+            &source,
+            &links,
+            &Default::default(),
+        )
+        .unwrap();
         assert!(!members.contains_key(&format!("{archive_root}/.pre-commit-config.yaml")));
         let link = source.join(".pre-commit-config.yaml");
         assert_eq!(links, std::collections::BTreeSet::from([link.clone()]));

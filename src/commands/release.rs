@@ -22,6 +22,7 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
         || command.release_plz_archives.is_some()
         || command.tag_namespace.is_some()
         || !command.reconstruct_packages.is_empty()
+        || command.source_submodules
     {
         bail!("publisher arguments require `simit release publisher`");
     }
