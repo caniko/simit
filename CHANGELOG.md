@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Add `[release.artifacts].netrc_secret` so GitHub release and prebuild jobs
+  authenticate private Nix substituters from a netrc Actions secret, written
+  with mode 0600 under `$RUNNER_TEMP` before Nix is installed. Non-GitHub
+  release backends reject it.
 - GitLab primaries: `init ci --check` now reports stale generated workflows
   (such as a former GitHub `nix-builds.yaml`) exactly as a write removes them,
   and `audit_ci` expects the GitHub prebuild generated beside `.gitlab-ci.yml`.

@@ -81,6 +81,11 @@ pub fn release_backend(
     let backend = CiBackend::from_parts(provider, platform)?;
     cfg.ci
         .validate_required_gate_artifacts_backend(provider, platform)?;
+    if cfg.release.artifacts.netrc_secret.is_some()
+        && (provider != CiProvider::Actions || platform != Platform::Github)
+    {
+        bail!("[release.artifacts].netrc_secret requires the effective GitHub Actions backend");
+    }
     crate::config::validate_required_gate_job_budget(&cfg.ci.required_gates)?;
     Ok(backend)
 }
