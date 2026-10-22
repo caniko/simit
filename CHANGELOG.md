@@ -10,6 +10,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add opt-in `[monorepo].submodules`: generated GitHub qualification and source
   publication checkouts fetch Git submodule components recursively. Output is
   unchanged when it is absent.
+- With `[monorepo].submodules`, trusted crate and native publishers admit
+  submodules pinned by the signed superproject tree (`--source-submodules`):
+  `.gitmodules` from the signed tree, same-owner HTTPS remotes only, exact
+  pinned commits, no nesting. Gitlinks remain rejected without the setting.
 - GitLab primaries: `init ci --check` now reports stale generated workflows
   (such as a former GitHub `nix-builds.yaml`) exactly as a write removes them,
   and `audit_ci` expects the GitHub prebuild generated beside `.gitlab-ci.yml`.

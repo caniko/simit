@@ -2743,4 +2743,32 @@ fn submodule_components_fetch_recursively_in_every_generated_checkout() {
             assert_eq!(step["with"]["submodules"], "recursive");
         }
     }
+    // Both publisher stages admit the pinned submodules; only the signed
+    // release-source checkout fetches them (not the publisher root or engine).
+    let publisher: serde_yaml::Value = serde_yaml::from_slice(
+        &fs::read(root.join(".github/workflows/trusted-publish-crate-engine.yaml")).unwrap(),
+    )
+    .unwrap();
+    let steps: Vec<_> = publisher["jobs"]
+        .as_mapping()
+        .unwrap()
+        .values()
+        .flat_map(|job| job["steps"].as_sequence().unwrap())
+        .collect();
+    let stages = steps
+        .iter()
+        .filter_map(|step| step["run"].as_str())
+        .filter(|run| run.contains("release publisher --publisher-stage"));
+    assert_eq!(
+        stages
+            .map(|run| run.contains(" --source-submodules"))
+            .collect::<Vec<_>>(),
+        [true, true]
+    );
+    let fetched: Vec<_> = steps
+        .iter()
+        .filter(|step| step["with"]["submodules"] == "recursive")
+        .map(|step| step["with"]["path"].as_str())
+        .collect();
+    assert_eq!(fetched, [Some(".simit-release-source")]);
 }

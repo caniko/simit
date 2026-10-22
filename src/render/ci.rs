@@ -211,6 +211,8 @@ pub struct CiOptions {
     pub pypi_token_secret: String,
     pub pypi_trusted_publishing: bool,
     pub publish_crates: bool,
+    /// Trusted publishers admit signed-tree-pinned monorepo submodules.
+    pub source_submodules: bool,
     pub required_gates: Vec<crate::config::RequiredGate>,
     pub om_ci: OmCiMode,
     pub omnix_ref: String,
@@ -271,6 +273,7 @@ impl Default for CiOptions {
             pypi_token_secret: "PYPI_TOKEN".to_owned(),
             pypi_trusted_publishing: false,
             publish_crates: false,
+            source_submodules: false,
             required_gates: Vec::new(),
             om_ci: OmCiMode::default(),
             omnix_ref: OMNIX_REF_DEFAULT.to_owned(),

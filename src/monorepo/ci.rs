@@ -328,6 +328,10 @@ pub(crate) fn files(
             }
             let options = crate::render::ci::CiOptions {
                 publish_crates: true,
+                source_submodules: config
+                    .monorepo
+                    .as_ref()
+                    .is_some_and(|monorepo| monorepo.submodules),
                 ..Default::default()
             };
             let mut generated = crate::render::ci::publish_independent_files(package, &options)?;

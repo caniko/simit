@@ -501,6 +501,7 @@ impl ResolvedCiInputs {
                 .unwrap_or_else(|| "PYPI_TOKEN".to_owned()),
             pypi_trusted_publishing: cfg.ci.pypi_trusted_publishing,
             publish_crates: self.publish_crates,
+            source_submodules: false,
             required_gates: self.required_gates.clone(),
             om_ci: self.om_ci,
             omnix_ref,
