@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Add `[ci.nix_build].engine_revision`, a committed exact grouped-engine
+  revision used when `vars.SIMIT_CI_ENGINE_REVISION` is unavailable, such as in
+  fork pull requests; the enrolled variable still takes precedence.
 - GitLab primaries: `init ci --check` now reports stale generated workflows
   (such as a former GitHub `nix-builds.yaml`) exactly as a write removes them,
   and `audit_ci` expects the GitHub prebuild generated beside `.gitlab-ci.yml`.

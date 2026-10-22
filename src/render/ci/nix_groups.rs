@@ -111,12 +111,17 @@ pub(super) fn render(
         });
     }
     // Enrollment is administrator-owned. Never build the engine from the producer
-    // checkout or silently resolve a moving branch when the pin is absent.
-    workflow.push_str(r#"      - name: Provision grouped-build Rust engine
-        shell: bash
-        env:
-          SIMIT_CI_ENGINE_REVISION: ${{ vars.SIMIT_CI_ENGINE_REVISION }}
-          BASH_ENV: ''
+    // checkout or silently resolve a moving branch when the pin is absent. A
+    // committed fallback serves runs without repository variables (fork PRs),
+    // which already execute their own head's workflow file.
+    let revision = match &options.engine_revision {
+        Some(revision) => format!("${{{{ vars.SIMIT_CI_ENGINE_REVISION || '{revision}' }}}}"),
+        None => "${{ vars.SIMIT_CI_ENGINE_REVISION }}".to_owned(),
+    };
+    workflow.push_str(&format!(
+        "      - name: Provision grouped-build Rust engine\n        shell: bash\n        env:\n          SIMIT_CI_ENGINE_REVISION: {revision}\n"
+    ));
+    workflow.push_str(r#"          BASH_ENV: ''
           ENV: ''
           NIX_CONFIG: 'experimental-features = nix-command flakes'
           NIX_USER_CONF_FILES: /dev/null
