@@ -1,7 +1,9 @@
+use std::cell::Cell;
 use std::fs;
 use std::path::PathBuf;
-use std::process::{Command, id};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::process::Command;
+
+use tempfile::TempDir;
 
 const MAINTAINERS_ASC: &str = r#"-----BEGIN PGP PUBLIC KEY BLOCK-----
 
@@ -22,24 +24,40 @@ MxverdzrWh20hxbY1ESMO55STiJlCofv54bICg==
 -----END PGP PUBLIC KEY BLOCK-----
 "#;
 
-pub fn maintainer_key_path() -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock is before UNIX_EPOCH")
-        .as_nanos();
-    let path = std::env::temp_dir().join(format!("simit-maintainers-{}-{nanos}.asc", id()));
-    fs::write(&path, MAINTAINERS_ASC).expect("write maintainer key fixture");
-    path
+thread_local! {
+    // libtest runs every test on its own thread, so this directory and every
+    // key file and data home created in it are removed when the test
+    // finishes, including after a panic. Fixtures are created on the thread
+    // that runs the command; do not hand them to another thread.
+    static SCRATCH: TempDir = tempfile::Builder::new()
+        .prefix("simit-test-")
+        .tempdir()
+        .expect("create per-test scratch directory");
+    static DATA_HOMES: Cell<u32> = const { Cell::new(0) };
 }
 
+pub fn maintainer_key_path() -> PathBuf {
+    SCRATCH.with(|scratch| {
+        let path = scratch.path().join("maintainers.asc");
+        if !path.exists() {
+            fs::write(&path, MAINTAINERS_ASC).expect("write maintainer key fixture");
+        }
+        path
+    })
+}
+
+/// A fresh, empty data home for each call, so commands never share state.
 pub fn data_home_path() -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock is before UNIX_EPOCH")
-        .as_nanos();
-    let path = std::env::temp_dir().join(format!("simit-data-home-{}-{nanos}", id()));
-    fs::create_dir_all(&path).expect("create isolated simit data home");
-    path
+    let index = DATA_HOMES.with(|count| {
+        let index = count.get();
+        count.set(index + 1);
+        index
+    });
+    SCRATCH.with(|scratch| {
+        let path = scratch.path().join(format!("data-home-{index}"));
+        fs::create_dir(&path).expect("create isolated simit data home");
+        path
+    })
 }
 
 pub fn simit() -> Command {
