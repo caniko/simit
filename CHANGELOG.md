@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Signed-source and trusted crate verification jobs reserve every required
+  gate's deadline even when no gate retains artifacts. They previously stayed at
+  60 minutes and cancelled serial gates mid-release. Publishers and hosted
+  releases whose serial gates exceed the 360-minute job limit are now rejected
+  with or without artifacts; independent CI gate jobs are unaffected.
 - GitLab primaries: `init ci --check` now reports stale generated workflows
   (such as a former GitHub `nix-builds.yaml`) exactly as a write removes them,
   and `audit_ci` expects the GitHub prebuild generated beside `.gitlab-ci.yml`.
