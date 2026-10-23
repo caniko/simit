@@ -311,3 +311,76 @@ fn unsupported_gitmodules_keys_are_rejected() {
     let (source, revision) = fixture.signed(Some(&gitmodules), true);
     assert!(error(fixture.admit(&source, &revision)).contains("unsupported .gitmodules key"));
 }
+
+#[test]
+fn submodule_owning_its_cargo_workspace_reconstructs_through_its_manifest() {
+    let mut fixture = Fixture::new(false);
+    let state = fixture.state.path().to_owned();
+    let root = fixture.superproject.clone();
+    // The submodule is its own workspace root; the root workspace excludes it.
+    let sub = root.parent().unwrap().join("sub");
+    let manifest = fs::read_to_string(sub.join("Cargo.toml")).unwrap();
+    fs::write(sub.join("Cargo.toml"), format!("{manifest}[workspace]\n")).unwrap();
+    output(
+        data_command("cargo", &state)
+            .unwrap()
+            .args(["generate-lockfile", "--offline", "--manifest-path"])
+            .arg(sub.join("Cargo.toml")),
+    )
+    .unwrap();
+    git(&state, &sub, &["add", "."]);
+    fixture.submodule = commit(&state, &sub);
+    fs::write(
+        root.join("Cargo.toml"),
+        "[workspace]\nmembers=[]\nexclude=['components/sub']\nresolver='2'\n",
+    )
+    .unwrap();
+    fs::write(root.join(".gitmodules"), fixture.declared()).unwrap();
+    let record = format!("160000,{},components/sub", fixture.submodule);
+    git(
+        &state,
+        &root,
+        &["update-index", "--add", "--cacheinfo", &record],
+    );
+    git(
+        &state,
+        &root,
+        &["submodule", "update", "--init", "-q", "components/sub"],
+    );
+    let component = Path::new("components/sub/Cargo.toml");
+    let packages = [CRATE.to_owned()];
+    let archive_root = format!("{CRATE}-1.0.0");
+    let archive = state.join(format!("target/package/{archive_root}.crate"));
+    output(
+        reconstruction_command_for(&state, &root, component, &packages)
+            .unwrap()
+            .arg("--offline"),
+    )
+    .unwrap();
+    let candidate = fs::read(&archive).unwrap();
+    fs::remove_file(&archive).unwrap();
+
+    let (source, revision) = fixture.signed(Some(&fixture.declared()), true);
+    let submodules = fixture.admit(&source, &revision).unwrap();
+    let mut links =
+        validate_signed_tree(&source, &tracked(&state, &source), &submodules.gitlinks).unwrap();
+    links.extend(submodules.links);
+    validate_workspace_manifest_paths(&source, component, &links).unwrap();
+    // The root workspace does not contain the package.
+    let root_attempt = reconstruction_command(&state, &source, &packages)
+        .unwrap()
+        .arg("--offline")
+        .output()
+        .unwrap();
+    assert!(!root_attempt.status.success());
+    output(
+        reconstruction_command_for(&state, &source, component, &packages)
+            .unwrap()
+            .arg("--offline"),
+    )
+    .unwrap();
+    verify_reconstructed_crate(&candidate, &fs::read(&archive).unwrap(), &archive_root).unwrap();
+    // A Git symlink standing in for the component lock is rejected.
+    let lock = source.join("components/sub/Cargo.lock");
+    assert!(validate_workspace_manifest_paths(&source, component, &[lock].into()).is_err());
+}

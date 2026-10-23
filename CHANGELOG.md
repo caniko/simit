@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Add per-component `cargo_manifest` to `[[monorepo.components]]` for components
+  that own a separate Cargo workspace. Their packages resolve from that
+  workspace, cross-workspace path dependencies still add edges, and generated
+  crate publication and the trusted publisher pass the manifest to Cargo.
 - Add opt-in `[monorepo].submodules`: generated GitHub qualification and source
   publication checkouts fetch Git submodule components recursively. Output is
   unchanged when it is absent.

@@ -473,6 +473,11 @@ pub struct ReleaseCommand {
         help = "Admit signed-tree-pinned Git submodules from the superproject owner's HTTPS remotes"
     )]
     pub source_submodules: bool,
+    #[arg(
+        long,
+        help = "Signed-source-relative manifest of the component Cargo workspace to reconstruct"
+    )]
+    pub cargo_manifest: Option<Utf8PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]

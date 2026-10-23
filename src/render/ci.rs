@@ -213,6 +213,8 @@ pub struct CiOptions {
     pub publish_crates: bool,
     /// Trusted publishers admit signed-tree-pinned monorepo submodules.
     pub source_submodules: bool,
+    /// Root-relative manifest of a component-owned Cargo workspace.
+    pub cargo_manifest: Option<String>,
     pub required_gates: Vec<crate::config::RequiredGate>,
     pub om_ci: OmCiMode,
     pub omnix_ref: String,
@@ -274,6 +276,7 @@ impl Default for CiOptions {
             pypi_trusted_publishing: false,
             publish_crates: false,
             source_submodules: false,
+            cargo_manifest: None,
             required_gates: Vec::new(),
             om_ci: OmCiMode::default(),
             omnix_ref: OMNIX_REF_DEFAULT.to_owned(),
