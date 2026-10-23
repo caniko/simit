@@ -113,8 +113,8 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
     );
     if command.release_plz_archives.is_some() {
         ensure!(
-            !command.source_submodules,
-            "release-plz publication does not admit submodules"
+            !command.source_submodules && command.cargo_manifest.is_none(),
+            "release-plz publication does not admit submodules or component workspaces"
         );
         return release_plz::run(command);
     }
@@ -127,6 +127,19 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
     );
     let name = &command.packages[0];
     let native = command.native_manifest.is_some();
+    // A signed-source-relative component workspace manifest, never an escape.
+    let cargo_manifest = command.cargo_manifest.as_ref().map_or_else(
+        || "Cargo.toml".into(),
+        |path| path.as_std_path().to_path_buf(),
+    );
+    ensure!(
+        (!native || command.cargo_manifest.is_none())
+            && cargo_manifest.file_name() == Some("Cargo.toml".as_ref())
+            && cargo_manifest
+                .components()
+                .all(|part| matches!(part, std::path::Component::Normal(_))),
+        "--cargo-manifest must be a relative Cargo.toml inside the signed source"
+    );
     if !native {
         package_name(name)?;
     }
@@ -361,7 +374,7 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
             namespace.context("native publication requires --tag-namespace")?
         )
     } else {
-        validate_manifest_paths_with_links(&source, &inert_links)?;
+        validate_workspace_manifest_paths(&source, &cargo_manifest, &inert_links)?;
         format!("simit-crate-{name}-")
     };
     let mut artifacts = Vec::new();
@@ -513,9 +526,10 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
     // and HOME/CARGO_HOME are fresh; env_clear removes wrappers, credential
     // providers, aliases, tokens and injected compiler flags. --no-verify never
     // compiles or runs a candidate build script. No Nix expression is evaluated.
-    output(&mut reconstruction_command(
+    output(&mut reconstruction_command_for(
         state.path(),
         &source,
+        &cargo_manifest,
         &reconstruction,
     )?)?;
     let reconstructed = fs::read(
@@ -677,6 +691,16 @@ fn checkout_signed_source(state: &Path, source: &Path, revision: &str) -> Result
 }
 
 fn reconstruction_command(state: &Path, source: &Path, packages: &[String]) -> Result<Command> {
+    reconstruction_command_for(state, source, Path::new("Cargo.toml"), packages)
+}
+
+/// `manifest` is the signed-source-relative Cargo workspace (or package) root.
+fn reconstruction_command_for(
+    state: &Path,
+    source: &Path,
+    manifest: &Path,
+    packages: &[String],
+) -> Result<Command> {
     ensure!(
         state.is_absolute() && source.is_absolute(),
         "reconstruction requires absolute isolated paths"
@@ -703,7 +727,7 @@ fn reconstruction_command(state: &Path, source: &Path, packages: &[String]) -> R
             "crates-io",
             "--manifest-path",
         ])
-        .arg(source.join("Cargo.toml"));
+        .arg(source.join(manifest));
     for package in packages {
         cargo.args(["--package", package]);
     }
@@ -984,6 +1008,14 @@ fn validate_manifest_paths_with_links(
     source: &Path,
     links: &std::collections::BTreeSet<std::path::PathBuf>,
 ) -> Result<()> {
+    validate_workspace_manifest_paths(source, Path::new("Cargo.toml"), links)
+}
+
+fn validate_workspace_manifest_paths(
+    source: &Path,
+    manifest: &Path,
+    links: &std::collections::BTreeSet<std::path::PathBuf>,
+) -> Result<()> {
     fn path_is_inside(
         source: &Path,
         parent: &Path,
@@ -1111,9 +1143,9 @@ fn validate_manifest_paths_with_links(
             }
         }
     }
-    let mut pending = vec![source.join("Cargo.toml")];
+    let mut pending = vec![source.join(manifest)];
     ensure!(
-        !links.contains(&source.join("Cargo.lock")),
+        !links.contains(&source.join(manifest).with_file_name("Cargo.lock")),
         "Cargo lock depends on a signed Git symlink"
     );
     let mut visited = std::collections::BTreeSet::new();

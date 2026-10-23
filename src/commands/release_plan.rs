@@ -47,10 +47,12 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
         .as_ref()
         .map(|_| crate::monorepo::load(&std::env::current_dir()?))
         .transpose()?;
-    let metadata = if let Some((root, _)) = &monorepo {
-        cargo::cargo_metadata(&root.join("Cargo.toml"))?
-    } else {
-        cargo::metadata_for_current_dir()?
+    let metadata = match (&monorepo, &command.component) {
+        (Some((root, project)), Some(id)) => {
+            crate::monorepo::component_metadata(root, project, id)?
+        }
+        (Some((root, _)), None) => cargo::cargo_metadata(&root.join("Cargo.toml"))?,
+        _ => cargo::metadata_for_current_dir()?,
     };
     let mut requested = command.packages.clone();
     let graph = monorepo
@@ -553,6 +555,8 @@ fn run_dry_run_package(entries: &[ReleasePlanEntry]) -> Result<()> {
                 &entry.package.name,
                 "--allow-dirty",
                 "--no-verify",
+                "--manifest-path",
+                entry.package.manifest_path.as_str(),
             ])
             .output()
             .with_context(|| format!("running cargo package for `{}`", entry.package.name))?;

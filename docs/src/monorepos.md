@@ -68,6 +68,27 @@ Paths must be normalized and root-relative. Overlapping component ownership,
 unknown dependencies, cycles, duplicate package ownership, and symlink traversal
 are rejected. A component may contain multiple paths and Cargo packages.
 
+A component may own a separate Cargo workspace (for example, a submodule with its
+own lockfile) that the root workspace excludes:
+
+```toml
+[[monorepo.components]]
+id = "rust"
+paths = ["components/rust"]
+cargo_manifest = "components/rust/Cargo.toml"
+cargo_packages = ["harbor-cache"]
+```
+
+Its `cargo_packages` resolve from that workspace instead of the root. The manifest
+must be a workspace root (or standalone package) inside the component's paths,
+and its members must not also belong to the root workspace. Every member of every
+workspace needs an owner. Path dependencies between workspaces still add
+`depends_on` edges. Generated crate publication workflows and trusted publishers
+pass the manifest to Cargo (`--manifest-path` and `--cargo-manifest`). Local
+`release plan`, `verify` and `sync-up` use the component workspace. Version bumps
+belong to that workspace's own repository; `simit release <bump> --component`
+refuses them.
+
 ## Generated qualification CI
 
 Monorepo workflows install Nix **2.35.2** explicitly, including their native

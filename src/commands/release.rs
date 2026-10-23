@@ -23,6 +23,7 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
         || command.tag_namespace.is_some()
         || !command.reconstruct_packages.is_empty()
         || command.source_submodules
+        || command.cargo_manifest.is_some()
     {
         bail!("publisher arguments require `simit release publisher`");
     }
@@ -77,6 +78,13 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
         .as_ref()
         .map(|_| crate::monorepo::load(&std::env::current_dir()?))
         .transpose()?;
+    if let (Some(id), Some((_, project))) = (&command.component, &monorepo)
+        && crate::monorepo::component_cargo_manifest(project, id)? != "Cargo.toml"
+    {
+        bail!(
+            "component {id} owns a separate Cargo workspace; bump its version there, then tag it with `simit release sync-up --component {id}`"
+        );
+    }
     let metadata = if let Some((root, _)) = &monorepo {
         cargo::cargo_metadata(&root.join("Cargo.toml"))?
     } else {
@@ -474,13 +482,19 @@ fn sync_up(command: ReleaseCommand) -> Result<()> {
             || crate::monorepo::releases::qualify(&selection),
         );
     }
-    let metadata = if command.component.is_some() {
-        let (root, _) = crate::monorepo::load(&std::env::current_dir()?)?;
-        cargo::cargo_metadata(&root.join("Cargo.toml"))?
-    } else {
-        cargo::metadata_for_current_dir()?
+    // A component workspace is not the repository: Git and policy stay at the root.
+    let (component_root, metadata) = match &command.component {
+        Some(id) => {
+            let (root, project) = crate::monorepo::load(&std::env::current_dir()?)?;
+            let metadata = crate::monorepo::component_metadata(&root, &project, id)?;
+            let separate = crate::monorepo::component_cargo_manifest(&project, id)? != "Cargo.toml";
+            (separate.then_some(root), metadata)
+        }
+        None => (None, cargo::metadata_for_current_dir()?),
     };
-    let workspace_root = metadata.workspace_root.as_std_path();
+    let workspace_root = component_root
+        .as_deref()
+        .unwrap_or(metadata.workspace_root.as_std_path());
     let config = ProjectConfig::load(workspace_root)?;
     if config.monorepo.is_some() && command.component.is_none() {
         bail!("monorepo tag sync-up requires --component and one independent package");
@@ -506,7 +520,8 @@ fn sync_up(command: ReleaseCommand) -> Result<()> {
         if let Some(component) = &command.component {
             crate::monorepo::releases::qualify_component(workspace_root, &config, component)?;
         }
-        git::run_project_checks(workspace_root)
+        // Cargo checks run in the package's own (possibly component) workspace.
+        git::run_project_checks(metadata.workspace_root.as_std_path())
     })
 }
 
