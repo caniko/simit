@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- `[ci.nix_build].only` now coexists with `[prebuild]`: Nix-only projects keep
+  their exact qualification matrix and add the Attic/archive prebuild without
+  gaining language CI.
 - Add per-component `cargo_manifest` to `[[monorepo.components]]` for components
   that own a separate Cargo workspace. Their packages resolve from that
   workspace, cross-workspace path dependencies still add edges, and generated
