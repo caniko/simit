@@ -410,8 +410,17 @@ pub fn credential_contract(inputs: &ReleaseWorkflowInputs<'_>) -> Vec<ReleaseCre
     credentials
 }
 
-fn prebuild_publishes_attic(inputs: &ReleaseWorkflowInputs<'_>) -> bool {
+/// Whether this release calls the prebuild's reusable `release: true` entry.
+/// Must agree with the prebuild renderer, which omits that entry otherwise.
+fn github_prebuild(inputs: &ReleaseWorkflowInputs<'_>) -> bool {
     inputs.platform == Platform::Github
+        && inputs.prebuild.is_some_and(|prebuild| {
+            super::ci::prebuild_release_entry(prebuild, inputs.release.is_some())
+        })
+}
+
+fn prebuild_publishes_attic(inputs: &ReleaseWorkflowInputs<'_>) -> bool {
+    github_prebuild(inputs)
         && inputs
             .prebuild
             .is_some_and(|prebuild| prebuild.publish_attic)
@@ -513,7 +522,7 @@ pub fn render(inputs: &ReleaseWorkflowInputs<'_>) -> String {
             ReleaseNotesSource::Changelog
         }
     });
-    let github_prebuild = inputs.platform == Platform::Github && inputs.prebuild.is_some();
+    let github_prebuild = github_prebuild(inputs);
     let separate_validation = github_prebuild || !inputs.required_gates.is_empty();
     if separate_validation {
         // No reusable build or Attic credential is admitted before event-bound

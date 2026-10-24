@@ -1402,7 +1402,79 @@ nix_builds = [".#server"]
     assert_eq!(on["push"]["branches"].as_sequence().unwrap().len(), 1);
     assert_eq!(on["push"]["tags-ignore"][0].as_str(), Some("**"));
     assert!(on.get("pull_request").is_some());
-    assert!(on["workflow_call"]["inputs"]["release"].is_mapping());
+    // No release target or release archives: nothing calls a release entry.
+    assert!(on.get("workflow_call").is_none());
+}
+
+#[test]
+fn github_prebuild_without_release_omits_reusable_release_entry() {
+    let attic = r#"
+[release.attic]
+cache = "demo"
+url = "https://attic.example"
+token_name = "demo"
+token_secret = "ATTIC_TOKEN"
+"#;
+    let base = format!(
+        r#"[prebuild]
+publish_attic = true
+attic_app = ".#push-flake-inputs"
+nix_builds = [".#server"]
+
+[prebuild.system_runners]
+"x86_64-linux" = "ubuntu-24.04"
+
+[ci]
+provider = "crow"
+platform = "forgejo"
+runtime = "nix"
+{attic}"#
+    );
+    let render = |config: &str| {
+        let temp = init_flake_only();
+        fs::write(temp.path().join("simit.toml"), config).unwrap();
+        let status = simit()
+            .current_dir(temp.path())
+            .args([
+                "init",
+                "ci",
+                "--prebuild-only",
+                "--platform",
+                "github",
+                "--ci-provider",
+                "actions",
+                "--runtime",
+                "nix",
+            ])
+            .status()
+            .unwrap();
+        assert!(status.success());
+        read(&temp.path().join(".github/workflows/prebuild.yaml"))
+    };
+
+    // Publish-only: no caller, so no changelog/keyring gate and no reusable
+    // secret indirection; trunk pushes read the repository secret directly.
+    let workflow = render(&base);
+    assert_yaml_parses(&workflow);
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
+    assert!(yaml["on"].get("workflow_call").is_none());
+    assert!(!workflow.contains("inputs.release"), "{workflow}");
+    assert!(!workflow.contains("Validate tag"));
+    assert!(!workflow.contains("CHANGELOG.md"));
+    assert!(!workflow.contains("maintainers.gpg"));
+    assert!(workflow.contains("ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN }}"));
+    assert!(workflow.contains("nix run '.#push-flake-inputs'"));
+
+    // A GitHub release target calls the entry with `attic_token`; direct
+    // push runs still fall back to the repository secret.
+    let workflow = render(&format!(
+        "{base}\n[release.github]\nrepo = \"example/demo\"\n"
+    ));
+    assert_yaml_parses(&workflow);
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
+    assert!(yaml["on"]["workflow_call"]["inputs"]["release"].is_mapping());
+    assert!(workflow.contains("Validate tag"));
+    assert!(workflow.contains("ATTIC_TOKEN: ${{ secrets.attic_token || secrets.ATTIC_TOKEN }}"));
 }
 
 #[test]

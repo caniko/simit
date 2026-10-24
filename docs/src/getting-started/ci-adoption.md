@@ -299,6 +299,10 @@ have migrated together. Combining branch filters with explicit `separate_events`
 is rejected before generation. Release/tag triggers retain their separate policy.
 `[prebuild].push_branches` filters the native prebuild's branch pushes the same
 way; pull requests still run it and releases still reuse it via `workflow_call`.
+That reusable `release: true` entry exists only when `[release.github]` or
+`[prebuild].release_archives` is configured. A publish-only prebuild has no
+caller, so it omits the entry, its tag/changelog/keyring validation, and the
+`attic_token` indirection, and reads the Attic token from the repository secret.
 Distinct MSRV, feature, platform, extracted-package, all-system evaluation and
 fresh-execution checks are separate acceptance cases, not duplicate work.
 

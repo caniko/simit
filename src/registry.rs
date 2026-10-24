@@ -1483,6 +1483,7 @@ fn push_prebuild_file(
         config.release.attic.as_ref(),
         config.release.tag_prefix,
         config.release.notes_source(Platform::Github),
+        config.release.github.is_some(),
     )?);
     Ok(())
 }
