@@ -127,7 +127,13 @@ pub(super) fn run(command: ReleaseCommand) -> Result<()> {
         )?;
         verify_reconstructed_crate(&candidate, &reconstructed, &root)?;
         let members = crate_members(&candidate, &root)?;
-        super::super::source::reject_link_members(&members, &root, &source, &links)?;
+        super::super::source::reject_link_members(
+            &members,
+            &root,
+            &source,
+            &links,
+            &Default::default(),
+        )?;
         let vcs: Value = serde_json::from_slice(
             &members
                 .get(&format!("{root}/.cargo_vcs_info.json"))

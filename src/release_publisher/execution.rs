@@ -28,6 +28,8 @@ use super::{
 use crate::cli::{PublisherStage, ReleaseCommand};
 
 mod release_plz;
+#[cfg(test)]
+mod submodule_tests;
 
 const MAX_PROVIDER_BYTES: u64 = 160 * 1024 * 1024;
 
@@ -47,7 +49,7 @@ fn package_name(name: &str) -> Result<()> {
     Ok(())
 }
 
-fn data_command(program: &str, state: &Path) -> Result<Command> {
+pub(super) fn data_command(program: &str, state: &Path) -> Result<Command> {
     let mut command = Command::new(program);
     command
         .env_clear()
@@ -76,7 +78,7 @@ fn data_command(program: &str, state: &Path) -> Result<Command> {
     Ok(command)
 }
 
-fn output(command: &mut Command) -> Result<Output> {
+pub(super) fn output(command: &mut Command) -> Result<Output> {
     let output = command
         .output()
         .context("execute trusted data-only release tool")?;
@@ -110,6 +112,10 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
         "--dry-run is not supported for the trusted publisher; use --publisher-stage prepare for credential-free verification"
     );
     if command.release_plz_archives.is_some() {
+        ensure!(
+            !command.source_submodules && command.cargo_manifest.is_none(),
+            "release-plz publication does not admit submodules or component workspaces"
+        );
         return release_plz::run(command);
     }
     let stage = command
@@ -121,6 +127,19 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
     );
     let name = &command.packages[0];
     let native = command.native_manifest.is_some();
+    // A signed-source-relative component workspace manifest, never an escape.
+    let cargo_manifest = command.cargo_manifest.as_ref().map_or_else(
+        || "Cargo.toml".into(),
+        |path| path.as_std_path().to_path_buf(),
+    );
+    ensure!(
+        (!native || command.cargo_manifest.is_none())
+            && cargo_manifest.file_name() == Some("Cargo.toml".as_ref())
+            && cargo_manifest
+                .components()
+                .all(|part| matches!(part, std::path::Component::Normal(_))),
+        "--cargo-manifest must be a relative Cargo.toml inside the signed source"
+    );
     if !native {
         package_name(name)?;
     }
@@ -266,20 +285,24 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
             .args(["remote", "add", "origin"])
             .arg(format!("https://github.com/{repository}.git")),
     )?;
-    let mut fetch = data_command("git", state.path())?;
-    // Read-only Actions authentication; never forward a crates.io token to Git.
-    fetch
-        .env("GIT_CONFIG_COUNT", "3")
-        .env("GIT_CONFIG_KEY_2", "http.https://github.com/.extraheader")
-        .env(
-            "GIT_CONFIG_VALUE_2",
-            format!(
-                "Authorization: Basic {}",
-                base64::engine::general_purpose::STANDARD.encode(format!("x-access-token:{token}"))
-            ),
-        );
-    output(
+    let fetch = || -> Result<Command> {
+        let mut fetch = data_command("git", state.path())?;
+        // Read-only Actions authentication; never forward a crates.io token to Git.
         fetch
+            .env("GIT_CONFIG_COUNT", "3")
+            .env("GIT_CONFIG_KEY_2", "http.https://github.com/.extraheader")
+            .env(
+                "GIT_CONFIG_VALUE_2",
+                format!(
+                    "Authorization: Basic {}",
+                    base64::engine::general_purpose::STANDARD
+                        .encode(format!("x-access-token:{token}"))
+                ),
+            );
+        Ok(fetch)
+    };
+    output(
+        fetch()?
             .arg("-C")
             .arg(&source)
             .args(["fetch", "--no-tags", "origin"])
@@ -326,20 +349,32 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
         verify_tag_only_source_workflow(&signed_workflow.stdout, &enrolled_workflow)?;
     }
     checkout_signed_source(state.path(), &source, &bound.source_sha)?;
+    let submodules = if command.source_submodules {
+        super::source::admit_submodules(
+            &fetch,
+            &source,
+            &bound.source_sha,
+            &super::source::github_owner_prefix(&repository)?,
+        )?
+    } else {
+        Default::default()
+    };
     let tracked = output(
         data_command("git", state.path())?
             .arg("-C")
             .arg(&source)
             .args(["ls-files", "--stage", "-z"]),
     )?;
-    let inert_links = super::source::validate_tree(&source, &tracked.stdout)?;
+    let mut inert_links =
+        super::source::validate_signed_tree(&source, &tracked.stdout, &submodules.gitlinks)?;
+    inert_links.extend(submodules.links);
     let artifact_prefix = if native {
         format!(
             "native-release-{}-",
             namespace.context("native publication requires --tag-namespace")?
         )
     } else {
-        validate_manifest_paths_with_links(&source, &inert_links)?;
+        validate_workspace_manifest_paths(&source, &cargo_manifest, &inert_links)?;
         format!("simit-crate-{name}-")
     };
     let mut artifacts = Vec::new();
@@ -491,9 +526,10 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
     // and HOME/CARGO_HOME are fresh; env_clear removes wrappers, credential
     // providers, aliases, tokens and injected compiler flags. --no-verify never
     // compiles or runs a candidate build script. No Nix expression is evaluated.
-    output(&mut reconstruction_command(
+    output(&mut reconstruction_command_for(
         state.path(),
         &source,
+        &cargo_manifest,
         &reconstruction,
     )?)?;
     let reconstructed = fs::read(
@@ -505,7 +541,13 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
     verify_reconstructed_crate(&candidate, &reconstructed, &root)?;
     let checksum = hex::encode(Sha256::digest(&candidate));
     let members = crate_members(&candidate, &root)?;
-    super::source::reject_link_members(&members, &root, &source, &inert_links)?;
+    super::source::reject_link_members(
+        &members,
+        &root,
+        &source,
+        &inert_links,
+        &submodules.gitlinks,
+    )?;
     let cargo_manifest = members
         .get(&format!("{root}/Cargo.toml"))
         .context("crate has no normalized manifest")?;
@@ -649,6 +691,16 @@ fn checkout_signed_source(state: &Path, source: &Path, revision: &str) -> Result
 }
 
 fn reconstruction_command(state: &Path, source: &Path, packages: &[String]) -> Result<Command> {
+    reconstruction_command_for(state, source, Path::new("Cargo.toml"), packages)
+}
+
+/// `manifest` is the signed-source-relative Cargo workspace (or package) root.
+fn reconstruction_command_for(
+    state: &Path,
+    source: &Path,
+    manifest: &Path,
+    packages: &[String],
+) -> Result<Command> {
     ensure!(
         state.is_absolute() && source.is_absolute(),
         "reconstruction requires absolute isolated paths"
@@ -675,7 +727,7 @@ fn reconstruction_command(state: &Path, source: &Path, packages: &[String]) -> R
             "crates-io",
             "--manifest-path",
         ])
-        .arg(source.join("Cargo.toml"));
+        .arg(source.join(manifest));
     for package in packages {
         cargo.args(["--package", package]);
     }
@@ -956,6 +1008,14 @@ fn validate_manifest_paths_with_links(
     source: &Path,
     links: &std::collections::BTreeSet<std::path::PathBuf>,
 ) -> Result<()> {
+    validate_workspace_manifest_paths(source, Path::new("Cargo.toml"), links)
+}
+
+fn validate_workspace_manifest_paths(
+    source: &Path,
+    manifest: &Path,
+    links: &std::collections::BTreeSet<std::path::PathBuf>,
+) -> Result<()> {
     fn path_is_inside(
         source: &Path,
         parent: &Path,
@@ -1083,9 +1143,9 @@ fn validate_manifest_paths_with_links(
             }
         }
     }
-    let mut pending = vec![source.join("Cargo.toml")];
+    let mut pending = vec![source.join(manifest)];
     ensure!(
-        !links.contains(&source.join("Cargo.lock")),
+        !links.contains(&source.join(manifest).with_file_name("Cargo.lock")),
         "Cargo lock depends on a signed Git symlink"
     );
     let mut visited = std::collections::BTreeSet::new();
@@ -1905,7 +1965,14 @@ mod tests {
         let reconstructed = fs::read(archive).unwrap();
         verify_reconstructed_crate(&candidate, &reconstructed, archive_root).unwrap();
         let members = crate_members(&candidate, archive_root).unwrap();
-        super::super::source::reject_link_members(&members, archive_root, &source, &links).unwrap();
+        super::super::source::reject_link_members(
+            &members,
+            archive_root,
+            &source,
+            &links,
+            &Default::default(),
+        )
+        .unwrap();
         assert!(!members.contains_key(&format!("{archive_root}/.pre-commit-config.yaml")));
         let link = source.join(".pre-commit-config.yaml");
         assert_eq!(links, std::collections::BTreeSet::from([link.clone()]));

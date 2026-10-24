@@ -1430,6 +1430,8 @@ pub struct ArtifactsConfig {
     /// `nix.conf` trusted-public-keys added in the install-nix step.
     #[serde(default)]
     pub trusted_public_keys: Vec<String>,
+    /// GitHub Actions secret holding netrc content for private substituters.
+    pub netrc_secret: Option<String>,
     /// Flake attribute whose `.version` must equal the tag
     /// (`nix eval --raw .#<attr>.version`). Skipped when unset.
     pub version_attr: Option<String>,
@@ -2594,6 +2596,12 @@ impl ProjectConfig {
             validate_github_actions_secret_identifier(
                 "simit project config: [release.attic].token_secret",
                 token_secret,
+            )?;
+        }
+        if let Some(netrc_secret) = &self.release.artifacts.netrc_secret {
+            validate_github_actions_secret_identifier(
+                "simit project config: [release.artifacts].netrc_secret",
+                netrc_secret,
             )?;
         }
         if let Some(prebuild) = &self.prebuild {

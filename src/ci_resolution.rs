@@ -81,6 +81,11 @@ pub fn release_backend(
     let backend = CiBackend::from_parts(provider, platform)?;
     cfg.ci
         .validate_required_gate_artifacts_backend(provider, platform)?;
+    if cfg.release.artifacts.netrc_secret.is_some()
+        && (provider != CiProvider::Actions || platform != Platform::Github)
+    {
+        bail!("[release.artifacts].netrc_secret requires the effective GitHub Actions backend");
+    }
     Ok(backend)
 }
 
@@ -500,6 +505,8 @@ impl ResolvedCiInputs {
                 .unwrap_or_else(|| "PYPI_TOKEN".to_owned()),
             pypi_trusted_publishing: cfg.ci.pypi_trusted_publishing,
             publish_crates: self.publish_crates,
+            source_submodules: false,
+            cargo_manifest: None,
             required_gates: self.required_gates.clone(),
             om_ci: self.om_ci,
             omnix_ref,

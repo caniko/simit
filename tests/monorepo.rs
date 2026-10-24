@@ -2724,3 +2724,209 @@ fn component_automatic_changelog_drafting_uses_only_owned_history() {
     );
     assert_eq!(fixture_git(root, &["status", "--porcelain"]), "");
 }
+
+#[cfg(unix)]
+#[test]
+fn submodule_components_fetch_recursively_in_every_generated_checkout() {
+    let temp = fixture();
+    let root = temp.path();
+    enroll_release_checks(root);
+    let config = fs::read_to_string(root.join("simit.toml"))
+        .unwrap()
+        .replace(
+            "runtime = \"nix\"",
+            "runtime = \"nix\"\npublish_crates = true",
+        )
+        .replace(
+            "schema_version = 1",
+            "schema_version = 1\nsubmodules = true",
+        );
+    write(root, "simit.toml", &config);
+    let output = common::simit()
+        .current_dir(root)
+        .args(["init", "ci"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    for workflow in ["ci.yaml", "publish-crate-engine.yaml"] {
+        let workflow: serde_yaml::Value = serde_yaml::from_slice(
+            &fs::read(root.join(".github/workflows").join(workflow)).unwrap(),
+        )
+        .unwrap();
+        let checkouts: Vec<_> = workflow["jobs"]
+            .as_mapping()
+            .unwrap()
+            .values()
+            .flat_map(|job| job["steps"].as_sequence().unwrap())
+            .filter(|step| {
+                step["uses"]
+                    .as_str()
+                    .is_some_and(|uses| uses.starts_with("actions/checkout@"))
+            })
+            .collect();
+        assert!(checkouts.len() > 1);
+        for step in checkouts {
+            assert_eq!(step["with"]["submodules"], "recursive");
+        }
+    }
+    // Both publisher stages admit the pinned submodules; only the signed
+    // release-source checkout fetches them (not the publisher root or engine).
+    let publisher: serde_yaml::Value = serde_yaml::from_slice(
+        &fs::read(root.join(".github/workflows/trusted-publish-crate-engine.yaml")).unwrap(),
+    )
+    .unwrap();
+    let steps: Vec<_> = publisher["jobs"]
+        .as_mapping()
+        .unwrap()
+        .values()
+        .flat_map(|job| job["steps"].as_sequence().unwrap())
+        .collect();
+    let stages = steps
+        .iter()
+        .filter_map(|step| step["run"].as_str())
+        .filter(|run| run.contains("release publisher --publisher-stage"));
+    assert_eq!(
+        stages
+            .map(|run| run.contains(" --source-submodules"))
+            .collect::<Vec<_>>(),
+        [true, true]
+    );
+    let fetched: Vec<_> = steps
+        .iter()
+        .filter(|step| step["with"]["submodules"] == "recursive")
+        .map(|step| step["with"]["path"].as_str())
+        .collect();
+    assert_eq!(fetched, [Some(".simit-release-source")]);
+}
+
+/// Adds component `tools` owning its own Cargo workspace under `components/ws`,
+/// excluded from the root, whose `tool` crate path-depends on root `engine`.
+fn add_component_workspace(root: &Path, manifest: &str) {
+    let config = fs::read_to_string(root.join("simit.toml")).unwrap();
+    write(
+        root,
+        "simit.toml",
+        &format!(
+            "{config}\n[[monorepo.components]]\nid = \"tools\"\npaths = [\"components/ws\"]\ncargo_manifest = \"{manifest}\"\ncargo_packages = [\"tool\"]\nchecks = [{{id = \"test\", run = \"true\"}}]\n"
+        ),
+    );
+    let workspace = fs::read_to_string(root.join("Cargo.toml")).unwrap();
+    write(
+        root,
+        "Cargo.toml",
+        &workspace.replace("resolver", "exclude = [\"components/ws\"]\nresolver"),
+    );
+    write(
+        root,
+        "components/ws/Cargo.toml",
+        "[workspace]\nmembers = [\"tool\"]\nresolver = \"3\"\n",
+    );
+    write(
+        root,
+        "components/ws/tool/Cargo.toml",
+        "[package]\nname = \"tool\"\nversion = \"0.1.0\"\nedition = \"2024\"\n[dependencies]\nengine = { path = \"../../../crates/engine\", version = \"0.1.0\" }\n",
+    );
+    write(root, "components/ws/tool/src/lib.rs", "pub fn tool() {}\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn component_cargo_workspaces_resolve_ownership_edges_and_publication() {
+    let temp = fixture();
+    let root = temp.path();
+    enroll_release_checks(root);
+    add_component_workspace(root, "components/ws/Cargo.toml");
+    let selected = |changed: &[&str]| {
+        let output = plan(root, changed);
+        assert!(output.status.success(), "{output:?}");
+        let plan: Value = serde_json::from_slice(&output.stdout).unwrap();
+        plan["selected"].clone()
+    };
+    // The cross-workspace path dependency makes tools a consumer of rust.
+    assert!(
+        selected(&["crates/engine/src/lib.rs"])
+            .as_array()
+            .unwrap()
+            .contains(&"tools".into())
+    );
+    assert_eq!(
+        selected(&["components/ws/tool/src/lib.rs"]),
+        serde_json::json!(["core", "rust", "tools"])
+    );
+    let config = fs::read_to_string(root.join("simit.toml"))
+        .unwrap()
+        .replace(
+            "runtime = \"nix\"",
+            "runtime = \"nix\"\npublish_crates = true",
+        );
+    write(root, "simit.toml", &config);
+    let output = common::simit()
+        .current_dir(root)
+        .args(["init", "ci"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let workflow =
+        |name: &str| fs::read_to_string(root.join(".github/workflows").join(name)).unwrap();
+    let source = workflow("publish-crate-tool.yaml");
+    for command in ["cargo test", "cargo clippy", "cargo package", "cargo pkgid"] {
+        assert!(
+            source.contains(&format!(
+                "{command} --locked --manifest-path components/ws/Cargo.toml"
+            )),
+            "{command}"
+        );
+    }
+    assert_eq!(
+        workflow("trusted-publish-crate-tool.yaml")
+            .matches(" --cargo-manifest components/ws/Cargo.toml")
+            .count(),
+        2
+    );
+    // Root workspace publication is unchanged.
+    assert!(!workflow("publish-crate-engine.yaml").contains("--manifest-path"));
+    assert!(!workflow("trusted-publish-crate-engine.yaml").contains("--cargo-manifest"));
+}
+
+#[test]
+fn component_cargo_manifests_must_be_owned_workspace_roots() {
+    for (manifest, error) in [
+        (
+            "nix/rust/Cargo.toml",
+            "must be a Cargo.toml inside its paths",
+        ),
+        (
+            "components/ws/missing/Cargo.toml",
+            "must be an existing regular file",
+        ),
+        (
+            "components/ws/tool/Cargo.toml",
+            "must be a workspace root or standalone package",
+        ),
+    ] {
+        let temp = fixture();
+        let root = temp.path();
+        add_component_workspace(root, manifest);
+        let output = plan(root, &[]);
+        assert!(!output.status.success(), "{manifest}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(error), "{manifest}: {stderr}");
+    }
+    // Root resolution cannot claim a component workspace package.
+    let temp = fixture();
+    let root = temp.path();
+    add_component_workspace(root, "components/ws/Cargo.toml");
+    let config = fs::read_to_string(root.join("simit.toml"))
+        .unwrap()
+        .replace(
+            "cargo_packages = [\"worker\"]",
+            "cargo_packages = [\"worker\", \"tool\"]",
+        );
+    write(root, "simit.toml", &config);
+    let output = plan(root, &[]);
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("component worker owns unknown Cargo package tool"),
+        "{output:?}"
+    );
+}
