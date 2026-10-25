@@ -1640,12 +1640,13 @@ runtime = "nix"
 [ci.crow]
 nix_image = "nixos/nix:2.34.8"
 labels = { group = "infra", platform = "linux/amd64" }
+skip_clone = true
 
 [release.attic]
 cache = "demo"
 url = "https://attic.example"
 token_name = "demo"
-token_secret = "ATTIC_TOKEN"
+token_secret = "DEMO_ATTIC_TOKEN"
 "#;
     let temp = init_flake_only();
     fs::write(temp.path().join("simit.toml"), config).unwrap();
@@ -1674,11 +1675,14 @@ token_secret = "ATTIC_TOKEN"
         Some("${CI_REPO_DEFAULT_BRANCH}")
     );
     assert_eq!(yaml["labels"]["group"].as_str(), Some("infra"));
+    // The prebuild builds the checked-out flake, so it keeps the clone.
+    assert!(yaml.get("skip_clone").is_none());
     let step = &yaml["steps"][0];
     assert_eq!(step["image"].as_str(), Some("nixos/nix:2.34.8"));
+    // The push app reads ATTIC_TOKEN whatever the Crow secret is named.
     assert_eq!(
         step["environment"]["ATTIC_TOKEN"]["from_secret"].as_str(),
-        Some("ATTIC_TOKEN")
+        Some("DEMO_ATTIC_TOKEN")
     );
     let commands = step["commands"]
         .as_sequence()

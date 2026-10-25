@@ -961,9 +961,13 @@ pub fn prebuild_file(
             .attic_app
             .as_deref()
             .context("Crow prebuild Attic publication requires [prebuild].attic_app")?;
+        // harbor-rs `mkAtticPush` reads ATTIC_TOKEN, whatever the Crow secret is named.
+        step.environment.insert(
+            "ATTIC_TOKEN".to_owned(),
+            json!({ "from_secret": token_secret }),
+        );
         step = step
-            .secret(token_secret)
-            .command(format!("test -n \"$${{{token_secret}:-}}\""))
+            .command("test -n \"$${ATTIC_TOKEN:-}\"")
             .command(format!("nix run {}", shell_quote(app)));
     }
     add_nix_environment(std::slice::from_mut(&mut step));
@@ -981,7 +985,8 @@ pub fn prebuild_file(
             ("event", "push"),
             ("branch", "${CI_REPO_DEFAULT_BRANCH}"),
         ])],
-        skip_clone: config.skip_clone.then_some(true),
+        // The prebuild builds the checked-out flake, so it never skips the clone.
+        skip_clone: None,
         variables: config.variables.clone(),
         workspace: None,
         steps: vec![step],

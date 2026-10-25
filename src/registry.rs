@@ -888,6 +888,7 @@ fn is_supplementary_workflow(file: &WorkflowFile) -> bool {
             | "pages.yml"
             | "pages.yaml"
             | "prebuild.yml"
+            | "prebuild.jsonnet"
             | "prebuild.yaml"
             | "nix-builds.yml"
             | "nix-builds.yaml"

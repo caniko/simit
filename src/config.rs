@@ -2626,6 +2626,14 @@ impl ProjectConfig {
                     "simit project config: [prebuild] provider = \"crow\" supports neither release_archives, system_runners nor push_branches"
                 );
             }
+            if prebuild.runs_on_crow()
+                && self.ci.provider == Some(CiProvider::Crow)
+                && !self.ci.nix_builds.is_empty()
+            {
+                bail!(
+                    "simit project config: Crow CI does not qualify [ci].nix_builds on pull requests; with [prebuild] provider = \"crow\" list them in [prebuild].nix_builds only"
+                );
+            }
             if prebuild.runs_on_crow() && prebuild.nix_builds.is_empty() {
                 bail!(
                     "simit project config: [prebuild] provider = \"crow\" requires its own [prebuild].nix_builds"
