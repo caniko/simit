@@ -10,10 +10,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add `[ci.nix_build].engine_revision`, a committed exact grouped-engine
   revision used when `vars.SIMIT_CI_ENGINE_REVISION` is unavailable, such as in
   fork pull requests; the enrolled variable still takes precedence.
+- Add `[prebuild].provider = "crow"` for projects without a GitHub mirror:
+  `simit init ci --prebuild-only` renders `.crow/prebuild.yaml`, which runs
+  only on default-branch pushes, builds the prebuild installables and, with
+  `publish_attic`, runs `attic_app` with the `[release.attic].token_secret`
+  Crow secret. Pull requests never receive the token, and CI keeps its own
+  Nix build matrix.
+- The GitHub prebuild emits its reusable `workflow_call`/`release: true` entry
+  only with `[release.github]` or `[prebuild].release_archives`. A publish-only
+  prebuild no longer requires `CHANGELOG.md` or `keys/maintainers.gpg` and reads
+  the Attic token from the repository secret; release calls pass `attic_token`,
+  with direct pushes falling back to the repository secret. Release workflows
+  call the prebuild only when it exposes that entry.
+- Add per-component `cargo_manifest` to `[[monorepo.components]]` for components
+  that own a separate Cargo workspace. Their packages resolve from that
+  workspace, cross-workspace path dependencies still add edges, and generated
+  crate publication and the trusted publisher pass the manifest to Cargo.
+- Add opt-in `[monorepo].submodules`: generated GitHub qualification and source
+  publication checkouts fetch Git submodule components recursively. Output is
+  unchanged when it is absent.
+- With `[monorepo].submodules`, trusted crate and native publishers admit
+  submodules pinned by the signed superproject tree (`--source-submodules`):
+  `.gitmodules` from the signed tree, same-owner HTTPS remotes only, exact
+  pinned commits, no nesting. Gitlinks remain rejected without the setting.
 - Add `[release.artifacts].netrc_secret` so GitHub release and prebuild jobs
   authenticate private Nix substituters from a netrc Actions secret, written
   with mode 0600 under `$RUNNER_TEMP` before Nix is installed. Non-GitHub
   release backends reject it.
+- Signed-source and trusted crate verification jobs add every required gate's
+  deadline to their own 60 minutes, even when no gate retains artifacts. They
+  previously stayed at 60 minutes and cancelled serial gates mid-release, or
+  left the workspace lane and packaging only the slack after artifact-bearing
+  gates. Generating publishers and
+  hosted releases whose serial gates exceed the 360-minute job limit now fails
+  with or without artifacts; independent CI gate jobs and local release
+  commands are no longer subject to that limit.
 - GitLab primaries: `init ci --check` now reports stale generated workflows
   (such as a former GitHub `nix-builds.yaml`) exactly as a write removes them,
   and `audit_ci` expects the GitHub prebuild generated beside `.gitlab-ci.yml`.

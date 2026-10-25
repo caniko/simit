@@ -1402,7 +1402,79 @@ nix_builds = [".#server"]
     assert_eq!(on["push"]["branches"].as_sequence().unwrap().len(), 1);
     assert_eq!(on["push"]["tags-ignore"][0].as_str(), Some("**"));
     assert!(on.get("pull_request").is_some());
-    assert!(on["workflow_call"]["inputs"]["release"].is_mapping());
+    // No release target or release archives: nothing calls a release entry.
+    assert!(on.get("workflow_call").is_none());
+}
+
+#[test]
+fn github_prebuild_without_release_omits_reusable_release_entry() {
+    let attic = r#"
+[release.attic]
+cache = "demo"
+url = "https://attic.example"
+token_name = "demo"
+token_secret = "ATTIC_TOKEN"
+"#;
+    let base = format!(
+        r#"[prebuild]
+publish_attic = true
+attic_app = ".#push-flake-inputs"
+nix_builds = [".#server"]
+
+[prebuild.system_runners]
+"x86_64-linux" = "ubuntu-24.04"
+
+[ci]
+provider = "crow"
+platform = "forgejo"
+runtime = "nix"
+{attic}"#
+    );
+    let render = |config: &str| {
+        let temp = init_flake_only();
+        fs::write(temp.path().join("simit.toml"), config).unwrap();
+        let status = simit()
+            .current_dir(temp.path())
+            .args([
+                "init",
+                "ci",
+                "--prebuild-only",
+                "--platform",
+                "github",
+                "--ci-provider",
+                "actions",
+                "--runtime",
+                "nix",
+            ])
+            .status()
+            .unwrap();
+        assert!(status.success());
+        read(&temp.path().join(".github/workflows/prebuild.yaml"))
+    };
+
+    // Publish-only: no caller, so no changelog/keyring gate and no reusable
+    // secret indirection; trunk pushes read the repository secret directly.
+    let workflow = render(&base);
+    assert_yaml_parses(&workflow);
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
+    assert!(yaml["on"].get("workflow_call").is_none());
+    assert!(!workflow.contains("inputs.release"), "{workflow}");
+    assert!(!workflow.contains("Validate tag"));
+    assert!(!workflow.contains("CHANGELOG.md"));
+    assert!(!workflow.contains("maintainers.gpg"));
+    assert!(workflow.contains("ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN }}"));
+    assert!(workflow.contains("nix run '.#push-flake-inputs'"));
+
+    // A GitHub release target calls the entry with `attic_token`; direct
+    // push runs still fall back to the repository secret.
+    let workflow = render(&format!(
+        "{base}\n[release.github]\nrepo = \"example/demo\"\n"
+    ));
+    assert_yaml_parses(&workflow);
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
+    assert!(yaml["on"]["workflow_call"]["inputs"]["release"].is_mapping());
+    assert!(workflow.contains("Validate tag"));
+    assert!(workflow.contains("ATTIC_TOKEN: ${{ secrets.attic_token || secrets.ATTIC_TOKEN }}"));
 }
 
 #[test]
@@ -1546,6 +1618,199 @@ token_secret = "ATTIC_TOKEN"
     assert_yaml_parses(&prebuild);
     assert!(prebuild.contains("runs-on: ${{ matrix.runner }}"));
     assert!(prebuild.contains("nix run '.#push-flake-inputs'"));
+    assert_eq!(
+        simit::registry::audit_ci(temp.path()).unwrap().status,
+        simit::registry::FeatureStatus::Managed
+    );
+}
+
+#[test]
+fn crow_prebuild_publishes_attic_on_default_branch_pushes() {
+    let config = r#"[prebuild]
+provider = "crow"
+publish_attic = true
+attic_app = ".#push-flake-inputs"
+nix_builds = [".#packages.x86_64-linux.server"]
+
+[ci]
+provider = "actions"
+platform = "github"
+runtime = "nix"
+
+[ci.crow]
+nix_image = "nixos/nix:2.34.8"
+labels = { group = "infra", platform = "linux/amd64" }
+skip_clone = true
+
+[release.attic]
+cache = "demo"
+url = "https://attic.example"
+token_name = "demo"
+token_secret = "DEMO_ATTIC_TOKEN"
+"#;
+    let temp = init_flake_only();
+    fs::write(temp.path().join("simit.toml"), config).unwrap();
+    let prebuild_only = |check: bool| {
+        let mut args = vec!["init", "ci", "--prebuild-only"];
+        if check {
+            args.push("--check");
+        }
+        simit()
+            .current_dir(temp.path())
+            .args(args)
+            .status()
+            .unwrap()
+            .success()
+    };
+    assert!(prebuild_only(false));
+    assert!(!temp.path().join(".github/workflows/prebuild.yaml").exists());
+
+    let workflow = read(&temp.path().join(".crow/prebuild.yaml"));
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
+    // Publication is pinned to pushes of the default branch; PRs never see the secret.
+    assert_eq!(yaml["when"].as_sequence().unwrap().len(), 1);
+    assert_eq!(yaml["when"][0]["event"].as_str(), Some("push"));
+    assert_eq!(
+        yaml["when"][0]["branch"].as_str(),
+        Some("${CI_REPO_DEFAULT_BRANCH}")
+    );
+    assert_eq!(yaml["labels"]["group"].as_str(), Some("infra"));
+    // The prebuild builds the checked-out flake, so it keeps the clone.
+    assert!(yaml.get("skip_clone").is_none());
+    let step = &yaml["steps"][0];
+    assert_eq!(step["image"].as_str(), Some("nixos/nix:2.34.8"));
+    // The push app reads ATTIC_TOKEN whatever the Crow secret is named.
+    assert_eq!(
+        step["environment"]["ATTIC_TOKEN"]["from_secret"].as_str(),
+        Some("DEMO_ATTIC_TOKEN")
+    );
+    let commands = step["commands"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .map(|command| command.as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        commands,
+        [
+            "mkdir -p .simit-prebuild",
+            "nix build '.#packages.x86_64-linux.server' --out-link '.simit-prebuild/ci-0' --print-build-logs",
+            "test -n \"$${ATTIC_TOKEN:-}\"",
+            "nix run '.#push-flake-inputs'",
+        ]
+    );
+    assert!(prebuild_only(true));
+
+    // The full GitHub-primary scope keeps the Crow prebuild, and the registry expects it.
+    assert!(
+        simit()
+            .current_dir(temp.path())
+            .args(["init", "ci", "--runner", "ubuntu-24.04"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert_eq!(read(&temp.path().join(".crow/prebuild.yaml")), workflow);
+    assert_eq!(
+        simit::registry::audit_ci(temp.path()).unwrap().status,
+        simit::registry::FeatureStatus::Managed
+    );
+
+    // GitHub runner labels and branch filters have no Crow meaning.
+    let runners = "\n[prebuild.system_runners]\n\"x86_64-linux\" = \"ubuntu-24.04\"\n";
+    fs::write(temp.path().join("simit.toml"), format!("{config}{runners}")).unwrap();
+    assert!(!prebuild_only(true));
+
+    // Moving back to the GitHub prebuild retires the Crow pipeline and its secret use.
+    let github = config.replace("provider = \"crow\"\n", "");
+    fs::write(temp.path().join("simit.toml"), format!("{github}{runners}")).unwrap();
+    assert!(!prebuild_only(true));
+    assert!(prebuild_only(false));
+    assert!(!temp.path().join(".crow/prebuild.yaml").exists());
+    assert!(
+        temp.path()
+            .join(".github/workflows/prebuild.yaml")
+            .is_file()
+    );
+}
+
+#[test]
+fn crow_prebuild_rejects_unqualified_crow_ci_nix_builds() {
+    let temp = init_package(true);
+    let config = r#"[prebuild]
+provider = "crow"
+publish_attic = true
+attic_app = ".#push-flake-inputs"
+nix_builds = [".#server"]
+
+[release.attic]
+cache = "demo"
+url = "https://attic.example"
+token_name = "demo"
+token_secret = "ATTIC_TOKEN"
+"#;
+    let crow_ci = |config: &str| {
+        fs::write(temp.path().join("simit.toml"), config).unwrap();
+        simit()
+            .current_dir(temp.path())
+            .args([
+                "init",
+                "ci",
+                "--ci-provider",
+                "crow",
+                "--platform",
+                "forgejo",
+                "--runtime",
+                "nix",
+                "--runner",
+                "crow-agent",
+            ])
+            .output()
+            .unwrap()
+    };
+    assert!(crow_ci(config).status.success());
+    assert!(temp.path().join(".crow/prebuild.yaml").is_file());
+
+    // A CLI-selected Crow primary never builds [ci].nix_builds on PRs either.
+    let output = crow_ci(&format!("{config}\n[ci]\nnix_builds = [\".#checks\"]\n"));
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("does not qualify [ci].nix_builds"));
+}
+
+#[test]
+fn crow_python_ci_keeps_the_crow_prebuild() {
+    let temp = init_python_project();
+    let config = fs::read_to_string(temp.path().join("simit.toml")).unwrap_or_default();
+    fs::write(
+        temp.path().join("simit.toml"),
+        format!(
+            "{config}\n[prebuild]\nprovider = \"crow\"\npublish_attic = true\nattic_app = \".#push-flake-inputs\"\nnix_builds = [\".#default\"]\n\n[release.attic]\ncache = \"demo\"\nurl = \"https://attic.example\"\ntoken_name = \"demo\"\ntoken_secret = \"ATTIC_TOKEN\"\n"
+        ),
+    )
+    .unwrap();
+    let output = simit()
+        .current_dir(temp.path())
+        .args([
+            "init",
+            "ci",
+            "--platform",
+            "forgejo",
+            "--ci-provider",
+            "crow",
+            "--runtime",
+            "nix",
+            "--runner",
+            "atlas-nix-trusted",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(temp.path().join(".crow/ci.yaml").is_file());
+    assert!(temp.path().join(".crow/prebuild.yaml").is_file());
 }
 
 #[test]

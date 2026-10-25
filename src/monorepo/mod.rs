@@ -28,6 +28,9 @@ pub struct Config {
     /// Root-relative, project-owned treefmt modules composed by init flake.
     #[serde(default)]
     pub formatter_modules: Vec<String>,
+    /// Components are Git submodules; generated checkouts fetch them recursively.
+    #[serde(default)]
+    pub submodules: bool,
 }
 
 fn default_shared_paths() -> Vec<String> {
@@ -54,6 +57,10 @@ pub struct Component {
     pub paths: Vec<String>,
     #[serde(default)]
     pub cargo_packages: Vec<String>,
+    /// Root-relative manifest of this component's own Cargo workspace (or
+    /// standalone package); `cargo_packages` then resolve there, not at the root.
+    #[serde(default)]
+    pub cargo_manifest: Option<String>,
     /// Static Python/npm version owners; registry publication is separate.
     #[serde(default)]
     pub releases: Vec<releases::ManifestRelease>,
@@ -64,6 +71,9 @@ pub struct Component {
     #[serde(default)]
     pub checks: Vec<RequiredGate>,
 }
+
+/// Merged Cargo metadata plus each member's owning manifest (`None` for the root).
+type CargoWorkspaces = (crate::cargo::Metadata, BTreeMap<String, Option<String>>);
 
 #[derive(Debug)]
 pub struct Graph {
@@ -91,6 +101,15 @@ impl Config {
             }
             for path in &component.paths {
                 validate_relative_path(path)?;
+            }
+            if let Some(manifest) = &component.cargo_manifest {
+                validate_relative_path(manifest)?;
+                ensure!(
+                    Path::new(manifest).file_name() == Some("Cargo.toml".as_ref())
+                        && component.paths.iter().any(|path| covers(path, manifest)),
+                    "component {} cargo_manifest must be a Cargo.toml inside its paths",
+                    component.id
+                );
             }
             for release in &component.releases {
                 release.validate()?;
@@ -179,21 +198,14 @@ impl Config {
     /// Cargo metadata supplies path ownership and all local dependency edges.
     pub fn resolve(&self, root: &Path) -> Result<Graph> {
         self.validate()?;
-        let metadata = if root.join("Cargo.toml").is_file() {
-            Some(crate::cargo::cargo_metadata(&root.join("Cargo.toml"))?)
-        } else {
-            if self
-                .components
-                .iter()
-                .any(|component| !component.cargo_packages.is_empty())
-            {
-                bail!("monorepo Cargo ownership requires Cargo.toml at the repository root");
-            }
-            None
-        };
+        let metadata = self.cargo_workspaces(root)?;
         let graph = self.graph(metadata.as_ref())?;
         graph.validate_ownership()?;
-        releases::validate(root, &graph, metadata.as_ref())?;
+        releases::validate(
+            root,
+            &graph,
+            metadata.as_ref().map(|(metadata, _)| metadata),
+        )?;
         for path in graph
             .components
             .values()
@@ -214,28 +226,100 @@ impl Config {
         Ok(graph)
     }
 
-    fn graph(&self, metadata: Option<&crate::cargo::Metadata>) -> Result<Graph> {
+    /// Root and component Cargo workspaces merged into one metadata view.
+    fn cargo_workspaces(&self, root: &Path) -> Result<Option<CargoWorkspaces>> {
+        let mut merged: Option<crate::cargo::Metadata> = None;
+        let mut scopes = BTreeMap::new();
+        if root.join("Cargo.toml").is_file() {
+            let metadata = crate::cargo::cargo_metadata(&root.join("Cargo.toml"))?;
+            for member in &metadata.workspace_members {
+                scopes.insert(member.clone(), None);
+            }
+            merged = Some(metadata);
+        } else if self
+            .components
+            .iter()
+            .any(|c| c.cargo_manifest.is_none() && !c.cargo_packages.is_empty())
+        {
+            bail!("monorepo Cargo ownership requires Cargo.toml at the repository root");
+        }
+        let manifests: BTreeSet<_> = self
+            .components
+            .iter()
+            .filter_map(|c| c.cargo_manifest.as_ref())
+            .collect();
+        for manifest in manifests {
+            let path = root.join(manifest);
+            ensure!(
+                std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_file()),
+                "component cargo_manifest {manifest} must be an existing regular file"
+            );
+            let metadata = crate::cargo::cargo_metadata(&path)?;
+            ensure!(
+                std::fs::canonicalize(metadata.workspace_root.join("Cargo.toml"))?
+                    == std::fs::canonicalize(&path)?,
+                "component cargo_manifest {manifest} must be a workspace root or standalone package"
+            );
+            for member in &metadata.workspace_members {
+                ensure!(
+                    scopes
+                        .insert(member.clone(), Some(manifest.clone()))
+                        .is_none(),
+                    "Cargo package {member} belongs to both the root and component workspace {manifest}; exclude it from the root workspace"
+                );
+            }
+            let merged = merged.get_or_insert_with(|| crate::cargo::Metadata {
+                packages: Vec::new(),
+                workspace_members: Vec::new(),
+                workspace_root: camino::Utf8PathBuf::default(),
+            });
+            for package in metadata.packages {
+                if !merged.packages.iter().any(|known| known.id == package.id) {
+                    merged.packages.push(package);
+                }
+            }
+            merged.workspace_members.extend(metadata.workspace_members);
+        }
+        if let Some(merged) = &mut merged
+            && merged.workspace_root.as_str().is_empty()
+        {
+            merged.workspace_root =
+                camino::Utf8PathBuf::from_path_buf(std::fs::canonicalize(root)?)
+                    .ok()
+                    .context("monorepo root is not UTF-8")?;
+        }
+        Ok(merged.map(|metadata| (metadata, scopes)))
+    }
+
+    fn graph(&self, metadata: Option<&CargoWorkspaces>) -> Result<Graph> {
         let mut components: BTreeMap<_, _> = self
             .components
             .iter()
             .map(|c| (c.id.clone(), c.clone()))
             .collect();
-        if let Some(metadata) = metadata {
+        if let Some((metadata, scopes)) = metadata {
             let mut owners = BTreeMap::new();
-            let packages: BTreeMap<_, _> = metadata
-                .packages
-                .iter()
-                .filter(|p| metadata.workspace_members.contains(&p.id))
-                .map(|p| (p.name.as_str(), p))
-                .collect();
+            let mut packages = BTreeMap::new();
+            for package in &metadata.packages {
+                if metadata.workspace_members.contains(&package.id) {
+                    ensure!(
+                        packages.insert(package.name.as_str(), package).is_none(),
+                        "Cargo package name {} is declared by more than one workspace",
+                        package.name
+                    );
+                }
+            }
             for component in components.values_mut() {
                 for name in &component.cargo_packages {
-                    let package = packages.get(name.as_str()).with_context(|| {
-                        format!(
-                            "component {} owns unknown Cargo package {name}",
-                            component.id
-                        )
-                    })?;
+                    let package = packages
+                        .get(name.as_str())
+                        .filter(|package| scopes[&package.id] == component.cargo_manifest)
+                        .with_context(|| {
+                            format!(
+                                "component {} owns unknown Cargo package {name}",
+                                component.id
+                            )
+                        })?;
                     if owners.insert(name.clone(), component.id.clone()).is_some() {
                         bail!("duplicate Cargo ownership for {name}");
                     }
@@ -422,6 +506,30 @@ pub fn load(start: &Path) -> Result<(PathBuf, ProjectConfig)> {
     let root = find_root(start)?.context("no [monorepo] configuration found in this repository")?;
     let config = ProjectConfig::load(&root)?;
     Ok((root, config))
+}
+
+/// Root-relative manifest of the Cargo workspace that owns a component's packages.
+pub(crate) fn component_cargo_manifest(project: &ProjectConfig, id: &str) -> Result<String> {
+    let component = project
+        .monorepo
+        .as_ref()
+        .context("missing monorepo config")?
+        .components
+        .iter()
+        .find(|component| component.id == id)
+        .with_context(|| format!("unknown monorepo component {id}"))?;
+    Ok(component
+        .cargo_manifest
+        .clone()
+        .unwrap_or_else(|| "Cargo.toml".to_owned()))
+}
+
+pub(crate) fn component_metadata(
+    root: &Path,
+    project: &ProjectConfig,
+    id: &str,
+) -> Result<crate::cargo::Metadata> {
+    crate::cargo::cargo_metadata(&root.join(component_cargo_manifest(project, id)?))
 }
 
 pub(crate) fn release_package(

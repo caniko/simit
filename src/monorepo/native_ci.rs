@@ -76,6 +76,7 @@ pub(super) fn files(
                     .unwrap()
                     .clone(),
             );
+            super::ci::checkout_submodules(config, &mut workflow);
             let source_path = format!(
                 ".github/workflows/publish-{}-{}.yaml",
                 registry.name(),
@@ -119,7 +120,16 @@ pub(super) fn files(
             } else {
                 ""
             };
-            publish_steps.push(json!({"name": "Re-admit original signed provider archive and upload", "env": upload_env, "run": format!(".simit-publisher-engine/target/release/simit release publisher --publisher-stage publish --repo \"$GITHUB_REPOSITORY\" --package {} --tag-namespace {} --native-manifest {} --native-registry {} --source-workflow {} --publisher-workflow {}{provenance_arg}", word(&package.name), word(&owner.namespace), word(&owner.manifest), word(registry.name()), word(&source_path), word(&publisher_path))}));
+            let submodules_arg = if config
+                .monorepo
+                .as_ref()
+                .is_some_and(|monorepo| monorepo.submodules)
+            {
+                " --source-submodules"
+            } else {
+                ""
+            };
+            publish_steps.push(json!({"name": "Re-admit original signed provider archive and upload", "env": upload_env, "run": format!(".simit-publisher-engine/target/release/simit release publisher --publisher-stage publish --repo \"$GITHUB_REPOSITORY\" --package {} --tag-namespace {} --native-manifest {} --native-registry {} --source-workflow {} --publisher-workflow {}{provenance_arg}{submodules_arg}", word(&package.name), word(&owner.namespace), word(&owner.manifest), word(registry.name()), word(&source_path), word(&publisher_path))}));
             let mut publisher = json!({"name": format!("Trusted {} Publisher {}", registry.name(), owner.namespace), "on": {"workflow_run": {"workflows": [display], "types": ["completed"]}}, "permissions": {"contents": "read", "actions": "read"}, "concurrency": {"group": format!("native-{}-${{{{ github.event.workflow_run.id }}}}", owner.namespace), "cancel-in-progress": false}, "jobs": {"publish": {"if": "github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'", "runs-on": "ubuntu-24.04", "timeout-minutes": 30, "environment": {"name": environment}, "steps": publish_steps}}});
             if provenance {
                 publisher["jobs"]["publish"]["permissions"] =

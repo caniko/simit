@@ -23,6 +23,29 @@ pub(super) fn checkout(node24: bool) -> Value {
     json!({"uses": github_action_ref("actions/checkout", version).split(" #").next().unwrap(), "with": {"fetch-depth": 0, "persist-credentials": false}})
 }
 
+/// Submodule gitlinks are empty unless every generated checkout fetches them.
+pub(super) fn checkout_submodules(config: &ProjectConfig, workflow: &mut Value) {
+    if !config
+        .monorepo
+        .as_ref()
+        .is_some_and(|monorepo| monorepo.submodules)
+    {
+        return;
+    }
+    let jobs = workflow.get_mut("jobs").and_then(Value::as_object_mut);
+    for job in jobs.into_iter().flat_map(|jobs| jobs.values_mut()) {
+        let steps = job.get_mut("steps").and_then(Value::as_array_mut);
+        for step in steps.into_iter().flatten() {
+            if step["uses"]
+                .as_str()
+                .is_some_and(|uses| uses.starts_with("actions/checkout@"))
+            {
+                step["with"]["submodules"] = json!("recursive");
+            }
+        }
+    }
+}
+
 pub(super) fn install_nix(node24: bool) -> Value {
     // 2.35.2 contains the lost build-slot wakeup fix (NixOS/nix fba3f6e).
     // The action's default 2.35.1 can abort Worker::run during qualification.
@@ -263,7 +286,8 @@ pub(crate) fn files(
     } else {
         config.ci.push_branches.clone()
     };
-    let workflow = json!({"name": "Monorepo qualification", "on": {"push": {"branches": branches}, "pull_request": {}, "workflow_dispatch": {}}, "permissions": {"contents": "read"}, "concurrency": {"group": "monorepo-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event.pull_request.head.ref || github.ref_name }}", "cancel-in-progress": true}, "jobs": jobs});
+    let mut workflow = json!({"name": "Monorepo qualification", "on": {"push": {"branches": branches}, "pull_request": {}, "workflow_dispatch": {}}, "permissions": {"contents": "read"}, "concurrency": {"group": "monorepo-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event.pull_request.head.ref || github.ref_name }}", "cancel-in-progress": true}, "jobs": jobs});
+    checkout_submodules(config, &mut workflow);
     let mut files = vec![GeneratedFile {
         relative_path: PathBuf::from(".github/workflows/ci.yaml"),
         content: format!(
@@ -278,71 +302,92 @@ pub(crate) fn files(
     let has_native = !native.is_empty();
     files.extend(native);
     if config.ci.publish_crates {
-        let metadata = crate::cargo::cargo_metadata(&root.join("Cargo.toml"))?;
         if config.release.signing.trust_root.as_str() != "keys/maintainers.gpg" {
             bail!(
                 "independent Cargo publication currently requires the keys/maintainers.gpg trust root"
             );
         }
-        for package in metadata.packages.iter().filter(|p| {
-            metadata.workspace_members.contains(&p.id) && p.is_publishable_to_crates_io()
-        }) {
-            let plan = crate::commands::release_plan::build_release_plan(
-                &metadata,
-                std::slice::from_ref(&package.name),
+        // The root workspace, then each component-owned Cargo workspace.
+        let manifests = std::iter::once(None).chain(
+            graph
+                .components
+                .values()
+                .filter_map(|component| component.cargo_manifest.clone())
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .map(Some),
+        );
+        for cargo_manifest in manifests {
+            let metadata = crate::cargo::cargo_metadata(
+                &root.join(cargo_manifest.as_deref().unwrap_or("Cargo.toml")),
             )?;
-            if let Some(dependency) = plan
-                .entries
-                .iter()
-                .find(|entry| !entry.package.is_publishable_to_crates_io())
-            {
-                bail!(
-                    "package {} has a local dependency {} not authorized for crates.io",
-                    package.name,
-                    dependency.package.name
+            for package in metadata.packages.iter().filter(|p| {
+                metadata.workspace_members.contains(&p.id) && p.is_publishable_to_crates_io()
+            }) {
+                let plan = crate::commands::release_plan::build_release_plan(
+                    &metadata,
+                    std::slice::from_ref(&package.name),
+                )?;
+                if let Some(dependency) = plan
+                    .entries
+                    .iter()
+                    .find(|entry| !entry.package.is_publishable_to_crates_io())
+                {
+                    bail!(
+                        "package {} has a local dependency {} not authorized for crates.io",
+                        package.name,
+                        dependency.package.name
+                    );
+                }
+                let options = crate::render::ci::CiOptions {
+                    publish_crates: true,
+                    source_submodules: config
+                        .monorepo
+                        .as_ref()
+                        .is_some_and(|monorepo| monorepo.submodules),
+                    cargo_manifest: cargo_manifest.clone(),
+                    ..Default::default()
+                };
+                let mut generated =
+                    crate::render::ci::publish_independent_files(package, &options)?;
+                let file = generated
+                    .first_mut()
+                    .context("independent publication requires a source workflow")?;
+                let mut release: Value = serde_yaml::from_str(&file.content)?;
+                release["permissions"] = json!({"contents": "read"});
+                // Qualify the entire graph, including non-Cargo checks, before
+                // constructing the archive for the independent publisher.
+                let qualification = full_qualification(&workflow)?;
+                require_hosted_qualification(&qualification)?;
+                release["jobs"]
+                    .as_object_mut()
+                    .context("release jobs must be a mapping")?
+                    .extend(
+                        qualification
+                            .as_object()
+                            .context("qualification jobs must be a mapping")?
+                            .clone(),
+                    );
+                release["jobs"]["build"]["needs"] = json!(["qualified"]);
+                checkout_submodules(config, &mut release);
+                file.content = format!(
+                    "{GENERATED_WORKFLOW_MARKER}\n{}",
+                    serde_yaml::to_string(&release)?
                 );
+                let validation_options = crate::render::ci::CiOptions {
+                    required_gates: graph
+                        .components
+                        .values()
+                        .flat_map(|component| component.checks.iter().cloned())
+                        .collect(),
+                    ..Default::default()
+                };
+                crate::render::ci::validate_credential_free_workflow(
+                    &file.content,
+                    &validation_options,
+                )?;
+                files.extend(generated);
             }
-            let options = crate::render::ci::CiOptions {
-                publish_crates: true,
-                ..Default::default()
-            };
-            let mut generated = crate::render::ci::publish_independent_files(package, &options)?;
-            let file = generated
-                .first_mut()
-                .context("independent publication requires a source workflow")?;
-            let mut release: Value = serde_yaml::from_str(&file.content)?;
-            release["permissions"] = json!({"contents": "read"});
-            // Qualify the entire graph, including non-Cargo checks, before
-            // constructing the archive for the independent publisher.
-            let qualification = full_qualification(&workflow)?;
-            require_hosted_qualification(&qualification)?;
-            release["jobs"]
-                .as_object_mut()
-                .context("release jobs must be a mapping")?
-                .extend(
-                    qualification
-                        .as_object()
-                        .context("qualification jobs must be a mapping")?
-                        .clone(),
-                );
-            release["jobs"]["build"]["needs"] = json!(["qualified"]);
-            file.content = format!(
-                "{GENERATED_WORKFLOW_MARKER}\n{}",
-                serde_yaml::to_string(&release)?
-            );
-            let validation_options = crate::render::ci::CiOptions {
-                required_gates: graph
-                    .components
-                    .values()
-                    .flat_map(|component| component.checks.iter().cloned())
-                    .collect(),
-                ..Default::default()
-            };
-            crate::render::ci::validate_credential_free_workflow(
-                &file.content,
-                &validation_options,
-            )?;
-            files.extend(generated);
         }
     }
     if config.ci.publish_crates || has_native {

@@ -68,6 +68,27 @@ Paths must be normalized and root-relative. Overlapping component ownership,
 unknown dependencies, cycles, duplicate package ownership, and symlink traversal
 are rejected. A component may contain multiple paths and Cargo packages.
 
+A component may own a separate Cargo workspace (for example, a submodule with its
+own lockfile) that the root workspace excludes:
+
+```toml
+[[monorepo.components]]
+id = "rust"
+paths = ["components/rust"]
+cargo_manifest = "components/rust/Cargo.toml"
+cargo_packages = ["harbor-cache"]
+```
+
+Its `cargo_packages` resolve from that workspace instead of the root. The manifest
+must be a workspace root (or standalone package) inside the component's paths,
+and its members must not also belong to the root workspace. Every member of every
+workspace needs an owner. Path dependencies between workspaces still add
+`depends_on` edges. Generated crate publication workflows and trusted publishers
+pass the manifest to Cargo (`--manifest-path` and `--cargo-manifest`). Local
+`release plan`, `verify` and `sync-up` use the component workspace. Version bumps
+belong to that workspace's own repository; `simit release <bump> --component`
+refuses them.
+
 ## Generated qualification CI
 
 Monorepo workflows install Nix **2.35.2** explicitly, including their native
@@ -99,6 +120,29 @@ declared environment and timeout. `systems` can select native runners using
 `formatter_modules` are composed into the generated root treefmt module; custom
 flakes retain their existing ownership contract. Language and publication
 overrides must not be used to replace component qualification commands.
+
+Set `submodules = true` when components are Git submodules. Every generated
+GitHub `actions/checkout` step in qualification and source publication workflows
+then fetches them with `submodules: recursive`. Nix flakes copy submodule content
+only when `flake.nix` declares `inputs.self.submodules = true`.
+
+Trusted publishers then pass `--source-submodules`, and the signed-source
+checkout used for package verification also fetches submodules. The trust model:
+
+- The superproject's signed tag is the only root of trust. Its tree pins every
+  gitlink to an exact commit ID, so submodule content is pinned transitively;
+  submodules need no signatures of their own.
+- `.gitmodules` is read from the signed tag's tree, never the working tree.
+  Every gitlink must have exactly one declaration and every declaration a
+  gitlink. Only `path`, `url` and (ignored) `branch` keys are accepted.
+- URLs must be `https://github.com/<owner>/<repository>[.git]` for the
+  superproject's own owner. Relative, SSH, `git`, `file` and other forms are rejected.
+- Each submodule is fetched at exactly its pinned commit, and its checked-out
+  `HEAD` must equal the gitlink. Nested submodules are rejected, not recursed.
+- Submodule trees obey the same entry rules as the superproject: regular files,
+  executables and inert symlink blobs only.
+
+Without the setting, signed sources containing gitlinks are still rejected.
 
 ### Running a declared check
 

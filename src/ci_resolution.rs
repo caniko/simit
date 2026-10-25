@@ -86,7 +86,6 @@ pub fn release_backend(
     {
         bail!("[release.artifacts].netrc_secret requires the effective GitHub Actions backend");
     }
-    crate::config::validate_required_gate_job_budget(&cfg.ci.required_gates)?;
     Ok(backend)
 }
 
@@ -506,6 +505,8 @@ impl ResolvedCiInputs {
                 .unwrap_or_else(|| "PYPI_TOKEN".to_owned()),
             pypi_trusted_publishing: cfg.ci.pypi_trusted_publishing,
             publish_crates: self.publish_crates,
+            source_submodules: false,
+            cargo_manifest: None,
             required_gates: self.required_gates.clone(),
             om_ci: self.om_ci,
             omnix_ref,

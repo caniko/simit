@@ -416,25 +416,20 @@ fn default_gate_timeout_minutes() -> u64 {
     30
 }
 
-/// Preserve existing job minima, reserving setup and every gate/upload deadline.
-pub(crate) fn required_gate_job_timeout(gates: &[RequiredGate], minimum: u64) -> u64 {
-    if !gates.iter().any(|gate| gate.artifacts.is_some()) {
-        return minimum;
-    }
-    gates
-        .iter()
-        .fold(10_u64, |budget, gate| {
-            budget
-                .saturating_add(gate.timeout_minutes)
-                .saturating_add(if gate.artifacts.is_some() { 5 } else { 0 })
-        })
-        .max(minimum)
+/// Gates run serially in shared jobs whether or not they retain artifacts, so
+/// every gate/upload deadline is added to the `base` limit of the job's own steps.
+pub(crate) fn required_gate_job_timeout(gates: &[RequiredGate], base: u64) -> u64 {
+    gates.iter().fold(base, |budget, gate| {
+        budget
+            .saturating_add(gate.timeout_minutes)
+            .saturating_add(if gate.artifacts.is_some() { 5 } else { 0 })
+    })
 }
 
-pub(crate) fn validate_required_gate_job_budget(gates: &[RequiredGate]) -> Result<()> {
-    if required_gate_job_timeout(gates, 0) > 360 {
+pub(crate) fn validate_required_gate_job_budget(gates: &[RequiredGate], base: u64) -> Result<()> {
+    if required_gate_job_timeout(gates, base) > 360 {
         bail!(
-            "required gate artifacts need a shared publishing job budget of at most 360 minutes, including all gate timeouts, 10 setup minutes and 5 minutes per upload"
+            "required gates need a shared publishing job budget of at most 360 minutes: {base} minutes for the job's own steps plus all gate timeouts and 5 minutes per artifact upload"
         );
     }
     Ok(())
@@ -1099,6 +1094,23 @@ impl ProjectConfig {
         artifacts
     }
 
+    /// Crow CI does not qualify `[ci].nix_builds` on pull requests and the Crow
+    /// prebuild only runs on default-branch pushes, so they cannot coexist.
+    pub(crate) fn validate_crow_prebuild_beside(&self, provider: CiProvider) -> Result<()> {
+        if provider == CiProvider::Crow
+            && self
+                .prebuild
+                .as_ref()
+                .is_some_and(PrebuildConfig::runs_on_crow)
+            && !self.ci.nix_builds.is_empty()
+        {
+            bail!(
+                "simit project config: Crow CI does not qualify [ci].nix_builds on pull requests; with [prebuild] provider = \"crow\" list them in [prebuild].nix_builds only"
+            );
+        }
+        Ok(())
+    }
+
     /// Whether `[ci].nix_builds` get their own matrix workflow on the primary `platform`. Without
     /// `[prebuild]` they always do; with it, the prebuild absorbs them unless the primary CI is
     /// GitHub (the only platform both share) and `[prebuild].nix_builds` or `[ci.nix_build]`
@@ -1107,8 +1119,11 @@ impl ProjectConfig {
         let Some(prebuild) = &self.prebuild else {
             return true;
         };
-        platform == Platform::Github
-            && (!prebuild.nix_builds.is_empty() || self.ci.nix_build != NixBuildConfig::default())
+        // The Crow prebuild only runs on default-branch pushes, so CI keeps qualifying PRs.
+        prebuild.runs_on_crow()
+            || (platform == Platform::Github
+                && (!prebuild.nix_builds.is_empty()
+                    || self.ci.nix_build != NixBuildConfig::default()))
     }
 }
 
@@ -1136,11 +1151,20 @@ pub struct PrebuildConfig {
     /// Pull requests still run it, and release publication uses `workflow_call`.
     #[serde(default)]
     pub push_branches: Vec<String>,
+    /// `crow` renders `.crow/prebuild.yaml` for projects without a GitHub
+    /// mirror: it builds and publishes on default-branch pushes only.
+    #[serde(default)]
+    pub provider: Option<CiProvider>,
 }
 
 impl PrebuildConfig {
+    pub(crate) fn runs_on_crow(&self) -> bool {
+        self.provider == Some(CiProvider::Crow)
+    }
+
     pub(crate) fn effective_nix_builds<'a>(&'a self, ci: &'a CiConfig) -> &'a [String] {
-        if self.nix_builds.is_empty() {
+        // The Crow prebuild never qualifies PRs, so it must not absorb `[ci].nix_builds`.
+        if self.nix_builds.is_empty() && !self.runs_on_crow() {
             &ci.nix_builds
         } else {
             &self.nix_builds
@@ -2624,7 +2648,24 @@ impl ProjectConfig {
             )?;
         }
         if let Some(prebuild) = &self.prebuild {
-            if prebuild.effective_system_runners(&self.ci).is_empty() {
+            if prebuild.runs_on_crow()
+                && (prebuild.release_archives
+                    || !prebuild.system_runners.is_empty()
+                    || !prebuild.push_branches.is_empty())
+            {
+                bail!(
+                    "simit project config: [prebuild] provider = \"crow\" supports neither release_archives, system_runners nor push_branches"
+                );
+            }
+            if let Some(provider) = self.ci.provider {
+                self.validate_crow_prebuild_beside(provider)?;
+            }
+            if prebuild.runs_on_crow() && prebuild.nix_builds.is_empty() {
+                bail!(
+                    "simit project config: [prebuild] provider = \"crow\" requires its own [prebuild].nix_builds"
+                );
+            }
+            if !prebuild.runs_on_crow() && prebuild.effective_system_runners(&self.ci).is_empty() {
                 bail!(
                     "simit project config: [prebuild] requires [prebuild.system_runners] or [ci.nix_system_runners]"
                 );
