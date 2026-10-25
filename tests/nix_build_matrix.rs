@@ -2682,6 +2682,51 @@ fn exact_matrix_coexists_with_prebuild_publication() {
     assert!(result.status.success(), "{result:?}");
 }
 
+#[cfg(unix)]
+#[test]
+fn prebuild_only_keeps_the_matrix_of_a_flake_backed_config() {
+    use std::os::unix::fs::PermissionsExt;
+    // A flake-backed config cannot persist the `--platform github` that generated its matrix.
+    let bin = TempDir::new().unwrap();
+    let nix = bin.path().join("nix");
+    fs::write(
+        &nix,
+        r#"#!/bin/sh
+printf '%s\n' '{"ci":{"provider":"actions","runtime":"nix","runner":"ubuntu-24.04","nix_builds":[".#checks.x86_64-linux.client"],"nix_build":{"only":true}},"prebuild":{"system_runners":{"x86_64-linux":"ubuntu-24.04"}}}'
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&nix, fs::Permissions::from_mode(0o755)).unwrap();
+    let path = std::env::join_paths(std::iter::once(bin.path().to_path_buf()).chain(
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
+    ))
+    .unwrap();
+    let temp = TempDir::new().unwrap();
+    fs::write(
+        temp.path().join("flake.nix"),
+        "{ outputs = { self }: { simitConfig = {}; }; }\n",
+    )
+    .unwrap();
+    let run = |args: &[&str]| {
+        common::simit()
+            .current_dir(temp.path())
+            .env("PATH", &path)
+            .args(["init", "ci"])
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let result = run(&["--platform", "github", "--runtime", "nix"]);
+    assert!(result.status.success(), "{result:?}");
+    let matrix = temp.path().join(".github/workflows/nix-builds.yaml");
+    assert!(matrix.exists());
+    let result = run(&["--prebuild-only", "--check"]);
+    assert!(result.status.success(), "{result:?}");
+    let result = run(&["--prebuild-only"]);
+    assert!(result.status.success(), "{result:?}");
+    assert!(matrix.exists());
+}
+
 #[test]
 fn nix_only_workspace_publishes_crates_without_language_ci_or_flake_check() {
     let temp = project("[ci.nix_build]\nonly = true");
