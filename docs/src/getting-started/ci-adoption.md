@@ -299,6 +299,22 @@ have migrated together. Combining branch filters with explicit `separate_events`
 is rejected before generation. Release/tag triggers retain their separate policy.
 `[prebuild].push_branches` filters the native prebuild's branch pushes the same
 way; pull requests still run it and releases still reuse it via `workflow_call`.
+That reusable `release: true` entry exists only when `[release.github]` or
+`[prebuild].release_archives` is configured. A publish-only prebuild has no
+caller, so it omits the entry, its tag/changelog/keyring validation, and the
+`attic_token` indirection, and reads the Attic token from the repository secret.
+Projects without a GitHub mirror set `[prebuild].provider = "crow"`. Then
+`simit init ci --prebuild-only` renders `.crow/prebuild.yaml` with the
+`[ci.crow]` image and labels. It runs only on pushes to
+`${CI_REPO_DEFAULT_BRANCH}`, builds the prebuild installables and, with
+`publish_attic`, runs `attic_app` with the `[release.attic].token_secret` Crow
+secret exported as `ATTIC_TOKEN`, which harbor-rs `mkAtticPush` reads. It
+always clones, and it needs its own `[prebuild].nix_builds`: it never absorbs
+`[ci].nix_builds`, which stay with PR qualification. A Crow primary, which does
+not qualify `[ci].nix_builds`, must list them in `[prebuild].nix_builds` only.
+Release archives, GitHub runner labels and branch filters are rejected for this
+provider.
+Switching providers removes the stale generated prebuild of the other one.
 Distinct MSRV, feature, platform, extracted-package, all-system evaluation and
 fresh-execution checks are separate acceptance cases, not duplicate work.
 
@@ -1304,12 +1320,13 @@ files explicitly, even when they start with a dot.
 Artifact-bearing CI gates apply `timeout_minutes` to the command step and give
 the job fifteen extra minutes for setup and upload, so their configured command
 timeout must be at most 345 minutes. Other gates retain their existing limit.
-Signed-source and trusted verification jobs reserve ten setup minutes plus all
-gate command deadlines and five minutes per diagnostic upload, with a minimum
-job limit of sixty minutes; larger existing job limits are retained.
-Configurations exceeding the shared 360-minute
-publishing job limit are rejected, including hosted-release validation jobs;
-independent CI gates do not share that limit.
+Signed-source and trusted verification jobs run every gate serially, with or
+without artifacts. They add all gate command deadlines and five minutes per
+diagnostic upload to their own sixty-minute limit, which stays reserved for
+setup, the workspace lane and packaging. Hosted-release validation jobs add the
+same gate budget to ten setup minutes. Configurations exceeding the shared
+360-minute publishing job limit are rejected; independent CI gates do not share
+that limit.
 Workflow/job cancellation can still prevent an upload; this is diagnostic
 retention, not an external custody guarantee.
 
