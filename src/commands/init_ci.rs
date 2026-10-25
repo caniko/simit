@@ -1203,6 +1203,7 @@ fn github_prebuild_file(cfg: &ProjectConfig) -> Result<Option<project::Generated
         cfg.release.attic.as_ref(),
         cfg.release.tag_prefix,
         cfg.release.notes_source(Platform::Github),
+        cfg.release.github.is_some(),
     )?))
 }
 

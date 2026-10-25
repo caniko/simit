@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- The GitHub prebuild emits its reusable `workflow_call`/`release: true` entry
+  only with `[release.github]` or `[prebuild].release_archives`. A publish-only
+  prebuild no longer requires `CHANGELOG.md` or `keys/maintainers.gpg` and reads
+  the Attic token from the repository secret; release calls pass `attic_token`,
+  with direct pushes falling back to the repository secret. Release workflows
+  call the prebuild only when it exposes that entry.
 - Add per-component `cargo_manifest` to `[[monorepo.components]]` for components
   that own a separate Cargo workspace. Their packages resolve from that
   workspace, cross-workspace path dependencies still add edges, and generated
