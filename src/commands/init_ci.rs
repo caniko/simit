@@ -1192,8 +1192,8 @@ fn run_nix_only_at(command: InitCiCommand, workspace_root: &Path) -> Result<()> 
 }
 
 /// The `[prebuild]` workflows: GitHub Actions by default, `.crow/prebuild.*` in the
-/// effective Crow format for `provider = "crow"`, plus `.crow/qualify.*` when
-/// `[prebuild].qualify` is set.
+/// effective Crow format for `provider = "crow"`, plus the
+/// `.crow/prebuild-qualify-*` workflows when `[prebuild].qualify` is set.
 pub(crate) fn prebuild_files(
     cfg: &ProjectConfig,
     crow_format: CrowWorkflowFormat,
@@ -1210,7 +1210,7 @@ pub(crate) fn prebuild_files(
             cfg.release.attic.as_ref(),
         )?];
         if !prebuild.qualify.is_empty() {
-            files.push(crate::render::crow::qualify_file(
+            files.extend(crate::render::crow::qualify_files(
                 crow_format,
                 &cfg.ci.crow,
                 prebuild,
@@ -2558,13 +2558,25 @@ fn obsolete_nix_workflows(
 ) -> Result<Vec<PathBuf>> {
     let workflow_dir = PathBuf::from(platform.workflow_dir());
     let mut obsolete = Vec::new();
-    let crow_prebuilds = [
+    let mut crow_prebuilds = [
         "prebuild.yaml",
         "prebuild.jsonnet",
         "qualify.yaml",
         "qualify.jsonnet",
     ]
-    .map(|name| Path::new(".crow").join(name));
+    .map(|name| Path::new(".crow").join(name))
+    .to_vec();
+    if let Ok(entries) = fs::read_dir(workspace_root.join(".crow")) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            if name.to_str().is_some_and(|name| {
+                name.starts_with("prebuild-qualify-")
+                    && (name.ends_with(".yaml") || name.ends_with(".jsonnet"))
+            }) {
+                crow_prebuilds.push(Path::new(".crow").join(name));
+            }
+        }
+    }
     for relative in [
         "nix-builds.yaml",
         "nix-builds.yml",

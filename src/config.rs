@@ -1141,10 +1141,10 @@ pub struct PrebuildConfig {
     /// mirror: it builds and publishes on default-branch pushes only.
     #[serde(default)]
     pub provider: Option<CiProvider>,
-    /// Crow only: installables (usually flake checks) that `.crow/qualify.yaml`
-    /// builds on pull requests and default-branch pushes after
-    /// `nix flake check --no-build`, followed by `nix_builds`. It never
-    /// receives secrets.
+    /// Crow only: installables (usually flake checks) qualified on pull
+    /// requests and default-branch pushes, together with
+    /// `nix flake check --no-build` and `nix_builds`, one secret-free
+    /// `.crow/prebuild-qualify-<name>` workflow per command.
     #[serde(default)]
     pub qualify: Vec<String>,
 }

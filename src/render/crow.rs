@@ -997,46 +997,79 @@ pub fn prebuild_file(
     })
 }
 
-/// Secret-free pipeline that qualifies `[prebuild].qualify` and the prebuild
-/// installables on pull requests and default-branch pushes. One step keeps a
-/// single Nix store, so the installables share their dependency builds.
-pub fn qualify_file(
+/// Secret-free workflows that qualify the flake, `[prebuild].qualify` and the
+/// prebuild installables on pull requests and default-branch pushes. Each
+/// command is its own workflow, `.crow/prebuild-qualify-<name>.*`, so every one
+/// gets the repository timeout and they run in parallel.
+pub fn qualify_files(
     format: CrowWorkflowFormat,
     config: &CrowCiConfig,
     prebuild: &PrebuildConfig,
-) -> Result<GeneratedFile> {
+) -> Result<Vec<GeneratedFile>> {
     let image = nix_image(config)?;
-    let mut step = Step::new("qualify", &image).command("nix flake check --no-build");
+    let mut jobs = vec![("flake-check".to_owned(), "nix flake check --no-build".to_owned())];
     for installable in prebuild.qualify.iter().chain(&prebuild.nix_builds) {
-        step = step.command(format!(
-            "nix build {} --no-link --print-build-logs",
-            shell_quote(installable)
+        jobs.push((
+            qualify_job_name(installable)?,
+            format!("nix build {} --no-link --print-build-logs", shell_quote(installable)),
         ));
     }
-    add_nix_environment(std::slice::from_mut(&mut step));
-    let workflow = Workflow {
-        name: "qualify".to_owned(),
-        labels: labels(
-            config,
-            &ResolvedRunner {
-                name: None,
-                labels: Vec::new(),
-            },
-        ),
-        platform: config.platform.clone(),
-        when: vec![
-            condition("event", "pull_request"),
-            conditions(&[("event", "push"), ("branch", "${CI_REPO_DEFAULT_BRANCH}")]),
-        ],
-        skip_clone: None,
-        variables: config.variables.clone(),
-        workspace: None,
-        steps: vec![step],
-    };
-    Ok(GeneratedFile {
-        relative_path: crow_path("qualify", None, format),
-        content: render_workflow(workflow, format)?,
-    })
+    let mut seen = std::collections::BTreeSet::new();
+    let mut files = Vec::new();
+    for (job, command) in jobs {
+        if !seen.insert(job.clone()) {
+            bail!("[prebuild].qualify and nix_builds map to the duplicate Crow workflow {job:?}");
+        }
+        let mut step = Step::new(job.clone(), &image).command(command);
+        add_nix_environment(std::slice::from_mut(&mut step));
+        let workflow = Workflow {
+            name: format!("qualify-{job}"),
+            labels: labels(
+                config,
+                &ResolvedRunner {
+                    name: None,
+                    labels: Vec::new(),
+                },
+            ),
+            platform: config.platform.clone(),
+            when: vec![
+                condition("event", "pull_request"),
+                conditions(&[("event", "push"), ("branch", "${CI_REPO_DEFAULT_BRANCH}")]),
+            ],
+            skip_clone: None,
+            variables: config.variables.clone(),
+            workspace: None,
+            steps: vec![step],
+        };
+        files.push(GeneratedFile {
+            relative_path: crow_path(&format!("prebuild-qualify-{job}"), None, format),
+            content: render_workflow(workflow, format)?,
+        });
+    }
+    Ok(files)
+}
+
+/// The installable's final attribute as a workflow name, e.g.
+/// `.#checks.x86_64-linux.clippy` -> `clippy`.
+fn qualify_job_name(installable: &str) -> Result<String> {
+    let attribute = installable.rsplit_once('#').map_or(installable, |(_, attribute)| attribute);
+    let last = attribute.rsplit('.').next().unwrap_or(attribute);
+    let name = last
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_owned();
+    if name.is_empty() {
+        bail!("cannot derive a Crow workflow name from installable {installable:?}");
+    }
+    Ok(name)
 }
 
 pub fn release_file(

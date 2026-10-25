@@ -317,10 +317,13 @@ provider.
 Switching providers removes the stale generated prebuild of the other one.
 Because the Crow prebuild never runs on pull requests, a Crow prebuild can
 also set `[prebuild].qualify` to a list of installables, usually flake checks.
-It renders `.crow/qualify.yaml` with the same image and labels, which runs on
-pull requests and default-branch pushes, receives no secrets, and in one step
-runs `nix flake check --no-build`, then builds the `qualify` installables and
-the prebuild `nix_builds`. Removing `qualify` retires the pipeline.
+It renders secret-free workflows with the same image and labels that run on
+pull requests and default-branch pushes: `.crow/prebuild-qualify-flake-check`
+runs `nix flake check --no-build`, and one `.crow/prebuild-qualify-<name>`
+workflow builds each `qualify` installable and each prebuild `nix_builds`
+installable, named after its final attribute. Separate workflows run in
+parallel and each gets the repository timeout. Removing `qualify` retires
+them.
 Distinct MSRV, feature, platform, extracted-package, all-system evaluation and
 fresh-execution checks are separate acceptance cases, not duplicate work.
 

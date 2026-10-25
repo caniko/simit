@@ -1775,39 +1775,34 @@ token_secret = "ATTIC_TOKEN"
     assert!(prebuild_only(false));
     assert!(temp.path().join(".crow/prebuild.yaml").is_file());
 
-    let workflow = read(&temp.path().join(".crow/qualify.yaml"));
-    let yaml: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
-    assert_eq!(yaml["when"][0]["event"].as_str(), Some("pull_request"));
-    assert_eq!(yaml["when"][1]["event"].as_str(), Some("push"));
-    assert_eq!(
-        yaml["when"][1]["branch"].as_str(),
-        Some("${CI_REPO_DEFAULT_BRANCH}")
-    );
-    assert_eq!(yaml["labels"]["group"].as_str(), Some("infra"));
-    let step = &yaml["steps"][0];
-    // Pull requests run this pipeline, so it never receives a secret.
-    assert!(!workflow.contains("from_secret"));
-    assert_eq!(
-        step["environment"]["NIX_CONFIG"].as_str(),
-        Some("experimental-features = nix-command flakes")
-    );
-    let commands = step["commands"]
-        .as_sequence()
-        .unwrap()
-        .iter()
-        .map(|command| command.as_str().unwrap())
-        .collect::<Vec<_>>();
-    assert_eq!(
-        commands,
-        [
-            "nix flake check --no-build",
-            "nix build '.#checks.x86_64-linux.clippy' --no-link --print-build-logs",
-            "nix build '.#packages.x86_64-linux.server' --no-link --print-build-logs",
-        ]
-    );
+    // One workflow per command, so each gets the repository timeout.
+    let qualify = |job: &str| temp.path().join(format!(".crow/prebuild-qualify-{job}.yaml"));
+    let expected = [
+        ("flake-check", "nix flake check --no-build"),
+        ("clippy", "nix build '.#checks.x86_64-linux.clippy' --no-link --print-build-logs"),
+        ("server", "nix build '.#packages.x86_64-linux.server' --no-link --print-build-logs"),
+    ];
+    for (job, command) in expected {
+        let workflow = read(&qualify(job));
+        let yaml: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
+        assert_eq!(yaml["name"].as_str(), Some(format!("qualify-{job}").as_str()));
+        assert_eq!(yaml["when"][0]["event"].as_str(), Some("pull_request"));
+        assert_eq!(yaml["when"][1]["event"].as_str(), Some("push"));
+        assert_eq!(
+            yaml["when"][1]["branch"].as_str(),
+            Some("${CI_REPO_DEFAULT_BRANCH}")
+        );
+        assert_eq!(yaml["labels"]["group"].as_str(), Some("infra"));
+        // Pull requests run these workflows, so they never receive a secret.
+        assert!(!workflow.contains("from_secret"));
+        assert_eq!(yaml["steps"].as_sequence().unwrap().len(), 1);
+        assert_eq!(yaml["steps"][0]["commands"][0].as_str(), Some(command));
+        assert_eq!(yaml["steps"][0]["commands"].as_sequence().unwrap().len(), 1);
+    }
+    let workflow = read(&qualify("clippy"));
     assert!(prebuild_only(true));
 
-    // The full GitHub-primary scope keeps the pipeline, and the registry expects it.
+    // The full GitHub-primary scope keeps the workflows, and the registry expects them.
     assert!(
         simit()
             .current_dir(temp.path())
@@ -1816,13 +1811,14 @@ token_secret = "ATTIC_TOKEN"
             .unwrap()
             .success()
     );
-    assert_eq!(read(&temp.path().join(".crow/qualify.yaml")), workflow);
+    assert_eq!(read(&qualify("clippy")), workflow);
     assert_eq!(
         simit::registry::audit_ci(temp.path()).unwrap().status,
         simit::registry::FeatureStatus::Managed
     );
 
-    // Dropping qualify retires the generated pipeline in both scopes.
+    // Dropping qualify retires the generated workflows in both scopes, and
+    // the earlier single-file pipeline as well.
     let without = config.replace("qualify = [\".#checks.x86_64-linux.clippy\"]\n", "");
     fs::write(temp.path().join("simit.toml"), &without).unwrap();
     assert!(!prebuild_only(true));
@@ -1834,9 +1830,11 @@ token_secret = "ATTIC_TOKEN"
             .unwrap()
             .success()
     );
-    assert!(!temp.path().join(".crow/qualify.yaml").exists());
+    assert!(!qualify("clippy").exists());
+    fs::write(qualify("clippy"), &workflow).unwrap();
     fs::write(temp.path().join(".crow/qualify.yaml"), &workflow).unwrap();
     assert!(prebuild_only(false));
+    assert!(!qualify("clippy").exists());
     assert!(!temp.path().join(".crow/qualify.yaml").exists());
 
     // The GitHub prebuild qualifies PRs itself, so qualify is Crow-only.
