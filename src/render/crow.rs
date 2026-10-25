@@ -1026,10 +1026,7 @@ pub fn qualify_file(
         platform: config.platform.clone(),
         when: vec![
             condition("event", "pull_request"),
-            conditions(&[
-                ("event", "push"),
-                ("branch", "${CI_REPO_DEFAULT_BRANCH}"),
-            ]),
+            conditions(&[("event", "push"), ("branch", "${CI_REPO_DEFAULT_BRANCH}")]),
         ],
         skip_clone: None,
         variables: config.variables.clone(),
