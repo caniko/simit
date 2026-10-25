@@ -1735,6 +1735,49 @@ token_secret = "DEMO_ATTIC_TOKEN"
 }
 
 #[test]
+fn crow_prebuild_rejects_unqualified_crow_ci_nix_builds() {
+    let temp = init_package(true);
+    let config = r#"[prebuild]
+provider = "crow"
+publish_attic = true
+attic_app = ".#push-flake-inputs"
+nix_builds = [".#server"]
+
+[release.attic]
+cache = "demo"
+url = "https://attic.example"
+token_name = "demo"
+token_secret = "ATTIC_TOKEN"
+"#;
+    let crow_ci = |config: &str| {
+        fs::write(temp.path().join("simit.toml"), config).unwrap();
+        simit()
+            .current_dir(temp.path())
+            .args([
+                "init",
+                "ci",
+                "--ci-provider",
+                "crow",
+                "--platform",
+                "forgejo",
+                "--runtime",
+                "nix",
+                "--runner",
+                "crow-agent",
+            ])
+            .output()
+            .unwrap()
+    };
+    assert!(crow_ci(config).status.success());
+    assert!(temp.path().join(".crow/prebuild.yaml").is_file());
+
+    // A CLI-selected Crow primary never builds [ci].nix_builds on PRs either.
+    let output = crow_ci(&format!("{config}\n[ci]\nnix_builds = [\".#checks\"]\n"));
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("does not qualify [ci].nix_builds"));
+}
+
+#[test]
 fn crow_ci_rejects_non_forgejo_platforms() {
     let temp = init_package(true);
 

@@ -1514,6 +1514,7 @@ fn run_crow(
             &options,
         )?);
     }
+    cfg.validate_crow_prebuild_beside(CiProvider::Crow)?;
     if let Some(prebuild) = prebuild_file(cfg, crow.format)? {
         files.push(prebuild);
     }

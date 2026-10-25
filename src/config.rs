@@ -1080,6 +1080,23 @@ impl ProjectConfig {
         artifacts
     }
 
+    /// Crow CI does not qualify `[ci].nix_builds` on pull requests and the Crow
+    /// prebuild only runs on default-branch pushes, so they cannot coexist.
+    pub(crate) fn validate_crow_prebuild_beside(&self, provider: CiProvider) -> Result<()> {
+        if provider == CiProvider::Crow
+            && self
+                .prebuild
+                .as_ref()
+                .is_some_and(PrebuildConfig::runs_on_crow)
+            && !self.ci.nix_builds.is_empty()
+        {
+            bail!(
+                "simit project config: Crow CI does not qualify [ci].nix_builds on pull requests; with [prebuild] provider = \"crow\" list them in [prebuild].nix_builds only"
+            );
+        }
+        Ok(())
+    }
+
     /// Whether `[ci].nix_builds` get their own matrix workflow on the primary `platform`. Without
     /// `[prebuild]` they always do; with it, the prebuild absorbs them unless the primary CI is
     /// GitHub (the only platform both share) and `[prebuild].nix_builds` or `[ci.nix_build]`
@@ -2626,13 +2643,8 @@ impl ProjectConfig {
                     "simit project config: [prebuild] provider = \"crow\" supports neither release_archives, system_runners nor push_branches"
                 );
             }
-            if prebuild.runs_on_crow()
-                && self.ci.provider == Some(CiProvider::Crow)
-                && !self.ci.nix_builds.is_empty()
-            {
-                bail!(
-                    "simit project config: Crow CI does not qualify [ci].nix_builds on pull requests; with [prebuild] provider = \"crow\" list them in [prebuild].nix_builds only"
-                );
+            if let Some(provider) = self.ci.provider {
+                self.validate_crow_prebuild_beside(provider)?;
             }
             if prebuild.runs_on_crow() && prebuild.nix_builds.is_empty() {
                 bail!(
