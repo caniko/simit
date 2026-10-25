@@ -415,7 +415,8 @@ pub fn credential_contract(inputs: &ReleaseWorkflowInputs<'_>) -> Vec<ReleaseCre
 fn github_prebuild(inputs: &ReleaseWorkflowInputs<'_>) -> bool {
     inputs.platform == Platform::Github
         && inputs.prebuild.is_some_and(|prebuild| {
-            super::ci::prebuild_release_entry(prebuild, inputs.release.is_some())
+            !prebuild.runs_on_crow()
+                && super::ci::prebuild_release_entry(prebuild, inputs.release.is_some())
         })
 }
 

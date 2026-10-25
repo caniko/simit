@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Add `[prebuild].provider = "crow"` for projects without a GitHub mirror:
+  `simit init ci --prebuild-only` renders `.crow/prebuild.yaml`, which runs
+  only on default-branch pushes, builds the prebuild installables and, with
+  `publish_attic`, runs `attic_app` with the `[release.attic].token_secret`
+  Crow secret. Pull requests never receive the token, and CI keeps its own
+  Nix build matrix.
 - The GitHub prebuild emits its reusable `workflow_call`/`release: true` entry
   only with `[release.github]` or `[prebuild].release_archives`. A publish-only
   prebuild no longer requires `CHANGELOG.md` or `keys/maintainers.gpg` and reads

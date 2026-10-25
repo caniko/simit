@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 
 use crate::cargo::Package;
 use crate::cli::{CrowWorkflowFormat, Runtime};
-use crate::config::{CrowCiConfig, CrowVariable};
+use crate::config::{AtticConfig, CrowCiConfig, CrowVariable, PrebuildConfig};
 use crate::project::GeneratedFile;
 use crate::render::ci::{
     CiOptions, OmCiMode, STEP_CARGO_CLIPPY, STEP_CARGO_DOC, STEP_CARGO_FMT, STEP_CARGO_PACKAGE,
@@ -934,6 +934,62 @@ fn apply_common_options(steps: &mut [Step], options: &CiOptions) {
 
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+/// Default-branch push pipeline that realizes `nix_builds` and, with
+/// `publish_attic`, runs the project's Attic push app with the token secret.
+pub fn prebuild_file(
+    format: CrowWorkflowFormat,
+    config: &CrowCiConfig,
+    nix_builds: &[String],
+    prebuild: &PrebuildConfig,
+    attic: Option<&AtticConfig>,
+) -> Result<GeneratedFile> {
+    let image = nix_image(config)?;
+    let mut step = Step::new("prebuild", &image).command("mkdir -p .simit-prebuild");
+    for (index, installable) in nix_builds.iter().enumerate() {
+        step = step.command(format!(
+            "nix build {} --out-link '.simit-prebuild/ci-{index}' --print-build-logs",
+            shell_quote(installable)
+        ));
+    }
+    if prebuild.publish_attic {
+        let token_secret = attic
+            .and_then(|attic| attic.token_secret.as_deref())
+            .context("Crow prebuild Attic publication requires [release.attic].token_secret")?;
+        let app = prebuild
+            .attic_app
+            .as_deref()
+            .context("Crow prebuild Attic publication requires [prebuild].attic_app")?;
+        step = step
+            .secret(token_secret)
+            .command(format!("test -n \"$${{{token_secret}:-}}\""))
+            .command(format!("nix run {}", shell_quote(app)));
+    }
+    add_nix_environment(std::slice::from_mut(&mut step));
+    let workflow = Workflow {
+        name: "prebuild".to_owned(),
+        labels: labels(
+            config,
+            &ResolvedRunner {
+                name: None,
+                labels: Vec::new(),
+            },
+        ),
+        platform: config.platform.clone(),
+        when: vec![conditions(&[
+            ("event", "push"),
+            ("branch", "${CI_REPO_DEFAULT_BRANCH}"),
+        ])],
+        skip_clone: config.skip_clone.then_some(true),
+        variables: config.variables.clone(),
+        workspace: None,
+        steps: vec![step],
+    };
+    Ok(GeneratedFile {
+        relative_path: crow_path("prebuild", None, format),
+        content: render_workflow(workflow, format)?,
+    })
 }
 
 pub fn release_file(

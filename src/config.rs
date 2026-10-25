@@ -1088,8 +1088,11 @@ impl ProjectConfig {
         let Some(prebuild) = &self.prebuild else {
             return true;
         };
-        platform == Platform::Github
-            && (!prebuild.nix_builds.is_empty() || self.ci.nix_build != NixBuildConfig::default())
+        // The Crow prebuild only runs on default-branch pushes, so CI keeps qualifying PRs.
+        prebuild.runs_on_crow()
+            || (platform == Platform::Github
+                && (!prebuild.nix_builds.is_empty()
+                    || self.ci.nix_build != NixBuildConfig::default()))
     }
 }
 
@@ -1117,9 +1120,17 @@ pub struct PrebuildConfig {
     /// Pull requests still run it, and release publication uses `workflow_call`.
     #[serde(default)]
     pub push_branches: Vec<String>,
+    /// `crow` renders `.crow/prebuild.yaml` for projects without a GitHub
+    /// mirror: it builds and publishes on default-branch pushes only.
+    #[serde(default)]
+    pub provider: Option<CiProvider>,
 }
 
 impl PrebuildConfig {
+    pub(crate) fn runs_on_crow(&self) -> bool {
+        self.provider == Some(CiProvider::Crow)
+    }
+
     pub(crate) fn effective_nix_builds<'a>(&'a self, ci: &'a CiConfig) -> &'a [String] {
         if self.nix_builds.is_empty() {
             &ci.nix_builds
@@ -2605,7 +2616,16 @@ impl ProjectConfig {
             )?;
         }
         if let Some(prebuild) = &self.prebuild {
-            if prebuild.effective_system_runners(&self.ci).is_empty() {
+            if prebuild.runs_on_crow()
+                && (prebuild.release_archives
+                    || !prebuild.system_runners.is_empty()
+                    || !prebuild.push_branches.is_empty())
+            {
+                bail!(
+                    "simit project config: [prebuild] provider = \"crow\" supports neither release_archives, system_runners nor push_branches"
+                );
+            }
+            if !prebuild.runs_on_crow() && prebuild.effective_system_runners(&self.ci).is_empty() {
                 bail!(
                     "simit project config: [prebuild] requires [prebuild.system_runners] or [ci.nix_system_runners]"
                 );

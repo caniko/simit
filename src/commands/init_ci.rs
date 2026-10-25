@@ -152,7 +152,10 @@ pub fn run(command: InitCiCommand) -> Result<()> {
         || command.with_chocolatey
         || command.with_scoop
         || cfg.release.github.is_some()
-        || cfg.prebuild.is_some();
+        || cfg
+            .prebuild
+            .as_ref()
+            .is_some_and(|prebuild| !prebuild.runs_on_crow());
     if platform == Platform::Github
         && provider == CiProvider::Actions
         && publishable_count > 0
@@ -471,7 +474,7 @@ pub fn run(command: InitCiCommand) -> Result<()> {
             &cfg.ci.nix_build,
         )?);
     }
-    if let Some(prebuild) = github_prebuild_file(&cfg)? {
+    if let Some(prebuild) = prebuild_file(&cfg)? {
         files.push(prebuild);
     }
     if !command.primary_only
@@ -597,8 +600,8 @@ fn run_prebuild_only(command: InitCiCommand) -> Result<()> {
         bail!("Prebuild workflow generation requires flake.nix at the workspace root");
     }
     let cfg = ProjectConfig::load(&workspace_root)?;
-    let file = github_prebuild_file(&cfg)?
-        .context("--prebuild-only requires a [prebuild] configuration")?;
+    let file =
+        prebuild_file(&cfg)?.context("--prebuild-only requires a [prebuild] configuration")?;
     let files = [file];
     let message = "Prebuild workflow is not up to date; run `simit init ci --prebuild-only`";
     let mut expected = files
@@ -1146,7 +1149,7 @@ fn run_nix_only_at(command: InitCiCommand, workspace_root: &Path) -> Result<()> 
             command.check,
         )?);
     }
-    if let Some(prebuild) = github_prebuild_file(&cfg)? {
+    if let Some(prebuild) = prebuild_file(&cfg)? {
         files.push(prebuild);
     }
     if let Some(pages) = &pages {
@@ -1191,10 +1194,19 @@ fn run_nix_only_at(command: InitCiCommand, workspace_root: &Path) -> Result<()> 
     Ok(())
 }
 
-fn github_prebuild_file(cfg: &ProjectConfig) -> Result<Option<project::GeneratedFile>> {
+fn prebuild_file(cfg: &ProjectConfig) -> Result<Option<project::GeneratedFile>> {
     let Some(prebuild) = &cfg.prebuild else {
         return Ok(None);
     };
+    if prebuild.runs_on_crow() {
+        return Ok(Some(crate::render::crow::prebuild_file(
+            cfg.ci.crow.format,
+            &cfg.ci.crow,
+            prebuild.effective_nix_builds(&cfg.ci),
+            prebuild,
+            cfg.release.attic.as_ref(),
+        )?));
+    }
     Ok(Some(ci::github_prebuild_file_with_policy(
         prebuild.effective_system_runners(&cfg.ci),
         prebuild.effective_nix_builds(&cfg.ci),
@@ -1319,7 +1331,7 @@ fn run_python(command: InitCiCommand) -> Result<()> {
             &cfg.ci.nix_build,
         )?);
     }
-    if let Some(prebuild) = github_prebuild_file(&cfg)? {
+    if let Some(prebuild) = prebuild_file(&cfg)? {
         files.push(prebuild);
     }
     if !command.primary_only && with_pypi_publish {
@@ -1497,7 +1509,7 @@ fn run_crow(
             &options,
         )?);
     }
-    if let Some(prebuild) = github_prebuild_file(cfg)? {
+    if let Some(prebuild) = prebuild_file(cfg)? {
         files.push(prebuild);
     }
 

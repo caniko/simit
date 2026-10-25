@@ -1621,6 +1621,88 @@ token_secret = "ATTIC_TOKEN"
 }
 
 #[test]
+fn crow_prebuild_publishes_attic_on_default_branch_pushes() {
+    let config = r#"[prebuild]
+provider = "crow"
+publish_attic = true
+attic_app = ".#push-flake-inputs"
+nix_builds = [".#packages.x86_64-linux.server"]
+
+[ci]
+provider = "actions"
+platform = "github"
+runtime = "nix"
+
+[ci.crow]
+nix_image = "nixos/nix:2.34.8"
+labels = { group = "infra", platform = "linux/amd64" }
+
+[release.attic]
+cache = "demo"
+url = "https://attic.example"
+token_name = "demo"
+token_secret = "ATTIC_TOKEN"
+"#;
+    let temp = init_flake_only();
+    fs::write(temp.path().join("simit.toml"), config).unwrap();
+    let prebuild_only = |check: bool| {
+        let mut args = vec!["init", "ci", "--prebuild-only"];
+        if check {
+            args.push("--check");
+        }
+        simit()
+            .current_dir(temp.path())
+            .args(args)
+            .status()
+            .unwrap()
+            .success()
+    };
+    assert!(prebuild_only(false));
+    assert!(!temp.path().join(".github/workflows/prebuild.yaml").exists());
+
+    let workflow = read(&temp.path().join(".crow/prebuild.yaml"));
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
+    // Publication is pinned to pushes of the default branch; PRs never see the secret.
+    assert_eq!(yaml["when"].as_sequence().unwrap().len(), 1);
+    assert_eq!(yaml["when"][0]["event"].as_str(), Some("push"));
+    assert_eq!(
+        yaml["when"][0]["branch"].as_str(),
+        Some("${CI_REPO_DEFAULT_BRANCH}")
+    );
+    assert_eq!(yaml["labels"]["group"].as_str(), Some("infra"));
+    let step = &yaml["steps"][0];
+    assert_eq!(step["image"].as_str(), Some("nixos/nix:2.34.8"));
+    assert_eq!(
+        step["environment"]["ATTIC_TOKEN"]["from_secret"].as_str(),
+        Some("ATTIC_TOKEN")
+    );
+    let commands = step["commands"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .map(|command| command.as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        commands,
+        [
+            "mkdir -p .simit-prebuild",
+            "nix build '.#packages.x86_64-linux.server' --out-link '.simit-prebuild/ci-0' --print-build-logs",
+            "test -n \"$${ATTIC_TOKEN:-}\"",
+            "nix run '.#push-flake-inputs'",
+        ]
+    );
+    assert!(prebuild_only(true));
+
+    // GitHub runner labels and branch filters have no Crow meaning.
+    fs::write(
+        temp.path().join("simit.toml"),
+        format!("{config}\n[prebuild.system_runners]\n\"x86_64-linux\" = \"ubuntu-24.04\"\n"),
+    )
+    .unwrap();
+    assert!(!prebuild_only(true));
+}
+
+#[test]
 fn crow_ci_rejects_non_forgejo_platforms() {
     let temp = init_package(true);
 
