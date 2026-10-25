@@ -2525,6 +2525,9 @@ fn is_primary_ci_workflow_name(name: &std::ffi::OsStr) -> bool {
             | "prebuild.yaml"
             | "prebuild.yml"
             | "prebuild.jsonnet"
+            | "qualify.yaml"
+            | "qualify.yml"
+            | "qualify.jsonnet"
     ) || ["ci-", "build-", "nix-builds-", "prebuild-"]
         .iter()
         .any(|prefix| {
@@ -2617,6 +2620,9 @@ fn is_ci_managed_workflow_name(name: &std::ffi::OsStr) -> bool {
             | "prebuild.yaml"
             | "prebuild.yml"
             | "prebuild.jsonnet"
+            | "qualify.yaml"
+            | "qualify.yml"
+            | "qualify.jsonnet"
             | "pages.yaml"
             | "pages.yml"
             | "publish-pypi.yaml"

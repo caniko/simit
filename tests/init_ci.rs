@@ -1822,10 +1822,20 @@ token_secret = "ATTIC_TOKEN"
         simit::registry::FeatureStatus::Managed
     );
 
-    // Dropping qualify retires the generated pipeline.
+    // Dropping qualify retires the generated pipeline in both scopes.
     let without = config.replace("qualify = [\".#checks.x86_64-linux.clippy\"]\n", "");
     fs::write(temp.path().join("simit.toml"), &without).unwrap();
     assert!(!prebuild_only(true));
+    assert!(
+        simit()
+            .current_dir(temp.path())
+            .args(["init", "ci", "--runner", "ubuntu-24.04"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(!temp.path().join(".crow/qualify.yaml").exists());
+    fs::write(temp.path().join(".crow/qualify.yaml"), &workflow).unwrap();
     assert!(prebuild_only(false));
     assert!(!temp.path().join(".crow/qualify.yaml").exists());
 
