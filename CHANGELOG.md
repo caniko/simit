@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- `[ci.nix_build].only` now coexists with `[prebuild]`: Nix-only projects keep
+  their exact qualification matrix and add the Attic/archive prebuild without
+  gaining language CI.
 - Add `[prebuild].provider = "crow"` for projects without a GitHub mirror:
   `simit init ci --prebuild-only` renders `.crow/prebuild.yaml`, which runs
   only on default-branch pushes, builds the prebuild installables and, with

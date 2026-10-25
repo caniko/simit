@@ -15,7 +15,7 @@ use crate::cli::{
 };
 use crate::commands::upgrade;
 use crate::config::{
-    CodebergPagesConfig, ProjectConfig, ResolvedChocolatey, ResolvedCodebergPages,
+    CodebergPagesConfig, NixBuildConfig, ProjectConfig, ResolvedChocolatey, ResolvedCodebergPages,
     ResolvedHomebrew, ResolvedJetbrains, ResolvedScoop, ResolvedVscode,
 };
 use crate::packaging_common::validate_download_repo;
@@ -608,7 +608,15 @@ fn run_prebuild_only(command: InitCiCommand) -> Result<()> {
         .iter()
         .map(|file| file.relative_path.clone())
         .collect::<BTreeSet<_>>();
-    let primary_platform = cfg.ci.platform.unwrap_or(Platform::Forgejo);
+    // A flake-backed config cannot persist the `--platform` that generated its matrix, and
+    // [ci.nix_build] renders only on GitHub Actions.
+    let primary_platform = command.platform.or(cfg.ci.platform).unwrap_or(
+        if cfg.ci.nix_build == NixBuildConfig::default() {
+            Platform::Forgejo
+        } else {
+            Platform::Github
+        },
+    );
     if cfg.ci.provider.unwrap_or(CiProvider::Actions) == CiProvider::Actions
         && cfg.ci_owns_nix_build_matrix(primary_platform)
         && !cfg.ci.nix_builds.is_empty()

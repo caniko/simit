@@ -2569,7 +2569,7 @@ fn matrix_options_reject_invalid_or_ignored_configuration() {
 }
 
 #[test]
-fn exact_matrix_rejects_missing_installables_other_backends_and_prebuild() {
+fn exact_matrix_rejects_missing_installables_and_other_backends() {
     for (replace, replacement, extra, expected) in [
         (
             "nix_builds = [\".#checks.x86_64-linux.client\", \".#checks.x86_64-linux.recovery\"]",
@@ -2600,12 +2600,6 @@ fn exact_matrix_rejects_missing_installables_other_backends_and_prebuild() {
             "components = [\"checks\"]\n[ci.nix_build]",
             "",
             "components",
-        ),
-        (
-            "[ci.nix_build]",
-            "[ci.nix_build]",
-            "\n[prebuild]\nsystem_runners = { x86_64-linux = \"ubuntu-24.04\" }\n",
-            "prebuild",
         ),
     ] {
         let temp = project("[ci.nix_build]\nonly = true");
@@ -2668,6 +2662,69 @@ fn explicit_matrix_qualifies_alongside_prebuild_publication() {
         fs::read_to_string(temp.path().join(".github/workflows/prebuild.yaml")).unwrap();
     assert!(published.contains("'.#checks.x86_64-linux.client'"));
     assert!(published.contains("'.#checks.x86_64-linux.recovery'"));
+}
+
+#[test]
+fn exact_matrix_coexists_with_prebuild_publication() {
+    let temp = project(
+        "[ci.nix_build]\nonly = true\n\n[prebuild]\nnix_builds = [\".#checks.x86_64-linux.client\"]\nsystem_runners = { x86_64-linux = \"ubuntu-24.04\" }\n",
+    );
+    let result = generate(&temp, &[]);
+    assert!(result.status.success(), "{result:?}");
+    let workflows = temp.path().join(".github/workflows");
+    assert!(!workflows.join("ci.yaml").exists());
+    assert!(workflow(&temp)["jobs"]["build"].is_mapping());
+    let published = fs::read_to_string(workflows.join("prebuild.yaml")).unwrap();
+    assert!(published.contains("'.#checks.x86_64-linux.client'"));
+    assert!(!published.contains("recovery"), "{published}");
+    assert!(generate(&temp, &["--check", "--diff"]).status.success());
+    let result = generate(&temp, &["--prebuild-only", "--check"]);
+    assert!(result.status.success(), "{result:?}");
+}
+
+#[cfg(unix)]
+#[test]
+fn prebuild_only_keeps_the_matrix_of_a_flake_backed_config() {
+    use std::os::unix::fs::PermissionsExt;
+    // A flake-backed config cannot persist the `--platform github` that generated its matrix.
+    let bin = TempDir::new().unwrap();
+    let nix = bin.path().join("nix");
+    fs::write(
+        &nix,
+        r#"#!/bin/sh
+printf '%s\n' '{"ci":{"provider":"actions","runtime":"nix","runner":"ubuntu-24.04","nix_builds":[".#checks.x86_64-linux.client"],"nix_build":{"only":true}},"prebuild":{"system_runners":{"x86_64-linux":"ubuntu-24.04"}}}'
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&nix, fs::Permissions::from_mode(0o755)).unwrap();
+    let path = std::env::join_paths(std::iter::once(bin.path().to_path_buf()).chain(
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
+    ))
+    .unwrap();
+    let temp = TempDir::new().unwrap();
+    fs::write(
+        temp.path().join("flake.nix"),
+        "{ outputs = { self }: { simitConfig = {}; }; }\n",
+    )
+    .unwrap();
+    let run = |args: &[&str]| {
+        common::simit()
+            .current_dir(temp.path())
+            .env("PATH", &path)
+            .args(["init", "ci"])
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let result = run(&["--platform", "github", "--runtime", "nix"]);
+    assert!(result.status.success(), "{result:?}");
+    let matrix = temp.path().join(".github/workflows/nix-builds.yaml");
+    assert!(matrix.exists());
+    let result = run(&["--prebuild-only", "--check"]);
+    assert!(result.status.success(), "{result:?}");
+    let result = run(&["--prebuild-only"]);
+    assert!(result.status.success(), "{result:?}");
+    assert!(matrix.exists());
 }
 
 #[test]
