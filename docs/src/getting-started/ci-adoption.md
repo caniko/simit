@@ -877,7 +877,8 @@ Generate and check with `simit init ci --platform github --runtime nix`, then
 emits `nix-builds.yaml` without a broad flake-check workflow. Switching to it
 removes obsolete Simit-managed primary CI while preserving project-owned
 workflows. It cannot be combined with `components`, `nix_system_runners`, or
-`prebuild` or language-specific release flags other than `publish_crates`. Without `only`, and only on a
+language-specific release flags other than `publish_crates`; it coexists with `[prebuild]`,
+which then publishes its own `[prebuild].nix_builds` subset. Without `only`, and only on a
 GitHub Actions primary, the matrix coexists with `[prebuild]` once
 `[prebuild].nix_builds` selects the published subset or `[ci.nix_build]` sets an
 option; otherwise the prebuild realizes every `[ci].nix_builds` entry itself. Rust workspaces resolve this

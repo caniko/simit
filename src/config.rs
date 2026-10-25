@@ -4318,9 +4318,6 @@ fn validate_nix_build_config(config: &ProjectConfig) -> Result<()> {
     if ci.nix_builds.is_empty() {
         bail!("simit project config: [ci.nix_build] requires [ci].nix_builds");
     }
-    if options.only && config.prebuild.is_some() {
-        bail!("simit project config: [ci.nix_build].only cannot be combined with [prebuild]");
-    }
     if ci
         .platform
         .is_some_and(|platform| platform != Platform::Github)
