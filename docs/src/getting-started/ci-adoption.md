@@ -303,6 +303,18 @@ That reusable `release: true` entry exists only when `[release.github]` or
 `[prebuild].release_archives` is configured. A publish-only prebuild has no
 caller, so it omits the entry, its tag/changelog/keyring validation, and the
 `attic_token` indirection, and reads the Attic token from the repository secret.
+Projects without a GitHub mirror set `[prebuild].provider = "crow"`. Then
+`simit init ci --prebuild-only` renders `.crow/prebuild.yaml` with the
+`[ci.crow]` image and labels. It runs only on pushes to
+`${CI_REPO_DEFAULT_BRANCH}`, builds the prebuild installables and, with
+`publish_attic`, runs `attic_app` with the `[release.attic].token_secret` Crow
+secret exported as `ATTIC_TOKEN`, which harbor-rs `mkAtticPush` reads. It
+always clones, and it needs its own `[prebuild].nix_builds`: it never absorbs
+`[ci].nix_builds`, which stay with PR qualification. A Crow primary, which does
+not qualify `[ci].nix_builds`, must list them in `[prebuild].nix_builds` only.
+Release archives, GitHub runner labels and branch filters are rejected for this
+provider.
+Switching providers removes the stale generated prebuild of the other one.
 Distinct MSRV, feature, platform, extracted-package, all-system evaluation and
 fresh-execution checks are separate acceptance cases, not duplicate work.
 
