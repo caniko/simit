@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Add Crow-only `[prebuild].qualify`: `simit init ci --prebuild-only` also
+  renders `.crow/qualify.yaml`, which runs `nix flake check --no-build` and
+  builds the `qualify` installables and the prebuild `nix_builds` on pull
+  requests and default-branch pushes, without secrets. This gives projects
+  without a GitHub mirror Nix qualification before the publishing prebuild.
 - Add `[prebuild].provider = "crow"` for projects without a GitHub mirror:
   `simit init ci --prebuild-only` renders `.crow/prebuild.yaml`, which runs
   only on default-branch pushes, builds the prebuild installables and, with

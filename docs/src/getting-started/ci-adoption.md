@@ -315,6 +315,12 @@ not qualify `[ci].nix_builds`, must list them in `[prebuild].nix_builds` only.
 Release archives, GitHub runner labels and branch filters are rejected for this
 provider.
 Switching providers removes the stale generated prebuild of the other one.
+Because the Crow prebuild never runs on pull requests, a Crow prebuild can
+also set `[prebuild].qualify` to a list of installables, usually flake checks.
+It renders `.crow/qualify.yaml` with the same image and labels, which runs on
+pull requests and default-branch pushes, receives no secrets, and in one step
+runs `nix flake check --no-build`, then builds the `qualify` installables and
+the prebuild `nix_builds`. Removing `qualify` retires the pipeline.
 Distinct MSRV, feature, platform, extracted-package, all-system evaluation and
 fresh-execution checks are separate acceptance cases, not duplicate work.
 

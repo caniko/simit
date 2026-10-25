@@ -1735,6 +1735,108 @@ token_secret = "DEMO_ATTIC_TOKEN"
 }
 
 #[test]
+fn crow_prebuild_qualify_runs_secret_free_on_pull_requests() {
+    let config = r#"[prebuild]
+provider = "crow"
+publish_attic = true
+attic_app = ".#push-flake-inputs"
+nix_builds = [".#packages.x86_64-linux.server"]
+qualify = [".#checks.x86_64-linux.clippy"]
+
+[ci]
+provider = "actions"
+platform = "github"
+runtime = "nix"
+
+[ci.crow]
+nix_image = "nixos/nix:2.34.8"
+labels = { group = "infra", platform = "linux/amd64" }
+
+[release.attic]
+cache = "demo"
+url = "https://attic.example"
+token_name = "demo"
+token_secret = "ATTIC_TOKEN"
+"#;
+    let temp = init_flake_only();
+    fs::write(temp.path().join("simit.toml"), config).unwrap();
+    let prebuild_only = |check: bool| {
+        let mut args = vec!["init", "ci", "--prebuild-only"];
+        if check {
+            args.push("--check");
+        }
+        simit()
+            .current_dir(temp.path())
+            .args(args)
+            .status()
+            .unwrap()
+            .success()
+    };
+    assert!(prebuild_only(false));
+    assert!(temp.path().join(".crow/prebuild.yaml").is_file());
+
+    let workflow = read(&temp.path().join(".crow/qualify.yaml"));
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
+    assert_eq!(yaml["when"][0]["event"].as_str(), Some("pull_request"));
+    assert_eq!(yaml["when"][1]["event"].as_str(), Some("push"));
+    assert_eq!(
+        yaml["when"][1]["branch"].as_str(),
+        Some("${CI_REPO_DEFAULT_BRANCH}")
+    );
+    assert_eq!(yaml["labels"]["group"].as_str(), Some("infra"));
+    let step = &yaml["steps"][0];
+    // Pull requests run this pipeline, so it never receives a secret.
+    assert!(!workflow.contains("from_secret"));
+    assert_eq!(
+        step["environment"]["NIX_CONFIG"].as_str(),
+        Some("experimental-features = nix-command flakes")
+    );
+    let commands = step["commands"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .map(|command| command.as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        commands,
+        [
+            "nix flake check --no-build",
+            "nix build '.#checks.x86_64-linux.clippy' --no-link --print-build-logs",
+            "nix build '.#packages.x86_64-linux.server' --no-link --print-build-logs",
+        ]
+    );
+    assert!(prebuild_only(true));
+
+    // The full GitHub-primary scope keeps the pipeline, and the registry expects it.
+    assert!(
+        simit()
+            .current_dir(temp.path())
+            .args(["init", "ci", "--runner", "ubuntu-24.04"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert_eq!(read(&temp.path().join(".crow/qualify.yaml")), workflow);
+    assert_eq!(
+        simit::registry::audit_ci(temp.path()).unwrap().status,
+        simit::registry::FeatureStatus::Managed
+    );
+
+    // Dropping qualify retires the generated pipeline.
+    let without = config.replace("qualify = [\".#checks.x86_64-linux.clippy\"]\n", "");
+    fs::write(temp.path().join("simit.toml"), &without).unwrap();
+    assert!(!prebuild_only(true));
+    assert!(prebuild_only(false));
+    assert!(!temp.path().join(".crow/qualify.yaml").exists());
+
+    // The GitHub prebuild qualifies PRs itself, so qualify is Crow-only.
+    let github = config.replace("provider = \"crow\"\n", "")
+        + "\n[prebuild.system_runners]\n\"x86_64-linux\" = \"ubuntu-24.04\"\n";
+    fs::write(temp.path().join("simit.toml"), github).unwrap();
+    assert!(!prebuild_only(false));
+}
+
+#[test]
 fn crow_prebuild_rejects_unqualified_crow_ci_nix_builds() {
     let temp = init_package(true);
     let config = r#"[prebuild]

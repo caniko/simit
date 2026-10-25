@@ -997,6 +997,51 @@ pub fn prebuild_file(
     })
 }
 
+/// Secret-free pipeline that qualifies `[prebuild].qualify` and the prebuild
+/// installables on pull requests and default-branch pushes. One step keeps a
+/// single Nix store, so the installables share their dependency builds.
+pub fn qualify_file(
+    format: CrowWorkflowFormat,
+    config: &CrowCiConfig,
+    prebuild: &PrebuildConfig,
+) -> Result<GeneratedFile> {
+    let image = nix_image(config)?;
+    let mut step = Step::new("qualify", &image).command("nix flake check --no-build");
+    for installable in prebuild.qualify.iter().chain(&prebuild.nix_builds) {
+        step = step.command(format!(
+            "nix build {} --no-link --print-build-logs",
+            shell_quote(installable)
+        ));
+    }
+    add_nix_environment(std::slice::from_mut(&mut step));
+    let workflow = Workflow {
+        name: "qualify".to_owned(),
+        labels: labels(
+            config,
+            &ResolvedRunner {
+                name: None,
+                labels: Vec::new(),
+            },
+        ),
+        platform: config.platform.clone(),
+        when: vec![
+            condition("event", "pull_request"),
+            conditions(&[
+                ("event", "push"),
+                ("branch", "${CI_REPO_DEFAULT_BRANCH}"),
+            ]),
+        ],
+        skip_clone: None,
+        variables: config.variables.clone(),
+        workspace: None,
+        steps: vec![step],
+    };
+    Ok(GeneratedFile {
+        relative_path: crow_path("qualify", None, format),
+        content: render_workflow(workflow, format)?,
+    })
+}
+
 pub fn release_file(
     format: CrowWorkflowFormat,
     config: &CrowCiConfig,
