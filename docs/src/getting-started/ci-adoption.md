@@ -309,8 +309,10 @@ Projects without a GitHub mirror set `[prebuild].provider = "crow"`. Then
 `${CI_REPO_DEFAULT_BRANCH}`, builds the prebuild installables and, with
 `publish_attic`, runs `attic_app` with the `[release.attic].token_secret` Crow
 secret exported under the same name (harbor-rs `mkAtticPush` reads
-`ATTIC_TOKEN` by default). Release archives, GitHub runner labels and branch
-filters are rejected for this provider.
+`ATTIC_TOKEN` by default). It needs its own `[prebuild].nix_builds`: it never
+absorbs `[ci].nix_builds`, which stay with PR qualification. Release archives,
+GitHub runner labels and branch filters are rejected for this provider.
+Switching providers removes the stale generated prebuild of the other one.
 Distinct MSRV, feature, platform, extracted-package, all-system evaluation and
 fresh-execution checks are separate acceptance cases, not duplicate work.
 

@@ -1132,7 +1132,8 @@ impl PrebuildConfig {
     }
 
     pub(crate) fn effective_nix_builds<'a>(&'a self, ci: &'a CiConfig) -> &'a [String] {
-        if self.nix_builds.is_empty() {
+        // The Crow prebuild never qualifies PRs, so it must not absorb `[ci].nix_builds`.
+        if self.nix_builds.is_empty() && !self.runs_on_crow() {
             &ci.nix_builds
         } else {
             &self.nix_builds
@@ -2623,6 +2624,11 @@ impl ProjectConfig {
             {
                 bail!(
                     "simit project config: [prebuild] provider = \"crow\" supports neither release_archives, system_runners nor push_branches"
+                );
+            }
+            if prebuild.runs_on_crow() && prebuild.nix_builds.is_empty() {
+                bail!(
+                    "simit project config: [prebuild] provider = \"crow\" requires its own [prebuild].nix_builds"
                 );
             }
             if !prebuild.runs_on_crow() && prebuild.effective_system_runners(&self.ci).is_empty() {

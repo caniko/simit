@@ -1618,6 +1618,10 @@ token_secret = "ATTIC_TOKEN"
     assert_yaml_parses(&prebuild);
     assert!(prebuild.contains("runs-on: ${{ matrix.runner }}"));
     assert!(prebuild.contains("nix run '.#push-flake-inputs'"));
+    assert_eq!(
+        simit::registry::audit_ci(temp.path()).unwrap().status,
+        simit::registry::FeatureStatus::Managed
+    );
 }
 
 #[test]
@@ -1693,13 +1697,37 @@ token_secret = "ATTIC_TOKEN"
     );
     assert!(prebuild_only(true));
 
+    // The full GitHub-primary scope keeps the Crow prebuild, and the registry expects it.
+    assert!(
+        simit()
+            .current_dir(temp.path())
+            .args(["init", "ci", "--runner", "ubuntu-24.04"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert_eq!(read(&temp.path().join(".crow/prebuild.yaml")), workflow);
+    assert_eq!(
+        simit::registry::audit_ci(temp.path()).unwrap().status,
+        simit::registry::FeatureStatus::Managed
+    );
+
     // GitHub runner labels and branch filters have no Crow meaning.
-    fs::write(
-        temp.path().join("simit.toml"),
-        format!("{config}\n[prebuild.system_runners]\n\"x86_64-linux\" = \"ubuntu-24.04\"\n"),
-    )
-    .unwrap();
+    let runners = "\n[prebuild.system_runners]\n\"x86_64-linux\" = \"ubuntu-24.04\"\n";
+    fs::write(temp.path().join("simit.toml"), format!("{config}{runners}")).unwrap();
     assert!(!prebuild_only(true));
+
+    // Moving back to the GitHub prebuild retires the Crow pipeline and its secret use.
+    let github = config.replace("provider = \"crow\"\n", "");
+    fs::write(temp.path().join("simit.toml"), format!("{github}{runners}")).unwrap();
+    assert!(!prebuild_only(true));
+    assert!(prebuild_only(false));
+    assert!(!temp.path().join(".crow/prebuild.yaml").exists());
+    assert!(
+        temp.path()
+            .join(".github/workflows/prebuild.yaml")
+            .is_file()
+    );
 }
 
 #[test]

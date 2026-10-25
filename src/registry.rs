@@ -1149,7 +1149,7 @@ fn infer_expected_primary_ci_files(
                 platform, &runner, &pages,
             )?);
         }
-        push_prebuild_file(&mut files, &config)?;
+        push_prebuild_file(&mut files, &config, config.ci.crow.format)?;
         return Ok(files);
     }
     if (config.ci.nix_build.only || !workspace_root.join("Cargo.toml").is_file())
@@ -1220,7 +1220,7 @@ fn infer_expected_primary_ci_files(
                 platform, &runner, &pages,
             )?);
         }
-        push_prebuild_file(&mut files, &config)?;
+        push_prebuild_file(&mut files, &config, config.ci.crow.format)?;
         return Ok(files);
     }
     let metadata = cargo::cargo_metadata(&cargo::find_manifest(workspace_root)?)?;
@@ -1447,7 +1447,7 @@ fn infer_expected_primary_ci_files(
             .unwrap_or_else(|| ResolvedRunner::literal("ubuntu-latest").expect("literal runner"));
         files.push(ci::codeberg_pages_file(platform, &pages_runner, &pages)?);
     }
-    push_prebuild_file(&mut files, &config)?;
+    push_prebuild_file(&mut files, &config, config.ci.crow.format)?;
 
     Ok(files
         .into_iter()
@@ -1464,26 +1464,18 @@ fn gitlab_flake_files(config: &ProjectConfig) -> Result<Vec<project::GeneratedFi
         relative_path: PathBuf::from(".gitlab-ci.yml"),
         content: crate::render::ci::gitlab_nix_flake_workflow(),
     }];
-    push_prebuild_file(&mut files, config)?;
+    push_prebuild_file(&mut files, config, config.ci.crow.format)?;
     Ok(files)
 }
 
 fn push_prebuild_file(
     files: &mut Vec<project::GeneratedFile>,
     config: &ProjectConfig,
+    crow_format: CrowWorkflowFormat,
 ) -> Result<()> {
-    let Some(prebuild) = &config.prebuild else {
-        return Ok(());
-    };
-    files.push(crate::render::ci::github_prebuild_file_with_policy(
-        prebuild.effective_system_runners(&config.ci),
-        prebuild.effective_nix_builds(&config.ci),
-        prebuild,
-        &config.release.artifacts,
-        config.release.attic.as_ref(),
-        config.release.tag_prefix,
-        config.release.notes_source(Platform::Github),
-        config.release.github.is_some(),
+    files.extend(crate::commands::init_ci::prebuild_file(
+        config,
+        crow_format,
     )?);
     Ok(())
 }
@@ -1743,6 +1735,7 @@ fn infer_expected_crow_files(
             &options,
         )?);
     }
+    push_prebuild_file(&mut files, &config, format)?;
     Ok(files
         .into_iter()
         .filter(|file| is_workflow_path(&file.relative_path))
