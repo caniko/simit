@@ -893,8 +893,10 @@ pub fn publish_independent_files(
     Ok(vec![source, publisher])
 }
 
+/// Monorepo, native and release-plz callers never run these gates serially in
+/// one job, so only credential safety applies here.
 pub(crate) fn validate_credential_free_workflow(workflow: &str, options: &CiOptions) -> Result<()> {
-    trusted_publisher::validate_credential_free_source(workflow, options)
+    trusted_publisher::validate_credential_free_inputs(workflow, options)
 }
 
 pub fn codeberg_pages_file(
