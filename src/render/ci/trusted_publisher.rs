@@ -7,9 +7,21 @@ use anyhow::Context;
 // Candidate-controlled build scripts/setup run only on fresh hosted workers,
 // independently of configured CI/release runners and their mounted credentials.
 pub(super) const CANDIDATE_RUNNER: &str = "ubuntu-24.04";
+// Setup, the workspace lane and packaging; required gates add their deadlines.
+const CANDIDATE_JOB_MINUTES: u64 = 60;
 
+/// Validates a source/publisher pair whose build and verify jobs run `options`
+/// gates serially.
 pub(super) fn validate_credential_free_source(workflow: &str, options: &CiOptions) -> Result<()> {
-    crate::config::validate_required_gate_job_budget(&options.required_gates)?;
+    crate::config::validate_required_gate_job_budget(
+        &options.required_gates,
+        CANDIDATE_JOB_MINUTES,
+    )?;
+    validate_credential_free_inputs(workflow, options)
+}
+
+/// Credential-safety checks only; gates checked here may run in their own jobs.
+pub(super) fn validate_credential_free_inputs(workflow: &str, options: &CiOptions) -> Result<()> {
     // Names are shell/YAML syntax, never expressions or executable defaults.
     // Recheck direct renderer callers as well as ProjectConfig consumers.
     for name in &options.required_env {
@@ -152,7 +164,16 @@ pub(super) fn prefixed_archive_steps(
     runtime: Runtime,
     prefix: crate::release_identity::TagPrefix,
 ) -> String {
-    archive_steps_with_packaging(name, runtime, true, None, prefix)
+    archive_steps_with_packaging(name, runtime, true, None, prefix, "")
+}
+
+/// ` --manifest-path <path>` for a component-owned Cargo workspace.
+fn manifest_argument(options: &CiOptions) -> String {
+    options
+        .cargo_manifest
+        .as_deref()
+        .map(|manifest| format!(" --manifest-path {}", shell_word(manifest)))
+        .unwrap_or_default()
 }
 
 fn archive_steps_with_packaging(
@@ -161,6 +182,7 @@ fn archive_steps_with_packaging(
     package: bool,
     namespace: Option<&str>,
     tag_prefix: crate::release_identity::TagPrefix,
+    manifest: &str,
 ) -> String {
     let prefix = command_prefix(runtime);
     let quoted = shell_word(name);
@@ -176,13 +198,13 @@ fn archive_steps_with_packaging(
     );
     let packaging = if package {
         format!(
-            "          {prefix}cargo package --locked --allow-dirty --no-verify -p {quoted} --target-dir \"$RUNNER_TEMP/simit-package-target\"\n"
+            "          {prefix}cargo package --locked{manifest} --allow-dirty --no-verify -p {quoted} --target-dir \"$RUNNER_TEMP/simit-package-target\"\n"
         )
     } else {
         String::new()
     };
     let mut w = format!(
-        "      - name: Build immutable archive {name}\n        run: |\n          set -euo pipefail\n          version=\"{version_expression}\"\n          test \"$({prefix}cargo pkgid --locked -p {quoted} | awk -F'[#@]' 'NF > 1 {{print $NF}}' | tail -n 1)\" = \"$version\"\n{packaging}          mkdir -p \"$RUNNER_TEMP/simit-crates/{name}\"\n          cp \"$RUNNER_TEMP/simit-package-target/package/{name}-$version.crate\" \"$RUNNER_TEMP/simit-crates/{name}/\"\n"
+        "      - name: Build immutable archive {name}\n        run: |\n          set -euo pipefail\n          version=\"{version_expression}\"\n          test \"$({prefix}cargo pkgid --locked{manifest} -p {quoted} | awk -F'[#@]' 'NF > 1 {{print $NF}}' | tail -n 1)\" = \"$version\"\n{packaging}          mkdir -p \"$RUNNER_TEMP/simit-crates/{name}\"\n          cp \"$RUNNER_TEMP/simit-package-target/package/{name}-$version.crate\" \"$RUNNER_TEMP/simit-crates/{name}/\"\n"
     );
     w.push_str(&format!(
         "      - name: Retain original-run archive {name}\n"
@@ -237,7 +259,7 @@ pub(super) fn source_workflow_with_namespace(
     w.push_str(CANDIDATE_RUNNER);
     w.push_str(&format!(
         "\n    timeout-minutes: {}\n",
-        crate::config::required_gate_job_timeout(&options.required_gates, 60)
+        crate::config::required_gate_job_timeout(&options.required_gates, CANDIDATE_JOB_MINUTES)
     ));
     push_job_env(&mut w, Platform::Github, runtime, &options.extra_env, true);
     w.push_str("    steps:\n");
@@ -272,6 +294,7 @@ pub(super) fn source_workflow_with_namespace(
         push_deny_step(&mut w, command_prefix(runtime));
     }
     push_source_required_gates(&mut w, options);
+    let manifest = manifest_argument(options);
     for name in names {
         let prefix = command_prefix(runtime);
         let quoted = shell_word(name);
@@ -280,10 +303,10 @@ pub(super) fn source_workflow_with_namespace(
         } else {
             ""
         };
-        w.push_str(&format!("      - name: Test {name}\n        run: {prefix}cargo test --locked -p {quoted} --all-targets{features}\n"));
-        w.push_str(&format!("      - name: Clippy {name}\n        run: {prefix}cargo clippy --locked -p {quoted} --all-targets{features} -- -D warnings\n"));
+        w.push_str(&format!("      - name: Test {name}\n        run: {prefix}cargo test --locked{manifest} -p {quoted} --all-targets{features}\n"));
+        w.push_str(&format!("      - name: Clippy {name}\n        run: {prefix}cargo clippy --locked{manifest} -p {quoted} --all-targets{features} -- -D warnings\n"));
         if options.with_docs {
-            w.push_str(&format!("      - name: Document {name}\n        run: {prefix}cargo doc --locked -p {quoted} --no-deps --all-features\n"));
+            w.push_str(&format!("      - name: Document {name}\n        run: {prefix}cargo doc --locked{manifest} -p {quoted} --no-deps --all-features\n"));
         }
     }
     // Cargo resolves not-yet-published interdependent members through its
@@ -292,7 +315,7 @@ pub(super) fn source_workflow_with_namespace(
         .iter()
         .map(|name| format!(" -p {}", shell_word(name)))
         .collect::<String>();
-    w.push_str(&format!("      - name: Package coordinated release set\n        run: {}cargo package --locked --allow-dirty --no-verify{selection} --target-dir \"$RUNNER_TEMP/simit-package-target\"\n", command_prefix(runtime)));
+    w.push_str(&format!("      - name: Package coordinated release set\n        run: {}cargo package --locked{manifest} --allow-dirty --no-verify{selection} --target-dir \"$RUNNER_TEMP/simit-package-target\"\n", command_prefix(runtime)));
     for name in names {
         w.push_str(&archive_steps_with_packaging(
             name,
@@ -300,6 +323,7 @@ pub(super) fn source_workflow_with_namespace(
             false,
             namespace,
             options.tag_prefix,
+            &manifest,
         ));
     }
     trim_trailing_blank_lines(&mut w);
@@ -398,6 +422,13 @@ pub(super) fn publisher_file_with_namespace(
     } else {
         namespace_argument
     };
+    let namespace_argument = match &options.cargo_manifest {
+        Some(manifest) => format!(
+            "{namespace_argument} --cargo-manifest {}",
+            shell_word(manifest)
+        ),
+        None => namespace_argument,
+    };
     for (name, dependencies) in plan {
         // Cargo names already use GitHub's permitted job-ID alphabet. Keep
         // their spelling: collapsing '-'/'_' or case aliases distinct crates.
@@ -423,7 +454,10 @@ pub(super) fn publisher_file_with_namespace(
         w.push_str(CANDIDATE_RUNNER);
         w.push_str(&format!(
             "\n    timeout-minutes: {}\n    steps:\n",
-            crate::config::required_gate_job_timeout(&options.required_gates, 60)
+            crate::config::required_gate_job_timeout(
+                &options.required_gates,
+                CANDIDATE_JOB_MINUTES
+            )
         ));
         bootstrap(&mut w);
         if runtime == Runtime::Nix {

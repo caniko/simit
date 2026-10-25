@@ -124,13 +124,19 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
         return verify_manifest(&selection, &command);
     }
 
-    let metadata = if command.component.is_some() {
-        let (root, _) = crate::monorepo::load(&std::env::current_dir()?)?;
-        cargo::cargo_metadata(&root.join("Cargo.toml"))?
-    } else {
-        cargo::metadata_for_current_dir()?
+    // A component workspace is not the repository: Git and policy stay at the root.
+    let (component_root, metadata) = match &command.component {
+        Some(id) => {
+            let (root, project) = crate::monorepo::load(&std::env::current_dir()?)?;
+            let metadata = crate::monorepo::component_metadata(&root, &project, id)?;
+            let separate = crate::monorepo::component_cargo_manifest(&project, id)? != "Cargo.toml";
+            (separate.then_some(root), metadata)
+        }
+        None => (None, cargo::metadata_for_current_dir()?),
     };
-    let workspace_root = metadata.workspace_root.as_std_path();
+    let workspace_root = component_root
+        .as_deref()
+        .unwrap_or(metadata.workspace_root.as_std_path());
     let config = ProjectConfig::load(workspace_root)?;
     if config.monorepo.is_some() && command.component.is_none() {
         bail!("monorepo release verification requires --component and one independent package");

@@ -213,6 +213,8 @@ pub struct CiOptions {
     pub publish_crates: bool,
     /// Trusted publishers admit signed-tree-pinned monorepo submodules.
     pub source_submodules: bool,
+    /// Root-relative manifest of a component-owned Cargo workspace.
+    pub cargo_manifest: Option<String>,
     pub required_gates: Vec<crate::config::RequiredGate>,
     pub om_ci: OmCiMode,
     pub omnix_ref: String,
@@ -274,6 +276,7 @@ impl Default for CiOptions {
             pypi_trusted_publishing: false,
             publish_crates: false,
             source_submodules: false,
+            cargo_manifest: None,
             required_gates: Vec::new(),
             om_ci: OmCiMode::default(),
             omnix_ref: OMNIX_REF_DEFAULT.to_owned(),
@@ -890,8 +893,10 @@ pub fn publish_independent_files(
     Ok(vec![source, publisher])
 }
 
+/// Monorepo, native and release-plz callers never run these gates serially in
+/// one job, so only credential safety applies here.
 pub(crate) fn validate_credential_free_workflow(workflow: &str, options: &CiOptions) -> Result<()> {
-    trusted_publisher::validate_credential_free_source(workflow, options)
+    trusted_publisher::validate_credential_free_inputs(workflow, options)
 }
 
 pub fn codeberg_pages_file(
@@ -1136,9 +1141,18 @@ pub fn github_prebuild_file(
         attic,
         crate::release_identity::TagPrefix::None,
         crate::config::ReleaseNotesSource::Changelog,
+        true,
     )
 }
 
+/// Whether the prebuild exposes the reusable `release: true` entry that a
+/// GitHub release workflow calls. A publish-only prebuild has no caller, so
+/// it must not demand a changelog, maintainer keyring, or reusable secret.
+pub fn prebuild_release_entry(prebuild: &PrebuildConfig, github_release: bool) -> bool {
+    github_release || prebuild.release_archives
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn github_prebuild_file_with_policy(
     system_runners: &BTreeMap<String, String>,
     nix_builds: &[String],
@@ -1147,10 +1161,12 @@ pub fn github_prebuild_file_with_policy(
     attic: Option<&AtticConfig>,
     prefix: crate::release_identity::TagPrefix,
     notes: crate::config::ReleaseNotesSource,
+    github_release: bool,
 ) -> Result<GeneratedFile> {
     if system_runners.is_empty() {
         bail!("GitHub prebuild requires at least one native system runner");
     }
+    let release_entry = prebuild_release_entry(prebuild, github_release);
     let release_attrs = artifacts.effective_nix_bundle_attrs();
     let attic = prebuild.publish_attic.then_some(attic).flatten();
     if prebuild.publish_attic && attic.is_none() {
@@ -1179,20 +1195,29 @@ pub fn github_prebuild_file_with_policy(
     }
     workflow.push_str("name: Native Nix prebuild\n\non:\n  push:\n");
     push_ci_branches(&mut workflow, &prebuild.push_branches);
-    workflow.push_str("    tags-ignore: [\"**\"]\n  pull_request:\n  workflow_dispatch:\n  workflow_call:\n    inputs:\n      release:\n        required: false\n        type: boolean\n        default: false\n");
-    if attic.is_some() || artifacts.netrc_secret.is_some() {
-        workflow.push_str("    secrets:\n");
-    }
-    if attic.is_some() {
-        workflow.push_str("      attic_token:\n        required: true\n");
-    }
-    if let Some(secret) = &artifacts.netrc_secret {
-        // Declared under its repository name so push runs and release calls
-        // read the same `secrets.<name>`.
-        workflow.push_str(&format!("      {secret}:\n        required: false\n"));
+    workflow.push_str("    tags-ignore: [\"**\"]\n  pull_request:\n  workflow_dispatch:\n");
+    if release_entry {
+        workflow.push_str("  workflow_call:\n    inputs:\n      release:\n        required: false\n        type: boolean\n        default: false\n");
+        if attic.is_some() || artifacts.netrc_secret.is_some() {
+            workflow.push_str("    secrets:\n");
+        }
+        if attic.is_some() {
+            workflow.push_str("      attic_token:\n        required: true\n");
+        }
+        if let Some(secret) = &artifacts.netrc_secret {
+            // Declared under its repository name so push runs and release calls
+            // read the same `secrets.<name>`.
+            workflow.push_str(&format!("      {secret}:\n        required: false\n"));
+        }
     }
     workflow.push_str("\npermissions:\n  contents: read\n\n");
-    workflow.push_str("concurrency:\n  group: ${{ github.workflow_ref }}-${{ github.event_name }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.head_ref || github.ref_name }}-prebuild\n  cancel-in-progress: ${{ !inputs.release && (github.event_name == 'push' || github.event_name == 'pull_request') }}\n\n");
+    workflow.push_str("concurrency:\n  group: ${{ github.workflow_ref }}-${{ github.event_name }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.head_ref || github.ref_name }}-prebuild\n  cancel-in-progress: ");
+    workflow.push_str(if release_entry {
+        "${{ !inputs.release && (github.event_name == 'push' || github.event_name == 'pull_request') }}"
+    } else {
+        "${{ github.event_name == 'push' || github.event_name == 'pull_request' }}"
+    });
+    workflow.push_str("\n\n");
     workflow.push_str(
         "jobs:\n  build:\n    strategy:\n      fail-fast: false\n      matrix:\n        include:\n",
     );
@@ -1214,14 +1239,16 @@ pub fn github_prebuild_file_with_policy(
         &artifacts.trusted_public_keys,
         artifacts.netrc_secret.as_deref(),
     );
-    // Reusable release prebuilds also validate their own event checkout before
-    // any project-controlled evaluation/build or Attic credential use.
-    let validation = super::release_workflow::tag_validation_step(artifacts, prefix, notes);
-    workflow.push_str(&validation.replacen(
-        "        run: |",
-        "        if: ${{ inputs.release }}\n        run: |",
-        1,
-    ));
+    if release_entry {
+        // Reusable release prebuilds also validate their own event checkout before
+        // any project-controlled evaluation/build or Attic credential use.
+        let validation = super::release_workflow::tag_validation_step(artifacts, prefix, notes);
+        workflow.push_str(&validation.replacen(
+            "        run: |",
+            "        if: ${{ inputs.release }}\n        run: |",
+            1,
+        ));
+    }
     workflow.push_str("      - name: Verify runner system\n        run: test \"$(nix eval --impure --raw --expr builtins.currentSystem)\" = \"${{ matrix.system }}\"\n");
     if !nix_builds.is_empty() {
         workflow.push_str("      - name: Build native Nix outputs\n        run: |\n          set -euo pipefail\n          mkdir -p .simit-prebuild\n");
@@ -1265,14 +1292,29 @@ pub fn github_prebuild_file_with_policy(
             .attic_app
             .as_deref()
             .expect("validated rs-harbor Attic app");
-        workflow.push_str("      - name: Publish flake inputs to Attic\n        if: ${{ (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) || (inputs.release && github.event_name != 'pull_request') }}\n        env:\n          ATTIC_TOKEN: ${{ inputs.release && secrets.attic_token || secrets.");
+        let publish_if = if release_entry {
+            "${{ (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) || (inputs.release && github.event_name != 'pull_request') }}"
+        } else {
+            "${{ github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}"
+        };
+        workflow.push_str("      - name: Publish flake inputs to Attic\n        if: ");
+        workflow.push_str(publish_if);
+        workflow.push_str("\n        env:\n          ATTIC_TOKEN: ${{ ");
+        if release_entry {
+            // A reusable call only sees the declared `attic_token`; a direct
+            // push run only sees the repository secret.
+            workflow.push_str("secrets.attic_token || ");
+        }
+        workflow.push_str("secrets.");
         workflow.push_str(token_secret);
         workflow.push_str(
             " }}\n          HARBOR_ATTIC_MANIFEST: attic-paths.txt\n        run: nix run ",
         );
         workflow.push_str(&shell_quote(attic_app));
         workflow.push('\n');
-        workflow.push_str("      - name: Upload flake input manifest\n        if: ${{ (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) || (inputs.release && github.event_name != 'pull_request') }}\n        uses: ");
+        workflow.push_str("      - name: Upload flake input manifest\n        if: ");
+        workflow.push_str(publish_if);
+        workflow.push_str("\n        uses: ");
         workflow.push_str(&github_action_ref(
             "actions/upload-artifact",
             artifact_version,
