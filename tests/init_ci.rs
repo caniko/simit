@@ -1778,6 +1778,42 @@ token_secret = "ATTIC_TOKEN"
 }
 
 #[test]
+fn crow_python_ci_keeps_the_crow_prebuild() {
+    let temp = init_python_project();
+    let config = fs::read_to_string(temp.path().join("simit.toml")).unwrap_or_default();
+    fs::write(
+        temp.path().join("simit.toml"),
+        format!(
+            "{config}\n[prebuild]\nprovider = \"crow\"\npublish_attic = true\nattic_app = \".#push-flake-inputs\"\nnix_builds = [\".#default\"]\n\n[release.attic]\ncache = \"demo\"\nurl = \"https://attic.example\"\ntoken_name = \"demo\"\ntoken_secret = \"ATTIC_TOKEN\"\n"
+        ),
+    )
+    .unwrap();
+    let output = simit()
+        .current_dir(temp.path())
+        .args([
+            "init",
+            "ci",
+            "--platform",
+            "forgejo",
+            "--ci-provider",
+            "crow",
+            "--runtime",
+            "nix",
+            "--runner",
+            "atlas-nix-trusted",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(temp.path().join(".crow/ci.yaml").is_file());
+    assert!(temp.path().join(".crow/prebuild.yaml").is_file());
+}
+
+#[test]
 fn crow_ci_rejects_non_forgejo_platforms() {
     let temp = init_package(true);
 
