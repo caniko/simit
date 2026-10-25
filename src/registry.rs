@@ -896,7 +896,7 @@ fn is_supplementary_workflow(file: &WorkflowFile) -> bool {
             | "nix-builds.yaml"
     ) || name.starts_with("prebuild-qualify-")
         || (file.content.contains("Native GitHub ")
-        && file.content.contains("equivalent of the generated Forgejo"))
+            && file.content.contains("equivalent of the generated Forgejo"))
 }
 
 #[derive(Debug, Clone)]
