@@ -188,15 +188,29 @@ fn netrc_secret_authenticates_github_release_nix_substituters() {
 }
 
 #[test]
-fn hosted_release_artifact_gates_share_the_bounded_upload_budget() {
+fn hosted_release_gates_share_the_bounded_job_budget() {
     for prebuild in [
         "",
         "[prebuild]\nrelease_archives=true\npublish_attic=false\nsystem_runners={x86_64-linux='ubuntu-24.04'}\n",
     ] {
-        for (timeout, accepted) in [(170, true), (171, false), (180, false)] {
+        // Gates share the validation job with or without diagnostic uploads.
+        for (artifacts, timeout, accepted) in [
+            (true, 170, true),
+            (true, 171, false),
+            (true, 180, false),
+            (false, 175, true),
+            (false, 176, false),
+        ] {
             let mut config = String::from("[ci]\nplatform='github'\n");
             for id in ["first", "second"] {
-                config.push_str(&format!("[[ci.required_gates]]\nid='{id}'\nrun='false'\ntimeout_minutes={timeout}\n[ci.required_gates.artifacts]\nname='{id}'\npaths=['target/evidence/']\n"));
+                config.push_str(&format!(
+                    "[[ci.required_gates]]\nid='{id}'\nrun='false'\ntimeout_minutes={timeout}\n"
+                ));
+                if artifacts {
+                    config.push_str(&format!(
+                        "[ci.required_gates.artifacts]\nname='{id}'\npaths=['target/evidence/']\n"
+                    ));
+                }
             }
             config.push_str(&format!("[release.github]\nrepo='example/player'\n[release.artifacts]\nrunner='ubuntu-24.04'\nprebuild_binaries=true\nsign=false\n{prebuild}"));
             let dir = project(&config);
@@ -219,6 +233,13 @@ fn hosted_release_artifact_gates_share_the_bounded_upload_budget() {
                     "{output:?}"
                 );
             }
+            // Tooling that only selects the release backend renders no shared job.
+            let output = common::simit()
+                .current_dir(dir.path())
+                .args(["release", "secrets", "contract", "--json"])
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{timeout}: {output:?}");
             assert!(!dir.path().join(".github/workflows/release.yml").exists());
         }
     }

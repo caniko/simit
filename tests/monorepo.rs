@@ -941,6 +941,32 @@ fn generated_component_gate_propagates_pipeline_failure() {
 }
 
 #[test]
+fn independent_component_checks_do_not_share_the_publisher_job_budget() {
+    let temp = fixture();
+    let root = temp.path();
+    enroll_release_checks(root);
+    // Four 180-minute checks run in separate component jobs, not one publisher job.
+    let config = fs::read_to_string(root.join("simit.toml"))
+        .unwrap()
+        .replace(
+            "run = \"true\" }",
+            "run = \"true\", timeout_minutes = 180 }",
+        )
+        .replace(
+            "runtime = \"nix\"",
+            "runtime = \"nix\"\npublish_crates = true",
+        );
+    assert_eq!(config.matches("timeout_minutes = 180").count(), 4);
+    write(root, "simit.toml", &config);
+    let output = common::simit()
+        .current_dir(root)
+        .args(["init", "ci"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+}
+
+#[test]
 fn primary_regeneration_preserves_independent_publishers_and_signing_from_members() {
     let temp = fixture();
     let root = temp.path();
