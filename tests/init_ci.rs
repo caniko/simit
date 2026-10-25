@@ -1776,16 +1776,28 @@ token_secret = "ATTIC_TOKEN"
     assert!(temp.path().join(".crow/prebuild.yaml").is_file());
 
     // One workflow per command, so each gets the repository timeout.
-    let qualify = |job: &str| temp.path().join(format!(".crow/prebuild-qualify-{job}.yaml"));
+    let qualify = |job: &str| {
+        temp.path()
+            .join(format!(".crow/prebuild-qualify-{job}.yaml"))
+    };
     let expected = [
         ("flake-check", "nix flake check --no-build"),
-        ("clippy", "nix build '.#checks.x86_64-linux.clippy' --no-link --print-build-logs"),
-        ("server", "nix build '.#packages.x86_64-linux.server' --no-link --print-build-logs"),
+        (
+            "clippy",
+            "nix build '.#checks.x86_64-linux.clippy' --no-link --print-build-logs",
+        ),
+        (
+            "server",
+            "nix build '.#packages.x86_64-linux.server' --no-link --print-build-logs",
+        ),
     ];
     for (job, command) in expected {
         let workflow = read(&qualify(job));
         let yaml: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
-        assert_eq!(yaml["name"].as_str(), Some(format!("qualify-{job}").as_str()));
+        assert_eq!(
+            yaml["name"].as_str(),
+            Some(format!("qualify-{job}").as_str())
+        );
         assert_eq!(yaml["when"][0]["event"].as_str(), Some("pull_request"));
         assert_eq!(yaml["when"][1]["event"].as_str(), Some("push"));
         assert_eq!(

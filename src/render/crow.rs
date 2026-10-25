@@ -1007,11 +1007,17 @@ pub fn qualify_files(
     prebuild: &PrebuildConfig,
 ) -> Result<Vec<GeneratedFile>> {
     let image = nix_image(config)?;
-    let mut jobs = vec![("flake-check".to_owned(), "nix flake check --no-build".to_owned())];
+    let mut jobs = vec![(
+        "flake-check".to_owned(),
+        "nix flake check --no-build".to_owned(),
+    )];
     for installable in prebuild.qualify.iter().chain(&prebuild.nix_builds) {
         jobs.push((
             qualify_job_name(installable)?,
-            format!("nix build {} --no-link --print-build-logs", shell_quote(installable)),
+            format!(
+                "nix build {} --no-link --print-build-logs",
+                shell_quote(installable)
+            ),
         ));
     }
     let mut seen = std::collections::BTreeSet::new();
@@ -1052,7 +1058,9 @@ pub fn qualify_files(
 /// The installable's final attribute as a workflow name, e.g.
 /// `.#checks.x86_64-linux.clippy` -> `clippy`.
 fn qualify_job_name(installable: &str) -> Result<String> {
-    let attribute = installable.rsplit_once('#').map_or(installable, |(_, attribute)| attribute);
+    let attribute = installable
+        .rsplit_once('#')
+        .map_or(installable, |(_, attribute)| attribute);
     let last = attribute.rsplit('.').next().unwrap_or(attribute);
     let name = last
         .chars()
