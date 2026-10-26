@@ -231,7 +231,7 @@ fn build_workflow(
             .components
             .contains(&crate::config::CiComponent::FlakeWiring)
     {
-        steps.push(step("flake-wiring", image, "nix run --no-write-lock-file git+https://github.com/caniko/simit.git -- init flake --check --diff".to_owned()));
+        steps.push(step("flake-wiring", image, super::flake_wiring_check()));
     }
 
     if let Some(command) = &config.check_command {
@@ -788,11 +788,7 @@ pub fn python_ci_file(
         steps.push(Step::new("project-setup", &image).commands(options.extra_setup.clone()));
     }
     if selected(crate::config::CiComponent::FlakeWiring) {
-        steps.push(step(
-            "flake-wiring",
-            &image,
-            "nix run --no-write-lock-file git+https://github.com/caniko/simit.git -- init flake --check --diff".to_owned(),
-        ));
+        steps.push(step("flake-wiring", &image, super::flake_wiring_check()));
     }
     if selected(crate::config::CiComponent::FlakeEvaluation) {
         steps.push(step(
