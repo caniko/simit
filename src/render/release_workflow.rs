@@ -16,7 +16,7 @@ use std::fmt::Write as _;
 
 use crate::cli::Platform;
 use crate::config::{
-    AnnounceConfig, ArtifactsConfig, AtticConfig, FlatpakConfig, PrebuildConfig,
+    AnnounceConfig, ArtifactsConfig, AtticConfig, FlatpakConfig, PrebuildConfig, PypiReleaseConfig,
     ReleaseNotesSource, ReleaseProvider, ReleasePublishConfig, ReleasePublisherEnforcement,
     ReleasePublisherPolicy, RequiredGate, ResolvedApt, ResolvedAur, ResolvedChocolatey,
     ResolvedCopr, ResolvedHomebrew, ResolvedReleaseTarget, ResolvedScoop, WindowsSigningConfig,
@@ -51,6 +51,7 @@ pub struct ReleaseWorkflowInputs<'a> {
     pub flatpak: Option<&'a FlatpakConfig>,
     pub winget: Option<&'a WingetConfig>,
     pub announce: Option<&'a AnnounceConfig>,
+    pub pypi: Option<&'a PypiReleaseConfig>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -293,6 +294,18 @@ pub fn credential_contract(inputs: &ReleaseWorkflowInputs<'_>) -> Vec<ReleaseCre
             "scoop",
             channel_credential_required(inputs, "scoop", false),
             "Token for pushing the Scoop bucket.",
+        ));
+    }
+    if let Some(pypi) = inputs
+        .pypi
+        .filter(|pypi| !pypi.trusted_publishing && channel_enabled(inputs, "pypi"))
+    {
+        credentials.push(ReleaseCredential::secret(
+            &pypi.token_secret,
+            ReleaseCredentialScope::Repo,
+            "pypi",
+            channel_credential_required(inputs, "pypi", true),
+            "PyPI API token for uploading the release wheels.",
         ));
     }
     if let Some(chocolatey) = inputs.chocolatey {
@@ -681,6 +694,13 @@ pub fn render(inputs: &ReleaseWorkflowInputs<'_>) -> String {
             channel_soft_skip(inputs, "scoop", activated_remote),
         );
     }
+    if let Some(pypi) = inputs.pypi.filter(|_| channel_enabled(inputs, "pypi")) {
+        push_publish_pypi(
+            &mut w,
+            pypi,
+            channel_policy(inputs, "pypi") == Some(ReleasePublisherPolicy::Staged),
+        );
+    }
     if let Some(copr) = inputs.copr {
         push_publish_copr(&mut w, copr, activated_remote);
     }
@@ -769,6 +789,17 @@ fn push_secrets_header(w: &mut String, inputs: &ReleaseWorkflowInputs<'_>) {
             w,
             "# - {}: optional Scoop bucket push token.",
             scoop.bucket_token_secret
+        )
+        .expect("write");
+    }
+    if let Some(pypi) = inputs
+        .pypi
+        .filter(|pypi| !pypi.trusted_publishing && channel_enabled(inputs, "pypi"))
+    {
+        writeln!(
+            w,
+            "# - {}: PyPI API token for uploading release/*.whl.",
+            pypi.token_secret
         )
         .expect("write");
     }
@@ -2212,6 +2243,40 @@ fn push_publish_scoop(w: &mut String, scoop: &ResolvedScoop, soft_skip: bool) {
     w.push_str("            --push\n");
 }
 
+/// Uploads the wheels the release build left in `release/`; nothing is built
+/// here. `--check-url` skips files PyPI already has, so a rerun resumes.
+fn push_publish_pypi(w: &mut String, pypi: &PypiReleaseConfig, staged: bool) {
+    w.push_str("      - name: Publish wheels to PyPI\n");
+    if !pypi.trusted_publishing {
+        writeln!(
+            w,
+            "        env:\n          UV_PUBLISH_TOKEN: ${{{{ secrets.{} }}}}",
+            pypi.token_secret
+        )
+        .expect("write");
+    }
+    w.push_str("        run: |\n          set -euo pipefail\n");
+    if !pypi.trusted_publishing {
+        if staged {
+            w.push_str("          if [ -z \"${UV_PUBLISH_TOKEN:-}\" ]; then echo '::warning::pypi: token unset; staged publisher is not active yet.' >&2; exit 0; fi\n");
+        } else {
+            writeln!(
+                w,
+                "          if [ -z \"${{UV_PUBLISH_TOKEN:-}}\" ]; then echo '{} is required because PyPI publishing is configured.' >&2; exit 1; fi",
+                pypi.token_secret
+            )
+            .expect("write");
+        }
+    }
+    w.push_str("          shopt -s nullglob\n          wheels=(release/*.whl)\n");
+    w.push_str("          if [ \"${#wheels[@]}\" -eq 0 ]; then echo 'No release/*.whl to publish to PyPI.' >&2; exit 1; fi\n");
+    w.push_str("          nix shell nixpkgs#uv -c uv publish --check-url https://pypi.org/simple/");
+    if pypi.trusted_publishing {
+        w.push_str(" --trusted-publishing always");
+    }
+    w.push_str(" \"${wheels[@]}\"\n");
+}
+
 fn push_sbom(w: &mut String, commands: &[String]) {
     w.push_str("      - name: Generate supply-chain reports\n        run: |\n          set -euo pipefail\n          . ./release-env\n          export VERSION IS_PRERELEASE\n          mkdir -p release\n");
     for line in commands {
@@ -3030,6 +3095,7 @@ mod tests {
             flatpak: Some(&flatpak),
             winget: Some(&winget),
             announce: None,
+            pypi: None,
         });
         let doc: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
         let directory = tempfile::tempdir().unwrap();
@@ -3287,6 +3353,7 @@ esac"#,
             flatpak: Some(&flatpak),
             winget: Some(&winget),
             announce: Some(&announce),
+            pypi: None,
         });
 
         // Scaffolding
@@ -3494,6 +3561,7 @@ esac"#,
             flatpak: Some(&flatpak),
             winget: Some(&winget),
             announce: None,
+            pypi: None,
         });
 
         assert!(workflow.contains("      - name: Probe downstream publisher state\n"));
@@ -3562,6 +3630,7 @@ esac"#,
             flatpak: None,
             winget: None,
             announce: None,
+            pypi: None,
         });
 
         assert!(workflow.contains("name: Publish APT repository"));
@@ -3600,10 +3669,75 @@ esac"#,
             flatpak: None,
             winget: None,
             announce: None,
+            pypi: None,
         });
         assert!(workflow.contains("nix build '.#release-bundle'"));
         assert!(workflow.contains("expected exactly one release manifest from Nix bundles"));
         assert!(workflow.contains(".schemaVersion == 2"));
+    }
+
+    #[test]
+    fn pypi_publishes_prebuilt_wheels_with_token_or_trusted_publishing() {
+        let artifacts = artifacts();
+        let publish = ReleasePublishConfig::default();
+        let inputs = |pypi| ReleaseWorkflowInputs {
+            platform: Platform::Github,
+            runner: "ubuntu-24.04",
+            preinstalled_nix: false,
+            publish_enforcement: ReleasePublisherEnforcement::Declared,
+            publish: &publish,
+            artifacts: &artifacts,
+            prebuild: None,
+            smoke_command: None,
+            release: None,
+            tag_prefix: crate::release_identity::TagPrefix::None,
+            notes_source: None,
+            required_gates: &[],
+            attic: None,
+            aur: None,
+            copr: None,
+            apt: None,
+            homebrew: None,
+            scoop: None,
+            chocolatey: None,
+            windows_signing: None,
+            flatpak: None,
+            winget: None,
+            announce: None,
+            pypi,
+        };
+
+        let token = PypiReleaseConfig {
+            trusted_publishing: false,
+            token_secret: "PYPI_API_TOKEN".to_owned(),
+        };
+        let workflow = render(&inputs(Some(&token)));
+        assert!(workflow.contains("# - PYPI_API_TOKEN: PyPI API token"));
+        assert!(workflow.contains("UV_PUBLISH_TOKEN: ${{ secrets.PYPI_API_TOKEN }}"));
+        assert!(workflow.contains("require_credential 'repo secret' 'PYPI_API_TOKEN'"));
+        assert!(
+            workflow.contains("uv publish --check-url https://pypi.org/simple/ \"${wheels[@]}\"")
+        );
+        // Uploads only what the release build produced, after the hosted release.
+        assert!(!workflow.contains("uv build"));
+        let required = credential_contract(&inputs(Some(&token)));
+        assert!(required.iter().any(|c| c.channel == "pypi" && c.required));
+
+        let trusted = PypiReleaseConfig {
+            trusted_publishing: true,
+            token_secret: "PYPI_TOKEN".to_owned(),
+        };
+        let workflow = render(&inputs(Some(&trusted)));
+        assert!(workflow.contains("id-token: write"));
+        assert!(workflow.contains("--trusted-publishing always \"${wheels[@]}\""));
+        assert!(!workflow.contains("UV_PUBLISH_TOKEN"));
+        assert!(
+            !credential_contract(&inputs(Some(&trusted)))
+                .iter()
+                .any(|c| c.channel == "pypi")
+        );
+
+        assert!(!render(&inputs(None)).contains("PyPI"));
     }
 
     #[test]
@@ -3650,6 +3784,7 @@ esac"#,
             flatpak: None,
             winget: None,
             announce: None,
+            pypi: None,
         });
         // Empty checksum_globs defaults to hashing all release directory files.
         assert!(workflow.contains("add_matches '*'"));
@@ -3688,6 +3823,7 @@ esac"#,
             flatpak: None,
             winget: None,
             announce: None,
+            pypi: None,
         });
         // The generated checksum command uses Bash glob enumeration, not bare `sha256sum *.deb`.
         assert!(

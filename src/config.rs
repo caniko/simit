@@ -1309,6 +1309,28 @@ pub struct ReleaseConfig {
     /// Optional Windows Authenticode signing of release `.exe`s.
     #[serde(default)]
     pub windows_signing: Option<WindowsSigningConfig>,
+    /// Optional upload of the prebuilt `release/*.whl` to PyPI.
+    #[serde(default)]
+    pub pypi: Option<PypiReleaseConfig>,
+}
+
+/// `[release.pypi]` — upload the wheels the release build left in `release/`
+/// (e.g. from a Nix release bundle) to PyPI with `uv publish`. Unlike
+/// `[ci].pypi_*`, nothing is built here: the wheels are release artifacts.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PypiReleaseConfig {
+    /// Authenticate with PyPI trusted publishing (GitHub OIDC). Register the
+    /// trusted publisher with workflow `release.yml`.
+    #[serde(default)]
+    pub trusted_publishing: bool,
+    /// API-token secret used when `trusted_publishing` is off.
+    #[serde(default = "default_pypi_release_token_secret")]
+    pub token_secret: String,
+}
+
+fn default_pypi_release_token_secret() -> String {
+    "PYPI_TOKEN".to_owned()
 }
 
 /// `[release.changelog]` — optional Codex-assisted Keep a Changelog drafting.
@@ -2660,6 +2682,12 @@ impl ProjectConfig {
             validate_github_actions_secret_identifier(
                 "simit project config: [release.artifacts].netrc_secret",
                 netrc_secret,
+            )?;
+        }
+        if let Some(pypi) = &self.release.pypi {
+            validate_secret_name(
+                "simit project config: [release.pypi].token_secret",
+                &pypi.token_secret,
             )?;
         }
         if let Some(prebuild) = &self.prebuild {

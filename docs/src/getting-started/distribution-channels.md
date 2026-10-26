@@ -151,7 +151,8 @@ hatch.
 The public distribution and release sections are `[aur]`, `[copr]`, `[apt]`,
 `[homebrew]`, `[chocolatey]`, `[scoop]`, `[flatpak]`, `[winget]`,
 `[release.codeberg]`, `[release.github]`, `[release.artifacts]`, `[release.attic]`,
-`[release.changelog]`, `[release.announce]`, and `[release.windows_signing]`.
+`[release.changelog]`, `[release.announce]`, `[release.windows_signing]`, and
+`[release.pypi]`.
 
 ## Release Secrets
 
@@ -228,6 +229,8 @@ header. These names are configurable:
 - Windows signing: `[release.windows_signing].pfx_secret`, `pass_secret`, and
   `subject_secret` default to `WINDOWS_SIGNING_PFX`, `WINDOWS_SIGNING_PASS`,
   and `WINDOWS_SIGNING_SUBJECT`.
+- PyPI: `[release.pypi].token_secret` defaults to `PYPI_TOKEN`; it is unused
+  with `trusted_publishing = true`.
 
 ## Release Workflow
 
@@ -238,6 +241,23 @@ substituters, artifact build commands, SBOM commands, checksum globs, signing,
 and the committed minisign public key path. Optional `[release.attic]`,
 `[release.announce]`, and `[release.windows_signing]` sections add cache push,
 stable-release announcements, and Authenticode signing steps.
+
+Optional `[release.pypi]` uploads the wheels the release build left in
+`release/` (for example from a Nix `release-bundle`) to PyPI with
+`uv publish --check-url`, after the hosted release, so a rerun skips files
+PyPI already has. Nothing is built for PyPI; add `"*.whl"` to
+`checksum_globs` to attach the same wheels to the hosted release. Prerelease
+tags publish too. `trusted_publishing = true` uses the job's GitHub OIDC token
+(register the trusted publisher with workflow `release.yml`; GitHub Actions
+only); otherwise the token secret is required before anything is published:
+
+```toml
+[release.pypi]
+trusted_publishing = true # or: token_secret = "PYPI_TOKEN"
+```
+
+This differs from `[ci].pypi_*`, which builds and publishes a Python project
+in a separate `publish-pypi.yaml` workflow.
 
 The workflow publishes only channels whose config sections are present. AUR,
 apt, Homebrew, Scoop, Chocolatey, Flatpak, and winget are stable-release-only

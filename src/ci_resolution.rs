@@ -86,6 +86,16 @@ pub fn release_backend(
     {
         bail!("[release.artifacts].netrc_secret requires the effective GitHub Actions backend");
     }
+    // PyPI trusts GitHub's OIDC issuer, not Forgejo's.
+    if cfg
+        .release
+        .pypi
+        .as_ref()
+        .is_some_and(|pypi| pypi.trusted_publishing)
+        && (provider != CiProvider::Actions || platform != Platform::Github)
+    {
+        bail!("[release.pypi].trusted_publishing requires the effective GitHub Actions backend");
+    }
     Ok(backend)
 }
 

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Add `[release.pypi]`: the release workflow uploads the prebuilt
+  `release/*.whl` (e.g. from a Nix `release-bundle`) to PyPI with
+  `uv publish --check-url` after the hosted release, using PyPI trusted
+  publishing on GitHub Actions or `token_secret` (default `PYPI_TOKEN`). The
+  token is checked in the release credential preflight; Crow release workflows
+  reject the section.
 - Add top-level `primary_package`: the workspace member used for the README
   crates.io badge and as the package-metadata fallback for AUR, COPR, APT,
   Scoop, Chocolatey and release setup. Previously these always took the

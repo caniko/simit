@@ -780,3 +780,50 @@ fn package_downloads_use_tags_but_archive_names_use_versions() {
     let formula = String::from_utf8(output.stdout).unwrap();
     assert!(formula.contains("/releases/download/v0.2.0/player-0.2.0-"));
 }
+
+#[test]
+fn release_pypi_uploads_bundle_wheels_after_the_hosted_release() {
+    let github = "[ci]\nplatform='github'\n[release.github]\nrepo='example/player'\n[release.artifacts]\nrunner='ubuntu-24.04'\nprebuild_binaries=true\nsign=false\n";
+
+    let workflow = render(
+        project(&format!(
+            "{github}[release.pypi]\ntrusted_publishing=true\n"
+        ))
+        .path(),
+    );
+    let hosted = workflow
+        .find("name: Publish GitHub release")
+        .expect("hosted release step");
+    let pypi = workflow
+        .find("name: Publish wheels to PyPI")
+        .expect("pypi step");
+    assert!(hosted < pypi, "{workflow}");
+    assert!(
+        workflow.contains("--trusted-publishing always"),
+        "{workflow}"
+    );
+
+    // Token mode also works on Forgejo; trusted publishing does not.
+    let workflow = render(project(&format!("{HOSTED}[release.pypi]\n")).path());
+    assert!(
+        workflow.contains("UV_PUBLISH_TOKEN: ${{ secrets.PYPI_TOKEN }}"),
+        "{workflow}"
+    );
+
+    let dir = project(&format!(
+        "{HOSTED}[release.pypi]\ntrusted_publishing=true\n"
+    ));
+    let output = common::simit()
+        .current_dir(dir.path())
+        .env("XDG_CONFIG_HOME", dir.path().join(".xdg"))
+        .args(["init", "release", "--print"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains(
+            "[release.pypi].trusted_publishing requires the effective GitHub Actions backend"
+        ),
+        "{output:?}"
+    );
+}
