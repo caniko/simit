@@ -1,0 +1,1402 @@
+//! `simit projects facts`: which simit usages each checkout has and which
+//! upgrade paths cover them, as one `fleetix.supply-facts.v1` document with
+//! the `simit.usage-facts.v1` vocabulary. Read-only: it never writes files or
+//! the project registry, and reports per-repository failures in `errors`.
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::fs;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use anyhow::{Result, bail};
+use serde::Serialize;
+use serde_json::{Value, json};
+
+use crate::cli::ProjectsFactsArgs;
+use crate::commands::init_ci;
+use crate::commands::projects::CommandExit;
+use crate::config::{ProjectConfig, flake_declares_simit_config};
+use crate::registry::{self, FeatureStatus};
+
+/// Canonical coordinate of the simit source that pins resolve to.
+const SIMIT: &str = "github.com/caniko/simit";
+
+pub fn run(args: ProjectsFactsArgs) -> Result<()> {
+    if !args.eval_flake {
+        crate::config::disable_flake_eval();
+    }
+    let paths = if args.paths.is_empty() {
+        vec![PathBuf::from(".")]
+    } else {
+        args.paths.into_iter().map(PathBuf::from).collect()
+    };
+    let mut facts = Facts::default();
+    for path in &paths {
+        facts.observe(path, args.eval_flake);
+    }
+    let document = json!({
+        "contract": "fleetix.supply-facts.v1",
+        "vocabulary": "simit.usage-facts.v1",
+        "producer": {"name": "simit", "version": env!("CARGO_PKG_VERSION")},
+        "observedAt": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        "nodes": facts.nodes.into_values().collect::<Vec<_>>(),
+        "edges": facts
+            .edges
+            .into_iter()
+            .map(|(from, to, kind)| json!({"from": from, "to": to, "kind": kind}))
+            .collect::<Vec<_>>(),
+        "capabilities": capabilities(),
+        "errors": facts.errors,
+    });
+    let mut stdout = std::io::stdout().lock();
+    serde_json::to_writer_pretty(&mut stdout, &document)
+        .map_err(std::io::Error::from)
+        .and_then(|()| writeln!(stdout))
+        .map_err(|error| CommandExit::new(2, format!("writing facts: {error}")).into())
+}
+
+type Attrs = BTreeMap<&'static str, Value>;
+
+#[derive(Serialize)]
+struct Node {
+    id: String,
+    kind: &'static str,
+    attrs: Attrs,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    expects: Vec<Value>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    blockers: Vec<Value>,
+}
+
+#[derive(Default)]
+struct Facts {
+    nodes: BTreeMap<String, Node>,
+    edges: BTreeSet<(String, String, &'static str)>,
+    errors: Vec<Value>,
+}
+
+/// Simit references found in one file.
+#[derive(Default)]
+struct Refs {
+    revisions: BTreeSet<String>,
+    tags: BTreeSet<String>,
+    floating: BTreeSet<String>,
+}
+
+fn blocker(code: &str, reason: impl Into<String>) -> Value {
+    json!({"code": code, "reason": reason.into()})
+}
+
+impl Facts {
+    fn node(&mut self, id: String, kind: &'static str, attrs: Attrs) -> &mut Node {
+        self.nodes.entry(id.clone()).or_insert(Node {
+            id,
+            kind,
+            attrs,
+            expects: Vec::new(),
+            blockers: Vec::new(),
+        })
+    }
+
+    fn error(&mut self, subject: &str, code: &str, message: String) {
+        self.errors
+            .push(json!({"subject": subject, "code": code, "message": message}));
+    }
+
+    fn usage(
+        &mut self,
+        coordinate: &str,
+        kind: &'static str,
+        locator: Option<&str>,
+        state: &str,
+        mut attrs: Attrs,
+    ) -> &mut Node {
+        debug_assert!(
+            capabilities().iter().any(|row| row.kind == kind),
+            "usage kind {kind} has no capability row"
+        );
+        let id = match locator {
+            Some(locator) => format!("usage:{coordinate}#{kind}:{locator}"),
+            None => format!("usage:{coordinate}#{kind}"),
+        };
+        attrs.insert("usageKind", kind.into());
+        attrs.insert("state", state.into());
+        self.edges
+            .insert((format!("repo:{coordinate}"), id.clone(), "uses"));
+        self.node(id, "usage", attrs)
+    }
+
+    /// A usage whose files simit generates.
+    fn generated(&mut self, coordinate: &str, kind: &'static str, state: &str, paths: Vec<String>) {
+        let node = self.usage(
+            coordinate,
+            kind,
+            None,
+            state,
+            Attrs::from([("paths", json!(paths))]),
+        );
+        if state != "hand-rolled" {
+            node.expects.push(json!({
+                "attr": "generatorRevision",
+                "blocker": "unknown-generator-revision",
+                "reason": "No receipt or pin proves which generator revision rendered these files.",
+            }));
+        }
+    }
+
+    /// A per-file reference to simit, pinned or not.
+    fn reference(
+        &mut self,
+        coordinate: &str,
+        kind: &'static str,
+        path: &str,
+        refs: Refs,
+    ) -> String {
+        let mut attrs = Attrs::from([("path", json!(path))]);
+        if !refs.revisions.is_empty() {
+            attrs.insert("revisions", json!(refs.revisions));
+        }
+        if !refs.tags.is_empty() {
+            attrs.insert("tags", json!(refs.tags));
+        }
+        let node = self.usage(coordinate, kind, Some(path), "unknown", attrs);
+        let id = node.id.clone();
+        for floating in &refs.floating {
+            node.blockers.push(blocker(
+                "unpinned-runtime",
+                format!("{path} runs simit from the floating reference {floating}"),
+            ));
+        }
+        for revision in refs.revisions {
+            self.pin(&id, revision);
+        }
+        id
+    }
+
+    fn pin(&mut self, usage: &str, revision: String) {
+        let rev = format!("rev:{SIMIT}@{revision}");
+        self.node(
+            rev.clone(),
+            "rev",
+            Attrs::from([("source", json!(SIMIT)), ("revision", json!(revision))]),
+        );
+        self.edges.insert((usage.to_owned(), rev, "pins"));
+    }
+
+    fn observe(&mut self, path: &Path, eval_flake: bool) {
+        let subject = path.display().to_string();
+        let root = match fs::canonicalize(path) {
+            Ok(root) if root.is_dir() => root,
+            Ok(_) => return self.error(&subject, "path-unreadable", "not a directory".into()),
+            Err(error) => return self.error(&subject, "path-unreadable", error.to_string()),
+        };
+        let coordinate = match registry::origin_coordinate(&root) {
+            Ok(coordinate) => coordinate,
+            Err(error) => {
+                return self.error(&subject, "coordinate-unresolved", format!("{error:#}"));
+            }
+        };
+        let repo = format!("repo:{coordinate}");
+        if self.nodes.contains_key(&repo) {
+            return self.error(
+                &subject,
+                "duplicate-coordinate",
+                format!("{repo} was already observed"),
+            );
+        }
+        let host = coordinate.split('/').next().unwrap_or_default().to_owned();
+        // ponytail: forge software by well-known host; every other host is
+        // Forgejo. Take the kind from operator forge policy if that stops holding.
+        let forge = match host.as_str() {
+            "github.com" => "github",
+            "gitlab.com" => "gitlab",
+            _ => "forgejo",
+        };
+        let mut attrs = Attrs::from([("forge", json!(forge)), ("forgeHost", json!(host))]);
+        let mut blockers = Vec::new();
+        match registry::infer_project_ci_target(&root) {
+            Ok(Some(backend)) => {
+                let platform = backend.platform().as_str();
+                let target = format!("{}/{platform}", backend.provider().as_str());
+                if platform != forge {
+                    blockers.push(blocker(
+                        "provider-mismatch",
+                        format!("{target} CI cannot run on {host}"),
+                    ));
+                }
+                attrs.insert("ciTarget", json!(target));
+            }
+            Ok(None) => {}
+            Err(error) => self.error(&repo, "ci-target-unresolved", format!("{error:#}")),
+        }
+
+        // Config sources. A flake source is never evaluated without --eval-flake.
+        let mut sources = Vec::new();
+        let mut explained = false;
+        match ProjectConfig::static_source_labels(&root) {
+            Ok(labels) => sources.extend(labels.iter().map(|label| match label.as_str() {
+                "simit.toml" => "config.simit-toml",
+                "Cargo.toml [workspace.metadata.simit]" => "config.cargo-workspace",
+                _ => "config.cargo-package",
+            })),
+            Err(error) => {
+                explained = true;
+                self.error(&repo, "config-error", format!("{error:#}"));
+                if root.join("simit.toml").is_file() {
+                    sources.push("config.simit-toml");
+                }
+            }
+        }
+        let flake = root.join("flake.nix");
+        if flake.is_file() && flake_declares_simit_config(&flake).unwrap_or(false) {
+            sources.push("config.flake");
+            blockers.push(blocker(
+                "config-not-persistable",
+                "flake outputs.simitConfig cannot be rewritten by the generator",
+            ));
+        }
+        if sources.len() > 1 {
+            explained = true;
+            blockers.push(blocker(
+                "config-conflict",
+                format!("several simit config sources: {}", sources.join(", ")),
+            ));
+        }
+        let config = ProjectConfig::load(&root);
+        match &config {
+            Err(error) if sources.contains(&"config.flake") => {
+                explained = true;
+                blockers.push(blocker(
+                    "config-unresolved",
+                    if eval_flake {
+                        format!("{error:#}")
+                    } else {
+                        "flake outputs.simitConfig is only evaluated with --eval-flake".into()
+                    },
+                ));
+            }
+            Err(error) if !explained => {
+                explained = true;
+                self.error(&repo, "config-error", format!("{error:#}"));
+            }
+            _ => {}
+        }
+        let config_state = if config.is_ok() { "current" } else { "unknown" };
+        for kind in &sources {
+            let path = match *kind {
+                "config.simit-toml" => "simit.toml",
+                "config.flake" => "flake.nix",
+                _ => "Cargo.toml",
+            };
+            self.usage(
+                &coordinate,
+                kind,
+                None,
+                config_state,
+                Attrs::from([("paths", json!([path]))]),
+            );
+        }
+        let repo_node = self.node(repo.clone(), "repo", attrs);
+        repo_node.blockers.extend(blockers);
+
+        let workflows = match registry::collect_workflow_files(&root) {
+            Ok(workflows) => workflows,
+            Err(error) => {
+                self.error(&repo, "workflows-unreadable", format!("{error:#}"));
+                Vec::new()
+            }
+        };
+        self.observe_ci(
+            &root,
+            &coordinate,
+            &host,
+            &workflows,
+            config.as_ref().ok(),
+            explained,
+        );
+        self.observe_generated(
+            &root,
+            &coordinate,
+            &workflows,
+            config.as_ref().ok(),
+            eval_flake,
+            explained,
+        );
+        self.observe_references(&root, &coordinate, &workflows);
+        self.observe_locks(&root, &coordinate);
+    }
+
+    fn observe_ci(
+        &mut self,
+        root: &Path,
+        coordinate: &str,
+        host: &str,
+        workflows: &[registry::WorkflowFile],
+        config: Option<&ProjectConfig>,
+        explained: bool,
+    ) {
+        let repo = format!("repo:{coordinate}");
+        let ci = workflows
+            .iter()
+            .filter(|file| !registry::is_release_workflow_path(&file.relative_path))
+            .collect::<Vec<_>>();
+        // kind -> (present paths, drifted)
+        let mut kinds: BTreeMap<&'static str, (BTreeSet<String>, bool)> = BTreeMap::new();
+        let (state, drifted) = match registry::audit_ci(root) {
+            Ok(audit) if audit.status == FeatureStatus::Absent => return,
+            Ok(audit) if audit.status == FeatureStatus::HandRolled => {
+                let paths = ci
+                    .iter()
+                    .map(|file| file.relative_path.display().to_string());
+                self.generated(coordinate, "ci.primary", "hand-rolled", paths.collect());
+                return;
+            }
+            Ok(audit) => (
+                "current",
+                [
+                    audit.changed_files,
+                    audit.missing_files,
+                    audit.extra_generated_files,
+                ]
+                .concat(),
+            ),
+            Err(error) => {
+                if !explained {
+                    self.error(&repo, "ci-audit-failed", format!("{error:#}"));
+                }
+                ("unknown", Vec::new())
+            }
+        };
+        for file in ci.iter().filter(|file| file.marked) {
+            let entry = kinds.entry(ci_kind(&file.relative_path)).or_default();
+            entry.0.insert(file.relative_path.display().to_string());
+        }
+        for path in drifted {
+            let entry = kinds.entry(ci_kind(&path)).or_default();
+            if root.join(&path).is_file() {
+                entry.0.insert(path.display().to_string());
+            }
+            entry.1 = true;
+        }
+        let local_gate = root.join(crate::render::ci::local::LOCAL_GATE_PATH);
+        if let Ok(content) = fs::read_to_string(&local_gate)
+            && crate::render::ci::is_generated_workflow_marker(&content)
+        {
+            let expected = config
+                .filter(|config| config.ci.local_gate)
+                .and_then(|config| {
+                    registry::expected_ci_files(root)
+                        .and_then(|files| {
+                            crate::render::ci::local::local_gate_script(&files, &config.ci)
+                        })
+                        .ok()
+                });
+            kinds.insert(
+                "ci.local-gate",
+                (
+                    BTreeSet::from([crate::render::ci::local::LOCAL_GATE_PATH.to_owned()]),
+                    expected.is_none_or(|expected| expected.content != content),
+                ),
+            );
+        }
+        for (kind, (paths, drift)) in kinds {
+            let state = if state == "unknown" {
+                state
+            } else if drift {
+                "drift"
+            } else {
+                "current"
+            };
+            self.generated(coordinate, kind, state, paths.into_iter().collect());
+        }
+        // Actions runners; Crow label maps are not runner pools. `.github`
+        // workflows run on GitHub even when they come from a mirror.
+        for file in ci
+            .iter()
+            .filter(|file| file.marked && !file.relative_path.starts_with(".crow"))
+        {
+            let usage = format!("usage:{coordinate}#{}", ci_kind(&file.relative_path));
+            let host = if file.relative_path.starts_with(".github") {
+                "github.com"
+            } else {
+                host
+            };
+            let jobs = file
+                .content
+                .lines()
+                .filter(|line| line.trim_start().starts_with("runs-on: "))
+                .count();
+            for occurrence in 0..jobs {
+                for label in
+                    registry::parse_runs_on_labels(&file.content, occurrence).unwrap_or_default()
+                {
+                    if label.is_empty() || label.contains("${{") {
+                        continue;
+                    }
+                    let runner = format!("runner:{host}/{label}");
+                    self.node(
+                        runner.clone(),
+                        "runner",
+                        Attrs::from([("forgeHost", json!(host)), ("label", json!(label))]),
+                    );
+                    self.edges.insert((usage.clone(), runner, "runsOn"));
+                }
+            }
+        }
+    }
+
+    /// Generated files outside the CI renderer: release, flake, hooks,
+    /// README badges, in-repository distribution files and the trust root.
+    fn observe_generated(
+        &mut self,
+        root: &Path,
+        coordinate: &str,
+        workflows: &[registry::WorkflowFile],
+        config: Option<&ProjectConfig>,
+        eval_flake: bool,
+        explained: bool,
+    ) {
+        let repo = format!("repo:{coordinate}");
+        let rust = root.join("Cargo.toml").is_file();
+        let check = |facts: &mut Self, kind: &'static str, args: &[&str], paths: Vec<String>| {
+            let state = if !rust {
+                "unknown"
+            } else {
+                match check_generated(root, args, eval_flake) {
+                    Ok(state) => state,
+                    Err(error) => {
+                        if !explained {
+                            facts.error(&repo, "check-failed", format!("{kind}: {error:#}"));
+                        }
+                        "unknown"
+                    }
+                }
+            };
+            facts.generated(coordinate, kind, state, paths);
+        };
+
+        let release = workflows
+            .iter()
+            .filter(|file| {
+                file.relative_path
+                    .file_stem()
+                    .is_some_and(|stem| stem == "release")
+            })
+            .collect::<Vec<_>>();
+        let release_paths = release
+            .iter()
+            .map(|file| file.relative_path.display().to_string())
+            .collect::<Vec<_>>();
+        if let Some(file) = release.iter().find(|file| file.marked) {
+            // Check the backend the committed workflow was rendered for.
+            let backend = if file.relative_path.starts_with(".github") {
+                ["--platform", "github"]
+            } else if file.relative_path.starts_with(".crow") {
+                ["--ci-provider", "crow"]
+            } else {
+                ["--platform", "forgejo"]
+            };
+            let args = [["init", "release", "--check"].as_slice(), &backend].concat();
+            check(self, "release.workflow", &args, release_paths);
+        } else if !release.is_empty() {
+            self.generated(coordinate, "release.workflow", "hand-rolled", release_paths);
+        }
+        for (kind, channel, marker) in [
+            ("dist.aur", "aur", "dist/aur"),
+            ("dist.copr", "copr", ".copr/Makefile"),
+            ("dist.apt", "apt", crate::commands::apt::DISTRIBUTIONS_PATH),
+        ] {
+            if root.join(marker).exists() {
+                check(
+                    self,
+                    kind,
+                    &["init", channel, "--check"],
+                    vec![marker.to_owned()],
+                );
+            }
+        }
+
+        let state = |status| match status {
+            FeatureStatus::Managed => "current",
+            FeatureStatus::Drift => "drift",
+            FeatureStatus::Absent => "hand-rolled",
+            _ => "unknown",
+        };
+        let flake_status = registry::detect_flake_status(root);
+        let present = |paths: &[&str]| {
+            paths
+                .iter()
+                .filter(|path| root.join(path).is_file())
+                .map(|path| path.to_string())
+                .collect::<Vec<_>>()
+        };
+        if fs::read_to_string(root.join("flake.nix"))
+            .is_ok_and(|content| crate::render::flake::has_required_wiring(&content))
+        {
+            self.generated(
+                coordinate,
+                "flake.wiring",
+                state(flake_status),
+                present(&["flake.nix", "nix/treefmt.nix"]),
+            );
+        }
+        if registry::has_hooks_config(root) {
+            let paths = present(&[
+                "nix/pre-commit.nix",
+                ".pre-commit-config.yaml",
+                ".pre-commit-config.yml",
+            ]);
+            let hooks = if root.join("nix/pre-commit.nix").is_file() {
+                state(flake_status)
+            } else {
+                "hand-rolled"
+            };
+            self.generated(coordinate, "hooks.config", hooks, paths);
+        }
+        if fs::read_to_string(root.join("README.md"))
+            .is_ok_and(|readme| readme.contains(crate::readme_badges::START_MARKER))
+        {
+            let state = match crate::readme_badges::plan(root) {
+                Ok(upgrade) if upgrade.changed() => "drift",
+                Ok(_) => "current",
+                Err(error) => {
+                    if !explained {
+                        self.error(&repo, "check-failed", format!("readme.badges: {error:#}"));
+                    }
+                    "unknown"
+                }
+            };
+            self.generated(coordinate, "readme.badges", state, vec!["README.md".into()]);
+        }
+        let trust_root = config.map_or_else(
+            || "keys/maintainers.gpg".to_owned(),
+            |config| config.release.signing.trust_root.clone(),
+        );
+        if root.join(&trust_root).is_file() {
+            self.usage(
+                coordinate,
+                "keys.trust-root",
+                None,
+                "current",
+                Attrs::from([("paths", json!([trust_root]))]),
+            );
+        }
+        if let Some(attic) = config.and_then(|config| config.release.attic.as_ref()) {
+            let cache = format!("cache:{}", attic.cache);
+            let mut publishers = vec!["release.workflow"];
+            if config
+                .and_then(|config| config.prebuild.as_ref())
+                .is_some_and(|prebuild| prebuild.publish_attic)
+            {
+                publishers.push("ci.primary");
+            }
+            for kind in publishers {
+                let usage = format!("usage:{coordinate}#{kind}");
+                if self.nodes.contains_key(&usage) {
+                    self.node(
+                        cache.clone(),
+                        "cache",
+                        Attrs::from([("url", json!(attic.url))]),
+                    );
+                    self.edges.insert((usage, cache.clone(), "publishesTo"));
+                }
+            }
+        }
+    }
+
+    /// Runtime references in workflows and `scripts/`, and pins in `simit.toml`.
+    fn observe_references(
+        &mut self,
+        root: &Path,
+        coordinate: &str,
+        workflows: &[registry::WorkflowFile],
+    ) {
+        let mut files = workflows
+            .iter()
+            .map(|file| (file.relative_path.clone(), file.content.clone(), false))
+            .collect::<Vec<_>>();
+        let mut pending = vec![root.join("scripts")];
+        while let Some(directory) = pending.pop() {
+            for entry in fs::read_dir(&directory).into_iter().flatten().flatten() {
+                let path = entry.path();
+                match entry.file_type() {
+                    Ok(kind) if kind.is_dir() => pending.push(path),
+                    Ok(kind) if kind.is_file() => {
+                        // Generated scripts (the local gate) echo workflow steps.
+                        if let Ok(content) = fs::read_to_string(&path)
+                            && !crate::render::ci::is_generated_workflow_marker(&content)
+                        {
+                            let relative = path.strip_prefix(root).unwrap_or(&path).to_path_buf();
+                            files.push((relative, content, true));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        files.sort();
+        for (path, content, script) in files {
+            let path = path.display().to_string();
+            let mut found: BTreeMap<&'static str, Refs> = BTreeMap::new();
+            for line in content.lines().map(str::trim) {
+                if line.starts_with('#') || line.starts_with("//") {
+                    continue;
+                }
+                let words = line
+                    .split(|c: char| c.is_whitespace() || ";|&()`\"'$".contains(c))
+                    .filter(|word| !word.is_empty())
+                    .collect::<Vec<_>>();
+                for (variable, kind) in [
+                    ("SIMIT_PUBLISHER_REVISION", "runtime.publisher-var"),
+                    ("SIMIT_CI_ENGINE_REVISION", "runtime.ci-engine"),
+                ] {
+                    if line.contains(variable) {
+                        let refs = found.entry(kind).or_default();
+                        // A committed fallback: `vars.X || '<revision>'`.
+                        if let Some(fallback) =
+                            line.split("|| '").nth(1).and_then(|rest| rest.get(..40))
+                            && is_revision(fallback)
+                        {
+                            refs.revisions.insert(fallback.to_owned());
+                        }
+                    }
+                }
+                let mut refs = Refs::default();
+                let runtime = flake_refs(line, &mut refs);
+                if runtime {
+                    merge(found.entry("runtime.flake-ref").or_default(), refs);
+                }
+                let install = line.contains("cargo install")
+                    && words.iter().any(|word| {
+                        *word == "simit"
+                            || word.starts_with("simit@")
+                            || word.contains("caniko/simit")
+                    });
+                if install {
+                    let refs = found.entry("runtime.cargo-install").or_default();
+                    match words
+                        .iter()
+                        .position(|word| matches!(*word, "--rev" | "--version" | "--tag"))
+                    {
+                        Some(index)
+                            if words.get(index + 1).is_some_and(|value| is_revision(value)) =>
+                        {
+                            refs.revisions.insert(words[index + 1].to_owned());
+                        }
+                        Some(index) if words.get(index + 1).is_some() => {
+                            refs.tags.insert(words[index + 1].to_owned());
+                        }
+                        _ => match words.iter().find_map(|word| word.strip_prefix("simit@")) {
+                            Some(version) => {
+                                refs.tags.insert(version.to_owned());
+                            }
+                            None => {
+                                refs.floating.insert("cargo install simit".to_owned());
+                            }
+                        },
+                    }
+                }
+                let devshell = line.contains("nix develop") && words.contains(&"simit");
+                if devshell {
+                    found.entry("runtime.devshell").or_default();
+                }
+                // ponytail: a bare `simit` word in a script line counts as an
+                // invocation, including inside echoed text; parse shell if that misleads.
+                if script && !runtime && !install && !devshell && words.contains(&"simit") {
+                    found.entry("script.invocation").or_default();
+                }
+            }
+            for (kind, refs) in found {
+                let id = self.reference(coordinate, kind, &path, refs);
+                if matches!(kind, "runtime.publisher-var" | "runtime.ci-engine") {
+                    self.nodes
+                        .get_mut(&id)
+                        .expect("usage recorded above")
+                        .expects
+                        .push(json!({
+                            "attr": "revision",
+                            "blocker": "unknown-generator-revision",
+                            "reason": "The repository variable's value lives on the forge.",
+                        }));
+                }
+            }
+        }
+        if let Ok(content) = fs::read_to_string(root.join("simit.toml")) {
+            let mut refs = Refs::default();
+            let mut pinned = false;
+            for line in content
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.starts_with('#'))
+            {
+                pinned |= flake_refs(line, &mut refs);
+            }
+            if pinned {
+                self.reference(coordinate, "pin.config-command", "simit.toml", refs);
+            }
+        }
+    }
+
+    /// Simit pinned by `flake.lock` inputs and `Cargo.lock` packages.
+    fn observe_locks(&mut self, root: &Path, coordinate: &str) {
+        let lock = fs::read_to_string(root.join("flake.lock"))
+            .ok()
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok());
+        for (kind, input, revision) in lock.as_ref().map(flake_inputs).unwrap_or_default() {
+            let mut attrs = Attrs::from([("path", json!("flake.lock")), ("input", json!(input))]);
+            if let Some(revision) = &revision {
+                attrs.insert("revisions", json!([revision]));
+            }
+            let state = if kind == "flake-input.cut" {
+                "absent"
+            } else {
+                "unknown"
+            };
+            let id = self
+                .usage(coordinate, kind, Some(&input), state, attrs)
+                .id
+                .clone();
+            if let Some(revision) = revision {
+                self.pin(&id, revision);
+            }
+        }
+        let cargo = fs::read_to_string(root.join("Cargo.lock"))
+            .ok()
+            .and_then(|text| text.parse::<toml_edit::DocumentMut>().ok());
+        let packages = cargo
+            .as_ref()
+            .and_then(|lock| lock.get("package"))
+            .and_then(|packages| packages.as_array_of_tables());
+        for package in packages.into_iter().flatten() {
+            let field = |key| package.get(key).and_then(|value| value.as_str());
+            // Workspace members carry no source; only dependencies on simit count.
+            let (Some("simit"), Some(source)) = (field("name"), field("source")) else {
+                continue;
+            };
+            let mut refs = Refs::default();
+            if let Some((_, revision)) = source.rsplit_once('#')
+                && is_revision(revision)
+            {
+                refs.revisions.insert(revision.to_owned());
+            }
+            refs.tags.extend(field("version").map(str::to_owned));
+            self.reference(coordinate, "cargo.dependency", "Cargo.lock", refs);
+        }
+    }
+}
+
+fn merge(into: &mut Refs, from: Refs) {
+    into.revisions.extend(from.revisions);
+    into.tags.extend(from.tags);
+    into.floating.extend(from.floating);
+}
+
+fn is_revision(value: &str) -> bool {
+    value.len() == 40
+        && value
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// Record every `github:caniko/simit` / `git+…github.com/caniko/simit` flake
+/// reference on `line`; returns whether any was found.
+fn flake_refs(line: &str, refs: &mut Refs) -> bool {
+    const NAME: &str = "caniko/simit";
+    let mut found = false;
+    for (start, _) in line.match_indices(NAME) {
+        let end = start + NAME.len();
+        if line[end..].starts_with(|c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+            continue; // another repository, such as caniko/simit-extra
+        }
+        let token_start = line[..start]
+            .rfind(|c: char| c.is_whitespace() || "\"'=(".contains(c))
+            .map_or(0, |index| index + 1);
+        let token_end = line[end..]
+            .find(|c: char| c.is_whitespace() || "\"'),".contains(c))
+            .map_or(line.len(), |index| end + index);
+        let prefix = &line[token_start..start];
+        if prefix != "github:" && !(prefix.starts_with("git+") && prefix.ends_with("github.com/")) {
+            continue;
+        }
+        found = true;
+        let rest = &line[end..token_end];
+        let reference = match rest.find("rev=") {
+            Some(index) => rest[index + 4..].split(['&', '#']).next(),
+            None => rest
+                .strip_prefix(".git")
+                .unwrap_or(rest)
+                .strip_prefix('/')
+                .and_then(|reference| reference.split(['#', '?']).next()),
+        };
+        match reference {
+            Some(reference) if reference.starts_with('$') => {} // a variable usage supplies it
+            Some(reference) if is_revision(reference) => {
+                refs.revisions.insert(reference.to_owned());
+            }
+            Some(reference) if reference.starts_with(|c: char| c.is_ascii_digit()) => {
+                refs.tags.insert(reference.to_owned());
+            }
+            Some(reference) if !reference.is_empty() => {
+                refs.floating.insert(format!("github:{NAME}/{reference}"));
+            }
+            _ => {
+                refs.floating.insert(format!("github:{NAME}"));
+            }
+        }
+    }
+    found
+}
+
+/// `(usage kind, input path, locked revision)` for every simit node a
+/// `flake.lock` owns, plus `simit` inputs cut with `follows = ""`.
+fn flake_inputs(lock: &Value) -> Vec<(&'static str, String, Option<String>)> {
+    let nodes = &lock["nodes"];
+    let Some(root) = lock["root"].as_str() else {
+        return Vec::new();
+    };
+    let is_simit = |node: &Value| {
+        let locked = &node["locked"];
+        match locked["type"].as_str() {
+            Some("github") => {
+                locked["owner"]
+                    .as_str()
+                    .is_some_and(|owner| owner.eq_ignore_ascii_case("caniko"))
+                    && locked["repo"] == "simit"
+            }
+            Some("git") => locked["url"].as_str().is_some_and(|url| {
+                let url = url.strip_suffix(".git").unwrap_or(url);
+                url.ends_with("github.com/caniko/simit")
+            }),
+            _ => false,
+        }
+    };
+    // Breadth-first over owning (string) edges, so each node keeps its
+    // shortest input path; `follows` arrays never own a lock entry.
+    let mut seen = BTreeSet::from([root.to_owned()]);
+    let mut queue = VecDeque::from([(root.to_owned(), Vec::<String>::new())]);
+    let mut found = Vec::new();
+    while let Some((key, path)) = queue.pop_front() {
+        for (name, target) in nodes[&key]["inputs"].as_object().into_iter().flatten() {
+            let mut input = path.clone();
+            input.push(name.clone());
+            match target {
+                Value::String(child) if seen.insert(child.clone()) => {
+                    if is_simit(&nodes[child]) {
+                        let kind = if path.is_empty() {
+                            "flake-input.direct"
+                        } else {
+                            "flake-input.transitive"
+                        };
+                        let revision = nodes[child]["locked"]["rev"].as_str().map(str::to_owned);
+                        found.push((kind, input.join("/"), revision));
+                    }
+                    queue.push_back((child.clone(), input));
+                }
+                Value::Array(follows) if follows.is_empty() && name == "simit" => {
+                    found.push(("flake-input.cut", input.join("/"), None));
+                }
+                _ => {}
+            }
+        }
+    }
+    found
+}
+
+fn ci_kind(path: &Path) -> &'static str {
+    let name = path.file_name().unwrap_or_default();
+    if crate::review::generation::is_review_path(path)
+        || path == Path::new(crate::render::review_policy::PATH)
+    {
+        "ci.review"
+    } else if path == Path::new(crate::render::ci::custody::PATH) {
+        "ci.custody"
+    } else if path.starts_with(".github/actions") {
+        "ci.primary"
+    } else if crate::render::release_plz::auxiliary_path(path) {
+        "ci.publish"
+    } else if path.file_stem().is_some_and(|stem| stem == "pages") {
+        "ci.pages"
+    } else if init_ci::is_primary_ci_workflow_name(name) {
+        "ci.primary"
+    } else if init_ci::is_ci_managed_workflow_name(name) {
+        "ci.publish"
+    } else {
+        "ci.template"
+    }
+}
+
+/// Run `simit <args>` (a `--check`) in `root`. README badge drift is reported
+/// by `readme.badges`, so it does not make these files drift.
+fn check_generated(root: &Path, args: &[&str], eval_flake: bool) -> Result<&'static str> {
+    let mut command = Command::new(std::env::current_exe()?);
+    command
+        .current_dir(root)
+        .args(args)
+        .env("SIMIT_NO_REGISTRY", "1");
+    if !eval_flake {
+        command.env("SIMIT_NO_FLAKE_EVAL", "1");
+    }
+    let output = command.output()?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if output.status.success() || stderr.contains("README badges are not up to date") {
+        Ok("current")
+    } else if stderr.contains("is not up to date") {
+        Ok("drift")
+    } else {
+        bail!("{}", stderr.trim())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum Status {
+    Implemented,
+    Planned,
+    Unsupported,
+}
+
+/// One upgrade path for a usage kind on repositories whose attributes match.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Row {
+    #[serde(rename = "usageKind")]
+    kind: &'static str,
+    #[serde(rename = "match", serialize_with = "as_map")]
+    matches: &'static [(&'static str, &'static str)],
+    path: &'static str,
+    via: &'static str,
+    lands: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    orchestrator: Option<&'static str>,
+    status: Status,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    blocker: Option<&'static str>,
+    reason: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fallback: Option<&'static str>,
+    /// `[scope, adapter, landing]` an updater path needs; only the honesty test reads it.
+    #[cfg_attr(not(test), allow(dead_code))]
+    #[serde(skip)]
+    updater: Option<[&'static str; 3]>,
+}
+
+fn as_map<S: serde::Serializer>(
+    pairs: &&'static [(&'static str, &'static str)],
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error> {
+    serializer.collect_map(pairs.iter().copied())
+}
+
+/// The usage is maintained without a generator upgrade.
+fn settled(kind: &'static str, path: &'static str, via: &'static str, reason: &'static str) -> Row {
+    Row {
+        kind,
+        matches: &[],
+        path,
+        via,
+        lands: true,
+        orchestrator: None,
+        status: Status::Implemented,
+        blocker: None,
+        reason,
+        fallback: None,
+        updater: None,
+    }
+}
+
+/// A generator command refreshes the files, but nothing lands them.
+fn regenerate(kind: &'static str, via: &'static str) -> Row {
+    Row {
+        lands: false,
+        blocker: Some("no-orchestrator"),
+        ..settled(
+            kind,
+            "regenerate",
+            via,
+            "The generator refreshes these files, but no orchestrator lands them for this repository.",
+        )
+    }
+}
+
+/// A pin that simit never rewrites.
+fn manual(
+    kind: &'static str,
+    via: &'static str,
+    blocker: &'static str,
+    reason: &'static str,
+) -> Row {
+    Row {
+        lands: false,
+        status: Status::Unsupported,
+        blocker: Some(blocker),
+        ..settled(kind, "manual", via, reason)
+    }
+}
+
+/// The workstation updater, `simit projects update`, which needs
+/// `[scope, adapter, landing]`.
+fn updater(
+    kind: &'static str,
+    matches: &'static [(&'static str, &'static str)],
+    needs: [&'static str; 3],
+    status: Status,
+    blocker: Option<&'static str>,
+    reason: &'static str,
+    fallback: Option<&'static str>,
+) -> Row {
+    Row {
+        matches,
+        orchestrator: Some("simit-updater"),
+        status,
+        blocker,
+        fallback,
+        updater: Some(needs),
+        ..settled(kind, "updater", "simit projects update", reason)
+    }
+}
+
+const GITHUB: &[(&str, &str)] = &[("forge", "github"), ("ciTarget", "actions/github")];
+const GITHUB_PR: &[(&str, &str)] = &[
+    ("forge", "github"),
+    ("ciTarget", "actions/github"),
+    ("landing", "pull-request"),
+];
+const CROW: &[(&str, &str)] = &[("forge", "forgejo"), ("ciTarget", "crow/forgejo")];
+const CROW_PR: &[(&str, &str)] = &[
+    ("forge", "forgejo"),
+    ("ciTarget", "crow/forgejo"),
+    ("landing", "pull-request"),
+];
+const FORGEJO_ACTIONS: &[(&str, &str)] = &[("forge", "forgejo"), ("ciTarget", "actions/forgejo")];
+const CROW_ON_GITHUB: &[(&str, &str)] = &[("forge", "github"), ("ciTarget", "crow/forgejo")];
+
+const CONFIG: &str = "Config sources are maintained by the repository owner; generator upgrades read them and never rewrite them.";
+const NO_FORGEJO: &str = "The updater has no Forgejo and Crow adapter yet.";
+const VARIABLE: &str = "Repository variable values are forge state; simit never changes them.";
+
+/// The capability matrix. Each updater feature flips its own rows;
+/// `updater_rows_are_implemented_exactly_when_supported` enforces that.
+fn capabilities() -> Vec<Row> {
+    use Status::{Implemented, Planned, Unsupported};
+    let mut rows = vec![
+        settled("config.simit-toml", "human", "repository owner", CONFIG),
+        settled(
+            "config.cargo-workspace",
+            "human",
+            "repository owner",
+            CONFIG,
+        ),
+        settled("config.cargo-package", "human", "repository owner", CONFIG),
+        settled("config.flake", "human", "repository owner", CONFIG),
+        regenerate("ci.primary", "simit init ci --primary-only"),
+        updater(
+            "ci.primary",
+            GITHUB,
+            ["ci", "github", "direct"],
+            Implemented,
+            None,
+            "The updater regenerates, qualifies and lands primary CI on GitHub.",
+            None,
+        ),
+        updater(
+            "ci.primary",
+            GITHUB_PR,
+            ["ci", "github", "pull-request"],
+            Planned,
+            Some("pr-required-unsupported"),
+            "The updater cannot land through a pull request yet.",
+            Some("land the simit init ci diff through a pull request"),
+        ),
+        updater(
+            "ci.primary",
+            CROW,
+            ["ci", "forgejo", "direct"],
+            Planned,
+            Some("adapter-missing"),
+            NO_FORGEJO,
+            Some("simit init ci"),
+        ),
+        updater(
+            "ci.primary",
+            CROW_PR,
+            ["ci", "forgejo", "pull-request"],
+            Planned,
+            Some("adapter-missing"),
+            NO_FORGEJO,
+            Some("simit init ci"),
+        ),
+        updater(
+            "ci.primary",
+            FORGEJO_ACTIONS,
+            ["ci", "forgejo-actions", "direct"],
+            Unsupported,
+            Some("adapter-missing"),
+            "No updater adapter qualifies Forgejo Actions.",
+            Some("simit init ci"),
+        ),
+        Row {
+            matches: CROW_ON_GITHUB,
+            lands: true,
+            orchestrator: Some("simit-updater"),
+            status: Planned,
+            blocker: Some("provider-mismatch"),
+            fallback: Some("simit init ci --ci-provider actions --platform github"),
+            ..settled(
+                "ci.primary",
+                "migration",
+                "simit projects update with a provider migration",
+                "Crow CI cannot run on github.com, and the updater cannot migrate providers yet.",
+            )
+        },
+    ];
+    // Generated files outside the primary scope: regenerate anywhere; the
+    // updater path waits on its scope and, on Forgejo, on the adapter.
+    for (kind, via, scope) in [
+        ("ci.publish", "simit init ci", "ci-extra"),
+        ("ci.pages", "simit init ci", "ci-extra"),
+        ("ci.review", "simit init ci", "ci-extra"),
+        ("ci.custody", "simit init ci", "ci-extra"),
+        ("ci.template", "simit init ci", "ci-extra"),
+        ("ci.local-gate", "simit init ci", "ci-extra"),
+        ("release.workflow", "simit init release", "release"),
+        ("flake.wiring", "simit init flake", "flake"),
+        ("hooks.config", "simit init flake", "flake"),
+        ("readme.badges", "simit upgrade", "readme"),
+    ] {
+        rows.extend([
+            regenerate(kind, via),
+            updater(
+                kind,
+                GITHUB,
+                [scope, "github", "direct"],
+                Planned,
+                Some("scope-unsupported"),
+                "The updater lands only the primary CI scope.",
+                Some(via),
+            ),
+            updater(
+                kind,
+                CROW,
+                [scope, "forgejo", "direct"],
+                Planned,
+                Some("adapter-missing"),
+                NO_FORGEJO,
+                Some(via),
+            ),
+        ]);
+    }
+    rows.extend([
+        regenerate("dist.aur", "simit init aur"),
+        regenerate("dist.copr", "simit init copr"),
+        regenerate("dist.apt", "simit init apt"),
+        settled(
+            "keys.trust-root",
+            "human",
+            "maintainer signing key",
+            "Trust roots are maintainer key material; generator upgrades never change them.",
+        ),
+        manual(
+            "flake-input.direct",
+            "nix flake update simit",
+            "manual-pin",
+            "Flake inputs need a networked lock update, which the updater sandbox cannot run.",
+        ),
+        manual(
+            "flake-input.transitive",
+            "update the input that locks simit",
+            "transitive-pin",
+            "Another input's lock pins this simit; update that input instead.",
+        ),
+        settled(
+            "flake-input.cut",
+            "none",
+            "follows = \"\"",
+            "A cut input is never fetched.",
+        ),
+        manual(
+            "runtime.publisher-var",
+            "repository variable SIMIT_PUBLISHER_REVISION",
+            "manual-pin",
+            VARIABLE,
+        ),
+        manual(
+            "runtime.ci-engine",
+            "repository variable SIMIT_CI_ENGINE_REVISION",
+            "manual-pin",
+            VARIABLE,
+        ),
+        manual(
+            "runtime.flake-ref",
+            "edit the reference",
+            "manual-pin",
+            "simit does not rewrite runtime flake references.",
+        ),
+        manual(
+            "runtime.cargo-install",
+            "edit the cargo install command",
+            "manual-pin",
+            "simit does not rewrite cargo install commands.",
+        ),
+        settled(
+            "runtime.devshell",
+            "flake-input",
+            "the repository's simit flake input",
+            "nix develop runs the simit the flake inputs pin; that input carries the upgrade path.",
+        ),
+        manual(
+            "pin.config-command",
+            "edit simit.toml",
+            "manual-pin",
+            "Pins inside human-owned simit.toml command strings are never rewritten.",
+        ),
+        settled(
+            "script.invocation",
+            "environment",
+            "the simit on the script's PATH",
+            "Scripts run the simit their environment provides; the devshell or flake input carries the upgrade path.",
+        ),
+        manual(
+            "cargo.dependency",
+            "cargo update -p simit",
+            "manual-pin",
+            "Cargo dependency updates are outside every simit orchestrator.",
+        ),
+    ]);
+    rows
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::projects_update::schema::{
+        SUPPORTED_LANDINGS, SUPPORTED_SCOPES, UPDATER_ADAPTERS,
+    };
+
+    #[test]
+    fn updater_rows_are_implemented_exactly_when_supported() {
+        for row in capabilities() {
+            let Some([scope, adapter, landing]) = row.updater else {
+                continue;
+            };
+            let supported = SUPPORTED_SCOPES.contains(&scope)
+                && UPDATER_ADAPTERS.contains(&adapter)
+                && SUPPORTED_LANDINGS.contains(&landing);
+            assert_eq!(
+                row.status == Status::Implemented && row.blocker.is_none(),
+                supported,
+                "{} {:?}",
+                row.kind,
+                row.matches
+            );
+            assert_eq!(
+                row.matches.contains(&("landing", "pull-request")),
+                landing == "pull-request",
+                "{} {:?}",
+                row.kind,
+                row.matches
+            );
+        }
+    }
+
+    #[test]
+    fn every_kind_has_a_fallback_row_and_no_ambiguous_rows() {
+        let rows = capabilities();
+        for row in &rows {
+            assert!(
+                rows.iter()
+                    .any(|other| other.kind == row.kind && other.matches.is_empty()),
+                "{} has no unconditional row",
+                row.kind
+            );
+            assert_eq!(
+                row.status == Status::Implemented && row.lands,
+                row.blocker.is_none(),
+                "{}: rows that do not land need a blocker",
+                row.kind
+            );
+            // Fleetix picks the most specific matching row; equally specific
+            // rows for one kind must contradict on some key, or they tie.
+            for other in &rows {
+                let disjoint = row.matches.iter().any(|(key, value)| {
+                    other
+                        .matches
+                        .iter()
+                        .any(|(other_key, other_value)| key == other_key && value != other_value)
+                });
+                assert!(
+                    std::ptr::eq(row, other)
+                        || other.kind != row.kind
+                        || other.matches.len() != row.matches.len()
+                        || disjoint,
+                    "{} {:?} ties with {:?}",
+                    row.kind,
+                    row.matches,
+                    other.matches
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn flake_references_classify_revisions_tags_and_floating_refs() {
+        let revision = "4c6841cce19327927ea8a8f6e856276dd5c878f0";
+        let mut refs = Refs::default();
+        for line in [
+            format!("nix run github:caniko/simit/{revision} -- init ci --check"),
+            format!("url = \"git+https://github.com/caniko/simit.git?ref=trunk&rev={revision}\";"),
+            "simit.url = \"github:caniko/simit/0.19.0\";".to_owned(),
+            "nix run --no-write-lock-file git+https://github.com/caniko/simit.git -- init flake"
+                .to_owned(),
+            "nix run github:caniko/simit/trunk".to_owned(),
+            "nix build github:caniko/simit/$SIMIT_CI_ENGINE_REVISION#default".to_owned(),
+        ] {
+            assert!(flake_refs(&line, &mut refs), "{line}");
+        }
+        for line in [
+            "see https://github.com/caniko/simit for details",
+            "nix run github:caniko/simit-extra",
+        ] {
+            assert!(!flake_refs(line, &mut refs), "{line}");
+        }
+        assert_eq!(refs.revisions, BTreeSet::from([revision.to_owned()]));
+        assert_eq!(refs.tags, BTreeSet::from(["0.19.0".to_owned()]));
+        assert_eq!(
+            refs.floating,
+            BTreeSet::from([
+                "github:caniko/simit".to_owned(),
+                "github:caniko/simit/trunk".to_owned()
+            ])
+        );
+    }
+
+    #[test]
+    fn flake_locks_report_direct_transitive_and_cut_simit_inputs() {
+        let simit = |rev: &str| json!({"locked": {"type": "github", "owner": "caniko", "repo": "simit", "rev": rev}});
+        let lock = json!({
+            "root": "root",
+            "nodes": {
+                "root": {"inputs": {"simit": "simit", "harbor": "harbor", "tool": "tool"}},
+                "simit": simit("a"),
+                "harbor": {"inputs": {"simit": "simit_2", "nixpkgs": ["simit"]}},
+                "simit_2": simit("b"),
+                "tool": {"inputs": {"simit": [], "harbor": ["harbor"]}}
+            }
+        });
+        assert_eq!(
+            flake_inputs(&lock),
+            vec![
+                (
+                    "flake-input.direct",
+                    "simit".to_owned(),
+                    Some("a".to_owned())
+                ),
+                (
+                    "flake-input.transitive",
+                    "harbor/simit".to_owned(),
+                    Some("b".to_owned())
+                ),
+                ("flake-input.cut", "tool/simit".to_owned(), None),
+            ]
+        );
+    }
+}

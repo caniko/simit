@@ -1,0 +1,1309 @@
+{
+  "capabilities": [
+    {
+      "lands": true,
+      "match": {},
+      "path": "human",
+      "reason": "Config sources are maintained by the repository owner; generator upgrades read them and never rewrite them.",
+      "status": "implemented",
+      "usageKind": "config.simit-toml",
+      "via": "repository owner"
+    },
+    {
+      "lands": true,
+      "match": {},
+      "path": "human",
+      "reason": "Config sources are maintained by the repository owner; generator upgrades read them and never rewrite them.",
+      "status": "implemented",
+      "usageKind": "config.cargo-workspace",
+      "via": "repository owner"
+    },
+    {
+      "lands": true,
+      "match": {},
+      "path": "human",
+      "reason": "Config sources are maintained by the repository owner; generator upgrades read them and never rewrite them.",
+      "status": "implemented",
+      "usageKind": "config.cargo-package",
+      "via": "repository owner"
+    },
+    {
+      "lands": true,
+      "match": {},
+      "path": "human",
+      "reason": "Config sources are maintained by the repository owner; generator upgrades read them and never rewrite them.",
+      "status": "implemented",
+      "usageKind": "config.flake",
+      "via": "repository owner"
+    },
+    {
+      "blocker": "no-orchestrator",
+      "lands": false,
+      "match": {},
+      "path": "regenerate",
+      "reason": "The generator refreshes these files, but no orchestrator lands them for this repository.",
+      "status": "implemented",
+      "usageKind": "ci.primary",
+      "via": "simit init ci --primary-only"
+    },
+    {
+      "lands": true,
+      "match": {
+        "ciTarget": "actions/github",
+        "forge": "github"
+      },
+      "orchestrator": "simit-updater",
+      "path": "updater",
+      "reason": "The updater regenerates, qualifies and lands primary CI on GitHub.",
+      "status": "implemented",
+      "usageKind": "ci.primary",
+      "via": "simit projects update"
+    },
+    {
+      "blocker": "pr-required-unsupported",
+      "fallback": "land the simit init ci diff through a pull request",
+      "lands": true,
+      "match": {
+        "ciTarget": "actions/github",
+        "forge": "github",
+        "landing": "pull-request"
+      },
+      "orchestrator": "simit-updater",
+      "path": "updater",
+      "reason": "The updater cannot land through a pull request yet.",
+      "status": "planned",
+      "usageKind": "ci.primary",
+      "via": "simit projects update"
+    },
+    {
+      "blocker": "adapter-missing",
+      "fallback": "simit init ci",
+      "lands": true,
+      "match": {
+        "ciTarget": "crow/forgejo",
+        "forge": "forgejo"
+      },
+      "orchestrator": "simit-updater",
+      "path": "updater",
+      "reason": "The updater has no Forgejo and Crow adapter yet.",
+      "status": "planned",
+      "usageKind": "ci.primary",
+      "via": "simit projects update"
+    },
+    {
+      "blocker": "adapter-missing",
+      "fallback": "simit init ci",
+      "lands": true,
+      "match": {
+        "ciTarget": "crow/forgejo",
+        "forge": "forgejo",
+        "landing": "pull-request"
+      },
+      "orchestrator": "simit-updater",
+      "path": "updater",
+      "reason": "The updater has no Forgejo and Crow adapter yet.",
+      "status": "planned",
+      "usageKind": "ci.primary",
+      "via": "simit projects update"
+    },
+    {
+      "blocker": "adapter-missing",
+      "fallback": "simit init ci",
+      "lands": true,
+      "match": {
+        "ciTarget": "actions/forgejo",
+        "forge": "forgejo"
+      },
+      "orchestrator": "simit-updater",
+      "path": "updater",
+      "reason": "No updater adapter qualifies Forgejo Actions.",
+      "status": "unsupported",
+      "usageKind": "ci.primary",
+      "via": "simit projects update"
+    },
+    {
+      "blocker": "provider-mismatch",
+      "fallback": "simit init ci --ci-provider actions --platform github",
+      "lands": true,
+      "match": {
+        "ciTarget": "crow/forgejo",
+        "forge": "github"
+      },
+      "orchestrator": "simit-updater",
+      "path": "migration",
+      "reason": "Crow CI cannot run on github.com, and the updater cannot migrate providers yet.",
+      "status": "planned",
+      "usageKind": "ci.primary",
+      "via": "simit projects update with a provider migration"
+    },
+    {
+      "blocker": "no-orchestrator",
+      "lands": false,
+      "match": {},
+      "path": "regenerate",
+      "reason": "The generator refreshes these files, but no orchestrator lands them for this repository.",
+      "status": "implemented",
+      "usageKind": "ci.publish",
+      "via": "simit init ci"
+    },
+    {
+      "blocker": "scope-unsupported",
+      "fallback": "simit init ci",
+      "lands": true,
+      "match": {
+        "ciTarget": "actions/github",
+        "forge": "github"
+      },
+      "orchestrator": "simit-updater",
+      "path": "updater",
+      "reason": "The updater lands only the primary CI scope.",
+      "status": "planned",
+      "usageKind": "ci.publish",
+      "via": "simit projects update"
+    },
+    {
+      "blocker": "adapter-missing",
+      "fallback": "simit init ci",
+      "lands": true,
+      "match": {
+        "ciTarget": "crow/forgejo",
+        "forge": "forgejo"
+      },
+      "orchestrator": "simit-updater",
+      "path": "updater",
+      "reason": "The updater has no Forgejo and Crow adapter yet.",
+      "status": "planned",
+      "usageKind": "ci.publish",
+      "via": "simit projects update"
+    },
+    {
+      "blocker": "no-orchestrator",
+      "lands": false,
+      "match": {},
+      "path": "regenerate",
+      "reason": "The generator refreshes these files, but no orchestrator lands them for this repository.",
+      "status": "implemented",
+      "usageKind": "ci.pages",
+      "via": "simit init ci"
+    },
+    {
+      "blocker": "scope-unsupported",
+      "fallback": "simit init ci",
+      "lands": true,
+      "match": {
+        "ciTarget": "actions/github",
+        "forge": "github"
+      },
+      "orchestrator": "simit-updater",
+      "path": "updater",
+      "reason": "The updater lands only the primary CI scope.",
+      "status": "planned",
+      "usageKind": "ci.pages",
+      "via": "simit projects update"
+    },
+    {
+      "blocker": "adapter-missing",
+      "fallback": "simit init ci",
+      "lands": true,
+      "match": {
+        "ciTarget": "crow/forgejo",
+        "forge": "forgejo"
+      },
+      "orchestrator": "simit-updater",
+      "path": "updater",
+      "reason": "The updater has no Forgejo and Crow adapter yet.",
+      "status": "planned",
+      "usageKind": "ci.pages",
+      "via": "simit projects update"
+    },
+    {
+      "blocker": "no-orchestrator",
+      "lands": false,
+      "match": {},
+      "path": "regenerate",
+      "reason": "The generator refreshes these files, but no orchestrator lands them for this repository.",
+      "status": "implemented",
+      "usageKind": "ci.review",
+      "via": "simit init ci"
+    },
+    {
+      "blocker": "scope-unsupported",
+      "fallback": "simit init ci",
+      "lands": true,
+      "match": {
+        "ciTarget": "actions/github",
+        "forge": "github"
+      },
+      "orchestrator": "simit-updater",
+      "path": "updater",
+      "reason": "The updater lands only the primary CI scope.",
+      "status": "planned",
+      "usageKind": "ci.review",
+      "via": "simit projects update"
+    },
+    {
+      "blocker": "adapter-missing",
+      "fallback": "simit init ci",
+      "lands": true,
+      "match": {
+        "ciTarget": "crow/forgejo",
+        "forge": "forgejo"
+      },
+      "orchestrator": "simit-updater",
+      "path": "updater",
+      "reason": "The updater has no Forgejo and Crow adapter yet.",
+      "status": "planned",
+      "usageKind": "ci.review",
+      "via": "simit projects update"
+    },
+    {
+      "blocker": "no-orchestrator",
+      "lands": false,
+      "match": {},
+      "path": "regenerate",
+      "reason": "The generator refreshes these files, but no orchestrator lands them for this repository.",
+      "status": "implemented",
+      "usageKind": "ci.custody",
+      "via": "simit init ci"
+    },
+    {
+      "blocker": "scope-unsupported",
+      "fallback": "simit init ci",
+      "lands": true,
+      "match": {
+        "ciTarget": "actions/github",
+        "forge": "github"
+      },
+      "orchestrator": "simit-updater",
+      "path": "updater",
+      "reason": "The updater lands only the primary CI scope.",
+      "status": "planned",
+      "usageKind": "ci.custody",
+      "via": "simit projects update"
+    },
+    {
+      "blocker": "adapter-missing",
+      "fallback": "simit init ci",
+      "lands": true,
+      "match": {
+        "ciTarget": "crow/forgejo",
+        "forge": "forgejo"
+      },
+      "orchestrator": "simit-updater",
+      "path": "updater",
+      "reason": "The updater has no Forgejo and Crow adapter yet.",
+      "status": "planned",
+      "usageKind": "ci.custody",
+      "via": "simit projects update"
+    },
+    {
+      "blocker": "no-orchestrator",
+      "lands": false,
+      "match": {},
+      "path": "regenerate",
+      "reason": "The generator refreshes these files, but no orchestrator lands them for this repository.",
+      "status": "implemented",
+      "usageKind": "ci.template",
+      "via": "simit init ci"
+    },
+    {
+      "blocker": "scope-unsupported",
+      "fallback": "simit init ci",
+      "lands": true,
+      "match": {
+        "ciTarget": "actions/github",
+        "forge": "github"
+      },
+      "orchestrator": "simit-updater",
+      "path": "updater",
+      "reason": "The updater lands only the primary CI scope.",
+      "status": "planned",
+      "usageKind": "ci.template",
+      "via": "simit projects update"
+    },
+    {
+      "blocker": "adapter-missing",
+      "fallback": "simit init ci",
+      "lands": true,
+      "match": {
+        "ciTarget": "crow/forgejo",
+        "forge": "forgejo"
+      },
+      "orchestrator": "simit-updater",
+      "path": "updater",
+      "reason": "The updater has no Forgejo and Crow adapter yet.",
+      "status": "planned",
+      "usageKind": "ci.template",
+      "via": "simit projects update"
+    },
+    {
+      "blocker": "no-orchestrator",
+      "lands": false,
+      "match": {},
+      "path": "regenerate",
+      "reason": "The generator refreshes these files, but no orchestrator lands them for this repository.",
+      "status": "implemented",
+      "usageKind": "ci.local-gate",
+      "via": "simit init ci"
+    },
+    {
+      "blocker": "scope-unsupported",
+      "fallback": "simit init ci",
+      "lands": true,
+      "match": {
+        "ciTarget": "actions/github",
+        "forge": "github"
+      },
+      "orchestrator": "simit-updater",
+      "path": "updater",
+      "reason": "The updater lands only the primary CI scope.",
+      "status": "planned",
+      "usageKind": "ci.local-gate",
+      "via": "simit projects update"
+    },
+    {
+      "blocker": "adapter-missing",
+      "fallback": "simit init ci",
+      "lands": true,
+      "match": {
+        "ciTarget": "crow/forgejo",
+        "forge": "forgejo"
+      },
+      "orchestrator": "simit-updater",
+      "path": "updater",
+      "reason": "The updater has no Forgejo and Crow adapter yet.",
+      "status": "planned",
+      "usageKind": "ci.local-gate",
+      "via": "simit projects update"
+    },
+    {
+      "blocker": "no-orchestrator",
+      "lands": false,
+      "match": {},
+      "path": "regenerate",
+      "reason": "The generator refreshes these files, but no orchestrator lands them for this repository.",
+      "status": "implemented",
+      "usageKind": "release.workflow",
+      "via": "simit init release"
+    },
+    {
+      "blocker": "scope-unsupported",
+      "fallback": "simit init release",
+      "lands": true,
+      "match": {
+        "ciTarget": "actions/github",
+        "forge": "github"
+      },
+      "orchestrator": "simit-updater",
+      "path": "updater",
+      "reason": "The updater lands only the primary CI scope.",
+      "status": "planned",
+      "usageKind": "release.workflow",
+      "via": "simit projects update"
+    },
+    {
+      "blocker": "adapter-missing",
+      "fallback": "simit init release",
+      "lands": true,
+      "match": {
+        "ciTarget": "crow/forgejo",
+        "forge": "forgejo"
+      },
+      "orchestrator": "simit-updater",
+      "path": "updater",
+      "reason": "The updater has no Forgejo and Crow adapter yet.",
+      "status": "planned",
+      "usageKind": "release.workflow",
+      "via": "simit projects update"
+    },
+    {
+      "blocker": "no-orchestrator",
+      "lands": false,
+      "match": {},
+      "path": "regenerate",
+      "reason": "The generator refreshes these files, but no orchestrator lands them for this repository.",
+      "status": "implemented",
+      "usageKind": "flake.wiring",
+      "via": "simit init flake"
+    },
+    {
+      "blocker": "scope-unsupported",
+      "fallback": "simit init flake",
+      "lands": true,
+      "match": {
+        "ciTarget": "actions/github",
+        "forge": "github"
+      },
+      "orchestrator": "simit-updater",
+      "path": "updater",
+      "reason": "The updater lands only the primary CI scope.",
+      "status": "planned",
+      "usageKind": "flake.wiring",
+      "via": "simit projects update"
+    },
+    {
+      "blocker": "adapter-missing",
+      "fallback": "simit init flake",
+      "lands": true,
+      "match": {
+        "ciTarget": "crow/forgejo",
+        "forge": "forgejo"
+      },
+      "orchestrator": "simit-updater",
+      "path": "updater",
+      "reason": "The updater has no Forgejo and Crow adapter yet.",
+      "status": "planned",
+      "usageKind": "flake.wiring",
+      "via": "simit projects update"
+    },
+    {
+      "blocker": "no-orchestrator",
+      "lands": false,
+      "match": {},
+      "path": "regenerate",
+      "reason": "The generator refreshes these files, but no orchestrator lands them for this repository.",
+      "status": "implemented",
+      "usageKind": "hooks.config",
+      "via": "simit init flake"
+    },
+    {
+      "blocker": "scope-unsupported",
+      "fallback": "simit init flake",
+      "lands": true,
+      "match": {
+        "ciTarget": "actions/github",
+        "forge": "github"
+      },
+      "orchestrator": "simit-updater",
+      "path": "updater",
+      "reason": "The updater lands only the primary CI scope.",
+      "status": "planned",
+      "usageKind": "hooks.config",
+      "via": "simit projects update"
+    },
+    {
+      "blocker": "adapter-missing",
+      "fallback": "simit init flake",
+      "lands": true,
+      "match": {
+        "ciTarget": "crow/forgejo",
+        "forge": "forgejo"
+      },
+      "orchestrator": "simit-updater",
+      "path": "updater",
+      "reason": "The updater has no Forgejo and Crow adapter yet.",
+      "status": "planned",
+      "usageKind": "hooks.config",
+      "via": "simit projects update"
+    },
+    {
+      "blocker": "no-orchestrator",
+      "lands": false,
+      "match": {},
+      "path": "regenerate",
+      "reason": "The generator refreshes these files, but no orchestrator lands them for this repository.",
+      "status": "implemented",
+      "usageKind": "readme.badges",
+      "via": "simit upgrade"
+    },
+    {
+      "blocker": "scope-unsupported",
+      "fallback": "simit upgrade",
+      "lands": true,
+      "match": {
+        "ciTarget": "actions/github",
+        "forge": "github"
+      },
+      "orchestrator": "simit-updater",
+      "path": "updater",
+      "reason": "The updater lands only the primary CI scope.",
+      "status": "planned",
+      "usageKind": "readme.badges",
+      "via": "simit projects update"
+    },
+    {
+      "blocker": "adapter-missing",
+      "fallback": "simit upgrade",
+      "lands": true,
+      "match": {
+        "ciTarget": "crow/forgejo",
+        "forge": "forgejo"
+      },
+      "orchestrator": "simit-updater",
+      "path": "updater",
+      "reason": "The updater has no Forgejo and Crow adapter yet.",
+      "status": "planned",
+      "usageKind": "readme.badges",
+      "via": "simit projects update"
+    },
+    {
+      "blocker": "no-orchestrator",
+      "lands": false,
+      "match": {},
+      "path": "regenerate",
+      "reason": "The generator refreshes these files, but no orchestrator lands them for this repository.",
+      "status": "implemented",
+      "usageKind": "dist.aur",
+      "via": "simit init aur"
+    },
+    {
+      "blocker": "no-orchestrator",
+      "lands": false,
+      "match": {},
+      "path": "regenerate",
+      "reason": "The generator refreshes these files, but no orchestrator lands them for this repository.",
+      "status": "implemented",
+      "usageKind": "dist.copr",
+      "via": "simit init copr"
+    },
+    {
+      "blocker": "no-orchestrator",
+      "lands": false,
+      "match": {},
+      "path": "regenerate",
+      "reason": "The generator refreshes these files, but no orchestrator lands them for this repository.",
+      "status": "implemented",
+      "usageKind": "dist.apt",
+      "via": "simit init apt"
+    },
+    {
+      "lands": true,
+      "match": {},
+      "path": "human",
+      "reason": "Trust roots are maintainer key material; generator upgrades never change them.",
+      "status": "implemented",
+      "usageKind": "keys.trust-root",
+      "via": "maintainer signing key"
+    },
+    {
+      "blocker": "manual-pin",
+      "lands": false,
+      "match": {},
+      "path": "manual",
+      "reason": "Flake inputs need a networked lock update, which the updater sandbox cannot run.",
+      "status": "unsupported",
+      "usageKind": "flake-input.direct",
+      "via": "nix flake update simit"
+    },
+    {
+      "blocker": "transitive-pin",
+      "lands": false,
+      "match": {},
+      "path": "manual",
+      "reason": "Another input's lock pins this simit; update that input instead.",
+      "status": "unsupported",
+      "usageKind": "flake-input.transitive",
+      "via": "update the input that locks simit"
+    },
+    {
+      "lands": true,
+      "match": {},
+      "path": "none",
+      "reason": "A cut input is never fetched.",
+      "status": "implemented",
+      "usageKind": "flake-input.cut",
+      "via": "follows = \"\""
+    },
+    {
+      "blocker": "manual-pin",
+      "lands": false,
+      "match": {},
+      "path": "manual",
+      "reason": "Repository variable values are forge state; simit never changes them.",
+      "status": "unsupported",
+      "usageKind": "runtime.publisher-var",
+      "via": "repository variable SIMIT_PUBLISHER_REVISION"
+    },
+    {
+      "blocker": "manual-pin",
+      "lands": false,
+      "match": {},
+      "path": "manual",
+      "reason": "Repository variable values are forge state; simit never changes them.",
+      "status": "unsupported",
+      "usageKind": "runtime.ci-engine",
+      "via": "repository variable SIMIT_CI_ENGINE_REVISION"
+    },
+    {
+      "blocker": "manual-pin",
+      "lands": false,
+      "match": {},
+      "path": "manual",
+      "reason": "simit does not rewrite runtime flake references.",
+      "status": "unsupported",
+      "usageKind": "runtime.flake-ref",
+      "via": "edit the reference"
+    },
+    {
+      "blocker": "manual-pin",
+      "lands": false,
+      "match": {},
+      "path": "manual",
+      "reason": "simit does not rewrite cargo install commands.",
+      "status": "unsupported",
+      "usageKind": "runtime.cargo-install",
+      "via": "edit the cargo install command"
+    },
+    {
+      "lands": true,
+      "match": {},
+      "path": "flake-input",
+      "reason": "nix develop runs the simit the flake inputs pin; that input carries the upgrade path.",
+      "status": "implemented",
+      "usageKind": "runtime.devshell",
+      "via": "the repository's simit flake input"
+    },
+    {
+      "blocker": "manual-pin",
+      "lands": false,
+      "match": {},
+      "path": "manual",
+      "reason": "Pins inside human-owned simit.toml command strings are never rewritten.",
+      "status": "unsupported",
+      "usageKind": "pin.config-command",
+      "via": "edit simit.toml"
+    },
+    {
+      "lands": true,
+      "match": {},
+      "path": "environment",
+      "reason": "Scripts run the simit their environment provides; the devshell or flake input carries the upgrade path.",
+      "status": "implemented",
+      "usageKind": "script.invocation",
+      "via": "the simit on the script's PATH"
+    },
+    {
+      "blocker": "manual-pin",
+      "lands": false,
+      "match": {},
+      "path": "manual",
+      "reason": "Cargo dependency updates are outside every simit orchestrator.",
+      "status": "unsupported",
+      "usageKind": "cargo.dependency",
+      "via": "cargo update -p simit"
+    }
+  ],
+  "contract": "fleetix.supply-facts.v1",
+  "edges": [
+    {
+      "from": "repo:codefloe.com/example/pink",
+      "kind": "uses",
+      "to": "usage:codefloe.com/example/pink#ci.primary"
+    },
+    {
+      "from": "repo:github.com/example/conflict",
+      "kind": "uses",
+      "to": "usage:github.com/example/conflict#config.cargo-package"
+    },
+    {
+      "from": "repo:github.com/example/conflict",
+      "kind": "uses",
+      "to": "usage:github.com/example/conflict#config.simit-toml"
+    },
+    {
+      "from": "repo:github.com/example/crow-on-github",
+      "kind": "uses",
+      "to": "usage:github.com/example/crow-on-github#ci.primary"
+    },
+    {
+      "from": "repo:github.com/example/drifted",
+      "kind": "uses",
+      "to": "usage:github.com/example/drifted#cargo.dependency:Cargo.lock"
+    },
+    {
+      "from": "repo:github.com/example/drifted",
+      "kind": "uses",
+      "to": "usage:github.com/example/drifted#ci.primary"
+    },
+    {
+      "from": "repo:github.com/example/drifted",
+      "kind": "uses",
+      "to": "usage:github.com/example/drifted#ci.publish"
+    },
+    {
+      "from": "repo:github.com/example/drifted",
+      "kind": "uses",
+      "to": "usage:github.com/example/drifted#config.simit-toml"
+    },
+    {
+      "from": "repo:github.com/example/drifted",
+      "kind": "uses",
+      "to": "usage:github.com/example/drifted#flake-input.cut:tool/simit"
+    },
+    {
+      "from": "repo:github.com/example/drifted",
+      "kind": "uses",
+      "to": "usage:github.com/example/drifted#flake-input.direct:simit"
+    },
+    {
+      "from": "repo:github.com/example/drifted",
+      "kind": "uses",
+      "to": "usage:github.com/example/drifted#flake-input.transitive:harbor/simit"
+    },
+    {
+      "from": "repo:github.com/example/drifted",
+      "kind": "uses",
+      "to": "usage:github.com/example/drifted#pin.config-command:simit.toml"
+    },
+    {
+      "from": "repo:github.com/example/drifted",
+      "kind": "uses",
+      "to": "usage:github.com/example/drifted#readme.badges"
+    },
+    {
+      "from": "repo:github.com/example/drifted",
+      "kind": "uses",
+      "to": "usage:github.com/example/drifted#release.workflow"
+    },
+    {
+      "from": "repo:github.com/example/drifted",
+      "kind": "uses",
+      "to": "usage:github.com/example/drifted#runtime.cargo-install:scripts/release.sh"
+    },
+    {
+      "from": "repo:github.com/example/drifted",
+      "kind": "uses",
+      "to": "usage:github.com/example/drifted#runtime.ci-engine:.github/workflows/ci.yaml"
+    },
+    {
+      "from": "repo:github.com/example/drifted",
+      "kind": "uses",
+      "to": "usage:github.com/example/drifted#runtime.flake-ref:.github/workflows/ci.yaml"
+    },
+    {
+      "from": "repo:github.com/example/drifted",
+      "kind": "uses",
+      "to": "usage:github.com/example/drifted#runtime.publisher-var:.github/workflows/publish-crate.yaml"
+    },
+    {
+      "from": "repo:github.com/example/drifted",
+      "kind": "uses",
+      "to": "usage:github.com/example/drifted#script.invocation:scripts/release.sh"
+    },
+    {
+      "from": "repo:github.com/example/flake-config",
+      "kind": "uses",
+      "to": "usage:github.com/example/flake-config#ci.primary"
+    },
+    {
+      "from": "repo:github.com/example/flake-config",
+      "kind": "uses",
+      "to": "usage:github.com/example/flake-config#config.flake"
+    },
+    {
+      "from": "usage:github.com/example/drifted#cargo.dependency:Cargo.lock",
+      "kind": "pins",
+      "to": "rev:github.com/caniko/simit@4c6841cce19327927ea8a8f6e856276dd5c878f0"
+    },
+    {
+      "from": "usage:github.com/example/drifted#ci.primary",
+      "kind": "runsOn",
+      "to": "runner:github.com/ubuntu-24.04"
+    },
+    {
+      "from": "usage:github.com/example/drifted#ci.publish",
+      "kind": "runsOn",
+      "to": "runner:github.com/atlas"
+    },
+    {
+      "from": "usage:github.com/example/drifted#ci.publish",
+      "kind": "runsOn",
+      "to": "runner:github.com/self-hosted"
+    },
+    {
+      "from": "usage:github.com/example/drifted#flake-input.direct:simit",
+      "kind": "pins",
+      "to": "rev:github.com/caniko/simit@de3325be17104fbdb0d70f1da38149d4016f1790"
+    },
+    {
+      "from": "usage:github.com/example/drifted#flake-input.transitive:harbor/simit",
+      "kind": "pins",
+      "to": "rev:github.com/caniko/simit@432cde792b74e5fdce8ed6e71b555e535f2b83b5"
+    },
+    {
+      "from": "usage:github.com/example/drifted#pin.config-command:simit.toml",
+      "kind": "pins",
+      "to": "rev:github.com/caniko/simit@4c6841cce19327927ea8a8f6e856276dd5c878f0"
+    },
+    {
+      "from": "usage:github.com/example/drifted#release.workflow",
+      "kind": "publishesTo",
+      "to": "cache:canix"
+    },
+    {
+      "from": "usage:github.com/example/drifted#runtime.ci-engine:.github/workflows/ci.yaml",
+      "kind": "pins",
+      "to": "rev:github.com/caniko/simit@8a132e416caf9cc58a753005b804343181477200"
+    },
+    {
+      "from": "usage:github.com/example/drifted#runtime.flake-ref:.github/workflows/ci.yaml",
+      "kind": "pins",
+      "to": "rev:github.com/caniko/simit@4c6841cce19327927ea8a8f6e856276dd5c878f0"
+    },
+    {
+      "from": "usage:github.com/example/flake-config#ci.primary",
+      "kind": "runsOn",
+      "to": "runner:github.com/ubuntu-latest"
+    }
+  ],
+  "errors": [
+    {
+      "code": "coordinate-unresolved",
+      "message": "<message>",
+      "subject": "no-origin"
+    },
+    {
+      "code": "path-unreadable",
+      "message": "<message>",
+      "subject": "missing"
+    }
+  ],
+  "nodes": [
+    {
+      "attrs": {
+        "url": "https://attic.example"
+      },
+      "id": "cache:canix",
+      "kind": "cache"
+    },
+    {
+      "attrs": {
+        "ciTarget": "crow/forgejo",
+        "forge": "forgejo",
+        "forgeHost": "codefloe.com"
+      },
+      "id": "repo:codefloe.com/example/pink",
+      "kind": "repo"
+    },
+    {
+      "attrs": {
+        "forge": "github",
+        "forgeHost": "github.com"
+      },
+      "blockers": [
+        {
+          "code": "config-conflict",
+          "reason": "several simit config sources: config.simit-toml, config.cargo-package"
+        }
+      ],
+      "id": "repo:github.com/example/conflict",
+      "kind": "repo"
+    },
+    {
+      "attrs": {
+        "ciTarget": "crow/forgejo",
+        "forge": "github",
+        "forgeHost": "github.com"
+      },
+      "blockers": [
+        {
+          "code": "provider-mismatch",
+          "reason": "crow/forgejo CI cannot run on github.com"
+        }
+      ],
+      "id": "repo:github.com/example/crow-on-github",
+      "kind": "repo"
+    },
+    {
+      "attrs": {
+        "ciTarget": "actions/github",
+        "forge": "github",
+        "forgeHost": "github.com"
+      },
+      "id": "repo:github.com/example/drifted",
+      "kind": "repo"
+    },
+    {
+      "attrs": {
+        "ciTarget": "actions/github",
+        "forge": "github",
+        "forgeHost": "github.com"
+      },
+      "blockers": [
+        {
+          "code": "config-not-persistable",
+          "reason": "flake outputs.simitConfig cannot be rewritten by the generator"
+        },
+        {
+          "code": "config-unresolved",
+          "reason": "flake outputs.simitConfig is only evaluated with --eval-flake"
+        }
+      ],
+      "id": "repo:github.com/example/flake-config",
+      "kind": "repo"
+    },
+    {
+      "attrs": {
+        "revision": "432cde792b74e5fdce8ed6e71b555e535f2b83b5",
+        "source": "github.com/caniko/simit"
+      },
+      "id": "rev:github.com/caniko/simit@432cde792b74e5fdce8ed6e71b555e535f2b83b5",
+      "kind": "rev"
+    },
+    {
+      "attrs": {
+        "revision": "4c6841cce19327927ea8a8f6e856276dd5c878f0",
+        "source": "github.com/caniko/simit"
+      },
+      "id": "rev:github.com/caniko/simit@4c6841cce19327927ea8a8f6e856276dd5c878f0",
+      "kind": "rev"
+    },
+    {
+      "attrs": {
+        "revision": "8a132e416caf9cc58a753005b804343181477200",
+        "source": "github.com/caniko/simit"
+      },
+      "id": "rev:github.com/caniko/simit@8a132e416caf9cc58a753005b804343181477200",
+      "kind": "rev"
+    },
+    {
+      "attrs": {
+        "revision": "de3325be17104fbdb0d70f1da38149d4016f1790",
+        "source": "github.com/caniko/simit"
+      },
+      "id": "rev:github.com/caniko/simit@de3325be17104fbdb0d70f1da38149d4016f1790",
+      "kind": "rev"
+    },
+    {
+      "attrs": {
+        "forgeHost": "github.com",
+        "label": "atlas"
+      },
+      "id": "runner:github.com/atlas",
+      "kind": "runner"
+    },
+    {
+      "attrs": {
+        "forgeHost": "github.com",
+        "label": "self-hosted"
+      },
+      "id": "runner:github.com/self-hosted",
+      "kind": "runner"
+    },
+    {
+      "attrs": {
+        "forgeHost": "github.com",
+        "label": "ubuntu-24.04"
+      },
+      "id": "runner:github.com/ubuntu-24.04",
+      "kind": "runner"
+    },
+    {
+      "attrs": {
+        "forgeHost": "github.com",
+        "label": "ubuntu-latest"
+      },
+      "id": "runner:github.com/ubuntu-latest",
+      "kind": "runner"
+    },
+    {
+      "attrs": {
+        "paths": [
+          ".crow/ci.yaml"
+        ],
+        "state": "drift",
+        "usageKind": "ci.primary"
+      },
+      "expects": [
+        {
+          "attr": "generatorRevision",
+          "blocker": "unknown-generator-revision",
+          "reason": "No receipt or pin proves which generator revision rendered these files."
+        }
+      ],
+      "id": "usage:codefloe.com/example/pink#ci.primary",
+      "kind": "usage"
+    },
+    {
+      "attrs": {
+        "paths": [
+          "Cargo.toml"
+        ],
+        "state": "unknown",
+        "usageKind": "config.cargo-package"
+      },
+      "id": "usage:github.com/example/conflict#config.cargo-package",
+      "kind": "usage"
+    },
+    {
+      "attrs": {
+        "paths": [
+          "simit.toml"
+        ],
+        "state": "unknown",
+        "usageKind": "config.simit-toml"
+      },
+      "id": "usage:github.com/example/conflict#config.simit-toml",
+      "kind": "usage"
+    },
+    {
+      "attrs": {
+        "paths": [
+          ".crow/ci.yaml"
+        ],
+        "state": "drift",
+        "usageKind": "ci.primary"
+      },
+      "expects": [
+        {
+          "attr": "generatorRevision",
+          "blocker": "unknown-generator-revision",
+          "reason": "No receipt or pin proves which generator revision rendered these files."
+        }
+      ],
+      "id": "usage:github.com/example/crow-on-github#ci.primary",
+      "kind": "usage"
+    },
+    {
+      "attrs": {
+        "path": "Cargo.lock",
+        "revisions": [
+          "4c6841cce19327927ea8a8f6e856276dd5c878f0"
+        ],
+        "state": "unknown",
+        "tags": [
+          "0.21.0"
+        ],
+        "usageKind": "cargo.dependency"
+      },
+      "id": "usage:github.com/example/drifted#cargo.dependency:Cargo.lock",
+      "kind": "usage"
+    },
+    {
+      "attrs": {
+        "paths": [
+          ".github/workflows/ci.yaml"
+        ],
+        "state": "drift",
+        "usageKind": "ci.primary"
+      },
+      "expects": [
+        {
+          "attr": "generatorRevision",
+          "blocker": "unknown-generator-revision",
+          "reason": "No receipt or pin proves which generator revision rendered these files."
+        }
+      ],
+      "id": "usage:github.com/example/drifted#ci.primary",
+      "kind": "usage"
+    },
+    {
+      "attrs": {
+        "paths": [
+          ".github/workflows/publish-crate.yaml"
+        ],
+        "state": "drift",
+        "usageKind": "ci.publish"
+      },
+      "expects": [
+        {
+          "attr": "generatorRevision",
+          "blocker": "unknown-generator-revision",
+          "reason": "No receipt or pin proves which generator revision rendered these files."
+        }
+      ],
+      "id": "usage:github.com/example/drifted#ci.publish",
+      "kind": "usage"
+    },
+    {
+      "attrs": {
+        "paths": [
+          "simit.toml"
+        ],
+        "state": "current",
+        "usageKind": "config.simit-toml"
+      },
+      "id": "usage:github.com/example/drifted#config.simit-toml",
+      "kind": "usage"
+    },
+    {
+      "attrs": {
+        "input": "tool/simit",
+        "path": "flake.lock",
+        "state": "absent",
+        "usageKind": "flake-input.cut"
+      },
+      "id": "usage:github.com/example/drifted#flake-input.cut:tool/simit",
+      "kind": "usage"
+    },
+    {
+      "attrs": {
+        "input": "simit",
+        "path": "flake.lock",
+        "revisions": [
+          "de3325be17104fbdb0d70f1da38149d4016f1790"
+        ],
+        "state": "unknown",
+        "usageKind": "flake-input.direct"
+      },
+      "id": "usage:github.com/example/drifted#flake-input.direct:simit",
+      "kind": "usage"
+    },
+    {
+      "attrs": {
+        "input": "harbor/simit",
+        "path": "flake.lock",
+        "revisions": [
+          "432cde792b74e5fdce8ed6e71b555e535f2b83b5"
+        ],
+        "state": "unknown",
+        "usageKind": "flake-input.transitive"
+      },
+      "id": "usage:github.com/example/drifted#flake-input.transitive:harbor/simit",
+      "kind": "usage"
+    },
+    {
+      "attrs": {
+        "path": "simit.toml",
+        "revisions": [
+          "4c6841cce19327927ea8a8f6e856276dd5c878f0"
+        ],
+        "state": "unknown",
+        "usageKind": "pin.config-command"
+      },
+      "id": "usage:github.com/example/drifted#pin.config-command:simit.toml",
+      "kind": "usage"
+    },
+    {
+      "attrs": {
+        "paths": [
+          "README.md"
+        ],
+        "state": "drift",
+        "usageKind": "readme.badges"
+      },
+      "expects": [
+        {
+          "attr": "generatorRevision",
+          "blocker": "unknown-generator-revision",
+          "reason": "No receipt or pin proves which generator revision rendered these files."
+        }
+      ],
+      "id": "usage:github.com/example/drifted#readme.badges",
+      "kind": "usage"
+    },
+    {
+      "attrs": {
+        "paths": [
+          ".github/workflows/release.yml"
+        ],
+        "state": "hand-rolled",
+        "usageKind": "release.workflow"
+      },
+      "id": "usage:github.com/example/drifted#release.workflow",
+      "kind": "usage"
+    },
+    {
+      "attrs": {
+        "path": "scripts/release.sh",
+        "state": "unknown",
+        "usageKind": "runtime.cargo-install"
+      },
+      "blockers": [
+        {
+          "code": "unpinned-runtime",
+          "reason": "scripts/release.sh runs simit from the floating reference cargo install simit"
+        }
+      ],
+      "id": "usage:github.com/example/drifted#runtime.cargo-install:scripts/release.sh",
+      "kind": "usage"
+    },
+    {
+      "attrs": {
+        "path": ".github/workflows/ci.yaml",
+        "revisions": [
+          "8a132e416caf9cc58a753005b804343181477200"
+        ],
+        "state": "unknown",
+        "usageKind": "runtime.ci-engine"
+      },
+      "expects": [
+        {
+          "attr": "revision",
+          "blocker": "unknown-generator-revision",
+          "reason": "The repository variable's value lives on the forge."
+        }
+      ],
+      "id": "usage:github.com/example/drifted#runtime.ci-engine:.github/workflows/ci.yaml",
+      "kind": "usage"
+    },
+    {
+      "attrs": {
+        "path": ".github/workflows/ci.yaml",
+        "revisions": [
+          "4c6841cce19327927ea8a8f6e856276dd5c878f0"
+        ],
+        "state": "unknown",
+        "usageKind": "runtime.flake-ref"
+      },
+      "blockers": [
+        {
+          "code": "unpinned-runtime",
+          "reason": ".github/workflows/ci.yaml runs simit from the floating reference github:caniko/simit"
+        }
+      ],
+      "id": "usage:github.com/example/drifted#runtime.flake-ref:.github/workflows/ci.yaml",
+      "kind": "usage"
+    },
+    {
+      "attrs": {
+        "path": ".github/workflows/publish-crate.yaml",
+        "state": "unknown",
+        "usageKind": "runtime.publisher-var"
+      },
+      "expects": [
+        {
+          "attr": "revision",
+          "blocker": "unknown-generator-revision",
+          "reason": "The repository variable's value lives on the forge."
+        }
+      ],
+      "id": "usage:github.com/example/drifted#runtime.publisher-var:.github/workflows/publish-crate.yaml",
+      "kind": "usage"
+    },
+    {
+      "attrs": {
+        "path": "scripts/release.sh",
+        "state": "unknown",
+        "usageKind": "script.invocation"
+      },
+      "id": "usage:github.com/example/drifted#script.invocation:scripts/release.sh",
+      "kind": "usage"
+    },
+    {
+      "attrs": {
+        "paths": [
+          ".github/workflows/ci.yaml"
+        ],
+        "state": "unknown",
+        "usageKind": "ci.primary"
+      },
+      "expects": [
+        {
+          "attr": "generatorRevision",
+          "blocker": "unknown-generator-revision",
+          "reason": "No receipt or pin proves which generator revision rendered these files."
+        }
+      ],
+      "id": "usage:github.com/example/flake-config#ci.primary",
+      "kind": "usage"
+    },
+    {
+      "attrs": {
+        "paths": [
+          "flake.nix"
+        ],
+        "state": "unknown",
+        "usageKind": "config.flake"
+      },
+      "id": "usage:github.com/example/flake-config#config.flake",
+      "kind": "usage"
+    }
+  ],
+  "observedAt": "<observedAt>",
+  "producer": {
+    "name": "simit",
+    "version": "<version>"
+  },
+  "vocabulary": "simit.usage-facts.v1"
+}

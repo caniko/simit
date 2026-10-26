@@ -2527,7 +2527,7 @@ fn reconcile_ci_files(
     )
 }
 
-fn is_primary_ci_workflow_name(name: &std::ffi::OsStr) -> bool {
+pub(crate) fn is_primary_ci_workflow_name(name: &std::ffi::OsStr) -> bool {
     let Some(name) = name.to_str() else {
         return false;
     };
@@ -2621,7 +2621,7 @@ fn obsolete_nix_workflows(
     Ok(obsolete)
 }
 
-fn is_ci_managed_workflow_name(name: &std::ffi::OsStr) -> bool {
+pub(crate) fn is_ci_managed_workflow_name(name: &std::ffi::OsStr) -> bool {
     let Some(name) = name.to_str() else {
         return false;
     };
