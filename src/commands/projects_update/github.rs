@@ -1472,7 +1472,7 @@ mod tests {
         let source = "5".repeat(40);
         let target = RefCell::new(source.clone());
         let linear = RefCell::new(true);
-        let method = RefCell::new("squash");
+        let merge_method = RefCell::new("squash");
         let get = |path: &str| -> Result<Value> {
             Ok(match path {
                 "repos/team/demo" => json!({
@@ -1511,7 +1511,7 @@ mod tests {
                 ("PUT", "repos/team/demo/pulls/7/merge") => {
                     assert_eq!(
                         body,
-                        &json!({"sha":revision,"merge_method":*method.borrow()})
+                        &json!({"sha":revision,"merge_method":*merge_method.borrow()})
                     );
                     json!({"merged":true,"sha":"c".repeat(40)})
                 }
@@ -1598,7 +1598,7 @@ mod tests {
         assert_eq!(change.merge_commit, Some("c".repeat(40)));
         assert_eq!(writes.take(), ["PUT repos/team/demo/pulls/7/merge"]);
         *linear.borrow_mut() = false;
-        *method.borrow_mut() = "merge";
+        *merge_method.borrow_mut() = "merge";
         replay(&request).unwrap();
         assert_eq!(writes.take(), ["PUT repos/team/demo/pulls/7/merge"]);
         request.operation = "close".into();
