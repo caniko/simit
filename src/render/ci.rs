@@ -1102,7 +1102,10 @@ pub(crate) fn nix_flake_ci_file_with_events(
         }
     } else {
         if selected(CiComponent::FlakeWiring) {
-            workflow.push_str("      - name: Check generated flake wiring\n        run: nix run --no-write-lock-file git+https://github.com/caniko/simit.git -- init flake --check --diff\n");
+            workflow.push_str(&format!(
+                "      - name: Check generated flake wiring\n        run: {}\n",
+                super::flake_wiring_check()
+            ));
         }
         if selected(CiComponent::FlakeEvaluation) && !selected(CiComponent::Checks) {
             workflow.push_str(
@@ -2517,9 +2520,7 @@ fn python_ci_workflow(
     push_extra_setup_steps(&mut workflow, &options.extra_setup);
     if selected(CiComponent::FlakeWiring) {
         workflow.push_str("      - name: Check generated flake wiring\n");
-        workflow.push_str(
-            "        run: nix run --no-write-lock-file git+https://github.com/caniko/simit.git -- init flake --check --diff\n\n",
-        );
+        workflow.push_str(&format!("        run: {}\n\n", super::flake_wiring_check()));
     }
     if selected(CiComponent::FlakeEvaluation) {
         workflow.push_str("      - name: Check flake evaluation\n");
@@ -3649,7 +3650,10 @@ fn push_windows_publish_job(
     workflow.push_str("          merge-multiple: true\n\n");
     push_windows_rust_setup_step(workflow, platform);
     workflow.push_str("      - name: Install simit\n");
-    workflow.push_str("        run: cargo install --locked simit\n\n");
+    workflow.push_str(&format!(
+        "        run: {}\n\n",
+        super::simit_cargo_install()
+    ));
 
     if let Some(chocolatey) = &options.chocolatey {
         push_chocolatey_publish_step(workflow, chocolatey, options.tag_prefix);
@@ -4899,7 +4903,10 @@ fn push_nix_ci_legacy_steps(
 
 fn push_nix_check_steps(workflow: &mut String, options: &CiOptions) {
     if options.repository_checks && options.components.contains(&CiComponent::FlakeWiring) {
-        workflow.push_str("      - name: Check generated flake wiring\n        run: nix run --no-write-lock-file git+https://github.com/caniko/simit.git -- init flake --check --diff\n\n");
+        workflow.push_str(&format!(
+            "      - name: Check generated flake wiring\n        run: {}\n\n",
+            super::flake_wiring_check()
+        ));
     }
     if options.om_ci != OmCiMode::Replace
         && let Some(command) = options.flake_check_command()

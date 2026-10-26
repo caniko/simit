@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   default branch and the fleet updater's `simit/update/**` maintenance refs.
   Pull request pipelines still gate every branch, and other branch pushes no
   longer duplicate them on metered Crow agents.
+- Generated `flake-wiring` checks and the Windows packager's simit install now
+  pin the generator that rendered them instead of tracking simit's default
+  branch or the latest crate. Nix-built simit uses its exact source revision;
+  Cargo-built or dirty-tree builds pin their crate version's release tag.
 - Add top-level `primary_package`: the workspace member used for the README
   crates.io badge and as the package-metadata fallback for AUR, COPR, APT,
   Scoop, Chocolatey and release setup. Previously these always took the
