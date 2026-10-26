@@ -50,9 +50,11 @@ and `.gitlab-ci.yml` becomes a workflow node from a static parse.
 `triggers` is `{events, branches}`: events normalized to `push`,
 `pull_request`, `tag`, `manual`, `cron`, `deployment` and `release` (other
 Actions events keep their names), and `branches` the push branch filter as
-written, empty when push runs on every branch. A Crow file without `when` runs
+written, empty when push runs on every branch; `branchesIgnore` lists push
+exclusions (`branches-ignore`, Crow `branch.exclude`) when present. A Crow file without `when` runs
 on every event. Jsonnet and GitLab files report `triggers: null`. `labels` are
-Actions `runs-on` labels or Crow `labels` as `key=value`; `steps` are step
+Actions `runs-on` labels (a runner group as `group=<name>`) or Crow `labels`
+as `key=value`; `steps` are step
 names. Per-file reference usages carry `generated`, true inside a
 simit-generated workflow.
 
@@ -76,6 +78,12 @@ expect the variable's `revision`.
 | `pin.config-command`                                                                              | flake references in `simit.toml` command strings                                                                         |
 | `script.invocation`                                                                               | `simit` commands in `scripts/`                                                                                           |
 | `cargo.dependency`                                                                                | a `simit` package in `Cargo.lock`                                                                                        |
+
+A reference whose revision comes from another variable (`github:caniko/simit/$VAR`)
+records it in `variables` and expects a `revision`. A generated release
+workflow without its trust root reports `keys.trust-root` as `drift` with the
+`trust-root-missing` blocker. Unreadable lock files and `scripts/`
+directories are `errors`, never silently empty.
 
 States are `current`, `drift`, `hand-rolled`, `absent` and `unknown`. Pins and
 runtime references report `unknown`: their freshness depends on the

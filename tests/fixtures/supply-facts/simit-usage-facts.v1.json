@@ -713,6 +713,11 @@
     {
       "from": "repo:github.com/example/drifted",
       "kind": "uses",
+      "to": "usage:github.com/example/drifted#ci.local-gate"
+    },
+    {
+      "from": "repo:github.com/example/drifted",
+      "kind": "uses",
       "to": "usage:github.com/example/drifted#ci.primary"
     },
     {
@@ -773,6 +778,11 @@
     {
       "from": "repo:github.com/example/drifted",
       "kind": "uses",
+      "to": "usage:github.com/example/drifted#runtime.flake-ref:scripts/release.sh"
+    },
+    {
+      "from": "repo:github.com/example/drifted",
+      "kind": "uses",
       "to": "usage:github.com/example/drifted#runtime.publisher-var:.github/workflows/publish-crate.yaml"
     },
     {
@@ -789,6 +799,26 @@
       "from": "repo:github.com/example/flake-config",
       "kind": "uses",
       "to": "usage:github.com/example/flake-config#config.flake"
+    },
+    {
+      "from": "repo:github.com/example/manual",
+      "kind": "uses",
+      "to": "usage:github.com/example/manual#ci.primary"
+    },
+    {
+      "from": "repo:github.com/example/manual",
+      "kind": "uses",
+      "to": "usage:github.com/example/manual#ci.publish"
+    },
+    {
+      "from": "repo:github.com/example/unsigned",
+      "kind": "uses",
+      "to": "usage:github.com/example/unsigned#keys.trust-root"
+    },
+    {
+      "from": "repo:github.com/example/unsigned",
+      "kind": "uses",
+      "to": "usage:github.com/example/unsigned#release.workflow"
     },
     {
       "from": "usage:codefloe.com/example/pink#ci.primary",
@@ -829,6 +859,11 @@
       "from": "usage:github.com/example/drifted#ci.publish",
       "kind": "contains",
       "to": "workflow:github.com/example/drifted#.github/workflows/publish-crate.yaml"
+    },
+    {
+      "from": "usage:github.com/example/drifted#ci.publish",
+      "kind": "contains",
+      "to": "workflow:github.com/example/drifted#.github/workflows/publish-vscode-extension.yaml"
     },
     {
       "from": "usage:github.com/example/drifted#flake-input.direct:simit",
@@ -879,6 +914,21 @@
       "from": "usage:github.com/example/flake-config#ci.primary",
       "kind": "contains",
       "to": "workflow:github.com/example/flake-config#.github/workflows/ci.yaml"
+    },
+    {
+      "from": "usage:github.com/example/manual#ci.primary",
+      "kind": "contains",
+      "to": "workflow:github.com/example/manual#.github/workflows/ci.yaml"
+    },
+    {
+      "from": "usage:github.com/example/manual#ci.publish",
+      "kind": "contains",
+      "to": "workflow:github.com/example/manual#.github/workflows/publish-crate.yaml"
+    },
+    {
+      "from": "usage:github.com/example/unsigned#release.workflow",
+      "kind": "contains",
+      "to": "workflow:github.com/example/unsigned#.github/workflows/release.yml"
     },
     {
       "from": "workflow:github.com/example/drifted#.github/workflows/ci.yaml",
@@ -985,6 +1035,23 @@
         }
       ],
       "id": "repo:github.com/example/flake-config",
+      "kind": "repo"
+    },
+    {
+      "attrs": {
+        "forge": "github",
+        "forgeHost": "github.com"
+      },
+      "id": "repo:github.com/example/manual",
+      "kind": "repo"
+    },
+    {
+      "attrs": {
+        "ciTarget": "actions/github",
+        "forge": "github",
+        "forgeHost": "github.com"
+      },
+      "id": "repo:github.com/example/unsigned",
       "kind": "repo"
     },
     {
@@ -1126,6 +1193,22 @@
     },
     {
       "attrs": {
+        "paths": [],
+        "state": "drift",
+        "usageKind": "ci.local-gate"
+      },
+      "expects": [
+        {
+          "attr": "generatorRevision",
+          "blocker": "unknown-generator-revision",
+          "reason": "No receipt or pin proves which generator revision rendered these files."
+        }
+      ],
+      "id": "usage:github.com/example/drifted#ci.local-gate",
+      "kind": "usage"
+    },
+    {
+      "attrs": {
         "paths": [
           ".github/workflows/ci.yaml"
         ],
@@ -1145,7 +1228,8 @@
     {
       "attrs": {
         "paths": [
-          ".github/workflows/publish-crate.yaml"
+          ".github/workflows/publish-crate.yaml",
+          ".github/workflows/publish-vscode-extension.yaml"
         ],
         "state": "drift",
         "usageKind": "ci.publish"
@@ -1308,6 +1392,26 @@
     },
     {
       "attrs": {
+        "generated": false,
+        "path": "scripts/release.sh",
+        "state": "unknown",
+        "usageKind": "runtime.flake-ref",
+        "variables": [
+          "SIMIT_REVISION"
+        ]
+      },
+      "expects": [
+        {
+          "attr": "revision",
+          "blocker": "unknown-generator-revision",
+          "reason": "scripts/release.sh takes the simit revision from a run-time variable"
+        }
+      ],
+      "id": "usage:github.com/example/drifted#runtime.flake-ref:scripts/release.sh",
+      "kind": "usage"
+    },
+    {
+      "attrs": {
         "generated": true,
         "path": ".github/workflows/publish-crate.yaml",
         "state": "unknown",
@@ -1360,6 +1464,61 @@
         "usageKind": "config.flake"
       },
       "id": "usage:github.com/example/flake-config#config.flake",
+      "kind": "usage"
+    },
+    {
+      "attrs": {
+        "paths": [
+          ".github/workflows/ci.yaml"
+        ],
+        "state": "hand-rolled",
+        "usageKind": "ci.primary"
+      },
+      "id": "usage:github.com/example/manual#ci.primary",
+      "kind": "usage"
+    },
+    {
+      "attrs": {
+        "paths": [
+          ".github/workflows/publish-crate.yaml"
+        ],
+        "state": "hand-rolled",
+        "usageKind": "ci.publish"
+      },
+      "id": "usage:github.com/example/manual#ci.publish",
+      "kind": "usage"
+    },
+    {
+      "attrs": {
+        "paths": [],
+        "state": "drift",
+        "usageKind": "keys.trust-root"
+      },
+      "blockers": [
+        {
+          "code": "trust-root-missing",
+          "reason": "the release workflow verifies tags against the missing keys/maintainers.gpg"
+        }
+      ],
+      "id": "usage:github.com/example/unsigned#keys.trust-root",
+      "kind": "usage"
+    },
+    {
+      "attrs": {
+        "paths": [
+          ".github/workflows/release.yml"
+        ],
+        "state": "unknown",
+        "usageKind": "release.workflow"
+      },
+      "expects": [
+        {
+          "attr": "generatorRevision",
+          "blocker": "unknown-generator-revision",
+          "reason": "No receipt or pin proves which generator revision rendered these files."
+        }
+      ],
+      "id": "usage:github.com/example/unsigned#release.workflow",
       "kind": "usage"
     },
     {
@@ -1446,6 +1605,22 @@
     },
     {
       "attrs": {
+        "generated": true,
+        "labels": [],
+        "path": ".github/workflows/publish-vscode-extension.yaml",
+        "steps": [],
+        "triggers": {
+          "branches": [],
+          "events": [
+            "manual"
+          ]
+        }
+      },
+      "id": "workflow:github.com/example/drifted#.github/workflows/publish-vscode-extension.yaml",
+      "kind": "workflow"
+    },
+    {
+      "attrs": {
         "generated": false,
         "labels": [],
         "path": ".github/workflows/release.yml",
@@ -1472,6 +1647,54 @@
         }
       },
       "id": "workflow:github.com/example/flake-config#.github/workflows/ci.yaml",
+      "kind": "workflow"
+    },
+    {
+      "attrs": {
+        "generated": false,
+        "labels": [],
+        "path": ".github/workflows/ci.yaml",
+        "steps": [],
+        "triggers": {
+          "branches": [],
+          "events": [
+            "push"
+          ]
+        }
+      },
+      "id": "workflow:github.com/example/manual#.github/workflows/ci.yaml",
+      "kind": "workflow"
+    },
+    {
+      "attrs": {
+        "generated": false,
+        "labels": [],
+        "path": ".github/workflows/publish-crate.yaml",
+        "steps": [],
+        "triggers": {
+          "branches": [],
+          "events": [
+            "release"
+          ]
+        }
+      },
+      "id": "workflow:github.com/example/manual#.github/workflows/publish-crate.yaml",
+      "kind": "workflow"
+    },
+    {
+      "attrs": {
+        "generated": true,
+        "labels": [],
+        "path": ".github/workflows/release.yml",
+        "steps": [],
+        "triggers": {
+          "branches": [],
+          "events": [
+            "tag"
+          ]
+        }
+      },
+      "id": "workflow:github.com/example/unsigned#.github/workflows/release.yml",
       "kind": "workflow"
     }
   ],

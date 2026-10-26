@@ -81,6 +81,8 @@ struct Refs {
     revisions: BTreeSet<String>,
     tags: BTreeSet<String>,
     floating: BTreeSet<String>,
+    /// Variables that supply the reference at run time.
+    variables: BTreeSet<String>,
 }
 
 fn blocker(code: &str, reason: impl Into<String>) -> Value {
@@ -159,8 +161,18 @@ impl Facts {
         if !refs.tags.is_empty() {
             attrs.insert("tags", json!(refs.tags));
         }
+        if !refs.variables.is_empty() {
+            attrs.insert("variables", json!(refs.variables));
+        }
         let node = self.usage(coordinate, kind, Some(path), "unknown", attrs);
         let id = node.id.clone();
+        if !refs.variables.is_empty() {
+            node.expects.push(json!({
+                "attr": "revision",
+                "blocker": "unknown-generator-revision",
+                "reason": format!("{path} takes the simit revision from a run-time variable"),
+            }));
+        }
         for floating in &refs.floating {
             node.blockers.push(blocker(
                 "unpinned-runtime",
@@ -309,7 +321,6 @@ impl Facts {
         self.observe_ci(
             &root,
             &coordinate,
-            &host,
             &workflows,
             config.as_ref().ok(),
             explained,
@@ -331,7 +342,6 @@ impl Facts {
         &mut self,
         root: &Path,
         coordinate: &str,
-        host: &str,
         workflows: &[registry::WorkflowFile],
         config: Option<&ProjectConfig>,
         explained: bool,
@@ -339,17 +349,19 @@ impl Facts {
         let repo = format!("repo:{coordinate}");
         let ci = workflows
             .iter()
-            .filter(|file| !registry::is_release_workflow_path(&file.relative_path))
+            .filter(|file| !is_release(&file.relative_path))
             .collect::<Vec<_>>();
-        // kind -> (present paths, drifted)
-        let mut kinds: BTreeMap<&'static str, (BTreeSet<String>, bool)> = BTreeMap::new();
+        // kind -> (present paths, drifted, unaudited)
+        let mut kinds: BTreeMap<&'static str, (BTreeSet<String>, bool, bool)> = BTreeMap::new();
         let (state, drifted) = match registry::audit_ci(root) {
-            Ok(audit) if audit.status == FeatureStatus::Absent => return,
             Ok(audit) if audit.status == FeatureStatus::HandRolled => {
-                let paths = ci
-                    .iter()
-                    .map(|file| file.relative_path.display().to_string());
-                self.generated(coordinate, "ci.primary", "hand-rolled", paths.collect());
+                for file in &ci {
+                    let entry = kinds.entry(ci_kind(&file.relative_path)).or_default();
+                    entry.0.insert(file.relative_path.display().to_string());
+                }
+                for (kind, (paths, ..)) in kinds {
+                    self.generated(coordinate, kind, "hand-rolled", paths.into_iter().collect());
+                }
                 return;
             }
             Ok(audit) => (
@@ -371,6 +383,8 @@ impl Facts {
         for file in ci.iter().filter(|file| file.marked) {
             let entry = kinds.entry(ci_kind(&file.relative_path)).or_default();
             entry.0.insert(file.relative_path.display().to_string());
+            // The audit leaves out the VS Code and JetBrains publishers.
+            entry.2 |= registry::is_release_workflow_path(&file.relative_path);
         }
         for path in drifted {
             let entry = kinds.entry(ci_kind(&path)).or_default();
@@ -379,70 +393,38 @@ impl Facts {
             }
             entry.1 = true;
         }
-        let local_gate = root.join(crate::render::ci::local::LOCAL_GATE_PATH);
-        if let Ok(content) = fs::read_to_string(&local_gate)
-            && crate::render::ci::is_generated_workflow_marker(&content)
-        {
-            let expected = config
-                .filter(|config| config.ci.local_gate)
-                .and_then(|config| {
-                    registry::expected_ci_files(root)
-                        .and_then(|files| {
-                            crate::render::ci::local::local_gate_script(&files, &config.ci)
-                        })
-                        .ok()
-                });
-            kinds.insert(
-                "ci.local-gate",
-                (
-                    BTreeSet::from([crate::render::ci::local::LOCAL_GATE_PATH.to_owned()]),
-                    expected.is_none_or(|expected| expected.content != content),
-                ),
-            );
+        let gate = crate::render::ci::local::LOCAL_GATE_PATH;
+        let content = fs::read_to_string(root.join(gate))
+            .ok()
+            .filter(|content| crate::render::ci::is_generated_workflow_marker(content));
+        let configured = config.filter(|config| config.ci.local_gate);
+        // A configured gate is expected wherever generated CI exists.
+        if content.is_some() || (configured.is_some() && !kinds.is_empty()) {
+            let expected = configured.and_then(|config| {
+                registry::expected_ci_files(root)
+                    .and_then(|files| {
+                        crate::render::ci::local::local_gate_script(&files, &config.ci)
+                    })
+                    .ok()
+            });
+            let drift = match (&content, expected) {
+                (Some(content), Some(expected)) => expected.content != *content,
+                _ => true,
+            };
+            let paths = content.iter().map(|_| gate.to_owned()).collect();
+            kinds.insert("ci.local-gate", (paths, drift, false));
         }
-        for (kind, (paths, drift)) in kinds {
+        for (kind, (paths, drift, unaudited)) in kinds {
             let state = if state == "unknown" {
                 state
             } else if drift {
                 "drift"
+            } else if unaudited {
+                "unknown"
             } else {
                 "current"
             };
             self.generated(coordinate, kind, state, paths.into_iter().collect());
-        }
-        // Actions runners; Crow label maps are not runner pools. `.github`
-        // workflows run on GitHub even when they come from a mirror.
-        for file in ci
-            .iter()
-            .filter(|file| file.marked && !file.relative_path.starts_with(".crow"))
-        {
-            let usage = format!("usage:{coordinate}#{}", ci_kind(&file.relative_path));
-            let host = if file.relative_path.starts_with(".github") {
-                "github.com"
-            } else {
-                host
-            };
-            let jobs = file
-                .content
-                .lines()
-                .filter(|line| line.trim_start().starts_with("runs-on: "))
-                .count();
-            for occurrence in 0..jobs {
-                for label in
-                    registry::parse_runs_on_labels(&file.content, occurrence).unwrap_or_default()
-                {
-                    if label.is_empty() || label.contains("${{") {
-                        continue;
-                    }
-                    let runner = format!("runner:{host}/{label}");
-                    self.node(
-                        runner.clone(),
-                        "runner",
-                        Attrs::from([("forgeHost", json!(host)), ("label", json!(label))]),
-                    );
-                    self.edges.insert((usage.clone(), runner, "runsOn"));
-                }
-            }
         }
     }
 
@@ -502,9 +484,12 @@ impl Facts {
         } else if !release.is_empty() {
             self.generated(coordinate, "release.workflow", "hand-rolled", release_paths);
         }
+        let copr = config
+            .and_then(|config| config.copr.as_ref())
+            .map_or(".copr/Makefile", |copr| copr.makefile_path.as_str());
         for (kind, channel, marker) in [
             ("dist.aur", "aur", "dist/aur"),
-            ("dist.copr", "copr", ".copr/Makefile"),
+            ("dist.copr", "copr", copr),
             ("dist.apt", "apt", crate::commands::apt::DISTRIBUTIONS_PATH),
         ] {
             if root.join(marker).exists() {
@@ -573,6 +558,8 @@ impl Facts {
             || "keys/maintainers.gpg".to_owned(),
             |config| config.release.signing.trust_root.clone(),
         );
+        let required = release.iter().any(|file| file.marked)
+            && config.is_none_or(|config| config.release.signing.required);
         if root.join(&trust_root).is_file() {
             self.usage(
                 coordinate,
@@ -581,6 +568,20 @@ impl Facts {
                 "current",
                 Attrs::from([("paths", json!([trust_root]))]),
             );
+        } else if required {
+            // Generated release workflows verify tags against this keyring.
+            self.usage(
+                coordinate,
+                "keys.trust-root",
+                None,
+                "drift",
+                Attrs::from([("paths", json!([]))]),
+            )
+            .blockers
+            .push(blocker(
+                "trust-root-missing",
+                format!("the release workflow verifies tags against the missing {trust_root}"),
+            ));
         }
         if let Some(attic) = config.and_then(|config| config.release.attic.as_ref()) {
             let cache = format!("cache:{}", attic.cache);
@@ -594,11 +595,21 @@ impl Facts {
             for kind in publishers {
                 let usage = format!("usage:{coordinate}#{kind}");
                 if self.nodes.contains_key(&usage) {
-                    self.node(
-                        cache.clone(),
-                        "cache",
-                        Attrs::from([("url", json!(attic.url))]),
-                    );
+                    let known = self
+                        .node(
+                            cache.clone(),
+                            "cache",
+                            Attrs::from([("url", json!(attic.url))]),
+                        )
+                        .attrs["url"]
+                        .clone();
+                    if known != json!(attic.url) {
+                        self.error(
+                            &repo,
+                            "cache-conflict",
+                            format!("{cache} is {known} elsewhere but {} here", attic.url),
+                        );
+                    }
                     self.edges.insert((usage, cache.clone(), "publishesTo"));
                 }
             }
@@ -616,19 +627,15 @@ impl Facts {
         for file in workflows {
             let path = file.relative_path.display().to_string();
             let id = format!("workflow:{coordinate}#{path}");
-            let kind = if registry::is_release_workflow_path(&file.relative_path)
-                && file
-                    .relative_path
-                    .file_stem()
-                    .is_some_and(|stem| stem == "release")
-            {
+            let kind = if is_release(&file.relative_path) {
                 "release.workflow"
             } else {
                 ci_kind(&file.relative_path)
             };
             let usage = format!("usage:{coordinate}#{kind}");
-            let owner = if self.nodes.contains_key(&usage) {
-                usage
+            let owned = self.nodes.contains_key(&usage);
+            let owner = if owned {
+                usage.clone()
             } else {
                 format!("repo:{coordinate}")
             };
@@ -666,11 +673,15 @@ impl Facts {
                         "runner",
                         Attrs::from([("forgeHost", json!(host)), ("label", json!(label))]),
                     );
+                    if owned && file.marked {
+                        self.edges.insert((usage.clone(), runner.clone(), "runsOn"));
+                    }
                     self.edges.insert((id.clone(), runner, "runsOn"));
                 }
             }
         }
     }
+
     /// Runtime references in workflows and `scripts/`, and pins in `simit.toml`.
     fn observe_references(
         &mut self,
@@ -691,7 +702,23 @@ impl Facts {
             .collect::<Vec<_>>();
         let mut pending = vec![root.join("scripts")];
         while let Some(directory) = pending.pop() {
-            for entry in fs::read_dir(&directory).into_iter().flatten().flatten() {
+            let entries = match fs::read_dir(&directory) {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => {
+                    let subject = format!("repo:{coordinate}");
+                    self.error(
+                        &subject,
+                        "scripts-unreadable",
+                        format!(
+                            "{}: {error}",
+                            directory.strip_prefix(root).unwrap_or(&directory).display()
+                        ),
+                    );
+                    continue;
+                }
+            };
+            for entry in entries.flatten() {
                 let path = entry.path();
                 match entry.file_type() {
                     Ok(kind) if kind.is_dir() => pending.push(path),
@@ -811,11 +838,30 @@ impl Facts {
         }
     }
 
+    /// A lock file's text; absence is not an error, any other failure is.
+    fn read_lock(&mut self, root: &Path, repo: &str, name: &str) -> Option<String> {
+        match fs::read_to_string(root.join(name)) {
+            Ok(text) => Some(text),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                self.error(repo, "lock-unreadable", format!("{name}: {error}"));
+                None
+            }
+        }
+    }
+
     /// Simit pinned by `flake.lock` inputs and `Cargo.lock` packages.
     fn observe_locks(&mut self, root: &Path, coordinate: &str) {
-        let lock = fs::read_to_string(root.join("flake.lock"))
-            .ok()
-            .and_then(|text| serde_json::from_str::<Value>(&text).ok());
+        let repo = format!("repo:{coordinate}");
+        let lock = self.read_lock(root, &repo, "flake.lock").and_then(|text| {
+            match serde_json::from_str::<Value>(&text) {
+                Ok(lock) => Some(lock),
+                Err(error) => {
+                    self.error(&repo, "lock-unreadable", format!("flake.lock: {error}"));
+                    None
+                }
+            }
+        });
         for (kind, input, revision) in lock.as_ref().map(flake_inputs).unwrap_or_default() {
             let mut attrs = Attrs::from([("path", json!("flake.lock")), ("input", json!(input))]);
             if let Some(revision) = &revision {
@@ -834,9 +880,15 @@ impl Facts {
                 self.pin(&id, revision);
             }
         }
-        let cargo = fs::read_to_string(root.join("Cargo.lock"))
-            .ok()
-            .and_then(|text| text.parse::<toml_edit::DocumentMut>().ok());
+        let cargo =
+            self.read_lock(root, &repo, "Cargo.lock")
+                .and_then(|text| match text.parse::<toml_edit::DocumentMut>() {
+                    Ok(lock) => Some(lock),
+                    Err(error) => {
+                        self.error(&repo, "lock-unreadable", format!("Cargo.lock: {error}"));
+                        None
+                    }
+                });
         let packages = cargo
             .as_ref()
             .and_then(|lock| lock.get("package"))
@@ -863,6 +915,7 @@ fn merge(into: &mut Refs, from: Refs) {
     into.revisions.extend(from.revisions);
     into.tags.extend(from.tags);
     into.floating.extend(from.floating);
+    into.variables.extend(from.variables);
 }
 
 fn is_revision(value: &str) -> bool {
@@ -914,11 +967,25 @@ fn flake_refs(line: &str, refs: &mut Refs) -> bool {
                     .and_then(|reference| reference.split(['#', '?']).next())
             });
         match reference {
-            Some(reference) if reference.starts_with('$') => {} // a variable usage supplies it
+            Some(reference) if reference.starts_with('$') => {
+                let variable = reference.trim_matches(|c| matches!(c, '$' | '{' | '}'));
+                // The two simit revision variables are usages of their own.
+                if !matches!(
+                    variable,
+                    "SIMIT_CI_ENGINE_REVISION" | "SIMIT_PUBLISHER_REVISION"
+                ) {
+                    refs.variables.insert(variable.to_owned());
+                }
+            }
             Some(reference) if is_revision(reference) => {
                 refs.revisions.insert(reference.to_owned());
             }
-            Some(reference) if reference.starts_with(|c: char| c.is_ascii_digit()) => {
+            Some(reference)
+                if reference
+                    .strip_prefix('v')
+                    .unwrap_or(reference)
+                    .starts_with(|c: char| c.is_ascii_digit()) =>
+            {
                 refs.tags.insert(reference.to_owned());
             }
             Some(reference) if !reference.is_empty() => {
@@ -1006,8 +1073,23 @@ fn yaml_strings(value: Option<&serde_yaml::Value>) -> Vec<String> {
     }
 }
 
+/// Actions `runs-on` as a label, a label list, or a `{group, labels}` mapping.
+fn runs_on_labels(value: Option<&serde_yaml::Value>) -> Vec<String> {
+    match value {
+        Some(serde_yaml::Value::Mapping(map)) => yaml_strings(map.get("labels"))
+            .into_iter()
+            .chain(
+                map.get("group")
+                    .and_then(serde_yaml::Value::as_str)
+                    .map(|group| format!("group={group}")),
+            )
+            .collect(),
+        other => yaml_strings(other),
+    }
+}
+
 /// Triggers (`events`, plus the push `branches` filter, empty when push runs
-/// on every branch), runner labels and step names of an Actions or Crow
+/// on every branch, and any `branchesIgnore` exclusions), runner labels and step names of an Actions or Crow
 /// workflow. A file that does not parse reports `triggers: null`.
 // ponytail: top-level triggers only; per-step Crow `when` and YAML merge keys
 // are ignored. Evaluate them if budget estimates need that precision.
@@ -1022,6 +1104,7 @@ fn workflow_shape(content: &str, crow: bool) -> Shape {
     };
     let mut events = BTreeSet::new();
     let mut branches = BTreeSet::new();
+    let mut ignored = BTreeSet::new();
     let mut unrestricted = false;
     if crow {
         let entries = match document.get("when") {
@@ -1064,6 +1147,9 @@ fn workflow_shape(content: &str, crow: bool) -> Shape {
                 let filter = yaml_strings(entry.get("branch"));
                 unrestricted |= filter.is_empty();
                 branches.extend(filter);
+                ignored.extend(yaml_strings(
+                    entry.get("branch").and_then(|branch| branch.get("exclude")),
+                ));
             }
             events.extend(named);
         }
@@ -1110,6 +1196,7 @@ fn workflow_shape(content: &str, crow: bool) -> Shape {
                         let pushed = yaml_strings(filter("branches"));
                         unrestricted |= pushed.is_empty();
                         branches.extend(pushed);
+                        ignored.extend(yaml_strings(filter("branches-ignore")));
                     }
                 }
                 "pull_request" | "pull_request_target" => {
@@ -1133,7 +1220,7 @@ fn workflow_shape(content: &str, crow: bool) -> Shape {
             .flat_map(|jobs| jobs.values())
         {
             shape.labels.extend(
-                yaml_strings(job.get("runs-on"))
+                runs_on_labels(job.get("runs-on"))
                     .into_iter()
                     .filter(|label| !label.contains("${{")),
             );
@@ -1150,8 +1237,16 @@ fn workflow_shape(content: &str, crow: bool) -> Shape {
         branches.clear();
     }
     shape.triggers = json!({"events": events, "branches": branches});
+    if !ignored.is_empty() {
+        shape.triggers["branchesIgnore"] = json!(ignored);
+    }
     shape
 }
+/// Release workflows belong to `simit init release`.
+fn is_release(path: &Path) -> bool {
+    path.file_stem().is_some_and(|stem| stem == "release")
+}
+
 fn ci_kind(path: &Path) -> &'static str {
     let name = path.file_name().unwrap_or_default();
     if crate::review::generation::is_review_path(path)
@@ -1697,5 +1792,51 @@ mod tests {
                 .triggers
                 .is_null()
         );
+    }
+
+    #[test]
+    fn workflow_shapes_read_runner_mappings_block_lists_and_exclusions() {
+        let actions = workflow_shape(
+            "on:\n  push:\n    branches-ignore: [gh-pages]\njobs:\n  grouped:\n    runs-on:\n      group: atlas-pool\n      labels: [nix]\n  listed:\n    runs-on:\n      - self-hosted\n      - linux\n",
+            false,
+        );
+        assert_eq!(
+            actions.triggers,
+            json!({"events": ["push"], "branches": [], "branchesIgnore": ["gh-pages"]})
+        );
+        assert_eq!(
+            actions.labels,
+            BTreeSet::from(["group=atlas-pool", "linux", "nix", "self-hosted"].map(String::from))
+        );
+        let crow = workflow_shape(
+            "when:\n  - event: push\n    branch:\n      exclude: [simit/update/*]\n",
+            true,
+        );
+        assert_eq!(
+            crow.triggers,
+            json!({"events": ["push"], "branches": [], "branchesIgnore": ["simit/update/*"]})
+        );
+    }
+
+    #[test]
+    fn flake_references_keep_v_tags_and_run_time_variables() {
+        let mut refs = Refs::default();
+        for line in [
+            "nix run github:caniko/simit/v0.19.0",
+            "nix run git+https://github.com/caniko/simit.git?ref=v0.20.0",
+            "nix run github:caniko/simit/$SIMIT_REVISION -- release",
+            "nix run github:caniko/simit/${SIMIT_CI_ENGINE_REVISION}#default",
+        ] {
+            assert!(flake_refs(line, &mut refs), "{line}");
+        }
+        assert_eq!(
+            refs.tags,
+            BTreeSet::from(["v0.19.0", "v0.20.0"].map(String::from))
+        );
+        assert_eq!(
+            refs.variables,
+            BTreeSet::from(["SIMIT_REVISION".to_owned()])
+        );
+        assert!(refs.floating.is_empty());
     }
 }
