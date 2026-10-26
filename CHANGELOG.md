@@ -16,6 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exactly when the new `SUPPORTED_SCOPES`, `UPDATER_ADAPTERS` and
   `SUPPORTED_LANDINGS` constants say so. Flake `simitConfig` is evaluated only
   with `--eval-flake`; `SIMIT_NO_FLAKE_EVAL=1` disables that evaluation in any
+  simit process. Every workflow file also becomes a `workflow:` node with its
+  static triggers, runner labels and step names. See
+  `docs/src/projects-facts.md`.
   simit process. See `docs/src/projects-facts.md`.
 - Add `[release.pypi]`: the release workflow uploads the prebuilt
   `release/*.whl` (e.g. from a Nix `release-bundle`) to PyPI with

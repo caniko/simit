@@ -322,6 +322,7 @@ impl Facts {
             eval_flake,
             explained,
         );
+        self.observe_workflows(&coordinate, &host, &workflows);
         self.observe_references(&root, &coordinate, &workflows);
         self.observe_locks(&root, &coordinate);
     }
@@ -604,6 +605,72 @@ impl Facts {
         }
     }
 
+    /// One node per CI workflow file with its static triggers, runner labels
+    /// and step names, contained by the usage that owns it (else the repo).
+    fn observe_workflows(
+        &mut self,
+        coordinate: &str,
+        host: &str,
+        workflows: &[registry::WorkflowFile],
+    ) {
+        for file in workflows {
+            let path = file.relative_path.display().to_string();
+            let id = format!("workflow:{coordinate}#{path}");
+            let kind = if registry::is_release_workflow_path(&file.relative_path)
+                && file
+                    .relative_path
+                    .file_stem()
+                    .is_some_and(|stem| stem == "release")
+            {
+                "release.workflow"
+            } else {
+                ci_kind(&file.relative_path)
+            };
+            let usage = format!("usage:{coordinate}#{kind}");
+            let owner = if self.nodes.contains_key(&usage) {
+                usage
+            } else {
+                format!("repo:{coordinate}")
+            };
+            let crow = file.relative_path.starts_with(".crow");
+            let shape = workflow_shape(&file.content, crow);
+            let mut attrs = Attrs::from([
+                ("path", json!(path)),
+                ("generated", json!(file.marked)),
+                ("triggers", shape.triggers),
+                ("labels", json!(shape.labels)),
+                ("steps", json!(shape.steps)),
+            ]);
+            // Jsonnet and GitLab CI need evaluation; their triggers stay unknown.
+            if file
+                .relative_path
+                .extension()
+                .is_some_and(|ext| ext == "jsonnet")
+                || file.relative_path == Path::new(".gitlab-ci.yml")
+            {
+                attrs.insert("triggers", Value::Null);
+            }
+            self.node(id.clone(), "workflow", attrs);
+            self.edges.insert((owner, id.clone(), "contains"));
+            // Crow label maps select agents; they are not runner pools.
+            if !crow {
+                let host = if file.relative_path.starts_with(".github") {
+                    "github.com"
+                } else {
+                    host
+                };
+                for label in &shape.labels {
+                    let runner = format!("runner:{host}/{label}");
+                    self.node(
+                        runner.clone(),
+                        "runner",
+                        Attrs::from([("forgeHost", json!(host)), ("label", json!(label))]),
+                    );
+                    self.edges.insert((id.clone(), runner, "runsOn"));
+                }
+            }
+        }
+    }
     /// Runtime references in workflows and `scripts/`, and pins in `simit.toml`.
     fn observe_references(
         &mut self,
@@ -613,7 +680,14 @@ impl Facts {
     ) {
         let mut files = workflows
             .iter()
-            .map(|file| (file.relative_path.clone(), file.content.clone(), false))
+            .map(|file| {
+                (
+                    file.relative_path.clone(),
+                    file.content.clone(),
+                    false,
+                    file.marked,
+                )
+            })
             .collect::<Vec<_>>();
         let mut pending = vec![root.join("scripts")];
         while let Some(directory) = pending.pop() {
@@ -627,7 +701,7 @@ impl Facts {
                             && !crate::render::ci::is_generated_workflow_marker(&content)
                         {
                             let relative = path.strip_prefix(root).unwrap_or(&path).to_path_buf();
-                            files.push((relative, content, true));
+                            files.push((relative, content, true, false));
                         }
                     }
                     _ => {}
@@ -635,7 +709,7 @@ impl Facts {
             }
         }
         files.sort();
-        for (path, content, script) in files {
+        for (path, content, script, generated) in files {
             let path = path.display().to_string();
             let mut found: BTreeMap<&'static str, Refs> = BTreeMap::new();
             for line in content.lines().map(str::trim) {
@@ -709,16 +783,15 @@ impl Facts {
             }
             for (kind, refs) in found {
                 let id = self.reference(coordinate, kind, &path, refs);
+                let node = self.nodes.get_mut(&id).expect("usage recorded above");
+                // References in simit-generated files follow their generator.
+                node.attrs.insert("generated", json!(generated));
                 if matches!(kind, "runtime.publisher-var" | "runtime.ci-engine") {
-                    self.nodes
-                        .get_mut(&id)
-                        .expect("usage recorded above")
-                        .expects
-                        .push(json!({
-                            "attr": "revision",
-                            "blocker": "unknown-generator-revision",
-                            "reason": "The repository variable's value lives on the forge.",
-                        }));
+                    node.expects.push(json!({
+                        "attr": "revision",
+                        "blocker": "unknown-generator-revision",
+                        "reason": "The repository variable's value lives on the forge.",
+                    }));
                 }
             }
         }
@@ -914,6 +987,171 @@ fn flake_inputs(lock: &Value) -> Vec<(&'static str, String, Option<String>)> {
     found
 }
 
+/// Static facts of one workflow file.
+struct Shape {
+    triggers: Value,
+    labels: BTreeSet<String>,
+    steps: Vec<String>,
+}
+
+fn yaml_strings(value: Option<&serde_yaml::Value>) -> Vec<String> {
+    match value {
+        Some(serde_yaml::Value::String(text)) => vec![text.clone()],
+        Some(serde_yaml::Value::Sequence(items)) => items
+            .iter()
+            .filter_map(|item| item.as_str().map(str::to_owned))
+            .collect(),
+        Some(serde_yaml::Value::Mapping(map)) => yaml_strings(map.get("include")),
+        _ => Vec::new(),
+    }
+}
+
+/// Triggers (`events`, plus the push `branches` filter, empty when push runs
+/// on every branch), runner labels and step names of an Actions or Crow
+/// workflow. A file that does not parse reports `triggers: null`.
+// ponytail: top-level triggers only; per-step Crow `when` and YAML merge keys
+// are ignored. Evaluate them if budget estimates need that precision.
+fn workflow_shape(content: &str, crow: bool) -> Shape {
+    let mut shape = Shape {
+        triggers: Value::Null,
+        labels: BTreeSet::new(),
+        steps: Vec::new(),
+    };
+    let Ok(document) = serde_yaml::from_str::<serde_yaml::Value>(content) else {
+        return shape;
+    };
+    let mut events = BTreeSet::new();
+    let mut branches = BTreeSet::new();
+    let mut unrestricted = false;
+    if crow {
+        let entries = match document.get("when") {
+            Some(serde_yaml::Value::Sequence(entries)) => entries.iter().collect(),
+            Some(entry) => vec![entry],
+            None => Vec::new(),
+        };
+        if entries.is_empty() {
+            // Without `when`, Crow runs the workflow for every event and branch.
+            events.extend(
+                [
+                    "push",
+                    "pull_request",
+                    "tag",
+                    "manual",
+                    "cron",
+                    "deployment",
+                    "release",
+                ]
+                .map(String::from),
+            );
+            unrestricted = true;
+        }
+        for entry in entries {
+            let mut named = yaml_strings(entry.get("event"));
+            if named.is_empty() {
+                named = [
+                    "push",
+                    "pull_request",
+                    "tag",
+                    "manual",
+                    "cron",
+                    "deployment",
+                    "release",
+                ]
+                .map(String::from)
+                .to_vec();
+            }
+            if named.iter().any(|event| event == "push") {
+                let filter = yaml_strings(entry.get("branch"));
+                unrestricted |= filter.is_empty();
+                branches.extend(filter);
+            }
+            events.extend(named);
+        }
+        if let Some(serde_yaml::Value::Mapping(labels)) = document.get("labels") {
+            for (key, value) in labels {
+                if let (Some(key), Some(value)) = (key.as_str(), value.as_str()) {
+                    shape.labels.insert(format!("{key}={value}"));
+                }
+            }
+        }
+        match document.get("steps") {
+            Some(serde_yaml::Value::Mapping(steps)) => shape.steps.extend(
+                steps
+                    .keys()
+                    .filter_map(|key| key.as_str().map(str::to_owned)),
+            ),
+            Some(serde_yaml::Value::Sequence(steps)) => shape.steps.extend(
+                steps
+                    .iter()
+                    .filter_map(|step| step.get("name")?.as_str().map(str::to_owned)),
+            ),
+            _ => {}
+        }
+    } else {
+        let triggers = match document.get("on") {
+            Some(serde_yaml::Value::Mapping(map)) => map
+                .iter()
+                .filter_map(|(name, config)| Some((name.as_str()?.to_owned(), Some(config))))
+                .collect(),
+            other => yaml_strings(other)
+                .into_iter()
+                .map(|name| (name, None))
+                .collect::<Vec<_>>(),
+        };
+        for (name, config) in triggers {
+            let filter = |key| config.and_then(|config| config.get(key));
+            match name.as_str() {
+                "push" => {
+                    if filter("tags").is_some() {
+                        events.insert("tag".to_owned());
+                    }
+                    if filter("branches").is_some() || filter("tags").is_none() {
+                        events.insert("push".to_owned());
+                        let pushed = yaml_strings(filter("branches"));
+                        unrestricted |= pushed.is_empty();
+                        branches.extend(pushed);
+                    }
+                }
+                "pull_request" | "pull_request_target" => {
+                    events.insert("pull_request".to_owned());
+                }
+                "workflow_dispatch" => {
+                    events.insert("manual".to_owned());
+                }
+                "schedule" => {
+                    events.insert("cron".to_owned());
+                }
+                _ => {
+                    events.insert(name);
+                }
+            }
+        }
+        for job in document
+            .get("jobs")
+            .and_then(serde_yaml::Value::as_mapping)
+            .into_iter()
+            .flat_map(|jobs| jobs.values())
+        {
+            shape.labels.extend(
+                yaml_strings(job.get("runs-on"))
+                    .into_iter()
+                    .filter(|label| !label.contains("${{")),
+            );
+            shape.steps.extend(
+                job.get("steps")
+                    .and_then(serde_yaml::Value::as_sequence)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|step| step.get("name")?.as_str().map(str::to_owned)),
+            );
+        }
+    }
+    if unrestricted {
+        branches.clear();
+    }
+    shape.triggers = json!({"events": events, "branches": branches});
+    shape
+}
 fn ci_kind(path: &Path) -> &'static str {
     let name = path.file_name().unwrap_or_default();
     if crate::review::generation::is_review_path(path)
@@ -1415,6 +1653,49 @@ mod tests {
                 ),
                 ("flake-input.cut", "tool/simit".to_owned(), None),
             ]
+        );
+    }
+
+    #[test]
+    fn workflow_shapes_read_triggers_labels_and_steps() {
+        let crow = workflow_shape(
+            "when:\n  - event: pull_request\n  - event: push\n    branch: ${CI_REPO_DEFAULT_BRANCH}\nlabels:\n  platform: linux/amd64\nsteps:\n  test:\n    image: rust\n",
+            true,
+        );
+        assert_eq!(
+            crow.triggers,
+            json!({"events": ["pull_request", "push"], "branches": ["${CI_REPO_DEFAULT_BRANCH}"]})
+        );
+        assert_eq!(
+            crow.labels,
+            BTreeSet::from(["platform=linux/amd64".to_owned()])
+        );
+        assert_eq!(crow.steps, ["test"]);
+        let everywhere = workflow_shape("steps:\n  - name: build\n", true);
+        assert_eq!(everywhere.triggers["branches"], json!([]));
+        assert_eq!(everywhere.steps, ["build"]);
+
+        let actions = workflow_shape(
+            "on:\n  push:\n    branches: [trunk]\n    tags: ['*']\n  pull_request:\n  workflow_dispatch:\njobs:\n  test:\n    runs-on: [self-hosted, atlas]\n    steps:\n      - name: Test\n        run: cargo test\n      - run: unnamed\n  matrix:\n    runs-on: ${{ matrix.os }}\n",
+            false,
+        );
+        assert_eq!(
+            actions.triggers,
+            json!({"events": ["manual", "pull_request", "push", "tag"], "branches": ["trunk"]})
+        );
+        assert_eq!(
+            actions.labels,
+            BTreeSet::from(["atlas".to_owned(), "self-hosted".to_owned()])
+        );
+        assert_eq!(actions.steps, ["Test"]);
+        assert_eq!(
+            workflow_shape("on: [push, pull_request]\n", false).triggers,
+            json!({"events": ["pull_request", "push"], "branches": []})
+        );
+        assert!(
+            workflow_shape("{ not: yaml: here", false)
+                .triggers
+                .is_null()
         );
     }
 }

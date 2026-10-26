@@ -38,10 +38,23 @@ any simit process honours). A flake source always reports
 | pinned revision | `rev:github.com/caniko/simit@<sha>`     | `source`, `revision`                                                                         |
 | runner          | `runner:<forgeHost>/<label>`            | `forgeHost`, `label`                                                                         |
 | cache           | `cache:<name>`                          | `url`                                                                                        |
+| workflow        | `workflow:<coordinate>#<path>`          | `path`, `generated`, `triggers`, `labels`, `steps`                                           |
 
-Edges: repository `uses` usage, usage `pins` revision, usage `runsOn`
-runner (Actions `runs-on` labels; `.github` workflows run on `github.com`),
-usage `publishesTo` cache (`[release.attic]`).
+Edges: repository `uses` usage, usage `pins` revision, usage and workflow
+`runsOn` runner (Actions `runs-on` labels; `.github` workflows run on
+`github.com`), usage `publishesTo` cache (`[release.attic]`), and usage
+`contains` workflow (the repository when no usage owns the file).
+
+Every workflow file under `.github/workflows`, `.forgejo/workflows`, `.crow`
+and `.gitlab-ci.yml` becomes a workflow node from a static parse.
+`triggers` is `{events, branches}`: events normalized to `push`,
+`pull_request`, `tag`, `manual`, `cron`, `deployment` and `release` (other
+Actions events keep their names), and `branches` the push branch filter as
+written, empty when push runs on every branch. A Crow file without `when` runs
+on every event. Jsonnet and GitLab files report `triggers: null`. `labels` are
+Actions `runs-on` labels or Crow `labels` as `key=value`; `steps` are step
+names. Per-file reference usages carry `generated`, true inside a
+simit-generated workflow.
 
 Generated usages expect a `generatorRevision` attribute that only a receipt
 or pin can supply (`unknown-generator-revision`); repository-variable usages
