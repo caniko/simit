@@ -1017,11 +1017,17 @@ fn pull(
     let mut pull = if let Some(number) = &request.change {
         get(&format!("{endpoint}/pulls/{}", encoded(number)))?
     } else {
+        // Closing finds the branch's request whatever it targets, since
+        // policy may have retargeted the repository since it was proposed.
+        let base = if request.operation == "close" {
+            String::new()
+        } else {
+            format!("&base={}", encoded(target))
+        };
         let found = list(
             &format!(
-                "{endpoint}/pulls?state=all&head={}&base={}",
-                encoded(&format!("{owner}:{branch}")),
-                encoded(target)
+                "{endpoint}/pulls?state=all&head={}{base}",
+                encoded(&format!("{owner}:{branch}"))
             ),
             "",
             get,
@@ -1080,15 +1086,36 @@ fn pull(
                 pull["head"]["sha"] == revision,
                 "pull request head differs from the qualified candidate"
             );
+            // The merge `sha` pins only the head. Merge onto the candidate's
+            // own source, so the landed commit can be adopted; a moved target
+            // stays pending until the engine closes and regenerates it.
+            // ponytail: GitHub has no base guard, so a push between this read
+            // and the merge still lands; adoption then fails closed.
+            let parents = get(&format!("{endpoint}/commits/{revision}"))?["parents"].clone();
+            let parents = parents.as_array().context("missing candidate parents")?;
+            ensure!(parents.len() == 1, "candidate must have one parent");
+            let base = get(&format!("{endpoint}/branches/{}", encoded(target)))?;
+            let moved = base["commit"]["sha"] != parents[0]["sha"];
             match text(&pull, "/mergeable_state")?.as_str() {
+                _ if moved => {}
                 "clean" | "unstable" | "has_hooks" => {
+                    // Linear history forbids merge commits on the target.
+                    let linear = base["protected"] == true
+                        && get(&format!(
+                            "{endpoint}/branches/{}/protection",
+                            encoded(target)
+                        ))?
+                        .pointer("/required_linear_history/enabled")
+                            == Some(&Value::Bool(true));
                     let method = [
                         ("merge", "allow_merge_commit"),
                         ("squash", "allow_squash_merge"),
                         ("rebase", "allow_rebase_merge"),
                     ]
                     .into_iter()
-                    .find(|(_, allowed)| repo[allowed] == true)
+                    .find(|(method, allowed)| {
+                        repo[allowed] == true && !(linear && *method == "merge")
+                    })
                     .context("repository allows no pull request merge method")?
                     .0;
                     let merged = send(
@@ -1442,15 +1469,32 @@ mod tests {
         let listed = RefCell::new(json!([]));
         let pull = RefCell::new(open.clone());
         let writes = RefCell::new(Vec::new());
+        let source = "5".repeat(40);
+        let target = RefCell::new(source.clone());
+        let linear = RefCell::new(true);
+        let method = RefCell::new("squash");
         let get = |path: &str| -> Result<Value> {
             Ok(match path {
                 "repos/team/demo" => json!({
                     "id":2,"full_name":"team/demo","archived":false,"disabled":false,"default_branch":"trunk",
                     "clone_url":"https://forge.example/team/demo.git",
-                    "allow_merge_commit":false,"allow_squash_merge":true,"allow_rebase_merge":true
+                    "allow_merge_commit":true,"allow_squash_merge":true,"allow_rebase_merge":true
                 }),
                 "repos/team/demo/pulls/7" => pull.borrow().clone(),
+                "repos/team/demo/branches/trunk" => {
+                    json!({"protected":true,"commit":{"sha":*target.borrow()}})
+                }
+                "repos/team/demo/branches/trunk/protection" => {
+                    json!({"required_linear_history":{"enabled":*linear.borrow()}})
+                }
+                _ if path == format!("repos/team/demo/commits/{revision}") => {
+                    json!({"parents":[{"sha":source}]})
+                }
                 _ if path == list => listed.borrow().clone(),
+                // Closing looks the branch up across targets.
+                "repos/team/demo/pulls?state=all&head=team%3Amaintenance%2Fcandidate&per_page=100&page=1" => {
+                    listed.borrow().clone()
+                }
                 _ => anyhow::bail!("unexpected replay endpoint {path}"),
             })
         };
@@ -1465,7 +1509,10 @@ mod tests {
                     pull.borrow().clone()
                 }
                 ("PUT", "repos/team/demo/pulls/7/merge") => {
-                    assert_eq!(body, &json!({"sha":revision,"merge_method":"squash"}));
+                    assert_eq!(
+                        body,
+                        &json!({"sha":revision,"merge_method":*method.borrow()})
+                    );
                     json!({"merged":true,"sha":"c".repeat(40)})
                 }
                 ("PATCH", "repos/team/demo/pulls/7") => {
@@ -1536,6 +1583,12 @@ mod tests {
             clean["mergeable_state"] = json!("clean");
             clean
         };
+        // A target that moved past the candidate's source is never merged.
+        *target.borrow_mut() = "6".repeat(40);
+        assert_eq!(replay(&request).unwrap().0, "pending");
+        assert!(writes.borrow().is_empty());
+        *target.borrow_mut() = source.clone();
+        // Linear history skips the allowed merge commit for squash.
         let (status, change) = replay(&request).unwrap();
         let change = change.unwrap();
         assert_eq!(
@@ -1543,6 +1596,10 @@ mod tests {
             ("success", "merged")
         );
         assert_eq!(change.merge_commit, Some("c".repeat(40)));
+        assert_eq!(writes.take(), ["PUT repos/team/demo/pulls/7/merge"]);
+        *linear.borrow_mut() = false;
+        *method.borrow_mut() = "merge";
+        replay(&request).unwrap();
         assert_eq!(writes.take(), ["PUT repos/team/demo/pulls/7/merge"]);
         request.operation = "close".into();
         assert_eq!(replay(&request).unwrap().1.unwrap().state, "closed");
@@ -1556,6 +1613,12 @@ mod tests {
         );
         assert!(writes.borrow().is_empty());
         request.change = None;
+        pull.borrow_mut()["merged_at"] = Value::Null;
+        let mut retargeted = open.clone();
+        retargeted["base"]["ref"] = json!("main");
+        *listed.borrow_mut() = json!([closed, retargeted]);
+        assert_eq!(replay(&request).unwrap().1.unwrap().state, "closed");
+        assert_eq!(writes.take(), ["PATCH repos/team/demo/pulls/7"]);
         *listed.borrow_mut() = json!([closed]);
         let (status, change) = replay(&request).unwrap();
         assert_eq!(status, "success");

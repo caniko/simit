@@ -101,7 +101,9 @@ alone does not bind their dynamic loaders or shared libraries.
 Runtime roots and credential paths are strings. Nix evaluation does not inspect
 worktrees, query forges or read credential contents. Git transport authentication
 is supplied by the execution user's existing Git configuration; `credentialFile`
-authenticates API reads only. The execution user's Git identity, signing and
+authenticates API reads only, except under pull-request landing, where it also
+opens, merges and closes pull requests. A fine-grained GitHub token then needs
+`Pull requests: write` and `Contents: write` on the enrolled repositories. The execution user's Git identity, signing and
 hooks are honored when creating candidate commits.
 The sandbox has no personal Simit configuration. Projects must declare their CI
 platform and any private runner labels through project policy; GitHub can use
@@ -523,6 +525,16 @@ Each run first re-reads a parked request:
 - open but stale, because the target moved, the repository policy or default
   branch changed, or `projectPolicyDigest` changed: close it, archive, delete
   the ref and regenerate.
+
+GitHub merges only while the target is still the candidate's source; a moved
+target leaves the merge pending until the next run closes and regenerates it.
+When the target requires linear history, merge commits are skipped in favour of
+the next allowed method. Previews (`--dry-run`) report a parked request as
+`proposed` and never close, propose or merge, or delete a ref.
+
+Deselecting or disabling a parked repository revokes the updater's authority
+over it, so the updater no longer touches its open request or maintenance ref;
+close those by hand, or re-enable the repository so a run resumes or retires them.
 
 Other forges add these operations in their own adapters.
 

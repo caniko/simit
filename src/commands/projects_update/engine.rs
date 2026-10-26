@@ -918,9 +918,16 @@ pub fn update(
             root.join(format!("invalidated-{}.json", canonical_digest(retained)?)),
         )?;
         File::open(&root)?.sync_all()?;
-        delete_maintenance_ref(&checkout, &retained.branch, &retained.candidate);
+        if push {
+            delete_maintenance_ref(&checkout, &retained.branch, &retained.candidate);
+        }
         Ok(())
     };
+    // A preview never writes to the forge, so it reports a parked pull request
+    // as it stands rather than closing, proposing or retiring anything.
+    if !push && previous.as_ref().is_some_and(|r| r.phase == "proposed") {
+        return previous.context("missing parked receipt");
+    }
     // Re-read a parked pull request first. A stale one is closed rather than
     // merged, since its qualification no longer describes the target.
     if let Some(retained) = previous.as_mut().filter(|r| r.phase == "proposed") {
@@ -3907,5 +3914,31 @@ else:
                 assert_eq!(adopted.candidate, pending.candidate);
             }
         }
+    }
+
+    #[test]
+    fn namespace_previews_never_retire_parked_pull_requests_or_refs() {
+        let f = Fixture::new().land_pull_requests();
+        f.control(json!({"merge": "pending"}));
+        assert_eq!(f.update(true).unwrap().phase, "proposed");
+        fs::write(f.source.join("application.txt"), "moved target\n").unwrap();
+        f.publish(&f.source, "advance the parked target");
+        let receipt = fs::read(f.root().join("receipt.json")).unwrap();
+        let refs = f.maintenance_refs();
+        assert!(!refs.is_empty());
+        assert_eq!(f.update(false).unwrap().phase, "proposed");
+        assert_eq!(fs::read(f.root().join("receipt.json")).unwrap(), receipt);
+        assert_eq!(f.maintenance_refs(), refs);
+        assert_eq!(f.pulls()[0]["state"], "open");
+        // A preview that invalidates a direct candidate keeps its published ref.
+        let f = Fixture::new();
+        f.control(json!({"candidate": "pending"}));
+        f.update(true).unwrap();
+        fs::write(f.source.join("application.txt"), "moved target\n").unwrap();
+        f.publish(&f.source, "advance the pending target");
+        let refs = f.maintenance_refs();
+        assert!(!refs.is_empty());
+        assert_eq!(f.update(false).unwrap().phase, "preview");
+        assert_eq!(f.maintenance_refs(), refs);
     }
 }

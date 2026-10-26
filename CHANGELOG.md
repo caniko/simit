@@ -10,8 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `simit projects update` can land through pull requests: set
   `landing = "pull-request"` on a profile or project override. After the
   candidate qualifies, the updater opens a pull request for the maintenance
-  branch and merges its exact head with the first merge method the repository
-  allows. A request that needs approval or is not yet mergeable parks the
+  branch and merges its exact head, only while the target is still the
+  candidate's source, with the first merge method the repository and target
+  protection allow. A request that needs approval or is not yet mergeable parks the
   repository in `proposed` without failing the run or stopping later
   repositories; a parked canary still blocks. On later runs a merged request
   (including one merged by a human) is adopted only if the landed commit has

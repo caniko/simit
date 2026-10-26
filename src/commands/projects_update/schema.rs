@@ -1027,8 +1027,12 @@ mod tests {
             "close leaves no open change"
         );
         request.change = None;
-        response.status = "success".into();
         response.change = None;
+        assert!(
+            response.validate(&request).is_err(),
+            "an unconfirmed close finds nothing"
+        );
+        response.status = "success".into();
         response.validate(&request).unwrap();
         request.change = Some("7".into());
         assert!(
@@ -1414,7 +1418,9 @@ impl AdapterResponse {
             // Closing an untracked candidate may find no pull request at all.
             let Some(change) = &self.change else {
                 ensure!(
-                    request.operation == "close" && request.change.is_none(),
+                    request.operation == "close"
+                        && request.change.is_none()
+                        && self.status == "success",
                     "pull-request operation returned no change"
                 );
                 return Ok(());
