@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Generated Crow `build` and `ci` workflows now run push pipelines only on the
+  default branch and the fleet updater's `simit/update/**` maintenance refs.
+  Pull request pipelines still gate every branch, and other branch pushes no
+  longer duplicate them on metered Crow agents.
 - Add top-level `primary_package`: the workspace member used for the README
   crates.io badge and as the package-metadata fallback for AUR, COPR, APT,
   Scoop, Chocolatey and release setup. Previously these always took the

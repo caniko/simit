@@ -434,7 +434,7 @@ fn build_workflow(
         labels: labels(config, &runners.ci),
         platform: config.platform.clone(),
         when: vec![
-            condition("event", "push"),
+            push_to_maintained_branches(),
             condition("event", "pull_request"),
         ],
         skip_clone: config.skip_clone.then_some(true),
@@ -563,6 +563,24 @@ fn condition(key: &str, value: &str) -> BTreeMap<String, Value> {
     let mut condition = BTreeMap::new();
     condition.insert(key.to_owned(), Value::String(value.to_owned()));
     condition
+}
+
+/// Push pipelines run only for the default branch and the fleet updater's
+/// maintenance refs; pull request pipelines gate every other branch, so a
+/// branch push would only duplicate them.
+// ponytail: matches the default `rollout.maintenanceRefPrefix`; a profile with
+// another prefix gets PR pipelines only on its maintenance refs.
+fn push_to_maintained_branches() -> BTreeMap<String, Value> {
+    let mut when = condition("event", "push");
+    let maintenance = format!(
+        "{}**",
+        crate::commands::projects_update::schema::maintenance_prefix()
+    );
+    when.insert(
+        "branch".to_owned(),
+        json!(["${CI_REPO_DEFAULT_BRANCH}", maintenance]),
+    );
+    when
 }
 
 fn conditions(entries: &[(&str, &str)]) -> BTreeMap<String, Value> {
@@ -824,7 +842,7 @@ pub fn python_ci_file(
         labels: labels(config, runner),
         platform: config.platform.clone(),
         when: vec![
-            condition("event", "push"),
+            push_to_maintained_branches(),
             condition("event", "pull_request"),
         ],
         skip_clone: config.skip_clone.then_some(true),
