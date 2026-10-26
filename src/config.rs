@@ -27,6 +27,12 @@ pub mod custody;
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectConfig {
+    /// Workspace member that represents the project wherever one package is
+    /// needed: README badges and package-manager metadata fallbacks. An
+    /// explicit `--package` still wins. Unset, the alphabetically first
+    /// workspace member is used.
+    #[serde(default)]
+    pub primary_package: Option<String>,
     #[serde(default)]
     pub review_policy: Option<crate::render::review_policy::Config>,
     #[serde(default)]

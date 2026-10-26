@@ -30,8 +30,8 @@ pub(crate) fn resolve(
 ) -> Result<(ResolvedAur, String)> {
     let metadata = cargo::metadata_for_current_dir()?;
     let workspace_root = metadata.workspace_root.as_std_path();
-    let pkg = cargo::representative_package(&metadata, package)?;
     let cfg = ProjectConfig::load(workspace_root)?;
+    let pkg = cargo::representative_package(&metadata, package.or(cfg.primary_package.as_deref()))?;
     let resolved = cfg.resolve_aur(overrides, &pkg)?;
     Ok((resolved, pkg.version))
 }

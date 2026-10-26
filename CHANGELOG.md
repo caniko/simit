@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Add top-level `primary_package`: the workspace member used for the README
+  crates.io badge and as the package-metadata fallback for AUR, COPR, APT,
+  Scoop, Chocolatey and release setup. Previously these always took the
+  alphabetically first member, which could change when a crate was added. An
+  explicit `--package` still wins.
 - `simit init ci --prebuild-only` now accepts `--ci-provider crow` and
   `--crow-format` when `[prebuild].provider = "crow"`, and `--crow-format`
   selects that prebuild's workflow format. Both stay rejected for GitHub

@@ -19,8 +19,14 @@ pub fn run(command: InitAptRepoCommand) -> Result<()> {
     let mode = CheckPrintMode::parse("init apt-repo", command.check, command.print, command.diff)?;
     let metadata = cargo::metadata_for_current_dir()?;
     let workspace_root = metadata.workspace_root.as_std_path();
-    let package = cargo::representative_package(&metadata, command.package.as_deref())?;
     let cfg = ProjectConfig::load(workspace_root)?;
+    let package = cargo::representative_package(
+        &metadata,
+        command
+            .package
+            .as_deref()
+            .or(cfg.primary_package.as_deref()),
+    )?;
     let resolved = cfg.resolve_apt(command.apt.as_overrides(), &package)?;
     if resolved.pages_provider != "codeberg-git-pages" {
         bail!(

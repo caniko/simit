@@ -70,7 +70,7 @@ fn badges(
     config: &ProjectConfig,
     features: &std::collections::BTreeMap<String, FeatureStatus>,
 ) -> Result<Vec<Badge>> {
-    let package = cargo::representative_package(metadata, None)?;
+    let package = cargo::representative_package(metadata, config.primary_package.as_deref())?;
     let mut badges = Vec::new();
 
     if has_simit_feature(features, "ci") {

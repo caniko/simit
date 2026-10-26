@@ -394,3 +394,76 @@ fn pages_only_upgrade_skips_readme_badges() {
     let workflow = read(&project.path().join(".forgejo/workflows/pages.yaml"));
     assert!(workflow.contains("CODEBERG_TOKEN: ${{ secrets.codeberg_token }}"));
 }
+
+#[test]
+fn crate_badge_follows_primary_package_in_a_virtual_workspace() {
+    let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/upgrade-fixtures");
+    fs::create_dir_all(&fixtures).unwrap();
+    let project = tempfile::Builder::new()
+        .prefix("upgrade-primary")
+        .tempdir_in(fixtures)
+        .unwrap();
+    let root = project.path();
+    fs::write(
+        root.join("Cargo.toml"),
+        "[workspace]\nresolver = \"2\"\nmembers = [\"crates/*\"]\n",
+    )
+    .unwrap();
+    for name in ["alpha-acceptance", "beta-annotate"] {
+        let crate_dir = root.join("crates").join(name);
+        fs::create_dir_all(crate_dir.join("src")).unwrap();
+        fs::write(
+            crate_dir.join("Cargo.toml"),
+            format!(
+                "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2024\"\nlicense = \"MIT\"\n"
+            ),
+        )
+        .unwrap();
+        fs::write(crate_dir.join("src/lib.rs"), "").unwrap();
+    }
+    fs::write(root.join("README.md"), "# primary\n\nbody\n").unwrap();
+    let upgrade = || {
+        simit()
+            .current_dir(root)
+            .args(["upgrade"])
+            .output()
+            .unwrap()
+    };
+    let assert_ok = |output: &std::process::Output| {
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+
+    // Unset: the alphabetically first member, as before.
+    assert_ok(&upgrade());
+    let readme = read(&root.join("README.md"));
+    assert!(
+        readme.contains("https://crates.io/crates/alpha-acceptance"),
+        "{readme}"
+    );
+
+    fs::write(
+        root.join("simit.toml"),
+        "primary_package = \"beta-annotate\"\n",
+    )
+    .unwrap();
+    assert_ok(&upgrade());
+    let readme = read(&root.join("README.md"));
+    assert!(
+        readme.contains("https://crates.io/crates/beta-annotate"),
+        "{readme}"
+    );
+    assert!(!readme.contains("alpha-acceptance"), "{readme}");
+
+    fs::write(root.join("simit.toml"), "primary_package = \"missing\"\n").unwrap();
+    let output = upgrade();
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("not a workspace member"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
