@@ -1,5 +1,6 @@
 //! Local gate script derived from the rendered CI workflows, so a project whose
-//! forge runs no CI can run the same checks before pushing.
+//! forge runs no CI can run the same checks before pushing. Project-owned
+//! `[ci].local_gate_steps` follow the derived steps.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -131,6 +132,13 @@ step() {{\n\
             "step {} {}\n",
             single_quoted(&format!("Nix build {installable}")),
             single_quoted(&command)
+        ));
+    }
+    for extra in &ci.local_gate_steps {
+        script.push_str(&format!(
+            "step {} {}\n",
+            single_quoted(&extra.name),
+            single_quoted(&extra.run)
         ));
     }
     Ok(GeneratedFile {

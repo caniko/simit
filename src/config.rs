@@ -405,6 +405,15 @@ pub struct RequiredGate {
     pub artifacts: Option<RequiredGateArtifacts>,
 }
 
+/// A `[ci].local_gate_steps` entry: a local-only check, such as a browser
+/// suite no hosted CI runs, appended to `scripts/ci-local.sh`.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LocalGateStep {
+    pub name: String,
+    pub run: String,
+}
+
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RequiredGateArtifacts {
@@ -630,6 +639,9 @@ pub struct CiConfig {
     /// Also generate `scripts/ci-local.sh`, the CI checks runnable locally.
     #[serde(default)]
     pub local_gate: bool,
+    /// Project-owned commands the local gate runs after the derived CI steps.
+    #[serde(default)]
+    pub local_gate_steps: Vec<LocalGateStep>,
     #[serde(default)]
     pub with_artifacts: bool,
     #[serde(default)]
@@ -2850,6 +2862,7 @@ impl ProjectConfig {
             );
         }
         validate_required_gates(&self.ci)?;
+        validate_local_gate_steps(&self.ci)?;
         if self
             .ci
             .crow
@@ -4281,6 +4294,43 @@ fn validate_required_gates(ci: &CiConfig) -> Result<()> {
     Ok(())
 }
 
+fn validate_local_gate_steps(ci: &CiConfig) -> Result<()> {
+    if !ci.local_gate_steps.is_empty() && !ci.local_gate {
+        bail!("simit project config: [ci].local_gate_steps requires [ci].local_gate = true");
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for step in &ci.local_gate_steps {
+        let name = step.name.trim();
+        if name.is_empty() || step.name.contains(['\n', '\r']) {
+            bail!(
+                "simit project config: [ci].local_gate_steps names must be non-empty single lines"
+            );
+        }
+        if !seen.insert(name) {
+            bail!("simit project config: [ci].local_gate_steps duplicate name `{name}`");
+        }
+        if step.run.trim().is_empty() {
+            bail!("simit project config: [ci].local_gate_steps `{name}` run must not be empty");
+        }
+    }
+    Ok(())
+}
+
+fn set_local_gate_steps(table: &mut Table, steps: &[LocalGateStep]) {
+    if steps.is_empty() {
+        table.remove("local_gate_steps");
+        return;
+    }
+    let mut array = Array::new();
+    for step in steps {
+        let mut item = InlineTable::default();
+        item.insert("name", Value::from(step.name.as_str()));
+        item.insert("run", Value::from(step.run.as_str()));
+        array.push(Value::InlineTable(item));
+    }
+    table["local_gate_steps"] = Item::Value(Value::Array(array));
+}
+
 fn set_required_gates_table(table: &mut Table, gates: &[RequiredGate]) {
     if gates.is_empty() {
         table.remove("required_gates");
@@ -4622,6 +4672,7 @@ fn set_ci_table(table: &mut Table, ci: &CiConfig) {
     set_bool(table, "with_deny", ci.with_deny);
     set_bool(table, "with_docs", ci.with_docs);
     set_bool(table, "local_gate", ci.local_gate);
+    set_local_gate_steps(table, &ci.local_gate_steps);
     set_bool(table, "with_artifacts", ci.with_artifacts);
     set_bool(table, "with_pypi_publish", ci.with_pypi_publish);
     set_optional_string(table, "pypi_token_secret", ci.pypi_token_secret.as_deref());

@@ -57,6 +57,22 @@ installable with the `[ci.nix_build]` job limits. Steps tied to the hosted
 runner, such as those using `$GITHUB_*`, Actions expressions or global Git
 configuration, are left out, and so is job `env`.
 
+Checks that no hosted CI runs, such as a development browser suite, go in
+`[ci].local_gate_steps`. Each entry runs after the derived steps and Nix builds,
+under its own name, so `--list` and `SIMIT_LOCAL_ONLY` cover it:
+
+```toml
+[ci]
+local_gate = true
+local_gate_steps = [
+  { name = "Browser suite", run = "CI=1 nix develop -c npm --prefix tests/browser run test:ci" },
+]
+```
+
+Names must be unique non-empty single lines, `run` must not be empty, and the
+key requires `local_gate = true`. Changing a step is reported as drift until
+`simit init ci` regenerates the script.
+
 ```sh
 bash scripts/ci-local.sh --list                  # list steps
 SIMIT_LOCAL_ONLY="clippy|test" bash scripts/ci-local.sh  # run matching steps

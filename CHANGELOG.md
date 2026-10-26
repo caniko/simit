@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Add `[ci].local_gate_steps`: project-owned `{ name, run }` checks that
+  `scripts/ci-local.sh` runs after the derived CI steps and Nix builds, for
+  suites no hosted CI runs. It requires `local_gate = true`, and names must be
+  unique single lines.
 - Add `[release.pypi]`: the release workflow uploads the prebuilt
   `release/*.whl` (e.g. from a Nix `release-bundle`) to PyPI with
   `uv publish --check-url` after the hosted release, using PyPI trusted
