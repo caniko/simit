@@ -38,6 +38,44 @@ artifacts = ["nix-build-0"]
 }
 
 #[test]
+fn strict_custody_dedupes_completions_per_commit_but_sealed_keeps_every_run() {
+    let temp = project();
+    let output = common::simit()
+        .current_dir(temp.path())
+        .args(["init", "ci"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let workflow = temp.path().join(".github/workflows/producer-custody.yaml");
+    let value: Value = serde_yaml::from_str(&fs::read_to_string(&workflow).unwrap()).unwrap();
+    assert_eq!(
+        value["concurrency"]["group"],
+        "producer-custody-${{ github.event.workflow_run.head_repository.id }}-${{ github.event.workflow_run.head_sha }}-${{ github.event.workflow_run.event }}-${{ github.event.workflow_run.head_branch }}-${{ github.event.workflow_run.pull_requests[0].number }}"
+    );
+    assert_eq!(value["concurrency"]["cancel-in-progress"], false);
+
+    let config = temp.path().join("simit.toml");
+    fs::write(
+        &config,
+        fs::read_to_string(&config)
+            .unwrap()
+            .replace("[ci.custody]\n", "[ci.custody]\nprotocol = \"sealed-v2\"\n"),
+    )
+    .unwrap();
+    let output = common::simit()
+        .current_dir(temp.path())
+        .args(["init", "ci"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let value: Value = serde_yaml::from_str(&fs::read_to_string(&workflow).unwrap()).unwrap();
+    assert!(
+        value.get("concurrency").is_none(),
+        "sealed custody seals every completion and must not drop pending runs"
+    );
+}
+
+#[test]
 fn sealed_custody_is_explicit_and_uploads_capsules_before_aggregate_reporting() {
     let temp = project();
     let config = temp.path().join("simit.toml");
@@ -241,7 +279,7 @@ fn completion_custody_uses_default_branch_code_without_executing_producer_source
         )
         .unwrap()
     );
-    assert!(value.get("concurrency").is_none());
+    assert_eq!(value["concurrency"]["cancel-in-progress"], false);
     assert_eq!(
         value["jobs"]["collect"]["concurrency"]["cancel-in-progress"],
         false

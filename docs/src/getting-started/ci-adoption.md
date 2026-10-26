@@ -1171,6 +1171,14 @@ A token-free, contents-read identity job derives the full target digest before
 collection. Collection uses that digest plus head SHA in job-level concurrency;
 different branches, PRs, base refs and case-distinct refs have distinct queues.
 Pending replacement within one target observes the same enrolled producer set.
+The strict protocol also groups the whole workflow by the completion's source
+repository, head SHA, event, branch and first associated PR. Only the newest
+pending completion for that key queues a runner, instead of one identity job per
+completed producer run. That key is coarser than the digest, because Actions
+groups ignore case and see only the first PR. Rare distinct targets that collide
+lose a pending run, and that target's status stays missing until its next
+completion, which fails closed. Sealed custody keeps one run per completion,
+because it seals each completion separately.
 The collect job reserves 25 minutes for six-minute capture, upload bounded to five
 minutes, six-minute report lookups and a separate 90-second status POST. Reporting
 runs after failed upload and exhausted lookup budgets to publish failure when the

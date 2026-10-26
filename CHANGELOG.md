@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Strict producer custody workflows now share one workflow-level concurrency
+  group per completion source repository, commit, event, branch and first PR.
+  Superseded completions no longer each queue an identity runner: on simit,
+  about 50 queued custody runs per trunk commit had starved the account's
+  Actions queue. Sealed custody is unchanged.
 - Generated Crow `build` and `ci` workflows now run push pipelines only on the
   default branch and the fleet updater's `simit/update/**` maintenance refs.
   Pull request pipelines still gate every branch, and other branch pushes no
