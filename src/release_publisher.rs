@@ -251,7 +251,7 @@ pub fn verify_release_artifact_archive(
     })
 }
 
-fn is_sha(value: &str) -> bool {
+pub(crate) fn is_sha(value: &str) -> bool {
     value.len() == 40
         && value
             .bytes()

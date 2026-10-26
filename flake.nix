@@ -127,6 +127,11 @@
         nativeBuildInputs = [pkgs.perl];
       };
 
+      # Generated workflows pin their simit invocations to this exact source.
+      # Dirty trees have no `self.rev` and fall back to the release tag. Kept
+      # out of commonArgs so dependency artifacts stay cached across commits.
+      sourceRevision = pkgs.lib.optionalAttrs (self ? rev) {SIMIT_SOURCE_REVISION = self.rev;};
+
       cargoArtifacts = craneLib.buildDepsOnly commonArgs;
       preCommitBin = pkgs.runCommand "pre-commit-bin" {} ''
         mkdir -p $out/bin
@@ -134,6 +139,7 @@
       '';
 
       package = craneLib.buildPackage (commonArgs
+        // sourceRevision
         // {
           inherit cargoArtifacts;
           nativeBuildInputs = commonArgs.nativeBuildInputs ++ [preCommitBin];
@@ -145,6 +151,7 @@
 
       publicCargoArtifacts = publicCraneLib.buildDepsOnly commonArgs;
       publicPackage = publicCraneLib.buildPackage (commonArgs
+        // sourceRevision
         // {
           cargoArtifacts = publicCargoArtifacts;
           nativeBuildInputs = commonArgs.nativeBuildInputs ++ [preCommitBin];
