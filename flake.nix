@@ -294,6 +294,20 @@
       apps.deploy-pages = projectSite.mkDeployPagesApp {
         domain = "simit.tartanoglu.com";
       };
+      # Simit prebuild publication on trunk (secret ATTIC_TOKEN), so consumer
+      # dev shells substitute the CLI instead of compiling it.
+      apps.push-flake-inputs = harbor.lib.rust.mkAtticPush {
+        inherit pkgs;
+        flake = ".";
+        paths = [publicPackage];
+        adapter = harbor.lib.rust.mkAdapter {
+          attic = {
+            endpoint = "https://attic.candee.baby";
+            cache = "canix";
+            tokenEnvVar = "ATTIC_TOKEN";
+          };
+        };
+      };
 
       formatter = treefmtEval.config.build.wrapper;
 
