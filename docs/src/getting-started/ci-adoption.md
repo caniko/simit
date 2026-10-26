@@ -24,6 +24,16 @@ When a project has not yet persisted its CI options, the drift error still
 prints the full regeneration command with the effective runtime, runner,
 workspace, and optional gates so the migration path stays explicit.
 
+Generated steps that run simit itself, the `flake-wiring` check and the
+Windows packager's `cargo install`, pin the simit that rendered them. A
+Nix-built simit embeds its clean flake `self.rev`
+(`git+https://github.com/caniko/simit.git?rev=<sha>`,
+`cargo install --locked --git … --rev <sha> simit`). A Cargo-built or
+dirty-tree simit has no source revision and pins its crate version's release
+tag instead (`?ref=refs/tags/<version>`,
+`cargo install --locked simit --version =<version>`). Regenerating with another
+simit therefore moves the pin, and the drift check reports it.
+
 Persisted CI settings look like:
 
 ```toml
