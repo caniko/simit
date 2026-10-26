@@ -1931,7 +1931,7 @@ fn crow_python_ci_keeps_the_crow_prebuild() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(temp.path().join(".crow/ci.yaml").is_file());
+    assert_crow_push_only_maintained_branches(&temp.path().join(".crow/ci.yaml"));
     assert!(temp.path().join(".crow/prebuild.yaml").is_file());
 }
 
@@ -1991,7 +1991,24 @@ fn crow_ci_accepts_default_forgejo_platform() {
         .status()
         .unwrap();
     assert!(status.success());
-    assert!(temp.path().join(".crow/build.yaml").is_file());
+    assert_crow_push_only_maintained_branches(&temp.path().join(".crow/build.yaml"));
+}
+
+// Branch pushes besides the default branch and updater refs duplicate PR runs.
+fn assert_crow_push_only_maintained_branches(path: &Path) {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&read(path)).unwrap();
+    let when = yaml["when"].as_sequence().unwrap();
+    assert_eq!(when.len(), 2);
+    assert_eq!(when[0]["event"].as_str(), Some("push"));
+    assert_eq!(
+        when[0]["branch"],
+        serde_yaml::from_str::<serde_yaml::Value>(
+            r#"["${CI_REPO_DEFAULT_BRANCH}", "simit/update/**"]"#
+        )
+        .unwrap()
+    );
+    assert_eq!(when[1]["event"].as_str(), Some("pull_request"));
+    assert!(when[1]["branch"].is_null());
 }
 
 #[test]

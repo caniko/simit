@@ -219,7 +219,7 @@ fn one() -> u32 {
 fn yes() -> bool {
     true
 }
-fn maintenance_prefix() -> String {
+pub(crate) fn maintenance_prefix() -> String {
     "simit/update/".into()
 }
 impl Default for Rollout {
