@@ -647,6 +647,15 @@
     {
       "lands": true,
       "match": {},
+      "path": "regenerate",
+      "reason": "Generated files pin simit's own invocations to the generator revision; they move whenever that file's usage is regenerated and landed.",
+      "status": "implemented",
+      "usageKind": "runtime.generated-ref",
+      "via": "the generated file that contains it"
+    },
+    {
+      "lands": true,
+      "match": {},
       "path": "flake-input",
       "reason": "nix develop runs the simit the flake inputs pin; that input carries the upgrade path.",
       "status": "implemented",
@@ -769,6 +778,11 @@
       "from": "repo:github.com/example/drifted",
       "kind": "uses",
       "to": "usage:github.com/example/drifted#runtime.flake-ref:.github/workflows/ci.yaml"
+    },
+    {
+      "from": "repo:github.com/example/drifted",
+      "kind": "uses",
+      "to": "usage:github.com/example/drifted#runtime.generated-ref:.github/workflows/ci.yaml"
     },
     {
       "from": "repo:github.com/example/drifted",
@@ -1297,13 +1311,23 @@
         "state": "unknown",
         "usageKind": "runtime.flake-ref"
       },
+      "id": "usage:github.com/example/drifted#runtime.flake-ref:.github/workflows/ci.yaml",
+      "kind": "usage"
+    },
+    {
+      "attrs": {
+        "generated": true,
+        "path": ".github/workflows/ci.yaml",
+        "state": "unknown",
+        "usageKind": "runtime.generated-ref"
+      },
       "blockers": [
         {
           "code": "unpinned-runtime",
           "reason": ".github/workflows/ci.yaml runs simit from the floating reference github:caniko/simit"
         }
       ],
-      "id": "usage:github.com/example/drifted#runtime.flake-ref:.github/workflows/ci.yaml",
+      "id": "usage:github.com/example/drifted#runtime.generated-ref:.github/workflows/ci.yaml",
       "kind": "usage"
     },
     {

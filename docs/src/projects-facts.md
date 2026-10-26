@@ -62,20 +62,21 @@ expect the variable's `revision`.
 
 ### Usage kinds
 
-| Kind                                                                                              | Source                                                                                                                   |
-| ------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
-| `config.simit-toml`, `config.cargo-workspace`, `config.cargo-package`, `config.flake`             | config sources                                                                                                           |
-| `ci.primary`, `ci.publish`, `ci.pages`, `ci.review`, `ci.custody`, `ci.template`, `ci.local-gate` | files `simit init ci` renders, compared as `simit projects audit` does                                                   |
-| `release.workflow`, `dist.aur`, `dist.copr`, `dist.apt`                                           | `simit init release` / `init <channel> --check`                                                                          |
-| `flake.wiring`, `hooks.config`                                                                    | `simit init flake` outputs                                                                                               |
-| `readme.badges`                                                                                   | the README badge block `simit upgrade` maintains                                                                         |
-| `keys.trust-root`                                                                                 | the release trust root                                                                                                   |
-| `flake-input.direct`, `flake-input.transitive`, `flake-input.cut`                                 | `flake.lock` inputs locking `caniko/simit`; `cut` is a `simit` input that follows nothing                                |
-| `runtime.publisher-var`, `runtime.ci-engine`                                                      | `SIMIT_PUBLISHER_REVISION` / `SIMIT_CI_ENGINE_REVISION` in workflows (a committed `\|\| '<sha>'` fallback is a revision) |
-| `runtime.flake-ref`, `runtime.cargo-install`, `runtime.devshell`                                  | simit run from a flake reference, `cargo install` or `nix develop` in workflows and `scripts/`                           |
-| `pin.config-command`                                                                              | flake references in `simit.toml` command strings                                                                         |
-| `script.invocation`                                                                               | `simit` commands in `scripts/`                                                                                           |
-| `cargo.dependency`                                                                                | a `simit` package in `Cargo.lock`                                                                                        |
+| Kind                                                                                              | Source                                                                                                                                             |
+| ------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `config.simit-toml`, `config.cargo-workspace`, `config.cargo-package`, `config.flake`             | config sources                                                                                                                                     |
+| `ci.primary`, `ci.publish`, `ci.pages`, `ci.review`, `ci.custody`, `ci.template`, `ci.local-gate` | files `simit init ci` renders, compared as `simit projects audit` does                                                                             |
+| `release.workflow`, `dist.aur`, `dist.copr`, `dist.apt`                                           | `simit init release` / `init <channel> --check`                                                                                                    |
+| `flake.wiring`, `hooks.config`                                                                    | `simit init flake` outputs                                                                                                                         |
+| `readme.badges`                                                                                   | the README badge block `simit upgrade` maintains                                                                                                   |
+| `keys.trust-root`                                                                                 | the release trust root                                                                                                                             |
+| `flake-input.direct`, `flake-input.transitive`, `flake-input.cut`                                 | `flake.lock` inputs locking `caniko/simit`; `cut` is a `simit` input that follows nothing                                                          |
+| `runtime.publisher-var`, `runtime.ci-engine`                                                      | `SIMIT_PUBLISHER_REVISION` / `SIMIT_CI_ENGINE_REVISION` in workflows (a committed `\|\| '<sha>'` fallback is a revision)                           |
+| `runtime.flake-ref`, `runtime.cargo-install`, `runtime.devshell`                                  | simit run from a flake reference, `cargo install` or `nix develop` in workflows and `scripts/`                                                     |
+| `runtime.generated-ref`                                                                           | simit's own flake reference or `cargo install` in a simit-generated file; it follows that file, while commands copied from config stay `runtime.*` |
+| `pin.config-command`                                                                              | flake references in `simit.toml` command strings                                                                                                   |
+| `script.invocation`                                                                               | `simit` commands in `scripts/`                                                                                                                     |
+| `cargo.dependency`                                                                                | a `simit` package in `Cargo.lock`                                                                                                                  |
 
 States are `current`, `drift`, `hand-rolled`, `absent` and `unknown`. Pins and
 runtime references report `unknown`: their freshness depends on the

@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- `simit projects facts` reports simit's own flake references and `cargo install`
+  commands in simit-generated files as `runtime.generated-ref`, covered by
+  regenerating that file, instead of manual `runtime.flake-ref` /
+  `runtime.cargo-install` pins. Config commands copied into generated files
+  stay manual pins.
 - Add `simit projects facts [PATH...] [--eval-flake]`: a read-only
   `fleetix.supply-facts.v1` document (vocabulary `simit.usage-facts.v1`) of
   every simit usage in the given checkouts (config sources, generated CI,
