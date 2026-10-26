@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Add `[ci.nix_build].engine_revision`, a committed exact grouped-engine
+  revision used when `vars.SIMIT_CI_ENGINE_REVISION` is unavailable, such as in
+  fork pull requests; the enrolled variable still takes precedence.
 - `[ci.nix_build].only` now coexists with `[prebuild]`: Nix-only projects keep
   their exact qualification matrix and add the Attic/archive prebuild without
   gaining language CI.

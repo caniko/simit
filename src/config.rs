@@ -776,6 +776,9 @@ pub struct NixBuildConfig {
     pub fresh_installables: Vec<String>,
     /// Heavy local build inputs reused across runs through the GitHub Actions cache.
     pub cache_installables: Vec<String>,
+    /// Committed grouped-engine revision for runs without repository variables,
+    /// such as fork pull requests; `vars.SIMIT_CI_ENGINE_REVISION` overrides it.
+    pub engine_revision: Option<String>,
     pub timeout_minutes: Option<u64>,
     pub max_parallel: Option<u64>,
     pub max_jobs: Option<u64>,
@@ -903,7 +906,18 @@ impl NixBuildConfig {
                 );
             }
         }
+        if self.engine_revision.as_deref().is_some_and(|revision| {
+            revision.len() != 40
+                || !revision
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        }) {
+            bail!("[ci.nix_build].engine_revision must be a 40-character lowercase Git revision");
+        }
         if self.groups.is_empty() {
+            if self.engine_revision.is_some() {
+                bail!("[ci.nix_build].engine_revision requires groups");
+            }
             if !self.cache_installables.is_empty() {
                 bail!("[ci.nix_build].cache_installables requires groups");
             }
@@ -4442,6 +4456,11 @@ fn set_nix_build_table(table: &mut Table, options: &NixBuildConfig) {
         &mut build,
         "cache_installables",
         &options.cache_installables,
+    );
+    set_optional_string(
+        &mut build,
+        "engine_revision",
+        options.engine_revision.as_deref(),
     );
     if !options.groups.is_empty() {
         let mut groups = Table::new();
