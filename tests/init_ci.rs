@@ -6075,6 +6075,8 @@ fn github_chocolatey_and_scoop_share_windows_artifacts() {
     assert!(workflow.contains("name: Publish Chocolatey package"));
     assert!(workflow.contains("name: Publish Scoop bucket"));
     assert!(workflow.contains("needs: [validate, build-windows]"));
+    assert!(workflow.contains(&format!("run: {}\n", simit::render::simit_cargo_install())));
+    assert!(!workflow.contains("cargo install --locked simit\n"));
     let parsed: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
     for name in ["build-linux", "build-windows"] {
         assert_eq!(parsed["jobs"][name]["needs"].as_str(), Some("validate"));
@@ -6360,14 +6362,9 @@ fn forgejo_python_uv_ci_uses_nix_checks() {
     let workflow = read(&temp.path().join(".forgejo/workflows/ci.yaml"));
     assert_yaml_parses(&workflow);
     assert!(workflow.contains("runs-on: atlas"));
-    assert!(workflow.contains(
-        "nix run --no-write-lock-file git+https://github.com/caniko/simit.git -- init flake --check --diff"
-    ));
-    assert!(
-        !workflow.contains(
-            "nix run git+https://github.com/caniko/simit.git -- init flake --check --diff"
-        )
-    );
+    assert!(workflow.contains(&simit::render::flake_wiring_check()));
+    assert!(!workflow.contains("nix run git+"));
+    assert!(!workflow.contains("caniko/simit.git -- "));
     assert!(workflow.contains("nix flake check --no-build"));
     assert!(workflow.contains("nix build .#checks.x86_64-linux.offline-tests"));
     assert!(workflow.contains("nix build .#checks.x86_64-linux.typecheck"));
