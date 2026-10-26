@@ -1381,7 +1381,7 @@ pub fn update(
             requirements.clone(),
         );
         admission.plan = Some(admission_plan.clone());
-        admission.schema_version = admission.derived_schema_version();
+        admission.schema_version = admission.derived_version();
         let evidence = adapter(forge, &admission, &root)?;
         ensure!(
             evidence.status == "success" && evidence.repository_id == receipt.repository_id,
