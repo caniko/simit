@@ -147,6 +147,40 @@ fn upgrade_current_workspace_writes_managed_badge_block() {
 }
 
 #[test]
+fn badge_plan_patches_only_an_existing_marker_block() {
+    let project = non_tmp_project("upgrade-plan");
+    let readme = project.path().join("README.md");
+    let plan = || {
+        let output = simit()
+            .current_dir(project.path())
+            .args(["upgrade", "--plan-json"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
+    };
+    let empty = serde_json::json!({"schema":"simit.ci-update-plan.v1","files":[],"obsolete":[]});
+    assert_eq!(plan(), empty);
+
+    let stale =
+        "# upgrade-plan\n\n<!-- simit:badges:start -->\nstale\n<!-- simit:badges:end -->\n\nbody\n";
+    fs::write(&readme, stale).unwrap();
+    let patched = plan();
+    assert_eq!(patched["schema"], "simit.ci-update-plan.v2");
+    assert_eq!(patched["patches"][0]["relative_path"], "README.md");
+    let content = patched["patches"][0]["content"].as_str().unwrap();
+    assert!(content.contains("crates.io-publishable") && !content.contains("stale"));
+    assert_eq!(read(&readme), stale);
+
+    fs::write(&readme, content).unwrap();
+    assert_eq!(plan(), empty);
+}
+
+#[test]
 fn hosted_release_badges_follow_crate_publication_policy() {
     for host in ["codeberg", "github"] {
         for publish_crates in [false, true] {

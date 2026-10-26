@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- `simit projects update` profiles can enroll the update-only scopes
+  `ci-extra`, `release`, `flake` and `readme` beside the required `ci`. Only
+  the `ci` files qualify a candidate; the other files are committed, admitted
+  and landed with it. Scopes must not overlap, and the `ci` plan must match its
+  part of the `ci-extra` plan byte for byte. Widening scopes on an adopted
+  repository requires `enrollCurrent` to adopt the files that already exist.
+- Generator update plans can carry `patches`, whole-file edits of
+  project-owned files that the updater commits but never baseline-owns: the
+  persisted `[ci]` table, a newly created `deny.toml` and the README badge
+  block. Plans with patches use schema `simit.ci-update-plan.v2`, admission
+  requests with them use adapter protocol version 2, and receipts record them
+  under `patches` with `schemaVersion = 2`.
+- `simit init ci --plan-json` no longer requires `--primary-only`; without it the
+  plan covers every owned CI file. Plans never resolve the local release trust
+  root, and a flake `simitConfig` source fails because its `[ci]` table cannot
+  be persisted. `simit init release`, `simit init flake` and `simit upgrade` gain
+  `--plan-json`, which is empty unless the release workflow, the managed
+  flake/hook files or the README badge markers already exist. The flake plan
+  rejects a `flake.nix` input change that `flake.lock` does not already lock.
+- `simit init release` on GitHub falls back to hosted runners without a simit
+  user config, as `simit init ci` already did.
+
 - Add top-level `primary_package`: the workspace member used for the README
   crates.io badge and as the package-metadata fallback for AUR, COPR, APT,
   Scoop, Chocolatey and release setup. Previously these always took the

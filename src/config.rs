@@ -2998,9 +2998,24 @@ impl ProjectConfig {
     }
 
     pub fn write_ci(workspace_root: &Path, ci: &CiConfig) -> Result<bool> {
+        let Some(file) = Self::render_ci(workspace_root, ci)? else {
+            return Ok(false);
+        };
+        let path = workspace_root.join(&file.relative_path);
+        std::fs::write(&path, file.content)
+            .with_context(|| format!("writing {}", path.display()))?;
+        Ok(true)
+    }
+
+    /// The config file with `ci` persisted, or `None` when it is unchanged.
+    /// A flake `simitConfig` source cannot be persisted and is an error.
+    pub fn render_ci(
+        workspace_root: &Path,
+        ci: &CiConfig,
+    ) -> Result<Option<crate::project::GeneratedFile>> {
         let sources = Self::load_sources(workspace_root)?;
         if sources.is_empty() && *ci == CiConfig::default() {
-            return Ok(false);
+            return Ok(None);
         }
         let (filename, scope) = match sources.as_slice() {
             [] => ("simit.toml", None),
@@ -3031,7 +3046,7 @@ impl ProjectConfig {
 
         let unchanged = sources.len() == 1 && sources[0].config.ci == *ci;
         if unchanged && !ci.publish_crates {
-            return Ok(false);
+            return Ok(None);
         }
 
         let path = workspace_root.join(filename);
@@ -3061,7 +3076,7 @@ impl ProjectConfig {
                 .and_then(Item::as_table_like_mut)
                 .context("[ci] must be a table")?;
             if table.contains_key("publish_strategy") {
-                return Ok(false);
+                return Ok(None);
             }
             // Freeze the legacy policy without reformatting unrelated settings.
             table.insert("publish_strategy", value(ci.publish_strategy.as_str()));
@@ -3079,10 +3094,12 @@ impl ProjectConfig {
 
         let updated = document.to_string();
         if updated == current_text {
-            return Ok(false);
+            return Ok(None);
         }
-        std::fs::write(&path, updated).with_context(|| format!("writing {}", path.display()))?;
-        Ok(true)
+        Ok(Some(crate::project::GeneratedFile {
+            relative_path: filename.into(),
+            content: updated,
+        }))
     }
 
     pub fn can_persist_ci(workspace_root: &Path) -> Result<bool> {

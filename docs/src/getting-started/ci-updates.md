@@ -229,9 +229,10 @@ For each repository:
 
 1. Resolve forge identity, remote default branch, target revision and protection.
 2. Qualify the pinned generator source and verify its enrolled executable.
-3. Obtain `init ci --primary-only --plan-json` in an isolated Linux sandbox. The versioned
-   ownership plan supplies writes and deletions; it uses the project's existing
-   resolved configuration without creating a new configuration file. Generation
+3. Obtain one versioned plan per enrolled scope (see [Scopes](#scopes)) in an
+   isolated Linux sandbox. Each ownership plan supplies writes and deletions; it
+   uses the project's existing resolved configuration without creating a new
+   configuration file. Generation
    must preserve persistent updater state, Git configuration, hooks and refs as
    well as source files. State outside the current checkout is checkpointed and
    verified before trusting the plan, including when generation fails. Detected
@@ -437,7 +438,7 @@ It does not migrate protection contexts, CI engine variables, or PR-only custody
 transitions require a later protocol with explicit ordered migration support.
 Other forge/CI backends can enroll an absolute adapter command implementing the
 same versioned inspect/qualify contract and its source-binding requirements.
-The request's `workflows` list carries all owned generated paths. Each adapter
+The request's `workflows` list carries the `ci` scope's generated paths. Each adapter
 selects its own workflow formats and trigger semantics. The GitHub adapter reads
 owned Actions YAML at the exact requested revision to identify push triggers.
 Before publishing a candidate receipt or maintenance ref, the adapter must support
@@ -456,6 +457,42 @@ requires an adapter that can evaluate GitHub's exact-change trigger semantics.
 Initial admission failures leave no published candidate receipt or maintenance
 ref and can be retried after correcting policy or templates. A failed resume
 admission preserves the prior receipt and cannot push or advance either ref.
+
+## Scopes
+
+`scopes` lists the generated-file consumptions a profile maintains. It must
+contain `ci`, and each scope may appear once. Every scope only updates an
+existing consumption; none introduces a new one.
+
+| Scope      | Generator call                       | Result                                                                                                                                                                                           |
+| ---------- | ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `ci`       | `init ci --primary-only --plan-json` | Primary CI. Its files are the only qualification set.                                                                                                                                            |
+| `ci-extra` | `init ci --plan-json`                | Also publishers, Pages, extension publishers, release-plz, review, custody and `scripts/ci-local.sh`. The persisted `[ci]` table and a newly created `deny.toml` are patches.                    |
+| `release`  | `init release --plan-json`           | The release workflow, only when a generated one exists.                                                                                                                                          |
+| `flake`    | `init flake --plan-json`             | Flake and hook files, only when simit already manages them. A `flake.nix` change whose input names differ from `flake.lock`'s root inputs is rejected, since generation cannot fetch a new lock. |
+| `readme`   | `upgrade --plan-json`                | A `README.md` badge-block patch, only when the badge markers exist.                                                                                                                              |
+
+The `ci` plan must equal its part of the `ci-extra` plan byte for byte, including
+obsolete paths. Paths in different scopes must not overlap, and patches cannot
+target `.github/workflows`, `.forgejo/workflows` or `.crow`. `workflows.json` and
+qualification requests carry only the `ci` files. Files from the other scopes are
+committed and admitted with the candidate, but land without their own
+qualification; their first run happens after landing. The full `init ci` plan
+never resolves the local release trust root, and it fails for a flake
+`simitConfig` source because that `[ci]` table cannot be persisted.
+
+A patch is a whole-file edit of a project-owned file. The plan lists it under
+`patches`, which makes the plan schema `simit.ci-update-plan.v2`; a plan without
+patches stays `simit.ci-update-plan.v1`. Patches are committed, recorded in the
+receipt's `patches` with their Git mode and blob, verified when a candidate is
+resumed, and included in admission requests. Admission requests whose plan has
+patches use adapter protocol version 2, and receipts with patches are version 2.
+The adopted baseline never owns a patch, so later README or `simit.toml` edits do
+not block updates.
+
+Widening `scopes` for a repository with an adopted baseline usually starts
+managing files that already exist. Like the initial baseline, adopting them
+requires `enrollCurrent`.
 
 ## Dependencies and verification
 

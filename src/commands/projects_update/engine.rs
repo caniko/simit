@@ -232,6 +232,9 @@ pub fn policy_digest(
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Receipt {
+    /// Absent (0) in v1 receipts. Older binaries reject v2 fields as unknown.
+    #[serde(default)]
+    pub schema_version: u32,
     pub coordinate: String,
     pub config_digest: String,
     pub repository_id: String,
@@ -243,6 +246,10 @@ pub struct Receipt {
     pub phase: String,
     pub managed: BTreeMap<String, Option<String>>,
     pub diff: String,
+    /// Committed, admitted and resume-verified project files that the adopted
+    /// baseline does not own.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub patches: BTreeMap<String, Option<String>>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -621,13 +628,18 @@ fn git_metadata(checkout: &Path) -> Result<String> {
     canonical_digest(&entries)
 }
 
-fn generate(executable: &Path, checkout: &Path, state_directory: &Path) -> Result<CiUpdatePlan> {
+fn generate(
+    executable: &Path,
+    checkout: &Path,
+    state_directory: &Path,
+    argv: &[String],
+) -> Result<CiUpdatePlan> {
     let metadata = git_metadata(checkout)?;
     let configuration = git(checkout, &["config", "--null", "--list", "--show-origin"])?;
     let nix_state = tempfile::tempdir()?;
     let output = super::checkpoint::protect(state_directory, checkout, || {
         run_tool(
-            super::sandbox::generation(executable, checkout, nix_state.path())?,
+            super::sandbox::generation(executable, checkout, nix_state.path(), argv)?,
             900,
         )
         .context("credential-free generation sandbox failed")
@@ -647,13 +659,14 @@ fn generate(executable: &Path, checkout: &Path, state_directory: &Path) -> Resul
         "read-only generator plan modified candidate sources"
     );
     ensure!(
-        plan.schema == "simit.ci-update-plan.v1",
+        plan.schema_matches(),
         "generator does not support the enrolled generation protocol"
     );
     let mut seen = BTreeSet::new();
     for path in plan
         .files
         .iter()
+        .chain(&plan.patches)
         .map(|f| &f.relative_path)
         .chain(&plan.obsolete)
     {
@@ -663,8 +676,96 @@ fn generate(executable: &Path, checkout: &Path, state_directory: &Path) -> Resul
             "duplicate/overlapping generation ownership"
         );
     }
-    ensure!(!plan.files.is_empty(), "empty generation plan");
     Ok(plan)
+}
+
+/// Generate every enrolled scope into one plan, returning it with the `ci`
+/// qualification paths. Other scopes' files are carried, not qualified.
+fn generate_scopes(
+    executable: &Path,
+    checkout: &Path,
+    state_directory: &Path,
+    profile: &Profile,
+) -> Result<(CiUpdatePlan, Vec<String>)> {
+    let mut plans = BTreeMap::new();
+    for scope in &profile.scopes {
+        let argv: &[&str] = match scope.as_str() {
+            "ci" => &["init", "ci", "--primary-only", "--plan-json"],
+            "ci-extra" => &["init", "ci", "--plan-json"],
+            "release" => &["init", "release", "--plan-json"],
+            "flake" => &["init", "flake", "--plan-json"],
+            "readme" => &["upgrade", "--plan-json"],
+            _ => anyhow::bail!("unsupported generation scope {scope}"),
+        };
+        let argv = argv.iter().map(|arg| arg.to_string()).collect::<Vec<_>>();
+        plans.insert(
+            scope.as_str(),
+            generate(executable, checkout, state_directory, &argv)?,
+        );
+    }
+    let mut merged = plans
+        .remove("ci")
+        .context("profiles require the ci scope")?;
+    ensure!(
+        !merged.files.is_empty() && merged.patches.is_empty(),
+        "empty generation plan"
+    );
+    let qualification = workflows(&merged);
+    if let Some(extra) = plans.remove("ci-extra") {
+        // The full plan must contain the primary plan byte for byte, so both
+        // generations agree on what the qualification set means.
+        ensure!(
+            merged.files.iter().all(|file| extra
+                .files
+                .iter()
+                .any(|other| other.relative_path == file.relative_path
+                    && other.content == file.content))
+                && merged
+                    .obsolete
+                    .iter()
+                    .all(|path| extra.obsolete.contains(path)),
+            "ci and ci-extra generation plans disagree"
+        );
+        merged = extra;
+    }
+    let mut seen = merged
+        .files
+        .iter()
+        .chain(&merged.patches)
+        .map(|file| file.relative_path.clone())
+        .chain(merged.obsolete.iter().cloned())
+        .collect::<BTreeSet<_>>();
+    for (scope, plan) in plans {
+        for path in plan
+            .files
+            .iter()
+            .chain(&plan.patches)
+            .map(|file| &file.relative_path)
+            .chain(&plan.obsolete)
+        {
+            ensure!(
+                seen.insert(path.clone()),
+                "generation scope {scope} overlaps another scope at {}",
+                path.display()
+            );
+        }
+        merged.files.extend(plan.files);
+        merged.obsolete.extend(plan.obsolete);
+        merged.patches.extend(plan.patches);
+    }
+    for patch in &merged.patches {
+        ensure!(
+            ![".github/workflows", ".forgejo/workflows", ".crow"]
+                .iter()
+                .any(|directory| patch.relative_path.starts_with(directory)),
+            "patches cannot target workflow directory path {}",
+            patch.relative_path.display()
+        );
+    }
+    Ok((
+        CiUpdatePlan::new(merged.files, merged.obsolete, merged.patches),
+        qualification,
+    ))
 }
 
 fn hashes(
@@ -963,7 +1064,13 @@ pub fn update(
     {
         previous
     } else {
-        let plan = generate(&generator, &checkout, &state_directory)?;
+        let (plan, workflow_paths) =
+            generate_scopes(&generator, &checkout, &state_directory, profile)?;
+        let patch_paths = plan
+            .patches
+            .iter()
+            .map(|f| f.relative_path.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
         let paths = plan
             .files
             .iter()
@@ -975,6 +1082,8 @@ pub fn update(
             )
             .collect::<Vec<_>>();
         let before = hashes(&checkout, paths.clone().into_iter(), None)?;
+        // Patches get the same path and symlink checks as owned outputs.
+        hashes(&checkout, patch_paths.iter().cloned(), None)?;
         let baseline_path = root.join("baseline.json");
         if baseline_path.exists() {
             let baseline: Baseline = crate::review::read_json(&baseline_path)?;
@@ -996,11 +1105,14 @@ pub fn update(
                     .all(|(path, hash)| hash.is_none() || before.contains_key(path)),
                 "generation plan abandons a managed path; retain it or explicitly mark it obsolete"
             );
+            // Widening scopes adopts existing generated files only under the
+            // same explicit enrollment as the initial baseline.
             ensure!(
-                before
-                    .keys()
-                    .all(|p| baseline.managed.contains_key(p) || before[p].is_none()),
-                "newly managed path already exists outside the baseline"
+                profile.enroll_current
+                    || before
+                        .keys()
+                        .all(|p| baseline.managed.contains_key(p) || before[p].is_none()),
+                "newly managed path already exists outside the baseline; enroll it with enrollCurrent"
             );
         } else {
             ensure!(
@@ -1008,7 +1120,6 @@ pub fn update(
                 "initial managed baseline is not enrolled"
             );
         }
-        let workflow_paths = workflows(&plan);
         ensure!(
             !workflow_paths.is_empty(),
             "candidate has no owned qualification paths"
@@ -1022,16 +1133,20 @@ pub fn update(
             false,
             false,
         )?;
+        crate::project::write_generated_files(&checkout, &plan.patches)?;
         let mut stage = vec!["--literal-pathspecs", "add", "--all", "--force", "--"];
         stage.extend(
             paths
                 .iter()
                 .filter(|p| checkout.join(p).exists() || before[*p].is_some())
+                .chain(&patch_paths)
                 .map(String::as_str),
         );
         git(&checkout, &stage)?;
         let tree = git(&checkout, &["write-tree"])?;
         let managed = hashes(&checkout, paths.into_iter(), Some(&tree))?;
+        let patches = hashes(&checkout, patch_paths.into_iter(), Some(&tree))?;
+        let schema_version = if patches.is_empty() { 0 } else { 2 };
         let diff = git(
             &checkout,
             &[
@@ -1081,6 +1196,7 @@ pub fn update(
                 )?;
             }
             let receipt = Receipt {
+                schema_version,
                 coordinate: project.coordinate.clone(),
                 config_digest,
                 repository_id: observed.repository_id,
@@ -1092,6 +1208,7 @@ pub fn update(
                 phase: "unchanged".into(),
                 managed,
                 diff,
+                patches,
             };
             if push {
                 save(&receipt_path, &receipt)?;
@@ -1100,6 +1217,7 @@ pub fn update(
         }
         if !push {
             return Ok(Receipt {
+                schema_version,
                 coordinate: project.coordinate.clone(),
                 config_digest,
                 repository_id: observed.repository_id,
@@ -1111,6 +1229,7 @@ pub fn update(
                 phase: "preview".into(),
                 managed,
                 diff,
+                patches,
             });
         }
         let author = git(&checkout, &["var", "GIT_AUTHOR_IDENT"])?;
@@ -1161,7 +1280,7 @@ pub fn update(
             changed
                 .split('\0')
                 .filter(|p| !p.is_empty())
-                .all(|p| managed.contains_key(p)),
+                .all(|p| managed.contains_key(p) || patches.contains_key(p)),
             "commit modified paths outside generator ownership"
         );
         let branch = format!(
@@ -1174,6 +1293,7 @@ pub fn update(
             &["check-ref-format", &format!("refs/heads/{branch}")],
         )?;
         Receipt {
+            schema_version,
             coordinate: project.coordinate.clone(),
             config_digest,
             repository_id: observed.repository_id.clone(),
@@ -1185,11 +1305,16 @@ pub fn update(
             phase: "prepared".into(),
             managed,
             diff,
+            patches,
         }
     };
+    // Patches are verified against the candidate only; the adopted baseline
+    // never owns them.
     ensure!(
         hashes(&checkout, receipt.managed.keys().cloned(), Some("HEAD"))? == receipt.managed
             && hashes(&checkout, receipt.managed.keys().cloned(), None)? == receipt.managed
+            && hashes(&checkout, receipt.patches.keys().cloned(), Some("HEAD"))? == receipt.patches
+            && receipt.patches.values().all(Option::is_some)
             && git(&checkout, &["status", "--porcelain"])?.is_empty(),
         "retained candidate files changed"
     );
@@ -1211,10 +1336,8 @@ pub fn update(
     // Rebuild admission from verified committed blobs on both first publication
     // and resume. Clean filters and prior admission never substitute for the
     // exact bytes this candidate will execute under the current forge policy.
-    let admission_plan = CiUpdatePlan {
-        schema: "simit.ci-update-plan.v1".into(),
-        files: receipt
-            .managed
+    let committed = |paths: &BTreeMap<String, Option<String>>| -> Result<Vec<_>> {
+        paths
             .iter()
             .filter(|(_, hash)| hash.is_some())
             .map(|(path, _)| {
@@ -1226,23 +1349,25 @@ pub fn update(
                     )?,
                 })
             })
-            .collect::<Result<_>>()?,
-        obsolete: receipt
+            .collect()
+    };
+    let admission_plan = CiUpdatePlan::new(
+        committed(&receipt.managed)?,
+        receipt
             .managed
             .iter()
             .filter(|(_, hash)| hash.is_none())
             .map(|(path, _)| path.into())
             .collect(),
-    };
+        committed(&receipt.patches)?,
+    );
+    // Only the primary CI set qualifies; other owned files are carried.
     let workflow_paths: Vec<String> = crate::review::read_json(&root.join("workflows.json"))?;
     ensure!(
-        workflow_paths.iter().collect::<BTreeSet<_>>()
-            == receipt
-                .managed
+        !workflow_paths.is_empty()
+            && workflow_paths
                 .iter()
-                .filter(|(_, hash)| hash.is_some())
-                .map(|(path, _)| path)
-                .collect(),
+                .all(|path| receipt.managed.get(path).is_some_and(Option::is_some)),
         "retained workflow ownership differs from the candidate"
     );
     let admit = |branch: &str| -> Result<()> {
@@ -1256,6 +1381,7 @@ pub fn update(
             requirements.clone(),
         );
         admission.plan = Some(admission_plan.clone());
+        admission.schema_version = admission.derived_schema_version();
         let evidence = adapter(forge, &admission, &root)?;
         ensure!(
             evidence.status == "success" && evidence.repository_id == receipt.repository_id,
@@ -1556,6 +1682,7 @@ if os.fork() == 0:
             &f.config.profiles["fleet"].generator.executable,
             &checkout,
             &f.config.workspaces["projects"].state_directory,
+            &["init", "ci", "--primary-only", "--plan-json"].map(String::from),
         )
         .unwrap();
         plan.files
@@ -2876,14 +3003,14 @@ else:
             ".gitlab-ci.yml",
             ".github/workflows/ci.yaml",
         ] {
-            let plan = CiUpdatePlan {
-                schema: "simit.ci-update-plan.v1".into(),
-                files: vec![crate::project::GeneratedFile {
+            let plan = CiUpdatePlan::new(
+                vec![crate::project::GeneratedFile {
                     relative_path: path.into(),
                     content: "backend-specific configuration\n".into(),
                 }],
-                obsolete: vec![],
-            };
+                vec![],
+                vec![],
+            );
             assert_eq!(workflows(&plan), vec![path]);
         }
     }
@@ -2963,6 +3090,147 @@ else:
         })
         .unwrap();
         assert!(!f.config.workspaces["projects"].state_directory.exists());
+    }
+
+    fn scoped_plans(f: &mut Fixture, scopes: &[&str], plans: serde_json::Value) {
+        f.config.profiles.get_mut("fleet").unwrap().scopes =
+            scopes.iter().map(|scope| scope.to_string()).collect();
+        save(&f.source.join("fixture-plans.json"), &plans).unwrap();
+        f.publish(&f.source, "enroll scoped generation plans");
+    }
+
+    fn primary_ci() -> serde_json::Value {
+        json!({"relative_path":".github/workflows/ci.yaml","content":"name: CI\non:\n  push:\njobs:\n  test:\n    steps: []\n"})
+    }
+
+    #[test]
+    fn namespace_scopes_carry_unqualified_files_and_unowned_patches() {
+        let mut f = Fixture::new();
+        let publish = json!({"relative_path":".github/workflows/publish-crate.yaml","content":"name: Publish\non:\n  push:\n    tags: ['*']\n"});
+        let config =
+            json!({"relative_path":"simit.toml","content":"[ci]\nplatform = \"github\"\n"});
+        let readme = json!({"relative_path":"README.md","content":"# demo\n<!-- simit:badges:start -->\ncurrent\n<!-- simit:badges:end -->\n"});
+        scoped_plans(
+            &mut f,
+            &["ci", "ci-extra", "readme"],
+            json!({
+                "init ci --primary-only --plan-json": {"schema":"simit.ci-update-plan.v1","files":[primary_ci()],"obsolete":[]},
+                "init ci --plan-json": {"schema":"simit.ci-update-plan.v2","files":[primary_ci(), publish],"obsolete":[],"patches":[config]},
+                "upgrade --plan-json": {"schema":"simit.ci-update-plan.v2","files":[],"obsolete":[],"patches":[readme]},
+            }),
+        );
+        f.control(json!({"candidate":"pending","expectedWorkflows":[".github/workflows/ci.yaml"]}));
+        let pending = f.update(true).unwrap();
+        assert_eq!(pending.phase, "candidate");
+        assert_eq!(
+            pending.patches.keys().collect::<Vec<_>>(),
+            ["README.md", "simit.toml"]
+        );
+        // Resume verifies recorded patch identities against the candidate.
+        let receipt = fs::read(f.root().join("receipt.json")).unwrap();
+        let mut tampered = pending;
+        tampered.patches.insert("README.md".into(), None);
+        save(&f.root().join("receipt.json"), &tampered).unwrap();
+        assert!(
+            f.update(true)
+                .unwrap_err()
+                .to_string()
+                .contains("retained candidate files changed")
+        );
+        fs::write(f.root().join("receipt.json"), receipt).unwrap();
+
+        f.control(json!({"expectedWorkflows":[".github/workflows/ci.yaml"]}));
+        let adopted = f.update(true).unwrap();
+        assert_eq!(adopted.phase, "qualified");
+        assert!(adopted.managed[".github/workflows/publish-crate.yaml"].is_some());
+        assert_eq!(adopted.schema_version, 2);
+        let workflows: Vec<String> =
+            crate::review::read_json(&f.root().join("workflows.json")).unwrap();
+        assert_eq!(workflows, [".github/workflows/ci.yaml"]);
+        let baseline: Baseline = crate::review::read_json(&f.root().join("baseline.json")).unwrap();
+        assert_eq!(baseline.managed, adopted.managed);
+        assert!(!baseline.managed.contains_key("README.md"));
+        for path in [
+            ".github/workflows/publish-crate.yaml",
+            "README.md",
+            "simit.toml",
+        ] {
+            git(
+                &f.remote,
+                &["cat-file", "-e", &format!("{}:{path}", adopted.candidate)],
+            )
+            .unwrap();
+        }
+        // Admission carried the committed patches under protocol v2.
+        let admissions = fs::read_dir(f.root())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("evidence-")
+            })
+            .map(|path| crate::review::read_json::<serde_json::Value>(&path).unwrap())
+            .filter(|evidence| evidence[0]["operation"] == "admit")
+            .collect::<Vec<_>>();
+        assert!(!admissions.is_empty());
+        for evidence in admissions {
+            assert_eq!(evidence[0]["schemaVersion"], 2);
+            assert_eq!(evidence[0]["plan"]["patches"].as_array().unwrap().len(), 2);
+        }
+
+        // A human README edit after adoption is project-owned and never blocks.
+        let checkout = f.root().join("checkout");
+        fs::write(checkout.join("README.md"), "# demo\nhuman edit\n").unwrap();
+        f.publish(&checkout, "edit README by hand");
+        let repatched = f.update(true).unwrap();
+        assert_eq!(repatched.phase, "qualified");
+        assert_eq!(f.remote_head(), repatched.candidate);
+    }
+
+    #[test]
+    fn namespace_scope_plans_must_agree_stay_disjoint_and_patch_outside_workflows() {
+        let primary =
+            json!({"schema":"simit.ci-update-plan.v1","files":[primary_ci()],"obsolete":[]});
+        let other = json!({"relative_path":".github/workflows/ci.yaml","content":"different\n"});
+        let extra = json!({"relative_path":".github/workflows/extra.yaml","content":"on: push\n"});
+        for (scopes, command, plan, error) in [
+            (
+                ["ci", "ci-extra"],
+                "init ci --plan-json",
+                json!({"schema":"simit.ci-update-plan.v1","files":[other],"obsolete":[]}),
+                "plans disagree",
+            ),
+            (
+                ["ci", "release"],
+                "init release --plan-json",
+                json!({"schema":"simit.ci-update-plan.v1","files":[],"obsolete":[".github/workflows/ci.yaml"]}),
+                "overlaps another scope",
+            ),
+            (
+                ["ci", "readme"],
+                "upgrade --plan-json",
+                json!({"schema":"simit.ci-update-plan.v2","files":[],"obsolete":[],"patches":[extra]}),
+                "workflow directory",
+            ),
+            (
+                ["ci", "readme"],
+                "upgrade --plan-json",
+                json!({"schema":"simit.ci-update-plan.v1","files":[],"obsolete":[],"patches":[{"relative_path":"README.md","content":"x\n"}]}),
+                "generation protocol",
+            ),
+        ] {
+            let mut f = Fixture::new();
+            let mut plans = json!({"init ci --primary-only --plan-json": primary.clone()});
+            plans[command] = plan;
+            scoped_plans(&mut f, &scopes, plans);
+            let source = f.remote_head();
+            let message = f.update(true).unwrap_err().to_string();
+            assert!(message.contains(error), "{command}: {message}");
+            assert_eq!(f.remote_head(), source);
+            assert!(!f.root().join("receipt.json").exists());
+        }
     }
 
     #[test]
