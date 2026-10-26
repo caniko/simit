@@ -280,7 +280,10 @@ preparation rather than credentialed fetching during generation. Updater executi
 currently requires Linux. SQLite is supplied by the NixOS module; standalone
 users include an immutable `sqlite3` on `PATH` for flake-backed configuration.
 
-Existing workflow branch filters must admit `maintenanceRefPrefix`. Missing
+Existing workflow branch filters must admit `maintenanceRefPrefix`. Generated
+Crow `build` and `ci` workflows admit only the default prefix
+(`simit/update/**`) beside `${CI_REPO_DEFAULT_BRANCH}` for push pipelines; a
+profile with another prefix gets no push pipelines on its maintenance refs. Missing
 candidate events, checks or capability support cannot authorize landing. Remote
 movement, changed default branches, protection changes and managed-file edits
 invalidate earlier candidate acceptance. Failed, skipped, cancelled, neutral or
