@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Add `simit projects facts [PATH...] [--eval-flake]`: a read-only
+  `fleetix.supply-facts.v1` document (vocabulary `simit.usage-facts.v1`) of
+  every simit usage in the given checkouts (config sources, generated CI,
+  release, flake, hooks, README badges and distribution files, flake inputs,
+  runtime references, pins and Cargo dependencies), with repository blockers
+  and the capability matrix of upgrade paths. Updater rows are `implemented`
+  exactly when the new `SUPPORTED_SCOPES`, `UPDATER_ADAPTERS` and
+  `SUPPORTED_LANDINGS` constants say so. Flake `simitConfig` is evaluated only
+  with `--eval-flake`; `SIMIT_NO_FLAKE_EVAL=1` disables that evaluation in any
+  simit process. See `docs/src/projects-facts.md`.
 - Add top-level `primary_package`: the workspace member used for the README
   crates.io badge and as the package-metadata fallback for AUR, COPR, APT,
   Scoop, Chocolatey and release setup. Previously these always took the

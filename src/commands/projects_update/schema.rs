@@ -5,6 +5,13 @@ use std::{
     path::{Path, PathBuf},
 };
 
+/// Update scopes the engine implements; `ci` is always required.
+pub const SUPPORTED_SCOPES: &[&str] = &["ci"];
+/// Built-in forge adapter protocols (`simit projects update-<name>-adapter`).
+pub const UPDATER_ADAPTERS: &[&str] = &["github"];
+/// How a qualified candidate reaches the target branch.
+pub const SUPPORTED_LANDINGS: &[&str] = &["direct"];
+
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Config {
@@ -403,8 +410,13 @@ impl Config {
                 "unknown workspace"
             );
             ensure!(
-                profile.scopes == ["ci"],
-                "only primary CI scope is supported"
+                profile.scopes.iter().any(|scope| scope == "ci")
+                    && profile
+                        .scopes
+                        .iter()
+                        .all(|scope| SUPPORTED_SCOPES.contains(&scope.as_str()))
+                    && profile.scopes.iter().collect::<BTreeSet<_>>().len() == profile.scopes.len(),
+                "profile scopes must be unique, include ci and be one of {SUPPORTED_SCOPES:?}"
             );
             ensure!(
                 !profile.select.coordinates.is_empty(),
@@ -646,6 +658,22 @@ mod tests {
         );
         cfg.forges.get_mut("weaker").unwrap().host = "other.example".into();
         cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn scopes_must_be_unique_supported_and_include_ci() {
+        for scopes in [
+            vec![],
+            vec!["ci", "ci"],
+            vec!["release"],
+            vec!["ci", "readme"],
+        ] {
+            let mut cfg = config();
+            cfg.profiles.get_mut("fleet").unwrap().scopes =
+                scopes.iter().map(|scope| scope.to_string()).collect();
+            assert!(cfg.validate().is_err(), "{scopes:?}");
+        }
+        config().validate().unwrap();
     }
 
     #[test]

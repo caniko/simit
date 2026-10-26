@@ -28,7 +28,7 @@ pub struct CommandExit {
 }
 
 impl CommandExit {
-    fn new(code: i32, message: impl Into<String>) -> Self {
+    pub(crate) fn new(code: i32, message: impl Into<String>) -> Self {
         Self {
             code,
             message: message.into(),
@@ -54,6 +54,7 @@ pub fn run(command: ProjectsCommand) -> Result<()> {
         ProjectsAction::Show(args) => show(args),
         ProjectsAction::Scan(args) => scan(args),
         ProjectsAction::Audit(args) => audit(args),
+        ProjectsAction::Facts(args) => super::projects_facts::run(args),
         ProjectsAction::Regenerate(args) => regenerate(args),
         ProjectsAction::Update(args) => super::projects_update::run(args),
         ProjectsAction::UpdateGithubAdapter(args) => super::projects_update::adapter(args),
