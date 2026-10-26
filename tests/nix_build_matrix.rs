@@ -933,6 +933,60 @@ fn engine_bootstrap_never_sources_producer_shell_startup_or_nix_configuration() 
 }
 
 #[test]
+fn committed_engine_revision_is_the_fork_safe_fallback_for_the_repository_variable() {
+    let pin = "de3325be17104fbdb0d70f1da38149d4016f1790";
+    let groups = "[ci.nix_build.groups]\nnetwork = [\".#checks.x86_64-linux.client\", \".#checks.x86_64-linux.recovery\"]";
+    let temp = project(&format!(
+        "[ci.nix_build]\nonly = true\ncapture_results = true\nengine_revision = \"{pin}\"\n{groups}"
+    ));
+    let result = generate(&temp, &[]);
+    assert!(result.status.success(), "{result:?}");
+    let value = workflow(&temp);
+    let steps = value["jobs"]["build"]["steps"].as_sequence().unwrap();
+    let step = |name: &str| steps.iter().find(|s| s["name"] == name).unwrap();
+    let revision = format!("(vars.SIMIT_CI_ENGINE_REVISION || '{pin}')");
+    assert_eq!(
+        step("Provision grouped-build Rust engine")["env"]["SIMIT_CI_ENGINE_REVISION"],
+        format!("${{{{ {revision} }}}}").as_str()
+    );
+    // The engine cache follows the effective revision, so fork runs reuse it too.
+    let key = format!(
+        "simit-engine-v1-${{{{ {revision} }}}}-${{{{ runner.os }}}}-${{{{ runner.arch }}}}"
+    );
+    for name in ["Restore grouped-build engine", "Save grouped-build engine"] {
+        assert_eq!(step(name)["with"]["key"], key.as_str());
+    }
+    assert_eq!(
+        step("Restore grouped-build engine")["if"],
+        format!("${{{{ {revision} != '' }}}}").as_str()
+    );
+    assert!(generate(&temp, &["--check"]).status.success());
+
+    for (options, message) in [
+        (
+            format!("engine_revision = \"{}\"\n{groups}", pin.to_uppercase()),
+            "40-character",
+        ),
+        (
+            format!("engine_revision = \"trunk\"\n{groups}"),
+            "40-character",
+        ),
+        (format!("engine_revision = \"{pin}\""), "requires groups"),
+    ] {
+        let temp = project(&format!(
+            "[ci.nix_build]\nonly = true\ncapture_results = true\n{options}"
+        ));
+        let result = generate(&temp, &[]);
+        assert!(!result.status.success(), "{options}: {result:?}");
+        assert!(
+            String::from_utf8_lossy(&result.stderr).contains(message),
+            "{result:?}"
+        );
+        assert!(!temp.path().join(".github/workflows").exists());
+    }
+}
+
+#[test]
 fn grouped_configuration_cannot_override_engine_or_generated_execution_inputs() {
     for key in [
         "SIMIT_CI_ENGINE",

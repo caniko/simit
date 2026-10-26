@@ -360,6 +360,13 @@ that command. Provisioning builds `github:caniko/simit/<revision>#default`, not
 the producer checkout, and retains the selected source revision and executable
 SHA-256 in the evidence root. Missing or malformed enrollment and an engine
 without the command fail the job. There is no moving-ref or Python fallback.
+A run that does not receive repository variables, for example a pull request
+from a fork, fails enrollment. Set `[ci.nix_build].engine_revision` to the same
+exact revision to commit a fallback: the workflow then uses
+`vars.SIMIT_CI_ENGINE_REVISION || '<revision>'`, so an enrolled variable still
+wins, and keys the engine cache by that effective revision. A `pull_request`
+run already executes its head's workflow file, so the committed fallback grants
+a fork no additional authority.
 This read-only producer bootstrap is not enrollment for privileged completion
 custody or release publishing; those engines have separate authority contracts.
 Producer `extra_env` bindings apply only to setup, validation, execution and
