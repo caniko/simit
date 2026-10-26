@@ -470,10 +470,12 @@ fn flake_plan_maintains_only_managed_files_with_locked_inputs() {
         );
         serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
     };
-    assert_eq!(
-        parse(plan()),
-        serde_json::json!({"schema":"simit.ci-update-plan.v1","files":[],"obsolete":[]})
-    );
+    let empty = serde_json::json!({"schema":"simit.ci-update-plan.v1","files":[],"obsolete":[]});
+    assert_eq!(parse(plan()), empty);
+    // A project-owned flake without simit hooks is not adopted either.
+    fs::write(root.join("flake.nix"), "{ outputs = _: { }; }\n").unwrap();
+    assert_eq!(parse(plan()), empty);
+    fs::remove_file(root.join("flake.nix")).unwrap();
     assert!(!root.join("nix").exists());
 
     let status = simit()
