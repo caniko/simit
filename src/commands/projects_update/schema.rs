@@ -1179,7 +1179,7 @@ pub struct AdapterRequest {
 impl AdapterRequest {
     /// Version 2 only when a v2 feature is present, so v1 requests, their
     /// admission digests and existing adapters stay unchanged.
-    pub fn derived_schema_version(&self) -> u32 {
+    pub fn derived_version(&self) -> u32 {
         if self
             .plan
             .as_ref()
@@ -1193,7 +1193,7 @@ impl AdapterRequest {
 
     pub fn validate(&self) -> Result<()> {
         ensure!(
-            self.schema_version == self.derived_schema_version()
+            self.schema_version == self.derived_version()
                 && matches!(self.operation.as_str(), "inspect" | "admit" | "qualify"),
             "unsupported adapter request"
         );
