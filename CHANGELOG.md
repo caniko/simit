@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- `simit init ci --prebuild-only` now accepts `--ci-provider crow` and
+  `--crow-format` when `[prebuild].provider = "crow"`, and `--crow-format`
+  selects that prebuild's workflow format. Both stay rejected for GitHub
+  prebuilds, and `--ci-provider actions` is still accepted.
 - Add `[ci].local_gate`: `simit init ci` also generates `scripts/ci-local.sh`.
   It replays the generated `ci*.yaml` run steps and `[ci].nix_builds` locally,
   without hosted-runner steps or job `env`. It supports `--list` and
