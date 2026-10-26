@@ -301,6 +301,59 @@ required_gates = [
 }
 
 #[test]
+fn manual_gates_render_dispatch_only_and_stay_out_of_ci() {
+    let temp = init_package(true);
+    fs::write(
+        temp.path().join("simit.toml"),
+        r#"[ci]
+platform = "github"
+provider = "actions"
+runtime = "nix"
+manual_gates = [{ id = "boot", run = "nix run .#boot", timeout_minutes = 20 }]
+"#,
+    )
+    .unwrap();
+    fs::write(
+        temp.path().join("README.md"),
+        "<!-- simit:badges:start -->\n<!-- simit:badges:end -->\n",
+    )
+    .unwrap();
+    // Regenerating and checking with manual-gates.yaml present must not
+    // infer its gates back into CI.
+    for check in [false, false, true] {
+        let mut command = simit();
+        command.current_dir(temp.path()).args(["init", "ci"]);
+        if check {
+            command.arg("--check");
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let workflows = temp.path().join(".github/workflows");
+    let ci = fs::read_to_string(workflows.join("ci.yaml")).unwrap();
+    assert!(!ci.contains("gate-"), "{ci}");
+    let manual: serde_yaml::Value =
+        serde_yaml::from_str(&fs::read_to_string(workflows.join("manual-gates.yaml")).unwrap())
+            .unwrap();
+    let triggers = manual["on"].as_mapping().unwrap();
+    assert_eq!(triggers.len(), 1);
+    assert!(triggers.contains_key("workflow_dispatch"));
+    assert_eq!(manual["jobs"].as_mapping().unwrap().len(), 1);
+    assert_eq!(
+        manual["jobs"]["gate-boot"]["timeout-minutes"].as_u64(),
+        Some(20)
+    );
+    let config = fs::read_to_string(temp.path().join("simit.toml")).unwrap();
+    assert!(config.contains("manual_gates"), "{config}");
+    let readme = fs::read_to_string(temp.path().join("README.md")).unwrap();
+    assert!(readme.contains("CI-managed"), "{readme}");
+}
+
+#[test]
 fn required_gate_evidence_survives_failure_and_round_trips_through_publishers() {
     let temp = init_package(true);
     fs::write(

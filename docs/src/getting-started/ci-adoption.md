@@ -1363,6 +1363,11 @@ not inherit test-only services or credentials. Release secrets
 belong only to independent default-branch upload jobs in the protected
 `simit-crates-io` environment.
 
+`[[ci.manual_gates]]` takes the same fields but renders the gates into
+`manual-gates.yaml`, triggered only by `workflow_dispatch` (GitHub Actions
+only). They stay generated and drift-checked, never run on push or pull
+requests, and never gate publication. Ids are unique across both lists.
+
 On GitHub Actions, a gate can retain diagnostic files after success or failure:
 
 ```toml

@@ -608,6 +608,11 @@ pub struct CiConfig {
     /// Rendered as dedicated required jobs; failures block publication.
     #[serde(default)]
     pub required_gates: Vec<RequiredGate>,
+    /// Gates rendered into `manual-gates.yaml`, triggered only by
+    /// `workflow_dispatch`: generated and drift-checked, but never run on
+    /// push/PR and never prerequisites of publication.
+    #[serde(default)]
+    pub manual_gates: Vec<RequiredGate>,
     /// Whether generated Rust checks should pass `--all-features`.
     #[serde(default)]
     pub all_features: Option<bool>,
@@ -680,6 +685,11 @@ impl CiConfig {
         platform: Platform,
     ) -> Result<()> {
         self.validate_required_gate_artifacts_backend(provider, platform)?;
+        if !self.manual_gates.is_empty()
+            && (provider != CiProvider::Actions || platform != Platform::Github)
+        {
+            bail!("[[ci.manual_gates]] requires the effective GitHub Actions backend");
+        }
         if self.separate_events && !self.push_branches.is_empty() {
             bail!(
                 "[ci].push_branches cannot filter explicitly retained separate_events producers; migrate event evidence and policy together"
@@ -754,7 +764,7 @@ impl CiConfig {
                 "[ci].check_command and nix_flake_check=false require Rust language CI; use [ci].components for Nix-only checks"
             );
         }
-        if !self.required_gates.is_empty() {
+        if !self.required_gates.is_empty() || !self.manual_gates.is_empty() {
             bail!("[[ci.required_gates]] requires Rust language CI; use Nix installables instead");
         }
         Ok(())
@@ -4191,7 +4201,8 @@ fn validate_required_gates(ci: &CiConfig) -> Result<()> {
     use std::collections::BTreeSet;
     let mut seen = BTreeSet::new();
     let mut artifact_names = BTreeSet::new();
-    for gate in &ci.required_gates {
+    // Manual gates share the namespace so ids stay unique across workflows.
+    for gate in ci.required_gates.iter().chain(&ci.manual_gates) {
         let id = gate.id.trim();
         if id.is_empty() {
             bail!("simit project config: [[ci.required_gates]] id must not be empty");
@@ -4281,9 +4292,9 @@ fn validate_required_gates(ci: &CiConfig) -> Result<()> {
     Ok(())
 }
 
-fn set_required_gates_table(table: &mut Table, gates: &[RequiredGate]) {
+fn set_required_gates_table(table: &mut Table, key: &str, gates: &[RequiredGate]) {
     if gates.is_empty() {
-        table.remove("required_gates");
+        table.remove(key);
         return;
     }
     let mut array = Array::new();
@@ -4317,7 +4328,7 @@ fn set_required_gates_table(table: &mut Table, gates: &[RequiredGate]) {
         }
         array.push(Value::InlineTable(item));
     }
-    table["required_gates"] = Item::Value(Value::Array(array));
+    table[key] = Item::Value(Value::Array(array));
 }
 
 fn validate_nix_system_runners(ci: &CiConfig) -> Result<()> {
@@ -4635,7 +4646,8 @@ fn set_ci_table(table: &mut Table, ci: &CiConfig) {
     } else {
         table.remove("publish_strategy");
     }
-    set_required_gates_table(table, &ci.required_gates);
+    set_required_gates_table(table, "required_gates", &ci.required_gates);
+    set_required_gates_table(table, "manual_gates", &ci.manual_gates);
     set_string_array(table, "extra_setup", &ci.extra_setup);
     set_string_map(table, "extra_env", &ci.extra_env);
     set_string_map(table, "workflow_templates", &ci.workflow_templates);

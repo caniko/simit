@@ -828,9 +828,14 @@ fn detect_ci_status(workspace_root: &Path) -> FeatureStatus {
     // the CI renderer's expected file set.  Treating its simit marker as a CI
     // workflow incorrectly reports CI drift whenever release automation is
     // enabled.
+    // Config-owned manual gates are drift-checked by `init ci --check`; the
+    // workflow-inferred expectation below cannot reproduce them.
     let workflows = workflows
         .into_iter()
-        .filter(|file| !is_release_workflow(file))
+        .filter(|file| {
+            !is_release_workflow(file)
+                && file.relative_path.file_name() != Some("manual-gates.yaml".as_ref())
+        })
         .collect::<Vec<_>>();
     let (marked, unmarked): (Vec<_>, Vec<_>) = workflows.into_iter().partition(|file| file.marked);
     let unmarked = unmarked
