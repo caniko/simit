@@ -112,9 +112,9 @@ fn fixtures(root: &Path) {
         &drifted,
         ".github/workflows/ci.yaml",
         &format!(
-            "{MARKER}\nname: CI\njobs:\n  test:\n    runs-on: ubuntu-24.04\n    env:\n      \
+            "{MARKER}\nname: CI\non:\n  push:\n    branches: [trunk]\n  pull_request:\njobs:\n  test:\n    runs-on: ubuntu-24.04\n    env:\n      \
              SIMIT_CI_ENGINE_REVISION: ${{{{ vars.SIMIT_CI_ENGINE_REVISION || '{ENGINE}' }}}}\n    \
-             steps:\n      - run: nix run github:caniko/simit/{PINNED} -- init ci --check\n      \
+             steps:\n      - name: parity\n        run: nix run github:caniko/simit/{PINNED} -- init ci --check\n      \
              - run: nix run --no-write-lock-file git+https://github.com/caniko/simit.git -- init flake --check\n"
         ),
     );
@@ -176,7 +176,9 @@ fn fixtures(root: &Path) {
         write(
             &repo,
             ".crow/ci.yaml",
-            &format!("{MARKER}\nsteps:\n  - name: test\n    image: rust\n"),
+            &format!(
+                "{MARKER}\nwhen:\n  - event: [push, pull_request]\nlabels:\n  platform: linux/amd64\nsteps:\n  - name: test\n    image: rust\n"
+            ),
         );
     }
 

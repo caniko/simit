@@ -16,7 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exactly when the new `SUPPORTED_SCOPES`, `UPDATER_ADAPTERS` and
   `SUPPORTED_LANDINGS` constants say so. Flake `simitConfig` is evaluated only
   with `--eval-flake`; `SIMIT_NO_FLAKE_EVAL=1` disables that evaluation in any
-  simit process. See `docs/src/projects-facts.md`.
+  simit process. Every workflow file also becomes a `workflow:` node with its
+  static triggers, runner labels and step names. See
+  `docs/src/projects-facts.md`.
 - Generated `flake-wiring` checks and the Windows packager's simit install now
   pin the generator that rendered them instead of tracking simit's default
   branch or the latest crate. Nix-built simit uses its exact source revision;

@@ -791,6 +791,16 @@
       "to": "usage:github.com/example/flake-config#config.flake"
     },
     {
+      "from": "usage:codefloe.com/example/pink#ci.primary",
+      "kind": "contains",
+      "to": "workflow:codefloe.com/example/pink#.crow/ci.yaml"
+    },
+    {
+      "from": "usage:github.com/example/crow-on-github#ci.primary",
+      "kind": "contains",
+      "to": "workflow:github.com/example/crow-on-github#.crow/ci.yaml"
+    },
+    {
       "from": "usage:github.com/example/drifted#cargo.dependency:Cargo.lock",
       "kind": "pins",
       "to": "rev:github.com/caniko/simit@4c6841cce19327927ea8a8f6e856276dd5c878f0"
@@ -801,6 +811,11 @@
       "to": "runner:github.com/ubuntu-24.04"
     },
     {
+      "from": "usage:github.com/example/drifted#ci.primary",
+      "kind": "contains",
+      "to": "workflow:github.com/example/drifted#.github/workflows/ci.yaml"
+    },
+    {
       "from": "usage:github.com/example/drifted#ci.publish",
       "kind": "runsOn",
       "to": "runner:github.com/atlas"
@@ -809,6 +824,11 @@
       "from": "usage:github.com/example/drifted#ci.publish",
       "kind": "runsOn",
       "to": "runner:github.com/self-hosted"
+    },
+    {
+      "from": "usage:github.com/example/drifted#ci.publish",
+      "kind": "contains",
+      "to": "workflow:github.com/example/drifted#.github/workflows/publish-crate.yaml"
     },
     {
       "from": "usage:github.com/example/drifted#flake-input.direct:simit",
@@ -831,6 +851,11 @@
       "to": "cache:canix"
     },
     {
+      "from": "usage:github.com/example/drifted#release.workflow",
+      "kind": "contains",
+      "to": "workflow:github.com/example/drifted#.github/workflows/release.yml"
+    },
+    {
       "from": "usage:github.com/example/drifted#runtime.cargo-install:scripts/release.sh",
       "kind": "pins",
       "to": "rev:github.com/caniko/simit@4c6841cce19327927ea8a8f6e856276dd5c878f0"
@@ -847,6 +872,31 @@
     },
     {
       "from": "usage:github.com/example/flake-config#ci.primary",
+      "kind": "runsOn",
+      "to": "runner:github.com/ubuntu-latest"
+    },
+    {
+      "from": "usage:github.com/example/flake-config#ci.primary",
+      "kind": "contains",
+      "to": "workflow:github.com/example/flake-config#.github/workflows/ci.yaml"
+    },
+    {
+      "from": "workflow:github.com/example/drifted#.github/workflows/ci.yaml",
+      "kind": "runsOn",
+      "to": "runner:github.com/ubuntu-24.04"
+    },
+    {
+      "from": "workflow:github.com/example/drifted#.github/workflows/publish-crate.yaml",
+      "kind": "runsOn",
+      "to": "runner:github.com/atlas"
+    },
+    {
+      "from": "workflow:github.com/example/drifted#.github/workflows/publish-crate.yaml",
+      "kind": "runsOn",
+      "to": "runner:github.com/self-hosted"
+    },
+    {
+      "from": "workflow:github.com/example/flake-config#.github/workflows/ci.yaml",
       "kind": "runsOn",
       "to": "runner:github.com/ubuntu-latest"
     }
@@ -1200,6 +1250,7 @@
     },
     {
       "attrs": {
+        "generated": false,
         "path": "scripts/release.sh",
         "revisions": [
           "4c6841cce19327927ea8a8f6e856276dd5c878f0"
@@ -1218,6 +1269,7 @@
     },
     {
       "attrs": {
+        "generated": true,
         "path": ".github/workflows/ci.yaml",
         "revisions": [
           "8a132e416caf9cc58a753005b804343181477200"
@@ -1237,6 +1289,7 @@
     },
     {
       "attrs": {
+        "generated": true,
         "path": ".github/workflows/ci.yaml",
         "revisions": [
           "4c6841cce19327927ea8a8f6e856276dd5c878f0"
@@ -1255,6 +1308,7 @@
     },
     {
       "attrs": {
+        "generated": true,
         "path": ".github/workflows/publish-crate.yaml",
         "state": "unknown",
         "usageKind": "runtime.publisher-var"
@@ -1271,6 +1325,7 @@
     },
     {
       "attrs": {
+        "generated": false,
         "path": "scripts/release.sh",
         "state": "unknown",
         "usageKind": "script.invocation"
@@ -1306,6 +1361,118 @@
       },
       "id": "usage:github.com/example/flake-config#config.flake",
       "kind": "usage"
+    },
+    {
+      "attrs": {
+        "generated": true,
+        "labels": [
+          "platform=linux/amd64"
+        ],
+        "path": ".crow/ci.yaml",
+        "steps": [
+          "test"
+        ],
+        "triggers": {
+          "branches": [],
+          "events": [
+            "pull_request",
+            "push"
+          ]
+        }
+      },
+      "id": "workflow:codefloe.com/example/pink#.crow/ci.yaml",
+      "kind": "workflow"
+    },
+    {
+      "attrs": {
+        "generated": true,
+        "labels": [
+          "platform=linux/amd64"
+        ],
+        "path": ".crow/ci.yaml",
+        "steps": [
+          "test"
+        ],
+        "triggers": {
+          "branches": [],
+          "events": [
+            "pull_request",
+            "push"
+          ]
+        }
+      },
+      "id": "workflow:github.com/example/crow-on-github#.crow/ci.yaml",
+      "kind": "workflow"
+    },
+    {
+      "attrs": {
+        "generated": true,
+        "labels": [
+          "ubuntu-24.04"
+        ],
+        "path": ".github/workflows/ci.yaml",
+        "steps": [
+          "parity"
+        ],
+        "triggers": {
+          "branches": [
+            "trunk"
+          ],
+          "events": [
+            "pull_request",
+            "push"
+          ]
+        }
+      },
+      "id": "workflow:github.com/example/drifted#.github/workflows/ci.yaml",
+      "kind": "workflow"
+    },
+    {
+      "attrs": {
+        "generated": true,
+        "labels": [
+          "atlas",
+          "self-hosted"
+        ],
+        "path": ".github/workflows/publish-crate.yaml",
+        "steps": [],
+        "triggers": {
+          "branches": [],
+          "events": []
+        }
+      },
+      "id": "workflow:github.com/example/drifted#.github/workflows/publish-crate.yaml",
+      "kind": "workflow"
+    },
+    {
+      "attrs": {
+        "generated": false,
+        "labels": [],
+        "path": ".github/workflows/release.yml",
+        "steps": [],
+        "triggers": {
+          "branches": [],
+          "events": []
+        }
+      },
+      "id": "workflow:github.com/example/drifted#.github/workflows/release.yml",
+      "kind": "workflow"
+    },
+    {
+      "attrs": {
+        "generated": true,
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "path": ".github/workflows/ci.yaml",
+        "steps": [],
+        "triggers": {
+          "branches": [],
+          "events": []
+        }
+      },
+      "id": "workflow:github.com/example/flake-config#.github/workflows/ci.yaml",
+      "kind": "workflow"
     }
   ],
   "observedAt": "<observedAt>",
