@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -26,11 +26,6 @@ const HOOK_REMOVAL_NOTES: &[(&str, &str)] = &[
 
 pub fn run(command: InitFlakeCommand) -> Result<()> {
     let current_dir = std::env::current_dir().context("reading current directory")?;
-    // Update plans only maintain flake/hook files simit already manages, so
-    // unmanaged projects never reach the adoption-time policy checks.
-    if command.plan_json && registry::detect_flake_status(&current_dir) == FeatureStatus::Absent {
-        return project::CiUpdatePlan::new(vec![], vec![], vec![]).print();
-    }
     if cargo::find_manifest(&current_dir).is_err() {
         if python::find_project_root(&current_dir).is_ok() {
             return run_python(command);
@@ -44,6 +39,9 @@ pub fn run(command: InitFlakeCommand) -> Result<()> {
 
     let metadata = cargo::metadata_for_current_dir()?;
     let workspace_root = metadata.workspace_root.as_std_path();
+    if unmanaged_plan(&command, workspace_root)? {
+        return Ok(());
+    }
     let cfg = ProjectConfig::load(workspace_root)?;
     // Cross mode generates an authoritative, project-owned multi-target flake.nix,
     // which is fundamentally incompatible with custom flake mode (where simit only
@@ -153,6 +151,9 @@ pub fn run_python(command: InitFlakeCommand) -> Result<()> {
 
     let project = python::project_for_current_dir()?;
     let workspace_root = project.workspace_root.as_std_path();
+    if unmanaged_plan(&command, workspace_root)? {
+        return Ok(());
+    }
     let cfg = ProjectConfig::load(workspace_root)?;
     let mut languages = project::detect_languages(workspace_root)?;
     languages.nix = true;
@@ -210,6 +211,12 @@ pub fn run_generic(command: InitFlakeCommand) -> Result<()> {
     }
 
     let current_dir = std::env::current_dir().context("reading current directory")?;
+    if unmanaged_plan(
+        &command,
+        &find_generic_root(&current_dir).unwrap_or_else(|_| current_dir.clone()),
+    )? {
+        return Ok(());
+    }
     let workspace_root = find_generic_root(&current_dir)?;
     let cfg = ProjectConfig::load(&workspace_root)?;
     if cfg.flake.backend == FlakeBackend::PyHarbor {
@@ -268,6 +275,17 @@ pub fn run_generic(command: InitFlakeCommand) -> Result<()> {
         );
     }
     write_tail(&workspace_root, &hook_files(&files), command.plan_json)
+}
+
+/// Update plans only maintain flake/hook files simit already manages, so an
+/// unmanaged project yields an empty plan before any adoption-time check.
+fn unmanaged_plan(command: &InitFlakeCommand, workspace_root: &Path) -> Result<bool> {
+    if !command.plan_json || registry::detect_flake_status(workspace_root) != FeatureStatus::Absent
+    {
+        return Ok(false);
+    }
+    project::CiUpdatePlan::new(vec![], vec![], vec![]).print()?;
+    Ok(true)
 }
 
 fn find_generic_root(start: &Path) -> Result<PathBuf> {
@@ -702,18 +720,22 @@ fn print_tail(files: &[GeneratedFile], scope: FlakeScope) {
 
 fn write_tail(workspace_root: &Path, files: &[GeneratedFile], plan_json: bool) -> Result<()> {
     if plan_json {
-        // The updater cannot fetch: a changed input set would need a new lock.
+        // The updater cannot fetch: changed input declarations need a new lock.
         if let Some(flake) = files
             .iter()
             .find(|file| file.relative_path == Path::new("flake.nix"))
             && fs::read_to_string(workspace_root.join("flake.nix")).ok()
                 != Some(flake.content.clone())
         {
-            let declared = flake_input_names(&flake.content);
+            let declared = flake_inputs(&flake.content);
+            let current = flake_inputs(
+                &fs::read_to_string(workspace_root.join("flake.nix")).unwrap_or_default(),
+            );
             let locked = locked_root_inputs(workspace_root)?;
-            if declared != locked {
+            if declared != current || !declared.keys().eq(locked.iter()) {
                 bail!(
-                    "generated flake.nix declares inputs {declared:?} but flake.lock locks {locked:?}; run `simit init flake` and update flake.lock outside the updater"
+                    "generated flake.nix changes input declarations (now {:?}) that flake.lock locks as {locked:?}; run `simit init flake` and update flake.lock outside the updater",
+                    declared.keys().collect::<Vec<_>>()
                 );
             }
         }
@@ -862,11 +884,12 @@ fn update_nix_brace_depth(depth: &mut i32, line: &str) {
     }
 }
 
-/// Input names a flake declares: `inputs.NAME…` bindings at the top level or
-/// `NAME…` bindings directly inside a top-level `inputs = { … }` block.
+/// Input declarations of a flake by name: `inputs.NAME…` bindings at the top
+/// level or `NAME…` bindings directly inside a top-level `inputs = { … }`
+/// block, each with the text of its nested lines.
 // ponytail: a line scanner for one binding per line, as simit renders flakes;
 // anything it misses fails the lock comparison closed rather than open.
-fn flake_input_names(content: &str) -> BTreeSet<String> {
+fn flake_inputs(content: &str) -> BTreeMap<String, String> {
     let identifier = |name: &str| {
         !name.is_empty()
             && name
@@ -879,29 +902,40 @@ fn flake_input_names(content: &str) -> BTreeSet<String> {
             .unwrap_or_default()
             .to_owned()
     };
-    let mut names = BTreeSet::new();
+    let mut inputs = BTreeMap::<String, String>::new();
     let mut depth = 0i32;
     let mut block = None;
+    let mut current: Option<(String, i32)> = None;
     for line in content.lines() {
         let trimmed = line.trim();
-        let key = first(trimmed);
-        if depth == 1 && key == "inputs" {
-            match trimmed.strip_prefix("inputs.") {
-                Some(rest) => {
-                    names.insert(first(rest));
-                }
-                None => block = Some(2),
+        if let Some((name, base)) = &current
+            && depth > *base
+        {
+            if !trimmed.starts_with('#') {
+                inputs.entry(name.clone()).or_default().push_str(trimmed);
             }
-        } else if block == Some(depth) && identifier(&key) {
-            names.insert(key);
+        } else {
+            current = None;
+            let key = first(trimmed);
+            if depth == 1 && key == "inputs" {
+                match trimmed.strip_prefix("inputs.") {
+                    Some(rest) => current = Some((first(rest), depth)),
+                    None => block = Some(2),
+                }
+            } else if block == Some(depth) && identifier(&key) {
+                current = Some((key, depth));
+            }
+            if let Some((name, _)) = &current {
+                inputs.entry(name.clone()).or_default().push_str(trimmed);
+            }
         }
         update_nix_brace_depth(&mut depth, line);
         if block.is_some_and(|inner| depth < inner) {
             block = None;
         }
     }
-    names.retain(|name| identifier(name));
-    names
+    inputs.retain(|name, _| identifier(name));
+    inputs
 }
 
 fn locked_root_inputs(workspace_root: &Path) -> Result<BTreeSet<String>> {
@@ -922,7 +956,7 @@ fn locked_root_inputs(workspace_root: &Path) -> Result<BTreeSet<String>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_pre_commit_hook_names, flake_input_names, pre_commit_removal_notes};
+    use super::{extract_pre_commit_hook_names, flake_inputs, pre_commit_removal_notes};
 
     #[test]
     fn removal_notes_use_specific_mapping_when_available() {
@@ -986,9 +1020,8 @@ mod tests {
     }
 
     #[test]
-    fn input_names_cover_block_and_dotted_declarations_only() {
-        let names = flake_input_names(
-            r#"{
+    fn inputs_cover_block_and_dotted_declarations_with_their_sources() {
+        let flake = r#"{
   description = "inputs.ignored = text";
   inputs = {
     # commented.url = "x";
@@ -1001,11 +1034,22 @@ mod tests {
   inputs.crane.url = "github:ipetkov/crane";
   outputs = { self, ... }: { inputs = {}; };
 }
-"#,
-        );
+"#;
+        let inputs = flake_inputs(flake);
         assert_eq!(
-            names.into_iter().collect::<Vec<_>>(),
+            inputs.keys().collect::<Vec<_>>(),
             ["crane", "nixpkgs", "treefmt-nix"]
         );
+        // A same-named input with another source is a different declaration.
+        let moved = flake_inputs(&flake.replace(
+            "github:numtide/treefmt-nix",
+            "github:numtide/treefmt-nix/other",
+        ));
+        assert_eq!(
+            moved.keys().collect::<Vec<_>>(),
+            inputs.keys().collect::<Vec<_>>()
+        );
+        assert_ne!(moved["treefmt-nix"], inputs["treefmt-nix"]);
+        assert_eq!(moved["crane"], inputs["crane"]);
     }
 }

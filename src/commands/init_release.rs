@@ -111,6 +111,18 @@ pub fn run(command: InitReleaseCommand) -> Result<()> {
     if command.plan_json {
         let obsolete =
             project::obsolete_generated_workflows(workspace_root, &plan.files, plan.owns_name)?;
+        // A plan keeps release automation on its backend unless the platform is
+        // explicit project policy or a --platform (as provider migrations pass).
+        if command.platform.is_none()
+            && cfg.ci.platform.is_none()
+            && obsolete
+                .iter()
+                .any(|path| path.parent() != std::path::Path::new(&workflow_path).parent())
+        {
+            bail!(
+                "release plan would move the generated release workflow to {workflow_path}; set [ci].platform or pass --platform"
+            );
+        }
         // Update plans only maintain an existing generated release workflow.
         let generated = std::fs::read_to_string(workspace_root.join(&workflow_path))
             .is_ok_and(|content| crate::render::ci::is_generated_workflow_marker(&content));

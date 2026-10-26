@@ -232,8 +232,9 @@ pub fn policy_digest(
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Receipt {
-    /// Absent (0) in v1 receipts. Older binaries reject v2 fields as unknown.
-    #[serde(default)]
+    /// Absent (0) in v1 receipts, which older binaries can still read. They
+    /// reject v2 fields as unknown.
+    #[serde(default, skip_serializing_if = "v1")]
     pub schema_version: u32,
     pub coordinate: String,
     pub config_digest: String,
@@ -252,11 +253,26 @@ pub struct Receipt {
     pub patches: BTreeMap<String, Option<String>>,
 }
 
+fn v1(version: &u32) -> bool {
+    *version == 0
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Baseline {
     repository_id: String,
     managed: BTreeMap<String, Option<String>>,
+    /// Scopes the baseline was adopted under; earlier baselines were `ci` only.
+    #[serde(default = "primary_scope", skip_serializing_if = "only_primary")]
+    scopes: Vec<String>,
+}
+
+fn primary_scope() -> Vec<String> {
+    vec!["ci".into()]
+}
+
+fn only_primary(scopes: &[String]) -> bool {
+    scopes == ["ci"]
 }
 
 pub fn status(root: &Path) -> Result<Vec<Receipt>> {
@@ -1105,10 +1121,14 @@ pub fn update(
                     .all(|(path, hash)| hash.is_none() || before.contains_key(path)),
                 "generation plan abandons a managed path; retain it or explicitly mark it obsolete"
             );
-            // Widening scopes adopts existing generated files only under the
+            // Widening scopes adopts their existing generated files once, under the
             // same explicit enrollment as the initial baseline.
+            let widened = profile
+                .scopes
+                .iter()
+                .any(|scope| !baseline.scopes.contains(scope));
             ensure!(
-                profile.enroll_current
+                (profile.enroll_current && widened)
                     || before
                         .keys()
                         .all(|p| baseline.managed.contains_key(p) || before[p].is_none()),
@@ -1192,6 +1212,7 @@ pub fn update(
                     &Baseline {
                         repository_id: observed.repository_id.clone(),
                         managed: managed.clone(),
+                        scopes: profile.scopes.clone(),
                     },
                 )?;
             }
@@ -1503,6 +1524,7 @@ pub fn update(
             &Baseline {
                 repository_id: receipt.repository_id.clone(),
                 managed: receipt.managed.clone(),
+                scopes: profile.scopes.clone(),
             },
         )?;
         receipt.phase = "qualified".into();
@@ -1529,6 +1551,27 @@ mod tests {
         assert!(save(&path, &json!({"diff": diff})).is_err());
         let previous: String = crate::review::read_json(&path).unwrap();
         assert_eq!(previous, "previous readable receipt");
+    }
+
+    #[test]
+    fn v1_receipts_and_ci_baselines_keep_their_original_shape() {
+        let receipt: Receipt = serde_json::from_value(json!({
+            "coordinate":"forge.example/team/demo","configDigest":"","repositoryId":"1","source":"",
+            "candidate":"","branch":"","defaultBranch":"trunk","policyDigest":"","phase":"qualified",
+            "managed":{},"diff":""
+        }))
+        .unwrap();
+        let receipt = serde_json::to_value(&receipt).unwrap();
+        assert!(receipt.get("schemaVersion").is_none() && receipt.get("patches").is_none());
+        let baseline: Baseline =
+            serde_json::from_value(json!({"repositoryId":"1","managed":{}})).unwrap();
+        assert_eq!(baseline.scopes, ["ci"]);
+        assert!(
+            serde_json::to_value(&baseline)
+                .unwrap()
+                .get("scopes")
+                .is_none()
+        );
     }
 
     #[test]
@@ -3187,6 +3230,66 @@ else:
         let repatched = f.update(true).unwrap();
         assert_eq!(repatched.phase, "qualified");
         assert_eq!(f.remote_head(), repatched.candidate);
+    }
+
+    #[test]
+    fn namespace_scope_widening_adopts_existing_files_only_once() {
+        let mut f = Fixture::new();
+        fs::write(
+            f.source.join(".github/workflows/release.yml"),
+            "old release\n",
+        )
+        .unwrap();
+        let primary =
+            json!({"schema":"simit.ci-update-plan.v1","files":[primary_ci()],"obsolete":[]});
+        scoped_plans(
+            &mut f,
+            &["ci"],
+            json!({"init ci --primary-only --plan-json": primary}),
+        );
+        assert_eq!(f.update(true).unwrap().phase, "qualified");
+
+        let release = |files: serde_json::Value| {
+            json!({
+                "init ci --primary-only --plan-json": primary,
+                "init release --plan-json": {"schema":"simit.ci-update-plan.v1","files":files,"obsolete":[]},
+            })
+        };
+        let checkout = f.root().join("checkout");
+        let workflow =
+            json!({"relative_path":".github/workflows/release.yml","content":"name: Release\n"});
+        f.config.profiles.get_mut("fleet").unwrap().scopes = vec!["ci".into(), "release".into()];
+        save(
+            &checkout.join("fixture-plans.json"),
+            &release(json!([workflow])),
+        )
+        .unwrap();
+        f.publish(&checkout, "widen to the release scope");
+        let widened = f.update(true).unwrap();
+        assert_eq!(widened.phase, "qualified");
+        let baseline: Baseline = crate::review::read_json(&f.root().join("baseline.json")).unwrap();
+        assert_eq!(baseline.scopes, ["ci", "release"]);
+
+        // Once adopted, enrollCurrent no longer lets the scope claim other files.
+        fs::write(
+            checkout.join(".github/workflows/extra.yaml"),
+            "project-owned\n",
+        )
+        .unwrap();
+        let extra = json!({"relative_path":".github/workflows/extra.yaml","content":"generated\n"});
+        save(
+            &checkout.join("fixture-plans.json"),
+            &release(json!([workflow, extra])),
+        )
+        .unwrap();
+        let source = f.publish(&checkout, "claim another existing file");
+        assert!(
+            f.update(true)
+                .unwrap_err()
+                .to_string()
+                .contains("already exists outside the baseline")
+        );
+        assert_eq!(f.remote_head(), source);
     }
 
     #[test]

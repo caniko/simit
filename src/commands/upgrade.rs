@@ -113,7 +113,15 @@ pub fn run(command: UpgradeCommand) -> Result<()> {
 /// The current workspace's README badge block as an update-plan patch. Update
 /// plans only maintain an existing block, so no markers yield an empty plan.
 fn plan_json() -> Result<()> {
-    let workspace_root = std::env::current_dir().context("reading current directory")?;
+    let current_dir = std::env::current_dir().context("reading current directory")?;
+    // Badges are a Cargo workspace feature; plain upgrade resolves the same root.
+    let workspace_root = if cargo::find_manifest(&current_dir).is_ok() {
+        cargo::metadata_for_current_dir()?
+            .workspace_root
+            .into_std_path_buf()
+    } else {
+        current_dir
+    };
     let has_block = workspace_root.join("Cargo.toml").is_file()
         && fs::read_to_string(workspace_root.join("README.md"))
             .is_ok_and(|readme| readme.contains(readme_badges::START_MARKER));

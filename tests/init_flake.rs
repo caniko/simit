@@ -455,9 +455,9 @@ fn default_scope_writes_only_detected_hook_file() {
 fn flake_plan_maintains_only_managed_files_with_locked_inputs() {
     let temp = init_package();
     let root = temp.path();
-    let plan = || {
+    let plan = |directory: &Path| {
         simit()
-            .current_dir(root)
+            .current_dir(directory)
             .args(["init", "flake", "--plan-json"])
             .output()
             .unwrap()
@@ -471,10 +471,10 @@ fn flake_plan_maintains_only_managed_files_with_locked_inputs() {
         serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
     };
     let empty = serde_json::json!({"schema":"simit.ci-update-plan.v1","files":[],"obsolete":[]});
-    assert_eq!(parse(plan()), empty);
+    assert_eq!(parse(plan(root)), empty);
     // A project-owned flake without simit hooks is not adopted either.
     fs::write(root.join("flake.nix"), "{ outputs = _: { }; }\n").unwrap();
-    assert_eq!(parse(plan()), empty);
+    assert_eq!(parse(plan(root)), empty);
     fs::remove_file(root.join("flake.nix")).unwrap();
     assert!(!root.join("nix").exists());
 
@@ -484,7 +484,9 @@ fn flake_plan_maintains_only_managed_files_with_locked_inputs() {
         .status()
         .unwrap();
     assert!(status.success());
-    let managed = parse(plan());
+    let managed = parse(plan(root));
+    // A workspace subdirectory plans the same workspace files.
+    assert_eq!(parse(plan(&root.join("src"))), managed);
     assert!(
         managed["files"]
             .as_array()
@@ -501,7 +503,7 @@ fn flake_plan_maintains_only_managed_files_with_locked_inputs() {
         .map(|line| format!("{line}\n"))
         .collect::<String>();
     fs::write(root.join("flake.nix"), &without_hooks).unwrap();
-    let output = plan();
+    let output = plan(root);
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("flake.lock"));
     assert_eq!(read(&root.join("flake.nix")), without_hooks);

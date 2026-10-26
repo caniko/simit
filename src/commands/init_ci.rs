@@ -567,14 +567,17 @@ pub fn run(command: InitCiCommand) -> Result<()> {
         command.check,
         &mut files,
     );
-    // Update plans never resolve local signing keys.
-    if (publish_crates || with_artifacts) && !command.primary_only && !command.plan_json {
-        files.push(release_trust::generated_file(
-            workspace_root,
-            &cfg,
-            &trust_overrides,
-            command.check,
-        )?);
+    if (publish_crates || with_artifacts) && !command.primary_only {
+        if command.plan_json {
+            release_trust::require_committed(workspace_root, &cfg, &trust_overrides)?;
+        } else {
+            files.push(release_trust::generated_file(
+                workspace_root,
+                &cfg,
+                &trust_overrides,
+                command.check,
+            )?);
+        }
     }
 
     if command.check {
@@ -1164,15 +1167,17 @@ fn run_nix_only_at(command: InitCiCommand, workspace_root: &Path) -> Result<()> 
             platform,
             &ResolvedRunner::literal(&runner)?,
         )?);
-        // Update plans never resolve local signing keys.
-        if !command.plan_json {
+        let overrides = TrustOverrides {
+            key: command.maintainer_key.clone(),
+            trust_root: command.maintainers_gpg.clone(),
+        };
+        if command.plan_json {
+            release_trust::require_committed(workspace_root, &cfg, &overrides)?;
+        } else {
             files.push(release_trust::generated_file(
                 workspace_root,
                 &cfg,
-                &TrustOverrides {
-                    key: command.maintainer_key.clone(),
-                    trust_root: command.maintainers_gpg.clone(),
-                },
+                &overrides,
                 command.check,
             )?);
         }
