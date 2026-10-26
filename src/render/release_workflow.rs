@@ -698,7 +698,7 @@ pub fn render(inputs: &ReleaseWorkflowInputs<'_>) -> String {
         push_publish_pypi(
             &mut w,
             pypi,
-            channel_policy(inputs, "pypi") == Some(ReleasePublisherPolicy::Staged),
+            channel_soft_skip(inputs, "pypi", activated_remote),
         );
     }
     if let Some(copr) = inputs.copr {
@@ -1238,7 +1238,15 @@ fn stable_only_preflight(credential: &ReleaseCredential) -> bool {
 fn downstream_publisher_credential(credential: &ReleaseCredential) -> bool {
     matches!(
         credential.channel.as_str(),
-        "apt" | "aur" | "copr" | "homebrew" | "scoop" | "chocolatey" | "flatpak" | "winget"
+        "apt"
+            | "aur"
+            | "copr"
+            | "homebrew"
+            | "scoop"
+            | "chocolatey"
+            | "flatpak"
+            | "winget"
+            | "pypi"
     )
 }
 
@@ -1899,6 +1907,12 @@ fn push_publisher_state_probe(w: &mut String, inputs: &ReleaseWorkflowInputs<'_>
     } else {
         w.push_str("          write_state scoop not-configured '-'\n");
     }
+    // Active once the project exists on PyPI; the name comes from the first
+    // wheel (the JSON API accepts the wheel's normalized name).
+    if inputs.pypi.is_some() && channel_enabled(inputs, "pypi") {
+        w.push_str("          pypi_wheels=(release/*.whl); pypi_name=\"${pypi_wheels[0]##*/}\"; pypi_name=\"${pypi_name%%-*}\"\n");
+        w.push_str("          active_or_soft pypi \"$pypi_name\" curl -fsS -o /dev/null \"https://pypi.org/pypi/${pypi_name}/json\"\n");
+    }
     if let Some(flatpak) = inputs.flatpak {
         writeln!(
             w,
@@ -2245,7 +2259,9 @@ fn push_publish_scoop(w: &mut String, scoop: &ResolvedScoop, soft_skip: bool) {
 
 /// Uploads the wheels the release build left in `release/`; nothing is built
 /// here. `--check-url` skips files PyPI already has, so a rerun resumes.
-fn push_publish_pypi(w: &mut String, pypi: &PypiReleaseConfig, staged: bool) {
+/// With `soft_skip`, a missing token or wheel defers to the channel state
+/// (staged policy, or a PyPI project that does not exist yet).
+fn push_publish_pypi(w: &mut String, pypi: &PypiReleaseConfig, soft_skip: bool) {
     w.push_str("      - name: Publish wheels to PyPI\n");
     if !pypi.trusted_publishing {
         writeln!(
@@ -2256,20 +2272,36 @@ fn push_publish_pypi(w: &mut String, pypi: &PypiReleaseConfig, staged: bool) {
         .expect("write");
     }
     w.push_str("        run: |\n          set -euo pipefail\n");
-    if !pypi.trusted_publishing {
-        if staged {
-            w.push_str("          if [ -z \"${UV_PUBLISH_TOKEN:-}\" ]; then echo '::warning::pypi: token unset; staged publisher is not active yet.' >&2; exit 0; fi\n");
+    if soft_skip {
+        push_active_or_skip_prelude(w);
+    }
+    let missing = |w: &mut String, condition: &str, message: &str| {
+        if soft_skip {
+            writeln!(
+                w,
+                "          if {condition}; then publisher_missing pypi '{message}'; fi"
+            )
         } else {
             writeln!(
                 w,
-                "          if [ -z \"${{UV_PUBLISH_TOKEN:-}}\" ]; then echo '{} is required because PyPI publishing is configured.' >&2; exit 1; fi",
-                pypi.token_secret
+                "          if {condition}; then echo '{message}' >&2; exit 1; fi"
             )
-            .expect("write");
         }
+        .expect("write");
+    };
+    if !pypi.trusted_publishing {
+        missing(
+            w,
+            "[ -z \"${UV_PUBLISH_TOKEN:-}\" ]",
+            &format!("{} is unset", pypi.token_secret),
+        );
     }
     w.push_str("          shopt -s nullglob\n          wheels=(release/*.whl)\n");
-    w.push_str("          if [ \"${#wheels[@]}\" -eq 0 ]; then echo 'No release/*.whl to publish to PyPI.' >&2; exit 1; fi\n");
+    missing(
+        w,
+        "[ \"${#wheels[@]}\" -eq 0 ]",
+        "no release/*.whl to publish",
+    );
     w.push_str("          nix shell nixpkgs#uv -c uv publish --check-url https://pypi.org/simple/");
     if pypi.trusted_publishing {
         w.push_str(" --trusted-publishing always");
@@ -3738,6 +3770,72 @@ esac"#,
         );
 
         assert!(!render(&inputs(None)).contains("PyPI"));
+    }
+
+    #[test]
+    fn pypi_follows_activated_remote_and_channel_policies() {
+        let artifacts = artifacts();
+        let pypi = PypiReleaseConfig {
+            trusted_publishing: false,
+            token_secret: "PYPI_TOKEN".to_owned(),
+        };
+        let render_with = |enforcement, publish: &ReleasePublishConfig| {
+            render(&ReleaseWorkflowInputs {
+                platform: Platform::Github,
+                runner: "ubuntu-24.04",
+                preinstalled_nix: false,
+                publish_enforcement: enforcement,
+                publish,
+                artifacts: &artifacts,
+                prebuild: None,
+                smoke_command: None,
+                release: None,
+                tag_prefix: crate::release_identity::TagPrefix::None,
+                notes_source: None,
+                required_gates: &[],
+                attic: None,
+                aur: None,
+                copr: None,
+                apt: None,
+                homebrew: None,
+                scoop: None,
+                chocolatey: None,
+                windows_signing: None,
+                flatpak: None,
+                winget: None,
+                announce: None,
+                pypi: Some(&pypi),
+            })
+        };
+        let policy = |p| ReleasePublishConfig {
+            channels: [("pypi".to_owned(), p)].into(),
+            ..ReleasePublishConfig::default()
+        };
+
+        // Soft until the PyPI project exists: no preflight requirement, a
+        // probe, and missing token or wheels defer to the probed state.
+        let workflow = render_with(
+            ReleasePublisherEnforcement::ActivatedRemote,
+            &ReleasePublishConfig::default(),
+        );
+        assert!(!workflow.contains("require_credential 'repo secret' 'PYPI_TOKEN'"));
+        assert!(workflow.contains("active_or_soft pypi \"$pypi_name\" curl -fsS"));
+        assert!(workflow.contains("then publisher_missing pypi 'PYPI_TOKEN is unset'"));
+        assert!(workflow.contains("then publisher_missing pypi 'no release/*.whl to publish'"));
+
+        // A staged channel skips missing wheels even under declared enforcement.
+        let workflow = render_with(
+            ReleasePublisherEnforcement::Declared,
+            &policy(ReleasePublisherPolicy::Staged),
+        );
+        assert!(workflow.contains("then publisher_missing pypi 'no release/*.whl to publish'"));
+        assert!(!workflow.contains("active_or_soft pypi"));
+
+        let workflow = render_with(
+            ReleasePublisherEnforcement::Declared,
+            &policy(ReleasePublisherPolicy::Disabled),
+        );
+        assert!(!workflow.contains("PyPI") && !workflow.contains("PYPI_TOKEN"));
     }
 
     #[test]

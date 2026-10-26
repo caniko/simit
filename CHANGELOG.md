@@ -10,9 +10,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add `[release.pypi]`: the release workflow uploads the prebuilt
   `release/*.whl` (e.g. from a Nix `release-bundle`) to PyPI with
   `uv publish --check-url` after the hosted release, using PyPI trusted
-  publishing on GitHub Actions or `token_secret` (default `PYPI_TOKEN`). The
-  token is checked in the release credential preflight; Crow release workflows
-  reject the section.
+  publishing on GitHub Actions or `token_secret` (default `PYPI_TOKEN`). It
+  follows `[release.publish]`: the token is checked in the preflight, stays soft
+  under `activated-remote` until the PyPI project exists, and a `staged` channel
+  skips a missing token or wheels. Crow release workflows reject the section
+  unless the channel is disabled.
 - Generated `flake-wiring` checks and the Windows packager's simit install now
   pin the generator that rendered them instead of tracking simit's default
   branch or the latest crate. Nix-built simit uses its exact source revision;

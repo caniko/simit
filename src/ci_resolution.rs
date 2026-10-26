@@ -92,6 +92,8 @@ pub fn release_backend(
         .pypi
         .as_ref()
         .is_some_and(|pypi| pypi.trusted_publishing)
+        && cfg.release.publish.policy("pypi")
+            != Some(crate::config::ReleasePublisherPolicy::Disabled)
         && (provider != CiProvider::Actions || platform != Platform::Github)
     {
         bail!("[release.pypi].trusted_publishing requires the effective GitHub Actions backend");

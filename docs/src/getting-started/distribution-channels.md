@@ -249,7 +249,11 @@ PyPI already has. Nothing is built for PyPI; add `"*.whl"` to
 `checksum_globs` to attach the same wheels to the hosted release. Prerelease
 tags publish too. `trusted_publishing = true` uses the job's GitHub OIDC token
 (register the trusted publisher with workflow `release.yml`; GitHub Actions
-only); otherwise the token secret is required before anything is published:
+only, unless the `pypi` channel is disabled); otherwise the token secret is
+checked before anything is published. Under
+`[release.publish].enforcement = "activated-remote"` the channel stays soft
+until the project exists on PyPI, and a `staged` channel skips a missing token
+or missing wheels with a warning:
 
 ```toml
 [release.pypi]

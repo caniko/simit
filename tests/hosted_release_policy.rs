@@ -827,3 +827,14 @@ fn release_pypi_uploads_bundle_wheels_after_the_hosted_release() {
         "{output:?}"
     );
 }
+
+#[test]
+fn disabled_pypi_channel_does_not_gate_the_release_backend() {
+    let workflow = render(
+        project(&format!(
+            "{HOSTED}[release.pypi]\ntrusted_publishing=true\n[release.publish.channels]\npypi='disabled'\n"
+        ))
+        .path(),
+    );
+    assert!(!workflow.contains("PyPI"), "{workflow}");
+}
