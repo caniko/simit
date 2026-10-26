@@ -10,6 +10,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add `[ci.nix_build].engine_revision`, a committed exact grouped-engine
   revision used when `vars.SIMIT_CI_ENGINE_REVISION` is unavailable, such as in
   fork pull requests; the enrolled variable still takes precedence.
+- Add Crow-only `[prebuild].qualify`: `simit init ci --prebuild-only` also
+  renders one `.crow/prebuild-qualify-<name>` workflow each for
+  `nix flake check --no-build`, every `qualify` installable and every prebuild
+  `nix_builds` installable. They run on pull requests and default-branch
+  pushes, without secrets, in parallel and each within the repository
+  timeout. This gives projects without a GitHub mirror Nix qualification
+  before the publishing prebuild.
 - `[ci.nix_build].only` now coexists with `[prebuild]`: Nix-only projects keep
   their exact qualification matrix and add the Attic/archive prebuild without
   gaining language CI.

@@ -1155,6 +1155,12 @@ pub struct PrebuildConfig {
     /// mirror: it builds and publishes on default-branch pushes only.
     #[serde(default)]
     pub provider: Option<CiProvider>,
+    /// Crow only: installables (usually flake checks) qualified on pull
+    /// requests and default-branch pushes, together with
+    /// `nix flake check --no-build` and `nix_builds`, one secret-free
+    /// `.crow/prebuild-qualify-<name>` workflow per command.
+    #[serde(default)]
+    pub qualify: Vec<String>,
 }
 
 impl PrebuildConfig {
@@ -2657,6 +2663,13 @@ impl ProjectConfig {
                     "simit project config: [prebuild] provider = \"crow\" supports neither release_archives, system_runners nor push_branches"
                 );
             }
+            if !prebuild.runs_on_crow() && !prebuild.qualify.is_empty() {
+                bail!("simit project config: [prebuild].qualify requires provider = \"crow\"");
+            }
+            validate_nonempty_strings(
+                "simit project config: [prebuild].qualify",
+                &prebuild.qualify,
+            )?;
             if let Some(provider) = self.ci.provider {
                 self.validate_crow_prebuild_beside(provider)?;
             }
@@ -2682,10 +2695,11 @@ impl ProjectConfig {
             if prebuild
                 .nix_builds
                 .iter()
+                .chain(&prebuild.qualify)
                 .any(|installable| installable.contains('\n') || installable.contains('\r'))
             {
                 bail!(
-                    "simit project config: [prebuild].nix_builds must contain single-line installables"
+                    "simit project config: [prebuild].nix_builds and qualify must contain single-line installables"
                 );
             }
             if prebuild.effective_nix_builds(&self.ci).is_empty()

@@ -474,9 +474,7 @@ pub fn run(command: InitCiCommand) -> Result<()> {
             &cfg.ci.nix_build,
         )?);
     }
-    if let Some(prebuild) = prebuild_file(&cfg, cfg.ci.crow.format)? {
-        files.push(prebuild);
-    }
+    files.extend(prebuild_files(&cfg, cfg.ci.crow.format)?);
     if !command.primary_only
         && resolved.with_pypi_publish
         && cargo::has_pyo3_dep(&metadata.packages)
@@ -600,9 +598,10 @@ fn run_prebuild_only(command: InitCiCommand) -> Result<()> {
         bail!("Prebuild workflow generation requires flake.nix at the workspace root");
     }
     let cfg = ProjectConfig::load(&workspace_root)?;
-    let file = prebuild_file(&cfg, cfg.ci.crow.format)?
-        .context("--prebuild-only requires a [prebuild] configuration")?;
-    let files = [file];
+    let files = prebuild_files(&cfg, cfg.ci.crow.format)?;
+    if files.is_empty() {
+        bail!("--prebuild-only requires a [prebuild] configuration");
+    }
     let message = "Prebuild workflow is not up to date; run `simit init ci --prebuild-only`";
     let mut expected = files
         .iter()
@@ -1157,9 +1156,7 @@ fn run_nix_only_at(command: InitCiCommand, workspace_root: &Path) -> Result<()> 
             command.check,
         )?);
     }
-    if let Some(prebuild) = prebuild_file(&cfg, cfg.ci.crow.format)? {
-        files.push(prebuild);
-    }
+    files.extend(prebuild_files(&cfg, cfg.ci.crow.format)?);
     if let Some(pages) = &pages {
         files.push(ci::codeberg_pages_file(
             platform,
@@ -1202,25 +1199,34 @@ fn run_nix_only_at(command: InitCiCommand, workspace_root: &Path) -> Result<()> 
     Ok(())
 }
 
-/// The `[prebuild]` workflow: GitHub Actions by default, `.crow/prebuild.*` in the
-/// effective Crow format for `provider = "crow"`.
-pub(crate) fn prebuild_file(
+/// The `[prebuild]` workflows: GitHub Actions by default, `.crow/prebuild.*` in the
+/// effective Crow format for `provider = "crow"`, plus the
+/// `.crow/prebuild-qualify-*` workflows when `[prebuild].qualify` is set.
+pub(crate) fn prebuild_files(
     cfg: &ProjectConfig,
     crow_format: CrowWorkflowFormat,
-) -> Result<Option<project::GeneratedFile>> {
+) -> Result<Vec<project::GeneratedFile>> {
     let Some(prebuild) = &cfg.prebuild else {
-        return Ok(None);
+        return Ok(Vec::new());
     };
     if prebuild.runs_on_crow() {
-        return Ok(Some(crate::render::crow::prebuild_file(
+        let mut files = vec![crate::render::crow::prebuild_file(
             crow_format,
             &cfg.ci.crow,
             prebuild.effective_nix_builds(&cfg.ci),
             prebuild,
             cfg.release.attic.as_ref(),
-        )?));
+        )?];
+        if !prebuild.qualify.is_empty() {
+            files.extend(crate::render::crow::qualify_files(
+                crow_format,
+                &cfg.ci.crow,
+                prebuild,
+            )?);
+        }
+        return Ok(files);
     }
-    Ok(Some(ci::github_prebuild_file_with_policy(
+    Ok(vec![ci::github_prebuild_file_with_policy(
         prebuild.effective_system_runners(&cfg.ci),
         prebuild.effective_nix_builds(&cfg.ci),
         prebuild,
@@ -1229,7 +1235,7 @@ pub(crate) fn prebuild_file(
         cfg.release.tag_prefix,
         cfg.release.notes_source(Platform::Github),
         cfg.release.github.is_some(),
-    )?))
+    )?])
 }
 
 fn run_python(command: InitCiCommand) -> Result<()> {
@@ -1344,9 +1350,7 @@ fn run_python(command: InitCiCommand) -> Result<()> {
             &cfg.ci.nix_build,
         )?);
     }
-    if let Some(prebuild) = prebuild_file(&cfg, cfg.ci.crow.format)? {
-        files.push(prebuild);
-    }
+    files.extend(prebuild_files(&cfg, cfg.ci.crow.format)?);
     if !command.primary_only && with_pypi_publish {
         files.push(ci::python_publish_file(
             platform,
@@ -1523,9 +1527,7 @@ fn run_crow(
         )?);
     }
     cfg.validate_crow_prebuild_beside(CiProvider::Crow)?;
-    if let Some(prebuild) = prebuild_file(cfg, crow.format)? {
-        files.push(prebuild);
-    }
+    files.extend(prebuild_files(cfg, crow.format)?);
 
     let inferred_pages = infer_codeberg_pages_from_workflows(&snapshots)?;
     let pages = if command.primary_only {
@@ -1651,9 +1653,7 @@ fn run_crow_python(
         )?);
     }
     cfg.validate_crow_prebuild_beside(CiProvider::Crow)?;
-    if let Some(prebuild) = prebuild_file(cfg, crow.format)? {
-        files.push(prebuild);
-    }
+    files.extend(prebuild_files(cfg, crow.format)?);
     let mut persisted_ci = resolved.persisted_ci(
         cfg,
         platform,
@@ -2533,6 +2533,9 @@ fn is_primary_ci_workflow_name(name: &std::ffi::OsStr) -> bool {
             | "prebuild.yaml"
             | "prebuild.yml"
             | "prebuild.jsonnet"
+            | "qualify.yaml"
+            | "qualify.yml"
+            | "qualify.jsonnet"
     ) || ["ci-", "build-", "nix-builds-", "prebuild-"]
         .iter()
         .any(|prefix| {
@@ -2563,8 +2566,25 @@ fn obsolete_nix_workflows(
 ) -> Result<Vec<PathBuf>> {
     let workflow_dir = PathBuf::from(platform.workflow_dir());
     let mut obsolete = Vec::new();
-    let crow_prebuilds =
-        ["prebuild.yaml", "prebuild.jsonnet"].map(|name| Path::new(".crow").join(name));
+    let mut crow_prebuilds = [
+        "prebuild.yaml",
+        "prebuild.jsonnet",
+        "qualify.yaml",
+        "qualify.jsonnet",
+    ]
+    .map(|name| Path::new(".crow").join(name))
+    .to_vec();
+    if let Ok(entries) = fs::read_dir(workspace_root.join(".crow")) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            if name.to_str().is_some_and(|name| {
+                name.starts_with("prebuild-qualify-")
+                    && (name.ends_with(".yaml") || name.ends_with(".jsonnet"))
+            }) {
+                crow_prebuilds.push(Path::new(".crow").join(name));
+            }
+        }
+    }
     for relative in [
         "nix-builds.yaml",
         "nix-builds.yml",
@@ -2620,6 +2640,9 @@ fn is_ci_managed_workflow_name(name: &std::ffi::OsStr) -> bool {
             | "prebuild.yaml"
             | "prebuild.yml"
             | "prebuild.jsonnet"
+            | "qualify.yaml"
+            | "qualify.yml"
+            | "qualify.jsonnet"
             | "pages.yaml"
             | "pages.yml"
             | "publish-pypi.yaml"

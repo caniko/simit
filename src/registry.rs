@@ -890,10 +890,13 @@ fn is_supplementary_workflow(file: &WorkflowFile) -> bool {
             | "prebuild.yml"
             | "prebuild.jsonnet"
             | "prebuild.yaml"
+            | "qualify.jsonnet"
+            | "qualify.yaml"
             | "nix-builds.yml"
             | "nix-builds.yaml"
-    ) || (file.content.contains("Native GitHub ")
-        && file.content.contains("equivalent of the generated Forgejo"))
+    ) || name.starts_with("prebuild-qualify-")
+        || (file.content.contains("Native GitHub ")
+            && file.content.contains("equivalent of the generated Forgejo"))
 }
 
 #[derive(Debug, Clone)]
@@ -1474,7 +1477,7 @@ fn push_prebuild_file(
     config: &ProjectConfig,
     crow_format: CrowWorkflowFormat,
 ) -> Result<()> {
-    files.extend(crate::commands::init_ci::prebuild_file(
+    files.extend(crate::commands::init_ci::prebuild_files(
         config,
         crow_format,
     )?);

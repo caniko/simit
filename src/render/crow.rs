@@ -997,6 +997,124 @@ pub fn prebuild_file(
     })
 }
 
+/// Secret-free workflows that qualify the flake, `[prebuild].qualify` and the
+/// prebuild installables on pull requests and default-branch pushes. Each
+/// command is its own workflow, `.crow/prebuild-qualify-<name>.*`, so every one
+/// gets the repository timeout and they run in parallel.
+pub fn qualify_files(
+    format: CrowWorkflowFormat,
+    config: &CrowCiConfig,
+    prebuild: &PrebuildConfig,
+) -> Result<Vec<GeneratedFile>> {
+    let image = nix_image(config)?;
+    let installables = prebuild
+        .qualify
+        .iter()
+        .chain(&prebuild.nix_builds)
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let mut jobs = vec![(
+        "flake-check".to_owned(),
+        "nix flake check --no-build".to_owned(),
+    )];
+    for (installable, job) in installables.iter().zip(qualify_job_names(&installables)) {
+        jobs.push((
+            job,
+            format!(
+                "nix build {} --no-link --print-build-logs",
+                shell_quote(installable)
+            ),
+        ));
+    }
+    let mut files = Vec::new();
+    for (job, command) in jobs {
+        let mut step = Step::new(job.clone(), &image).command(command);
+        add_nix_environment(std::slice::from_mut(&mut step));
+        let workflow = Workflow {
+            name: format!("qualify-{job}"),
+            labels: labels(
+                config,
+                &ResolvedRunner {
+                    name: None,
+                    labels: Vec::new(),
+                },
+            ),
+            platform: config.platform.clone(),
+            when: vec![
+                condition("event", "pull_request"),
+                conditions(&[("event", "push"), ("branch", "${CI_REPO_DEFAULT_BRANCH}")]),
+            ],
+            skip_clone: None,
+            variables: config.variables.clone(),
+            workspace: None,
+            steps: vec![step],
+        };
+        files.push(GeneratedFile {
+            relative_path: crow_path(&format!("prebuild-qualify-{job}"), None, format),
+            content: render_workflow(workflow, format)?,
+        });
+    }
+    Ok(files)
+}
+
+/// Workflow names for the installables: the final attribute, e.g.
+/// `.#checks.x86_64-linux.clippy` -> `clippy`, or the whole attribute path when
+/// that is ambiguous, then a numeric suffix for repeated installables.
+fn qualify_job_names(installables: &[&str]) -> Vec<String> {
+    let slug = |text: &str| {
+        let name = text
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() {
+                    c.to_ascii_lowercase()
+                } else {
+                    '-'
+                }
+            })
+            .collect::<String>();
+        let name = name.trim_matches('-');
+        if name.is_empty() {
+            "installable".to_owned()
+        } else {
+            name.to_owned()
+        }
+    };
+    let attribute = |installable: &str| -> String {
+        installable
+            .rsplit_once('#')
+            .map_or(installable, |(_, attribute)| attribute)
+            .to_owned()
+    };
+    let short = installables
+        .iter()
+        .map(|installable| {
+            let attribute = attribute(installable);
+            slug(attribute.rsplit('.').next().unwrap_or(&attribute))
+        })
+        .collect::<Vec<_>>();
+    let mut seen = std::collections::BTreeSet::from(["flake-check".to_owned()]);
+    installables
+        .iter()
+        .zip(&short)
+        .map(|(installable, name)| {
+            let ambiguous =
+                name == "flake-check" || short.iter().filter(|other| *other == name).count() > 1;
+            let base = if ambiguous {
+                slug(&attribute(installable))
+            } else {
+                name.clone()
+            };
+            let mut job = base.clone();
+            let mut suffix = 2;
+            while !seen.insert(job.clone()) {
+                job = format!("{base}-{suffix}");
+                suffix += 1;
+            }
+            job
+        })
+        .collect()
+}
+
 pub fn release_file(
     format: CrowWorkflowFormat,
     config: &CrowCiConfig,
@@ -1189,6 +1307,28 @@ mod tests {
         .unwrap();
         assert!(file.content.contains("nix build .#site --out-link result"));
         assert!(!file.content.contains("nix build .#site --no-link\n"));
+    }
+
+    #[test]
+    fn qualify_job_names_disambiguate_shared_final_attributes() {
+        let names = super::qualify_job_names(&[
+            ".#checks.x86_64-linux.test",
+            ".#checks.aarch64-linux.test",
+            ".#packages.x86_64-linux.server",
+            ".#flake-check",
+            ".#packages.x86_64-linux.server",
+        ]);
+        assert_eq!(
+            names,
+            [
+                "checks-x86-64-linux-test",
+                "checks-aarch64-linux-test",
+                "packages-x86-64-linux-server",
+                "flake-check-2",
+                "packages-x86-64-linux-server-2",
+            ]
+        );
+        assert_eq!(super::qualify_job_names(&[".#docs"]), ["docs"]);
     }
 
     #[test]
