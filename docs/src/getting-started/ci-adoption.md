@@ -55,6 +55,25 @@ SIMIT_LOCAL_ONLY="clippy|test" bash scripts/ci-local.sh  # run matching steps
 The script carries the generated marker, so `simit init ci --check` reports hand
 edits as drift. Setting `local_gate` back to false retires the script.
 
+## Primary package
+
+Wherever Simit needs one package to represent the project, it uses the
+alphabetically first workspace member. That covers the README crates.io badge
+and the name, description, license and homepage fallbacks for AUR, COPR, APT,
+Scoop, Chocolatey and release setup. In a virtual workspace that choice can
+move whenever a crate is added. Pin it with a top-level key, which must come
+before any table:
+
+```toml
+primary_package = "bekiper-annotate"
+
+[ci]
+# ...
+```
+
+An explicit `--package` still takes precedence. A name that is not a workspace
+member is an error.
+
 ## Release-plz on GitHub Actions
 
 Newly enabling Rust publication on supported GitHub Actions projects selects

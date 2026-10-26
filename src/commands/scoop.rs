@@ -82,8 +82,8 @@ pub(crate) fn bump(args: ScoopBumpArgs) -> Result<()> {
 fn resolve(overrides: ScoopOverrides<'_>) -> Result<(ResolvedScoop, String)> {
     let metadata = cargo::metadata_for_current_dir()?;
     let workspace_root = metadata.workspace_root.as_std_path();
-    let package = cargo::representative_package(&metadata, None)?;
     let cfg = ProjectConfig::load(workspace_root)?;
+    let package = cargo::representative_package(&metadata, cfg.primary_package.as_deref())?;
     let resolved = cfg.resolve_scoop(overrides, &package)?;
     Ok((resolved, package.version))
 }

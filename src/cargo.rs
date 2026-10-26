@@ -274,7 +274,8 @@ pub fn select_packages(
 /// packaging channel (aur/copr/apt).
 ///
 /// Unlike [`select_packages`], this never errors on multi-package workspaces:
-/// with an explicit `requested` name it selects that package, otherwise it
+/// with an explicit `requested` name (an explicit `--package`, else the
+/// project's `primary_package`) it selects that package, otherwise it
 /// returns the alphabetically-first workspace member. Channel config is
 /// expected to provide the substantive fields; the package only fills in
 /// `description`/`license`/`homepage`/`name` fallbacks.

@@ -13,8 +13,14 @@ pub fn run(command: InitCoprCommand) -> Result<()> {
 
     let metadata = cargo::metadata_for_current_dir()?;
     let workspace_root = metadata.workspace_root.as_std_path();
-    let package = cargo::representative_package(&metadata, command.package.as_deref())?;
     let cfg = ProjectConfig::load(workspace_root)?;
+    let package = cargo::representative_package(
+        &metadata,
+        command
+            .package
+            .as_deref()
+            .or(cfg.primary_package.as_deref()),
+    )?;
     let resolved = cfg.resolve_copr(command.copr.as_overrides(), &package)?;
     let rendered = copr::render_files(&resolved, &package.version);
 

@@ -16,8 +16,14 @@ pub fn run(command: InitReleaseCommand) -> Result<()> {
 
     let metadata = cargo::metadata_for_current_dir()?;
     let workspace_root = metadata.workspace_root.as_std_path();
-    let package = cargo::representative_package(&metadata, command.package.as_deref())?;
     let cfg = ProjectConfig::load(workspace_root)?;
+    let package = cargo::representative_package(
+        &metadata,
+        command
+            .package
+            .as_deref()
+            .or(cfg.primary_package.as_deref()),
+    )?;
     if cfg.ci.publish_strategy == crate::config::PublishStrategy::ReleasePlz
         && metadata
             .packages
