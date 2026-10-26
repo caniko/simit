@@ -735,6 +735,9 @@ impl Facts {
                 }
             }
         }
+        let config = ["simit.toml", "Cargo.toml"]
+            .map(|name| fs::read_to_string(root.join(name)).unwrap_or_default())
+            .concat();
         files.sort();
         for (path, content, script, generated) in files {
             let path = path.display().to_string();
@@ -743,6 +746,20 @@ impl Facts {
                 if line.starts_with('#') || line.starts_with("//") {
                     continue;
                 }
+                // Simit pins its own invocations in generated files to the generator
+                // revision, so they move with their file. Generated files also copy
+                // config commands (required gates, setup) verbatim; those stay human.
+                // ponytail: raw substring check, so a TOML-escaped command (quotes,
+                // backslashes) reads as generator-owned.
+                let command = line
+                    .trim_start_matches("- ")
+                    .trim_start_matches("run:")
+                    .trim();
+                let (flake_ref, cargo_install) = if generated && !config.contains(command) {
+                    ("runtime.generated-ref", "runtime.generated-ref")
+                } else {
+                    ("runtime.flake-ref", "runtime.cargo-install")
+                };
                 let words = line
                     .split(|c: char| c.is_whitespace() || ";|&()`\"'$".contains(c))
                     .filter(|word| !word.is_empty())
@@ -765,7 +782,7 @@ impl Facts {
                 let mut refs = Refs::default();
                 let runtime = flake_refs(line, &mut refs);
                 if runtime {
-                    merge(found.entry("runtime.flake-ref").or_default(), refs);
+                    merge(found.entry(flake_ref).or_default(), refs);
                 }
                 let install = line.contains("cargo install")
                     && words.iter().any(|word| {
@@ -774,7 +791,7 @@ impl Facts {
                             || word.contains("caniko/simit")
                     });
                 if install {
-                    let refs = found.entry("runtime.cargo-install").or_default();
+                    let refs = found.entry(cargo_install).or_default();
                     match words
                         .iter()
                         .position(|word| matches!(*word, "--rev" | "--version" | "--tag"))
@@ -1581,6 +1598,12 @@ fn capabilities() -> Vec<Row> {
             "edit the cargo install command",
             "manual-pin",
             "simit does not rewrite cargo install commands.",
+        ),
+        settled(
+            "runtime.generated-ref",
+            "regenerate",
+            "the generated file that contains it",
+            "Generated files pin simit's own invocations to the generator revision; they move whenever that file's usage is regenerated and landed.",
         ),
         settled(
             "runtime.devshell",
