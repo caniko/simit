@@ -70,6 +70,18 @@ pub fn generated_file(
     })
 }
 
+/// Update plans never resolve local signing keys. The publishing workflows they
+/// carry fetch the committed trust root, so it must already exist.
+pub fn require_committed(
+    workspace_root: &Path,
+    config: &ProjectConfig,
+    overrides: &TrustOverrides,
+) -> Result<()> {
+    read_and_validate_existing(workspace_root, &trust_root_path(config, overrides)?)
+        .context("update plans for publishing workflows need a committed release trust root")?;
+    Ok(())
+}
+
 pub fn resolve(
     workspace_root: &Path,
     config: &ProjectConfig,

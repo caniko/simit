@@ -464,13 +464,13 @@ admission preserves the prior receipt and cannot push or advance either ref.
 contain `ci`, and each scope may appear once. Every scope only updates an
 existing consumption; none introduces a new one.
 
-| Scope      | Generator call                       | Result                                                                                                                                                                                           |
-| ---------- | ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `ci`       | `init ci --primary-only --plan-json` | Primary CI. Its files are the only qualification set.                                                                                                                                            |
-| `ci-extra` | `init ci --plan-json`                | Also publishers, Pages, extension publishers, release-plz, review, custody and `scripts/ci-local.sh`. The persisted `[ci]` table and a newly created `deny.toml` are patches.                    |
-| `release`  | `init release --plan-json`           | The release workflow, only when a generated one exists.                                                                                                                                          |
-| `flake`    | `init flake --plan-json`             | Flake and hook files, only when simit already manages them. A `flake.nix` change whose input names differ from `flake.lock`'s root inputs is rejected, since generation cannot fetch a new lock. |
-| `readme`   | `upgrade --plan-json`                | A `README.md` badge-block patch, only when the badge markers exist.                                                                                                                              |
+| Scope      | Generator call                       | Result                                                                                                                                                                                                                                             |
+| ---------- | ------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ci`       | `init ci --primary-only --plan-json` | Primary CI. Its files are the only qualification set.                                                                                                                                                                                              |
+| `ci-extra` | `init ci --plan-json`                | Also publishers, Pages, extension publishers, release-plz, review, custody and `scripts/ci-local.sh`. The persisted `[ci]` table and a newly created `deny.toml` are patches.                                                                      |
+| `release`  | `init release --plan-json`           | The release workflow, only when a generated one exists. It moves to another backend only when `[ci].platform` or a migration selects one.                                                                                                          |
+| `flake`    | `init flake --plan-json`             | Flake and hook files, only when simit already manages them. A `flake.nix` change whose input names differ from `flake.lock`'s root inputs is rejected, as is a changed declaration of an existing input, since generation cannot fetch a new lock. |
+| `readme`   | `upgrade --plan-json`                | A `README.md` badge-block patch, only when the badge markers exist.                                                                                                                                                                                |
 
 The `ci` plan must equal its part of the `ci-extra` plan byte for byte, including
 obsolete paths. Paths in different scopes must not overlap, and patches cannot
@@ -478,7 +478,8 @@ target `.github/workflows`, `.forgejo/workflows` or `.crow`. `workflows.json` an
 qualification requests carry only the `ci` files. Files from the other scopes are
 committed and admitted with the candidate, but land without their own
 qualification; their first run happens after landing. The full `init ci` plan
-never resolves the local release trust root, and it fails for a flake
+never resolves the local release trust root; a plan with publishing workflows
+instead requires the committed trust root they fetch. It fails for a flake
 `simitConfig` source because that `[ci]` table cannot be persisted.
 
 A patch is a whole-file edit of a project-owned file. The plan lists it under
@@ -492,7 +493,9 @@ not block updates.
 
 Widening `scopes` for a repository with an adopted baseline usually starts
 managing files that already exist. Like the initial baseline, adopting them
-requires `enrollCurrent`.
+requires `enrollCurrent`. Baselines record the scopes they were adopted under,
+so this applies only to the run that adds a scope; later runs again stop when a
+plan claims an existing file outside the baseline.
 
 ## Dependencies and verification
 

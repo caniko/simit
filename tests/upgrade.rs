@@ -150,9 +150,9 @@ fn upgrade_current_workspace_writes_managed_badge_block() {
 fn badge_plan_patches_only_an_existing_marker_block() {
     let project = non_tmp_project("upgrade-plan");
     let readme = project.path().join("README.md");
-    let plan = || {
+    let plan_in = |directory: &Path| {
         let output = simit()
-            .current_dir(project.path())
+            .current_dir(directory)
             .args(["upgrade", "--plan-json"])
             .output()
             .unwrap();
@@ -163,6 +163,7 @@ fn badge_plan_patches_only_an_existing_marker_block() {
         );
         serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
     };
+    let plan = || plan_in(project.path());
     let empty = serde_json::json!({"schema":"simit.ci-update-plan.v1","files":[],"obsolete":[]});
     assert_eq!(plan(), empty);
 
@@ -175,6 +176,8 @@ fn badge_plan_patches_only_an_existing_marker_block() {
     let content = patched["patches"][0]["content"].as_str().unwrap();
     assert!(content.contains("crates.io-publishable") && !content.contains("stale"));
     assert_eq!(read(&readme), stale);
+    // A workspace subdirectory plans the same workspace README.
+    assert_eq!(plan_in(&project.path().join("src")), patched);
 
     fs::write(&readme, content).unwrap();
     assert_eq!(plan(), empty);

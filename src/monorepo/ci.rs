@@ -391,14 +391,17 @@ pub(crate) fn files(
             }
         }
     }
-    // Update plans never resolve local signing keys.
-    if trust_root && (config.ci.publish_crates || has_native) {
-        files.push(crate::release_trust::generated_file(
-            root,
-            config,
-            &Default::default(),
-            true,
-        )?);
+    if config.ci.publish_crates || has_native {
+        if trust_root {
+            files.push(crate::release_trust::generated_file(
+                root,
+                config,
+                &Default::default(),
+                true,
+            )?);
+        } else if include_publishers {
+            crate::release_trust::require_committed(root, config, &Default::default())?;
+        }
     }
     Ok(files)
 }

@@ -94,6 +94,16 @@ fn full_plan_patches_changed_project_policy_without_resolving_trust() {
             .unwrap()
     };
     assert!(!run(&["init", "ci"]).status.success());
+    // Publishing workflows fetch the committed trust root, so a plan needs one.
+    let missing = run(&["init", "ci", "--plan-json"]);
+    assert!(!missing.status.success());
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("committed release trust root"));
+    fs::create_dir(root.join("keys")).unwrap();
+    fs::copy(
+        common::maintainer_key_path(),
+        root.join("keys/maintainers.gpg"),
+    )
+    .unwrap();
     let before = fs::read(root.join("simit.toml")).unwrap();
     let plan = || {
         let output = run(&["init", "ci", "--plan-json"]);

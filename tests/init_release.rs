@@ -486,6 +486,29 @@ fn release_plan_only_maintains_an_existing_generated_workflow() {
         serde_json::json!([".github/workflows/release.yaml"])
     );
     assert!(!root.join(".github/workflows/release.yml").exists());
+
+    // With two release targets and no [ci].platform, the default backend must
+    // not silently move the existing GitHub release workflow to Forgejo.
+    let mut config = read(&root.join("simit.toml"));
+    config.push_str("\n[release.codeberg]\nrepo = \"example/release-plan-demo\"\n");
+    fs::write(root.join("simit.toml"), config).unwrap();
+    let moved = simit()
+        .current_dir(root)
+        .args(["init", "release", "--plan-json"])
+        .output()
+        .unwrap();
+    assert!(!moved.status.success());
+    assert!(String::from_utf8_lossy(&moved.stderr).contains("--platform"));
+    let explicit = simit()
+        .current_dir(root)
+        .args(["init", "release", "--plan-json", "--platform", "github"])
+        .output()
+        .unwrap();
+    assert!(
+        explicit.status.success(),
+        "{}",
+        String::from_utf8_lossy(&explicit.stderr)
+    );
 }
 
 #[test]
