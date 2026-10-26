@@ -337,9 +337,10 @@ fn execute_with(
     // Crow must build this exact forge repository; its id survives renames.
     let ci = crow(&format!("repos/lookup/{repository}"))?;
     ensure!(
-        ci["forge_remote_id"].as_str() == Some(id.to_string().as_str()) && ci["active"] == true,
-        "Crow repository is inactive or bound to another forge repository"
+        ci["forge_remote_id"].as_str() == Some(id.to_string().as_str()),
+        "Crow repository is bound to another forge repository"
     );
+    ensure!(ci["active"] == true, "Crow repository is not active");
     ensure!(
         matches!(
             ci["require_approval"].as_str(),
@@ -537,6 +538,16 @@ fn execute_with(
             Some("created" | "pending" | "running" | "blocked") => {
                 response.status = "pending".into();
                 continue;
+            }
+            // Quota denial fails the workflow before it starts; it never ran.
+            _ if row[0]["error"]
+                .as_str()
+                .is_some_and(|error| error.starts_with("CI quota denied")) =>
+            {
+                bail!(
+                    "Crow CI quota exhausted for this period; rerun after reset ({})",
+                    workflow.name
+                )
             }
             _ => bail!("Crow workflow {} did not succeed", workflow.name),
         }
@@ -736,9 +747,27 @@ mod tests {
             status(&|crow| crow[PIPELINE]["workflows"][0]["state"] = json!("running")),
             "pending"
         );
+        let message = |change: &dyn Fn(&mut Value)| mutated(change).unwrap_err().to_string();
+        assert!(
+            message(&|crow| crow["repos/lookup/caniko/pink-raven"]["active"] = json!(false))
+                .contains("not active")
+        );
+        // Quota denial as codefloe reports it (pink-raven pipelines 118-120).
+        assert!(
+            message(&|crow| {
+                let build = &mut crow[PIPELINE]["workflows"][0];
+                build["state"] = json!("failure");
+                build["error"] = json!(
+                    "CI quota denied (linux): the CI time quota \"CI quota (all)\" is used up: 1 day 19 hours spent of 1 day 17 hours this period"
+                );
+                for step in build["children"].as_array_mut().unwrap() {
+                    step["state"] = json!("skipped");
+                }
+            })
+            .contains("quota exhausted")
+        );
         let changes: Vec<&dyn Fn(&mut Value)> = vec![
             &|crow| crow["repos/lookup/caniko/pink-raven"]["forge_remote_id"] = json!("5405"),
-            &|crow| crow["repos/lookup/caniko/pink-raven"]["active"] = json!(false),
             &|crow| {
                 crow["repos/lookup/caniko/pink-raven"]["require_approval"] = json!("all_events")
             },
@@ -983,6 +1012,7 @@ mod tests {
     #[test]
     fn crow_conditions_names_and_compile_time_step_filters_follow_crow() {
         let steps = "steps:\n- name: test\n  image: alpine\n  commands: [true]\n- name: pr\n  image: alpine\n  commands: [true]\n  when:\n    event: pull_request\n";
+        const RESTRICTED: &str = "when:\n- event: push\n  branch: ['${CI_REPO_DEFAULT_BRANCH}', 'simit/update/**']\n- event: pull_request\n";
         for (when, branch, runs) in [
             ("", MAINTENANCE, true),
             ("when: []\n", MAINTENANCE, true),
@@ -1005,6 +1035,10 @@ mod tests {
                 "trunk",
                 true,
             ),
+            // Generated push triggers: default branch plus the maintenance namespace.
+            (RESTRICTED, MAINTENANCE, true),
+            (RESTRICTED, "trunk", true),
+            (RESTRICTED, "feature/x", false),
         ] {
             let parsed = workflow(
                 ".crow/.test.yml",

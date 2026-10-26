@@ -523,7 +523,9 @@ The workflow and every step must be original attempts that succeeded, and the
 steps must be exactly the implicit `clone` step (unless `skip_clone`) plus the
 source steps whose conditions match the push, because Crow drops the rest when it
 compiles the workflow. Each workflow becomes a check with run
-`<crow repository id>/<pipeline number>`. Generator qualification stays with
+`<crow repository id>/<pipeline number>`. A workflow Crow refused for an
+exhausted CI quota (`CI quota denied ...`) fails with a distinct quota message;
+rerun the update after the quota resets. Generator qualification stays with
 GitHub Actions; requests without workflows answer `unsupported`.
 
 ## Dependencies and verification
