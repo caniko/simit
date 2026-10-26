@@ -26,6 +26,11 @@ const HOOK_REMOVAL_NOTES: &[(&str, &str)] = &[
 
 pub fn run(command: InitFlakeCommand) -> Result<()> {
     let current_dir = std::env::current_dir().context("reading current directory")?;
+    // Update plans only maintain flake/hook files simit already manages, so
+    // unmanaged projects never reach the adoption-time policy checks.
+    if command.plan_json && registry::detect_flake_status(&current_dir) == FeatureStatus::Absent {
+        return project::CiUpdatePlan::new(vec![], vec![], vec![]).print();
+    }
     if cargo::find_manifest(&current_dir).is_err() {
         if python::find_project_root(&current_dir).is_ok() {
             return run_python(command);
@@ -697,10 +702,6 @@ fn print_tail(files: &[GeneratedFile], scope: FlakeScope) {
 
 fn write_tail(workspace_root: &Path, files: &[GeneratedFile], plan_json: bool) -> Result<()> {
     if plan_json {
-        // Update plans only maintain flake/hook files simit already manages.
-        if registry::detect_flake_status(workspace_root) == FeatureStatus::Absent {
-            return project::CiUpdatePlan::new(vec![], vec![], vec![]).print();
-        }
         // The updater cannot fetch: a changed input set would need a new lock.
         if let Some(flake) = files
             .iter()
