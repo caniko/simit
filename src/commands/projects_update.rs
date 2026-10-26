@@ -6,6 +6,7 @@ use std::path::PathBuf;
 
 mod checkpoint;
 mod engine;
+mod forgejo;
 mod github;
 mod sandbox;
 pub mod schema;
@@ -37,7 +38,7 @@ pub struct Args {
     pub json: bool,
 }
 
-/// Native GitHub Actions implementation of the versioned adapter protocol.
+/// Native implementation of the versioned adapter protocol.
 #[derive(Debug, ClapArgs)]
 pub struct AdapterArgs {
     #[arg(long)]
@@ -45,9 +46,20 @@ pub struct AdapterArgs {
 }
 
 pub fn adapter(args: AdapterArgs) -> Result<()> {
+    respond(args, github::execute)
+}
+
+pub fn forgejo_adapter(args: AdapterArgs) -> Result<()> {
+    respond(args, forgejo::execute)
+}
+
+fn respond(
+    args: AdapterArgs,
+    execute: fn(&AdapterRequest) -> Result<AdapterResponse>,
+) -> Result<()> {
     let request: AdapterRequest = crate::review::read_json(&args.request)?;
     request.validate()?;
-    let response = github::execute(&request)?;
+    let response = execute(&request)?;
     println!("{}", serde_json::to_string(&response)?);
     Ok(())
 }

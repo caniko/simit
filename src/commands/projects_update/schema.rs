@@ -53,6 +53,9 @@ pub struct Forge {
     pub host: String,
     pub api_url: String,
     pub credential_file: Option<PathBuf>,
+    /// Second API credential for a separate check authority (Crow beside Forgejo).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ci_credential_file: Option<PathBuf>,
     pub adapter: Command,
     pub adapter_sha256: Option<String>,
     #[serde(default)]
@@ -385,7 +388,11 @@ impl Config {
                     );
                 }
             }
-            if let Some(path) = &forge.credential_file {
+            for path in forge
+                .credential_file
+                .iter()
+                .chain(&forge.ci_credential_file)
+            {
                 absolute(path)?;
                 ensure!(
                     !path.starts_with("/nix/store"),
@@ -396,6 +403,11 @@ impl Config {
                     "adapter credential overlaps code inputs"
                 );
             }
+            ensure!(
+                forge.ci_credential_file.is_none()
+                    || forge.ci_credential_file != forge.credential_file,
+                "forge and CI credentials must be distinct files"
+            );
         }
         for profile in self.profiles.values() {
             ensure!(
@@ -865,6 +877,7 @@ mod tests {
             coordinate: "forge.example/team/demo".into(),
             api_url: "https://forge.example/api".into(),
             credential_file: None,
+            ci_credential_file: None,
             authority: "777".into(),
             revision: Some("a".repeat(40)),
             branch: Some("maintenance/candidate".into()),
@@ -929,6 +942,72 @@ mod tests {
         assert!(response.validate(&request).is_err());
         response.checks.clear();
         assert!(response.validate(&request).is_err());
+    }
+
+    #[test]
+    fn version_one_requests_keep_their_bytes_and_v2_features_must_be_declared() {
+        let json = r#"{"schemaVersion":1,"operation":"admit","coordinate":"forge.example/team/demo","apiUrl":"https://forge.example/api","credentialFile":"/run/credentials/forge","authority":"777","revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","branch":"maintenance/candidate","workflows":[".github/workflows/ci.yaml"],"requiredChecks":[{"name":"test","authority":"777"}],"plan":{"schema":"simit.ci-update-plan.v1","files":[{"relative_path":".github/workflows/ci.yaml","content":"on: push\n"}],"obsolete":[]}}"#;
+        let mut request: AdapterRequest = serde_json::from_str(json).unwrap();
+        request.validate().unwrap();
+        assert_eq!(serde_json::to_string(&request).unwrap(), json);
+        // Digest of the same request as serialized by the version-1-only schema.
+        assert_eq!(
+            crate::review::canonical_digest(&request).unwrap(),
+            "cb8b7078ca933c4a9c0116763ab6afa20f06e12e863514d9bb95fd6c6b8de62c"
+        );
+        request.ci_credential_file = Some("/run/credentials/ci".into());
+        assert_eq!(request.derived_version(), 2);
+        assert!(request.validate().is_err());
+        request.schema_version = 2;
+        request.validate().unwrap();
+        let mut response: AdapterResponse = serde_json::from_value(serde_json::json!({
+            "schemaVersion":1,"coordinate":request.coordinate,"repositoryId":"42","defaultBranch":"trunk",
+            "revision":request.revision,"remote":"https://forge.example/team/demo.git","policyDigest":"b".repeat(64),
+            "requirements":[],"status":"success","checks":[{"name":"admission","authority":"777",
+            "revision":request.revision,"run":crate::review::canonical_digest(&request).unwrap(),"attempt":1,"status":"success"}]
+        })).unwrap();
+        assert!(response.validate(&request).is_err());
+        response.schema_version = 2;
+        response.validate(&request).unwrap();
+        request.ci_credential_file = None;
+        assert!(request.validate().is_err());
+    }
+
+    #[test]
+    fn ci_credentials_follow_forge_credential_rules_and_stay_distinct() {
+        // Unset, the field leaves existing policy digests unchanged.
+        assert!(
+            serde_json::to_value(&config().forges["example"])
+                .unwrap()
+                .get("ciCredentialFile")
+                .is_none()
+        );
+        for credential in [
+            "/runtime/adapter",
+            "/runtime//helper.py",
+            "/nix/store/fixture-token",
+            "relative/token",
+            "/run/credentials/forge",
+            "/run//credentials/forge",
+        ] {
+            let mut cfg = config();
+            let forge = cfg.forges.get_mut("example").unwrap();
+            forge.adapter.program = "/runtime/adapter".into();
+            forge
+                .adapter_inputs
+                .insert("/runtime/helper.py".into(), "b".repeat(64));
+            forge.credential_file = Some("/run/credentials/forge".into());
+            forge.ci_credential_file = Some(credential.into());
+            assert!(cfg.validate().is_err(), "{credential}");
+        }
+        let mut cfg = config();
+        let forge = cfg.forges.get_mut("example").unwrap();
+        forge.credential_file = Some("/run/credentials/forge".into());
+        forge.ci_credential_file = Some("/run/credentials/ci".into());
+        cfg.validate().unwrap();
+        // A CI-only credential is valid for public forge repositories.
+        cfg.forges.get_mut("example").unwrap().credential_file = None;
+        cfg.validate().unwrap();
     }
 }
 
@@ -1111,6 +1190,8 @@ pub struct AdapterRequest {
     pub coordinate: String,
     pub api_url: String,
     pub credential_file: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ci_credential_file: Option<PathBuf>,
     pub authority: String,
     pub revision: Option<String>,
     pub branch: Option<String>,
@@ -1122,9 +1203,25 @@ pub struct AdapterRequest {
     pub plan: Option<crate::project::CiUpdatePlan>,
 }
 impl AdapterRequest {
+    /// Version 2 marks any request a version-1 adapter could misread. Without
+    /// v2 features the request keeps its version-1 bytes and admission digest.
+    pub fn derived_version(&self) -> u32 {
+        if self.ci_credential_file.is_some()
+            || matches!(self.operation.as_str(), "propose" | "merge" | "close")
+            || self
+                .plan
+                .as_ref()
+                .is_some_and(|plan| plan.schema == "simit.ci-update-plan.v2")
+        {
+            2
+        } else {
+            1
+        }
+    }
+
     pub fn validate(&self) -> Result<()> {
         ensure!(
-            self.schema_version == 1
+            self.schema_version == self.derived_version()
                 && matches!(self.operation.as_str(), "inspect" | "admit" | "qualify"),
             "unsupported adapter request"
         );
@@ -1181,7 +1278,7 @@ pub struct Check {
 impl AdapterResponse {
     pub fn validate(&self, request: &AdapterRequest) -> Result<()> {
         ensure!(
-            self.schema_version == 1
+            self.schema_version == request.schema_version
                 && self.coordinate == request.coordinate
                 && !self.repository_id.is_empty(),
             "adapter identity mismatch"

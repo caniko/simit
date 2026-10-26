@@ -83,7 +83,8 @@
     && (forge.adapterSha256 != null || lib.hasPrefix "/nix/store/" forge.adapter.program)
     && lib.all absolute (builtins.attrNames forge.adapterInputs)
     && lib.all (path: normalized path != normalized forge.adapter.program) (builtins.attrNames forge.adapterInputs)
-    && (forge.credentialFile == null || (normalized forge.credentialFile != normalized forge.adapter.program && lib.all (path: normalized path != normalized forge.credentialFile) (builtins.attrNames forge.adapterInputs)))
+    && lib.all (credential: credential == null || (normalized credential != normalized forge.adapter.program && lib.all (path: normalized path != normalized credential) (builtins.attrNames forge.adapterInputs))) [forge.credentialFile forge.ciCredentialFile]
+    && (forge.ciCredentialFile == null || forge.credentialFile == null || normalized forge.ciCredentialFile != normalized forge.credentialFile)
     && lib.all (validArgument forge) forge.adapter.arguments;
 in
   if

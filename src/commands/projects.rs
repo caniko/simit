@@ -57,6 +57,7 @@ pub fn run(command: ProjectsCommand) -> Result<()> {
         ProjectsAction::Regenerate(args) => regenerate(args),
         ProjectsAction::Update(args) => super::projects_update::run(args),
         ProjectsAction::UpdateGithubAdapter(args) => super::projects_update::adapter(args),
+        ProjectsAction::UpdateForgejoAdapter(args) => super::projects_update::forgejo_adapter(args),
         ProjectsAction::Discover(args) => discover(args),
         ProjectsAction::Forget(args) => forget(args),
         ProjectsAction::Prune(args) => prune(args),

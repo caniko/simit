@@ -146,8 +146,18 @@ in
   assert lib.all (path:
     !(accepts (withInventory {file = path;}))
     && !(accepts (withInventory {command.program = path;}))
-    && !(accepts (withForge {credentialFile = path;}))) ["relative.json" "../inventory" "/run/../credentials"];
-  assert lib.all (credentialFile: !(accepts (withForge {inherit credentialFile;}))) ["/nix/store/fixture-token" "/nix//store/fixture-token"];
+    && !(accepts (withForge {credentialFile = path;}))
+    && !(accepts (withForge {ciCredentialFile = path;}))) ["relative.json" "../inventory" "/run/../credentials"];
+  assert lib.all (credentialFile: !(accepts (withForge {inherit credentialFile;})) && !(accepts (withForge {ciCredentialFile = credentialFile;}))) ["/nix/store/fixture-token" "/nix//store/fixture-token"];
+  # The CI credential is distinct from the forge credential, including path aliases.
+  assert lib.all (ciCredentialFile: !(accepts (withForge {inherit ciCredentialFile;}))) ["/run/credentials/not-present-during-evaluation" "/run//credentials/not-present-during-evaluation"];
+  assert (mkConfig (withForge {
+    ciCredentialFile = "/run/credentials/crow";
+    checkAuthority = "https://ci.git.example.org";
+    adapter = example.forges.enterprise.adapter // {arguments = ["projects" "update-forgejo-adapter"];};
+  })).forges.enterprise.ciCredentialFile
+  == "/run/credentials/crow";
+  assert rendered.forges.enterprise.ciCredentialFile == null;
   assert accepts (withInventory {file = "/runtime/not-present-inventory.json";});
   assert lib.all (apiUrl: !(accepts (withForge {inherit apiUrl;}))) ["http://git.example.org" "https://token@git.example.org/api" "https://git.example.org/api?token=x" "https://git.example.org/api#fragment"];
   assert lib.all (apiUrl: !(accepts (withForge {inherit apiUrl;}))) ["https://git.example.org:bogus/api" "https://git.example.org:/api" "https://git.example.org:443:80/api" "https://git.example.org:65536/api" "https://git.example.org:123456/api"];
@@ -166,6 +176,11 @@ in
   assert lib.all (credentialFile:
     !(accepts (withForge {
       inherit credentialFile;
+      adapter.program = "/runtime/adapter";
+      adapterInputs."/runtime/helper.py" = lib.concatStrings (lib.replicate 64 "f");
+    }))
+    && !(accepts (withForge {
+      ciCredentialFile = credentialFile;
       adapter.program = "/runtime/adapter";
       adapterInputs."/runtime/helper.py" = lib.concatStrings (lib.replicate 64 "f");
     }))) ["/runtime/adapter" "/runtime//adapter" "/runtime/helper.py" "/runtime//helper.py"];

@@ -31,7 +31,7 @@ def respond(request, control_path, remote):
         for r in request["requiredChecks"]
     ] if request["operation"] == "qualify" and status == "success" else []
     response = dict(
-        schemaVersion=1, coordinate=request["coordinate"], repositoryId="42",
+        schemaVersion=request["schemaVersion"], coordinate=request["coordinate"], repositoryId="42",
         defaultBranch=control.get("defaultBranch", "trunk"), revision=revision,
         remote=control.get("remotes", {}).get(request["coordinate"], control.get("remote", pathlib.Path(remote).as_uri())), policyDigest=control.get("policy", "b" * 64),
         requirements=[dict(name="test", authority="777")], status=status, checks=checks,

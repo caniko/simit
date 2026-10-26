@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Add `simit projects update-forgejo-adapter`, an updater adapter for Forgejo
+  repositories qualified by Crow CI. It binds the Crow repository to the
+  Forgejo repository ID, admits only the generated Crow workflow vocabulary,
+  and qualifies the original push pipeline of the exact revision after
+  checking Crow's stored configuration against the forge bytes and every
+  workflow and step outcome. It supports direct landing; the generator stays
+  qualified on GitHub Actions.
+- Add updater `forges.<name>.ciCredentialFile`, a second credential for a
+  separate CI service. It follows the `credentialFile` rules, must be a
+  distinct file, and is pinned read-only into the adapter namespace beside the
+  forge credential.
+- Updater adapter requests now derive `schemaVersion`: 2 when a version-2
+  feature such as `ciCredentialFile` is present, otherwise 1 with unchanged
+  bytes and admission digests. Adapters reject a mismatched declaration and
+  responses echo the request version.
 - Add `[release.pypi]`: the release workflow uploads the prebuilt
   `release/*.whl` (e.g. from a Nix `release-bundle`) to PyPI with
   `uv publish --check-url` after the hosted release, using PyPI trusted

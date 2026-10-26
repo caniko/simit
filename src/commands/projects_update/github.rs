@@ -9,23 +9,27 @@ use std::{
     time::Duration,
 };
 
-struct Api {
+pub(super) struct Api {
     client: reqwest::blocking::Client,
     base: url::Url,
     token: Option<String>,
+    accept: &'static str,
 }
 impl Api {
-    fn new(request: &AdapterRequest) -> Result<Self> {
-        let base = url::Url::parse(&format!("{}/", request.api_url.trim_end_matches('/')))?;
+    /// One bearer credential per API root; adapters never share tokens across origins.
+    pub(super) fn with(
+        base: &str,
+        credential: Option<&std::path::Path>,
+        accept: &'static str,
+    ) -> Result<Self> {
+        let base = url::Url::parse(&format!("{}/", base.trim_end_matches('/')))?;
         ensure!(
             base.scheme() == "https" && base.username().is_empty() && base.password().is_none(),
-            "GitHub API requires credential-free HTTPS"
+            "adapter API requires credential-free HTTPS"
         );
-        let token = request
-            .credential_file
-            .as_ref()
+        let token = credential
             .map(|path| {
-                String::from_utf8(credential_bytes(path)?).context("GitHub credential is not UTF-8")
+                String::from_utf8(credential_bytes(path)?).context("API credential is not UTF-8")
             })
             .transpose()?
             .map(|s| s.trim().to_owned());
@@ -37,22 +41,26 @@ impl Api {
             client,
             base,
             token,
+            accept,
         })
     }
-    fn get(&self, path: &str) -> Result<Value> {
+    pub(super) fn get(&self, path: &str) -> Result<Value> {
         self.send(self.client.get(self.base.join(path)?))
     }
     fn send(&self, request: reqwest::blocking::RequestBuilder) -> Result<Value> {
         let mut request = request
             .header("User-Agent", "simit-updater")
-            .header("Accept", "application/vnd.github+json");
+            .header("Accept", self.accept);
         if let Some(token) = &self.token {
             request = request.bearer_auth(token);
         }
-        let response = request.send().context("GitHub API transport failed")?;
+        let response = request
+            .send()
+            .with_context(|| format!("{} transport failed", self.base))?;
         ensure!(
             response.status().is_success(),
-            "GitHub API returned {}",
+            "{} returned {}",
+            self.base,
             response.status()
         );
         let mut bytes = Vec::new();
@@ -61,7 +69,8 @@ impl Api {
             .read_to_end(&mut bytes)?;
         ensure!(
             bytes.len() as u64 <= crate::review::MAX_JSON_BYTES,
-            "GitHub response too large"
+            "{} response too large",
+            self.base
         );
         Ok(serde_json::from_slice(&bytes)?)
     }
@@ -126,30 +135,30 @@ fn collection(key: &str, mut page: impl FnMut(u32) -> Result<Value>) -> Result<V
     anyhow::bail!("GitHub collection exceeds adapter pagination ceiling")
 }
 
-fn text(value: &Value, key: &str) -> Result<String> {
+pub(super) fn text(value: &Value, key: &str) -> Result<String> {
     Ok(value
         .pointer(key)
         .and_then(Value::as_str)
-        .with_context(|| format!("missing GitHub {key}"))?
+        .with_context(|| format!("missing API field {key}"))?
         .to_owned())
 }
-fn number(value: &Value, key: &str) -> Result<u64> {
+pub(super) fn number(value: &Value, key: &str) -> Result<u64> {
     value
         .pointer(key)
         .and_then(Value::as_u64)
-        .with_context(|| format!("missing GitHub {key}"))
+        .with_context(|| format!("missing API field {key}"))
 }
-fn encoded(value: &str) -> String {
+pub(super) fn encoded(value: &str) -> String {
     url::form_urlencoded::byte_serialize(value.as_bytes()).collect()
 }
 
-fn branch_pattern(pattern: &str, branch: &str) -> Result<bool> {
+pub(super) fn branch_pattern(pattern: &str, branch: &str) -> Result<bool> {
     // ponytail: only literal names and * / ** patterns are admitted. Reject
-    // richer GitHub syntax until it has an exact, provider-native evaluator.
+    // richer GitHub/Forgejo/Crow syntax until it has a provider-native evaluator.
     ensure!(
         !pattern.is_empty()
             && !pattern.contains(['!', '?', '+', '[', ']', '{', '}', '(', ')', '\\']),
-        "unsupported GitHub branch filter pattern"
+        "unsupported branch filter pattern"
     );
     Ok(glob::Pattern::new(pattern)?.matches_with(
         branch,
@@ -211,15 +220,18 @@ fn admit_branch(trigger: &serde_yaml::Value, branch: &str) -> Result<()> {
     Ok(())
 }
 
-fn workflow_source(path: &str, file: &Value) -> Result<serde_yaml::Value> {
+/// Exact bytes from a GitHub/Forgejo contents API file object.
+pub(super) fn workflow_bytes(path: &str, file: &Value) -> Result<Vec<u8>> {
     ensure!(
         file["path"] == path && file["type"] == "file" && file["encoding"] == "base64",
         "workflow source inventory is incomplete"
     );
     let content = text(file, "/content")?;
-    let content =
-        base64::engine::general_purpose::STANDARD.decode(content.replace(['\r', '\n'], ""))?;
-    Ok(serde_yaml::from_slice(&content)?)
+    Ok(base64::engine::general_purpose::STANDARD.decode(content.replace(['\r', '\n'], ""))?)
+}
+
+fn workflow_source(path: &str, file: &Value) -> Result<serde_yaml::Value> {
+    Ok(serde_yaml::from_slice(&workflow_bytes(path, file)?)?)
 }
 
 #[derive(Default)]
@@ -709,7 +721,11 @@ fn admit_classic_rules(
 
 pub fn execute(request: &AdapterRequest) -> Result<AdapterResponse> {
     request.validate()?;
-    let api = Api::new(request)?;
+    let api = Api::with(
+        &request.api_url,
+        request.credential_file.as_deref(),
+        "application/vnd.github+json",
+    )?;
     execute_with(
         request,
         |path| api.get(path),
@@ -723,6 +739,10 @@ fn execute_with(
     classic: impl Fn(&str, &str) -> Result<()>,
 ) -> Result<AdapterResponse> {
     request.validate()?;
+    ensure!(
+        request.ci_credential_file.is_none(),
+        "GitHub Actions checks use the forge credential; a separate CI credential is unsupported"
+    );
     let authority: u64 = request
         .authority
         .parse()
@@ -804,7 +824,7 @@ fn execute_with(
         Value::Null
     };
     let mut response = AdapterResponse {
-        schema_version: 1,
+        schema_version: request.schema_version,
         coordinate: request.coordinate.clone(),
         repository_id: id.to_string(),
         default_branch: default_branch.clone(),
