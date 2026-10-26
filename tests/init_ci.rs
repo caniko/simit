@@ -6788,3 +6788,68 @@ fn local_gate_is_opt_in_and_disabling_it_retires_the_script() {
     assert_ok(&run_init_ci(temp.path(), false));
     assert!(!script_path.exists());
 }
+
+#[test]
+fn prebuild_only_accepts_crow_options_only_for_a_crow_prebuild() {
+    let crow = r#"[prebuild]
+provider = "crow"
+nix_builds = [".#packages.x86_64-linux.server"]
+
+[ci]
+provider = "crow"
+platform = "github"
+runtime = "nix"
+
+[ci.crow]
+nix_image = "nixos/nix:2.34.8"
+"#;
+    let temp = init_flake_only();
+    fs::write(temp.path().join("simit.toml"), crow).unwrap();
+    let prebuild_only = |extra: &[&str]| {
+        simit()
+            .current_dir(temp.path())
+            .args(["init", "ci", "--prebuild-only"])
+            .args(extra)
+            .output()
+            .unwrap()
+    };
+    let generated = prebuild_only(&["--ci-provider", "crow"]);
+    assert!(
+        generated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    assert!(temp.path().join(".crow/prebuild.yaml").exists());
+    assert!(
+        prebuild_only(&["--ci-provider", "crow", "--check"])
+            .status
+            .success()
+    );
+    assert!(
+        prebuild_only(&["--crow-format", "yaml", "--check"])
+            .status
+            .success()
+    );
+
+    // A GitHub prebuild still rejects Crow-only options, and Actions stays accepted.
+    fs::write(
+        temp.path().join("simit.toml"),
+        "[ci]\nplatform = 'github'\nprovider = 'actions'\nruntime = 'nix'\nrunner = 'ubuntu-24.04'\nnix_builds = ['.#default']\n[prebuild]\npublish_attic = false\n[prebuild.system_runners]\nx86_64-linux = 'ubuntu-24.04'\n",
+    )
+    .unwrap();
+    let rejected = prebuild_only(&["--ci-provider", "crow"]);
+    assert!(!rejected.status.success());
+    assert!(
+        String::from_utf8_lossy(&rejected.stderr)
+            .contains("require [prebuild] provider = \"crow\""),
+        "{}",
+        String::from_utf8_lossy(&rejected.stderr)
+    );
+    assert!(!prebuild_only(&["--crow-format", "yaml"]).status.success());
+    let actions = prebuild_only(&["--ci-provider", "actions"]);
+    assert!(
+        actions.status.success(),
+        "{}",
+        String::from_utf8_lossy(&actions.stderr)
+    );
+}

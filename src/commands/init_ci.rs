@@ -592,13 +592,17 @@ pub fn run(command: InitCiCommand) -> Result<()> {
 }
 
 fn run_prebuild_only(command: InitCiCommand) -> Result<()> {
-    validate_prebuild_only_options(&command)?;
     let workspace_root = workflow_workspace_root()?;
     if !workspace_root.join("flake.nix").is_file() {
         bail!("Prebuild workflow generation requires flake.nix at the workspace root");
     }
     let cfg = ProjectConfig::load(&workspace_root)?;
-    let files = prebuild_files(&cfg, cfg.ci.crow.format)?;
+    let crow_prebuild = cfg
+        .prebuild
+        .as_ref()
+        .is_some_and(crate::config::PrebuildConfig::runs_on_crow);
+    validate_prebuild_only_options(&command, crow_prebuild)?;
+    let files = prebuild_files(&cfg, command.crow_format.unwrap_or(cfg.ci.crow.format))?;
     if files.is_empty() {
         bail!("--prebuild-only requires a [prebuild] configuration");
     }
@@ -647,19 +651,20 @@ fn run_prebuild_only(command: InitCiCommand) -> Result<()> {
     Ok(())
 }
 
-fn validate_prebuild_only_options(command: &InitCiCommand) -> Result<()> {
+fn validate_prebuild_only_options(command: &InitCiCommand, crow_prebuild: bool) -> Result<()> {
     if command
         .platform
         .is_some_and(|platform| platform != Platform::Github)
     {
         bail!("--prebuild-only only supports --platform github");
     }
-    if command
-        .ci_provider
-        .is_some_and(|provider| provider != CiProvider::Actions)
-        || command.crow_format.is_some()
+    // `[prebuild].provider` decides what renders; Crow options may only confirm a Crow prebuild.
+    if !crow_prebuild
+        && (command.ci_provider == Some(CiProvider::Crow) || command.crow_format.is_some())
     {
-        bail!("--prebuild-only only supports the Actions provider");
+        bail!(
+            "--prebuild-only --ci-provider crow and --crow-format require [prebuild] provider = \"crow\""
+        );
     }
     if command
         .runtime
