@@ -1564,8 +1564,16 @@ behavior. It cannot be combined with custom `CARGO_HOME` or
 
 These options apply to Rust language CI. The Cargo cache requires the Actions
 provider; Crow supports the generic project command but retains its dedicated
-`[ci.crow].check_command` and push-only secret policy. Exact-only Nix and Python
+`[ci.crow].check_command` and its secret policy. Exact-only Nix and Python
 workflows use `[ci].components` to select their checks instead.
+
+`[ci.crow].check_push_secret` gives one Crow secret to the push-event copy of
+`check_command`; pull requests run the same gate without it.
+`[ci.crow].check_secret` instead gives the secret to a single gate on every
+event, including pull requests. Use it only for read-only credentials, such as
+a pull-only token for a private binary cache, and allow the Crow secret on the
+same events (`push`, `pull_request`, `manual`). The two keys are mutually
+exclusive.
 
 ## Cargo-Audit Reliability
 

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Add `[ci.crow].check_secret`: a Crow secret given to a single
+  `check_command` gate on every event, pull requests included, for read-only
+  credentials such as a private cache pull token. It excludes
+  `check_push_secret`, which keeps the secret off pull requests.
 - Add top-level `primary_package`: the workspace member used for the README
   crates.io badge and as the package-metadata fallback for AUR, COPR, APT,
   Scoop, Chocolatey and release setup. Previously these always took the

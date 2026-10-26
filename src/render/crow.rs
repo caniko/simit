@@ -242,6 +242,8 @@ fn build_workflow(
             let mut pr = step("project-check-pr", image, command.clone());
             pr.when.push(condition("event", "pull_request"));
             steps.push(pr);
+        } else if let Some(secret) = &config.check_secret {
+            steps.push(step("project-check", image, command.clone()).secret(secret));
         } else {
             steps.push(step("project-check", image, command.clone()));
         }
