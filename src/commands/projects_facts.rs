@@ -684,7 +684,8 @@ impl Facts {
                             refs.revisions.insert(words[index + 1].to_owned());
                         }
                         Some(index) if words.get(index + 1).is_some() => {
-                            refs.tags.insert(words[index + 1].to_owned());
+                            refs.tags
+                                .insert(words[index + 1].trim_start_matches('=').to_owned());
                         }
                         _ => match words.iter().find_map(|word| word.strip_prefix("simit@")) {
                             Some(version) => {
@@ -820,14 +821,25 @@ fn flake_refs(line: &str, refs: &mut Refs) -> bool {
         }
         found = true;
         let rest = &line[end..token_end];
-        let reference = match rest.find("rev=") {
-            Some(index) => rest[index + 4..].split(['&', '#']).next(),
-            None => rest
-                .strip_prefix(".git")
-                .unwrap_or(rest)
-                .strip_prefix('/')
-                .and_then(|reference| reference.split(['#', '?']).next()),
+        let query = |key: &str| {
+            rest.split(['?', '&', '#'])
+                .find_map(|pair| pair.strip_prefix(key))
         };
+        // `?rev=` wins over `?ref=`; a ref names a tag or branch.
+        let reference = query("rev=")
+            .or_else(|| {
+                query("ref=").map(|name| {
+                    name.strip_prefix("refs/tags/")
+                        .or_else(|| name.strip_prefix("refs/heads/"))
+                        .unwrap_or(name)
+                })
+            })
+            .or_else(|| {
+                rest.strip_prefix(".git")
+                    .unwrap_or(rest)
+                    .strip_prefix('/')
+                    .and_then(|reference| reference.split(['#', '?']).next())
+            });
         match reference {
             Some(reference) if reference.starts_with('$') => {} // a variable usage supplies it
             Some(reference) if is_revision(reference) => {
@@ -1349,6 +1361,12 @@ mod tests {
                 .to_owned(),
             "nix run github:caniko/simit/trunk".to_owned(),
             "nix build github:caniko/simit/$SIMIT_CI_ENGINE_REVISION#default".to_owned(),
+            format!(
+                "nix run --no-write-lock-file git+https://github.com/caniko/simit.git?rev={revision} -- init flake --check"
+            ),
+            "nix run git+https://github.com/caniko/simit.git?ref=refs/tags/0.19.0 -- init flake"
+                .to_owned(),
+            "nix run git+https://github.com/caniko/simit?ref=trunk#default".to_owned(),
         ] {
             assert!(flake_refs(&line, &mut refs), "{line}");
         }
