@@ -233,6 +233,10 @@ pub struct Override {
     #[serde(default = "yes")]
     pub enable: bool,
     pub reason: Option<String>,
+    /// Machine-readable kebab-case code for why a coordinate is disabled.
+    /// Omitted when absent so existing policy digests stay stable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocker: Option<String>,
     pub target_branch: Option<String>,
     #[serde(default)]
     pub required_checks: Vec<Requirement>,
@@ -488,6 +492,19 @@ impl Config {
                     value.enable || value.reason.as_ref().is_some_and(|s| !s.trim().is_empty()),
                     "disabled project override requires a reason"
                 );
+                if let Some(blocker) = &value.blocker {
+                    ensure!(
+                        !value.enable,
+                        "override blocker requires a disabled project"
+                    );
+                    ensure!(
+                        blocker.starts_with(|c: char| c.is_ascii_lowercase())
+                            && blocker
+                                .bytes()
+                                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-'),
+                        "override blocker must be a kebab-case token"
+                    );
+                }
             }
         }
         Ok(())
@@ -817,6 +834,49 @@ mod tests {
                 );
             cfg.validate().unwrap();
         }
+    }
+
+    #[test]
+    fn override_blockers_are_kebab_tokens_on_disabled_projects() {
+        let with = |value: serde_json::Value| {
+            let mut cfg = config();
+            cfg.profiles
+                .get_mut("fleet")
+                .unwrap()
+                .project_overrides
+                .insert(
+                    "forge.example/team/demo".into(),
+                    serde_json::from_value(value).unwrap(),
+                );
+            cfg
+        };
+        for blocker in ["provider-mismatch", "pr-required", "a1"] {
+            with(serde_json::json!({"enable": false, "reason": "x", "blocker": blocker}))
+                .validate()
+                .unwrap();
+        }
+        for blocker in ["", "Provider", "-x", "1x", "pr_required", "pr required"] {
+            assert!(
+                with(serde_json::json!({"enable": false, "reason": "x", "blocker": blocker}))
+                    .validate()
+                    .is_err(),
+                "{blocker:?}"
+            );
+        }
+        assert!(
+            with(serde_json::json!({"blocker": "pr-required"}))
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("requires a disabled project")
+        );
+        // An absent blocker serializes exactly as before, keeping policy digests.
+        let plain = with(serde_json::json!({"enable": false, "reason": "x"}));
+        assert!(
+            !serde_json::to_string(&plain.profiles["fleet"])
+                .unwrap()
+                .contains("blocker")
+        );
     }
 
     #[test]

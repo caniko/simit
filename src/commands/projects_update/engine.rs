@@ -243,6 +243,10 @@ pub struct Receipt {
     pub phase: String,
     pub managed: BTreeMap<String, Option<String>>,
     pub diff: String,
+    /// Generator source revision that produced this receipt; absent in
+    /// receipts written before it was recorded.
+    #[serde(default)]
+    pub generator_revision: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -961,7 +965,11 @@ pub fn update(
     let mut receipt = if let Some(previous) =
         previous.filter(|r| !matches!(r.phase.as_str(), "qualified" | "unchanged"))
     {
-        previous
+        // The matching config digest binds this receipt to the same generator.
+        Receipt {
+            generator_revision: Some(profile.generator.source_revision.clone()),
+            ..previous
+        }
     } else {
         let plan = generate(&generator, &checkout, &state_directory)?;
         let paths = plan
@@ -1092,6 +1100,7 @@ pub fn update(
                 phase: "unchanged".into(),
                 managed,
                 diff,
+                generator_revision: Some(profile.generator.source_revision.clone()),
             };
             if push {
                 save(&receipt_path, &receipt)?;
@@ -1111,6 +1120,7 @@ pub fn update(
                 phase: "preview".into(),
                 managed,
                 diff,
+                generator_revision: Some(profile.generator.source_revision.clone()),
             });
         }
         let author = git(&checkout, &["var", "GIT_AUTHOR_IDENT"])?;
@@ -1185,6 +1195,7 @@ pub fn update(
             phase: "prepared".into(),
             managed,
             diff,
+            generator_revision: Some(profile.generator.source_revision.clone()),
         }
     };
     ensure!(
@@ -3235,16 +3246,25 @@ else:
         let pending = f.update(true).unwrap();
         assert_eq!(pending.phase, "candidate");
         assert_eq!(f.remote_head(), source);
+        let generator_revision = Some(f.config.profiles["fleet"].generator.source_revision.clone());
+        assert_eq!(pending.generator_revision, generator_revision);
+        // Receipts written before the generator revision was recorded still load and resume.
+        let receipt_path = f.root().join("receipt.json");
+        let mut legacy: serde_json::Value = crate::review::read_json(&receipt_path).unwrap();
+        legacy.as_object_mut().unwrap().remove("generatorRevision");
+        save(&receipt_path, &legacy).unwrap();
         let status_before = status(&profile_directory(
             &f.config.workspaces["projects"],
             "fleet",
         ))
         .unwrap();
         assert_eq!(status_before[0].candidate, pending.candidate);
+        assert_eq!(status_before[0].generator_revision, None);
         f.control(json!({"adoption":"pending"}));
         let adopting = f.update(true).unwrap();
         assert_eq!(adopting.phase, "adopting");
         assert_eq!(adopting.candidate, pending.candidate);
+        assert_eq!(adopting.generator_revision, generator_revision);
         assert_eq!(f.remote_head(), pending.candidate);
         f.control(json!({}));
         let adopted = f.update(true).unwrap();
@@ -3413,6 +3433,7 @@ else:
             Override {
                 enable: true,
                 reason: None,
+                blocker: None,
                 target_branch: None,
                 required_checks: vec![Requirement {
                     name: "override-check".into(),
