@@ -2167,7 +2167,8 @@ fn coordinate_from_remote(url: &str) -> Option<String> {
         .rsplit_once('@')
         .map_or(authority, |(_, host)| host);
     let host = host.split(':').next()?.to_ascii_lowercase();
-    let path = path.trim_matches('/');
+    // A query or fragment can carry credentials; it is never part of the coordinate.
+    let path = path.split(['?', '#']).next()?.trim_matches('/');
     let path = path.strip_suffix(".git").unwrap_or(path);
     (!host.is_empty()
         && !host.contains('/')
@@ -2220,7 +2221,7 @@ fn infer_windows_runner(marked: &[WorkflowFile]) -> Option<ResolvedRunner> {
     Some(ResolvedRunner { name: None, labels })
 }
 
-pub(crate) fn parse_runs_on_labels(content: &str, occurrence: usize) -> Result<Vec<String>> {
+fn parse_runs_on_labels(content: &str, occurrence: usize) -> Result<Vec<String>> {
     let line = content
         .lines()
         .filter_map(|line| line.trim_start().strip_prefix("runs-on: "))
@@ -2837,6 +2838,10 @@ jobs:
             (
                 "git@codeberg.org:caniko/group/sub.git",
                 Some("codeberg.org/caniko/group/sub"),
+            ),
+            (
+                "https://github.com/caniko/simit.git?token=secret#frag",
+                Some("github.com/caniko/simit"),
             ),
             ("git@github.com:demo.git", None),
             ("/data/checkouts/simit", None),

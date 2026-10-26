@@ -24,6 +24,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   simit process. Every workflow file also becomes a `workflow:` node with its
   static triggers, runner labels and step names. See
   `docs/src/projects-facts.md`.
+- Generated Crow `build` and `ci` workflows now run push pipelines only on the
+  default branch and the fleet updater's `simit/update/**` maintenance refs.
+  Pull request pipelines still gate every branch, and other branch pushes no
+  longer duplicate them on metered Crow agents.
 - Generated `flake-wiring` checks and the Windows packager's simit install now
   pin the generator that rendered them instead of tracking simit's default
   branch or the latest crate. Nix-built simit uses its exact source revision;
