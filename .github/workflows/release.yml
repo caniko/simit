@@ -5,6 +5,7 @@
 # - GITHUB_TOKEN: hosted release API token for release creation and asset upload.
 # - MINISIGN_SECRET_KEY, MINISIGN_PASSWORD: minisign signing of SHA256SUMS.txt.
 # - COSIGN_PRIVATE_KEY, COSIGN_PASSWORD: optional fallback when keyless Sigstore OIDC is unavailable.
+# - ATTIC_TOKEN: repository secret for native prebuild Attic publication.
 
 name: release
 
@@ -98,6 +99,8 @@ jobs:
     uses: ./.github/workflows/prebuild.yaml
     with:
       release: true
+    secrets:
+      attic_token: ${{ secrets.ATTIC_TOKEN }}
   release:
     needs: [validate, prebuild]
     runs-on: ubuntu-24.04
@@ -189,6 +192,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
           MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}
+          ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN }}
         run: |
           set -euo pipefail
           . ./release-env
@@ -200,6 +204,7 @@ jobs:
           require_credential 'global/user secret' 'GITHUB_TOKEN' "${GITHUB_TOKEN:-}"
           require_credential 'repo secret' 'MINISIGN_SECRET_KEY' "${MINISIGN_SECRET_KEY:-}"
           require_credential 'repo secret' 'MINISIGN_PASSWORD' "${MINISIGN_PASSWORD:-}"
+          require_credential 'repo secret' 'ATTIC_TOKEN' "${ATTIC_TOKEN:-}"
           if [ -n "$missing" ]; then
             printf 'Missing release credentials:%s\n' "$missing" >&2
             exit 1
