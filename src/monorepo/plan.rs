@@ -23,6 +23,9 @@ pub fn select(graph: &Graph, paths: &[String], all: bool) -> Result<Plan> {
     let paths: BTreeSet<_> = paths.iter().cloned().collect();
     for path in &paths {
         validate_relative_path(path)?;
+        if graph.ignore_paths.iter().any(|p| covers(p, path)) {
+            continue;
+        }
         let owners: Vec<_> = graph
             .components
             .values()

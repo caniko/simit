@@ -31,6 +31,9 @@ pub struct Config {
     /// Components are Git submodules; generated checkouts fetch them recursively.
     #[serde(default)]
     pub submodules: bool,
+    /// Paths whose changes select no component (documentation, migration notes).
+    #[serde(default)]
+    pub ignore_paths: Vec<String>,
 }
 
 fn default_shared_paths() -> Vec<String> {
@@ -70,6 +73,16 @@ pub struct Component {
     pub systems: Vec<String>,
     #[serde(default)]
     pub checks: Vec<RequiredGate>,
+    /// Components naming the same job share one CI job (checkout, Nix store,
+    /// provisioning) and run their checks in dependency order; default `id`.
+    #[serde(default)]
+    pub job: Option<String>,
+}
+
+impl Component {
+    pub fn job_id(&self) -> &str {
+        self.job.as_deref().unwrap_or(&self.id)
+    }
 }
 
 /// Merged Cargo metadata plus each member's owning manifest (`None` for the root).
@@ -79,6 +92,7 @@ type CargoWorkspaces = (crate::cargo::Metadata, BTreeMap<String, Option<String>>
 pub struct Graph {
     pub components: BTreeMap<String, Component>,
     pub shared_paths: Vec<String>,
+    pub ignore_paths: Vec<String>,
     pub order: Vec<String>,
 }
 
@@ -94,8 +108,18 @@ impl Config {
             bail!("monorepo requires at least one component");
         }
         let mut ids = BTreeSet::new();
+        let mut job_systems: BTreeMap<&str, &Vec<String>> = BTreeMap::new();
         for component in &self.components {
             validate_id(&component.id)?;
+            validate_id(component.job_id())?;
+            if let Some(systems) = job_systems.insert(component.job_id(), &component.systems)
+                && systems != &component.systems
+            {
+                bail!(
+                    "components sharing job {} must declare the same systems",
+                    component.job_id()
+                );
+            }
             if !ids.insert(&component.id) {
                 bail!("duplicate monorepo component {}", component.id);
             }
@@ -189,8 +213,25 @@ impl Config {
                 }
             }
         }
-        for path in self.shared_paths.iter().chain(&self.formatter_modules) {
+        for path in self
+            .shared_paths
+            .iter()
+            .chain(&self.formatter_modules)
+            .chain(&self.ignore_paths)
+        {
             validate_relative_path(path)?;
+        }
+        for ignored in &self.ignore_paths {
+            for path in self
+                .shared_paths
+                .iter()
+                .chain(self.components.iter().flat_map(|c| &c.paths))
+            {
+                ensure!(
+                    !covers(ignored, path) && !covers(path, ignored),
+                    "ignore path {ignored} overlaps owned or shared path {path}"
+                );
+            }
         }
         self.graph(None)?.validate_ownership()
     }
@@ -402,6 +443,7 @@ impl Config {
         Ok(Graph {
             components,
             shared_paths: self.shared_paths.clone(),
+            ignore_paths: self.ignore_paths.clone(),
             order,
         })
     }
