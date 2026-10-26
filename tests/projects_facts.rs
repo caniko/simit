@@ -135,7 +135,7 @@ fn fixtures(root: &Path) {
     write(
         &drifted,
         "scripts/release.sh",
-        "#!/bin/sh\n# simit is not invoked by this comment\nsimit release --dry-run\ncargo install simit\n",
+        "#!/bin/sh\n# simit is not invoked by this comment\nsimit release --dry-run\ncargo install simit\ncargo install --locked --git https://github.com/caniko/simit.git --rev 4c6841cce19327927ea8a8f6e856276dd5c878f0 simit\n",
     );
     write(
         &drifted,
