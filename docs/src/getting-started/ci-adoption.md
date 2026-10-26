@@ -38,6 +38,23 @@ with_docs = true
 with_msrv = true
 ```
 
+## Local gate
+
+`local_gate = true` under `[ci]` also generates `scripts/ci-local.sh`, for
+projects whose forge runs no hosted CI. It replays every `run` step of the
+generated `ci*.yaml` workflows in CI order, then builds each `[ci].nix_builds`
+installable with the `[ci.nix_build]` job limits. Steps tied to the hosted
+runner, such as those using `$GITHUB_*`, Actions expressions or global Git
+configuration, are left out, and so is job `env`.
+
+```sh
+bash scripts/ci-local.sh --list                  # list steps
+SIMIT_LOCAL_ONLY="clippy|test" bash scripts/ci-local.sh  # run matching steps
+```
+
+The script carries the generated marker, so `simit init ci --check` reports hand
+edits as drift. Setting `local_gate` back to false retires the script.
+
 ## Release-plz on GitHub Actions
 
 Newly enabling Rust publication on supported GitHub Actions projects selects

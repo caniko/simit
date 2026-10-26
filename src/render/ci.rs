@@ -16,6 +16,7 @@ use crate::user_config::{ResolvedCiRunners, ResolvedRunner};
 
 pub mod custody;
 mod independent_lanes;
+pub mod local;
 mod nix_dependencies;
 mod nix_groups;
 pub(super) mod trusted_publisher;

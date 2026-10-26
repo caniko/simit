@@ -621,6 +621,9 @@ pub struct CiConfig {
     pub with_deny: bool,
     #[serde(default)]
     pub with_docs: bool,
+    /// Also generate `scripts/ci-local.sh`, the CI checks runnable locally.
+    #[serde(default)]
+    pub local_gate: bool,
     #[serde(default)]
     pub with_artifacts: bool,
     #[serde(default)]
@@ -4584,6 +4587,7 @@ fn set_ci_table(table: &mut Table, ci: &CiConfig) {
     set_bool(table, "with_audit", ci.with_audit);
     set_bool(table, "with_deny", ci.with_deny);
     set_bool(table, "with_docs", ci.with_docs);
+    set_bool(table, "local_gate", ci.local_gate);
     set_bool(table, "with_artifacts", ci.with_artifacts);
     set_bool(table, "with_pypi_publish", ci.with_pypi_publish);
     set_optional_string(table, "pypi_token_secret", ci.pypi_token_secret.as_deref());

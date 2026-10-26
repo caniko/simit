@@ -2469,6 +2469,11 @@ fn reconcile_ci_files(
             command.diff,
         );
     }
+    if config.ci.local_gate {
+        // Derived from the rendered workflows, so it must precede the extras below.
+        let script = ci::local::local_gate_script(&files, &config.ci)?;
+        files.push(script);
+    }
     if let Some(review) = config.review.as_ref() {
         files.extend(crate::review::generation::files(review)?);
     }
@@ -2484,6 +2489,7 @@ fn reconcile_ci_files(
     for path in [
         crate::render::release_plz::CONFIG,
         crate::render::release_plz::HELPER,
+        ci::local::LOCAL_GATE_PATH,
     ] {
         if !files
             .iter()
