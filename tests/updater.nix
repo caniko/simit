@@ -120,6 +120,13 @@
   };
 in
   assert rendered.schemaVersion == 1;
+  assert rendered.profiles.fleet.landing == "direct";
+  assert rendered.profiles.fleet.projectOverrides."git.example.org/team/legacy".landing == null;
+  assert lib.all (landing: accepts (example // {profiles.fleet = example.profiles.fleet // {inherit landing;};})) ["direct" "pull-request"];
+  assert accepts (example // {profiles.fleet = example.profiles.fleet // {projectOverrides."git.example.org/team/demo".landing = "pull-request";};});
+  assert lib.all (landing:
+    !(accepts (example // {profiles.fleet = example.profiles.fleet // {inherit landing;};}))
+    && !(accepts (example // {profiles.fleet = example.profiles.fleet // {projectOverrides."git.example.org/team/demo" = {inherit landing;};};}))) ["merge-queue" "Pull-Request" ""];
   assert !(accepts (withOtherForge "git.example.org"));
   assert !(accepts (withOtherForge "Git.Example.Org"));
   assert !(accepts (withForge {host = "Git.Example.Org";}));

@@ -73,7 +73,7 @@ pub fn run(args: Args) -> Result<()> {
     let state_directory = config.state_directory(workspace)?;
     let lock = engine::lock(&state_directory)?;
     checkpoint::ensure_idle(&state_directory)?;
-    let selection_policy = engine::policy_digest(&config, profile, workspace, None)?;
+    let selection_policy = engine::policy_digest(&config, profile, workspace, None, None)?;
     let selection_key =
         crate::review::canonical_digest(&(&args.profile, &selection_policy, &args.repo))?;
     let frozen_path = engine::selection_path(&state_directory, &selection_key);
@@ -229,8 +229,11 @@ pub fn run(args: Args) -> Result<()> {
             args.wait_seconds,
         ) {
             Ok(report) => {
+                // A pull request awaiting approval parks; only a canary blocks on it.
                 let complete =
-                    matches!(report.phase.as_str(), "unchanged" | "preview" | "qualified");
+                    matches!(report.phase.as_str(), "unchanged" | "preview" | "qualified")
+                        || (report.phase == "proposed"
+                            && !profile.rollout.canaries.contains(&project.coordinate));
                 reports.push(serde_json::to_value(report)?);
                 if !complete {
                     failed = true;
@@ -262,18 +265,17 @@ pub fn run(args: Args) -> Result<()> {
                     && matches!(r["phase"].as_str(), Some("qualified" | "unchanged"))
             })
         });
-        if !profile.rollout.stop_on_failure {
-            let attempted = reports
-                .iter()
-                .filter_map(|r| r["coordinate"].as_str())
-                .collect::<std::collections::BTreeSet<_>>();
-            // Keep incomplete canaries at the front as barriers; retry ordinary
-            // failures only after repositories this rollout has not attempted.
-            frozen.projects.sort_by_key(|p| {
-                !profile.rollout.canaries.contains(&p.coordinate)
-                    && attempted.contains(p.coordinate.as_str())
-            });
-        }
+        let retried = reports
+            .iter()
+            .filter(|r| !profile.rollout.stop_on_failure || r["phase"] == "proposed")
+            .filter_map(|r| r["coordinate"].as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        // Keep incomplete canaries at the front as barriers; retry ordinary
+        // failures and parked pull requests after unattempted repositories.
+        frozen.projects.sort_by_key(|p| {
+            !profile.rollout.canaries.contains(&p.coordinate)
+                && retried.contains(p.coordinate.as_str())
+        });
         frozen.completed = frozen.projects.is_empty();
         engine::save(&frozen_path, &frozen)?;
     }

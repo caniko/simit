@@ -213,6 +213,7 @@ pub fn policy_digest(
     profile: &Profile,
     workspace: &Workspace,
     consumer_forge: Option<&str>,
+    coordinate: Option<&str>,
 ) -> Result<String> {
     let generator = config
         .forges
@@ -226,12 +227,34 @@ pub fn policy_digest(
                 .context("unknown consumer forge")
         })
         .transpose()?;
-    canonical_digest(&(profile, workspace, generator, consumer))
+    let Some(coordinate) = coordinate else {
+        return canonical_digest(&(profile, workspace, generator, consumer));
+    };
+    // Other repositories' enrollment and overrides are not this transaction's
+    // policy, so editing them keeps its pending candidate or pull request.
+    let mut scoped = serde_json::to_value(profile)?;
+    let enrolled = serde_json::Value::from(coordinate);
+    for list in ["/select/coordinates", "/rollout/canaries"] {
+        if let Some(values) = scoped
+            .pointer_mut(list)
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            values.retain(|value| value == &enrolled);
+        }
+    }
+    if let Some(overrides) = scoped["projectOverrides"].as_object_mut() {
+        overrides.retain(|key, _| key == coordinate);
+    }
+    canonical_digest(&(scoped, workspace, generator, consumer))
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Receipt {
+    /// Absent (0) in v1 receipts, which always landed directly. Older binaries
+    /// reject v2 fields as unknown rather than misreading a pull request.
+    #[serde(default)]
+    pub schema_version: u32,
     pub coordinate: String,
     pub config_digest: String,
     pub repository_id: String,
@@ -243,6 +266,17 @@ pub struct Receipt {
     pub phase: String,
     pub managed: BTreeMap<String, Option<String>>,
     pub diff: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub landing: Option<String>,
+    /// Forge identifier of the candidate's pull request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change: Option<String>,
+    /// Target commit that merged the candidate, when the forge landed one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub landed: Option<String>,
+    /// Policy scoped to this coordinate; v2 receipts resume against it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_policy_digest: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -293,6 +327,48 @@ fn request(
         workflows,
         required_checks,
         plan: None,
+        landing: None,
+        target: None,
+        change: None,
+    }
+}
+
+/// Marks a request as pull-request landing into `target`; this is protocol v2.
+fn pull_request(
+    mut request: AdapterRequest,
+    target: Option<&str>,
+    change: Option<&str>,
+) -> AdapterRequest {
+    request.landing = Some("pull-request".into());
+    request.target = target.map(str::to_owned);
+    request.change = change.map(str::to_owned);
+    request.schema_version = request.derived_version();
+    request
+}
+
+/// Retires a published maintenance ref under a lease on its candidate. This
+/// is cleanup: a ref that is gone or now belongs to another writer stays.
+fn delete_maintenance_ref(checkout: &Path, branch: &str, candidate: &str) {
+    let reference = format!("refs/heads/{branch}");
+    let result = git(checkout, &["ls-remote", "origin", &reference]).and_then(|existing| {
+        if existing.is_empty() {
+            eprintln!("maintenance ref {branch} is already gone");
+            return Ok(());
+        }
+        git(
+            checkout,
+            &[
+                "push",
+                "--quiet",
+                &format!("--force-with-lease={reference}:{candidate}"),
+                "origin",
+                &format!(":{reference}"),
+            ],
+        )
+        .map(drop)
+    });
+    if let Err(error) = result {
+        eprintln!("retained maintenance ref {branch}: {error:#}");
     }
 }
 
@@ -538,21 +614,22 @@ fn inspect(
     forge: &Forge,
     project: &Project,
     target: Option<&str>,
+    landing: &str,
     root: &Path,
 ) -> Result<AdapterResponse> {
-    let response = adapter(
+    let mut request = request(
         forge,
-        &request(
-            forge,
-            &project.coordinate,
-            "inspect",
-            None,
-            target,
-            vec![],
-            vec![],
-        ),
-        root,
-    )?;
+        &project.coordinate,
+        "inspect",
+        None,
+        target,
+        vec![],
+        vec![],
+    );
+    if landing == "pull-request" {
+        request = pull_request(request, None, None);
+    }
+    let response = adapter(forge, &request, root)?;
     ensure!(
         response.status == "success",
         "repository inspection incomplete"
@@ -787,10 +864,20 @@ pub fn update(
     );
     private_directory(&root)?;
     let receipt_path = root.join("receipt.json");
-    let config_digest = policy_digest(config, profile, workspace, Some(&project.forge))?;
+    let config_digest = policy_digest(config, profile, workspace, Some(&project.forge), None)?;
+    let project_digest = policy_digest(
+        config,
+        profile,
+        workspace,
+        Some(&project.forge),
+        Some(&project.coordinate),
+    )?;
     let over = profile.project_overrides.get(&project.coordinate);
     let target = over.and_then(|o| o.target_branch.as_deref());
-    let observed = inspect(forge, project, target, &root)?;
+    let landing = over
+        .and_then(|o| o.landing.as_deref())
+        .unwrap_or(&profile.landing);
+    let observed = inspect(forge, project, target, landing, &root)?;
     let mut requirements = observed.requirements.clone();
     for r in profile
         .required_checks
@@ -823,10 +910,57 @@ pub fn update(
         );
     }
     let checkout = root.join("checkout");
+    let archive = |retained: &Receipt| -> Result<()> {
+        // Archive before replacing the checkout, so interruption cannot leave an
+        // unfinished receipt referring to a new clone. Adopted baselines survive.
+        fs::rename(
+            &receipt_path,
+            root.join(format!("invalidated-{}.json", canonical_digest(retained)?)),
+        )?;
+        File::open(&root)?.sync_all()?;
+        delete_maintenance_ref(&checkout, &retained.branch, &retained.candidate);
+        Ok(())
+    };
+    // Re-read a parked pull request first. A stale one is closed rather than
+    // merged, since its qualification no longer describes the target.
+    if let Some(retained) = previous.as_mut().filter(|r| r.phase == "proposed") {
+        let stale = observed.revision != retained.source
+            || observed.policy_digest != retained.policy_digest
+            || observed.default_branch != retained.default_branch
+            || retained.project_policy_digest.as_ref() != Some(&project_digest);
+        let reread = pull_request(
+            request(
+                forge,
+                &project.coordinate,
+                if stale { "close" } else { "propose" },
+                Some(&retained.candidate),
+                Some(&retained.branch),
+                vec![],
+                vec![],
+            ),
+            Some(target.unwrap_or(&retained.default_branch)),
+            retained.change.as_deref(),
+        );
+        match adapter(forge, &reread, &root)?.change {
+            // Merged, possibly by a human: adoption verifies what landed.
+            Some(change) if change.state == "merged" => {
+                retained.change = Some(change.id);
+                retained.landed = change.merge_commit;
+                retained.phase = "adopting".into();
+                save(&receipt_path, &*retained)?;
+            }
+            Some(change) if change.state == "open" => retained.change = Some(change.id),
+            _ => {
+                archive(retained)?;
+                previous = None;
+            }
+        }
+    }
     if let Some(retained) = previous.as_ref().filter(|receipt| {
         !matches!(receipt.phase.as_str(), "qualified" | "unchanged")
             && observed.revision != receipt.source
             && observed.revision != receipt.candidate
+            && receipt.landed.as_ref() != Some(&observed.revision)
     }) {
         ensure!(
             matches!(
@@ -860,13 +994,7 @@ pub fn update(
             .is_empty(),
             "remote advanced beyond the landed candidate; adoption reconciliation is required"
         );
-        // Archive before replacing the checkout, so interruption cannot leave an
-        // unfinished receipt referring to a new clone. Adopted baselines survive.
-        fs::rename(
-            &receipt_path,
-            root.join(format!("invalidated-{}.json", canonical_digest(retained)?)),
-        )?;
-        File::open(&root)?.sync_all()?;
+        archive(retained)?;
         previous = None;
     }
     if let Some(previous) = previous
@@ -874,7 +1002,11 @@ pub fn update(
         .filter(|r| !matches!(r.phase.as_str(), "qualified" | "unchanged"))
     {
         ensure!(
-            previous.config_digest == config_digest,
+            if previous.schema_version >= 2 {
+                previous.project_policy_digest.as_ref() == Some(&project_digest)
+            } else {
+                previous.config_digest == config_digest
+            },
             "an unfinished rollout uses another policy; resume it with its original configuration"
         );
         ensure!(
@@ -884,7 +1016,9 @@ pub fn update(
             "repository identity/default branch/protection changed during rollout"
         );
         ensure!(
-            observed.revision == previous.source || observed.revision == previous.candidate,
+            observed.revision == previous.source
+                || observed.revision == previous.candidate
+                || previous.landed.as_ref() == Some(&observed.revision),
             "remote moved; candidate qualification invalidated"
         );
         ensure!(
@@ -1043,7 +1177,25 @@ pub fn update(
                 "--",
             ],
         )?;
-        if diff.is_empty() {
+        let receipt = Receipt {
+            schema_version: 2,
+            coordinate: project.coordinate.clone(),
+            config_digest,
+            repository_id: observed.repository_id.clone(),
+            source: observed.revision.clone(),
+            candidate: String::new(),
+            branch: String::new(),
+            default_branch: observed.default_branch.clone(),
+            policy_digest: observed.policy_digest.clone(),
+            phase: "preview".into(),
+            managed,
+            diff,
+            landing: Some(landing.into()),
+            change: None,
+            landed: None,
+            project_policy_digest: Some(project_digest.clone()),
+        };
+        if receipt.diff.is_empty() {
             if push {
                 let qualified = wait(
                     forge,
@@ -1064,7 +1216,7 @@ pub fn update(
                         && qualified.repository_id == observed.repository_id,
                     "unchanged source qualification is incomplete"
                 );
-                let fresh = inspect(forge, project, target, &root)?;
+                let fresh = inspect(forge, project, target, landing, &root)?;
                 ensure!(
                     fresh.revision == observed.revision
                         && fresh.repository_id == observed.repository_id
@@ -1076,22 +1228,14 @@ pub fn update(
                     &baseline_path,
                     &Baseline {
                         repository_id: observed.repository_id.clone(),
-                        managed: managed.clone(),
+                        managed: receipt.managed.clone(),
                     },
                 )?;
             }
             let receipt = Receipt {
-                coordinate: project.coordinate.clone(),
-                config_digest,
-                repository_id: observed.repository_id,
-                source: observed.revision.clone(),
-                candidate: observed.revision,
-                branch: String::new(),
-                default_branch: observed.default_branch,
-                policy_digest: observed.policy_digest,
+                candidate: observed.revision.clone(),
                 phase: "unchanged".into(),
-                managed,
-                diff,
+                ..receipt
             };
             if push {
                 save(&receipt_path, &receipt)?;
@@ -1099,19 +1243,7 @@ pub fn update(
             return Ok(receipt);
         }
         if !push {
-            return Ok(Receipt {
-                coordinate: project.coordinate.clone(),
-                config_digest,
-                repository_id: observed.repository_id,
-                source: observed.revision,
-                candidate: String::new(),
-                branch: String::new(),
-                default_branch: observed.default_branch,
-                policy_digest: observed.policy_digest,
-                phase: "preview".into(),
-                managed,
-                diff,
-            });
+            return Ok(receipt);
         }
         let author = git(&checkout, &["var", "GIT_AUTHOR_IDENT"])?;
         let committer = git(&checkout, &["var", "GIT_COMMITTER_IDENT"])?;
@@ -1161,7 +1293,7 @@ pub fn update(
             changed
                 .split('\0')
                 .filter(|p| !p.is_empty())
-                .all(|p| managed.contains_key(p)),
+                .all(|p| receipt.managed.contains_key(p)),
             "commit modified paths outside generator ownership"
         );
         let branch = format!(
@@ -1174,17 +1306,10 @@ pub fn update(
             &["check-ref-format", &format!("refs/heads/{branch}")],
         )?;
         Receipt {
-            coordinate: project.coordinate.clone(),
-            config_digest,
-            repository_id: observed.repository_id.clone(),
-            source: observed.revision.clone(),
             candidate,
             branch,
-            default_branch: observed.default_branch.clone(),
-            policy_digest: observed.policy_digest.clone(),
             phase: "prepared".into(),
-            managed,
-            diff,
+            ..receipt
         }
     };
     ensure!(
@@ -1245,6 +1370,7 @@ pub fn update(
                 .collect(),
         "retained workflow ownership differs from the candidate"
     );
+    let target_branch = target.unwrap_or(&observed.default_branch);
     let admit = |branch: &str| -> Result<()> {
         let mut admission = request(
             forge,
@@ -1256,6 +1382,9 @@ pub fn update(
             requirements.clone(),
         );
         admission.plan = Some(admission_plan.clone());
+        if landing == "pull-request" && branch == target_branch {
+            admission = pull_request(admission, Some(branch), None);
+        }
         let evidence = adapter(forge, &admission, &root)?;
         ensure!(
             evidence.status == "success" && evidence.repository_id == receipt.repository_id,
@@ -1263,14 +1392,11 @@ pub fn update(
         );
         Ok(())
     };
-    for branch in [
-        receipt.branch.as_str(),
-        target.unwrap_or(&observed.default_branch),
-    ] {
+    for branch in [receipt.branch.as_str(), target_branch] {
         admit(branch)?;
     }
     save(&receipt_path, &receipt)?;
-    if observed.revision == receipt.source {
+    if observed.revision == receipt.source && receipt.landed.is_none() {
         let remote_ref = format!("refs/heads/{}", receipt.branch);
         let existing = git(&checkout, &["ls-remote", "origin", &remote_ref])?;
         if existing.is_empty() {
@@ -1312,7 +1438,7 @@ pub fn update(
         if candidate.status != "success" {
             return Ok(receipt);
         }
-        let fresh = inspect(forge, project, target, &root)?;
+        let fresh = inspect(forge, project, target, landing, &root)?;
         ensure!(
             fresh.repository_id == receipt.repository_id
                 && fresh.revision == receipt.source
@@ -1320,39 +1446,97 @@ pub fn update(
                 && fresh.policy_digest == receipt.policy_digest,
             "remote identity, source or policy moved after qualification"
         );
-        admit(target.unwrap_or(&receipt.default_branch))?;
-        receipt.phase = "landing".into();
-        save(&receipt_path, &receipt)?;
-        // The candidate is a direct child of source; the explicit lease is a compare-and-swap.
-        let target_ref = format!("refs/heads/{}", target.unwrap_or(&receipt.default_branch));
-        git(
-            &checkout,
-            &[
-                "push",
-                &format!("--force-with-lease={target_ref}:{}", receipt.source),
-                "origin",
-                &format!("{}:{target_ref}", receipt.candidate),
-            ],
-        )?;
+        admit(target_branch)?;
+        if landing == "pull-request" {
+            receipt.phase = "proposed".into();
+            save(&receipt_path, &receipt)?;
+            let change = |operation: &str, id: Option<&str>| {
+                pull_request(
+                    request(
+                        forge,
+                        &project.coordinate,
+                        operation,
+                        Some(&receipt.candidate),
+                        Some(&receipt.branch),
+                        vec![],
+                        vec![],
+                    ),
+                    Some(target_branch),
+                    id,
+                )
+            };
+            let proposed = adapter(forge, &change("propose", None), &root)?
+                .change
+                .context("missing proposed pull request")?;
+            let merged = if proposed.state == "open" {
+                wait(forge, &change("merge", Some(&proposed.id)), &root, deadline)?
+                    .change
+                    .context("missing merged pull request")?
+            } else {
+                proposed
+            };
+            receipt.change = Some(merged.id.clone());
+            match merged.state.as_str() {
+                // Parked until approvals or forge mergeability arrive.
+                "open" => {
+                    save(&receipt_path, &receipt)?;
+                    return Ok(receipt);
+                }
+                "closed" => {
+                    save(&receipt_path, &receipt)?;
+                    anyhow::bail!("pull request {} closed without merging", merged.id)
+                }
+                _ => receipt.landed = merged.merge_commit,
+            }
+        } else {
+            receipt.phase = "landing".into();
+            save(&receipt_path, &receipt)?;
+            // The candidate is a direct child of source; the explicit lease is a compare-and-swap.
+            let target_ref = format!("refs/heads/{target_branch}");
+            git(
+                &checkout,
+                &[
+                    "push",
+                    &format!("--force-with-lease={target_ref}:{}", receipt.source),
+                    "origin",
+                    &format!("{}:{target_ref}", receipt.candidate),
+                ],
+            )?;
+        }
     }
     receipt.phase = "adopting".into();
     save(&receipt_path, &receipt)?;
-    let fresh = inspect(forge, project, target, &root)?;
+    // A pull request can land a merge, squash or rebase commit instead of the
+    // candidate. It must carry exactly the candidate's tree onto its source.
+    let landed = receipt.landed.clone().unwrap_or(receipt.candidate.clone());
+    let fresh = inspect(forge, project, target, landing, &root)?;
     ensure!(
         fresh.repository_id == receipt.repository_id
-            && fresh.revision == receipt.candidate
+            && fresh.revision == landed
             && fresh.default_branch == receipt.default_branch
             && fresh.policy_digest == receipt.policy_digest,
         "landed source or policy changed before adoption"
     );
+    if landed != receipt.candidate {
+        git(
+            &checkout,
+            &["fetch", "--quiet", "--no-tags", "origin", &landed],
+        )?;
+        let tree = |commit: &str| git(&checkout, &["rev-parse", &format!("{commit}^{{tree}}")]);
+        ensure!(
+            tree(&landed)? == tree(&receipt.candidate)?
+                && git(&checkout, &["rev-parse", &format!("{landed}^1")])? == receipt.source,
+            "landed commit differs from the qualified candidate tree or source"
+        );
+    }
     let adopted = wait(
         forge,
         &request(
             forge,
             &project.coordinate,
             "qualify",
-            Some(&receipt.candidate),
-            Some(target.unwrap_or(&receipt.default_branch)),
+            Some(&landed),
+            Some(target_branch),
             workflow_paths,
             requirements,
         ),
@@ -1364,9 +1548,9 @@ pub fn update(
         "adoption qualification repository changed"
     );
     if adopted.status == "success" {
-        let final_state = inspect(forge, project, target, &root)?;
+        let final_state = inspect(forge, project, target, landing, &root)?;
         ensure!(
-            final_state.revision == receipt.candidate
+            final_state.revision == landed
                 && final_state.repository_id == receipt.repository_id
                 && final_state.policy_digest == receipt.policy_digest
                 && final_state.default_branch == receipt.default_branch,
@@ -1381,6 +1565,7 @@ pub fn update(
         )?;
         receipt.phase = "qualified".into();
         save(&receipt_path, &receipt)?;
+        delete_maintenance_ref(&checkout, &receipt.branch, &receipt.candidate);
     }
     Ok(receipt)
 }
@@ -3211,6 +3396,16 @@ else:
         fn control(&self, value: serde_json::Value) {
             save(&self.control, &value).unwrap();
         }
+        fn land_pull_requests(mut self) -> Self {
+            self.config.profiles.get_mut("fleet").unwrap().landing = "pull-request".into();
+            self
+        }
+        fn pulls(&self) -> serde_json::Value {
+            crate::review::read_json(&self.control.with_file_name("pulls.json")).unwrap()
+        }
+        fn maintenance_refs(&self) -> String {
+            git(&self.remote, &["for-each-ref", "refs/heads/maintenance/"]).unwrap()
+        }
         fn inject_generator(&mut self, code: &str) {
             let generator = &mut self.config.profiles.get_mut("fleet").unwrap().generator;
             let original = fs::read_to_string(&generator.executable).unwrap();
@@ -3418,6 +3613,7 @@ else:
                     name: "override-check".into(),
                     authority: "777".into(),
                 }],
+                landing: None,
             },
         );
         f.control(json!({"expectedAdmissionChecks":[
@@ -3494,6 +3690,222 @@ else:
             let adopted = f.update(true).unwrap();
             assert_eq!(adopted.phase, "qualified");
             assert_eq!(adopted.candidate, retained.candidate);
+        }
+    }
+
+    #[test]
+    fn namespace_pull_requests_land_every_merge_style_through_adoption() {
+        for style in ["merge", "squash", "rebase", "ff"] {
+            let f = Fixture::new().land_pull_requests();
+            let source = f.remote_head();
+            f.control(json!({"mergeStyle": style}));
+            let receipt = f.update(true).unwrap();
+            assert_eq!(receipt.phase, "qualified", "{style}");
+            assert_eq!(receipt.schema_version, 2);
+            assert_eq!(receipt.change.as_deref(), Some("1"));
+            let landed = receipt.landed.clone().unwrap();
+            assert_eq!(f.remote_head(), landed);
+            assert_eq!(landed == receipt.candidate, style == "ff", "{style}");
+            let checkout = f.root().join("checkout");
+            let tree = |commit: &str| git(&checkout, &["rev-parse", &format!("{commit}^{{tree}}")]);
+            assert_eq!(tree(&landed).unwrap(), tree(&receipt.candidate).unwrap());
+            assert_eq!(
+                git(&checkout, &["rev-parse", &format!("{landed}^1")]).unwrap(),
+                source
+            );
+            assert_eq!(f.pulls()[0]["state"], "merged");
+            assert!(f.maintenance_refs().is_empty(), "{style}");
+            assert_eq!(f.update(true).unwrap().phase, "unchanged");
+        }
+    }
+
+    #[test]
+    fn namespace_pull_requests_park_until_mergeable_and_resume_the_same_change() {
+        let f = Fixture::new().land_pull_requests();
+        let source = f.remote_head();
+        f.control(json!({"merge": "pending"}));
+        let parked = f.update(true).unwrap();
+        assert_eq!(parked.phase, "proposed");
+        assert_eq!(parked.change.as_deref(), Some("1"));
+        assert_eq!(f.remote_head(), source);
+        assert_eq!(f.update(true).unwrap().phase, "proposed");
+        assert_eq!(f.pulls().as_array().unwrap().len(), 1);
+        f.control(json!({}));
+        let adopted = f.update(true).unwrap();
+        assert_eq!(adopted.phase, "qualified");
+        assert_eq!(adopted.candidate, parked.candidate);
+        assert_eq!(adopted.change, parked.change);
+        assert_eq!(Some(f.remote_head()), adopted.landed);
+    }
+
+    #[test]
+    fn namespace_stale_or_closed_pull_requests_retire_their_ref_and_regenerate() {
+        for change in ["target", "policy", "closed"] {
+            let mut f = Fixture::new().land_pull_requests();
+            f.control(json!({"merge": "pending"}));
+            let parked = f.update(true).unwrap();
+            assert_eq!(parked.phase, "proposed");
+            f.control(json!({}));
+            match change {
+                "target" => {
+                    fs::write(f.source.join("application.txt"), "moved target\n").unwrap();
+                    f.publish(&f.source, "advance the pull request target");
+                }
+                "policy" => {
+                    f.config
+                        .profiles
+                        .get_mut("fleet")
+                        .unwrap()
+                        .rollout
+                        .batch_size = 2
+                }
+                _ => f.control(json!({"humanClose": true})),
+            }
+            let adopted = f.update(true).unwrap();
+            assert_eq!(adopted.phase, "qualified", "{change}");
+            assert_eq!(adopted.change.as_deref(), Some("2"));
+            let pulls = f.pulls();
+            assert_eq!(pulls[0]["state"], "closed", "{change}");
+            assert_eq!(pulls[1]["state"], "merged", "{change}");
+            assert!(f.maintenance_refs().is_empty(), "{change}");
+            assert!(
+                f.root()
+                    .join(format!(
+                        "invalidated-{}.json",
+                        canonical_digest(&parked).unwrap()
+                    ))
+                    .is_file()
+            );
+        }
+    }
+
+    #[test]
+    fn namespace_human_merged_pull_requests_are_verified_then_adopted() {
+        let f = Fixture::new().land_pull_requests();
+        f.control(json!({"merge": "pending"}));
+        let parked = f.update(true).unwrap();
+        f.control(json!({"merge": "pending", "humanMerge": "squash"}));
+        let adopted = f.update(true).unwrap();
+        assert_eq!(adopted.phase, "qualified");
+        assert_eq!(adopted.candidate, parked.candidate);
+        let landed = adopted.landed.unwrap();
+        assert_ne!(landed, parked.candidate);
+        assert_eq!(f.remote_head(), landed);
+        assert!(f.maintenance_refs().is_empty());
+    }
+
+    #[test]
+    fn namespace_landed_tree_or_parent_mismatch_fails_closed() {
+        for style in ["wrong-tree", "wrong-parent"] {
+            let f = Fixture::new().land_pull_requests();
+            f.control(json!({"mergeStyle": style}));
+            for _ in 0..2 {
+                assert!(
+                    f.update(true)
+                        .unwrap_err()
+                        .to_string()
+                        .contains("differs from the qualified candidate tree"),
+                    "{style}"
+                );
+            }
+            let retained: Receipt =
+                crate::review::read_json(&f.root().join("receipt.json")).unwrap();
+            assert_eq!(retained.phase, "adopting");
+            assert_eq!(retained.landed, Some(f.remote_head()));
+            assert!(!f.root().join("baseline.json").exists());
+        }
+    }
+
+    #[test]
+    fn namespace_parked_pull_requests_do_not_block_later_repositories() {
+        for canary in [false, true] {
+            let mut f = Fixture::new().land_pull_requests();
+            if canary {
+                let coordinate = f.project.coordinate.clone();
+                let profile = f.config.profiles.get_mut("fleet").unwrap();
+                profile.rollout.canaries.push(coordinate);
+            }
+            let mut second = f.project.clone();
+            second.coordinate = "fixture.example/team/next".into();
+            second.relative_path = "other/next".into();
+            f.write_inventory();
+            let inventory_path = f.config.workspaces["projects"]
+                .inventory
+                .file
+                .clone()
+                .unwrap();
+            let mut inventory: Inventory = crate::review::read_json(&inventory_path).unwrap();
+            inventory.projects.push(second.clone());
+            save(&inventory_path, &inventory).unwrap();
+            f.control(json!({"coordinateStatus":{&f.project.coordinate:{"merge":"pending"}}}));
+            let profile_root = profile_directory(&f.config.workspaces["projects"], "fleet");
+            let phase = |coordinate: &str| {
+                status(&profile_root)
+                    .unwrap()
+                    .into_iter()
+                    .find(|receipt| receipt.coordinate == coordinate)
+                    .map(|receipt| receipt.phase)
+            };
+            for _ in 0..2 {
+                assert_eq!(f.cli("fleet", true).is_err(), canary);
+            }
+            assert_eq!(phase(&f.project.coordinate).as_deref(), Some("proposed"));
+            assert_eq!(
+                phase(&second.coordinate).as_deref(),
+                (!canary).then_some("qualified")
+            );
+        }
+    }
+
+    #[test]
+    fn namespace_v1_receipts_resume_as_direct_landing_and_retire_their_ref() {
+        let f = Fixture::new();
+        f.control(json!({"candidate":"pending"}));
+        let pending = f.update(true).unwrap();
+        assert_eq!(pending.phase, "candidate");
+        let path = f.root().join("receipt.json");
+        let mut legacy: serde_json::Value = crate::review::read_json(&path).unwrap();
+        for key in ["schemaVersion", "landing", "projectPolicyDigest"] {
+            legacy.as_object_mut().unwrap().remove(key).unwrap();
+        }
+        save(&path, &legacy).unwrap();
+        assert!(!f.maintenance_refs().is_empty());
+        f.control(json!({}));
+        let adopted = f.update(true).unwrap();
+        assert_eq!(adopted.phase, "qualified");
+        assert_eq!(adopted.schema_version, 0);
+        assert_eq!(adopted.candidate, pending.candidate);
+        assert_eq!(adopted.landed, None);
+        assert_eq!(f.remote_head(), pending.candidate);
+        assert!(f.maintenance_refs().is_empty());
+    }
+
+    #[test]
+    fn namespace_other_repository_policy_edits_keep_pending_candidates() {
+        for own in [false, true] {
+            let mut f = Fixture::new();
+            f.control(json!({"candidate":"pending"}));
+            let pending = f.update(true).unwrap();
+            let coordinate = if own {
+                f.project.coordinate.clone()
+            } else {
+                "fixture.example/team/other".to_owned()
+            };
+            let profile = f.config.profiles.get_mut("fleet").unwrap();
+            profile.select.coordinates.push(coordinate.clone());
+            profile.project_overrides.insert(
+                coordinate,
+                serde_json::from_value(json!({"targetBranch":"trunk"})).unwrap(),
+            );
+            f.control(json!({}));
+            let resumed = f.update(true);
+            if own {
+                assert!(resumed.unwrap_err().to_string().contains("another policy"));
+            } else {
+                let adopted = resumed.unwrap();
+                assert_eq!(adopted.phase, "qualified");
+                assert_eq!(adopted.candidate, pending.candidate);
+            }
         }
     }
 }
