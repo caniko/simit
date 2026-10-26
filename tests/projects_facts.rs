@@ -102,7 +102,7 @@ fn fixtures(root: &Path) {
         &drifted,
         "simit.toml",
         &format!(
-            "[ci]\nplatform = \"github\"\nprovider = \"actions\"\n\n\
+            "[ci]\nplatform = \"github\"\nprovider = \"actions\"\nlocal_gate = true\n\n\
              [[ci.required_gates]]\nid = \"parity\"\n\
              run = \"nix run github:caniko/simit/{PINNED} -- init ci --check\"\n\n\
              [release.attic]\ncache = \"canix\"\nurl = \"https://attic.example\"\ntoken_name = \"drifted\"\n"
@@ -129,13 +129,18 @@ fn fixtures(root: &Path) {
     write(&drifted, ".github/workflows/release.yml", "name: release\n");
     write(
         &drifted,
+        ".github/workflows/publish-vscode-extension.yaml",
+        &format!("{MARKER}\non:\n  workflow_dispatch:\n"),
+    );
+    write(
+        &drifted,
         "README.md",
         "# drifted\n\n<!-- simit:badges:start -->\nstale\n<!-- simit:badges:end -->\n",
     );
     write(
         &drifted,
         "scripts/release.sh",
-        "#!/bin/sh\n# simit is not invoked by this comment\nsimit release --dry-run\ncargo install simit\ncargo install --locked --git https://github.com/caniko/simit.git --rev 4c6841cce19327927ea8a8f6e856276dd5c878f0 simit\n",
+        "#!/bin/sh\n# simit is not invoked by this comment\nsimit release --dry-run\nnix run github:caniko/simit/$SIMIT_REVISION -- release\ncargo install simit\ncargo install --locked --git https://github.com/caniko/simit.git --rev 4c6841cce19327927ea8a8f6e856276dd5c878f0 simit\n",
     );
     write(
         &drifted,
@@ -208,6 +213,23 @@ fn fixtures(root: &Path) {
     );
     write(&conflict, "simit.toml", "[ci]\nplatform = \"github\"\n");
 
+    // A generated release workflow needs the trust root it verifies tags with.
+    let unsigned = checkout(root, "unsigned", "https://github.com/example/unsigned");
+    write(
+        &unsigned,
+        ".github/workflows/release.yml",
+        &format!("{MARKER}\non:\n  push:\n    tags: ['*']\n"),
+    );
+
+    // Hand-written CI keeps its workflow kinds apart.
+    let manual = checkout(root, "manual", "https://github.com/example/manual");
+    write(&manual, ".github/workflows/ci.yaml", "on: [push]\n");
+    write(
+        &manual,
+        ".github/workflows/publish-crate.yaml",
+        "on: [release]\n",
+    );
+
     // Not a forge checkout.
     fs::create_dir_all(root.join("no-origin")).unwrap();
     git(&root.join("no-origin"), &["init", "--quiet"]);
@@ -236,6 +258,8 @@ fn facts_match_the_golden_document_without_evaluating_flakes_or_writing() {
             "pink",
             "flake-config",
             "conflict",
+            "unsigned",
+            "manual",
             "no-origin",
             "missing",
         ],
