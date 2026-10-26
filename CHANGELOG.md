@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Add `[ci].local_gate`: `simit init ci` also generates `scripts/ci-local.sh`.
+  It replays the generated `ci*.yaml` run steps and `[ci].nix_builds` locally,
+  without hosted-runner steps or job `env`. It supports `--list` and
+  `SIMIT_LOCAL_ONLY` filtering, is drift-checked, and is retired when the
+  option is turned off.
 - Add `[ci.nix_build].engine_revision`, a committed exact grouped-engine
   revision used when `vars.SIMIT_CI_ENGINE_REVISION` is unavailable, such as in
   fork pull requests; the enrolled variable still takes precedence.
