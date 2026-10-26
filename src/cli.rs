@@ -1878,6 +1878,12 @@ pub struct InitReleaseCommand {
     pub ci_provider: Option<CiProvider>,
     #[arg(
         long,
+        value_name = "LABEL",
+        help = "Runner used where the release would fall back to [ci].runner, as after a provider migration"
+    )]
+    pub runner: Option<String>,
+    #[arg(
+        long,
         help = "Verify the platform release workflow matches generated output"
     )]
     pub check: bool,

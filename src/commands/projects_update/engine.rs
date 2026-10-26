@@ -724,7 +724,11 @@ fn generate_scopes(
                     format!("--runner={}", migration.runner),
                     "--reset-step-runners".into(),
                 ])),
-                "release" => argv.extend(backend),
+                "release" => argv.extend(
+                    backend
+                        .into_iter()
+                        .chain([format!("--runner={}", migration.runner)]),
+                ),
                 _ => {}
             }
         }

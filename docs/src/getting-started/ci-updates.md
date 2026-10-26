@@ -424,8 +424,9 @@ observations fail. A path absent from a complete registry may be introduced by
 the candidate, but still needs a genuine original push run to qualify.
 Before admitting such a new qualification workflow, the adapter requires
 Actions to be enabled with all actions allowed (`actions/permissions`). Every
-job must run on a hosted `ubuntu-`, `macos-` or `windows-` label or on a label
-of a runner registered to the repository, resolving `${{ matrix.KEY }}` through
+job must run on a hosted image label (such as `ubuntu-24.04`, `macos-latest` or
+`windows-11-arm`) or on labels that one runner registered to the repository
+carries together, resolving `${{ matrix.KEY }}` through
 static matrix values. Every referenced `secrets.NAME` (other than
 `GITHUB_TOKEN`) and `vars.NAME` must exist in the repository; admission lists
 the missing names. Registered workflows skip these checks.
@@ -513,7 +514,8 @@ plan claims an existing file outside the baseline.
 another backend: `actions` on `github` or `forgejo`, or `crow` on `forgejo`.
 The `init ci` scopes receive `--ci-provider`, `--platform`, `--runner` and
 `--reset-step-runners`, which drops persisted `[ci].step_runners` labels of the
-old runner fleet; `init release` receives the provider and platform. The
+old runner fleet; `init release` receives the provider, platform and runner,
+which replaces the `[ci].runner` fallback of its release jobs. The
 rewritten `[ci]` table is a `ci-extra` patch, so a migrating profile must enroll
 `ci-extra`. It cannot enroll `readme`, because badges are computed from the
 pre-migration workflows. The ordinary obsolete sweep retires the old

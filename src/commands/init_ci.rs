@@ -1213,6 +1213,9 @@ fn run_nix_only_at(command: InitCiCommand, workspace_root: &Path) -> Result<()> 
         persisted_ci.platform = Some(platform);
         persisted_ci.runtime = Some(Runtime::Nix);
         persisted_ci.runner = system_runners.is_empty().then(|| runner.clone());
+        if command.reset_step_runners {
+            persisted_ci.step_runners.clear();
+        }
         if command.with_codeberg_pages {
             persisted_ci.pages = Some(codeberg_pages_config(&pages)?);
         }

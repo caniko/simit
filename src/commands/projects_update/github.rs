@@ -572,14 +572,21 @@ fn admit_new_workflows(
         "new workflows need GitHub Actions enabled with all actions allowed"
     );
     let runners = list(&format!("{endpoint}/actions/runners"), "runners", get)?;
+    // GitHub schedules a job on one runner carrying every requested label.
     let registered = runners["runners"]
         .as_array()
         .context("missing runner inventory")?
         .iter()
-        .flat_map(|runner| runner["labels"].as_array().into_iter().flatten())
-        .filter_map(|label| label["name"].as_str())
-        .map(str::to_ascii_lowercase)
-        .collect::<BTreeSet<_>>();
+        .map(|runner| {
+            runner["labels"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|label| label["name"].as_str())
+                .map(str::to_ascii_lowercase)
+                .collect::<BTreeSet<_>>()
+        })
+        .collect::<Vec<_>>();
     let names = |kind: &str| -> Result<BTreeSet<String>> {
         let inventory = list(&format!("{endpoint}/actions/{kind}"), kind, get)?;
         Ok(inventory[kind]
@@ -610,13 +617,15 @@ fn admit_new_workflows(
             .context("missing workflow jobs")?
             .values()
         {
-            for label in runner_labels(job)? {
+            for labels in runner_labels(job)? {
+                let wanted = labels
+                    .iter()
+                    .map(|label| label.to_ascii_lowercase())
+                    .collect::<BTreeSet<_>>();
                 ensure!(
-                    ["ubuntu-", "macos-", "windows-"]
-                        .iter()
-                        .any(|hosted| label.starts_with(hosted))
-                        || registered.contains(&label.to_ascii_lowercase()),
-                    "new workflow {path} runs on {label}, which is neither hosted nor a registered runner label"
+                    matches!(labels.as_slice(), [label] if hosted_label(label))
+                        || registered.iter().any(|runner| wanted.is_subset(runner)),
+                    "new workflow {path} runs on {labels:?}, which is neither a hosted label nor the labels of one registered runner"
                 );
             }
         }
@@ -636,9 +645,9 @@ fn admit_new_workflows(
     Ok(())
 }
 
-/// A job's literal runner labels, through at most a `${{ matrix.KEY }}`
-/// indirection over static matrix values.
-fn runner_labels(job: &serde_yaml::Value) -> Result<Vec<String>> {
+/// The literal label sets a job can request, one per static matrix value when
+/// `runs-on` is a `${{ matrix.KEY }}` indirection.
+fn runner_labels(job: &serde_yaml::Value) -> Result<Vec<Vec<String>>> {
     let runs_on = &job["runs-on"];
     let values = match runs_on
         .as_str()
@@ -658,27 +667,45 @@ fn runner_labels(job: &serde_yaml::Value) -> Result<Vec<String>> {
         }
         None => vec![runs_on.clone()],
     };
-    let mut labels = Vec::new();
+    let mut sets = Vec::new();
     for value in values {
-        match value {
-            serde_yaml::Value::String(label) => labels.push(label),
-            serde_yaml::Value::Sequence(items) => {
-                for item in items {
-                    labels.push(
-                        item.as_str()
-                            .context("runs-on needs literal labels")?
-                            .into(),
-                    );
-                }
-            }
+        let labels = match value {
+            serde_yaml::Value::String(label) => vec![label],
+            serde_yaml::Value::Sequence(items) => items
+                .iter()
+                .map(|item| item.as_str().map(str::to_owned))
+                .collect::<Option<Vec<_>>>()
+                .context("runs-on needs literal labels")?,
             _ => anyhow::bail!("runs-on needs literal labels"),
-        }
+        };
+        ensure!(
+            !labels.is_empty() && labels.iter().all(|label| !label.contains("${{")),
+            "runs-on needs literal labels"
+        );
+        sets.push(labels);
     }
-    ensure!(
-        !labels.is_empty() && labels.iter().all(|label| !label.contains("${{")),
-        "runs-on needs literal labels"
-    );
-    Ok(labels)
+    ensure!(!sets.is_empty(), "runs-on needs literal labels");
+    Ok(sets)
+}
+
+/// A GitHub-hosted runner image label such as `ubuntu-24.04`, `macos-latest`,
+/// `ubuntu-24.04-arm` or `windows-11-arm`.
+// ponytail: shape check of the published naming scheme; larger hosted runners
+// with custom names must be registered labels until an API lists them.
+fn hosted_label(label: &str) -> bool {
+    let mut parts = label.split('-');
+    let (Some(os), Some(version)) = (parts.next(), parts.next()) else {
+        return false;
+    };
+    let suffix = parts.next();
+    matches!(os, "ubuntu" | "macos" | "windows")
+        && (version == "latest"
+            || (!version.is_empty()
+                && version
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || byte == b'.')))
+        && suffix.is_none_or(|suffix| matches!(suffix, "arm" | "intel" | "large" | "xlarge"))
+        && parts.next().is_none()
 }
 
 /// Names referenced as `PREFIX.NAME`, such as `secrets.ATTIC_TOKEN`.
@@ -1413,7 +1440,7 @@ mod tests {
     fn new_workflow_admission_requires_actions_runners_secrets_and_variables() {
         use std::{cell::RefCell, collections::BTreeMap};
         let path = ".github/workflows/ci.yaml";
-        let workflow = "on: push\njobs:\n  test:\n    runs-on: ubuntu-24.04\n    steps:\n      - run: echo ${{ secrets.ATTIC_TOKEN }} ${{ secrets.GITHUB_TOKEN }} ${{ vars.SIMIT_CI_ENGINE_REVISION }}\n  build:\n    strategy:\n      matrix:\n        include:\n          - runner: atlas-nix\n    runs-on: ${{ matrix.runner }}\n    steps:\n      - run: exit 0\n";
+        let workflow = "on: push\njobs:\n  test:\n    runs-on: ubuntu-24.04\n    steps:\n      - run: echo ${{ secrets.ATTIC_TOKEN }} ${{ secrets.GITHUB_TOKEN }} ${{ vars.SIMIT_CI_ENGINE_REVISION }}\n  build:\n    strategy:\n      matrix:\n        include:\n          - runner: atlas-nix\n    runs-on: ${{ matrix.runner }}\n    steps:\n      - run: exit 0\n  combined:\n    runs-on: [self-hosted, atlas-nix]\n    steps:\n      - run: exit 0\n";
         let request: AdapterRequest = serde_json::from_value(json!({
             "schemaVersion":1,"operation":"admit","coordinate":"forge.example/team/demo",
             "apiUrl":"https://forge.example/api","authority":"777","revision":"a".repeat(40),
@@ -1512,6 +1539,35 @@ mod tests {
             ),
             BTreeSet::from(["A", "C_1"])
         );
+        // One runner must carry every label a job requests.
+        responses.borrow_mut().insert(
+            runners.clone(),
+            json!({"total_count":2,"runners":[{"labels":[{"name":"self-hosted"}]},{"labels":[{"name":"atlas-nix"}]}]}),
+        );
+        assert!(
+            admit_new_workflows(&request, &introduced, "repos/team/demo", &get)
+                .unwrap_err()
+                .to_string()
+                .contains("self-hosted")
+        );
+        for hosted in [
+            "ubuntu-24.04",
+            "ubuntu-latest",
+            "ubuntu-24.04-arm",
+            "macos-15",
+            "windows-11-arm",
+        ] {
+            assert!(hosted_label(hosted), "{hosted}");
+        }
+        for other in [
+            "ubuntu-not-a-real-runner",
+            "ubuntu",
+            "self-hosted",
+            "windows-2022-gpu",
+            "macos-",
+        ] {
+            assert!(!hosted_label(other), "{other}");
+        }
     }
 
     #[test]

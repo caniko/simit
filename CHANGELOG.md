@@ -14,9 +14,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `readme`; the obsolete sweep retires the old generated workflows.
 - The GitHub updater adapter admits a qualification workflow that is new to
   the repository's workflow registry only when Actions is enabled with all
-  actions allowed, every job runs on a hosted or registered runner label, and
-  every referenced secret and variable exists. Admission names the missing
-  ones.
+  actions allowed, every job runs on a hosted image label or on labels one
+  registered runner carries, and every referenced secret and variable exists.
+  Admission names the missing ones.
+- Add `simit init release --runner`, which replaces the `[ci].runner` fallback
+  for release jobs, as provider migrations pass.
 - Add `simit init ci --reset-step-runners`, which drops persisted
   `[ci].step_runners` before applying `--step-runner`, for moving a project to
   another runner fleet.
