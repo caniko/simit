@@ -6820,8 +6820,16 @@ nix_image = "nixos/nix:2.34.8"
         String::from_utf8_lossy(&generated.stderr)
     );
     assert!(temp.path().join(".crow/prebuild.yaml").exists());
-    assert!(prebuild_only(&["--ci-provider", "crow", "--check"]).status.success());
-    assert!(prebuild_only(&["--crow-format", "yaml", "--check"]).status.success());
+    assert!(
+        prebuild_only(&["--ci-provider", "crow", "--check"])
+            .status
+            .success()
+    );
+    assert!(
+        prebuild_only(&["--crow-format", "yaml", "--check"])
+            .status
+            .success()
+    );
 
     // A GitHub prebuild still rejects Crow-only options, and Actions stays accepted.
     fs::write(
@@ -6832,7 +6840,8 @@ nix_image = "nixos/nix:2.34.8"
     let rejected = prebuild_only(&["--ci-provider", "crow"]);
     assert!(!rejected.status.success());
     assert!(
-        String::from_utf8_lossy(&rejected.stderr).contains("require [prebuild] provider = \"crow\""),
+        String::from_utf8_lossy(&rejected.stderr)
+            .contains("require [prebuild] provider = \"crow\""),
         "{}",
         String::from_utf8_lossy(&rejected.stderr)
     );
