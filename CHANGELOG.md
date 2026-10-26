@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Fix `simit init ci` with `[ci].nix_system_runners`: it no longer persists a
+  `runner` that its own validation then rejects, and a `[ci.nix_system_runners]`
+  table is rewritten as `nix_system_runners = { ... }` instead of
+  `nix_system_runners= { ... }`.
 - Add `[release.pypi]`: the release workflow uploads the prebuilt
   `release/*.whl` (e.g. from a Nix `release-bundle`) to PyPI with
   `uv publish --check-url` after the hosted release, using PyPI trusted
