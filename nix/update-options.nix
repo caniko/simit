@@ -98,6 +98,15 @@ in {
       }) {};
       scopes = option (types.listOf (types.enum ["ci" "ci-extra" "release" "flake" "readme"])) ["ci"];
       enrollCurrent = option types.bool false;
+      migrate =
+        option (types.nullOr (types.submodule {
+          options = {
+            provider = mkOption {type = types.enum ["actions" "crow"];};
+            platform = mkOption {type = types.enum ["github" "forgejo"];};
+            runner = mkOption {type = types.strMatching "[A-Za-z0-9._-]+";};
+          };
+        }))
+        null;
       requiredChecks = option requirements [];
       rollout = option (types.submodule {
         options = {

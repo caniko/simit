@@ -523,7 +523,8 @@ fn admit_workflows(request: &AdapterRequest) -> Result<BTreeSet<String>> {
     Ok(paths)
 }
 
-fn admit_workflow_states(paths: &BTreeSet<String>, inventory: &Value) -> Result<()> {
+/// Returns the registered workflow paths.
+fn admit_workflow_states(paths: &BTreeSet<String>, inventory: &Value) -> Result<BTreeSet<String>> {
     let entries = inventory["workflows"]
         .as_array()
         .context("missing workflow inventory")?;
@@ -549,7 +550,154 @@ fn admit_workflow_states(paths: &BTreeSet<String>, inventory: &Value) -> Result<
     }
     // An absent path in a complete inventory can be introduced by this candidate.
     // Qualification still requires its genuine registered original push run.
+    Ok(registered)
+}
+
+/// A qualification workflow the registry has never seen (for example after a
+/// provider migration) can only run when Actions is enabled for all actions,
+/// every job targets a hosted or registered runner, and every secret and
+/// variable it references exists.
+fn admit_new_workflows(
+    request: &AdapterRequest,
+    paths: &BTreeSet<String>,
+    endpoint: &str,
+    get: &impl Fn(&str) -> Result<Value>,
+) -> Result<()> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+    let permissions = get(&format!("{endpoint}/actions/permissions"))?;
+    ensure!(
+        permissions["enabled"] == true && permissions["allowed_actions"] == "all",
+        "new workflows need GitHub Actions enabled with all actions allowed"
+    );
+    let runners = list(&format!("{endpoint}/actions/runners"), "runners", get)?;
+    let registered = runners["runners"]
+        .as_array()
+        .context("missing runner inventory")?
+        .iter()
+        .flat_map(|runner| runner["labels"].as_array().into_iter().flatten())
+        .filter_map(|label| label["name"].as_str())
+        .map(str::to_ascii_lowercase)
+        .collect::<BTreeSet<_>>();
+    let names = |kind: &str| -> Result<BTreeSet<String>> {
+        let inventory = list(&format!("{endpoint}/actions/{kind}"), kind, get)?;
+        Ok(inventory[kind]
+            .as_array()
+            .with_context(|| format!("missing {kind} inventory"))?
+            .iter()
+            .filter_map(|entry| entry["name"].as_str())
+            .map(str::to_owned)
+            .collect())
+    };
+    let defined = [
+        ("secrets.", names("secrets")?),
+        ("vars.", names("variables")?),
+    ];
+    let plan = request.plan.as_ref().context("missing admission plan")?;
+    let mut missing = BTreeSet::new();
+    for file in &plan.files {
+        let path = file
+            .relative_path
+            .to_str()
+            .context("non-UTF-8 workflow path")?;
+        if !paths.contains(path) {
+            continue;
+        }
+        let workflow: serde_yaml::Value = serde_yaml::from_str(&file.content)?;
+        for job in workflow["jobs"]
+            .as_mapping()
+            .context("missing workflow jobs")?
+            .values()
+        {
+            for label in runner_labels(job)? {
+                ensure!(
+                    ["ubuntu-", "macos-", "windows-"]
+                        .iter()
+                        .any(|hosted| label.starts_with(hosted))
+                        || registered.contains(&label.to_ascii_lowercase()),
+                    "new workflow {path} runs on {label}, which is neither hosted nor a registered runner label"
+                );
+            }
+        }
+        for (prefix, names) in &defined {
+            for name in references(&file.content, prefix) {
+                if name != "GITHUB_TOKEN" && !names.contains(name) {
+                    missing.insert(format!("{prefix}{name}"));
+                }
+            }
+        }
+    }
+    ensure!(
+        missing.is_empty(),
+        "new workflows reference undefined {}",
+        missing.into_iter().collect::<Vec<_>>().join(", ")
+    );
     Ok(())
+}
+
+/// A job's literal runner labels, through at most a `${{ matrix.KEY }}`
+/// indirection over static matrix values.
+fn runner_labels(job: &serde_yaml::Value) -> Result<Vec<String>> {
+    let runs_on = &job["runs-on"];
+    let values = match runs_on
+        .as_str()
+        .and_then(|value| value.strip_prefix("${{"))
+        .and_then(|value| value.strip_suffix("}}"))
+        .and_then(|value| value.trim().strip_prefix("matrix."))
+    {
+        Some(key) => {
+            let matrix = &job["strategy"]["matrix"];
+            matrix["include"]
+                .as_sequence()
+                .into_iter()
+                .flatten()
+                .map(|row| row[key].clone())
+                .chain(matrix[key].as_sequence().into_iter().flatten().cloned())
+                .collect()
+        }
+        None => vec![runs_on.clone()],
+    };
+    let mut labels = Vec::new();
+    for value in values {
+        match value {
+            serde_yaml::Value::String(label) => labels.push(label),
+            serde_yaml::Value::Sequence(items) => {
+                for item in items {
+                    labels.push(
+                        item.as_str()
+                            .context("runs-on needs literal labels")?
+                            .into(),
+                    );
+                }
+            }
+            _ => anyhow::bail!("runs-on needs literal labels"),
+        }
+    }
+    ensure!(
+        !labels.is_empty() && labels.iter().all(|label| !label.contains("${{")),
+        "runs-on needs literal labels"
+    );
+    Ok(labels)
+}
+
+/// Names referenced as `PREFIX.NAME`, such as `secrets.ATTIC_TOKEN`.
+fn references<'a>(content: &'a str, prefix: &str) -> BTreeSet<&'a str> {
+    let word = |ch: char| ch.is_ascii_alphanumeric() || ch == '_';
+    content
+        .match_indices(prefix)
+        .filter(|(start, _)| {
+            content[..*start]
+                .chars()
+                .next_back()
+                .is_none_or(|ch| !word(ch) && ch != '.')
+        })
+        .map(|(start, _)| {
+            let rest = &content[start + prefix.len()..];
+            &rest[..rest.find(|ch| !word(ch)).unwrap_or(rest.len())]
+        })
+        .filter(|name| !name.is_empty())
+        .collect()
 }
 
 fn admit_signatures(signatures: &Value) -> Result<()> {
@@ -820,10 +968,12 @@ fn execute_with(
     }
     if request.operation == "admit" {
         let paths = admit_workflows(request)?;
-        admit_workflow_states(
+        let registered = admit_workflow_states(
             &paths,
             &list(&format!("{endpoint}/actions/workflows"), "workflows", &get)?,
         )?;
+        let introduced = paths.difference(&registered).cloned().collect();
+        admit_new_workflows(request, &introduced, &endpoint, &get)?;
         response.checks.push(Check {
             name: "admission".into(),
             authority: request.authority.clone(),
@@ -1257,6 +1407,111 @@ mod tests {
         );
         responses.borrow_mut().remove(inventory_key);
         assert!(execute_with(&request, get, classic).is_err());
+    }
+
+    #[test]
+    fn new_workflow_admission_requires_actions_runners_secrets_and_variables() {
+        use std::{cell::RefCell, collections::BTreeMap};
+        let path = ".github/workflows/ci.yaml";
+        let workflow = "on: push\njobs:\n  test:\n    runs-on: ubuntu-24.04\n    steps:\n      - run: echo ${{ secrets.ATTIC_TOKEN }} ${{ secrets.GITHUB_TOKEN }} ${{ vars.SIMIT_CI_ENGINE_REVISION }}\n  build:\n    strategy:\n      matrix:\n        include:\n          - runner: atlas-nix\n    runs-on: ${{ matrix.runner }}\n    steps:\n      - run: exit 0\n";
+        let request: AdapterRequest = serde_json::from_value(json!({
+            "schemaVersion":1,"operation":"admit","coordinate":"forge.example/team/demo",
+            "apiUrl":"https://forge.example/api","authority":"777","revision":"a".repeat(40),
+            "branch":"maintenance/candidate","workflows":[path],"requiredChecks":[],
+            "plan":{"schema":"simit.ci-update-plan.v1","files":[{"relative_path":path,"content":workflow}],"obsolete":[]}
+        }))
+        .unwrap();
+        let [permissions, runners, secrets, variables] = [
+            "actions/permissions",
+            "actions/runners?per_page=100&page=1",
+            "actions/secrets?per_page=100&page=1",
+            "actions/variables?per_page=100&page=1",
+        ]
+        .map(|key| format!("repos/team/demo/{key}"));
+        let responses = RefCell::new(BTreeMap::from([
+            (
+                permissions.clone(),
+                json!({"enabled":true,"allowed_actions":"all"}),
+            ),
+            (
+                runners.clone(),
+                json!({"total_count":1,"runners":[{"labels":[{"name":"self-hosted"},{"name":"Atlas-Nix"}]}]}),
+            ),
+            (
+                secrets.clone(),
+                json!({"total_count":1,"secrets":[{"name":"ATTIC_TOKEN"}]}),
+            ),
+            (
+                variables.clone(),
+                json!({"total_count":1,"variables":[{"name":"SIMIT_CI_ENGINE_REVISION"}]}),
+            ),
+        ]));
+        let get = |key: &str| -> Result<Value> {
+            responses
+                .borrow()
+                .get(key)
+                .cloned()
+                .with_context(|| format!("unexpected replay endpoint {key}"))
+        };
+        let introduced = BTreeSet::from([path.to_owned()]);
+        admit_new_workflows(&request, &introduced, "repos/team/demo", &get).unwrap();
+        // Registered paths never consult Actions policy.
+        admit_new_workflows(&request, &BTreeSet::new(), "repos/team/demo", &|_| {
+            anyhow::bail!("registered workflows need no policy request")
+        })
+        .unwrap();
+        for (key, pointer, value, error) in [
+            (
+                &permissions,
+                "/allowed_actions",
+                json!("selected"),
+                "all actions allowed",
+            ),
+            (
+                &permissions,
+                "/enabled",
+                json!(false),
+                "all actions allowed",
+            ),
+            (
+                &runners,
+                "/runners/0/labels/1/name",
+                json!("other"),
+                "atlas-nix",
+            ),
+            (
+                &secrets,
+                "/secrets/0/name",
+                json!("OTHER"),
+                "secrets.ATTIC_TOKEN",
+            ),
+            (
+                &variables,
+                "/variables/0/name",
+                json!("OTHER"),
+                "vars.SIMIT_CI_ENGINE_REVISION",
+            ),
+        ] {
+            let original = responses.borrow()[key].clone();
+            *responses
+                .borrow_mut()
+                .get_mut(key)
+                .unwrap()
+                .pointer_mut(pointer)
+                .unwrap() = value;
+            let message = admit_new_workflows(&request, &introduced, "repos/team/demo", &get)
+                .unwrap_err()
+                .to_string();
+            assert!(message.contains(error), "{pointer}: {message}");
+            responses.borrow_mut().insert(key.clone(), original);
+        }
+        assert_eq!(
+            references(
+                "${{ secrets.A }} inputs.secrets.B ${{secrets.C_1}}",
+                "secrets."
+            ),
+            BTreeSet::from(["A", "C_1"])
+        );
     }
 
     #[test]

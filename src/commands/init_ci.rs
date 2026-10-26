@@ -733,6 +733,7 @@ fn validate_prebuild_only_options(command: &InitCiCommand, crow_prebuild: bool) 
         || command.runner.is_some()
         || command.windows_runner.is_some()
         || !command.step_runner.is_empty()
+        || command.reset_step_runners
         || command.granular
         || command.maintainer_key.is_some()
         || command.maintainers_gpg.is_some()
@@ -1789,6 +1790,7 @@ fn ci_cli_overrides(command: &InitCiCommand) -> CiCliOverrides {
         runner: command.runner.clone(),
         windows_runner: command.windows_runner.clone(),
         step_runner,
+        reset_step_runners: command.reset_step_runners,
         granular: command.granular,
         workspace: command.workspace,
         workspace_strategy: command.workspace_strategy,
@@ -2075,6 +2077,7 @@ pub(crate) fn project_regeneration_command(workspace_root: &Path) -> Result<Opti
         om_ci_augment: None,
         omnix_ref: None,
         step_runner: Vec::new(),
+        reset_step_runners: false,
         with_artifacts: None,
         with_homebrew,
         with_chocolatey,

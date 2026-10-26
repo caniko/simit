@@ -148,6 +148,49 @@ fn full_plan_patches_changed_project_policy_without_resolving_trust() {
 }
 
 #[test]
+fn provider_migration_plan_resets_persisted_step_runners() {
+    let temp = init_package(false);
+    let root = temp.path();
+    fs::write(
+        root.join("simit.toml"),
+        "[ci]\nplatform = 'forgejo'\nprovider = 'actions'\nruntime = 'cargo'\nrunner = 'codeberg-small'\nstep_runners = { cargo-fmt = 'codeberg-tiny' }\n",
+    )
+    .unwrap();
+    let persisted = |reset: bool| {
+        let mut args = vec![
+            "init",
+            "ci",
+            "--plan-json",
+            "--ci-provider=actions",
+            "--platform=github",
+            "--runner=ubuntu-24.04",
+        ];
+        if reset {
+            args.push("--reset-step-runners");
+        }
+        let output = simit().current_dir(root).args(args).output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let plan: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        plan["patches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|patch| patch["relative_path"] == "simit.toml")
+            .unwrap()["content"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    assert!(persisted(false).contains("codeberg-tiny"));
+    let reset = persisted(true);
+    assert!(!reset.contains("step_runners") && reset.contains("platform = \"github\""));
+}
+
+#[test]
 fn full_plan_rejects_flake_config_it_cannot_persist() {
     let temp = init_package(false);
     let root = temp.path();

@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- `simit projects update` profiles can declare
+  `migrate = { provider, platform, runner }` to regenerate CI for another
+  backend (Actions on GitHub or Forgejo, Crow on Forgejo). The `[ci]` rewrite
+  lands as a `ci-extra` patch, so migration requires `ci-extra` and excludes
+  `readme`; the obsolete sweep retires the old generated workflows.
+- The GitHub updater adapter admits a qualification workflow that is new to
+  the repository's workflow registry only when Actions is enabled with all
+  actions allowed, every job runs on a hosted or registered runner label, and
+  every referenced secret and variable exists. Admission names the missing
+  ones.
+- Add `simit init ci --reset-step-runners`, which drops persisted
+  `[ci].step_runners` before applying `--step-runner`, for moving a project to
+  another runner fleet.
 - `simit projects update` profiles can enroll the update-only scopes
   `ci-extra`, `release`, `flake` and `readme` beside the required `ci`. Only
   the `ci` files qualify a candidate; the other files are committed, admitted

@@ -422,6 +422,13 @@ The workflow registry is completely paginated before admission and qualification
 Existing selected workflows must be active; disabled, incomplete or duplicate
 observations fail. A path absent from a complete registry may be introduced by
 the candidate, but still needs a genuine original push run to qualify.
+Before admitting such a new qualification workflow, the adapter requires
+Actions to be enabled with all actions allowed (`actions/permissions`). Every
+job must run on a hosted `ubuntu-`, `macos-` or `windows-` label or on a label
+of a runner registered to the repository, resolving `${{ matrix.KEY }}` through
+static matrix values. Every referenced `secrets.NAME` (other than
+`GITHUB_TOKEN`) and `vars.NAME` must exist in the repository; admission lists
+the missing names. Registered workflows skip these checks.
 Concurrency is admitted only when absent or in the supported path/ref-scoped
 forms below, with an absent or literal boolean `cancel-in-progress`:
 
@@ -499,6 +506,32 @@ managing files that already exist. Like the initial baseline, adopting them
 requires `enrollCurrent`. Baselines record the scopes they were adopted under,
 so this applies only to the run that adds a scope; later runs again stop when a
 plan claims an existing file outside the baseline.
+
+## Provider migration
+
+`migrate = { provider; platform; runner; }` regenerates a profile's CI for
+another backend: `actions` on `github` or `forgejo`, or `crow` on `forgejo`.
+The `init ci` scopes receive `--ci-provider`, `--platform`, `--runner` and
+`--reset-step-runners`, which drops persisted `[ci].step_runners` labels of the
+old runner fleet; `init release` receives the provider and platform. The
+rewritten `[ci]` table is a `ci-extra` patch, so a migrating profile must enroll
+`ci-extra`. It cannot enroll `readme`, because badges are computed from the
+pre-migration workflows. The ordinary obsolete sweep retires the old
+generator-owned workflows, such as `.crow/*`. A repository without an adopted
+baseline needs `enrollCurrent` for its first migrated run.
+
+```nix
+profiles.migrate-provider = {
+  scopes = ["ci" "ci-extra"];
+  migrate = {
+    provider = "actions";
+    platform = "github";
+    runner = "ubuntu-24.04";
+  };
+  enrollCurrent = true;
+  # workspace, generator, select and requiredChecks as for any profile
+};
+```
 
 ## Dependencies and verification
 

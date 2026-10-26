@@ -674,6 +674,11 @@ pub struct InitCiCommand {
     pub step_runner: Vec<String>,
     #[arg(
         long,
+        help = "Drop persisted [ci].step_runners before applying --step-runner, as when moving to another runner fleet"
+    )]
+    pub reset_step_runners: bool,
+    #[arg(
+        long,
         help = "Generate granular split of CI steps across Codeberg runner tiers (fmt→tiny, clippy/deny/audit→small, test/doc/package→medium); forgejo-only"
     )]
     pub granular: bool,
