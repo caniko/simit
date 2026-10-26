@@ -67,6 +67,7 @@ pub(crate) fn files(
     root: &Path,
     config: &ProjectConfig,
     include_publishers: bool,
+    trust_root: bool,
 ) -> Result<Vec<GeneratedFile>> {
     if config.ci.platform != Some(Platform::Github)
         || config.ci.provider.is_some_and(|p| p != CiProvider::Actions)
@@ -390,7 +391,8 @@ pub(crate) fn files(
             }
         }
     }
-    if config.ci.publish_crates || has_native {
+    // Update plans never resolve local signing keys.
+    if trust_root && (config.ci.publish_crates || has_native) {
         files.push(crate::release_trust::generated_file(
             root,
             config,
@@ -522,7 +524,7 @@ mod scope_tests {
         .unwrap();
         std::fs::write(root.join("simit.toml"), "[ci]\nplatform = 'github'\nruntime = 'nix'\n[monorepo]\nschema_version = 1\n[[monorepo.components]]\nid = 'python'\npaths = ['python']\nchecks = [{id = 'test', run = 'true'}]\nreleases = [{manifest = 'python/pyproject.toml', namespace = 'python-owner', publish = true}]\n").unwrap();
         let config = ProjectConfig::load(root).unwrap();
-        let primary = files(root, &config, false).unwrap();
+        let primary = files(root, &config, false, true).unwrap();
         assert_eq!(primary.len(), 1);
         assert_eq!(
             primary[0].relative_path,

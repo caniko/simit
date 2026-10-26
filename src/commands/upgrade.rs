@@ -67,6 +67,9 @@ struct FileUpgrade {
 }
 
 pub fn run(command: UpgradeCommand) -> Result<()> {
+    if command.plan_json {
+        return plan_json();
+    }
     if command.diff && !(command.dry_run || command.check) {
         bail!("simit upgrade --diff requires --dry-run or --check");
     }
@@ -105,6 +108,26 @@ pub fn run(command: UpgradeCommand) -> Result<()> {
         refresh_successful_registry_entries(&outcomes)?;
     }
     check_exit(&outcomes, mode)
+}
+
+/// The current workspace's README badge block as an update-plan patch. Update
+/// plans only maintain an existing block, so no markers yield an empty plan.
+fn plan_json() -> Result<()> {
+    let workspace_root = std::env::current_dir().context("reading current directory")?;
+    let has_block = workspace_root.join("Cargo.toml").is_file()
+        && fs::read_to_string(workspace_root.join("README.md"))
+            .is_ok_and(|readme| readme.contains(readme_badges::START_MARKER));
+    let mut patches = Vec::new();
+    if has_block {
+        let upgrade = readme_badges::plan(&workspace_root)?;
+        if upgrade.changed() {
+            patches.push(crate::project::GeneratedFile {
+                relative_path: PathBuf::from("README.md"),
+                content: upgrade.upgraded,
+            });
+        }
+    }
+    crate::project::CiUpdatePlan::new(vec![], vec![], patches).print()
 }
 
 pub fn update_readme_badges_if_present(

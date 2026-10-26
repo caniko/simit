@@ -101,12 +101,12 @@ pub fn run(command: InitFlakeCommand) -> Result<()> {
     }
 
     if scope == FlakeScope::HooksOnly {
-        return hooks_only_tail(workspace_root, &files);
+        return hooks_only_tail(workspace_root, &files, command.plan_json);
     }
 
     let flake_path = workspace_root.join("flake.nix");
     if cfg.flake.mode == FlakeMode::Custom {
-        return custom_mode_tail(workspace_root, &files);
+        return custom_mode_tail(workspace_root, &files, command.plan_json);
     }
 
     // In cross mode the generated flake.nix is canonical and authoritative, so
@@ -134,10 +134,10 @@ pub fn run(command: InitFlakeCommand) -> Result<()> {
             .find(|file| file.relative_path == Path::new("flake.nix"))
             .expect("flake.nix is generated");
         flake_file.content = patched;
-        return write_tail(workspace_root, &patched_files);
+        return write_tail(workspace_root, &patched_files, command.plan_json);
     }
 
-    write_tail(workspace_root, &files)
+    write_tail(workspace_root, &files, command.plan_json)
 }
 
 pub fn run_python(command: InitFlakeCommand) -> Result<()> {
@@ -181,12 +181,12 @@ pub fn run_python(command: InitFlakeCommand) -> Result<()> {
     }
 
     if scope == FlakeScope::HooksOnly {
-        return hooks_only_tail(workspace_root, &files);
+        return hooks_only_tail(workspace_root, &files, command.plan_json);
     }
 
     let flake_path = workspace_root.join("flake.nix");
     if cfg.flake.mode == FlakeMode::Custom {
-        return custom_mode_tail(workspace_root, &files);
+        return custom_mode_tail(workspace_root, &files, command.plan_json);
     }
 
     if flake_path.exists() {
@@ -195,7 +195,7 @@ pub fn run_python(command: InitFlakeCommand) -> Result<()> {
         );
     }
 
-    write_tail(workspace_root, &files)
+    write_tail(workspace_root, &files, command.plan_json)
 }
 
 pub fn run_generic(command: InitFlakeCommand) -> Result<()> {
@@ -257,19 +257,12 @@ pub fn run_generic(command: InitFlakeCommand) -> Result<()> {
             "custom flake mode requires an existing flake.nix; simit will manage hook files but will not generate a canonical flake"
         );
     }
-    let hook_files = hook_files(&files);
-    if scope == FlakeScope::HooksOnly {
+    if scope == FlakeScope::HooksOnly && !command.plan_json {
         println!(
             "note: hooks-only scope leaves existing flake.nix untouched; review it before taking project ownership"
         );
     }
-    project::write_generated_files(&workspace_root, &hook_files)?;
-    upgrade::update_readme_badges_if_present(&workspace_root, false, false)?;
-    registry::touch_current_project_or_warn([
-        ("flake", FeatureStatus::Managed),
-        ("hooks", FeatureStatus::Installed),
-    ]);
-    Ok(())
+    write_tail(&workspace_root, &hook_files(&files), command.plan_json)
 }
 
 fn find_generic_root(start: &Path) -> Result<PathBuf> {
@@ -702,7 +695,29 @@ fn print_tail(files: &[GeneratedFile], scope: FlakeScope) {
     }
 }
 
-fn write_tail(workspace_root: &Path, files: &[GeneratedFile]) -> Result<()> {
+fn write_tail(workspace_root: &Path, files: &[GeneratedFile], plan_json: bool) -> Result<()> {
+    if plan_json {
+        // Update plans only maintain flake/hook files simit already manages.
+        if registry::detect_flake_status(workspace_root) == FeatureStatus::Absent {
+            return project::CiUpdatePlan::new(vec![], vec![], vec![]).print();
+        }
+        // The updater cannot fetch: a changed input set would need a new lock.
+        if let Some(flake) = files
+            .iter()
+            .find(|file| file.relative_path == Path::new("flake.nix"))
+            && fs::read_to_string(workspace_root.join("flake.nix")).ok()
+                != Some(flake.content.clone())
+        {
+            let declared = flake_input_names(&flake.content);
+            let locked = locked_root_inputs(workspace_root)?;
+            if declared != locked {
+                bail!(
+                    "generated flake.nix declares inputs {declared:?} but flake.lock locks {locked:?}; run `simit init flake` and update flake.lock outside the updater"
+                );
+            }
+        }
+        return project::CiUpdatePlan::new(files.to_vec(), vec![], vec![]).print();
+    }
     project::write_generated_files(workspace_root, files)?;
     upgrade::update_readme_badges_if_present(workspace_root, false, false)?;
     registry::touch_current_project_or_warn([
@@ -743,16 +758,16 @@ fn validate_hooks_only_policy(
     Ok(())
 }
 
-fn hooks_only_tail(workspace_root: &Path, files: &[GeneratedFile]) -> Result<()> {
-    if workspace_root.join("flake.nix").exists() {
+fn hooks_only_tail(workspace_root: &Path, files: &[GeneratedFile], plan_json: bool) -> Result<()> {
+    if workspace_root.join("flake.nix").exists() && !plan_json {
         println!(
             "note: hooks-only scope leaves existing flake.nix untouched; review it before taking project ownership"
         );
     }
-    write_tail(workspace_root, files)
+    write_tail(workspace_root, files, plan_json)
 }
 
-fn custom_mode_tail(workspace_root: &Path, files: &[GeneratedFile]) -> Result<()> {
+fn custom_mode_tail(workspace_root: &Path, files: &[GeneratedFile], plan_json: bool) -> Result<()> {
     let flake_path = workspace_root.join("flake.nix");
     if !flake_path.exists() {
         bail!(
@@ -777,7 +792,7 @@ fn custom_mode_tail(workspace_root: &Path, files: &[GeneratedFile]) -> Result<()
             );
         }
     }
-    write_tail(workspace_root, &hook_files)
+    write_tail(workspace_root, &hook_files, plan_json)
 }
 
 fn pre_commit_removal_notes(actual: &str, generated: &str) -> Vec<String> {
@@ -846,9 +861,67 @@ fn update_nix_brace_depth(depth: &mut i32, line: &str) {
     }
 }
 
+/// Input names a flake declares: `inputs.NAME…` bindings at the top level or
+/// `NAME…` bindings directly inside a top-level `inputs = { … }` block.
+// ponytail: a line scanner for one binding per line, as simit renders flakes;
+// anything it misses fails the lock comparison closed rather than open.
+fn flake_input_names(content: &str) -> BTreeSet<String> {
+    let identifier = |name: &str| {
+        !name.is_empty()
+            && name
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '\''))
+    };
+    let first = |text: &str| {
+        text.split(|ch: char| ch == '.' || ch == '=' || ch.is_whitespace())
+            .next()
+            .unwrap_or_default()
+            .to_owned()
+    };
+    let mut names = BTreeSet::new();
+    let mut depth = 0i32;
+    let mut block = None;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        let key = first(trimmed);
+        if depth == 1 && key == "inputs" {
+            match trimmed.strip_prefix("inputs.") {
+                Some(rest) => {
+                    names.insert(first(rest));
+                }
+                None => block = Some(2),
+            }
+        } else if block == Some(depth) && identifier(&key) {
+            names.insert(key);
+        }
+        update_nix_brace_depth(&mut depth, line);
+        if block.is_some_and(|inner| depth < inner) {
+            block = None;
+        }
+    }
+    names.retain(|name| identifier(name));
+    names
+}
+
+fn locked_root_inputs(workspace_root: &Path) -> Result<BTreeSet<String>> {
+    let path = workspace_root.join("flake.lock");
+    let lock: serde_json::Value = match fs::read_to_string(&path) {
+        Ok(text) => {
+            serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))?
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(BTreeSet::new()),
+        Err(error) => return Err(error).with_context(|| format!("reading {}", path.display())),
+    };
+    let root = lock["root"].as_str().unwrap_or("root");
+    Ok(lock["nodes"][root]["inputs"]
+        .as_object()
+        .map(|inputs| inputs.keys().cloned().collect())
+        .unwrap_or_default())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{extract_pre_commit_hook_names, pre_commit_removal_notes};
+    use super::{extract_pre_commit_hook_names, flake_input_names, pre_commit_removal_notes};
 
     #[test]
     fn removal_notes_use_specific_mapping_when_available() {
@@ -909,5 +982,29 @@ mod tests {
         assert!(hooks.contains("cargo-msrv"));
         assert!(!hooks.contains("stages"));
         assert!(!hooks.contains("pre-push"));
+    }
+
+    #[test]
+    fn input_names_cover_block_and_dotted_declarations_only() {
+        let names = flake_input_names(
+            r#"{
+  description = "inputs.ignored = text";
+  inputs = {
+    # commented.url = "x";
+    nixpkgs.follows = "harbor/nixpkgs";
+    treefmt-nix = {
+      url = "github:numtide/treefmt-nix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+  };
+  inputs.crane.url = "github:ipetkov/crane";
+  outputs = { self, ... }: { inputs = {}; };
+}
+"#,
+        );
+        assert_eq!(
+            names.into_iter().collect::<Vec<_>>(),
+            ["crane", "nixpkgs", "treefmt-nix"]
+        );
     }
 }

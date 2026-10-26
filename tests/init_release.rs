@@ -438,6 +438,57 @@ fn switching_release_platform_removes_only_obsolete_generated_workflows() {
 }
 
 #[test]
+fn release_plan_only_maintains_an_existing_generated_workflow() {
+    let project = init_package("release-plan-demo");
+    let root = project.path();
+    let config_path = root.join("simit.toml");
+    let config = read(&config_path).replace("[release.codeberg]", "[release.github]");
+    fs::write(config_path, config).unwrap();
+    let plan = || {
+        let output = simit()
+            .current_dir(root)
+            .args(["init", "release", "--plan-json"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
+    };
+    let empty = serde_json::json!({"schema":"simit.ci-update-plan.v1","files":[],"obsolete":[]});
+    assert_eq!(plan(), empty);
+    fs::create_dir_all(root.join(".github/workflows")).unwrap();
+    fs::write(
+        root.join(".github/workflows/release.yml"),
+        "name: hand-written\n",
+    )
+    .unwrap();
+    assert_eq!(plan(), empty);
+
+    fs::remove_file(root.join(".github/workflows/release.yml")).unwrap();
+    fs::write(
+        root.join(".github/workflows/release.yaml"),
+        format!(
+            "{}\nname: previous\n",
+            simit::render::ci::GENERATED_WORKFLOW_MARKER
+        ),
+    )
+    .unwrap();
+    let migrated = plan();
+    assert_eq!(
+        migrated["files"][0]["relative_path"],
+        ".github/workflows/release.yml"
+    );
+    assert_eq!(
+        migrated["obsolete"],
+        serde_json::json!([".github/workflows/release.yaml"])
+    );
+    assert!(!root.join(".github/workflows/release.yml").exists());
+}
+
+#[test]
 fn crow_release_pushes_attic_only_for_tags() {
     let project = init_package("crow-attic-demo");
     let config_path = project.path().join("simit.toml");

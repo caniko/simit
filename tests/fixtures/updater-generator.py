@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
 """Read-only generation oracle for disposable updater repository tests."""
 import json
+import sys
 from pathlib import Path
 
+scoped = Path("fixture-plans.json")
+if scoped.exists():
+    print(json.dumps(json.loads(scoped.read_text())[" ".join(sys.argv[1:])]))
+    raise SystemExit
 plan = Path("fixture-plan.json")
 if plan.exists():
     print(plan.read_text())

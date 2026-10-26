@@ -108,6 +108,20 @@ pub fn run(command: InitReleaseCommand) -> Result<()> {
         owns_name: is_release_workflow_name,
     };
 
+    if command.plan_json {
+        let obsolete =
+            project::obsolete_generated_workflows(workspace_root, &plan.files, plan.owns_name)?;
+        // Update plans only maintain an existing generated release workflow.
+        let generated = std::fs::read_to_string(workspace_root.join(&workflow_path))
+            .is_ok_and(|content| crate::render::ci::is_generated_workflow_marker(&content));
+        return if generated || !obsolete.is_empty() {
+            project::CiUpdatePlan::new(plan.files, obsolete, vec![])
+        } else {
+            project::CiUpdatePlan::new(vec![], vec![], vec![])
+        }
+        .print();
+    }
+
     match mode {
         CheckPrintMode::Print => {
             print!("{}", plan.files[0].content);
@@ -159,7 +173,14 @@ fn resolve_release_runner(cfg: &ProjectConfig, platform: Platform) -> Result<(St
         return Ok((runner, preinstalled_nix));
     }
 
-    let user_config = UserConfig::load()?;
+    // Hosted GitHub runners need no workstation runner registry, as in `init ci`.
+    let user_config = UserConfig::load().or_else(|err| {
+        if platform == Platform::Github {
+            Ok(UserConfig::default())
+        } else {
+            Err(err)
+        }
+    })?;
     let runners = user_config.resolve_ci_runners(platform, Runtime::Nix, None, None, false)?;
     Ok((runs_on(&runners.release), platform == Platform::Forgejo))
 }

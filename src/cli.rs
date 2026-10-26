@@ -176,6 +176,8 @@ pub struct UpgradeCommand {
         help = "Only apply Codeberg Pages workflow upgrades, skipping README badge upgrades"
     )]
     pub pages_only: bool,
+    #[arg(long, conflicts_with_all = ["paths", "all", "dry_run", "check", "diff", "pages_only"], help = "Print the current workspace's README badge update as a versioned plan patch; empty without badge markers")]
+    pub plan_json: bool,
 }
 
 #[derive(Debug, Args)]
@@ -588,7 +590,7 @@ pub enum BumpKind {
 
 #[derive(Debug, Args)]
 pub struct InitCiCommand {
-    #[arg(long, requires = "primary_only", conflicts_with_all = ["check", "diff"], help = "Print the versioned primary-CI ownership plan without writing files")]
+    #[arg(long, conflicts_with_all = ["check", "diff", "review_only", "pages_only", "prebuild_only"], help = "Print the versioned generated-file ownership plan without writing files; with --primary-only, only primary CI")]
     pub plan_json: bool,
     #[arg(
         long,
@@ -1878,6 +1880,8 @@ pub struct InitReleaseCommand {
     pub diff: bool,
     #[arg(long, help = "Print the rendered workflow without writing files")]
     pub print: bool,
+    #[arg(long, conflicts_with_all = ["check", "diff", "print"], help = "Print the versioned release-workflow ownership plan without writing files; empty without an existing release workflow")]
+    pub plan_json: bool,
 }
 
 #[derive(Debug, Args)]
@@ -2159,6 +2163,8 @@ pub struct InitFlakeCommand {
         help = "Print generated flake and hook files without writing them"
     )]
     pub print: bool,
+    #[arg(long, conflicts_with_all = ["check", "diff", "print", "cross"], help = "Print the versioned flake/hook ownership plan without writing files; empty unless simit already manages them")]
+    pub plan_json: bool,
     #[arg(long, help = "Show a unified diff when --check finds stale files")]
     pub diff: bool,
     #[arg(

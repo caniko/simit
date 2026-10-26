@@ -17,13 +17,48 @@ pub struct GeneratedFile {
     pub content: String,
 }
 
-/// Versioned primary-CI ownership boundary consumed by workstation updaters.
+/// Versioned generated-file ownership boundary consumed by workstation updaters.
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CiUpdatePlan {
     pub schema: String,
     pub files: Vec<GeneratedFile>,
     pub obsolete: Vec<PathBuf>,
+    /// Whole-file edits of project-owned files (`[ci]` config, README badges).
+    /// They are committed but never baseline-owned, so later human edits do
+    /// not block updates. Their presence is the only v2 feature.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub patches: Vec<GeneratedFile>,
+}
+
+impl CiUpdatePlan {
+    pub fn new(
+        files: Vec<GeneratedFile>,
+        obsolete: Vec<PathBuf>,
+        patches: Vec<GeneratedFile>,
+    ) -> Self {
+        Self {
+            schema: Self::schema_for(&patches),
+            files,
+            obsolete,
+            patches,
+        }
+    }
+
+    fn schema_for(patches: &[GeneratedFile]) -> String {
+        let version = if patches.is_empty() { 1 } else { 2 };
+        format!("simit.ci-update-plan.v{version}")
+    }
+
+    /// Readers accept exactly the version implied by the plan's features.
+    pub fn schema_matches(&self) -> bool {
+        self.schema == Self::schema_for(&self.patches)
+    }
+
+    pub fn print(self) -> Result<()> {
+        println!("{}", serde_json::to_string(&self)?);
+        Ok(())
+    }
 }
 
 /// A complete generated-workflow plan: the files to render plus a predicate

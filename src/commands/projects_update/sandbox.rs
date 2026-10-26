@@ -218,7 +218,12 @@ fn snapshot_registrations(source_state: &Path, nix_state: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn generation(executable: &Path, checkout: &Path, nix_state: &Path) -> Result<Command> {
+pub fn generation(
+    executable: &Path,
+    checkout: &Path,
+    nix_state: &Path,
+    argv: &[String],
+) -> Result<Command> {
     ensure!(
         cfg!(target_os = "linux"),
         "updater generation requires Linux namespaces"
@@ -304,7 +309,7 @@ pub fn generation(executable: &Path, checkout: &Path, nix_state: &Path) -> Resul
     command
         .args(["--chdir", "/source", "--"])
         .arg(program)
-        .args(["init", "ci", "--primary-only", "--plan-json"]);
+        .args(argv);
     Ok(command)
 }
 
