@@ -87,7 +87,8 @@
       "cancel_previous_pipeline_events": [
         "push",
         "pull_request"
-      ]
+      ],
+      "clone_url": "https://codefloe.com/caniko/pink-raven.git"
     },
     "repos/1906/pipelines?branch=trunk&event=push&after=2026-10-02T06%3A34%3A59Z&page=1&perPage=50": [
       {

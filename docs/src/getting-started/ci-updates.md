@@ -472,7 +472,8 @@ canonical Crow origin (no path or trailing slash); the adapter calls Crow at
 `<checkAuthority>/api/v1`. `credentialFile` holds the Forgejo token and
 `ciCredentialFile` the Crow token. Each token is sent only to its own origin;
 both follow the credential path, store and code-overlap rules and must be
-distinct files.
+distinct files. At dispatch the snapshotted tokens must also differ, so links or
+copies of one secret are refused.
 
 ```nix
 forges.codefloe = {
@@ -494,8 +495,9 @@ its literal top-level `name:`, otherwise its file name without extension, as
 Crow reports it and as Forgejo shows it in `ci/crow/push/<name>` status contexts.
 
 Inspection requires an unarchived, non-mirror repository whose active Crow record
-names the Forgejo repository ID as `forge_remote_id`, uses the default `.crow/`
-configuration path and has no push approval gate (`require_approval` of `none`,
+names the Forgejo repository ID as `forge_remote_id` and its clone URL (remote IDs
+repeat across forge connections), shares its default branch, uses the default
+`.crow/` configuration path and has no push approval gate (`require_approval` of `none`,
 `forks` or `pull_requests`). The token must be able to push the target branch.
 Every protection rule matching the target or maintenance branch is checked:
 approvals, signed commits, protected file patterns, and disabled or allowlisted

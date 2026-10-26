@@ -89,6 +89,10 @@ fn push_runs(when: Option<&serde_yaml::Value>, branch: &str, default_branch: &st
             }
         }
         let events = strings(constraint.get("event"))?;
+        ensure!(
+            events.iter().all(|event| !event.contains('$')),
+            "Crow event conditions must be literal"
+        );
         runs |= matched && (events.is_empty() || events.contains(&"push"));
     }
     Ok(runs)
@@ -334,11 +338,18 @@ fn execute_with(
     let id = number(&repo, "/id")?;
     let default_branch = text(&repo, "/default_branch")?;
     let branch = request.branch.as_deref().unwrap_or(&default_branch);
-    // Crow must build this exact forge repository; its id survives renames.
+    // Crow must build this exact forge repository. Remote ids are only unique
+    // per forge connection, so the clone URL binds the Forgejo instance too.
     let ci = crow(&format!("repos/lookup/{repository}"))?;
     ensure!(
-        ci["forge_remote_id"].as_str() == Some(id.to_string().as_str()),
+        ci["forge_remote_id"].as_str() == Some(id.to_string().as_str())
+            && ci["clone_url"] == repo["clone_url"],
         "Crow repository is bound to another forge repository"
+    );
+    // Crow expands ${CI_REPO_DEFAULT_BRANCH} from its own record.
+    ensure!(
+        ci["default_branch"] == default_branch.as_str(),
+        "Crow and Forgejo disagree on the default branch; resynchronize the Crow repository"
     );
     ensure!(ci["active"] == true, "Crow repository is not active");
     ensure!(
@@ -379,7 +390,7 @@ fn execute_with(
         response.policy_digest = crate::review::canonical_digest(&serde_json::json!({
             "protection": rules,
             "branch": subset(&info, &["protected", "required_approvals", "enable_status_check", "status_check_contexts", "user_can_push", "effective_branch_protection_name"]),
-            "crow": subset(&ci, &["id", "forge_remote_id", "require_approval", "config_file"]),
+            "crow": subset(&ci, &["id", "forge_remote_id", "clone_url", "default_branch", "require_approval", "config_file"]),
         }))?;
         response.validate(request)?;
         return Ok(response);
@@ -768,6 +779,12 @@ mod tests {
         );
         let changes: Vec<&dyn Fn(&mut Value)> = vec![
             &|crow| crow["repos/lookup/caniko/pink-raven"]["forge_remote_id"] = json!("5405"),
+            // Same name and id on another forge connection.
+            &|crow| {
+                crow["repos/lookup/caniko/pink-raven"]["clone_url"] =
+                    json!("https://forge.example/caniko/pink-raven.git")
+            },
+            &|crow| crow["repos/lookup/caniko/pink-raven"]["default_branch"] = json!("main"),
             &|crow| {
                 crow["repos/lookup/caniko/pink-raven"]["require_approval"] = json!("all_events")
             },
@@ -915,6 +932,10 @@ mod tests {
             (
                 "when:\n- event: push\n",
                 "when:\n- event: push\n  evaluate: 'true'\n",
+            ),
+            (
+                "when:\n- event: push\n",
+                "when:\n- event: ${CI_PIPELINE_EVENT}\n",
             ),
             (
                 "when:\n- event: push\n",

@@ -346,6 +346,7 @@ fn adapter(forge: &Forge, request: &AdapterRequest, root: &Path) -> Result<Adapt
             }
         }
     }
+    let mut tokens = Vec::new();
     for (index, credential) in [&request.credential_file, &request.ci_credential_file]
         .into_iter()
         .flatten()
@@ -355,8 +356,16 @@ fn adapter(forge: &Forge, request: &AdapterRequest, root: &Path) -> Result<Adapt
             !inputs.contains_key(credential),
             "adapter credential overlaps code inputs"
         );
+        let bytes = credential_bytes(credential)?;
+        // Path checks miss symlinks, hard links and copies; each token goes to
+        // its own origin only, so the snapshotted secrets must differ.
+        ensure!(
+            !tokens.contains(&bytes.trim_ascii().to_vec()),
+            "forge and CI credentials must hold different tokens"
+        );
+        tokens.push(bytes.trim_ascii().to_vec());
         let pinned = snapshots.path().join(format!("credential-{index}"));
-        fs::write(&pinned, credential_bytes(credential)?)?;
+        fs::write(&pinned, bytes)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -2367,6 +2376,18 @@ else:
                 None,
                 vec![],
                 vec![],
+            );
+            // A CI credential aliasing the forge token is refused before dispatch.
+            let alias = f.control.with_file_name("ci-credential-alias");
+            std::os::unix::fs::symlink(&credential, &alias).unwrap();
+            let mut aliased: AdapterRequest =
+                serde_json::from_value(serde_json::to_value(&request).unwrap()).unwrap();
+            aliased.ci_credential_file = Some(alias);
+            assert!(
+                adapter(forge, &aliased, &root)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("different tokens")
             );
             assert_eq!(adapter(forge, &request, &root).unwrap().status, "success");
             assert!(
