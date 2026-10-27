@@ -72,7 +72,7 @@ fn single_quoted(text: &str) -> String {
 
 pub fn local_gate_script(files: &[GeneratedFile], ci: &CiConfig) -> Result<GeneratedFile> {
     let steps = workflow_steps(files)?;
-    if steps.is_empty() {
+    if steps.is_empty() && ci.local_gate_steps.is_empty() {
         bail!("[ci].local_gate needs GitHub/Forgejo Actions CI workflows to derive steps from");
     }
     let mut workflows_per_command: BTreeMap<&str, usize> = BTreeMap::new();
@@ -148,4 +148,22 @@ step() {{\n\
         relative_path: PathBuf::from(LOCAL_GATE_PATH),
         content: script,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::LocalGateStep;
+
+    #[test]
+    fn local_only_steps_do_not_need_derived_workflow_steps() {
+        let mut ci = CiConfig::default();
+        assert!(local_gate_script(&[], &ci).is_err());
+        ci.local_gate_steps.push(LocalGateStep {
+            name: "Browser suite".into(),
+            run: "npm test".into(),
+        });
+        let script = local_gate_script(&[], &ci).unwrap();
+        assert!(script.content.contains("step 'Browser suite' 'npm test'"));
+    }
 }
