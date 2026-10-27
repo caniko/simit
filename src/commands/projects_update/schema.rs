@@ -1239,6 +1239,13 @@ mod tests {
         );
         response.status = "success".into();
         response.validate(&request).unwrap();
+        // An empty close still answers for the requested candidate.
+        let revision = std::mem::replace(&mut response.revision, "c".repeat(40));
+        assert!(
+            response.validate(&request).is_err(),
+            "an empty close for another candidate"
+        );
+        response.revision = revision;
         request.change = Some("7".into());
         assert!(
             response.validate(&request).is_err(),
@@ -1689,22 +1696,15 @@ impl AdapterResponse {
         if !matches!(request.operation.as_str(), "propose" | "merge" | "close") {
             ensure!(self.change.is_none(), "unexpected pull request");
         } else if matches!(self.status.as_str(), "success" | "pending") {
-            // Closing an untracked candidate may find no pull request at all.
-            let Some(change) = &self.change else {
+            // Closing an untracked candidate may find no pull request at all;
+            // the common response checks below still apply.
+            if let Some(change) = &self.change {
+                crate::review::contract::sha(&change.head)?;
+                if let Some(commit) = &change.merge_commit {
+                    crate::review::contract::sha(commit)?;
+                }
                 ensure!(
-                    request.operation == "close"
-                        && request.change.is_none()
-                        && self.status == "success",
-                    "pull-request operation returned no change"
-                );
-                return Ok(());
-            };
-            crate::review::contract::sha(&change.head)?;
-            if let Some(commit) = &change.merge_commit {
-                crate::review::contract::sha(commit)?;
-            }
-            ensure!(
-                !change.id.is_empty()
+                    !change.id.is_empty()
                     && request.change.as_ref().is_none_or(|id| id == &change.id)
                     // Closing retires a stale change whose head or target moved.
                     && (request.operation == "close"
@@ -1718,8 +1718,16 @@ impl AdapterResponse {
                         "close" => self.status == "success" && change.state != "open",
                         _ => self.status == "success",
                     },
-                "pull request differs from the qualified candidate or its target"
-            );
+                    "pull request differs from the qualified candidate or its target"
+                );
+            } else {
+                ensure!(
+                    request.operation == "close"
+                        && request.change.is_none()
+                        && self.status == "success",
+                    "pull-request operation returned no change"
+                );
+            }
         }
         crate::review::contract::sha(&self.revision)?;
         sha256(&self.policy_digest)?;
