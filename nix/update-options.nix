@@ -30,6 +30,7 @@
     };
   };
   requirements = types.listOf requirement;
+  credential = types.nullOr (types.addCheck absolute (path: !(normalized path == "/nix/store" || lib.hasPrefix "/nix/store/" (normalized path))));
 in {
   schemaVersion = option (types.enum [1]) 1;
   workspaces = option (types.attrsOf (types.submodule {
@@ -59,7 +60,9 @@ in {
         in
           port == null || lib.toIntBase10 (builtins.head port) <= 65535);
       };
-      credentialFile = option (types.nullOr (types.addCheck absolute (path: !(normalized path == "/nix/store" || lib.hasPrefix "/nix/store/" (normalized path))))) null;
+      credentialFile = option credential null;
+      # Second API credential for a separate check authority (Crow beside Forgejo).
+      ciCredentialFile = option credential null;
       adapter = mkOption {type = command;};
       adapterSha256 = option (types.nullOr sha256) null;
       adapterInputs = option (types.attrsOf sha256) {};

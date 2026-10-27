@@ -1,0 +1,240 @@
+{
+  "_source": "Sanitized read-only replies from codefloe.com (Forgejo 16.0.6, /api/v1) and ci.codefloe.com (Crow 6.12.0, /api/v1), captured 2026-10-26 for caniko/pink-raven trunk pipeline 52. Identities, avatars, e-mail addresses, commit messages and changed files are removed and the trunk head is pinned to that pipeline's revision; workflow bytes and Crow configuration are the real files. statusContexts are the commit's real Forgejo status contexts.",
+  "statusContexts": [
+    "ci/crow/pr/build",
+    "ci/crow/pr/vm-checks",
+    "ci/crow/push/build",
+    "ci/crow/push/vm-checks"
+  ],
+  "forge": {
+    "repos/caniko/pink-raven": {
+      "id": 5404,
+      "name": "pink-raven",
+      "full_name": "caniko/pink-raven",
+      "private": true,
+      "empty": false,
+      "archived": false,
+      "mirror": false,
+      "default_branch": "trunk",
+      "clone_url": "https://codefloe.com/caniko/pink-raven.git",
+      "ssh_url": "ssh://git@codefloe.com/caniko/pink-raven.git",
+      "permissions": {
+        "admin": true,
+        "push": true,
+        "pull": true
+      }
+    },
+    "repos/caniko/pink-raven/branches/trunk": {
+      "name": "trunk",
+      "protected": false,
+      "required_approvals": 0,
+      "enable_status_check": false,
+      "status_check_contexts": [],
+      "user_can_push": true,
+      "user_can_merge": true,
+      "effective_branch_protection_name": "",
+      "commit": {
+        "id": "a96a22ab6f554631e72068acdf22baab4bdbe622"
+      }
+    },
+    "repos/caniko/pink-raven/branch_protections": [],
+    "repos/caniko/pink-raven/git/commits/a96a22ab6f554631e72068acdf22baab4bdbe622?stat=false&verification=false&files=false": {
+      "sha": "a96a22ab6f554631e72068acdf22baab4bdbe622",
+      "commit": {
+        "committer": {
+          "date": "2026-10-02T09:34:59+02:00"
+        }
+      }
+    },
+    "repos/caniko/pink-raven/contents/.crow/build-pink-raven.yaml?ref=a96a22ab6f554631e72068acdf22baab4bdbe622": {
+      "name": "build-pink-raven.yaml",
+      "path": ".crow/build-pink-raven.yaml",
+      "type": "file",
+      "encoding": "base64",
+      "size": 964,
+      "sha": "f6213ca7dd5457c9d3b8168215cc37765f0d4f55",
+      "content": "IyBHZW5lcmF0ZWQgYnkgc2ltaXQuIE1hbnVhbCBlZGl0cyB3aWxsIGJlIHJlcG9ydGVkIGFzIGNpPWRyaWZ0LgpuYW1lOiBidWlsZApsYWJlbHM6CiAgZ3JvdXA6IGNvZGVmbG9lLWluZnJhCiAgcGxhdGZvcm06IGxpbnV4L2FtZDY0CndoZW46Ci0gZXZlbnQ6IHB1c2gKLSBldmVudDogcHVsbF9yZXF1ZXN0CnN0ZXBzOgotIG5hbWU6IG5peC1jb25maWcKICBpbWFnZTogbml4b3Mvbml4OjIuMzQuOAogIGNvbW1hbmRzOgogIC0gbml4IC0tdmVyc2lvbgogIC0gZXhwb3J0IE5JWF9DT05GSUc9ImV4cGVyaW1lbnRhbC1mZWF0dXJlcyA9IG5peC1jb21tYW5kIGZsYWtlcyIKICBlbnZpcm9ubWVudDoKICAgIENBUkdPX0hPTUU6IC90bXAvLmNhcmdvCiAgICBOSVhfQ09ORklHOiBleHBlcmltZW50YWwtZmVhdHVyZXMgPSBuaXgtY29tbWFuZCBmbGFrZXMKLSBuYW1lOiBwcm9qZWN0LWNoZWNrLXB1c2gKICBpbWFnZTogbml4b3Mvbml4OjIuMzQuOAogIGNvbW1hbmRzOgogIC0gYmFzaCBzY3JpcHRzL2NpL2Nyb3ctbml4LWdhdGUuc2ggcHJvamVjdC1jaGVjawogIGVudmlyb25tZW50OgogICAgQVRUSUNfVE9LRU46CiAgICAgIGZyb21fc2VjcmV0OiBBVFRJQ19UT0tFTgogICAgQ0FSR09fSE9NRTogL3RtcC8uY2FyZ28KICAgIE5JWF9DT05GSUc6IGV4cGVyaW1lbnRhbC1mZWF0dXJlcyA9IG5peC1jb21tYW5kIGZsYWtlcwogIHdoZW46CiAgLSBldmVudDogcHVzaAotIG5hbWU6IHByb2plY3QtY2hlY2stcHIKICBpbWFnZTogbml4b3Mvbml4OjIuMzQuOAogIGNvbW1hbmRzOgogIC0gYmFzaCBzY3JpcHRzL2NpL2Nyb3ctbml4LWdhdGUuc2ggcHJvamVjdC1jaGVjawogIGVudmlyb25tZW50OgogICAgQ0FSR09fSE9NRTogL3RtcC8uY2FyZ28KICAgIE5JWF9DT05GSUc6IGV4cGVyaW1lbnRhbC1mZWF0dXJlcyA9IG5peC1jb21tYW5kIGZsYWtlcwogIHdoZW46CiAgLSBldmVudDogcHVsbF9yZXF1ZXN0Cg=="
+    },
+    "repos/caniko/pink-raven/contents/.crow/vm-checks.yaml?ref=a96a22ab6f554631e72068acdf22baab4bdbe622": {
+      "name": "vm-checks.yaml",
+      "path": ".crow/vm-checks.yaml",
+      "type": "file",
+      "encoding": "base64",
+      "size": 730,
+      "sha": "bbc5ae4d0c39ee9f889b2226e5f18c1f08132899",
+      "content": "IyBQcm9qZWN0LW93bmVkIE5peC1vbmx5IGNvbnRyYWN0OiBrZWVwIHRoZSBtb2R1bGUgc21va2UgdGVzdCBzZXBhcmF0ZSBmcm9tCiMgdGhlIFJ1c3Qgb3JjaGVzdHJhdG9yIGluIHRoZSBnZW5lcmF0ZWQgYnVpbGQgd29ya2Zsb3dzLgpuYW1lOiB2bS1jaGVja3MKbGFiZWxzOgogIGdyb3VwOiBjb2RlZmxvZS1pbmZyYQogIHBsYXRmb3JtOiBsaW51eC9hbWQ2NAp3aGVuOgotIGV2ZW50OiBwdXNoCi0gZXZlbnQ6IHB1bGxfcmVxdWVzdApzdGVwczoKLSBuYW1lOiBuaXgtY29udHJhY3QKICBpbWFnZTogbml4b3Mvbml4OjIuMzQuOAogIGNvbW1hbmRzOgogIC0gYmFzaCBzY3JpcHRzL2NpL2Nyb3ctbml4LWdhdGUuc2ggbW9kdWxlLXNtb2tlCiAgd2hlbjoKICAtIGV2ZW50OiBwdWxsX3JlcXVlc3QKICBlbnZpcm9ubWVudDoKICAgIE5JWF9DT05GSUc6IGV4cGVyaW1lbnRhbC1mZWF0dXJlcyA9IG5peC1jb21tYW5kIGZsYWtlcwotIG5hbWU6IG5peC1jb250cmFjdC1wdXNoCiAgaW1hZ2U6IG5peG9zL25peDoyLjM0LjgKICBjb21tYW5kczoKICAtIGJhc2ggc2NyaXB0cy9jaS9jcm93LW5peC1nYXRlLnNoIG1vZHVsZS1zbW9rZQogIHdoZW46CiAgLSBldmVudDogcHVzaAogIGVudmlyb25tZW50OgogICAgTklYX0NPTkZJRzogZXhwZXJpbWVudGFsLWZlYXR1cmVzID0gbml4LWNvbW1hbmQgZmxha2VzCiAgICBBVFRJQ19UT0tFTjoKICAgICAgZnJvbV9zZWNyZXQ6IEFUVElDX1RPS0VOCg=="
+    }
+  },
+  "crow": {
+    "repos/lookup/caniko/pink-raven": {
+      "id": 1906,
+      "forge_id": 1,
+      "forge_remote_id": "5404",
+      "owner": "caniko",
+      "name": "pink-raven",
+      "full_name": "caniko/pink-raven",
+      "default_branch": "trunk",
+      "private": true,
+      "visibility": "private",
+      "active": true,
+      "require_approval": "forks",
+      "config_file": "",
+      "trusted": {
+        "network": false,
+        "volumes": false,
+        "security": false
+      },
+      "cancel_previous_pipeline_events": [
+        "push",
+        "pull_request"
+      ],
+      "clone_url": "https://codefloe.com/caniko/pink-raven.git"
+    },
+    "repos/1906/pipelines?branch=trunk&event=push&after=2026-10-02T06%3A34%3A59Z&page=1&perPage=50": [
+      {
+        "id": 115830,
+        "number": 59,
+        "parent": 0,
+        "event": "push",
+        "status": "failure",
+        "branch": "trunk",
+        "ref": "refs/heads/trunk",
+        "commit": "78f26ed0eae3abef277855b5279b7983185131a3",
+        "created": 1792536825,
+        "started": 1792536826,
+        "finished": 1792541933
+      },
+      {
+        "id": 100050,
+        "number": 52,
+        "parent": 0,
+        "event": "push",
+        "status": "success",
+        "branch": "trunk",
+        "ref": "refs/heads/trunk",
+        "commit": "a96a22ab6f554631e72068acdf22baab4bdbe622",
+        "created": 1791011921,
+        "started": 1791011922,
+        "finished": 1791016291
+      }
+    ],
+    "repos/1906/pipelines/52": {
+      "id": 100050,
+      "number": 52,
+      "parent": 0,
+      "event": "push",
+      "status": "success",
+      "branch": "trunk",
+      "ref": "refs/heads/trunk",
+      "commit": "a96a22ab6f554631e72068acdf22baab4bdbe622",
+      "created": 1791011921,
+      "started": 1791011922,
+      "finished": 1791016291,
+      "workflows": [
+        {
+          "id": 150915,
+          "pipeline_id": 100050,
+          "pid": 1,
+          "name": "build",
+          "pipeline_name": "build",
+          "state": "success",
+          "error": null,
+          "attempt": 1,
+          "original_workflow_id": 0,
+          "children": [
+            {
+              "id": 426290,
+              "pipeline_id": 100050,
+              "pid": 3,
+              "ppid": 1,
+              "name": "clone",
+              "type": "clone",
+              "state": "success",
+              "exit_code": 0,
+              "failure": "fail",
+              "attempt": 1,
+              "original_step_id": 0
+            },
+            {
+              "id": 426291,
+              "pipeline_id": 100050,
+              "pid": 4,
+              "ppid": 1,
+              "name": "nix-config",
+              "type": "commands",
+              "state": "success",
+              "exit_code": 0,
+              "failure": "fail",
+              "attempt": 1,
+              "original_step_id": 0
+            },
+            {
+              "id": 426292,
+              "pipeline_id": 100050,
+              "pid": 5,
+              "ppid": 1,
+              "name": "project-check-push",
+              "type": "commands",
+              "state": "success",
+              "exit_code": 0,
+              "failure": "fail",
+              "attempt": 1,
+              "original_step_id": 0
+            }
+          ]
+        },
+        {
+          "id": 150916,
+          "pipeline_id": 100050,
+          "pid": 2,
+          "name": "vm-checks",
+          "pipeline_name": "vm-checks",
+          "state": "success",
+          "error": null,
+          "attempt": 1,
+          "original_workflow_id": 0,
+          "children": [
+            {
+              "id": 426293,
+              "pipeline_id": 100050,
+              "pid": 6,
+              "ppid": 2,
+              "name": "clone",
+              "type": "clone",
+              "state": "success",
+              "exit_code": 0,
+              "failure": "fail",
+              "attempt": 1,
+              "original_step_id": 0
+            },
+            {
+              "id": 426294,
+              "pipeline_id": 100050,
+              "pid": 7,
+              "ppid": 2,
+              "name": "nix-contract-push",
+              "type": "commands",
+              "state": "success",
+              "exit_code": 0,
+              "failure": "fail",
+              "attempt": 1,
+              "original_step_id": 0
+            }
+          ]
+        }
+      ]
+    },
+    "repos/1906/pipelines/52/config": [
+      {
+        "hash": "e3ba2b87652acb91693a1c7b2af319c5fa3e00425b0925ed5c1194e2afa1a58f",
+        "name": ".crow/build-pink-raven.yaml",
+        "data": "IyBHZW5lcmF0ZWQgYnkgc2ltaXQuIE1hbnVhbCBlZGl0cyB3aWxsIGJlIHJlcG9ydGVkIGFzIGNpPWRyaWZ0LgpuYW1lOiBidWlsZApsYWJlbHM6CiAgZ3JvdXA6IGNvZGVmbG9lLWluZnJhCiAgcGxhdGZvcm06IGxpbnV4L2FtZDY0CndoZW46Ci0gZXZlbnQ6IHB1c2gKLSBldmVudDogcHVsbF9yZXF1ZXN0CnN0ZXBzOgotIG5hbWU6IG5peC1jb25maWcKICBpbWFnZTogbml4b3Mvbml4OjIuMzQuOAogIGNvbW1hbmRzOgogIC0gbml4IC0tdmVyc2lvbgogIC0gZXhwb3J0IE5JWF9DT05GSUc9ImV4cGVyaW1lbnRhbC1mZWF0dXJlcyA9IG5peC1jb21tYW5kIGZsYWtlcyIKICBlbnZpcm9ubWVudDoKICAgIENBUkdPX0hPTUU6IC90bXAvLmNhcmdvCiAgICBOSVhfQ09ORklHOiBleHBlcmltZW50YWwtZmVhdHVyZXMgPSBuaXgtY29tbWFuZCBmbGFrZXMKLSBuYW1lOiBwcm9qZWN0LWNoZWNrLXB1c2gKICBpbWFnZTogbml4b3Mvbml4OjIuMzQuOAogIGNvbW1hbmRzOgogIC0gYmFzaCBzY3JpcHRzL2NpL2Nyb3ctbml4LWdhdGUuc2ggcHJvamVjdC1jaGVjawogIGVudmlyb25tZW50OgogICAgQVRUSUNfVE9LRU46CiAgICAgIGZyb21fc2VjcmV0OiBBVFRJQ19UT0tFTgogICAgQ0FSR09fSE9NRTogL3RtcC8uY2FyZ28KICAgIE5JWF9DT05GSUc6IGV4cGVyaW1lbnRhbC1mZWF0dXJlcyA9IG5peC1jb21tYW5kIGZsYWtlcwogIHdoZW46CiAgLSBldmVudDogcHVzaAotIG5hbWU6IHByb2plY3QtY2hlY2stcHIKICBpbWFnZTogbml4b3Mvbml4OjIuMzQuOAogIGNvbW1hbmRzOgogIC0gYmFzaCBzY3JpcHRzL2NpL2Nyb3ctbml4LWdhdGUuc2ggcHJvamVjdC1jaGVjawogIGVudmlyb25tZW50OgogICAgQ0FSR09fSE9NRTogL3RtcC8uY2FyZ28KICAgIE5JWF9DT05GSUc6IGV4cGVyaW1lbnRhbC1mZWF0dXJlcyA9IG5peC1jb21tYW5kIGZsYWtlcwogIHdoZW46CiAgLSBldmVudDogcHVsbF9yZXF1ZXN0Cg=="
+      },
+      {
+        "hash": "3bf88b98e85e1e0d2c80ff25387b5cdf1233076f6fb6586399d78d5afc5fd54b",
+        "name": ".crow/vm-checks.yaml",
+        "data": "IyBQcm9qZWN0LW93bmVkIE5peC1vbmx5IGNvbnRyYWN0OiBrZWVwIHRoZSBtb2R1bGUgc21va2UgdGVzdCBzZXBhcmF0ZSBmcm9tCiMgdGhlIFJ1c3Qgb3JjaGVzdHJhdG9yIGluIHRoZSBnZW5lcmF0ZWQgYnVpbGQgd29ya2Zsb3dzLgpuYW1lOiB2bS1jaGVja3MKbGFiZWxzOgogIGdyb3VwOiBjb2RlZmxvZS1pbmZyYQogIHBsYXRmb3JtOiBsaW51eC9hbWQ2NAp3aGVuOgotIGV2ZW50OiBwdXNoCi0gZXZlbnQ6IHB1bGxfcmVxdWVzdApzdGVwczoKLSBuYW1lOiBuaXgtY29udHJhY3QKICBpbWFnZTogbml4b3Mvbml4OjIuMzQuOAogIGNvbW1hbmRzOgogIC0gYmFzaCBzY3JpcHRzL2NpL2Nyb3ctbml4LWdhdGUuc2ggbW9kdWxlLXNtb2tlCiAgd2hlbjoKICAtIGV2ZW50OiBwdWxsX3JlcXVlc3QKICBlbnZpcm9ubWVudDoKICAgIE5JWF9DT05GSUc6IGV4cGVyaW1lbnRhbC1mZWF0dXJlcyA9IG5peC1jb21tYW5kIGZsYWtlcwotIG5hbWU6IG5peC1jb250cmFjdC1wdXNoCiAgaW1hZ2U6IG5peG9zL25peDoyLjM0LjgKICBjb21tYW5kczoKICAtIGJhc2ggc2NyaXB0cy9jaS9jcm93LW5peC1nYXRlLnNoIG1vZHVsZS1zbW9rZQogIHdoZW46CiAgLSBldmVudDogcHVzaAogIGVudmlyb25tZW50OgogICAgTklYX0NPTkZJRzogZXhwZXJpbWVudGFsLWZlYXR1cmVzID0gbml4LWNvbW1hbmQgZmxha2VzCiAgICBBVFRJQ19UT0tFTjoKICAgICAgZnJvbV9zZWNyZXQ6IEFUVElDX1RPS0VOCg=="
+      }
+    ]
+  }
+}

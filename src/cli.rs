@@ -2307,6 +2307,8 @@ pub enum ProjectsAction {
     Update(crate::commands::projects_update::Args),
     #[command(about = "Run the GitHub Actions updater adapter protocol")]
     UpdateGithubAdapter(crate::commands::projects_update::AdapterArgs),
+    #[command(about = "Run the Forgejo + Crow CI updater adapter protocol")]
+    UpdateForgejoAdapter(crate::commands::projects_update::AdapterArgs),
     #[command(about = "Discover Rust workspaces under a filesystem subtree")]
     Discover(ProjectsDiscoverArgs),
     #[command(about = "Forget one registered project")]

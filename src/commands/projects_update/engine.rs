@@ -285,19 +285,22 @@ fn request(
     workflows: Vec<String>,
     required_checks: Vec<Requirement>,
 ) -> AdapterRequest {
-    AdapterRequest {
+    let mut request = AdapterRequest {
         schema_version: 1,
         operation: operation.into(),
         coordinate: coordinate.into(),
         api_url: forge.api_url.clone(),
         credential_file: forge.credential_file.clone(),
+        ci_credential_file: forge.ci_credential_file.clone(),
         authority: forge.check_authority.clone(),
         revision: revision.map(str::to_owned),
         branch: branch.map(str::to_owned),
         workflows,
         required_checks,
         plan: None,
-    }
+    };
+    request.schema_version = request.derived_version();
+    request
 }
 
 fn adapter(forge: &Forge, request: &AdapterRequest, root: &Path) -> Result<AdapterResponse> {
@@ -347,13 +350,26 @@ fn adapter(forge: &Forge, request: &AdapterRequest, root: &Path) -> Result<Adapt
             }
         }
     }
-    if let Some(credential) = &request.credential_file {
+    let mut tokens = Vec::new();
+    for (index, credential) in [&request.credential_file, &request.ci_credential_file]
+        .into_iter()
+        .flatten()
+        .enumerate()
+    {
         ensure!(
             !inputs.contains_key(credential),
             "adapter credential overlaps code inputs"
         );
-        let pinned = snapshots.path().join("credential");
-        fs::write(&pinned, credential_bytes(credential)?)?;
+        let bytes = credential_bytes(credential)?;
+        // Path checks miss symlinks, hard links and copies; each token goes to
+        // its own origin only, so the snapshotted secrets must differ.
+        ensure!(
+            !tokens.contains(&bytes.trim_ascii().to_vec()),
+            "forge and CI credentials must hold different tokens"
+        );
+        tokens.push(bytes.trim_ascii().to_vec());
+        let pinned = snapshots.path().join(format!("credential-{index}"));
+        fs::write(&pinned, bytes)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -2287,6 +2303,7 @@ if os.fork() == 0:
             let helper = f.control.with_file_name("enrolled-helper.py");
             let undeclared = f.control.with_file_name("undeclared-helper.py");
             let credential = f.control.with_file_name("enrolled-credential");
+            let ci_credential = f.control.with_file_name("enrolled-ci-credential");
             let unrelated = f.control.with_file_name("other-forge-credential");
             fs::write(&helper, "marker = 'verified helper'\n").unwrap();
             fs::write(
@@ -2295,6 +2312,7 @@ if os.fork() == 0:
             )
             .unwrap();
             fs::write(&credential, "synthetic-enrolled-token").unwrap();
+            fs::write(&ci_credential, "synthetic-ci-token").unwrap();
             fs::write(&unrelated, "synthetic-unrelated-token").unwrap();
             let original = fs::read_to_string(&entrypoint).unwrap();
             let (shebang, body) = original.split_once('\n').unwrap();
@@ -2317,6 +2335,15 @@ except OSError:
     pass
 else:
     raise AssertionError('credential mount is writable')
+assert request['schemaVersion'] == 2
+ci = pathlib.Path(request['ciCredentialFile'])
+assert ci.read_text() == 'synthetic-ci-token'
+try:
+    ci.write_text('changed')
+except OSError:
+    pass
+else:
+    raise AssertionError('CI credential mount is writable')
 "#,
                 [&undeclared, &unrelated, &f.control, &f.remote, &f.source]
             );
@@ -2332,6 +2359,7 @@ else:
             .unwrap();
             let forge = f.config.forges.get_mut("fixture").unwrap();
             forge.credential_file = Some(credential.clone());
+            forge.ci_credential_file = Some(ci_credential.clone());
             forge.adapter_sha256 = Some(digest(&fs::read(&entrypoint).unwrap()));
             forge
                 .adapter_inputs
@@ -2360,6 +2388,18 @@ else:
                 vec![],
                 vec![],
             );
+            // A CI credential aliasing the forge token is refused before dispatch.
+            let alias = f.control.with_file_name("ci-credential-alias");
+            std::os::unix::fs::symlink(&credential, &alias).unwrap();
+            let mut aliased: AdapterRequest =
+                serde_json::from_value(serde_json::to_value(&request).unwrap()).unwrap();
+            aliased.ci_credential_file = Some(alias);
+            assert!(
+                adapter(forge, &aliased, &root)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("different tokens")
+            );
             assert_eq!(adapter(forge, &request, &root).unwrap().status, "success");
             assert!(
                 fs::read_to_string(&helper)
@@ -2382,6 +2422,10 @@ else:
             assert_eq!(
                 fs::read_to_string(credential).unwrap(),
                 "synthetic-enrolled-token"
+            );
+            assert_eq!(
+                fs::read_to_string(&ci_credential).unwrap(),
+                "synthetic-ci-token"
             );
             assert_eq!(f.remote_head(), source);
             assert!(!f.root().join("receipt.json").exists());

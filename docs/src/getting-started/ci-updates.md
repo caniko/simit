@@ -329,8 +329,8 @@ At runtime the updater resolves existing path components, checks every state tre
 against the resolved workspace roots, and rejects overlaps before creating files.
 
 Forge adapters execute in Linux namespaces with an empty filesystem view populated
-by the read-only Nix store, enrolled code snapshots, the exact request, the one
-configured credential, DNS plumbing and immutable CA certificates. They retain
+by the read-only Nix store, enrolled code snapshots, the exact request, the
+configured credentials, DNS plumbing and immutable CA certificates. They retain
 network access to their forge. Home and temporary storage are private, host state
 and daemon sockets are absent, and descendants cannot outlive the adapter.
 
@@ -364,9 +364,9 @@ user-site imports; Python scripts should use an isolated (`-I`) store interprete
 Inventory launchers start with a cleared environment and an explicit runtime
 allowlist. Adapters use only store-backed `PATH`/CA paths and private home/temp
 settings. Forge/package-registry credentials and unlisted variables are excluded;
-adapters receive their configured `credentialFile` through request JSON and a
-read-only file mount. The updater's separate Git transport commands retain
-operator Git identity, signing and transport configuration.
+adapters receive their configured `credentialFile` and `ciCredentialFile`
+through request JSON and read-only file mounts. The updater's separate Git
+transport commands retain operator Git identity, signing and transport configuration.
 Repository-routing variables such as `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`,
 object directories and ref namespaces are removed from every updater Git command
 so an inherited environment cannot redirect operations outside the disposable clone.
@@ -457,6 +457,10 @@ the enrolled authority, bound to that revision and to the SHA-256 of the complet
 request's recursively key-sorted compact UTF-8 JSON in `run`, with `attempt = 1`
 and `status = "success"`. This prevents older adapters from silently treating
 admission as qualification. The plan field is omitted from other operations.
+Requests declare `schemaVersion = 1` unless they use a version-2 feature
+(currently `ciCredentialFile`); version-1 requests keep their exact bytes and
+admission digest. Adapters reject a declared version that differs from the
+request's features, and responses echo the request's version.
 
 The GitHub adapter checks branch trigger filters against both qualification
 branches, including ordered exclusions and tag-only triggers. Literal branch
@@ -466,6 +470,72 @@ requires an adapter that can evaluate GitHub's exact-change trigger semantics.
 Initial admission failures leave no published candidate receipt or maintenance
 ref and can be retried after correcting policy or templates. A failed resume
 admission preserves the prior receipt and cannot push or advance either ref.
+
+### Forgejo + Crow adapter
+
+`simit projects update-forgejo-adapter` qualifies Crow workflows of repositories
+hosted on Forgejo. `apiUrl` is the Forgejo API root and `checkAuthority` is the
+canonical Crow origin (no path or trailing slash); the adapter calls Crow at
+`<checkAuthority>/api/v1`. `credentialFile` holds the Forgejo token and
+`ciCredentialFile` the Crow token. Each token is sent only to its own origin;
+both follow the credential path, store and code-overlap rules and must be
+distinct files. At dispatch the snapshotted tokens must also differ, so links or
+copies of one secret are refused.
+
+```nix
+forges.codefloe = {
+  host = "codefloe.com";
+  apiUrl = "https://codefloe.com/api/v1";
+  credentialFile = "/run/credentials/simit/forgejo-token";
+  ciCredentialFile = "/run/credentials/simit/crow-token";
+  checkAuthority = "https://ci.codefloe.com";
+  adapter = {
+    program = "${simit}/bin/simit";
+    arguments = ["projects" "update-forgejo-adapter"];
+  };
+};
+```
+
+Requirements name Crow workflows under the Crow origin, for example
+`{name = "build"; authority = "https://ci.codefloe.com";}`. A workflow's name is
+its literal top-level `name:`, otherwise its file name without extension, as
+Crow reports it and as Forgejo shows it in `ci/crow/push/<name>` status contexts.
+
+Inspection requires an unarchived, non-mirror repository whose active Crow record
+names the Forgejo repository ID as `forge_remote_id` and its clone URL (remote IDs
+repeat across forge connections), shares its default branch, uses the default
+`.crow/` configuration path and has no push approval gate (`require_approval` of `none`,
+`forks` or `pull_requests`). The token must be able to push the target branch.
+Every protection rule matching the target or maintenance branch is checked:
+approvals, signed commits, protected file patterns, and disabled or allowlisted
+pushes are rejected for direct landing. Required status contexts must be literal
+`ci/crow/push/<name>`; globs, pull-request contexts and other CI systems fail.
+
+Admission statically evaluates owned `.crow/*.yaml` and `.yml` files. Jsonnet and
+keys outside the generated vocabulary are rejected: workflows may use `name`,
+`labels`, `platform`, `when`, `skip_clone`, `variables`, `workspace` and `steps`;
+steps may use `name`, `image`, `commands`, `environment`, `directory`,
+`entrypoint`, `failure: fail`, `temp_volumes` and `when`. Matrices, services,
+dependencies, `runs_on`, approval gates, caches, `detach` and `failure: ignore`
+therefore fail before publication. Conditions may use only `event` and `branch`
+(literal names, `*`/`**` globs, or exactly `${CI_REPO_DEFAULT_BRANCH}`). A push
+to the branch must run at least one owned workflow, and each required check must
+name one. Workflows that run only on the default branch are carried unqualified
+by the maintenance branch and qualified after adoption.
+
+Qualification finds the single original push pipeline (`parent = 0`) for the
+exact revision and branch among pipelines created from one hour before the
+revision's committer date, scanning at most 20 pages of 50. Restarts never
+qualify; duplicate originals fail. Crow's stored configuration for each owned
+workflow must equal the forge's bytes at the revision and must not be generated.
+The workflow and every step must be original attempts that succeeded, and the
+steps must be exactly the implicit `clone` step (unless `skip_clone`) plus the
+source steps whose conditions match the push, because Crow drops the rest when it
+compiles the workflow. Each workflow becomes a check with run
+`<crow repository id>/<pipeline number>`. A workflow Crow refused for an
+exhausted CI quota (`CI quota denied ...`) fails with a distinct quota message;
+rerun the update after the quota resets. Generator qualification stays with
+GitHub Actions; requests without workflows answer `unsupported`.
 
 ## Dependencies and verification
 
