@@ -37,7 +37,7 @@ any simit process honours). A flake source always reports
 | usage           | `usage:<coordinate>#<kind>[:<locator>]` | `usageKind`, `state`, `paths` or `path`, `revisions`, `tags`, `input`                        |
 | pinned revision | `rev:github.com/caniko/simit@<sha>`     | `source`, `revision`                                                                         |
 | runner          | `runner:<forgeHost>/<label>`            | `forgeHost`, `label`                                                                         |
-| cache           | `cache:<name>`                          | `url`                                                                                        |
+| cache           | `cache:<name>@<url>`                    | `name`, `url`                                                                                |
 | workflow        | `workflow:<coordinate>#<path>`          | `path`, `generated`, `triggers`, `labels`, `steps`                                           |
 
 Edges: repository `uses` usage, usage `pins` revision, usage and workflow

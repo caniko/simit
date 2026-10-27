@@ -584,7 +584,8 @@ impl Facts {
             ));
         }
         if let Some(attic) = config.and_then(|config| config.release.attic.as_ref()) {
-            let cache = format!("cache:{}", attic.cache);
+            // The server URL is part of the identity: one name on two servers is two caches.
+            let cache = format!("cache:{}@{}", attic.cache, attic.url.trim_end_matches('/'));
             let mut publishers = vec!["release.workflow"];
             if config
                 .and_then(|config| config.prebuild.as_ref())
@@ -595,21 +596,11 @@ impl Facts {
             for kind in publishers {
                 let usage = format!("usage:{coordinate}#{kind}");
                 if self.nodes.contains_key(&usage) {
-                    let known = self
-                        .node(
-                            cache.clone(),
-                            "cache",
-                            Attrs::from([("url", json!(attic.url))]),
-                        )
-                        .attrs["url"]
-                        .clone();
-                    if known != json!(attic.url) {
-                        self.error(
-                            &repo,
-                            "cache-conflict",
-                            format!("{cache} is {known} elsewhere but {} here", attic.url),
-                        );
-                    }
+                    self.node(
+                        cache.clone(),
+                        "cache",
+                        Attrs::from([("name", json!(attic.cache)), ("url", json!(attic.url))]),
+                    );
                     self.edges.insert((usage, cache.clone(), "publishesTo"));
                 }
             }

@@ -647,6 +647,15 @@
     {
       "lands": true,
       "match": {},
+      "path": "regenerate",
+      "reason": "Generated files pin simit's own invocations to the generator revision; they move whenever that file's usage is regenerated and landed.",
+      "status": "implemented",
+      "usageKind": "runtime.generated-ref",
+      "via": "the generated file that contains it"
+    },
+    {
+      "lands": true,
+      "match": {},
       "path": "flake-input",
       "reason": "nix develop runs the simit the flake inputs pin; that input carries the upgrade path.",
       "status": "implemented",
@@ -783,6 +792,11 @@
     {
       "from": "repo:github.com/example/drifted",
       "kind": "uses",
+      "to": "usage:github.com/example/drifted#runtime.generated-ref:.github/workflows/ci.yaml"
+    },
+    {
+      "from": "repo:github.com/example/drifted",
+      "kind": "uses",
       "to": "usage:github.com/example/drifted#runtime.publisher-var:.github/workflows/publish-crate.yaml"
     },
     {
@@ -883,7 +897,7 @@
     {
       "from": "usage:github.com/example/drifted#release.workflow",
       "kind": "publishesTo",
-      "to": "cache:canix"
+      "to": "cache:canix@https://attic.example"
     },
     {
       "from": "usage:github.com/example/drifted#release.workflow",
@@ -966,9 +980,10 @@
   "nodes": [
     {
       "attrs": {
+        "name": "canix",
         "url": "https://attic.example"
       },
-      "id": "cache:canix",
+      "id": "cache:canix@https://attic.example",
       "kind": "cache"
     },
     {
@@ -1381,12 +1396,6 @@
         "state": "unknown",
         "usageKind": "runtime.flake-ref"
       },
-      "blockers": [
-        {
-          "code": "unpinned-runtime",
-          "reason": ".github/workflows/ci.yaml runs simit from the floating reference github:caniko/simit"
-        }
-      ],
       "id": "usage:github.com/example/drifted#runtime.flake-ref:.github/workflows/ci.yaml",
       "kind": "usage"
     },
@@ -1408,6 +1417,22 @@
         }
       ],
       "id": "usage:github.com/example/drifted#runtime.flake-ref:scripts/release.sh",
+      "kind": "usage"
+    },
+    {
+      "attrs": {
+        "generated": true,
+        "path": ".github/workflows/ci.yaml",
+        "state": "unknown",
+        "usageKind": "runtime.generated-ref"
+      },
+      "blockers": [
+        {
+          "code": "unpinned-runtime",
+          "reason": ".github/workflows/ci.yaml runs simit from the floating reference github:caniko/simit"
+        }
+      ],
+      "id": "usage:github.com/example/drifted#runtime.generated-ref:.github/workflows/ci.yaml",
       "kind": "usage"
     },
     {
