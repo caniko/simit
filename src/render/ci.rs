@@ -4508,7 +4508,7 @@ pub(crate) fn push_job_env(
     }
 }
 
-pub(crate) fn yaml_double_quote(value: &str) -> String {
+fn yaml_double_quote(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 

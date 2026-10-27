@@ -7,7 +7,7 @@ name: Release-plz
 
 on:
   push:
-    branches: ["trunk"]
+    branches: ["**"]
 
 permissions:
   contents: read
