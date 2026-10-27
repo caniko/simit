@@ -31,14 +31,14 @@ any simit process honours). A flake source always reports
 
 ## Nodes and edges
 
-| Node            | Id                                      | Attributes                                                                                   |
-| --------------- | --------------------------------------- | -------------------------------------------------------------------------------------------- |
-| repository      | `repo:<coordinate>`                     | `forge` (`github`, `forgejo` or `gitlab`), `forgeHost`, `ciTarget` (`<provider>/<platform>`) |
-| usage           | `usage:<coordinate>#<kind>[:<locator>]` | `usageKind`, `state`, `paths` or `path`, `revisions`, `tags`, `input`                        |
-| pinned revision | `rev:github.com/caniko/simit@<sha>`     | `source`, `revision`                                                                         |
-| runner          | `runner:<forgeHost>/<label>`            | `forgeHost`, `label`                                                                         |
-| cache           | `cache:<name>@<url>`                    | `name`, `url`                                                                                |
-| workflow        | `workflow:<coordinate>#<path>`          | `path`, `generated`, `triggers`, `labels`, `steps`                                           |
+| Node            | Id                                      | Attributes                                                                                                                                                            |
+| --------------- | --------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| repository      | `repo:<coordinate>`                     | `forge` (`github`, `forgejo`, `gitlab`, or `unknown` for a self-hosted forge whose committed CI names no platform), `forgeHost`, `ciTarget` (`<provider>/<platform>`) |
+| usage           | `usage:<coordinate>#<kind>[:<locator>]` | `usageKind`, `state`, `paths` or `path`, `revisions`, `tags`, `input`                                                                                                 |
+| pinned revision | `rev:github.com/caniko/simit@<sha>`     | `source`, `revision`                                                                                                                                                  |
+| runner          | `runner:<forgeHost>/<label>`            | `forgeHost`, `label`                                                                                                                                                  |
+| cache           | `cache:<name>@<url>`                    | `name`, `url`                                                                                                                                                         |
+| workflow        | `workflow:<coordinate>#<path>`          | `path`, `generated`, `triggers`, `labels`, `steps`                                                                                                                    |
 
 Edges: repository `uses` usage, usage `pins` revision, usage and workflow
 `runsOn` runner (Actions `runs-on` labels; `.github` workflows run on
