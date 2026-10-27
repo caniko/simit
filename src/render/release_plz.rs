@@ -879,9 +879,16 @@ fn workflow(
     options: &CiOptions,
     packages: &[Package],
 ) -> String {
+    let release_branch = config
+        .release
+        .github
+        .as_ref()
+        .map(|github| github.target_branch.as_str())
+        .unwrap_or("**");
     let mut w = format!(
-        "{}\n# release-plz computes updates and orchestrates publication and signed tags.\n# Build code runs only on credential-free workers; trusted jobs transport data.\n# Use an App/PAT: GITHUB_TOKEN cannot trigger PR checks or tag workflows.\n# Reruns skip published crates; recover missing tags explicitly (see CI adoption docs).\nname: Release-plz\n\non:\n  push:\n    branches: [\"**\"]\n\npermissions:\n  contents: read\n\nconcurrency:\n  group: release-plz-${{{{ github.repository }}}}-${{{{ github.run_id }}}}\n  cancel-in-progress: false\n\njobs:\n  select:\n    if: github.ref == format('refs/heads/{{0}}', github.event.repository.default_branch)\n    concurrency:\n      group: release-plz-admission-${{{{ github.repository }}}}-${{{{ github.ref }}}}\n      queue: max\n      cancel-in-progress: false\n    runs-on: ubuntu-24.04\n    timeout-minutes: 360\n    permissions:\n      actions: read\n      contents: read\n      pull-requests: read\n    outputs:\n      release_sha: ${{{{ steps.select.outputs.release_sha }}}}\n    steps:\n",
-        ci::GENERATED_WORKFLOW_MARKER
+        "{}\n# release-plz computes updates and orchestrates publication and signed tags.\n# Build code runs only on credential-free workers; trusted jobs transport data.\n# Use an App/PAT: GITHUB_TOKEN cannot trigger PR checks or tag workflows.\n# Reruns skip published crates; recover missing tags explicitly (see CI adoption docs).\nname: Release-plz\n\non:\n  push:\n    branches: [\"{}\"]\n\npermissions:\n  contents: read\n\nconcurrency:\n  group: release-plz-${{{{ github.repository }}}}-${{{{ github.run_id }}}}\n  cancel-in-progress: false\n\njobs:\n  select:\n    if: github.ref == format('refs/heads/{{0}}', github.event.repository.default_branch)\n    concurrency:\n      group: release-plz-admission-${{{{ github.repository }}}}-${{{{ github.ref }}}}\n      queue: max\n      cancel-in-progress: false\n    runs-on: ubuntu-24.04\n    timeout-minutes: 360\n    permissions:\n      actions: read\n      contents: read\n      pull-requests: read\n    outputs:\n      release_sha: ${{{{ steps.select.outputs.release_sha }}}}\n    steps:\n",
+        ci::GENERATED_WORKFLOW_MARKER,
+        ci::yaml_double_quote(release_branch)
     );
     checkout(&mut w);
     w.push_str("      - name: Require the preceding release-plz event to succeed\n        env:\n          GH_TOKEN: ${{ github.token }}\n        run: python3 .simit/release-plz.py prior-run\n\n");

@@ -2,7 +2,7 @@ name: Qualify generator and retain regeneration
 
 on:
   push:
-    branches: ["**"]
+    branches: ["trunk"]
   pull_request:
   workflow_dispatch:
 

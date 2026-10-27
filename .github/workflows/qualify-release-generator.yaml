@@ -4,7 +4,7 @@ name: Qualify signed-release generator
 
 on:
   push:
-    branches: ["**"]
+    branches: ["trunk"]
   pull_request:
 
 permissions:

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Generated `release-plz` workflows now trigger only on the configured
+  `[release.github].target_branch` instead of every branch push. The `select`
+  job already skipped other branches, so this only removes skipped runs.
+  Repositories without `[release.github]` keep the previous `"**"` trigger.
 - Add `[release.pypi]`: the release workflow uploads the prebuilt
   `release/*.whl` (e.g. from a Nix `release-bundle`) to PyPI with
   `uv publish --check-url` after the hosted release, using PyPI trusted
