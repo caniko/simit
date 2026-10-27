@@ -33,6 +33,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   under `activated-remote` until the PyPI project exists, and a `staged` channel
   skips a missing token or wheels. Crow release workflows reject the section
   unless the channel is disabled.
+- Monorepo components can share a CI job with `job = "<name>"`. Members run in
+  one `component-<name>` job (one checkout, Nix install and store) in dependency
+  order, each check guarded by its member's selection, and the `qualified` gate
+  maps members to their job. Superprojects can now cut their job count and stop
+  rebuilding a prerequisite on every dependent's runner.
+- Monorepo qualification now applies `[ci.cache]` substituters and trusted keys
+  to the planner and component jobs instead of silently ignoring them.
+  Publication workflows still resolve without them.
+- `[monorepo].ignore_paths` lists paths whose changes select no component, so
+  README or docs edits no longer trigger full qualification.
 - Generated Crow `build` and `ci` workflows now run push pipelines only on the
   default branch and the fleet updater's `simit/update/**` maintenance refs.
   Pull request pipelines still gate every branch, and other branch pushes no

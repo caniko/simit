@@ -5,7 +5,7 @@ use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 
 use crate::cli::{CiProvider, InitCiCommand, Platform, Runtime, RuntimeChoice};
-use crate::config::ProjectConfig;
+use crate::config::{NixCiCacheConfig, ProjectConfig};
 use crate::project::GeneratedFile;
 use crate::render::ci::{GENERATED_WORKFLOW_MARKER, github_action_ref, immutable_action_ref};
 
@@ -46,11 +46,31 @@ pub(super) fn checkout_submodules(config: &ProjectConfig, workflow: &mut Value) 
     }
 }
 
-pub(super) fn install_nix(node24: bool) -> Value {
+pub(super) fn install_nix(node24: bool, cache: Option<&NixCiCacheConfig>) -> Value {
     // 2.35.2 contains the lost build-slot wakeup fix (NixOS/nix fba3f6e).
     // The action's default 2.35.1 can abort Worker::run during qualification.
     let version = if node24 { "v31.11.1" } else { "v31" };
-    json!({"uses": immutable_action_ref("https://github.com/cachix/install-nix-action", version).trim_start_matches("https://github.com/").split(" #").next().unwrap(), "with": {"install_url": "https://releases.nixos.org/nix/nix-2.35.2/install"}})
+    let mut step = json!({"uses": immutable_action_ref("https://github.com/cachix/install-nix-action", version).trim_start_matches("https://github.com/").split(" #").next().unwrap(), "with": {"install_url": "https://releases.nixos.org/nix/nix-2.35.2/install"}});
+    // Same pull-only policy as single-project CI; publication never inherits it.
+    if let Some(cache) =
+        cache.filter(|c| !c.substituters.is_empty() || !c.trusted_public_keys.is_empty())
+    {
+        let mut config = "experimental-features = nix-command flakes\n".to_owned();
+        if !cache.substituters.is_empty() {
+            config.push_str(&format!(
+                "substituters = {}\n",
+                cache.substituters.join(" ")
+            ));
+        }
+        if !cache.trusted_public_keys.is_empty() {
+            config.push_str(&format!(
+                "trusted-public-keys = {}\n",
+                cache.trusted_public_keys.join(" ")
+            ));
+        }
+        step["with"]["extra_nix_config"] = json!(config);
+    }
+    step
 }
 
 pub(super) fn input_transport() -> Value {
@@ -149,7 +169,18 @@ pub(crate) fn files(
     // Evaluated policy retains native worker validation; static policy has one owner.
     let evaluated_policy =
         flake_path.is_file() && crate::config::flake_declares_simit_config(&flake_path)?;
-    let mut plan_steps = vec![checkout(node24), install_nix(node24), input_transport()];
+    // Same default as single-project CI: [ci.cache], else release artifact caches.
+    let artifacts = config.ci_cache_artifacts();
+    let cache = NixCiCacheConfig {
+        substituters: artifacts.substituters,
+        trusted_public_keys: artifacts.trusted_public_keys,
+    };
+    let cache = Some(&cache);
+    let mut plan_steps = vec![
+        checkout(node24),
+        install_nix(node24, cache),
+        input_transport(),
+    ];
     if !evaluated_policy {
         plan_steps.push(drift_check.clone());
     }
@@ -170,16 +201,37 @@ pub(crate) fn files(
         }),
     );
     let mut needs = vec!["plan".to_owned()];
-    for component in graph.components.values() {
-        if component.checks.is_empty() {
-            bail!(
-                "component {} requires at least one qualification check",
-                component.id
-            );
+    // Jobs in name order; members in dependency order so later members reuse
+    // the store their prerequisites populated.
+    let mut groups: std::collections::BTreeMap<&str, Vec<&crate::monorepo::Component>> =
+        Default::default();
+    for id in &graph.order {
+        let component = &graph.components[id];
+        groups
+            .entry(component.job_id())
+            .or_default()
+            .push(component);
+    }
+    let selected = |id: &str| format!("contains(fromJSON(needs.plan.outputs.selected), '{id}')");
+    for (job_id, members) in &groups {
+        for component in members {
+            if component.checks.is_empty() {
+                bail!(
+                    "component {} requires at least one qualification check",
+                    component.id
+                );
+            }
         }
-        let id = format!("component-{}", component.id);
+        let component = members[0];
+        let shared = members.len() > 1;
+        let id = format!("component-{job_id}");
         needs.push(id.clone());
-        let mut job = json!({"needs": "plan", "if": format!("${{{{ contains(fromJSON(needs.plan.outputs.selected), '{}') }}}}", component.id), "runs-on": runner, "timeout-minutes": 360, "env": {"NIX_CONFIG": "experimental-features = nix-command flakes"}});
+        let condition = members
+            .iter()
+            .map(|c| selected(&c.id))
+            .collect::<Vec<_>>()
+            .join(" || ");
+        let mut job = json!({"needs": "plan", "if": format!("${{{{ {condition} }}}}"), "runs-on": runner, "timeout-minutes": 360, "env": {"NIX_CONFIG": "experimental-features = nix-command flakes"}});
         if !component.systems.is_empty() {
             let rows = component
                 .systems
@@ -213,7 +265,7 @@ pub(crate) fn files(
         let mut steps = vec![
             gate_budget(),
             checkout(node24),
-            install_nix(node24),
+            install_nix(node24, cache),
             input_transport(),
         ];
         if !component.systems.is_empty() {
@@ -222,7 +274,10 @@ pub(crate) fn files(
         if evaluated_policy {
             steps.push(drift_check.clone());
         }
-        for gate in &component.checks {
+        for (component, gate) in members
+            .iter()
+            .flat_map(|c| c.checks.iter().map(move |gate| (*c, gate)))
+        {
             // Run the validated config through native Simit, already alive when
             // a Nix daemon dies, so failure evidence does not need another eval.
             // Capture evaluated step values before nix develop can override them
@@ -264,6 +319,10 @@ pub(crate) fn files(
                 component.id, gate.id
             );
             let mut step = json!({"name": gate.id, "shell": "bash", "timeout-minutes": provider_minutes, "run": run});
+            if shared {
+                step["name"] = json!(format!("{} {}", component.id, gate.id));
+                step["if"] = json!(format!("${{{{ {} }}}}", selected(&component.id)));
+            }
             if !gate.env.is_empty() {
                 step["env"] = json!(
                     gate.env
@@ -278,10 +337,25 @@ pub(crate) fn files(
         job["steps"] = json!(steps);
         jobs.insert(id, job);
     }
-    jobs.insert("qualified".into(), json!({
-        "needs": needs, "if": "${{ always() }}", "runs-on": runner, "timeout-minutes": 5,
-        "steps": [{"name": "Require every selected component", "env": {"RESULTS": "${{ toJSON(needs) }}", "SELECTED": "${{ needs.plan.outputs.selected }}"}, "run": "printf '%s' \"$RESULTS\" | jq -e --argjson selected \"$SELECTED\" '. as $jobs | $jobs.plan.result == \"success\" and all($selected[]; $jobs[\"component-\" + .].result == \"success\")'"}]
-    }));
+    let mut require = json!({"name": "Require every selected component", "env": {"RESULTS": "${{ toJSON(needs) }}", "SELECTED": "${{ needs.plan.outputs.selected }}"}, "run": "printf '%s' \"$RESULTS\" | jq -e --argjson selected \"$SELECTED\" '. as $jobs | $jobs.plan.result == \"success\" and all($selected[]; $jobs[\"component-\" + .].result == \"success\")'"});
+    if graph.components.values().any(|c| c.job_id() != c.id) {
+        let owners: serde_json::Map<_, _> = graph
+            .components
+            .values()
+            .map(|c| (c.id.clone(), json!(c.job_id())))
+            .collect();
+        require["env"]["OWNERS"] = json!(serde_json::to_string(&owners)?);
+        require["run"] = json!(
+            "printf '%s' \"$RESULTS\" | jq -e --argjson selected \"$SELECTED\" --argjson owners \"$OWNERS\" '. as $jobs | $jobs.plan.result == \"success\" and all($selected[]; $jobs[\"component-\" + $owners[.]].result == \"success\")'"
+        );
+    }
+    jobs.insert(
+        "qualified".into(),
+        json!({
+            "needs": needs, "if": "${{ always() }}", "runs-on": runner, "timeout-minutes": 5,
+            "steps": [require]
+        }),
+    );
     let branches = if config.ci.push_branches.is_empty() {
         vec!["**".to_owned()]
     } else {
@@ -411,6 +485,18 @@ pub(super) fn full_qualification(workflow: &Value) -> Result<Value> {
         .find(|step| step["id"] == "plan")
         .context("qualification plan step is missing")?;
     plan["env"]["BASE_REVISION"] = json!("");
+    // Publication resolves only its declared substituters, never CI caches.
+    for job in jobs
+        .as_object_mut()
+        .into_iter()
+        .flat_map(|jobs| jobs.values_mut())
+    {
+        for step in job["steps"].as_array_mut().into_iter().flatten() {
+            if let Some(with) = step.get_mut("with").and_then(Value::as_object_mut) {
+                with.remove("extra_nix_config");
+            }
+        }
+    }
     Ok(jobs)
 }
 
